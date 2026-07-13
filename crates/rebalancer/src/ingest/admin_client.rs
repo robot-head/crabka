@@ -11,6 +11,8 @@ use crabka_protocol::owned::{
     metadata_request::MetadataRequest, metadata_response::MetadataResponse,
 };
 
+/// # Errors
+/// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub async fn fetch_metadata(client: &Client) -> Result<MetadataResponse, ClientError> {
     client.send(metadata_request()).await
 }
@@ -23,6 +25,8 @@ fn metadata_request() -> MetadataRequest {
     }
 }
 
+/// # Errors
+/// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub async fn fetch_describe_cluster(
     client: &Client,
 ) -> Result<DescribeClusterResponse, ClientError> {
@@ -35,6 +39,8 @@ fn describe_cluster_request() -> DescribeClusterRequest {
     DescribeClusterRequest::default()
 }
 
+/// # Errors
+/// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub async fn fetch_list_reassignments(
     client: &Client,
 ) -> Result<ListPartitionReassignmentsResponse, ClientError> {

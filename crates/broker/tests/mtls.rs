@@ -1,6 +1,5 @@
 // Rust 1.95 annotate-snippets ICE on clippy::pedantic in test files,
 // matching the convention in auth_handlers.rs / elect_leaders.rs.
-#![allow(clippy::pedantic)]
 
 //! mTLS client authentication.
 //!
@@ -21,6 +20,7 @@
 
 use std::{io, sync::Arc};
 
+use assert2::assert;
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::{Broker, BrokerConfig, config::ListenerSpec};
 use crabka_protocol::{
@@ -55,7 +55,7 @@ const DEV_CLIENT_KEY: &str =
 
 /// Subject DN of the fixture client cert as rendered by `x509-parser`.
 /// Must match `extract_principal_from_cert` exactly — operators pin
-/// this string in ACLs and super_users.
+/// this string in ACLs and `super_users`.
 const CLIENT_PRINCIPAL: &str = "CN=test-client,OU=integration,O=crabka";
 
 fn write_fixture(dir: &std::path::Path, name: &str, contents: &str) -> std::path::PathBuf {
@@ -226,7 +226,12 @@ async fn mtls_principal_is_cert_dn_and_super_user_bypass_works() {
     let mut cur: &[u8] = &resp_bytes;
     let resp = CreateTopicsResponse::decode(&mut cur, 7).expect("decode CreateTopicsResponse");
 
-    assert2::assert!((resp.topics.len(), resp.topics[0].error_code) == (1, 0));
+    assert!(resp.topics.len() == 1);
+    assert!(
+        resp.topics[0].error_code == 0,
+        "CreateTopics must succeed for the cert-DN super-user — got {:?}",
+        resp.topics[0]
+    );
 
     handle.shutdown().await;
 }

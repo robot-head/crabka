@@ -1,5 +1,3 @@
-#![allow(clippy::pedantic)]
-
 //! JVM differential / interop test for KIP-932 share groups.
 //!
 //! Drives a REAL Apache Kafka 4.x `kafka-console-share-consumer.sh`
@@ -30,6 +28,7 @@ use std::{
     time::Duration,
 };
 
+use assert2::assert;
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_core::Client;
 use crabka_log::LogConfig;
@@ -123,9 +122,12 @@ async fn create_topic(broker: &BrokerHandle, client: &Client, topic: &str) -> uu
         })
         .await
         .expect("CreateTopics");
-    assert2::assert!(resp.topics[0].error_code == 0);
+    assert!(
+        resp.topics[0].error_code == 0,
+        "topic create failed: {resp:?}"
+    );
     broker.wait_until_partition_present(topic, 0).await;
-    assert2::assert!(broker.has_partition(topic, 0).await);
+    assert!(broker.has_partition(topic, 0), "partition never led");
     let image = broker.controller_image_for_test();
     image
         .topic(topic)
@@ -147,7 +149,11 @@ async fn bootstrap_share_state(broker: &BrokerHandle, client: &Client, key: &str
         })
         .await
         .expect("FindCoordinator(SHARE)");
-    assert2::assert!(resp.coordinators[0].error_code == 0);
+    assert!(
+        resp.coordinators[0].error_code == 0,
+        "FindCoordinator(SHARE) error: {}",
+        resp.coordinators[0].error_code
+    );
     for p in 0..SHARE_STATE_PARTITIONS {
         broker
             .wait_until_partition_present(SHARE_STATE_TOPIC, p)
@@ -272,7 +278,11 @@ async fn jvm_share_consumer_reads_crabka() {
     eprintln!("CRABKA[test] share-consumer stdout:\n{stdout}");
 
     for v in values {
-        assert2::assert!(stdout.contains(v));
+        assert!(
+            stdout.contains(v),
+            "JVM share consumer must read produced value {v:?}; got stdout:\n{stdout}\nstderr:\n{}",
+            String::from_utf8_lossy(&consumed.stderr),
+        );
     }
 }
 
@@ -322,7 +332,11 @@ async fn jvm_share_groups_describe_state() {
     ]);
     let state_out = String::from_utf8_lossy(&state.stdout);
     eprintln!("CRABKA[test] share-groups --describe --state stdout:\n{state_out}");
-    assert2::assert!(state_out.contains(group));
+    assert!(
+        state_out.contains(group),
+        "share group {group} must appear in --describe --state output; got:\n{state_out}\nstderr:\n{}",
+        String::from_utf8_lossy(&state.stderr),
+    );
 }
 
 /// `kafka-share-groups.sh --list` drives `ListGroups` (`api_key` 16) with
@@ -372,5 +386,9 @@ async fn jvm_share_groups_list() {
     ]);
     let list_out = String::from_utf8_lossy(&listed.stdout);
     eprintln!("CRABKA[test] share-groups --list stdout:\n{list_out}");
-    assert2::assert!(list_out.contains(group));
+    assert!(
+        list_out.contains(group),
+        "share group {group} must appear in --list output; got:\n{list_out}\nstderr:\n{}",
+        String::from_utf8_lossy(&listed.stderr),
+    );
 }

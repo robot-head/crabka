@@ -14,6 +14,10 @@ pub struct Endpoint<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl Endpoint<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::common::streams_group_describe_response::endpoint::Endpoint {
@@ -29,9 +33,9 @@ impl Encode for Endpoint<'_> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.host);
+                let () = put_compact_string(buf, self.host);
             } else {
-                put_string(buf, self.host);
+                let () = put_string(buf, self.host);
             }
         }
         if version >= 0 {

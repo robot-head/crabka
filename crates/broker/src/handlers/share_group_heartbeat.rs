@@ -100,6 +100,7 @@ fn error(code: i16) -> ShareGroupHeartbeatResponse {
 mod tests {
     use std::net::SocketAddr;
 
+    use assert2::assert;
     use crabka_protocol::{UnknownTaggedFields, owned::share_group_heartbeat_response};
     use crabka_security::{AuthMethod, Principal};
 
@@ -108,7 +109,7 @@ mod tests {
     #[test]
     fn disabled_feature_yields_unsupported_version() {
         let resp = disabled_response();
-        assert2::assert!(resp.error_code == codes::UNSUPPORTED_VERSION);
+        assert!(resp.error_code == codes::UNSUPPORTED_VERSION);
     }
 
     #[test]
@@ -129,8 +130,8 @@ mod tests {
 
         let ctx = crate::test_support::request_context(&principal, &peer, "share-client");
 
-        assert2::assert!(group_read_denied(&authorizer, &image, &ctx, "g"));
-        assert2::assert!(!group_read_denied(
+        assert!(group_read_denied(&authorizer, &image, &ctx, "g"));
+        assert!(!group_read_denied(
             &crate::authorizer::AllowAllAuthorizer,
             &image,
             &ctx,
@@ -148,8 +149,8 @@ mod tests {
             share_group_heartbeat_response::MAX_VERSION,
         )
         .unwrap();
-        assert2::assert!(resp.error_code == codes::GROUP_AUTHORIZATION_FAILED);
-        assert2::assert!(cur.is_empty());
+        assert!(resp.error_code == codes::GROUP_AUTHORIZATION_FAILED);
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
     }
 
     crate::test_support::wire_helpers!(
@@ -197,7 +198,7 @@ mod tests {
             assignment: None,
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 }

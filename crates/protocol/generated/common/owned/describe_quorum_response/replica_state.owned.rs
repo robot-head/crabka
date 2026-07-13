@@ -16,11 +16,11 @@ impl Default for ReplicaState {
     fn default() -> Self {
         Self {
             replica_id: 0i32,
-            replica_directory_id: Default::default(),
+            replica_directory_id: crate::primitives::uuid::Uuid::default(),
             log_end_offset: 0i64,
             last_fetch_timestamp: -1i64,
             last_caught_up_timestamp: -1i64,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }

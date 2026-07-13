@@ -82,6 +82,8 @@ pub fn encode_share_key(key: &ShareGroupKey) -> Bytes {
     buf.freeze()
 }
 
+/// # Errors
+/// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
 pub fn parse_share_key(version: i16, mut buf: &[u8]) -> Result<ShareGroupKey, BrokerError> {
     let key = match version {
         KEY_SHARE_GROUP_METADATA => ShareGroupKey::GroupMetadata {
@@ -121,13 +123,14 @@ pub struct ShareGroupMetadataValue {
 
 impl ShareGroupMetadataValue {
     #[must_use]
-    #[allow(clippy::trivially_copy_pass_by_ref)] // wire-encode API mirrors the other *Value::encode signatures
-    pub fn encode(&self) -> Bytes {
+    pub fn encode(self) -> Bytes {
         let mut buf = BytesMut::new();
         buf.put_i16(0);
         buf.put_i32(self.epoch);
         buf.freeze()
     }
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
     pub fn decode(mut buf: &[u8]) -> Result<Self, BrokerError> {
         let _v = get_i16(&mut buf)?;
         Ok(Self {
@@ -146,6 +149,8 @@ pub struct ShareGroupMemberMetadataValue {
 
 impl ShareGroupMemberMetadataValue {
     #[must_use]
+    /// # Panics
+    /// Panics if synchronized log state is poisoned or a segment previously validated as nonempty is unexpectedly missing its required batch or index entry.
     pub fn encode(&self) -> Bytes {
         let mut buf = BytesMut::new();
         buf.put_i16(0);
@@ -159,6 +164,10 @@ impl ShareGroupMemberMetadataValue {
         }
         buf.freeze()
     }
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
+    /// # Panics
+    /// Panics if synchronized log state is poisoned or a segment previously validated as nonempty is unexpectedly missing its required batch or index entry.
     pub fn decode(mut buf: &[u8]) -> Result<Self, BrokerError> {
         let _v = get_i16(&mut buf)?;
         let rack_id = get_nullable_string(&mut buf)?;
@@ -186,13 +195,14 @@ pub struct ShareGroupTargetAssignmentMetadataValue {
 
 impl ShareGroupTargetAssignmentMetadataValue {
     #[must_use]
-    #[allow(clippy::trivially_copy_pass_by_ref)] // wire-encode API mirrors the other *Value::encode signatures
-    pub fn encode(&self) -> Bytes {
+    pub fn encode(self) -> Bytes {
         let mut buf = BytesMut::new();
         buf.put_i16(0);
         buf.put_i32(self.assignment_epoch);
         buf.freeze()
     }
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
     pub fn decode(mut buf: &[u8]) -> Result<Self, BrokerError> {
         let _v = get_i16(&mut buf)?;
         Ok(Self {
@@ -214,6 +224,8 @@ impl ShareGroupTargetAssignmentMemberValue {
         encode_topic_partitions(&mut buf, &self.topic_partitions);
         buf.freeze()
     }
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
     pub fn decode(mut buf: &[u8]) -> Result<Self, BrokerError> {
         let _v = get_i16(&mut buf)?;
         let topic_partitions = decode_topic_partitions(&mut buf)?;
@@ -236,6 +248,8 @@ impl ShareGroupCurrentMemberAssignmentValue {
         encode_topic_partitions(&mut buf, &self.assigned_partitions);
         buf.freeze()
     }
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
     pub fn decode(mut buf: &[u8]) -> Result<Self, BrokerError> {
         let _v = get_i16(&mut buf)?;
         let member_epoch = get_i32(&mut buf)?;
@@ -259,6 +273,8 @@ pub struct ShareGroupStatePartitionMetadataValue {
 
 impl ShareGroupStatePartitionMetadataValue {
     #[must_use]
+    /// # Panics
+    /// Panics if synchronized log state is poisoned or a segment previously validated as nonempty is unexpectedly missing its required batch or index entry.
     pub fn encode(&self) -> Bytes {
         let mut buf = BytesMut::new();
         buf.put_i16(0);
@@ -280,6 +296,10 @@ impl ShareGroupStatePartitionMetadataValue {
         buf.freeze()
     }
 
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
+    /// # Panics
+    /// Panics if synchronized log state is poisoned or a segment previously validated as nonempty is unexpectedly missing its required batch or index entry.
     pub fn decode(mut buf: &[u8]) -> Result<Self, BrokerError> {
         let _v = get_i16(&mut buf)?;
         let n = get_i32(&mut buf)?;
@@ -360,6 +380,7 @@ fn decode_topic_partitions(buf: &mut &[u8]) -> Result<Vec<(Uuid, Vec<i32>)>, Bro
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
 
     use super::*;
 
@@ -379,11 +400,11 @@ mod tests {
         };
         let bytes = encode_share_key(&key);
         let (ver, body) = peek_version(&bytes);
-        assert2::assert!(ver == KEY_SHARE_GROUP_METADATA);
-        assert2::assert!(parse_share_key(ver, body).unwrap() == key);
+        assert!(ver == KEY_SHARE_GROUP_METADATA);
+        assert!(parse_share_key(ver, body).unwrap() == key);
 
         let v = ShareGroupMetadataValue { epoch: 7 };
-        assert2::assert!(ShareGroupMetadataValue::decode(&v.encode()).unwrap() == v);
+        assert!(ShareGroupMetadataValue::decode(&v.encode()).unwrap() == v);
     }
 
     #[test]
@@ -394,8 +415,8 @@ mod tests {
         };
         let b = encode_share_key(&key);
         let (ver, body) = peek_version(&b);
-        assert2::assert!(ver == KEY_SHARE_MEMBER_METADATA);
-        assert2::assert!(parse_share_key(ver, body).unwrap() == key);
+        assert!(ver == KEY_SHARE_MEMBER_METADATA);
+        assert!(parse_share_key(ver, body).unwrap() == key);
 
         let v = ShareGroupMemberMetadataValue {
             rack_id: Some("us-east-1a".into()),
@@ -403,7 +424,7 @@ mod tests {
             client_host: "/127.0.0.1".into(),
             subscribed_topic_names: vec!["a".into(), "b".into()],
         };
-        assert2::assert!(ShareGroupMemberMetadataValue::decode(&v.encode()).unwrap() == v);
+        assert!(ShareGroupMemberMetadataValue::decode(&v.encode()).unwrap() == v);
     }
 
     #[test]
@@ -414,7 +435,7 @@ mod tests {
             client_host: "/127.0.0.1".into(),
             subscribed_topic_names: vec![],
         };
-        assert2::assert!(ShareGroupMemberMetadataValue::decode(&v.encode()).unwrap() == v);
+        assert!(ShareGroupMemberMetadataValue::decode(&v.encode()).unwrap() == v);
     }
 
     #[test]
@@ -424,15 +445,13 @@ mod tests {
         };
         let b = encode_share_key(&key);
         let (ver, body) = peek_version(&b);
-        assert2::assert!(ver == KEY_SHARE_TARGET_ASSIGNMENT_METADATA);
-        assert2::assert!(parse_share_key(ver, body).unwrap() == key);
+        assert!(ver == KEY_SHARE_TARGET_ASSIGNMENT_METADATA);
+        assert!(parse_share_key(ver, body).unwrap() == key);
 
         let v = ShareGroupTargetAssignmentMetadataValue {
             assignment_epoch: 12,
         };
-        assert2::assert!(
-            ShareGroupTargetAssignmentMetadataValue::decode(&v.encode()).unwrap() == v
-        );
+        assert!(ShareGroupTargetAssignmentMetadataValue::decode(&v.encode()).unwrap() == v);
     }
 
     #[test]
@@ -443,13 +462,13 @@ mod tests {
         };
         let b = encode_share_key(&key);
         let (ver, body) = peek_version(&b);
-        assert2::assert!(ver == KEY_SHARE_TARGET_ASSIGNMENT_MEMBER);
-        assert2::assert!(parse_share_key(ver, body).unwrap() == key);
+        assert!(ver == KEY_SHARE_TARGET_ASSIGNMENT_MEMBER);
+        assert!(parse_share_key(ver, body).unwrap() == key);
 
         let v = ShareGroupTargetAssignmentMemberValue {
             topic_partitions: vec![(Uuid([1; 16]), vec![0, 1, 2]), (Uuid([2; 16]), vec![])],
         };
-        assert2::assert!(ShareGroupTargetAssignmentMemberValue::decode(&v.encode()).unwrap() == v);
+        assert!(ShareGroupTargetAssignmentMemberValue::decode(&v.encode()).unwrap() == v);
     }
 
     #[test]
@@ -460,14 +479,14 @@ mod tests {
         };
         let b = encode_share_key(&key);
         let (ver, body) = peek_version(&b);
-        assert2::assert!(ver == KEY_SHARE_CURRENT_MEMBER_ASSIGNMENT);
-        assert2::assert!(parse_share_key(ver, body).unwrap() == key);
+        assert!(ver == KEY_SHARE_CURRENT_MEMBER_ASSIGNMENT);
+        assert!(parse_share_key(ver, body).unwrap() == key);
 
         let v = ShareGroupCurrentMemberAssignmentValue {
             member_epoch: 5,
             assigned_partitions: vec![(Uuid([3; 16]), vec![0, 1])],
         };
-        assert2::assert!(ShareGroupCurrentMemberAssignmentValue::decode(&v.encode()).unwrap() == v);
+        assert!(ShareGroupCurrentMemberAssignmentValue::decode(&v.encode()).unwrap() == v);
     }
 
     #[test]
@@ -477,8 +496,8 @@ mod tests {
         };
         let b = encode_share_key(&key);
         let (ver, body) = peek_version(&b);
-        assert2::assert!(ver == KEY_SHARE_GROUP_STATE_PARTITION_METADATA);
-        assert2::assert!(parse_share_key(ver, body).unwrap() == key);
+        assert!(ver == KEY_SHARE_GROUP_STATE_PARTITION_METADATA);
+        assert!(parse_share_key(ver, body).unwrap() == key);
 
         let v = ShareGroupStatePartitionMetadataValue {
             initialized: vec![
@@ -487,17 +506,17 @@ mod tests {
             ],
             deleting: vec![uuid::Uuid::from_bytes([9; 16])],
         };
-        assert2::assert!(ShareGroupStatePartitionMetadataValue::decode(&v.encode()).unwrap() == v);
+        assert!(ShareGroupStatePartitionMetadataValue::decode(&v.encode()).unwrap() == v);
     }
 
     #[test]
     fn state_partition_metadata_empty_round_trip() {
         let v = ShareGroupStatePartitionMetadataValue::default();
-        assert2::assert!(ShareGroupStatePartitionMetadataValue::decode(&v.encode()).unwrap() == v);
+        assert!(ShareGroupStatePartitionMetadataValue::decode(&v.encode()).unwrap() == v);
     }
 
     #[test]
     fn unknown_key_version_rejected() {
-        assert2::assert!(parse_share_key(99, &[]).is_err());
+        assert!(parse_share_key(99, &[]).is_err());
     }
 }

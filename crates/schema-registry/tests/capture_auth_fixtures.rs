@@ -1,10 +1,3 @@
-// Attributes FIRST (above the `//!` module docs): on windows `cfg(false)` would
-// otherwise strip the trailing `#![allow(clippy::pedantic)]` while the crate-root
-// `//!` docs are still linted ⇒ `doc_markdown` fires windows-only. Attributes-first
-// prevents that; code-like identifiers in the docs are also backticked.
-
-#![allow(clippy::pedantic)]
-
 //! Golden HTTP-Basic-auth capture harness for Crabka Schema Registry slice 6.
 //!
 //! Boots a real `mirror.gcr.io/confluentinc/cp-schema-registry:7.4.0` container with
@@ -114,7 +107,7 @@ async fn start_host_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir)
 /// bind-mounted at `/etc/sr` and referenced by `SCHEMA_REGISTRY_OPTS`.
 ///
 /// `jaas.conf` declares one `SchemaRegistry-Props` entry backed by Jetty's
-/// `org.eclipse.jetty.jaas.spi.PropertyFileLoginModule` (the LoginModule cp
+/// `org.eclipse.jetty.jaas.spi.PropertyFileLoginModule` (the `LoginModule` cp
 /// 7.4.0 ships for `authentication.method=BASIC`). Its `file=` points at the
 /// mounted `password.properties`, whose Jetty format is
 /// `username: password[,role...]` — here `alice: pw,admin` (role `admin` matches
@@ -263,7 +256,7 @@ impl Drop for ContainerGuard {
 /// the readiness probe MUST present a valid credential (`alice:pw`); a
 /// credential-less probe would loop on `401` forever.
 async fn wait_for_registry(http: &reqwest::Client, base: &str, container_id: &str) {
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + Duration::from_mins(2);
     let url = format!("{base}/subjects");
     let mut last: Option<String> = None;
     while Instant::now() < deadline {

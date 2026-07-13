@@ -74,6 +74,7 @@ mod tests {
         atomic::{AtomicI32, AtomicU64},
     };
 
+    use assert2::assert;
     use bytes::Bytes;
     use crabka_audit::chain::{GENESIS_HEAD, to_hex};
     use crabka_ids::PartitionIndex;
@@ -90,7 +91,7 @@ mod tests {
         let writer = tokio::spawn(async {});
         let p = Partition {
             topic: "__audit".into(),
-            partition_id: PartitionIndex(0),
+            index: PartitionIndex(0),
             log_dir: Arc::new(arc_swap::ArcSwap::from_pointee(dir.path().to_path_buf())),
             log: Arc::new(Mutex::new(log)),
             writer_tx: tx,
@@ -101,7 +102,7 @@ mod tests {
             hw_advance_notify: Arc::new(Notify::new()),
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
-            _writer_handle: Arc::new(writer),
+            writer_handle: Arc::new(writer),
         };
         (p, dir)
     }
@@ -153,7 +154,10 @@ mod tests {
     fn tail_window_start_keeps_only_last_4096_offsets() {
         let cases = [(0, 0), (4096, 0), (4097, 1), (8192, 4096)];
         for (log_end_offset, want) in cases {
-            assert2::assert!(tail_window_start(Offset(log_end_offset)) == want);
+            assert!(
+                tail_window_start(Offset(log_end_offset)) == want,
+                "log_end_offset {log_end_offset}"
+            );
         }
     }
 
@@ -161,7 +165,7 @@ mod tests {
     async fn recover_empty_partition_returns_none() {
         let (partition, _td) = test_partition();
 
-        assert2::assert!(recover_from_partition_tail(&partition).is_none());
+        assert!(recover_from_partition_tail(&partition).is_none());
     }
 
     #[tokio::test]
@@ -173,7 +177,8 @@ mod tests {
 
         let recovered = recover_from_partition_tail(&partition).expect("tail record");
 
-        assert2::assert!(recovered == (seq + 1, chain_hash(&GENESIS_HEAD, seq, value)));
+        assert!(recovered.0 == seq + 1);
+        assert!(recovered.1 == chain_hash(&GENESIS_HEAD, seq, value));
     }
 
     #[tokio::test]
@@ -187,7 +192,7 @@ mod tests {
 
         let recovered = recover_from_partition_tail(&partition).expect("last chained record");
 
-        assert2::assert!(recovered == (10, last_head));
+        assert!(recovered == (10, last_head));
     }
 
     #[tokio::test]
@@ -209,12 +214,11 @@ mod tests {
 
         let recovered = recover_from_partition_tail(&partition).expect("last chained record");
 
-        assert2::assert!(recovered == (2, second_head));
+        assert!(recovered == (2, second_head));
     }
 
     #[test]
     fn header_bytes_matches_requested_key_and_preserves_value() {
-        type TestCase1<'a> = (&'a str, Option<&'a [u8]>);
         let rec = Record {
             headers: vec![
                 header("other", Bytes::from_static(&[0])),
@@ -223,9 +227,10 @@ mod tests {
             ..Default::default()
         };
 
-        let cases: [TestCase1<'_>; 2] = [("target", Some(&[0xCA, 0xFE])), ("missing", None)];
+        let cases: [(&str, Option<&[u8]>); 2] =
+            [("target", Some(&[0xCA, 0xFE])), ("missing", None)];
         for (key, want) in cases {
-            assert2::assert!(header_bytes(&rec, key) == want);
+            assert!(header_bytes(&rec, key) == want, "key {key:?}");
         }
     }
 
@@ -245,7 +250,7 @@ mod tests {
             ("missing", None),
         ];
         for (key, want) in cases {
-            assert2::assert!(header_str(&rec, key) == want);
+            assert!(header_str(&rec, key) == want, "key {key:?}");
         }
     }
 }

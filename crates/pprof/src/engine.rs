@@ -45,6 +45,8 @@ impl<S: ProfileStore> FlameEngine<S> {
         Self { store, opts }
     }
 
+    /// # Errors
+    /// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
     pub async fn select_merge_stacktraces(
         &self,
         tenant: &str,
@@ -59,8 +61,7 @@ impl<S: ProfileStore> FlameEngine<S> {
                 tenant,
                 profile_type,
                 label_selector,
-                start_ms,
-                end_ms,
+                (start_ms, end_ms),
                 None,
                 &[],
             )
@@ -73,14 +74,14 @@ impl<S: ProfileStore> FlameEngine<S> {
         Ok(tree.to_flamegraph(max_nodes))
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// # Errors
+    /// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
     pub async fn select_merge_stacktraces_grouped(
         &self,
         tenant: &str,
         profile_type: &str,
         label_selector: &str,
-        start_ms: i64,
-        end_ms: i64,
+        range_ms: (i64, i64),
         max_nodes: i64,
         group_by: &[String],
     ) -> Result<FlameGraph, ProfileError> {
@@ -90,8 +91,8 @@ impl<S: ProfileStore> FlameEngine<S> {
                     tenant,
                     profile_type,
                     label_selector,
-                    start_ms,
-                    end_ms,
+                    range_ms.0,
+                    range_ms.1,
                     max_nodes,
                 )
                 .await;
@@ -99,7 +100,7 @@ impl<S: ProfileStore> FlameEngine<S> {
         let base_matchers = crate::matcher::parse_label_selector(label_selector)?;
         let groups = self
             .store
-            .series(tenant, &base_matchers, group_by, start_ms, end_ms)
+            .series(tenant, &base_matchers, group_by, range_ms.0, range_ms.1)
             .await?;
         let mut tree = Tree::new();
         for labels in groups {
@@ -111,7 +112,7 @@ impl<S: ProfileStore> FlameEngine<S> {
             );
             let scan = self
                 .store
-                .select(tenant, profile_type, &matchers, start_ms, end_ms)
+                .select(tenant, profile_type, &matchers, range_ms.0, range_ms.1)
                 .await?;
             let prefix = vec![Frame {
                 function: group_frame_name(&labels),
@@ -128,14 +129,14 @@ impl<S: ProfileStore> FlameEngine<S> {
         Ok(tree.to_flamegraph(max_nodes))
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// # Errors
+    /// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
     pub async fn select_merge_stacktraces_with_stack_trace_selector(
         &self,
         tenant: &str,
         profile_type: &str,
         label_selector: &str,
-        start_ms: i64,
-        end_ms: i64,
+        range_ms: (i64, i64),
         max_nodes: i64,
         call_sites: &[String],
     ) -> Result<FlameGraph, ProfileError> {
@@ -144,8 +145,7 @@ impl<S: ProfileStore> FlameEngine<S> {
                 tenant,
                 profile_type,
                 label_selector,
-                start_ms,
-                end_ms,
+                range_ms,
                 None,
                 call_sites,
             )
@@ -158,14 +158,14 @@ impl<S: ProfileStore> FlameEngine<S> {
         Ok(tree.to_flamegraph(max_nodes))
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// # Errors
+    /// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
     pub async fn select_merge_stacktraces_tree_with_stack_trace_selector(
         &self,
         tenant: &str,
         profile_type: &str,
         label_selector: &str,
-        start_ms: i64,
-        end_ms: i64,
+        range_ms: (i64, i64),
         max_nodes: i64,
         call_sites: &[String],
     ) -> Result<Vec<u8>, ProfileError> {
@@ -174,8 +174,7 @@ impl<S: ProfileStore> FlameEngine<S> {
                 tenant,
                 profile_type,
                 label_selector,
-                start_ms,
-                end_ms,
+                range_ms,
                 None,
                 call_sites,
             )
@@ -188,6 +187,8 @@ impl<S: ProfileStore> FlameEngine<S> {
         Ok(tree.to_pyroscope_tree_bytes(max_nodes))
     }
 
+    /// # Errors
+    /// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
     pub async fn select_merge_stacktraces_sharded(
         &self,
         tenant: &str,
@@ -209,13 +210,12 @@ impl<S: ProfileStore> FlameEngine<S> {
                     tenant,
                     profile_type,
                     label_selector,
-                    *start_ms,
-                    *end_ms,
+                    (*start_ms, *end_ms),
                     None,
                     &[],
                 )
                 .await?;
-            merged.merge(tree);
+            merged.merge(&tree);
         }
         let max_nodes = if max_nodes > 0 {
             max_nodes
@@ -225,6 +225,8 @@ impl<S: ProfileStore> FlameEngine<S> {
         Ok(merged.to_flamegraph(max_nodes))
     }
 
+    /// # Errors
+    /// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
     pub async fn select_merge_stacktraces_with_stack_trace_selector_sharded(
         &self,
         tenant: &str,
@@ -247,13 +249,12 @@ impl<S: ProfileStore> FlameEngine<S> {
                     tenant,
                     profile_type,
                     label_selector,
-                    *start_ms,
-                    *end_ms,
+                    (*start_ms, *end_ms),
                     None,
                     call_sites,
                 )
                 .await?;
-            merged.merge(tree);
+            merged.merge(&tree);
         }
         let max_nodes = if max_nodes > 0 {
             max_nodes
@@ -263,6 +264,8 @@ impl<S: ProfileStore> FlameEngine<S> {
         Ok(merged.to_flamegraph(max_nodes))
     }
 
+    /// # Errors
+    /// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
     pub async fn select_merge_stacktraces_tree_with_stack_trace_selector_sharded(
         &self,
         tenant: &str,
@@ -285,13 +288,12 @@ impl<S: ProfileStore> FlameEngine<S> {
                     tenant,
                     profile_type,
                     label_selector,
-                    *start_ms,
-                    *end_ms,
+                    (*start_ms, *end_ms),
                     None,
                     call_sites,
                 )
                 .await?;
-            merged.merge(tree);
+            merged.merge(&tree);
         }
         let max_nodes = if max_nodes > 0 {
             max_nodes
@@ -301,14 +303,12 @@ impl<S: ProfileStore> FlameEngine<S> {
         Ok(merged.to_pyroscope_tree_bytes(max_nodes))
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn merge_to_tree(
         &self,
         tenant: &str,
         profile_type: &str,
         label_selector: &str,
-        start_ms: i64,
-        end_ms: i64,
+        range_ms: (i64, i64),
         span_ids: Option<&[u64]>,
         call_sites: &[String],
     ) -> Result<Tree, ProfileError> {
@@ -320,7 +320,7 @@ impl<S: ProfileStore> FlameEngine<S> {
         let matchers = crate::matcher::parse_label_selector(label_selector)?;
         let scan = self
             .store
-            .select(tenant, profile_type, &matchers, start_ms, end_ms)
+            .select(tenant, profile_type, &matchers, range_ms.0, range_ms.1)
             .await?;
         let span_where = span_ids.map_or_else(String::new, |ids| {
             format!(
@@ -344,45 +344,33 @@ impl<S: ProfileStore> FlameEngine<S> {
         Ok(tree)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// # Errors
+    /// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
     pub async fn select_series(
         &self,
-        tenant: &str,
-        profile_type: &str,
-        label_selector: &str,
+        query: (&str, &str, &str),
         group_by: &[String],
         step_secs: f64,
         agg: SeriesAgg,
-        start_ms: i64,
-        end_ms: i64,
+        range: (i64, i64),
     ) -> Result<Vec<Series>, ProfileError> {
-        self.select_series_with_stack_trace_selector(
-            tenant,
-            profile_type,
-            label_selector,
-            group_by,
-            step_secs,
-            agg,
-            start_ms,
-            end_ms,
-            &[],
-        )
-        .await
+        self.select_series_with_stack_trace_selector(query, group_by, step_secs, agg, range, &[])
+            .await
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// # Errors
+    /// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
     pub async fn select_series_with_stack_trace_selector(
         &self,
-        tenant: &str,
-        profile_type: &str,
-        label_selector: &str,
+        query: (&str, &str, &str),
         group_by: &[String],
         step_secs: f64,
         agg: SeriesAgg,
-        start_ms: i64,
-        end_ms: i64,
+        range: (i64, i64),
         call_sites: &[String],
     ) -> Result<Vec<Series>, ProfileError> {
+        let (tenant, profile_type, label_selector) = query;
+        let (start_ms, end_ms) = range;
         let step_ms = step_ms_from_secs(step_secs)?;
         let base_matchers = crate::matcher::parse_label_selector(label_selector)?;
         let groups = if group_by.is_empty() {
@@ -424,21 +412,18 @@ impl<S: ProfileStore> FlameEngine<S> {
         Ok(out)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// # Errors
+    /// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
     pub async fn select_series_sharded(
         &self,
-        tenant: &str,
-        profile_type: &str,
-        label_selector: &str,
+        query: (&str, &str, &str),
         group_by: &[String],
         step_secs: f64,
         agg: SeriesAgg,
         ranges: &[(i64, i64)],
     ) -> Result<Vec<Series>, ProfileError> {
         self.select_series_with_stack_trace_selector_sharded(
-            tenant,
-            profile_type,
-            label_selector,
+            query,
             group_by,
             step_secs,
             agg,
@@ -448,12 +433,11 @@ impl<S: ProfileStore> FlameEngine<S> {
         .await
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// # Errors
+    /// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
     pub async fn select_series_with_stack_trace_selector_sharded(
         &self,
-        tenant: &str,
-        profile_type: &str,
-        label_selector: &str,
+        query: (&str, &str, &str),
         group_by: &[String],
         step_secs: f64,
         agg: SeriesAgg,
@@ -469,14 +453,11 @@ impl<S: ProfileStore> FlameEngine<S> {
         if agg == SeriesAgg::Average {
             return self
                 .select_series_with_stack_trace_selector(
-                    tenant,
-                    profile_type,
-                    label_selector,
+                    query,
                     group_by,
                     step_secs,
                     agg,
-                    start_ms,
-                    end_ms,
+                    (start_ms, end_ms),
                     call_sites,
                 )
                 .await;
@@ -486,14 +467,11 @@ impl<S: ProfileStore> FlameEngine<S> {
         for (start_ms, end_ms) in ranges {
             let series = self
                 .select_series_with_stack_trace_selector(
-                    tenant,
-                    profile_type,
-                    label_selector,
+                    query,
                     group_by,
                     step_secs,
                     agg,
-                    *start_ms,
-                    *end_ms,
+                    (*start_ms, *end_ms),
                     call_sites,
                 )
                 .await?;
@@ -514,6 +492,8 @@ impl<S: ProfileStore> FlameEngine<S> {
             .collect())
     }
 
+    /// # Errors
+    /// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
     pub async fn diff(
         &self,
         tenant: &str,
@@ -525,7 +505,8 @@ impl<S: ProfileStore> FlameEngine<S> {
             .await
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// # Errors
+    /// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
     pub async fn diff_with_stack_trace_selector(
         &self,
         tenant: &str,
@@ -540,8 +521,7 @@ impl<S: ProfileStore> FlameEngine<S> {
                 tenant,
                 left.0,
                 left.1,
-                left.2,
-                left.3,
+                (left.2, left.3),
                 None,
                 left_call_sites,
             )
@@ -551,8 +531,7 @@ impl<S: ProfileStore> FlameEngine<S> {
                 tenant,
                 right.0,
                 right.1,
-                right.2,
-                right.3,
+                (right.2, right.3),
                 None,
                 right_call_sites,
             )
@@ -562,9 +541,11 @@ impl<S: ProfileStore> FlameEngine<S> {
         } else {
             self.opts.default_max_nodes
         };
-        Ok(diff_trees(left_tree, right_tree, max_nodes))
+        Ok(diff_trees(&left_tree, &right_tree, max_nodes))
     }
 
+    /// # Errors
+    /// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
     pub async fn select_merge_profile(
         &self,
         tenant: &str,
@@ -584,6 +565,8 @@ impl<S: ProfileStore> FlameEngine<S> {
         .await
     }
 
+    /// # Errors
+    /// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
     pub async fn select_merge_profile_with_stack_trace_selector(
         &self,
         tenant: &str,
@@ -599,8 +582,7 @@ impl<S: ProfileStore> FlameEngine<S> {
                 tenant,
                 &profile_type.to_string(),
                 label_selector,
-                start_ms,
-                end_ms,
+                (start_ms, end_ms),
                 None,
                 call_sites,
             )
@@ -608,25 +590,24 @@ impl<S: ProfileStore> FlameEngine<S> {
         Ok(tree_to_pprof(&tree, &profile_type).encode())
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// # Errors
+    /// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
     pub async fn select_merge_profile_with_max_nodes_and_stack_trace_selector(
         &self,
-        tenant: &str,
-        profile_type: &str,
-        label_selector: &str,
-        start_ms: i64,
-        end_ms: i64,
+        query: (&str, &str, &str),
+        range: (i64, i64),
         max_nodes: i64,
         call_sites: &[String],
     ) -> Result<Vec<u8>, ProfileError> {
+        let (tenant, profile_type, label_selector) = query;
+        let (start_ms, end_ms) = range;
         let profile_type = ProfileType::parse(profile_type)?;
         let tree = self
             .merge_to_tree(
                 tenant,
                 &profile_type.to_string(),
                 label_selector,
-                start_ms,
-                end_ms,
+                (start_ms, end_ms),
                 None,
                 call_sites,
             )
@@ -639,24 +620,23 @@ impl<S: ProfileStore> FlameEngine<S> {
         Ok(tree_to_pprof_with_max_nodes(&tree, &profile_type, max_nodes).encode())
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// # Errors
+    /// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
     pub async fn select_merge_span_profile(
         &self,
-        tenant: &str,
-        profile_type: &str,
-        label_selector: &str,
+        query: (&str, &str, &str),
         span_selector: &[u64],
-        start_ms: i64,
-        end_ms: i64,
+        range: (i64, i64),
         max_nodes: i64,
     ) -> Result<FlameGraph, ProfileError> {
+        let (tenant, profile_type, label_selector) = query;
+        let (start_ms, end_ms) = range;
         let tree = self
             .merge_to_tree(
                 tenant,
                 profile_type,
                 label_selector,
-                start_ms,
-                end_ms,
+                (start_ms, end_ms),
                 Some(span_selector),
                 &[],
             )
@@ -669,24 +649,23 @@ impl<S: ProfileStore> FlameEngine<S> {
         Ok(tree.to_flamegraph(max_nodes))
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// # Errors
+    /// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
     pub async fn select_merge_span_profile_tree(
         &self,
-        tenant: &str,
-        profile_type: &str,
-        label_selector: &str,
+        query: (&str, &str, &str),
         span_selector: &[u64],
-        start_ms: i64,
-        end_ms: i64,
+        range: (i64, i64),
         max_nodes: i64,
     ) -> Result<Vec<u8>, ProfileError> {
+        let (tenant, profile_type, label_selector) = query;
+        let (start_ms, end_ms) = range;
         let tree = self
             .merge_to_tree(
                 tenant,
                 profile_type,
                 label_selector,
-                start_ms,
-                end_ms,
+                (start_ms, end_ms),
                 Some(span_selector),
                 &[],
             )
@@ -699,7 +678,8 @@ impl<S: ProfileStore> FlameEngine<S> {
         Ok(tree.to_pyroscope_tree_bytes(max_nodes))
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// # Errors
+    /// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
     pub async fn select_merge_span_profile_sharded(
         &self,
         tenant: &str,
@@ -727,13 +707,12 @@ impl<S: ProfileStore> FlameEngine<S> {
                     tenant,
                     profile_type,
                     label_selector,
-                    *start_ms,
-                    *end_ms,
+                    (*start_ms, *end_ms),
                     Some(span_selector),
                     &[],
                 )
                 .await?;
-            merged.merge(tree);
+            merged.merge(&tree);
         }
         let max_nodes = if max_nodes > 0 {
             max_nodes
@@ -743,7 +722,8 @@ impl<S: ProfileStore> FlameEngine<S> {
         Ok(merged.to_flamegraph(max_nodes))
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// # Errors
+    /// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
     pub async fn select_merge_span_profile_tree_sharded(
         &self,
         tenant: &str,
@@ -771,13 +751,12 @@ impl<S: ProfileStore> FlameEngine<S> {
                     tenant,
                     profile_type,
                     label_selector,
-                    *start_ms,
-                    *end_ms,
+                    (*start_ms, *end_ms),
                     Some(span_selector),
                     &[],
                 )
                 .await?;
-            merged.merge(tree);
+            merged.merge(&tree);
         }
         let max_nodes = if max_nodes > 0 {
             max_nodes
@@ -787,28 +766,18 @@ impl<S: ProfileStore> FlameEngine<S> {
         Ok(merged.to_pyroscope_tree_bytes(max_nodes))
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// # Errors
+    /// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
     pub async fn select_heatmap(
         &self,
-        tenant: &str,
-        profile_type: &str,
-        label_selector: &str,
-        start_ms: i64,
-        end_ms: i64,
+        query: (&str, &str, &str),
+        range: (i64, i64),
         time_buckets: usize,
         value_buckets: usize,
     ) -> Result<Heatmap, ProfileError> {
+        let (start_ms, end_ms) = range;
         Ok(self
-            .select_heatmaps(
-                tenant,
-                profile_type,
-                label_selector,
-                &[],
-                start_ms,
-                end_ms,
-                time_buckets,
-                value_buckets,
-            )
+            .select_heatmaps(query, &[], range, time_buckets, value_buckets)
             .await?
             .into_iter()
             .next()
@@ -818,18 +787,18 @@ impl<S: ProfileStore> FlameEngine<S> {
             ))
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// # Errors
+    /// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
     pub async fn select_heatmaps(
         &self,
-        tenant: &str,
-        profile_type: &str,
-        label_selector: &str,
+        query: (&str, &str, &str),
         group_by: &[String],
-        start_ms: i64,
-        end_ms: i64,
+        range: (i64, i64),
         time_buckets: usize,
         value_buckets: usize,
     ) -> Result<Vec<LabeledHeatmap>, ProfileError> {
+        let (tenant, profile_type, label_selector) = query;
+        let (start_ms, end_ms) = range;
         let base_matchers = crate::matcher::parse_label_selector(label_selector)?;
         let groups = if group_by.is_empty() {
             vec![Vec::new()]
@@ -1089,7 +1058,7 @@ fn validate_range(start_ms: i64, end_ms: i64) -> Result<(), ProfileError> {
 mod tests {
     use std::sync::Arc;
 
-    use assert2::check;
+    use assert2::{assert, check};
 
     use super::*;
     use crate::{FunctionRec, InMemoryProfileStore, LineRec, LocationRec, SeriesAgg};
@@ -1109,29 +1078,23 @@ mod tests {
             )
         };
         store.push_sample(
-            "tenant-a",
-            PT,
+            ("tenant-a", PT),
             vec![("service".to_string(), "api".to_string())],
-            0,
-            work_stack,
+            (0, work_stack),
             10,
             100,
         );
         store.push_sample(
-            "tenant-a",
-            PT,
+            ("tenant-a", PT),
             vec![("service".to_string(), "api".to_string())],
-            0,
-            work_stack,
+            (0, work_stack),
             5,
             110,
         );
         store.push_sample(
-            "tenant-a",
-            PT,
+            ("tenant-a", PT),
             vec![("service".to_string(), "worker".to_string())],
-            0,
-            other_stack,
+            (0, other_stack),
             3,
             120,
         );
@@ -1152,29 +1115,28 @@ mod tests {
         };
         let labels = vec![("service".to_string(), "api".to_string())];
         store.push_sample_with_total_and_span(
-            "tenant-a",
-            PT,
+            ("tenant-a", PT),
             labels.clone(),
-            0,
-            work_stack,
-            10,
-            10,
+            (0, work_stack),
+            (10, 10),
             0,
             111,
         );
         store.push_sample_with_total_and_span(
-            "tenant-a",
-            PT,
+            ("tenant-a", PT),
             labels.clone(),
-            0,
-            cold_stack,
-            5,
-            5,
+            (0, cold_stack),
+            (5, 5),
             0,
             111,
         );
         store.push_sample_with_total_and_span(
-            "tenant-a", PT, labels, 0, work_stack, 4, 4, 30_000, 111,
+            ("tenant-a", PT),
+            labels,
+            (0, work_stack),
+            (4, 4),
+            30_000,
+            111,
         );
         FlameEngine::new(Arc::new(store), EngineOpts { default_max_nodes })
     }
@@ -1246,7 +1208,7 @@ mod tests {
 
     #[test]
     fn default_max_nodes_is_2048() {
-        assert2::assert!(EngineOpts::default().default_max_nodes == 2048);
+        assert!(EngineOpts::default().default_max_nodes == 2048);
     }
 
     #[tokio::test]
@@ -1259,33 +1221,24 @@ mod tests {
             (db.intern_stacktrace(0, &[a]), db.intern_stacktrace(0, &[b]))
         };
         store.push_sample_with_total(
-            "tenant-a",
-            PT,
+            ("tenant-a", PT),
             vec![("svc".to_string(), "x".to_string())],
-            0,
-            stack_a,
-            10,
-            10,
+            (0, stack_a),
+            (10, 10),
             0,
         );
         store.push_sample_with_total(
-            "tenant-a",
-            PT,
+            ("tenant-a", PT),
             vec![("svc".to_string(), "x".to_string())],
-            0,
-            stack_a,
-            10,
-            15,
+            (0, stack_a),
+            (10, 15),
             30_000,
         );
         store.push_sample_with_total(
-            "tenant-a",
-            PT,
+            ("tenant-a", PT),
             vec![("svc".to_string(), "x".to_string())],
-            0,
-            stack_b,
-            5,
-            15,
+            (0, stack_b),
+            (5, 15),
             30_000,
         );
         let engine = FlameEngine::new(
@@ -1300,9 +1253,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert2::assert!(diff.left_ticks == 10);
-        assert2::assert!(diff.right_ticks == 15);
-        assert2::assert!(diff.names.iter().any(|name| name == "b"));
+        check!(diff.left_ticks == 10);
+        check!(diff.right_ticks == 15);
+        check!(diff.names.iter().any(|name| name == "b"));
     }
 
     #[tokio::test]
@@ -1319,7 +1272,7 @@ mod tests {
             .map(|sample| sample.value.iter().sum::<i64>())
             .sum();
 
-        assert2::assert!(total == 15);
+        assert!(total == 15);
     }
 
     #[tokio::test]
@@ -1332,38 +1285,32 @@ mod tests {
             (db.intern_stacktrace(0, &[a]), db.intern_stacktrace(0, &[b]))
         };
         store.push_sample_with_total_and_span(
-            "tenant-a",
-            PT,
+            ("tenant-a", PT),
             vec![("svc".to_string(), "x".to_string())],
-            0,
-            stack_a,
-            6,
-            10,
+            (0, stack_a),
+            (6, 10),
             0,
             111,
         );
         store.push_sample_with_total_and_span(
-            "tenant-a",
-            PT,
+            ("tenant-a", PT),
             vec![("svc".to_string(), "x".to_string())],
-            0,
-            stack_b,
-            4,
-            10,
+            (0, stack_b),
+            (4, 10),
             0,
             222,
         );
         let engine = FlameEngine::new(Arc::new(store), EngineOpts::default());
 
         let fg = engine
-            .select_merge_span_profile("tenant-a", PT, "{}", &[111], 0, 60_000, 0)
+            .select_merge_span_profile(("tenant-a", PT, "{}"), &[111], (0, 60_000), 0)
             .await
             .unwrap();
 
-        assert2::assert!(fg.total == 6);
-        assert2::assert!(
+        assert!(fg.total == 6);
+        assert!(
             engine
-                .select_merge_span_profile("tenant-a", PT, "{}", &[], 0, 60_000, 0)
+                .select_merge_span_profile(("tenant-a", PT, "{}"), &[], (0, 60_000), 0)
                 .await
                 .is_err()
         );
@@ -1379,30 +1326,24 @@ mod tests {
             (db.intern_stacktrace(0, &[a]), db.intern_stacktrace(0, &[b]))
         };
         store.push_sample_with_total_and_span(
-            "tenant-a",
-            PT,
+            ("tenant-a", PT),
             vec![("svc".to_string(), "x".to_string())],
-            0,
-            stack_a,
-            6,
-            10,
+            (0, stack_a),
+            (6, 10),
             0,
             111,
         );
         store.push_sample_with_total_and_span(
-            "tenant-a",
-            PT,
+            ("tenant-a", PT),
             vec![("svc".to_string(), "x".to_string())],
-            0,
-            stack_b,
-            4,
-            10,
+            (0, stack_b),
+            (4, 10),
             30_000,
             111,
         );
         let engine = FlameEngine::new(Arc::new(store), EngineOpts::default());
         let whole = engine
-            .select_merge_span_profile("tenant-a", PT, "{}", &[111], 0, 60_000, 0)
+            .select_merge_span_profile(("tenant-a", PT, "{}"), &[111], (0, 60_000), 0)
             .await
             .unwrap();
         let sharded = engine
@@ -1417,51 +1358,42 @@ mod tests {
             .await
             .unwrap();
 
-        assert2::assert!(sharded == whole);
+        assert!(sharded == whole);
     }
 
     #[tokio::test]
     async fn select_heatmap_bins_profile_totals() {
         let mut store = InMemoryProfileStore::new();
         store.push_sample_with_total(
-            "tenant-a",
-            PT,
+            ("tenant-a", PT),
             vec![("svc".to_string(), "x".to_string())],
-            0,
-            1,
-            2,
-            5,
+            (0, 1),
+            (2, 5),
             0,
         );
         store.push_sample_with_total(
-            "tenant-a",
-            PT,
+            ("tenant-a", PT),
             vec![("svc".to_string(), "x".to_string())],
-            0,
-            2,
-            3,
-            5,
+            (0, 2),
+            (3, 5),
             0,
         );
         store.push_sample_with_total(
-            "tenant-a",
-            PT,
+            ("tenant-a", PT),
             vec![("svc".to_string(), "x".to_string())],
-            0,
-            1,
-            30,
-            30,
+            (0, 1),
+            (30, 30),
             60,
         );
         let engine = FlameEngine::new(Arc::new(store), EngineOpts::default());
 
         let heatmap = engine
-            .select_heatmap("tenant-a", PT, "{}", 0, 100, 2, 2)
+            .select_heatmap(("tenant-a", PT, "{}"), (0, 100), 2, 2)
             .await
             .unwrap();
 
-        assert2::assert!(heatmap.counts[0][0] == 1);
-        assert2::assert!(heatmap.counts[1][1] == 1);
+        assert!(heatmap.counts[0][0] == 1);
+        assert!(heatmap.counts[1][1] == 1);
     }
 
     #[tokio::test]
@@ -1476,9 +1408,9 @@ mod tests {
                 db.intern_stacktrace(1, &[beta]),
             )
         };
-        assert2::assert!(alpha_stack == beta_stack);
-        store.push_sample("tenant-a", PT, Vec::new(), 0, alpha_stack, 5, 0);
-        store.push_sample("tenant-a", PT, Vec::new(), 1, beta_stack, 7, 0);
+        assert!(alpha_stack == beta_stack);
+        store.push_sample(("tenant-a", PT), Vec::new(), (0, alpha_stack), 5, 0);
+        store.push_sample(("tenant-a", PT), Vec::new(), (1, beta_stack), 7, 0);
         let engine = FlameEngine::new(Arc::new(store), EngineOpts::default());
 
         let fg = engine
@@ -1486,9 +1418,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert2::assert!(fg.names.iter().any(|name| name == "alpha"));
-        assert2::assert!(fg.names.iter().any(|name| name == "beta"));
-        assert2::assert!(fg.total == 12);
+        check!(fg.names.iter().any(|name| name == "alpha"));
+        check!(fg.names.iter().any(|name| name == "beta"));
+        check!(fg.total == 12);
     }
 
     #[tokio::test]
@@ -1498,9 +1430,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert2::assert!(fg.total == 18);
-        assert2::assert!(&fg.levels[0].values == &vec![0, 18, 0, 0]);
-        assert2::assert!(self_value_for(&fg, "work") == 15);
+        check!(fg.total == 18);
+        check!(fg.levels[0].values == vec![0, 18, 0, 0]);
+        check!(self_value_for(&fg, "work") == 15);
     }
 
     #[tokio::test]
@@ -1510,10 +1442,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert2::assert!(fg.total == 15);
-        assert2::assert!(fg.names[0].as_str() == "total");
-        assert2::assert!(self_value_for(&fg, "work") == 15);
-        assert2::assert!(!fg.names.iter().any(|name| name == "other"));
+        check!(fg.total == 15);
+        check!(fg.names[0] == "total");
+        check!(self_value_for(&fg, "work") == 15);
+        check!(!fg.names.iter().any(|name| name == "other"));
     }
 
     #[tokio::test]
@@ -1523,17 +1455,16 @@ mod tests {
                 "tenant-a",
                 PT,
                 "{}",
-                0,
-                200,
+                (0, 200),
                 0,
                 &["work".to_string()],
             )
             .await
             .unwrap();
 
-        assert2::assert!(fg.total == 15);
-        assert2::assert!(fg.names.iter().any(|name| name == "work"));
-        assert2::assert!(!fg.names.iter().any(|name| name == "other"));
+        check!(fg.total == 15);
+        check!(fg.names.iter().any(|name| name == "work"));
+        check!(!fg.names.iter().any(|name| name == "other"));
     }
 
     #[tokio::test]
@@ -1543,11 +1474,11 @@ mod tests {
         let service_group = ["service".to_string()];
 
         let grouped_default = engine
-            .select_merge_stacktraces_grouped("tenant-a", PT, "{}", 0, 60_000, 0, &service_group)
+            .select_merge_stacktraces_grouped("tenant-a", PT, "{}", (0, 60_000), 0, &service_group)
             .await
             .unwrap();
         let grouped_limited = engine
-            .select_merge_stacktraces_grouped("tenant-a", PT, "{}", 0, 60_000, 16, &service_group)
+            .select_merge_stacktraces_grouped("tenant-a", PT, "{}", (0, 60_000), 16, &service_group)
             .await
             .unwrap();
         check!(has_name(&grouped_default, "api"));
@@ -1557,18 +1488,28 @@ mod tests {
 
         let selected_default = engine
             .select_merge_stacktraces_with_stack_trace_selector(
-                "tenant-a", PT, "{}", 0, 60_000, 0, &selector,
+                "tenant-a",
+                PT,
+                "{}",
+                (0, 60_000),
+                0,
+                &selector,
             )
             .await
             .unwrap();
         let selected_limited = engine
             .select_merge_stacktraces_with_stack_trace_selector(
-                "tenant-a", PT, "{}", 0, 60_000, 16, &selector,
+                "tenant-a",
+                PT,
+                "{}",
+                (0, 60_000),
+                16,
+                &selector,
             )
             .await
             .unwrap();
-        assert2::assert!(has_name(&selected_default, "other"));
-        assert2::assert!(!has_name(&selected_limited, "other"));
+        assert!(has_name(&selected_default, "other"));
+        assert!(!has_name(&selected_limited, "other"));
 
         let sharded_default = engine
             .select_merge_stacktraces_sharded("tenant-a", PT, "{}", &[(0, 0), (30_000, 30_000)], 0)
@@ -1620,15 +1561,15 @@ mod tests {
             .diff("tenant-a", (PT, "{}", 0, 0), (PT, "{}", 30_000, 30_000), 16)
             .await
             .unwrap();
-        assert2::assert!(diff_has_name(&diff_default, "other"));
-        assert2::assert!(!diff_has_name(&diff_limited, "other"));
+        assert!(diff_has_name(&diff_default, "other"));
+        assert!(!diff_has_name(&diff_limited, "other"));
 
         let span_default = engine
-            .select_merge_span_profile("tenant-a", PT, "{}", &[111], 0, 60_000, 0)
+            .select_merge_span_profile(("tenant-a", PT, "{}"), &[111], (0, 60_000), 0)
             .await
             .unwrap();
         let span_limited = engine
-            .select_merge_span_profile("tenant-a", PT, "{}", &[111], 0, 60_000, 16)
+            .select_merge_span_profile(("tenant-a", PT, "{}"), &[111], (0, 60_000), 16)
             .await
             .unwrap();
         let span_sharded_default = engine
@@ -1666,13 +1607,23 @@ mod tests {
 
         let tree_default = engine
             .select_merge_stacktraces_tree_with_stack_trace_selector(
-                "tenant-a", PT, "{}", 0, 60_000, 0, &selector,
+                "tenant-a",
+                PT,
+                "{}",
+                (0, 60_000),
+                0,
+                &selector,
             )
             .await
             .unwrap();
         let tree_limited = engine
             .select_merge_stacktraces_tree_with_stack_trace_selector(
-                "tenant-a", PT, "{}", 0, 60_000, 16, &selector,
+                "tenant-a",
+                PT,
+                "{}",
+                (0, 60_000),
+                16,
+                &selector,
             )
             .await
             .unwrap();
@@ -1712,13 +1663,19 @@ mod tests {
 
         let profile_default = engine
             .select_merge_profile_with_max_nodes_and_stack_trace_selector(
-                "tenant-a", PT, "{}", 0, 0, 0, &selector,
+                ("tenant-a", PT, "{}"),
+                (0, 0),
+                0,
+                &selector,
             )
             .await
             .unwrap();
         let profile_limited = engine
             .select_merge_profile_with_max_nodes_and_stack_trace_selector(
-                "tenant-a", PT, "{}", 0, 0, 16, &selector,
+                ("tenant-a", PT, "{}"),
+                (0, 0),
+                16,
+                &selector,
             )
             .await
             .unwrap();
@@ -1729,11 +1686,11 @@ mod tests {
         check!(!decoded_profile_has_string(&profile_limited, "other"));
 
         let span_tree_default = engine
-            .select_merge_span_profile_tree("tenant-a", PT, "{}", &[111], 0, 60_000, 0)
+            .select_merge_span_profile_tree(("tenant-a", PT, "{}"), &[111], (0, 60_000), 0)
             .await
             .unwrap();
         let span_tree_limited = engine
-            .select_merge_span_profile_tree("tenant-a", PT, "{}", &[111], 0, 60_000, 16)
+            .select_merge_span_profile_tree(("tenant-a", PT, "{}"), &[111], (0, 60_000), 16)
             .await
             .unwrap();
         check!(bytes_contain(&span_tree_default, "other"));
@@ -1780,27 +1737,24 @@ mod tests {
             .await
             .unwrap();
 
-        assert2::assert!(sharded == whole);
+        assert!(sharded == whole);
     }
 
     #[tokio::test]
     async fn stack_trace_selector_series_sums_selected_stacks_per_profile() {
         let got = branchy_fixture(16)
             .select_series_with_stack_trace_selector(
-                "tenant-a",
-                PT,
-                r#"{service="api"}"#,
+                ("tenant-a", PT, r#"{service="api"}"#),
                 &[],
                 15.0,
                 SeriesAgg::Sum,
-                0,
-                0,
+                (0, 0),
                 &["main".to_string()],
             )
             .await
             .unwrap();
 
-        assert2::assert!(
+        assert!(
             got == vec![Series {
                 labels: Vec::new(),
                 points: vec![(0, 15.0)],
@@ -1812,9 +1766,7 @@ mod tests {
     async fn sharded_average_uses_covering_range_instead_of_summing_shards() {
         let got = branchy_fixture(16)
             .select_series_with_stack_trace_selector_sharded(
-                "tenant-a",
-                PT,
-                r#"{service="api"}"#,
+                ("tenant-a", PT, r#"{service="api"}"#),
                 &[],
                 60.0,
                 SeriesAgg::Average,
@@ -1824,7 +1776,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert2::assert!(
+        assert!(
             got == vec![Series {
                 labels: Vec::new(),
                 points: vec![(0, 9.5)],
@@ -1834,7 +1786,7 @@ mod tests {
 
     #[tokio::test]
     async fn sharded_queries_reject_reversed_ranges() {
-        assert2::assert!(
+        assert!(
             branchy_fixture(16)
                 .select_merge_stacktraces_sharded("tenant-a", PT, "{}", &[(10, 0)], 0)
                 .await
@@ -1846,48 +1798,35 @@ mod tests {
     async fn grouped_heatmaps_skip_label_sets_without_selected_profile_points() {
         let mut store = InMemoryProfileStore::new();
         store.push_sample_with_total(
-            "tenant-a",
-            PT,
+            ("tenant-a", PT),
             vec![("service".to_string(), "api".to_string())],
-            0,
-            1,
-            5,
-            5,
+            (0, 1),
+            (5, 5),
             0,
         );
         store.push_sample_with_total(
-            "tenant-a",
-            "memory:alloc_space:bytes:space:bytes",
+            ("tenant-a", "memory:alloc_space:bytes:space:bytes"),
             vec![("service".to_string(), "idle".to_string())],
-            0,
-            1,
-            9,
-            9,
+            (0, 1),
+            (9, 9),
             0,
         );
         let engine = FlameEngine::new(Arc::new(store), EngineOpts::default());
 
         let got = engine
             .select_heatmaps(
-                "tenant-a",
-                PT,
-                "{}",
+                ("tenant-a", PT, "{}"),
                 &["service".to_string()],
-                0,
-                60_000,
+                (0, 60_000),
                 2,
                 2,
             )
             .await
             .unwrap();
 
-        check!(
-            (
-                got.len(),
-                got[0].labels.as_slice(),
-                got[0].heatmap.counts.iter().flatten().sum::<u64>(),
-            ) == (1, &[("service".to_string(), "api".to_string())][..], 1,)
-        );
+        assert!(got.len() == 1);
+        check!(got[0].labels == vec![("service".to_string(), "api".to_string())]);
+        check!(got[0].heatmap.counts.iter().flatten().sum::<u64>() == 1);
     }
 
     fn series_fixture() -> FlameEngine<InMemoryProfileStore> {
@@ -1895,53 +1834,38 @@ mod tests {
         let stack_a = 1;
         let stack_b = 2;
         store.push_sample_with_total(
-            "tenant-a",
-            PT,
+            ("tenant-a", PT),
             vec![("service".to_string(), "api".to_string())],
-            0,
-            stack_a,
-            60,
-            100,
+            (0, stack_a),
+            (60, 100),
             0,
         );
         store.push_sample_with_total(
-            "tenant-a",
-            PT,
+            ("tenant-a", PT),
             vec![("service".to_string(), "api".to_string())],
-            0,
-            stack_b,
-            40,
-            100,
+            (0, stack_b),
+            (40, 100),
             0,
         );
         store.push_sample_with_total(
-            "tenant-a",
-            PT,
+            ("tenant-a", PT),
             vec![("service".to_string(), "api".to_string())],
-            0,
-            stack_a,
-            50,
-            50,
+            (0, stack_a),
+            (50, 50),
             16_000,
         );
         store.push_sample_with_total(
-            "tenant-a",
-            PT,
+            ("tenant-a", PT),
             vec![("service".to_string(), "web".to_string())],
-            0,
-            stack_a,
-            7,
-            7,
+            (0, stack_a),
+            (7, 7),
             0,
         );
         store.push_sample_with_total(
-            "tenant-a",
-            "memory:alloc_space:bytes:space:bytes",
+            ("tenant-a", "memory:alloc_space:bytes:space:bytes"),
             vec![("service".to_string(), "api".to_string())],
-            0,
-            stack_a,
-            999,
-            999,
+            (0, stack_a),
+            (999, 999),
             0,
         );
         FlameEngine::new(Arc::new(store), EngineOpts::default())
@@ -1951,20 +1875,17 @@ mod tests {
     async fn select_series_sum_buckets_by_step_and_counts_total_once_per_profile() {
         let mut got = series_fixture()
             .select_series(
-                "tenant-a",
-                PT,
-                "{}",
+                ("tenant-a", PT, "{}"),
                 &["service".to_string()],
                 15.0,
                 SeriesAgg::Sum,
-                0,
-                60_000,
+                (0, 60_000),
             )
             .await
             .unwrap();
         got.sort_by(|left, right| left.labels.cmp(&right.labels));
 
-        assert2::assert!(
+        assert!(
             got == vec![
                 Series {
                     labels: vec![("service".to_string(), "api".to_string())],
@@ -1982,52 +1903,40 @@ mod tests {
     async fn select_series_floors_timestamps_to_step_buckets() {
         let mut store = InMemoryProfileStore::new();
         store.push_sample_with_total(
-            "tenant-a",
-            PT,
+            ("tenant-a", PT),
             vec![("service".to_string(), "api".to_string())],
-            0,
-            1,
-            1,
-            10,
+            (0, 1),
+            (1, 10),
             0,
         );
         store.push_sample_with_total(
-            "tenant-a",
-            PT,
+            ("tenant-a", PT),
             vec![("service".to_string(), "api".to_string())],
-            0,
-            1,
-            1,
-            20,
+            (0, 1),
+            (1, 20),
             10_000,
         );
         store.push_sample_with_total(
-            "tenant-a",
-            PT,
+            ("tenant-a", PT),
             vec![("service".to_string(), "api".to_string())],
-            0,
-            1,
-            1,
-            5,
+            (0, 1),
+            (1, 5),
             16_000,
         );
         let engine = FlameEngine::new(Arc::new(store), EngineOpts::default());
 
         let got = engine
             .select_series(
-                "tenant-a",
-                PT,
-                "{}",
+                ("tenant-a", PT, "{}"),
                 &["service".to_string()],
                 15.0,
                 SeriesAgg::Sum,
-                0,
-                60_000,
+                (0, 60_000),
             )
             .await
             .unwrap();
 
-        assert2::assert!(
+        assert!(
             got == vec![Series {
                 labels: vec![("service".to_string(), "api".to_string())],
                 points: vec![(0, 30.0), (15_000, 5.0)],
@@ -2039,19 +1948,16 @@ mod tests {
     async fn select_series_average_and_label_selector_bucket_by_step() {
         let got = series_fixture()
             .select_series(
-                "tenant-a",
-                PT,
-                r#"{service="api"}"#,
+                ("tenant-a", PT, r#"{service="api"}"#),
                 &[],
                 60.0,
                 SeriesAgg::Average,
-                0,
-                60_000,
+                (0, 60_000),
             )
             .await
             .unwrap();
 
-        assert2::assert!(
+        assert!(
             got == vec![Series {
                 labels: Vec::new(),
                 points: vec![(0, 75.0)],
@@ -2063,9 +1969,7 @@ mod tests {
     async fn sharded_select_series_merges_points_for_same_label_set() {
         let mut got = series_fixture()
             .select_series_sharded(
-                "tenant-a",
-                PT,
-                "{}",
+                ("tenant-a", PT, "{}"),
                 &["service".to_string()],
                 15.0,
                 SeriesAgg::Sum,
@@ -2075,7 +1979,7 @@ mod tests {
             .unwrap();
         got.sort_by(|left, right| left.labels.cmp(&right.labels));
 
-        assert2::assert!(
+        assert!(
             got == vec![
                 Series {
                     labels: vec![("service".to_string(), "api".to_string())],

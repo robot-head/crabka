@@ -8,7 +8,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,11 +25,15 @@ impl Default for DescribeClusterRequest {
             include_cluster_authorized_operations: false,
             endpoint_type: 1i8,
             include_fenced_brokers: false,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl DescribeClusterRequest {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_cluster_request::DescribeClusterRequest {
         crate::owned::describe_cluster_request::DescribeClusterRequest {
             include_cluster_authorized_operations: (self.include_cluster_authorized_operations),

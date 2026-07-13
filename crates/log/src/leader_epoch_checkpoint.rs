@@ -45,6 +45,8 @@ impl LeaderEpochCheckpoint {
         fields(path = %path.display(), entries = tracing::field::Empty),
         err,
     )]
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
     pub fn open(path: PathBuf) -> Result<Self, LogError> {
         let entries = match fs::read_to_string(&path) {
             Ok(s) => Self::parse(&s)?,
@@ -91,6 +93,8 @@ impl LeaderEpochCheckpoint {
     /// with the same epoch is a no-op (keeps the earliest recorded
     /// `start_offset`). Rewrites the file atomically.
     #[instrument(level = "debug", skip(self), fields(epoch = epoch.0, start_offset = start_offset.0), err)]
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
     pub fn append(&mut self, epoch: LeaderEpoch, start_offset: Offset) -> Result<(), LogError> {
         if append_to(&mut self.entries, epoch, start_offset) {
             self.flush()?;
@@ -101,6 +105,8 @@ impl LeaderEpochCheckpoint {
     /// Remove epoch entries that begin at or after `end_offset` (mirrors Kafka's
     /// LeaderEpochFileCache.truncateFromEnd). Persists if anything changed.
     #[instrument(level = "debug", skip(self), fields(end_offset = end_offset.0), err)]
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
     pub fn truncate_from_end(&mut self, end_offset: Offset) -> Result<(), LogError> {
         let before = self.entries.len();
         truncate_to(&mut self.entries, end_offset);
@@ -112,10 +118,12 @@ impl LeaderEpochCheckpoint {
 
     /// Drop every recorded epoch (mirrors Kafka's
     /// `LeaderEpochFileCache.clearAndFlush`, invoked by
-    /// `LocalLog.truncateFullyAndStartAt`). Used by [`Log::reset_to`]: once the
+    /// `LocalLog.truncateFullyAndStartAt`). Used by [`crate::Log::reset_to`]: once the
     /// log has been emptied, no offset has a backing record, so no epoch may be
     /// advertised. Persists the now-empty file only when something was removed.
     #[instrument(level = "debug", skip(self), fields(cleared = self.entries.len()), err)]
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
     pub fn clear(&mut self) -> Result<(), LogError> {
         if self.entries.is_empty() {
             return Ok(());

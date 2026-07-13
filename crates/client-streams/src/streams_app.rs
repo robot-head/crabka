@@ -77,9 +77,7 @@ impl StreamsApp {
     ///
     /// Installs the registry as a side effect of `build`, so it is ready before
     /// the topology (and its default serdes) are constructed.
-    // `build()` installs the process default registry as a side effect, so it's
-    // not a pure value-returning constructor.
-    #[allow(clippy::must_use_candidate)]
+    #[must_use]
     #[builder(start_fn = builder, finish_fn = build)]
     pub fn new(
         #[builder(into)] bootstrap: String,
@@ -138,6 +136,8 @@ impl StreamsApp {
         fields(application_id = %self.application_id),
         err,
     )]
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn run(self, builder: StreamsBuilder) -> Result<KafkaStreams, StreamsClientError> {
         let built = builder.build(&self.application_id)?;
         self.run_built(built).await
@@ -151,6 +151,8 @@ impl StreamsApp {
         fields(application_id = %self.application_id, guarantee = ?self.processing_guarantee),
         err,
     )]
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn run_built(
         self,
         topology: BuiltTopology,
@@ -183,6 +185,6 @@ mod tests {
             .schema_registry("http://127.0.0.1:8081")
             .build();
 
-        assert2::assert!(app.application_id() == "orders-app");
+        assert_eq!(app.application_id(), "orders-app");
     }
 }

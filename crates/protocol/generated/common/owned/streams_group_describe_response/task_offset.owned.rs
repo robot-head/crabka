@@ -19,9 +19,9 @@ impl Encode for TaskOffset {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.subtopology_id);
+                let () = put_compact_string(buf, &self.subtopology_id);
             } else {
-                put_string(buf, &self.subtopology_id);
+                let () = put_string(buf, &self.subtopology_id);
             }
         }
         if version >= 0 {

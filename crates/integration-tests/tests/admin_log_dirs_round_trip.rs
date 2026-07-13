@@ -1,7 +1,3 @@
-// rustc 1.95 clippy ICEs on annotate-snippets in pedantic lints on these
-// raw-wire test files; match the opt-out used by `round_trip.rs`.
-#![allow(clippy::pedantic)]
-
 //! Integration test: drive KIP-113 (`AlterReplicaLogDirs` +
 //! `DescribeLogDirs`) through `AdminClient` so the typed admin
 //! wrappers in `crates/client-admin/src/log_dirs.rs` get exercised

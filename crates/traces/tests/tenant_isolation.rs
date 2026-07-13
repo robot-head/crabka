@@ -256,8 +256,7 @@ fn trace_with_n_spans(trace_seed: u8, n: usize) -> Vec<u8> {
     let spans = (0..n)
         .map(|i| OtlpSpan {
             trace_id: [trace_seed; 16].to_vec(),
-            #[allow(clippy::cast_possible_truncation)]
-            span_id: [(i as u8).wrapping_add(1); 8].to_vec(),
+            span_id: [i.to_le_bytes()[0].wrapping_add(1); 8].to_vec(),
             name: format!("span-{i}"),
             start_time_unix_nano: 1_000,
             end_time_unix_nano: 1_500,
@@ -354,10 +353,6 @@ fn tag_values(values: &JsonValue) -> Vec<String> {
 }
 
 #[tokio::test]
-#[allow(
-    clippy::too_many_lines,
-    reason = "headline test deliberately drives every read surface end-to-end"
-)]
 async fn tenants_are_fully_isolated_across_all_read_surfaces() -> TestResult {
     // SAME trace_id bytes in both tenants, same service, different root name,
     // plus an attribute unique to tenant-a.

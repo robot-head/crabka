@@ -12,6 +12,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::{Bytes, BytesMut};
 
+use crate::numeric::saturating_u128_to_u64;
+
 /// Magic prefix on every record so consumers can confirm a record was
 /// produced by this driver and not (say) some pre-existing data left in
 /// the topic.
@@ -28,7 +30,7 @@ pub fn template(msg_size_bytes: usize) -> BytesMut {
     // Fill the body with a repeating ramp so compression has *some* work.
     // All-zeros compresses too well; all-random compresses too poorly.
     for (i, byte) in b.iter_mut().enumerate().skip(HEADER_LEN) {
-        *byte = (i & 0xff) as u8;
+        *byte = u8::try_from(i & 0xff).unwrap_or_default();
     }
     b
 }
@@ -40,7 +42,7 @@ pub fn stamp_into(buf: &mut BytesMut, scenario_id: u64) -> Bytes {
     debug_assert!(buf.len() >= HEADER_LEN, "buf too short for header");
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos() as u64);
+        .map_or(0, |d| saturating_u128_to_u64(d.as_nanos()));
     buf[..MAGIC.len()].copy_from_slice(&MAGIC);
     buf[8..16].copy_from_slice(&scenario_id.to_be_bytes());
     buf[16..24].copy_from_slice(&nanos.to_be_bytes());

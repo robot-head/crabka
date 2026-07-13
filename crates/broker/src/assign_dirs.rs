@@ -133,7 +133,7 @@ fn validate_assign_response(error_code: i16) -> Result<(), String> {
 mod tests {
     use std::{collections::BTreeSet, net::SocketAddr};
 
-    use assert2::check;
+    use assert2::{assert, check};
     use crabka_metadata::MetadataImage;
     use crabka_protocol::{Decode, Encode};
     use crabka_raft::{
@@ -228,7 +228,9 @@ mod tests {
         let req = build_request(7, &assignments);
 
         // broker_id, epoch, and two directories.
-        check!((req.broker_id, req.broker_epoch, req.directories.len()) == (7, -1, 2));
+        check!(req.broker_id == 7);
+        check!(req.broker_epoch == -1);
+        check!(req.directories.len() == 2);
 
         // Find dir dX and dY by their UUID bytes.
         let dir_x = req
@@ -243,7 +245,7 @@ mod tests {
             .expect("dir dY missing");
 
         // dX should have exactly one topic (tA) with two partitions [0, 1].
-        assert2::assert!(dir_x.topics.len() == 1);
+        assert!(dir_x.topics.len() == 1);
         let topic_a = dir_x
             .topics
             .iter()
@@ -255,27 +257,25 @@ mod tests {
             .map(|p| p.partition_index)
             .collect();
         part_indices.sort_unstable();
-        assert2::assert!(part_indices == vec![0, 1]);
+        assert!(part_indices == vec![0, 1]);
 
         // dY should have exactly one topic (tB) with one partition [0].
-        assert2::assert!(dir_y.topics.len() == 1);
+        assert!(dir_y.topics.len() == 1);
         let topic_b = dir_y
             .topics
             .iter()
             .find(|t| t.topic_id.0 == *tb.as_bytes())
             .expect("topic tB in dY missing");
-        assert2::assert!(
-            (
-                topic_b.partitions.len(),
-                topic_b.partitions[0].partition_index
-            ) == (1, 0)
-        );
+        assert!(topic_b.partitions.len() == 1);
+        assert!(topic_b.partitions[0].partition_index == 0);
     }
 
     #[test]
     fn build_request_empty_assignments() {
         let req = build_request(1, &[]);
-        check!((req.broker_id, req.broker_epoch, req.directories) == (1, -1, Vec::new()));
+        check!(req.broker_id == 1);
+        check!(req.broker_epoch == -1);
+        check!(req.directories.is_empty());
     }
 
     #[test]
@@ -287,7 +287,8 @@ mod tests {
         let decoded =
             AssignReplicasToDirsRequest::decode(&mut bytes.freeze(), 0).expect("decode request");
 
-        assert2::assert!((decoded.broker_id, decoded.broker_epoch) == (3, -1));
+        assert!(decoded.broker_id == 3);
+        assert!(decoded.broker_epoch == -1);
     }
 
     #[tokio::test]
@@ -308,14 +309,14 @@ mod tests {
                 .await
                 .expect_err("bad controller leader must fail");
 
-            assert2::assert!(err == expected);
+            assert!(err == expected, "case: leader={leader:?}");
         }
     }
 
     #[test]
     fn validate_assign_response_rejects_controller_error() {
-        assert2::assert!(validate_assign_response(0).is_ok());
+        assert!(validate_assign_response(0).is_ok());
         let err = validate_assign_response(42).expect_err("non-zero error_code must fail");
-        assert2::assert!(err.contains("error_code=42"));
+        assert!(err.contains("error_code=42"));
     }
 }

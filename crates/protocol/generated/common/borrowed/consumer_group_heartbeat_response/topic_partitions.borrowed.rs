@@ -10,6 +10,10 @@ pub struct TopicPartitions {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl TopicPartitions {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::common::consumer_group_heartbeat_response::topic_partitions::TopicPartitions

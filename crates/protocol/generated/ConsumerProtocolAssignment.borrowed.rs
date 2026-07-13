@@ -14,8 +14,9 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 3;
 pub const FLEXIBLE_MIN: i16 = 32767;
 #[inline]
-fn is_flexible(version: i16) -> bool {
-    version >= FLEXIBLE_MIN
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
+    version == FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ConsumerProtocolAssignment<'a> {
@@ -24,6 +25,9 @@ pub struct ConsumerProtocolAssignment<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl ConsumerProtocolAssignment<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
     pub fn to_owned(
         &self,
     ) -> crate::owned::consumer_protocol_assignment::ConsumerProtocolAssignment {
@@ -59,9 +63,9 @@ impl Encode for ConsumerProtocolAssignment<'_> {
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_bytes(buf, self.user_data);
+                let () = put_compact_nullable_bytes(buf, self.user_data);
             } else {
-                put_nullable_bytes(buf, self.user_data);
+                let () = put_nullable_bytes(buf, self.user_data);
             }
         }
         Ok(())
@@ -154,6 +158,10 @@ pub struct TopicPartition<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl TopicPartition<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::consumer_protocol_assignment::TopicPartition {
         crate::owned::consumer_protocol_assignment::TopicPartition {
             topic: (self.topic).to_string(),
@@ -164,12 +172,12 @@ impl TopicPartition<'_> {
 }
 impl Encode for TopicPartition<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
-        let flex = version >= 32767;
+        let flex = version == i16::MAX;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.topic);
+                let () = put_compact_string(buf, self.topic);
             } else {
-                put_string(buf, self.topic);
+                let () = put_string(buf, self.topic);
             }
         }
         if version >= 0 {
@@ -183,7 +191,7 @@ impl Encode for TopicPartition<'_> {
         Ok(())
     }
     fn encoded_len(&self, version: i16) -> usize {
-        let flex = version >= 32767;
+        let flex = version == i16::MAX;
         let mut n: usize = 0;
         if version >= 0 {
             n += if flex {
@@ -205,7 +213,7 @@ impl Encode for TopicPartition<'_> {
 }
 impl<'de> DecodeBorrow<'de> for TopicPartition<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
-        let flex = version >= 32767;
+        let flex = version == i16::MAX;
         let mut out = Self::default();
         if version >= 0 {
             out.topic = if flex {

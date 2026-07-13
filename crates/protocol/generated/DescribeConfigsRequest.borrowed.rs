@@ -12,7 +12,8 @@ pub const MIN_VERSION: i16 = 1;
 pub const MAX_VERSION: i16 = 4;
 pub const FLEXIBLE_MIN: i16 = 4;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -23,6 +24,10 @@ pub struct DescribeConfigsRequest<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl DescribeConfigsRequest<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_configs_request::DescribeConfigsRequest {
         crate::owned::describe_configs_request::DescribeConfigsRequest {
             resources: (self.resources)
@@ -148,6 +153,10 @@ pub struct DescribeConfigsResource<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl DescribeConfigsResource<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_configs_request::DescribeConfigsResource {
         crate::owned::describe_configs_request::DescribeConfigsResource {
             resource_type: (self.resource_type),
@@ -167,9 +176,9 @@ impl Encode for DescribeConfigsResource<'_> {
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.resource_name);
+                let () = put_compact_string(buf, self.resource_name);
             } else {
-                put_string(buf, self.resource_name);
+                let () = put_string(buf, self.resource_name);
             }
         }
         if version >= 0 {
@@ -179,9 +188,9 @@ impl Encode for DescribeConfigsResource<'_> {
                 if let Some(v) = &self.configuration_keys {
                     for it in v {
                         if flex {
-                            put_compact_string(buf, it);
+                            let () = put_compact_string(buf, it);
                         } else {
-                            put_string(buf, it);
+                            let () = put_string(buf, it);
                         }
                     }
                 }

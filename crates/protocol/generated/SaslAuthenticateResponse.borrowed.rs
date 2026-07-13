@@ -17,7 +17,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 2;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -29,6 +30,10 @@ pub struct SaslAuthenticateResponse<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl SaslAuthenticateResponse<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::sasl_authenticate_response::SaslAuthenticateResponse {
         crate::owned::sasl_authenticate_response::SaslAuthenticateResponse {
             error_code: (self.error_code),
@@ -53,16 +58,16 @@ impl Encode for SaslAuthenticateResponse<'_> {
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message);
+                let () = put_compact_nullable_string(buf, self.error_message);
             } else {
-                put_nullable_string(buf, self.error_message);
+                let () = put_nullable_string(buf, self.error_message);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_bytes(buf, self.auth_bytes);
+                let () = put_compact_bytes(buf, self.auth_bytes);
             } else {
-                put_bytes(buf, self.auth_bytes);
+                let () = put_bytes(buf, self.auth_bytes);
             }
         }
         if version >= 1 {

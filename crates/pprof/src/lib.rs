@@ -23,7 +23,6 @@ mod union_store;
 
 /// Prost-generated perftools.profiles wire types.
 pub mod proto {
-    #![allow(clippy::all, clippy::pedantic, clippy::useless_borrows_in_formatting)]
 
     include!(concat!(env!("OUT_DIR"), "/perftools.profiles.rs"));
 }
@@ -44,7 +43,9 @@ pub use samples::{
 };
 pub use series::{Series, SeriesAgg, fold_bucket, step_bucket_ms, step_ms_from_secs};
 pub use store::{ProfileScan, ProfileStats, ProfileStore};
-pub use symbol_db::{FunctionRec, LineRec, LocationRec, MappingRec, RawLocation, SymbolDb};
+pub use symbol_db::{
+    FunctionRec, LineRec, LocationRec, MappingRec, MappingSymbolization, RawLocation, SymbolDb,
+};
 pub use symbolizer::{
     ChainedResolver, DebuginfodResolver, FileSystemResolver, LazySymbolizer, NativeResolver,
     NativeSymbol, ObjectSymbolResolver, SymbolizeRequest,

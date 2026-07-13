@@ -16,6 +16,8 @@ pub struct RulerShard {
 }
 
 impl RulerShard {
+    /// # Errors
+    /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
     pub fn new(index: usize, total: usize) -> Result<Self, PromqlError> {
         if total == 0 {
             return Err(PromqlError::Plan(

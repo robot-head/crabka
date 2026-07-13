@@ -1,6 +1,6 @@
 //! Querier role: Pyroscope `querier.v1` Connect API and legacy flamebearer endpoints.
 
-use std::{collections::BTreeMap, future::Future, net::SocketAddr, sync::Arc};
+use std::{collections::BTreeMap, fmt::Write as _, future::Future, net::SocketAddr, sync::Arc};
 
 use arrow::{
     array::{Array, AsArray},
@@ -21,6 +21,7 @@ use crabka_pprof::{
     PCOL_VALUE, ProfileError, ProfileStats, ProfileStore, ProfileType, Series, SeriesAgg,
     bin_heatmap, parse_label_selector, step_bucket_ms, step_ms_from_secs,
 };
+use num_traits::ToPrimitive as _;
 use prost::Message;
 use serde::{Deserialize, Deserializer};
 use serde_json::json;
@@ -34,6 +35,9 @@ use crate::{
     wire::pb,
 };
 
+type QueryTarget<'a> = (&'a str, &'a str, &'a str);
+type QueryRange = (i64, i64);
+
 const DEFAULT_HEATMAP_VALUE_BUCKETS: usize = 32;
 const MAX_HEATMAP_TIME_BUCKETS: usize = 4096;
 const PROFILE_ID_LABEL: &str = "__profile_id__";
@@ -46,7 +50,7 @@ fn is_internal_label(name: &str) -> bool {
     name == PROFILE_ID_LABEL
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy)]
 struct MetadataRange {
     start_ms: i64,
     end_ms: i64,
@@ -205,28 +209,23 @@ impl<S: ProfileStore> QuerierState<S> {
         max_nodes: i64,
     ) -> Result<FlameGraph, ProfileError> {
         self.select_merge_stacktraces_with_stack_trace_selector(
-            tenant,
-            profile_type,
-            label_selector,
-            start_ms,
-            end_ms,
+            (tenant, profile_type, label_selector),
+            (start_ms, end_ms),
             max_nodes,
             &[],
         )
         .await
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn select_merge_stacktraces_grouped(
         &self,
-        tenant: &str,
-        profile_type: &str,
-        label_selector: &str,
-        start_ms: i64,
-        end_ms: i64,
+        target: QueryTarget<'_>,
+        range: QueryRange,
         max_nodes: i64,
         group_by: &[String],
     ) -> Result<FlameGraph, ProfileError> {
+        let (tenant, profile_type, label_selector) = target;
+        let (start_ms, end_ms) = range;
         if group_by.is_empty() {
             return self
                 .select_merge_stacktraces(
@@ -246,25 +245,22 @@ impl<S: ProfileStore> QuerierState<S> {
                 tenant,
                 profile_type,
                 label_selector,
-                start_ms,
-                end_ms,
+                (start_ms, end_ms),
                 max_nodes,
                 group_by,
             )
             .await
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn select_merge_stacktraces_with_stack_trace_selector(
         &self,
-        tenant: &str,
-        profile_type: &str,
-        label_selector: &str,
-        start_ms: i64,
-        end_ms: i64,
+        target: QueryTarget<'_>,
+        range: QueryRange,
         max_nodes: i64,
         stack_trace_call_sites: &[String],
     ) -> Result<FlameGraph, ProfileError> {
+        let (tenant, profile_type, label_selector) = target;
+        let (start_ms, end_ms) = range;
         self.validate_query_range(tenant, start_ms, end_ms)?;
         let max_nodes = self.effective_max_nodes(tenant, max_nodes);
         match &self.execution {
@@ -274,8 +270,7 @@ impl<S: ProfileStore> QuerierState<S> {
                         tenant,
                         profile_type,
                         label_selector,
-                        start_ms,
-                        end_ms,
+                        (start_ms, end_ms),
                         max_nodes,
                         stack_trace_call_sites,
                     )
@@ -297,17 +292,15 @@ impl<S: ProfileStore> QuerierState<S> {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn select_merge_stacktraces_tree_with_stack_trace_selector(
         &self,
-        tenant: &str,
-        profile_type: &str,
-        label_selector: &str,
-        start_ms: i64,
-        end_ms: i64,
+        target: QueryTarget<'_>,
+        range: QueryRange,
         max_nodes: i64,
         stack_trace_call_sites: &[String],
     ) -> Result<Vec<u8>, ProfileError> {
+        let (tenant, profile_type, label_selector) = target;
+        let (start_ms, end_ms) = range;
         self.validate_query_range(tenant, start_ms, end_ms)?;
         let max_nodes = self.effective_max_nodes(tenant, max_nodes);
         match &self.execution {
@@ -317,8 +310,7 @@ impl<S: ProfileStore> QuerierState<S> {
                         tenant,
                         profile_type,
                         label_selector,
-                        start_ms,
-                        end_ms,
+                        (start_ms, end_ms),
                         max_nodes,
                         stack_trace_call_sites,
                     )
@@ -340,32 +332,27 @@ impl<S: ProfileStore> QuerierState<S> {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn select_series(
         &self,
-        tenant: &str,
-        profile_type: &str,
-        label_selector: &str,
+        target: QueryTarget<'_>,
         group_by: &[String],
         step_secs: f64,
         agg: SeriesAgg,
-        start_ms: i64,
-        end_ms: i64,
+        range: QueryRange,
         stack_trace_call_sites: &[String],
     ) -> Result<Vec<Series>, ProfileError> {
+        let (tenant, profile_type, label_selector) = target;
+        let (start_ms, end_ms) = range;
         self.validate_query_range(tenant, start_ms, end_ms)?;
         match &self.execution {
             QueryExecution::Direct => {
                 self.engine
                     .select_series_with_stack_trace_selector(
-                        tenant,
-                        profile_type,
-                        label_selector,
+                        (tenant, profile_type, label_selector),
                         group_by,
                         step_secs,
                         agg,
-                        start_ms,
-                        end_ms,
+                        (start_ms, end_ms),
                         stack_trace_call_sites,
                     )
                     .await
@@ -374,9 +361,7 @@ impl<S: ProfileStore> QuerierState<S> {
                 let shards = split_inclusive_range(start_ms, end_ms, config.shard_width_ms)?;
                 self.engine
                     .select_series_with_stack_trace_selector_sharded(
-                        tenant,
-                        profile_type,
-                        label_selector,
+                        (tenant, profile_type, label_selector),
                         group_by,
                         step_secs,
                         agg,
@@ -388,18 +373,16 @@ impl<S: ProfileStore> QuerierState<S> {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn select_series_span_exemplars(
         &self,
-        tenant: &str,
-        profile_type: &str,
-        label_selector: &str,
+        target: QueryTarget<'_>,
         group_by: &[String],
         step_secs: f64,
-        start_ms: i64,
-        end_ms: i64,
+        range: QueryRange,
         call_sites: &[String],
     ) -> Result<SpanExemplarsBySeries, ProfileError> {
+        let (tenant, profile_type, label_selector) = target;
+        let (start_ms, end_ms) = range;
         self.validate_query_range(tenant, start_ms, end_ms)?;
         let step_ms = step_ms_from_secs(step_secs)?;
         let base_matchers = parse_label_selector(label_selector)?;
@@ -430,18 +413,16 @@ impl<S: ProfileStore> QuerierState<S> {
         Ok(out)
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn select_series_individual_exemplars(
         &self,
-        tenant: &str,
-        profile_type: &str,
-        label_selector: &str,
+        target: QueryTarget<'_>,
         group_by: &[String],
         step_secs: f64,
-        start_ms: i64,
-        end_ms: i64,
+        range: QueryRange,
         call_sites: &[String],
     ) -> Result<SpanExemplarsBySeries, ProfileError> {
+        let (tenant, profile_type, label_selector) = target;
+        let (start_ms, end_ms) = range;
         self.validate_query_range(tenant, start_ms, end_ms)?;
         let step_ms = step_ms_from_secs(step_secs)?;
         let base_matchers = parse_label_selector(label_selector)?;
@@ -493,17 +474,15 @@ impl<S: ProfileStore> QuerierState<S> {
         Ok(out)
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn select_heatmap_span_exemplars(
         &self,
-        tenant: &str,
-        profile_type: &str,
-        label_selector: &str,
+        target: QueryTarget<'_>,
         group_by: &[String],
-        start_ms: i64,
-        end_ms: i64,
+        range: QueryRange,
         time_buckets: usize,
     ) -> Result<HeatmapSpanExemplarsBySeries, ProfileError> {
+        let (tenant, profile_type, label_selector) = target;
+        let (start_ms, end_ms) = range;
         self.validate_query_range(tenant, start_ms, end_ms)?;
         let base_matchers = parse_label_selector(label_selector)?;
         let groups = if group_by.is_empty() {
@@ -535,17 +514,15 @@ impl<S: ProfileStore> QuerierState<S> {
         Ok(out)
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn select_heatmap_individual_exemplars(
         &self,
-        tenant: &str,
-        profile_type: &str,
-        label_selector: &str,
+        target: QueryTarget<'_>,
         group_by: &[String],
-        start_ms: i64,
-        end_ms: i64,
+        range: QueryRange,
         time_buckets: usize,
     ) -> Result<HeatmapSpanExemplarsBySeries, ProfileError> {
+        let (tenant, profile_type, label_selector) = target;
+        let (start_ms, end_ms) = range;
         self.validate_query_range(tenant, start_ms, end_ms)?;
         let base_matchers = parse_label_selector(label_selector)?;
         let mut profile_group_by = group_by.to_vec();
@@ -597,18 +574,16 @@ impl<S: ProfileStore> QuerierState<S> {
         Ok(out)
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn select_span_heatmaps(
         &self,
-        tenant: &str,
-        profile_type: &str,
-        label_selector: &str,
+        target: QueryTarget<'_>,
         group_by: &[String],
-        start_ms: i64,
-        end_ms: i64,
+        range: QueryRange,
         time_buckets: usize,
         value_buckets: usize,
     ) -> Result<Vec<LabeledHeatmap>, ProfileError> {
+        let (tenant, profile_type, label_selector) = target;
+        let (start_ms, end_ms) = range;
         self.validate_query_range(tenant, start_ms, end_ms)?;
         let base_matchers = parse_label_selector(label_selector)?;
         let groups = if group_by.is_empty() {
@@ -642,29 +617,24 @@ impl<S: ProfileStore> QuerierState<S> {
         Ok(out)
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn select_merge_span_profile(
         &self,
-        tenant: &str,
-        profile_type: &str,
-        label_selector: &str,
+        target: QueryTarget<'_>,
         span_ids: &[u64],
-        start_ms: i64,
-        end_ms: i64,
+        range: QueryRange,
         max_nodes: i64,
     ) -> Result<FlameGraph, ProfileError> {
+        let (tenant, profile_type, label_selector) = target;
+        let (start_ms, end_ms) = range;
         self.validate_query_range(tenant, start_ms, end_ms)?;
         let max_nodes = self.effective_max_nodes(tenant, max_nodes);
         match &self.execution {
             QueryExecution::Direct => {
                 self.engine
                     .select_merge_span_profile(
-                        tenant,
-                        profile_type,
-                        label_selector,
+                        (tenant, profile_type, label_selector),
                         span_ids,
-                        start_ms,
-                        end_ms,
+                        (start_ms, end_ms),
                         max_nodes,
                     )
                     .await
@@ -685,29 +655,24 @@ impl<S: ProfileStore> QuerierState<S> {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn select_merge_span_profile_tree(
         &self,
-        tenant: &str,
-        profile_type: &str,
-        label_selector: &str,
+        target: QueryTarget<'_>,
         span_ids: &[u64],
-        start_ms: i64,
-        end_ms: i64,
+        range: QueryRange,
         max_nodes: i64,
     ) -> Result<Vec<u8>, ProfileError> {
+        let (tenant, profile_type, label_selector) = target;
+        let (start_ms, end_ms) = range;
         self.validate_query_range(tenant, start_ms, end_ms)?;
         let max_nodes = self.effective_max_nodes(tenant, max_nodes);
         match &self.execution {
             QueryExecution::Direct => {
                 self.engine
                     .select_merge_span_profile_tree(
-                        tenant,
-                        profile_type,
-                        label_selector,
+                        (tenant, profile_type, label_selector),
                         span_ids,
-                        start_ms,
-                        end_ms,
+                        (start_ms, end_ms),
                         max_nodes,
                     )
                     .await
@@ -1195,6 +1160,9 @@ where
         .layer(Extension(state))
 }
 
+///
+/// # Errors
+/// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
 pub async fn serve<S>(
     addr: SocketAddr,
     state: Arc<QuerierState<S>>,
@@ -1475,11 +1443,8 @@ where
         format if format == pb::querier::v1::ProfileFormat::Tree as i32 => {
             let tree = state
                 .select_merge_stacktraces_tree_with_stack_trace_selector(
-                    &tenant,
-                    &req.profile_type_id,
-                    &label_selector,
-                    req.start,
-                    req.end,
+                    (&tenant, &req.profile_type_id, &label_selector),
+                    (req.start, req.end),
                     req.max_nodes,
                     &stack_trace_call_sites,
                 )
@@ -1494,11 +1459,8 @@ where
         format if format == pb::querier::v1::ProfileFormat::Dot as i32 => {
             let flamegraph = state
                 .select_merge_stacktraces_with_stack_trace_selector(
-                    &tenant,
-                    &req.profile_type_id,
-                    &label_selector,
-                    req.start,
-                    req.end,
+                    (&tenant, &req.profile_type_id, &label_selector),
+                    (req.start, req.end),
                     req.max_nodes,
                     &stack_trace_call_sites,
                 )
@@ -1513,11 +1475,8 @@ where
         _ => {
             let flamegraph = state
                 .select_merge_stacktraces_with_stack_trace_selector(
-                    &tenant,
-                    &req.profile_type_id,
-                    &label_selector,
-                    req.start,
-                    req.end,
+                    (&tenant, &req.profile_type_id, &label_selector),
+                    (req.start, req.end),
                     req.max_nodes,
                     &stack_trace_call_sites,
                 )
@@ -1571,26 +1530,20 @@ where
     let span_exemplars = match req.exemplar_type {
         exemplar_type if exemplar_type == pb::querier::v1::ExemplarType::Span as i32 => state
             .select_series_span_exemplars(
-                &tenant,
-                &req.profile_type_id,
-                &req.label_selector,
+                (&tenant, &req.profile_type_id, &req.label_selector),
                 &req.group_by,
                 req.step,
-                req.start,
-                req.end,
+                (req.start, req.end),
                 &stack_trace_call_sites,
             )
             .await
             .map_err(connect_error)?,
         exemplar_type if exemplar_type == pb::querier::v1::ExemplarType::Individual as i32 => state
             .select_series_individual_exemplars(
-                &tenant,
-                &req.profile_type_id,
-                &req.label_selector,
+                (&tenant, &req.profile_type_id, &req.label_selector),
                 &req.group_by,
                 req.step,
-                req.start,
-                req.end,
+                (req.start, req.end),
                 &stack_trace_call_sites,
             )
             .await
@@ -1599,14 +1552,11 @@ where
     };
     let series = state
         .select_series(
-            &tenant,
-            &req.profile_type_id,
-            &req.label_selector,
+            (&tenant, &req.profile_type_id, &req.label_selector),
             &req.group_by,
             req.step,
             agg,
-            req.start,
-            req.end,
+            (req.start, req.end),
             &stack_trace_call_sites,
         )
         .await
@@ -1670,12 +1620,9 @@ where
     let response = if req.format == pb::querier::v1::ProfileFormat::Tree as i32 {
         let tree = state
             .select_merge_span_profile_tree(
-                &tenant,
-                &req.profile_type_id,
-                &req.label_selector,
+                (&tenant, &req.profile_type_id, &req.label_selector),
                 &span_ids,
-                req.start,
-                req.end,
+                (req.start, req.end),
                 req.max_nodes,
             )
             .await
@@ -1687,12 +1634,9 @@ where
     } else {
         let flamegraph = state
             .select_merge_span_profile(
-                &tenant,
-                &req.profile_type_id,
-                &req.label_selector,
+                (&tenant, &req.profile_type_id, &req.label_selector),
                 &span_ids,
-                req.start,
-                req.end,
+                (req.start, req.end),
                 req.max_nodes,
             )
             .await
@@ -1742,11 +1686,8 @@ where
     let profile = state
         .engine
         .select_merge_profile_with_max_nodes_and_stack_trace_selector(
-            &tenant,
-            &req.profile_type_id,
-            &label_selector,
-            req.start,
-            req.end,
+            (&tenant, &req.profile_type_id, &label_selector),
+            (req.start, req.end),
             max_nodes,
             &stack_trace_call_sites,
         )
@@ -1792,24 +1733,18 @@ where
     let span_exemplars = match req.exemplar_type {
         exemplar_type if exemplar_type == pb::querier::v1::ExemplarType::Span as i32 => state
             .select_heatmap_span_exemplars(
-                &tenant,
-                &req.profile_type_id,
-                &req.label_selector,
+                (&tenant, &req.profile_type_id, &req.label_selector),
                 &req.group_by,
-                req.start,
-                req.end,
+                (req.start, req.end),
                 time_buckets,
             )
             .await
             .map_err(connect_error)?,
         exemplar_type if exemplar_type == pb::querier::v1::ExemplarType::Individual as i32 => state
             .select_heatmap_individual_exemplars(
-                &tenant,
-                &req.profile_type_id,
-                &req.label_selector,
+                (&tenant, &req.profile_type_id, &req.label_selector),
                 &req.group_by,
-                req.start,
-                req.end,
+                (req.start, req.end),
                 time_buckets,
             )
             .await
@@ -1819,12 +1754,9 @@ where
     let heatmaps = if req.query_type == pb::querier::v1::HeatmapQueryType::Span as i32 {
         state
             .select_span_heatmaps(
-                &tenant,
-                &req.profile_type_id,
-                &req.label_selector,
+                (&tenant, &req.profile_type_id, &req.label_selector),
                 &req.group_by,
-                req.start,
-                req.end,
+                (req.start, req.end),
                 time_buckets,
                 DEFAULT_HEATMAP_VALUE_BUCKETS,
             )
@@ -1833,12 +1765,9 @@ where
         state
             .engine
             .select_heatmaps(
-                &tenant,
-                &req.profile_type_id,
-                &req.label_selector,
+                (&tenant, &req.profile_type_id, &req.label_selector),
                 &req.group_by,
-                req.start,
-                req.end,
+                (req.start, req.end),
                 time_buckets,
                 DEFAULT_HEATMAP_VALUE_BUCKETS,
             )
@@ -1973,15 +1902,15 @@ where
     // latter always looks empty and wedges the Drilldown onto its onboarding
     // screen even when the tenant has data. No range validation: a global
     // metadata query is unbounded by design (Pyroscope doesn't limit it).
-    let stats = state
+    let profile_stats = state
         .global_profile_stats(&tenant)
         .await
         .map_err(connect_error)?;
     Ok(ConnectResponse::new(
         pb::querier::v1::GetProfileStatsResponse {
-            data_ingested: stats.data_ingested,
-            oldest_profile_time: stats.oldest_profile_time.unwrap_or_default(),
-            newest_profile_time: stats.newest_profile_time.unwrap_or_default(),
+            data_ingested: profile_stats.data_ingested,
+            oldest_profile_time: profile_stats.oldest_profile_time.unwrap_or_default(),
+            newest_profile_time: profile_stats.newest_profile_time.unwrap_or_default(),
         },
     ))
 }
@@ -2133,11 +2062,8 @@ where
     };
     match state
         .select_merge_stacktraces_grouped(
-            &tenant,
-            &profile_type,
-            &selector,
-            start,
-            end,
+            (&tenant, &profile_type, &selector),
+            (start, end),
             query.max_nodes.unwrap_or(0),
             &query.group_by,
         )
@@ -2195,13 +2121,11 @@ where
     let left_query = params
         .iter()
         .find(|(name, _)| name == "leftQuery" || name == "query")
-        .map(|(_, value)| value.as_str())
-        .unwrap_or("");
+        .map_or("", |(_, value)| value.as_str());
     let right_query = params
         .iter()
         .find(|(name, _)| name == "rightQuery")
-        .map(|(_, value)| value.as_str())
-        .unwrap_or(left_query);
+        .map_or(left_query, |(_, value)| value.as_str());
     let (left_type, left_selector) = match parse_render_query(left_query) {
         Ok(parsed) => parsed,
         Err(err) => return profile_error_response(err),
@@ -2368,9 +2292,15 @@ fn heatmap_time_buckets(
             "heatmap start must be before end".to_string(),
         ));
     }
-    let step_ms = step_ms_from_secs(step_secs)? as f64;
-    let span_ms = (end_ms.0 - start_ms.0) as f64;
-    Ok(((span_ms / step_ms).ceil().max(1.0) as usize).min(MAX_HEATMAP_TIME_BUCKETS))
+    let step_ms = step_ms_from_secs(step_secs)?;
+    let span_ms = end_ms
+        .0
+        .checked_sub(start_ms.0)
+        .ok_or_else(|| ProfileError::Plan("heatmap time range is too large".to_string()))?;
+    let buckets = (span_ms / step_ms + i64::from(span_ms % step_ms != 0)).max(1);
+    Ok(usize::try_from(buckets)
+        .unwrap_or(MAX_HEATMAP_TIME_BUCKETS)
+        .min(MAX_HEATMAP_TIME_BUCKETS))
 }
 
 fn query_param_i64(params: &[(String, String)], name: &str) -> Option<i64> {
@@ -2543,17 +2473,18 @@ fn flamegraph_dot(flamegraph: &crabka_pprof::FlameGraph) -> String {
                 .unwrap_or_else(|| format!("unknown:{name_idx}"));
             let id = next_id;
             next_id += 1;
-            dot.push_str(&format!(
-                "  n{id} [label=\"{}\\ntotal={} self={}\"];\n",
+            let _ = writeln!(
+                dot,
+                "  n{id} [label=\"{}\\ntotal={} self={}\"];",
                 dot_escape(&name),
                 total,
                 self_,
-            ));
+            );
             if let Some(parent) = previous
                 .iter()
                 .find(|parent| x_start >= parent.x_start && x_start < parent.x_start + parent.total)
             {
-                dot.push_str(&format!("  n{} -> n{id};\n", parent.id));
+                let _ = writeln!(dot, "  n{} -> n{id};", parent.id);
             }
             current.push(DotBar { id, x_start, total });
             previous_end = x_start + total;
@@ -2678,23 +2609,26 @@ fn label_matcher_value_escape(value: &str) -> String {
 /// (`Exec`/`Store`/`Symbolize`) return a generic 500 and log the detail via
 /// tracing so raw DataFusion/internal text never reaches the client.
 fn profile_error_response(err: ProfileError) -> Response {
-    match err {
+    let status = match &err {
         ProfileError::Decode(_) | ProfileError::Plan(_) | ProfileError::Unsupported(_) => {
-            (StatusCode::BAD_REQUEST, err.to_string()).into_response()
+            StatusCode::BAD_REQUEST
         }
         ProfileError::Exec(_) | ProfileError::Store(_) | ProfileError::Symbolize(_) => {
             tracing::error!(%err, "profiles querier internal error");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal error".to_string(),
-            )
-                .into_response()
+            StatusCode::INTERNAL_SERVER_ERROR
         }
-    }
+    };
+    let message = if status == StatusCode::BAD_REQUEST {
+        err.to_string()
+    } else {
+        "internal error".to_string()
+    };
+    drop(err);
+    (status, message).into_response()
 }
 
 fn connect_error(err: ProfileError) -> ConnectError {
-    let code = match err {
+    let code = match &err {
         ProfileError::Decode(_) | ProfileError::Plan(_) | ProfileError::Unsupported(_) => {
             Code::InvalidArgument
         }
@@ -2702,7 +2636,9 @@ fn connect_error(err: ProfileError) -> ConnectError {
             Code::Internal
         }
     };
-    ConnectError::new(code, err.to_string())
+    let message = err.to_string();
+    drop(err);
+    ConnectError::new(code, message)
 }
 
 fn label_pairs(labels: Vec<(String, String)>) -> Vec<pb::querier::v1::LabelPair> {
@@ -2814,9 +2750,23 @@ fn heatmap_y_mins(min_value: MinValue, max_value: MaxValue, value_buckets: usize
     if value_buckets == 0 {
         return Vec::new();
     }
-    let span = (max_value.0 - min_value.0).max(0) as f64;
+    let span = max_value
+        .0
+        .checked_sub(min_value.0)
+        .unwrap_or(i64::MAX)
+        .max(0)
+        .to_f64()
+        .unwrap_or(f64::MAX);
+    let min_value = min_value.0.to_f64().unwrap_or_else(|| {
+        if min_value.0.is_negative() {
+            f64::MIN
+        } else {
+            f64::MAX
+        }
+    });
+    let bucket_count = value_buckets.to_f64().unwrap_or(f64::MAX);
     (0..value_buckets)
-        .map(|bucket| min_value.0 as f64 + span * bucket as f64 / value_buckets as f64)
+        .map(|bucket| min_value + span * bucket.to_f64().unwrap_or(f64::MAX) / bucket_count)
         .collect()
 }
 
@@ -2824,7 +2774,7 @@ fn heatmap_y_mins(min_value: MinValue, max_value: MaxValue, value_buckets: usize
 mod tests {
     use std::sync::Arc;
 
-    use assert2::check;
+    use assert2::{assert, check};
     use base64::Engine;
     use crabka_pprof::{FunctionRec, LineRec, LocationRec};
 
@@ -2847,14 +2797,9 @@ mod tests {
             .validate(&state, "tenant-a")
             .unwrap();
 
-        assert2::assert!(
-            range
-                == MetadataRange {
-                    start_ms: 0,
-                    end_ms: i64::MAX,
-                    omitted: true,
-                }
-        );
+        assert!(range.start_ms == 0);
+        assert!(range.end_ms == i64::MAX);
+        assert!(range.omitted);
     }
 
     #[test]
@@ -2870,19 +2815,14 @@ mod tests {
         let range = MetadataRange::from_request(0, 1_000)
             .validate(&state, "tenant-a")
             .unwrap();
-        assert2::assert!(
-            range
-                == MetadataRange {
-                    start_ms: 0,
-                    end_ms: 1_000,
-                    omitted: false,
-                }
-        );
+        assert!(range.start_ms == 0);
+        assert!(range.end_ms == 1_000);
+        assert!(!range.omitted);
 
         let Err(err) = MetadataRange::from_request(0, 2_000).validate(&state, "tenant-a") else {
             panic!("explicit over-limit metadata range should be rejected");
         };
-        assert2::assert!(err.to_string().contains("query length exceeded"));
+        assert!(err.to_string().contains("query length exceeded"), "{err}");
     }
 
     fn store_with_frame(name: &str) -> InMemoryProfileStore {
@@ -2904,11 +2844,9 @@ mod tests {
         });
         let stacktrace = store.symbols_mut().intern_stacktrace(0, &[location_id]);
         store.push_sample(
-            "tenant-a",
-            PT,
+            ("tenant-a", PT),
             vec![("service_name".to_string(), "api".to_string())],
-            0,
-            stacktrace,
+            (0, stacktrace),
             7,
             10,
         );
@@ -2937,16 +2875,14 @@ mod tests {
         });
         let stacktrace = store.symbols_mut().intern_stacktrace(0, &[location_id]);
         store.push_sample(
-            "tenant-a",
-            PT,
+            ("tenant-a", PT),
             vec![
                 ("service_name".to_string(), "api".to_string()),
                 ("__name__".to_string(), "process_cpu".to_string()),
                 ("env".to_string(), "pprofdiff".to_string()),
                 ("__profile_type__".to_string(), PT.to_string()),
             ],
-            0,
-            stacktrace,
+            (0, stacktrace),
             7,
             10,
         );
@@ -2973,14 +2909,12 @@ mod tests {
         let stacktrace = store.symbols_mut().intern_stacktrace(0, &[location_id]);
         for profile_type in [PT, "memory:alloc_space:bytes:space:bytes"] {
             store.push_sample(
-                "tenant-a",
-                profile_type,
+                ("tenant-a", profile_type),
                 vec![
                     ("service_name".to_string(), "api".to_string()),
                     ("__profile_type__".to_string(), profile_type.to_string()),
                 ],
-                0,
-                stacktrace,
+                (0, stacktrace),
                 7,
                 10,
             );
@@ -3007,13 +2941,10 @@ mod tests {
         });
         let stacktrace = store.symbols_mut().intern_stacktrace(0, &[location_id]);
         store.push_sample_with_total_and_span(
-            "tenant-a",
-            PT,
+            ("tenant-a", PT),
             vec![("service_name".to_string(), "api".to_string())],
-            0,
-            stacktrace,
-            7,
-            7,
+            (0, stacktrace),
+            (7, 7),
             10,
             span_id,
         );
@@ -3040,13 +2971,10 @@ mod tests {
             });
             let stacktrace = store.symbols_mut().intern_stacktrace(0, &[location_id]);
             store.push_sample_with_total_and_span(
-                "tenant-a",
-                PT,
+                ("tenant-a", PT),
                 vec![("service_name".to_string(), "api".to_string())],
-                0,
-                stacktrace,
-                *value,
-                *value,
+                (0, stacktrace),
+                (*value, *value),
                 10,
                 *span_id,
             );
@@ -3074,11 +3002,9 @@ mod tests {
         let stacktrace = store.symbols_mut().intern_stacktrace(0, &[location_id]);
         for (timestamp, value) in samples {
             store.push_sample(
-                "tenant-a",
-                PT,
+                ("tenant-a", PT),
                 vec![("service_name".to_string(), "api".to_string())],
-                0,
-                stacktrace,
+                (0, stacktrace),
                 *value,
                 *timestamp,
             );
@@ -3106,14 +3032,12 @@ mod tests {
         let stacktrace = store.symbols_mut().intern_stacktrace(0, &[location_id]);
         for (service, env, value) in samples {
             store.push_sample(
-                "tenant-a",
-                PT,
+                ("tenant-a", PT),
                 vec![
                     ("service_name".to_string(), (*service).to_string()),
                     ("env".to_string(), (*env).to_string()),
                 ],
-                0,
-                stacktrace,
+                (0, stacktrace),
                 *value,
                 10,
             );
@@ -3141,11 +3065,9 @@ mod tests {
             });
             let stacktrace = store.symbols_mut().intern_stacktrace(0, &[location_id]);
             store.push_sample(
-                "tenant-a",
-                PT,
+                ("tenant-a", PT),
                 vec![("service_name".to_string(), "api".to_string())],
-                0,
-                stacktrace,
+                (0, stacktrace),
                 *value,
                 10,
             );
@@ -3173,14 +3095,12 @@ mod tests {
         let stacktrace = store.symbols_mut().intern_stacktrace(0, &[location_id]);
         for (profile_id, value) in [("profile-a", 5), ("profile-b", 7)] {
             store.push_sample(
-                "tenant-a",
-                PT,
+                ("tenant-a", PT),
                 vec![
                     ("service_name".to_string(), "api".to_string()),
                     ("__profile_id__".to_string(), profile_id.to_string()),
                 ],
-                0,
-                stacktrace,
+                (0, stacktrace),
                 value,
                 10,
             );
@@ -3210,14 +3130,12 @@ mod tests {
             });
             let stacktrace = store.symbols_mut().intern_stacktrace(0, &[location_id]);
             store.push_sample(
-                "tenant-a",
-                PT,
+                ("tenant-a", PT),
                 vec![
                     ("service_name".to_string(), "api".to_string()),
                     ("__profile_id__".to_string(), (*profile_id).to_string()),
                 ],
-                0,
-                stacktrace,
+                (0, stacktrace),
                 *value,
                 10,
             );
@@ -3255,11 +3173,9 @@ mod tests {
         });
         let stacktrace = store.symbols_mut().intern_stacktrace(0, &[location_id]);
         store.push_sample(
-            "tenant-a",
-            PT,
+            ("tenant-a", PT),
             vec![("service_name".to_string(), "api".to_string())],
-            0,
-            stacktrace,
+            (0, stacktrace),
             7,
             5_000, // non-zero ingest timestamp
         );
@@ -3267,13 +3183,13 @@ mod tests {
 
         // Control: the old [0, 0]-scoped behavior misses the sample entirely.
         let scoped = store.stats("tenant-a", 0, 0).await.unwrap();
-        assert2::assert!(!scoped.data_ingested);
+        assert!(!scoped.data_ingested);
 
         // The handler path queries globally and reports the sample.
         let state = QuerierState::new(Arc::clone(&store));
-        let stats = state.global_profile_stats("tenant-a").await.unwrap();
-        assert2::assert!(
-            stats
+        let profile_stats = state.global_profile_stats("tenant-a").await.unwrap();
+        assert!(
+            profile_stats
                 == ProfileStats {
                     data_ingested: true,
                     oldest_profile_time: Some(5_000),
@@ -3294,20 +3210,17 @@ mod tests {
 
         let err = state
             .select_series(
-                "tenant-a",
-                PT,
-                r#"{service_name="api"}"#,
+                ("tenant-a", PT, r#"{service_name="api"}"#),
                 &[],
                 1.0,
                 SeriesAgg::Sum,
-                0,
-                2_000,
+                (0, 2_000),
                 &[],
             )
             .await
             .unwrap_err();
 
-        assert2::assert!(err.to_string().contains("query length exceeded"));
+        assert!(err.to_string().contains("query length exceeded"), "{err}");
     }
 
     #[tokio::test]
@@ -3315,46 +3228,43 @@ mod tests {
         let state = QuerierState::new_with_overrides(
             Arc::new(store_with_frame("main.work")),
             OverridesProvider::from_yaml(
-                r#"
+                r"
 overrides:
   tenant-a:
     max_query_length_secs: 1
-"#,
+",
             )
             .unwrap(),
         );
 
         let tenant_a_err = state
             .select_series(
-                "tenant-a",
-                PT,
-                r#"{service_name="api"}"#,
+                ("tenant-a", PT, r#"{service_name="api"}"#),
                 &[],
                 1.0,
                 SeriesAgg::Sum,
-                0,
-                2_000,
+                (0, 2_000),
                 &[],
             )
             .await
             .unwrap_err();
         let tenant_b_series = state
             .select_series(
-                "tenant-b",
-                PT,
-                r#"{service_name="api"}"#,
+                ("tenant-b", PT, r#"{service_name="api"}"#),
                 &[],
                 1.0,
                 SeriesAgg::Sum,
-                0,
-                2_000,
+                (0, 2_000),
                 &[],
             )
             .await
             .unwrap();
 
-        assert2::assert!(tenant_a_err.to_string().contains("query length exceeded"));
-        assert2::assert!(tenant_b_series.is_empty());
+        assert!(
+            tenant_a_err.to_string().contains("query length exceeded"),
+            "{tenant_a_err}"
+        );
+        assert!(tenant_b_series.is_empty());
     }
 
     #[tokio::test]
@@ -3409,8 +3319,8 @@ overrides:
             .await
             .unwrap();
 
-        assert2::assert!(body.starts_with("digraph flamegraph"));
-        assert2::assert!(body.contains("main.work"));
+        assert!(body.starts_with("digraph flamegraph"));
+        assert!(body.contains("main.work"), "{body}");
     }
 
     #[tokio::test]
@@ -3438,14 +3348,18 @@ overrides:
             .send()
             .await
             .unwrap();
-        assert2::assert!(resp.status() == reqwest::StatusCode::OK);
+        assert!(
+            resp.status() == reqwest::StatusCode::OK,
+            "Get must succeed (Grafana init calls this), got {}",
+            resp.status()
+        );
         let json: serde_json::Value = resp.json().await.unwrap();
         // Connect JSON omits empty repeated fields, so `settings` is absent or [].
         let empty = json
             .get("settings")
             .and_then(|v| v.as_array())
             .is_none_or(std::vec::Vec::is_empty);
-        assert2::assert!(empty);
+        assert!(empty, "expected empty settings, got {json}");
 
         let resp = client
             .post(format!("http://{bound}/settings.v1.SettingsService/Set"))
@@ -3456,10 +3370,15 @@ overrides:
             .send()
             .await
             .unwrap();
-        assert2::assert!(resp.status() == reqwest::StatusCode::OK);
+        assert!(
+            resp.status() == reqwest::StatusCode::OK,
+            "Set must succeed, got {}",
+            resp.status()
+        );
         let json: serde_json::Value = resp.json().await.unwrap();
-        assert2::assert!(
-            json.pointer("/setting/name").and_then(|v| v.as_str()) == Some("flamegraph.collapsed")
+        assert!(
+            json.pointer("/setting/name").and_then(|v| v.as_str()) == Some("flamegraph.collapsed"),
+            "Set must echo the setting, got {json}"
         );
     }
 
@@ -3590,15 +3509,17 @@ overrides:
             .await
             .unwrap();
 
-        assert2::assert!(
+        assert!(
             body.pointer("/flamebearer/leftTicks")
                 .and_then(serde_json::Value::as_i64)
-                == Some(5)
+                == Some(5),
+            "{body}"
         );
-        assert2::assert!(
+        assert!(
             body.pointer("/flamebearer/rightTicks")
                 .and_then(serde_json::Value::as_i64)
-                == Some(7)
+                == Some(7),
+            "{body}"
         );
     }
 
@@ -3681,12 +3602,13 @@ overrides:
             .await
             .unwrap();
 
-        assert2::assert!(response.get("flamegraph").is_none());
-        assert2::assert!(
+        assert!(response.get("flamegraph").is_none(), "{response}");
+        assert!(
             response
                 .get("dot")
                 .and_then(serde_json::Value::as_str)
-                .is_none_or(str::is_empty)
+                .is_none_or(str::is_empty),
+            "{response}"
         );
         let tree = response
             .get("tree")
@@ -3694,7 +3616,7 @@ overrides:
             .and_then(|tree| base64::engine::general_purpose::STANDARD.decode(tree).ok())
             .unwrap();
 
-        assert2::assert!(tree == b"\x00\x00\x01\x09main.work\x07\x00");
+        assert!(tree == b"\x00\x00\x01\x09main.work\x07\x00", "{response}");
     }
 
     #[tokio::test]
@@ -3731,14 +3653,14 @@ overrides:
             .await
             .unwrap();
 
-        assert2::assert!(response.get("flamegraph").is_none());
+        assert!(response.get("flamegraph").is_none(), "{response}");
         let tree = response
             .get("tree")
             .and_then(serde_json::Value::as_str)
             .and_then(|tree| base64::engine::general_purpose::STANDARD.decode(tree).ok())
             .unwrap();
 
-        assert2::assert!(tree == b"\x00\x00\x01\x09main.work\x07\x00");
+        assert!(tree == b"\x00\x00\x01\x09main.work\x07\x00", "{response}");
     }
 
     #[tokio::test]
@@ -3775,7 +3697,7 @@ overrides:
             .get("flamegraph")
             .and_then(|flamegraph| flamegraph.get("total"))
             .and_then(json_i64);
-        assert2::assert!(total == Some(5));
+        assert!(total == Some(5), "{response}");
     }
 
     #[tokio::test]
@@ -3807,7 +3729,7 @@ overrides:
             .json()
             .await
             .unwrap();
-        assert2::assert!(response.get("profile").is_none());
+        assert!(response.get("profile").is_none(), "{response}");
         let total: i64 = response
             .get("sample")
             .and_then(serde_json::Value::as_array)
@@ -3823,7 +3745,7 @@ overrides:
             .filter_map(json_i64)
             .sum();
 
-        assert2::assert!(total == 5);
+        assert!(total == 5, "{response}");
     }
 
     #[tokio::test]
@@ -3860,7 +3782,7 @@ overrides:
             .json()
             .await
             .unwrap();
-        assert2::assert!(response.get("profile").is_none());
+        assert!(response.get("profile").is_none(), "{response}");
         let total: i64 = response
             .get("sample")
             .and_then(serde_json::Value::as_array)
@@ -3876,7 +3798,7 @@ overrides:
             .filter_map(json_i64)
             .sum();
 
-        assert2::assert!(total == 7);
+        assert!(total == 7, "{response}");
     }
 
     #[tokio::test]
@@ -3985,7 +3907,7 @@ overrides:
             .get("flamegraph")
             .and_then(|flamegraph| flamegraph.get("total"))
             .and_then(json_i64);
-        assert2::assert!(total == Some(7));
+        assert!(total == Some(7), "{response}");
     }
 
     #[tokio::test]
@@ -4028,12 +3950,16 @@ overrides:
             .await
             .unwrap();
 
-        assert2::assert!(response.pointer("/flamegraph/leftTicks").and_then(json_i64) == Some(7));
-        assert2::assert!(
+        assert!(
+            response.pointer("/flamegraph/leftTicks").and_then(json_i64) == Some(7),
+            "{response}"
+        );
+        assert!(
             response
                 .pointer("/flamegraph/rightTicks")
                 .and_then(json_i64)
-                == Some(10)
+                == Some(10),
+            "{response}"
         );
     }
 
@@ -4065,13 +3991,16 @@ overrides:
             .get("profileTypes")
             .and_then(serde_json::Value::as_array)
             .unwrap();
-        assert2::assert!(profile_types.iter().any(|profile_type| {
-            profile_type
-                .get("ID")
-                .or_else(|| profile_type.get("id"))
-                .and_then(serde_json::Value::as_str)
-                == Some(PT)
-        }));
+        assert!(
+            profile_types.iter().any(|profile_type| {
+                profile_type
+                    .get("ID")
+                    .or_else(|| profile_type.get("id"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some(PT)
+            }),
+            "{response}"
+        );
     }
 
     #[tokio::test]
@@ -4104,11 +4033,12 @@ overrides:
             .await
             .unwrap();
 
-        assert2::assert!(
+        assert!(
             response
                 .get("profileTypes")
                 .and_then(serde_json::Value::as_array)
-                .is_some_and(|profile_types| !profile_types.is_empty())
+                .is_some_and(|profile_types| !profile_types.is_empty()),
+            "{response}"
         );
     }
 
@@ -4153,8 +4083,11 @@ overrides:
             .pointer("/series/0/points")
             .and_then(serde_json::Value::as_array)
             .unwrap();
-        assert2::assert!(points.len() == 1);
-        assert2::assert!(points[0].get("value").and_then(serde_json::Value::as_f64) == Some(7.0));
+        assert!(points.len() == 1, "{response}");
+        assert!(
+            points[0].get("value").and_then(serde_json::Value::as_f64) == Some(7.0),
+            "{response}"
+        );
     }
 
     /// The `Series` RPC must emit each label set SORTED by name, matching real
@@ -4209,8 +4142,9 @@ overrides:
             "labelNames": ["service_name", "__profile_type__"],
         }))
         .await;
-        assert2::assert!(
-            projected == vec!["__profile_type__".to_string(), "service_name".to_string()]
+        assert!(
+            projected == vec!["__profile_type__".to_string(), "service_name".to_string()],
+            "{projected:?}"
         );
 
         // Full label set (`labelNames=[]`) — also sorted by name, not the order
@@ -4220,13 +4154,14 @@ overrides:
             "labelNames": [],
         }))
         .await;
-        assert2::assert!(
+        assert!(
             full == vec![
                 "__name__".to_string(),
                 "__profile_type__".to_string(),
                 "env".to_string(),
                 "service_name".to_string(),
-            ]
+            ],
+            "{full:?}"
         );
     }
 
@@ -4322,7 +4257,7 @@ overrides:
             .filter_map(|exemplar| exemplar.get("spanId").and_then(serde_json::Value::as_str))
             .collect();
 
-        assert2::assert!(span_ids == vec!["2a"]);
+        assert!(span_ids == vec!["2a"], "{response}");
     }
 
     #[tokio::test]
@@ -4370,8 +4305,8 @@ overrides:
             })
             .collect();
 
-        assert2::assert!(profile_ids.contains(&"profile-a"));
-        assert2::assert!(profile_ids.contains(&"profile-b"));
+        assert!(profile_ids.contains(&"profile-a"), "{response}");
+        assert!(profile_ids.contains(&"profile-b"), "{response}");
     }
 
     #[tokio::test]
@@ -4427,30 +4362,24 @@ overrides:
             })
             .collect();
 
-        assert2::assert!(profile_ids == vec!["profile-a"]);
+        assert!(profile_ids == vec!["profile-a"], "{response}");
     }
 
     #[tokio::test]
     async fn select_heatmap_group_by_returns_labeled_series() {
         let mut store = InMemoryProfileStore::new();
         store.push_sample_with_total(
-            "tenant-a",
-            PT,
+            ("tenant-a", PT),
             vec![("service_name".to_string(), "api".to_string())],
-            0,
-            1,
-            4,
-            4,
+            (0, 1),
+            (4, 4),
             0,
         );
         store.push_sample_with_total(
-            "tenant-a",
-            PT,
+            ("tenant-a", PT),
             vec![("service_name".to_string(), "worker".to_string())],
-            0,
-            2,
-            9,
-            9,
+            (0, 2),
+            (9, 9),
             0,
         );
         let state = Arc::new(QuerierState::new(Arc::new(store)));
@@ -4594,32 +4523,26 @@ overrides:
             })
             .collect();
 
-        assert2::assert!(profile_ids.contains(&"profile-a"));
-        assert2::assert!(profile_ids.contains(&"profile-b"));
+        assert!(profile_ids.contains(&"profile-a"), "{response}");
+        assert!(profile_ids.contains(&"profile-b"), "{response}");
     }
 
     #[tokio::test]
     async fn select_heatmap_span_query_type_counts_only_span_profiles() {
         let mut store = InMemoryProfileStore::new();
         store.push_sample_with_total_and_span(
-            "tenant-a",
-            PT,
+            ("tenant-a", PT),
             vec![("service_name".to_string(), "api".to_string())],
-            0,
-            1,
-            7,
-            7,
+            (0, 1),
+            (7, 7),
             10,
             0x2a,
         );
         store.push_sample_with_total(
-            "tenant-a",
-            PT,
+            ("tenant-a", PT),
             vec![("service_name".to_string(), "api".to_string())],
-            0,
-            2,
-            11,
-            11,
+            (0, 2),
+            (11, 11),
             20,
         );
         let state = Arc::new(QuerierState::new(Arc::new(store)));
@@ -4660,7 +4583,7 @@ overrides:
             .filter_map(json_i64)
             .sum();
 
-        assert2::assert!(count == 1);
+        assert!(count == 1, "{response}");
     }
 
     #[tokio::test]
@@ -4743,11 +4666,12 @@ overrides:
             .await
             .unwrap();
 
-        assert2::assert!(
+        assert!(
             response
                 .pointer("/queryImpact/totalQueriedSeries")
                 .and_then(json_i64)
-                == Some(1)
+                == Some(1),
+            "{response}"
         );
     }
 
@@ -4758,8 +4682,8 @@ overrides:
         )
         .unwrap();
 
-        assert2::assert!(profile_type == "process_cpu:cpu:nanoseconds:cpu:nanoseconds");
-        assert2::assert!(selector == r#"{service_name="api"}"#);
+        assert!(profile_type == "process_cpu:cpu:nanoseconds:cpu:nanoseconds");
+        assert!(selector == r#"{service_name="api"}"#);
     }
 
     #[test]
@@ -4767,8 +4691,8 @@ overrides:
         let (profile_type, selector) =
             parse_render_query("process_cpu:cpu:nanoseconds:cpu:nanoseconds").unwrap();
 
-        assert2::assert!(profile_type == "process_cpu:cpu:nanoseconds:cpu:nanoseconds");
-        assert2::assert!(selector == "{}");
+        assert!(profile_type == "process_cpu:cpu:nanoseconds:cpu:nanoseconds");
+        assert!(selector == "{}");
     }
 
     #[test]
@@ -4784,7 +4708,7 @@ overrides:
         );
 
         let metadata = response.get("metadata").unwrap();
-        assert2::assert!(
+        assert!(
             metadata
                 == &json!({
                     "format": "single",
@@ -4827,8 +4751,8 @@ overrides:
 
     #[test]
     fn limit_zero_means_unlimited() {
-        assert2::assert!(limit(0) == usize::MAX);
-        assert2::assert!(limit(2) == 2);
+        assert!(limit(0) == usize::MAX);
+        assert!(limit(2) == 2);
     }
 
     #[test]
@@ -4879,17 +4803,17 @@ overrides:
     fn tenant_from_headers_validates_and_defaults() {
         // Absent header -> anonymous.
         let empty = HeaderMap::new();
-        assert2::assert!(tenant_from_headers(&empty).unwrap() == "anonymous");
+        assert!(tenant_from_headers(&empty).unwrap() == "anonymous");
 
         // Valid tenant passes through.
         let mut valid = HeaderMap::new();
         valid.insert("x-scope-orgid", "tenant-a".parse().unwrap());
-        assert2::assert!(tenant_from_headers(&valid).unwrap() == "tenant-a");
+        assert!(tenant_from_headers(&valid).unwrap() == "tenant-a");
 
         // Empty header value falls back to anonymous (preserved behaviour).
         let mut blank = HeaderMap::new();
         blank.insert("x-scope-orgid", "".parse().unwrap());
-        assert2::assert!(tenant_from_headers(&blank).unwrap() == "anonymous");
+        assert!(tenant_from_headers(&blank).unwrap() == "anonymous");
     }
 
     #[test]
@@ -4900,8 +4824,8 @@ overrides:
 
         // Mapped to an invalid-argument-class error with a generic message that
         // does not echo the attacker-supplied id.
-        assert2::assert!(matches!(err, ProfileError::Plan(_)));
-        assert2::assert!(connect_error(err).code() == Code::InvalidArgument);
+        assert!(matches!(err, ProfileError::Plan(_)));
+        assert!(connect_error(err).code() == Code::InvalidArgument);
     }
 
     #[tokio::test]
@@ -4924,7 +4848,7 @@ overrides:
             .unwrap()
             .status();
 
-        assert2::assert!(status.is_client_error());
+        assert!(status.is_client_error(), "{status}");
     }
 
     #[test]
@@ -4936,10 +4860,10 @@ overrides:
         let err = state
             .validate_query_range("anonymous", 0, i64::MAX)
             .unwrap_err();
-        assert2::assert!(err.to_string().contains("query length exceeded"));
+        assert!(err.to_string().contains("query length exceeded"), "{err}");
 
         // A bounded recent window stays well within the 721h default.
-        assert2::assert!(state.validate_query_range("anonymous", 0, 60_000).is_ok());
+        assert!(state.validate_query_range("anonymous", 0, 60_000).is_ok());
     }
 
     #[tokio::test]
@@ -4968,11 +4892,12 @@ overrides:
             .await
             .unwrap();
 
-        assert2::assert!(
+        assert!(
             response
                 .get("profileTypes")
                 .and_then(serde_json::Value::as_array)
-                .is_some_and(|profile_types| !profile_types.is_empty())
+                .is_some_and(|profile_types| !profile_types.is_empty()),
+            "{response}"
         );
     }
 
@@ -4982,7 +4907,7 @@ overrides:
         let response = profile_error_response(ProfileError::Exec(
             "datafusion: secret plan detail".to_string(),
         ));
-        assert2::assert!(response.status() == StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(response.status() == StatusCode::INTERNAL_SERVER_ERROR);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
@@ -4998,12 +4923,12 @@ overrides:
         // `Plan`) keep their user-facing message at 400.
         let response =
             profile_error_response(ProfileError::Plan("query length exceeded".to_string()));
-        assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
+        assert!(response.status() == StatusCode::BAD_REQUEST);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
         let body = String::from_utf8(body.to_vec()).unwrap();
-        assert2::assert!(body.contains("query length exceeded"));
+        assert!(body.contains("query length exceeded"), "{body}");
     }
 
     #[test]
@@ -5011,12 +4936,12 @@ overrides:
         let spans =
             parse_span_selectors(&["42".to_string(), "9a517183f26a089d".to_string()]).unwrap();
 
-        assert2::assert!(spans == vec![42, 0x9a51_7183_f26a_089d]);
+        assert!(spans == vec![42, 0x9a51_7183_f26a_089d]);
     }
 
     #[test]
     fn parse_span_selectors_rejects_bad_span() {
-        assert2::assert!(parse_span_selectors(&["not-a-span".to_string()]).is_err());
+        assert!(parse_span_selectors(&["not-a-span".to_string()]).is_err());
     }
 
     #[test]
@@ -5036,7 +4961,7 @@ overrides:
 
     #[test]
     fn heatmap_time_buckets_rejects_sub_millisecond_steps() {
-        for step in [0.0001, 0.0005, 0.0009999] {
+        for step in [0.0001, 0.0005, 0.000_999_9] {
             check!(heatmap_time_buckets(StartMs(0), EndMs(1), step).is_err());
         }
         check!(heatmap_time_buckets(StartMs(0), EndMs(1), 0.001).unwrap() == 1);
@@ -5044,7 +4969,7 @@ overrides:
 
     #[test]
     fn heatmap_time_buckets_caps_large_ranges() {
-        assert2::assert!(
+        assert!(
             heatmap_time_buckets(StartMs(0), EndMs(i64::MAX), 10.0).unwrap()
                 == MAX_HEATMAP_TIME_BUCKETS
         );
@@ -5062,7 +4987,7 @@ overrides:
             counts: vec![vec![1, 0], vec![0, 2]],
         });
 
-        assert2::assert!(
+        assert!(
             series
                 == pb::querier::v1::HeatmapSeries {
                     labels: Vec::new(),

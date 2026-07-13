@@ -28,6 +28,7 @@ use tracing::{info, warn};
 use crate::{
     hist,
     ids::{DurationSeconds, MessageCount, TimeOffsetMs, WallclockMs},
+    numeric::{nonnegative_i64_to_u64, saturating_u128_to_u64, to_f64},
     payload,
     prom::PromClient,
     rate::Pacer,
@@ -74,8 +75,11 @@ struct Grid {
 impl Grid {
     /// Slice index for an event observed at `now`, clamped into `[0, n-1]`.
     fn idx(&self, now: Instant) -> usize {
-        let elapsed_ms = now.saturating_duration_since(self.meas_start).as_millis() as u64;
-        ((elapsed_ms / self.interval_ms) as usize).min(self.n.saturating_sub(1))
+        let elapsed_ms =
+            saturating_u128_to_u64(now.saturating_duration_since(self.meas_start).as_millis());
+        usize::try_from(elapsed_ms / self.interval_ms)
+            .unwrap_or(usize::MAX)
+            .min(self.n.saturating_sub(1))
     }
 }
 
@@ -137,6 +141,10 @@ impl TlsParams {
 
 /// Top-level entrypoint called by `main`. Returns the populated
 /// `RunOutput`. The caller is responsible for serialising it to disk.
+/// # Errors
+/// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
+/// # Panics
+/// Panics if synchronized state is poisoned or validated input is missing a field required to produce the output.
 pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
     let wallclock_start = Utc::now().timestamp_millis();
     let t_start = Instant::now();
@@ -145,7 +153,8 @@ pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
     // slices. Computed up front (meas_start is t_start + warmup) so it can be
     // handed to each task at spawn time.
     let interval_ms = SAMPLE_INTERVAL_MS;
-    let n_intervals = (scenario.duration_s * 1000).div_ceil(interval_ms).max(1) as usize;
+    let n_intervals = usize::try_from((scenario.duration_s * 1000).div_ceil(interval_ms).max(1))
+        .unwrap_or(usize::MAX);
     let grid = Grid {
         meas_start: t_start + Duration::from_secs(scenario.warmup_s),
         interval_ms,
@@ -155,42 +164,14 @@ pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
     let mut notes: Vec<String> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
 
-    // Failover scenarios need RF >= 3; otherwise mark skipped.
-    let failover_active =
-        scenario.failover.is_some() && scenario.replication_factor >= 3 && cfg.broker_count >= 3;
-    if scenario.failover.is_some() && !failover_active {
-        notes.push("skipped:failover-needs-rf3".into());
+    let (failover_active, skipped) =
+        validate_topology(&scenario, &cfg, wallclock_start, &mut notes);
+    if let Some(output) = skipped {
+        return Ok(output);
     }
 
-    if matches!(scenario.mode_tag, ModeTag::Cluster)
-        && scenario.replication_factor >= 3
-        && cfg.broker_count < 3
-    {
-        notes.push(format!(
-            "skipped:topology-mismatch (rf={} brokers={})",
-            scenario.replication_factor, cfg.broker_count
-        ));
-        return Ok(empty_output(
-            &scenario,
-            &cfg,
-            wallclock_start,
-            notes,
-            errors,
-        ));
-    }
+    let security = client_security(&cfg);
 
-    // Client security policy for the data path. `None` → plaintext (the
-    // default). When `Some`, both producers and consumers dial the broker's
-    // TLS listener so the produce/fetch byte stream is encrypted.
-    let security: Option<ClientSecurity> = cfg.tls.as_ref().map(TlsParams::to_security);
-    if let Some(sec) = &security {
-        info!(
-            server_name = sec.tls.as_ref().map_or("", |t| t.server_name.as_str()),
-            "TLS data path enabled (protocol=Ssl)"
-        );
-    }
-
-    // ── Producer workloads ──────────────────────────────────────────────────
     let mut prod_set: JoinSet<ProducerOut> = JoinSet::new();
     let stop = Arc::new(AtomicU8::new(STATE_RUN));
     let first_ack_unix_ms = Arc::new(AtomicU64::new(0));
@@ -203,12 +184,19 @@ pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
         let first_ack = first_ack_unix_ms.clone();
         let sid = cfg.scenario_id;
         let sec = security.clone();
-        prod_set.spawn(async move {
-            run_producer(i, s, bootstrap, topic, sid, stop, first_ack, sec, grid).await
-        });
+        prod_set.spawn(run_producer(ProducerTask {
+            idx: i,
+            scenario: s,
+            bootstrap,
+            topic,
+            scenario_id: sid,
+            stop,
+            first_ack,
+            security: sec,
+            grid,
+        }));
     }
 
-    // ── Consumer workloads ──────────────────────────────────────────────────
     let mut cons_set: JoinSet<ConsumerOut> = JoinSet::new();
     for i in 0..scenario.consumers {
         let s = scenario.clone();
@@ -218,63 +206,33 @@ pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
         let sid = cfg.scenario_id;
         let sec = security.clone();
         let stack = cfg.stack;
-        cons_set.spawn(async move {
-            run_consumer(i, s, bootstrap, topic, sid, stop, sec, grid, stack).await
-        });
+        cons_set.spawn(run_consumer(ConsumerTask {
+            idx: i,
+            scenario: s,
+            bootstrap,
+            topic,
+            scenario_id: sid,
+            stop,
+            security: sec,
+            grid,
+            stack,
+        }));
     }
 
-    // ── Failover orchestrator task ──────────────────────────────────────────
     let kill_at_ms = Arc::new(AtomicU64::new(0));
-    if failover_active {
-        let spec = scenario.failover.clone().expect("checked above");
-        let stack = cfg.stack;
-        let namespace = cfg.namespace.clone();
-        let bootstrap = cfg.bootstrap.clone();
-        let topic = cfg.topic.clone();
-        let security = security.clone();
-        let kill_at = kill_at_ms.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep_until(t_start + Duration::from_secs(spec.kill_at_s)).await;
-            let ms = Utc::now().timestamp_millis() as u64;
-            kill_at.store(ms, Ordering::SeqCst);
-            match crate::failover::try_client().await {
-                Ok(client) => {
-                    let leader_id = if spec.target == "partition0_leader" {
-                        match crate::failover::partition0_leader_from_metadata(
-                            &bootstrap, &topic, security,
-                        )
-                        .await
-                        {
-                            Ok(id) => Some(id),
-                            Err(e) => {
-                                warn!(
-                                    error = %e,
-                                    "failover: partition0_leader lookup failed; falling back to first broker pod"
-                                );
-                                None
-                            }
-                        }
-                    } else {
-                        None
-                    };
-                    match crate::failover::kill_broker_pod(&client, stack, &namespace, leader_id)
-                        .await
-                    {
-                        Ok(name) => info!(pod = %name, "failover: killed broker"),
-                        Err(e) => warn!(error = %e, "failover: kill_first_broker failed"),
-                    }
-                }
-                Err(e) => warn!(error = %e, "failover: in-cluster client unavailable"),
-            }
-        });
-    }
+    spawn_failover(
+        failover_active,
+        &scenario,
+        &cfg,
+        security.clone(),
+        t_start,
+        kill_at_ms.clone(),
+    );
 
-    // ── Phase 1: warmup ─────────────────────────────────────────────────────
     let warmup_end = t_start + Duration::from_secs(scenario.warmup_s);
     tokio::time::sleep_until(warmup_end).await;
     stop.store(STATE_MEASURING, Ordering::SeqCst);
 
-    // ── Phase 2: measurement ────────────────────────────────────────────────
     let meas_end = warmup_end + Duration::from_secs(scenario.duration_s);
     tokio::time::sleep_until(meas_end).await;
     stop.store(STATE_STOP, Ordering::SeqCst);
@@ -346,97 +304,34 @@ pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
         }
     }
 
-    // Assemble the client-side time series from the merged per-slice tallies.
-    let interval_s = interval_ms as f64 / 1000.0;
-    let pctl = |h: &Histogram<u64>, q: f64| {
-        if h.is_empty() {
-            0.0
-        } else {
-            h.value_at_quantile(q) as f64 / 1000.0
-        }
-    };
-    let samples: Vec<Sample> = (0..n_intervals)
-        .map(|iv| Sample {
-            t_offset_ms: TimeOffsetMs(iv as u64 * interval_ms),
-            producer_msgs_per_sec: prod_iv_msgs[iv] as f64 / interval_s,
-            consumer_msgs_per_sec: cons_iv_msgs[iv] as f64 / interval_s,
-            producer_p50_ms: pctl(&prod_iv_hist[iv], 0.50),
-            producer_p99_ms: pctl(&prod_iv_hist[iv], 0.99),
-            consumer_e2e_p99_ms: pctl(&cons_iv_hist[iv], 0.99),
-        })
-        .collect();
+    let samples = build_samples(
+        interval_ms,
+        (&prod_iv_msgs, &prod_iv_hist),
+        (&cons_iv_msgs, &cons_iv_hist),
+    );
 
     let wallclock_end = Utc::now().timestamp_millis();
-    let duration_s = scenario.duration_s.max(1) as f64;
+    let duration_s = to_f64(scenario.duration_s.max(1));
+    let (resource, broker_samples) = capture_resources(
+        &scenario,
+        &cfg,
+        (wallclock_start, wallclock_end),
+        prod_msgs,
+        &mut notes,
+    )
+    .await;
 
-    // ── Resource capture from Prometheus ────────────────────────────────────
-    let resource = if let Some(url) = &cfg.prometheus_url {
-        match PromClient::new(url) {
-            Ok(c) => match c
-                .capture_resource(
-                    cfg.stack,
-                    &cfg.namespace,
-                    DurationSeconds(scenario.duration_s),
-                    MessageCount(prod_msgs),
-                )
-                .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    warn!(error = %e, "prometheus capture failed");
-                    notes.push(format!("prometheus-capture-failed: {e}"));
-                    Resource::default()
-                }
-            },
-            Err(e) => {
-                notes.push(format!("prometheus-client-failed: {e}"));
-                Resource::default()
-            }
-        }
-    } else {
-        notes.push("prometheus-url-not-set".into());
-        Resource::default()
-    };
-
-    // Broker resource *time series* for graphing — a Prometheus range query
-    // over the whole wallclock window (warmup + measurement), at the 15s scrape
-    // step. Separate from the instant `resource` aggregate above. Queried now,
-    // before teardown, so the series is well within Prometheus' retention.
-    let broker_samples: Vec<BrokerSample> = if let Some(url) = &cfg.prometheus_url {
-        match PromClient::new(url) {
-            Ok(c) => c
-                .capture_resource_series(
-                    cfg.stack,
-                    &cfg.namespace,
-                    wallclock_start as f64 / 1000.0,
-                    wallclock_end as f64 / 1000.0,
-                    15,
-                )
-                .await
-                .unwrap_or_default(),
-            Err(_) => Vec::new(),
-        }
-    } else {
-        Vec::new()
-    };
-
-    let disturbance = if failover_active {
-        Some(Disturbance {
-            kill_at_ms: TimeOffsetMs(kill_at_ms.load(Ordering::SeqCst)),
-            recovery_at_ms: TimeOffsetMs(earliest_recovery_ms),
-            dropped: MessageCount(prod_dropped),
-            latency_spike_max_ms: max_spike_us as f64 / 1000.0,
-        })
-    } else {
-        None
-    };
-
-    let first_ack = first_ack_unix_ms.load(Ordering::SeqCst);
-    let first_ack_ms = if first_ack == 0 {
-        0
-    } else {
-        (first_ack as i64 - wallclock_start).max(0) as u64
-    };
+    let (disturbance, first_ack_ms) = finalize_timing(
+        failover_active,
+        (
+            kill_at_ms.load(Ordering::SeqCst),
+            earliest_recovery_ms,
+            prod_dropped,
+            max_spike_us,
+        ),
+        first_ack_unix_ms.load(Ordering::SeqCst),
+        wallclock_start,
+    );
 
     Ok(RunOutput {
         scenario: scenario.clone(),
@@ -453,8 +348,8 @@ pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
             msgs_consumed: MessageCount(cons_msgs),
             mb_in: bytes_to_mb(prod_bytes),
             mb_out: bytes_to_mb(cons_bytes),
-            producer_msgs_per_sec: prod_msgs as f64 / duration_s,
-            consumer_msgs_per_sec: cons_msgs as f64 / duration_s,
+            producer_msgs_per_sec: to_f64(prod_msgs) / duration_s,
+            consumer_msgs_per_sec: to_f64(cons_msgs) / duration_s,
         },
         producer_latency_ms: hist::percentiles(&prod_hist),
         consumer_e2e_latency_ms: hist::percentiles(&cons_hist),
@@ -467,6 +362,203 @@ pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
         samples,
         broker_samples,
     })
+}
+
+fn client_security(cfg: &DriverConfig) -> Option<ClientSecurity> {
+    let security = cfg.tls.as_ref().map(TlsParams::to_security);
+    if let Some(value) = &security {
+        info!(
+            server_name = value
+                .tls
+                .as_ref()
+                .map_or("", |tls| tls.server_name.as_str()),
+            "TLS data path enabled (protocol=Ssl)"
+        );
+    }
+    security
+}
+
+fn build_samples(
+    interval_ms: u64,
+    producer: (&[u64], &[Histogram<u64>]),
+    consumer: (&[u64], &[Histogram<u64>]),
+) -> Vec<Sample> {
+    let interval_seconds = to_f64(interval_ms) / 1000.0;
+    let percentile = |histogram: &Histogram<u64>, quantile: f64| {
+        if histogram.is_empty() {
+            0.0
+        } else {
+            to_f64(histogram.value_at_quantile(quantile)) / 1000.0
+        }
+    };
+    producer
+        .0
+        .iter()
+        .enumerate()
+        .map(|(index, messages)| Sample {
+            t_offset_ms: TimeOffsetMs(
+                u64::try_from(index)
+                    .unwrap_or(u64::MAX)
+                    .saturating_mul(interval_ms),
+            ),
+            producer_msgs_per_sec: to_f64(*messages) / interval_seconds,
+            consumer_msgs_per_sec: to_f64(consumer.0[index]) / interval_seconds,
+            producer_p50_ms: percentile(&producer.1[index], 0.50),
+            producer_p99_ms: percentile(&producer.1[index], 0.99),
+            consumer_e2e_p99_ms: percentile(&consumer.1[index], 0.99),
+        })
+        .collect()
+}
+
+fn finalize_timing(
+    failover_active: bool,
+    failover: (u64, u64, u64, u64),
+    first_ack: u64,
+    wallclock_start: i64,
+) -> (Option<Disturbance>, u64) {
+    let disturbance = failover_active.then(|| Disturbance {
+        kill_at_ms: TimeOffsetMs(failover.0),
+        recovery_at_ms: TimeOffsetMs(failover.1),
+        dropped: MessageCount(failover.2),
+        latency_spike_max_ms: to_f64(failover.3) / 1000.0,
+    });
+    let first_ack_ms = if first_ack == 0 {
+        0
+    } else {
+        nonnegative_i64_to_u64(
+            i64::try_from(first_ack)
+                .unwrap_or(i64::MAX)
+                .saturating_sub(wallclock_start),
+        )
+    };
+    (disturbance, first_ack_ms)
+}
+
+fn validate_topology(
+    scenario: &Scenario,
+    cfg: &DriverConfig,
+    wallclock_start: i64,
+    notes: &mut Vec<String>,
+) -> (bool, Option<RunOutput>) {
+    let failover_active =
+        scenario.failover.is_some() && scenario.replication_factor >= 3 && cfg.broker_count >= 3;
+    if scenario.failover.is_some() && !failover_active {
+        notes.push("skipped:failover-needs-rf3".into());
+    }
+    let topology_mismatch = matches!(scenario.mode_tag, ModeTag::Cluster)
+        && scenario.replication_factor >= 3
+        && cfg.broker_count < 3;
+    if !topology_mismatch {
+        return (failover_active, None);
+    }
+    notes.push(format!(
+        "skipped:topology-mismatch (rf={} brokers={})",
+        scenario.replication_factor, cfg.broker_count
+    ));
+    let output = empty_output(
+        scenario,
+        cfg,
+        wallclock_start,
+        std::mem::take(notes),
+        Vec::new(),
+    );
+    (failover_active, Some(output))
+}
+
+async fn capture_resources(
+    scenario: &Scenario,
+    cfg: &DriverConfig,
+    wallclock: (i64, i64),
+    produced: u64,
+    notes: &mut Vec<String>,
+) -> (Resource, Vec<BrokerSample>) {
+    let Some(url) = &cfg.prometheus_url else {
+        notes.push("prometheus-url-not-set".into());
+        return (Resource::default(), Vec::new());
+    };
+    let client = match PromClient::new(url) {
+        Ok(client) => client,
+        Err(error) => {
+            notes.push(format!("prometheus-client-failed: {error}"));
+            return (Resource::default(), Vec::new());
+        }
+    };
+    let resource = match client
+        .capture_resource(
+            cfg.stack,
+            &cfg.namespace,
+            DurationSeconds(scenario.duration_s),
+            MessageCount(produced),
+        )
+        .await
+    {
+        Ok(resource) => resource,
+        Err(error) => {
+            warn!(%error, "prometheus capture failed");
+            notes.push(format!("prometheus-capture-failed: {error}"));
+            Resource::default()
+        }
+    };
+    let broker_samples = client
+        .capture_resource_series(
+            cfg.stack,
+            &cfg.namespace,
+            to_f64(wallclock.0) / 1000.0,
+            to_f64(wallclock.1) / 1000.0,
+            15,
+        )
+        .await
+        .unwrap_or_default();
+    (resource, broker_samples)
+}
+
+fn spawn_failover(
+    active: bool,
+    scenario: &Scenario,
+    cfg: &DriverConfig,
+    security: Option<ClientSecurity>,
+    started_at: Instant,
+    kill_at: Arc<AtomicU64>,
+) {
+    if !active {
+        return;
+    }
+    let spec = scenario.failover.clone().expect("checked above");
+    let stack = cfg.stack;
+    let namespace = cfg.namespace.clone();
+    let bootstrap = cfg.bootstrap.clone();
+    let topic = cfg.topic.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep_until(started_at + Duration::from_secs(spec.kill_at_s)).await;
+        kill_at.store(
+            nonnegative_i64_to_u64(Utc::now().timestamp_millis()),
+            Ordering::SeqCst,
+        );
+        let client = match crate::failover::try_client().await {
+            Ok(client) => client,
+            Err(error) => {
+                warn!(%error, "failover: in-cluster client unavailable");
+                return;
+            }
+        };
+        let leader_id = if spec.target == "partition0_leader" {
+            match crate::failover::partition0_leader_from_metadata(&bootstrap, &topic, security)
+                .await
+            {
+                Ok(id) => Some(id),
+                Err(error) => {
+                    warn!(%error, "failover: leader lookup failed; using first broker pod");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        match crate::failover::kill_broker_pod(&client, stack, &namespace, leader_id).await {
+            Ok(name) => info!(pod = %name, "failover: killed broker"),
+            Err(error) => warn!(%error, "failover: broker kill failed"),
+        }
+    });
 }
 
 const STATE_RUN: u8 = 0; // warmup phase, record-but-discard
@@ -497,7 +589,7 @@ struct ConsumerOut {
 }
 
 fn bytes_to_mb(bytes: u64) -> f64 {
-    (bytes as f64) / 1_048_576.0
+    (to_f64(bytes)) / 1_048_576.0
 }
 
 fn empty_output(
@@ -533,8 +625,7 @@ fn empty_output(
 
 // ── Producer task ───────────────────────────────────────────────────────────
 
-#[allow(clippy::too_many_arguments)] // bench task fan-out: each arg is an independent per-task input
-async fn run_producer(
+struct ProducerTask {
     idx: usize,
     scenario: Scenario,
     bootstrap: String,
@@ -544,7 +635,20 @@ async fn run_producer(
     first_ack: Arc<AtomicU64>,
     security: Option<ClientSecurity>,
     grid: Grid,
-) -> ProducerOut {
+}
+
+async fn run_producer(task: ProducerTask) -> ProducerOut {
+    let ProducerTask {
+        idx,
+        scenario,
+        bootstrap,
+        topic,
+        scenario_id,
+        stop,
+        first_ack,
+        security,
+        grid,
+    } = task;
     // Idempotence forces acks=All; turn it off whenever the scenario
     // requested something weaker.
     let enable_idempotence = matches!(scenario.acks, crate::scenario::Acks::All);
@@ -627,7 +731,7 @@ async fn run_producer(
         ($res:expr, $t0:expr) => {
             match $res {
                 Ok(_meta) => {
-                    let us = $t0.elapsed().as_micros() as u64;
+                    let us = saturating_u128_to_u64($t0.elapsed().as_micros());
                     if stop.load(Ordering::Relaxed) == STATE_MEASURING {
                         hist::record_us(&mut meas_hist, us);
                         meas_msgs += 1;
@@ -636,14 +740,15 @@ async fn run_producer(
                         iv_msgs[iv] += 1;
                         hist::record_us(&mut iv_hist[iv], us);
                         if kill_observed && recovery_unix_ms == 0 {
-                            recovery_unix_ms = Utc::now().timestamp_millis() as u64;
+                            recovery_unix_ms =
+                                nonnegative_i64_to_u64(Utc::now().timestamp_millis());
                         }
                         if kill_observed && us > latency_spike_max_us {
                             latency_spike_max_us = us;
                         }
                     }
                     if first_ack.load(Ordering::Relaxed) == 0 {
-                        let now_ms = Utc::now().timestamp_millis() as u64;
+                        let now_ms = nonnegative_i64_to_u64(Utc::now().timestamp_millis());
                         let _ = first_ack.compare_exchange(
                             0,
                             now_ms,
@@ -764,8 +869,7 @@ async fn run_producer(
 
 // ── Consumer task ───────────────────────────────────────────────────────────
 
-#[allow(clippy::too_many_arguments)] // bench task fan-out: each arg is an independent per-task input
-async fn run_consumer(
+struct ConsumerTask {
     idx: usize,
     scenario: Scenario,
     bootstrap: String,
@@ -775,7 +879,20 @@ async fn run_consumer(
     security: Option<ClientSecurity>,
     grid: Grid,
     stack: Stack,
-) -> ConsumerOut {
+}
+
+async fn run_consumer(task: ConsumerTask) -> ConsumerOut {
+    let ConsumerTask {
+        idx,
+        scenario,
+        bootstrap,
+        topic,
+        scenario_id,
+        stop,
+        security,
+        grid,
+        stack,
+    } = task;
     let group_id = format!("crabka-bench-{}", scenario.name);
     let mut consumer = match build_consumer_with_retry(
         idx,
@@ -813,7 +930,8 @@ async fn run_consumer(
         }
         match consumer.poll(Duration::from_millis(50)).await {
             Ok(records) => {
-                let now_ns = Utc::now().timestamp_nanos_opt().unwrap_or_default() as u64;
+                let now_ns =
+                    nonnegative_i64_to_u64(Utc::now().timestamp_nanos_opt().unwrap_or_default());
                 let phase = stop.load(Ordering::Relaxed);
                 let iv = grid.idx(Instant::now());
                 for r in records {

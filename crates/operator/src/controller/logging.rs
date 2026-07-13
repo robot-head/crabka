@@ -216,7 +216,7 @@ pub fn condition_for(outcome: &LoggingOutcome) -> KafkaCondition {
 
 #[cfg(test)]
 mod tests {
-    use assert2::check;
+    use assert2::{assert, check};
 
     use super::*;
 
@@ -228,73 +228,69 @@ mod tests {
     }
 
     #[test]
-    fn compose_inline_filter_success_cases() {
-        for (_name, input, expected) in [
-            ("root is a bare level", &[("root", "info")][..], "info"),
-            (
-                "target includes its level",
-                &[("crabka_broker", "debug")][..],
-                "crabka_broker=debug",
-            ),
-            (
-                "directives are sorted",
-                &[
-                    ("root", "info"),
-                    ("crabka_raft", "warn"),
-                    ("crabka_broker", "debug"),
-                ][..],
-                "crabka_broker=debug,crabka_raft=warn,info",
-            ),
-            (
-                "levels are canonicalized",
-                &[
-                    ("root", "INFO"),
-                    ("crabka_broker", "WARNING"),
-                    ("crabka_log", "FATAL"),
-                    ("crabka_raft", "OFF"),
-                ][..],
-                "crabka_broker=warn,crabka_log=error,crabka_raft=off,info",
-            ),
-            (
-                "root is case insensitive",
-                &[("ROOT", "debug")][..],
-                "debug",
-            ),
-        ] {
-            assert2::assert!(compose_inline_filter(&loggers(input)) == Ok(expected.to_string()));
-        }
+    fn compose_root_is_bare_level() {
+        let f = compose_inline_filter(&loggers(&[("root", "info")])).unwrap();
+        assert!(f == "info");
     }
 
     #[test]
-    fn compose_inline_filter_error_cases() {
-        for (_name, input, expected, expected_reason) in [
-            (
-                "empty logger map",
-                &[][..],
-                LoggingError::EmptyLoggers,
-                "EmptyLoggers",
-            ),
-            (
-                "blank logger name",
-                &[("  ", "info")][..],
-                LoggingError::EmptyLoggerName,
-                "EmptyLoggerName",
-            ),
-            (
-                "invalid level",
-                &[("root", "verbose")][..],
-                LoggingError::InvalidLevel {
-                    logger: "root".into(),
-                    level: "verbose".into(),
-                },
-                "InvalidLogLevel",
-            ),
-        ] {
-            let actual = compose_inline_filter(&loggers(input)).unwrap_err();
-            let actual_reason = actual.reason();
-            assert2::assert!(actual == expected);
-            assert2::assert!(actual_reason == expected_reason);
-        }
+    fn compose_target_is_target_equals_level() {
+        let f = compose_inline_filter(&loggers(&[("crabka_broker", "debug")])).unwrap();
+        assert!(f == "crabka_broker=debug");
+    }
+
+    #[test]
+    fn compose_is_sorted_and_deterministic() {
+        // Insertion order shouldn't matter — output is sorted.
+        let f = compose_inline_filter(&loggers(&[
+            ("root", "info"),
+            ("crabka_raft", "warn"),
+            ("crabka_broker", "debug"),
+        ]))
+        .unwrap();
+        assert!(f == "crabka_broker=debug,crabka_raft=warn,info");
+    }
+
+    #[test]
+    fn compose_levels_are_canonicalized() {
+        // Uppercase + log4j aliases normalize to tracing levels.
+        let f = compose_inline_filter(&loggers(&[
+            ("root", "INFO"),
+            ("crabka_broker", "WARNING"),
+            ("crabka_log", "FATAL"),
+            ("crabka_raft", "OFF"),
+        ]))
+        .unwrap();
+        assert!(f == "crabka_broker=warn,crabka_log=error,crabka_raft=off,info");
+    }
+
+    #[test]
+    fn compose_root_is_case_insensitive() {
+        let f = compose_inline_filter(&loggers(&[("ROOT", "debug")])).unwrap();
+        assert!(f == "debug");
+    }
+
+    #[test]
+    fn compose_rejects_empty_map() {
+        assert!(compose_inline_filter(&BTreeMap::new()).unwrap_err() == LoggingError::EmptyLoggers);
+    }
+
+    #[test]
+    fn compose_rejects_blank_logger_name() {
+        let err = compose_inline_filter(&loggers(&[("  ", "info")])).unwrap_err();
+        assert!(err == LoggingError::EmptyLoggerName);
+    }
+
+    #[test]
+    fn compose_rejects_invalid_level() {
+        let err = compose_inline_filter(&loggers(&[("root", "verbose")])).unwrap_err();
+        assert!(
+            err == LoggingError::InvalidLevel {
+                logger: "root".into(),
+                level: "verbose".into()
+            }
+        );
+        assert!(err.reason() == "InvalidLogLevel");
     }
 
     #[test]
@@ -304,42 +300,35 @@ mod tests {
             (LoggingOutcome::Disabled, None),
             (LoggingOutcome::Invalid(LoggingError::EmptyLoggers), None),
         ] {
-            assert2::assert!(outcome.filter() == want);
+            assert!(outcome.filter() == want, "case {outcome:?}");
         }
     }
 
     #[test]
-    fn condition_cases() {
-        for (name, outcome, expected, message_fragment) in [
-            (
-                "disabled",
-                LoggingOutcome::Disabled,
-                ("LoggingReady", "False", "Disabled"),
-                None,
-            ),
-            (
-                "resolved",
-                LoggingOutcome::Resolved("crabka_broker=debug,info".into()),
-                ("LoggingReady", "True", "Available"),
-                Some("crabka_broker=debug,info"),
-            ),
-            (
-                "missing external ConfigMap",
-                LoggingOutcome::Invalid(LoggingError::ExternalConfigMapNotFound {
-                    name: "missing-cm".into(),
-                }),
-                ("LoggingReady", "False", "LoggingConfigMapNotFound"),
-                Some("missing-cm"),
-            ),
-        ] {
-            let c = condition_for(&outcome);
-            check!(
-                (c.type_.as_str(), c.status.as_str(), c.reason.as_str()) == expected,
-                "case {name}"
-            );
-            if let Some(fragment) = message_fragment {
-                check!(c.message.contains(fragment), "case {name}");
-            }
-        }
+    fn condition_disabled_is_false() {
+        let c = condition_for(&LoggingOutcome::Disabled);
+        check!(c.type_ == "LoggingReady");
+        check!(c.status == "False");
+        check!(c.reason == "Disabled");
+    }
+
+    #[test]
+    fn condition_resolved_is_true_and_echoes_filter() {
+        let c = condition_for(&LoggingOutcome::Resolved("crabka_broker=debug,info".into()));
+        check!(c.status == "True");
+        check!(c.reason == "Available");
+        check!(c.message.contains("crabka_broker=debug,info"));
+    }
+
+    #[test]
+    fn condition_invalid_carries_reason() {
+        let c = condition_for(&LoggingOutcome::Invalid(
+            LoggingError::ExternalConfigMapNotFound {
+                name: "missing-cm".into(),
+            },
+        ));
+        check!(c.status == "False");
+        check!(c.reason == "LoggingConfigMapNotFound");
+        check!(c.message.contains("missing-cm"));
     }
 }

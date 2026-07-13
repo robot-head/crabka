@@ -16,8 +16,9 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 3;
 pub const FLEXIBLE_MIN: i16 = 32767;
 #[inline]
-fn is_flexible(version: i16) -> bool {
-    version >= FLEXIBLE_MIN
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
+    version == FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsumerProtocolSubscription {
@@ -36,7 +37,7 @@ impl Default for ConsumerProtocolSubscription {
             owned_partitions: Vec::new(),
             generation_id: -1i32,
             rack_id: None,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
@@ -53,18 +54,18 @@ impl Encode for ConsumerProtocolSubscription {
                 crate::primitives::array::put_array_len(buf, (self.topics).len(), flex);
                 for it in &self.topics {
                     if flex {
-                        put_compact_string(buf, it);
+                        let () = put_compact_string(buf, it);
                     } else {
-                        put_string(buf, it);
+                        let () = put_string(buf, it);
                     }
                 }
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_bytes(buf, self.user_data.as_deref());
+                let () = put_compact_nullable_bytes(buf, self.user_data.as_deref());
             } else {
-                put_nullable_bytes(buf, self.user_data.as_deref());
+                let () = put_nullable_bytes(buf, self.user_data.as_deref());
             }
         }
         if version >= 1 {
@@ -80,9 +81,9 @@ impl Encode for ConsumerProtocolSubscription {
         }
         if version >= 3 {
             if flex {
-                put_compact_nullable_string(buf, self.rack_id.as_deref());
+                let () = put_compact_nullable_string(buf, self.rack_id.as_deref());
             } else {
-                put_nullable_string(buf, self.rack_id.as_deref());
+                let () = put_nullable_string(buf, self.rack_id.as_deref());
             }
         }
         Ok(())
@@ -224,12 +225,12 @@ pub struct TopicPartition {
 }
 impl Encode for TopicPartition {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
-        let flex = version >= 32767;
+        let flex = version == i16::MAX;
         if version >= 1 {
             if flex {
-                put_compact_string(buf, &self.topic);
+                let () = put_compact_string(buf, &self.topic);
             } else {
-                put_string(buf, &self.topic);
+                let () = put_string(buf, &self.topic);
             }
         }
         if version >= 1 {
@@ -243,7 +244,7 @@ impl Encode for TopicPartition {
         Ok(())
     }
     fn encoded_len(&self, version: i16) -> usize {
-        let flex = version >= 32767;
+        let flex = version == i16::MAX;
         let mut n: usize = 0;
         if version >= 1 {
             n += if flex {
@@ -265,7 +266,7 @@ impl Encode for TopicPartition {
 }
 impl Decode<'_> for TopicPartition {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
-        let flex = version >= 32767;
+        let flex = version == i16::MAX;
         let mut out = Self::default();
         if version >= 1 {
             out.topic = if flex {

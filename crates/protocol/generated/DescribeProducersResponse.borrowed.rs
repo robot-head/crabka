@@ -16,7 +16,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 0;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -26,6 +27,10 @@ pub struct DescribeProducersResponse<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl DescribeProducersResponse<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_producers_response::DescribeProducersResponse {
         crate::owned::describe_producers_response::DescribeProducersResponse {
             throttle_time_ms: (self.throttle_time_ms),
@@ -131,6 +136,10 @@ pub struct TopicResponse<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl TopicResponse<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_producers_response::TopicResponse {
         crate::owned::describe_producers_response::TopicResponse {
             name: (self.name).to_string(),
@@ -147,9 +156,9 @@ impl Encode for TopicResponse<'_> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name);
+                let () = put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name);
+                let () = put_string(buf, self.name);
             }
         }
         if version >= 0 {
@@ -244,6 +253,10 @@ pub struct PartitionResponse<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl PartitionResponse<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_producers_response::PartitionResponse {
         crate::owned::describe_producers_response::PartitionResponse {
             partition_index: (self.partition_index),
@@ -268,9 +281,9 @@ impl Encode for PartitionResponse<'_> {
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message);
+                let () = put_compact_nullable_string(buf, self.error_message);
             } else {
-                put_nullable_string(buf, self.error_message);
+                let () = put_nullable_string(buf, self.error_message);
             }
         }
         if version >= 0 {
@@ -395,11 +408,15 @@ impl Default for ProducerState {
             last_timestamp: -1i64,
             coordinator_epoch: 0i32,
             current_txn_start_offset: -1i64,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl ProducerState {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_producers_response::ProducerState {
         crate::owned::describe_producers_response::ProducerState {
             producer_id: (self.producer_id),

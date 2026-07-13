@@ -96,6 +96,8 @@ pub struct ObjectSymbolResolver {
 }
 
 impl ObjectSymbolResolver {
+    /// # Errors
+    /// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, String> {
         parse_object_guarded(bytes.as_slice())?;
         Ok(Self {
@@ -104,6 +106,8 @@ impl ObjectSymbolResolver {
         })
     }
 
+    /// # Errors
+    /// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
     pub fn from_file(path: impl Into<PathBuf>) -> Result<Self, String> {
         let path = path.into();
         let bytes = std::fs::read(&path).map_err(|err| err.to_string())?;
@@ -139,6 +143,8 @@ pub struct DebuginfodResolver {
 }
 
 impl DebuginfodResolver {
+    /// # Errors
+    /// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
     pub fn new(base_urls: Vec<String>) -> Result<Self, String> {
         let base_urls = base_urls
             .into_iter()
@@ -295,7 +301,6 @@ impl NativeResolver for ObjectSymbolResolver {
     }
 }
 
-#[cfg_attr(test, mutants::skip)] // cargo-mutants: addr2line output depends on stripped/debug test binaries.
 fn loader_frames(path: &std::path::Path, address: u64) -> Option<Vec<NativeSymbol>> {
     let loader = addr2line::Loader::new(path).ok()?;
     let mut frames = loader.find_frames(address).ok()?;
@@ -327,7 +332,6 @@ fn loader_frames(path: &std::path::Path, address: u64) -> Option<Vec<NativeSymbo
     Some(out)
 }
 
-#[cfg_attr(test, mutants::skip)] // cargo-mutants: temp-file addr2line mirrors loader_frames above.
 fn loader_frames_from_bytes(bytes: &[u8], address: u64) -> Option<Vec<NativeSymbol>> {
     // `addr2line::Loader` requires a filesystem path. Use a `NamedTempFile`
     // (O_EXCL, 0600, auto-removed on drop) instead of a predictable temp path
@@ -369,7 +373,7 @@ impl<R: NativeResolver> LazySymbolizer<R> {
     }
 
     fn symbolize_location(&self, location: RawLocation) -> Vec<Frame> {
-        if location.mapping.has_functions {
+        if location.mapping.symbolization.has_functions() {
             return Vec::new();
         }
         let request = SymbolizeRequest {
@@ -416,13 +420,13 @@ impl<R: NativeResolver> SymbolSource for LazySymbolizer<R> {
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use assert2::check;
+    use assert2::{assert, check};
     // Only used by the ELF/DWARF self-symbolization tests below, which run on Linux.
     #[cfg(target_os = "linux")]
     use object::{Object, ObjectSymbol};
 
     use super::*;
-    use crate::{LocationRec, MappingRec};
+    use crate::{LocationRec, MappingRec, MappingSymbolization};
 
     struct FixedResolver {
         calls: AtomicUsize,
@@ -432,8 +436,8 @@ mod tests {
     impl NativeResolver for FixedResolver {
         fn symbolize(&self, request: &SymbolizeRequest) -> Option<Vec<NativeSymbol>> {
             self.calls.fetch_add(1, Ordering::Relaxed);
-            assert2::assert!(request.build_id.as_str() == "build-a");
-            assert2::assert!(request.address == self.expected_address);
+            assert!(request.build_id == "build-a");
+            assert!(request.address == self.expected_address);
             Some(vec![NativeSymbol {
                 function: "native_main".to_string(),
                 file: "main.c".to_string(),
@@ -458,10 +462,7 @@ mod tests {
             file_offset: 0x30,
             filename,
             build_id,
-            has_functions: false,
-            has_filenames: false,
-            has_line_numbers: false,
-            has_inline_frames: false,
+            symbolization: MappingSymbolization::default(),
         });
         let loc = db.intern_location(LocationRec {
             address: 0x1010,
@@ -510,8 +511,8 @@ mod tests {
 
         let frames = source.resolve(0, stack);
 
-        assert2::assert!(frames[0].function == "known");
-        assert2::assert!(resolver.calls.load(Ordering::Relaxed) == 0);
+        assert!(frames[0].function == "known");
+        assert!(resolver.calls.load(Ordering::Relaxed) == 0);
     }
 
     // Reads DWARF embedded in the test binary itself. Only Linux ships DWARF in
@@ -552,7 +553,7 @@ mod tests {
             })
             .unwrap();
 
-        assert2::assert!(
+        assert!(
             frames
                 .iter()
                 .any(|frame| frame.function.contains("object_symbol_anchor"))
@@ -599,7 +600,7 @@ mod tests {
             })
             .unwrap();
 
-        assert2::assert!(
+        assert!(
             frames
                 .iter()
                 .any(|frame| frame.function.contains("object_symbol_anchor"))
@@ -611,7 +612,7 @@ mod tests {
             return;
         }
 
-        assert2::assert!(frames.iter().any(is_object_symbol_anchor_location));
+        assert!(frames.iter().any(is_object_symbol_anchor_location));
     }
 
     #[cfg(target_os = "linux")]
@@ -652,7 +653,7 @@ mod tests {
             let mut request = [0_u8; 1024];
             let read = std::io::Read::read(&mut stream, &mut request).unwrap();
             let request = String::from_utf8_lossy(&request[..read]);
-            assert2::assert!(request.starts_with("GET /buildid/deadbeef/debuginfo "));
+            assert!(request.starts_with("GET /buildid/deadbeef/debuginfo "));
             served_clone.fetch_add(1, Ordering::Relaxed);
             let header = format!(
                 "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
@@ -712,16 +713,16 @@ mod tests {
             })
             .unwrap();
 
-        assert2::assert!(out[0].function == "native_main");
-        assert2::assert!(fixed.calls.load(Ordering::Relaxed) == 1);
+        assert!(out[0].function == "native_main");
+        assert!(fixed.calls.load(Ordering::Relaxed) == 1);
     }
 
     #[test]
     fn object_symbol_resolver_rejects_invalid_object_bytes() {
         let bytes = b"not an object file".to_vec();
 
-        assert2::assert!(parse_object_guarded(&bytes).is_err());
-        assert2::assert!(ObjectSymbolResolver::from_bytes(bytes).is_err());
+        assert!(parse_object_guarded(&bytes).is_err());
+        assert!(ObjectSymbolResolver::from_bytes(bytes).is_err());
     }
 
     #[cfg(target_os = "linux")]
@@ -744,12 +745,12 @@ mod tests {
         let first = resolver.symbolize(&request).unwrap();
         let second = resolver.symbolize(&request).unwrap();
 
-        assert2::assert!(
+        assert!(
             first
                 .iter()
                 .any(|frame| frame.function.contains("object_symbol_anchor"))
         );
-        assert2::assert!(first == second);
+        assert!(first == second);
     }
 
     #[cfg(target_os = "linux")]
@@ -785,7 +786,7 @@ mod tests {
                 (!names.is_empty()).then_some((*address, names))
             })
             .expect("test binary has an uncovered zero-size symbol");
-        assert2::assert!(
+        assert!(
             nearest_symbol_name(&object, zero_addr)
                 .is_some_and(|name| zero_names.iter().any(|candidate| candidate == &name))
         );
@@ -801,7 +802,7 @@ mod tests {
             })
             .expect("anchor has a sized symbol");
         let at_end = nearest_symbol_name(&object, anchor.address() + anchor.size());
-        assert2::assert!(!at_end.is_some_and(|name| name.contains("object_symbol_anchor")));
+        assert!(!at_end.is_some_and(|name| name.contains("object_symbol_anchor")));
     }
 
     #[test]
@@ -814,7 +815,7 @@ mod tests {
             // Minimum length is two hex digits.
             "ab",
         ] {
-            assert2::assert!(is_valid_build_id(build_id));
+            assert!(is_valid_build_id(build_id), "{build_id}");
         }
     }
 
@@ -836,7 +837,7 @@ mod tests {
             "dead beef",
             "build-a",
         ] {
-            assert2::assert!(!is_valid_build_id(build_id));
+            assert!(!is_valid_build_id(build_id), "{build_id:?}");
         }
     }
 
@@ -852,7 +853,7 @@ mod tests {
             address: 0x10,
         });
 
-        assert2::assert!(out.is_none());
+        assert!(out.is_none());
     }
 
     #[test]
@@ -860,7 +861,9 @@ mod tests {
         let base = reqwest::Url::parse("https://debuginfod.example/").unwrap();
         let url = DebuginfodResolver::build_url(&base, "deadbeef").unwrap();
 
-        assert2::assert!(url.as_str() == "https://debuginfod.example/buildid/deadbeef/debuginfo");
+        assert!(url.as_str() == "https://debuginfod.example/buildid/deadbeef/debuginfo");
+        // Host is untouched and there is exactly one path beyond the prefix.
+        assert!(url.host_str() == Some("debuginfod.example"));
     }
 
     #[test]
@@ -868,7 +871,7 @@ mod tests {
         let base = reqwest::Url::parse("https://proxy.example/debuginfod").unwrap();
         let url = DebuginfodResolver::build_url(&base, "abcd").unwrap();
 
-        assert2::assert!(url.as_str() == "https://proxy.example/debuginfod/buildid/abcd/debuginfo");
+        assert!(url.as_str() == "https://proxy.example/debuginfod/buildid/abcd/debuginfo");
     }
 
     #[test]
@@ -880,17 +883,20 @@ mod tests {
         let cap_usize = usize::try_from(cap).unwrap();
         let oversized = vec![0_u8; cap_usize + 1];
         let out = read_capped_reader(&oversized[..], cap);
-        assert2::assert!(out.is_none());
+        assert!(out.is_none());
 
         let exact = vec![7_u8; cap_usize];
         let out = read_capped_reader(&exact[..], cap).unwrap();
-        assert2::assert!(out.len() == cap_usize);
+        assert!(out.len() == cap_usize);
     }
 
     #[test]
     fn content_length_cap_allows_absent_and_exact_lengths_only() {
         for (content_length, want) in [(None, true), (Some(10), true), (Some(11), false)] {
-            assert2::assert!(content_length_within_cap(content_length, 10) == want);
+            assert!(
+                content_length_within_cap(content_length, 10) == want,
+                "{content_length:?}"
+            );
         }
     }
 
@@ -931,8 +937,8 @@ mod tests {
         });
 
         server_thread.join().unwrap();
-        assert2::assert!(out.is_none());
-        assert2::assert!(followed.load(Ordering::Relaxed) == 0);
+        assert!(out.is_none());
+        assert!(followed.load(Ordering::Relaxed) == 0);
     }
 
     #[cfg(target_os = "linux")]
@@ -959,7 +965,10 @@ mod tests {
             match listener.accept() {
                 Ok(stream) => return stream,
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                    assert2::assert!(std::time::Instant::now() < deadline);
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "timed out waiting for debuginfod request"
+                    );
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
                 Err(err) => panic!("accept failed: {err}"),

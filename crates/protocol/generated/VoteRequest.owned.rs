@@ -14,7 +14,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,7 +31,7 @@ impl Default for VoteRequest {
             cluster_id: None,
             voter_id: -1i32,
             topics: Vec::new(),
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
@@ -45,9 +46,9 @@ impl Encode for VoteRequest {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.cluster_id.as_deref());
+                let () = put_compact_nullable_string(buf, self.cluster_id.as_deref());
             } else {
-                put_nullable_string(buf, self.cluster_id.as_deref());
+                let () = put_nullable_string(buf, self.cluster_id.as_deref());
             }
         }
         if version >= 1 {
@@ -159,9 +160,9 @@ impl Encode for TopicData {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.topic_name);
+                let () = put_compact_string(buf, &self.topic_name);
             } else {
-                put_string(buf, &self.topic_name);
+                let () = put_string(buf, &self.topic_name);
             }
         }
         if version >= 0 {
@@ -259,37 +260,165 @@ pub struct PartitionData {
     pub pre_vote: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Encode for PartitionData {
-    fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
-        let flex = version >= 0;
+impl PartitionData {
+    fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
             put_i32(buf, self.partition_index);
         }
+    }
+    fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
             put_i32(buf, self.replica_epoch);
         }
+    }
+    fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
             put_i32(buf, self.replica_id);
         }
+    }
+    fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 1 {
             crate::primitives::uuid::put_uuid(buf, self.replica_directory_id);
         }
+    }
+    fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 1 {
             crate::primitives::uuid::put_uuid(buf, self.voter_directory_id);
         }
+    }
+    fn encode_field_5<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
             put_i32(buf, self.last_offset_epoch);
         }
+    }
+    fn encode_field_6<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
             put_i64(buf, self.last_offset);
         }
+    }
+    fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 2 {
             put_bool(buf, self.pre_vote);
         }
+    }
+    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
         }
+    }
+    fn decode_field_0<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.partition_index = get_i32(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_1<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.replica_epoch = get_i32(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_2<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.replica_id = get_i32(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_3<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 1 {
+            out.replica_directory_id = crate::primitives::uuid::get_uuid(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_4<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 1 {
+            out.voter_directory_id = crate::primitives::uuid::get_uuid(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_5<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.last_offset_epoch = get_i32(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_6<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.last_offset = get_i64(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_7<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 2 {
+            out.pre_vote = get_bool(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_tagged_fields<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        _version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if flex {
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
+        }
+        Ok(())
+    }
+}
+impl Encode for PartitionData {
+    fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
+        let flex = version >= 0;
+        self.encode_field_0(buf, version, flex);
+        self.encode_field_1(buf, version, flex);
+        self.encode_field_2(buf, version, flex);
+        self.encode_field_3(buf, version, flex);
+        self.encode_field_4(buf, version, flex);
+        self.encode_field_5(buf, version, flex);
+        self.encode_field_6(buf, version, flex);
+        self.encode_field_7(buf, version, flex);
+        self.encode_tagged_fields(buf, version, flex);
         Ok(())
     }
     fn encoded_len(&self, version: i16) -> usize {
@@ -330,33 +459,15 @@ impl Decode<'_> for PartitionData {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
-        if version >= 0 {
-            out.partition_index = get_i32(buf)?;
-        }
-        if version >= 0 {
-            out.replica_epoch = get_i32(buf)?;
-        }
-        if version >= 0 {
-            out.replica_id = get_i32(buf)?;
-        }
-        if version >= 1 {
-            out.replica_directory_id = crate::primitives::uuid::get_uuid(buf)?;
-        }
-        if version >= 1 {
-            out.voter_directory_id = crate::primitives::uuid::get_uuid(buf)?;
-        }
-        if version >= 0 {
-            out.last_offset_epoch = get_i32(buf)?;
-        }
-        if version >= 0 {
-            out.last_offset = get_i64(buf)?;
-        }
-        if version >= 2 {
-            out.pre_vote = get_bool(buf)?;
-        }
-        if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
-        }
+        Self::decode_field_0(&mut out, buf, version, flex)?;
+        Self::decode_field_1(&mut out, buf, version, flex)?;
+        Self::decode_field_2(&mut out, buf, version, flex)?;
+        Self::decode_field_3(&mut out, buf, version, flex)?;
+        Self::decode_field_4(&mut out, buf, version, flex)?;
+        Self::decode_field_5(&mut out, buf, version, flex)?;
+        Self::decode_field_6(&mut out, buf, version, flex)?;
+        Self::decode_field_7(&mut out, buf, version, flex)?;
+        Self::decode_tagged_fields(&mut out, buf, version, flex)?;
         Ok(out)
     }
 }

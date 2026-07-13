@@ -35,12 +35,6 @@ const KAFKA_CLUSTER: &str = "kafka-cluster";
 /// Subject-scoped endpoints map to `ResourceType::Topic` named by the subject;
 /// cluster-global endpoints map to `ResourceType::Cluster` named
 /// `KAFKA_CLUSTER`.
-// One arm per REST endpoint keeps this a readable routing table; several
-// distinct paths/methods legitimately map to the same decision (e.g. multiple
-// reads -> (Cluster, Read); PUT and DELETE on /mode/{subject} both -> Alter), so
-// `match_same_arms` (which would coalesce them and drop the per-path comments)
-// is intentionally allowed here.
-#[allow(clippy::match_same_arms)]
 #[must_use]
 pub fn authz_target(method: &Method, path: &str) -> Option<(ResourceType, String, AclOperation)> {
     // Split into non-empty segments.
@@ -61,8 +55,10 @@ pub fn authz_target(method: &Method, path: &str) -> Option<(ResourceType, String
 
     match seg.as_slice() {
         // ---- /subjects ... ------------------------------------------------
-        // GET /subjects — list every subject (cluster-wide read of names).
-        ["subjects"] if method == Method::GET => cluster(AclOperation::Describe),
+        // GET /subjects and /schemas/types expose cluster-wide metadata.
+        ["subjects"] | ["schemas", "types"] if method == Method::GET => {
+            cluster(AclOperation::Describe)
+        }
         // POST /subjects/{subject} — look up a schema under a subject.
         // DELETE /subjects/{subject} — delete the whole subject.
         ["subjects", subject] => match *method {
@@ -94,8 +90,8 @@ pub fn authz_target(method: &Method, path: &str) -> Option<(ResourceType, String
         ] if method == Method::GET => topic(subject, AclOperation::Read),
 
         // ---- /config ... --------------------------------------------------
-        // Global compatibility level.
-        ["config"] => match *method {
+        // Global compatibility level and global mode share the same policy.
+        ["config" | "mode"] => match *method {
             Method::PUT => cluster(AclOperation::Alter),
             Method::GET => cluster(AclOperation::Describe),
             _ => None,
@@ -108,17 +104,10 @@ pub fn authz_target(method: &Method, path: &str) -> Option<(ResourceType, String
         },
 
         // ---- /mode ... ----------------------------------------------------
-        // Global mode (mirrors /config: PUT = Alter, GET = Describe).
-        ["mode"] => match *method {
-            Method::PUT => cluster(AclOperation::Alter),
-            Method::GET => cluster(AclOperation::Describe),
-            _ => None,
-        },
         // Per-subject mode override (mirrors /config/{subject}); PUT sets and
         // DELETE clears it (both mutations → Alter), GET reads → Describe.
         ["mode", subject] => match *method {
-            Method::PUT => topic(subject, AclOperation::Alter),
-            Method::DELETE => topic(subject, AclOperation::Alter),
+            Method::PUT | Method::DELETE => topic(subject, AclOperation::Alter),
             Method::GET => topic(subject, AclOperation::Describe),
             _ => None,
         },
@@ -130,15 +119,15 @@ pub fn authz_target(method: &Method, path: &str) -> Option<(ResourceType, String
         }
 
         // ---- /schemas ... -------------------------------------------------
-        // GET /schemas/types — list the supported schema types (cluster info).
-        ["schemas", "types"] if method == Method::GET => cluster(AclOperation::Describe),
         // POST /schemas/import — bulk-register a FileDescriptorSet spanning
         // multiple subjects, so authorize it as a cluster-level schema write.
         ["schemas", "import"] if method == Method::POST => cluster(AclOperation::Write),
         // GET /schemas/ids/{id} and GET /schemas — read schemas by id / list all.
-        ["schemas", "ids", _] | ["schemas"] if method == Method::GET => cluster(AclOperation::Read),
-        // GET /schemas/ids/{id}/versions — subjects/versions using a schema id.
-        ["schemas", "ids", _, "versions"] if method == Method::GET => cluster(AclOperation::Read),
+        ["schemas", "ids", _] | ["schemas"] | ["schemas", "ids", _, "versions"]
+            if method == Method::GET =>
+        {
+            cluster(AclOperation::Read)
+        }
 
         // Root, health, and anything unrecognized carry no authz requirement.
         _ => None,

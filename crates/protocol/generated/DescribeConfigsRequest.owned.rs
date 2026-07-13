@@ -13,7 +13,8 @@ pub const MIN_VERSION: i16 = 1;
 pub const MAX_VERSION: i16 = 4;
 pub const FLEXIBLE_MIN: i16 = 4;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -143,9 +144,9 @@ impl Encode for DescribeConfigsResource {
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.resource_name);
+                let () = put_compact_string(buf, &self.resource_name);
             } else {
-                put_string(buf, &self.resource_name);
+                let () = put_string(buf, &self.resource_name);
             }
         }
         if version >= 0 {
@@ -155,9 +156,9 @@ impl Encode for DescribeConfigsResource {
                 if let Some(v) = &self.configuration_keys {
                     for it in v {
                         if flex {
-                            put_compact_string(buf, it);
+                            let () = put_compact_string(buf, it);
                         } else {
-                            put_string(buf, it);
+                            let () = put_string(buf, it);
                         }
                     }
                 }

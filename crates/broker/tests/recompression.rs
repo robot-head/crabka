@@ -1,6 +1,5 @@
 // rustc 1.95 clippy ICEs on `clippy::pedantic` in test files (same
 // upstream bug as `tests/compaction.rs` / `tests/mtls.rs`).
-#![allow(clippy::pedantic)]
 
 //! Broker-side recompression.
 //!
@@ -20,7 +19,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use assert2::check;
+use assert2::{assert, check};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_compression::CompressionType;
@@ -108,16 +107,20 @@ async fn create_topic_with_compression(addr: SocketAddr, topic: &str, codec: &st
         timeout_ms: 5_000,
         ..Default::default()
     };
-    const VERSION: i16 = 7;
+    let version: i16 = 7;
     let mut body = BytesMut::new();
-    req.encode(&mut body, VERSION).unwrap();
+    req.encode(&mut body, version).unwrap();
     let mut stream = TcpStream::connect(addr).await.unwrap();
-    let resp = round_trip(&mut stream, 19, VERSION, 1, true, &body)
+    let resp = round_trip(&mut stream, 19, version, 1, true, &body)
         .await
         .unwrap();
     let mut cur: &[u8] = &resp;
-    let r = CreateTopicsResponse::decode(&mut cur, VERSION).unwrap();
-    assert2::assert!(r.topics[0].error_code == 0);
+    let r = CreateTopicsResponse::decode(&mut cur, version).unwrap();
+    assert!(
+        r.topics[0].error_code == 0,
+        "CreateTopics must succeed for compression.type={codec}: {:?}",
+        r.topics[0]
+    );
 }
 
 async fn get_topic_id(addr: SocketAddr, topic: &str) -> Uuid {
@@ -128,15 +131,15 @@ async fn get_topic_id(addr: SocketAddr, topic: &str) -> Uuid {
         }]),
         ..Default::default()
     };
-    const VERSION: i16 = 12;
+    let version: i16 = 12;
     let mut body = BytesMut::new();
-    req.encode(&mut body, VERSION).unwrap();
+    req.encode(&mut body, version).unwrap();
     let mut stream = TcpStream::connect(addr).await.unwrap();
-    let resp = round_trip(&mut stream, 3, VERSION, 1, true, &body)
+    let resp = round_trip(&mut stream, 3, version, 1, true, &body)
         .await
         .unwrap();
     let mut cur: &[u8] = &resp;
-    let r = MetadataResponse::decode(&mut cur, VERSION).unwrap();
+    let r = MetadataResponse::decode(&mut cur, version).unwrap();
     r.topics
         .iter()
         .find(|t| t.name.as_deref() == Some(topic))
@@ -169,17 +172,17 @@ async fn produce_gzip(addr: SocketAddr, topic: &str, topic_id: Uuid, value: &[u8
         }],
         ..Default::default()
     };
-    const VERSION: i16 = 9;
+    let version: i16 = 9;
     let mut body = BytesMut::new();
-    req.encode(&mut body, VERSION).unwrap();
+    req.encode(&mut body, version).unwrap();
     let mut stream = TcpStream::connect(addr).await.unwrap();
-    let resp = round_trip(&mut stream, 0, VERSION, 1, true, &body)
+    let resp = round_trip(&mut stream, 0, version, 1, true, &body)
         .await
         .unwrap();
     let mut cur: &[u8] = &resp;
-    let r = ProduceResponse::decode(&mut cur, VERSION).unwrap();
+    let r = ProduceResponse::decode(&mut cur, version).unwrap();
     let part = &r.responses[0].partition_responses[0];
-    assert2::assert!(part.error_code == 0);
+    assert!(part.error_code == 0, "Produce must succeed: {part:?}");
 }
 
 async fn fetch_first_batch(addr: SocketAddr, topic: &str, topic_id: Uuid) -> RecordBatch {
@@ -201,17 +204,17 @@ async fn fetch_first_batch(addr: SocketAddr, topic: &str, topic_id: Uuid) -> Rec
         }],
         ..Default::default()
     };
-    const VERSION: i16 = 12;
+    let version: i16 = 12;
     let mut body = BytesMut::new();
-    req.encode(&mut body, VERSION).unwrap();
+    req.encode(&mut body, version).unwrap();
     let mut stream = TcpStream::connect(addr).await.unwrap();
-    let resp = round_trip(&mut stream, 1, VERSION, 1, true, &body)
+    let resp = round_trip(&mut stream, 1, version, 1, true, &body)
         .await
         .unwrap();
     let mut cur: &[u8] = &resp;
-    let r = FetchResponse::decode(&mut cur, VERSION).unwrap();
+    let r = FetchResponse::decode(&mut cur, version).unwrap();
     let part = &r.responses[0].partitions[0];
-    assert2::assert!(part.error_code == 0);
+    assert!(part.error_code == 0, "Fetch error: {}", part.error_code);
     part.records
         .as_ref()
         .and_then(|p| p.as_v2())
@@ -231,7 +234,10 @@ async fn wait_for_compression(
         {
             return;
         }
-        assert2::assert!(Instant::now() <= deadline);
+        assert!(
+            Instant::now() <= deadline,
+            "compression_type={expected:?} never propagated to partition LogConfig within 10s"
+        );
         // intentional: this polls the partition writer's applied LogConfig
         // (partition_log_config_for_test), not the metadata image. No awaiter
         // captures "the reconcile loop has pushed the compression override into
@@ -261,11 +267,12 @@ async fn topic_compression_lz4_recompresses_producer_gzip_batch() {
 
     let served = fetch_first_batch(addr, TOPIC, topic_id).await;
     check!(
-        (
-            served.attributes.compression(),
-            served.records.len(),
-            served.records[0].value.as_deref()
-        ) == (CompressionType::Lz4, 1, Some(payload.as_slice())),
+        served.attributes.compression() == CompressionType::Lz4,
+        "broker must re-encode the gzip batch to lz4 before write"
+    );
+    assert!(served.records.len() == 1);
+    check!(
+        served.records[0].value.as_deref() == Some(payload.as_slice()),
         "record payload must survive the recompress round-trip"
     );
 
@@ -289,12 +296,11 @@ async fn topic_compression_producer_preserves_producer_gzip() {
     produce_gzip(addr, TOPIC, topic_id, payload).await;
 
     let served = fetch_first_batch(addr, TOPIC, topic_id).await;
-    assert2::assert!(
-        (
-            served.attributes.compression(),
-            served.records[0].value.as_deref()
-        ) == (CompressionType::Gzip, Some(payload.as_slice()))
+    assert!(
+        served.attributes.compression() == CompressionType::Gzip,
+        "compression.type=producer must preserve the producer's gzip flag"
     );
+    assert!(served.records[0].value.as_deref() == Some(payload.as_slice()));
 
     handle.shutdown().await;
 }

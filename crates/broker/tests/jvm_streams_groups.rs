@@ -1,5 +1,3 @@
-#![allow(clippy::pedantic)]
-
 //! JVM differential / interop test for KIP-1071 streams groups (the Streams
 //! Rebalance Protocol).
 //!
@@ -7,7 +5,7 @@
 //! (a `KafkaStreamsGroupsCommand` wrapping the JVM `AdminClient`) inside an
 //! `mirror.gcr.io/apache/kafka:4.1.0` container against an in-process Crabka broker running
 //! on the host. The container has a JRE-only Kafka image (no `javac`/`jshell`),
-//! so we cannot compile a custom KafkaStreams app; instead we use the native
+//! so we cannot compile a custom `KafkaStreams` app; instead we use the native
 //! `crabka-client-core` client to make a streams group EXIST on Crabka (finalize
 //! `streams.version=1`, create a source topic, drive a `StreamsGroupHeartbeat`
 //! so the group has a live member with an assignment), then point the bundled
@@ -37,7 +35,7 @@ use std::{
     time::Duration,
 };
 
-use assert2::check;
+use assert2::{assert, check};
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_core::Client;
 use crabka_log::LogConfig;
@@ -55,7 +53,7 @@ const HOST_PORT: u16 = 9092;
 const BOOTSTRAP: &str = "host.docker.internal:9092";
 const LISTEN: &str = "0.0.0.0:9092";
 /// Official Apache Kafka image. Ships KIP-1071 streams groups plus the
-/// `kafka-streams-groups.sh` admin tool (StreamsGroupDescribe / ListGroups).
+/// `kafka-streams-groups.sh` admin tool (`StreamsGroupDescribe` / `ListGroups`).
 const KAFKA_IMAGE: &str = "mirror.gcr.io/apache/kafka:4.1.0";
 const STREAMS_GROUPS: &str = "/opt/kafka/bin/kafka-streams-groups.sh";
 /// Kafka `COORDINATOR_LOAD_IN_PROGRESS` — the first-join heartbeat is retried
@@ -127,9 +125,12 @@ async fn create_topic(broker: &BrokerHandle, client: &Client, topic: &str, parti
         })
         .await
         .expect("CreateTopics");
-    assert2::assert!(resp.topics[0].error_code == 0);
+    assert!(
+        resp.topics[0].error_code == 0,
+        "topic create failed: {resp:?}"
+    );
     broker.wait_until_partition_present(topic, 0).await;
-    assert2::assert!(broker.has_partition(topic, 0).await);
+    assert!(broker.has_partition(topic, 0), "partition never led");
 }
 
 /// Finalize `streams.version` to level 1 so the heartbeat/describe handlers
@@ -147,7 +148,10 @@ async fn finalize_streams_version(client: &Client) {
         })
         .await
         .expect("UpdateFeatures");
-    assert2::assert!(resp.error_code == 0);
+    assert!(
+        resp.error_code == 0,
+        "streams.version finalize failed: {resp:?}"
+    );
 }
 
 /// A single-subtopology topology subscribing to one source topic (stateless).
@@ -199,8 +203,7 @@ fn follow_up(
 fn active_partition_count(resp: &StreamsGroupHeartbeatResponse) -> usize {
     resp.active_tasks
         .as_ref()
-        .map(|v| v.iter().map(|t| t.partitions.len()).sum())
-        .unwrap_or(0)
+        .map_or(0, |v| v.iter().map(|t| t.partitions.len()).sum())
 }
 
 /// Drive a single member to its first join, then re-heartbeat until it owns
@@ -228,7 +231,7 @@ async fn join_and_converge(
             member_id = resp.member_id.clone();
             continue;
         }
-        assert2::assert!(resp.error_code == 0);
+        assert!(resp.error_code == 0, "heartbeat error: {resp:?}");
         if active_partition_count(&resp) >= want_active {
             break;
         }
@@ -420,6 +423,11 @@ async fn jvm_streams_groups_admin_round_trips_crabka() {
         (group_needle.as_str(), true),
     ];
     for (needle, expected) in cases {
-        assert2::assert!(wire.contains(needle) == expected);
+        assert!(
+            wire.contains(needle) == expected,
+            "JVM streams-group admin round-trip checkpoint failed: wire log must {} \
+             {needle:?}; wire log:\n{wire}",
+            if expected { "contain" } else { "not contain" },
+        );
     }
 }

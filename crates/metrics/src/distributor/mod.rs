@@ -28,6 +28,7 @@ pub use ha::{
     HA_TRACKER_TOPIC, HaDecision, HaElection, HaElectionRecord, HaTracker, ha_decision,
     ha_election, strip_replica_label,
 };
+use num_traits::ToPrimitive;
 use opentelemetry_proto::tonic::{
     collector::metrics::v1::{
         ExportMetricsServiceRequest, ExportMetricsServiceResponse,
@@ -248,6 +249,8 @@ pub struct HaElectionConsumerLoopSummary {
     pub committed_offsets: Vec<HaElectionPartitionOffset>,
 }
 
+/// # Errors
+/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub fn replay_ha_election_records(
     tracker: &HaTracker,
     ha_topic: &str,
@@ -320,6 +323,8 @@ impl HaElectionConsumerCommit for Consumer {
     }
 }
 
+/// # Errors
+/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub async fn poll_ha_election_consumer_once<C>(
     consumer: &mut C,
     tracker: &HaTracker,
@@ -346,6 +351,8 @@ where
     Ok(result)
 }
 
+/// # Errors
+/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub async fn run_ha_election_consumer_loop<C, Stop>(
     consumer: &mut C,
     tracker: &HaTracker,
@@ -514,6 +521,8 @@ impl MetricsService for OtlpMetricsService {
 }
 
 /// Bind and serve the metrics distributor until `shutdown` resolves.
+/// # Errors
+/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub async fn serve(
     addr: SocketAddr,
     state: Arc<DistributorState>,
@@ -786,13 +795,12 @@ impl DistributorState {
     }
 }
 
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "Legacy distributor limits are integer sample counts; the Mimir limit model stores ingestion rate as f64 samples/sec."
-)]
 fn tenant_limits_to_limits(limits: &TenantLimits) -> Limits {
     Limits {
-        ingestion_rate: limits.ingestion_rate_samples_per_second as f64,
+        ingestion_rate: limits
+            .ingestion_rate_samples_per_second
+            .to_f64()
+            .unwrap_or(f64::MAX),
         ingestion_burst_size: u64::try_from(limits.ingestion_burst_size).unwrap_or(u64::MAX),
         max_label_name_length: u64::try_from(limits.max_label_name_len).unwrap_or(u64::MAX),
         max_label_value_length: u64::try_from(limits.max_label_value_len).unwrap_or(u64::MAX),
@@ -977,6 +985,8 @@ fn validate_request_tenant(tenant: &str) -> Result<&str, PushError> {
 }
 
 /// Validate decoded series against structural limits.
+/// # Errors
+/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub fn validate(series: &[DecodedSeries], limits: &TenantLimits) -> Result<(), WireError> {
     if series.len() > limits.max_series_per_request {
         return Err(WireError::Invalid(format!(
@@ -1254,7 +1264,7 @@ fn label_pairs(series: &DecodedSeries) -> Vec<(String, String)> {
 mod tests {
     use std::sync::Mutex;
 
-    use assert2::check;
+    use assert2::{assert, check};
     use axum::{body::Body, http::Request};
     use crabka_blockstore::Labels;
     use opentelemetry_proto::tonic::{
@@ -1284,14 +1294,14 @@ mod tests {
     fn tenant_for_span_labels_present_and_falls_back_on_missing_or_empty() {
         let mut present = HeaderMap::new();
         present.insert("X-Scope-OrgID", "acme".parse().unwrap());
-        assert2::assert!(tenant_for_span(&present) == "acme");
+        assert!(tenant_for_span(&present) == "acme");
 
         let missing = HeaderMap::new();
-        assert2::assert!(tenant_for_span(&missing) == "unknown");
+        assert!(tenant_for_span(&missing) == "unknown");
 
         let mut empty = HeaderMap::new();
         empty.insert("X-Scope-OrgID", "".parse().unwrap());
-        assert2::assert!(tenant_for_span(&empty) == "unknown");
+        assert!(tenant_for_span(&empty) == "unknown");
     }
 
     #[derive(Default)]
@@ -1713,19 +1723,19 @@ mod tests {
             .unwrap();
 
         let records = sink.records();
-        assert2::assert!(response.status() == StatusCode::NO_CONTENT);
-        assert2::assert!(
-            records
-                == vec![WalRecord {
-                    tenant: "tenant-a".to_string(),
-                    labels: vec![("__name__".to_string(), "up".to_string())],
-                    payload: SamplePayload::Float {
-                        timestamp_ms: 100,
-                        value: 1.0,
-                        start_timestamp_ms: None,
-                    },
-                    exemplars: Vec::new(),
-                }]
+        assert!(response.status() == StatusCode::NO_CONTENT);
+        assert_eq!(
+            records,
+            vec![WalRecord {
+                tenant: "tenant-a".to_string(),
+                labels: vec![("__name__".to_string(), "up".to_string())],
+                payload: SamplePayload::Float {
+                    timestamp_ms: 100,
+                    value: 1.0,
+                    start_timestamp_ms: None,
+                },
+                exemplars: Vec::new(),
+            }]
         );
     }
 
@@ -1746,8 +1756,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::NO_CONTENT);
-        assert2::assert!(sink.records().len() == 1);
+        assert!(response.status() == StatusCode::NO_CONTENT);
+        assert!(sink.records().len() == 1);
     }
 
     #[tokio::test]
@@ -1767,8 +1777,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::NO_CONTENT);
-        assert2::assert!(sink.records().len() == 1);
+        assert!(response.status() == StatusCode::NO_CONTENT);
+        assert!(sink.records().len() == 1);
     }
 
     #[tokio::test]
@@ -1791,10 +1801,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::NO_CONTENT);
+        assert!(response.status() == StatusCode::NO_CONTENT);
         let records = sink.records();
-        assert2::assert!(records.len() == 1);
-        assert2::assert!(
+        assert!(records.len() == 1);
+        assert!(
             sink.append_keys()
                 == vec![crate::wal::partition_key(
                     "tenant-a",
@@ -1823,15 +1833,15 @@ mod tests {
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::NO_CONTENT);
-        assert2::assert!(
+        check!(response.status() == StatusCode::NO_CONTENT);
+        check!(
             response
                 .headers()
                 .get("X-Prometheus-Remote-Write-Samples-Written")
                 .and_then(|value| value.to_str().ok())
                 == Some("1")
         );
-        assert2::assert!(sink.records().len() == 1);
+        check!(sink.records().len() == 1);
     }
 
     #[tokio::test]
@@ -1867,9 +1877,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::NO_CONTENT);
+        assert!(response.status() == StatusCode::NO_CONTENT);
         let records = sink.records();
-        assert2::assert!(records.len() == 1);
+        assert!(records.len() == 1);
         let SamplePayload::Float {
             timestamp_ms,
             value,
@@ -1901,13 +1911,13 @@ mod tests {
             .unwrap();
 
         let records = sink.records();
-        assert2::assert!(response.status() == StatusCode::NO_CONTENT);
-        assert2::assert!(records.len() == 2);
+        assert!(response.status() == StatusCode::NO_CONTENT);
+        assert!(records.len() == 2);
         let metadata = records
             .iter()
             .find(|record| matches!(record.payload, SamplePayload::Metadata { .. }))
             .expect("metadata wal record");
-        assert2::assert!(
+        assert!(
             metadata.payload
                 == SamplePayload::Metadata {
                     metric_family_name: "http_requests_total".to_string(),
@@ -1939,13 +1949,13 @@ mod tests {
             .unwrap();
 
         let records = sink.records();
-        assert2::assert!(response.status() == StatusCode::NO_CONTENT);
-        assert2::assert!(records.len() == 2);
+        assert!(response.status() == StatusCode::NO_CONTENT);
+        assert!(records.len() == 2);
         let metadata = records
             .iter()
             .find(|record| matches!(record.payload, SamplePayload::Metadata { .. }))
             .expect("metadata wal record");
-        assert2::assert!(
+        assert!(
             metadata.payload
                 == SamplePayload::Metadata {
                     metric_family_name: "http_requests_total".to_string(),
@@ -1975,8 +1985,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-        assert2::assert!(sink.records().is_empty());
+        assert!(response.status() == StatusCode::BAD_REQUEST);
+        assert!(sink.records().is_empty());
     }
 
     #[tokio::test]
@@ -2002,8 +2012,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-        assert2::assert!(sink.records().is_empty());
+        assert!(response.status() == StatusCode::BAD_REQUEST);
+        assert!(sink.records().is_empty());
     }
 
     #[tokio::test]
@@ -2085,8 +2095,8 @@ overrides:
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-        assert2::assert!(sink.records().is_empty());
+        assert!(response.status() == StatusCode::BAD_REQUEST);
+        assert!(sink.records().is_empty());
     }
 
     #[test]
@@ -2123,8 +2133,8 @@ overrides:
         )
         .unwrap_err();
 
-        assert2::assert!(matches!(err, WireError::Invalid(_)));
-        assert2::assert!(format!("{err}").contains("samples per series 2 exceeds limit 1"));
+        assert!(matches!(err, WireError::Invalid(_)));
+        assert!(format!("{err}").contains("samples per series 2 exceeds limit 1"));
     }
 
     #[test]
@@ -2143,8 +2153,8 @@ overrides:
 
             let err = validate(&series, &TenantLimits::default()).unwrap_err();
 
-            assert2::assert!(matches!(err, WireError::Invalid(_)));
-            assert2::assert!(format!("{err}").contains("invalid label name"));
+            assert!(matches!(err, WireError::Invalid(_)));
+            assert!(format!("{err}").contains("invalid label name"));
         }
     }
 
@@ -2169,8 +2179,8 @@ overrides:
 
             let err = validate(&series, &TenantLimits::default()).unwrap_err();
 
-            assert2::assert!(matches!(err, WireError::Invalid(_)));
-            assert2::assert!(format!("{err}").contains("invalid exemplar label name"));
+            assert!(matches!(err, WireError::Invalid(_)));
+            assert!(format!("{err}").contains("invalid exemplar label name"));
         }
     }
 
@@ -2483,8 +2493,8 @@ overrides:
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-        assert2::assert!(sink.records().is_empty());
+        assert!(response.status() == StatusCode::BAD_REQUEST);
+        assert!(sink.records().is_empty());
     }
 
     #[tokio::test]
@@ -2503,8 +2513,8 @@ overrides:
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::UNSUPPORTED_MEDIA_TYPE);
-        assert2::assert!(sink.records().is_empty());
+        assert!(response.status() == StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert!(sink.records().is_empty());
     }
 
     #[tokio::test]
@@ -2524,8 +2534,8 @@ overrides:
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::UNSUPPORTED_MEDIA_TYPE);
-        assert2::assert!(sink.records().is_empty());
+        assert!(response.status() == StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert!(sink.records().is_empty());
     }
 
     #[tokio::test]
@@ -2544,8 +2554,8 @@ overrides:
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::UNSUPPORTED_MEDIA_TYPE);
-        assert2::assert!(sink.records().is_empty());
+        assert!(response.status() == StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert!(sink.records().is_empty());
     }
 
     #[tokio::test]
@@ -2565,33 +2575,33 @@ overrides:
             .unwrap();
 
         let records = sink.records();
-        assert2::assert!(response.status() == StatusCode::OK);
-        assert2::assert!(records.len() == 2);
+        assert!(response.status() == StatusCode::OK);
+        assert!(records.len() == 2);
         let sample = records
             .iter()
             .find(|record| matches!(record.payload, SamplePayload::Float { .. }))
             .expect("float wal record");
-        assert2::assert!(&sample.tenant == &"tenant-a".to_string());
-        assert2::assert!(
-            &sample.labels
-                == &vec![
+        check!(sample.tenant == "tenant-a");
+        check!(
+            sample.labels
+                == vec![
                     ("__name__".to_string(), "system_cpu_utilization".to_string()),
                     ("host_name".to_string(), "api-1".to_string())
                 ]
         );
-        assert2::assert!(
-            &sample.payload
-                == &SamplePayload::Float {
-                    timestamp_ms: 1,
-                    value: 0.5,
-                    start_timestamp_ms: None,
-                }
-        );
+        assert!(matches!(
+            sample.payload,
+            SamplePayload::Float {
+                timestamp_ms: 1,
+                value: 0.5,
+                ..
+            }
+        ));
         let metadata = records
             .iter()
             .find(|record| matches!(record.payload, SamplePayload::Metadata { .. }))
             .expect("metadata wal record");
-        assert2::assert!(
+        assert!(
             metadata.payload
                 == SamplePayload::Metadata {
                     metric_family_name: "system_cpu_utilization".to_string(),
@@ -2617,16 +2627,16 @@ overrides:
         let response = service.export(request).await.expect("otlp grpc export");
 
         let records = sink.records();
-        assert2::assert!(response.into_inner().partial_success.is_none());
-        assert2::assert!(records.len() == 2);
+        assert!(response.into_inner().partial_success.is_none());
+        assert!(records.len() == 2);
         let sample = records
             .iter()
             .find(|record| matches!(record.payload, SamplePayload::Float { .. }))
             .expect("float wal record");
-        assert2::assert!(sample.tenant.as_str() == "tenant-a");
-        assert2::assert!(
-            &sample.labels
-                == &vec![
+        assert!(sample.tenant == "tenant-a");
+        assert!(
+            sample.labels
+                == vec![
                     ("__name__".to_string(), "system_cpu_utilization".to_string()),
                     ("host_name".to_string(), "api-1".to_string())
                 ]
@@ -2678,8 +2688,8 @@ overrides:
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::UNSUPPORTED_MEDIA_TYPE);
-        assert2::assert!(sink.records().is_empty());
+        assert!(response.status() == StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert!(sink.records().is_empty());
     }
 
     #[tokio::test]
@@ -2724,14 +2734,14 @@ overrides:
             .unwrap();
 
         let records = sink.records();
-        assert2::assert!(first_response.status() == StatusCode::OK);
-        assert2::assert!(second_response.status() == StatusCode::OK);
+        assert!(first_response.status() == StatusCode::OK);
+        assert!(second_response.status() == StatusCode::OK);
         let float_records = records
             .iter()
             .filter(|record| matches!(record.payload, SamplePayload::Float { .. }))
             .collect::<Vec<_>>();
-        assert2::assert!(float_records.len() == 2);
-        assert2::assert!(matches!(
+        assert!(float_records.len() == 2);
+        assert!(matches!(
             float_records[0].payload,
             SamplePayload::Float {
                 timestamp_ms: 2,
@@ -2739,7 +2749,7 @@ overrides:
                 ..
             }
         ));
-        assert2::assert!(matches!(
+        assert!(matches!(
             float_records[1].payload,
             SamplePayload::Float {
                 timestamp_ms: 3,
@@ -2766,12 +2776,12 @@ overrides:
             .unwrap();
 
         let records = sink.records();
-        assert2::assert!(response.status() == StatusCode::OK);
+        assert!(response.status() == StatusCode::OK);
         let float_records = records
             .iter()
             .filter(|record| matches!(record.payload, SamplePayload::Float { .. }))
             .collect::<Vec<_>>();
-        assert2::assert!(float_records.len() == 2);
+        assert!(float_records.len() == 2);
         let target = records
             .iter()
             .find(|record| {
@@ -2782,14 +2792,14 @@ overrides:
                         .any(|(name, value)| name == "__name__" && value == "target_info")
             })
             .expect("target_info wal record");
-        assert2::assert!(
-            &target.labels
-                == &vec![
+        assert!(
+            target.labels
+                == vec![
                     ("__name__".to_string(), "target_info".to_string()),
                     ("service_name".to_string(), "checkout".to_string()),
                 ]
         );
-        assert2::assert!(matches!(
+        assert!(matches!(
             target.payload,
             SamplePayload::Float {
                 timestamp_ms: 1,
@@ -2821,8 +2831,8 @@ overrides:
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::ACCEPTED);
-        assert2::assert!(sink.records().is_empty());
+        assert!(response.status() == StatusCode::ACCEPTED);
+        assert!(sink.records().is_empty());
     }
 
     #[tokio::test]
@@ -2890,10 +2900,10 @@ overrides:
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::NO_CONTENT);
-        assert2::assert!(sink.records().len() == 1);
+        assert!(response.status() == StatusCode::NO_CONTENT);
+        assert!(sink.records().len() == 1);
         let elections = election_sink.elections();
-        assert2::assert!(elections.len() == 1);
+        assert!(elections.len() == 1);
         check!(elections[0].tenant == "tenant-a");
         check!(elections[0].cluster == "c1");
         check!(elections[0].replica == "r1");
@@ -2926,8 +2936,8 @@ overrides:
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::INTERNAL_SERVER_ERROR);
-        assert2::assert!(sink.records().is_empty());
+        assert!(response.status() == StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(sink.records().is_empty());
     }
 
     #[test]
@@ -2941,10 +2951,8 @@ overrides:
 
         let encoded = record.encode().unwrap();
 
-        assert2::assert!(HaElectionRecord::decode(&encoded).unwrap() == record);
-        assert2::assert!(
-            ha_election_compaction_key(&record) == Bytes::from_static(b"tenant-a\0c1")
-        );
+        assert!(HaElectionRecord::decode(&encoded).unwrap() == record);
+        assert!(ha_election_compaction_key(&record) == Bytes::from_static(b"tenant-a\0c1"));
     }
 
     #[test]
@@ -2973,7 +2981,7 @@ overrides:
 
         let result = replay_ha_election_records(&tracker, HA_TRACKER_TOPIC, &records).unwrap();
 
-        assert2::assert!(
+        assert!(
             result
                 == HaElectionReplayResult {
                     polled_records: 2,
@@ -2984,7 +2992,7 @@ overrides:
                     }],
                 }
         );
-        assert2::assert!(tracker.elected_replica("tenant-a", "c1") == Some("r1".to_string()));
+        assert!(tracker.elected_replica("tenant-a", "c1") == Some("r1".to_string()));
     }
 
     #[tokio::test]
@@ -3015,7 +3023,7 @@ overrides:
         .await
         .unwrap();
 
-        assert2::assert!(
+        assert!(
             result
                 == HaElectionReplayResult {
                     polled_records: 1,
@@ -3045,11 +3053,10 @@ overrides:
 
         let records = wal_records_from_series("tenant-a", &series);
 
-        assert2::assert!(records.len() == 2);
-        assert2::assert!(records[0].tenant.as_str() == "tenant-a");
-        assert2::assert!(&records[0].labels == &records[1].labels);
-        assert2::assert!(&records[1].labels == &records[1].labels);
-        assert2::assert!(matches!(
+        assert!(records.len() == 2);
+        check!(records[0].tenant == "tenant-a");
+        check!(records[0].labels == records[1].labels);
+        assert!(matches!(
             records[0].payload,
             SamplePayload::Float {
                 timestamp_ms: 10,
@@ -3057,7 +3064,7 @@ overrides:
                 ..
             }
         ));
-        assert2::assert!(matches!(
+        assert!(matches!(
             records[1].payload,
             SamplePayload::Float {
                 timestamp_ms: 20,

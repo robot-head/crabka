@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use assert2::check;
+use assert2::{assert, check};
 use async_trait::async_trait;
 use axum::{
     body::Body,
@@ -183,8 +183,8 @@ async fn compactor_writes_block_then_tenant_index_manifest() {
     .await
     .unwrap();
 
-    assert2::assert!(&descriptor.key == &key);
-    assert2::assert!(&descriptor.fingerprints == &BTreeSet::from([api]));
+    check!(descriptor.key == key);
+    check!(descriptor.fingerprints == BTreeSet::from([api]));
     check!(
         block_index.match_blocks("tenant-a", TimeRange::new(0, 30).unwrap(), &[api])
             == vec![descriptor.clone()]
@@ -193,7 +193,7 @@ async fn compactor_writes_block_then_tenant_index_manifest() {
     let rows = read_log_block_from_object_store(&store, &prefix, &key)
         .await
         .unwrap();
-    assert2::assert!(
+    assert!(
         rows.iter().map(|row| row.line.as_str()).collect::<Vec<_>>() == vec!["api ok", "api error"]
     );
 
@@ -201,10 +201,8 @@ async fn compactor_writes_block_then_tenant_index_manifest() {
         .await
         .unwrap();
 
-    assert2::assert!(
-        loaded_labels.label_values("tenant-a", "app") == BTreeSet::from(["api".into()])
-    );
-    assert2::assert!(
+    assert!(loaded_labels.label_values("tenant-a", "app") == BTreeSet::from(["api".into()]));
+    assert!(
         loaded_blocks.match_blocks("tenant-a", TimeRange::new(0, 30).unwrap(), &[api])
             == vec![descriptor]
     );
@@ -252,7 +250,7 @@ async fn compactor_commits_partition_offset_after_writing_block_and_index() {
     let rows = read_log_block_from_object_store(&store, &prefix, &key)
         .await
         .unwrap();
-    assert2::assert!(
+    assert!(
         rows.iter().map(|row| row.line.as_str()).collect::<Vec<_>>() == vec!["api ok", "api error"]
     );
 
@@ -260,7 +258,7 @@ async fn compactor_commits_partition_offset_after_writing_block_and_index() {
         read_tenant_log_index_manifest_from_object_store(&store, &prefix, "tenant-a")
             .await
             .unwrap();
-    assert2::assert!(
+    assert!(
         loaded_blocks.match_blocks("tenant-a", TimeRange::new(0, 30).unwrap(), &[api])
             == vec![descriptor]
     );
@@ -308,7 +306,7 @@ async fn compactor_decodes_kafka_wal_records_before_writing_block() {
     let rows = read_log_block_from_object_store(&store, &prefix, &key)
         .await
         .unwrap();
-    assert2::assert!(
+    assert!(
         rows.iter().map(|row| row.line.as_str()).collect::<Vec<_>>() == vec!["api ok", "api error"]
     );
 }
@@ -354,8 +352,8 @@ async fn compactor_decodes_native_kafka_log_records_from_headers() {
         TimeRange::new(1_900_000, 1_900_000).unwrap(),
     );
 
-    assert2::assert!(descriptor.key == key);
-    assert2::assert!(
+    assert!(descriptor.key == key);
+    assert!(
         committer.committed
             == vec![WalPosition {
                 partition: PartitionIndex(2),
@@ -367,7 +365,7 @@ async fn compactor_decodes_native_kafka_log_records_from_headers() {
         .unwrap();
     let labels = labels([("app", "api"), ("env", "prod")]);
     let fingerprint = series_fingerprint(&labels);
-    assert2::assert!(
+    assert!(
         rows == vec![LogRow::new(
             fingerprint,
             1_900_000,
@@ -379,10 +377,8 @@ async fn compactor_decodes_native_kafka_log_records_from_headers() {
     let (loaded_labels, loaded_blocks) = read_all_tenant_shard_indexes(&store, &prefix, "tenant-a")
         .await
         .unwrap();
-    assert2::assert!(
-        loaded_labels.label_values("tenant-a", "app") == BTreeSet::from(["api".into()])
-    );
-    assert2::assert!(
+    assert!(loaded_labels.label_values("tenant-a", "app") == BTreeSet::from(["api".into()]));
+    assert!(
         loaded_blocks.match_blocks(
             "tenant-a",
             TimeRange::new(0, 2_000_000).unwrap(),
@@ -489,8 +485,8 @@ async fn compactor_polls_kafka_wal_batch_then_commits_after_object_store_write()
 
     let key = BlockKey::new("tenant-a", 3, 42, 43, TimeRange::new(10, 19).unwrap());
 
-    assert2::assert!(descriptor.key == key);
-    assert2::assert!(
+    assert!(descriptor.key == key);
+    assert!(
         consumer.committed
             == vec![WalPosition {
                 partition: PartitionIndex(3),
@@ -500,7 +496,7 @@ async fn compactor_polls_kafka_wal_batch_then_commits_after_object_store_write()
     let rows = read_log_block_from_object_store(&store, &prefix, &key)
         .await
         .unwrap();
-    assert2::assert!(
+    assert!(
         rows.iter().map(|row| row.line.as_str()).collect::<Vec<_>>() == vec!["api ok", "api error"]
     );
 }
@@ -558,12 +554,12 @@ async fn compactor_runtime_compacts_one_polled_batch_from_service_config() {
 
     let key = BlockKey::new("tenant-a", 4, 42, 43, TimeRange::new(10, 19).unwrap());
 
-    assert2::assert!(descriptor.key == key);
+    assert!(descriptor.key == key);
     let rows =
         read_log_block_from_object_store(&store, &ObjectPath::from("observability/logs"), &key)
             .await
             .unwrap();
-    assert2::assert!(
+    assert!(
         rows.iter().map(|row| row.line.as_str()).collect::<Vec<_>>() == vec!["api ok", "api error"]
     );
 }
@@ -588,7 +584,7 @@ async fn compactor_runtime_materializes_active_delete_requests_in_written_blocks
         )
         .await
         .unwrap();
-    assert2::assert!(delete_response.status() == StatusCode::NO_CONTENT);
+    assert!(delete_response.status() == StatusCode::NO_CONTENT);
     let dependencies =
         ServiceDependencies::default().with_wal_consumer(RecordingWalConsumer::new(vec![vec![
             kafka_wal_record(
@@ -620,12 +616,12 @@ async fn compactor_runtime_materializes_active_delete_requests_in_written_blocks
         44,
         TimeRange::new(14_000_000_000, 17_000_000_000).unwrap(),
     );
-    assert2::assert!(descriptor.key == key);
+    assert!(descriptor.key == key);
     let rows =
         read_log_block_from_object_store(&store, &ObjectPath::from("observability/logs"), &key)
             .await
             .unwrap();
-    assert2::assert!(
+    assert!(
         rows.iter().map(|row| row.line.as_str()).collect::<Vec<_>>()
             == vec!["api ok", "api later secret"]
     );
@@ -685,19 +681,19 @@ async fn compactor_runtime_materializes_active_delete_requests_in_existing_block
         )
         .await
         .unwrap();
-    assert2::assert!(delete_response.status() == StatusCode::NO_CONTENT);
+    assert!(delete_response.status() == StatusCode::NO_CONTENT);
 
     let dependencies = ServiceDependencies::default()
         .with_wal_consumer(RecordingWalConsumer::new(vec![Vec::new()]));
     let descriptor = run_compactor_once(&config, dependencies, Some(&store))
         .await
         .unwrap();
-    assert2::assert!(descriptor.is_none());
+    assert!(descriptor.is_none());
 
     let rows = read_log_block_from_object_store(&store, &prefix, &key)
         .await
         .unwrap();
-    assert2::assert!(
+    assert!(
         rows.iter().map(|row| row.line.as_str()).collect::<Vec<_>>()
             == vec!["api ok", "api later secret"]
     );
@@ -705,7 +701,7 @@ async fn compactor_runtime_materializes_active_delete_requests_in_existing_block
         read_tenant_log_index_manifest_from_object_store(&store, &prefix, "tenant-a")
             .await
             .unwrap();
-    assert2::assert!(
+    assert!(
         loaded_blocks
             .match_blocks("tenant-a", key.time_range, &[api])
             .len()
@@ -756,22 +752,22 @@ async fn compactor_runtime_materializes_active_delete_requests_in_existing_local
         )
         .await
         .unwrap();
-    assert2::assert!(delete_response.status() == StatusCode::NO_CONTENT);
+    assert!(delete_response.status() == StatusCode::NO_CONTENT);
 
     let dependencies = ServiceDependencies::default()
         .with_wal_consumer(RecordingWalConsumer::new(vec![Vec::new()]));
     let descriptor = run_compactor_once(&config, dependencies, Some(&store))
         .await
         .unwrap();
-    assert2::assert!(descriptor.is_none());
+    assert!(descriptor.is_none());
 
     let rows = read_log_block(dir.path(), &key).unwrap();
-    assert2::assert!(
+    assert!(
         rows.iter().map(|row| row.line.as_str()).collect::<Vec<_>>()
             == vec!["api ok", "api later secret"]
     );
     let (_, loaded_blocks) = read_log_index_manifest(dir.path()).unwrap();
-    assert2::assert!(
+    assert!(
         loaded_blocks
             .match_blocks("tenant-a", key.time_range, &[api])
             .len()
@@ -835,19 +831,19 @@ async fn compactor_runtime_materializes_active_delete_requests_in_existing_shard
         )
         .await
         .unwrap();
-    assert2::assert!(delete_response.status() == StatusCode::NO_CONTENT);
+    assert!(delete_response.status() == StatusCode::NO_CONTENT);
 
     let dependencies = ServiceDependencies::default()
         .with_wal_consumer(RecordingWalConsumer::new(vec![Vec::new()]));
     let descriptor = run_compactor_once(&config, dependencies, Some(&store))
         .await
         .unwrap();
-    assert2::assert!(descriptor.is_none());
+    assert!(descriptor.is_none());
 
     let rows = read_log_block_from_object_store(&store, &prefix, &key)
         .await
         .unwrap();
-    assert2::assert!(
+    assert!(
         rows.iter().map(|row| row.line.as_str()).collect::<Vec<_>>()
             == vec!["api ok", "api later secret"]
     );
@@ -855,7 +851,7 @@ async fn compactor_runtime_materializes_active_delete_requests_in_existing_shard
         read_tenant_log_index_shard_from_object_store(&store, &prefix, "tenant-a", shard_range)
             .await
             .unwrap();
-    assert2::assert!(
+    assert!(
         loaded_blocks
             .match_blocks("tenant-a", key.time_range, &[api])
             .len()
@@ -894,10 +890,8 @@ async fn compactor_once_loads_existing_manifest_after_restart() {
     let api_labels = labels([("app", "api"), ("env", "prod")]);
     let api = series_fingerprint(&api_labels);
 
-    assert2::assert!(
-        loaded_labels.label_values("tenant-a", "app") == BTreeSet::from(["api".into()])
-    );
-    assert2::assert!(
+    assert!(loaded_labels.label_values("tenant-a", "app") == BTreeSet::from(["api".into()]));
+    assert!(
         loaded_blocks.match_blocks("tenant-a", TimeRange::new(0, 30).unwrap(), &[api])
             == vec![first_descriptor, second_descriptor]
     );
@@ -931,7 +925,7 @@ async fn compactor_runtime_updates_object_store_shard_catalog_incrementally() {
         list_tenant_log_index_shard_ranges_from_object_store(&store, &prefix, "tenant-a")
             .await
             .unwrap();
-    assert2::assert!(
+    assert!(
         shard_ranges
             == vec![
                 first_descriptor.key.time_range,
@@ -950,10 +944,8 @@ async fn compactor_runtime_updates_object_store_shard_catalog_incrementally() {
     .await
     .unwrap();
 
-    assert2::assert!(
-        loaded_labels.label_values("tenant-a", "app") == BTreeSet::from(["api".into()])
-    );
-    assert2::assert!(
+    assert!(loaded_labels.label_values("tenant-a", "app") == BTreeSet::from(["api".into()]));
+    assert!(
         loaded_blocks.match_blocks("tenant-a", TimeRange::new(0, 30).unwrap(), &[api])
             == vec![first_descriptor, second_descriptor]
     );
@@ -969,7 +961,7 @@ async fn compactor_runtime_rejects_missing_wal_consumer_dependency() {
         .await
         .unwrap_err();
 
-    assert2::assert!(error.to_string().contains("WAL consumer is required"));
+    assert!(error.to_string().contains("WAL consumer is required"));
 }
 
 #[tokio::test]
@@ -982,7 +974,7 @@ async fn compactor_runtime_rejects_missing_object_store() {
         .await
         .unwrap_err();
 
-    assert2::assert!(error.to_string().contains("object store is required"));
+    assert!(error.to_string().contains("object store is required"));
 }
 
 #[tokio::test]
@@ -1009,7 +1001,7 @@ async fn compactor_runtime_preserves_indexes_across_polled_batches_until_idle() 
         .await
         .unwrap();
 
-    assert2::assert!(descriptors.len() == 2);
+    assert!(descriptors.len() == 2);
     let prefix = ObjectPath::from("observability/logs");
     let (loaded_labels, loaded_blocks) = read_all_tenant_shard_indexes(&store, &prefix, "tenant-a")
         .await
@@ -1017,10 +1009,8 @@ async fn compactor_runtime_preserves_indexes_across_polled_batches_until_idle() 
     let api_labels = labels([("app", "api"), ("env", "prod")]);
     let api = series_fingerprint(&api_labels);
 
-    assert2::assert!(
-        loaded_labels.label_values("tenant-a", "app") == BTreeSet::from(["api".into()])
-    );
-    assert2::assert!(
+    assert!(loaded_labels.label_values("tenant-a", "app") == BTreeSet::from(["api".into()]));
+    assert!(
         loaded_blocks.match_blocks("tenant-a", TimeRange::new(0, 30).unwrap(), &[api])
             == descriptors
     );
@@ -1129,11 +1119,11 @@ async fn compactor_runtime_writes_shards_with_only_the_new_block() {
     .await
     .unwrap();
 
-    assert2::assert!(
+    assert!(
         first_blocks.match_blocks("tenant-a", TimeRange::new(0, 50).unwrap(), &[api])
             == vec![descriptors[0].clone()]
     );
-    assert2::assert!(
+    assert!(
         second_blocks.match_blocks("tenant-a", TimeRange::new(0, 50).unwrap(), &[api])
             == vec![descriptors[1].clone()]
     );
@@ -1173,8 +1163,11 @@ async fn compactor_runtime_appends_batches_without_loading_tenant_manifest() {
         .filter(|path| path == &manifest_path)
         .count();
 
-    assert2::assert!(descriptors.len() == 2);
-    assert2::assert!(manifest_gets == 0);
+    assert!(descriptors.len() == 2);
+    assert!(
+        manifest_gets == 0,
+        "normal append compaction should not load the historical tenant manifest"
+    );
 }
 
 #[tokio::test]
@@ -1222,17 +1215,17 @@ async fn compactor_runtime_appends_shard_without_loading_historical_shards() {
     let old_shard_manifest =
         crabka_blockstore::log_tenant_index_shard_manifest_object_path(&prefix, tenant, old_range)
             .to_string();
-    assert2::assert!(descriptors.len() == 1);
-    assert2::assert!(
+    assert!(descriptors.len() == 1);
+    assert!(
         !store
             .get_paths()
             .into_iter()
-            .any(|path| path == old_shard_manifest)
+            .any(|path| path == old_shard_manifest),
+        "appending a new shard should not load historical shard manifests"
     );
 }
 
 #[tokio::test]
-#[allow(clippy::similar_names)]
 async fn compactor_runtime_splits_mixed_tenant_wal_batch_into_tenant_blocks() {
     let dir = tempfile::tempdir().unwrap();
     let store = LocalFileSystem::new_with_prefix(dir.path()).unwrap();
@@ -1258,7 +1251,8 @@ async fn compactor_runtime_splits_mixed_tenant_wal_batch_into_tenant_blocks() {
         .await
         .unwrap();
 
-    assert2::assert!(
+    assert!(descriptors.len() == 2);
+    assert!(
         descriptors
             .iter()
             .map(|descriptor| descriptor.key.tenant.as_str())
@@ -1267,11 +1261,11 @@ async fn compactor_runtime_splits_mixed_tenant_wal_batch_into_tenant_blocks() {
     );
 
     let prefix = ObjectPath::from("observability/logs");
-    let (tenant_a_labels, tenant_a_blocks) =
+    let (first_tenant_labels, first_tenant_blocks) =
         read_all_tenant_shard_indexes(&store, &prefix, "tenant-a")
             .await
             .unwrap();
-    let (tenant_b_labels, tenant_b_blocks) =
+    let (second_tenant_labels, second_tenant_blocks) =
         read_all_tenant_shard_indexes(&store, &prefix, "tenant-b")
             .await
             .unwrap();
@@ -1280,22 +1274,20 @@ async fn compactor_runtime_splits_mixed_tenant_wal_batch_into_tenant_blocks() {
 
     for (tenant_labels, tenant_blocks, tenant, descriptor) in [
         (
-            &tenant_a_labels,
-            &tenant_a_blocks,
+            &first_tenant_labels,
+            &first_tenant_blocks,
             "tenant-a",
             &descriptors[0],
         ),
         (
-            &tenant_b_labels,
-            &tenant_b_blocks,
+            &second_tenant_labels,
+            &second_tenant_blocks,
             "tenant-b",
             &descriptors[1],
         ),
     ] {
-        assert2::assert!(
-            tenant_labels.label_values(tenant, "app") == BTreeSet::from(["api".into()])
-        );
-        assert2::assert!(
+        assert!(tenant_labels.label_values(tenant, "app") == BTreeSet::from(["api".into()]));
+        assert!(
             tenant_blocks.match_blocks(tenant, TimeRange::new(0, 30).unwrap(), &[api])
                 == vec![descriptor.clone()]
         );
@@ -1330,13 +1322,11 @@ async fn compactor_runtime_keeps_polling_after_idle_until_shutdown() {
     .unwrap()
     .unwrap();
 
-    assert2::assert!(descriptors.len() == 1);
+    assert!(descriptors.len() == 1);
     let rows = read_log_block_from_object_store(&store, &prefix, &key)
         .await
         .unwrap();
-    assert2::assert!(
-        rows.iter().map(|row| row.line.as_str()).collect::<Vec<_>>() == vec!["api error"]
-    );
+    assert!(rows.iter().map(|row| row.line.as_str()).collect::<Vec<_>>() == vec!["api error"]);
 }
 
 #[tokio::test]
@@ -1368,16 +1358,14 @@ async fn compactor_runtime_retries_object_store_errors_before_committing_offsets
     .unwrap()
     .unwrap();
 
-    assert2::assert!(descriptors.len() == 1);
-    assert2::assert!(store.failed_put_count() == 1);
+    assert!(descriptors.len() == 1);
+    assert!(store.failed_put_count() == 1);
     let key = BlockKey::new("tenant-a", 6, 42, 42, TimeRange::new(10, 10).unwrap());
     let rows =
         read_log_block_from_object_store(&store, &ObjectPath::from("observability/logs"), &key)
             .await
             .unwrap();
-    assert2::assert!(
-        rows.iter().map(|row| row.line.as_str()).collect::<Vec<_>>() == vec!["api ok"]
-    );
+    assert!(rows.iter().map(|row| row.line.as_str()).collect::<Vec<_>>() == vec!["api ok"]);
 }
 
 #[tokio::test]
@@ -1410,23 +1398,21 @@ async fn compactor_runtime_retries_shard_manifest_write_errors_before_committing
     .unwrap()
     .unwrap();
 
-    assert2::assert!(descriptors.len() == 1);
-    assert2::assert!(store.failed_put_count() == 1);
+    assert!(descriptors.len() == 1);
+    assert!(store.failed_put_count() == 1);
 
     let prefix = ObjectPath::from("observability/logs");
     let key = BlockKey::new("tenant-a", 6, 42, 42, TimeRange::new(10, 10).unwrap());
     let rows = read_log_block_from_object_store(&store, &prefix, &key)
         .await
         .unwrap();
-    assert2::assert!(
-        rows.iter().map(|row| row.line.as_str()).collect::<Vec<_>>() == vec!["api ok"]
-    );
+    assert!(rows.iter().map(|row| row.line.as_str()).collect::<Vec<_>>() == vec!["api ok"]);
 
     let shard_ranges =
         list_tenant_log_index_shard_ranges_from_object_store(&store, &prefix, "tenant-a")
             .await
             .unwrap();
-    assert2::assert!(shard_ranges == vec![key.time_range]);
+    assert!(shard_ranges == vec![key.time_range]);
 }
 
 #[tokio::test]
@@ -1459,14 +1445,14 @@ async fn compactor_runtime_retries_compaction_frontier_write_errors_after_commit
     .unwrap()
     .unwrap();
 
-    assert2::assert!(descriptors.len() == 1);
-    assert2::assert!(store.failed_put_count() == 1);
+    assert!(descriptors.len() == 1);
+    assert!(store.failed_put_count() == 1);
 
     let persisted_frontier =
         read_compaction_frontier_from_object_store(&store, &ObjectPath::from("observability/logs"))
             .await
             .unwrap();
-    assert2::assert!(
+    assert!(
         persisted_frontier
             == CompactionFrontier::new(i64::MIN)
                 .with_partition_offset(PartitionIndex(6), Offset(42))
@@ -1494,8 +1480,8 @@ async fn compactor_runtime_advances_shared_compaction_frontier_after_commit() {
         .await
         .unwrap();
 
-    assert2::assert!(descriptors.len() == 1);
-    assert2::assert!(
+    assert!(descriptors.len() == 1);
+    assert!(
         frontier.snapshot()
             == crabka_observability::CompactionFrontier::new(i64::MIN)
                 .with_partition_offset(PartitionIndex(8), Offset(43))
@@ -1518,7 +1504,7 @@ async fn compaction_frontier_round_trips_through_object_store() {
         .await
         .unwrap();
 
-    assert2::assert!(loaded == frontier);
+    assert!(loaded == frontier);
 }
 
 #[tokio::test]
@@ -1549,7 +1535,7 @@ async fn compactor_runtime_reloads_shared_frontier_after_restart() {
         .await
         .unwrap();
 
-    assert2::assert!(
+    assert!(
         restarted_frontier.snapshot()
             == CompactionFrontier::new(i64::MIN)
                 .with_partition_offset(PartitionIndex(8), Offset(43))
@@ -1597,10 +1583,8 @@ async fn compactor_runtime_loads_existing_manifest_after_restart() {
     let api_labels = labels([("app", "api"), ("env", "prod")]);
     let api = series_fingerprint(&api_labels);
 
-    assert2::assert!(
-        loaded_labels.label_values("tenant-a", "app") == BTreeSet::from(["api".into()])
-    );
-    assert2::assert!(
+    assert!(loaded_labels.label_values("tenant-a", "app") == BTreeSet::from(["api".into()]));
+    assert!(
         loaded_blocks.match_blocks("tenant-a", TimeRange::new(0, 30).unwrap(), &[api])
             == descriptors
     );
@@ -1622,7 +1606,7 @@ async fn compactor_runtime_reprocesses_uncommitted_wal_without_duplicate_manifes
     let err = run_compactor_until_idle(&config, first_run, Some(&store))
         .await
         .unwrap_err();
-    assert2::assert!(err.to_string().contains("coordinator unavailable"));
+    assert!(err.to_string().contains("coordinator unavailable"));
 
     let prefix = ObjectPath::from("observability/logs");
     let key = BlockKey::new("tenant-a", 6, 42, 42, TimeRange::new(10, 10).unwrap());
@@ -1657,10 +1641,8 @@ async fn compactor_runtime_reprocesses_uncommitted_wal_without_duplicate_manifes
     let rows = read_log_block_from_object_store(&store, &prefix, &key)
         .await
         .unwrap();
-    assert2::assert!(
-        rows.iter().map(|row| row.line.as_str()).collect::<Vec<_>>() == vec!["api ok"]
-    );
-    assert2::assert!(rewritten_bytes == first_bytes);
+    assert!(rows.iter().map(|row| row.line.as_str()).collect::<Vec<_>>() == vec!["api ok"]);
+    assert!(rewritten_bytes == first_bytes);
 
     let (_, loaded_blocks) = read_all_tenant_shard_indexes(&store, &prefix, "tenant-a")
         .await
@@ -1668,8 +1650,8 @@ async fn compactor_runtime_reprocesses_uncommitted_wal_without_duplicate_manifes
     let api_labels = labels([("app", "api"), ("env", "prod")]);
     let api = series_fingerprint(&api_labels);
 
-    assert2::assert!(descriptors.len() == 1);
-    assert2::assert!(
+    assert!(descriptors.len() == 1);
+    assert!(
         loaded_blocks.match_blocks("tenant-a", TimeRange::new(0, 30).unwrap(), &[api])
             == descriptors
     );
@@ -1702,12 +1684,10 @@ async fn compactor_service_target_keeps_running_after_idle() {
     )
     .await;
 
-    assert2::assert!(!server.is_finished());
+    assert!(!server.is_finished());
     server.abort();
 
-    assert2::assert!(
-        rows.iter().map(|row| row.line.as_str()).collect::<Vec<_>>() == vec!["api ok"]
-    );
+    assert!(rows.iter().map(|row| row.line.as_str()).collect::<Vec<_>>() == vec!["api ok"]);
 }
 
 #[tokio::test]
@@ -1741,17 +1721,16 @@ async fn compactor_service_accumulates_adjacent_small_wal_polls_into_one_block()
     .await
     .unwrap();
 
-    assert2::assert!(descriptors.len() == 1);
-    assert2::assert!(
-        descriptors[0].key.clone()
-            == BlockKey::new("tenant-a", 6, 42, 43, TimeRange::new(10, 20).unwrap())
+    assert!(descriptors.len() == 1);
+    assert!(
+        descriptors[0].key == BlockKey::new("tenant-a", 6, 42, 43, TimeRange::new(10, 20).unwrap())
     );
 
     let prefix = ObjectPath::from("observability/logs");
     let rows = read_log_block_from_object_store(&store, &prefix, &descriptors[0].key)
         .await
         .unwrap();
-    assert2::assert!(
+    assert!(
         rows.iter().map(|row| row.line.as_str()).collect::<Vec<_>>() == vec!["first", "second"]
     );
 }
@@ -1789,8 +1768,8 @@ async fn compactor_service_listener_serves_http_while_polling_wal() {
     let mut response = String::new();
     stream.read_to_string(&mut response).await.unwrap();
 
-    assert2::assert!(response.starts_with("HTTP/1.1 200 OK"));
-    assert2::assert!(response.ends_with("ready\n"));
+    assert!(response.starts_with("HTTP/1.1 200 OK"));
+    assert!(response.ends_with("ready\n"));
 
     let key = BlockKey::new("tenant-a", 6, 42, 42, TimeRange::new(10, 10).unwrap());
     let mut rows = None;
@@ -1813,9 +1792,7 @@ async fn compactor_service_listener_serves_http_while_polling_wal() {
     }
     server.abort();
     let rows = rows.expect("compactor writes block while HTTP server is running");
-    assert2::assert!(
-        rows.iter().map(|row| row.line.as_str()).collect::<Vec<_>>() == vec!["api ok"]
-    );
+    assert!(rows.iter().map(|row| row.line.as_str()).collect::<Vec<_>>() == vec!["api ok"]);
 }
 
 #[derive(Debug)]

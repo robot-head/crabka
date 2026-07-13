@@ -123,9 +123,16 @@ where
         let had_old = r.value.old.is_some();
 
         if self.is_left {
-            self.left_join_instructions(ctx, &key, had_old, old_fk, new_fk, hash.as_deref(), ts);
+            self.left_join_instructions(ctx, &key, had_old, (old_fk, new_fk), hash.as_deref(), ts);
         } else {
-            self.default_join_instructions(ctx, &key, had_old, old_fk, new_fk, hash.as_deref(), ts);
+            self.default_join_instructions(
+                ctx,
+                &key,
+                had_old,
+                (old_fk, new_fk),
+                hash.as_deref(),
+                ts,
+            );
         }
     }
 }
@@ -144,18 +151,19 @@ where
     }
 
     /// JVM `leftJoinInstructions`.
-    #[allow(clippy::too_many_arguments)] // mirrors the JVM signature + the cached hash
+    // mirrors the JVM signature + the cached hash
     fn left_join_instructions(
         &self,
         ctx: &mut ProcessorContext<'_, '_, KO, SubscriptionWrapper>,
         key: &K,
         had_old: bool,
-        old_fk: Option<KO>,
-        new_fk: Option<KO>,
+        foreign_keys: (Option<KO>, Option<KO>),
         hash: Option<&[u8]>,
         ts: i64,
     ) {
         use Instruction::{DeleteKeyNoPropagate, PropagateNullIfNoFkValAvailable};
+
+        let (old_fk, new_fk) = foreign_keys;
         if had_old {
             // Delete the OLD key's subscription when the FK changed (or vanished).
             if let Some(ofk) = old_fk
@@ -193,14 +201,13 @@ where
     }
 
     /// JVM `defaultJoinInstructions` (inner).
-    #[allow(clippy::too_many_arguments)] // mirrors the JVM signature + the cached hash
+    // mirrors the JVM signature + the cached hash
     fn default_join_instructions(
         &self,
         ctx: &mut ProcessorContext<'_, '_, KO, SubscriptionWrapper>,
         key: &K,
         had_old: bool,
-        old_fk: Option<KO>,
-        new_fk: Option<KO>,
+        foreign_keys: (Option<KO>, Option<KO>),
         hash: Option<&[u8]>,
         ts: i64,
     ) {
@@ -208,6 +215,8 @@ where
             DeleteKeyAndPropagate, DeleteKeyNoPropagate, PropagateNullIfNoFkValAvailable,
             PropagateOnlyIfFkValAvailable,
         };
+
+        let (old_fk, new_fk) = foreign_keys;
         let h = || hash.map(<[u8]>::to_vec);
         if !had_old {
             if let Some(nfk) = new_fk {

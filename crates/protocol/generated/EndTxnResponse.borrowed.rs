@@ -8,7 +8,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 5;
 pub const FLEXIBLE_MIN: i16 = 3;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,11 +27,15 @@ impl Default for EndTxnResponse {
             error_code: 0i16,
             producer_id: -1i64,
             producer_epoch: -1i16,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl EndTxnResponse {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::end_txn_response::EndTxnResponse {
         crate::owned::end_txn_response::EndTxnResponse {
             throttle_time_ms: (self.throttle_time_ms),

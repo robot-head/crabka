@@ -84,6 +84,7 @@ pub(crate) async fn sweep(controller: &dyn DelegationTokenController) {
 mod tests {
     use std::sync::Mutex;
 
+    use assert2::assert;
     use crabka_metadata::{DelegationTokenRecord, MetadataImage, MetadataRecord};
     use crabka_security::KafkaPrincipal;
     use uuid::Uuid;
@@ -152,7 +153,7 @@ mod tests {
         // Two tombstones submitted, one per expired token (order in the
         // batch is HashMap-iteration order, so check by id-set).
         let submitted = mock.submitted.lock().unwrap();
-        assert2::assert!(submitted.len() == 2);
+        assert!(submitted.len() == 2);
         let mut tombstone_ids: Vec<String> = submitted
             .iter()
             .map(|r| match r {
@@ -161,15 +162,18 @@ mod tests {
             })
             .collect();
         tombstone_ids.sort();
-        assert2::assert!(tombstone_ids == vec!["expired-1".to_string(), "expired-2".to_string()]);
+        assert!(tombstone_ids == vec!["expired-1".to_string(), "expired-2".to_string()]);
         drop(submitted);
 
         // Post-sweep image keeps only the fresh token.
         let after = mock.current_image();
-        assert2::assert!(after.all_delegation_tokens().count() == 1);
+        assert!(after.all_delegation_tokens().count() == 1);
         let cases = [("fresh", true), ("expired-1", false), ("expired-2", false)];
         for (token_id, expect_present) in cases {
-            assert2::assert!(after.delegation_token_by_id(token_id).is_some() == expect_present);
+            assert!(
+                after.delegation_token_by_id(token_id).is_some() == expect_present,
+                "case: {token_id}"
+            );
         }
     }
 
@@ -185,8 +189,8 @@ mod tests {
 
         sweep(&*mock).await;
 
-        assert2::assert!(mock.submitted.lock().unwrap().is_empty());
-        assert2::assert!(mock.current_image().all_delegation_tokens().count() == 1);
+        assert!(mock.submitted.lock().unwrap().is_empty());
+        assert!(mock.current_image().all_delegation_tokens().count() == 1);
     }
 
     #[tokio::test]
@@ -212,10 +216,11 @@ mod tests {
         .await
         .expect("cleanup run loop should sweep on its first tick");
 
-        assert2::assert!(
+        assert!(
             tokio::time::timeout(Duration::from_millis(25), &mut task)
                 .await
-                .is_err()
+                .is_err(),
+            "cleanup run loop exited before shutdown"
         );
 
         shutdown.cancel();

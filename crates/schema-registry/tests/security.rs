@@ -1,4 +1,3 @@
-#![allow(clippy::pedantic)]
 //! In-process integration of the registry security stack against a real broker.
 //!
 //! Boots a Crabka `Broker`, seeds Kafka ACLs (`User:alice` Allow Write/Read on
@@ -719,7 +718,7 @@ fn mint_rs256_for_test(kid: &str, claims_json: &str) -> (String, String) {
     (token, jwks)
 }
 
-/// Extract the (n, e) big-endian unsigned integers from a PKCS#1 RSAPublicKey
+/// Extract the (n, e) big-endian unsigned integers from a PKCS#1 `RSAPublicKey`
 /// DER blob. ring exposes the public key as raw PKCS#1 bytes.
 fn split_pkcs1_for_jwks(der: &[u8]) -> (Vec<u8>, Vec<u8>) {
     fn read_len(b: &[u8]) -> (usize, usize) {

@@ -36,6 +36,8 @@ struct Entry {
 
 impl AdminClient {
     /// Return the group-id of every consumer group known to the broker.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn list_groups(&mut self) -> Result<Vec<String>, AdminError> {
         // Default request lists every group (empty state/type filters).
         let req = ListGroupsRequest::default();
@@ -58,6 +60,8 @@ impl AdminClient {
     ///
     /// At `OffsetFetch` v10 the response carries `topic_id` instead of `name`, so
     /// the topic ids are resolved to names via a `Metadata` round-trip.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn list_consumer_group_offsets(
         &mut self,
         group: &str,

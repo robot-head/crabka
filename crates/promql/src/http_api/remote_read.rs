@@ -15,6 +15,7 @@ use crabka_metrics::{
     BucketSpan, NativeHistogram, ResetHint, decode_native_histograms,
     wire::{pb, snappy_block_decode},
 };
+use num_traits::ToPrimitive;
 use prost::Message;
 
 use super::{
@@ -346,29 +347,19 @@ fn remote_read_histogram(timestamp: i64, hist: &NativeHistogram) -> pb::v1::Hist
     }
 }
 
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "Prometheus integer histograms require integer protobuf fields; Crabka stores native histogram counts in f64 for query math."
-)]
 fn remote_read_histogram_count(hist: &NativeHistogram) -> pb::v1::histogram::Count {
     if hist.is_float {
         pb::v1::histogram::Count::CountFloat(hist.count)
     } else {
-        pb::v1::histogram::Count::CountInt(hist.count as u64)
+        pb::v1::histogram::Count::CountInt(hist.count.to_u64().unwrap_or(u64::MAX))
     }
 }
 
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "Prometheus integer histograms require integer protobuf fields; Crabka stores native histogram counts in f64 for query math."
-)]
 fn remote_read_histogram_zero_count(hist: &NativeHistogram) -> pb::v1::histogram::ZeroCount {
     if hist.is_float {
         pb::v1::histogram::ZeroCount::ZeroCountFloat(hist.zero_count)
     } else {
-        pb::v1::histogram::ZeroCount::ZeroCountInt(hist.zero_count as u64)
+        pb::v1::histogram::ZeroCount::ZeroCountInt(hist.zero_count.to_u64().unwrap_or(u64::MAX))
     }
 }
 
@@ -382,10 +373,6 @@ fn remote_read_bucket_spans(spans: &[BucketSpan]) -> Vec<pb::v1::BucketSpan> {
         .collect()
 }
 
-#[allow(
-    clippy::cast_possible_truncation,
-    reason = "Prometheus integer histogram bucket deltas are integer protobuf fields; Crabka stores absolute counts in f64 for query math."
-)]
 fn remote_read_histogram_deltas(is_float: bool, counts: &[f64]) -> Vec<i64> {
     if is_float {
         return Vec::new();
@@ -396,7 +383,13 @@ fn remote_read_histogram_deltas(is_float: bool, counts: &[f64]) -> Vec<i64> {
         .map(|count| {
             let delta = *count - previous;
             previous = *count;
-            delta as i64
+            delta.to_i64().unwrap_or_else(|| {
+                if delta.is_sign_negative() {
+                    i64::MIN
+                } else {
+                    i64::MAX
+                }
+            })
         })
         .collect()
 }

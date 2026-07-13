@@ -116,7 +116,6 @@ async fn cooperative_three_member_partial_revocation() {
 }
 
 // Linear two-phase scenario; splitting fragments the produce/consume narrative.
-#[allow(clippy::too_many_lines)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cooperative_transparent_to_poll() {
     let dir = TempDir::new().unwrap();

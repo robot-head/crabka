@@ -20,7 +20,7 @@ proptest! {
         for (frames, value) in &stacks[mid..] {
             right.add_stack(frames, *value);
         }
-        left.merge(right);
+        left.merge(&right);
 
         prop_assert_eq!(whole.to_flamegraph(2048), left.to_flamegraph(2048));
     }

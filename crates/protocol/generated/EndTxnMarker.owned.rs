@@ -7,8 +7,9 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 0;
 pub const FLEXIBLE_MIN: i16 = 32767;
 #[inline]
-fn is_flexible(version: i16) -> bool {
-    version >= FLEXIBLE_MIN
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
+    version == FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EndTxnMarker {
@@ -22,14 +23,12 @@ impl Encode for EndTxnMarker {
                 "EndTxnMarker version out of range",
             ));
         }
-        let flex = is_flexible(version);
         if version >= 0 {
             put_i32(buf, self.coordinator_epoch);
         }
         Ok(())
     }
     fn encoded_len(&self, version: i16) -> usize {
-        let flex = is_flexible(version);
         let mut n: usize = 0;
         if version >= 0 {
             n += 4;
@@ -44,7 +43,6 @@ impl Decode<'_> for EndTxnMarker {
                 "EndTxnMarker version out of range",
             ));
         }
-        let flex = is_flexible(version);
         let mut out = Self::default();
         if version >= 0 {
             out.coordinator_epoch = get_i32(buf)?;
@@ -67,7 +65,7 @@ impl EndTxnMarker {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(version: i16) -> ::serde_json::Value {
+pub fn default_json(_version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("coordinatorEpoch".to_string(), ::serde_json::json!(0));
     ::serde_json::Value::Object(obj)

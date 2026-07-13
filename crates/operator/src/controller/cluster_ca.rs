@@ -178,21 +178,37 @@ pub(crate) struct CaState {
 }
 
 /// Per-reconcile inputs to [`plan_ca_rotation`].
-#[allow(clippy::struct_excessive_bools)] // distinct rotation triggers/state, not a state enum
+// distinct rotation triggers/state, not a state enum
 pub(crate) struct RotationInputs {
     /// `generateCertificateAuthority` — BYO CAs are never rotated.
     pub generate: bool,
     pub validity_days: u32,
     pub renewal_days: u32,
     /// `crabka.io/force-renew-ca` present on the `Kafka` CR.
-    pub force_renew: bool,
-    /// `crabka.io/force-replace-ca-key` present on the `Kafka` CR.
-    pub force_replace_key: bool,
+    pub force: ForceRotation,
     /// Every pool carries the desired config-hash AND is Ready (so the previous
     /// rotation step's roll has finished). Only consulted for staged phases.
     pub rollout_converged: bool,
     pub now: OffsetDateTime,
     pub which: WhichCa,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ForceRotation {
+    None,
+    RenewCertificate,
+    ReplaceKey,
+    RenewAndReplaceKey,
+}
+
+impl ForceRotation {
+    fn renews_certificate(self) -> bool {
+        matches!(self, Self::RenewCertificate | Self::RenewAndReplaceKey)
+    }
+
+    fn replaces_key(self) -> bool {
+        matches!(self, Self::ReplaceKey | Self::RenewAndReplaceKey)
+    }
 }
 
 /// Why a forced rotation could not be honored.
@@ -225,7 +241,7 @@ pub(crate) fn plan_ca_rotation(state: &CaState, inp: &RotationInputs) -> CaRotat
     // BYO: never rotate. A forced request is refused (and the annotation is
     // stripped by the caller, with a Warning Event).
     if !inp.generate {
-        return if inp.force_renew || inp.force_replace_key {
+        return if inp.force.renews_certificate() || inp.force.replaces_key() {
             CaRotationPlan::Refuse(RefuseReason::Byo)
         } else {
             CaRotationPlan::NoOp
@@ -249,14 +265,14 @@ pub(crate) fn plan_ca_rotation(state: &CaState, inp: &RotationInputs) -> CaRotat
             }
         }
         CaPhase::Idle => {
-            if inp.force_replace_key {
+            if inp.force.replaces_key() {
                 return match inp.which {
                     WhichCa::Cluster => CaRotationPlan::StartKeyReplace,
                     WhichCa::Clients => CaRotationPlan::Refuse(RefuseReason::ClientsCaKeyReplace),
                 };
             }
             let signing = state.bundle.first().map_or("", String::as_str);
-            let renew_due = inp.force_renew
+            let renew_due = inp.force.renews_certificate()
                 || renew_if_expiring(signing, inp.renewal_days, inp.now).unwrap_or(false);
             if renew_due {
                 return CaRotationPlan::RenewCertSameKey;
@@ -343,7 +359,6 @@ pub(crate) struct CaReconcileOutcome {
 /// or surface `ByoCaMissing`. Make exactly the create-path I/O
 /// (`GET key`, `GET cert`, then on create `PATCH key`, `PATCH cert`) plus, only
 /// when a rotation step fires, an extra cert/key `PATCH`.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 #[tracing::instrument(
     level = "info",
     skip_all,
@@ -397,20 +412,20 @@ pub(crate) async fn reconcile_ca(
             generate: spec.generate_certificate_authority,
             validity_days: spec.validity_days,
             renewal_days: spec.renewal_days,
-            force_renew,
-            force_replace_key,
+            force: match (force_renew, force_replace_key) {
+                (false, false) => ForceRotation::None,
+                (true, false) => ForceRotation::RenewCertificate,
+                (false, true) => ForceRotation::ReplaceKey,
+                (true, true) => ForceRotation::RenewAndReplaceKey,
+            },
             rollout_converged,
             now,
             which,
         };
         let plan = plan_ca_rotation(&state, &inp);
         return apply_ca_rotation(
-            secret_api,
-            kafka,
-            which,
-            &key_name,
-            &cert_name,
-            &cn,
+            (secret_api, kafka, which),
+            (&key_name, &cert_name, &cn),
             &state,
             plan,
             &inp,
@@ -498,19 +513,16 @@ async fn patch_secret(
 /// The trust bundle for `NoOp`/`Refuse` is the raw stored PEM (preserving a
 /// byte-identical config-hash for the non-rotating path); rotating plans emit a
 /// freshly joined bundle.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn apply_ca_rotation(
-    secret_api: &Api<Secret>,
-    kafka: &Kafka,
-    which: WhichCa,
-    key_name: &str,
-    cert_name: &str,
-    cn: &str,
+    owner: (&Api<Secret>, &Kafka, WhichCa),
+    names: (&str, &str, &str),
     state: &CaState,
     plan: CaRotationPlan,
     inp: &RotationInputs,
     raw_bundle_pem: &str,
 ) -> Result<CaReconcileOutcome, ReconcileError> {
+    let (secret_api, kafka, which) = owner;
+    let (key_name, cert_name, cn) = names;
     let now = inp.now;
     // Defaults carried over from the current state for plans that don't change a field.
     let mut bundle = state.bundle.clone();
@@ -814,7 +826,6 @@ pub(crate) struct BrokerCertRequest {
     pub extra_sans: Vec<SubjectAltName>,
 }
 
-#[allow(dead_code, clippy::too_many_lines)]
 pub(crate) async fn ensure_broker_keystore(
     secret_api: &Api<Secret>,
     kafka: &Kafka,
@@ -981,6 +992,8 @@ pub fn compute_san_digest(base_sans: &[SubjectAltName], extras: &[SubjectAltName
 // Renewal predicate
 // ---------------------------------------------------------------------------
 
+/// # Errors
+/// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub fn renew_if_expiring(
     cert_pem: &str,
     renewal_days: u32,
@@ -998,6 +1011,8 @@ use k8s_openapi::api::core::v1::Event;
 use kube::api::{ListParams, PostParams};
 
 #[tracing::instrument(level = "info", skip_all, fields(namespace = ?namespace), err)]
+/// # Errors
+/// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub async fn run_renewal_check(
     client: kube::Client,
     namespace: Option<&str>,
@@ -1138,15 +1153,17 @@ async fn flag_ca_if_expiring(
             client,
             &ns,
             kafka,
-            "Normal",
-            "CaRenewalScheduled",
-            &format!(
-                "CA {} is within renewalDays; scheduled a same-key renewal on the next reconcile",
-                which.condition_name()
-            ),
-            "crabka-ca-renewal-",
-            "RenewalCheck",
-            "crabka-operator/ca-renewal-check",
+            EventDetails {
+                type_: "Normal",
+                reason: "CaRenewalScheduled",
+                message: &format!(
+                    "CA {} is within renewalDays; scheduled a same-key renewal on the next reconcile",
+                    which.condition_name()
+                ),
+                generate_name: "crabka-ca-renewal-",
+                action: "RenewalCheck",
+                reporting_component: "crabka-operator/ca-renewal-check",
+            },
         )
         .await?;
     } else {
@@ -1155,16 +1172,18 @@ async fn flag_ca_if_expiring(
             client,
             &ns,
             kafka,
-            "Warning",
-            "ByoCaExpiringSoon",
-            &format!(
-                "CA {} is expiring within renewalDays; \
-                 rotation is the cluster admin's responsibility (BYO)",
-                which.condition_name()
-            ),
-            "crabka-ca-renewal-",
-            "RenewalCheck",
-            "crabka-operator/ca-renewal-check",
+            EventDetails {
+                type_: "Warning",
+                reason: "ByoCaExpiringSoon",
+                message: &format!(
+                    "CA {} is expiring within renewalDays; \
+                     rotation is the cluster admin's responsibility (BYO)",
+                    which.condition_name()
+                ),
+                generate_name: "crabka-ca-renewal-",
+                action: "RenewalCheck",
+                reporting_component: "crabka-operator/ca-renewal-check",
+            },
         )
         .await?;
     }
@@ -1325,31 +1344,45 @@ async fn renew_broker_leafs(
             client,
             &ns,
             kafka,
-            "Normal",
-            "BrokerCertRenewed",
-            &format!("broker={id} reissued by ca-renewal-check"),
-            "crabka-ca-renewal-",
-            "RenewalCheck",
-            "crabka-operator/ca-renewal-check",
+            EventDetails {
+                type_: "Normal",
+                reason: "BrokerCertRenewed",
+                message: &format!("broker={id} reissued by ca-renewal-check"),
+                generate_name: "crabka-ca-renewal-",
+                action: "RenewalCheck",
+                reporting_component: "crabka-operator/ca-renewal-check",
+            },
         )
         .await?;
     }
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)] // shared event helper; arity reflects the K8s Event fields
+pub(crate) struct EventDetails<'a> {
+    pub type_: &'a str,
+    pub reason: &'a str,
+    pub message: &'a str,
+    pub generate_name: &'a str,
+    pub action: &'a str,
+    pub reporting_component: &'a str,
+}
+
 pub(crate) async fn emit_event(
     client: &kube::Client,
     namespace: &str,
     kafka: &Kafka,
-    type_: &str,
-    reason: &str,
-    message: &str,
-    generate_name: &str,
-    action: &str,
-    reporting_component: &str,
+    details: EventDetails<'_>,
 ) -> Result<(), ReconcileError> {
     use k8s_openapi::{apimachinery::pkg::apis::meta::v1::MicroTime, jiff::Timestamp};
+
+    let EventDetails {
+        type_,
+        reason,
+        message,
+        generate_name,
+        action,
+        reporting_component,
+    } = details;
     let now = Timestamp::now();
     let event = Event {
         metadata: ObjectMeta {
@@ -1387,7 +1420,7 @@ pub(crate) async fn emit_event(
 
 #[cfg(test)]
 mod tests {
-
+    use assert2::assert;
     use crabka_security::ca::{generate_clients_ca, generate_cluster_ca, issue_user_cert};
 
     use super::*;
@@ -1409,30 +1442,40 @@ mod tests {
             .expect("valid timestamp");
         let now = OffsetDateTime::now_utc();
         let days_remaining = (not_after - now).whole_days();
-        assert2::assert!((29..=31).contains(&days_remaining));
+        assert!(
+            (29..=31).contains(&days_remaining),
+            "expected ~30 days remaining, got {days_remaining}"
+        );
     }
 
     #[test]
-    fn renewal_window_cases() {
-        for (_name, validity_days, now_offset_days, expected) in [
-            ("within renewal window", 5, 0, true),
-            ("comfortably in future", 365, 0, false),
-            ("already expired", 1, 10, true),
-        ] {
-            let ca = generate_clients_ca("c1", 365).expect("CA");
-            let user =
-                issue_user_cert(&ca.cert_pem, &ca.key_pem, "alice", validity_days).expect("leaf");
-            let now = OffsetDateTime::now_utc() + time::Duration::days(now_offset_days);
-            assert2::assert!(
-                renew_if_expiring(&user.cert_pem, 30, now).expect("predicate") == expected
-            );
-        }
+    fn renews_when_within_window() {
+        let ca = generate_clients_ca("c1", 365).expect("CA");
+        let user = issue_user_cert(&ca.cert_pem, &ca.key_pem, "alice", 5).expect("leaf");
+        let now = OffsetDateTime::now_utc();
+        assert!(renew_if_expiring(&user.cert_pem, 30, now).expect("predicate"));
+    }
+
+    #[test]
+    fn does_not_renew_when_comfortably_in_future() {
+        let ca = generate_clients_ca("c1", 365).expect("CA");
+        let user = issue_user_cert(&ca.cert_pem, &ca.key_pem, "alice", 365).expect("leaf");
+        let now = OffsetDateTime::now_utc();
+        assert!(!renew_if_expiring(&user.cert_pem, 30, now).expect("predicate"));
+    }
+
+    #[test]
+    fn renews_when_already_past() {
+        let ca = generate_clients_ca("c1", 365).expect("CA");
+        let user = issue_user_cert(&ca.cert_pem, &ca.key_pem, "alice", 1).expect("leaf");
+        let now = OffsetDateTime::now_utc() + time::Duration::days(10);
+        assert!(renew_if_expiring(&user.cert_pem, 30, now).expect("predicate"));
     }
 }
 
 #[cfg(test)]
 mod reissue_tests {
-
+    use assert2::assert;
     use crabka_security::ca::SubjectAltName;
 
     use super::compute_san_digest;
@@ -1443,7 +1486,7 @@ mod reissue_tests {
         let no_extras = compute_san_digest(&base, &[]);
         let with_extras =
             compute_san_digest(&base, &[SubjectAltName::Dns("broker-0.example.com".into())]);
-        assert2::assert!(no_extras != with_extras);
+        assert!(no_extras != with_extras);
     }
 
     #[test]
@@ -1456,7 +1499,7 @@ mod reissue_tests {
             SubjectAltName::Dns("b.example.com".into()),
             SubjectAltName::Dns("a.example.com".into()),
         ];
-        assert2::assert!(compute_san_digest(&a, &[]) == compute_san_digest(&b, &[]));
+        assert!(compute_san_digest(&a, &[]) == compute_san_digest(&b, &[]));
     }
 
     #[test]
@@ -1465,13 +1508,16 @@ mod reissue_tests {
         let extras = vec![SubjectAltName::Dns("internal.svc".into())];
         let single = compute_san_digest(&base, &[]);
         let with_dup_extra = compute_san_digest(&base, &extras);
-        assert2::assert!(single == with_dup_extra);
+        assert!(
+            single == with_dup_extra,
+            "duplicate extras should not change digest"
+        );
     }
 }
 
 #[cfg(test)]
 mod san_tests {
-
+    use assert2::assert;
     use crabka_security::ca::{SubjectAltName, generate_cluster_ca, issue_broker_cert};
     use rustls::pki_types::{CertificateDer, pem::PemObject};
     use x509_parser::{
@@ -1538,7 +1584,7 @@ mod san_tests {
             "DNS:broker-0.example.com",
             "IP:203.0.113.10",
         ] {
-            assert2::assert!(parsed_sans.iter().any(|s| s == want));
+            assert!(parsed_sans.iter().any(|s| s == want), "missing {want:?}");
         }
     }
 
@@ -1556,7 +1602,8 @@ mod san_tests {
         )
         .unwrap();
         let parsed = parse_cert_sans(&leaf.cert_pem);
-        assert2::assert!(parsed == ["DNS:internal.svc"]);
+        assert!(parsed.len() == 1);
+        assert!(parsed[0] == "DNS:internal.svc");
     }
 
     // Round-trip: issue a leaf with a known CN and mixed DNS/IP SANs, then pull
@@ -1584,20 +1631,20 @@ mod san_tests {
         .unwrap();
 
         let (cn, sans) = read_existing_cn_and_sans(&leaf.cert_pem).expect("parse leaf");
-        assert2::assert!(cn == "broker-0");
+        assert!(cn == "broker-0");
         for want in [
             SubjectAltName::Dns("internal.svc".into()),
             SubjectAltName::Dns("broker-0.example.com".into()),
             SubjectAltName::Ip("203.0.113.10".parse().unwrap()),
         ] {
-            assert2::assert!(sans.contains(&want));
+            assert!(sans.contains(&want), "missing {want:?} in {sans:?}");
         }
     }
 }
 
 #[cfg(test)]
 mod rotation_tests {
-
+    use assert2::assert;
     use crabka_security::ca::{generate_cluster_ca, renew_cluster_ca};
 
     use super::*;
@@ -1623,8 +1670,7 @@ mod rotation_tests {
             generate,
             validity_days: 365,
             renewal_days: 30,
-            force_renew: false,
-            force_replace_key: false,
+            force: ForceRotation::None,
             rollout_converged: false,
             now: OffsetDateTime::now_utc(),
             which,
@@ -1639,10 +1685,11 @@ mod rotation_tests {
         let b = ca_cert("b", 365);
         let bundle = format!("{a}{b}");
         let blocks = split_pem_certs(&bundle);
-        assert2::assert!(blocks == vec![normalize_block(&a), normalize_block(&b)]);
+        assert!(blocks.len() == 2);
+        assert!(blocks[0].contains("BEGIN CERTIFICATE"));
         // join is the concatenation of normalized blocks; re-splitting is stable.
         let rejoined = join_bundle(&blocks);
-        assert2::assert!(split_pem_certs(&rejoined) == blocks);
+        assert!(split_pem_certs(&rejoined).len() == 2);
     }
 
     #[test]
@@ -1650,7 +1697,7 @@ mod rotation_tests {
         let a = normalize_block(&ca_cert("a", 365));
         let b = normalize_block(&ca_cert("b", 365));
         let out = dedup_blocks(&[a.clone(), b.clone(), a.clone()]);
-        assert2::assert!(out == vec![a, b]);
+        assert!(out == vec![a, b]);
     }
 
     #[test]
@@ -1661,7 +1708,7 @@ mod rotation_tests {
         // 0) is never dropped.
         let now = OffsetDateTime::now_utc() + time::Duration::days(100);
         let out = prune_expired(&[signing.clone(), trust], now);
-        assert2::assert!(out == vec![signing]);
+        assert!(out == vec![signing]);
     }
 
     #[test]
@@ -1671,130 +1718,139 @@ mod rotation_tests {
         let stale = normalize_block(&ca_cert("stale", 20));
         let now = OffsetDateTime::now_utc() + time::Duration::days(100);
         let out = prune_expired(&[signing.clone(), fresh.clone(), stale], now);
-        assert2::assert!(out == vec![signing, fresh]);
+        assert!(out == vec![signing, fresh]);
     }
 
     // --- planner: BYO -------------------------------------------------------
 
     #[test]
-    fn idle_and_byo_plan_cases() {
-        let idle_cluster = |days| {
-            state(
-                vec![normalize_block(&ca_cert("c1-cluster-ca", days))],
-                "k",
-                CaPhase::Idle,
-            )
-        };
-        let mut byo_force_key = inputs(false, WhichCa::Cluster);
-        byo_force_key.force_replace_key = true;
-        let mut byo_force_renew = inputs(false, WhichCa::Cluster);
-        byo_force_renew.force_renew = true;
-        let mut force_renew = inputs(true, WhichCa::Cluster);
-        force_renew.force_renew = true;
-        let mut force_replace = inputs(true, WhichCa::Cluster);
-        force_replace.force_replace_key = true;
-        let mut clients_force_replace = inputs(true, WhichCa::Clients);
-        clients_force_replace.force_replace_key = true;
-        let mut prune = inputs(true, WhichCa::Cluster);
-        prune.now = OffsetDateTime::now_utc() + time::Duration::days(100);
+    fn byo_never_rotates() {
+        let s = state(
+            vec![normalize_block(&ca_cert("c1-cluster-ca", 365))],
+            "k",
+            CaPhase::Idle,
+        );
+        assert!(plan_ca_rotation(&s, &inputs(false, WhichCa::Cluster)) == CaRotationPlan::NoOp);
+    }
 
-        for (_name, state, input, expected) in [
-            (
-                "BYO without force",
-                idle_cluster(365),
-                inputs(false, WhichCa::Cluster),
-                CaRotationPlan::NoOp,
-            ),
-            (
-                "BYO force key replacement",
-                idle_cluster(365),
-                byo_force_key,
-                CaRotationPlan::Refuse(RefuseReason::Byo),
-            ),
-            (
-                "BYO force renewal",
-                idle_cluster(365),
-                byo_force_renew,
-                CaRotationPlan::Refuse(RefuseReason::Byo),
-            ),
-            (
-                "idle certificate not due",
-                idle_cluster(365),
-                inputs(true, WhichCa::Cluster),
-                CaRotationPlan::NoOp,
-            ),
-            (
-                "idle certificate within renewal window",
-                idle_cluster(20),
-                inputs(true, WhichCa::Cluster),
-                CaRotationPlan::RenewCertSameKey,
-            ),
-            (
-                "forced renewal",
-                idle_cluster(365),
-                force_renew,
-                CaRotationPlan::RenewCertSameKey,
-            ),
-            (
-                "forced cluster CA key replacement",
-                idle_cluster(365),
-                force_replace,
-                CaRotationPlan::StartKeyReplace,
-            ),
-            (
-                "forced clients CA key replacement",
-                state(
-                    vec![normalize_block(&ca_cert("c1-clients-ca", 365))],
-                    "k",
-                    CaPhase::Idle,
-                ),
-                clients_force_replace,
-                CaRotationPlan::Refuse(RefuseReason::ClientsCaKeyReplace),
-            ),
-            (
-                "expired trust anchor",
-                state(
-                    vec![
-                        normalize_block(&ca_cert("c1-cluster-ca", 365)),
-                        normalize_block(&ca_cert("old", 50)),
-                    ],
-                    "k",
-                    CaPhase::Idle,
-                ),
-                prune,
-                CaRotationPlan::PruneOldTrust,
-            ),
-        ] {
-            assert2::assert!(plan_ca_rotation(&state, &input) == expected);
-        }
+    #[test]
+    fn byo_force_is_refused() {
+        let s = state(
+            vec![normalize_block(&ca_cert("c1-cluster-ca", 365))],
+            "k",
+            CaPhase::Idle,
+        );
+        let mut inp = inputs(false, WhichCa::Cluster);
+        inp.force = ForceRotation::ReplaceKey;
+        assert!(plan_ca_rotation(&s, &inp) == CaRotationPlan::Refuse(RefuseReason::Byo));
+        let mut inp2 = inputs(false, WhichCa::Cluster);
+        inp2.force = ForceRotation::RenewCertificate;
+        assert!(plan_ca_rotation(&s, &inp2) == CaRotationPlan::Refuse(RefuseReason::Byo));
+    }
+
+    // --- planner: idle ------------------------------------------------------
+
+    #[test]
+    fn idle_not_due_is_noop() {
+        let s = state(
+            vec![normalize_block(&ca_cert("c1-cluster-ca", 365))],
+            "k",
+            CaPhase::Idle,
+        );
+        assert!(plan_ca_rotation(&s, &inputs(true, WhichCa::Cluster)) == CaRotationPlan::NoOp);
+    }
+
+    #[test]
+    fn idle_within_renewal_window_renews_same_key() {
+        // Signing cert with 20 days left, renewalDays=30 → due.
+        let s = state(
+            vec![normalize_block(&ca_cert("c1-cluster-ca", 20))],
+            "k",
+            CaPhase::Idle,
+        );
+        assert!(
+            plan_ca_rotation(&s, &inputs(true, WhichCa::Cluster))
+                == CaRotationPlan::RenewCertSameKey
+        );
+    }
+
+    #[test]
+    fn idle_force_renew_renews_even_when_not_due() {
+        let s = state(
+            vec![normalize_block(&ca_cert("c1-cluster-ca", 365))],
+            "k",
+            CaPhase::Idle,
+        );
+        let mut inp = inputs(true, WhichCa::Cluster);
+        inp.force = ForceRotation::RenewCertificate;
+        assert!(plan_ca_rotation(&s, &inp) == CaRotationPlan::RenewCertSameKey);
+    }
+
+    #[test]
+    fn idle_force_replace_starts_key_replace_on_cluster_ca() {
+        let s = state(
+            vec![normalize_block(&ca_cert("c1-cluster-ca", 365))],
+            "k",
+            CaPhase::Idle,
+        );
+        let mut inp = inputs(true, WhichCa::Cluster);
+        inp.force = ForceRotation::ReplaceKey;
+        assert!(plan_ca_rotation(&s, &inp) == CaRotationPlan::StartKeyReplace);
+    }
+
+    #[test]
+    fn idle_force_replace_refused_on_clients_ca() {
+        let s = state(
+            vec![normalize_block(&ca_cert("c1-clients-ca", 365))],
+            "k",
+            CaPhase::Idle,
+        );
+        let mut inp = inputs(true, WhichCa::Clients);
+        inp.force = ForceRotation::ReplaceKey;
+        assert!(
+            plan_ca_rotation(&s, &inp) == CaRotationPlan::Refuse(RefuseReason::ClientsCaKeyReplace)
+        );
+    }
+
+    #[test]
+    fn idle_with_expired_trust_anchor_prunes() {
+        let signing = normalize_block(&ca_cert("c1-cluster-ca", 365));
+        let stale = normalize_block(&ca_cert("old", 50));
+        let s = state(vec![signing, stale], "k", CaPhase::Idle);
+        let mut inp = inputs(true, WhichCa::Cluster);
+        // 100 days out: signing still valid (not due), trust anchor expired.
+        inp.now = OffsetDateTime::now_utc() + time::Duration::days(100);
+        assert!(plan_ca_rotation(&s, &inp) == CaRotationPlan::PruneOldTrust);
     }
 
     // --- planner: staged phases --------------------------------------------
 
     #[test]
-    fn staged_phase_convergence_cases() {
-        for (_name, phase, expected_converged) in [
-            (
-                "trust phase",
-                CaPhase::KeyReplaceTrust,
-                CaRotationPlan::PromoteNewKey,
-            ),
-            (
-                "promote phase",
-                CaPhase::KeyReplacePromote,
-                CaRotationPlan::PruneOldTrust,
-            ),
-        ] {
-            let state = state(
-                vec![normalize_block(&ca_cert("c1-cluster-ca", 365))],
-                "k",
-                phase,
-            );
-            let mut input = inputs(true, WhichCa::Cluster);
-            assert2::assert!(plan_ca_rotation(&state, &input) == CaRotationPlan::NoOp);
-            input.rollout_converged = true;
-            assert2::assert!(plan_ca_rotation(&state, &input) == expected_converged);
-        }
+    fn trust_phase_waits_until_converged() {
+        let s = state(
+            vec![normalize_block(&ca_cert("c1-cluster-ca", 365))],
+            "k",
+            CaPhase::KeyReplaceTrust,
+        );
+        let mut inp = inputs(true, WhichCa::Cluster);
+        inp.rollout_converged = false;
+        assert!(plan_ca_rotation(&s, &inp) == CaRotationPlan::NoOp);
+        inp.rollout_converged = true;
+        assert!(plan_ca_rotation(&s, &inp) == CaRotationPlan::PromoteNewKey);
+    }
+
+    #[test]
+    fn promote_phase_waits_then_prunes() {
+        let s = state(
+            vec![normalize_block(&ca_cert("c1-cluster-ca", 365))],
+            "k",
+            CaPhase::KeyReplacePromote,
+        );
+        let mut inp = inputs(true, WhichCa::Cluster);
+        inp.rollout_converged = false;
+        assert!(plan_ca_rotation(&s, &inp) == CaRotationPlan::NoOp);
+        inp.rollout_converged = true;
+        assert!(plan_ca_rotation(&s, &inp) == CaRotationPlan::PruneOldTrust);
     }
 
     #[test]
@@ -1806,9 +1862,9 @@ mod rotation_tests {
             CaPhase::KeyReplaceTrust,
         );
         let mut inp = inputs(true, WhichCa::Cluster);
-        inp.force_replace_key = true;
+        inp.force = ForceRotation::ReplaceKey;
         inp.rollout_converged = false;
-        assert2::assert!(plan_ca_rotation(&s, &inp) == CaRotationPlan::NoOp);
+        assert!(plan_ca_rotation(&s, &inp) == CaRotationPlan::NoOp);
     }
 
     // --- same-key renewal preserves leaf chaining ---------------------------

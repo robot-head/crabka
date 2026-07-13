@@ -13,6 +13,10 @@ pub struct KeyValue<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl KeyValue<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::common::streams_group_heartbeat_request::key_value::KeyValue {
@@ -28,16 +32,16 @@ impl Encode for KeyValue<'_> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.key);
+                let () = put_compact_string(buf, self.key);
             } else {
-                put_string(buf, self.key);
+                let () = put_string(buf, self.key);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.value);
+                let () = put_compact_string(buf, self.value);
             } else {
-                put_string(buf, self.value);
+                let () = put_string(buf, self.value);
             }
         }
         if flex {

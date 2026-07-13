@@ -14,7 +14,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 2;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -146,9 +147,9 @@ impl Encode for ReplicaElectionResult {
         let flex = version >= 2;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.topic);
+                let () = put_compact_string(buf, &self.topic);
             } else {
-                put_string(buf, &self.topic);
+                let () = put_string(buf, &self.topic);
             }
         }
         if version >= 0 {
@@ -254,9 +255,9 @@ impl Encode for PartitionResult {
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message.as_deref());
+                let () = put_compact_nullable_string(buf, self.error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.error_message.as_deref());
+                let () = put_nullable_string(buf, self.error_message.as_deref());
             }
         }
         if flex {

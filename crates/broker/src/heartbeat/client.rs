@@ -210,7 +210,7 @@ pub(crate) async fn run(mut cfg: Config) {
 
 #[cfg(test)]
 mod tests {
-
+    use assert2::assert;
     use tempfile::tempdir;
 
     use super::*;
@@ -224,13 +224,14 @@ mod tests {
         let status = crate::log_dir_status::LogDirRegistry::probe(&paths);
 
         // Initially no dirs are offline.
-        assert2::assert!(offline_dir_uuids(&status, &ids).is_empty());
+        assert!(offline_dir_uuids(&status, &ids).is_empty());
 
         // Mark dir `a` as offline.
         status.mark_offline(a.path(), "test");
         let result = offline_dir_uuids(&status, &ids);
+        assert!(result.len() == 1);
         let expected_id = ids.id_for(a.path()).unwrap();
-        assert2::assert!((result.len(), result[0].0) == (1, *expected_id.as_bytes()));
+        assert!(result[0].0 == *expected_id.as_bytes());
     }
 
     #[test]
@@ -241,18 +242,18 @@ mod tests {
         let status = crate::log_dir_status::LogDirRegistry::probe(&paths);
 
         // Empty all_log_dirs: always false.
-        assert2::assert!(!all_dirs_offline(&[], &status));
+        assert!(!all_dirs_offline(&[], &status));
 
         // No dirs offline yet.
-        assert2::assert!(!all_dirs_offline(&paths, &status));
+        assert!(!all_dirs_offline(&paths, &status));
 
         // Only `a` offline: still false.
         status.mark_offline(a.path(), "disk error");
-        assert2::assert!(!all_dirs_offline(&paths, &status));
+        assert!(!all_dirs_offline(&paths, &status));
 
         // Both offline: true.
         status.mark_offline(b.path(), "disk error");
-        assert2::assert!(all_dirs_offline(&paths, &status));
+        assert!(all_dirs_offline(&paths, &status));
     }
 
     #[test]
@@ -262,7 +263,7 @@ mod tests {
             (Duration::from_millis(500), Duration::from_secs(1)),
             (Duration::from_secs(5), Duration::from_secs(1)),
         ] {
-            assert2::assert!(heartbeat_rpc_timeout(interval) == want);
+            assert!(heartbeat_rpc_timeout(interval) == want, "{interval:?}");
         }
     }
 
@@ -271,16 +272,8 @@ mod tests {
         use assert2::check;
         let opts = heartbeat_connection_options(9, Duration::from_millis(500));
 
-        check!(
-            (
-                opts.client_id.as_str(),
-                opts.connect_timeout,
-                opts.request_timeout
-            ) == (
-                "crabka-broker-9-heartbeat",
-                Duration::from_secs(1),
-                Duration::from_secs(1),
-            )
-        );
+        check!(opts.client_id == "crabka-broker-9-heartbeat");
+        check!(opts.connect_timeout == Duration::from_secs(1));
+        check!(opts.request_timeout == Duration::from_secs(1));
     }
 }

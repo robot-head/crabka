@@ -1,7 +1,9 @@
 use std::path::Path;
 
-#[allow(clippy::unnecessary_wraps)]
+use assert2::assert;
+
 fn golden_case_file(path: &Path) -> datatest_stable::Result<()> {
+    std::fs::metadata(path)?;
     let report = crabka_traceql::testkit::run_corpus_file(path);
     println!("{}", report.to_text());
 
@@ -11,7 +13,10 @@ fn golden_case_file(path: &Path) -> datatest_stable::Result<()> {
         .filter(|case| !case.passed)
         .collect::<Vec<_>>();
 
-    assert2::assert!(failing.is_empty());
+    assert!(
+        failing.is_empty(),
+        "traceql golden corpus failures: {failing:?}"
+    );
     Ok(())
 }
 

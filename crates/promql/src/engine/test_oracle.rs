@@ -35,6 +35,70 @@ use crate::{
     store::MetricStore,
 };
 
+fn unary_float_function(name: &str) -> Option<UnaryFloatFn> {
+    Some(match name {
+        "ceil" => UnaryFloatFn::Ceil,
+        "floor" => UnaryFloatFn::Floor,
+        "sgn" => UnaryFloatFn::Sgn,
+        "abs" => UnaryFloatFn::Abs,
+        "sqrt" => UnaryFloatFn::Sqrt,
+        "exp" => UnaryFloatFn::Exp,
+        "ln" => UnaryFloatFn::Ln,
+        "log2" => UnaryFloatFn::Log2,
+        "log10" => UnaryFloatFn::Log10,
+        "sin" => UnaryFloatFn::Sin,
+        "sinh" => UnaryFloatFn::Sinh,
+        "cos" => UnaryFloatFn::Cos,
+        "cosh" => UnaryFloatFn::Cosh,
+        "tan" => UnaryFloatFn::Tan,
+        "tanh" => UnaryFloatFn::Tanh,
+        "asin" => UnaryFloatFn::Asin,
+        "asinh" => UnaryFloatFn::Asinh,
+        "acos" => UnaryFloatFn::Acos,
+        "acosh" => UnaryFloatFn::Acosh,
+        "atan" => UnaryFloatFn::Atan,
+        "atanh" => UnaryFloatFn::Atanh,
+        "deg" => UnaryFloatFn::Deg,
+        "rad" => UnaryFloatFn::Rad,
+        _ => return None,
+    })
+}
+
+fn calendar_function(name: &str) -> Option<CalendarFn> {
+    Some(match name {
+        "year" => CalendarFn::Year,
+        "month" => CalendarFn::Month,
+        "day_of_month" => CalendarFn::DayOfMonth,
+        "day_of_week" => CalendarFn::DayOfWeek,
+        "day_of_year" => CalendarFn::DayOfYear,
+        "days_in_month" => CalendarFn::DaysInMonth,
+        "hour" => CalendarFn::Hour,
+        "minute" => CalendarFn::Minute,
+        _ => return None,
+    })
+}
+
+fn over_time_function(name: &str) -> Option<OverTimeFn> {
+    Some(match name {
+        "sum_over_time" => OverTimeFn::Sum,
+        "avg_over_time" => OverTimeFn::Avg,
+        "count_over_time" => OverTimeFn::Count,
+        "min_over_time" => OverTimeFn::Min,
+        "max_over_time" => OverTimeFn::Max,
+        "stddev_over_time" => OverTimeFn::Stddev,
+        "stdvar_over_time" => OverTimeFn::Stdvar,
+        "mad_over_time" => OverTimeFn::Mad,
+        "first_over_time" => OverTimeFn::First,
+        "last_over_time" => OverTimeFn::Last,
+        "ts_of_first_over_time" => OverTimeFn::TsOfFirst,
+        "ts_of_last_over_time" => OverTimeFn::TsOfLast,
+        "ts_of_min_over_time" => OverTimeFn::TsOfMin,
+        "ts_of_max_over_time" => OverTimeFn::TsOfMax,
+        "present_over_time" => OverTimeFn::Present,
+        _ => return None,
+    })
+}
+
 impl<S: MetricStore> PromqlEngine<S> {
     /// Tree-walking differential test oracle — NOT compiled into shipped builds.
     ///
@@ -423,16 +487,23 @@ impl<S: MetricStore> PromqlEngine<S> {
     }
 
     #[cfg(test)]
-    #[allow(
-        clippy::too_many_lines,
-        reason = "PromQL function dispatch is intentionally centralized for now"
-    )]
     pub(super) async fn eval_instant_call(
         &self,
         tenant: &str,
         call: &Call,
         time_ms: i64,
     ) -> Result<QueryResult> {
+        if let Some(kind) = unary_float_function(call.func.name) {
+            return self
+                .eval_unary_float_call(tenant, call, time_ms, kind)
+                .await;
+        }
+        if let Some(kind) = calendar_function(call.func.name) {
+            return self.eval_calendar_call(tenant, call, time_ms, kind).await;
+        }
+        if let Some(kind) = over_time_function(call.func.name) {
+            return self.eval_over_time_call(tenant, call, time_ms, kind).await;
+        }
         match call.func.name {
             "rate" => {
                 self.eval_range_function_call(tenant, call, time_ms, RangeFn::Rate)
@@ -503,66 +574,6 @@ impl<S: MetricStore> PromqlEngine<S> {
                 "function `double_exponential_smoothing` requires the experimental-functions feature"
                     .to_string(),
             )),
-            "sum_over_time" => {
-                self.eval_over_time_call(tenant, call, time_ms, OverTimeFn::Sum)
-                    .await
-            }
-            "avg_over_time" => {
-                self.eval_over_time_call(tenant, call, time_ms, OverTimeFn::Avg)
-                    .await
-            }
-            "count_over_time" => {
-                self.eval_over_time_call(tenant, call, time_ms, OverTimeFn::Count)
-                    .await
-            }
-            "min_over_time" => {
-                self.eval_over_time_call(tenant, call, time_ms, OverTimeFn::Min)
-                    .await
-            }
-            "max_over_time" => {
-                self.eval_over_time_call(tenant, call, time_ms, OverTimeFn::Max)
-                    .await
-            }
-            "stddev_over_time" => {
-                self.eval_over_time_call(tenant, call, time_ms, OverTimeFn::Stddev)
-                    .await
-            }
-            "stdvar_over_time" => {
-                self.eval_over_time_call(tenant, call, time_ms, OverTimeFn::Stdvar)
-                    .await
-            }
-            "mad_over_time" => {
-                self.eval_over_time_call(tenant, call, time_ms, OverTimeFn::Mad)
-                    .await
-            }
-            "first_over_time" => {
-                self.eval_over_time_call(tenant, call, time_ms, OverTimeFn::First)
-                    .await
-            }
-            "last_over_time" => {
-                self.eval_over_time_call(tenant, call, time_ms, OverTimeFn::Last)
-                    .await
-            }
-            "ts_of_first_over_time" => {
-                self.eval_over_time_call(tenant, call, time_ms, OverTimeFn::TsOfFirst)
-                    .await
-            }
-            "ts_of_last_over_time" => {
-                self.eval_over_time_call(tenant, call, time_ms, OverTimeFn::TsOfLast)
-                    .await
-            }
-            "ts_of_min_over_time" => {
-                self.eval_over_time_call(tenant, call, time_ms, OverTimeFn::TsOfMin)
-                    .await
-            }
-            "ts_of_max_over_time" => {
-                self.eval_over_time_call(tenant, call, time_ms, OverTimeFn::TsOfMax)
-                    .await
-            }
-            "present_over_time" => {
-                self.eval_over_time_call(tenant, call, time_ms, OverTimeFn::Present)
-                    .await
-            }
             "absent" => self.eval_absent_call(tenant, call, time_ms).await,
             "absent_over_time" => self.eval_absent_over_time_call(tenant, call, time_ms).await,
             "time" => Self::eval_time_call(call, time_ms),
@@ -621,98 +632,6 @@ impl<S: MetricStore> PromqlEngine<S> {
                 self.eval_clamp_call(tenant, call, time_ms, ClampKind::Max)
                     .await
             }
-            "ceil" => {
-                self.eval_unary_float_call(tenant, call, time_ms, UnaryFloatFn::Ceil)
-                    .await
-            }
-            "floor" => {
-                self.eval_unary_float_call(tenant, call, time_ms, UnaryFloatFn::Floor)
-                    .await
-            }
-            "sgn" => {
-                self.eval_unary_float_call(tenant, call, time_ms, UnaryFloatFn::Sgn)
-                    .await
-            }
-            "abs" => {
-                self.eval_unary_float_call(tenant, call, time_ms, UnaryFloatFn::Abs)
-                    .await
-            }
-            "sqrt" => {
-                self.eval_unary_float_call(tenant, call, time_ms, UnaryFloatFn::Sqrt)
-                    .await
-            }
-            "exp" => {
-                self.eval_unary_float_call(tenant, call, time_ms, UnaryFloatFn::Exp)
-                    .await
-            }
-            "ln" => {
-                self.eval_unary_float_call(tenant, call, time_ms, UnaryFloatFn::Ln)
-                    .await
-            }
-            "log2" => {
-                self.eval_unary_float_call(tenant, call, time_ms, UnaryFloatFn::Log2)
-                    .await
-            }
-            "log10" => {
-                self.eval_unary_float_call(tenant, call, time_ms, UnaryFloatFn::Log10)
-                    .await
-            }
-            "sin" => {
-                self.eval_unary_float_call(tenant, call, time_ms, UnaryFloatFn::Sin)
-                    .await
-            }
-            "sinh" => {
-                self.eval_unary_float_call(tenant, call, time_ms, UnaryFloatFn::Sinh)
-                    .await
-            }
-            "cos" => {
-                self.eval_unary_float_call(tenant, call, time_ms, UnaryFloatFn::Cos)
-                    .await
-            }
-            "cosh" => {
-                self.eval_unary_float_call(tenant, call, time_ms, UnaryFloatFn::Cosh)
-                    .await
-            }
-            "tan" => {
-                self.eval_unary_float_call(tenant, call, time_ms, UnaryFloatFn::Tan)
-                    .await
-            }
-            "tanh" => {
-                self.eval_unary_float_call(tenant, call, time_ms, UnaryFloatFn::Tanh)
-                    .await
-            }
-            "asin" => {
-                self.eval_unary_float_call(tenant, call, time_ms, UnaryFloatFn::Asin)
-                    .await
-            }
-            "asinh" => {
-                self.eval_unary_float_call(tenant, call, time_ms, UnaryFloatFn::Asinh)
-                    .await
-            }
-            "acos" => {
-                self.eval_unary_float_call(tenant, call, time_ms, UnaryFloatFn::Acos)
-                    .await
-            }
-            "acosh" => {
-                self.eval_unary_float_call(tenant, call, time_ms, UnaryFloatFn::Acosh)
-                    .await
-            }
-            "atan" => {
-                self.eval_unary_float_call(tenant, call, time_ms, UnaryFloatFn::Atan)
-                    .await
-            }
-            "atanh" => {
-                self.eval_unary_float_call(tenant, call, time_ms, UnaryFloatFn::Atanh)
-                    .await
-            }
-            "deg" => {
-                self.eval_unary_float_call(tenant, call, time_ms, UnaryFloatFn::Deg)
-                    .await
-            }
-            "rad" => {
-                self.eval_unary_float_call(tenant, call, time_ms, UnaryFloatFn::Rad)
-                    .await
-            }
             "pi" => Self::eval_pi_call(call, time_ms),
             "round" => self.eval_round_call(tenant, call, time_ms).await,
             "sort" => {
@@ -729,38 +648,6 @@ impl<S: MetricStore> PromqlEngine<S> {
             }
             "sort_by_label_desc" => {
                 self.eval_sort_by_label_call(tenant, call, time_ms, SortDirection::Descending)
-                    .await
-            }
-            "year" => {
-                self.eval_calendar_call(tenant, call, time_ms, CalendarFn::Year)
-                    .await
-            }
-            "month" => {
-                self.eval_calendar_call(tenant, call, time_ms, CalendarFn::Month)
-                    .await
-            }
-            "day_of_month" => {
-                self.eval_calendar_call(tenant, call, time_ms, CalendarFn::DayOfMonth)
-                    .await
-            }
-            "day_of_week" => {
-                self.eval_calendar_call(tenant, call, time_ms, CalendarFn::DayOfWeek)
-                    .await
-            }
-            "day_of_year" => {
-                self.eval_calendar_call(tenant, call, time_ms, CalendarFn::DayOfYear)
-                    .await
-            }
-            "days_in_month" => {
-                self.eval_calendar_call(tenant, call, time_ms, CalendarFn::DaysInMonth)
-                    .await
-            }
-            "hour" => {
-                self.eval_calendar_call(tenant, call, time_ms, CalendarFn::Hour)
-                    .await
-            }
-            "minute" => {
-                self.eval_calendar_call(tenant, call, time_ms, CalendarFn::Minute)
                     .await
             }
             "scalar" => self.eval_scalar_function_call(tenant, call, time_ms).await,

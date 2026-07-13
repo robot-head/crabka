@@ -42,6 +42,8 @@ const DEFAULT_IMAGE: &str = concat!(
     env!("CARGO_PKG_VERSION")
 );
 
+/// # Errors
+/// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub async fn run(ctx: Context) -> anyhow::Result<()> {
     let sr_api: Api<SchemaRegistry> = Api::all(ctx.client.clone());
     let kafka_api: Api<Kafka> = Api::all(ctx.client.clone());
@@ -66,7 +68,7 @@ pub fn error_policy(_obj: Arc<SchemaRegistry>, err: &ReconcileError, _ctx: Arc<C
 }
 
 /// Reconcile entry point. Times the pass and records the reconcile
-/// counter/histogram, then delegates to [`reconcile_inner`].
+/// counter/histogram, then delegates to the internal `reconcile_inner` operation.
 #[tracing::instrument(
     level = "info",
     skip_all,
@@ -77,6 +79,8 @@ pub fn error_policy(_obj: Arc<SchemaRegistry>, err: &ReconcileError, _ctx: Arc<C
         generation = ?obj.meta().generation,
     )
 )]
+/// # Errors
+/// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub async fn reconcile(
     obj: Arc<SchemaRegistry>,
     ctx: Arc<Context>,
@@ -89,7 +93,6 @@ pub async fn reconcile(
     .await
 }
 
-#[allow(clippy::too_many_lines)]
 async fn reconcile_inner(
     obj: Arc<SchemaRegistry>,
     ctx: Arc<Context>,
@@ -398,7 +401,6 @@ fn render_deployment(
 /// Build the container args + the Secret volumes/mounts from the spec.
 /// Non-secret config → args; credentials → mounted Secret files referenced
 /// by path args. Returns (args, volumes, volumeMounts, `extra_env`) as JSON values.
-#[allow(clippy::too_many_lines)]
 fn build_args_and_mounts(
     obj: &SchemaRegistry,
     bootstrap: &str,

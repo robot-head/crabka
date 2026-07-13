@@ -35,5 +35,7 @@ fn emits_roundtrip_and_header_helpers() {
     check!(out.contains("pub fn request_header_version"));
     check!(out.contains("pub fn response_header_version"));
     check!(out.contains("pub fn strip_frame_header"));
-    check!(out.contains("\"ApiVersionsResponse\" => 0"));
+    check!(out.contains("if name == \"ApiVersionsResponse\""));
+    check!(out.contains("const REQUEST_FLEX_MIN"));
+    check!(out.contains("header_flex_min"));
 }

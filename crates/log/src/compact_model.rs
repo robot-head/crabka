@@ -227,7 +227,6 @@ impl Model for CompactModel {
         actions.push(CompactAction::Compact);
     }
 
-    #[allow(clippy::too_many_lines)]
     fn next_state(&self, last: &Self::State, action: Self::Action) -> Option<Self::State> {
         match action {
             CompactAction::AppendData(key, value) => {
@@ -346,7 +345,6 @@ type RetainFn = fn(RecordMeta, BatchMeta, bool, TxnDataState, i64, i64) -> Retai
 /// log. Panics (with a message containing the invariant name) on any safety
 /// violation. (Non-vacuity is proven separately via state-derived `sometimes`
 /// properties, so this pass carries no witness accumulator.)
-#[allow(clippy::too_many_lines)]
 fn compact_pass(log: &[Entry], clock: i64, retain: RetainFn) -> Vec<Entry> {
     let offset_map = CompactModel::offset_map(log);
     let data_survives = CompactModel::data_survives(log, &offset_map);
@@ -578,7 +576,7 @@ fn legacy_retain(
 ///   has surviving data → marker-data-precedence fails, OR if both collapse to
 ///   one slot the control-not-deduped count check fails. The assert message
 ///   contains "control" / "marker".
-#[allow(clippy::too_many_lines)] // one self-contained, heavily-commented scenario
+// one self-contained, heavily-commented scenario
 fn legacy_compact_fixed() -> Vec<Entry> {
     // Two committed transactions whose data both survives. Markers carry NO
     // model key (key=None); the legacy bug indexes them under a synthetic

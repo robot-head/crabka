@@ -6,9 +6,8 @@
 //! `CaRotation` condition. The pure decision logic is covered exhaustively by
 //! the `controller::cluster_ca::rotation_tests` unit module; here we verify the
 //! reconciler wiring.
-#![allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
 
-use assert2::check;
+use assert2::{assert, check};
 #[path = "shared/mod.rs"]
 mod shared;
 
@@ -54,11 +53,11 @@ fn secret_with(name: &str, ns: &str, data: &[(&str, &str)], anns: &[(&str, &str)
     })
 }
 
-fn get(path: String, body: Value) -> MockRule {
+fn get(path: String, body: &Value) -> MockRule {
     MockRule {
         method: Method::GET,
         path_substr: path,
-        response: json_response(200, &body),
+        response: json_response(200, body),
     }
 }
 
@@ -74,11 +73,11 @@ fn get_404(path: String) -> MockRule {
     }
 }
 
-fn patch(path: String, body: Value) -> MockRule {
+fn patch(path: String, body: &Value) -> MockRule {
     MockRule {
         method: Method::PATCH,
         path_substr: path,
-        response: json_response(200, &body),
+        response: json_response(200, body),
     }
 }
 
@@ -131,7 +130,7 @@ fn head_rules(c: &str, ns: &str) -> Vec<MockRule> {
     vec![
         patch(
             format!("/services/{c}-broker-headless"),
-            fake_service_body(&format!("{c}-broker-headless"), ns),
+            &fake_service_body(&format!("{c}-broker-headless"), ns),
         ),
         get_404(format!("/secrets/{c}-cluster-id")),
         MockRule {
@@ -148,7 +147,7 @@ fn head_rules(c: &str, ns: &str) -> Vec<MockRule> {
         },
         get(
             format!("/namespaces/{ns}/kafkanodepools"),
-            fake_pool_list_body(&[fake_pool_list_item("brokers", ns, c, 1, 1)]),
+            &fake_pool_list_body(&[fake_pool_list_item("brokers", ns, c, 1, 1)]),
         ),
     ]
 }
@@ -158,17 +157,17 @@ fn tail_rules(c: &str, ns: &str) -> Vec<MockRule> {
         get_404(format!("/secrets/{c}-kafka-brokers")),
         patch(
             format!("/secrets/{c}-kafka-brokers"),
-            fake_keystore_secret(&format!("{c}-kafka-brokers"), ns),
+            &fake_keystore_secret(&format!("{c}-kafka-brokers"), ns),
         ),
         patch(
             format!("/configmaps/{c}-broker-config"),
-            fake_configmap_body(&format!("{c}-broker-config"), ns),
+            &fake_configmap_body(&format!("{c}-broker-config"), ns),
         ),
         patch(
             "/kafkanodepools/brokers?".to_string(),
-            shared::fake_pool_body("brokers", ns, c),
+            &shared::fake_pool_body("brokers", ns, c),
         ),
-        patch(format!("/kafkas/{c}/status"), fake_kafka_body(c, ns)),
+        patch(format!("/kafkas/{c}/status"), &fake_kafka_body(c, ns)),
     ]
 }
 
@@ -198,7 +197,7 @@ async fn cluster_ca_within_renewal_window_renews_same_key() {
         // cluster CA: GET key, GET cert (existing, gen 0), then PATCH cert (renewal).
         get(
             format!("/secrets/{c}-cluster-ca"),
-            secret_with(
+            &secret_with(
                 &format!("{c}-cluster-ca"),
                 ns,
                 &[("ca.key", &expiring.key_pem)],
@@ -207,7 +206,7 @@ async fn cluster_ca_within_renewal_window_renews_same_key() {
         ),
         get(
             format!("/secrets/{c}-cluster-ca-cert"),
-            secret_with(
+            &secret_with(
                 &format!("{c}-cluster-ca-cert"),
                 ns,
                 &[("ca.crt", &expiring.cert_pem)],
@@ -216,12 +215,12 @@ async fn cluster_ca_within_renewal_window_renews_same_key() {
         ),
         patch(
             format!("/secrets/{c}-cluster-ca-cert"),
-            fake_keystore_secret(&format!("{c}-cluster-ca-cert"), ns),
+            &fake_keystore_secret(&format!("{c}-cluster-ca-cert"), ns),
         ),
         // clients CA: fresh → reuse, no patch.
         get(
             format!("/secrets/{c}-clients-ca"),
-            secret_with(
+            &secret_with(
                 &format!("{c}-clients-ca"),
                 ns,
                 &[("ca.key", &clients.key_pem)],
@@ -230,7 +229,7 @@ async fn cluster_ca_within_renewal_window_renews_same_key() {
         ),
         get(
             format!("/secrets/{c}-clients-ca-cert"),
-            secret_with(
+            &secret_with(
                 &format!("{c}-clients-ca-cert"),
                 ns,
                 &[("ca.crt", &clients.cert_pem)],
@@ -288,8 +287,8 @@ async fn cluster_ca_within_renewal_window_renews_same_key() {
         .expect("status PATCH");
     let sbody: Value = serde_json::from_slice(status_patch.body()).expect("status JSON");
     let rot = status_condition(&sbody, "CaRotation");
-    assert2::assert!(rot["status"].as_str() == Some("True"));
-    assert2::assert!(rot["reason"].as_str() == Some("RenewingCert"));
+    check!(rot["status"] == "True", "body = {sbody}");
+    check!(rot["reason"] == "RenewingCert", "body = {sbody}");
 
     check!(state.remaining_rules() == 0, "all rules consumed");
 }
@@ -310,7 +309,7 @@ async fn force_replace_key_starts_staged_rotation() {
     rules.extend([
         get(
             format!("/secrets/{c}-cluster-ca"),
-            secret_with(
+            &secret_with(
                 &format!("{c}-cluster-ca"),
                 ns,
                 &[("ca.key", &fresh.key_pem)],
@@ -319,7 +318,7 @@ async fn force_replace_key_starts_staged_rotation() {
         ),
         get(
             format!("/secrets/{c}-cluster-ca-cert"),
-            secret_with(
+            &secret_with(
                 &format!("{c}-cluster-ca-cert"),
                 ns,
                 &[("ca.crt", &fresh.cert_pem)],
@@ -329,15 +328,15 @@ async fn force_replace_key_starts_staged_rotation() {
         // StartKeyReplace patches the key Secret (stage *.next) THEN the cert Secret.
         patch(
             format!("/secrets/{c}-cluster-ca"),
-            secret_with(&format!("{c}-cluster-ca"), ns, &[], &[]),
+            &secret_with(&format!("{c}-cluster-ca"), ns, &[], &[]),
         ),
         patch(
             format!("/secrets/{c}-cluster-ca-cert"),
-            fake_keystore_secret(&format!("{c}-cluster-ca-cert"), ns),
+            &fake_keystore_secret(&format!("{c}-cluster-ca-cert"), ns),
         ),
         get(
             format!("/secrets/{c}-clients-ca"),
-            secret_with(
+            &secret_with(
                 &format!("{c}-clients-ca"),
                 ns,
                 &[("ca.key", &clients.key_pem)],
@@ -346,7 +345,7 @@ async fn force_replace_key_starts_staged_rotation() {
         ),
         get(
             format!("/secrets/{c}-clients-ca-cert"),
-            secret_with(
+            &secret_with(
                 &format!("{c}-clients-ca-cert"),
                 ns,
                 &[("ca.crt", &clients.cert_pem)],
@@ -354,7 +353,7 @@ async fn force_replace_key_starts_staged_rotation() {
             ),
         ),
         // Strip the consumed force annotation off the Kafka CR (metadata PATCH).
-        patch(format!("/kafkas/{c}"), fake_kafka_body(c, ns)),
+        patch(format!("/kafkas/{c}"), &fake_kafka_body(c, ns)),
     ]);
     rules.extend(tail_rules(c, ns));
 
@@ -384,7 +383,10 @@ async fn force_replace_key_starts_staged_rotation() {
         .expect("cluster-ca key PATCH");
     let kbody: Value = serde_json::from_slice(key_patch.body()).expect("key PATCH JSON");
     for k in ["ca.key", "ca.key.next", "ca.crt.next"] {
-        assert2::assert!(kbody["data"][k].is_string());
+        assert!(
+            kbody["data"][k].is_string(),
+            "key Secret PATCH must carry {k}; body = {kbody}"
+        );
     }
 
     // Cert Secret PATCH must hold a 2-block trust bundle + the trust phase.
@@ -398,10 +400,13 @@ async fn force_replace_key_starts_staged_rotation() {
         })
         .expect("cluster-ca-cert PATCH");
     let cbody: Value = serde_json::from_slice(cert_patch.body()).expect("cert PATCH JSON");
-    assert2::assert!(count_cert_blocks(cbody["data"]["ca.crt"].as_str().expect("ca.crt")) == 2);
-    assert2::assert!(
-        cbody["metadata"]["annotations"]["crabka.io/ca-rotation-phase"].as_str()
-            == Some("key-replace-trust")
+    assert!(
+        count_cert_blocks(cbody["data"]["ca.crt"].as_str().expect("ca.crt")) == 2,
+        "trust bundle must grow to old+new; body = {cbody}"
+    );
+    assert!(
+        cbody["metadata"]["annotations"]["crabka.io/ca-rotation-phase"] == "key-replace-trust",
+        "phase must be key-replace-trust; body = {cbody}"
     );
 
     // The force annotation must be stripped (null) via a metadata PATCH.
@@ -414,7 +419,10 @@ async fn force_replace_key_starts_staged_rotation() {
         })
         .expect("metadata PATCH");
     let mbody: Value = serde_json::from_slice(meta_patch.body()).expect("meta PATCH JSON");
-    assert2::assert!(mbody["metadata"]["annotations"]["crabka.io/force-replace-ca-key"].is_null());
+    assert!(
+        mbody["metadata"]["annotations"]["crabka.io/force-replace-ca-key"].is_null(),
+        "force annotation must be stripped; body = {mbody}"
+    );
 
     // CaRotation=True/DistributingTrust.
     let status_patch = observed
@@ -427,8 +435,8 @@ async fn force_replace_key_starts_staged_rotation() {
         .expect("status PATCH");
     let sbody: Value = serde_json::from_slice(status_patch.body()).expect("status JSON");
     let rot = status_condition(&sbody, "CaRotation");
-    assert2::assert!(rot["status"].as_str() == Some("True"));
-    assert2::assert!(rot["reason"].as_str() == Some("DistributingTrust"));
+    check!(rot["status"] == "True", "body = {sbody}");
+    check!(rot["reason"] == "DistributingTrust", "body = {sbody}");
 
     check!(state.remaining_rules() == 0, "all rules consumed");
 }

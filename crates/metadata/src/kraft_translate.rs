@@ -447,7 +447,99 @@ pub fn from_kraft_value(
     from_kraft(&rec, image)
 }
 
-#[allow(clippy::too_many_lines)] // exhaustive match over MetadataRecord
+fn topic_config_to_kraft(
+    config: &crate::records::TopicConfigRecord,
+    image: &MetadataImage,
+) -> Vec<KraftMetadataRecord> {
+    let empty = std::collections::BTreeMap::new();
+    let old = image.topic_config(&config.topic).unwrap_or(&empty);
+    let mut output = Vec::with_capacity(config.overrides.len());
+    for (key, value) in &config.overrides {
+        output.push(KraftMetadataRecord::Config(ConfigRecord {
+            resource_type: 2,
+            resource_name: config.topic.clone(),
+            name: key.clone(),
+            value: Some(value.clone()),
+            ..Default::default()
+        }));
+    }
+    for key in old.keys() {
+        if !config.overrides.contains_key(key) {
+            output.push(KraftMetadataRecord::Config(ConfigRecord {
+                resource_type: 2,
+                resource_name: config.topic.clone(),
+                name: key.clone(),
+                ..Default::default()
+            }));
+        }
+    }
+    output
+}
+
+fn delete_acl_to_kraft(
+    filter: &crate::AclEntryFilter,
+    image: &MetadataImage,
+) -> Vec<KraftMetadataRecord> {
+    image
+        .all_acls()
+        .filter(|entry| filter.matches(entry))
+        .map(|entry| {
+            KraftMetadataRecord::RemoveAccessControlEntry(RemoveAccessControlEntryRecord {
+                id: acl_id(entry),
+                ..Default::default()
+            })
+        })
+        .collect()
+}
+
+fn acl_to_kraft(entry: &crate::AclEntry) -> KraftMetadataRecord {
+    KraftMetadataRecord::AccessControlEntry(AccessControlEntryRecord {
+        id: acl_id(entry),
+        resource_type: resource_type_to_wire(entry.resource_type),
+        resource_name: entry.resource_name.clone(),
+        pattern_type: pattern_type_to_wire(entry.pattern_type),
+        principal: entry.principal.clone(),
+        host: entry.host.clone(),
+        operation: operation_to_wire(entry.operation),
+        permission_type: permission_to_wire(entry.permission_type),
+        ..Default::default()
+    })
+}
+
+fn scram_to_kraft(record: &MetadataRecord) -> Result<Vec<KraftMetadataRecord>, TranslateError> {
+    match record {
+        MetadataRecord::V1ScramCredential(scram) => {
+            let iterations =
+                i32::try_from(scram.iterations).map_err(|_| TranslateError::Invalid {
+                    field: "scram iterations",
+                    detail: format!("{} exceeds i32", scram.iterations),
+                })?;
+            Ok(vec![KraftMetadataRecord::UserScramCredential(
+                UserScramCredentialRecord {
+                    name: scram.user.clone(),
+                    mechanism: scram_mechanism_to_wire(scram.mechanism)?,
+                    salt: bytes::Bytes::copy_from_slice(&scram.salt),
+                    stored_key: bytes::Bytes::copy_from_slice(&scram.stored_key),
+                    server_key: bytes::Bytes::copy_from_slice(&scram.server_key),
+                    iterations,
+                    ..Default::default()
+                },
+            )])
+        }
+        MetadataRecord::V1DeleteScramCredential(scram) => {
+            Ok(vec![KraftMetadataRecord::RemoveUserScramCredential(
+                RemoveUserScramCredentialRecord {
+                    name: scram.user.clone(),
+                    mechanism: scram_mechanism_to_wire(scram.mechanism)?,
+                    ..Default::default()
+                },
+            )])
+        }
+        _ => unreachable!("non-SCRAM record routed to scram_to_kraft"),
+    }
+}
+
+// exhaustive match over MetadataRecord
 fn to_kraft_iter(
     rec: &MetadataRecord,
     image: &MetadataImage,
@@ -476,48 +568,10 @@ fn to_kraft_iter(
                 },
             )]
         }
-        MetadataRecord::V1ScramCredential(s) => {
-            vec![KraftMetadataRecord::UserScramCredential(
-                UserScramCredentialRecord {
-                    name: s.user.clone(),
-                    mechanism: scram_mechanism_to_wire(s.mechanism)?,
-                    salt: bytes::Bytes::copy_from_slice(&s.salt),
-                    stored_key: bytes::Bytes::copy_from_slice(&s.stored_key),
-                    server_key: bytes::Bytes::copy_from_slice(&s.server_key),
-                    iterations: i32::try_from(s.iterations).map_err(|_| {
-                        TranslateError::Invalid {
-                            field: "scram iterations",
-                            detail: format!("{} exceeds i32", s.iterations),
-                        }
-                    })?,
-                    ..Default::default()
-                },
-            )]
+        MetadataRecord::V1ScramCredential(_) | MetadataRecord::V1DeleteScramCredential(_) => {
+            scram_to_kraft(rec)?
         }
-        MetadataRecord::V1DeleteScramCredential(s) => {
-            vec![KraftMetadataRecord::RemoveUserScramCredential(
-                RemoveUserScramCredentialRecord {
-                    name: s.user.clone(),
-                    mechanism: scram_mechanism_to_wire(s.mechanism)?,
-                    ..Default::default()
-                },
-            )]
-        }
-        MetadataRecord::V1AccessControlEntry(e) => {
-            vec![KraftMetadataRecord::AccessControlEntry(
-                AccessControlEntryRecord {
-                    id: acl_id(e),
-                    resource_type: resource_type_to_wire(e.resource_type),
-                    resource_name: e.resource_name.clone(),
-                    pattern_type: pattern_type_to_wire(e.pattern_type),
-                    principal: e.principal.clone(),
-                    host: e.host.clone(),
-                    operation: operation_to_wire(e.operation),
-                    permission_type: permission_to_wire(e.permission_type),
-                    ..Default::default()
-                },
-            )]
-        }
+        MetadataRecord::V1AccessControlEntry(entry) => vec![acl_to_kraft(entry)],
         MetadataRecord::V1ClientQuota(q) => {
             vec![KraftMetadataRecord::ClientQuota(client_quota_to_kraft(q))]
         }
@@ -569,55 +623,8 @@ fn to_kraft_iter(
                 ..Default::default()
             })]
         }
-        MetadataRecord::V1TopicConfig(c) => {
-            // Crabka's `V1TopicConfig` is whole-map authoritative; KIP-631 has
-            // only per-key `ConfigRecord`s. Diff the new map against the image's
-            // current overrides: emit a *set* for every key in the new map and a
-            // *tombstone* (`value: None`) for every key the new map drops. Empty
-            // new map + existing keys => all tombstones (a clear). The records
-            // apply in order against a live image (engine + snapshot), so the
-            // merged result reproduces the new map exactly.
-            let empty = std::collections::BTreeMap::new();
-            let old = image.topic_config(&c.topic).unwrap_or(&empty);
-            let mut out = Vec::with_capacity(c.overrides.len());
-            for (k, v) in &c.overrides {
-                out.push(KraftMetadataRecord::Config(ConfigRecord {
-                    resource_type: 2, // TOPIC
-                    resource_name: c.topic.clone(),
-                    name: k.clone(),
-                    value: Some(v.clone()),
-                    ..Default::default()
-                }));
-            }
-            for k in old.keys() {
-                if !c.overrides.contains_key(k) {
-                    out.push(KraftMetadataRecord::Config(ConfigRecord {
-                        resource_type: 2, // TOPIC
-                        resource_name: c.topic.clone(),
-                        name: k.clone(),
-                        ..Default::default()
-                    }));
-                }
-            }
-            out
-        }
-        MetadataRecord::V1DeleteAccessControlEntry(filter) => {
-            // KIP-631 deletes ACLs by id. Resolve the filter against the image
-            // to the concrete matching entries and emit one
-            // `RemoveAccessControlEntry{id}` per match (id = content-hash, the
-            // same id the add path stamped). A filter matching nothing yields no
-            // records (the original apply is a no-op anyway).
-            image
-                .all_acls()
-                .filter(|e| filter.matches(e))
-                .map(|e| {
-                    KraftMetadataRecord::RemoveAccessControlEntry(RemoveAccessControlEntryRecord {
-                        id: acl_id(e),
-                        ..Default::default()
-                    })
-                })
-                .collect()
-        }
+        MetadataRecord::V1TopicConfig(c) => topic_config_to_kraft(c, image),
+        MetadataRecord::V1DeleteAccessControlEntry(filter) => delete_acl_to_kraft(filter, image),
         // ----- records main's KIP-584/KIP-714 work added with no KIP-631 wire
         // counterpart yet: carry verbatim (wincode body) in an Unknown envelope
         // so Crabka-only logs/snapshots round-trip. They never reach a JVM peer
@@ -803,7 +810,7 @@ fn delegation_token_to_kraft(t: &DelegationTokenRecord) -> KDelegationTokenRecor
 /// topic id absent from `image`, [`TranslateError::NoCounterpart`] for
 /// records this layer does not model, and [`TranslateError::Invalid`] for
 /// out-of-range enum/hex values.
-#[allow(clippy::too_many_lines)] // exhaustive match over KraftMetadataRecord
+// exhaustive match over KraftMetadataRecord
 pub fn from_kraft(
     rec: &KraftMetadataRecord,
     image: &MetadataImage,
@@ -820,9 +827,7 @@ pub fn from_kraft(
         )),
         KraftMetadataRecord::UnregisterBroker(u) => {
             Ok(MetadataRecord::V1UnregisterBroker(UnregisterBrokerRecord {
-                // Kafka broker ids are non-negative by contract.
-                #[allow(clippy::cast_sign_loss)]
-                node_id: NodeId(u.broker_id as u64),
+                node_id: node_id_from_wire(u.broker_id, "unregister broker id")?,
             }))
         }
         KraftMetadataRecord::UserScramCredential(s) => {
@@ -917,9 +922,6 @@ fn kraft_variant_name(rec: &KraftMetadataRecord) -> &'static str {
     }
 }
 
-// Kafka broker ids are non-negative by contract, so the i32 -> u64
-// NodeId widen never loses a sign.
-#[allow(clippy::cast_sign_loss)]
 fn register_broker_from_kraft(
     b: &RegisterBrokerRecord,
 ) -> Result<BrokerRegistrationRecord, TranslateError> {
@@ -941,7 +943,7 @@ fn register_broker_from_kraft(
         })
         .collect::<Result<Vec<_>, TranslateError>>()?;
     Ok(BrokerRegistrationRecord {
-        node_id: NodeId(b.broker_id as u64),
+        node_id: node_id_from_wire(b.broker_id, "register broker id")?,
         broker_epoch: b.broker_epoch,
         incarnation_id: from_kuuid(b.incarnation_id),
         host,
@@ -970,30 +972,41 @@ fn topic_from_kraft(t: &KTopicRecord, image: &MetadataImage) -> TopicRecord {
     }
 }
 
-// Kafka replica/leader ids are non-negative by contract, so the i32 ->
-// u64 NodeId widen never loses a sign.
-#[allow(clippy::cast_sign_loss)]
 fn partition_from_kraft(
     p: &KPartitionRecord,
     image: &MetadataImage,
 ) -> Result<PartitionRecord, TranslateError> {
     let id = from_kuuid(p.topic_id);
     let topic = topic_name_for_id(image, id).ok_or(TranslateError::UnknownTopicId(id))?;
-    let cast = |v: &[i32]| -> Vec<NodeId> { v.iter().map(|n| NodeId(*n as u64)).collect() };
+    let nodes = |values: &[i32], field| {
+        values
+            .iter()
+            .map(|value| node_id_from_wire(*value, field))
+            .collect::<Result<Vec<_>, _>>()
+    };
     Ok(PartitionRecord {
         topic,
         partition: p.partition_id,
-        leader: NodeId(p.leader as u64),
-        replicas: cast(&p.replicas),
-        isr: cast(&p.isr),
+        leader: node_id_from_wire(p.leader, "partition leader")?,
+        replicas: nodes(&p.replicas, "partition replica")?,
+        isr: nodes(&p.isr, "partition ISR member")?,
         // Wire boundary: wrap the raw int32 leader epoch decoded off KRaft.
         leader_epoch: LeaderEpoch(p.leader_epoch),
         partition_epoch: p.partition_epoch,
-        adding_replicas: cast(&p.adding_replicas),
-        removing_replicas: cast(&p.removing_replicas),
+        adding_replicas: nodes(&p.adding_replicas, "adding replica")?,
+        removing_replicas: nodes(&p.removing_replicas, "removing replica")?,
         // KIP-858: per-replica log-directory assignment, present at KRaft v1+.
         directories: p.directories.iter().map(|u| from_kuuid(*u)).collect(),
     })
+}
+
+fn node_id_from_wire(value: i32, field: &'static str) -> Result<NodeId, TranslateError> {
+    u64::try_from(value)
+        .map(NodeId)
+        .map_err(|_| TranslateError::Invalid {
+            field,
+            detail: format!("{value} is negative"),
+        })
 }
 
 fn client_quota_from_kraft(q: &KClientQuotaRecord) -> ClientQuotaRecord {
@@ -1275,6 +1288,38 @@ mod tests {
             node_id: NodeId(42),
         });
         round_trip(&rec, &img());
+    }
+
+    #[test]
+    fn negative_wire_broker_id_is_rejected() {
+        let record = KraftMetadataRecord::UnregisterBroker(KUnregisterBrokerRecord {
+            broker_id: -1,
+            ..Default::default()
+        });
+
+        let error = from_kraft(&record, &img()).unwrap_err();
+        assert!(matches!(error, TranslateError::Invalid { .. }));
+    }
+
+    #[test]
+    fn negative_wire_partition_node_id_is_rejected() {
+        let mut image = img();
+        let topic_id = uuid::Uuid::from_u128(100);
+        image.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: "negative-node-test".into(),
+            topic_id,
+            partitions: 1,
+            replication_factor: 1,
+        }));
+        let record = KraftMetadataRecord::Partition(KPartitionRecord {
+            topic_id: to_kuuid(topic_id),
+            partition_id: 0,
+            leader: -1,
+            ..Default::default()
+        });
+
+        let error = from_kraft(&record, &image).unwrap_err();
+        assert!(matches!(error, TranslateError::Invalid { .. }));
     }
 
     #[test]

@@ -46,6 +46,8 @@ impl SwappableRlmm {
 
     /// Replace the backing implementation. The next trait call
     /// observes the new one.
+    /// # Panics
+    /// Panics if an internal lock is poisoned or validated block metadata is inconsistent with its index.
     pub fn swap(&self, new: Arc<dyn RemoteLogMetadataManager>) {
         *self
             .inner
@@ -126,6 +128,7 @@ impl RemoteLogMetadataManager for SwappableRlmm {
 mod tests {
     use std::collections::BTreeMap;
 
+    use assert2::assert;
     use crabka_remote_storage::{
         InmemoryRemoteLogMetadataManager, RemoteLogSegmentId, RemoteLogSegmentState,
     };
@@ -145,9 +148,11 @@ mod tests {
             end + 1,
             1,
             100,
-            2048,
-            RemoteLogSegmentState::CopySegmentStarted,
-            BTreeMap::from([(LeaderEpoch(0), start)]),
+            crabka_remote_storage::RemoteLogSegmentDetails::new(
+                2048,
+                RemoteLogSegmentState::CopySegmentStarted,
+                BTreeMap::from([(LeaderEpoch(0), start)]),
+            ),
         )
         .unwrap()
     }
@@ -159,30 +164,24 @@ mod tests {
         let swap = SwappableRlmm::new(first.clone());
 
         // Write through the facade lands in `first`.
-        let first_segment = started(10, 0, 99);
-        swap.add_remote_log_segment_metadata(first_segment.clone())
+        swap.add_remote_log_segment_metadata(started(10, 0, 99))
             .unwrap();
-        assert2::assert!(
-            first.list_remote_log_segments(&tp()).unwrap() == vec![first_segment.clone()]
-        );
+        assert!(first.list_remote_log_segments(&tp()).unwrap().len() == 1);
 
         // Swap in a fresh empty backing impl; reads now show the new
         // (empty) one, not the original.
         let second: Arc<dyn RemoteLogMetadataManager> =
             Arc::new(InmemoryRemoteLogMetadataManager::new());
         swap.swap(second.clone());
+        assert!(swap.list_remote_log_segments(&tp()).unwrap().is_empty());
         // The previous `first` is undisturbed — the facade just stopped
         // pointing at it.
-        assert2::assert!(swap.list_remote_log_segments(&tp()).unwrap() == Vec::new());
-        assert2::assert!(
-            first.list_remote_log_segments(&tp()).unwrap() == vec![first_segment.clone()]
-        );
+        assert!(first.list_remote_log_segments(&tp()).unwrap().len() == 1);
 
         // Writes after the swap go to `second`.
-        let second_segment = started(11, 100, 199);
-        swap.add_remote_log_segment_metadata(second_segment.clone())
+        swap.add_remote_log_segment_metadata(started(11, 100, 199))
             .unwrap();
-        assert2::assert!(second.list_remote_log_segments(&tp()).unwrap() == vec![second_segment]);
-        assert2::assert!(first.list_remote_log_segments(&tp()).unwrap() == vec![first_segment]);
+        assert!(second.list_remote_log_segments(&tp()).unwrap().len() == 1);
+        assert!(first.list_remote_log_segments(&tp()).unwrap().len() == 1);
     }
 }

@@ -22,6 +22,8 @@ const KNOWN_PRIMITIVE_TYPES: &[&str] = &[
     "uuid", "records",
 ];
 
+/// # Errors
+/// Returns an error when the schema model is invalid or generated Rust cannot be formatted or written.
 pub fn validate(specs: &[MessageSpec]) -> Result<(), ValidateError> {
     for spec in specs {
         let ctx = spec.name.clone();

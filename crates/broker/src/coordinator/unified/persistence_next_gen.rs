@@ -28,6 +28,8 @@ pub enum NextGenKey {
     CurrentMemberAssignment { group_id: String, member_id: String },
 }
 
+/// # Errors
+/// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
 pub fn parse_key(version: i16, mut buf: &[u8]) -> Result<NextGenKey, BrokerError> {
     let key = match version {
         KEY_GROUP_METADATA => NextGenKey::GroupMetadata {
@@ -104,13 +106,14 @@ pub struct GroupMetadataValue {
 
 impl GroupMetadataValue {
     #[must_use]
-    #[allow(clippy::trivially_copy_pass_by_ref)] // wire-encode API mirrors the other *Value::encode signatures
-    pub fn encode(&self) -> Bytes {
+    pub fn encode(self) -> Bytes {
         let mut buf = BytesMut::new();
         buf.put_i16(0);
         buf.put_i32(self.epoch);
         buf.freeze()
     }
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
     pub fn decode(mut buf: &[u8]) -> Result<Self, BrokerError> {
         let _v = get_i16(&mut buf)?;
         Ok(Self {
@@ -150,6 +153,8 @@ pub struct MemberMetadataValue {
 
 impl MemberMetadataValue {
     #[must_use]
+    /// # Panics
+    /// Panics if synchronized log state is poisoned or a segment previously validated as nonempty is unexpectedly missing its required batch or index entry.
     pub fn encode(&self) -> Bytes {
         let mut buf = BytesMut::new();
         buf.put_i16(0);
@@ -181,6 +186,10 @@ impl MemberMetadataValue {
         }
         buf.freeze()
     }
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
+    /// # Panics
+    /// Panics if synchronized log state is poisoned or a segment previously validated as nonempty is unexpectedly missing its required batch or index entry.
     pub fn decode(mut buf: &[u8]) -> Result<Self, BrokerError> {
         let _v = get_i16(&mut buf)?;
         let instance_id = get_nullable_string(&mut buf)?;
@@ -243,13 +252,14 @@ pub struct TargetAssignmentMetadataValue {
 
 impl TargetAssignmentMetadataValue {
     #[must_use]
-    #[allow(clippy::trivially_copy_pass_by_ref)] // wire-encode API mirrors the other *Value::encode signatures
-    pub fn encode(&self) -> Bytes {
+    pub fn encode(self) -> Bytes {
         let mut buf = BytesMut::new();
         buf.put_i16(0);
         buf.put_i32(self.assignment_epoch);
         buf.freeze()
     }
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
     pub fn decode(mut buf: &[u8]) -> Result<Self, BrokerError> {
         let _v = get_i16(&mut buf)?;
         Ok(Self {
@@ -271,6 +281,8 @@ pub struct TargetAssignmentMemberValue {
 
 impl TargetAssignmentMemberValue {
     #[must_use]
+    /// # Panics
+    /// Panics if synchronized log state is poisoned or a segment previously validated as nonempty is unexpectedly missing its required batch or index entry.
     pub fn encode(&self) -> Bytes {
         let mut buf = BytesMut::new();
         buf.put_i16(0);
@@ -286,6 +298,10 @@ impl TargetAssignmentMemberValue {
         }
         buf.freeze()
     }
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
+    /// # Panics
+    /// Panics if synchronized log state is poisoned or a segment previously validated as nonempty is unexpectedly missing its required batch or index entry.
     pub fn decode(mut buf: &[u8]) -> Result<Self, BrokerError> {
         let _v = get_i16(&mut buf)?;
         let n = get_i32(&mut buf)?;
@@ -324,6 +340,8 @@ pub enum MemberAssignmentState {
 }
 
 impl MemberAssignmentState {
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
     pub fn from_i8(v: i8) -> Result<Self, BrokerError> {
         match v {
             0 => Ok(Self::Stable),
@@ -357,6 +375,8 @@ impl CurrentMemberAssignmentValue {
         encode_topic_partitions(&mut buf, &self.partitions_pending_revocation);
         buf.freeze()
     }
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
     pub fn decode(mut buf: &[u8]) -> Result<Self, BrokerError> {
         let _v = get_i16(&mut buf)?;
         let member_epoch = get_i32(&mut buf)?;
@@ -422,13 +442,14 @@ fn decode_topic_partitions(buf: &mut &[u8]) -> Result<Vec<AssignedTopicPartition
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn group_metadata_value_roundtrip() {
         let v = GroupMetadataValue { epoch: 7 };
-        assert2::assert!(GroupMetadataValue::decode(&v.encode()).unwrap() == v);
+        assert!(GroupMetadataValue::decode(&v.encode()).unwrap() == v);
     }
 
     #[test]
@@ -444,7 +465,7 @@ mod tests {
             rebalance_timeout_ms: 60_000,
             classic: None,
         };
-        assert2::assert!(MemberMetadataValue::decode(&v.encode()).unwrap() == v);
+        assert!(MemberMetadataValue::decode(&v.encode()).unwrap() == v);
     }
 
     #[test]
@@ -463,7 +484,7 @@ mod tests {
             rebalance_timeout_ms: 60_000,
             classic: None,
         };
-        assert2::assert!(MemberMetadataValue::decode(&v.encode()).unwrap() == v);
+        assert!(MemberMetadataValue::decode(&v.encode()).unwrap() == v);
     }
 
     #[test]
@@ -471,7 +492,7 @@ mod tests {
         let v = TargetAssignmentMetadataValue {
             assignment_epoch: 12,
         };
-        assert2::assert!(TargetAssignmentMetadataValue::decode(&v.encode()).unwrap() == v);
+        assert!(TargetAssignmentMetadataValue::decode(&v.encode()).unwrap() == v);
     }
 
     #[test]
@@ -482,7 +503,7 @@ mod tests {
                 partitions: vec![0, 1, 2],
             }],
         };
-        assert2::assert!(TargetAssignmentMemberValue::decode(&v.encode()).unwrap() == v);
+        assert!(TargetAssignmentMemberValue::decode(&v.encode()).unwrap() == v);
     }
 
     #[test]
@@ -497,7 +518,7 @@ mod tests {
             }],
             partitions_pending_revocation: vec![],
         };
-        assert2::assert!(CurrentMemberAssignmentValue::decode(&v.encode()).unwrap() == v);
+        assert!(CurrentMemberAssignmentValue::decode(&v.encode()).unwrap() == v);
     }
 
     #[test]
@@ -519,16 +540,16 @@ mod tests {
             }),
         };
         let decoded = MemberMetadataValue::decode(&v.encode()).unwrap();
-        assert2::assert!(decoded == v);
+        assert!(decoded == v);
 
         let mut native = v.clone();
         native.classic = None;
-        assert2::assert!(MemberMetadataValue::decode(&native.encode()).unwrap() == native);
+        assert!(MemberMetadataValue::decode(&native.encode()).unwrap() == native);
     }
 
     #[test]
     fn unknown_key_version_rejected() {
-        assert2::assert!(parse_key(99, &[]).is_err());
+        assert!(parse_key(99, &[]).is_err());
     }
 
     #[test]
@@ -540,6 +561,6 @@ mod tests {
         let kb = encode_key(&k);
         let mut r = &kb[..];
         let v = bytes::Buf::get_i16(&mut r);
-        assert2::assert!(parse_key(v, r).unwrap() == k);
+        assert!(parse_key(v, r).unwrap() == k);
     }
 }

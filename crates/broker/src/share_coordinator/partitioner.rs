@@ -23,7 +23,7 @@ pub fn partition_for_share_key(
 
 #[cfg(test)]
 mod tests {
-
+    use assert2::assert;
     use uuid::Uuid;
 
     use super::*;
@@ -33,7 +33,7 @@ mod tests {
         let id = Uuid::from_bytes([5; 16]);
         let a = partition_for_share_key("g", &id, 0, 50);
         let b = partition_for_share_key("g", &id, 0, 50);
-        assert2::assert!(a == b);
+        assert!(a == b);
     }
 
     #[test]
@@ -44,7 +44,7 @@ mod tests {
         let p0 = partition_for_share_key("g", &id, 0, 50);
         let p1 = partition_for_share_key("g", &id, 1, 50);
         let pg = partition_for_share_key("h", &id, 0, 50);
-        assert2::assert!(p0 != p1 || p0 != pg);
+        assert!(p0 != p1 || p0 != pg);
     }
 
     #[test]
@@ -59,7 +59,10 @@ mod tests {
                 for p in [0, 7, 49, i32::MAX] {
                     for num in [1, 3, 50, 256] {
                         let idx = partition_for_share_key(g, &id, p, num);
-                        assert2::assert!((0..num).contains(&idx));
+                        assert!(
+                            (0..num).contains(&idx),
+                            "g={g:?} id={id} p={p} num={num} produced {idx}"
+                        );
                     }
                 }
             }

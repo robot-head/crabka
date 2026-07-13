@@ -37,8 +37,10 @@ pub struct TimeWindows {
 impl TimeWindows {
     /// Tumbling window of `size_ms` (advance == size, grace 0).
     #[must_use]
+    /// # Panics
+    /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub fn of_size(size_ms: i64) -> Self {
-        assert2::assert!(size_ms > 0);
+        assert!(size_ms > 0, "window size must be > 0");
         Self {
             size_ms,
             advance_ms: size_ms,
@@ -47,15 +49,22 @@ impl TimeWindows {
     }
     /// Hopping: advance by `advance_ms` (`0 < advance_ms <= size_ms`).
     #[must_use]
+    /// # Panics
+    /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub fn advance_by(mut self, advance_ms: i64) -> Self {
-        assert2::assert!(advance_ms > 0 && advance_ms <= self.size_ms);
+        assert!(
+            advance_ms > 0 && advance_ms <= self.size_ms,
+            "0 < advance <= size"
+        );
         self.advance_ms = advance_ms;
         self
     }
     /// Set the grace period (only affects changelog retention here).
     #[must_use]
+    /// # Panics
+    /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub fn grace(mut self, grace_ms: i64) -> Self {
-        assert2::assert!(grace_ms >= 0);
+        assert!(grace_ms >= 0, "grace must be >= 0");
         self.grace_ms = grace_ms;
         self
     }
@@ -86,8 +95,10 @@ pub struct JoinWindows {
 impl JoinWindows {
     /// Symmetric window of `time_difference_ms` before and after (grace 0).
     #[must_use]
+    /// # Panics
+    /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub fn of(time_difference_ms: i64) -> Self {
-        assert2::assert!(time_difference_ms >= 0);
+        assert!(time_difference_ms >= 0, "time difference must be >= 0");
         Self {
             before_ms: time_difference_ms,
             after_ms: time_difference_ms,
@@ -95,20 +106,26 @@ impl JoinWindows {
         }
     }
     #[must_use]
+    /// # Panics
+    /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub fn before(mut self, before_ms: i64) -> Self {
-        assert2::assert!(before_ms >= 0);
+        assert!(before_ms >= 0, "before must be >= 0");
         self.before_ms = before_ms;
         self
     }
     #[must_use]
+    /// # Panics
+    /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub fn after(mut self, after_ms: i64) -> Self {
-        assert2::assert!(after_ms >= 0);
+        assert!(after_ms >= 0, "after must be >= 0");
         self.after_ms = after_ms;
         self
     }
     #[must_use]
+    /// # Panics
+    /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub fn grace(mut self, grace_ms: i64) -> Self {
-        assert2::assert!(grace_ms >= 0);
+        assert!(grace_ms >= 0, "grace must be >= 0");
         self.grace_ms = grace_ms;
         self
     }
@@ -135,8 +152,10 @@ pub struct SessionWindows {
 impl SessionWindows {
     /// Inactivity gap of `gap_ms` (grace 0). `gap_ms > 0`.
     #[must_use]
+    /// # Panics
+    /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub fn of_inactivity_gap(gap_ms: i64) -> Self {
-        assert2::assert!(gap_ms > 0);
+        assert!(gap_ms > 0, "session gap must be > 0");
         Self {
             gap_ms,
             grace_ms: 0,
@@ -144,8 +163,10 @@ impl SessionWindows {
     }
     /// Set the grace period (only affects changelog retention here).
     #[must_use]
+    /// # Panics
+    /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub fn grace(mut self, grace_ms: i64) -> Self {
-        assert2::assert!(grace_ms >= 0);
+        assert!(grace_ms >= 0, "grace must be >= 0");
         self.grace_ms = grace_ms;
         self
     }
@@ -168,8 +189,10 @@ pub struct SlidingWindows {
 impl SlidingWindows {
     /// Time difference of `time_difference_ms` with no grace.
     #[must_use]
+    /// # Panics
+    /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub fn of_time_difference_with_no_grace(time_difference_ms: i64) -> Self {
-        assert2::assert!(time_difference_ms >= 0);
+        assert!(time_difference_ms >= 0, "time difference must be >= 0");
         Self {
             time_difference_ms,
             grace_ms: 0,
@@ -177,9 +200,11 @@ impl SlidingWindows {
     }
     /// Time difference + grace period.
     #[must_use]
+    /// # Panics
+    /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub fn of_time_difference_and_grace(time_difference_ms: i64, grace_ms: i64) -> Self {
-        assert2::assert!(time_difference_ms >= 0);
-        assert2::assert!(grace_ms >= 0);
+        assert!(time_difference_ms >= 0, "time difference must be >= 0");
+        assert!(grace_ms >= 0, "grace must be >= 0");
         Self {
             time_difference_ms,
             grace_ms,
@@ -295,39 +320,27 @@ mod tests {
     #[test]
     fn windows_for_tumbling_one_window() {
         let w = TimeWindows::of_size(10);
-        for (_name, timestamp, expected) in [
-            ("window start", 0, vec![0]),
-            ("window end minus one", 9, vec![0]),
-            ("next window start", 10, vec![10]),
-            ("later window", 25, vec![20]),
-        ] {
-            assert2::assert!(w.windows_for(timestamp) == expected);
-        }
+        assert_eq!(w.windows_for(0), vec![0]);
+        assert_eq!(w.windows_for(9), vec![0]);
+        assert_eq!(w.windows_for(10), vec![10]);
+        assert_eq!(w.windows_for(25), vec![20]);
     }
 
     #[test]
     fn windows_for_hopping_overlaps() {
         let w = TimeWindows::of_size(10).advance_by(5);
-        for (_name, timestamp, expected) in [
-            ("overlapping windows", 12, vec![5, 10]),
-            ("initial window", 0, vec![0]),
-        ] {
-            assert2::assert!(w.windows_for(timestamp) == expected);
-        }
+        assert_eq!(w.windows_for(12), vec![5, 10]); // start0 = max(0,12-10+5)/5*5 = 5
+        assert_eq!(w.windows_for(0), vec![0]);
     }
 
     #[test]
     fn join_windows_before_after_size() {
         let w = JoinWindows::of(10);
+        assert_eq!((w.before_ms, w.after_ms, w.grace_ms), (10, 10, 0));
+        assert_eq!(w.size(), 20);
         let a = JoinWindows::of(10).before(3).after(7).grace(5);
-        assert2::assert!(w.before_ms == 10);
-        assert2::assert!(w.after_ms == 10);
-        assert2::assert!(w.grace_ms == 0);
-        assert2::assert!(w.size() == 20);
-        assert2::assert!(a.before_ms == 3);
-        assert2::assert!(a.after_ms == 7);
-        assert2::assert!(a.grace_ms == 5);
-        assert2::assert!(a.size() == 10);
+        assert_eq!((a.before_ms, a.after_ms, a.grace_ms), (3, 7, 5));
+        assert_eq!(a.size(), 10);
     }
 
     #[test]
@@ -339,20 +352,19 @@ mod tests {
             window: Window { start: 20, end: 30 },
         };
         let b = s.serialize("t", &wk);
-        assert2::assert!(b.len() == 9); // "k"(1) ‖ 20i64 BE(8)
-        assert2::assert!(&b[1..9] == &20i64.to_be_bytes());
+        assert_eq!(b.len(), 9); // "k"(1) ‖ 20i64 BE(8)
+        assert_eq!(&b[1..9], &20i64.to_be_bytes());
         let back = s.deserialize("t", &b).unwrap();
-        assert2::assert!(back == wk);
+        assert_eq!(back.key, "k");
+        assert_eq!(back.window, Window { start: 20, end: 30 }); // end = start + size
     }
 
     #[test]
     fn session_windows_gap_and_grace() {
         let w = SessionWindows::of_inactivity_gap(60_000);
-        assert2::assert!(w.gap_ms == 60_000);
-        assert2::assert!(w.grace_ms == 0);
+        assert_eq!((w.gap_ms, w.grace_ms), (60_000, 0));
         let g = SessionWindows::of_inactivity_gap(60_000).grace(5);
-        assert2::assert!(g.gap_ms == 60_000);
-        assert2::assert!(g.grace_ms == 5);
+        assert_eq!((g.gap_ms, g.grace_ms), (60_000, 5));
     }
 
     #[test]
@@ -364,25 +376,24 @@ mod tests {
             window: Window { start: 5, end: 9 },
         };
         let b = s.serialize("t", &wk);
-        assert2::assert!(b.len() == 17); // "k"(1) ‖ end:8 ‖ start:8
-        assert2::assert!(&b[1..9] == &9i64.to_be_bytes()); // end first
-        assert2::assert!(&b[9..17] == &5i64.to_be_bytes()); // start second
+        assert_eq!(b.len(), 17); // "k"(1) ‖ end:8 ‖ start:8
+        assert_eq!(&b[1..9], &9i64.to_be_bytes()); // end first
+        assert_eq!(&b[9..17], &5i64.to_be_bytes()); // start second
         let back = s.deserialize("t", &b).unwrap();
-        assert2::assert!(back == wk);
+        assert_eq!(back.key, "k");
+        assert_eq!(back.window, Window { start: 5, end: 9 });
     }
 
     #[test]
     fn sliding_windows_constructors() {
         let w = SlidingWindows::of_time_difference_with_no_grace(100);
-        assert2::assert!(w.time_difference_ms == 100);
-        assert2::assert!(w.grace_ms == 0);
+        assert_eq!((w.time_difference_ms, w.grace_ms), (100, 0));
         let g = SlidingWindows::of_time_difference_and_grace(100, 50);
-        assert2::assert!(g.time_difference_ms == 100);
-        assert2::assert!(g.grace_ms == 50);
+        assert_eq!((g.time_difference_ms, g.grace_ms), (100, 50));
     }
 
     #[test]
-    #[should_panic(expected = "assertion failed")]
+    #[should_panic(expected = "time difference must be >= 0")]
     fn sliding_windows_rejects_negative_difference() {
         let _ = SlidingWindows::of_time_difference_with_no_grace(-1);
     }

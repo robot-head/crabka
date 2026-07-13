@@ -92,24 +92,41 @@ fn assert_decision(pre: &FailoverState, dead: NodeId, d: &FailoverDecision, uncl
             isr,
             unclean,
         } => {
-            assert2::assert!(*leader != dead);
-            assert2::assert!(pre.alive.contains(leader));
-            assert2::assert!(isr.contains(leader));
+            assert!(*leader != dead, "elected the dead broker {dead}");
+            assert!(
+                pre.alive.contains(leader),
+                "elected leader {leader} not alive"
+            );
+            assert!(
+                isr.contains(leader),
+                "elected leader {leader} not in new ISR {isr:?}"
+            );
             if *unclean {
-                assert2::assert!(unclean_enabled);
+                assert!(unclean_enabled, "unclean election without unclean_enabled");
             } else {
                 // Clean election: the new leader was in the pre-failover ISR, so
                 // it holds every committed record. No data loss.
-                assert2::assert!(pre.isr.contains(leader));
+                assert!(
+                    pre.isr.contains(leader),
+                    "clean election picked {leader} not in pre-failover ISR {:?} (data loss!)",
+                    pre.isr
+                );
             }
         }
         FailoverDecision::ShrinkIsr { isr } => {
-            assert2::assert!(isr.iter().all(|n| pre.isr.contains(n)));
-            assert2::assert!(isr.len() < pre.isr.len());
+            assert!(
+                isr.iter().all(|n| pre.isr.contains(n)),
+                "shrink introduced a non-member: {isr:?} vs {:?}",
+                pre.isr
+            );
+            assert!(isr.len() < pre.isr.len(), "ShrinkIsr did not shrink");
         }
         FailoverDecision::Recover(s) => {
-            assert2::assert!(*s != RecoveryStrategy::None);
-            assert2::assert!(pre.leader == dead);
+            assert!(*s != RecoveryStrategy::None, "Recover with strategy None");
+            assert!(
+                pre.leader == dead,
+                "Recover when the dead broker was not leader"
+            );
         }
         FailoverDecision::Unavailable | FailoverDecision::NoChange => {}
     }
@@ -229,8 +246,14 @@ fn run_failover(model: FailoverModel, label: &str) {
         checker.state_count(),
         checker.max_depth()
     );
-    assert2::assert!(checker.max_depth() < MAX_DEPTH);
-    assert2::assert!(checker.state_count() < MAX_STATES);
+    assert!(
+        checker.max_depth() < MAX_DEPTH,
+        "[{label}] hit depth cap {MAX_DEPTH}: depth-truncated, not exhaustive"
+    );
+    assert!(
+        checker.state_count() < MAX_STATES,
+        "[{label}] hit state cap {MAX_STATES}: truncated, not exhaustive"
+    );
     checker.assert_properties();
 }
 
@@ -447,8 +470,14 @@ fn run_recovery(model: RecoveryModel, label: &str) {
         checker.state_count(),
         checker.max_depth()
     );
-    assert2::assert!(checker.max_depth() < MAX_DEPTH);
-    assert2::assert!(checker.state_count() < MAX_STATES);
+    assert!(
+        checker.max_depth() < MAX_DEPTH,
+        "[{label}] hit depth cap {MAX_DEPTH}: depth-truncated, not exhaustive"
+    );
+    assert!(
+        checker.state_count() < MAX_STATES,
+        "[{label}] hit state cap {MAX_STATES}: truncated, not exhaustive"
+    );
     checker.assert_properties();
 }
 

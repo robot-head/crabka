@@ -150,6 +150,8 @@ impl AdminClient {
     /// `salted_password` (PBKDF2-HMAC-SHA-512) client-side via
     /// `crabka_security::pbkdf2_salted`. The broker never sees the raw
     /// password.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn alter_user_scram_credentials_sha512(
         &mut self,
         upsertions: &[ScramUpsertion],
@@ -187,6 +189,8 @@ impl AdminClient {
     /// resource-grouped on the wire (one block per `(resource_type,
     /// resource_name, pattern_type)`); we flatten back into `AclEntry`
     /// rows for diffing.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn describe_acls(
         &mut self,
         filter: &AclEntryFilter,
@@ -203,6 +207,8 @@ impl AdminClient {
         parse_describe_acls(resp)
     }
 
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn describe_user_scram_credentials(
         &mut self,
         users: Option<&[String]>,
@@ -225,6 +231,8 @@ impl AdminClient {
     }
 
     /// Create the supplied ACLs.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn create_acls(
         &mut self,
         creations: &[AclEntry],
@@ -246,6 +254,8 @@ impl AdminClient {
     /// Delete every ACL matching any of `filters`. Each filter's
     /// response surfaces the matched ACL set so callers can confirm
     /// the deletion converged on the expected rows.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn delete_acls(
         &mut self,
         filters: &[AclEntryFilter],

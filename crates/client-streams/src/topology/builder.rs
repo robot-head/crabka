@@ -546,15 +546,13 @@ impl Topology {
     /// `end = start + window_size_ms` (the store-key bytes hold only the start).
     /// For sliding windows this is `timeDifferenceMs` (1×), NOT the retention
     /// span.
-    #[allow(clippy::too_many_arguments)] // size_ms (retention basis) + window_size_ms (key-end) are distinct
+    // size_ms (retention basis) + window_size_ms (key-end) are distinct
     pub fn add_window_store<K, V, KS, VS>(
         &mut self,
         name: impl Into<String>,
         key_serde: KS,
         value_serde: VS,
-        size_ms: i64,
-        window_size_ms: i64,
-        grace_ms: i64,
+        window: (i64, i64, i64),
         processors: impl IntoIterator<Item = impl Into<String>>,
     ) -> &mut Self
     where
@@ -563,6 +561,7 @@ impl Topology {
         KS: Serde<K> + Clone,
         VS: Serde<V> + Clone,
     {
+        let (size_ms, window_size_ms, grace_ms) = window;
         let name: String = name.into();
         // windowstore.changelog.additional.retention.ms default = 1 day (86_400_000 ms)
         let retention_ms = size_ms + grace_ms + 86_400_000;
@@ -604,15 +603,13 @@ impl Topology {
     /// not applicable because the store retains duplicates.
     ///
     /// [`add_window_store`]: Topology::add_window_store
-    #[allow(clippy::too_many_arguments)] // mirrors add_window_store + extra before_ms/after_ms split
+    // mirrors add_window_store + extra before_ms/after_ms split
     pub fn add_join_window_store<K, V, KS, VS>(
         &mut self,
         name: impl Into<String>,
         key_serde: KS,
         value_serde: VS,
-        before_ms: i64,
-        after_ms: i64,
-        grace_ms: i64,
+        window: (i64, i64, i64),
         processors: impl IntoIterator<Item = impl Into<String>>,
     ) -> &mut Self
     where
@@ -621,6 +618,7 @@ impl Topology {
         KS: Serde<K> + Clone,
         VS: Serde<V> + Clone,
     {
+        let (before_ms, after_ms, grace_ms) = window;
         let name: String = name.into();
         // windowstore.changelog.additional.retention.ms default = 1 day (86_400_000 ms)
         let retention_ms = before_ms + after_ms + grace_ms + 86_400_000;
@@ -1159,6 +1157,8 @@ impl Topology {
     /// [`NodeHandle`] wiring, so `build()` only checks structural invariants
     /// (no duplicate names, every predecessor exists, at least one source). The
     /// wire `Topology` is byte-identical to the untyped implementation.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub fn build<S: Into<String>>(
         mut self,
         application_id: S,
@@ -1632,12 +1632,8 @@ mod tests {
         t.add_copartition_group(["left", "right"]);
         let wire = t.build("app").unwrap().to_wire();
         let sub = &wire.subtopologies[0];
-        check!(
-            (
-                sub.copartition_groups.len(),
-                sub.copartition_groups[0].source_topics.as_slice()
-            ) == (1, &[0i16, 1][..])
-        );
+        check!(sub.copartition_groups.len() == 1);
+        check!(sub.copartition_groups[0].source_topics == vec![0i16, 1i16]); // sorted ["left","right"]
     }
 
     #[test]
@@ -1661,13 +1657,9 @@ mod tests {
         check!(t.has_global_store_for_test("global-store"));
         let built = t.build("app").unwrap();
         let wire = built.to_wire();
-        check!(
-            (
-                wire.subtopologies.len(),
-                wire.subtopologies[0].subtopology_id.as_str(),
-                wire.subtopologies[0].source_topics.as_slice(),
-            ) == (1, "1", &["in".to_string()][..])
-        );
+        check!(wire.subtopologies.len() == 1);
+        check!(wire.subtopologies[0].subtopology_id == "1");
+        check!(wire.subtopologies[0].source_topics == vec!["in".to_string()]);
         // No changelog topic anywhere.
         check!(
             wire.subtopologies
@@ -1702,13 +1694,9 @@ mod tests {
         t.add_sink("out", "out-topic", [&up]);
         let built = t.build("app").unwrap();
         let wire = built.to_wire();
-        check!(
-            (
-                wire.epoch,
-                wire.subtopologies[0].subtopology_id.as_str(),
-                wire.subtopologies[0].source_topics.as_slice(),
-            ) == (0, "0", &["in".to_string()][..])
-        );
+        check!(wire.epoch == 0);
+        check!(wire.subtopologies[0].subtopology_id == "0");
+        check!(wire.subtopologies[0].source_topics == vec!["in".to_string()]);
         check!(built.source_topics_for("0") == ["in".to_string()]);
     }
 
@@ -1777,10 +1765,8 @@ mod tests {
         .unwrap();
         pollster::block_on(g.pipe("in", Some(b"k"), b"hi", 0)).unwrap();
         let out = g.take_output();
-        check!(
-            (out.len(), out[0].value.as_ref().map(bytes::Bytes::as_ref))
-                == (1, Some(b"HI".as_slice()))
-        );
+        check!(out.len() == 1);
+        check!(out[0].value.as_ref().unwrap().as_ref() == b"HI");
     }
 
     #[test]
@@ -2035,7 +2021,8 @@ mod tests {
             1024,
         ))
         .unwrap();
-        check!((g.cache_owner.get("counts"), g.stores.kv_is_cached("counts")) == (Some(&0), true));
+        check!(g.cache_owner.get("counts") == Some(&0));
+        check!(g.stores.kv_is_cached("counts"));
 
         // Pipe two records for the SAME key, then flush: a cached store dedups the
         // two staged writes into ONE changelog entry. (Without caching the store
@@ -2049,15 +2036,9 @@ mod tests {
         );
         pollster::block_on(g.flush_caches()).unwrap();
         let cl = g.drain_changelogs(&std::collections::HashSet::new());
+        check!(cl.len() == 1); // deduped to the latest count (2)
         // tuple is (changelog_topic, key, value, ts); value is the BE i64 count.
-        check!(
-            cl == vec![(
-                "app-counts-changelog".to_string(),
-                bytes::Bytes::from_static(b"x"),
-                Some(bytes::Bytes::copy_from_slice(&2i64.to_be_bytes())),
-                None,
-            )]
-        ); // deduped to the latest count (2)
+        check!(cl[0].2.as_ref().unwrap().as_ref() == [0, 0, 0, 0, 0, 0, 0, 2]);
     }
 
     #[test]
@@ -2072,7 +2053,8 @@ mod tests {
             0,
         ))
         .unwrap();
-        check!((g.cache_owner.is_empty(), g.stores.kv_is_cached("counts")) == (true, false));
+        check!(g.cache_owner.is_empty());
+        check!(!g.stores.kv_is_cached("counts"));
 
         pollster::block_on(g.pipe("in", None, b"x", 0)).unwrap();
         pollster::block_on(g.pipe("in", None, b"x", 1)).unwrap();
@@ -2092,7 +2074,8 @@ mod tests {
             1024,
         ))
         .unwrap();
-        check!((g.cache_owner.is_empty(), g.stores.kv_is_cached("counts")) == (true, false));
+        check!(g.cache_owner.is_empty());
+        check!(!g.stores.kv_is_cached("counts"));
     }
 
     #[test]
@@ -2111,14 +2094,13 @@ mod tests {
         t.add_sink("out", "out-topic", [&proc]);
         let wire = t.build("app").unwrap().to_wire();
         let blob = serde_json::to_value(&wire).unwrap().to_string();
+        check!(blob.contains("vstore"), "changelog topic name not in wire");
+        check!(
+            blob.contains("min.compaction.lag.ms"),
+            "min.compaction.lag.ms key not in wire"
+        );
         // history_retention_ms=600_000 → min_compaction_lag_ms = 600_000 + 86_400_000 = 87_000_000
-        for (name, fragment) in [
-            ("changelog topic name", "vstore"),
-            ("compaction-lag config key", "min.compaction.lag.ms"),
-            ("retention-derived lag value", "87000000"),
-        ] {
-            check!(blob.contains(fragment), "case {name}");
-        }
+        check!(blob.contains("87000000"), "lag value not in wire");
     }
 
     #[tokio::test]
@@ -2148,7 +2130,7 @@ mod tests {
         const D: i64 = 10;
         let mut t = Topology::new();
         // size_ms = 2*D (retention basis), window_size_ms = D (true window size).
-        t.add_window_store::<String, i64, _, _>("sw", StringSerde, I64Serde, D * 2, D, 0, ["p"]);
+        t.add_window_store::<String, i64, _, _>("sw", StringSerde, I64Serde, (D * 2, D, 0), ["p"]);
 
         // Pull the registered factory and instantiate the store over a fresh backend.
         let (_changelog, factory) = t.store_factories.get("sw").expect("factory registered");
@@ -2173,6 +2155,7 @@ mod tests {
 
         let mut buffer = std::collections::VecDeque::new();
         store.flush_cache_into(&mut buffer, &[0]).await;
+        assert_eq!(buffer.len(), 1);
         let (_child, rec) = &buffer[0];
         let key = rec
             .key
@@ -2180,14 +2163,10 @@ mod tests {
             .unwrap()
             .downcast_ref::<Windowed<String>>()
             .unwrap();
+        assert_eq!(key.key, "a");
+        // end == start + window_size (D), NOT start + retention basis (2*D).
+        assert_eq!(key.window, Window { start: 0, end: D });
         let change = rec.value.downcast_ref::<Change<i64>>().unwrap();
-        assert2::assert!(buffer.len() == 1);
-        assert2::assert!(
-            key == &Windowed {
-                key: "a".to_string(),
-                window: Window { start: 0, end: D },
-            }
-        );
-        assert2::assert!(change.new == Some(1));
+        assert_eq!(change.new, Some(1));
     }
 }

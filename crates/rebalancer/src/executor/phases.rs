@@ -59,6 +59,8 @@ pub enum PhaseError {
 
 /// Apply throttle: one `IncrementalAlterConfigs` request with all four
 /// KIP-73 keys SET to the target values.
+/// # Errors
+/// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub async fn apply_throttle(
     client: &(impl ClientFacade + ?Sized),
     targets: &ThrottleTargets,
@@ -72,6 +74,8 @@ pub async fn apply_throttle(
 /// Clear throttle: one `IncrementalAlterConfigs` request with all four
 /// KIP-73 keys DELETED on the same resources. Idempotent — safe to
 /// re-run.
+/// # Errors
+/// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub async fn clear_throttle(
     client: &(impl ClientFacade + ?Sized),
     targets: &ThrottleTargets,
@@ -82,6 +86,8 @@ pub async fn clear_throttle(
 }
 
 /// Submit a movement plan, chunked at `batch_size`.
+/// # Errors
+/// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub async fn submit_movements(
     client: &(impl ClientFacade + ?Sized),
     movements: &[Movement],
@@ -154,6 +160,8 @@ pub mod tests {
             Self::default()
         }
 
+        /// # Panics
+        /// Panics if the test call log mutex is poisoned.
         pub fn calls(&self) -> Vec<MockCall> {
             self.calls.lock().unwrap().clone()
         }

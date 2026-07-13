@@ -15,6 +15,8 @@ use crate::{
 /// covering all active schemas).
 /// If `has_common` is true, a `pub mod common;` entry is also emitted.
 #[must_use]
+/// # Panics
+/// Panics if the validated schema model cannot be represented as the expected Rust syntax tree.
 pub fn emit(
     specs: &[&MessageSpec],
     flavor: Flavor,
@@ -59,6 +61,7 @@ pub fn emit(
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
 
     use super::*;
     use crate::ir::{MessageSpec, MessageType, VersionRange};
@@ -91,8 +94,8 @@ mod tests {
         let api_pos = out.find("pub mod api_versions_request").unwrap();
         let meta_pos = out.find("pub mod metadata_request").unwrap();
         let prod_pos = out.find("pub mod produce_request").unwrap();
-        assert2::assert!(api_pos < meta_pos);
-        assert2::assert!(meta_pos < prod_pos);
+        assert!(api_pos < meta_pos, "api before metadata");
+        assert!(meta_pos < prod_pos, "metadata before produce");
     }
 
     #[test]
@@ -103,8 +106,8 @@ mod tests {
         ];
         let refs: Vec<&MessageSpec> = specs.iter().collect();
         let out = emit(&refs, Flavor::Owned, "test-sha", false);
-        assert2::assert!(out.contains("pub mod active_request"));
-        assert2::assert!(!out.contains("pub mod removed_request"));
+        assert!(out.contains("pub mod active_request"));
+        assert!(!out.contains("pub mod removed_request"));
     }
 
     #[test]
@@ -113,6 +116,6 @@ mod tests {
         let out = emit(&refs, Flavor::Borrowed, "sha123", false);
         // Output now uses `#![doc = "..."]` form instead of `//! ...` comment,
         // so we check for the doc text itself rather than the `//!` prefix.
-        assert2::assert!(out.contains("Borrowed-flavor generated message types."));
+        assert!(out.contains("Borrowed-flavor generated message types."));
     }
 }

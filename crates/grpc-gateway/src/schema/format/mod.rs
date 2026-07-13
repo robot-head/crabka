@@ -4,8 +4,6 @@
 //! the gateway codec needs; each dispatches to the appropriate sub-module
 //! based on the [`SchemaFormat`].
 
-#![allow(clippy::todo, unused_variables)]
-
 pub mod avro;
 pub mod json;
 pub mod protobuf;
@@ -18,6 +16,8 @@ use crate::codec::{CodecError, SchemaFormat};
 /// using `schema` as the schema descriptor.
 ///
 /// Returns the serialized bytes ready for Confluent framing.
+/// # Errors
+/// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
 pub fn serialize(fmt: SchemaFormat, schema: &str, json: &[u8]) -> Result<Bytes, CodecError> {
     match fmt {
         SchemaFormat::Avro => avro::serialize(schema, json),
@@ -30,6 +30,8 @@ pub fn serialize(fmt: SchemaFormat, schema: &str, json: &[u8]) -> Result<Bytes, 
 /// value using `schema` as the schema descriptor.
 ///
 /// Returns the JSON bytes.
+/// # Errors
+/// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
 pub fn deserialize(fmt: SchemaFormat, schema: &str, payload: &[u8]) -> Result<Bytes, CodecError> {
     match fmt {
         SchemaFormat::Avro => avro::deserialize(schema, payload),
@@ -41,6 +43,8 @@ pub fn deserialize(fmt: SchemaFormat, schema: &str, payload: &[u8]) -> Result<By
 /// Validate that `json` is a valid instance of `schema` in `fmt`.
 ///
 /// Returns `Ok(())` on success, [`CodecError::Validate`] on failure.
+/// # Errors
+/// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
 pub fn validate(fmt: SchemaFormat, schema: &str, json: &[u8]) -> Result<(), CodecError> {
     match fmt {
         SchemaFormat::Avro => avro::validate(schema, json),

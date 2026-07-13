@@ -109,12 +109,11 @@ impl<K: 'static, V: 'static> JoinGraceBufferStore<K, V> {
 
     /// Buffer a stream record `(key, value)` at `ts`. Always appends a NEW entry
     /// (no replace-by-key): a stream is not a changelog.
-    // async to mirror the suppress store's `put` (trait-async there); the
-    // grace-flush processor awaits it like every other store op.
-    #[allow(clippy::unused_async)]
-    pub async fn put(&mut self, key: K, value: V, ts: i64) {
+    pub fn put(&mut self, key: K, value: V, ts: i64) -> std::future::Ready<()> {
         let kb = self.key_serde.serialize(&self.changelog_topic, &key);
         let vb = self.value_serde.serialize(&self.changelog_topic, &value);
+        drop(key);
+        drop(value);
         let id = (ts, self.seq);
         self.seq = self.seq.wrapping_add(1);
         if self.logging {
@@ -122,12 +121,12 @@ impl<K: 'static, V: 'static> JoinGraceBufferStore<K, V> {
                 .push((encode_id(id), Some(encode_payload(&kb, &vb))));
         }
         self.buffer.insert(id, (kb, vb));
+        std::future::ready(())
     }
 
     /// Pop every entry with `ts <= threshold`, in ascending `(ts, seq)` order, as
     /// `(key, value, ts)`. Logs a tombstone per popped entry (if logging).
-    #[allow(clippy::unused_async)]
-    pub async fn drain_due(&mut self, threshold: i64) -> Vec<(K, V, i64)> {
+    pub fn drain_due(&mut self, threshold: i64) -> std::future::Ready<Vec<(K, V, i64)>> {
         let ids: Vec<(i64, u32)> = self
             .buffer
             .range(..=(threshold, u32::MAX))
@@ -149,7 +148,7 @@ impl<K: 'static, V: 'static> JoinGraceBufferStore<K, V> {
                 .expect("grace buffer value deserialize");
             out.push((key, value, id.0));
         }
-        out
+        std::future::ready(out)
     }
 
     /// Number of buffered records.
@@ -228,9 +227,9 @@ mod tests {
         s.put("a".into(), 1, 100).await; // out-of-order, same key
         s.put("b".into(), 3, 150).await;
         let due = s.drain_due(150).await; // everything ts <= 150, ascending (ts, seq)
-        assert2::assert!(due == vec![("a".into(), 1, 100), ("b".into(), 3, 150)]);
+        assert_eq!(due, vec![("a".into(), 1, 100), ("b".into(), 3, 150)]);
         let rest = s.drain_due(i64::MAX).await; // remaining ts=200
-        assert2::assert!(rest == vec![("a".into(), 2, 200)]);
+        assert_eq!(rest, vec![("a".into(), 2, 200)]);
     }
 
     #[tokio::test]
@@ -261,10 +260,12 @@ mod tests {
         s.put("a".into(), 1, 100).await;
         s.put("b".into(), 2, 200).await;
         let cl = s.take_changelog();
-        check!((cl.len(), cl.iter().all(|(_, v)| v.is_some())) == (2, true));
+        check!(cl.len() == 2);
+        check!(cl.iter().all(|(_, v)| v.is_some()));
         let _ = s.drain_due(100).await;
         let cl = s.take_changelog();
-        check!((cl.len(), cl[0].1.is_none()) == (1, true));
+        check!(cl.len() == 1);
+        check!(cl[0].1.is_none());
     }
 
     #[tokio::test]

@@ -86,13 +86,17 @@ fn new_str_list_list() -> ListBuilder<ListBuilder<StringBuilder>> {
     ListBuilder::new(new_str_list())
 }
 
-/// Encode rows into a record batch matching [`span_block_schema`].
+/// Encode rows into a record batch matching the canonical span-block schema.
+/// # Errors
+/// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
 pub fn encode_span_rows(rows: &[SpanRow]) -> Result<RecordBatch> {
     encode_span_rows_with_promoted_attrs(rows, &[])
 }
 
 /// Encode rows into a record batch with configured attribute columns promoted
 /// out of the generic attribute lists.
+/// # Errors
+/// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
 pub fn encode_span_rows_with_promoted_attrs(
     rows: &[SpanRow],
     promoted_attrs: &[PromotedSpanAttr],

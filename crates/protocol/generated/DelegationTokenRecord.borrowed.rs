@@ -11,7 +11,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 0;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -26,6 +27,10 @@ pub struct DelegationTokenRecord<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl DelegationTokenRecord<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::delegation_token_record::DelegationTokenRecord {
         crate::owned::delegation_token_record::DelegationTokenRecord {
             owner: (self.owner).to_string(),
@@ -52,16 +57,16 @@ impl Encode for DelegationTokenRecord<'_> {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.owner);
+                let () = put_compact_string(buf, self.owner);
             } else {
-                put_string(buf, self.owner);
+                let () = put_string(buf, self.owner);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.requester);
+                let () = put_compact_string(buf, self.requester);
             } else {
-                put_string(buf, self.requester);
+                let () = put_string(buf, self.requester);
             }
         }
         if version >= 0 {
@@ -69,9 +74,9 @@ impl Encode for DelegationTokenRecord<'_> {
                 crate::primitives::array::put_array_len(buf, (self.renewers).len(), flex);
                 for it in &self.renewers {
                     if flex {
-                        put_compact_string(buf, it);
+                        let () = put_compact_string(buf, it);
                     } else {
-                        put_string(buf, it);
+                        let () = put_string(buf, it);
                     }
                 }
             }
@@ -87,9 +92,9 @@ impl Encode for DelegationTokenRecord<'_> {
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.token_id);
+                let () = put_compact_string(buf, self.token_id);
             } else {
-                put_string(buf, self.token_id);
+                let () = put_string(buf, self.token_id);
             }
         }
         if flex {

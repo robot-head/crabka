@@ -89,6 +89,8 @@ impl DedupEngine {
     /// the partition's transactional producer and writes the data record +
     /// claim atomically, then updates the local map.
     #[tracing::instrument(skip_all)]
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn dedup_produce(
         &self,
         rec: &GatewayRecord,

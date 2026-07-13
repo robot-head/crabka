@@ -15,7 +15,8 @@ pub const MIN_VERSION: i16 = 1;
 pub const MAX_VERSION: i16 = 5;
 pub const FLEXIBLE_MIN: i16 = 2;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -149,7 +150,7 @@ impl Default for DescribeLogDirsResult {
             total_bytes: -1i64,
             usable_bytes: -1i64,
             is_cordoned: false,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
@@ -161,9 +162,9 @@ impl Encode for DescribeLogDirsResult {
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.log_dir);
+                let () = put_compact_string(buf, &self.log_dir);
             } else {
-                put_string(buf, &self.log_dir);
+                let () = put_string(buf, &self.log_dir);
             }
         }
         if version >= 0 {
@@ -302,9 +303,9 @@ impl Encode for DescribeLogDirsTopic {
         let flex = version >= 2;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.name);
+                let () = put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name);
+                let () = put_string(buf, &self.name);
             }
         }
         if version >= 0 {

@@ -12,7 +12,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 0;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -22,6 +23,9 @@ pub struct EnvelopeResponse<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl EnvelopeResponse<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
     pub fn to_owned(&self) -> crate::owned::envelope_response::EnvelopeResponse {
         crate::owned::envelope_response::EnvelopeResponse {
             response_data: (self.response_data).map(Bytes::copy_from_slice),
@@ -41,9 +45,9 @@ impl Encode for EnvelopeResponse<'_> {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_nullable_bytes(buf, self.response_data);
+                let () = put_compact_nullable_bytes(buf, self.response_data);
             } else {
-                put_nullable_bytes(buf, self.response_data);
+                let () = put_nullable_bytes(buf, self.response_data);
             }
         }
         if version >= 0 {

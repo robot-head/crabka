@@ -15,6 +15,10 @@ pub struct TaskOffset<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl TaskOffset<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::common::streams_group_heartbeat_request::task_offset::TaskOffset {
@@ -31,9 +35,9 @@ impl Encode for TaskOffset<'_> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.subtopology_id);
+                let () = put_compact_string(buf, self.subtopology_id);
             } else {
-                put_string(buf, self.subtopology_id);
+                let () = put_string(buf, self.subtopology_id);
             }
         }
         if version >= 0 {

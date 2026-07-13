@@ -16,6 +16,10 @@ pub struct TopicInfo<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl TopicInfo<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::common::streams_group_heartbeat_request::topic_info::TopicInfo {
@@ -36,9 +40,9 @@ impl Encode for TopicInfo<'_> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name);
+                let () = put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name);
+                let () = put_string(buf, self.name);
             }
         }
         if version >= 0 {

@@ -33,6 +33,8 @@ struct Forwarding {
 
 impl ProduceCore {
     /// Build a plain idempotent producer (`acks=all`, no transactional id).
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn new(
         bootstrap: &str,
         client_id: &str,
@@ -58,6 +60,9 @@ impl ProduceCore {
     /// Build a non-idempotent producer for unit tests that don't need a real
     /// broker. The producer will fail at first send (no bootstrap available),
     /// but route-layer tests that short-circuit before producing can use this.
+    ///
+    /// # Errors
+    /// Returns an error if the test producer cannot be configured.
     #[cfg(test)]
     pub async fn new_for_test(
         bootstrap: &str,
@@ -113,6 +118,10 @@ impl ProduceCore {
     /// routing table); everything else is produced locally. `principal` is the
     /// resolved caller identity, relayed on a forward so the owning replica can
     /// re-authorize the original caller (it is unused on the local path).
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
+    /// # Panics
+    /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub async fn produce(
         &self,
         rec: GatewayRecord,
@@ -148,6 +157,8 @@ impl ProduceCore {
     /// Local produce (NO forwarding): keyed → dedup engine (owner/warm gate),
     /// unkeyed → plain idempotent producer. Used by the public path when this
     /// replica owns the key, and by the internal forward endpoint.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn produce_local(&self, rec: GatewayRecord) -> Result<RecordOutcome, GatewayError> {
         let value = self
             .codec

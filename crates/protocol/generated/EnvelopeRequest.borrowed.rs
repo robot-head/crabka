@@ -14,7 +14,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 0;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -25,6 +26,9 @@ pub struct EnvelopeRequest<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl EnvelopeRequest<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
     pub fn to_owned(&self) -> crate::owned::envelope_request::EnvelopeRequest {
         crate::owned::envelope_request::EnvelopeRequest {
             request_data: Bytes::copy_from_slice(self.request_data),
@@ -45,23 +49,23 @@ impl Encode for EnvelopeRequest<'_> {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_bytes(buf, self.request_data);
+                let () = put_compact_bytes(buf, self.request_data);
             } else {
-                put_bytes(buf, self.request_data);
+                let () = put_bytes(buf, self.request_data);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_bytes(buf, self.request_principal);
+                let () = put_compact_nullable_bytes(buf, self.request_principal);
             } else {
-                put_nullable_bytes(buf, self.request_principal);
+                let () = put_nullable_bytes(buf, self.request_principal);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_bytes(buf, self.client_host_address);
+                let () = put_compact_bytes(buf, self.client_host_address);
             } else {
-                put_bytes(buf, self.client_host_address);
+                let () = put_bytes(buf, self.client_host_address);
             }
         }
         if flex {

@@ -298,21 +298,25 @@ mod tests {
         c.put(key(b"bb"), entry(b"22"));
         c.put(key(b"ccc"), entry(b"333"));
 
+        assert_eq!(c.len(), 3);
+        assert_eq!(
+            c.get(&key(b"a")).unwrap().value,
+            Some(Bytes::from_static(b"1"))
+        );
+        assert_eq!(
+            c.get(&key(b"bb")).unwrap().value,
+            Some(Bytes::from_static(b"22"))
+        );
+        assert_eq!(
+            c.get(&key(b"ccc")).unwrap().value,
+            Some(Bytes::from_static(b"333"))
+        );
+
         // size = sum(key.len + value_size); value_size = v + 8+8+4 + topic("t"=1)
         // a:  1 + (1 + 21) = 23
         // bb: 2 + (2 + 21) = 25
         // ccc:3 + (3 + 21) = 27
-        assert2::assert!(c.len() == 3);
-        assert2::assert!(
-            c.get(&key(b"a")).unwrap().value.clone() == Some(Bytes::from_static(b"1"))
-        );
-        assert2::assert!(
-            c.get(&key(b"bb")).unwrap().value.clone() == Some(Bytes::from_static(b"22"))
-        );
-        assert2::assert!(
-            c.get(&key(b"ccc")).unwrap().value.clone() == Some(Bytes::from_static(b"333"))
-        );
-        assert2::assert!(c.size_bytes() == 23 + 25 + 27);
+        assert_eq!(c.size_bytes(), 23 + 25 + 27);
     }
 
     #[test]
@@ -323,17 +327,17 @@ mod tests {
         c.put(key(b"C"), entry(b"3"));
 
         // Promote B to MRU; LRU order is now A, C, B.
-        assert2::assert!(c.get_promote(&key(b"B")).is_some());
+        assert!(c.get_promote(&key(b"B")).is_some());
 
         let mut noop = |_: &Bytes, _: &LruCacheEntry| {};
         c.evict(&mut noop);
-        check!(
-            [b"A", b"B", b"C"].map(|name| c.get(&key(name)).is_some()) == [false, true, true],
-            "A (LRU) evicted first"
-        );
+        check!(c.get(&key(b"A")).is_none(), "A (LRU) evicted first");
+        check!(c.get(&key(b"B")).is_some());
+        check!(c.get(&key(b"C")).is_some());
 
         c.evict(&mut noop);
-        assert2::assert!([b"B", b"C"].map(|name| c.get(&key(name)).is_some()) == [true, false]);
+        assert!(c.get(&key(b"C")).is_none(), "C evicted next");
+        assert!(c.get(&key(b"B")).is_some(), "B promoted, survives");
     }
 
     #[test]
@@ -348,13 +352,12 @@ mod tests {
             let mut listener = |k: &Bytes, _: &LruCacheEntry| seen.push(k.clone());
             c.flush(&mut listener);
         }
-        assert2::assert!(seen == vec![key(b"A"), key(b"B"), key(b"C")]);
+        assert_eq!(seen, vec![key(b"A"), key(b"B"), key(b"C")]);
 
         // No entry remains dirty.
-        check!(
-            [b"A", b"B", b"C"].map(|name| c.get(&key(name)).unwrap().dirty)
-                == [false, false, false]
-        );
+        check!(!c.get(&key(b"A")).unwrap().dirty);
+        check!(!c.get(&key(b"B")).unwrap().dirty);
+        check!(!c.get(&key(b"C")).unwrap().dirty);
     }
 
     #[test]
@@ -373,9 +376,9 @@ mod tests {
             // Head is A (LRU, dirty).
             c.evict(&mut listener);
         }
-        assert2::assert!(count == 1);
-        assert2::assert!(seen_key == Some(key(b"A")));
-        assert2::assert!(c.get(&key(b"A")).is_none());
+        assert_eq!(count, 1, "listener called once for dirty head");
+        assert_eq!(seen_key, Some(key(b"A")));
+        assert!(c.get(&key(b"A")).is_none());
     }
 
     #[test]
@@ -393,9 +396,16 @@ mod tests {
             let mut listener = |k: &Bytes, _: &LruCacheEntry| seen.push(k.clone());
             c.flush(&mut listener);
         }
-        assert2::assert!(seen == vec![key(b"A"), key(b"B")]);
+        assert_eq!(
+            seen,
+            vec![key(b"A"), key(b"B")],
+            "A keeps its original dirty position on re-dirty"
+        );
         // The updated value is the one flushed.
-        assert2::assert!(c.get(&key(b"A")).unwrap().value == Some(Bytes::from_static(b"9")));
+        assert_eq!(
+            c.get(&key(b"A")).unwrap().value,
+            Some(Bytes::from_static(b"9"))
+        );
     }
 
     #[test]
@@ -411,24 +421,31 @@ mod tests {
         // Range [a, ccc) is half-open: includes a, bb, bb2; EXCLUDES ccc at hi.
         let r = c.range(b"a", b"ccc");
         let keys: Vec<Bytes> = r.iter().map(|(k, _)| k.clone()).collect();
-        assert2::assert!(keys == vec![key(b"a"), key(b"bb"), key(b"bb2")]);
+        assert_eq!(
+            keys,
+            vec![key(b"a"), key(b"bb"), key(b"bb2")],
+            "ascending memcmp order, hi-exclusive"
+        );
         // The in-range tombstone is present with a None value.
         let bb2 = r.iter().find(|(k, _)| k == &key(b"bb2")).unwrap();
-        assert2::assert!(bb2.1.value.as_ref() == None);
-        assert2::assert!(bb2.1.dirty);
+        assert_eq!(bb2.1.value, None);
+        assert!(bb2.1.dirty);
 
         // A range scan must NOT promote recency: LRU head stays the
         // first-inserted key (ccc), so it is evicted first.
         let mut noop = |_: &Bytes, _: &LruCacheEntry| {};
         c.evict(&mut noop);
-        assert2::assert!(c.get(&key(b"ccc")).is_none());
+        assert!(
+            c.get(&key(b"ccc")).is_none(),
+            "ccc (LRU head) evicted first; range did not touch recency"
+        );
 
         // all() returns the full set in key order, including the out-of-range ccc.
         let mut c2 = NamedCache::new("s".to_string());
         c2.put(key(b"z"), entry(b"9"));
         c2.put(key(b"a"), entry(b"1"));
         let all: Vec<Bytes> = c2.all().into_iter().map(|(k, _)| k).collect();
-        assert2::assert!(all == vec![key(b"a"), key(b"z")]);
+        assert_eq!(all, vec![key(b"a"), key(b"z")]);
     }
 
     #[test]
@@ -436,7 +453,7 @@ mod tests {
         let mut c = NamedCache::new("s".to_string());
         c.delete(key(b"k"), ctx());
         let e = c.get(&key(b"k")).unwrap();
-        assert2::assert!(e.value.as_ref() == None);
-        assert2::assert!(e.dirty);
+        assert_eq!(e.value, None);
+        assert!(e.dirty);
     }
 }

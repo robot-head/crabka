@@ -153,6 +153,8 @@ pub fn pprof_router() -> Router {
 
 /// Bind an admin HTTP server on `addr` serving `pprof_router()` merged with
 /// `extra` (e.g. a `/metrics` route). Spawns the server and returns once bound.
+/// # Errors
+/// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
 pub async fn serve_admin(addr: SocketAddr, extra: Router) -> std::io::Result<()> {
     let app = pprof_router().merge(extra);
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -168,6 +170,8 @@ pub async fn serve_admin(addr: SocketAddr, extra: Router) -> std::io::Result<()>
 
 /// Like [`serve_admin`] but resolves the bind address from
 /// `CRABKA_ADMIN_LISTEN_ADDR`, falling back to `default_addr`.
+/// # Errors
+/// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
 pub async fn serve_admin_from_env(default_addr: &str) -> std::io::Result<()> {
     serve_admin_from_env_with(default_addr, Router::new()).await
 }
@@ -175,6 +179,10 @@ pub async fn serve_admin_from_env(default_addr: &str) -> std::io::Result<()> {
 /// Like [`serve_admin_from_env`] but merges `extra` (e.g. a `GET /metrics`
 /// route) alongside the pprof routes. Services that expose Prometheus metrics
 /// call this with their `/metrics` router so the exporter shares the admin port.
+/// # Errors
+/// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
+/// # Panics
+/// Panics if synchronized telemetry state is poisoned or validated columnar data is missing a required field.
 pub async fn serve_admin_from_env_with(default_addr: &str, extra: Router) -> std::io::Result<()> {
     let raw =
         std::env::var("CRABKA_ADMIN_LISTEN_ADDR").unwrap_or_else(|_| default_addr.to_string());

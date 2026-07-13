@@ -246,9 +246,11 @@ fn from_proto_add(
         r.max_timestamp_ms,
         r.broker_id,
         r.event_timestamp_ms,
-        r.segment_size_in_bytes,
-        state,
-        segment_leader_epochs,
+        crabka_remote_storage::RemoteLogSegmentDetails::new(
+            r.segment_size_in_bytes,
+            state,
+            segment_leader_epochs,
+        ),
     )
     .map_err(|e| CodecError::Domain(e.to_string()))?;
     if let Some(c) = custom {
@@ -361,13 +363,13 @@ fn from_proto_partition_delete(
 
 /// Unsigned LEB128 — 7 data bits per byte, MSB is the continuation flag.
 /// Encodes 1 byte for values < 128.
-#[allow(clippy::cast_possible_truncation)] // varint encode-byte by design
 pub(crate) fn write_uvarint(mut v: u64, buf: &mut BytesMut) {
     while v >= 0x80 {
-        buf.put_u8(((v as u8) & 0x7F) | 0x80);
+        let byte = u8::try_from(v & 0x7F).expect("varint payload is seven bits");
+        buf.put_u8(byte | 0x80);
         v >>= 7;
     }
-    buf.put_u8(v as u8);
+    buf.put_u8(u8::try_from(v).expect("final varint byte is less than 128"));
 }
 
 pub(crate) fn read_uvarint(r: &mut Reader<'_>) -> Result<u64, CodecError> {
@@ -438,7 +440,7 @@ impl<'a> Reader<'a> {
 
 #[cfg(test)]
 mod tests {
-
+    use assert2::assert;
     use uuid::Uuid;
 
     use super::*;
@@ -459,13 +461,15 @@ mod tests {
             end + 1,
             42,
             123,
-            4096,
-            RemoteLogSegmentState::CopySegmentStarted,
-            BTreeMap::from([
-                (LeaderEpoch(0), start),
-                (LeaderEpoch(1), start + 10),
-                (LeaderEpoch(2), start + 20),
-            ]),
+            crabka_remote_storage::RemoteLogSegmentDetails::new(
+                4096,
+                RemoteLogSegmentState::CopySegmentStarted,
+                BTreeMap::from([
+                    (LeaderEpoch(0), start),
+                    (LeaderEpoch(1), start + 10),
+                    (LeaderEpoch(2), start + 20),
+                ]),
+            ),
         )
         .unwrap();
         if let Some(c) = custom {
@@ -479,14 +483,14 @@ mod tests {
         let event = MetadataEvent::AddSegment(add(1, 0, 99, Some(vec![1, 2, 3, 4])));
         let bytes = event.encode();
         let back = MetadataEvent::decode(&bytes).expect("decodes");
-        assert2::assert!(back == event);
+        assert!(back == event);
     }
 
     #[test]
     fn round_trip_add_without_custom_metadata() {
         let event = MetadataEvent::AddSegment(add(2, 100, 199, None));
         let bytes = event.encode();
-        assert2::assert!(MetadataEvent::decode(&bytes).unwrap() == event);
+        assert!(MetadataEvent::decode(&bytes).unwrap() == event);
     }
 
     #[test]
@@ -499,7 +503,7 @@ mod tests {
             broker_id: 13,
         });
         let bytes = event.encode();
-        assert2::assert!(MetadataEvent::decode(&bytes).unwrap() == event);
+        assert!(MetadataEvent::decode(&bytes).unwrap() == event);
     }
 
     #[test]
@@ -512,21 +516,15 @@ mod tests {
             broker_id: 0,
         });
         let bytes = event.encode();
-        assert2::assert!(MetadataEvent::decode(&bytes).unwrap() == event);
+        assert!(MetadataEvent::decode(&bytes).unwrap() == event);
     }
 
     #[test]
     fn round_trip_partition_delete_each_state() {
-        for (_name, state) in [
-            ("marked", RemotePartitionDeleteState::DeletePartitionMarked),
-            (
-                "started",
-                RemotePartitionDeleteState::DeletePartitionStarted,
-            ),
-            (
-                "finished",
-                RemotePartitionDeleteState::DeletePartitionFinished,
-            ),
+        for state in [
+            RemotePartitionDeleteState::DeletePartitionMarked,
+            RemotePartitionDeleteState::DeletePartitionStarted,
+            RemotePartitionDeleteState::DeletePartitionFinished,
         ] {
             let event = MetadataEvent::PartitionDelete(RemotePartitionDeleteMetadata {
                 topic_id_partition: tp(),
@@ -535,7 +533,7 @@ mod tests {
                 broker_id: 1,
             });
             let bytes = event.encode();
-            assert2::assert!(MetadataEvent::decode(&bytes).unwrap() == event);
+            assert!(MetadataEvent::decode(&bytes).unwrap() == event);
         }
     }
 
@@ -545,7 +543,10 @@ mod tests {
         let event = MetadataEvent::AddSegment(md);
         let bytes = event.encode();
         let back = MetadataEvent::decode(&bytes).expect("decodes");
-        assert2::assert!(back == event);
+        assert!(back == event);
+        if let MetadataEvent::AddSegment(ref md) = back {
+            assert!(md.txn_index_empty());
+        }
     }
 
     #[test]
@@ -554,7 +555,7 @@ mod tests {
             .encode()
             .to_vec();
         let err = MetadataEvent::decode(&bytes[..bytes.len() - 5]).unwrap_err();
-        assert2::assert!(matches!(err, CodecError::Protocol(_)));
+        assert!(matches!(err, CodecError::Protocol(_)));
     }
 
     #[test]
@@ -578,7 +579,7 @@ mod tests {
             .encode_value()
             .unwrap();
         let err = MetadataEvent::decode(&bytes).unwrap_err();
-        assert2::assert!(matches!(err, CodecError::UnknownState(7, _)));
+        assert!(matches!(err, CodecError::UnknownState(7, _)));
     }
 
     #[test]
@@ -590,6 +591,6 @@ mod tests {
         .encode_value()
         .unwrap();
         let err = MetadataEvent::decode(&bytes).unwrap_err();
-        assert2::assert!(matches!(err, CodecError::Protocol(_)));
+        assert!(matches!(err, CodecError::Protocol(_)));
     }
 }

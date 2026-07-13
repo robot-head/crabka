@@ -1,4 +1,4 @@
-use std::{cmp::Ordering, collections::BTreeMap};
+use std::{cmp::Ordering, collections::BTreeMap, fmt::Write as _};
 
 use base64::{Engine as _, prelude::BASE64_STANDARD};
 use chrono::{FixedOffset, LocalResult, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
@@ -18,6 +18,8 @@ pub struct LineFormat {
 }
 
 impl LineFormat {
+    /// # Errors
+    /// Returns an error when the query or template is malformed, a requested conversion is invalid, or evaluation cannot read its input data.
     pub fn new(template: impl Into<String>) -> Result<Self, ParseError> {
         let template = template.into();
         let parts = parse_template_parts(&template)?;
@@ -290,7 +292,9 @@ impl TemplateRange {
         }
         let mut rendered = String::new();
         for (index, value) in values.into_iter().enumerate() {
-            let key = TemplateRuntimeValue::Integer(index as i64);
+            let key = TemplateRuntimeValue::Integer(
+                i64::try_from(index).expect("template collection index fits in i64"),
+            );
             let value = TemplateRuntimeValue::Json(value);
             rendered.push_str(&self.render_iteration(context, key, value));
         }
@@ -438,7 +442,7 @@ impl TemplateCommand {
             return Err(template_parse_error("unsupported template action"));
         }
         Ok(Self::Function {
-            name: head.to_string(),
+            name: head.clone(),
             args: tail
                 .iter()
                 .map(|token| TemplateValue::parse(token))
@@ -1170,11 +1174,10 @@ fn tokenize_template_command(command: &str) -> Result<Vec<String>, ParseError> {
             let end = command
                 .get(pos..)
                 .and_then(|rest| rest.find(char::is_whitespace))
-                .map(|offset| {
+                .map_or(command.len(), |offset| {
                     pos.checked_add(offset)
                         .expect("template token end offset cannot overflow")
-                })
-                .unwrap_or(command.len());
+                });
             tokens.push(command[pos..end].to_string());
             pos = end;
         }
@@ -1429,320 +1432,340 @@ fn is_template_function_name(name: &str) -> bool {
     )
 }
 
-fn evaluate_template_function(name: &str, args: &[TemplateRuntimeValue]) -> TemplateRuntimeValue {
+fn evaluate_template_value_function(
+    name: &str,
+    args: &[TemplateRuntimeValue],
+) -> Option<TemplateRuntimeValue> {
     if name == "fromJson" {
         let Some(value) = args.first() else {
-            return TemplateRuntimeValue::String(String::new());
+            return Some(TemplateRuntimeValue::String(String::new()));
         };
         let Ok(value) = serde_json::from_str::<serde_json::Value>(&value.as_rendered_string())
         else {
-            return TemplateRuntimeValue::String(String::new());
+            return Some(TemplateRuntimeValue::String(String::new()));
         };
-        return TemplateRuntimeValue::Json(value);
+        return Some(TemplateRuntimeValue::Json(value));
     }
 
     if name == "index" {
-        return evaluate_template_index(args);
+        return Some(evaluate_template_index(args));
     }
     if name == "slice" {
-        return evaluate_template_slice(args);
+        return Some(evaluate_template_slice(args));
     }
     if name == "print" {
-        return TemplateRuntimeValue::String(format_template_print(args, false));
+        return Some(TemplateRuntimeValue::String(format_template_print(
+            args, false,
+        )));
     }
     if name == "println" {
-        return TemplateRuntimeValue::String(format_template_print(args, true));
+        return Some(TemplateRuntimeValue::String(format_template_print(
+            args, true,
+        )));
     }
     if name == "html" {
-        return TemplateRuntimeValue::String(html_escape_template_string(&format_template_print(
-            args, false,
+        return Some(TemplateRuntimeValue::String(html_escape_template_string(
+            &format_template_print(args, false),
         )));
     }
     if name == "js" {
-        return TemplateRuntimeValue::String(js_escape_template_string(&format_template_print(
-            args, false,
+        return Some(TemplateRuntimeValue::String(js_escape_template_string(
+            &format_template_print(args, false),
         )));
     }
     if name == "and" {
-        return TemplateRuntimeValue::String(
+        return Some(TemplateRuntimeValue::String(
             args.iter().all(TemplateRuntimeValue::is_truthy).to_string(),
-        );
+        ));
     }
     if name == "not" {
-        return TemplateRuntimeValue::String(
+        return Some(TemplateRuntimeValue::String(
             args.first()
                 .is_none_or(|value| !value.is_truthy())
                 .to_string(),
-        );
+        ));
     }
     if name == "or" {
-        return TemplateRuntimeValue::String(
+        return Some(TemplateRuntimeValue::String(
             args.iter().any(TemplateRuntimeValue::is_truthy).to_string(),
-        );
+        ));
+    }
+
+    None
+}
+
+fn evaluate_common_string_function(name: &str, args: &[String]) -> Option<String> {
+    let rendered = match name {
+        "alignLeft" => {
+            if args.len() < 2 {
+                return Some(String::new());
+            }
+            let Ok(width) = args[0].parse::<usize>() else {
+                return Some(String::new());
+            };
+            align_left_template_string(width, &args[1])
+        }
+        "alignRight" => {
+            if args.len() < 2 {
+                return Some(String::new());
+            }
+            let Ok(width) = args[0].parse::<usize>() else {
+                return Some(String::new());
+            };
+            align_right_template_string(width, &args[1])
+        }
+        "b64enc" => args
+            .first()
+            .map_or_else(String::new, |value| BASE64_STANDARD.encode(value)),
+        "b64dec" => {
+            let Some(value) = args.first() else {
+                return Some(String::new());
+            };
+            let Ok(decoded) = BASE64_STANDARD.decode(value) else {
+                return Some(String::new());
+            };
+            String::from_utf8(decoded).unwrap_or_default()
+        }
+        "lower" => args
+            .first()
+            .map_or_else(String::new, |value| value.to_lowercase()),
+        "upper" => args
+            .first()
+            .map_or_else(String::new, |value| value.to_uppercase()),
+        "replace" => {
+            if args.len() < 3 {
+                return Some(String::new());
+            }
+            args[2].replace(&args[0], &args[1])
+        }
+        "default" => {
+            if args.len() < 2 || args[1].is_empty() {
+                return Some(args.first().cloned().unwrap_or_default());
+            }
+            args[1].clone()
+        }
+        "contains" => {
+            if args.len() < 2 {
+                return Some("false".to_string());
+            }
+            args[1].contains(&args[0]).to_string()
+        }
+        "nindent" => {
+            if args.len() < 2 {
+                return Some(String::new());
+            }
+            let Ok(spaces) = args[0].parse::<usize>() else {
+                return Some(String::new());
+            };
+            format!("\n{}", indent_template_string(spaces, &args[1]))
+        }
+        "now" => current_template_timestamp(),
+        _ => return None,
+    };
+    Some(rendered)
+}
+
+fn evaluate_template_function(name: &str, args: &[TemplateRuntimeValue]) -> TemplateRuntimeValue {
+    if let Some(value) = evaluate_template_value_function(name, args) {
+        return value;
     }
 
     let args = args
         .iter()
         .map(TemplateRuntimeValue::as_rendered_string)
         .collect::<Vec<_>>();
-    let rendered = (|| -> String {
-        match name {
-            "add" => format_template_integer_sum(&args),
-            "addf" => format_template_float_sum(&args),
-            "alignLeft" => {
-                if args.len() < 2 {
-                    return String::new();
-                }
-                let Ok(width) = args[0].parse::<usize>() else {
-                    return String::new();
-                };
-                align_left_template_string(width, &args[1])
-            }
-            "alignRight" => {
-                if args.len() < 2 {
-                    return String::new();
-                }
-                let Ok(width) = args[0].parse::<usize>() else {
-                    return String::new();
-                };
-                align_right_template_string(width, &args[1])
-            }
-            "b64enc" => args
-                .first()
-                .map_or_else(String::new, |value| BASE64_STANDARD.encode(value)),
-            "b64dec" => {
-                let Some(value) = args.first() else {
-                    return String::new();
-                };
-                let Ok(decoded) = BASE64_STANDARD.decode(value) else {
-                    return String::new();
-                };
-                String::from_utf8(decoded).unwrap_or_default()
-            }
-            "lower" => args
-                .first()
-                .map_or_else(String::new, |value| value.to_lowercase()),
-            "upper" => args
-                .first()
-                .map_or_else(String::new, |value| value.to_uppercase()),
-            "replace" => {
-                if args.len() < 3 {
-                    return String::new();
-                }
-                args[2].replace(&args[0], &args[1])
-            }
-            "default" => {
-                if args.len() < 2 || args[1].is_empty() {
-                    return args.first().cloned().unwrap_or_default();
-                }
-                args[1].clone()
-            }
-            "contains" => {
-                if args.len() < 2 {
-                    return "false".to_string();
-                }
-                args[1].contains(&args[0]).to_string()
-            }
-            "ceil" => args.first().map_or_else(String::new, |value| {
-                format_template_float_unary(value, f64::ceil)
-            }),
-            "bytes" => {
-                let Some(value) = args.first() else {
-                    return String::new();
-                };
-                format_template_bytes(value)
-            }
-            "date" => format_template_date(&args),
-            "duration" | "duration_seconds" => {
-                let Some(value) = args.first() else {
-                    return String::new();
-                };
-                format_template_duration_seconds(value)
-            }
-            "div" => format_template_integer_binary(&args, |left, right| {
-                (right != 0).then_some(left / right)
-            }),
-            "divf" => format_template_float_fold(&args, |left, right| {
-                (right != 0.0).then_some(left / right)
-            }),
-            "eq" => {
-                if args.len() < 2 {
-                    return "false".to_string();
-                }
-                (args[1] == args[0]).to_string()
-            }
-            "ne" => {
-                if args.len() < 2 {
-                    return "false".to_string();
-                }
-                (args[1] != args[0]).to_string()
-            }
-            "lt" => format_template_ordering(&args, |ordering| ordering.is_lt()),
-            "le" => format_template_ordering(&args, |ordering| ordering.is_le()),
-            "gt" => format_template_ordering(&args, |ordering| ordering.is_gt()),
-            "ge" => format_template_ordering(&args, |ordering| ordering.is_ge()),
-            "float64" => args
-                .first()
-                .map_or_else(String::new, |value| parse_template_float(value)),
-            "floor" => args.first().map_or_else(String::new, |value| {
-                format_template_float_unary(value, f64::floor)
-            }),
-            "hasPrefix" => {
-                if args.len() < 2 {
-                    return "false".to_string();
-                }
-                args[1].starts_with(&args[0]).to_string()
-            }
-            "hasSuffix" => {
-                if args.len() < 2 {
-                    return "false".to_string();
-                }
-                args[1].ends_with(&args[0]).to_string()
-            }
-            "indent" => {
-                if args.len() < 2 {
-                    return String::new();
-                }
-                let Ok(spaces) = args[0].parse::<usize>() else {
-                    return String::new();
-                };
-                indent_template_string(spaces, &args[1])
-            }
-            "int" => args
-                .first()
-                .map_or_else(String::new, |value| parse_template_integer(value)),
-            "len" => args
-                .first()
-                .map_or_else(String::new, |value| value.len().to_string()),
-            "max" => format_template_integer_min_max(&args, Ord::max),
-            "maxf" => format_template_float_min_max(&args, f64::max),
-            "min" => format_template_integer_min_max(&args, Ord::min),
-            "minf" => format_template_float_min_max(&args, f64::min),
-            "mod" => format_template_integer_binary(&args, |left, right| {
-                (right != 0).then_some(left % right)
-            }),
-            "mul" => format_template_integer_product(&args),
-            "mulf" => format_template_float_product(&args),
-            "nindent" => {
-                if args.len() < 2 {
-                    return String::new();
-                }
-                let Ok(spaces) = args[0].parse::<usize>() else {
-                    return String::new();
-                };
-                format!("\n{}", indent_template_string(spaces, &args[1]))
-            }
-            "now" => current_template_timestamp(),
-            "printf" => format_template_printf(&args),
-            "repeat" => {
-                if args.len() < 2 {
-                    return String::new();
-                }
-                let Ok(count) = args[0].parse::<usize>() else {
-                    return String::new();
-                };
-                args[1].repeat(count)
-            }
-            "count" => {
-                if args.len() < 2 {
-                    return String::new();
-                }
-                let Ok(regex) = Regex::new(&args[0]) else {
-                    return String::new();
-                };
-                regex.find_iter(&args[1]).count().to_string()
-            }
-            "regexReplaceAll" => {
-                if args.len() < 3 {
-                    return String::new();
-                }
-                let Ok(regex) = Regex::new(&args[0]) else {
-                    return String::new();
-                };
-                regex.replace_all(&args[1], args[2].as_str()).into_owned()
-            }
-            "regexReplaceAllLiteral" => {
-                if args.len() < 3 {
-                    return String::new();
-                }
-                let Ok(regex) = Regex::new(&args[0]) else {
-                    return String::new();
-                };
-                regex
-                    .replace_all(&args[1], NoExpand(args[2].as_str()))
-                    .into_owned()
-            }
-            "round" => format_template_float_round(&args),
-            "trunc" => {
-                if args.len() < 2 {
-                    return String::new();
-                }
-                let Ok(count) = args[0].parse::<i64>() else {
-                    return String::new();
-                };
-                truncate_template_string(&args[1], count)
-            }
-            "substr" => {
-                if args.len() < 3 {
-                    return String::new();
-                }
-                let (Ok(start), Ok(end)) = (args[0].parse::<i64>(), args[1].parse::<i64>()) else {
-                    return String::new();
-                };
-                substring_template_string(&args[2], start, end)
-            }
-            "title" => args
-                .first()
-                .map_or_else(String::new, |value| title_template_string(value)),
-            "toDate" => format_template_to_date(&args),
-            "toDateInZone" => format_template_to_date_in_zone(&args),
-            "trim" => args
-                .first()
-                .map_or_else(String::new, |value| value.trim().to_string()),
-            "trimAll" => {
-                if args.len() < 2 {
-                    return String::new();
-                }
-                args[1].trim_matches(|ch| args[0].contains(ch)).to_string()
-            }
-            "trimPrefix" => {
-                if args.len() < 2 {
-                    return String::new();
-                }
-                args[1]
-                    .strip_prefix(&args[0])
-                    .unwrap_or(&args[1])
-                    .to_string()
-            }
-            "trimSuffix" => {
-                if args.len() < 2 {
-                    return String::new();
-                }
-                args[1]
-                    .strip_suffix(&args[0])
-                    .unwrap_or(&args[1])
-                    .to_string()
-            }
-            "sub" => format_template_integer_binary(&args, |left, right| Some(left - right)),
-            "subf" => format_template_float_fold(&args, |left, right| Some(left - right)),
-            "unixEpoch" => epoch_template_timestamp(&args, 1_000_000_000),
-            "unixEpochMillis" => epoch_template_timestamp(&args, 1_000_000),
-            "unixEpochNanos" => epoch_template_timestamp(&args, 1),
-            "unixToTime" => args
-                .first()
-                .map_or_else(String::new, |value| unix_to_template_timestamp(value)),
-            "urlquery" => args
-                .first()
-                .map_or_else(String::new, |value| urlquery_template_string(value)),
-            "urlencode" => args
-                .first()
-                .map_or_else(String::new, |value| urlencode_template_string(value)),
-            "urldecode" => args
-                .first()
-                .map_or_else(String::new, |value| urldecode_template_string(value)),
-            _ => String::new(),
+    let rendered = evaluate_common_string_function(name, &args).unwrap_or_else(|| match name {
+        "add" => format_template_integer_sum(&args),
+        "addf" => format_template_float_sum(&args),
+        "ceil" => args.first().map_or_else(String::new, |value| {
+            format_template_float_unary(value, f64::ceil)
+        }),
+        "bytes" => {
+            let Some(value) = args.first() else {
+                return String::new();
+            };
+            format_template_bytes(value)
         }
-    })();
+        "date" => format_template_date(&args),
+        "duration" | "duration_seconds" => {
+            let Some(value) = args.first() else {
+                return String::new();
+            };
+            format_template_duration_seconds(value)
+        }
+        "div" => format_template_integer_binary(&args, |left, right| {
+            (right != 0).then_some(left / right)
+        }),
+        "divf" => {
+            format_template_float_fold(&args, |left, right| (right != 0.0).then_some(left / right))
+        }
+        "eq" => {
+            if args.len() < 2 {
+                return "false".to_string();
+            }
+            (args[1] == args[0]).to_string()
+        }
+        "ne" => {
+            if args.len() < 2 {
+                return "false".to_string();
+            }
+            (args[1] != args[0]).to_string()
+        }
+        "lt" => format_template_ordering(&args, std::cmp::Ordering::is_lt),
+        "le" => format_template_ordering(&args, std::cmp::Ordering::is_le),
+        "gt" => format_template_ordering(&args, std::cmp::Ordering::is_gt),
+        "ge" => format_template_ordering(&args, std::cmp::Ordering::is_ge),
+        "float64" => args
+            .first()
+            .map_or_else(String::new, |value| parse_template_float(value)),
+        "floor" => args.first().map_or_else(String::new, |value| {
+            format_template_float_unary(value, f64::floor)
+        }),
+        "hasPrefix" => {
+            if args.len() < 2 {
+                return "false".to_string();
+            }
+            args[1].starts_with(&args[0]).to_string()
+        }
+        "hasSuffix" => {
+            if args.len() < 2 {
+                return "false".to_string();
+            }
+            args[1].ends_with(&args[0]).to_string()
+        }
+        "indent" => {
+            if args.len() < 2 {
+                return String::new();
+            }
+            let Ok(spaces) = args[0].parse::<usize>() else {
+                return String::new();
+            };
+            indent_template_string(spaces, &args[1])
+        }
+        "int" => args
+            .first()
+            .map_or_else(String::new, |value| parse_template_integer(value)),
+        "len" => args
+            .first()
+            .map_or_else(String::new, |value| value.len().to_string()),
+        "max" => format_template_integer_min_max(&args, Ord::max),
+        "maxf" => format_template_float_min_max(&args, f64::max),
+        "min" => format_template_integer_min_max(&args, Ord::min),
+        "minf" => format_template_float_min_max(&args, f64::min),
+        "mod" => format_template_integer_binary(&args, |left, right| {
+            (right != 0).then_some(left % right)
+        }),
+        "mul" => format_template_integer_product(&args),
+        "mulf" => format_template_float_product(&args),
+        "printf" => format_template_printf(&args),
+        "repeat" => {
+            if args.len() < 2 {
+                return String::new();
+            }
+            let Ok(count) = args[0].parse::<usize>() else {
+                return String::new();
+            };
+            args[1].repeat(count)
+        }
+        "count" => {
+            if args.len() < 2 {
+                return String::new();
+            }
+            let Ok(regex) = Regex::new(&args[0]) else {
+                return String::new();
+            };
+            regex.find_iter(&args[1]).count().to_string()
+        }
+        "regexReplaceAll" => {
+            if args.len() < 3 {
+                return String::new();
+            }
+            let Ok(regex) = Regex::new(&args[0]) else {
+                return String::new();
+            };
+            regex.replace_all(&args[1], args[2].as_str()).into_owned()
+        }
+        "regexReplaceAllLiteral" => {
+            if args.len() < 3 {
+                return String::new();
+            }
+            let Ok(regex) = Regex::new(&args[0]) else {
+                return String::new();
+            };
+            regex
+                .replace_all(&args[1], NoExpand(args[2].as_str()))
+                .into_owned()
+        }
+        "round" => format_template_float_round(&args),
+        "trunc" => {
+            if args.len() < 2 {
+                return String::new();
+            }
+            let Ok(count) = args[0].parse::<i64>() else {
+                return String::new();
+            };
+            truncate_template_string(&args[1], count)
+        }
+        "substr" => {
+            if args.len() < 3 {
+                return String::new();
+            }
+            let (Ok(start), Ok(end)) = (args[0].parse::<i64>(), args[1].parse::<i64>()) else {
+                return String::new();
+            };
+            substring_template_string(&args[2], start, end)
+        }
+        "title" => args
+            .first()
+            .map_or_else(String::new, |value| title_template_string(value)),
+        "toDate" => format_template_to_date(&args),
+        "toDateInZone" => format_template_to_date_in_zone(&args),
+        "trim" => args
+            .first()
+            .map_or_else(String::new, |value| value.trim().to_string()),
+        "trimAll" => {
+            if args.len() < 2 {
+                return String::new();
+            }
+            args[1].trim_matches(|ch| args[0].contains(ch)).to_string()
+        }
+        "trimPrefix" => {
+            if args.len() < 2 {
+                return String::new();
+            }
+            args[1]
+                .strip_prefix(&args[0])
+                .unwrap_or(&args[1])
+                .to_string()
+        }
+        "trimSuffix" => {
+            if args.len() < 2 {
+                return String::new();
+            }
+            args[1]
+                .strip_suffix(&args[0])
+                .unwrap_or(&args[1])
+                .to_string()
+        }
+        "sub" => format_template_integer_binary(&args, |left, right| Some(left - right)),
+        "subf" => format_template_float_fold(&args, |left, right| Some(left - right)),
+        "unixEpoch" => epoch_template_timestamp(&args, 1_000_000_000),
+        "unixEpochMillis" => epoch_template_timestamp(&args, 1_000_000),
+        "unixEpochNanos" => epoch_template_timestamp(&args, 1),
+        "unixToTime" => args
+            .first()
+            .map_or_else(String::new, |value| unix_to_template_timestamp(value)),
+        "urlquery" => args
+            .first()
+            .map_or_else(String::new, |value| urlquery_template_string(value)),
+        "urlencode" => args
+            .first()
+            .map_or_else(String::new, |value| urlencode_template_string(value)),
+        "urldecode" => args
+            .first()
+            .map_or_else(String::new, |value| urldecode_template_string(value)),
+        _ => String::new(),
+    });
     TemplateRuntimeValue::String(rendered)
 }
 
@@ -1846,10 +1869,10 @@ fn evaluate_template_index(args: &[TemplateRuntimeValue]) -> TemplateRuntimeValu
     };
     let mut current = value.clone();
     for index in indexes {
-        let Some(indexed) = template_index_value(&current, &index.as_rendered_string()) else {
+        let Some(element) = template_index_value(&current, &index.as_rendered_string()) else {
             return TemplateRuntimeValue::String(String::new());
         };
-        current = indexed;
+        current = element;
     }
     current
 }
@@ -1885,9 +1908,11 @@ fn template_value_is_collection(value: &TemplateRuntimeValue) -> bool {
     matches!(
         value,
         TemplateRuntimeValue::String(_)
-            | TemplateRuntimeValue::Json(serde_json::Value::String(_))
-            | TemplateRuntimeValue::Json(serde_json::Value::Array(_))
-            | TemplateRuntimeValue::Json(serde_json::Value::Object(_))
+            | TemplateRuntimeValue::Json(
+                serde_json::Value::String(_)
+                    | serde_json::Value::Array(_)
+                    | serde_json::Value::Object(_)
+            )
     )
 }
 
@@ -2057,8 +2082,8 @@ fn format_template_bytes(value: &str) -> String {
     let Some(bytes) = parse_bytes_literal(value) else {
         return String::new();
     };
-    if bytes.fract() == 0.0 && bytes <= u64::MAX as f64 {
-        (bytes as u64).to_string()
+    if bytes.fract() == 0.0 {
+        format!("{bytes:.0}")
     } else {
         bytes.to_string()
     }
@@ -2220,28 +2245,28 @@ fn format_go_time_layout(layout: &str, timestamp: OffsetDateTime) -> String {
     let mut rest = layout;
     while !rest.is_empty() {
         if let Some(next) = rest.strip_prefix("2006") {
-            formatted.push_str(&format!("{:04}", timestamp.year()));
+            let _ = write!(formatted, "{:04}", timestamp.year());
             rest = next;
         } else if let Some(next) = rest.strip_prefix("06") {
-            formatted.push_str(&format!("{:02}", timestamp.year().rem_euclid(100)));
+            let _ = write!(formatted, "{:02}", timestamp.year().rem_euclid(100));
             rest = next;
         } else if let Some(next) = rest.strip_prefix("15") {
-            formatted.push_str(&format!("{:02}", timestamp.hour()));
+            let _ = write!(formatted, "{:02}", timestamp.hour());
             rest = next;
         } else if let Some(next) = rest.strip_prefix("04") {
-            formatted.push_str(&format!("{:02}", timestamp.minute()));
+            let _ = write!(formatted, "{:02}", timestamp.minute());
             rest = next;
         } else if let Some(next) = rest.strip_prefix("05") {
-            formatted.push_str(&format!("{:02}", timestamp.second()));
+            let _ = write!(formatted, "{:02}", timestamp.second());
             rest = next;
         } else if let Some(next) = rest.strip_prefix("01") {
-            formatted.push_str(&format!("{:02}", u8::from(timestamp.month())));
+            let _ = write!(formatted, "{:02}", u8::from(timestamp.month()));
             rest = next;
         } else if let Some(next) = rest.strip_prefix('1') {
             formatted.push_str(&u8::from(timestamp.month()).to_string());
             rest = next;
         } else if let Some(next) = rest.strip_prefix("02") {
-            formatted.push_str(&format!("{:02}", timestamp.day()));
+            let _ = write!(formatted, "{:02}", timestamp.day());
             rest = next;
         } else if let Some(next) = rest.strip_prefix('2') {
             formatted.push_str(&timestamp.day().to_string());
@@ -2347,10 +2372,11 @@ fn parse_go_time_layout_value(layout: &str, value: &str) -> Option<ParsedTemplat
     let mut rest = layout;
     while !rest.is_empty() {
         if let Some(next) = rest.strip_prefix("2006") {
-            parsed.year = parse_fixed_template_digits(value, &mut value_pos, 4)? as i32;
+            parsed.year = parse_fixed_template_digits(value, &mut value_pos, 4)?.cast_signed();
             rest = next;
         } else if let Some(next) = rest.strip_prefix("06") {
-            parsed.year = 2000 + parse_fixed_template_digits(value, &mut value_pos, 2)? as i32;
+            parsed.year =
+                2000 + parse_fixed_template_digits(value, &mut value_pos, 2)?.cast_signed();
             rest = next;
         } else if let Some(next) = rest.strip_prefix("15") {
             parsed.hour = parse_fixed_template_digits(value, &mut value_pos, 2)?;
@@ -2536,9 +2562,10 @@ fn indent_template_string(spaces: usize, value: &str) -> String {
 
 fn truncate_template_string(value: &str, count: i64) -> String {
     if count >= 0 {
-        return value.chars().take(count as usize).collect();
+        let count = usize::try_from(count).unwrap_or(usize::MAX);
+        return value.chars().take(count).collect();
     }
-    let count = count.unsigned_abs() as usize;
+    let count = usize::try_from(count.unsigned_abs()).unwrap_or(usize::MAX);
     let len = value.chars().count();
     value.chars().skip(len.saturating_sub(count)).collect()
 }
@@ -2648,7 +2675,7 @@ fn urlquery_template_string(value: &str) -> String {
 }
 
 fn push_template_unicode_escape(output: &mut String, value: u32) {
-    output.push_str(&format!("\\u{value:04X}"));
+    let _ = write!(output, "\\u{value:04X}");
 }
 
 fn urldecode_template_string(value: &str) -> String {
@@ -2707,31 +2734,39 @@ mod tests {
 
     #[test]
     fn template_helpers_trim_body_suffixes_and_literal_boundaries() {
-        assert2::assert!(trim_template_body_end("prefix body \n\t", 7, 14) == 11);
-        assert2::assert!(trim_template_body_end("prefix \n\t", 7, 9) == 7);
+        assert_eq!(trim_template_body_end("prefix body \n\t", 7, 14), 11);
+        assert_eq!(trim_template_body_end("prefix \n\t", 7, 9), 7);
 
-        assert2::assert!(parse_template_parts("").unwrap().is_empty());
-        assert2::assert!(
-            parse_template_parts("literal").unwrap()
-                == vec![TemplatePart::Literal("literal".to_string())]
+        assert!(parse_template_parts("").unwrap().is_empty());
+        assert_eq!(
+            parse_template_parts("literal").unwrap(),
+            vec![TemplatePart::Literal("literal".to_string())]
         );
     }
 
     #[test]
     fn template_helpers_skip_leading_whitespace_from_current_position() {
-        assert2::assert!(skip_leading_template_whitespace("abc \n\tdef", 3) == 6);
-        assert2::assert!(skip_leading_template_whitespace("abc", 1) == 1);
-        assert2::assert!(skip_leading_template_whitespace("abc", 10) == 3);
+        assert_eq!(skip_leading_template_whitespace("abc \n\tdef", 3), 6);
+        assert_eq!(skip_leading_template_whitespace("abc", 1), 1);
+        assert_eq!(skip_leading_template_whitespace("abc", 10), 3);
     }
 
     #[test]
     fn template_helpers_classify_invalid_variable_boundaries() {
         for (ch, expected) in [('|', true), (' ', true), ('\n', true), ('_', false)] {
-            assert2::assert!(is_template_control_assignment_variable_char(ch) == expected);
+            assert_eq!(
+                is_template_control_assignment_variable_char(ch),
+                expected,
+                "control-assignment boundary: {ch:?}"
+            );
         }
 
         for (ch, expected) in [('.', true), (' ', true), ('\t', true), ('_', false)] {
-            assert2::assert!(is_template_variable_name_char_invalid(ch) == expected);
+            assert_eq!(
+                is_template_variable_name_char_invalid(ch),
+                expected,
+                "variable-name boundary: {ch:?}"
+            );
         }
     }
 
@@ -2743,8 +2778,10 @@ mod tests {
             ("`ok`", 5, false),
             ("`ok", 3, false),
         ] {
-            assert2::assert!(
-                ensure_template_quoted_token("`ok`", 0, token, end, '`').is_ok() == expected_ok
+            assert_eq!(
+                ensure_template_quoted_token("`ok`", 0, token, end, '`').is_ok(),
+                expected_ok,
+                "quoted token {token:?} ending at {end}"
             );
         }
 
@@ -2755,73 +2792,77 @@ mod tests {
             ("ok)", 3, false),
             ("(ok", 3, false),
         ] {
-            assert2::assert!(
-                ensure_template_parenthesized_token("(ok)", 0, token, end).is_ok() == expected_ok
+            assert_eq!(
+                ensure_template_parenthesized_token("(ok)", 0, token, end).is_ok(),
+                expected_ok,
+                "parenthesized token {token:?} ending at {end}"
             );
         }
     }
 
     #[test]
     fn template_parenthesized_tokens_ignore_parentheses_inside_strings() {
-        assert2::assert!(
-            parse_template_parenthesized_token(r#"(printf "a)b") tail"#, 0).unwrap()
-                == (r#"(printf "a)b")"#.to_string(), 14)
+        assert_eq!(
+            parse_template_parenthesized_token(r#"(printf "a)b") tail"#, 0).unwrap(),
+            (r#"(printf "a)b")"#.to_string(), 14)
         );
-        assert2::assert!(
-            parse_template_parenthesized_token(r#"(printf `c)d`) tail"#, 0).unwrap()
-                == ("(printf `c)d`)".to_string(), 14)
+        assert_eq!(
+            parse_template_parenthesized_token(r"(printf `c)d`) tail", 0).unwrap(),
+            ("(printf `c)d`)".to_string(), 14)
         );
-        assert2::assert!(
-            tokenize_template_command(r#"print (printf "a)b") (printf `c)d`)"#).unwrap()
-                == vec![
-                    "print".to_string(),
-                    r#"(printf "a)b")"#.to_string(),
-                    "(printf `c)d`)".to_string(),
-                ]
+        assert_eq!(
+            tokenize_template_command(r#"print (printf "a)b") (printf `c)d`)"#).unwrap(),
+            vec![
+                "print".to_string(),
+                r#"(printf "a)b")"#.to_string(),
+                "(printf `c)d`)".to_string(),
+            ]
         );
     }
 
     #[test]
     fn template_quoted_tokens_advance_from_the_opening_quote() {
-        assert2::assert!(
-            parse_template_quoted_token(r#"x "a\"b" tail"#, 2, '"').unwrap()
-                == (r#""a\"b""#.to_string(), 8)
+        assert_eq!(
+            parse_template_quoted_token(r#"x "a\"b" tail"#, 2, '"').unwrap(),
+            (r#""a\"b""#.to_string(), 8)
         );
-        assert2::assert!(
-            parse_template_quoted_token("x `a b` tail", 2, '`').unwrap()
-                == ("`a b`".to_string(), 7)
+        assert_eq!(
+            parse_template_quoted_token("x `a b` tail", 2, '`').unwrap(),
+            ("`a b`".to_string(), 7)
         );
-        assert2::assert!(
-            tokenize_template_command(r#"print "a b" `c d`"#).unwrap()
-                == vec![
-                    "print".to_string(),
-                    r#""a b""#.to_string(),
-                    "`c d`".to_string(),
-                ]
+        assert_eq!(
+            tokenize_template_command(r#"print "a b" `c d`"#).unwrap(),
+            vec![
+                "print".to_string(),
+                r#""a b""#.to_string(),
+                "`c d`".to_string(),
+            ]
         );
     }
 
     #[test]
     fn quoted_template_token_values_require_matching_wrappers() {
-        for (_name, input, expected) in [
-            ("unquoted", "abc", None),
-            ("single backtick", "`", None),
-            ("single quote", "\"", None),
-            ("empty backticks", "``", Some(String::new())),
-            ("empty quotes", "\"\"", Some(String::new())),
-            ("missing closing backtick", "`unterminated", None),
-            ("missing opening backtick", "unterminated`", None),
-            ("missing closing quote", "\"unterminated", None),
-            ("missing opening quote", "unterminated\"", None),
-        ] {
-            assert2::assert!(quoted_template_token_value(input).unwrap() == expected);
-        }
+        assert_eq!(quoted_template_token_value("abc").unwrap(), None);
+        assert_eq!(quoted_template_token_value("`").unwrap(), None);
+        assert_eq!(quoted_template_token_value("\"").unwrap(), None);
+        assert_eq!(
+            quoted_template_token_value("``").unwrap(),
+            Some(String::new())
+        );
+        assert_eq!(
+            quoted_template_token_value("\"\"").unwrap(),
+            Some(String::new())
+        );
+        assert_eq!(quoted_template_token_value("`unterminated").unwrap(), None);
+        assert_eq!(quoted_template_token_value("unterminated`").unwrap(), None);
+        assert_eq!(quoted_template_token_value("\"unterminated").unwrap(), None);
+        assert_eq!(quoted_template_token_value("unterminated\"").unwrap(), None);
     }
 
     #[test]
     fn template_trim_right_allows_adjacent_literal() {
         let format = LineFormat::new(r#"{{ "ok" -}}tail"#).unwrap();
-        assert2::assert!(format.render("line", &BTreeMap::new()) == "oktail");
+        assert_eq!(format.render("line", &BTreeMap::new()), "oktail");
     }
 
     #[test]
@@ -2849,7 +2890,11 @@ mod tests {
             ("{{ trimSuffix \"/\" }}", ""),
         ] {
             let format = LineFormat::new(template).unwrap();
-            assert2::assert!(format.render("raw", &BTreeMap::new()) == expected);
+            assert_eq!(
+                format.render("raw", &BTreeMap::new()),
+                expected,
+                "template should tolerate missing args: {template}"
+            );
         }
     }
 
@@ -2858,17 +2903,19 @@ mod tests {
         let one = vec!["9".to_string()];
         let two = vec!["9".to_string(), "4".to_string()];
 
-        assert2::assert!(
-            format_template_integer_binary(&one, |left, right| Some(left - right)) == ""
+        assert_eq!(
+            format_template_integer_binary(&one, |left, right| Some(left - right)),
+            ""
         );
-        assert2::assert!(
-            format_template_integer_binary(&two, |left, right| Some(left - right)) == "5"
+        assert_eq!(
+            format_template_integer_binary(&two, |left, right| Some(left - right)),
+            "5"
         );
-        assert2::assert!(format_template_ordering(&one, Ordering::is_lt) == "false");
-        assert2::assert!(format_template_ordering(&two, Ordering::is_gt) == "true");
+        assert_eq!(format_template_ordering(&one, Ordering::is_lt), "false");
+        assert_eq!(format_template_ordering(&two, Ordering::is_gt), "true");
 
-        assert2::assert!(template_compare_values("NaN", "2") == Some(Ordering::Greater));
-        assert2::assert!(template_compare_values("1", "inf") == Some(Ordering::Less));
+        assert_eq!(template_compare_values("NaN", "2"), Some(Ordering::Greater));
+        assert_eq!(template_compare_values("1", "inf"), Some(Ordering::Less));
     }
 
     #[test]
@@ -2878,37 +2925,44 @@ mod tests {
         let scalar = TemplateRuntimeValue::Integer(7);
 
         for (value, expected) in [(&plain, true), (&json_string, true), (&scalar, false)] {
-            assert2::assert!(template_value_is_collection(value) == expected);
+            assert_eq!(
+                template_value_is_collection(value),
+                expected,
+                "collection check: {value:?}"
+            );
         }
 
-        assert2::assert!(
-            template_index_value(&plain, "1")
-                == Some(TemplateRuntimeValue::Integer(i64::from(b'b')))
+        assert_eq!(
+            template_index_value(&plain, "1"),
+            Some(TemplateRuntimeValue::Integer(i64::from(b'b')))
         );
-        assert2::assert!(
-            template_index_value(&json_string, "1")
-                == Some(TemplateRuntimeValue::Integer(i64::from(b'y')))
+        assert_eq!(
+            template_index_value(&json_string, "1"),
+            Some(TemplateRuntimeValue::Integer(i64::from(b'y')))
         );
-        assert2::assert!(template_index_value(&scalar, "0") == None);
+        assert_eq!(template_index_value(&scalar, "0"), None);
 
-        assert2::assert!(
+        assert_eq!(
             evaluate_template_index(&[
                 plain.clone(),
                 TemplateRuntimeValue::String("2".to_string())
-            ]) == TemplateRuntimeValue::Integer(i64::from(b'c'))
+            ]),
+            TemplateRuntimeValue::Integer(i64::from(b'c'))
         );
-        assert2::assert!(
+        assert_eq!(
             evaluate_template_index(&[
                 json_string.clone(),
                 TemplateRuntimeValue::String("0".to_string())
-            ]) == TemplateRuntimeValue::Integer(i64::from(b'x'))
+            ]),
+            TemplateRuntimeValue::Integer(i64::from(b'x'))
         );
-        assert2::assert!(
+        assert_eq!(
             evaluate_template_slice(&[
                 json_string,
                 TemplateRuntimeValue::String("1".to_string()),
                 TemplateRuntimeValue::String("3".to_string()),
-            ]) == TemplateRuntimeValue::String("yz".to_string())
+            ]),
+            TemplateRuntimeValue::String("yz".to_string())
         );
     }
 
@@ -2921,16 +2975,16 @@ mod tests {
                 .collect::<Vec<_>>()
         };
 
-        assert2::assert!(template_slice_bounds(5, &bounds(&[0, 2, 5])) == Some((0, 2)));
-        assert2::assert!(template_slice_bounds(5, &bounds(&[0, 2, 5, 5])) == None);
+        assert_eq!(template_slice_bounds(5, &bounds(&[0, 2, 5])), Some((0, 2)));
+        assert_eq!(template_slice_bounds(5, &bounds(&[0, 2, 5, 5])), None);
 
-        assert2::assert!(template_slice_bounds(5, &bounds(&[0, 3, 3])) == Some((0, 3)));
-        assert2::assert!(template_slice_bounds(5, &bounds(&[0, 5, 5])) == Some((0, 5)));
-        assert2::assert!(template_slice_bounds(5, &bounds(&[0, 4, 3])) == None);
-        assert2::assert!(template_slice_bounds(5, &bounds(&[0, 3, 6])) == None);
+        assert_eq!(template_slice_bounds(5, &bounds(&[0, 3, 3])), Some((0, 3)));
+        assert_eq!(template_slice_bounds(5, &bounds(&[0, 5, 5])), Some((0, 5)));
+        assert_eq!(template_slice_bounds(5, &bounds(&[0, 4, 3])), None);
+        assert_eq!(template_slice_bounds(5, &bounds(&[0, 3, 6])), None);
 
-        assert2::assert!(template_slice_bounds(5, &bounds(&[4, 2])) == None);
-        assert2::assert!(template_slice_bounds(5, &bounds(&[1, 6])) == None);
+        assert_eq!(template_slice_bounds(5, &bounds(&[4, 2])), None);
+        assert_eq!(template_slice_bounds(5, &bounds(&[1, 6])), None);
     }
 
     #[test]
@@ -2938,20 +2992,29 @@ mod tests {
         let args = |values: &[&str]| {
             values
                 .iter()
-                .map(|value| value.to_string())
+                .map(std::string::ToString::to_string)
                 .collect::<Vec<_>>()
         };
 
-        assert2::assert!(format_template_float(-0.0) == "0");
-        assert2::assert!(format_template_float_round(&args(&["1"])) == "");
-        assert2::assert!(format_template_float_round(&args(&["-1.6", "0"])) == "-2");
-        assert2::assert!(format_template_float_round(&args(&["1.24", "1", "0.5"])) == "1.2");
-        assert2::assert!(format_template_float_round(&args(&["1.24", "1", "NaN"])) == "");
-        assert2::assert!(format_template_float_round(&args(&["1.2", "400"])) == "");
+        assert_eq!(format_template_float(-0.0), "0");
+        assert_eq!(format_template_float_round(&args(&["1"])), "");
+        assert_eq!(format_template_float_round(&args(&["-1.6", "0"])), "-2");
+        assert_eq!(
+            format_template_float_round(&args(&["1.24", "1", "0.5"])),
+            "1.2"
+        );
+        assert_eq!(
+            format_template_float_round(&args(&["1.24", "1", "NaN"])),
+            ""
+        );
+        assert_eq!(format_template_float_round(&args(&["1.2", "400"])), "");
 
-        assert2::assert!(format_template_bytes("1.5") == "1.5");
-        assert2::assert!(format_template_bytes("1kB") == "1000");
-        assert2::assert!(format_template_bytes("100000000000000000000") == "100000000000000000000");
+        assert_eq!(format_template_bytes("1.5"), "1.5");
+        assert_eq!(format_template_bytes("1kB"), "1000");
+        assert_eq!(
+            format_template_bytes("100000000000000000000"),
+            "100000000000000000000"
+        );
     }
 
     #[test]
@@ -2959,48 +3022,52 @@ mod tests {
         let args = |values: &[&str]| {
             values
                 .iter()
-                .map(|value| value.to_string())
+                .map(std::string::ToString::to_string)
                 .collect::<Vec<_>>()
         };
         let timestamp_ns = "1704197045123456789";
 
-        assert2::assert!(
+        assert_eq!(
             format_template_date(&args(&[
                 "2006-01-02T15:04:05.000000000Z07:00",
                 timestamp_ns,
                 "ignored",
-            ])) == "2024-01-02T12:04:05.123456789Z"
+            ])),
+            "2024-01-02T12:04:05.123456789Z"
         );
-        assert2::assert!(
+        assert_eq!(
             format_template_to_date(&args(&[
                 "2006-01-02T15:04:05.999999999 -07:00",
                 "2024-01-02T12:04:05.123456789 +00:00",
                 "ignored",
-            ])) == timestamp_ns
+            ])),
+            timestamp_ns
         );
-        assert2::assert!(
+        assert_eq!(
             format_template_to_date_in_zone(&args(&[
                 "2006-01-02 15:04:05",
                 "America/New_York",
                 "2024-01-02 07:04:05",
                 "ignored",
-            ])) == "1704197045000000000"
+            ])),
+            "1704197045000000000"
         );
-        assert2::assert!(format_template_date(&args(&["2006"])) == "");
-        assert2::assert!(format_template_to_date(&args(&["2006"])) == "");
-        assert2::assert!(format_template_to_date_in_zone(&args(&["2006", "UTC"])) == "");
+        assert_eq!(format_template_date(&args(&["2006"])), "");
+        assert_eq!(format_template_to_date(&args(&["2006"])), "");
+        assert_eq!(format_template_to_date_in_zone(&args(&["2006", "UTC"])), "");
     }
 
     #[test]
     fn go_time_layout_helpers_format_and_parse_each_supported_token() {
-        let timestamp = time::OffsetDateTime::from_unix_timestamp_nanos(1704197045123456789)
+        let timestamp = time::OffsetDateTime::from_unix_timestamp_nanos(1_704_197_045_123_456_789)
             .expect("test timestamp should be valid");
 
-        assert2::assert!(
+        assert_eq!(
             format_go_time_layout(
                 "2006|06|15|04|05|01|1|02|2|Z07:00|-07:00|.000000000|.",
                 timestamp,
-            ) == "2024|24|12|04|05|01|1|02|2|Z|+00:00|.123456789|."
+            ),
+            "2024|24|12|04|05|01|1|02|2|Z|+00:00|.123456789|."
         );
 
         let parsed = parse_go_time_layout_value(
@@ -3008,71 +3075,87 @@ mod tests {
             "24|7|8|09|10|11|.123456789|+02:30|-03:15|.",
         )
         .expect("layout value should parse");
-        assert2::assert!(parsed.year == 2024);
-        assert2::assert!(parsed.month == 7);
-        assert2::assert!(parsed.day == 8);
-        assert2::assert!(parsed.hour == 9);
-        assert2::assert!(parsed.minute == 10);
-        assert2::assert!(parsed.second == 11);
-        assert2::assert!(parsed.nanosecond == 123_456_789);
-        assert2::assert!(parsed.offset_seconds == Some(-11_700));
+        assert_eq!(parsed.year, 2024);
+        assert_eq!(parsed.month, 7);
+        assert_eq!(parsed.day, 8);
+        assert_eq!(parsed.hour, 9);
+        assert_eq!(parsed.minute, 10);
+        assert_eq!(parsed.second, 11);
+        assert_eq!(parsed.nanosecond, 123_456_789);
+        assert_eq!(parsed.offset_seconds, Some(-11_700));
     }
 
     #[test]
     fn go_time_low_level_parsers_consume_expected_widths() {
         let mut pos = 0;
-        assert2::assert!(parse_variable_template_digits("123x", &mut pos, 2) == Some(12));
-        assert2::assert!(pos == 2);
-
-        pos = 0;
-        assert2::assert!(parse_variable_template_digits("x12", &mut pos, 2) == None);
-        assert2::assert!(pos == 0);
-
-        pos = 0;
-        assert2::assert!(
-            parse_template_fractional_nanoseconds(".1234x", &mut pos, 3) == Some(123_000_000)
+        assert_eq!(
+            parse_variable_template_digits("123x", &mut pos, 2),
+            Some(12)
         );
-        assert2::assert!(pos == 4);
+        assert_eq!(pos, 2);
 
         pos = 0;
-        assert2::assert!(parse_template_fractional_nanoseconds(".x", &mut pos, 3) == None);
-        assert2::assert!(pos == 1);
+        assert_eq!(parse_variable_template_digits("x12", &mut pos, 2), None);
+        assert_eq!(pos, 0);
 
         pos = 0;
-        assert2::assert!(parse_template_timezone_offset("Z!", &mut pos) == Some(0));
-        assert2::assert!(pos == 1);
+        assert_eq!(
+            parse_template_fractional_nanoseconds(".1234x", &mut pos, 3),
+            Some(123_000_000)
+        );
+        assert_eq!(pos, 4);
 
         pos = 0;
-        assert2::assert!(parse_template_timezone_offset("+02:30", &mut pos) == Some(9_000));
-        assert2::assert!(pos == 6);
+        assert_eq!(
+            parse_template_fractional_nanoseconds(".x", &mut pos, 3),
+            None
+        );
+        assert_eq!(pos, 1);
 
         pos = 0;
-        assert2::assert!(parse_template_timezone_offset("+12:34", &mut pos) == Some(45_240));
-        assert2::assert!(pos == 6);
+        assert_eq!(parse_template_timezone_offset("Z!", &mut pos), Some(0));
+        assert_eq!(pos, 1);
+
+        pos = 0;
+        assert_eq!(
+            parse_template_timezone_offset("+02:30", &mut pos),
+            Some(9_000)
+        );
+        assert_eq!(pos, 6);
+
+        pos = 0;
+        assert_eq!(
+            parse_template_timezone_offset("+12:34", &mut pos),
+            Some(45_240)
+        );
+        assert_eq!(pos, 6);
 
         pos = 1;
-        assert2::assert!(parse_template_timezone_offset("x-03:15", &mut pos) == Some(-11_700));
-        assert2::assert!(pos == 7);
+        assert_eq!(
+            parse_template_timezone_offset("x-03:15", &mut pos),
+            Some(-11_700)
+        );
+        assert_eq!(pos, 7);
 
         pos = 0;
-        assert2::assert!(parse_template_timezone_offset("UTC", &mut pos) == None);
-        assert2::assert!(pos == 0);
+        assert_eq!(parse_template_timezone_offset("UTC", &mut pos), None);
+        assert_eq!(pos, 0);
     }
 
     #[test]
     fn template_string_escape_helpers_cover_special_bytes() {
-        assert2::assert!(substring_template_string("abcdef", 2, 0) == "");
-        assert2::assert!(substring_template_string("abcdef", 2, -1) == "cdef");
+        assert_eq!(substring_template_string("abcdef", 2, 0), "");
+        assert_eq!(substring_template_string("abcdef", 2, -1), "cdef");
 
-        assert2::assert!(
-            js_escape_template_string("\\'\"\n\r\t\u{2028}\u{2029}\u{0001}")
-                == r#"\\\'\"\u000A\u000D\u0009\u2028\u2029\u0001"#
+        assert_eq!(
+            js_escape_template_string("\\'\"\n\r\t\u{2028}\u{2029}\u{0001}"),
+            r#"\\\'\"\u000A\u000D\u0009\u2028\u2029\u0001"#
         );
 
         let mut escaped = "prefix".to_string();
         push_template_unicode_escape(&mut escaped, 0x1f);
-        assert2::assert!(escaped == r"prefix\u001F");
+        assert_eq!(escaped, r"prefix\u001F");
 
-        assert2::assert!(urldecode_template_string("%7a%2F%3f%zz%A") == "z/?%zz%A");
+        assert_eq!(urldecode_template_string("%7a%2F%3f%zz%A"), "z/?%zz%A");
     }
 }

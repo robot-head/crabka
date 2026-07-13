@@ -12,7 +12,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 1;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -21,6 +22,10 @@ pub struct DescribeShareGroupOffsetsRequest<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl DescribeShareGroupOffsetsRequest<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::describe_share_group_offsets_request::DescribeShareGroupOffsetsRequest {
@@ -120,6 +125,10 @@ pub struct DescribeShareGroupOffsetsRequestGroup<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl DescribeShareGroupOffsetsRequestGroup<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::describe_share_group_offsets_request::DescribeShareGroupOffsetsRequestGroup
@@ -140,9 +149,9 @@ impl Encode for DescribeShareGroupOffsetsRequestGroup<'_> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.group_id);
+                let () = put_compact_string(buf, self.group_id);
             } else {
-                put_string(buf, self.group_id);
+                let () = put_string(buf, self.group_id);
             }
         }
         if version >= 0 {
@@ -248,6 +257,10 @@ pub struct DescribeShareGroupOffsetsRequestTopic<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl DescribeShareGroupOffsetsRequestTopic<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::describe_share_group_offsets_request::DescribeShareGroupOffsetsRequestTopic
@@ -264,9 +277,9 @@ impl Encode for DescribeShareGroupOffsetsRequestTopic<'_> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.topic_name);
+                let () = put_compact_string(buf, self.topic_name);
             } else {
-                put_string(buf, self.topic_name);
+                let () = put_string(buf, self.topic_name);
             }
         }
         if version >= 0 {

@@ -43,7 +43,6 @@ pub struct FunctionRec {
 }
 
 /// A binary mapping record.
-#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MappingRec {
     pub memory_start: u64,
@@ -51,10 +50,56 @@ pub struct MappingRec {
     pub file_offset: u64,
     pub filename: u32,
     pub build_id: u32,
-    pub has_functions: bool,
-    pub has_filenames: bool,
-    pub has_line_numbers: bool,
-    pub has_inline_frames: bool,
+    pub symbolization: MappingSymbolization,
+}
+
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MappingSymbolization(u8);
+
+impl MappingSymbolization {
+    const FUNCTIONS: u8 = 1;
+    const FILENAMES: u8 = 1 << 1;
+    const LINE_NUMBERS: u8 = 1 << 2;
+    const INLINE_FRAMES: u8 = 1 << 3;
+
+    #[must_use]
+    pub fn from_parts(parts: (bool, bool, bool, bool)) -> Self {
+        let (has_functions, has_filenames, has_line_numbers, has_inline_frames) = parts;
+        let mut flags = 0;
+        if has_functions {
+            flags |= Self::FUNCTIONS;
+        }
+        if has_filenames {
+            flags |= Self::FILENAMES;
+        }
+        if has_line_numbers {
+            flags |= Self::LINE_NUMBERS;
+        }
+        if has_inline_frames {
+            flags |= Self::INLINE_FRAMES;
+        }
+        Self(flags)
+    }
+
+    #[must_use]
+    pub fn has_functions(self) -> bool {
+        self.0 & Self::FUNCTIONS != 0
+    }
+
+    #[must_use]
+    pub fn has_filenames(self) -> bool {
+        self.0 & Self::FILENAMES != 0
+    }
+
+    #[must_use]
+    pub fn has_line_numbers(self) -> bool {
+        self.0 & Self::LINE_NUMBERS != 0
+    }
+
+    #[must_use]
+    pub fn has_inline_frames(self) -> bool {
+        self.0 & Self::INLINE_FRAMES != 0
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -121,6 +166,8 @@ impl SymbolDb {
         }
     }
 
+    /// # Panics
+    /// Panics if decoded profile indexes reference a missing string, mapping, function, or location that validation promised was present.
     pub fn intern_string(&mut self, value: &str) -> u32 {
         self.ensure_init();
         if let Some(index) = self.string_index.get(value) {
@@ -133,12 +180,16 @@ impl SymbolDb {
     }
 
     #[must_use]
+    /// # Panics
+    /// Panics if decoded profile indexes reference a missing string, mapping, function, or location that validation promised was present.
     pub fn string(&self, index: u32) -> &str {
         self.strings
             .get(usize::try_from(index).expect("u32 fits usize"))
             .map_or("", String::as_str)
     }
 
+    /// # Panics
+    /// Panics if decoded profile indexes reference a missing string, mapping, function, or location that validation promised was present.
     pub fn intern_function(&mut self, function: FunctionRec) -> u32 {
         if let Some(index) = self.function_index.get(&function) {
             return *index;
@@ -149,6 +200,8 @@ impl SymbolDb {
         index
     }
 
+    /// # Panics
+    /// Panics if decoded profile indexes reference a missing string, mapping, function, or location that validation promised was present.
     pub fn intern_location(&mut self, location: LocationRec) -> u32 {
         if let Some(index) = self.location_index.get(&location) {
             return *index;
@@ -159,6 +212,8 @@ impl SymbolDb {
         index
     }
 
+    /// # Panics
+    /// Panics if decoded profile indexes reference a missing string, mapping, function, or location that validation promised was present.
     pub fn intern_mapping(&mut self, mapping: MappingRec) -> u32 {
         if let Some(index) = self.mapping_index.get(&mapping) {
             return *index;
@@ -169,6 +224,8 @@ impl SymbolDb {
         index
     }
 
+    /// # Panics
+    /// Panics if decoded profile indexes reference a missing string, mapping, function, or location that validation promised was present.
     pub fn intern_stacktrace(&mut self, partition: u64, location_refs: &[u32]) -> u32 {
         if location_refs.is_empty() {
             return EMPTY_STACKTRACE_ID;
@@ -193,6 +250,10 @@ impl SymbolDb {
         u32::try_from(parent.max(0)).expect("leaf node index")
     }
 
+    /// # Errors
+    /// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
+    /// # Panics
+    /// Panics if decoded profile indexes reference a missing string, mapping, function, or location that validation promised was present.
     pub fn copy_partition_from(
         &mut self,
         source: &SymbolDb,
@@ -227,10 +288,7 @@ impl SymbolDb {
                     file_offset: mapping.file_offset,
                     filename: remap_index(mapping.filename, &strings),
                     build_id: remap_index(mapping.build_id, &strings),
-                    has_functions: mapping.has_functions,
-                    has_filenames: mapping.has_filenames,
-                    has_line_numbers: mapping.has_line_numbers,
-                    has_inline_frames: mapping.has_inline_frames,
+                    symbolization: mapping.symbolization,
                 })
             })
             .collect::<Vec<_>>();
@@ -294,6 +352,8 @@ impl SymbolDb {
     }
 
     #[must_use]
+    /// # Panics
+    /// Panics if decoded profile indexes reference a missing string, mapping, function, or location that validation promised was present.
     pub fn resolve(&self, partition: u64, stacktrace_id: u32) -> Vec<Frame> {
         if stacktrace_id == EMPTY_STACKTRACE_ID {
             return Vec::new();
@@ -340,6 +400,8 @@ impl SymbolDb {
     }
 
     #[must_use]
+    /// # Panics
+    /// Panics if decoded profile indexes reference a missing string, mapping, function, or location that validation promised was present.
     pub fn raw_locations(&self, partition: u64, stacktrace_id: u32) -> Vec<RawLocation> {
         if stacktrace_id == EMPTY_STACKTRACE_ID {
             return Vec::new();
@@ -379,10 +441,14 @@ impl SymbolDb {
     }
 
     #[must_use]
+    /// # Panics
+    /// Panics if decoded profile indexes reference a missing string, mapping, function, or location that validation promised was present.
     pub fn encode(&self) -> Vec<u8> {
         <SerdeCompat<SymbolDb> as WincodeSerialize>::serialize(self).expect("SymbolDb serializes")
     }
 
+    /// # Errors
+    /// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
     pub fn decode(bytes: &[u8]) -> Result<Self, ProfileError> {
         let mut db = <SerdeCompat<SymbolDb> as WincodeDeserialize>::deserialize(bytes)
             .map_err(|err| ProfileError::Decode(err.to_string()))?;
@@ -474,7 +540,7 @@ fn drop_go_type_parameters(input: &str) -> Cow<'_, str> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::check;
+    use assert2::{assert, check};
 
     use super::*;
 
@@ -507,7 +573,7 @@ mod tests {
     #[test]
     fn string_zero_is_empty() {
         let db = SymbolDb::default();
-        assert2::assert!(db.string(0) == "");
+        assert!(db.string(0) == "");
     }
 
     #[test]
@@ -515,7 +581,9 @@ mod tests {
         let mut db = SymbolDb::new();
         let name = db.intern_string("name");
 
-        check!((db.string(0), name, db.string(name)) == ("", 1, "name"));
+        check!(db.string(0) == "");
+        check!(name == 1);
+        check!(db.string(name) == "name");
     }
 
     #[test]
@@ -523,7 +591,7 @@ mod tests {
         let (mut db, [a, b, c]) = db_with_abc();
         let id1 = db.intern_stacktrace(0, &[a, b, c]);
         let id2 = db.intern_stacktrace(0, &[a, b, c]);
-        assert2::assert!(id1 == id2);
+        assert!(id1 == id2);
     }
 
     #[test]
@@ -532,7 +600,9 @@ mod tests {
         let id = db.intern_stacktrace(0, &[a, b]);
         let part = db.partitions.get(&0).unwrap();
 
-        check!((id, part.nodes[0].parent, part.nodes[1].parent) == (1, -1, 0));
+        check!(id == 1);
+        check!(part.nodes[0].parent == -1);
+        check!(part.nodes[1].parent == 0);
     }
 
     #[test]
@@ -543,7 +613,7 @@ mod tests {
 
         let frames = db.resolve(0, id);
         let names: Vec<&str> = frames.iter().map(|frame| frame.function.as_str()).collect();
-        assert2::assert!(names == vec!["a", "b"]);
+        assert!(names == vec!["a", "b"]);
     }
 
     #[test]
@@ -551,9 +621,9 @@ mod tests {
         let (mut db, [a, b, c]) = db_with_abc();
         let abc = db.intern_stacktrace(0, &[a, b, c]);
         let ab = db.intern_stacktrace(0, &[a, b]);
-        assert2::assert!(abc != ab);
+        assert!(abc != ab);
         let other = db.intern_stacktrace(1, &[a, b, c]);
-        assert2::assert!(db.resolve(1, other).len() == 3);
+        assert!(db.resolve(1, other).len() == 3);
     }
 
     #[test]
@@ -578,7 +648,7 @@ mod tests {
         let id = db.intern_stacktrace(0, &[a, b, c]);
         let frames = db.resolve(0, id);
         let names: Vec<&str> = frames.iter().map(|frame| frame.function.as_str()).collect();
-        assert2::assert!(names == vec!["a", "b", "c"]);
+        assert!(names == vec!["a", "b", "c"]);
     }
 
     #[test]
@@ -587,7 +657,7 @@ mod tests {
         let _ = db.intern_stacktrace(0, &[a, b, c]);
         let invalid = u32::try_from(i64::from(i32::MAX) + 1).unwrap();
 
-        assert2::assert!(db.resolve(0, invalid).is_empty());
+        assert!(db.resolve(0, invalid).is_empty());
 
         let mut raw_db = SymbolDb::new();
         let filename = raw_db.intern_string("/bin/app");
@@ -598,10 +668,7 @@ mod tests {
             file_offset: 0,
             filename,
             build_id,
-            has_functions: false,
-            has_filenames: false,
-            has_line_numbers: false,
-            has_inline_frames: false,
+            symbolization: MappingSymbolization::default(),
         });
         let loc_a = raw_db.intern_location(LocationRec {
             address: 0x10,
@@ -615,7 +682,7 @@ mod tests {
         });
         let _ = raw_db.intern_stacktrace(0, &[loc_a, loc_b]);
 
-        assert2::assert!(raw_db.raw_locations(0, invalid).is_empty());
+        assert!(raw_db.raw_locations(0, invalid).is_empty());
     }
 
     #[test]
@@ -652,7 +719,7 @@ mod tests {
         let id = db.intern_stacktrace(0, &[loc]);
         let frames = db.resolve(0, id);
         let names: Vec<&str> = frames.iter().map(|frame| frame.function.as_str()).collect();
-        assert2::assert!(names == vec!["inner", "outer"]);
+        assert!(names == vec!["inner", "outer"]);
     }
 
     #[test]
@@ -680,25 +747,23 @@ mod tests {
 
         let frames = db.resolve(0, id);
 
-        assert2::assert!(
-            frames[0].function == "github.com/dgraph-io/ristretto/v2.(*Cache).processItems"
-        );
+        assert!(frames[0].function == "github.com/dgraph-io/ristretto/v2.(*Cache).processItems");
     }
 
     #[test]
     fn drop_go_type_parameters_handles_multiple_nested_and_unclosed_shapes() {
-        assert2::assert!(
+        assert!(
             drop_go_type_parameters("pkg.(*Cache[go.shape.string]).Get[go.shape.int]").as_ref()
                 == "pkg.(*Cache).Get"
         );
-        assert2::assert!(
+        assert!(
             drop_go_type_parameters("pkg.F[go.shape.struct{Field [go.shape.int]}].G").as_ref()
                 == "pkg.F.G"
         );
         let unclosed = "pkg.F[go.shape.string";
-        assert2::assert!(drop_go_type_parameters(unclosed).as_ref() == unclosed);
+        assert!(drop_go_type_parameters(unclosed).as_ref() == unclosed);
         let ordinary_generic = "pkg.F[int]";
-        assert2::assert!(drop_go_type_parameters(ordinary_generic).as_ref() == ordinary_generic);
+        assert!(drop_go_type_parameters(ordinary_generic).as_ref() == ordinary_generic);
     }
 
     #[test]
@@ -707,12 +772,9 @@ mod tests {
         let id = db.intern_stacktrace(0, &[a, b, c]);
         let bytes = db.encode();
         let mut back = SymbolDb::decode(&bytes).unwrap();
-        let decoded_stack = back.resolve(0, id);
-        let source_stack = db.resolve(0, id);
-        let decoded_a = back.intern_string("a");
-        let source_a = db.intern_string("a");
-        let decoded_id = back.intern_stacktrace(0, &[a, b, c]);
-        check!((decoded_stack, decoded_a, decoded_id) == (source_stack, source_a, id));
+        check!(back.resolve(0, id) == db.resolve(0, id));
+        check!(back.intern_string("a") == db.intern_string("a"));
+        check!(back.intern_stacktrace(0, &[a, b, c]) == id);
     }
 
     #[test]
@@ -720,7 +782,7 @@ mod tests {
         let (mut db, [a, b, c]) = db_with_abc();
         let id = db.intern_stacktrace(0, &[a, b, c]);
         let source: &dyn SymbolSource = &db;
-        assert2::assert!(source.resolve(0, id) == db.resolve(0, id));
+        assert!(source.resolve(0, id) == db.resolve(0, id));
     }
 
     #[test]
@@ -746,7 +808,7 @@ mod tests {
 
         dest.copy_partition_from(&source, 0, 17).unwrap();
 
-        assert2::assert!(dest.resolve(17, id) == source.resolve(0, id));
+        assert!(dest.resolve(17, id) == source.resolve(0, id));
     }
 
     #[test]
@@ -757,7 +819,7 @@ mod tests {
 
         dest.copy_partition_from(&source, 0, 17).unwrap();
 
-        assert2::assert!(dest.intern_stacktrace(17, &[a, b]) == id);
-        assert2::assert!(dest.copy_partition_from(&source, 0, 17).is_err());
+        assert!(dest.intern_stacktrace(17, &[a, b]) == id);
+        assert!(dest.copy_partition_from(&source, 0, 17).is_err());
     }
 }

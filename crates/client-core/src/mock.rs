@@ -49,6 +49,8 @@ impl MockBroker {
     ///
     /// The `MockBroker` prepends the correlation-id to the returned body
     /// automatically; the handler only supplies the response body bytes.
+    /// # Panics
+    /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub async fn start<F>(handler: F) -> Self
     where
         F: FnMut(i16, i16, i32, &[u8]) -> Option<Vec<u8>> + Send + 'static,

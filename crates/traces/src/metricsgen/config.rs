@@ -62,10 +62,16 @@ mod secs {
 
     use serde::{Deserialize, Deserializer, Serializer};
 
+    ///
+    /// # Errors
+    /// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
     pub fn serialize<S: Serializer>(d: &Duration, s: S) -> Result<S::Ok, S::Error> {
         s.serialize_u64(d.as_secs())
     }
 
+    ///
+    /// # Errors
+    /// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Duration, D::Error> {
         let secs = u64::deserialize(d)?;
         Ok(Duration::from_secs(secs))

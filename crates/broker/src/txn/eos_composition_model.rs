@@ -30,12 +30,6 @@
 //!
 //! See the design spec.
 
-#![allow(
-    clippy::cast_possible_wrap,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss
-)]
-
 use std::time::Duration;
 
 use crabka_log::{Offset, ProducerId};
@@ -53,6 +47,14 @@ const MAX_UNIQUE_STATES: usize = 2_000_000;
 const MAX_DEPTH: usize = 50;
 const CHECK_TIMEOUT: Duration = Duration::from_mins(2);
 const PID0: i64 = 1000; // base producer id; per-producer pid = PID0 + producer index
+
+fn model_offset(value: usize) -> i64 {
+    i64::try_from(value).expect("bounded model offset fits in i64")
+}
+
+fn model_index(value: i64) -> usize {
+    usize::try_from(value).expect("model offsets are non-negative and bounded")
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Kind {
@@ -106,7 +108,7 @@ fn rebuild(p: usize, pr: Prod) -> TxnEntry {
     // Per-producer pid = PID0 + index; wrap into `ProducerId` at the seam.
     let mut e = TxnEntry::new_empty(
         "tid".to_string(),
-        ProducerId(PID0 + p as i64),
+        ProducerId(PID0 + model_offset(p)),
         pr.epoch,
         60_000,
         1,
@@ -140,11 +142,11 @@ fn lso(log: &[Batch]) -> Offset {
             seen.push((b.producer, b.generation));
             // First occurrence of this (producer, generation) — its base offset.
             if txn_outcome(log, b.producer, b.generation).is_none() {
-                min_open = Some(min_open.map_or(off as i64, |m| m.min(off as i64)));
+                min_open = Some(min_open.map_or(model_offset(off), |m| m.min(model_offset(off))));
             }
         }
     }
-    Offset(min_open.unwrap_or(log.len() as i64))
+    Offset(min_open.unwrap_or(model_offset(log.len())))
 }
 
 /// The exclusive offset a `read_committed` consumer may see, driving the REAL
@@ -152,7 +154,7 @@ fn lso(log: &[Batch]) -> Offset {
 /// lso.min(hw)`). When an open txn's records sit above the HWM, `lso > hw` and
 /// the clamp returns `hw` — the consumer never reads above the watermark.
 fn effective_lso(log: &[Batch], hw: Offset) -> Offset {
-    let log_end = Offset(log.len() as i64);
+    let log_end = Offset(model_offset(log.len()));
     let l = lso(log);
     let vw = compute_visibility_window(
         false,     // consumer, not follower
@@ -170,10 +172,10 @@ fn effective_lso(log: &[Batch], hw: Offset) -> Offset {
 /// whose txn did NOT abort.
 fn visible(log: &[Batch], hw: Offset) -> Vec<i64> {
     let eff = effective_lso(log, hw);
-    (0..log.len() as i64)
+    (0..model_offset(log.len()))
         .filter(|&off| off < eff)
         .filter(|&off| {
-            let b = log[off as usize];
+            let b = log[model_index(off)];
             b.kind == Kind::Data && txn_outcome(log, b.producer, b.generation) != Some(Kind::Abort)
         })
         .collect()
@@ -209,14 +211,14 @@ impl Model for EosModel {
 
     fn actions(&self, s: &Self::State, acts: &mut Vec<Self::Action>) {
         // A follower replicating: advance the HWM toward the log end.
-        if s.hw < s.log.len() as i64 {
+        if s.hw < model_offset(s.log.len()) {
             acts.push(Act::Ack);
         }
         if s.log.len() >= self.max_log {
             return;
         }
         for p in 0..self.producers {
-            let pr = s.prod[p as usize];
+            let pr = s.prod[usize::from(p)];
             if pr.generation < self.max_gen && tstate(pr.state).can_transition_to(TxnState::Ongoing)
             {
                 acts.push(Act::Begin(p));
@@ -244,7 +246,7 @@ impl Model for EosModel {
         let mut s = last.clone();
         match a {
             Act::Begin(p) => {
-                let pr = &mut s.prod[p as usize];
+                let pr = &mut s.prod[usize::from(p)];
                 if !tstate(pr.state).can_transition_to(TxnState::Ongoing) {
                     return None;
                 }
@@ -252,7 +254,7 @@ impl Model for EosModel {
                 pr.state = TxnState::Ongoing.to_kafka_status();
             }
             Act::Append(p) => {
-                let g = s.prod[p as usize].generation;
+                let g = s.prod[usize::from(p)].generation;
                 s.log.push(Batch {
                     producer: p,
                     generation: g,
@@ -260,8 +262,8 @@ impl Model for EosModel {
                 });
             }
             Act::End(p, commit) => {
-                let pr = s.prod[p as usize];
-                let mut entry = rebuild(p as usize, pr);
+                let pr = s.prod[usize::from(p)];
+                let mut entry = rebuild(usize::from(p), pr);
                 let Ok((prepare, complete)) = decide_phase1_transition(&mut entry, commit) else {
                     return None; // illegal transition
                 };
@@ -285,7 +287,7 @@ impl Model for EosModel {
                             generation: pr.generation,
                             kind: if commit { Kind::Commit } else { Kind::Abort },
                         });
-                        let np = &mut s.prod[p as usize];
+                        let np = &mut s.prod[usize::from(p)];
                         np.state = next_state.to_kafka_status();
                         np.epoch = response_epoch; // TV_2 bumps the epoch on completion
                     }
@@ -302,10 +304,13 @@ impl Model for EosModel {
             }
         }
         // HWM never regresses and never passes the log end.
-        assert2::assert!(s.hw >= last.hw && s.hw <= s.log.len() as i64);
+        assert!(
+            s.hw >= last.hw && s.hw <= model_offset(s.log.len()),
+            "HWM out of range"
+        );
         // LSO is monotonic across every transition (offsets only grow; the
         // oldest-open base only advances). Assert it (cheap regression guard).
-        assert2::assert!(lso(&s.log) >= lso(&last.log));
+        assert!(lso(&s.log) >= lso(&last.log), "LSO regressed");
         Some(s)
     }
 
@@ -317,7 +322,7 @@ impl Model for EosModel {
             // min(lso, hw) (which would expose open-txn or above-HWM data).
             Property::always("only_committed_visible", |_, s: &EosState| {
                 visible(&s.log, s.hw).into_iter().all(|off| {
-                    let b = s.log[off as usize];
+                    let b = s.log[model_index(off)];
                     txn_outcome(&s.log, b.producer, b.generation) == Some(Kind::Commit)
                 })
             }),
@@ -330,15 +335,15 @@ impl Model for EosModel {
                 let eff = effective_lso(&s.log, s.hw);
                 s.log.iter().enumerate().all(|(off, b)| {
                     !(b.kind == Kind::Data
-                        && (off as i64) < eff
+                        && (model_offset(off)) < eff
                         && txn_outcome(&s.log, b.producer, b.generation) == Some(Kind::Commit))
-                        || v.contains(&(off as i64))
+                        || v.contains(&(model_offset(off)))
                 })
             }),
             // No aborted batch is ever visible (the abort-side all-or-nothing).
             Property::always("no_visible_aborted", |_, s: &EosState| {
                 visible(&s.log, s.hw).into_iter().all(|off| {
-                    let b = s.log[off as usize];
+                    let b = s.log[model_index(off)];
                     txn_outcome(&s.log, b.producer, b.generation) != Some(Kind::Abort)
                 })
             }),
@@ -350,7 +355,7 @@ impl Model for EosModel {
                 let eff = effective_lso(&s.log, s.hw);
                 s.log.iter().enumerate().any(|(off, b)| {
                     b.kind == Kind::Data
-                        && (off as i64) < eff
+                        && (model_offset(off)) < eff
                         && txn_outcome(&s.log, b.producer, b.generation) == Some(Kind::Abort)
                 })
             }),
@@ -360,7 +365,7 @@ impl Model for EosModel {
                 let l = lso(&s.log);
                 s.log.iter().enumerate().any(|(off, b)| {
                     b.kind == Kind::Data
-                        && (off as i64) >= l
+                        && (model_offset(off)) >= l
                         && txn_outcome(&s.log, b.producer, b.generation) == Some(Kind::Commit)
                 })
             }),
@@ -393,9 +398,16 @@ fn run(model: EosModel, label: &str) {
         checker.state_count(),
         checker.max_depth()
     );
-    assert2::assert!(checker.max_depth() < MAX_DEPTH);
-    assert2::assert!(checker.state_count() < TARGET_STATE_COUNT);
-    assert2::assert!(checker.unique_state_count() < MAX_UNIQUE_STATES);
+    assert!(checker.max_depth() < MAX_DEPTH, "[{label}] depth cap hit");
+    assert!(
+        checker.state_count() < TARGET_STATE_COUNT,
+        "[{label}] truncated"
+    );
+    assert!(
+        checker.unique_state_count() < MAX_UNIQUE_STATES,
+        "[{label}] unique bound exceeded ({})",
+        checker.unique_state_count()
+    );
     checker.assert_properties();
 }
 

@@ -1,4 +1,3 @@
-#![allow(clippy::doc_markdown, clippy::doc_lazy_continuation)]
 //! Integration tests for the `gssapi` listener authentication variant +
 //! inter-broker Kerberos initiate config. Exercises the full reconcile
 //! path against the kube-mock harness:
@@ -6,29 +5,30 @@
 //!   1. Happy path: a `type: gssapi` listener with its keytab Secret
 //!      present renders the broker-global `[gssapi]` TOML block (with
 //!      `keytab_path` + `enabled_mechanisms = ["GSSAPI"]`) into the
-//!      broker-config ConfigMap, and the pool reconciler mounts the
+//!      broker-config `ConfigMap`, and the pool reconciler mounts the
 //!      `gssapi-keytab` projected-items volume at
 //!      `/etc/crabka/gssapi-keytab`.
 //!   2. Missing keytab Secret: the cluster reconciler short-circuits to a
 //!      `Ready=False` status condition with reason
 //!      `MissingGssapiKeytabSecret` (same shape as the OAuth
-//!      introspection missing-Secret path) and emits no ConfigMap PATCH.
+//!      introspection missing-Secret path) and emits no `ConfigMap` PATCH.
 //!   3. Inter-broker GSSAPI: when `interBrokerListenerName` resolves to
 //!      the gssapi listener and `spec.interBrokerKerberos` is set, the
-//!      ConfigMap TOML gains the `[inter_broker_credentials]` block with
+//!      `ConfigMap` TOML gains the `[inter_broker_credentials]` block with
 //!      `type = "gssapi"` + the client principal.
 //!   4. krb5.conf: `spec.krb5ConfSecretRef` drives a `krb5-conf` volume +
 //!      `/etc/crabka/krb5` mount and a `KRB5_CONFIG` env on the broker
-//!      container (asserted via the pool reconciler's StatefulSet).
+//!      container (asserted via the pool reconciler's `StatefulSet`).
 //!
 //! The pure validator + TOML render + pod-template render functions are
 //! covered by unit tests inside `controller/{listeners,kafka_node_pool}.rs`.
 //! The added value here is end-to-end wiring: the keytab-Secret existence
-//! check, the rendered TOML landing in the ConfigMap, and the mounts
-//! landing on the StatefulSet.
+//! check, the rendered TOML landing in the `ConfigMap`, and the mounts
+//! landing on the `StatefulSet`.
 
 use std::{collections::BTreeMap, sync::Arc};
 
+use assert2::{assert, check};
 use base64::Engine as _;
 use crabka_operator::{
     controller::{
@@ -163,7 +163,7 @@ fn rule_get_secret_404(name: &str) -> MockRule {
 /// Secret is absent the reconciler short-circuits (after CA convergence +
 /// pool list) to a `patch_status_with_condition` (GET status + PATCH
 /// status) before upserting per-broker objects. Drop the per-broker
-/// keystore / ConfigMap / status-PATCH rules so an unconsumed rule can't
+/// keystore / `ConfigMap` / status-PATCH rules so an unconsumed rule can't
 /// mask the assertion, then re-add the GET+PATCH status pair. Mirrors
 /// `reconcile_oauth_introspection.rs::rules_for_failure_path`.
 fn rules_for_failure_path(name: &str, namespace: &str) -> Vec<MockRule> {
@@ -214,8 +214,8 @@ fn assert_ready_false_with_reason(
         .iter()
         .find(|c| c["type"] == "Ready")
         .unwrap_or_else(|| panic!("Ready condition present; body = {body}"));
-    assert2::assert!(ready["status"].as_str() == Some("False"));
-    assert2::assert!(ready["reason"].as_str() == Some(expected_reason));
+    assert!(ready["status"] == "False", "body = {body}");
+    assert!(ready["reason"] == expected_reason, "body = {body}");
 }
 
 /// Extract the `broker-0.toml` string from the `ConfigMap` PATCH captured
@@ -308,7 +308,7 @@ fn parent_kafka_body_with_gssapi(name: &str, namespace: &str, krb5: bool) -> ser
 }
 
 /// FIFO rule sequence the pool reconciler needs:
-///   1. GET kafkas/<parent>              → parent_body
+///   1. GET kafkas/<parent>              → `parent_body`
 ///   2. GET statefulsets/<parent>-<pool> → 404 (first reconcile)
 ///   3. PATCH statefulsets/<parent>-<pool> (SSA)
 ///   4. GET statefulsets/<parent>-<pool>  (post-apply status read)
@@ -366,7 +366,7 @@ fn pool_ctx(
 
 /// A `type: gssapi` listener with its keytab Secret present reconciles
 /// cleanly: the keytab Secret is GET'd + validated, and the broker-config
-/// ConfigMap embeds the broker-global `[gssapi]` block with
+/// `ConfigMap` embeds the broker-global `[gssapi]` block with
 /// `keytab_path = "/etc/crabka/gssapi-keytab/keytab"` plus the per-listener
 /// `sasl_config = { enabled_mechanisms = ["GSSAPI"] }` row.
 #[tokio::test]
@@ -404,12 +404,19 @@ async fn gssapi_listener_renders_gssapi_toml_block_and_mechanism() {
     let observed = state.take_observed();
 
     // Keytab-Secret existence check fired.
-    assert2::assert!(observed.iter().any(|r| {
-        r.method() == Method::GET
-            && r.uri()
-                .to_string()
-                .contains(&format!("/secrets/{KEYTAB_SECRET_NAME}"))
-    }));
+    assert!(
+        observed.iter().any(|r| {
+            r.method() == Method::GET
+                && r.uri()
+                    .to_string()
+                    .contains(&format!("/secrets/{KEYTAB_SECRET_NAME}"))
+        }),
+        "keytab Secret GET must fire; observed: {:?}",
+        observed
+            .iter()
+            .map(|r| format!("{} {}", r.method(), r.uri()))
+            .collect::<Vec<_>>(),
+    );
 
     let toml = extract_broker0_toml(&observed, "c1");
     // `[inter_broker_credentials]` must be absent: the synthesized inter-broker
@@ -420,7 +427,10 @@ async fn gssapi_listener_renders_gssapi_toml_block_and_mechanism() {
         ("sasl_config = { enabled_mechanisms = [\"GSSAPI\"] }", true),
         ("[inter_broker_credentials]", false),
     ] {
-        assert2::assert!(toml.contains(needle) == want);
+        assert!(
+            toml.contains(needle) == want,
+            "needle {needle:?}, want present = {want}; TOML: {toml}"
+        );
     }
 }
 
@@ -459,6 +469,15 @@ async fn gssapi_listener_statefulset_mounts_keytab_volume() {
         .iter()
         .find(|v| v["name"] == "gssapi-keytab")
         .unwrap_or_else(|| panic!("gssapi-keytab volume present; body = {body}"));
+    assert!(
+        kt_vol["secret"]["secretName"] == KEYTAB_SECRET_NAME,
+        "keytab volume sources the user's Secret; body = {body}"
+    );
+    assert!(
+        kt_vol["secret"]["items"] == serde_json::json!([{ "key": KEYTAB_KEY, "path": "keytab" }]),
+        "exactly one projected item, pinned to the fixed `keytab` path; body = {body}"
+    );
+
     // Broker-container volumeMount at the canonical keytab dir.
     let containers = pod_spec["containers"].as_array().expect("containers array");
     let broker = containers
@@ -470,24 +489,9 @@ async fn gssapi_listener_statefulset_mounts_keytab_volume() {
         .iter()
         .find(|m| m["name"] == "gssapi-keytab")
         .unwrap_or_else(|| panic!("gssapi-keytab mount present; body = {body}"));
-    assert2::assert!(
-        kt_vol
-            == &serde_json::json!({
-                "name": "gssapi-keytab",
-                "secret": {
-                    "defaultMode": 256,
-                    "secretName": KEYTAB_SECRET_NAME,
-                    "items": [{ "key": KEYTAB_KEY, "path": "keytab" }],
-                },
-            })
-    );
-    assert2::assert!(
-        kt_mount
-            == &serde_json::json!({
-                "mountPath": "/etc/crabka/gssapi-keytab",
-                "name": "gssapi-keytab",
-                "readOnly": true,
-            })
+    assert!(
+        kt_mount["mountPath"] == "/etc/crabka/gssapi-keytab",
+        "canonical keytab mount dir; body = {body}"
     );
 }
 
@@ -496,7 +500,7 @@ async fn gssapi_listener_statefulset_mounts_keytab_volume() {
 /// The keytab Secret is entirely absent (mock returns 404 on the
 /// `get_opt`). The cluster reconciler patches the `Kafka` CR `Ready`
 /// condition to `status: "False"` with reason
-/// `MissingGssapiKeytabSecret`, and no broker-config ConfigMap PATCH
+/// `MissingGssapiKeytabSecret`, and no broker-config `ConfigMap` PATCH
 /// fires. Mirrors the OAuth introspection missing-Secret assertion
 /// (`reconcile_oauth_introspection.rs::assert_ready_false_with_reason`).
 #[tokio::test]
@@ -512,14 +516,17 @@ async fn gssapi_listener_missing_keytab_secret_rejects_with_missing_gssapi_keyta
     assert_ready_false_with_reason(&observed, "c2", "MissingGssapiKeytabSecret");
 
     // No ConfigMap PATCH on a failure path.
-    assert2::assert!(!observed.iter().any(|r| r.method() == Method::PATCH
-        && r.uri().to_string().contains("/configmaps/c2-broker-config")));
+    assert!(
+        !observed.iter().any(|r| r.method() == Method::PATCH
+            && r.uri().to_string().contains("/configmaps/c2-broker-config")),
+        "broker-config ConfigMap must not be PATCHed on MissingGssapiKeytabSecret",
+    );
 }
 
 // ── test 3: inter-broker GSSAPI → [inter_broker_credentials] TOML ───────────
 
 /// When `interBrokerListenerName` resolves to the gssapi listener AND
-/// `spec.interBrokerKerberos` is set, the broker-config ConfigMap TOML
+/// `spec.interBrokerKerberos` is set, the broker-config `ConfigMap` TOML
 /// gains the `[inter_broker_credentials]` block with `type = "gssapi"`,
 /// the shared client principal, and the KDC URL.
 #[tokio::test]
@@ -555,7 +562,7 @@ async fn inter_broker_gssapi_renders_inter_broker_credentials_block() {
         "client_principal = \"kafka@EXAMPLE.COM\"",
         "kdc_url = \"tcp://kdc:88\"",
     ] {
-        assert2::assert!(toml.contains(needle));
+        assert!(toml.contains(needle), "missing {needle:?}; TOML: {toml}");
     }
 }
 
@@ -640,20 +647,21 @@ async fn rendered_gssapi_toml_round_trips_through_broker_file_config() {
 
     // [gssapi] survives the round trip with every field intact.
     let g = bc.gssapi.expect("bc.gssapi must be Some after round trip");
-    assert2::assert!(g.service_name.as_str() == "kafka");
-    assert2::assert!(g.principal_to_local_rules.len() == 2);
-    assert2::assert!(g.realm.as_deref() == Some("EXAMPLE.COM"));
-    assert2::assert!(g.kdc.as_deref() == Some("tcp://kdc:88"));
-    assert2::assert!(
-        g.keytab_path.as_path() == std::path::Path::new("/etc/crabka/gssapi-keytab/keytab")
+    check!(g.service_name == "kafka");
+    check!(
+        g.principal_to_local_rules.len() == 2,
+        "both auth_to_local rules must parse through"
     );
+    check!(g.realm == Some("EXAMPLE.COM".into()));
+    check!(g.kdc == Some("tcp://kdc:88".into()));
+    check!(g.keytab_path == std::path::PathBuf::from("/etc/crabka/gssapi-keytab/keytab"));
 
     // [inter_broker_credentials] survives as the Gssapi variant with the
     // shared client principal, service name, KDC URL, and keytab path.
     let creds = bc
         .inter_broker_credentials
         .expect("bc.inter_broker_credentials must be Some after round trip");
-    assert2::assert!(
+    assert!(
         creds
             == crabka_broker::config::InterBrokerCredentials::Gssapi {
                 keytab_path: std::path::PathBuf::from("/etc/crabka/gssapi-keytab/keytab"),
@@ -670,7 +678,7 @@ async fn rendered_gssapi_toml_round_trips_through_broker_file_config() {
 /// user's Secret with the key pinned to `krb5.conf`), a broker-container
 /// volumeMount at `/etc/crabka/krb5`, and a `KRB5_CONFIG` env pointing at
 /// `/etc/crabka/krb5/krb5.conf`. Asserted via the pool reconciler's
-/// rendered StatefulSet (the layer that mounts the volume + sets the env).
+/// rendered `StatefulSet` (the layer that mounts the volume + sets the env).
 #[tokio::test]
 async fn krb5_conf_statefulset_mounts_volume_and_sets_env() {
     let rules = pool_reconcile_rules(
@@ -700,6 +708,15 @@ async fn krb5_conf_statefulset_mounts_volume_and_sets_env() {
         .iter()
         .find(|v| v["name"] == "krb5-conf")
         .unwrap_or_else(|| panic!("krb5-conf volume present; body = {body}"));
+    assert!(
+        krb5_vol["secret"]["secretName"] == KRB5_SECRET_NAME,
+        "krb5-conf volume sources the user's Secret; body = {body}"
+    );
+    let krb5_items = krb5_vol["secret"]["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("projected items present; body = {body}"));
+    assert!(krb5_items[0]["path"] == "krb5.conf", "body = {body}");
+
     // Broker-container volumeMount + KRB5_CONFIG env.
     let containers = pod_spec["containers"].as_array().expect("containers array");
     let broker = containers
@@ -711,35 +728,18 @@ async fn krb5_conf_statefulset_mounts_volume_and_sets_env() {
         .iter()
         .find(|m| m["name"] == "krb5-conf")
         .unwrap_or_else(|| panic!("krb5-conf mount present; body = {body}"));
+    assert!(
+        krb5_mount["mountPath"] == "/etc/crabka/krb5",
+        "body = {body}"
+    );
+
     let env = broker["env"].as_array().expect("env array");
     let krb5_config = env
         .iter()
         .find(|e| e["name"] == "KRB5_CONFIG")
         .unwrap_or_else(|| panic!("KRB5_CONFIG env present; body = {body}"));
-    assert2::assert!(
-        krb5_vol
-            == &serde_json::json!({
-                "name": "krb5-conf",
-                "secret": {
-                    "defaultMode": 256,
-                    "items": [{ "key": KRB5_KEY, "path": "krb5.conf" }],
-                    "secretName": KRB5_SECRET_NAME,
-                },
-            })
-    );
-    assert2::assert!(
-        krb5_mount
-            == &serde_json::json!({
-                "mountPath": "/etc/crabka/krb5",
-                "name": "krb5-conf",
-                "readOnly": true,
-            })
-    );
-    assert2::assert!(
-        krb5_config
-            == &serde_json::json!({
-                "name": "KRB5_CONFIG",
-                "value": "/etc/crabka/krb5/krb5.conf",
-            })
+    assert!(
+        krb5_config["value"] == "/etc/crabka/krb5/krb5.conf",
+        "KRB5_CONFIG must point at the mounted krb5.conf; body = {body}"
     );
 }

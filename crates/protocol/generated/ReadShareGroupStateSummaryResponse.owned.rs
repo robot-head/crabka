@@ -13,7 +13,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 1;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -210,7 +211,7 @@ impl Default for PartitionResult {
             leader_epoch: 0i32,
             start_offset: 0i64,
             delivery_complete_count: -1i32,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
@@ -225,9 +226,9 @@ impl Encode for PartitionResult {
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message.as_deref());
+                let () = put_compact_nullable_string(buf, self.error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.error_message.as_deref());
+                let () = put_nullable_string(buf, self.error_message.as_deref());
             }
         }
         if version >= 0 {
@@ -351,7 +352,7 @@ impl PartitionResult {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(version: i16) -> ::serde_json::Value {
+pub fn default_json(_version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("results".to_string(), ::serde_json::Value::Array(vec![]));
     ::serde_json::Value::Object(obj)

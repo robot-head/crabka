@@ -13,7 +13,8 @@ pub const MIN_VERSION: i16 = 1;
 pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 2;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -110,9 +111,9 @@ impl Encode for AlterReplicaLogDir {
         let flex = version >= 2;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.path);
+                let () = put_compact_string(buf, &self.path);
             } else {
-                put_string(buf, &self.path);
+                let () = put_string(buf, &self.path);
             }
         }
         if version >= 0 {
@@ -206,9 +207,9 @@ impl Encode for AlterReplicaLogDirTopic {
         let flex = version >= 2;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.name);
+                let () = put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name);
+                let () = put_string(buf, &self.name);
             }
         }
         if version >= 0 {
@@ -295,7 +296,7 @@ impl AlterReplicaLogDirTopic {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(version: i16) -> ::serde_json::Value {
+pub fn default_json(_version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("dirs".to_string(), ::serde_json::Value::Array(vec![]));
     ::serde_json::Value::Object(obj)

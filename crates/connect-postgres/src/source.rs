@@ -68,6 +68,8 @@ impl PostgresWalSource {
         })
     }
 
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub fn scripted(
         config: PostgresSourceConfig,
         database_name: impl Into<String>,
@@ -89,6 +91,8 @@ impl PostgresWalSource {
         fields(slot = %config.slot_name, publication = %config.publication_name, schema = %config.schema),
         err,
     )]
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn connect(config: PostgresSourceConfig) -> Result<Self, ConnectError> {
         let catalog = TokioPgCatalog::connect(config.database_url.expose_secret()).await?;
         let database_name = initialize(&catalog, &config).await?;

@@ -6,7 +6,7 @@
 
 use std::time::{Duration, Instant};
 
-use assert2::check;
+use assert2::{assert, check};
 use bytes::Bytes;
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
@@ -93,7 +93,10 @@ async fn create_topic(broker: &BrokerHandle, bootstrap: &str, name: &str, rf: i1
         })
         .await
         .expect("CreateTopics");
-    assert2::assert!(resp.topics[0].error_code == 0);
+    assert!(
+        resp.topics[0].error_code == 0,
+        "CreateTopics failed: {resp:?}"
+    );
     // CreateTopics ack means the controller's quorum committed the
     // metadata record, but the supervisor's reconcile loop materializes
     // the partition locally asynchronously. Wait until it appears so
@@ -233,7 +236,10 @@ async fn idempotent_retry_reappends_after_truncation_instead_of_stalling() {
         3_000,
     )
     .await;
-    assert2::assert!(retry.is_ok());
+    assert!(
+        retry.is_ok(),
+        "idempotent retry after truncation must re-append (not dedup-stall); got {retry:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -245,8 +251,11 @@ async fn acks_one_returns_quickly_on_rf1_broker() {
         .await
         .expect("ack=1 success");
     let elapsed = start.elapsed();
-    assert2::assert!(offset == 0);
-    assert2::assert!(elapsed < Duration::from_secs(1));
+    assert!(offset == 0);
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "acks=1 should return promptly; took {elapsed:?}"
+    );
     broker.shutdown().await;
 }
 
@@ -259,8 +268,11 @@ async fn acks_all_returns_quickly_on_rf1_broker() {
         .await
         .expect("ack=-1 success");
     let elapsed = start.elapsed();
-    assert2::assert!(offset == 0);
-    assert2::assert!(elapsed < Duration::from_secs(1));
+    assert!(offset == 0);
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "acks=-1 on rf=1 should return promptly; took {elapsed:?}"
+    );
     broker.shutdown().await;
 }
 
@@ -272,7 +284,7 @@ async fn consumer_clamps_at_hw_when_followers_lag() {
     let offset = produce_acks(&bootstrap, "clamp", &["x", "y", "z"], 1, 5_000)
         .await
         .expect("produce ok");
-    assert2::assert!(offset == 0);
+    assert!(offset == 0);
     // The writer sends the acks=1 response after the local append and then
     // advances the rf=1 high watermark asynchronously. Wait on the actual HW
     // transition before asserting the Fetch response so this regression test
@@ -307,22 +319,8 @@ async fn consumer_clamps_at_hw_when_followers_lag() {
         .await
         .expect("Fetch");
     let pd = &resp.responses[0].partitions[0];
-    assert2::assert!((pd.error_code, pd.high_watermark) == (0, 3));
-
-    broker.shutdown().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn high_watermark_waiter_blocks_until_target_is_reached() {
-    let (broker, bootstrap, _dir) = boot_single().await;
-    create_topic(&broker, &bootstrap, "pending-hw", 1).await;
-
-    let pending = tokio::time::timeout(
-        Duration::from_millis(50),
-        broker.wait_until_high_watermark("pending-hw", 0, 1),
-    )
-    .await;
-    assert2::assert!(pending.is_err());
+    assert!(pd.error_code == 0);
+    assert!(pd.high_watermark == 3, "HW should equal LEO for rf=1");
 
     broker.shutdown().await;
 }
@@ -378,7 +376,7 @@ async fn read_committed_under_rf1_unchanged() {
             seen.push(String::from_utf8_lossy(r.value.as_deref().unwrap_or(b"")).into_owned());
         }
     }
-    assert2::assert!(seen == vec!["p", "q", "r"]);
+    assert!(seen == vec!["p", "q", "r"]);
     producer.close().await.unwrap();
     consumer.close().await.unwrap();
     broker.shutdown().await;

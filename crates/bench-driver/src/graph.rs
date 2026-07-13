@@ -12,7 +12,10 @@
 //! crate itself targets) and embeds each figure inline, so the whole report is
 //! a single `.html` file.
 
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    fmt::{Arguments, Write},
+};
 
 use plotly::{
     Bar, Layout, Plot, Scatter,
@@ -24,8 +27,15 @@ use crate::{
     aggregate::{
         CellAgg, ScalarMetric, TsSeries, aggregate_cells, averaged_timeseries, scalar_metrics,
     },
+    numeric::to_f64,
     scenario::{RunOutput, Stack},
 };
+
+fn push_fmt(output: &mut String, args: Arguments<'_>) {
+    output
+        .write_fmt(args)
+        .expect("writing formatted data to a String cannot fail");
+}
 
 /// plotly.js version the `plotly` crate (0.14) renders against; pin the same
 /// one in the page `<head>` so the inline figures find a compatible global.
@@ -74,9 +84,10 @@ pub fn render_web_fragment(tagged: &[(String, RunOutput)]) -> String {
     let ts = averaged_timeseries(&runs);
 
     let mut out = String::new();
-    out.push_str(&format!(
-        "<script src=\"{PLOTLY_CDN}\" charset=\"utf-8\"></script>\n"
-    ));
+    push_fmt(
+        &mut out,
+        format_args!("<script src=\"{PLOTLY_CDN}\" charset=\"utf-8\"></script>\n"),
+    );
 
     out.push_str(
         "<h2 id=\"summary\">Summary — mean across runs (error bars = run-to-run stddev)</h2>\n",
@@ -100,10 +111,10 @@ pub fn render_web_fragment(tagged: &[(String, RunOutput)]) -> String {
             .push((tag.as_str(), r));
     }
     for (&(scenario, brokers), cell_runs) in &by_cell {
-        out.push_str(&format!(
-            "<h3>{} @ {brokers} brokers</h3>\n",
-            escape(scenario)
-        ));
+        push_fmt(
+            &mut out,
+            format_args!("<h3>{} @ {brokers} brokers</h3>\n", escape(scenario)),
+        );
         for wm in &web_metrics() {
             let plot = per_run_chart(scenario, brokers, cell_runs, wm, &ts);
             let id = sanitize_id(&format!("bench-ts-{scenario}-{brokers}-{}", wm.avg_key));
@@ -155,7 +166,7 @@ fn web_metrics() -> Vec<WebMetric> {
                     .map(|b| {
                         (
                             u64::from(b.t_offset_ms),
-                            b.mem_working_set_bytes as f64 / 1_048_576.0,
+                            to_f64(b.mem_working_set_bytes) / 1_048_576.0,
                         )
                     })
                     .collect()
@@ -190,7 +201,7 @@ fn per_run_chart(
             if pts.is_empty() {
                 continue;
             }
-            let x: Vec<f64> = pts.iter().map(|(t, _)| *t as f64 / 1000.0).collect();
+            let x: Vec<f64> = pts.iter().map(|(t, _)| to_f64(*t) / 1000.0).collect();
             let y: Vec<f64> = pts.iter().map(|(_, v)| *v).collect();
             plot.add_trace(
                 Scatter::new(x, y)
@@ -211,7 +222,7 @@ fn per_run_chart(
             let x: Vec<f64> = series
                 .points
                 .iter()
-                .map(|p| u64::from(p.t_offset_ms) as f64 / 1000.0)
+                .map(|p| to_f64(u64::from(p.t_offset_ms)) / 1000.0)
                 .collect();
             let y: Vec<f64> = series.points.iter().map(|p| p.mean).collect();
             let n = series.points.iter().map(|p| p.n).max().unwrap_or(0);
@@ -292,7 +303,7 @@ fn timeseries_charts(ts: &[TsSeries]) -> String {
             let x: Vec<f64> = s
                 .points
                 .iter()
-                .map(|p| u64::from(p.t_offset_ms) as f64 / 1000.0)
+                .map(|p| to_f64(u64::from(p.t_offset_ms)) / 1000.0)
                 .collect();
             let y: Vec<f64> = s.points.iter().map(|p| p.mean).collect();
             plot.add_trace(

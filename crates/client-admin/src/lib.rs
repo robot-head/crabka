@@ -439,6 +439,8 @@ impl AdminClient {
     /// DNS is resolved via `tokio::net::lookup_host`. First successful
     /// connect wins. Returns `AdminError::Connect { tried }` if none
     /// responded. Plaintext; see [`AdminClient::connect_secured`].
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn connect(bootstrap_addrs: &[String]) -> Result<Self, AdminError> {
         Self::connect_secured(bootstrap_addrs, None).await
     }

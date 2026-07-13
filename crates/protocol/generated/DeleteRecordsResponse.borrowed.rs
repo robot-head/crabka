@@ -12,7 +12,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 2;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -22,6 +23,10 @@ pub struct DeleteRecordsResponse<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl DeleteRecordsResponse<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::delete_records_response::DeleteRecordsResponse {
         crate::owned::delete_records_response::DeleteRecordsResponse {
             throttle_time_ms: (self.throttle_time_ms),
@@ -130,6 +135,10 @@ pub struct DeleteRecordsTopicResult<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl DeleteRecordsTopicResult<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::delete_records_response::DeleteRecordsTopicResult {
         crate::owned::delete_records_response::DeleteRecordsTopicResult {
             name: (self.name).to_string(),
@@ -146,9 +155,9 @@ impl Encode for DeleteRecordsTopicResult<'_> {
         let flex = version >= 2;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name);
+                let () = put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name);
+                let () = put_string(buf, self.name);
             }
         }
         if version >= 0 {
@@ -242,6 +251,10 @@ pub struct DeleteRecordsPartitionResult {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl DeleteRecordsPartitionResult {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::delete_records_response::DeleteRecordsPartitionResult {
         crate::owned::delete_records_response::DeleteRecordsPartitionResult {
             partition_index: (self.partition_index),

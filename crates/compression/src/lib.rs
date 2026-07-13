@@ -43,6 +43,8 @@ pub use error::CompressionError;
 /// new `Bytes`). For other codecs, dispatches to the per-codec module.
 /// If the codec's Cargo feature is not enabled, returns
 /// `Err(CompressionError::FeatureDisabled(_))`.
+/// # Errors
+/// Returns an error when input is malformed, compression or decompression fails, or runtime rate-limit state cannot be updated.
 pub fn compress(ct: CompressionType, data: &[u8]) -> Result<Bytes, CompressionError> {
     match ct {
         CompressionType::None => Ok(Bytes::copy_from_slice(data)),
@@ -61,6 +63,8 @@ pub fn compress(ct: CompressionType, data: &[u8]) -> Result<Bytes, CompressionEr
 /// buffer. This guards against decompression bombs on the untrusted decode
 /// path. Callers that handle wire input should derive `max_output` from the
 /// compressed length (e.g. a bounded ratio plus an absolute ceiling).
+/// # Errors
+/// Returns an error when input is malformed, compression or decompression fails, or runtime rate-limit state cannot be updated.
 pub fn decompress(
     ct: CompressionType,
     data: &[u8],

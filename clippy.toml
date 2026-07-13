@@ -1,0 +1,4 @@
+# Production code is kept substantially below this limit. The wider bound
+# accommodates linear end-to-end integration scenarios without blanket lint
+# allows; scenarios above 200 lines must still be decomposed.
+too-many-lines-threshold = 200

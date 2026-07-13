@@ -12,7 +12,8 @@ pub const MIN_VERSION: i16 = 1;
 pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 2;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -44,9 +45,9 @@ impl Encode for RequestHeader {
             {
                 let flex = false;
                 if flex {
-                    put_compact_nullable_string(buf, self.client_id.as_deref());
+                    let () = put_compact_nullable_string(buf, self.client_id.as_deref());
                 } else {
-                    put_nullable_string(buf, self.client_id.as_deref());
+                    let () = put_nullable_string(buf, self.client_id.as_deref());
                 }
             }
         }

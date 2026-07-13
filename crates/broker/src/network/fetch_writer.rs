@@ -31,9 +31,17 @@
 
 use bytes::{BufMut, Bytes, BytesMut};
 use crabka_protocol::{
+    Encode, ProtocolError,
     api_key::ApiKey,
-    owned::fetch_response::{FetchResponse, FetchWriteOp},
+    owned::fetch_response::{FetchResponse, FetchableTopicResponse, PartitionData},
+    primitives::{
+        array::{put_array_len, put_nullable_array_len},
+        fixed::{put_i16, put_i32, put_i64},
+        string_bytes::{put_compact_string, put_string},
+        uuid::put_uuid,
+    },
     records::RecordsPayload,
+    tagged_fields::{WriteTaggedFields, encode_to_bytes},
 };
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
@@ -77,7 +85,7 @@ impl WriteOp {
     /// Byte length this op contributes to the frame body. Used by the
     /// frame-length accounting in tests.
     #[must_use]
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         match self {
             Self::Inline(b) => b.len(),
@@ -93,6 +101,212 @@ impl WriteOp {
             Self::File(r) => r.len,
         }
     }
+}
+
+/// One ordered segment of a `FetchResponse` body write plan.
+#[derive(Debug, Clone)]
+enum FetchWriteOp {
+    Inline(Bytes),
+    Records(RecordsPayload),
+}
+
+impl FetchWriteOp {
+    #[must_use]
+    fn len(&self) -> usize {
+        match self {
+            Self::Inline(bytes) => bytes.len(),
+            Self::Records(payload) => payload.payload_len(),
+        }
+    }
+}
+
+fn fetch_response_write_plan(
+    response: &FetchResponse,
+    version: i16,
+) -> Result<Vec<FetchWriteOp>, ProtocolError> {
+    debug_assert!(
+        version >= 4,
+        "write plan is only valid for the canonical Fetch codec (v4+)"
+    );
+
+    let flex = version >= 12;
+    let mut ops = Vec::new();
+    let mut buf = BytesMut::new();
+
+    if version >= 1 {
+        put_i32(&mut buf, response.throttle_time_ms);
+    }
+    if version >= 7 {
+        put_i16(&mut buf, response.error_code);
+        put_i32(&mut buf, response.session_id);
+    }
+
+    put_array_len(&mut buf, response.responses.len(), flex);
+    for topic in &response.responses {
+        encode_fetch_topic(&mut buf, &mut ops, topic, version, flex)?;
+    }
+
+    if flex {
+        let mut tagged = WriteTaggedFields::new();
+        if !crabka_protocol::codegen_helpers::is_default(&response.node_endpoints) {
+            let node_endpoints = &response.node_endpoints;
+            let payload = encode_to_bytes(
+                crabka_protocol::primitives::array::array_len_prefix_len(
+                    node_endpoints.len(),
+                    flex,
+                ) + node_endpoints
+                    .iter()
+                    .map(|endpoint| endpoint.encoded_len(version))
+                    .sum::<usize>(),
+                |bytes| {
+                    put_array_len(bytes, node_endpoints.len(), flex);
+                    for endpoint in node_endpoints {
+                        endpoint.encode(bytes, version)?;
+                    }
+                    Ok(())
+                },
+            );
+            tagged.add(0, payload);
+        }
+        tagged.write(&mut buf, &response.unknown_tagged_fields);
+    }
+
+    flush_fetch_inline(&mut buf, &mut ops);
+    Ok(ops)
+}
+
+fn encode_fetch_topic(
+    buf: &mut BytesMut,
+    ops: &mut Vec<FetchWriteOp>,
+    topic: &FetchableTopicResponse,
+    version: i16,
+    flex: bool,
+) -> Result<(), ProtocolError> {
+    if (0..=12).contains(&version) {
+        if flex {
+            put_compact_string(buf, &topic.topic);
+        } else {
+            put_string(buf, &topic.topic);
+        }
+    }
+    if version >= 13 {
+        put_uuid(buf, topic.topic_id);
+    }
+
+    put_array_len(buf, topic.partitions.len(), flex);
+    for partition in &topic.partitions {
+        encode_fetch_partition(buf, ops, partition, version, flex)?;
+    }
+    if flex {
+        WriteTaggedFields::new().write(buf, &topic.unknown_tagged_fields);
+    }
+    Ok(())
+}
+
+fn encode_fetch_partition(
+    buf: &mut BytesMut,
+    ops: &mut Vec<FetchWriteOp>,
+    partition: &PartitionData,
+    version: i16,
+    flex: bool,
+) -> Result<(), ProtocolError> {
+    put_i32(buf, partition.partition_index);
+    put_i16(buf, partition.error_code);
+    put_i64(buf, partition.high_watermark);
+    if version >= 4 {
+        put_i64(buf, partition.last_stable_offset);
+    }
+    if version >= 5 {
+        put_i64(buf, partition.log_start_offset);
+    }
+    if version >= 4 {
+        put_nullable_array_len(
+            buf,
+            partition.aborted_transactions.as_ref().map(Vec::len),
+            flex,
+        );
+        if let Some(aborted_transactions) = &partition.aborted_transactions {
+            for transaction in aborted_transactions {
+                transaction.encode(buf, version)?;
+            }
+        }
+    }
+    if version >= 11 {
+        put_i32(buf, partition.preferred_read_replica);
+    }
+
+    encode_records_prefix(buf, ops, partition.records.as_ref(), flex)?;
+
+    if flex {
+        let mut tagged = WriteTaggedFields::new();
+        if !crabka_protocol::codegen_helpers::is_default(&partition.diverging_epoch) {
+            tagged.add(
+                0,
+                encode_to_bytes(partition.diverging_epoch.encoded_len(version), |bytes| {
+                    partition.diverging_epoch.encode(bytes, version)?;
+                    Ok(())
+                }),
+            );
+        }
+        if !crabka_protocol::codegen_helpers::is_default(&partition.current_leader) {
+            tagged.add(
+                1,
+                encode_to_bytes(partition.current_leader.encoded_len(version), |bytes| {
+                    partition.current_leader.encode(bytes, version)?;
+                    Ok(())
+                }),
+            );
+        }
+        if !crabka_protocol::codegen_helpers::is_default(&partition.snapshot_id) {
+            tagged.add(
+                2,
+                encode_to_bytes(partition.snapshot_id.encoded_len(version), |bytes| {
+                    partition.snapshot_id.encode(bytes, version)?;
+                    Ok(())
+                }),
+            );
+        }
+        tagged.write(buf, &partition.unknown_tagged_fields);
+    }
+
+    Ok(())
+}
+
+fn encode_records_prefix(
+    buf: &mut BytesMut,
+    ops: &mut Vec<FetchWriteOp>,
+    records: Option<&RecordsPayload>,
+    flex: bool,
+) -> Result<(), ProtocolError> {
+    let Some(payload) = records else {
+        if flex {
+            crabka_protocol::primitives::varint::put_uvarint(buf, 0);
+        } else {
+            put_i32(buf, -1);
+        }
+        return Ok(());
+    };
+
+    let payload_len = payload.payload_len();
+    if flex {
+        let prefixed_len = u32::try_from(payload_len + 1)
+            .map_err(|_| ProtocolError::InvalidValue("records too large for compact len"))?;
+        crabka_protocol::primitives::varint::put_uvarint(buf, prefixed_len);
+    } else {
+        let records_len = i32::try_from(payload_len)
+            .map_err(|_| ProtocolError::InvalidValue("records too large for i32 len"))?;
+        put_i32(buf, records_len);
+    }
+    flush_fetch_inline(buf, ops);
+    ops.push(FetchWriteOp::Records(payload.clone()));
+    Ok(())
+}
+
+fn flush_fetch_inline(buf: &mut BytesMut, ops: &mut Vec<FetchWriteOp>) {
+    if buf.is_empty() {
+        return;
+    }
+    ops.push(FetchWriteOp::Inline(buf.split().freeze()));
 }
 
 /// Build the ordered [`WriteOp`] plan for a v4+ fetch response, including the
@@ -130,7 +344,7 @@ where
     let header_v1 = response_header_v1(ApiKey::Fetch as i16, body_flexible);
     let header_len = response_header_len(ApiKey::Fetch as i16, body_flexible);
 
-    let proto_plan = resp.write_plan(version)?;
+    let proto_plan = fetch_response_write_plan(resp, version)?;
     let body_len: usize = proto_plan.iter().map(FetchWriteOp::len).sum();
     let frame_body_len = header_len + body_len;
     if frame_body_len >= MAX_FRAME_BYTES {
@@ -731,7 +945,11 @@ mod tests {
             }
             old_bytes.extend_from_slice(&body);
 
-            assert2::assert!(&new_bytes[..] == &old_bytes[..]);
+            assert_eq!(
+                &new_bytes[..],
+                &old_bytes[..],
+                "plan != legacy encode at version {version}"
+            );
         }
     }
 
@@ -739,7 +957,7 @@ mod tests {
     fn plan_total_len_matches_frame_prefix() {
         // The 4-byte frame prefix the writer emits must equal the actual bytes
         // following it (header + body). Off-by-one here corrupts every frame.
-        for (_case, version) in [("legacy", 4i16), ("flexible", 12), ("latest", 18)] {
+        for version in [4i16, 12, 18] {
             let resp = sample_response(version);
             let ops =
                 build_fetch_plan(&resp, version, 1, version >= 12, resolve_records_inline).unwrap();
@@ -749,7 +967,7 @@ mod tests {
             let declared = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as usize;
             let header_after_len = head.len() - 4;
             let tail_len: usize = ops[1..].iter().map(WriteOp::len).sum();
-            assert2::assert!(declared == header_after_len + tail_len);
+            assert_eq!(declared, header_after_len + tail_len);
         }
     }
 
@@ -843,12 +1061,18 @@ mod tests {
                 .unwrap();
 
                 // The file plan must actually contain a File op (zero-copy).
-                assert2::assert!(file_ops.iter().any(|o| matches!(o, WriteOp::File(_))));
+                assert!(
+                    file_ops.iter().any(|o| matches!(o, WriteOp::File(_))),
+                    "sendfile resolver must emit a File op at v{version}"
+                );
 
                 // Resolve both plans to bytes (pread the file ops) and compare.
                 let raw_bytes = resolve_ops_to_bytes(&raw_ops);
                 let file_bytes = resolve_ops_to_bytes(&file_ops);
-                assert2::assert!(raw_bytes == file_bytes);
+                assert_eq!(
+                    raw_bytes, file_bytes,
+                    "sendfile plan wire bytes must equal raw plan at v{version}"
+                );
             }
         }
 
@@ -867,7 +1091,7 @@ mod tests {
                         let mut off = region.offset;
                         while filled < buf.len() {
                             let n = region.file.read_at(&mut buf[filled..], off).unwrap();
-                            assert2::assert!(n > 0);
+                            assert!(n > 0);
                             filled += n;
                             off += n as u64;
                         }
@@ -891,11 +1115,11 @@ mod tests {
             };
             let (_tf, payload) = file_payload(&records);
             let ops = resolve_records_inline(&payload).unwrap();
-            assert2::assert!(ops.len() == 1);
+            assert_eq!(ops.len(), 1);
             let WriteOp::Inline(ref b) = ops[0] else {
                 panic!("fallback must produce an inline op");
             };
-            assert2::assert!(&b[..] == &records[..]);
+            assert_eq!(&b[..], &records[..]);
         }
 
         /// End-to-end `sendfile` over a real loopback TCP socket: the bytes the
@@ -925,7 +1149,7 @@ mod tests {
                 let mut stream = TcpStream::connect(addr).await.unwrap();
                 let mut got = vec![0u8; expected.len()];
                 stream.read_exact(&mut got).await.unwrap();
-                assert2::assert!(got == &expected[..]);
+                assert_eq!(got, &expected[..], "sendfile'd bytes must match file");
             });
 
             let (mut server, _) = listener.accept().await.unwrap();
@@ -936,7 +1160,7 @@ mod tests {
                 let _ = sr.set_send_buffer_size(8 * 1024);
             }
             let ops = resolve_records_sendfile(&payload).unwrap();
-            assert2::assert!(ops.iter().any(|o| matches!(o, WriteOp::File(_))));
+            assert!(ops.iter().any(|o| matches!(o, WriteOp::File(_))));
             write_fetch_plan(&mut server, ops).await.unwrap();
             drop(server); // EOF for the client's read_exact tail
             client.await.unwrap();
@@ -1045,13 +1269,13 @@ mod tests {
             // reads the Fetch request before writing the response.
             let mut req = vec![0u8; REQ.len()];
             ktls_stream.read_exact(&mut req).await.unwrap();
-            assert2::assert!(req == REQ);
+            assert_eq!(req, REQ, "kTLS RX must deliver the request bytes intact");
 
             // The KtlsStream must report itself sendfile-capable, and the
             // resolver must emit a File op (true zero-copy over TLS).
-            assert2::assert!(SendfileSink::is_sendfile_capable(&ktls_stream));
+            assert!(SendfileSink::is_sendfile_capable(&ktls_stream));
             let ops = resolve_records_sendfile(&payload).unwrap();
-            assert2::assert!(ops.iter().any(|o| matches!(o, WriteOp::File(_))));
+            assert!(ops.iter().any(|o| matches!(o, WriteOp::File(_))));
 
             // sendfile the file region onto the kTLS socket — the kernel
             // encrypts it into TLS records on the way out.
@@ -1060,7 +1284,11 @@ mod tests {
             drop(ktls_stream); // sends close_notify; EOF for the client tail
 
             let got = client.await.unwrap();
-            assert2::assert!(got == &records[..]);
+            assert_eq!(
+                got,
+                &records[..],
+                "client-decrypted kTLS bytes must equal the file region (wire byte-exact)"
+            );
         }
     }
 }

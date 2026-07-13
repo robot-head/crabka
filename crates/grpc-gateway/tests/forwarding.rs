@@ -53,7 +53,6 @@ async fn boot() -> (BrokerHandle, String, TempDir) {
 
 /// Bind a listener first (to learn the advertised addr), install the membership
 /// publisher, start ownership + membership, then serve Connect + forward routes.
-#[allow(clippy::too_many_lines)]
 async fn spawn_gateway(bootstrap: &str, client: &str) -> Gw {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();
@@ -191,7 +190,6 @@ async fn count_in_user_topic(bootstrap: &str, key_filter: &str) -> usize {
     n
 }
 
-#[allow(clippy::too_many_lines)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn keyed_record_forwards_to_owner_and_dedups() {
     let (broker, bootstrap, _dir) = boot().await;

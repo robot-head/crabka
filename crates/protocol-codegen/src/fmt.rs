@@ -38,6 +38,8 @@ pub enum FmtError {
 /// `src` must be a complete Rust source file (the generated files all are). The
 /// leading `//`-style banner comment is preserved: `syn` discards line comments,
 /// so it is peeled off before pretty-printing and re-attached afterwards.
+/// # Errors
+/// Returns an error when the schema model is invalid or generated Rust cannot be formatted or written.
 pub fn rustfmt(src: &str) -> Result<String, FmtError> {
     let (banner, body) = split_banner(src);
     // prettyplease normalizes spacing and breaks lines rustfmt would otherwise
@@ -67,7 +69,15 @@ fn split_banner(src: &str) -> (&str, &str) {
 
 fn run_rustfmt(src: &str) -> Result<String, FmtError> {
     let mut child = Command::new("rustfmt")
-        .args(["--edition", "2024", "--emit", "stdout", "--quiet"])
+        .args([
+            "--edition",
+            "2024",
+            "--emit",
+            "stdout",
+            "--quiet",
+            "--config",
+            "max_width=240",
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -96,17 +106,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn split_banner_cases() {
-        for (_case, src, expected) in [
-            (
-                "leading comment block",
-                "// AUTO-GENERATED foo\n// line two\n\npub struct X;\n",
-                ("// AUTO-GENERATED foo\n// line two\n\n", "pub struct X;\n"),
-            ),
-            ("no banner", "pub struct X;\n", ("", "pub struct X;\n")),
-        ] {
-            assert2::assert!(split_banner(src) == expected);
-        }
+    fn split_banner_separates_leading_comment_block() {
+        let src = "// AUTO-GENERATED foo\n// line two\n\npub struct X;\n";
+        let (banner, body) = split_banner(src);
+        assert_eq!(banner, "// AUTO-GENERATED foo\n// line two\n\n");
+        assert_eq!(body, "pub struct X;\n");
+    }
+
+    #[test]
+    fn split_banner_handles_no_banner() {
+        let src = "pub struct X;\n";
+        let (banner, body) = split_banner(src);
+        assert_eq!(banner, "");
+        assert_eq!(body, src);
     }
 
     /// Regression guard for the ` :: ` / ` . ` spacing bug: a `to_owned` whose

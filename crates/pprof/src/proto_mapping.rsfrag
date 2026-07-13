@@ -1,0 +1,103 @@
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct Mapping {
+    pub id: u64,
+    pub memory_start: u64,
+    pub memory_limit: u64,
+    pub file_offset: u64,
+    pub filename: i64,
+    pub build_id: i64,
+    pub symbolization: MappingSymbolization,
+}
+
+impl ::core::fmt::Debug for Mapping {
+    fn fmt(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        formatter.debug_struct("Mapping").field("id", &self.id).field("memory_start", &self.memory_start).field("memory_limit", &self.memory_limit).field("file_offset", &self.file_offset).field("filename", &self.filename).field("build_id", &self.build_id).field("symbolization", &self.symbolization).finish()
+    }
+}
+
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Hash)]
+pub struct MappingSymbolization(u8);
+
+impl MappingSymbolization {
+    const FUNCTIONS: u8 = 1;
+    const FILENAMES: u8 = 1 << 1;
+    const LINE_NUMBERS: u8 = 1 << 2;
+    const INLINE_FRAMES: u8 = 1 << 3;
+
+    #[must_use]
+    pub fn from_parts(parts: (bool, bool, bool, bool)) -> Self {
+        let (has_functions, has_filenames, has_line_numbers, has_inline_frames) = parts;
+        let mut flags = 0;
+        if has_functions { flags |= Self::FUNCTIONS; }
+        if has_filenames { flags |= Self::FILENAMES; }
+        if has_line_numbers { flags |= Self::LINE_NUMBERS; }
+        if has_inline_frames { flags |= Self::INLINE_FRAMES; }
+        Self(flags)
+    }
+
+    #[must_use]
+    pub fn has_functions(self) -> bool { self.0 & Self::FUNCTIONS != 0 }
+    #[must_use]
+    pub fn has_filenames(self) -> bool { self.0 & Self::FILENAMES != 0 }
+    #[must_use]
+    pub fn has_line_numbers(self) -> bool { self.0 & Self::LINE_NUMBERS != 0 }
+    #[must_use]
+    pub fn has_inline_frames(self) -> bool { self.0 & Self::INLINE_FRAMES != 0 }
+}
+
+impl ::prost::Message for Mapping {
+    fn encode_raw(&self, buf: &mut impl ::prost::bytes::BufMut) {
+        encode_uint64(1, self.id, buf);
+        encode_uint64(2, self.memory_start, buf);
+        encode_uint64(3, self.memory_limit, buf);
+        encode_uint64(4, self.file_offset, buf);
+        encode_int64(5, self.filename, buf);
+        encode_int64(6, self.build_id, buf);
+        self.symbolization.encode(buf);
+    }
+
+    fn merge_field(&mut self, tag: u32, wire_type: ::prost::encoding::WireType, buf: &mut impl ::prost::bytes::Buf, ctx: ::prost::encoding::DecodeContext) -> Result<(), ::prost::DecodeError> {
+        match tag {
+            1 => ::prost::encoding::uint64::merge(wire_type, &mut self.id, buf, ctx),
+            2 => ::prost::encoding::uint64::merge(wire_type, &mut self.memory_start, buf, ctx),
+            3 => ::prost::encoding::uint64::merge(wire_type, &mut self.memory_limit, buf, ctx),
+            4 => ::prost::encoding::uint64::merge(wire_type, &mut self.file_offset, buf, ctx),
+            5 => ::prost::encoding::int64::merge(wire_type, &mut self.filename, buf, ctx),
+            6 => ::prost::encoding::int64::merge(wire_type, &mut self.build_id, buf, ctx),
+            7..=10 => self.symbolization.merge(tag, wire_type, buf, ctx),
+            _ => ::prost::encoding::skip_field(wire_type, tag, buf, ctx),
+        }
+    }
+
+    fn encoded_len(&self) -> usize {
+        encoded_uint64_len(1, self.id) + encoded_uint64_len(2, self.memory_start) + encoded_uint64_len(3, self.memory_limit) + encoded_uint64_len(4, self.file_offset) + encoded_int64_len(5, self.filename) + encoded_int64_len(6, self.build_id) + self.symbolization.encoded_len()
+    }
+
+    fn clear(&mut self) { *self = Self::default(); }
+}
+
+impl MappingSymbolization {
+    fn encode(self, buf: &mut impl ::prost::bytes::BufMut) {
+        for (tag, is_set) in self.tag_values() { if is_set { ::prost::encoding::bool::encode(tag, &true, buf); } }
+    }
+
+    fn merge(&mut self, tag: u32, wire_type: ::prost::encoding::WireType, buf: &mut impl ::prost::bytes::Buf, ctx: ::prost::encoding::DecodeContext) -> Result<(), ::prost::DecodeError> {
+        let mut value = false;
+        ::prost::encoding::bool::merge(wire_type, &mut value, buf, ctx)?;
+        self.set(tag, value);
+        Ok(())
+    }
+
+    fn encoded_len(self) -> usize { self.tag_values().into_iter().filter(|(_, is_set)| *is_set).map(|(tag, _)| ::prost::encoding::bool::encoded_len(tag, &true)).sum() }
+    fn tag_values(self) -> [(u32, bool); 4] { [(7, self.has_functions()), (8, self.has_filenames()), (9, self.has_line_numbers()), (10, self.has_inline_frames())] }
+
+    fn set(&mut self, tag: u32, value: bool) {
+        let flag = match tag { 7 => Self::FUNCTIONS, 8 => Self::FILENAMES, 9 => Self::LINE_NUMBERS, 10 => Self::INLINE_FRAMES, _ => return };
+        if value { self.0 |= flag; } else { self.0 &= !flag; }
+    }
+}
+
+fn encode_uint64(tag: u32, value: u64, buf: &mut impl ::prost::bytes::BufMut) { if value != 0 { ::prost::encoding::uint64::encode(tag, &value, buf); } }
+fn encode_int64(tag: u32, value: i64, buf: &mut impl ::prost::bytes::BufMut) { if value != 0 { ::prost::encoding::int64::encode(tag, &value, buf); } }
+fn encoded_uint64_len(tag: u32, value: u64) -> usize { if value == 0 { 0 } else { ::prost::encoding::uint64::encoded_len(tag, &value) } }
+fn encoded_int64_len(tag: u32, value: i64) -> usize { if value == 0 { 0 } else { ::prost::encoding::int64::encoded_len(tag, &value) } }

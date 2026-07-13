@@ -10,7 +10,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,11 +35,15 @@ impl Default for BrokerHeartbeatRequest {
             want_shut_down: false,
             offline_log_dirs: Vec::new(),
             cordoned_log_dirs: None,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl BrokerHeartbeatRequest {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::broker_heartbeat_request::BrokerHeartbeatRequest {
         crate::owned::broker_heartbeat_request::BrokerHeartbeatRequest {
             broker_id: (self.broker_id),
@@ -104,7 +109,7 @@ impl Encode for BrokerHeartbeatRequest {
                 );
                 tagged.add(0, payload);
             }
-            if !(self.cordoned_log_dirs.is_none()) {
+            if self.cordoned_log_dirs.is_some() {
                 let payload = encode_to_bytes(
                     {
                         let opt: Option<&Vec<_>> = (self.cordoned_log_dirs).as_ref();
@@ -164,7 +169,7 @@ impl Encode for BrokerHeartbeatRequest {
                     prefix + body
                 }));
             }
-            if !(self.cordoned_log_dirs.is_none()) {
+            if self.cordoned_log_dirs.is_some() {
                 known_pairs.push((1, {
                     let opt: Option<&Vec<_>> = (self.cordoned_log_dirs).as_ref();
                     let prefix = crate::primitives::array::nullable_array_len_prefix_len(

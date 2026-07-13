@@ -50,7 +50,6 @@ pub struct StreamsMembership {
 impl StreamsMembership {
     /// Join a streams group and start heartbeating.
     #[builder(start_fn = builder, finish_fn = build)]
-    #[allow(clippy::too_many_lines)]
     #[tracing::instrument(
         name = "streams.membership.start",
         level = "info",
@@ -58,6 +57,10 @@ impl StreamsMembership {
         fields(group_id = %group_id, member_id = tracing::field::Empty),
         err,
     )]
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
+    /// # Panics
+    /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub async fn start(
         #[builder(into)] bootstrap: String,
         #[builder(into, default = "crabka-streams".to_string())] client_id: String,
@@ -203,15 +206,17 @@ impl StreamsMembership {
     pub async fn group_metadata(&self) -> crate::runtime::eos::StreamsGroupMeta {
         let epoch = *self.member_epoch.lock().await;
         crate::runtime::eos::StreamsGroupMeta {
-            group_id: self.group_id.clone(),
-            generation_id: epoch,
-            member_id: self.member_id.clone(),
-            group_instance_id: None,
+            group: self.group_id.clone(),
+            generation: epoch,
+            member: self.member_id.clone(),
+            group_instance: None,
         }
     }
 
     /// Await the next membership event (assignment / not-ready / fenced).
     /// Returns [`StreamsClientError::Closed`] once the heartbeat loop has ended.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn next_event(&mut self) -> Result<StreamsEvent, StreamsClientError> {
         self.events.recv().await.ok_or(StreamsClientError::Closed)
     }
@@ -224,6 +229,8 @@ impl StreamsMembership {
         fields(group_id = %self.group_id, member_id = %self.member_id),
         err,
     )]
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn close(&mut self) -> Result<(), StreamsClientError> {
         self.shutdown.cancel();
         if let Some(h) = self.hb_handle.take() {
@@ -341,55 +348,28 @@ mod tests {
             &topology,
         );
 
-        check!(
-            (
-                req.group_id.as_str(),
-                req.member_id.as_str(),
-                req.member_epoch,
-                req.process_id.as_deref(),
-                req.instance_id.as_deref(),
-                req.rebalance_timeout_ms,
-                req.topology.is_some(),
-            ) == (
-                "streams-group",
-                "member-1",
-                0,
-                Some("process-1"),
-                Some("instance-1"),
-                45_000,
-                true,
-            )
-        );
+        check!(req.group_id == "streams-group");
+        check!(req.member_id == "member-1");
+        check!(req.member_epoch == 0);
+        check!(req.process_id.as_deref() == Some("process-1"));
+        check!(req.instance_id.as_deref() == Some("instance-1"));
+        check!(req.rebalance_timeout_ms == 45_000);
+        check!(req.topology.is_some());
     }
 
     #[test]
     fn heartbeat_interval_uses_positive_broker_value_or_default() {
-        for (name, broker_ms, expected) in [
-            (
-                "positive millisecond",
-                1,
-                std::time::Duration::from_millis(1),
-            ),
-            ("positive seconds", 3_000, std::time::Duration::from_secs(3)),
-            ("zero defaults", 0, std::time::Duration::from_secs(3)),
-            ("negative defaults", -1, std::time::Duration::from_secs(3)),
-        ] {
-            check!(heartbeat_interval(broker_ms) == expected, "case {name}");
-        }
+        check!(heartbeat_interval(1) == std::time::Duration::from_millis(1));
+        check!(heartbeat_interval(3_000) == std::time::Duration::from_secs(3));
+        check!(heartbeat_interval(0) == std::time::Duration::from_secs(3));
+        check!(heartbeat_interval(-1) == std::time::Duration::from_secs(3));
     }
 
     #[test]
     fn should_emit_statuses_only_for_non_empty_status_list() {
-        for (name, statuses, expected) in [
-            ("absent", None, false),
-            ("empty", Some(vec![]), false),
-            ("present", Some(vec![1]), true),
-        ] {
-            check!(
-                should_emit_statuses(statuses.as_ref()) == expected,
-                "case {name}"
-            );
-        }
+        check!(!should_emit_statuses::<i32>(None));
+        check!(!should_emit_statuses(Some(&Vec::<i32>::new())));
+        check!(should_emit_statuses(Some(&vec![1])));
     }
 
     #[tokio::test]
@@ -407,61 +387,44 @@ mod tests {
             tracker: tracker.clone(),
         };
 
-        check!((membership.member_id(), membership.group_id()) == ("member-1", "group-1"));
+        check!(membership.member_id() == "member-1");
+        check!(membership.group_id() == "group-1");
         check!(Arc::ptr_eq(&membership.tracker(), &tracker));
 
         let meta = membership.group_metadata().await;
-        check!(
-            (
-                meta.member_id.as_str(),
-                meta.group_id.as_str(),
-                meta.generation_id,
-                meta.group_instance_id.as_ref(),
-            ) == ("member-1", "group-1", 42, None)
-        );
+        check!(meta.member == "member-1");
+        check!(meta.group == "group-1");
+        check!(meta.generation == 42);
+        check!(meta.group_instance.is_none());
     }
 
     #[test]
     fn invalid_topology_family_maps() {
-        for (name, code) in [
-            ("invalid topology", 130i16),
-            ("invalid subscription", 131),
-            ("invalid repartition", 132),
-        ] {
-            check!(
-                matches!(
-                    map_error(resp(code)),
-                    Err(StreamsClientError::InvalidTopology { code: c, .. }) if c == code
-                ),
-                "case {name}"
-            );
+        for code in [130i16, 131, 132] {
+            check!(matches!(
+                map_error(resp(code)),
+                Err(StreamsClientError::InvalidTopology { code: c, .. }) if c == code
+            ));
         }
     }
 
     #[test]
     fn auth_not_found_and_unknown_codes_map() {
-        enum Expected {
-            Authorization(i16),
-            NotFound,
-            Server(i16),
-        }
-        for (name, code, expected) in [
-            ("cluster authorization", 30, Expected::Authorization(30)),
-            ("topic authorization", 29, Expected::Authorization(29)),
-            ("group not found", 69, Expected::NotFound),
-            ("unknown server error", 99, Expected::Server(99)),
-        ] {
-            let actual = map_error(resp(code));
-            let matches = match expected {
-                Expected::Authorization(expected) => {
-                    matches!(actual, Err(StreamsClientError::Authorization(code)) if code == expected)
-                }
-                Expected::NotFound => matches!(actual, Err(StreamsClientError::GroupIdNotFound)),
-                Expected::Server(expected) => {
-                    matches!(actual, Err(StreamsClientError::Server(code)) if code == expected)
-                }
-            };
-            check!(matches, "case {name}");
-        }
+        check!(matches!(
+            map_error(resp(30)),
+            Err(StreamsClientError::Authorization(30))
+        ));
+        check!(matches!(
+            map_error(resp(29)),
+            Err(StreamsClientError::Authorization(29))
+        ));
+        check!(matches!(
+            map_error(resp(69)),
+            Err(StreamsClientError::GroupIdNotFound)
+        ));
+        check!(matches!(
+            map_error(resp(99)),
+            Err(StreamsClientError::Server(99))
+        ));
     }
 }

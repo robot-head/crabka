@@ -16,7 +16,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -28,6 +29,10 @@ pub struct UpdateFeaturesResponse<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl UpdateFeaturesResponse<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::update_features_response::UpdateFeaturesResponse {
         crate::owned::update_features_response::UpdateFeaturesResponse {
             throttle_time_ms: (self.throttle_time_ms),
@@ -58,9 +63,9 @@ impl Encode for UpdateFeaturesResponse<'_> {
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message);
+                let () = put_compact_nullable_string(buf, self.error_message);
             } else {
-                put_nullable_string(buf, self.error_message);
+                let () = put_nullable_string(buf, self.error_message);
             }
         }
         if (0..=1).contains(&version) {
@@ -178,6 +183,10 @@ pub struct UpdatableFeatureResult<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl UpdatableFeatureResult<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::update_features_response::UpdatableFeatureResult {
         crate::owned::update_features_response::UpdatableFeatureResult {
             feature: (self.feature).to_string(),
@@ -192,9 +201,9 @@ impl Encode for UpdatableFeatureResult<'_> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.feature);
+                let () = put_compact_string(buf, self.feature);
             } else {
-                put_string(buf, self.feature);
+                let () = put_string(buf, self.feature);
             }
         }
         if version >= 0 {
@@ -202,9 +211,9 @@ impl Encode for UpdatableFeatureResult<'_> {
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message);
+                let () = put_compact_nullable_string(buf, self.error_message);
             } else {
-                put_nullable_string(buf, self.error_message);
+                let () = put_nullable_string(buf, self.error_message);
             }
         }
         if flex {

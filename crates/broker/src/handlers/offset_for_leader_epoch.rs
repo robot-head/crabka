@@ -28,7 +28,6 @@ use crabka_protocol::{
 
 use crate::{broker::Broker, codes, error::BrokerError};
 
-#[allow(clippy::unused_async)] // async to match the inline-intercept handler shape.
 #[tracing::instrument(
     name = "handle_offset_for_leader_epoch",
     level = "info",
@@ -36,7 +35,7 @@ use crate::{broker::Broker, codes, error::BrokerError};
     fields(api = "OffsetForLeaderEpoch", version, req_bytes = req_bytes.len()),
     err,
 )]
-pub(crate) async fn handle(
+pub(crate) fn handle(
     broker: &Broker,
     version: i16,
     _correlation_id: i32,
@@ -158,7 +157,7 @@ pub(crate) async fn handle(
 
 #[cfg(test)]
 mod tests {
-
+    use assert2::assert;
     use bytes::BytesMut;
     use crabka_protocol::Encode;
 
@@ -187,7 +186,7 @@ mod tests {
             sendfile_capable: false,
             connection_listener_name: "PLAINTEXT",
         };
-        assert2::assert!(crate::handlers::acl_denied(
+        assert!(crate::handlers::acl_denied(
             &authorizer,
             &image,
             &ctx,
@@ -216,8 +215,6 @@ mod tests {
         resp.encode(&mut buf, version).expect("encode");
         let mut cur: &[u8] = &buf;
         let decoded = OffsetForLeaderEpochResponse::decode(&mut cur, version).unwrap();
-        assert2::assert!(
-            decoded.topics[0].partitions[0].error_code == codes::TOPIC_AUTHORIZATION_FAILED
-        );
+        assert!(decoded.topics[0].partitions[0].error_code == codes::TOPIC_AUTHORIZATION_FAILED);
     }
 }

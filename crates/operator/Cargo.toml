@@ -22,7 +22,6 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
-assert2 = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }
@@ -59,6 +58,7 @@ x509-parser = { workspace = true }
 
 [dev-dependencies]
 mutants = { workspace = true }
+assert2 = { workspace = true }
 crabka-broker = { version = "0.3", path = "../broker" }
 crabka-client-core = { version = "0.3", path = "../client-core" }
 # Path-only (no version): keeps this dev-dependency out of the published

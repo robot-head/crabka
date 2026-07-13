@@ -9,6 +9,7 @@ pub mod scalar_math;
 
 use std::{any::Any, sync::Arc, time::Duration};
 
+use num_traits::ToPrimitive;
 use promql_parser::{
     parser::{
         Call, Expr, Extension, Function, FunctionArgs, ast::ExtensionExpr, parse, value::ValueType,
@@ -19,30 +20,29 @@ use promql_parser::{
 use crate::{PromqlError, error::Result};
 
 /// Query-range values available to Prometheus duration expressions.
-#[allow(clippy::struct_field_names)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DurationExprContext {
-    start_ms: i64,
-    end_ms: i64,
-    step_ms: i64,
+    start: i64,
+    end: i64,
+    step: i64,
 }
 
 impl DurationExprContext {
     #[must_use]
     pub fn instant(time_ms: i64) -> Self {
         Self {
-            start_ms: time_ms,
-            end_ms: time_ms,
-            step_ms: 0,
+            start: time_ms,
+            end: time_ms,
+            step: 0,
         }
     }
 
     #[must_use]
     pub fn range(start_ms: i64, end_ms: i64, step_ms: i64) -> Self {
         Self {
-            start_ms,
-            end_ms,
-            step_ms,
+            start: start_ms,
+            end: end_ms,
+            step: step_ms,
         }
     }
 }
@@ -534,11 +534,12 @@ fn is_ident_char(ch: char) -> bool {
 /// Largest duration the engine represents: `i64::MAX` milliseconds expressed in
 /// seconds. `Duration::from_secs_f64` panics for finite values beyond `u64`
 /// seconds (~1.8e19), so we reject anything past the engine ceiling first.
-#[allow(clippy::cast_precision_loss)]
-const MAX_DURATION_SECONDS: f64 = (i64::MAX as f64) / 1000.0;
-
 fn seconds_to_duration_literal(seconds: f64) -> Result<String> {
-    if !seconds.is_finite() || !(0.0..=MAX_DURATION_SECONDS).contains(&seconds) {
+    let max_duration_seconds = i64::MAX
+        .to_f64()
+        .expect("i64::MAX has a finite f64 representation")
+        / 1000.0;
+    if !seconds.is_finite() || !(0.0..=max_duration_seconds).contains(&seconds) {
         return Err(PromqlError::Parse(format!(
             "duration expression evaluated to invalid duration `{seconds}`"
         )));
@@ -689,12 +690,12 @@ impl<'a> DurationExprParser<'a> {
         }
 
         match name.to_ascii_lowercase().as_str() {
-            "step" if args.is_empty() => Ok(ms_to_seconds(self.context.step_ms)),
+            "step" if args.is_empty() => Ok(ms_to_seconds(self.context.step)),
             "range" if args.is_empty() => Ok(ms_to_seconds(
-                self.context.end_ms.saturating_sub(self.context.start_ms),
+                self.context.end.saturating_sub(self.context.start),
             )),
-            "start" if args.is_empty() => Ok(ms_to_seconds(self.context.start_ms)),
-            "end" if args.is_empty() => Ok(ms_to_seconds(self.context.end_ms)),
+            "start" if args.is_empty() => Ok(ms_to_seconds(self.context.start)),
+            "end" if args.is_empty() => Ok(ms_to_seconds(self.context.end)),
             "min" if !args.is_empty() => Ok(args.into_iter().fold(f64::INFINITY, f64::min)),
             "max" if !args.is_empty() => Ok(args.into_iter().fold(f64::NEG_INFINITY, f64::max)),
             _ => Err(PromqlError::Parse(format!(
@@ -779,9 +780,10 @@ impl<'a> DurationExprParser<'a> {
     }
 }
 
-#[allow(clippy::cast_precision_loss)]
 fn ms_to_seconds(ms: i64) -> f64 {
-    ms as f64 / 1000.0
+    ms.to_f64()
+        .expect("every i64 has a finite f64 representation")
+        / 1000.0
 }
 
 fn duration_unit_seconds(unit: &str) -> Result<f64> {

@@ -4729,7 +4729,6 @@ overrides:
     }
 
     #[tokio::test]
-    #[allow(clippy::too_many_lines)]
     async fn search_tags_v2_query_filter_returns_event_and_link_scopes() {
         let mut store = InMemorySpanStore::new();
         let mut root = span_at_with_attrs(
@@ -5373,8 +5372,25 @@ overrides:
         );
     }
 
+    async fn filtered_tag_values(app: &Router, tag: &str) -> (StatusCode, Value) {
+        let uri = format!("/api/v2/search/tag/{tag}/values?q=%7B%20.env%20%3D%20%22prod%22%20%7D");
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
     #[tokio::test]
-    #[allow(clippy::too_many_lines)]
     async fn search_tag_values_v2_query_filter_returns_intrinsic_values() {
         let mut store = InMemorySpanStore::new();
         let mut root = span_at_with_attrs(
@@ -5402,22 +5418,7 @@ overrides:
         store.push_trace("tenant-a", "svc-b", "root-b", vec![dropped]);
         let engine = Arc::new(TraceqlEngine::new(Arc::new(store), EngineOpts::default()));
         let app = router(engine);
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri(
-                        "/api/v2/search/tag/span:name/values?q=%7B%20.env%20%3D%20%22prod%22%20%7D",
-                    )
-                    .header("x-scope-orgid", "tenant-a")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let status = resp.status();
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        let (status, body) = filtered_tag_values(&app, "span:name").await;
 
         assert2::assert!(status == StatusCode::OK);
         assert2::assert!(
@@ -5438,22 +5439,7 @@ overrides:
             })
         );
 
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri(
-                        "/api/v2/search/tag/trace:duration/values?q=%7B%20.env%20%3D%20%22prod%22%20%7D",
-                    )
-                    .header("x-scope-orgid", "tenant-a")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let status = resp.status();
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        let (status, body) = filtered_tag_values(&app, "trace:duration").await;
 
         assert2::assert!(status == StatusCode::OK);
         assert2::assert!(
@@ -5468,22 +5454,7 @@ overrides:
             })
         );
 
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri(
-                        "/api/v2/search/tag/span:status/values?q=%7B%20.env%20%3D%20%22prod%22%20%7D",
-                    )
-                    .header("x-scope-orgid", "tenant-a")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let status = resp.status();
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        let (status, body) = filtered_tag_values(&app, "span:status").await;
 
         assert2::assert!(status == StatusCode::OK);
         assert2::assert!(
@@ -5498,22 +5469,7 @@ overrides:
             })
         );
 
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri(
-                        "/api/v2/search/tag/span:nestedSetLeft/values?q=%7B%20.env%20%3D%20%22prod%22%20%7D",
-                    )
-                    .header("x-scope-orgid", "tenant-a")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let status = resp.status();
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        let (status, body) = filtered_tag_values(&app, "span:nestedSetLeft").await;
 
         assert2::assert!(status == StatusCode::OK);
         assert2::assert!(
@@ -5534,22 +5490,7 @@ overrides:
             })
         );
 
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri(
-                        "/api/v2/search/tag/span:Parent/values?q=%7B%20.env%20%3D%20%22prod%22%20%7D",
-                    )
-                    .header("x-scope-orgid", "tenant-a")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let status = resp.status();
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        let (status, body) = filtered_tag_values(&app, "span:Parent").await;
 
         assert2::assert!(status == StatusCode::OK);
         assert2::assert!(
@@ -5570,22 +5511,7 @@ overrides:
             })
         );
 
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri(
-                        "/api/v2/search/tag/span:childCount/values?q=%7B%20.env%20%3D%20%22prod%22%20%7D",
-                    )
-                    .header("x-scope-orgid", "tenant-a")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let status = resp.status();
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        let (status, body) = filtered_tag_values(&app, "span:childCount").await;
 
         assert2::assert!(status == StatusCode::OK);
         assert2::assert!(
@@ -5606,21 +5532,7 @@ overrides:
             })
         );
 
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri(
-                        "/api/v2/search/tag/instrumentation:name/values?q=%7B%20.env%20%3D%20%22prod%22%20%7D",
-                    )
-                    .header("x-scope-orgid", "tenant-a")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let status = resp.status();
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        let (status, body) = filtered_tag_values(&app, "instrumentation:name").await;
 
         assert2::assert!(status == StatusCode::OK);
         assert2::assert!(
@@ -5722,7 +5634,6 @@ overrides:
     }
 
     #[tokio::test]
-    #[allow(clippy::too_many_lines)]
     async fn search_tag_values_v2_query_filter_returns_event_and_link_attribute_values() {
         let mut store = InMemorySpanStore::new();
         let mut root = span_at_with_attrs(

@@ -12,7 +12,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 5;
 pub const FLEXIBLE_MIN: i16 = 3;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -23,6 +24,10 @@ pub struct ListGroupsResponse<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl ListGroupsResponse<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::list_groups_response::ListGroupsResponse {
         crate::owned::list_groups_response::ListGroupsResponse {
             throttle_time_ms: (self.throttle_time_ms),
@@ -143,6 +148,10 @@ pub struct ListedGroup<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl ListedGroup<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::list_groups_response::ListedGroup {
         crate::owned::list_groups_response::ListedGroup {
             group_id: (self.group_id).to_string(),
@@ -158,30 +167,30 @@ impl Encode for ListedGroup<'_> {
         let flex = version >= 3;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.group_id);
+                let () = put_compact_string(buf, self.group_id);
             } else {
-                put_string(buf, self.group_id);
+                let () = put_string(buf, self.group_id);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.protocol_type);
+                let () = put_compact_string(buf, self.protocol_type);
             } else {
-                put_string(buf, self.protocol_type);
+                let () = put_string(buf, self.protocol_type);
             }
         }
         if version >= 4 {
             if flex {
-                put_compact_string(buf, self.group_state);
+                let () = put_compact_string(buf, self.group_state);
             } else {
-                put_string(buf, self.group_state);
+                let () = put_string(buf, self.group_state);
             }
         }
         if version >= 5 {
             if flex {
-                put_compact_string(buf, self.group_type);
+                let () = put_compact_string(buf, self.group_type);
             } else {
-                put_string(buf, self.group_type);
+                let () = put_string(buf, self.group_type);
             }
         }
         if flex {

@@ -95,8 +95,9 @@ impl ClientMetricsManager {
             .lock()
             .expect("client-metrics mutex poisoned");
         // push_interval_ms is validated in [100, 3_600_000] — always positive.
-        #[allow(clippy::cast_sign_loss)]
-        let push_interval = Duration::from_millis(computed.push_interval_ms as u64);
+        let push_interval = Duration::from_millis(
+            u64::try_from(computed.push_interval_ms).expect("validated positive push interval"),
+        );
         let inst = guard
             .entry(attrs.client_instance_id)
             .or_insert(ClientInstance {
@@ -166,8 +167,7 @@ impl ClientMetricsManager {
         let first_after_get = inst.last_push.is_none_or(|lp| inst.last_get > lp);
         if !terminating && !interval_elapsed && !first_after_get {
             inst.last_error = crate::codes::THROTTLING_QUOTA_EXCEEDED;
-            #[allow(clippy::cast_possible_truncation)]
-            let throttle_ms = inst.push_interval.as_millis() as i32;
+            let throttle_ms = i32::try_from(inst.push_interval.as_millis()).unwrap_or(i32::MAX);
             return PushDecision::Reject {
                 error_code: crate::codes::THROTTLING_QUOTA_EXCEEDED,
                 throttle_ms,
@@ -185,10 +185,8 @@ impl ClientMetricsManager {
 
         // 6. Payload oversize → TELEMETRY_TOO_LARGE.
         //    Do NOT update last_push on this path.
-        // payload_len is always << i32::MAX in practice (max is telemetry_max_bytes
-        // which is i32); the cast is safe for any realistic telemetry payload.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-        if payload_len as i32 > self.telemetry_max_bytes {
+        let max_payload_len = usize::try_from(self.telemetry_max_bytes).unwrap_or(0);
+        if payload_len > max_payload_len {
             return PushDecision::Reject {
                 error_code: crate::codes::TELEMETRY_TOO_LARGE,
                 throttle_ms: 0,
@@ -273,16 +271,15 @@ pub(crate) fn compute_subscription(
 
 fn selector_matches(rule: &config::MatchRule, attrs: &ClientAttributes) -> bool {
     use config::MatchSelector::{
-        ClientId, ClientInstanceId, ClientSoftwareName, ClientSoftwareVersion, ClientSourceAddress,
-        ClientSourcePort,
+        Id, InstanceId, SoftwareName, SoftwareVersion, SourceAddress, SourcePort,
     };
     let target: std::borrow::Cow<'_, str> = match rule.selector {
-        ClientInstanceId => attrs.client_instance_id.to_string().into(),
-        ClientId => (&attrs.client_id).into(),
-        ClientSoftwareName => (&attrs.software_name).into(),
-        ClientSoftwareVersion => (&attrs.software_version).into(),
-        ClientSourceAddress => (&attrs.source_address).into(),
-        ClientSourcePort => attrs.source_port.to_string().into(),
+        InstanceId => attrs.client_instance_id.to_string().into(),
+        Id => (&attrs.client_id).into(),
+        SoftwareName => (&attrs.software_name).into(),
+        SoftwareVersion => (&attrs.software_version).into(),
+        SourceAddress => (&attrs.source_address).into(),
+        SourcePort => attrs.source_port.to_string().into(),
     };
     rule.pattern
         .find(&target)
@@ -299,8 +296,7 @@ pub(crate) fn subscription_id(sub: &ComputedSubscription, client_instance_id: Uu
     let rendered = format!("[{}]{}", sorted.join(", "), sub.push_interval_ms);
     // CRC32C output is u32; reinterpreting as i32 is intentional — the value
     // is used only for equality checks, not arithmetic.
-    #[allow(clippy::cast_possible_wrap)]
-    let crc = crc32c::crc32c(rendered.as_bytes()) as i32;
+    let crc = crc32c::crc32c(rendered.as_bytes()).cast_signed();
     crc ^ uuid_hashcode(client_instance_id)
 }
 
@@ -310,10 +306,9 @@ fn uuid_hashcode(id: Uuid) -> i32 {
     let msb = i64::from_be_bytes(bytes[0..8].try_into().unwrap());
     let lsb = i64::from_be_bytes(bytes[8..16].try_into().unwrap());
     let hilo = msb ^ lsb;
-    #[allow(clippy::cast_possible_truncation)]
-    let high = (hilo >> 32) as i32;
-    #[allow(clippy::cast_possible_truncation)]
-    let low = hilo as i32;
+    let hilo_bytes = hilo.to_be_bytes();
+    let high = i32::from_be_bytes(hilo_bytes[..4].try_into().expect("four-byte high half"));
+    let low = i32::from_be_bytes(hilo_bytes[4..].try_into().expect("four-byte low half"));
     high ^ low
 }
 
@@ -356,16 +351,16 @@ mod tests {
     fn no_subscription_means_no_metrics() {
         let img = MetadataImage::new(Uuid::nil());
         let m = compute_subscription(&img, &attrs());
-        assert2::assert!(m.metrics == Vec::<String>::new());
-        assert2::assert!(m.push_interval_ms == 300_000);
+        assert!(m.metrics.is_empty());
+        assert_eq!(m.push_interval_ms, 300_000);
     }
 
     #[test]
     fn match_all_empty_match_applies() {
         let img = img_with("all", &[("metrics", "*"), ("interval.ms", "60000")]);
         let m = compute_subscription(&img, &attrs());
-        assert2::assert!(m.metrics == vec!["*".to_string()]);
-        assert2::assert!(m.push_interval_ms == 60_000);
+        assert_eq!(m.metrics, vec!["*".to_string()]);
+        assert_eq!(m.push_interval_ms, 60_000);
     }
 
     #[test]
@@ -378,7 +373,7 @@ mod tests {
             ],
         );
         let m = compute_subscription(&img, &attrs());
-        assert2::assert!(m.metrics == vec!["a.".to_string()]);
+        assert_eq!(m.metrics, vec!["a.".to_string()]);
 
         let img2 = img_with(
             "py-only",
@@ -388,7 +383,10 @@ mod tests {
             ],
         );
         let m2 = compute_subscription(&img2, &attrs());
-        assert2::assert!(m2.metrics.is_empty());
+        assert!(
+            m2.metrics.is_empty(),
+            "java client must not match python selector"
+        );
     }
 
     #[test]
@@ -408,8 +406,8 @@ mod tests {
         let m = compute_subscription(&img, &attrs());
         let mut got = m.metrics.clone();
         got.sort();
-        assert2::assert!(got == vec!["a.".to_string(), "b.".to_string()]);
-        assert2::assert!(m.push_interval_ms == 30_000);
+        assert_eq!(got, vec!["a.".to_string(), "b.".to_string()]);
+        assert_eq!(m.push_interval_ms, 30_000);
     }
 
     #[test]
@@ -426,7 +424,7 @@ mod tests {
             },
         ));
         let m = compute_subscription(&img, &attrs());
-        assert2::assert!(m.metrics == vec!["*".to_string()]);
+        assert_eq!(m.metrics, vec!["*".to_string()]);
     }
 
     #[test]
@@ -441,17 +439,17 @@ mod tests {
             metrics: vec!["b.".into(), "a.".into()],
             push_interval_ms: 60_000,
         };
-        assert2::assert!(id1 == subscription_id(&s1b, a.client_instance_id));
+        assert_eq!(id1, subscription_id(&s1b, a.client_instance_id));
         let s2 = ComputedSubscription {
             metrics: vec!["a.".into(), "b.".into()],
             push_interval_ms: 30_000,
         };
-        assert2::assert!(id1 != subscription_id(&s2, a.client_instance_id));
+        assert_ne!(id1, subscription_id(&s2, a.client_instance_id));
         let s3 = ComputedSubscription {
             metrics: vec!["a.".into()],
             push_interval_ms: 60_000,
         };
-        assert2::assert!(id1 != subscription_id(&s3, a.client_instance_id));
+        assert_ne!(id1, subscription_id(&s3, a.client_instance_id));
     }
 
     #[test]
@@ -469,42 +467,42 @@ mod tests {
         };
         let assigned = m.assign(&img, &attrs);
         // First push after assign is allowed (compression_supported=true).
-        assert2::assert!(matches!(
+        assert!(matches!(
             m.authorize_push(id, assigned.subscription_id, false, true, 10),
             PushDecision::Accept { .. }
         ));
         // Immediate second push (interval not elapsed, no new get) is throttled —
         // even if the payload would also be oversized; throttle wins per Kafka order.
-        assert2::assert!(matches!(
+        assert!(matches!(
             m.authorize_push(id, assigned.subscription_id, false, true, 10),
             PushDecision::Reject { error_code, .. } if error_code == crate::codes::THROTTLING_QUOTA_EXCEEDED
         ));
         // Ordering assertion: oversized payload that is ALSO interval-not-elapsed
         // must return THROTTLING_QUOTA_EXCEEDED (throttle before size in ladder).
-        assert2::assert!(matches!(
+        assert!(matches!(
             m.authorize_push(id, assigned.subscription_id, false, true, 2048),
             PushDecision::Reject { error_code, .. } if error_code == crate::codes::THROTTLING_QUOTA_EXCEEDED
         ));
         // Wrong subscription id → UNKNOWN_SUBSCRIPTION_ID.
-        assert2::assert!(matches!(
+        assert!(matches!(
             m.authorize_push(id, assigned.subscription_id ^ 0x5555, false, true, 10),
             PushDecision::Reject { error_code, .. } if error_code == crate::codes::UNKNOWN_SUBSCRIPTION_ID
         ));
         // Unknown instance → INVALID_REQUEST.
-        assert2::assert!(matches!(
+        assert!(matches!(
             m.authorize_push(Uuid::from_u128(999), 0, false, true, 10),
             PushDecision::Reject { error_code, .. } if error_code == crate::codes::INVALID_REQUEST
         ));
         // Re-assign to get a fresh get-timestamp (acts as a new allowance).
         let assigned2 = m.assign(&img, &attrs);
         // Oversized payload with fresh get → TELEMETRY_TOO_LARGE.
-        assert2::assert!(matches!(
+        assert!(matches!(
             m.authorize_push(id, assigned2.subscription_id, false, true, 2048),
             PushDecision::Reject { error_code, .. } if error_code == crate::codes::TELEMETRY_TOO_LARGE
         ));
         // Unsupported compression with fresh get + small payload → UNSUPPORTED_COMPRESSION_TYPE.
         let assigned3 = m.assign(&img, &attrs);
-        assert2::assert!(matches!(
+        assert!(matches!(
             m.authorize_push(id, assigned3.subscription_id, false, false, 10),
             PushDecision::Reject { error_code, .. } if error_code == crate::codes::UNSUPPORTED_COMPRESSION_TYPE
         ));

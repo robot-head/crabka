@@ -54,6 +54,8 @@ impl BlockWriter {
     /// Write `batches` as a single Parquet block at `object_key`.
     ///
     /// Returns [`BlockMeta`] computed from the mandatory block columns.
+    /// # Errors
+    /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub async fn write_block(
         &self,
         tenant: &str,
@@ -80,6 +82,8 @@ impl BlockWriter {
         fields(tenant = %tenant, object_key = %object_key, batches = batches.len()),
         err
     )]
+    /// # Errors
+    /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub async fn write_block_with_decl(
         &self,
         tenant: &str,

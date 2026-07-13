@@ -13,7 +13,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 0;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -31,7 +32,7 @@ impl Encode for BeginTransactionRecord {
         let flex = is_flexible(version);
         if flex {
             let mut tagged = WriteTaggedFields::new();
-            if !(self.name.is_none()) {
+            if self.name.is_some() {
                 let payload = encode_to_bytes(
                     if flex {
                         compact_nullable_string_len(self.name.as_deref())
@@ -40,9 +41,9 @@ impl Encode for BeginTransactionRecord {
                     },
                     |b| {
                         if flex {
-                            put_compact_nullable_string(b, self.name.as_deref());
+                            let () = put_compact_nullable_string(b, self.name.as_deref());
                         } else {
-                            put_nullable_string(b, self.name.as_deref());
+                            let () = put_nullable_string(b, self.name.as_deref());
                         }
                         Ok(())
                     },
@@ -58,7 +59,7 @@ impl Encode for BeginTransactionRecord {
         let mut n: usize = 0;
         if flex {
             let mut known_pairs: Vec<(u32, usize)> = Vec::new();
-            if !(self.name.is_none()) {
+            if self.name.is_some() {
                 known_pairs.push((
                     0,
                     if flex {
@@ -120,7 +121,7 @@ impl BeginTransactionRecord {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(version: i16) -> ::serde_json::Value {
+pub fn default_json(_version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("name".to_string(), ::serde_json::Value::Null);
     ::serde_json::Value::Object(obj)

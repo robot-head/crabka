@@ -156,9 +156,6 @@ impl SharePartitionLeaderManager {
     /// loader losing the insert race adopts the winner's cell.
     ///
     /// Consumed by the ShareFetch/ShareAcknowledge handlers.
-    // cargo-mutants: lazy-loading adapter around durable persister/DashMap state;
-    // acquisition-state folding helpers carry the unit-testable semantics.
-    #[cfg_attr(test, mutants::skip)]
     pub(crate) async fn get_or_load(
         &self,
         group: &str,
@@ -251,10 +248,8 @@ impl SharePartitionLeaderManager {
                 group,
                 topic_id,
                 partition,
-                st.state_epoch,
-                st.leader_epoch,
-                start,
-                dcc,
+                (st.state_epoch, st.leader_epoch),
+                (start, dcc),
                 batches,
             )
             .await
@@ -305,10 +300,9 @@ impl SharePartitionLeaderManager {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::{BTreeMap, BTreeSet},
-        net::SocketAddr,
-    };
+    use std::{collections::BTreeSet, net::SocketAddr};
+
+    use assert2::assert;
 
     use super::*;
 
@@ -360,58 +354,40 @@ mod tests {
             self.image.clone()
         }
         fn watch_image(&self) -> watch::Receiver<Arc<MetadataImage>> {
-            let (_image_tx, image_rx) = watch::channel(self.image.clone());
-            image_rx
+            unimplemented!()
         }
         fn watch_leader(&self) -> watch::Receiver<Option<NodeId>> {
             self.leader_rx.clone()
         }
         fn quorum_state(&self) -> QuorumState {
-            QuorumState {
-                current_term: 0,
-                last_applied_index: 0,
-                current_leader: Some(NodeId(1)),
-                voters: vec![NodeId(1)],
-                voter_nodes: BTreeMap::default(),
-                per_voter_matched_index: BTreeMap::default(),
-            }
+            unimplemented!()
         }
         async fn submit_change(&self, _records: Vec<MetadataRecord>) -> Result<(), RaftError> {
             Ok(())
         }
         async fn change_membership(&self, _new_voters: BTreeSet<NodeId>) -> Result<(), RaftError> {
-            Err(RaftError::Unsupported(
-                "MockSource does not support change_membership",
-            ))
+            unimplemented!()
         }
         async fn add_learner(&self, _node_id: NodeId, _node: Node) -> Result<(), RaftError> {
-            Err(RaftError::Unsupported(
-                "MockSource does not support add_learner",
-            ))
+            unimplemented!()
         }
         fn controller_bound_addr(&self) -> SocketAddr {
-            SocketAddr::from(([0, 0, 0, 0], 0))
+            unimplemented!()
         }
         fn read_snapshot_range(&self, _position: i64, _max_bytes: i32) -> SnapshotRange {
-            SnapshotRange::NoSnapshot
+            unimplemented!()
         }
         async fn trigger_snapshot(&self) -> Result<(), RaftError> {
-            Ok(())
+            unimplemented!()
         }
         async fn add_voter(&self, _req: AddVoter) -> Result<ReconfigOutcome, RaftError> {
-            Err(RaftError::Unsupported(
-                "MockSource does not support add_voter",
-            ))
+            unimplemented!()
         }
         async fn remove_voter(&self, _req: RemoveVoter) -> Result<ReconfigOutcome, RaftError> {
-            Err(RaftError::Unsupported(
-                "MockSource does not support remove_voter",
-            ))
+            unimplemented!()
         }
         async fn update_voter(&self, _req: UpdateVoter) -> Result<ReconfigOutcome, RaftError> {
-            Err(RaftError::Unsupported(
-                "MockSource does not support update_voter",
-            ))
+            unimplemented!()
         }
         async fn cancel(&self) {}
     }
@@ -477,11 +453,12 @@ mod tests {
 
         let cell = mgr.get_or_load("g1", tid, 0).await;
         let st = cell.lock().await;
-        assert2::assert!(*st == AcquisitionState::new(Offset(0)));
+        assert!(st.start_offset == 0);
+        assert!(!st.dirty);
         drop(st);
         // A second call returns the same cached cell.
         let cell2 = mgr.get_or_load("g1", tid, 0).await;
-        assert2::assert!(Arc::ptr_eq(&cell, &cell2));
+        assert!(Arc::ptr_eq(&cell, &cell2));
     }
 
     #[tokio::test]
@@ -491,10 +468,10 @@ mod tests {
 
         let cell = mgr.get_or_load("g1", tid, 0).await;
         let mut st = cell.lock().await;
-        assert2::assert!(!st.dirty);
+        assert!(!st.dirty);
         // Clean state: no-op, no panic, stays clean.
         mgr.persist_if_dirty("g1", tid, 0, &mut st).await;
-        assert2::assert!(!st.dirty);
+        assert!(!st.dirty);
     }
 
     #[tokio::test]
@@ -510,18 +487,18 @@ mod tests {
         // Make the state dirty with persistable content.
         st.materialize(Offset(4), 100);
         let _ = st.acquire("m1", 10, i32::MAX, std::time::Instant::now(), LOCK, 5);
-        assert2::assert!(st.dirty);
+        assert!(st.dirty);
 
         mgr.persist_if_dirty("g1", tid, 0, &mut st).await;
         // Write failed -> dirty stays set for retry.
-        assert2::assert!(st.dirty);
+        assert!(st.dirty);
     }
 
     #[tokio::test]
     async fn topic_leader_is_self_false_for_unknown_topic() {
         let mgr = manager();
         let tid = uuid::Uuid::from_bytes([23; 16]);
-        assert2::assert!(!mgr.topic_leader_is_self(tid, 0));
+        assert!(!mgr.topic_leader_is_self(tid, 0));
     }
 
     #[tokio::test]
@@ -534,7 +511,7 @@ mod tests {
         let cell = mgr.get_or_load("g1", tid, 0).await;
         mgr.invalidate("g1", tid, 0);
         let cell2 = mgr.get_or_load("g1", tid, 0).await;
-        assert2::assert!(!Arc::ptr_eq(&cell, &cell2));
+        assert!(!Arc::ptr_eq(&cell, &cell2));
     }
 
     #[tokio::test]
@@ -571,17 +548,11 @@ mod tests {
         ));
         let mgr = manager_with_image(image);
 
-        for (_case, topic_id, partition, expected) in [
-            ("known partition", tid, 0, (2, 5)),
-            ("unknown partition", tid, 9, (-1, -1)),
-            (
-                "unknown topic",
-                uuid::Uuid::from_bytes([99; 16]),
-                0,
-                (-1, -1),
-            ),
-        ] {
-            assert2::assert!(mgr.current_leader_of(topic_id, partition) == expected);
-        }
+        // Known partition resolves to (leader_id, leader_epoch) from the image.
+        assert!(mgr.current_leader_of(tid, 0) == (2, 5));
+        // Unknown partition of a known topic -> (-1, -1).
+        assert!(mgr.current_leader_of(tid, 9) == (-1, -1));
+        // Unknown topic -> (-1, -1).
+        assert!(mgr.current_leader_of(uuid::Uuid::from_bytes([99; 16]), 0) == (-1, -1));
     }
 }

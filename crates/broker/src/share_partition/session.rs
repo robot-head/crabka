@@ -112,6 +112,7 @@ impl ShareSessionCache {
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
 
     use super::*;
 
@@ -120,50 +121,42 @@ mod tests {
         let cache = ShareSessionCache::new(8);
         // epoch 0 opens → stored epoch becomes 1; each subsequent request
         // must carry the stored epoch, which advances by 1 on success.
-        for (_case, epoch) in [
-            ("open", 0),
-            ("first incremental", 1),
-            ("second incremental", 2),
-        ] {
-            assert2::assert!(cache.validate("g", "m", epoch) == Ok(()));
+        for epoch in [0, 1, 2] {
+            assert!(cache.validate("g", "m", epoch) == Ok(()), "epoch {epoch}");
         }
     }
 
     #[test]
     fn stale_epoch_is_invalid() {
         let cache = ShareSessionCache::new(8);
-        assert2::assert!(cache.validate("g", "m", 0) == Ok(()));
+        assert!(cache.validate("g", "m", 0) == Ok(()));
         // Stored epoch is 1; sending the wrong epoch is rejected.
-        assert2::assert!(cache.validate("g", "m", 5) == Err(codes::INVALID_SHARE_SESSION_EPOCH));
+        assert!(cache.validate("g", "m", 5) == Err(codes::INVALID_SHARE_SESSION_EPOCH));
     }
 
     #[test]
     fn unknown_member_non_zero_epoch_not_found() {
         let cache = ShareSessionCache::new(8);
-        assert2::assert!(cache.validate("g", "ghost", 3) == Err(codes::SHARE_SESSION_NOT_FOUND));
+        assert!(cache.validate("g", "ghost", 3) == Err(codes::SHARE_SESSION_NOT_FOUND));
     }
 
     #[test]
     fn close_removes_session() {
         let cache = ShareSessionCache::new(8);
         // Open, close (epoch -1), then an incremental epoch finds nothing.
-        for (_case, epoch, want) in [
-            ("open", 0, Ok(())),
-            ("close", -1, Ok(())),
-            (
-                "incremental after close",
-                1,
-                Err(codes::SHARE_SESSION_NOT_FOUND),
-            ),
+        for (epoch, want) in [
+            (0, Ok(())),
+            (-1, Ok(())),
+            (1, Err(codes::SHARE_SESSION_NOT_FOUND)),
         ] {
-            assert2::assert!(cache.validate("g", "m", epoch) == want);
+            assert!(cache.validate("g", "m", epoch) == want, "epoch {epoch}");
         }
     }
 
     #[test]
     fn close_absent_session_is_ok() {
         let cache = ShareSessionCache::new(8);
-        assert2::assert!(cache.validate("g", "never", -1) == Ok(()));
+        assert!(cache.validate("g", "never", -1) == Ok(()));
     }
 
     #[test]
@@ -171,16 +164,12 @@ mod tests {
         let cache = ShareSessionCache::new(1);
         // m1 takes the single slot; a second new session is rejected;
         // re-opening the existing session is still fine.
-        for (_case, member, want) in [
-            ("first member opens", "m1", Ok(())),
-            (
-                "second member exceeds capacity",
-                "m2",
-                Err(codes::SHARE_SESSION_LIMIT_REACHED),
-            ),
-            ("existing member reopens", "m1", Ok(())),
+        for (member, want) in [
+            ("m1", Ok(())),
+            ("m2", Err(codes::SHARE_SESSION_LIMIT_REACHED)),
+            ("m1", Ok(())),
         ] {
-            assert2::assert!(cache.validate("g", member, 0) == want);
+            assert!(cache.validate("g", member, 0) == want, "member {member}");
         }
     }
 }

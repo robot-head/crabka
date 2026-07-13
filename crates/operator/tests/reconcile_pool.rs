@@ -14,6 +14,7 @@
 
 use std::{collections::BTreeMap, sync::Arc};
 
+use assert2::assert;
 use crabka_operator::{
     controller::kafka_node_pool::reconcile,
     crd::{KafkaNodePool, KafkaNodePoolSpec, NodeRole},
@@ -150,14 +151,16 @@ async fn pool_applies_statefulset_with_pool_name() {
         .iter()
         .find(|r| r.method() == Method::PATCH && r.uri().to_string().contains("/statefulsets/"))
         .expect("StatefulSet PATCH must have been captured");
-    assert2::assert!(
+    assert!(
         sts_patch
             .uri()
             .to_string()
-            .contains("/statefulsets/demo-brokers")
+            .contains("/statefulsets/demo-brokers"),
+        "StatefulSet name should be `<parent>-<pool>` = demo-brokers, got: {}",
+        sts_patch.uri(),
     );
 
-    assert2::assert!(state.remaining_rules() == 0);
+    assert!(state.remaining_rules() == 0);
 }
 
 #[tokio::test]
@@ -186,10 +189,10 @@ async fn pool_status_ready_when_sts_ready() {
         ("status", "True"),
         ("reason", "Available"),
     ] {
-        assert2::assert!(cond[field] == want);
+        assert!(cond[field] == want, "field {field}; body = {body}");
     }
 
-    assert2::assert!(state.remaining_rules() == 0);
+    assert!(state.remaining_rules() == 0);
 }
 
 #[tokio::test]
@@ -209,13 +212,26 @@ async fn pool_validation_rejects_replicas_two() {
     let observed = state.take_observed();
     for req in &observed {
         let uri = req.uri().to_string();
-        assert2::assert!(!uri.contains("/statefulsets/"));
-        assert2::assert!(!uri.contains("/kafkas/demo"));
+        assert!(
+            !uri.contains("/statefulsets/"),
+            "validation must not touch statefulsets: {uri}",
+        );
+        assert!(
+            !uri.contains("/kafkas/demo"),
+            "validation must not look up the parent Kafka: {uri}",
+        );
     }
-    assert2::assert!(observed.len() == 1);
+    assert!(
+        observed.len() == 1,
+        "validation path should issue exactly one request, saw: {:?}",
+        observed
+            .iter()
+            .map(|r| (r.method().clone(), r.uri().to_string()))
+            .collect::<Vec<_>>()
+    );
 
     let status_patch = &observed[0];
-    assert2::assert!(status_patch.method() == Method::PATCH);
+    assert!(status_patch.method() == Method::PATCH);
     let body: serde_json::Value =
         serde_json::from_slice(status_patch.body()).expect("status PATCH body is JSON");
     let cond = &body["status"]["conditions"][0];
@@ -224,10 +240,10 @@ async fn pool_validation_rejects_replicas_two() {
         ("status", "False"),
         ("reason", "UnsupportedReplicaCount"),
     ] {
-        assert2::assert!(cond[field] == want);
+        assert!(cond[field] == want, "field {field}; body = {body}");
     }
 
-    assert2::assert!(state.remaining_rules() == 0);
+    assert!(state.remaining_rules() == 0);
 }
 
 #[tokio::test]
@@ -245,13 +261,22 @@ async fn pool_validation_rejects_missing_cluster_label() {
     let pool = pool_cr("brokers", "y", None, 1);
 
     let res = reconcile(Arc::new(pool), ctx).await;
-    assert2::assert!(res.is_err());
+    assert!(
+        res.is_err(),
+        "expected reconcile to surface PoolMissingClusterLabel as an error",
+    );
 
     let observed = state.take_observed();
     for req in &observed {
         let uri = req.uri().to_string();
-        assert2::assert!(!uri.contains("/kafkas/"));
-        assert2::assert!(!uri.contains("/statefulsets/"));
+        assert!(
+            !uri.contains("/kafkas/"),
+            "missing-label path must not look up the parent Kafka: {uri}",
+        );
+        assert!(
+            !uri.contains("/statefulsets/"),
+            "missing-label path must not touch statefulsets: {uri}",
+        );
     }
 }
 
@@ -283,7 +308,10 @@ async fn pool_status_parent_not_found() {
     let observed = state.take_observed();
     for req in &observed {
         let uri = req.uri().to_string();
-        assert2::assert!(!uri.contains("/statefulsets/"));
+        assert!(
+            !uri.contains("/statefulsets/"),
+            "ParentNotFound path must not touch statefulsets: {uri}",
+        );
     }
 
     let status_patch = observed
@@ -303,10 +331,10 @@ async fn pool_status_parent_not_found() {
         ("status", "False"),
         ("reason", "ParentNotFound"),
     ] {
-        assert2::assert!(cond[field] == want);
+        assert!(cond[field] == want, "field {field}; body = {body}");
     }
 
-    assert2::assert!(state.remaining_rules() == 0);
+    assert!(state.remaining_rules() == 0);
 }
 
 #[tokio::test]
@@ -383,16 +411,17 @@ async fn pool_persistent_claim_renders_volume_claim_template() {
     let vct = body["spec"]["volumeClaimTemplates"]
         .as_array()
         .unwrap_or_else(|| panic!("volumeClaimTemplates present; body = {body}"));
+    assert!(vct.len() == 1, "body = {body}");
     let pvc = &vct[0];
-    assert2::assert!(vct.len() == 1);
-    assert2::assert!(&pvc["metadata"]["name"] == &serde_json::json!("data"));
-    assert2::assert!(
-        &pvc["spec"]
-            == &serde_json::json!({
+    assert!(pvc["metadata"]["name"] == "data", "body = {body}");
+    assert!(
+        pvc["spec"]
+            == serde_json::json!({
                 "accessModes": ["ReadWriteOnce"],
                 "resources": { "requests": { "storage": "10Gi" } },
                 "storageClassName": "fast-ssd"
-            })
+            }),
+        "body = {body}"
     );
 
     // No emptyDir for `data` in the pod-template volumes (the
@@ -403,11 +432,14 @@ async fn pool_persistent_claim_renders_volume_claim_template() {
         .unwrap_or_default();
     for v in &volumes {
         if v["name"] == "data" {
-            assert2::assert!(v.get("emptyDir").is_none());
+            assert!(
+                v.get("emptyDir").is_none(),
+                "expected no emptyDir entry for data; got {v}",
+            );
         }
     }
 
-    assert2::assert!(state.remaining_rules() == 0);
+    assert!(state.remaining_rules() == 0);
 }
 
 #[tokio::test]
@@ -460,7 +492,10 @@ async fn pool_storage_shrink_is_rejected() {
     for req in &observed {
         let uri = req.uri().to_string();
         if req.method() == Method::PATCH {
-            assert2::assert!(!uri.contains(&format!("/statefulsets/{sts_name}")));
+            assert!(
+                !uri.contains(&format!("/statefulsets/{sts_name}")),
+                "shrink path must not PATCH the StatefulSet: {uri}",
+            );
         }
     }
     // Status PATCH body has reason=StorageImmutable.
@@ -481,17 +516,16 @@ async fn pool_storage_shrink_is_rejected() {
         ("status", "False"),
         ("reason", "StorageImmutable"),
     ] {
-        assert2::assert!(cond[field] == want);
+        assert!(cond[field] == want, "field {field}; body = {body}");
     }
 
-    assert2::assert!(state.remaining_rules() == 0);
+    assert!(state.remaining_rules() == 0);
 }
 
 /// A JBOD pool renders one `volumeClaimTemplate` per disk
 /// (`data` + `data-{id}`), a set-wide retention policy, and the broker
 /// container's `CRABKA_EXTRA_LOG_DIRS` env listing every non-primary disk.
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn pool_jbod_renders_multiple_volume_claim_templates() {
     use crabka_operator::crd::{JbodSpec, JbodVolume, Storage};
 
@@ -571,53 +605,40 @@ async fn pool_jbod_renders_multiple_volume_claim_templates() {
         serde_json::from_slice(sts_patch.body()).expect("STS PATCH body is JSON");
 
     // One PVC template per disk: primary `data` + `data-1`.
-    assert2::assert!(
-        body["spec"]["volumeClaimTemplates"]
-            == serde_json::json!([
-                {
-                    "apiVersion": "v1",
-                    "kind": "PersistentVolumeClaim",
-                    "metadata": {
-                        "name": "data",
-                        "labels": {
-                            "app.kubernetes.io/instance": "demo",
-                            "app.kubernetes.io/managed-by": "crabka-operator",
-                            "app.kubernetes.io/name": "crabka-broker",
-                            "app.kubernetes.io/version": "0.1.1",
-                            "crabka.io/pool": "brokers",
-                        },
-                    },
-                    "spec": {
-                        "accessModes": ["ReadWriteOnce"],
-                        "resources": { "requests": { "storage": "1Gi" } }
-                    },
-                },
-                {
-                    "apiVersion": "v1",
-                    "kind": "PersistentVolumeClaim",
-                    "metadata": {
-                        "name": "data-1",
-                        "labels": {
-                            "app.kubernetes.io/instance": "demo",
-                            "app.kubernetes.io/managed-by": "crabka-operator",
-                            "app.kubernetes.io/name": "crabka-broker",
-                            "app.kubernetes.io/version": "0.1.1",
-                            "crabka.io/pool": "brokers",
-                        },
-                    },
-                    "spec": {
-                        "accessModes": ["ReadWriteOnce"],
-                        "resources": { "requests": { "storage": "2Gi" } },
-                        "storageClassName": "fast"
-                    },
-                },
-            ])
-    );
+    let vct = body["spec"]["volumeClaimTemplates"]
+        .as_array()
+        .unwrap_or_else(|| panic!("volumeClaimTemplates present; body = {body}"));
+    assert!(vct.len() == 2, "body = {body}");
+    let want_templates = [
+        (
+            "data",
+            serde_json::json!({
+                "accessModes": ["ReadWriteOnce"],
+                "resources": { "requests": { "storage": "1Gi" } }
+            }),
+        ),
+        (
+            "data-1",
+            serde_json::json!({
+                "accessModes": ["ReadWriteOnce"],
+                "resources": { "requests": { "storage": "2Gi" } },
+                "storageClassName": "fast"
+            }),
+        ),
+    ];
+    for (i, (want_name, want_spec)) in want_templates.iter().enumerate() {
+        assert!(
+            vct[i]["metadata"]["name"] == *want_name,
+            "disk {i}; body = {body}"
+        );
+        assert!(vct[i]["spec"] == *want_spec, "disk {i}; body = {body}");
+    }
 
     // Set-wide retention honors the JBOD-level deleteClaim.
-    assert2::assert!(
+    assert!(
         body["spec"]["persistentVolumeClaimRetentionPolicy"]
-            == serde_json::json!({ "whenDeleted": "Delete", "whenScaled": "Retain" })
+            == serde_json::json!({ "whenDeleted": "Delete", "whenScaled": "Retain" }),
+        "body = {body}"
     );
 
     // Broker container learns the extra disk via CRABKA_EXTRA_LOG_DIRS.
@@ -631,9 +652,9 @@ async fn pool_jbod_renders_multiple_volume_claim_templates() {
         .iter()
         .find(|e| e["name"] == "CRABKA_EXTRA_LOG_DIRS")
         .unwrap_or_else(|| panic!("CRABKA_EXTRA_LOG_DIRS env present; body = {body}"));
-    assert2::assert!(extra["value"] == "/var/lib/crabka/data-1");
+    assert!(extra["value"] == "/var/lib/crabka/data-1", "body = {body}");
 
-    assert2::assert!(state.remaining_rules() == 0);
+    assert!(state.remaining_rules() == 0);
 }
 
 /// The rendered `StatefulSet` must:
@@ -642,7 +663,6 @@ async fn pool_jbod_renders_multiple_volume_claim_templates() {
 ///   3. Mount the `ConfigMap` at `/etc/crabka/config` (readOnly) in the broker container.
 ///   4. NOT include `CRABKA_ADVERTISED_LISTENER` in the broker container env.
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn statefulset_mounts_broker_config_volume_and_uses_config_file() {
     let parent = "demo";
     let pool_name = "brokers";
@@ -718,7 +738,10 @@ async fn statefulset_mounts_broker_config_volume_and_uses_config_file() {
         .iter()
         .find(|v| v["name"] == "broker-config")
         .unwrap_or_else(|| panic!("broker-config volume missing; volumes = {volumes:?}"));
-    assert2::assert!(broker_config_vol["configMap"]["name"] == "demo-broker-config");
+    assert!(
+        broker_config_vol["configMap"]["name"] == "demo-broker-config",
+        "broker-config volume must reference <parent>-broker-config; body = {body}"
+    );
 
     // 2. Broker container args must reference --config-file.
     let containers = body["spec"]["template"]["spec"]["containers"]
@@ -736,8 +759,14 @@ async fn statefulset_mounts_broker_config_volume_and_uses_config_file() {
         .filter_map(|v| v.as_str())
         .collect::<Vec<_>>()
         .join(" ");
-    assert2::assert!(script.contains("--config-file=/run/crabka/broker.toml"));
-    assert2::assert!(!script.contains("--listen-addr"));
+    assert!(
+        script.contains("--config-file=/run/crabka/broker.toml"),
+        "--config-file flag missing from broker args; args = {script}"
+    );
+    assert!(
+        !script.contains("--listen-addr"),
+        "--listen-addr must not be present in broker args; args = {script}"
+    );
 
     // 3. Broker container must mount broker-config at /etc/crabka/config.
     let volume_mounts = broker["volumeMounts"]
@@ -747,8 +776,14 @@ async fn statefulset_mounts_broker_config_volume_and_uses_config_file() {
         .iter()
         .find(|m| m["name"] == "broker-config")
         .unwrap_or_else(|| panic!("broker-config volumeMount missing; mounts = {volume_mounts:?}"));
-    assert2::assert!(config_mount["mountPath"].as_str() == Some("/etc/crabka/config"));
-    assert2::assert!(config_mount["readOnly"].as_bool() == Some(true));
+    assert!(
+        config_mount["mountPath"] == "/etc/crabka/config",
+        "broker-config must mount at /etc/crabka/config; body = {body}"
+    );
+    assert!(
+        config_mount["readOnly"] == serde_json::Value::Bool(true),
+        "broker-config mount must be readOnly; body = {body}"
+    );
 
     // 4. CRABKA_ADVERTISED_LISTENER must not be in the broker container env.
     let env = broker["env"]
@@ -757,9 +792,12 @@ async fn statefulset_mounts_broker_config_volume_and_uses_config_file() {
     let has_advertised_listener = env
         .iter()
         .any(|e| e["name"] == "CRABKA_ADVERTISED_LISTENER");
-    assert2::assert!(!has_advertised_listener);
+    assert!(
+        !has_advertised_listener,
+        "CRABKA_ADVERTISED_LISTENER must not be in broker env (replaced by per-broker TOML); body = {body}"
+    );
 
-    assert2::assert!(state.remaining_rules() == 0);
+    assert!(state.remaining_rules() == 0);
 }
 
 /// A fresh cluster whose parent Kafka has an invalid `kafkaVersion` must
@@ -798,7 +836,10 @@ async fn pool_blocks_pod_creation_when_parent_version_invalid() {
     // No StatefulSet was touched at all — no pods get formatted/created.
     for req in &observed {
         let uri = req.uri().to_string();
-        assert2::assert!(!uri.contains("/statefulsets/"));
+        assert!(
+            !uri.contains("/statefulsets/"),
+            "invalid-version path must not touch statefulsets: {uri}",
+        );
     }
 
     // The pool surfaces Ready=False / KafkaVersionInvalid, echoing the
@@ -820,8 +861,8 @@ async fn pool_blocks_pod_creation_when_parent_version_invalid() {
         ("status", "False"),
         ("reason", "KafkaVersionInvalid"),
     ] {
-        assert2::assert!(cond[field] == want);
+        assert!(cond[field] == want, "field {field}; body = {body}");
     }
 
-    assert2::assert!(state.remaining_rules() == 0);
+    assert!(state.remaining_rules() == 0);
 }

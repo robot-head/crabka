@@ -154,10 +154,6 @@ impl<S: MetricStore> PromqlEngine<S> {
     }
 
     #[cfg(feature = "experimental-functions")]
-    #[allow(
-        clippy::cast_precision_loss,
-        reason = "PromQL duration helpers return seconds as f64 scalars"
-    )]
     pub(super) fn eval_duration_helper_call(
         call: &Call,
         time_ms: i64,

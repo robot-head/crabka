@@ -14,7 +14,8 @@ pub const MIN_VERSION: i16 = 1;
 pub const MAX_VERSION: i16 = 3;
 pub const FLEXIBLE_MIN: i16 = 2;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -133,9 +134,9 @@ impl Encode for DeleteAclsFilterResult {
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message.as_deref());
+                let () = put_compact_nullable_string(buf, self.error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.error_message.as_deref());
+                let () = put_nullable_string(buf, self.error_message.as_deref());
             }
         }
         if version >= 0 {
@@ -257,60 +258,218 @@ impl Default for DeleteAclsMatchingAcl {
             host: String::new(),
             operation: 0i8,
             permission_type: 0i8,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
+    }
+}
+impl DeleteAclsMatchingAcl {
+    fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
+        if version >= 0 {
+            put_i16(buf, self.error_code);
+        }
+    }
+    fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
+        if version >= 0 {
+            if flex {
+                let () = put_compact_nullable_string(buf, self.error_message.as_deref());
+            } else {
+                let () = put_nullable_string(buf, self.error_message.as_deref());
+            }
+        }
+    }
+    fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
+        if version >= 0 {
+            put_i8(buf, self.resource_type);
+        }
+    }
+    fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
+        if version >= 0 {
+            if flex {
+                let () = put_compact_string(buf, &self.resource_name);
+            } else {
+                let () = put_string(buf, &self.resource_name);
+            }
+        }
+    }
+    fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
+        if version >= 1 {
+            put_i8(buf, self.pattern_type);
+        }
+    }
+    fn encode_field_5<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
+        if version >= 0 {
+            if flex {
+                let () = put_compact_string(buf, &self.principal);
+            } else {
+                let () = put_string(buf, &self.principal);
+            }
+        }
+    }
+    fn encode_field_6<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
+        if version >= 0 {
+            if flex {
+                let () = put_compact_string(buf, &self.host);
+            } else {
+                let () = put_string(buf, &self.host);
+            }
+        }
+    }
+    fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
+        if version >= 0 {
+            put_i8(buf, self.operation);
+        }
+    }
+    fn encode_field_8<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
+        if version >= 0 {
+            put_i8(buf, self.permission_type);
+        }
+    }
+    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {
+        if flex {
+            let tagged = WriteTaggedFields::new();
+            tagged.write(buf, &self.unknown_tagged_fields);
+        }
+    }
+    fn decode_field_0<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.error_code = get_i16(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_1<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.error_message = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_2<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.resource_type = get_i8(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_3<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.resource_name = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_4<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 1 {
+            out.pattern_type = get_i8(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_5<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.principal = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_6<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.host = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_7<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.operation = get_i8(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_8<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.permission_type = get_i8(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_tagged_fields<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        _version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if flex {
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
+        }
+        Ok(())
     }
 }
 impl Encode for DeleteAclsMatchingAcl {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
-        if version >= 0 {
-            put_i16(buf, self.error_code);
-        }
-        if version >= 0 {
-            if flex {
-                put_compact_nullable_string(buf, self.error_message.as_deref());
-            } else {
-                put_nullable_string(buf, self.error_message.as_deref());
-            }
-        }
-        if version >= 0 {
-            put_i8(buf, self.resource_type);
-        }
-        if version >= 0 {
-            if flex {
-                put_compact_string(buf, &self.resource_name);
-            } else {
-                put_string(buf, &self.resource_name);
-            }
-        }
-        if version >= 1 {
-            put_i8(buf, self.pattern_type);
-        }
-        if version >= 0 {
-            if flex {
-                put_compact_string(buf, &self.principal);
-            } else {
-                put_string(buf, &self.principal);
-            }
-        }
-        if version >= 0 {
-            if flex {
-                put_compact_string(buf, &self.host);
-            } else {
-                put_string(buf, &self.host);
-            }
-        }
-        if version >= 0 {
-            put_i8(buf, self.operation);
-        }
-        if version >= 0 {
-            put_i8(buf, self.permission_type);
-        }
-        if flex {
-            let tagged = WriteTaggedFields::new();
-            tagged.write(buf, &self.unknown_tagged_fields);
-        }
+        self.encode_field_0(buf, version, flex);
+        self.encode_field_1(buf, version, flex);
+        self.encode_field_2(buf, version, flex);
+        self.encode_field_3(buf, version, flex);
+        self.encode_field_4(buf, version, flex);
+        self.encode_field_5(buf, version, flex);
+        self.encode_field_6(buf, version, flex);
+        self.encode_field_7(buf, version, flex);
+        self.encode_field_8(buf, version, flex);
+        self.encode_tagged_fields(buf, version, flex);
         Ok(())
     }
     fn encoded_len(&self, version: i16) -> usize {
@@ -370,52 +529,16 @@ impl Decode<'_> for DeleteAclsMatchingAcl {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 2;
         let mut out = Self::default();
-        if version >= 0 {
-            out.error_code = get_i16(buf)?;
-        }
-        if version >= 0 {
-            out.error_message = if flex {
-                get_compact_nullable_string_owned(buf)?
-            } else {
-                get_nullable_string_owned(buf)?
-            };
-        }
-        if version >= 0 {
-            out.resource_type = get_i8(buf)?;
-        }
-        if version >= 0 {
-            out.resource_name = if flex {
-                get_compact_string_owned(buf)?
-            } else {
-                get_string_owned(buf)?
-            };
-        }
-        if version >= 1 {
-            out.pattern_type = get_i8(buf)?;
-        }
-        if version >= 0 {
-            out.principal = if flex {
-                get_compact_string_owned(buf)?
-            } else {
-                get_string_owned(buf)?
-            };
-        }
-        if version >= 0 {
-            out.host = if flex {
-                get_compact_string_owned(buf)?
-            } else {
-                get_string_owned(buf)?
-            };
-        }
-        if version >= 0 {
-            out.operation = get_i8(buf)?;
-        }
-        if version >= 0 {
-            out.permission_type = get_i8(buf)?;
-        }
-        if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
-        }
+        Self::decode_field_0(&mut out, buf, version, flex)?;
+        Self::decode_field_1(&mut out, buf, version, flex)?;
+        Self::decode_field_2(&mut out, buf, version, flex)?;
+        Self::decode_field_3(&mut out, buf, version, flex)?;
+        Self::decode_field_4(&mut out, buf, version, flex)?;
+        Self::decode_field_5(&mut out, buf, version, flex)?;
+        Self::decode_field_6(&mut out, buf, version, flex)?;
+        Self::decode_field_7(&mut out, buf, version, flex)?;
+        Self::decode_field_8(&mut out, buf, version, flex)?;
+        Self::decode_tagged_fields(&mut out, buf, version, flex)?;
         Ok(out)
     }
 }
@@ -458,7 +581,7 @@ impl DeleteAclsMatchingAcl {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(version: i16) -> ::serde_json::Value {
+pub fn default_json(_version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("throttleTimeMs".to_string(), ::serde_json::json!(0));
     obj.insert(

@@ -321,7 +321,6 @@ mod tests {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn make_dispatch<'a>(
         buffer: &'a mut VecDeque<(usize, ErasedRecord)>,
         children: &'a [usize],
@@ -405,10 +404,8 @@ mod tests {
         let rec = ErasedRecord::new(None, Box::new("hi".to_string()), 1);
         node.process(&mut d, rec).await.unwrap();
         let (_c, out) = buffer.pop_front().unwrap();
-        check!(
-            (out.key.is_none(), *out.value.downcast::<String>().unwrap())
-                == (true, "HI".to_string())
-        );
+        check!(out.key.is_none());
+        check!(*out.value.downcast::<String>().unwrap() == "HI");
     }
 
     #[tokio::test]
@@ -458,13 +455,9 @@ mod tests {
             1,
         );
         node.process(&mut d, rec).await.unwrap();
-        check!(
-            (
-                output.len(),
-                output[0].topic.as_str(),
-                output[0].value.as_deref()
-            ) == (1, "out-topic", Some(b"V".as_slice()))
-        );
+        check!(output.len() == 1);
+        check!(output[0].topic == "out-topic");
+        check!(output[0].value.as_ref().unwrap().as_ref() == b"V");
     }
 
     #[tokio::test]
@@ -487,13 +480,9 @@ mod tests {
         );
         let rec = ErasedRecord::new(None, Box::new("v".to_string()), 0);
         node.process(&mut d, rec).await.unwrap();
-        check!(
-            (
-                output.len(),
-                output[0].key.is_none(),
-                output[0].value.as_deref()
-            ) == (1, true, Some(b"v".as_slice()))
-        );
+        check!(output.len() == 1);
+        check!(output[0].key.is_none());
+        check!(output[0].value.as_ref().unwrap().as_ref() == b"v");
     }
 
     #[tokio::test]

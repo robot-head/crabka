@@ -874,7 +874,6 @@ fn instrumentation_matches(
     })
 }
 
-#[allow(clippy::too_many_lines)]
 fn intrinsic_matches(
     batch: &RecordBatch,
     row: usize,
@@ -4266,9 +4265,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    #[allow(clippy::too_many_lines)]
-    async fn cold_traceql_search_filters_event_intrinsics() {
+    async fn event_intrinsic_fixture() -> (TraceqlEngine<CrabkaSpanStore>, [[u8; 16]; 4]) {
         let object_store = Arc::new(InMemory::new());
         let blocks = Arc::new(BlockStore::new(
             object_store.clone(),
@@ -4347,6 +4344,21 @@ mod tests {
         );
         let store = Arc::new(CrabkaSpanStore::new(blocks, shared(index), None));
         let engine = TraceqlEngine::new(store, EngineOpts::default());
+        (
+            engine,
+            [
+                matching.trace_id,
+                other.trace_id,
+                split_events.trace_id,
+                no_event.trace_id,
+            ],
+        )
+    }
+
+    #[tokio::test]
+    async fn cold_traceql_search_filters_event_intrinsics() {
+        let (engine, [matching_id, other_id, split_events_id, no_event_id]) =
+            event_intrinsic_fixture().await;
 
         let resp = engine
             .search("tenant", "{ event:name = \"exception\" }", 0, 10_000, 10)
@@ -4358,7 +4370,7 @@ mod tests {
                 .iter()
                 .map(|trace| trace.trace_id)
                 .collect::<BTreeSet<_>>()
-                == BTreeSet::from([matching.trace_id, split_events.trace_id])
+                == BTreeSet::from([matching_id, split_events_id])
         );
 
         let resp = engine
@@ -4377,7 +4389,7 @@ mod tests {
                 .iter()
                 .map(|trace| trace.trace_id)
                 .collect::<BTreeSet<_>>()
-                == BTreeSet::from([matching.trace_id, other.trace_id, split_events.trace_id])
+                == BTreeSet::from([matching_id, other_id, split_events_id])
         );
 
         let resp = engine
@@ -4396,7 +4408,7 @@ mod tests {
                 .iter()
                 .map(|trace| trace.trace_id)
                 .collect::<BTreeSet<_>>()
-                == BTreeSet::from([matching.trace_id, other.trace_id, split_events.trace_id])
+                == BTreeSet::from([matching_id, other_id, split_events_id])
         );
 
         let resp = engine
@@ -4411,7 +4423,7 @@ mod tests {
             .unwrap();
 
         assert2::assert!(resp.traces.len() == 1);
-        assert2::assert!(resp.traces[0].trace_id == matching.trace_id);
+        assert2::assert!(resp.traces[0].trace_id == matching_id);
 
         let resp = engine
             .search("tenant", "{ event:name != nil }", 0, 10_000, 10)
@@ -4422,23 +4434,19 @@ mod tests {
         check!(
             resp.traces
                 .iter()
-                .any(|trace| trace.trace_id == matching.trace_id)
+                .any(|trace| trace.trace_id == matching_id)
         );
+        check!(resp.traces.iter().any(|trace| trace.trace_id == other_id));
         check!(
             resp.traces
                 .iter()
-                .any(|trace| trace.trace_id == other.trace_id)
-        );
-        check!(
-            resp.traces
-                .iter()
-                .any(|trace| trace.trace_id == split_events.trace_id)
+                .any(|trace| trace.trace_id == split_events_id)
         );
         check!(
             !resp
                 .traces
                 .iter()
-                .any(|trace| trace.trace_id == no_event.trace_id)
+                .any(|trace| trace.trace_id == no_event_id)
         );
 
         let mut series = engine

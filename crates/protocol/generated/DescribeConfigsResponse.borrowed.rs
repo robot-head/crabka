@@ -18,7 +18,8 @@ pub const MIN_VERSION: i16 = 1;
 pub const MAX_VERSION: i16 = 4;
 pub const FLEXIBLE_MIN: i16 = 4;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -28,6 +29,10 @@ pub struct DescribeConfigsResponse<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl DescribeConfigsResponse<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_configs_response::DescribeConfigsResponse {
         crate::owned::describe_configs_response::DescribeConfigsResponse {
             throttle_time_ms: (self.throttle_time_ms),
@@ -142,6 +147,10 @@ pub struct DescribeConfigsResult<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl DescribeConfigsResult<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_configs_response::DescribeConfigsResult {
         crate::owned::describe_configs_response::DescribeConfigsResult {
             error_code: (self.error_code),
@@ -164,9 +173,9 @@ impl Encode for DescribeConfigsResult<'_> {
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message);
+                let () = put_compact_nullable_string(buf, self.error_message);
             } else {
-                put_nullable_string(buf, self.error_message);
+                let () = put_nullable_string(buf, self.error_message);
             }
         }
         if version >= 0 {
@@ -174,9 +183,9 @@ impl Encode for DescribeConfigsResult<'_> {
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.resource_name);
+                let () = put_compact_string(buf, self.resource_name);
             } else {
-                put_string(buf, self.resource_name);
+                let () = put_string(buf, self.resource_name);
             }
         }
         if version >= 0 {
@@ -320,11 +329,15 @@ impl Default for DescribeConfigsResourceResult<'_> {
             synonyms: Vec::new(),
             config_type: 0i8,
             documentation: None,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
-impl DescribeConfigsResourceResult<'_> {
+impl<'a> DescribeConfigsResourceResult<'a> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::describe_configs_response::DescribeConfigsResourceResult {
@@ -343,33 +356,45 @@ impl DescribeConfigsResourceResult<'_> {
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
-}
-impl Encode for DescribeConfigsResourceResult<'_> {
-    fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
-        let flex = version >= 4;
+    fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name);
+                let () = put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name);
+                let () = put_string(buf, self.name);
             }
         }
+    }
+    fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.value);
+                let () = put_compact_nullable_string(buf, self.value);
             } else {
-                put_nullable_string(buf, self.value);
+                let () = put_nullable_string(buf, self.value);
             }
         }
+    }
+    fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
             put_bool(buf, self.read_only);
         }
+    }
+    fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 1 {
             put_i8(buf, self.config_source);
         }
+    }
+    fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
             put_bool(buf, self.is_sensitive);
         }
+    }
+    fn encode_field_5<B: BufMut>(
+        &self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 1 {
             {
                 crate::primitives::array::put_array_len(buf, (self.synonyms).len(), flex);
@@ -378,20 +403,159 @@ impl Encode for DescribeConfigsResourceResult<'_> {
                 }
             }
         }
+        Ok(())
+    }
+    fn encode_field_6<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 3 {
             put_i8(buf, self.config_type);
         }
+    }
+    fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if version >= 3 {
             if flex {
-                put_compact_nullable_string(buf, self.documentation);
+                let () = put_compact_nullable_string(buf, self.documentation);
             } else {
-                put_nullable_string(buf, self.documentation);
+                let () = put_nullable_string(buf, self.documentation);
             }
         }
+    }
+    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
         }
+    }
+    fn decode_field_0(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.name = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_1(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.value = if flex {
+                get_compact_nullable_string_borrowed(buf)?
+            } else {
+                get_nullable_string_borrowed(buf)?
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_2(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.read_only = get_bool(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_3(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 1 {
+            out.config_source = get_i8(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_4(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.is_sensitive = get_bool(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_5(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 1 {
+            out.synonyms = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(DescribeConfigsSynonym::decode_borrow(buf, version)?);
+                }
+                v
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_6(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 3 {
+            out.config_type = get_i8(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_7(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 3 {
+            out.documentation = if flex {
+                get_compact_nullable_string_borrowed(buf)?
+            } else {
+                get_nullable_string_borrowed(buf)?
+            };
+        }
+        Ok(())
+    }
+    fn decode_tagged_fields(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        _version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if flex {
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
+        }
+        Ok(())
+    }
+}
+impl Encode for DescribeConfigsResourceResult<'_> {
+    fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
+        let flex = version >= 4;
+        self.encode_field_0(buf, version, flex);
+        self.encode_field_1(buf, version, flex);
+        self.encode_field_2(buf, version, flex);
+        self.encode_field_3(buf, version, flex);
+        self.encode_field_4(buf, version, flex);
+        self.encode_field_5(buf, version, flex)?;
+        self.encode_field_6(buf, version, flex);
+        self.encode_field_7(buf, version, flex);
+        self.encode_tagged_fields(buf, version, flex);
         Ok(())
     }
     fn encoded_len(&self, version: i16) -> usize {
@@ -452,52 +616,15 @@ impl<'de> DecodeBorrow<'de> for DescribeConfigsResourceResult<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 4;
         let mut out = Self::default();
-        if version >= 0 {
-            out.name = if flex {
-                get_compact_string_borrowed(buf)?
-            } else {
-                get_string_borrowed(buf)?
-            };
-        }
-        if version >= 0 {
-            out.value = if flex {
-                get_compact_nullable_string_borrowed(buf)?
-            } else {
-                get_nullable_string_borrowed(buf)?
-            };
-        }
-        if version >= 0 {
-            out.read_only = get_bool(buf)?;
-        }
-        if version >= 1 {
-            out.config_source = get_i8(buf)?;
-        }
-        if version >= 0 {
-            out.is_sensitive = get_bool(buf)?;
-        }
-        if version >= 1 {
-            out.synonyms = {
-                let n = crate::primitives::array::get_array_len(buf, flex)?;
-                let mut v = Vec::with_capacity(n);
-                for _ in 0..n {
-                    v.push(DescribeConfigsSynonym::decode_borrow(buf, version)?);
-                }
-                v
-            };
-        }
-        if version >= 3 {
-            out.config_type = get_i8(buf)?;
-        }
-        if version >= 3 {
-            out.documentation = if flex {
-                get_compact_nullable_string_borrowed(buf)?
-            } else {
-                get_nullable_string_borrowed(buf)?
-            };
-        }
-        if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
-        }
+        Self::decode_field_0(&mut out, buf, version, flex)?;
+        Self::decode_field_1(&mut out, buf, version, flex)?;
+        Self::decode_field_2(&mut out, buf, version, flex)?;
+        Self::decode_field_3(&mut out, buf, version, flex)?;
+        Self::decode_field_4(&mut out, buf, version, flex)?;
+        Self::decode_field_5(&mut out, buf, version, flex)?;
+        Self::decode_field_6(&mut out, buf, version, flex)?;
+        Self::decode_field_7(&mut out, buf, version, flex)?;
+        Self::decode_tagged_fields(&mut out, buf, version, flex)?;
         Ok(out)
     }
 }
@@ -541,6 +668,10 @@ pub struct DescribeConfigsSynonym<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl DescribeConfigsSynonym<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_configs_response::DescribeConfigsSynonym {
         crate::owned::describe_configs_response::DescribeConfigsSynonym {
             name: (self.name).to_string(),
@@ -555,16 +686,16 @@ impl Encode for DescribeConfigsSynonym<'_> {
         let flex = version >= 4;
         if version >= 1 {
             if flex {
-                put_compact_string(buf, self.name);
+                let () = put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name);
+                let () = put_string(buf, self.name);
             }
         }
         if version >= 1 {
             if flex {
-                put_compact_nullable_string(buf, self.value);
+                let () = put_compact_nullable_string(buf, self.value);
             } else {
-                put_nullable_string(buf, self.value);
+                let () = put_nullable_string(buf, self.value);
             }
         }
         if version >= 1 {

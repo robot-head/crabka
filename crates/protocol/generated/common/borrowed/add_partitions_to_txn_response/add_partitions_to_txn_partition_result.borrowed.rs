@@ -10,9 +10,11 @@ pub struct AddPartitionsToTxnPartitionResult {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl AddPartitionsToTxnPartitionResult {
-    pub fn to_owned(
-        &self,
-    ) -> crate::owned::common::add_partitions_to_txn_response::add_partitions_to_txn_partition_result::AddPartitionsToTxnPartitionResult{
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
+    pub fn to_owned(&self) -> crate::owned::common::add_partitions_to_txn_response::add_partitions_to_txn_partition_result::AddPartitionsToTxnPartitionResult{
         crate::owned::common::add_partitions_to_txn_response::add_partitions_to_txn_partition_result::AddPartitionsToTxnPartitionResult {
             partition_index: (self.partition_index),
             partition_error_code: (self.partition_error_code),

@@ -92,9 +92,7 @@ where
                 ks.clone(),
                 vs.clone(),
                 // Tumbling/hopping: retention basis == window size.
-                size,
-                size,
-                grace,
+                (size, size, grace),
                 procs,
             );
             state.topology.mark_store_caching(&store_for_reg, caching);
@@ -102,8 +100,8 @@ where
         let merge_id = lower_cogroup::<K, VOut, Windowed<K>>(
             &self.builder,
             self.inputs,
-            store_name.clone(),
-            spec,
+            &store_name,
+            &spec,
             logging,
             registrar,
         );

@@ -8,6 +8,9 @@ use crabka_pprof::PprofProfile;
 
 use crate::{error::ProfilesError, ingest::RawProfile, wire::pb};
 
+///
+/// # Errors
+/// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
 pub fn decode_otlp(
     req: &pb::otlp_profiles::ExportProfilesServiceRequest,
 ) -> Result<Vec<RawProfile>, ProfilesError> {
@@ -114,10 +117,10 @@ fn otlp_profile_to_pprof(
     };
 
     if let Some(sample_type) = &profile.sample_type {
-        pprof.sample_type.push(value_type(sample_type));
+        pprof.sample_type.push(value_type(*sample_type));
     }
     if let Some(period_type) = &profile.period_type {
-        pprof.period_type = Some(value_type(period_type));
+        pprof.period_type = Some(value_type(*period_type));
     }
 
     for sample in &profile.samples {
@@ -129,11 +132,11 @@ fn otlp_profile_to_pprof(
             .location_indices
             .iter()
             .map(|idx| {
-                Ok(table_ref_checked(
+                table_ref_checked(
                     *idx,
                     dict.location_table.len(),
                     "OTLP stack references missing location",
-                )?)
+                )
             })
             .collect::<Result<Vec<_>, ProfilesError>>()?;
         pprof.sample.push(crabka_pprof::proto::Sample {
@@ -245,10 +248,12 @@ fn otlp_sample_timestamps(
         .collect()
 }
 
+type OtlpSampleLinks = (Vec<Option<u64>>, Vec<Option<Vec<u8>>>);
+
 fn otlp_sample_links(
     profile: &pb::otlp_profiles::Profile,
     dict: &pb::otlp_profiles::ProfilesDictionary,
-) -> Result<(Vec<Option<u64>>, Vec<Option<Vec<u8>>>), ProfilesError> {
+) -> Result<OtlpSampleLinks, ProfilesError> {
     let mut span_ids = Vec::with_capacity(profile.samples.len());
     let mut trace_ids = Vec::with_capacity(profile.samples.len());
     for sample in &profile.samples {
@@ -276,7 +281,7 @@ fn otlp_sample_links(
     Ok((span_ids, trace_ids))
 }
 
-fn value_type(value: &pb::otlp_profiles::ValueType) -> crabka_pprof::proto::ValueType {
+fn value_type(value: pb::otlp_profiles::ValueType) -> crabka_pprof::proto::ValueType {
     crabka_pprof::proto::ValueType {
         r#type: i64::from(value.type_strindex),
         unit: i64::from(value.unit_strindex),
@@ -323,6 +328,8 @@ fn resolve_service_name(rp: &pb::otlp_profiles::ResourceProfiles) -> String {
 
 #[cfg(test)]
 mod tests {
+    use assert2::{assert, check};
+
     use super::*;
     use crate::wire::pb;
 
@@ -399,7 +406,6 @@ mod tests {
                 attribute_indices: vec![0],
                 values: vec![7],
                 timestamps_unix_nano: vec![1_700_000_000_000_000_123],
-                ..Default::default()
             }],
             time_unix_nano: 1_700_000_000_000_000_000,
             attribute_indices: vec![1],
@@ -419,16 +425,19 @@ mod tests {
 
         let out = decode_otlp(&req).unwrap();
 
-        assert2::assert!(out.len() == 1);
-        assert2::assert!(
-            ["__name__", "env", "__profile_id__"].map(|name| out[0].labels.get(name))
-                == [Some("samples"), Some("prod"), Some("abcd")]
-        );
-        assert2::assert!(!out[0].profile.sample_types().is_empty());
+        assert!(out.len() == 1);
+        for (name, want) in [
+            ("__name__", "samples"),
+            ("env", "prod"),
+            ("__profile_id__", "abcd"),
+        ] {
+            check!(out[0].labels.get(name) == Some(want));
+        }
+        check!(!out[0].profile.sample_types().is_empty());
         let split = crate::ingest::split_sample_types(&out[0]).unwrap();
-        assert2::assert!(split[0].samples[0].timestamp_ns == 1_700_000_000_000_000_123);
-        assert2::assert!(split[0].samples[0].span_id == Some(42));
-        assert2::assert!(&split[0].samples[0].trace_id == &Some(vec![0xaa; 16]));
-        assert2::assert!(split[0].labels.get("target") == Some("all"));
+        check!(split[0].samples[0].timestamp_ns == 1_700_000_000_000_000_123);
+        check!(split[0].samples[0].span_id == Some(42));
+        check!(split[0].samples[0].trace_id == Some(vec![0xaa; 16]));
+        check!(split[0].labels.get("target") == Some("all"));
     }
 }

@@ -7,6 +7,7 @@
 
 use std::{net::SocketAddr, time::Duration};
 
+use assert2::assert;
 use crabka_broker::{
     BootstrapMode, Broker, BrokerConfig, BrokerHandle,
     config::{InterBrokerCredentials, ListenerSpec},
@@ -26,18 +27,17 @@ fn init_tracing() {
 
 /// Build a `SASL_PLAINTEXT` data-plane listener config for broker `i`
 /// (0-indexed) and parameterized `controller_listener_protocol`.
-#[allow(clippy::too_many_arguments)]
 fn sasl_broker_config(
     i: usize,
     data_addr: SocketAddr,
-    ctrl: ListenerProtocol,
-    ctrl_addr: SocketAddr,
+    controller: (ListenerProtocol, SocketAddr),
     voters: &[(u64, SocketAddr)],
     log_dir: &std::path::Path,
     mode: BootstrapMode,
-    plain_user: &str,
-    plain_pass: &str,
+    credentials: (&str, &str),
 ) -> BrokerConfig {
+    let (ctrl, ctrl_addr) = controller;
+    let (plain_user, plain_pass) = credentials;
     let mut cfg = BrokerConfig::for_tests(log_dir.to_path_buf());
     cfg.broker_id = i32::try_from(i + 1).unwrap();
     cfg.listen_addr = data_addr;
@@ -115,24 +115,20 @@ async fn start_two_brokers_with_controller_protocol(
     let cfg0 = sasl_broker_config(
         0,
         data_listen_addr(),
-        ctrl,
-        ctrl_addrs[0],
+        (ctrl, ctrl_addrs[0]),
         &voters,
         dir0.path(),
         BootstrapMode::Bootstrap,
-        plain_user,
-        plain_pass,
+        (plain_user, plain_pass),
     );
     let cfg1 = sasl_broker_config(
         1,
         data_listen_addr(),
-        ctrl,
-        ctrl_addrs[1],
+        (ctrl, ctrl_addrs[1]),
         &voters,
         dir1.path(),
         BootstrapMode::Bootstrap,
-        plain_user,
-        plain_pass,
+        (plain_user, plain_pass),
     );
 
     // KIP-595 Slice 3c static bootstrap: both brokers boot with the same
@@ -198,24 +194,20 @@ async fn controller_listener_sasl_plaintext_rejects_mismatched_creds() {
     let c1 = sasl_broker_config(
         0,
         data_listen_addr(),
-        ListenerProtocol::SaslPlaintext,
-        ctrl_addrs[0],
+        (ListenerProtocol::SaslPlaintext, ctrl_addrs[0]),
         &[(1, ctrl_addrs[0])],
         dir1.path(),
         BootstrapMode::Bootstrap,
-        "alice",
-        "wonderland",
+        ("alice", "wonderland"),
     );
     let c2 = sasl_broker_config(
         1,
         data_listen_addr(),
-        ListenerProtocol::SaslPlaintext,
-        ctrl_addrs[1],
+        (ListenerProtocol::SaslPlaintext, ctrl_addrs[1]),
         &[(2, ctrl_addrs[1])],
         dir2.path(),
         BootstrapMode::Bootstrap,
-        "bob",
-        "burgers",
+        ("bob", "burgers"),
     );
 
     let b1 = Broker::start_with_controller_listener(c1, Some(ctrl_l1))
@@ -234,7 +226,7 @@ async fn controller_listener_sasl_plaintext_rejects_mismatched_creds() {
     // intentional: negative test — observe that no convergence happens within a
     // fixed window; there is no awaiter for "state stays put".
     tokio::time::sleep(Duration::from_secs(3)).await;
-    assert2::assert!(b1.broker_count().await < 2);
+    assert!(b1.broker_count() < 2, "mismatched creds must not converge");
     let _ = &b2;
 
     b2.shutdown().await;
@@ -263,24 +255,20 @@ async fn controller_listener_sasl_denies_unauthorized_principal() {
     let mut c1 = sasl_broker_config(
         0,
         data_listen_addr(),
-        ListenerProtocol::SaslPlaintext,
-        ctrl_addrs[0],
+        (ListenerProtocol::SaslPlaintext, ctrl_addrs[0]),
         &[(1, ctrl_addrs[0])],
         dir1.path(),
         BootstrapMode::Bootstrap,
-        "broker",
-        "secret",
+        ("broker", "secret"),
     );
     let mut c2 = sasl_broker_config(
         1,
         data_listen_addr(),
-        ListenerProtocol::SaslPlaintext,
-        ctrl_addrs[1],
+        (ListenerProtocol::SaslPlaintext, ctrl_addrs[1]),
         &[(2, ctrl_addrs[1])],
         dir2.path(),
         BootstrapMode::Bootstrap,
-        "broker",
-        "secret",
+        ("broker", "secret"),
     );
     // Deny-by-default authorizer: empty super-user set, no ACLs ⇒ every
     // principal (including the authenticated inter-broker one) is denied.
@@ -304,7 +292,10 @@ async fn controller_listener_sasl_denies_unauthorized_principal() {
     // intentional: negative test — observe that no convergence happens within a
     // fixed window; there is no awaiter for "state stays put".
     tokio::time::sleep(Duration::from_secs(3)).await;
-    assert2::assert!(b1.broker_count().await < 2);
+    assert!(
+        b1.broker_count() < 2,
+        "unauthorized principal must not be able to drive controller RPCs"
+    );
     let _ = &b2;
 
     b2.shutdown().await;

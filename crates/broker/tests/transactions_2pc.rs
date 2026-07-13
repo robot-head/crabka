@@ -1,5 +1,4 @@
 // Rust 1.95 annotate-snippets ICE on clippy::pedantic in test files.
-#![allow(clippy::pedantic)]
 
 //! KIP-939 two-phase-commit (2PC) participation — `InitProducerId` v6
 //! coordinator semantics:
@@ -15,6 +14,7 @@
 
 use std::time::Duration;
 
+use assert2::assert;
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_producer::Producer;
 use crabka_protocol::owned::{
@@ -31,7 +31,7 @@ const TRANSACTIONAL_ID_AUTHORIZATION_FAILED: i16 = 53;
 async fn boot(two_pc_enabled: bool) -> (BrokerHandle, String, TempDir) {
     let dir = TempDir::new().unwrap();
     let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
-    cfg.transaction_two_phase_commit_enable = two_pc_enabled;
+    cfg.features.transaction_two_phase_commit_enable = two_pc_enabled;
     let broker = Broker::start(cfg).await.unwrap();
     let bootstrap = broker.listen_addr().to_string();
     (broker, bootstrap, dir)
@@ -67,7 +67,11 @@ async fn enable_2pc_rejected_when_cluster_disabled() {
         .await
         .expect("InitProducerId");
 
-    assert2::assert!(resp.error_code == TRANSACTIONAL_ID_AUTHORIZATION_FAILED);
+    assert!(
+        resp.error_code == TRANSACTIONAL_ID_AUTHORIZATION_FAILED,
+        "expected 53 (TRANSACTIONAL_ID_AUTHORIZATION_FAILED), got {}",
+        resp.error_code
+    );
     broker.shutdown().await;
 }
 
@@ -91,7 +95,11 @@ async fn keep_prepared_txn_is_unsupported() {
         .await
         .expect("InitProducerId");
 
-    assert2::assert!(resp.error_code == UNSUPPORTED_VERSION);
+    assert!(
+        resp.error_code == UNSUPPORTED_VERSION,
+        "expected 35 (UNSUPPORTED_VERSION), got {}",
+        resp.error_code
+    );
     broker.shutdown().await;
 }
 
@@ -129,8 +137,12 @@ async fn enable_2pc_persists_no_timeout_sentinel() {
         })
         .await
         .expect("InitProducerId(enable2Pc)");
-    assert2::assert!(resp.error_code == NONE);
-    assert2::assert!(resp.producer_id >= 0);
+    assert!(
+        resp.error_code == NONE,
+        "enable2Pc init should succeed once the cluster enables 2PC, got {}",
+        resp.error_code
+    );
+    assert!(resp.producer_id >= 0);
 
     // The persisted transaction timeout must be the 2PC no-timeout sentinel.
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
@@ -146,13 +158,19 @@ async fn enable_2pc_persists_no_timeout_sentinel() {
         if row.error_code == NONE {
             break row.transaction_timeout_ms;
         }
-        assert2::assert!(std::time::Instant::now() < deadline);
+        assert!(
+            std::time::Instant::now() < deadline,
+            "DescribeTransactions never returned the tid: {row:?}"
+        );
         // intentional: transaction-coordinator state (persisted txn timeout) is
         // read via a DescribeTransactions RPC and is not in the metadata image
         // nor exposed as a metric — bounded RPC-response poll, no awaiter exists.
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
-    assert2::assert!(timeout_ms == i32::MAX);
+    assert!(
+        timeout_ms == i32::MAX,
+        "2PC transaction must persist the no-timeout sentinel i32::MAX, got {timeout_ms}"
+    );
 
     producer.close().await.ok();
     broker.shutdown().await;

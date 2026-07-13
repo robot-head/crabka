@@ -380,22 +380,12 @@ mod tests {
         let offsets = mgr.bootstrap(&fetcher).await.unwrap();
 
         // Both partitions materialized into the single fully-replicated store.
-        let values = [
-            mgr.get::<String, String>("g", &"a".to_string()).await,
-            mgr.get::<String, String>("g", &"b".to_string()).await,
-        ];
+        check!(mgr.get::<String, String>("g", &"a".to_string()).await == Some("A".to_string()));
+        check!(mgr.get::<String, String>("g", &"b".to_string()).await == Some("B".to_string()));
+
         // Next-offset is one past the single record on each partition.
-        let next_offsets = [
-            offsets.get(&("global".to_string(), 0)).copied(),
-            offsets.get(&("global".to_string(), 1)).copied(),
-        ];
-        check!(
-            (values, next_offsets)
-                == (
-                    [Some("A".to_string()), Some("B".to_string())],
-                    [Some(1), Some(1)]
-                )
-        );
+        check!(offsets.get(&("global".to_string(), 0)) == Some(&1));
+        check!(offsets.get(&("global".to_string(), 1)) == Some(&1));
     }
 
     #[tokio::test]
@@ -415,12 +405,9 @@ mod tests {
         fetcher.script(("global".into(), 0, 1), one_rec(1, "a", "A2"));
         mgr.poll_once(&fetcher, &mut offsets).await.unwrap();
 
+        check!(mgr.get::<String, String>("g", &"a".to_string()).await == Some("A2".to_string()));
         // The offset for partition 0 advanced; partition 1 is unchanged.
-        let actual = (
-            mgr.get::<String, String>("g", &"a".to_string()).await,
-            offsets.get(&("global".to_string(), 0)).copied(),
-            offsets.get(&("global".to_string(), 1)).copied(),
-        );
-        check!(actual == (Some("A2".to_string()), Some(2), Some(1)));
+        check!(offsets.get(&("global".to_string(), 0)) == Some(&2));
+        check!(offsets.get(&("global".to_string(), 1)) == Some(&1));
     }
 }

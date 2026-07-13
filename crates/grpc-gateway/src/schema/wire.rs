@@ -41,6 +41,8 @@ pub fn encode_frame(id: i32, fmt: SchemaFormat, payload: &[u8]) -> Bytes {
 /// Returns `(schema_id, payload)` where `payload` is the bytes *after* the
 /// 5-byte header.  For Protobuf, the caller must strip the message-index
 /// prefix from the returned payload via [`strip_proto_index`].
+/// # Errors
+/// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
 pub fn decode_frame(bytes: &[u8]) -> Result<(i32, Vec<u8>), CodecError> {
     if bytes.len() < 5 {
         return Err(CodecError::Framing(format!(
@@ -66,6 +68,8 @@ pub fn decode_frame(bytes: &[u8]) -> Result<(i32, Vec<u8>), CodecError> {
 /// - If `count == 0` (the common single-first-message optimization), the
 ///   remainder after that one byte is the proto payload.
 /// - Otherwise, `count` more varints follow, then the proto payload.
+/// # Errors
+/// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
 pub fn strip_proto_index(payload: &[u8]) -> Result<Vec<u8>, CodecError> {
     let (count, mut pos) = read_varint(payload, 0)?;
     if count == 0 {

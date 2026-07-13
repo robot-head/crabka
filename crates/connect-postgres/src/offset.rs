@@ -22,6 +22,8 @@ impl PgLsn {
         SourceOffset::new(partition.into(), position.into())
     }
 
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub fn from_source_offset(
         offset: &SourceOffset,
         expected_slot: &str,

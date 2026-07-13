@@ -15,7 +15,8 @@ pub const MIN_VERSION: i16 = 1;
 pub const MAX_VERSION: i16 = 3;
 pub const FLEXIBLE_MIN: i16 = 2;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,11 +40,15 @@ impl Default for DescribeAclsRequest<'_> {
             host_filter: None,
             operation: 0i8,
             permission_type: 0i8,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl DescribeAclsRequest<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_acls_request::DescribeAclsRequest {
         crate::owned::describe_acls_request::DescribeAclsRequest {
             resource_type_filter: (self.resource_type_filter),
@@ -71,9 +76,9 @@ impl Encode for DescribeAclsRequest<'_> {
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.resource_name_filter);
+                let () = put_compact_nullable_string(buf, self.resource_name_filter);
             } else {
-                put_nullable_string(buf, self.resource_name_filter);
+                let () = put_nullable_string(buf, self.resource_name_filter);
             }
         }
         if version >= 1 {
@@ -81,16 +86,16 @@ impl Encode for DescribeAclsRequest<'_> {
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.principal_filter);
+                let () = put_compact_nullable_string(buf, self.principal_filter);
             } else {
-                put_nullable_string(buf, self.principal_filter);
+                let () = put_nullable_string(buf, self.principal_filter);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.host_filter);
+                let () = put_compact_nullable_string(buf, self.host_filter);
             } else {
-                put_nullable_string(buf, self.host_filter);
+                let () = put_nullable_string(buf, self.host_filter);
             }
         }
         if version >= 0 {

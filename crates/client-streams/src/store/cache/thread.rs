@@ -101,7 +101,7 @@ mod tests {
 
     #[test]
     fn zero_budget_not_enabled() {
-        assert2::assert!(!ThreadCache::new(0).enabled());
+        assert!(!ThreadCache::new(0).enabled());
     }
 
     #[test]
@@ -120,7 +120,7 @@ mod tests {
         ca.lock().unwrap().put(key(b"C"), dirty_entry(b"2")); // 23 -> 69
         cb.lock().unwrap().put(key(b"D"), dirty_entry(b"3")); // 23 -> 92
 
-        assert2::assert!(tc.total_bytes() == 92);
+        assert_eq!(tc.total_bytes(), 92);
 
         let mut evicted: Vec<(String, Bytes)> = Vec::new();
         {
@@ -130,17 +130,23 @@ mod tests {
             tc.maybe_evict(&mut listener);
         }
 
-        assert2::assert!(tc.total_bytes() <= max_bytes);
+        assert!(
+            tc.total_bytes() <= max_bytes,
+            "total {} should be <= {}",
+            tc.total_bytes(),
+            max_bytes
+        );
 
         // 92 over budget 50. Each round restarts from the sorted name list and
         // evicts the first non-empty cache's LRU head, so cache "a" drains first:
         // evict A -> 69 (still over), evict C -> 46 (<= 50, stop). Both are
         // cache "a"'s LRU heads in turn (A was inserted before C).
-        assert2::assert!(
-            evicted == vec![("a".to_string(), key(b"A")), ("a".to_string(), key(b"C")),]
+        assert_eq!(
+            evicted,
+            vec![("a".to_string(), key(b"A")), ("a".to_string(), key(b"C")),]
         );
         // Remaining: B and D (23 + 23 = 46 <= 50).
-        assert2::assert!(tc.total_bytes() == 46);
+        assert_eq!(tc.total_bytes(), 46);
     }
 
     #[test]
@@ -160,7 +166,7 @@ mod tests {
         cb.lock().unwrap().put(key(b"C"), dirty_entry(b"2")); // b: 46 -> 69
         cb.lock().unwrap().put(key(b"D"), dirty_entry(b"3")); // b: 69 -> 92
 
-        assert2::assert!(tc.total_bytes() == 92);
+        assert_eq!(tc.total_bytes(), 92);
 
         let mut evicted: Vec<(String, Bytes)> = Vec::new();
         {
@@ -170,22 +176,27 @@ mod tests {
             tc.maybe_evict(&mut listener);
         }
 
-        assert2::assert!(tc.total_bytes() <= max_bytes);
+        assert!(
+            tc.total_bytes() <= max_bytes,
+            "total {} should be <= {}",
+            tc.total_bytes(),
+            max_bytes
+        );
 
         // 92 over budget 30. Sorted name order ["a","b"] always tries "a" first:
         //   evict a/A -> 69 (a now empty); next round "a" is empty so cross to "b":
         //   evict b/B -> 46; evict b/C -> 23 (<= 30, stop).
         // This is exactly the cross-cache path: "a" fully drains, then "b" is hit.
-        assert2::assert!(
-            evicted
-                == vec![
-                    ("a".to_string(), key(b"A")),
-                    ("b".to_string(), key(b"B")),
-                    ("b".to_string(), key(b"C")),
-                ]
+        assert_eq!(
+            evicted,
+            vec![
+                ("a".to_string(), key(b"A")),
+                ("b".to_string(), key(b"B")),
+                ("b".to_string(), key(b"C")),
+            ]
         );
-        assert2::assert!(ca.lock().unwrap().len() == 0);
+        assert_eq!(ca.lock().unwrap().len(), 0, "cache a fully emptied");
         // Remaining: only D in cache "b".
-        assert2::assert!(tc.total_bytes() == 23);
+        assert_eq!(tc.total_bytes(), 23);
     }
 }

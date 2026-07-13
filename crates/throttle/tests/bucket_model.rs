@@ -125,11 +125,6 @@ impl Model for BucketModel {
         }
     }
 
-    #[allow(
-        clippy::cast_sign_loss,
-        clippy::cast_possible_wrap,
-        clippy::too_many_lines
-    )]
     fn next_state(&self, last: &Self::State, action: Self::Action) -> Option<Self::State> {
         let mut s = last.clone();
         match action {
@@ -169,12 +164,12 @@ impl Model for BucketModel {
                             // Atomic read-compute-write (net effect of the CAS loop),
                             // driving the real production arithmetic.
                             let (_grant, new) = plan_consume(
-                                AvailableTokens(s.available.max(0) as u64),
-                                RefillTokens(refill as u64),
-                                BurstCapacity(s.rate as u64),
-                                RequestedTokens(req as u64),
+                                AvailableTokens(s.available.max(0).cast_unsigned()),
+                                RefillTokens(refill.cast_unsigned()),
+                                BurstCapacity(s.rate.cast_unsigned()),
+                                RequestedTokens(req.cast_unsigned()),
                             );
-                            s.available = new.0 as i64;
+                            s.available = new.0.cast_signed();
                             s.pcs[t] = Pc::Idle;
                         } else {
                             // Re-claim refill from the current pending and resample

@@ -38,6 +38,8 @@ pub struct TopologyTestDriver {
 impl TopologyTestDriver {
     /// Instantiate the topology's graph for testing. Errors if the topology is
     /// invalid (propagates `instantiate`'s error).
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub fn new(built: &BuiltTopology) -> Result<Self, ProcessorError> {
         let source_topics: HashSet<String> = built.list_source_topics().into_iter().collect();
         let backend = crate::store::backend::StoreBackend::InMemory;
@@ -72,7 +74,6 @@ impl TopologyTestDriver {
     ///
     /// `consumed` is the same `Consumed::with(key_serde, value_serde)` pair the
     /// source for `topic` reads with.
-    #[allow(clippy::needless_pass_by_value)] // owned K/V is the natural API
     pub fn pipe_input<KS, VS>(
         &mut self,
         topic: &str,
@@ -87,6 +88,8 @@ impl TopologyTestDriver {
         let consumed = consumed.into();
         let kb = key.as_ref().map(|k| consumed.key_serde.serialize(topic, k));
         let vb = consumed.value_serde.serialize(topic, &value);
+        drop(key);
+        drop(value);
         self.pipe_bytes(topic, kb.as_deref(), &vb, timestamp);
     }
 
@@ -110,7 +113,6 @@ impl TopologyTestDriver {
 
     /// Advance the mock wall clock by `by`, firing wall-clock punctuators (each at
     /// most once, value = the new clock) — mirrors JVM `TopologyTestDriver.advanceWallClockTime`.
-    #[allow(clippy::needless_pass_by_value)]
     pub fn advance_wall_clock_time(&mut self, by: std::time::Duration) {
         self.mock_wall_ms += i64::try_from(by.as_millis()).unwrap_or(i64::MAX);
         let mut queue: VecDeque<PendingRecord> = VecDeque::new();
@@ -204,7 +206,6 @@ impl TopologyTestDriver {
     /// consumer reads all partitions of the source topic and applies them to the
     /// fully-replicated global store; the test driver injects values straight into
     /// the shared global store manager so a stream-globaltable join can look them up.
-    #[allow(clippy::needless_pass_by_value)] // owned K/V is the natural API
     pub fn pipe_global<K, V>(&mut self, store_name: &str, key: K, value: V)
     where
         K: Send + Sync + 'static,
@@ -223,6 +224,8 @@ impl TopologyTestDriver {
 
     /// Interactive-query KV read: value for `key`, else `None`. `None` if the
     /// store is absent or not a key-value store.
+    /// # Panics
+    /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub async fn iq_kv_get<K: 'static, V: 'static>(
         &self,
         store: &str,
@@ -238,6 +241,8 @@ impl TopologyTestDriver {
 
     /// Interactive-query KV range read over the inclusive `[lo, hi]` key span,
     /// in store (memcmp) order. Empty if the store is absent or not a KV store.
+    /// # Panics
+    /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub async fn iq_kv_range<K: 'static, V: 'static>(
         &self,
         store: &str,
@@ -264,6 +269,8 @@ impl TopologyTestDriver {
     }
 
     /// Interactive-query read of every entry in a KV store, in store order.
+    /// # Panics
+    /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub async fn iq_kv_all<K: 'static, V: 'static>(
         &self,
         store: &str,
@@ -296,6 +303,8 @@ impl TopologyTestDriver {
     /// Interactive-query window read: `(windowStart, value)` for every window of
     /// `key` whose start is in the inclusive `[from, to]` span, ascending by
     /// window start. Empty if the store is absent or not a window store.
+    /// # Panics
+    /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub async fn iq_window_fetch<K: 'static, V: 'static>(
         &self,
         store: &str,
@@ -318,6 +327,8 @@ impl TopologyTestDriver {
 
     /// Interactive-query single-window read: value of the window of `key` that
     /// starts exactly at `window_start`, else `None`.
+    /// # Panics
+    /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub async fn iq_window_fetch_single<K: 'static, V: 'static>(
         &self,
         store: &str,
@@ -405,6 +416,8 @@ impl TopologyTestDriver {
     /// Interactive-query session read: `((start, end), value)` for every session
     /// of `key`, in store order. Empty if the store is absent or not a session
     /// store.
+    /// # Panics
+    /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub async fn iq_session_fetch<K: 'static, V: 'static>(
         &self,
         store: &str,
@@ -427,7 +440,8 @@ impl TopologyTestDriver {
     ///
     /// `produced` is the same `Produced::with(key_serde, value_serde)` pair the
     /// sink writing `topic` produced with.
-    #[allow(clippy::needless_pass_by_value)] // Produced holds Copy serdes; by-value reads cleanly
+    /// # Panics
+    /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub fn read_output<KS, VS>(
         &mut self,
         topic: &str,
@@ -684,6 +698,6 @@ mod tests {
             )
             .await;
         let only = res.only_partition_result().unwrap();
-        assert2::assert!(only.result() == Some(&Some(2)));
+        assert_eq!(only.result(), Some(&Some(2)));
     }
 }

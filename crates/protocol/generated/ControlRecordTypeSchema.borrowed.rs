@@ -6,8 +6,9 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 0;
 pub const FLEXIBLE_MIN: i16 = 32767;
 #[inline]
-fn is_flexible(version: i16) -> bool {
-    version >= FLEXIBLE_MIN
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
+    version == FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ControlRecordTypeSchema {
@@ -15,6 +16,10 @@ pub struct ControlRecordTypeSchema {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl ControlRecordTypeSchema {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::control_record_type_schema::ControlRecordTypeSchema {
         crate::owned::control_record_type_schema::ControlRecordTypeSchema {
             type_: (self.type_),
@@ -29,14 +34,12 @@ impl Encode for ControlRecordTypeSchema {
                 "ControlRecordTypeSchema version out of range",
             ));
         }
-        let flex = is_flexible(version);
         if version >= 0 {
             put_i16(buf, self.type_);
         }
         Ok(())
     }
     fn encoded_len(&self, version: i16) -> usize {
-        let flex = is_flexible(version);
         let mut n: usize = 0;
         if version >= 0 {
             n += 2;
@@ -51,7 +54,6 @@ impl<'de> DecodeBorrow<'de> for ControlRecordTypeSchema {
                 "ControlRecordTypeSchema version out of range",
             ));
         }
-        let flex = is_flexible(version);
         let mut out = Self::default();
         if version >= 0 {
             out.type_ = get_i16(buf)?;

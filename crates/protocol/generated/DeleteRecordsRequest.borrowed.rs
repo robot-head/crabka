@@ -12,7 +12,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 2;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -22,6 +23,10 @@ pub struct DeleteRecordsRequest<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl DeleteRecordsRequest<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::delete_records_request::DeleteRecordsRequest {
         crate::owned::delete_records_request::DeleteRecordsRequest {
             topics: (self.topics)
@@ -130,6 +135,10 @@ pub struct DeleteRecordsTopic<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl DeleteRecordsTopic<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::delete_records_request::DeleteRecordsTopic {
         crate::owned::delete_records_request::DeleteRecordsTopic {
             name: (self.name).to_string(),
@@ -146,9 +155,9 @@ impl Encode for DeleteRecordsTopic<'_> {
         let flex = version >= 2;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name);
+                let () = put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name);
+                let () = put_string(buf, self.name);
             }
         }
         if version >= 0 {
@@ -241,6 +250,10 @@ pub struct DeleteRecordsPartition {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl DeleteRecordsPartition {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::delete_records_request::DeleteRecordsPartition {
         crate::owned::delete_records_request::DeleteRecordsPartition {
             partition_index: (self.partition_index),

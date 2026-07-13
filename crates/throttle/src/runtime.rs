@@ -19,9 +19,8 @@ use crate::{AvailableTokens, BurstCapacity, RefillTokens, RequestedTokens, plan_
 /// anchor is irrelevant; a wall-clock-anchored epoch (~1.75e18 ns today) or a
 /// mock timeline anchored at the Unix epoch both fit comfortably in `u64`.
 #[inline]
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn clock_nanos(clock: &dyn NanoClock) -> u64 {
-    clock.nanos() as u64
+    u64::try_from(clock.nanos()).expect("clock nanoseconds must fit in u64")
 }
 
 pub struct TokenBucket {
@@ -128,7 +127,8 @@ impl TokenBucket {
     /// straddles this call's refill-claim and CAS commit can never be applied
     /// non-atomically: an odd or mismatched generation forces a retry, and on
     /// retry the refill gap is re-claimed against the post-reset `last_refill`.
-    #[allow(clippy::cast_possible_truncation)]
+    /// # Panics
+    /// Panics if validated compression or rate-limit state contains an impossible size or time value.
     pub fn try_consume(&self, requested: u64) -> u64 {
         if self.rate_per_sec.load(Relaxed) == 0 {
             return requested;
@@ -159,7 +159,9 @@ impl TokenBucket {
             let now = self.now_nanos();
             let last = self.last_refill_nanos.swap(now, Relaxed);
             let elapsed = now.saturating_sub(last);
-            let refill = ((u128::from(elapsed) * u128::from(rate)) / 1_000_000_000) as u64;
+            let refill = (u128::from(elapsed) * u128::from(rate)) / 1_000_000_000;
+            let refill = u64::try_from(refill.min(u128::from(u64::MAX)))
+                .expect("refill is capped at u64::MAX");
 
             let cur = self.available.load(Relaxed);
             let (grant, new_avail) = plan_consume(

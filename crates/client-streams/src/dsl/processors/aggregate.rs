@@ -206,13 +206,8 @@ mod tests {
             .pop_front()
             .expect("expected forwarded record after 1st process");
         let change1 = rec1.value.downcast::<Change<i64>>().unwrap();
-        check!(
-            *change1
-                == Change {
-                    old: None,
-                    new: Some(1i64)
-                }
-        );
+        check!(change1.old.is_none());
+        check!(change1.new == Some(1i64));
 
         // Process record 2: same key="a", value="x" again.
         {
@@ -240,13 +235,8 @@ mod tests {
             .pop_front()
             .expect("expected forwarded record after 2nd process");
         let change2 = rec2.value.downcast::<Change<i64>>().unwrap();
-        check!(
-            *change2
-                == Change {
-                    old: Some(1i64),
-                    new: Some(2i64)
-                }
-        );
+        check!(change2.old == Some(1i64));
+        check!(change2.new == Some(2i64));
 
         // Store should now contain count=2 for key "a".
         let store = stores.get_kv::<String, i64>("counts").unwrap();

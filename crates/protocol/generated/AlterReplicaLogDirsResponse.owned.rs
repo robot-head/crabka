@@ -13,7 +13,8 @@ pub const MIN_VERSION: i16 = 1;
 pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 2;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -126,9 +127,9 @@ impl Encode for AlterReplicaLogDirTopicResult {
         let flex = version >= 2;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.topic_name);
+                let () = put_compact_string(buf, &self.topic_name);
             } else {
-                put_string(buf, &self.topic_name);
+                let () = put_string(buf, &self.topic_name);
             }
         }
         if version >= 0 {
@@ -285,7 +286,7 @@ impl AlterReplicaLogDirPartitionResult {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(version: i16) -> ::serde_json::Value {
+pub fn default_json(_version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("throttleTimeMs".to_string(), ::serde_json::json!(0));
     obj.insert("results".to_string(), ::serde_json::Value::Array(vec![]));

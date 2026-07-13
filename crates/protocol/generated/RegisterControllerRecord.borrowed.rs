@@ -13,7 +13,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 0;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -26,6 +27,10 @@ pub struct RegisterControllerRecord<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl RegisterControllerRecord<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::register_controller_record::RegisterControllerRecord {
         crate::owned::register_controller_record::RegisterControllerRecord {
             controller_id: (self.controller_id),
@@ -199,6 +204,10 @@ pub struct ControllerEndpoint<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl ControllerEndpoint<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::register_controller_record::ControllerEndpoint {
         crate::owned::register_controller_record::ControllerEndpoint {
             name: (self.name).to_string(),
@@ -214,16 +223,16 @@ impl Encode for ControllerEndpoint<'_> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name);
+                let () = put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name);
+                let () = put_string(buf, self.name);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.host);
+                let () = put_compact_string(buf, self.host);
             } else {
-                put_string(buf, self.host);
+                let () = put_string(buf, self.host);
             }
         }
         if version >= 0 {
@@ -326,6 +335,10 @@ pub struct ControllerFeature<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl ControllerFeature<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::register_controller_record::ControllerFeature {
         crate::owned::register_controller_record::ControllerFeature {
             name: (self.name).to_string(),
@@ -340,9 +353,9 @@ impl Encode for ControllerFeature<'_> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name);
+                let () = put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name);
+                let () = put_string(buf, self.name);
             }
         }
         if version >= 0 {

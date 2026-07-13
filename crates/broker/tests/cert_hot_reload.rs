@@ -1,6 +1,5 @@
 // Rust 1.95 annotate-snippets ICE on `clippy::pedantic` in test files
 // (same upstream bug as auth_handlers.rs / mtls.rs).
-#![allow(clippy::pedantic)]
 
 //! TLS hot-reload.
 //!
@@ -13,6 +12,7 @@
 
 use std::{io, path::PathBuf, sync::Arc};
 
+use assert2::assert;
 use crabka_broker::{Broker, BrokerConfig, config::ListenerSpec};
 use crabka_security::{ClientAuthMode, ListenerProtocol, TlsConfig};
 use tokio::net::TcpStream;
@@ -170,7 +170,10 @@ async fn reload_tls_swaps_served_cert() {
         .await
         .expect("pre-reload handshake against cert A must succeed");
     let pre_b = handshake_against(addr, cert_b.clone()).await;
-    assert2::assert!(pre_b.is_err());
+    assert!(
+        pre_b.is_err(),
+        "pre-reload handshake against cert B must fail: got {pre_b:?}",
+    );
 
     // Overwrite the cert files with cert B and trigger an immediate
     // reload. The periodic watcher is disabled, so without this call
@@ -184,7 +187,10 @@ async fn reload_tls_swaps_served_cert() {
         .await
         .expect("post-reload handshake against cert B must succeed");
     let post_a = handshake_against(addr, cert_a).await;
-    assert2::assert!(post_a.is_err());
+    assert!(
+        post_a.is_err(),
+        "post-reload handshake against cert A must fail: got {post_a:?}",
+    );
 
     handle.shutdown().await;
 }
@@ -242,7 +248,10 @@ async fn periodic_watcher_reloads_on_mtime_change() {
         if handshake_against(addr, cert_b.clone()).await.is_ok() {
             break;
         }
-        assert2::assert!(std::time::Instant::now() < deadline);
+        assert!(
+            std::time::Instant::now() < deadline,
+            "watcher never reloaded within 5s",
+        );
         // intentional: the periodic mtime-polling reload is the behavior under test;
         // "cert B is served" is observable only via a live handshake, not any broker
         // metadata-image or metric, so keep the bounded handshake-retry poll.

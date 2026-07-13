@@ -1,6 +1,5 @@
 // Rust 1.95 annotate-snippets ICE on `clippy::pedantic` in test files
 // (same upstream bug as `tests/mtls.rs` etc).
-#![allow(clippy::pedantic)]
 
 //! Prometheus `/metrics` HTTP endpoint.
 //!
@@ -11,11 +10,11 @@
 //!
 //! Gated to non-Windows: the broker handle's `metrics_addr()` is
 //! Linux/macOS-only by convention (matches the other integration
-//! tests' ``).
+//! test conventions).
 
 use std::{io, time::Duration};
 
-use assert2::check;
+use assert2::{assert, check};
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::{Broker, BrokerConfig, config::ListenerSpec, metrics::PartitionLabel};
 use crabka_protocol::{
@@ -95,7 +94,7 @@ async fn create_topic(addr: std::net::SocketAddr) {
         .unwrap();
     let mut cur: &[u8] = &resp;
     let r = CreateTopicsResponse::decode(&mut cur, CREATE_TOPICS_VERSION).unwrap();
-    assert2::assert!(r.topics[0].error_code == 0);
+    assert!(r.topics[0].error_code == 0, "create: {:?}", r.topics[0]);
 }
 
 async fn produce_one(addr: std::net::SocketAddr) -> u64 {
@@ -137,7 +136,7 @@ async fn produce_one(addr: std::net::SocketAddr) -> u64 {
         .into_iter()
         .next()
         .expect("one partition in resp");
-    assert2::assert!(part.error_code == 0);
+    assert!(part.error_code == 0, "produce: {part:?}");
     body.len() as u64
 }
 
@@ -167,7 +166,7 @@ async fn fetch_one(addr: std::net::SocketAddr) {
         .unwrap();
     let mut cur: &[u8] = &resp;
     let r = FetchResponse::decode(&mut cur, FETCH_VERSION).unwrap();
-    assert2::assert!(r.error_code == 0);
+    assert!(r.error_code == 0, "fetch top-level: {r:?}");
 }
 
 async fn scrape(addr: std::net::SocketAddr) -> String {
@@ -217,9 +216,9 @@ async fn metrics_endpoint_serves_openmetrics_and_counters_tick() {
         "crabka_broker_isr_shrinks_total",
         "crabka_broker_isr_expands_total",
     ] {
-        assert2::assert!(body.contains(needle));
+        assert!(body.contains(needle), "missing {needle} in:\n{body}");
     }
-    assert2::assert!(body.contains("# EOF"));
+    assert!(body.contains("# EOF"), "no EOF marker in:\n{body}");
 
     // Drive a CreateTopics + Produce + Fetch so the topic-labelled
     // counters get at least one entry and start emitting series.
@@ -245,7 +244,10 @@ async fn metrics_endpoint_serves_openmetrics_and_counters_tick() {
         "crabka_broker_topic_fetch_requests_total",
         "crabka_broker_messages_in_total",
     ] {
-        assert2::assert!(body.contains(needle));
+        assert!(
+            body.contains(needle),
+            "post-traffic scrape missing {needle} in:\n{body}"
+        );
     }
     // `produce_one` writes a single v2 record into the
     // topic, so `messages_in_total{topic=TOPIC}` must read exactly 1.
@@ -276,9 +278,15 @@ async fn metrics_endpoint_serves_openmetrics_and_counters_tick() {
         .next()
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
-    assert2::assert!(value >= 1);
+    assert!(
+        value >= 1,
+        "partitions_led should be >=1, got line: {led_line}"
+    );
     // Single-node broker: it's its own controller leader.
-    assert2::assert!(body.contains("crabka_broker_active_controller 1"));
+    assert!(
+        body.contains("crabka_broker_active_controller 1"),
+        "active_controller should be 1 on single-node, body:\n{body}"
+    );
 
     handle.shutdown().await;
 }
@@ -336,19 +344,28 @@ async fn partition_level_metrics_and_disk_gauge_render() {
 
     // Topic-level still present.
     let topic_needle = format!("crabka_broker_topic_bytes_in_total{{topic=\"{TOPIC}\"}}");
-    assert2::assert!(body.contains(&topic_needle));
+    assert!(
+        body.contains(&topic_needle),
+        "missing topic-level bytes_in in:\n{body}"
+    );
 
     // Partition-level present with non-zero value.
     let partition_needle =
         format!("crabka_broker_partition_bytes_in_total{{topic=\"{TOPIC}\",partition=\"0\"}}");
-    assert2::assert!(body.contains(&partition_needle));
+    assert!(
+        body.contains(&partition_needle),
+        "missing partition-level bytes_in in:\n{body}"
+    );
     // Per-partition CPU micros counter must be emitted with
     // the topic/partition label set after the produce + fetch path
     // runs. Value is timing-dependent (could be 0 if the handler was
     // sub-microsecond), so we only assert presence of the series name,
     // not a specific value.
     let cpu_needle = format!("crabka_broker_partition_cpu_micros_total{{topic=\"{TOPIC}\"");
-    assert2::assert!(body.contains(&cpu_needle));
+    assert!(
+        body.contains(&cpu_needle),
+        "missing partition_cpu_micros_total in:\n{body}"
+    );
     // Confirm the value is non-zero.
     let part_line = body
         .lines()
@@ -359,11 +376,17 @@ async fn partition_level_metrics_and_disk_gauge_render() {
         .next()
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
-    assert2::assert!(value > 0);
+    assert!(
+        value > 0,
+        "partition_bytes_in should be >0 after produce, got line: {part_line}"
+    );
 
     // Disk gauge: emitted for at least one (topic, partition) of TOPIC.
     let disk_prefix = format!("crabka_broker_partition_disk_bytes{{topic=\"{TOPIC}\"");
-    assert2::assert!(body.contains(&disk_prefix));
+    assert!(
+        body.contains(&disk_prefix),
+        "missing partition_disk_bytes for materialized partition in:\n{body}"
+    );
 
     let _ = tokio::time::timeout(Duration::from_secs(10), handle.shutdown()).await;
 }

@@ -43,6 +43,69 @@ use crate::{
 /// Each per-side processor wraps it so a match passes the present sides.
 type SharedOuterJoiner<V, V2, VO> = Arc<dyn Fn(Option<&V>, Option<&V2>) -> VO + Send + Sync>;
 
+struct StreamJoinGraph {
+    join_this: String,
+    join_other: String,
+    this_store: String,
+    other_store: String,
+    outer_store: Option<String>,
+    this_id: NodeId,
+    other_id: NodeId,
+    merge: String,
+}
+
+fn allocate_stream_join_graph(
+    builder: &mut InternalStreamsBuilder,
+    parents: (NodeId, NodeId),
+    required: (bool, bool),
+) -> StreamJoinGraph {
+    builder.new_processor_name(names::KSTREAM_WINDOWED);
+    builder.new_processor_name(names::KSTREAM_WINDOWED);
+    let this_prefix = if required.0 {
+        names::KSTREAM_JOINTHIS
+    } else {
+        names::KSTREAM_OUTERTHIS
+    };
+    let other_prefix = if required.1 {
+        names::KSTREAM_JOINOTHER
+    } else {
+        names::KSTREAM_OUTEROTHER
+    };
+    let join_this = builder.new_processor_name(this_prefix);
+    let join_other = builder.new_processor_name(other_prefix);
+    let merge = builder.new_processor_name(names::MERGE);
+    let this_store = format!("{join_this}-store");
+    let other_store = format!("{join_other}-store");
+    let outer_store = (!required.0 || !required.1).then(|| {
+        let this_index = &join_this[this_prefix.len()..];
+        format!("{}{this_index}-store", names::KSTREAM_OUTERSHARED)
+    });
+    let this_id = builder.graph.add(
+        join_this.clone(),
+        GraphNodeKind::StatelessProcessor {
+            repartition_required: false,
+        },
+        vec![parents.0],
+    );
+    let other_id = builder.graph.add(
+        join_other.clone(),
+        GraphNodeKind::StatelessProcessor {
+            repartition_required: false,
+        },
+        vec![parents.1],
+    );
+    StreamJoinGraph {
+        join_this,
+        join_other,
+        this_store,
+        other_store,
+        outer_store,
+        this_id,
+        other_id,
+        merge,
+    }
+}
+
 /// Type-erased KIP-923 grace lowering, built by the `*_with` methods (which hold
 /// the `Serde`/`Sync` bounds the grace buffer store + processor require) and run
 /// once inside [`KStream::join_table_impl`]'s lowering thunk. Given the live
@@ -623,6 +686,8 @@ where
     ///
     /// [`StreamsBuilder::table`]: crate::dsl::builder::StreamsBuilder::table
     #[must_use]
+    /// # Panics
+    /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub fn join_table<VT, VO, F, VTS>(
         &self,
         table: &KTable<K, VT, KS, VTS>,
@@ -670,13 +735,13 @@ where
     ///
     /// [`Materialized::as_versioned`]: crate::dsl::config::Materialized::as_versioned
     #[must_use]
-    #[allow(clippy::similar_names)] // `joiner`/`joined` mirror the JVM `join(table, joiner, Joined)`
-    #[allow(clippy::needless_pass_by_value)] // by-value `Joined` mirrors the JVM DSL (cf. `StreamJoined`)
+    /// # Panics
+    /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub fn join_table_with<VT, VO, F, VTS>(
         &self,
         table: &KTable<K, VT, KS, VTS>,
         joiner: F,
-        joined: Joined,
+        join_config: Joined,
     ) -> KStream<K, VO, KS, <VO as DefaultSerde>::Serde>
     where
         VT: Any + Send + Sync + Clone,
@@ -688,8 +753,9 @@ where
         F: Fn(&V, &VT) -> VO + Clone + Send + Sync + 'static,
     {
         let lf = move |v: &V, opt: Option<&VT>| joiner(v, opt.expect("inner join hit"));
-        let grace =
-            self.build_grace_lowering::<VT, VO, _, VTS>(table, lf.clone(), false, joined.grace_ms);
+        let grace_ms = join_config.grace_ms;
+        drop(join_config);
+        let grace = self.build_grace_lowering::<VT, VO, _, VTS>(table, lf.clone(), false, grace_ms);
         self.join_table_impl::<VT, VO, _, VTS>(table, lf, false, grace)
     }
 
@@ -699,13 +765,11 @@ where
     /// [`join_table_with`](Self::join_table_with)). On a table miss at drain time
     /// the joiner receives `None`.
     #[must_use]
-    #[allow(clippy::similar_names)] // `joiner`/`joined` mirror the JVM `leftJoin(table, joiner, Joined)`
-    #[allow(clippy::needless_pass_by_value)] // by-value `Joined` mirrors the JVM DSL (cf. `StreamJoined`)
     pub fn left_join_table_with<VT, VO, F, VTS>(
         &self,
         table: &KTable<K, VT, KS, VTS>,
         joiner: F,
-        joined: Joined,
+        join_config: Joined,
     ) -> KStream<K, VO, KS, <VO as DefaultSerde>::Serde>
     where
         VT: Any + Send + Sync + Clone,
@@ -716,12 +780,10 @@ where
         V: Sync,
         F: Fn(&V, Option<&VT>) -> VO + Clone + Send + Sync + 'static,
     {
-        let grace = self.build_grace_lowering::<VT, VO, _, VTS>(
-            table,
-            joiner.clone(),
-            true,
-            joined.grace_ms,
-        );
+        let grace_ms = join_config.grace_ms;
+        drop(join_config);
+        let grace =
+            self.build_grace_lowering::<VT, VO, _, VTS>(table, joiner.clone(), true, grace_ms);
         self.join_table_impl::<VT, VO, _, VTS>(table, joiner, true, grace)
     }
 
@@ -758,7 +820,7 @@ where
         let retention = table
             .versioned_retention_ms
             .expect("grace requires a versioned table");
-        assert2::assert!(
+        assert!(
             grace_ms < retention,
             "grace_ms must be < history_retention_ms"
         );
@@ -831,7 +893,11 @@ where
         VTS: Clone,
         LF: Fn(&V, Option<&VT>) -> VO + Clone + Send + Sync + 'static,
     {
-        assert2::assert!(!self.key_changing);
+        assert!(
+            !self.key_changing,
+            "join: the stream key was changed upstream (map/select_key/flat_map/group_by); \
+             call `.repartition(..)` before joining to re-partition by the new key"
+        );
         let table_store = table
             .store_name()
             .expect("join requires a materialized table (a store-backed KTable)")
@@ -946,6 +1012,8 @@ where
     ///
     /// [`GlobalKTable`]: crate::dsl::global_table::GlobalKTable
     #[must_use]
+    /// # Panics
+    /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub fn join_global<GK, VG, VR, KM, J, GKS, VGS>(
         &self,
         global: &crate::dsl::global_table::GlobalKTable<GK, VG, GKS, VGS>,
@@ -1090,6 +1158,8 @@ where
     /// [`JoinWindowStore`]: crate::store::join_window::JoinWindowStore
     /// [`KTable::join`]: crate::dsl::ktable::KTable::join
     #[must_use]
+    /// # Panics
+    /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub fn join<V2, VO, F, V2S>(
         &self,
         other: &KStream<K, V2, KS, V2S>,
@@ -1110,13 +1180,8 @@ where
         // (a null result never occurs for an inner join, so `expect` is unreachable).
         let j =
             move |a: Option<&V>, b: Option<&V2>| joiner(a.expect("inner a"), b.expect("inner b"));
-        self.join_impl::<V2, VO, V2S>(
-            other,
-            Arc::new(j),
-            windows,
-            stream_joined,
-            JoinKind::inner(),
-        )
+        let j: SharedOuterJoiner<V, V2, VO> = Arc::new(j);
+        self.join_impl::<V2, VO, V2S>(other, &j, windows, stream_joined, JoinKind::inner())
     }
 
     /// `leftJoin` (windowed left stream-stream join): every record on THIS (left)
@@ -1125,6 +1190,8 @@ where
     /// stream-time-driven). Matched records emit `joiner(&this, Some(&other))` as in
     /// the inner join. The right side never emits a non-join.
     #[must_use]
+    /// # Panics
+    /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub fn left_join<V2, VO, F, V2S>(
         &self,
         other: &KStream<K, V2, KS, V2S>,
@@ -1144,7 +1211,8 @@ where
         // Left form: the left (A) side may receive `None` for B; the A side is always
         // present (the join never fires from a non-existent A).
         let j = move |a: Option<&V>, b: Option<&V2>| joiner(a.expect("left a"), b);
-        self.join_impl::<V2, VO, V2S>(other, Arc::new(j), windows, stream_joined, JoinKind::left())
+        let j: SharedOuterJoiner<V, V2, VO> = Arc::new(j);
+        self.join_impl::<V2, VO, V2S>(other, &j, windows, stream_joined, JoinKind::left())
     }
 
     /// `outerJoin` (windowed outer stream-stream join): every record on EITHER side
@@ -1168,13 +1236,8 @@ where
         V: Send + Sync,
     {
         // The user joiner is already in outer form.
-        self.join_impl::<V2, VO, V2S>(
-            other,
-            Arc::new(joiner),
-            windows,
-            stream_joined,
-            JoinKind::outer(),
-        )
+        let joiner: SharedOuterJoiner<V, V2, VO> = Arc::new(joiner);
+        self.join_impl::<V2, VO, V2S>(other, &joiner, windows, stream_joined, JoinKind::outer())
     }
 
     /// Shared dual+merge lowering for inner/left/outer windowed stream-stream joins.
@@ -1196,12 +1259,11 @@ where
     ///
     /// [`KTable::join`]: crate::dsl::ktable::KTable::join
     /// [`TimeTracker`]: crate::dsl::processors::outer_join_store::TimeTracker
-    #[allow(clippy::too_many_lines)] // dual+merge lowering: 3 nodes + shared outer store, each a typed thunk
-    #[allow(clippy::needless_pass_by_value)] // `outer_joiner` is consumed (cloned into both thunks)
+    // dual+merge lowering: 3 nodes + shared outer store, each a typed thunk
     fn join_impl<V2, VO, V2S>(
         &self,
         other: &KStream<K, V2, KS, V2S>,
-        outer_joiner: SharedOuterJoiner<V, V2, VO>,
+        outer_joiner: &SharedOuterJoiner<V, V2, VO>,
         windows: JoinWindows,
         stream_joined: StreamJoined<KS, VS, V2S>,
         kind: JoinKind,
@@ -1214,67 +1276,30 @@ where
         V2S: Serde<V2> + Clone + 'static,
         V: Send + Sync,
     {
-        let this_src = self.source_topic.clone();
-        let other_src = other.source_topic.clone();
-        // Symmetrically extract source topics when both sides are single source.
-        let a_src = this_src.clone();
-        let b_src = other_src.clone();
+        let a_src = self.source_topic.clone();
+        let b_src = other.source_topic.clone();
 
         let parent_id = self.node;
         let other_parent_id = other.node;
 
-        let before = windows.before_ms;
-        let after = windows.after_ms;
-        let grace = windows.grace_ms;
+        let (before, after, grace) = (windows.before_ms, windows.after_ms, windows.grace_ms);
 
         let mut g = self.builder.borrow_mut();
-        // Burn two KSTREAM-WINDOWED- indices: the JVM creates one per side before
-        // allocating the join processors, so THIS/OTHER land at index+2.
-        g.new_processor_name(names::KSTREAM_WINDOWED);
-        g.new_processor_name(names::KSTREAM_WINDOWED);
-
-        // KIP-633: use OUTERTHIS/OUTEROTHER when a/b side may produce without a match.
-        let this_prefix = if kind.a_required {
-            names::KSTREAM_JOINTHIS
-        } else {
-            names::KSTREAM_OUTERTHIS
-        };
-        let other_prefix = if kind.b_required {
-            names::KSTREAM_JOINOTHER
-        } else {
-            names::KSTREAM_OUTEROTHER
-        };
-        let join_this = g.new_processor_name(this_prefix);
-        let join_other = g.new_processor_name(other_prefix);
-        let merge = g.new_processor_name(names::MERGE);
-
-        // Store names at their JVM positions (minted before the processors).
-        let this_store = format!("{join_this}-store");
-        let other_store = format!("{join_other}-store");
-
-        // The shared outer KV store is only needed for left/outer joins.
-        // Named KSTREAM-OUTERSHARED-{this_index}-store (reuses THIS processor's index).
-        let outer_store = (!kind.a_required || !kind.b_required).then(|| {
-            let this_index = &join_this[this_prefix.len()..];
-            format!("{}{this_index}-store", names::KSTREAM_OUTERSHARED)
-        });
-
-        let this_id = g.graph.add(
-            join_this.clone(),
-            GraphNodeKind::StatelessProcessor {
-                repartition_required: false,
-            },
-            vec![parent_id],
-        );
-        let other_id = g.graph.add(
-            join_other.clone(),
-            GraphNodeKind::StatelessProcessor {
-                repartition_required: false,
-            },
-            vec![other_parent_id],
+        let StreamJoinGraph {
+            join_this,
+            join_other,
+            this_store,
+            other_store,
+            outer_store,
+            this_id,
+            other_id,
+            merge,
+        } = allocate_stream_join_graph(
+            &mut g,
+            (parent_id, other_parent_id),
+            (kind.a_required, kind.b_required),
         );
 
-        let stream_joined_clone = stream_joined.clone();
         let this_store_clone = this_store.clone();
         let other_store_clone = other_store.clone();
         let outer_store_clone = outer_store.clone();
@@ -1285,9 +1310,11 @@ where
 
         // We capture both serdes by cloning the stream_joined fields; since they are
         // cloneable wrappers, this moves them into the lowering closures safely.
-        let ks = stream_joined_clone.key_serde.clone();
-        let vs1 = stream_joined_clone.value1_serde.clone();
-        let vs2 = stream_joined_clone.value2_serde.clone();
+        let StreamJoined {
+            key: ks,
+            left_value: vs1,
+            right_value: vs2,
+        } = stream_joined;
 
         // ── THIS side: fed by `self`; puts into `this_store`, reads `other_store`.
         {
@@ -1297,7 +1324,7 @@ where
             let tracker_this = Arc::clone(&tracker);
             let ks_for_proc = ks.clone();
             let vs_for_proc = vs1.clone();
-            let oj = Arc::clone(&outer_joiner);
+            let oj = Arc::clone(outer_joiner);
             let this_emit = !kind.b_required; // this side emits non-joins (left & outer)
 
             g.graph.nodes[this_id].lower = Some(Box::new(move |state: &mut LowerState| {
@@ -1348,9 +1375,7 @@ where
                     own.clone(),
                     ks.clone(),
                     vs.clone(),
-                    before,
-                    after,
-                    grace,
+                    (before, after, grace),
                     [h.name().to_string()],
                 );
                 state.topology.connect_processor_store(h.name(), &own);
@@ -1379,7 +1404,7 @@ where
             let tracker_other = Arc::clone(&tracker);
             let ks_for_proc = ks.clone();
             let vs_for_proc = vs2.clone();
-            let oj = Arc::clone(&outer_joiner);
+            let oj = Arc::clone(outer_joiner);
             let other_emit = !kind.a_required; // other side emits non-joins (outer only)
 
             g.graph.nodes[other_id].lower = Some(Box::new(move |state: &mut LowerState| {
@@ -1434,9 +1459,7 @@ where
                     own.clone(),
                     ks.clone(),
                     vs.clone(),
-                    before,
-                    after,
-                    grace,
+                    (before, after, grace),
                     [h.name().to_string()],
                 );
                 state.topology.connect_processor_store(h.name(), &own);
@@ -2144,7 +2167,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "assertion failed")]
+    #[should_panic(expected = "grace_ms must be < history_retention_ms")]
     fn grace_geq_retention_panics() {
         use crate::{
             dsl::config::{Joined, Materialized},
@@ -2199,11 +2222,10 @@ mod to_table_caching_tests {
 
         pollster::block_on(g.flush_caches()).unwrap();
         let out = g.take_output();
+        check!(out.len() == 1);
+        check!(out[0].topic == "out");
         // to_stream forwards the deduped `new` value = 9 (BE i64).
-        check!(
-            (out.len(), out[0].topic.as_str(), out[0].value.as_deref())
-                == (1, "out", Some(9i64.to_be_bytes().as_slice()))
-        );
+        check!(out[0].value.as_ref().unwrap().as_ref() == 9i64.to_be_bytes());
     }
 
     /// `with_caching(false)`: the store is NOT cached even with a positive

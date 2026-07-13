@@ -1355,7 +1355,6 @@ async fn rest_cp_calibrated_admin_error_codes() {
 // Error + edge branches across the facade/REST admin surface (mode gating,
 // soft-before-hard, missing subject/version, latest resolution, IMPORT guards).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[allow(clippy::too_many_lines)]
 async fn rest_admin_edge_and_error_branches() {
     let (broker, store, cancel, _dir) = boot_registry(1).await;
     assert2::assert!(store.topic() == "_schemas");

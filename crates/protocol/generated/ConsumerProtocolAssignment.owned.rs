@@ -15,8 +15,9 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 3;
 pub const FLEXIBLE_MIN: i16 = 32767;
 #[inline]
-fn is_flexible(version: i16) -> bool {
-    version >= FLEXIBLE_MIN
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
+    version == FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ConsumerProtocolAssignment {
@@ -46,9 +47,9 @@ impl Encode for ConsumerProtocolAssignment {
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_bytes(buf, self.user_data.as_deref());
+                let () = put_compact_nullable_bytes(buf, self.user_data.as_deref());
             } else {
-                put_nullable_bytes(buf, self.user_data.as_deref());
+                let () = put_nullable_bytes(buf, self.user_data.as_deref());
             }
         }
         Ok(())
@@ -130,12 +131,12 @@ pub struct TopicPartition {
 }
 impl Encode for TopicPartition {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
-        let flex = version >= 32767;
+        let flex = version == i16::MAX;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.topic);
+                let () = put_compact_string(buf, &self.topic);
             } else {
-                put_string(buf, &self.topic);
+                let () = put_string(buf, &self.topic);
             }
         }
         if version >= 0 {
@@ -149,7 +150,7 @@ impl Encode for TopicPartition {
         Ok(())
     }
     fn encoded_len(&self, version: i16) -> usize {
-        let flex = version >= 32767;
+        let flex = version == i16::MAX;
         let mut n: usize = 0;
         if version >= 0 {
             n += if flex {
@@ -171,7 +172,7 @@ impl Encode for TopicPartition {
 }
 impl Decode<'_> for TopicPartition {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
-        let flex = version >= 32767;
+        let flex = version == i16::MAX;
         let mut out = Self::default();
         if version >= 0 {
             out.topic = if flex {
@@ -211,7 +212,7 @@ impl TopicPartition {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(version: i16) -> ::serde_json::Value {
+pub fn default_json(_version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert(
         "assignedPartitions".to_string(),

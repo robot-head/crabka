@@ -21,9 +21,9 @@ impl Encode for Status {
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.status_detail);
+                let () = put_compact_string(buf, &self.status_detail);
             } else {
-                put_string(buf, &self.status_detail);
+                let () = put_string(buf, &self.status_detail);
             }
         }
         if flex {

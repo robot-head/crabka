@@ -251,9 +251,11 @@ async fn run_ruler(
     tokio::spawn(async move {
         let result = run_ruler_evaluation_loop(
             state,
-            wal_sink,
-            RulerAlertmanagerSink::from_endpoint(alertmanager_url),
-            state_sink,
+            (
+                wal_sink,
+                RulerAlertmanagerSink::from_endpoint(alertmanager_url),
+                state_sink,
+            ),
             tenant,
             shard,
             interval,

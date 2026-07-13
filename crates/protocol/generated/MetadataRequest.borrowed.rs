@@ -16,7 +16,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 13;
 pub const FLEXIBLE_MIN: i16 = 9;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,11 +35,15 @@ impl Default for MetadataRequest<'_> {
             allow_auto_topic_creation: true,
             include_cluster_authorized_operations: false,
             include_topic_authorized_operations: false,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl MetadataRequest<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::metadata_request::MetadataRequest {
         crate::owned::metadata_request::MetadataRequest {
             topics: (self.topics)
@@ -214,6 +219,10 @@ pub struct MetadataRequestTopic<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl MetadataRequestTopic<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::metadata_request::MetadataRequestTopic {
         crate::owned::metadata_request::MetadataRequestTopic {
             topic_id: (self.topic_id),
@@ -231,15 +240,15 @@ impl Encode for MetadataRequestTopic<'_> {
         if version >= 0 {
             if version >= 10 {
                 if flex {
-                    put_compact_nullable_string(buf, self.name);
+                    let () = put_compact_nullable_string(buf, self.name);
                 } else {
-                    put_nullable_string(buf, self.name);
+                    let () = put_nullable_string(buf, self.name);
                 }
             } else {
                 if flex {
-                    put_compact_string(buf, (self.name).unwrap_or(""));
+                    let () = put_compact_string(buf, (self.name).unwrap_or(""));
                 } else {
-                    put_string(buf, (self.name).unwrap_or(""));
+                    let () = put_string(buf, (self.name).unwrap_or(""));
                 }
             }
         }

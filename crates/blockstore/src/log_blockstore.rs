@@ -88,6 +88,8 @@ pub struct LabelPredicate {
 }
 
 impl LabelPredicate {
+    /// # Errors
+    /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub fn new(
         name: impl Into<String>,
         op: MatchOp,
@@ -263,6 +265,8 @@ pub struct TimeRange {
 }
 
 impl TimeRange {
+    /// # Errors
+    /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub fn new(start_ns: i64, end_ns: i64) -> Result<Self, BlockStoreError> {
         if start_ns > end_ns {
             return Err(BlockStoreError::InvalidTimeRange { start_ns, end_ns });
@@ -375,6 +379,8 @@ impl LogRow {
     fields(tenant = %key.tenant, partition = key.partition, rows = rows.len()),
     err
 )]
+/// # Errors
+/// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
 pub fn write_log_block(
     root: impl AsRef<Path>,
     key: &BlockKey,
@@ -407,6 +413,8 @@ pub fn write_log_block(
     fields(tenant = %key.tenant, partition = key.partition, rows = rows.len(), size = tracing::field::Empty),
     err
 )]
+/// # Errors
+/// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
 pub async fn write_log_block_to_object_store(
     store: &dyn ObjectStore,
     prefix: &ObjectPath,
@@ -436,6 +444,8 @@ pub async fn write_log_block_to_object_store(
     fields(tenant = %key.tenant, partition = key.partition),
     err
 )]
+/// # Errors
+/// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
 pub fn read_log_block(
     root: impl AsRef<Path>,
     key: &BlockKey,
@@ -455,6 +465,8 @@ pub fn read_log_block(
     fields(tenant = %key.tenant, partition = key.partition),
     err
 )]
+/// # Errors
+/// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
 pub async fn read_log_block_from_object_store(
     store: &dyn ObjectStore,
     prefix: &ObjectPath,
@@ -468,6 +480,8 @@ pub async fn read_log_block_from_object_store(
     read_log_block_from_reader(bytes)
 }
 
+/// # Errors
+/// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
 pub fn register_log_blocks(
     ctx: &SessionContext,
     table_name: &str,
@@ -479,6 +493,8 @@ pub fn register_log_blocks(
     Ok(())
 }
 
+/// # Errors
+/// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
 pub fn register_log_blocks_from_object_store(
     ctx: &SessionContext,
     table_name: &str,
@@ -510,6 +526,8 @@ enum LogBlockTableSource {
 }
 
 impl LogBlockTableProvider {
+    /// # Errors
+    /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub fn try_new(
         root: impl AsRef<Path>,
         blocks: &[BlockDescriptor],
@@ -523,6 +541,8 @@ impl LogBlockTableProvider {
         })
     }
 
+    /// # Errors
+    /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub fn try_new_object_store(
         store: Arc<dyn ObjectStore>,
         prefix: ObjectPath,
@@ -646,6 +666,8 @@ const LOG_INDEX_MANIFEST_RELATIVE_PATH: &str = "index/logs/manifest.json";
 const LOG_INDEX_MANIFEST_VERSION: u32 = 1;
 
 #[instrument(skip_all, err)]
+/// # Errors
+/// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
 pub fn write_log_index_manifest(
     root: impl AsRef<Path>,
     label_index: &LabelIndex,
@@ -662,6 +684,8 @@ pub fn write_log_index_manifest(
 }
 
 #[instrument(skip_all, err)]
+/// # Errors
+/// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
 pub async fn write_log_index_manifest_to_object_store(
     store: &dyn ObjectStore,
     prefix: &ObjectPath,
@@ -677,6 +701,8 @@ pub async fn write_log_index_manifest_to_object_store(
 }
 
 #[instrument(skip_all, fields(tenant = %tenant), err)]
+/// # Errors
+/// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
 pub async fn write_tenant_log_index_manifest_to_object_store(
     store: &dyn ObjectStore,
     prefix: &ObjectPath,
@@ -700,6 +726,8 @@ pub async fn write_tenant_log_index_manifest_to_object_store(
     fields(tenant = %tenant, start_ns = shard_range.start_ns, end_ns = shard_range.end_ns),
     err
 )]
+/// # Errors
+/// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
 pub async fn write_tenant_log_index_shard_to_object_store(
     store: &dyn ObjectStore,
     prefix: &ObjectPath,
@@ -724,6 +752,8 @@ pub async fn write_tenant_log_index_shard_to_object_store(
     Ok(())
 }
 
+/// # Errors
+/// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
 pub async fn write_tenant_log_index_shards_to_object_store(
     store: &dyn ObjectStore,
     prefix: &ObjectPath,
@@ -748,6 +778,8 @@ pub async fn write_tenant_log_index_shards_to_object_store(
 }
 
 #[instrument(skip_all, fields(tenant = %tenant, shards = shard_ranges.len()), err)]
+/// # Errors
+/// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
 pub async fn write_tenant_log_index_shard_catalog_to_object_store(
     store: &dyn ObjectStore,
     prefix: &ObjectPath,
@@ -766,6 +798,8 @@ pub async fn write_tenant_log_index_shard_catalog_to_object_store(
 }
 
 #[instrument(level = "debug", skip_all, err)]
+/// # Errors
+/// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
 pub fn read_log_index_manifest(
     root: impl AsRef<Path>,
 ) -> Result<(LabelIndex, BlockIndex), BlockStoreError> {
@@ -775,6 +809,8 @@ pub fn read_log_index_manifest(
 }
 
 #[instrument(level = "debug", skip_all, fields(tenant = %tenant), err)]
+/// # Errors
+/// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
 pub async fn read_tenant_log_index_manifest_from_object_store(
     store: &dyn ObjectStore,
     prefix: &ObjectPath,
@@ -795,6 +831,8 @@ pub async fn read_tenant_log_index_manifest_from_object_store(
     fields(tenant = %tenant, start_ns = shard_range.start_ns, end_ns = shard_range.end_ns),
     err
 )]
+/// # Errors
+/// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
 pub async fn read_tenant_log_index_shard_from_object_store(
     store: &dyn ObjectStore,
     prefix: &ObjectPath,
@@ -815,6 +853,8 @@ pub async fn read_tenant_log_index_shard_from_object_store(
 }
 
 #[instrument(level = "debug", skip_all, fields(tenant = %tenant), err)]
+/// # Errors
+/// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
 pub async fn read_tenant_log_index_shard_ranges_from_object_store(
     store: &dyn ObjectStore,
     prefix: &ObjectPath,
@@ -830,6 +870,8 @@ pub async fn read_tenant_log_index_shard_ranges_from_object_store(
 }
 
 #[instrument(level = "debug", skip_all, fields(tenant = %tenant), err)]
+/// # Errors
+/// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
 pub async fn list_tenant_log_index_shard_ranges_from_object_store(
     store: &dyn ObjectStore,
     prefix: &ObjectPath,
@@ -850,6 +892,8 @@ pub async fn list_tenant_log_index_shard_ranges_from_object_store(
     fields(tenant = %tenant, start_ns = query_range.start_ns, end_ns = query_range.end_ns),
     err
 )]
+/// # Errors
+/// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
 pub async fn list_tenant_log_index_shard_ranges_overlapping_query_from_object_store(
     store: &dyn ObjectStore,
     prefix: &ObjectPath,
@@ -890,6 +934,8 @@ async fn collect_tenant_log_index_shard_ranges(
     Ok(ranges)
 }
 
+/// # Errors
+/// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
 pub async fn read_tenant_log_index_shards_from_object_store(
     store: &dyn ObjectStore,
     prefix: &ObjectPath,
@@ -944,6 +990,8 @@ pub async fn read_tenant_log_index_shards_from_object_store(
 }
 
 #[instrument(level = "debug", skip_all, err)]
+/// # Errors
+/// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
 pub async fn read_log_index_manifest_from_object_store(
     store: &dyn ObjectStore,
     prefix: &ObjectPath,

@@ -8,8 +8,7 @@
 //! reworked consumer delivers exactly the assigned records — never the
 //! unassigned partition.
 
-#![allow(clippy::pedantic, clippy::manual_assert)]
-
+use assert2::assert;
 mod support;
 
 use std::time::{Duration, Instant};
@@ -64,7 +63,7 @@ async fn subscribe_subset_from_nonzero_offset_yields_exact_records() {
     cfg.replication = 1;
     let log = KafkaMetadataEventLog::start(cfg).await.expect("log start");
     let pc = log.partition_count();
-    assert2::assert!(pc >= 3);
+    assert!(pc >= 3);
 
     // Publish: partition 0 -> a,b,c ; partition 1 -> x,y ; partition 2 -> z
     for v in [b"a".as_slice(), b"b", b"c"] {
@@ -95,16 +94,19 @@ async fn subscribe_subset_from_nonzero_offset_yields_exact_records() {
         let next = tokio::time::timeout(Duration::from_millis(500), stream.next()).await;
         match next {
             Ok(Some(r)) => {
-                assert2::assert!(r.partition != 2);
+                assert!(r.partition != 2, "partition 2 was not assigned");
                 got.push((r.partition, r.offset, r.payload.to_vec()));
             }
             Ok(None) => break,
             Err(_) => {} // timeout tick; keep waiting until deadline
         }
-        assert2::assert!(Instant::now() <= deadline);
+        assert!(
+            Instant::now() <= deadline,
+            "did not receive 4 records in 15s: {got:?}"
+        );
     }
     got.sort();
-    assert2::assert!(
+    assert!(
         got == vec![
             (0, 1, b"b".to_vec()),
             (0, 2, b"c".to_vec()),
@@ -115,7 +117,7 @@ async fn subscribe_subset_from_nonzero_offset_yields_exact_records() {
 
     // Brief grace: ensure no stray partition-2 record sneaks in.
     if let Ok(Some(extra)) = tokio::time::timeout(Duration::from_millis(500), stream.next()).await {
-        assert2::assert!(extra.partition != 2);
+        assert!(extra.partition != 2, "partition 2 leaked: {extra:?}");
     }
 
     log.shutdown().await;

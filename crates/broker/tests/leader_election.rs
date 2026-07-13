@@ -5,14 +5,9 @@
 //! `tokio` scheduling on Windows runners cause flakes that have
 //! nothing to do with the protocol being tested.
 
-#![allow(
-    clippy::cast_possible_truncation,
-    clippy::default_trait_access,
-    clippy::too_many_lines
-)]
-
 use std::time::{Duration, Instant};
 
+use assert2::assert;
 use bytes::Bytes;
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_core::Client;
@@ -36,7 +31,7 @@ async fn find_controller_leader(cluster: &[(BrokerHandle, BrokerConfig, TempDir)
         h.wait_until_controller_leader().await;
     }
     for (i, (h, cfg, _)) in cluster.iter().enumerate() {
-        if h.controller_leader_id().await == Some(cfg.node_id) {
+        if h.controller_leader_id() == Some(cfg.node_id) {
             return i;
         }
     }
@@ -62,7 +57,7 @@ async fn create_topic(broker: &BrokerHandle, bootstrap: &str, name: &str, rf: i1
         })
         .await
         .expect("CreateTopics");
-    assert2::assert!(resp.topics[0].error_code == 0);
+    assert!(resp.topics[0].error_code == 0, "CreateTopics: {resp:?}");
     broker.wait_until_partition_present(name, 0).await;
 }
 
@@ -185,8 +180,11 @@ async fn broker_death_elects_new_leader() {
         .expect("topic");
     let p = t.partitions.first().expect("partition");
     let (new_leader, new_epoch) = (p.leader_id, p.leader_epoch);
-    assert2::assert!(new_leader == 2 || new_leader == 3);
-    assert2::assert!(new_epoch > 0);
+    assert!(
+        new_leader == 2 || new_leader == 3,
+        "unexpected new leader: {new_leader}"
+    );
+    assert!(new_epoch > 0, "leader_epoch should bump after election");
 
     // Clean up surviving brokers.
     for (h, _, _) in cluster {
@@ -214,8 +212,11 @@ async fn acks_all_completes_after_isr_shrink() {
         .await
         .expect("acks=-1 after shrink");
     let elapsed = start.elapsed();
-    assert2::assert!(offset == 0);
-    assert2::assert!(elapsed < Duration::from_secs(10));
+    assert!(offset == 0);
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "shrink should be quick on for_tests config; took {elapsed:?}"
+    );
 
     for (h, _, _) in cluster {
         h.shutdown().await;
@@ -269,7 +270,7 @@ async fn isr_expand_on_catchup() {
         listen_addr: dead_listen_addr,
         advertised_listener: dead_listen_addr.to_string(),
         log_dir: reborn_dir.path().to_path_buf(),
-        log_config: Default::default(),
+        log_config: crabka_log::LogConfig::default(),
         node_id: crabka_broker::NodeId(3),
         controller_listen_addr: dead_controller_addr,
         controller_quorum_voters: voters

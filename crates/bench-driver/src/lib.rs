@@ -5,15 +5,6 @@
 // linearly than the equivalent `write!(out, ...).unwrap()` chain, and
 // the orchestrator function in `workload::run` is intentionally one
 // long top-to-bottom narrative.
-#![allow(
-    clippy::cast_sign_loss,
-    clippy::cast_possible_truncation,
-    clippy::cast_precision_loss,
-    clippy::cast_possible_wrap,
-    clippy::similar_names,
-    clippy::format_push_string,
-    clippy::too_many_lines
-)]
 
 //! Load driver + report aggregator for the Crabka vs Strimzi benchmark
 //! harness on Kubernetes.
@@ -65,6 +56,7 @@ pub mod failover;
 pub mod graph;
 pub mod hist;
 pub mod ids;
+mod numeric;
 pub mod payload;
 pub mod prom;
 pub mod rate;

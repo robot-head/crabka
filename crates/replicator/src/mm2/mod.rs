@@ -91,11 +91,8 @@ impl<'a> Reader<'a> {
         let raw = self.take(2)?;
         // SAFETY: take(2) guarantees exactly 2 bytes.
         let len_i16 = i16::from_be_bytes([raw[0], raw[1]]);
-        // MM2 string lengths are non-negative i16 values (0..=32767).
-        // Casting to usize is safe: the value is non-negative and fits in usize
-        // on any platform Crabka targets (≥ 16-bit address space).
-        #[allow(clippy::cast_sign_loss)]
-        let len = len_i16 as usize;
+        let len = usize::try_from(len_i16)
+            .map_err(|_| ReplicatorError::Codec("negative MM2 string length".into()))?;
         Ok(String::from_utf8_lossy(self.take(len)?).into_owned())
     }
 

@@ -11,6 +11,8 @@ use crate::error::GatewayError;
 const INVALID_REPLICATION_FACTOR: i16 = 38;
 const TOPIC_ALREADY_EXISTS: i16 = 36;
 
+/// # Errors
+/// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
 pub async fn ensure_dedup_topic(
     bootstrap: &str,
     name: &str,
@@ -37,6 +39,8 @@ pub async fn ensure_dedup_topic(
 /// `cleanup.policy=compact` (no delete) keeps one live record per node until a
 /// tombstone supersedes it. Single partition ⇒ all publishes are totally
 /// ordered, so the routing table's offset tiebreak is exact.
+/// # Errors
+/// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
 pub async fn ensure_membership_topic(
     bootstrap: &str,
     name: &str,

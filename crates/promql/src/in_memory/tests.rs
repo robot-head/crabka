@@ -791,7 +791,7 @@ fn offsets_track_low_and_high_water() {
     }
 
     // Pruning does not move offsets (they track ingestion, not retention).
-    head.prune(i64::MAX);
+    let _ = head.prune(i64::MAX);
     assert2::assert!(head.high_water_offset(PartitionIndex(0)) == Some(Offset(6)));
     assert2::assert!(head.low_water_offset(PartitionIndex(0)) == Some(Offset(5)));
 }

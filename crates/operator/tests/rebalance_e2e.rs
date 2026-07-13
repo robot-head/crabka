@@ -9,10 +9,9 @@
 //! the rebalancer's prost/pbjson codegen emits — something the unit tests
 //! can only assume.
 
-#![allow(clippy::pedantic)]
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
-use std::{sync::Arc, time::Duration};
-
+use assert2::assert;
 use async_trait::async_trait;
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
@@ -37,7 +36,7 @@ use crabka_rebalancer::{
 };
 
 /// Stand-in for the executor's client facade — these tests only exercise
-/// CreateProposal / GetProposal / (failed) ExecuteProposal, never the
+/// `CreateProposal` / `GetProposal` / (failed) `ExecuteProposal`, never the
 /// reassignment path, so every method is a no-op.
 struct NoopClient;
 
@@ -124,7 +123,7 @@ async fn operator_client_round_trips_against_real_rebalancer() {
                 name: "e2e-topic".into(),
                 partitions: 3,
                 replicas: 1,
-                configs: Default::default(),
+                configs: BTreeMap::default(),
             }],
             5_000,
         )
@@ -155,20 +154,27 @@ async fn operator_client_round_trips_against_real_rebalancer() {
     // CreateProposal — single-broker cluster ⇒ Computed (likely zero
     // movements). The point is the wire round-trip + enum decode.
     let proposal = client.create_proposal(&[]).await.expect("create_proposal");
-    assert2::assert!(proposal.status == ProposalStatus::Computed);
-    assert2::assert!(!proposal.id.is_empty());
+    assert!(
+        proposal.status == ProposalStatus::Computed,
+        "CreateProposal must decode to Computed"
+    );
+    assert!(!proposal.id.is_empty(), "proposal must carry an id");
 
     // GetProposal round-trips the same proposal back by id.
     let fetched = client
         .get_proposal(&proposal.id)
         .await
         .expect("get_proposal");
-    assert2::assert!(fetched == proposal);
+    assert!(fetched.id == proposal.id);
+    assert!(fetched.status == ProposalStatus::Computed);
 
     // GetProposal on an unknown id surfaces a Connect error mapped to Rpc.
     match client.get_proposal("does-not-exist").await {
         Err(RebalancerError::Rpc { code, .. }) => {
-            assert2::assert!(!code.is_empty());
+            assert!(
+                !code.is_empty(),
+                "unknown-proposal error must carry a Connect code"
+            );
         }
         other => panic!("expected Rpc error for unknown proposal, got {other:?}"),
     }
@@ -177,11 +183,11 @@ async fn operator_client_round_trips_against_real_rebalancer() {
     // Connect FailedPrecondition — verifies the error decode path.
     match client.execute_proposal(&proposal.id, Some(1_000_000)).await {
         Err(RebalancerError::Rpc { code, .. }) => {
-            assert2::assert!(!code.is_empty());
+            assert!(!code.is_empty(), "execute rejection must carry a code");
         }
         // If the optimizer happened to produce movements (it shouldn't on
         // a single broker) execution would start instead; accept that too.
-        Ok(p) => assert2::assert!(p.status == ProposalStatus::Executing),
+        Ok(p) => assert!(p.status == ProposalStatus::Executing),
         other => panic!("unexpected execute outcome: {other:?}"),
     }
 

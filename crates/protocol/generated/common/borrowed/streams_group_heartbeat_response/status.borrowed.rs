@@ -14,6 +14,10 @@ pub struct Status<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl Status<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::common::streams_group_heartbeat_response::status::Status {
@@ -32,9 +36,9 @@ impl Encode for Status<'_> {
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.status_detail);
+                let () = put_compact_string(buf, self.status_detail);
             } else {
-                put_string(buf, self.status_detail);
+                let () = put_string(buf, self.status_detail);
             }
         }
         if flex {

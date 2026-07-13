@@ -114,8 +114,8 @@ where
         let merge_id = lower_cogroup::<K, VOut, Windowed<K>>(
             &self.builder,
             self.inputs,
-            store_name.clone(),
-            spec,
+            &store_name,
+            &spec,
             logging,
             registrar,
         );

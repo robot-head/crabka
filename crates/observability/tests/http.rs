@@ -1,5 +1,3 @@
-#![allow(clippy::unreadable_literal)]
-
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::Write as _,
@@ -9,7 +7,7 @@ use std::{
     },
 };
 
-use assert2::check;
+use assert2::{assert, check};
 use async_trait::async_trait;
 use axum::{
     body::{Body, to_bytes},
@@ -112,8 +110,8 @@ struct RejectingIngestLimiter;
 #[async_trait]
 impl LogIngestLimiter for RejectingIngestLimiter {
     async fn check(&self, tenant: &str, records: &[WalLogRecord]) -> Result<(), IngestLimitError> {
-        assert2::assert!(tenant == "tenant-a");
-        assert2::assert!(records.len() == 1);
+        assert!(tenant == "tenant-a");
+        assert!(records.len() == 1);
         Err(IngestLimitError::RateLimited {
             tenant: tenant.to_string(),
             reason: "tenant write quota exceeded".to_string(),
@@ -188,9 +186,9 @@ async fn loki_push_endpoint_writes_tenant_scoped_wal_records() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::NO_CONTENT);
+    assert!(response.status() == StatusCode::NO_CONTENT);
     let records = sink.records();
-    assert2::assert!(
+    assert!(
         records
             == vec![
                 WalLogRecord {
@@ -254,9 +252,9 @@ async fn loki_push_endpoint_accepts_incomplete_json_value_as_empty_line() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::NO_CONTENT);
+    assert!(response.status() == StatusCode::NO_CONTENT);
     let records = sink.records();
-    assert2::assert!(
+    assert!(
         records
             == vec![WalLogRecord {
                 tenant: "tenant-a".to_string(),
@@ -301,9 +299,9 @@ async fn loki_push_endpoint_ignores_extra_json_value_fields_like_loki() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::NO_CONTENT);
+    assert!(response.status() == StatusCode::NO_CONTENT);
     let records = sink.records();
-    assert2::assert!(
+    assert!(
         records
             == vec![WalLogRecord {
                 tenant: "tenant-a".to_string(),
@@ -352,9 +350,9 @@ async fn loki_push_endpoint_decodes_empty_json_value_as_zero_timestamp_empty_lin
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::NO_CONTENT);
+    assert!(response.status() == StatusCode::NO_CONTENT);
     let records = sink.records();
-    assert2::assert!(
+    assert!(
         records
             == vec![WalLogRecord {
                 tenant: "tenant-a".to_string(),
@@ -400,7 +398,7 @@ async fn loki_push_endpoint_rejects_non_array_json_value_like_loki() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(response.status() == StatusCode::BAD_REQUEST);
     let body = text_body(response).await;
     check!(body.contains(
         "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: unmarshalerDecoder: Unknown value type"
@@ -434,7 +432,7 @@ async fn loki_push_endpoint_rejects_non_object_json_stream_like_loki() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(response.status() == StatusCode::BAD_REQUEST);
     let body = text_body(response).await;
     check!(body.contains(
         "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: unmarshalerDecoder: Value looks like object"
@@ -466,7 +464,7 @@ async fn loki_push_endpoint_rejects_non_array_json_streams_like_loki() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(response.status() == StatusCode::BAD_REQUEST);
     let body = text_body(response).await;
     check!(body.contains(
         "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: decode slice: expect [ or n, but found"
@@ -493,7 +491,7 @@ async fn loki_push_endpoint_rejects_array_json_payload_like_loki() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(response.status() == StatusCode::BAD_REQUEST);
     let body = text_body(response).await;
     check!(body.contains("readObjectStart: expect { or n, but found ["));
     check!(body.contains(r#"[{"streams""#));
@@ -679,7 +677,7 @@ async fn loki_push_endpoint_rejects_non_array_json_values_like_loki() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(response.status() == StatusCode::BAD_REQUEST);
     let body = text_body(response).await;
     check!(body.contains(
         "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: unmarshalerDecoder: Unknown value type"
@@ -716,7 +714,7 @@ async fn loki_push_endpoint_rejects_non_object_json_labels_like_loki() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(response.status() == StatusCode::BAD_REQUEST);
     let body = text_body(response).await;
     check!(body.contains(
         "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: unmarshalerDecoder: Value looks like object"
@@ -753,7 +751,7 @@ async fn loki_push_endpoint_rejects_null_json_labels_like_loki() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(response.status() == StatusCode::BAD_REQUEST);
     let body = text_body(response).await;
     check!(body.contains(
         "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: unmarshalerDecoder: Value looks like object"
@@ -824,7 +822,7 @@ async fn loki_push_endpoint_returns_server_error_when_wal_append_fails() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::SERVICE_UNAVAILABLE);
+    assert!(response.status() == StatusCode::SERVICE_UNAVAILABLE);
     assert_loki_error(&json_body(response).await, "server_error", "wal sink");
 }
 
@@ -864,9 +862,9 @@ async fn loki_push_endpoint_accepts_gzipped_json_payloads() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::NO_CONTENT);
+    assert!(response.status() == StatusCode::NO_CONTENT);
     let records = sink.records();
-    assert2::assert!(
+    assert!(
         records
             == vec![WalLogRecord {
                 tenant: "tenant-a".to_string(),
@@ -944,9 +942,9 @@ async fn loki_push_endpoint_accepts_deflated_json_payloads() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::NO_CONTENT);
+    assert!(response.status() == StatusCode::NO_CONTENT);
     let records = sink.records();
-    assert2::assert!(
+    assert!(
         records
             == vec![WalLogRecord {
                 tenant: "tenant-a".to_string(),
@@ -1097,9 +1095,9 @@ async fn loki_push_endpoint_rejects_malformed_content_type_without_wal_append() 
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(response.status() == StatusCode::BAD_REQUEST);
     assert_loki_error(&json_body(response).await, "bad_data", "invalid media");
-    assert2::assert!(sink.records().is_empty());
+    assert!(sink.records().is_empty());
 }
 
 #[tokio::test]
@@ -1134,9 +1132,9 @@ async fn loki_push_endpoint_accepts_json_content_type_parameters() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::NO_CONTENT);
+    assert!(response.status() == StatusCode::NO_CONTENT);
     let records = sink.records();
-    assert2::assert!(
+    assert!(
         records
             == vec![WalLogRecord {
                 tenant: "tenant-a".to_string(),
@@ -1186,9 +1184,9 @@ async fn deprecated_api_prom_push_endpoint_writes_wal_records() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::NO_CONTENT);
+    assert!(response.status() == StatusCode::NO_CONTENT);
     let records = sink.records();
-    assert2::assert!(
+    assert!(
         records
             == vec![WalLogRecord {
                 tenant: "tenant-a".to_string(),
@@ -1224,27 +1222,30 @@ fn kafka_wal_record_encodes_tenant_series_key_headers_and_json_payload() {
     let producer_record = build_kafka_wal_record("__crabka_observability_logs_wal", &record)
         .expect("producer record");
 
-    assert2::assert!(producer_record.topic.as_str() == "__crabka_observability_logs_wal");
-    assert2::assert!(
+    check!(producer_record.topic == "__crabka_observability_logs_wal");
+    check!(
         producer_record.key.as_deref()
             == Some(format!("tenant-a:{}", series_fingerprint(&labels)).as_bytes())
     );
-    assert2::assert!(producer_record.timestamp_ms == Some(1));
-    assert2::assert!(
+    check!(producer_record.timestamp_ms == Some(1));
+    check!(
         producer_record
             .headers
             .iter()
-            .map(|header| (header.key.as_str(), header.value.as_deref()))
-            .collect::<Vec<_>>()
-            == vec![
-                ("crabka-wal-record-type", Some(b"log".as_slice())),
-                ("crabka-tenant", Some(b"tenant-a".as_slice())),
-            ]
+            .any(|header| header.key == "crabka-wal-record-type"
+                && header.value.as_deref() == Some(b"log".as_slice()))
+    );
+    check!(
+        producer_record
+            .headers
+            .iter()
+            .any(|header| header.key == "crabka-tenant"
+                && header.value.as_deref() == Some(b"tenant-a".as_slice()))
     );
 
     let payload: serde_json::Value =
         serde_json::from_slice(producer_record.value.as_deref().unwrap()).unwrap();
-    assert2::assert!(
+    assert!(
         payload
             == json!({
                 "tenant": "tenant-a",
@@ -1278,7 +1279,7 @@ fn kafka_wal_record_decodes_payload_with_consumed_position() {
     )
     .expect("decoded WAL record");
 
-    assert2::assert!(
+    assert!(
         decoded
             == WalLogRecord {
                 position: Some(WalPosition {
@@ -1294,7 +1295,7 @@ fn kafka_wal_record_decodes_payload_with_consumed_position() {
 fn kafka_wal_record_decode_rejects_invalid_payload() {
     let error = decode_kafka_wal_record(b"not json", PartitionIndex(7), Offset(99)).unwrap_err();
 
-    assert2::assert!(
+    assert!(
         error
             .to_string()
             .contains("wal record deserialization failed")
@@ -1325,7 +1326,7 @@ fn native_kafka_log_record_rejects_invalid_label_header_name() {
     })
     .unwrap_err();
 
-    assert2::assert!(error.to_string().contains("invalid native Kafka label"));
+    assert!(error.to_string().contains("invalid native Kafka label"));
 }
 
 #[test]
@@ -1356,7 +1357,7 @@ fn native_kafka_log_record_rejects_invalid_metadata_header_name() {
     })
     .unwrap_err();
 
-    assert2::assert!(error.to_string().contains("invalid native Kafka metadata"));
+    assert!(error.to_string().contains("invalid native Kafka metadata"));
 }
 
 #[test]
@@ -1387,7 +1388,7 @@ fn native_kafka_log_record_rejects_duplicate_label_header_name() {
     })
     .unwrap_err();
 
-    assert2::assert!(error.to_string().contains("duplicate native Kafka label"));
+    assert!(error.to_string().contains("duplicate native Kafka label"));
 }
 
 #[test]
@@ -1422,7 +1423,7 @@ fn native_kafka_log_record_rejects_duplicate_metadata_header_name() {
     })
     .unwrap_err();
 
-    assert2::assert!(
+    assert!(
         error
             .to_string()
             .contains("duplicate native Kafka metadata")
@@ -1457,7 +1458,7 @@ fn native_kafka_log_record_rejects_negative_timestamp_header() {
     })
     .unwrap_err();
 
-    assert2::assert!(error.to_string().contains("invalid native Kafka timestamp"));
+    assert!(error.to_string().contains("invalid native Kafka timestamp"));
 }
 
 #[test]
@@ -1484,7 +1485,7 @@ fn native_kafka_log_record_rejects_negative_broker_timestamp() {
     })
     .unwrap_err();
 
-    assert2::assert!(error.to_string().contains("invalid native Kafka timestamp"));
+    assert!(error.to_string().contains("invalid native Kafka timestamp"));
 }
 
 #[test]
@@ -1511,7 +1512,7 @@ fn native_kafka_log_record_rejects_broker_timestamp_overflow() {
     })
     .unwrap_err();
 
-    assert2::assert!(error.to_string().contains("invalid native Kafka timestamp"));
+    assert!(error.to_string().contains("invalid native Kafka timestamp"));
 }
 
 fn minimal_service_config(target: Role) -> ServiceConfig {
@@ -1566,13 +1567,14 @@ async fn post_form_response(
     .unwrap()
 }
 
-fn assert_content_type(response: &axum::response::Response, expected: &str, _context: &str) {
-    assert2::assert!(
+fn assert_content_type(response: &axum::response::Response, expected: &str, context: &str) {
+    assert!(
         response
             .headers()
             .get("content-type")
             .and_then(|value| value.to_str().ok())
-            == Some(expected)
+            == Some(expected),
+        "{context} content-type"
     );
 }
 
@@ -1604,49 +1606,67 @@ async fn role_operations_routes_match_existing_behavior() {
         ("compactor", compactor),
     ] {
         let response = get_response(app.clone(), "/ready").await;
-        assert2::assert!(response.status() == StatusCode::OK);
+        assert!(response.status() == StatusCode::OK, "{name} /ready status");
         assert_content_type(
             &response,
             "text/plain; charset=utf-8",
             &format!("{name} /ready"),
         );
-        assert2::assert!(text_body(response).await == "ready\n");
+        assert!(text_body(response).await == "ready\n", "{name} /ready body");
 
         let response = get_response(app.clone(), "/config").await;
-        assert2::assert!(response.status() == StatusCode::OK);
+        assert!(response.status() == StatusCode::OK, "{name} /config status");
         assert_content_type(
             &response,
             "application/yaml; charset=utf-8",
             &format!("{name} /config"),
         );
-        assert2::assert!(text_body(response).await == "target: all\n");
+        assert!(
+            text_body(response).await == "target: all\n",
+            "{name} /config body"
+        );
 
         let response = get_response(app.clone(), "/config?mode=defaults").await;
-        assert2::assert!(response.status() == StatusCode::OK);
+        assert!(
+            response.status() == StatusCode::OK,
+            "{name} /config?mode=defaults status"
+        );
         assert_content_type(
             &response,
             "application/yaml; charset=utf-8",
             &format!("{name} /config?mode=defaults"),
         );
-        assert2::assert!(text_body(response).await == "target: all\nauth_enabled: true\n");
+        assert!(
+            text_body(response).await == "target: all\nauth_enabled: true\n",
+            "{name} /config?mode=defaults body"
+        );
 
         let response = get_response(app.clone(), "/config?mode=diff").await;
-        assert2::assert!(response.status() == StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            response.status() == StatusCode::INTERNAL_SERVER_ERROR,
+            "{name} /config?mode=diff status"
+        );
         assert_content_type(
             &response,
             "text/plain; charset=utf-8",
             &format!("{name} /config?mode=diff"),
         );
-        assert2::assert!(text_body(response).await == "unsupported type <nil>\n");
+        assert!(
+            text_body(response).await == "unsupported type <nil>\n",
+            "{name} /config?mode=diff body"
+        );
 
         let response = get_response(app.clone(), "/services").await;
-        assert2::assert!(response.status() == StatusCode::OK);
+        assert!(
+            response.status() == StatusCode::OK,
+            "{name} /services status"
+        );
         assert_content_type(
             &response,
             "text/plain; charset=utf-8",
             &format!("{name} /services"),
         );
-        assert2::assert!(
+        assert!(
             text_body(response).await
                 == "query-scheduler => Running\n\
                     ingester-querier => Running\n\
@@ -1664,44 +1684,65 @@ async fn role_operations_routes_match_existing_behavior() {
                     ingester => Running\n\
                     compactor => Running\n\
                     distributor => Running\n\
-                    query-scheduler-ring => Running\n"
+                    query-scheduler-ring => Running\n",
+            "{name} /services body"
         );
 
         let response = get_response(app.clone(), "/memberlist").await;
-        assert2::assert!(response.status() == StatusCode::OK);
+        assert!(
+            response.status() == StatusCode::OK,
+            "{name} /memberlist status"
+        );
         assert_content_type(&response, "text/plain", &format!("{name} /memberlist"));
-        assert2::assert!(text_body(response).await == "This instance doesn't use memberlist.");
+        assert!(
+            text_body(response).await == "This instance doesn't use memberlist.",
+            "{name} /memberlist body"
+        );
 
         let response = get_response(app.clone(), "/metrics").await;
-        assert2::assert!(response.status() == StatusCode::OK);
+        assert!(
+            response.status() == StatusCode::OK,
+            "{name} /metrics status"
+        );
         assert_content_type(
             &response,
             "text/plain; version=0.0.4; charset=utf-8",
             &format!("{name} /metrics"),
         );
-        assert2::assert!(text_body(response).await.contains("# HELP"));
+        assert!(
+            text_body(response).await.contains("# HELP"),
+            "{name} /metrics body"
+        );
 
         let response = get_response(app.clone(), "/loki/api/v1/status/buildinfo").await;
-        assert2::assert!(response.status() == StatusCode::OK);
+        assert!(
+            response.status() == StatusCode::OK,
+            "{name} buildinfo status"
+        );
         assert_content_type(&response, "application/json", &format!("{name} buildinfo"));
-        assert2::assert!(
+        assert!(
             text_body(response).await
                 == format!(
                     "{{\"version\":\"{}\",\"revision\":\"unknown\",\"branch\":\"unknown\",\"buildDate\":\"\",\"buildUser\":\"crabka\",\"goVersion\":\"not-go\"}}",
                     env!("CARGO_PKG_VERSION")
-                )
+                ),
+            "{name} buildinfo body"
         );
 
         let response = post_form_response(app.clone(), "/log_level", "log_level=verbose").await;
-        assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
+        assert!(
+            response.status() == StatusCode::BAD_REQUEST,
+            "{name} invalid log_level status"
+        );
         assert_content_type(
             &response,
             "application/json",
             &format!("{name} invalid log_level"),
         );
-        assert2::assert!(
+        assert!(
             text_body(response).await
-                == "{\"status\":\"failed\",\"message\":\"unrecognized log level \\\"verbose\\\"\"}"
+                == "{\"status\":\"failed\",\"message\":\"unrecognized log level \\\"verbose\\\"\"}",
+            "{name} invalid log_level body"
         );
     }
 }
@@ -1738,9 +1779,9 @@ async fn role_ring_alias_routes_remain_available() {
         (compactor, "/compactor/ring", "crabka-compactor"),
     ] {
         let response = get_response(app, uri).await;
-        assert2::assert!(response.status() == StatusCode::OK);
+        assert!(response.status() == StatusCode::OK, "{uri} status");
         assert_content_type(&response, "text/html; charset=utf-8", uri);
-        assert2::assert!(text_body(response).await.contains(expected));
+        assert!(text_body(response).await.contains(expected), "{uri} body");
     }
 }
 
@@ -1802,7 +1843,7 @@ async fn service_router_builds_distributor_role() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::NO_CONTENT);
+    assert!(response.status() == StatusCode::NO_CONTENT);
     let records = sink.records();
     check!(records.len() == 1);
     check!(records[0].tenant == "tenant-a");
@@ -1865,7 +1906,7 @@ async fn service_router_rejects_stale_loki_push_timestamp_without_wal_append() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(response.status() == StatusCode::BAD_REQUEST);
     let body = text_body(response).await;
     check!(body.contains("timestamp too old"));
     check!(body.contains(r#"{app="api", service_name="api"}"#));
@@ -1931,7 +1972,7 @@ async fn service_router_rejects_missing_protobuf_timestamp_like_loki_without_wal
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(response.status() == StatusCode::BAD_REQUEST);
     let body = text_body(response).await;
     check!(body.contains("timestamp too old"));
     check!(body.contains("0001-01-01T00:00:00Z"));
@@ -1996,7 +2037,7 @@ async fn service_router_rejects_future_loki_push_timestamp_without_wal_append() 
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(response.status() == StatusCode::BAD_REQUEST);
     let body = text_body(response).await;
     check!(body.contains("timestamp too new"));
     check!(body.contains(r#"{app="api", service_name="api"}"#));
@@ -2071,7 +2112,7 @@ async fn service_router_rejects_future_otlp_timestamp_without_wal_append() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(response.status() == StatusCode::BAD_REQUEST);
     let body = text_body(response).await;
     check!(body.contains("timestamp too new"));
     check!(body.contains(r#"{service_name="checkout"}"#));
@@ -2135,9 +2176,9 @@ async fn service_router_rejects_loki_push_over_configured_ingest_body_limit_with
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::TOO_MANY_REQUESTS);
+    assert!(response.status() == StatusCode::TOO_MANY_REQUESTS);
     assert_loki_error(&json_body(response).await, "rate_limited", "ingest body");
-    assert2::assert!(sink.records().is_empty());
+    assert!(sink.records().is_empty());
 }
 
 #[tokio::test]
@@ -2200,13 +2241,13 @@ async fn service_router_rejects_loki_push_over_ingest_quota_without_wal_append()
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::TOO_MANY_REQUESTS);
+    assert!(response.status() == StatusCode::TOO_MANY_REQUESTS);
     assert_loki_error(
         &json_body(response).await,
         "rate_limited",
         "tenant write quota exceeded",
     );
-    assert2::assert!(sink.records().is_empty());
+    assert!(sink.records().is_empty());
 }
 
 #[tokio::test]
@@ -2266,7 +2307,7 @@ async fn service_router_times_out_loki_push_when_wal_append_stalls() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::SERVICE_UNAVAILABLE);
+    assert!(response.status() == StatusCode::SERVICE_UNAVAILABLE);
     assert_loki_error(
         &json_body(response).await,
         "server_error",
@@ -2447,9 +2488,9 @@ async fn loki_push_endpoint_accepts_snappy_protobuf_payloads() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::NO_CONTENT);
+    assert!(response.status() == StatusCode::NO_CONTENT);
     let records = sink.records();
-    assert2::assert!(
+    assert!(
         records
             == vec![WalLogRecord {
                 tenant: "tenant-a".to_string(),
@@ -2506,9 +2547,9 @@ async fn loki_push_endpoint_accepts_empty_protobuf_labels_with_unknown_service()
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::NO_CONTENT);
+    assert!(response.status() == StatusCode::NO_CONTENT);
     let records = sink.records();
-    assert2::assert!(
+    assert!(
         records
             == vec![WalLogRecord {
                 tenant: "tenant-a".to_string(),
@@ -2560,9 +2601,9 @@ async fn loki_push_endpoint_accepts_empty_string_protobuf_labels_with_unknown_se
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::NO_CONTENT);
+    assert!(response.status() == StatusCode::NO_CONTENT);
     let records = sink.records();
-    assert2::assert!(
+    assert!(
         records
             == vec![WalLogRecord {
                 tenant: "tenant-a".to_string(),
@@ -2786,9 +2827,9 @@ async fn loki_push_endpoint_accepts_duplicate_protobuf_structured_metadata_using
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::NO_CONTENT);
+    assert!(response.status() == StatusCode::NO_CONTENT);
     let records = sink.records();
-    assert2::assert!(
+    assert!(
         records
             == vec![WalLogRecord {
                 tenant: "tenant-a".to_string(),
@@ -2844,9 +2885,9 @@ async fn loki_push_endpoint_accepts_invalid_protobuf_structured_metadata_name() 
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::NO_CONTENT);
+    assert!(response.status() == StatusCode::NO_CONTENT);
     let records = sink.records();
-    assert2::assert!(
+    assert!(
         records
             == vec![WalLogRecord {
                 tenant: "tenant-a".to_string(),
@@ -2902,9 +2943,9 @@ async fn loki_push_endpoint_accepts_empty_protobuf_structured_metadata_name() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::NO_CONTENT);
+    assert!(response.status() == StatusCode::NO_CONTENT);
     let records = sink.records();
-    assert2::assert!(
+    assert!(
         records
             == vec![WalLogRecord {
                 tenant: "tenant-a".to_string(),
@@ -2915,7 +2956,7 @@ async fn loki_push_endpoint_accepts_empty_protobuf_structured_metadata_name() {
                 ]),
                 timestamp_ns: 19,
                 line: "api error".to_string(),
-                structured_metadata: BTreeMap::from([("".to_string(), "metadata".to_string())]),
+                structured_metadata: BTreeMap::from([(String::new(), "metadata".to_string())]),
                 position: None,
             }]
     );
@@ -2953,8 +2994,8 @@ async fn loki_push_endpoint_rejects_invalid_timestamp_without_wal_append() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert2::assert!(sink.records().is_empty());
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(sink.records().is_empty());
 }
 
 #[tokio::test]
@@ -3017,7 +3058,7 @@ async fn loki_push_endpoint_rejects_non_string_json_timestamp_like_loki_without_
                                     "app": "api"
                                 },
                                 "values": [
-                                    [1000000000, "non-string push timestamp"]
+                                    [1_000_000_000, "non-string push timestamp"]
                                 ]
                             }
                         ]
@@ -3189,9 +3230,9 @@ async fn loki_push_endpoint_rejects_negative_timestamp_without_wal_append() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(response.status() == StatusCode::BAD_REQUEST);
     assert_loki_error(&json_body(response).await, "bad_data", "timestamp");
-    assert2::assert!(sink.records().is_empty());
+    assert!(sink.records().is_empty());
 }
 
 #[tokio::test]
@@ -3256,7 +3297,7 @@ async fn loki_push_endpoint_rejects_negative_protobuf_timestamp_like_loki_withou
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(response.status() == StatusCode::BAD_REQUEST);
     let body = text_body(response).await;
     check!(body.contains("timestamp too old"));
     check!(body.contains("1969-12-31T23:59:59Z"));
@@ -3300,9 +3341,9 @@ async fn loki_push_endpoint_rejects_out_of_range_protobuf_timestamp_nanos_withou
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(response.status() == StatusCode::BAD_REQUEST);
     assert_loki_error(&json_body(response).await, "bad_data", "timestamp");
-    assert2::assert!(sink.records().is_empty());
+    assert!(sink.records().is_empty());
 }
 
 #[tokio::test]
@@ -3377,11 +3418,11 @@ async fn loki_push_endpoint_accepts_duplicate_json_labels_using_last_value() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::NO_CONTENT);
+    assert!(response.status() == StatusCode::NO_CONTENT);
     let records = sink.records();
-    assert2::assert!(records.len() == 1);
-    assert2::assert!(
-        records[0].labels.clone()
+    assert!(records.len() == 1);
+    assert!(
+        records[0].labels
             == labels([
                 ("app", "worker"),
                 ("detected_level", "error"),
@@ -3420,11 +3461,11 @@ async fn loki_push_endpoint_accepts_empty_json_labels_with_unknown_service() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::NO_CONTENT);
+    assert!(response.status() == StatusCode::NO_CONTENT);
     let records = sink.records();
-    assert2::assert!(records.len() == 1);
-    assert2::assert!(
-        records[0].labels.clone()
+    assert!(records.len() == 1);
+    assert!(
+        records[0].labels
             == labels([
                 ("detected_level", "info"),
                 ("service_name", "unknown_service"),
@@ -3464,9 +3505,9 @@ async fn loki_push_endpoint_accepts_invalid_json_structured_metadata_name() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::NO_CONTENT);
+    assert!(response.status() == StatusCode::NO_CONTENT);
     let records = sink.records();
-    assert2::assert!(
+    assert!(
         records
             == vec![WalLogRecord {
                 tenant: "tenant-a".to_string(),
@@ -3521,9 +3562,9 @@ async fn loki_push_endpoint_accepts_duplicate_json_structured_metadata_using_las
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::NO_CONTENT);
+    assert!(response.status() == StatusCode::NO_CONTENT);
     let records = sink.records();
-    assert2::assert!(
+    assert!(
         records
             == vec![WalLogRecord {
                 tenant: "tenant-a".to_string(),
@@ -3574,13 +3615,13 @@ async fn loki_push_endpoint_rejects_non_string_json_structured_metadata_without_
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-        assert2::assert!(text_body(response).await.contains(
+        assert!(response.status() == StatusCode::BAD_REQUEST);
+        assert!(text_body(response).await.contains(
             "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: unmarshalerDecoder: Value is string"
         ));
     }
 
-    assert2::assert!(sink.records().is_empty());
+    assert!(sink.records().is_empty());
 }
 
 #[tokio::test]
@@ -3615,7 +3656,7 @@ async fn loki_push_endpoint_rejects_non_object_json_structured_metadata_like_lok
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(response.status() == StatusCode::BAD_REQUEST);
     let body = text_body(response).await;
     check!(body.contains(
         "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: unmarshalerDecoder: Value looks like object"
@@ -3675,9 +3716,9 @@ async fn otlp_logs_endpoint_writes_tenant_scoped_wal_records() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::NO_CONTENT);
+    assert!(response.status() == StatusCode::NO_CONTENT);
     let records = sink.records();
-    assert2::assert!(
+    assert!(
         records
             == vec![WalLogRecord {
                 tenant: "tenant-a".to_string(),
@@ -3743,11 +3784,11 @@ async fn otlp_logs_endpoint_preserves_severity_fields_as_structured_metadata() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::NO_CONTENT);
+    assert!(response.status() == StatusCode::NO_CONTENT);
     let records = sink.records();
-    assert2::assert!(records.len() == 1);
-    assert2::assert!(
-        records[0].structured_metadata.clone()
+    assert!(records.len() == 1);
+    assert!(
+        records[0].structured_metadata
             == BTreeMap::from([
                 ("severity_number".to_string(), "17".to_string()),
                 ("severity_text".to_string(), "ERROR".to_string()),
@@ -3796,7 +3837,7 @@ async fn otlp_logs_endpoint_returns_server_error_when_wal_append_fails() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::SERVICE_UNAVAILABLE);
+    assert!(response.status() == StatusCode::SERVICE_UNAVAILABLE);
     assert_loki_error(&json_body(response).await, "server_error", "wal sink");
 }
 
@@ -3851,9 +3892,9 @@ async fn otlp_logs_endpoint_normalizes_attribute_names_for_loki_labels_and_metad
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::NO_CONTENT);
+    assert!(response.status() == StatusCode::NO_CONTENT);
     let records = sink.records();
-    assert2::assert!(
+    assert!(
         records
             == vec![WalLogRecord {
                 tenant: "tenant-a".to_string(),
@@ -3915,9 +3956,9 @@ async fn otlp_logs_endpoint_rejects_duplicate_normalized_resource_attributes_wit
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(response.status() == StatusCode::BAD_REQUEST);
     assert_loki_error(&json_body(response).await, "bad_data", "OTLP attribute");
-    assert2::assert!(sink.records().is_empty());
+    assert!(sink.records().is_empty());
 }
 
 #[tokio::test]
@@ -3965,9 +4006,9 @@ async fn otlp_logs_endpoint_rejects_duplicate_normalized_log_attributes_without_
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(response.status() == StatusCode::BAD_REQUEST);
     assert_loki_error(&json_body(response).await, "bad_data", "OTLP attribute");
-    assert2::assert!(sink.records().is_empty());
+    assert!(sink.records().is_empty());
 }
 
 #[tokio::test]
@@ -4012,11 +4053,11 @@ async fn otlp_logs_endpoint_discovers_service_name_label_from_resource_attribute
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::NO_CONTENT);
+    assert!(response.status() == StatusCode::NO_CONTENT);
     let records = sink.records();
-    assert2::assert!(records.len() == 1);
-    assert2::assert!(
-        records[0].labels.clone()
+    assert!(records.len() == 1);
+    assert!(
+        records[0].labels
             == labels([
                 ("app", "checkout"),
                 ("deployment_environment", "prod"),
@@ -4061,10 +4102,10 @@ async fn otlp_logs_endpoint_uses_unknown_service_when_no_service_name_candidate_
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::NO_CONTENT);
+    assert!(response.status() == StatusCode::NO_CONTENT);
     let records = sink.records();
-    assert2::assert!(records.len() == 1);
-    assert2::assert!(records[0].labels.clone() == labels([("service_name", "unknown_service")]));
+    assert!(records.len() == 1);
+    assert!(records[0].labels == labels([("service_name", "unknown_service")]));
 }
 
 #[tokio::test]
@@ -4108,8 +4149,8 @@ async fn otlp_logs_endpoint_rejects_invalid_timestamp_without_wal_append() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert2::assert!(sink.records().is_empty());
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(sink.records().is_empty());
 }
 
 #[tokio::test]
@@ -4153,9 +4194,9 @@ async fn otlp_logs_endpoint_rejects_negative_timestamp_without_wal_append() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(response.status() == StatusCode::BAD_REQUEST);
     assert_loki_error(&json_body(response).await, "bad_data", "timestamp");
-    assert2::assert!(sink.records().is_empty());
+    assert!(sink.records().is_empty());
 }
 
 #[tokio::test]
@@ -4177,9 +4218,9 @@ async fn otlp_logs_endpoint_accepts_protobuf_payloads() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::NO_CONTENT);
+    assert!(response.status() == StatusCode::NO_CONTENT);
     let records = sink.records();
-    assert2::assert!(
+    assert!(
         records
             == vec![WalLogRecord {
                 tenant: "tenant-a".to_string(),
@@ -4225,11 +4266,11 @@ async fn otlp_logs_endpoint_maps_proto_trace_and_span_ids_to_structured_metadata
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::NO_CONTENT);
+    assert!(response.status() == StatusCode::NO_CONTENT);
     let records = sink.records();
-    assert2::assert!(records.len() == 1);
-    assert2::assert!(
-        records[0].structured_metadata.clone()
+    assert!(records.len() == 1);
+    assert!(
+        records[0].structured_metadata
             == BTreeMap::from([
                 ("status".to_string(), "500".to_string()),
                 (
@@ -4267,11 +4308,11 @@ async fn otlp_logs_endpoint_maps_proto_severity_fields_to_structured_metadata() 
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::NO_CONTENT);
+    assert!(response.status() == StatusCode::NO_CONTENT);
     let records = sink.records();
-    assert2::assert!(records.len() == 1);
-    assert2::assert!(
-        records[0].structured_metadata.clone()
+    assert!(records.len() == 1);
+    assert!(
+        records[0].structured_metadata
             == BTreeMap::from([
                 ("severity_number".to_string(), "17".to_string()),
                 ("severity_text".to_string(), "ERROR".to_string()),
@@ -4313,9 +4354,9 @@ async fn otlp_logs_endpoint_rejects_duplicate_normalized_protobuf_attributes_wit
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(response.status() == StatusCode::BAD_REQUEST);
     assert_loki_error(&json_body(response).await, "bad_data", "OTLP attribute");
-    assert2::assert!(sink.records().is_empty());
+    assert!(sink.records().is_empty());
 }
 
 #[tokio::test]
@@ -4337,7 +4378,7 @@ async fn otlp_logs_endpoint_accepts_loki_otlp_path() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::NO_CONTENT);
+    assert!(response.status() == StatusCode::NO_CONTENT);
     let records = sink.records();
     check!(records.len() == 1);
     check!(records[0].tenant == "tenant-a");
@@ -4355,9 +4396,9 @@ async fn otlp_grpc_logs_service_writes_tenant_scoped_wal_records() {
 
     let response = service.export(request).await.unwrap();
 
-    assert2::assert!(response.get_ref().partial_success.is_none());
+    assert!(response.get_ref().partial_success.is_none());
     let records = sink.records();
-    assert2::assert!(
+    assert!(
         records
             == vec![WalLogRecord {
                 tenant: "tenant-a".to_string(),
@@ -4387,8 +4428,8 @@ async fn otlp_grpc_logs_service_rejects_missing_tenant_without_wal_append() {
         .await
         .unwrap_err();
 
-    assert2::assert!(error.code() == tonic::Code::InvalidArgument);
-    assert2::assert!(sink.records().is_empty());
+    assert!(error.code() == tonic::Code::InvalidArgument);
+    assert!(sink.records().is_empty());
 }
 
 #[tokio::test]
@@ -4425,8 +4466,8 @@ async fn otlp_logs_endpoint_rejects_invalid_protobuf_without_wal_append() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert2::assert!(sink.records().is_empty());
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(sink.records().is_empty());
 }
 
 #[tokio::test]
@@ -4444,9 +4485,9 @@ async fn status_ready_endpoint_returns_ok_for_loki_router() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    assert2::assert!(body.as_ref() == b"ready\n");
+    assert!(body.as_ref() == b"ready\n");
 }
 
 #[tokio::test]
@@ -4464,9 +4505,9 @@ async fn status_ready_endpoint_returns_ok_for_distributor_router() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    assert2::assert!(body.as_ref() == b"ready\n");
+    assert!(body.as_ref() == b"ready\n");
 }
 
 #[tokio::test]
@@ -4484,11 +4525,11 @@ async fn status_buildinfo_endpoint_returns_loki_build_info_json() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
-    assert2::assert!(body["version"] == env!("CARGO_PKG_VERSION"));
+    assert!(body["version"] == env!("CARGO_PKG_VERSION"));
     for field in ["revision", "branch", "buildDate", "buildUser", "goVersion"] {
-        assert2::assert!(body.get(field).and_then(Value::as_str).is_some());
+        assert!(body.get(field).and_then(Value::as_str).is_some());
     }
 }
 
@@ -4507,8 +4548,8 @@ async fn status_log_level_endpoint_returns_current_level() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(json_body(response).await == json!({"message": "Current log level is info"}));
+    assert!(response.status() == StatusCode::OK);
+    assert!(json_body(response).await == json!({"message": "Current log level is info"}));
 }
 
 #[tokio::test]
@@ -4527,8 +4568,8 @@ async fn status_log_level_endpoint_accepts_post_query_parameter() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({"status": "success", "message": "Log level set to debug"})
     );
@@ -4551,8 +4592,8 @@ async fn status_log_level_endpoint_accepts_form_post_body_for_distributor_router
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({"status": "success", "message": "Log level set to warn"})
     );
@@ -4575,8 +4616,8 @@ async fn status_log_level_endpoint_prefers_form_body_over_post_query_parameter()
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({"status": "success", "message": "Log level set to warn"})
     );
@@ -4598,8 +4639,8 @@ async fn status_log_level_endpoint_rejects_invalid_level() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(
         json_body(response).await
             == json!({"status": "failed", "message": "unrecognized log level \"trace\""})
     );
@@ -4621,8 +4662,8 @@ async fn status_log_level_endpoint_rejects_missing_level_like_loki() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(
         json_body(response).await
             == json!({"status": "failed", "message": "unrecognized log level \"\""})
     );
@@ -4643,10 +4684,10 @@ async fn status_config_endpoint_returns_loki_yaml_placeholder() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body = std::str::from_utf8(&body).unwrap();
-    assert2::assert!(body.contains("target: all"));
+    assert!(body.contains("target: all"));
 }
 
 #[tokio::test]
@@ -4664,8 +4705,8 @@ async fn status_config_diff_mode_returns_loki_error() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::INTERNAL_SERVER_ERROR);
-    assert2::assert!(text_body(response).await == "unsupported type <nil>\n");
+    assert!(response.status() == StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(text_body(response).await == "unsupported type <nil>\n");
 }
 
 #[tokio::test]
@@ -4683,10 +4724,10 @@ async fn status_config_defaults_mode_returns_loki_defaults_lines() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = text_body(response).await;
-    assert2::assert!(body.contains("target: all\n"));
-    assert2::assert!(body.contains("auth_enabled: true\n"));
+    assert!(body.contains("target: all\n"));
+    assert!(body.contains("auth_enabled: true\n"));
 }
 
 #[tokio::test]
@@ -4704,7 +4745,7 @@ async fn distributor_router_exposes_loki_ingester_control_endpoints() {
         )
         .await
         .unwrap();
-    assert2::assert!(response.status() == StatusCode::NO_CONTENT);
+    assert!(response.status() == StatusCode::NO_CONTENT);
 
     let response = app
         .clone()
@@ -4716,8 +4757,8 @@ async fn distributor_router_exposes_loki_ingester_control_endpoints() {
         )
         .await
         .unwrap();
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(text_body(response).await == "unset");
+    assert!(response.status() == StatusCode::OK);
+    assert!(text_body(response).await == "unset");
 
     let response = app
         .clone()
@@ -4730,7 +4771,7 @@ async fn distributor_router_exposes_loki_ingester_control_endpoints() {
         )
         .await
         .unwrap();
-    assert2::assert!(response.status() == StatusCode::NO_CONTENT);
+    assert!(response.status() == StatusCode::NO_CONTENT);
 
     let response = app
         .clone()
@@ -4742,7 +4783,7 @@ async fn distributor_router_exposes_loki_ingester_control_endpoints() {
         )
         .await
         .unwrap();
-    assert2::assert!(text_body(response).await == "set");
+    assert!(text_body(response).await == "set");
 
     let response = app
         .clone()
@@ -4755,7 +4796,7 @@ async fn distributor_router_exposes_loki_ingester_control_endpoints() {
         )
         .await
         .unwrap();
-    assert2::assert!(response.status() == StatusCode::NO_CONTENT);
+    assert!(response.status() == StatusCode::NO_CONTENT);
 
     let response = app
         .clone()
@@ -4767,7 +4808,7 @@ async fn distributor_router_exposes_loki_ingester_control_endpoints() {
         )
         .await
         .unwrap();
-    assert2::assert!(text_body(response).await == "unset");
+    assert!(text_body(response).await == "unset");
 
     let response = app
         .clone()
@@ -4779,7 +4820,7 @@ async fn distributor_router_exposes_loki_ingester_control_endpoints() {
         )
         .await
         .unwrap();
-    assert2::assert!(response.status() == StatusCode::NO_CONTENT);
+    assert!(response.status() == StatusCode::NO_CONTENT);
 
     let response = app
         .oneshot(
@@ -4791,7 +4832,7 @@ async fn distributor_router_exposes_loki_ingester_control_endpoints() {
         )
         .await
         .unwrap();
-    assert2::assert!(response.status() == StatusCode::NO_CONTENT);
+    assert!(response.status() == StatusCode::NO_CONTENT);
 }
 
 #[tokio::test]
@@ -4809,7 +4850,7 @@ async fn status_services_endpoint_returns_loki_service_states() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = text_body(response).await;
     for needle in [
         "server => Running\n",
@@ -4845,8 +4886,8 @@ async fn status_memberlist_endpoint_reports_memberlist_not_configured() {
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::OK);
-        assert2::assert!(text_body(response).await == "This instance doesn't use memberlist.");
+        assert!(response.status() == StatusCode::OK);
+        assert!(text_body(response).await == "This instance doesn't use memberlist.");
     }
 }
 
@@ -4874,7 +4915,7 @@ async fn status_ring_aliases_return_loki_ring_pages() {
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::OK);
+        assert!(response.status() == StatusCode::OK);
         let content_type = response
             .headers()
             .get("content-type")
@@ -4903,7 +4944,7 @@ async fn status_metrics_endpoint_returns_prometheus_text_for_loki_router() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body = std::str::from_utf8(&body).unwrap();
     for needle in [
@@ -4931,7 +4972,7 @@ async fn status_metrics_endpoint_returns_prometheus_text_for_distributor_router(
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body = std::str::from_utf8(&body).unwrap();
     for needle in [
@@ -4980,8 +5021,8 @@ async fn compactor_router_exposes_loki_status_and_ring_endpoints() {
         )
         .await
         .unwrap();
-    assert2::assert!(ready_response.status() == StatusCode::OK);
-    assert2::assert!(text_body(ready_response).await == "ready\n");
+    assert!(ready_response.status() == StatusCode::OK);
+    assert!(text_body(ready_response).await == "ready\n");
 
     let services_response = app
         .clone()
@@ -4993,7 +5034,7 @@ async fn compactor_router_exposes_loki_status_and_ring_endpoints() {
         )
         .await
         .unwrap();
-    assert2::assert!(
+    assert!(
         text_body(services_response)
             .await
             .contains("compactor => Running")
@@ -5009,10 +5050,10 @@ async fn compactor_router_exposes_loki_status_and_ring_endpoints() {
         )
         .await
         .unwrap();
-    assert2::assert!(metrics_response.status() == StatusCode::OK);
+    assert!(metrics_response.status() == StatusCode::OK);
     let metrics = text_body(metrics_response).await;
-    assert2::assert!(metrics.contains("crabka_observability_service_up"));
-    assert2::assert!(metrics.contains(r#"component="compactor""#));
+    assert!(metrics.contains("crabka_observability_service_up"));
+    assert!(metrics.contains(r#"component="compactor""#));
 
     let config_response = app
         .clone()
@@ -5024,8 +5065,8 @@ async fn compactor_router_exposes_loki_status_and_ring_endpoints() {
         )
         .await
         .unwrap();
-    assert2::assert!(config_response.status() == StatusCode::OK);
-    assert2::assert!(text_body(config_response).await.contains("target: all"));
+    assert!(config_response.status() == StatusCode::OK);
+    assert!(text_body(config_response).await.contains("target: all"));
 
     let ring_response = app
         .oneshot(
@@ -5037,7 +5078,7 @@ async fn compactor_router_exposes_loki_status_and_ring_endpoints() {
         .await
         .unwrap();
 
-    assert2::assert!(ring_response.status() == StatusCode::OK);
+    assert!(ring_response.status() == StatusCode::OK);
     let content_type = ring_response
         .headers()
         .get("content-type")
@@ -5089,7 +5130,7 @@ async fn compactor_delete_endpoint_tracks_and_cancels_delete_requests() {
         )
         .await
         .unwrap();
-    assert2::assert!(create_response.status() == StatusCode::NO_CONTENT);
+    assert!(create_response.status() == StatusCode::NO_CONTENT);
 
     let list_response = app
         .clone()
@@ -5102,7 +5143,7 @@ async fn compactor_delete_endpoint_tracks_and_cancels_delete_requests() {
         )
         .await
         .unwrap();
-    assert2::assert!(list_response.status() == StatusCode::OK);
+    assert!(list_response.status() == StatusCode::OK);
     let body = json_body(list_response).await;
     check!(body.as_array().unwrap().len() == 1);
     check!(body[0]["request_id"] == "delete-1");
@@ -5123,7 +5164,7 @@ async fn compactor_delete_endpoint_tracks_and_cancels_delete_requests() {
         )
         .await
         .unwrap();
-    assert2::assert!(json_body(other_tenant_response).await == json!([]));
+    assert!(json_body(other_tenant_response).await == json!([]));
 
     let cancel_response = app
         .clone()
@@ -5137,7 +5178,7 @@ async fn compactor_delete_endpoint_tracks_and_cancels_delete_requests() {
         )
         .await
         .unwrap();
-    assert2::assert!(cancel_response.status() == StatusCode::NO_CONTENT);
+    assert!(cancel_response.status() == StatusCode::NO_CONTENT);
 
     let list_after_cancel_response = app
         .oneshot(
@@ -5149,7 +5190,7 @@ async fn compactor_delete_endpoint_tracks_and_cancels_delete_requests() {
         )
         .await
         .unwrap();
-    assert2::assert!(json_body(list_after_cancel_response).await == json!([]));
+    assert!(json_body(list_after_cancel_response).await == json!([]));
 }
 
 #[tokio::test]
@@ -5194,7 +5235,7 @@ async fn compactor_delete_endpoint_accepts_form_post_query_with_raw_ampersand() 
         )
         .await
         .unwrap();
-    assert2::assert!(create_response.status() == StatusCode::NO_CONTENT);
+    assert!(create_response.status() == StatusCode::NO_CONTENT);
 
     let list_response = app
         .oneshot(
@@ -5206,7 +5247,7 @@ async fn compactor_delete_endpoint_accepts_form_post_query_with_raw_ampersand() 
         )
         .await
         .unwrap();
-    assert2::assert!(list_response.status() == StatusCode::OK);
+    assert!(list_response.status() == StatusCode::OK);
     let body = json_body(list_response).await;
     check!(body.as_array().unwrap().len() == 1);
     check!(body[0]["query"] == r#"{app="api&edge"} |= "secret""#);
@@ -5251,8 +5292,8 @@ async fn compactor_delete_endpoint_rejects_invalid_requests() {
         )
         .await
         .unwrap();
-    assert2::assert!(missing_tenant_response.status() == StatusCode::BAD_REQUEST);
-    assert2::assert!(
+    assert!(missing_tenant_response.status() == StatusCode::BAD_REQUEST);
+    assert!(
         json_body(missing_tenant_response).await["error"]
             .as_str()
             .unwrap()
@@ -5271,8 +5312,8 @@ async fn compactor_delete_endpoint_rejects_invalid_requests() {
         )
         .await
         .unwrap();
-    assert2::assert!(missing_start_response.status() == StatusCode::BAD_REQUEST);
-    assert2::assert!(
+    assert!(missing_start_response.status() == StatusCode::BAD_REQUEST);
+    assert!(
         json_body(missing_start_response).await["error"]
             .as_str()
             .unwrap()
@@ -5290,8 +5331,8 @@ async fn compactor_delete_endpoint_rejects_invalid_requests() {
         )
         .await
         .unwrap();
-    assert2::assert!(invalid_query_response.status() == StatusCode::BAD_REQUEST);
-    assert2::assert!(
+    assert!(invalid_query_response.status() == StatusCode::BAD_REQUEST);
+    assert!(
         text_body(invalid_query_response)
             .await
             .contains("parse error")
@@ -5340,7 +5381,7 @@ async fn compactor_delete_requests_filter_querier_stream_results() {
         )
         .await
         .unwrap();
-    assert2::assert!(delete_response.status() == StatusCode::NO_CONTENT);
+    assert!(delete_response.status() == StatusCode::NO_CONTENT);
 
     let dir = tempfile::tempdir().unwrap().keep();
     let mut label_index = LabelIndex::default();
@@ -5404,10 +5445,10 @@ async fn compactor_delete_requests_filter_querier_stream_results() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
-    assert2::assert!(
-        body["data"]["result"].clone()
+    assert!(
+        body["data"]["result"]
             == json!([
                 {
                     "stream": {
@@ -5422,7 +5463,7 @@ async fn compactor_delete_requests_filter_querier_stream_results() {
                 }
             ])
     );
-    assert2::assert!(body["data"]["stats"].clone() == expected_loki_stats_with(block_bytes, 2, 1));
+    assert!(body["data"]["stats"] == expected_loki_stats_with(block_bytes, 2, 1));
 }
 
 #[tokio::test]
@@ -5486,7 +5527,7 @@ async fn compactor_delete_requests_persist_for_configured_querier() {
         )
         .await
         .unwrap();
-    assert2::assert!(delete_response.status() == StatusCode::NO_CONTENT);
+    assert!(delete_response.status() == StatusCode::NO_CONTENT);
 
     let querier_config = ServiceConfig {
         target: Role::Querier,
@@ -5522,10 +5563,10 @@ async fn compactor_delete_requests_persist_for_configured_querier() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
-    assert2::assert!(
-        body["data"]["result"].clone()
+    assert!(
+        body["data"]["result"]
             == json!([
                 {
                     "stream": {
@@ -5540,7 +5581,7 @@ async fn compactor_delete_requests_persist_for_configured_querier() {
                 }
             ])
     );
-    assert2::assert!(body["data"]["stats"].clone() == expected_loki_stats_with(block_bytes, 2, 1));
+    assert!(body["data"]["stats"] == expected_loki_stats_with(block_bytes, 2, 1));
 }
 
 #[tokio::test]
@@ -5585,7 +5626,7 @@ async fn compactor_delete_requests_filter_querier_metric_results() {
         )
         .await
         .unwrap();
-    assert2::assert!(delete_response.status() == StatusCode::NO_CONTENT);
+    assert!(delete_response.status() == StatusCode::NO_CONTENT);
 
     let dir = tempfile::tempdir().unwrap().keep();
     let mut label_index = LabelIndex::default();
@@ -5649,8 +5690,8 @@ async fn compactor_delete_requests_filter_querier_metric_results() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -5686,8 +5727,8 @@ async fn format_query_endpoint_is_available_on_distributor_and_compactor_routers
         .await
         .unwrap();
 
-    assert2::assert!(distributor_response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(distributor_response.status() == StatusCode::OK);
+    assert!(
         json_body(distributor_response).await
             == json!({
                 "status": "success",
@@ -5731,8 +5772,8 @@ async fn format_query_endpoint_is_available_on_distributor_and_compactor_routers
         .await
         .unwrap();
 
-    assert2::assert!(compactor_response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(compactor_response.status() == StatusCode::OK);
+    assert!(
         json_body(compactor_response).await
             == json!({
                 "status": "success",
@@ -5756,7 +5797,7 @@ async fn distributor_ring_endpoint_returns_loki_status_page() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let content_type = response
         .headers()
         .get("content-type")
@@ -5785,7 +5826,7 @@ async fn ruler_endpoints_match_empty_rule_and_alert_lists() {
         .await
         .unwrap();
 
-    assert2::assert!(loki_rules_response.status() == StatusCode::BAD_REQUEST);
+    assert!(loki_rules_response.status() == StatusCode::BAD_REQUEST);
     let content_type = loki_rules_response
         .headers()
         .get("content-type")
@@ -5793,8 +5834,8 @@ async fn ruler_endpoints_match_empty_rule_and_alert_lists() {
         .unwrap_or_default()
         .to_string();
     let body = text_body(loki_rules_response).await;
-    assert2::assert!(content_type.starts_with("text/plain"));
-    assert2::assert!(
+    assert!(content_type.starts_with("text/plain"));
+    assert!(
         body == "unable to read rule dir /loki/rules/fake: open /loki/rules/fake: no such file or directory\n"
     );
 
@@ -5809,8 +5850,8 @@ async fn ruler_endpoints_match_empty_rule_and_alert_lists() {
         .await
         .unwrap();
 
-    assert2::assert!(prometheus_rules_response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(prometheus_rules_response.status() == StatusCode::OK);
+    assert!(
         json_body(prometheus_rules_response).await
             == json!({
                 "status": "success",
@@ -5833,7 +5874,7 @@ async fn ruler_endpoints_match_empty_rule_and_alert_lists() {
         .await
         .unwrap();
 
-    assert2::assert!(api_prom_rules_response.status() == StatusCode::BAD_REQUEST);
+    assert!(api_prom_rules_response.status() == StatusCode::BAD_REQUEST);
     let content_type = api_prom_rules_response
         .headers()
         .get("content-type")
@@ -5841,8 +5882,8 @@ async fn ruler_endpoints_match_empty_rule_and_alert_lists() {
         .unwrap_or_default()
         .to_string();
     let body = text_body(api_prom_rules_response).await;
-    assert2::assert!(content_type.starts_with("text/plain"));
-    assert2::assert!(
+    assert!(content_type.starts_with("text/plain"));
+    assert!(
         body == "unable to read rule dir /loki/rules/fake: open /loki/rules/fake: no such file or directory\n"
     );
 
@@ -5857,8 +5898,8 @@ async fn ruler_endpoints_match_empty_rule_and_alert_lists() {
         .await
         .unwrap();
 
-    assert2::assert!(prometheus_alerts_response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(prometheus_alerts_response.status() == StatusCode::OK);
+    assert!(
         json_body(prometheus_alerts_response).await
             == json!({
                 "status": "success",
@@ -5880,7 +5921,7 @@ async fn ruler_endpoints_match_empty_rule_and_alert_lists() {
         .await
         .unwrap();
 
-    assert2::assert!(api_prom_alerts_response.status() == StatusCode::NOT_FOUND);
+    assert!(api_prom_alerts_response.status() == StatusCode::NOT_FOUND);
     let content_type = api_prom_alerts_response
         .headers()
         .get("content-type")
@@ -5888,8 +5929,8 @@ async fn ruler_endpoints_match_empty_rule_and_alert_lists() {
         .unwrap_or_default()
         .to_string();
     let body = text_body(api_prom_alerts_response).await;
-    assert2::assert!(content_type.starts_with("text/plain"));
-    assert2::assert!(body == "404 page not found\n");
+    assert!(content_type.starts_with("text/plain"));
+    assert!(body == "404 page not found\n");
 }
 
 #[tokio::test]
@@ -5904,9 +5945,9 @@ async fn ruler_rule_group_read_endpoints_return_loki_not_found_errors() {
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
+        assert!(response.status() == StatusCode::BAD_REQUEST);
         let body = text_body(response).await;
-        assert2::assert!(
+        assert!(
             body == "error parsing /loki/rules/fake/default: /loki/rules/fake/default: open /loki/rules/fake/default: no such file or directory\n"
         );
     }
@@ -5921,9 +5962,9 @@ async fn ruler_rule_group_read_endpoints_return_loki_not_found_errors() {
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
+        assert!(response.status() == StatusCode::BAD_REQUEST);
         let body = text_body(response).await;
-        assert2::assert!(body == "GetRuleGroup unsupported in rule local store\n");
+        assert!(body == "GetRuleGroup unsupported in rule local store\n");
     }
 }
 
@@ -5958,8 +5999,8 @@ rules:
         .await
         .unwrap();
 
-    assert2::assert!(create_response.status() == StatusCode::ACCEPTED);
-    assert2::assert!(
+    assert!(create_response.status() == StatusCode::ACCEPTED);
+    assert!(
         json_body(create_response).await
             == json!({
                 "status": "success"
@@ -5978,7 +6019,7 @@ rules:
         .await
         .unwrap();
 
-    assert2::assert!(group_response.status() == StatusCode::OK);
+    assert!(group_response.status() == StatusCode::OK);
     let group_body = text_body(group_response).await;
     for needle in [
         "name: api-errors\n",
@@ -6000,10 +6041,10 @@ rules:
         .await
         .unwrap();
 
-    assert2::assert!(namespace_response.status() == StatusCode::OK);
+    assert!(namespace_response.status() == StatusCode::OK);
     let namespace_body = text_body(namespace_response).await;
-    assert2::assert!(namespace_body.contains("- name: api-errors\n"));
-    assert2::assert!(namespace_body.contains("alert: ApiErrors\n"));
+    assert!(namespace_body.contains("- name: api-errors\n"));
+    assert!(namespace_body.contains("alert: ApiErrors\n"));
 
     let all_rules_response = app
         .oneshot(
@@ -6016,7 +6057,7 @@ rules:
         .await
         .unwrap();
 
-    assert2::assert!(all_rules_response.status() == StatusCode::OK);
+    assert!(all_rules_response.status() == StatusCode::OK);
     let all_rules_body = text_body(all_rules_response).await;
     for needle in ["default:\n", "- name: api-errors\n", "alert: ApiErrors\n"] {
         check!(all_rules_body.contains(needle));
@@ -6049,8 +6090,8 @@ rules:
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert2::assert!(text_body(response).await == "unable to decoded rule group\n");
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(text_body(response).await == "unable to decoded rule group\n");
 
     let namespace_response = app
         .oneshot(
@@ -6062,8 +6103,8 @@ rules:
         )
         .await
         .unwrap();
-    assert2::assert!(namespace_response.status() == StatusCode::BAD_REQUEST);
-    assert2::assert!(
+    assert!(namespace_response.status() == StatusCode::BAD_REQUEST);
+    assert!(
         text_body(namespace_response).await
             == "error parsing /loki/rules/tenant-a/default: /loki/rules/tenant-a/default: open /loki/rules/tenant-a/default: no such file or directory\n"
     );
@@ -6104,10 +6145,10 @@ rules:
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = text_body(response).await;
-    assert2::assert!(body.contains("- name: api-errors\n"));
-    assert2::assert!(body.contains("alert: ApiErrors\n"));
+    assert!(body.contains("- name: api-errors\n"));
+    assert!(body.contains("alert: ApiErrors\n"));
 }
 
 #[tokio::test]
@@ -6144,7 +6185,7 @@ rules:
         )
         .await
         .unwrap();
-    assert2::assert!(create_response.status() == StatusCode::ACCEPTED);
+    assert!(create_response.status() == StatusCode::ACCEPTED);
 
     let response = app
         .clone()
@@ -6158,8 +6199,8 @@ rules:
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -6215,7 +6256,7 @@ rules:
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = text_body(response).await;
     for needle in ["default:", "- name: api-errors\n", "alert: ApiErrors\n"] {
         check!(body.contains(needle));
@@ -6236,7 +6277,7 @@ async fn post_loki_rule_group_for_test(app: &axum::Router, namespace: &str, rule
         )
         .await
         .unwrap();
-    assert2::assert!(response.status() == StatusCode::ACCEPTED);
+    assert!(response.status() == StatusCode::ACCEPTED);
 }
 
 async fn prometheus_rules_body_for_test(app: &axum::Router, uri: &str) -> Value {
@@ -6251,7 +6292,7 @@ async fn prometheus_rules_body_for_test(app: &axum::Router, uri: &str) -> Value 
         )
         .await
         .unwrap();
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     json_body(response).await
 }
 
@@ -6362,8 +6403,8 @@ rules:
         .await
         .unwrap();
 
-    assert2::assert!(alerts_response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(alerts_response.status() == StatusCode::OK);
+    assert!(
         json_body(alerts_response).await
             == json!({
                 "status": "success",
@@ -6393,13 +6434,10 @@ rules:
 
     let rules_body =
         prometheus_rules_body_for_test(&app, "/prometheus/api/v1/rules?time=19&type=alert").await;
-    assert2::assert!(
-        rules_body["data"]["groups"][0]["rules"][0]["alerts"][0]["state"].as_str()
-            == Some("firing")
-    );
-    assert2::assert!(
-        rules_body["data"]["groups"][0]["rules"][0]["alerts"][0]["labels"]["alertname"].as_str()
-            == Some("ApiErrors")
+    assert!(rules_body["data"]["groups"][0]["rules"][0]["alerts"][0]["state"] == "firing");
+    assert!(
+        rules_body["data"]["groups"][0]["rules"][0]["alerts"][0]["labels"]["alertname"]
+            == "ApiErrors"
     );
 }
 
@@ -6435,7 +6473,7 @@ rules:
         .await
         .unwrap();
 
-    assert2::assert!(alerts_response.status() == StatusCode::OK);
+    assert!(alerts_response.status() == StatusCode::OK);
     let body = json_body(alerts_response).await;
     check!(body["data"]["alerts"].as_array().unwrap().len() == 1);
     check!(body["data"]["alerts"][0]["labels"]["route"] == "api-prod");
@@ -6474,7 +6512,7 @@ rules:
         .await
         .unwrap();
 
-    assert2::assert!(alerts_response.status() == StatusCode::OK);
+    assert!(alerts_response.status() == StatusCode::OK);
     let body = json_body(alerts_response).await;
     check!(body["data"]["alerts"].as_array().unwrap().len() == 1);
     check!(body["data"]["alerts"][0]["labels"]["route"] == "api-prod");
@@ -6511,7 +6549,7 @@ rules:
         )
         .await
         .unwrap();
-    assert2::assert!(pending_response.status() == StatusCode::OK);
+    assert!(pending_response.status() == StatusCode::OK);
     let pending_body = json_body(pending_response).await;
     check!(pending_body["data"]["alerts"].as_array().unwrap().len() == 1);
     check!(pending_body["data"]["alerts"][0]["state"] == "pending");
@@ -6519,13 +6557,10 @@ rules:
 
     let firing_body =
         prometheus_rules_body_for_test(&app, "/prometheus/api/v1/rules?time=40&type=alert").await;
-    assert2::assert!(
-        firing_body["data"]["groups"][0]["rules"][0]["alerts"][0]["state"].as_str()
-            == Some("firing")
-    );
-    assert2::assert!(
-        firing_body["data"]["groups"][0]["rules"][0]["alerts"][0]["activeAt"].as_str()
-            == Some("1970-01-01T00:00:00.000000019Z")
+    assert!(firing_body["data"]["groups"][0]["rules"][0]["alerts"][0]["state"] == "firing");
+    assert!(
+        firing_body["data"]["groups"][0]["rules"][0]["alerts"][0]["activeAt"]
+            == "1970-01-01T00:00:00.000000019Z"
     );
 }
 
@@ -6548,9 +6583,7 @@ rules:
 
     let firing_body =
         prometheus_rules_body_for_test(&app, "/prometheus/api/v1/rules?time=40&type=alert").await;
-    assert2::assert!(
-        firing_body["data"]["groups"][0]["rules"][0]["alerts"][0]["state"] == "firing"
-    );
+    assert!(firing_body["data"]["groups"][0]["rules"][0]["alerts"][0]["state"] == "firing");
 
     let retained_response = app
         .clone()
@@ -6563,7 +6596,7 @@ rules:
         )
         .await
         .unwrap();
-    assert2::assert!(retained_response.status() == StatusCode::OK);
+    assert!(retained_response.status() == StatusCode::OK);
     let retained_body = json_body(retained_response).await;
     check!(retained_body["data"]["alerts"].as_array().unwrap().len() == 1);
     check!(retained_body["data"]["alerts"][0]["state"] == "firing");
@@ -6580,9 +6613,9 @@ rules:
         )
         .await
         .unwrap();
-    assert2::assert!(resolved_response.status() == StatusCode::OK);
+    assert!(resolved_response.status() == StatusCode::OK);
     let resolved_body = json_body(resolved_response).await;
-    assert2::assert!(resolved_body["data"]["alerts"] == json!([]));
+    assert!(resolved_body["data"]["alerts"] == json!([]));
 }
 
 #[tokio::test]
@@ -6600,9 +6633,7 @@ rules:
 
     let first_body =
         prometheus_rules_body_for_test(&app, "/prometheus/api/v1/rules?time=19&type=alert").await;
-    assert2::assert!(
-        first_body["data"]["groups"][0]["rules"][0]["alerts"][0]["state"] == "pending"
-    );
+    assert!(first_body["data"]["groups"][0]["rules"][0]["alerts"][0]["state"] == "pending");
 
     let delete_response = app
         .clone()
@@ -6616,18 +6647,15 @@ rules:
         )
         .await
         .unwrap();
-    assert2::assert!(delete_response.status() == StatusCode::ACCEPTED);
+    assert!(delete_response.status() == StatusCode::ACCEPTED);
 
     post_loki_rule_group_for_test(&app, "default", rule_group).await;
     let recreated_body =
         prometheus_rules_body_for_test(&app, "/prometheus/api/v1/rules?time=40&type=alert").await;
-    assert2::assert!(
-        recreated_body["data"]["groups"][0]["rules"][0]["alerts"][0]["state"].as_str()
-            == Some("pending")
-    );
-    assert2::assert!(
-        recreated_body["data"]["groups"][0]["rules"][0]["alerts"][0]["activeAt"].as_str()
-            == Some("1970-01-01T00:00:00.00000004Z")
+    assert!(recreated_body["data"]["groups"][0]["rules"][0]["alerts"][0]["state"] == "pending");
+    assert!(
+        recreated_body["data"]["groups"][0]["rules"][0]["alerts"][0]["activeAt"]
+            == "1970-01-01T00:00:00.00000004Z"
     );
 }
 
@@ -6803,7 +6831,7 @@ rules:
         )
         .await
         .unwrap();
-    assert2::assert!(delete_response.status() == StatusCode::ACCEPTED);
+    assert!(delete_response.status() == StatusCode::ACCEPTED);
 
     let response = app
         .clone()
@@ -6819,7 +6847,7 @@ rules:
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(response.status() == StatusCode::BAD_REQUEST);
     assert_loki_error(&json_body(response).await, "bad_data", "group_next_token");
 }
 
@@ -6840,7 +6868,7 @@ async fn prometheus_rules_endpoint_rejects_group_next_token_without_matching_rul
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(response.status() == StatusCode::BAD_REQUEST);
     assert_loki_error(&json_body(response).await, "bad_data", "group_next_token");
 }
 
@@ -6876,7 +6904,7 @@ rules:
             )
             .await
             .unwrap();
-        assert2::assert!(create_response.status() == StatusCode::ACCEPTED);
+        assert!(create_response.status() == StatusCode::ACCEPTED);
     }
 
     let delete_response = app
@@ -6892,7 +6920,7 @@ rules:
         .await
         .unwrap();
 
-    assert2::assert!(delete_response.status() == StatusCode::ACCEPTED);
+    assert!(delete_response.status() == StatusCode::ACCEPTED);
 
     let deleted_group_response = app
         .clone()
@@ -6905,8 +6933,8 @@ rules:
         )
         .await
         .unwrap();
-    assert2::assert!(deleted_group_response.status() == StatusCode::NOT_FOUND);
-    assert2::assert!(text_body(deleted_group_response).await == "group does not exist\n");
+    assert!(deleted_group_response.status() == StatusCode::NOT_FOUND);
+    assert!(text_body(deleted_group_response).await == "group does not exist\n");
 
     let namespace_response = app
         .oneshot(
@@ -6919,7 +6947,7 @@ rules:
         .await
         .unwrap();
 
-    assert2::assert!(namespace_response.status() == StatusCode::OK);
+    assert!(namespace_response.status() == StatusCode::OK);
     let namespace_body = text_body(namespace_response).await;
     check!(!namespace_body.contains("api-errors"));
     check!(namespace_body.contains("worker-errors"));
@@ -6964,7 +6992,7 @@ rules:
             )
             .await
             .unwrap();
-        assert2::assert!(create_response.status() == StatusCode::ACCEPTED);
+        assert!(create_response.status() == StatusCode::ACCEPTED);
     }
 
     let delete_response = app
@@ -6980,7 +7008,7 @@ rules:
         .await
         .unwrap();
 
-    assert2::assert!(delete_response.status() == StatusCode::ACCEPTED);
+    assert!(delete_response.status() == StatusCode::ACCEPTED);
 
     let deleted_namespace_response = app
         .clone()
@@ -6993,8 +7021,8 @@ rules:
         )
         .await
         .unwrap();
-    assert2::assert!(deleted_namespace_response.status() == StatusCode::NOT_FOUND);
-    assert2::assert!(text_body(deleted_namespace_response).await == "no rule groups found\n");
+    assert!(deleted_namespace_response.status() == StatusCode::NOT_FOUND);
+    assert!(text_body(deleted_namespace_response).await == "no rule groups found\n");
 
     let other_namespace_response = app
         .oneshot(
@@ -7007,10 +7035,10 @@ rules:
         .await
         .unwrap();
 
-    assert2::assert!(other_namespace_response.status() == StatusCode::OK);
+    assert!(other_namespace_response.status() == StatusCode::OK);
     let other_namespace_body = text_body(other_namespace_response).await;
-    assert2::assert!(other_namespace_body.contains("worker-errors"));
-    assert2::assert!(other_namespace_body.contains("WorkerErrors"));
+    assert!(other_namespace_body.contains("worker-errors"));
+    assert!(other_namespace_body.contains("WorkerErrors"));
 }
 
 #[tokio::test]
@@ -7037,7 +7065,7 @@ rules:
         )
         .await
         .unwrap();
-    assert2::assert!(create_response.status() == StatusCode::ACCEPTED);
+    assert!(create_response.status() == StatusCode::ACCEPTED);
 
     let delete_response = app
         .clone()
@@ -7051,7 +7079,7 @@ rules:
         )
         .await
         .unwrap();
-    assert2::assert!(delete_response.status() == StatusCode::ACCEPTED);
+    assert!(delete_response.status() == StatusCode::ACCEPTED);
 
     let namespace_response = app
         .oneshot(
@@ -7064,8 +7092,8 @@ rules:
         .await
         .unwrap();
 
-    assert2::assert!(namespace_response.status() == StatusCode::BAD_REQUEST);
-    assert2::assert!(
+    assert!(namespace_response.status() == StatusCode::BAD_REQUEST);
+    assert!(
         text_body(namespace_response).await
             == "error parsing /loki/rules/tenant-a/default: /loki/rules/tenant-a/default: open /loki/rules/tenant-a/default: no such file or directory\n"
     );
@@ -7086,7 +7114,7 @@ async fn ruler_ring_endpoint_returns_loki_status_page() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let content_type = response
         .headers()
         .get("content-type")
@@ -7094,8 +7122,8 @@ async fn ruler_ring_endpoint_returns_loki_status_page() {
         .unwrap_or_default()
         .to_string();
     let body = text_body(response).await;
-    assert2::assert!(content_type.starts_with("text/html"));
-    assert2::assert!(body.contains("Cortex Ruler Status"));
+    assert!(content_type.starts_with("text/html"));
+    assert!(body.contains("Cortex Ruler Status"));
 }
 
 #[tokio::test]
@@ -7113,8 +7141,8 @@ async fn format_query_endpoint_returns_formatted_logql_query() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -7140,8 +7168,8 @@ async fn format_query_endpoint_accepts_form_encoded_post_body() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -7167,8 +7195,8 @@ async fn format_query_endpoint_prefers_form_body_over_post_query_parameter() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -7194,8 +7222,8 @@ async fn format_query_endpoint_accepts_form_post_query_with_raw_ampersand() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -7219,8 +7247,8 @@ async fn format_query_endpoint_formats_regex_field_filters() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -7244,8 +7272,8 @@ async fn format_query_endpoint_formats_backtick_field_filter_strings() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -7269,8 +7297,8 @@ async fn format_query_endpoint_formats_pattern_parser_stage() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -7294,8 +7322,8 @@ async fn format_query_endpoint_formats_regexp_parser_stage() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -7319,8 +7347,8 @@ async fn format_query_endpoint_formats_unpack_parser_stage() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -7344,8 +7372,8 @@ async fn format_query_endpoint_formats_selected_json_stage() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -7369,8 +7397,8 @@ async fn format_query_endpoint_formats_parameterized_logfmt_stage() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -7394,8 +7422,8 @@ async fn format_query_endpoint_formats_line_format_stage() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -7419,8 +7447,8 @@ async fn format_query_endpoint_formats_line_format_template_pipelines() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -7444,8 +7472,8 @@ async fn format_query_endpoint_formats_additional_template_string_helpers() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -7469,8 +7497,8 @@ async fn format_query_endpoint_formats_logical_template_helpers() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -7494,8 +7522,8 @@ async fn format_query_endpoint_formats_spacing_template_helpers() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -7519,8 +7547,8 @@ async fn format_query_endpoint_formats_regex_template_helpers() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -7544,8 +7572,8 @@ async fn format_query_endpoint_formats_label_format_stage() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -7569,8 +7597,8 @@ async fn format_query_endpoint_accepts_label_replace_metric_query() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -7594,8 +7622,8 @@ async fn format_query_endpoint_rejects_label_join_metric_query_like_loki() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "invalid-query",
@@ -7619,8 +7647,8 @@ async fn format_query_endpoint_accepts_vector_function_expression() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -7644,8 +7672,8 @@ async fn format_query_endpoint_formats_label_replace_vector_function_like_loki()
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -7669,8 +7697,8 @@ async fn format_query_endpoint_formats_label_replace_vector_expression_like_loki
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -7694,8 +7722,8 @@ async fn format_query_endpoint_formats_label_replace_metric_vector_expression_li
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -7719,8 +7747,8 @@ async fn format_query_endpoint_formats_label_replace_metric_scalar_expression_li
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -7744,8 +7772,8 @@ async fn format_query_endpoint_rejects_label_join_vector_function_like_loki() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "invalid-query",
@@ -7780,8 +7808,8 @@ async fn format_query_endpoint_formats_vector_set_expression_like_loki() {
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::OK);
-        assert2::assert!(
+        assert!(response.status() == StatusCode::OK);
+        assert!(
             json_body(response).await
                 == json!({
                     "status": "success",
@@ -7817,8 +7845,8 @@ async fn format_query_endpoint_formats_vector_arithmetic_expression_like_loki() 
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::OK);
-        assert2::assert!(
+        assert!(response.status() == StatusCode::OK);
+        assert!(
             json_body(response).await
                 == json!({
                     "status": "success",
@@ -7862,8 +7890,8 @@ async fn format_query_endpoint_formats_metric_vector_arithmetic_expression_like_
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::OK);
-        assert2::assert!(
+        assert!(response.status() == StatusCode::OK);
+        assert!(
             json_body(response).await
                 == json!({
                     "status": "success",
@@ -7888,8 +7916,8 @@ async fn format_query_endpoint_formats_metric_scalar_arithmetic_like_loki() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -7913,8 +7941,8 @@ async fn format_query_endpoint_formats_scalar_metric_comparison_like_loki() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -7938,8 +7966,8 @@ async fn format_query_endpoint_formats_quantile_metric_vector_arithmetic_like_lo
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -7978,8 +8006,8 @@ async fn format_query_endpoint_formats_metric_vector_set_modifier_like_loki() {
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::OK);
-        assert2::assert!(
+        assert!(response.status() == StatusCode::OK);
+        assert!(
             json_body(response).await
                 == json!({
                     "status": "success",
@@ -8004,8 +8032,8 @@ async fn format_query_endpoint_formats_vector_metric_arithmetic_expression_like_
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -8029,8 +8057,8 @@ async fn format_query_endpoint_formats_metric_vector_matching_modifier_like_loki
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -8054,8 +8082,8 @@ async fn format_query_endpoint_formats_vector_metric_group_modifier_like_loki() 
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -8079,8 +8107,8 @@ async fn format_query_endpoint_formats_vector_matching_modifier_like_loki() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -8104,8 +8132,8 @@ async fn format_query_endpoint_formats_vector_group_modifier_like_loki() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -8129,8 +8157,8 @@ async fn format_query_endpoint_formats_vector_group_modifier_without_labels_like
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -8165,8 +8193,8 @@ async fn format_query_endpoint_formats_metric_vector_bool_comparison_like_loki()
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::OK);
-        assert2::assert!(
+        assert!(response.status() == StatusCode::OK);
+        assert!(
             json_body(response).await
                 == json!({
                     "status": "success",
@@ -8191,8 +8219,8 @@ async fn format_query_endpoint_formats_vector_metric_comparison_group_modifier_l
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -8216,8 +8244,8 @@ async fn format_query_endpoint_formats_vector_comparison_expression_like_loki() 
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -8241,8 +8269,8 @@ async fn format_query_endpoint_formats_scalar_expression_like_loki() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -8266,8 +8294,8 @@ async fn format_query_endpoint_formats_metric_binary_arithmetic_query_like_loki(
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -8291,8 +8319,8 @@ async fn format_query_endpoint_formats_vector_aggregation_like_loki() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -8335,8 +8363,8 @@ async fn format_query_endpoint_formats_sort_vector_expression_like_loki() {
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::OK);
-        assert2::assert!(
+        assert!(response.status() == StatusCode::OK);
+        assert!(
             json_body(response).await
                 == json!({
                     "status": "success",
@@ -8376,8 +8404,8 @@ async fn format_query_endpoint_formats_metric_offsets_like_loki() {
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::OK);
-        assert2::assert!(
+        assert!(response.status() == StatusCode::OK);
+        assert!(
             json_body(response).await
                 == json!({
                     "status": "success",
@@ -8402,8 +8430,8 @@ async fn format_query_endpoint_formats_range_grouping_like_loki() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -8427,8 +8455,8 @@ async fn format_query_endpoint_accepts_range_selector_before_pipeline() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -8452,8 +8480,8 @@ async fn format_query_endpoint_accepts_approx_topk_metric_query() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -8477,8 +8505,8 @@ async fn format_query_endpoint_formats_metric_binary_comparison_query_like_loki(
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -8502,8 +8530,8 @@ async fn format_query_endpoint_formats_metric_binary_set_query_like_loki() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -8527,8 +8555,8 @@ async fn format_query_endpoint_formats_metric_binary_matching_modifier_like_loki
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -8552,8 +8580,8 @@ async fn format_query_endpoint_formats_metric_binary_group_modifier_like_loki() 
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -8577,8 +8605,8 @@ async fn format_query_endpoint_formats_decolorize_stage() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -8602,8 +8630,8 @@ async fn format_query_endpoint_formats_drop_and_keep_label_expression_stages() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -8627,8 +8655,8 @@ async fn format_query_endpoint_formats_unwrap_stage() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -8652,8 +8680,8 @@ async fn format_query_endpoint_formats_unwrap_bytes_stage() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -8677,8 +8705,8 @@ async fn format_query_endpoint_formats_unwrap_duration_stage() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -8702,8 +8730,8 @@ async fn format_query_endpoint_formats_pattern_line_filters() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -8727,8 +8755,8 @@ async fn format_query_endpoint_ignores_logql_comments() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -8752,8 +8780,8 @@ async fn format_query_endpoint_formats_duration_and_bytes_field_filters() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -8777,8 +8805,8 @@ async fn format_query_endpoint_formats_or_field_filter_chains() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -8802,8 +8830,8 @@ async fn format_query_endpoint_formats_parenthesized_field_filter_chains() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -8828,8 +8856,8 @@ async fn format_query_endpoint_formats_comma_and_adjacent_field_filter_chains() 
         .await
         .unwrap();
 
-    assert2::assert!(comma_response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(comma_response.status() == StatusCode::OK);
+    assert!(
         json_body(comma_response).await
             == json!({
                 "status": "success",
@@ -8847,8 +8875,8 @@ async fn format_query_endpoint_formats_comma_and_adjacent_field_filter_chains() 
         .await
         .unwrap();
 
-    assert2::assert!(adjacent_response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(adjacent_response.status() == StatusCode::OK);
+    assert!(
         json_body(adjacent_response).await
             == json!({
                 "status": "success",
@@ -8872,8 +8900,8 @@ async fn format_query_endpoint_returns_loki_error_for_invalid_logql() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "invalid-query",
@@ -8897,8 +8925,8 @@ async fn format_query_endpoint_rejects_signed_vector_function_literals_like_loki
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "invalid-query",
@@ -8927,8 +8955,8 @@ async fn format_query_endpoint_rejects_unspaced_vector_set_operators_like_loki()
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-        assert2::assert!(
+        assert!(response.status() == StatusCode::BAD_REQUEST);
+        assert!(
             json_body(response).await
                 == json!({
                     "status": "invalid-query",
@@ -8953,8 +8981,8 @@ async fn format_query_endpoint_returns_loki_error_for_missing_query() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "invalid-query",
@@ -8981,13 +9009,13 @@ async fn query_endpoint_returns_loki_streams_json_for_tenant() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(json_body(response).await == expected_api_error());
+    assert!(response.status() == StatusCode::OK);
+    assert!(json_body(response).await == expected_api_error());
 }
 
 #[tokio::test]
 async fn query_endpoint_fans_out_pipe_separated_tenant_header() {
-    let (state, tenant_a_bytes, tenant_b_bytes) = multi_tenant_fixture();
+    let (state, prod_bytes, stage_bytes) = multi_tenant_fixture();
     let app = loki_router(state);
 
     let response = app
@@ -9003,8 +9031,8 @@ async fn query_endpoint_fans_out_pipe_separated_tenant_header() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -9033,7 +9061,7 @@ async fn query_endpoint_fans_out_pipe_separated_tenant_header() {
                         }
                     ],
                     "stats": expected_loki_stats_with(
-                        tenant_a_bytes + tenant_b_bytes,
+                        prod_bytes + stage_bytes,
                         2,
                         2
                     )
@@ -9062,8 +9090,8 @@ async fn query_endpoint_accepts_form_encoded_post_body() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(json_body(response).await == expected_api_error());
+    assert!(response.status() == StatusCode::OK);
+    assert!(json_body(response).await == expected_api_error());
 }
 
 #[tokio::test]
@@ -9082,8 +9110,8 @@ async fn deprecated_api_prom_query_endpoint_returns_loki_streams_json() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(json_body(response).await == expected_api_error());
+    assert!(response.status() == StatusCode::OK);
+    assert!(json_body(response).await == expected_api_error());
 }
 
 #[tokio::test]
@@ -9106,8 +9134,8 @@ async fn deprecated_api_prom_query_endpoint_accepts_form_encoded_post_body() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(json_body(response).await == expected_api_error());
+    assert!(response.status() == StatusCode::OK);
+    assert!(json_body(response).await == expected_api_error());
 }
 
 #[tokio::test]
@@ -9126,8 +9154,8 @@ async fn deprecated_api_prom_query_endpoint_rejects_metric_results_like_loki() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(
         text_body(response).await
             == "rpc error: code = Code(400) desc = legacy endpoints only support streams result type"
     );
@@ -9149,8 +9177,8 @@ async fn deprecated_api_prom_query_range_endpoint_returns_loki_streams_json() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -9188,8 +9216,8 @@ async fn deprecated_api_prom_query_range_endpoint_rejects_metric_results() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(
         text_body(response).await
             == "rpc error: code = Code(400) desc = legacy endpoints only support streams result type"
     );
@@ -9215,8 +9243,8 @@ async fn deprecated_api_prom_query_range_endpoint_accepts_form_encoded_post_body
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response)
             .await
             .pointer("/data/result/0/values/0/1")
@@ -9241,8 +9269,8 @@ async fn query_endpoint_returns_metric_query_as_loki_vector_json() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -9255,7 +9283,7 @@ async fn query_endpoint_returns_metric_query_as_loki_vector_json() {
                                 "detected_level": "unknown",
                                 "env": "prod"
                             },
-                            "value": [0.000000019, "1"]
+                            "value": [0.000_000_019, "1"]
                         }
                     ],
                     "stats": expected_loki_stats_with(1819, 1, 1)
@@ -9280,8 +9308,8 @@ async fn query_endpoint_returns_synthetic_vector_timestamps_as_loki_raw_nanoseco
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -9316,8 +9344,8 @@ async fn query_endpoint_returns_vector_metrics_as_parquet_when_requested() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         response
             .headers()
             .get("content-type")
@@ -9327,9 +9355,9 @@ async fn query_endpoint_returns_vector_metrics_as_parquet_when_requested() {
     let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
     let mut reader = ParquetRecordBatchReader::try_new(body, 1024).unwrap();
     let batch = reader.next().unwrap().unwrap();
-    assert2::assert!(reader.next().is_none());
+    assert!(reader.next().is_none());
 
-    assert2::assert!(batch.num_rows() == 1);
+    assert!(batch.num_rows() == 1);
     for (index, name) in [(0, "timestamp"), (1, "labels"), (2, "value")] {
         check!(batch.schema().field(index).name() == name);
     }
@@ -9338,15 +9366,15 @@ async fn query_endpoint_returns_vector_metrics_as_parquet_when_requested() {
         .as_any()
         .downcast_ref::<TimestampNanosecondArray>()
         .unwrap();
-    assert2::assert!(timestamps.value(0) == 20);
+    assert!(timestamps.value(0) == 20);
     let labels = batch.column(1).as_any().downcast_ref::<MapArray>().unwrap();
-    assert2::assert!(labels.value_offsets() == &[0, 0]);
+    assert!(labels.value_offsets() == &[0, 0]);
     let values = batch
         .column(2)
         .as_any()
         .downcast_ref::<Float64Array>()
         .unwrap();
-    assert2::assert!((values.value(0) - 6.0).abs() < f64::EPSILON);
+    assert!((values.value(0) - 6.0).abs() < f64::EPSILON);
 }
 
 #[tokio::test]
@@ -9365,8 +9393,8 @@ async fn query_endpoint_filters_metric_query_with_scalar_comparison() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -9395,8 +9423,8 @@ async fn query_endpoint_applies_metric_vector_bool_comparison_on_modifier() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -9405,7 +9433,7 @@ async fn query_endpoint_applies_metric_vector_bool_comparison_on_modifier() {
                     "result": [
                         {
                             "metric": {},
-                            "value": [0.000000019, "1"]
+                            "value": [0.000_000_019, "1"]
                         }
                     ],
                     "stats": expected_loki_stats_with(1819, 1, 1)
@@ -9430,8 +9458,8 @@ async fn query_endpoint_applies_metric_vector_set_and_on_modifier() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -9444,7 +9472,7 @@ async fn query_endpoint_applies_metric_vector_set_and_on_modifier() {
                                 "detected_level": "unknown",
                                 "env": "prod"
                             },
-                            "value": [0.000000019, "1"]
+                            "value": [0.000_000_019, "1"]
                         }
                     ],
                     "stats": expected_loki_stats_with(1819, 1, 1)
@@ -9469,8 +9497,8 @@ async fn query_endpoint_applies_vector_metric_set_or_on_modifier() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -9479,7 +9507,7 @@ async fn query_endpoint_applies_vector_metric_set_or_on_modifier() {
                     "result": [
                         {
                             "metric": {},
-                            "value": [0.000000019, "1"]
+                            "value": [0.000_000_019, "1"]
                         }
                     ],
                     "stats": expected_loki_stats_with(1819, 1, 1)
@@ -9504,8 +9532,8 @@ async fn query_endpoint_applies_metric_query_scalar_arithmetic() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -9518,7 +9546,7 @@ async fn query_endpoint_applies_metric_query_scalar_arithmetic() {
                                 "detected_level": "unknown",
                                 "env": "prod"
                             },
-                            "value": [0.000000019, "2"]
+                            "value": [0.000_000_019, "2"]
                         }
                     ],
                     "stats": expected_loki_stats_with(1819, 1, 1)
@@ -9543,8 +9571,8 @@ async fn query_endpoint_applies_metric_vector_arithmetic_on_modifier() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -9553,7 +9581,7 @@ async fn query_endpoint_applies_metric_vector_arithmetic_on_modifier() {
                     "result": [
                         {
                             "metric": {},
-                            "value": [0.000000019, "2"]
+                            "value": [0.000_000_019, "2"]
                         }
                     ],
                     "stats": expected_loki_stats_with(1819, 1, 1)
@@ -9578,8 +9606,8 @@ async fn query_endpoint_applies_vector_metric_arithmetic_group_right_modifier() 
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -9590,7 +9618,7 @@ async fn query_endpoint_applies_vector_metric_arithmetic_group_right_modifier() 
                             "metric": {
                                 "detected_level": "unknown"
                             },
-                            "value": [0.000000019, "2"]
+                            "value": [0.000_000_019, "2"]
                         }
                     ],
                     "stats": expected_loki_stats_with(1819, 1, 1)
@@ -9615,8 +9643,8 @@ async fn query_endpoint_applies_scalar_metric_query_arithmetic() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -9629,7 +9657,7 @@ async fn query_endpoint_applies_scalar_metric_query_arithmetic() {
                                 "detected_level": "unknown",
                                 "env": "prod"
                             },
-                            "value": [0.000000019, "1"]
+                            "value": [0.000_000_019, "1"]
                         }
                     ],
                     "stats": expected_loki_stats_with(1819, 1, 1)
@@ -9654,8 +9682,8 @@ async fn query_endpoint_applies_parenthesized_metric_query_scalar_arithmetic() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -9668,7 +9696,7 @@ async fn query_endpoint_applies_parenthesized_metric_query_scalar_arithmetic() {
                                 "detected_level": "unknown",
                                 "env": "prod"
                             },
-                            "value": [0.000000019, "2"]
+                            "value": [0.000_000_019, "2"]
                         }
                     ],
                     "stats": expected_loki_stats_with(1819, 1, 1)
@@ -9693,8 +9721,8 @@ async fn query_endpoint_applies_parenthesized_metric_operand_scalar_arithmetic()
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -9707,7 +9735,7 @@ async fn query_endpoint_applies_parenthesized_metric_operand_scalar_arithmetic()
                                 "detected_level": "unknown",
                                 "env": "prod"
                             },
-                            "value": [0.000000019, "2"]
+                            "value": [0.000_000_019, "2"]
                         }
                     ],
                     "stats": expected_loki_stats_with(1819, 1, 1)
@@ -9732,8 +9760,8 @@ async fn query_endpoint_applies_metric_binary_arithmetic() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -9746,7 +9774,7 @@ async fn query_endpoint_applies_metric_binary_arithmetic() {
                                 "detected_level": "unknown",
                                 "env": "prod"
                             },
-                            "value": [0.000000019, "2"]
+                            "value": [0.000_000_019, "2"]
                         }
                     ],
                     "stats": expected_loki_stats_with(1819, 1, 1)
@@ -9771,8 +9799,8 @@ async fn query_endpoint_applies_metric_binary_arithmetic_ignoring_modifier() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -9785,7 +9813,7 @@ async fn query_endpoint_applies_metric_binary_arithmetic_ignoring_modifier() {
                                 "detected_level": "unknown",
                                 "env": "prod"
                             },
-                            "value": [0.000000025, "2"]
+                            "value": [0.000_000_025, "2"]
                         }
                     ],
                     "stats": expected_loki_stats_with(1819, 1, 1)
@@ -9810,9 +9838,9 @@ async fn query_endpoint_applies_metric_binary_arithmetic_group_left_modifier() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
-    assert2::assert!(
+    assert!(
         body.pointer("/data/result")
             == Some(&json!([
                 {
@@ -9820,14 +9848,14 @@ async fn query_endpoint_applies_metric_binary_arithmetic_group_left_modifier() {
                         "app": "api",
                         "env": "prod"
                     },
-                    "value": [0.000000025, "0.666666666"]
+                    "value": [0.000_000_025, "0.666666666"]
                 },
                 {
                     "metric": {
                         "app": "worker",
                         "env": "prod"
                     },
-                    "value": [0.000000025, "0.333333333"]
+                    "value": [0.000_000_025, "0.333333333"]
                 }
             ]))
     );
@@ -9849,9 +9877,9 @@ async fn query_endpoint_applies_metric_binary_arithmetic_group_right_modifier() 
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
-    assert2::assert!(
+    assert!(
         body.pointer("/data/result")
             == Some(&json!([
                 {
@@ -9859,14 +9887,14 @@ async fn query_endpoint_applies_metric_binary_arithmetic_group_right_modifier() 
                         "app": "api",
                         "env": "prod"
                     },
-                    "value": [0.000000025, "1.5"]
+                    "value": [0.000_000_025, "1.5"]
                 },
                 {
                     "metric": {
                         "app": "worker",
                         "env": "prod"
                     },
-                    "value": [0.000000025, "3"]
+                    "value": [0.000_000_025, "3"]
                 }
             ]))
     );
@@ -9888,8 +9916,8 @@ async fn query_endpoint_filters_metric_binary_comparison() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -9902,7 +9930,7 @@ async fn query_endpoint_filters_metric_binary_comparison() {
                                 "detected_level": "unknown",
                                 "env": "prod"
                             },
-                            "value": [0.000000019, "2"]
+                            "value": [0.000_000_019, "2"]
                         }
                     ],
                     "stats": expected_loki_stats_with(1819, 1, 1)
@@ -9927,8 +9955,8 @@ async fn query_endpoint_applies_metric_binary_comparison_on_modifier() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -9941,7 +9969,7 @@ async fn query_endpoint_applies_metric_binary_comparison_on_modifier() {
                                 "detected_level": "unknown",
                                 "env": "prod"
                             },
-                            "value": [0.000000025, "1"]
+                            "value": [0.000_000_025, "1"]
                         }
                     ],
                     "stats": expected_loki_stats_with(1819, 1, 1)
@@ -9966,9 +9994,9 @@ async fn query_endpoint_applies_metric_binary_comparison_group_left_modifier() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
-    assert2::assert!(
+    assert!(
         body.pointer("/data/result")
             == Some(&json!([
                 {
@@ -9976,14 +10004,14 @@ async fn query_endpoint_applies_metric_binary_comparison_group_left_modifier() {
                         "app": "api",
                         "env": "prod"
                     },
-                    "value": [0.000000025, "1"]
+                    "value": [0.000_000_025, "1"]
                 },
                 {
                     "metric": {
                         "app": "worker",
                         "env": "prod"
                     },
-                    "value": [0.000000025, "1"]
+                    "value": [0.000_000_025, "1"]
                 }
             ]))
     );
@@ -10005,8 +10033,8 @@ async fn query_endpoint_applies_metric_binary_set_and() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -10019,7 +10047,7 @@ async fn query_endpoint_applies_metric_binary_set_and() {
                                 "detected_level": "unknown",
                                 "env": "prod"
                             },
-                            "value": [0.000000019, "2"]
+                            "value": [0.000_000_019, "2"]
                         }
                     ],
                     "stats": expected_loki_stats_with(1819, 1, 1)
@@ -10044,8 +10072,8 @@ async fn query_endpoint_applies_metric_binary_set_on_modifier() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -10058,7 +10086,7 @@ async fn query_endpoint_applies_metric_binary_set_on_modifier() {
                                 "detected_level": "unknown",
                                 "env": "prod"
                             },
-                            "value": [0.000000025, "2"]
+                            "value": [0.000_000_025, "2"]
                         }
                     ],
                     "stats": expected_loki_stats_with(1819, 1, 1)
@@ -10083,8 +10111,8 @@ async fn query_endpoint_applies_metric_binary_set_unless() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -10113,8 +10141,8 @@ async fn query_endpoint_filters_scalar_metric_query_comparison() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -10127,7 +10155,7 @@ async fn query_endpoint_filters_scalar_metric_query_comparison() {
                                 "detected_level": "unknown",
                                 "env": "prod"
                             },
-                            "value": [0.000000019, "1"]
+                            "value": [0.000_000_019, "1"]
                         }
                     ],
                     "stats": expected_loki_stats_with(1819, 1, 1)
@@ -10152,8 +10180,8 @@ async fn query_range_endpoint_applies_metric_binary_arithmetic() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -10167,7 +10195,7 @@ async fn query_range_endpoint_applies_metric_binary_arithmetic() {
                                 "env": "prod"
                             },
                             "values": [
-                                [0.00000003, "2"]
+                                [0.000_000_03, "2"]
                             ]
                         }
                     ],
@@ -10193,8 +10221,8 @@ async fn query_range_endpoint_applies_bool_metric_binary_comparison() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -10208,7 +10236,7 @@ async fn query_range_endpoint_applies_bool_metric_binary_comparison() {
                                 "env": "prod"
                             },
                             "values": [
-                                [0.00000003, "0"]
+                                [0.000_000_03, "0"]
                             ]
                         }
                     ],
@@ -10234,9 +10262,9 @@ async fn query_range_endpoint_applies_metric_binary_set_or() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
-    assert2::assert!(
+    assert!(
         body.pointer("/data/result")
             == Some(&json!([
                 {
@@ -10246,7 +10274,7 @@ async fn query_range_endpoint_applies_metric_binary_set_or() {
                         "env": "prod"
                     },
                     "values": [
-                        [0.00000003, "1"]
+                        [0.000_000_03, "1"]
                     ]
                 },
                 {
@@ -10256,7 +10284,7 @@ async fn query_range_endpoint_applies_metric_binary_set_or() {
                         "env": "prod"
                     },
                     "values": [
-                        [0.00000003, "1"]
+                        [0.000_000_03, "1"]
                     ]
                 }
             ]))
@@ -10279,8 +10307,8 @@ async fn query_range_endpoint_rejects_approx_topk_metric_query() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::INTERNAL_SERVER_ERROR);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(
         text_body(response).await == "approx_topk is not enabled. See -limits.shard_aggregations"
     );
 }
@@ -10301,8 +10329,8 @@ async fn query_range_endpoint_applies_bool_metric_query_scalar_comparison() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -10316,7 +10344,7 @@ async fn query_range_endpoint_applies_bool_metric_query_scalar_comparison() {
                                 "env": "prod"
                             },
                             "values": [
-                                [0.00000003, "1"]
+                                [0.000_000_03, "1"]
                             ]
                         }
                     ],
@@ -10342,8 +10370,8 @@ async fn query_range_endpoint_applies_bool_scalar_metric_query_comparison() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -10357,7 +10385,7 @@ async fn query_range_endpoint_applies_bool_scalar_metric_query_comparison() {
                                 "env": "prod"
                             },
                             "values": [
-                                [0.00000003, "0"]
+                                [0.000_000_03, "0"]
                             ]
                         }
                     ],
@@ -10383,8 +10411,8 @@ async fn query_range_endpoint_applies_metric_query_scalar_arithmetic() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -10398,7 +10426,7 @@ async fn query_range_endpoint_applies_metric_query_scalar_arithmetic() {
                                 "env": "prod"
                             },
                             "values": [
-                                [0.00000003, "2"]
+                                [0.000_000_03, "2"]
                             ]
                         }
                     ],
@@ -10424,8 +10452,8 @@ async fn query_range_endpoint_applies_scalar_metric_query_arithmetic() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -10439,7 +10467,7 @@ async fn query_range_endpoint_applies_scalar_metric_query_arithmetic() {
                                 "env": "prod"
                             },
                             "values": [
-                                [0.00000003, "2"]
+                                [0.000_000_03, "2"]
                             ]
                         }
                     ],
@@ -10465,8 +10493,8 @@ async fn query_endpoint_accepts_label_replace_metric_query() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -10480,7 +10508,7 @@ async fn query_endpoint_accepts_label_replace_metric_query() {
                                 "env": "prod",
                                 "service": "api-api"
                             },
-                            "value": [0.000000019, "1"]
+                            "value": [0.000_000_019, "1"]
                         }
                     ],
                     "stats": expected_loki_stats_with(1819, 1, 1)
@@ -10505,8 +10533,8 @@ async fn query_endpoint_accepts_parenthesized_label_replace_metric_query() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -10520,7 +10548,7 @@ async fn query_endpoint_accepts_parenthesized_label_replace_metric_query() {
                                 "env": "prod",
                                 "service": "api-api"
                             },
-                            "value": [0.000000019, "1"]
+                            "value": [0.000_000_019, "1"]
                         }
                     ],
                     "stats": expected_loki_stats_with(1819, 1, 1)
@@ -10545,8 +10573,8 @@ async fn query_endpoint_accepts_label_replace_metric_binary_expression() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -10560,7 +10588,7 @@ async fn query_endpoint_accepts_label_replace_metric_binary_expression() {
                                 "env": "prod",
                                 "service": "api-api"
                             },
-                            "value": [0.000000019, "2"]
+                            "value": [0.000_000_019, "2"]
                         }
                     ],
                     "stats": expected_loki_stats_with(1819, 1, 1)
@@ -10585,8 +10613,8 @@ async fn query_endpoint_applies_metric_binary_arithmetic_with_label_replace_oper
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -10600,7 +10628,7 @@ async fn query_endpoint_applies_metric_binary_arithmetic_with_label_replace_oper
                                 "env": "prod",
                                 "service": "api-api"
                             },
-                            "value": [0.000000019, "1"]
+                            "value": [0.000_000_019, "1"]
                         }
                     ],
                     "stats": expected_loki_stats_with(1819, 1, 1)
@@ -10625,8 +10653,8 @@ async fn query_endpoint_applies_metric_binary_arithmetic_with_label_replace_scal
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -10640,7 +10668,7 @@ async fn query_endpoint_applies_metric_binary_arithmetic_with_label_replace_scal
                                 "env": "prod",
                                 "service": "api-api"
                             },
-                            "value": [0.000000019, "1"]
+                            "value": [0.000_000_019, "1"]
                         }
                     ],
                     "stats": expected_loki_stats_with(1819, 1, 1)
@@ -10665,8 +10693,8 @@ async fn query_endpoint_applies_metric_binary_comparison_with_label_replace_oper
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -10680,7 +10708,7 @@ async fn query_endpoint_applies_metric_binary_comparison_with_label_replace_oper
                                 "env": "prod",
                                 "service": "api-api"
                             },
-                            "value": [0.000000019, "0"]
+                            "value": [0.000_000_019, "0"]
                         }
                     ],
                     "stats": expected_loki_stats_with(1819, 1, 1)
@@ -10705,8 +10733,8 @@ async fn query_endpoint_applies_metric_binary_set_with_label_replace_operands() 
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -10720,7 +10748,7 @@ async fn query_endpoint_applies_metric_binary_set_with_label_replace_operands() 
                                 "env": "prod",
                                 "service": "api-api"
                             },
-                            "value": [0.000000019, "2"]
+                            "value": [0.000_000_019, "2"]
                         }
                     ],
                     "stats": expected_loki_stats_with(1819, 1, 1)
@@ -10745,9 +10773,9 @@ async fn query_endpoint_applies_metric_binary_group_left_with_label_replace_oper
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
-    assert2::assert!(
+    assert!(
         body.pointer("/data/result")
             == Some(&json!([
                 {
@@ -10756,7 +10784,7 @@ async fn query_endpoint_applies_metric_binary_group_left_with_label_replace_oper
                         "env": "prod",
                         "service": "api-api"
                     },
-                    "value": [0.000000025, "0.666666666"]
+                    "value": [0.000_000_025, "0.666666666"]
                 },
                 {
                     "metric": {
@@ -10764,7 +10792,7 @@ async fn query_endpoint_applies_metric_binary_group_left_with_label_replace_oper
                         "env": "prod",
                         "service": "worker-api"
                     },
-                    "value": [0.000000025, "0.333333333"]
+                    "value": [0.000_000_025, "0.333333333"]
                 }
             ]))
     );
@@ -10786,9 +10814,9 @@ async fn query_endpoint_applies_metric_binary_comparison_group_left_with_label_r
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
-    assert2::assert!(
+    assert!(
         body.pointer("/data/result")
             == Some(&json!([
                 {
@@ -10797,7 +10825,7 @@ async fn query_endpoint_applies_metric_binary_comparison_group_left_with_label_r
                         "env": "prod",
                         "service": "api-api"
                     },
-                    "value": [0.000000025, "1"]
+                    "value": [0.000_000_025, "1"]
                 },
                 {
                     "metric": {
@@ -10805,7 +10833,7 @@ async fn query_endpoint_applies_metric_binary_comparison_group_left_with_label_r
                         "env": "prod",
                         "service": "worker-api"
                     },
-                    "value": [0.000000025, "1"]
+                    "value": [0.000_000_025, "1"]
                 }
             ]))
     );
@@ -10827,8 +10855,8 @@ async fn query_endpoint_accepts_label_join_metric_query() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -10842,7 +10870,7 @@ async fn query_endpoint_accepts_label_join_metric_query() {
                                 "env": "prod",
                                 "joined": "api/prod/"
                             },
-                            "value": [0.000000019, "1"]
+                            "value": [0.000_000_019, "1"]
                         }
                     ],
                     "stats": expected_loki_stats_with(1819, 1, 1)
@@ -10867,9 +10895,9 @@ async fn query_endpoint_rejects_parenthesized_label_join_metric_query_like_loki(
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(response.status() == StatusCode::BAD_REQUEST);
     let body = text_body(response).await;
-    assert2::assert!(body.contains("expecting range aggregation"));
+    assert!(body.contains("expecting range aggregation"), "{body}");
 }
 
 #[tokio::test]
@@ -10888,7 +10916,7 @@ async fn query_endpoint_rejects_metric_pipeline_errors() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(response.status() == StatusCode::BAD_REQUEST);
     assert_loki_error(&json_body(response).await, "bad_data", "JSONParserErr");
 }
 
@@ -10910,8 +10938,8 @@ async fn query_endpoint_accepts_fractional_unix_seconds_time() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(json_body(response).await == expected_api_error());
+    assert!(response.status() == StatusCode::OK);
+    assert!(json_body(response).await == expected_api_error());
 }
 
 #[tokio::test]
@@ -10932,9 +10960,9 @@ async fn query_endpoint_includes_loki_stats_object() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
-    assert2::assert!(
+    assert!(
         body.pointer("/data/stats")
             .and_then(Value::as_object)
             .is_some()
@@ -10973,7 +11001,7 @@ async fn query_endpoint_populates_loki_stats_from_planned_cold_blocks() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
     check!(body["data"]["stats"]["store"]["compressedBytes"] == expected_block_bytes);
     check!(body["data"]["stats"]["store"]["decompressedBytes"] == expected_block_bytes);
@@ -11014,7 +11042,7 @@ async fn metric_query_endpoint_populates_loki_stats_from_planned_cold_blocks() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
     check!(body["data"]["resultType"] == "vector");
     check!(body["data"]["result"][0]["value"][1] == "1");
@@ -11055,8 +11083,8 @@ async fn metric_query_endpoint_splits_stats_for_cold_blocks_and_hot_tail_samples
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -11069,7 +11097,7 @@ async fn metric_query_endpoint_splits_stats_for_cold_blocks_and_hot_tail_samples
                                 "detected_level": "unknown",
                                 "env": "dev"
                             },
-                            "value": [0.00000003, "1"]
+                            "value": [0.000_000_03, "1"]
                         },
                         {
                             "metric": {
@@ -11077,7 +11105,7 @@ async fn metric_query_endpoint_splits_stats_for_cold_blocks_and_hot_tail_samples
                                 "detected_level": "unknown",
                                 "env": "prod"
                             },
-                            "value": [0.00000003, "1"]
+                            "value": [0.000_000_03, "1"]
                         }
                     ],
                     "stats": expected_loki_mixed_stats_with(1819, 1, 1, 1)
@@ -11127,8 +11155,8 @@ async fn query_endpoint_merges_cold_blocks_with_hot_wal_tail() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -11191,8 +11219,8 @@ async fn query_endpoint_uses_updated_shared_compaction_frontier_for_hot_tail() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -11246,8 +11274,8 @@ async fn query_endpoint_applies_limit_to_stream_results() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -11301,8 +11329,8 @@ async fn query_endpoint_applies_backward_direction_before_limit() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -11356,8 +11384,8 @@ async fn query_endpoint_defaults_to_backward_direction_before_limit() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -11397,8 +11425,8 @@ async fn query_endpoint_rejects_invalid_direction() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert2::assert!(text_body(response).await == "invalid direction 'sideways'");
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(text_body(response).await == "invalid direction 'sideways'");
 }
 
 #[tokio::test]
@@ -11432,11 +11460,11 @@ async fn tail_endpoint_streams_hot_wal_tail_over_websocket() {
         .insert("X-Scope-OrgID", "tenant-a".parse().unwrap());
 
     let (mut socket, response) = connect_async(request).await.unwrap();
-    assert2::assert!(response.status() == StatusCode::SWITCHING_PROTOCOLS);
+    assert!(response.status() == StatusCode::SWITCHING_PROTOCOLS);
     let message = socket.next().await.unwrap().unwrap();
     let frame: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
 
-    assert2::assert!(
+    assert!(
         frame
             == json!({
                 "streams": [
@@ -11473,7 +11501,7 @@ async fn tail_endpoint_streams_hot_wal_tail_over_websocket() {
     let frame: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
     server.abort();
 
-    assert2::assert!(
+    assert!(
         frame
             == json!({
                     "streams": [
@@ -11525,12 +11553,12 @@ async fn tail_endpoint_applies_limit_to_hot_wal_tail_frame() {
         .insert("X-Scope-OrgID", "tenant-a".parse().unwrap());
 
     let (mut socket, response) = connect_async(request).await.unwrap();
-    assert2::assert!(response.status() == StatusCode::SWITCHING_PROTOCOLS);
+    assert!(response.status() == StatusCode::SWITCHING_PROTOCOLS);
     let message = socket.next().await.unwrap().unwrap();
     let frame: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
     server.abort();
 
-    assert2::assert!(
+    assert!(
         frame
             == json!({
                 "streams": [
@@ -11582,7 +11610,7 @@ async fn tail_endpoint_defaults_limit_to_one_hundred_entries() {
         .insert("X-Scope-OrgID", "tenant-a".parse().unwrap());
 
     let (mut socket, response) = connect_async(request).await.unwrap();
-    assert2::assert!(response.status() == StatusCode::SWITCHING_PROTOCOLS);
+    assert!(response.status() == StatusCode::SWITCHING_PROTOCOLS);
     let message = socket.next().await.unwrap().unwrap();
     let frame: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
     server.abort();
@@ -11619,16 +11647,17 @@ async fn tail_endpoint_rejects_delay_for_over_five_seconds() {
     let tokio_tungstenite::tungstenite::Error::Http(response) = error else {
         panic!("expected HTTP websocket error");
     };
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(
         response
             .headers()
             .get("content-type")
             .and_then(|value| value.to_str().ok())
             .is_some_and(|value| value.starts_with("text/plain"))
     );
-    assert2::assert!(
-        response.body().as_deref() == Some("delay_for can't be greater than 5".as_bytes())
+    assert_eq!(
+        response.body().as_deref(),
+        Some("delay_for can't be greater than 5".as_bytes())
     );
 }
 
@@ -11650,7 +11679,7 @@ async fn tail_endpoint_accepts_delay_for_at_five_seconds() {
         .insert("X-Scope-OrgID", "tenant-a".parse().unwrap());
 
     let (mut socket, response) = connect_async(request).await.unwrap();
-    assert2::assert!(response.status() == StatusCode::SWITCHING_PROTOCOLS);
+    assert!(response.status() == StatusCode::SWITCHING_PROTOCOLS);
     let _ = socket.close(None).await;
     server.abort();
 }
@@ -11689,8 +11718,8 @@ async fn tail_endpoint_delays_fresh_records_when_delay_for_is_set() {
         .insert("X-Scope-OrgID", "tenant-a".parse().unwrap());
 
     let (mut socket, response) = connect_async(request).await.unwrap();
-    assert2::assert!(response.status() == StatusCode::SWITCHING_PROTOCOLS);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::SWITCHING_PROTOCOLS);
+    assert!(
         timeout(Duration::from_millis(150), socket.next())
             .await
             .is_err()
@@ -11741,7 +11770,7 @@ async fn compactor_delete_requests_filter_querier_tail_results() {
         )
         .await
         .unwrap();
-    assert2::assert!(delete_response.status() == StatusCode::NO_CONTENT);
+    assert!(delete_response.status() == StatusCode::NO_CONTENT);
 
     let dir = tempfile::tempdir().unwrap().keep();
     let mut label_index = LabelIndex::default();
@@ -11815,7 +11844,7 @@ async fn compactor_delete_requests_filter_querier_tail_results() {
         .insert("X-Scope-OrgID", "tenant-a".parse().unwrap());
 
     let (mut socket, response) = connect_async(request).await.unwrap();
-    assert2::assert!(response.status() == StatusCode::SWITCHING_PROTOCOLS);
+    assert!(response.status() == StatusCode::SWITCHING_PROTOCOLS);
     let message = timeout(Duration::from_secs(2), socket.next())
         .await
         .unwrap()
@@ -11824,7 +11853,7 @@ async fn compactor_delete_requests_filter_querier_tail_results() {
     let frame: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
     server.abort();
 
-    assert2::assert!(
+    assert!(
         frame
             == json!({
                 "streams": [
@@ -11859,8 +11888,8 @@ async fn query_range_endpoint_applies_start_end_and_tenant() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(json_body(response).await == expected_api_error());
+    assert!(response.status() == StatusCode::OK);
+    assert!(json_body(response).await == expected_api_error());
 }
 
 #[tokio::test]
@@ -11880,8 +11909,8 @@ async fn query_range_endpoint_returns_streams_as_parquet_when_requested() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         response
             .headers()
             .get("content-type")
@@ -11891,26 +11920,26 @@ async fn query_range_endpoint_returns_streams_as_parquet_when_requested() {
     let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
     let mut reader = ParquetRecordBatchReader::try_new(body, 1024).unwrap();
     let batch = reader.next().unwrap().unwrap();
-    assert2::assert!(reader.next().is_none());
+    assert!(reader.next().is_none());
 
-    assert2::assert!(batch.num_rows() == 1);
-    assert2::assert!(batch.schema().field(0).name().as_str() == "timestamp");
-    assert2::assert!(
+    assert!(batch.num_rows() == 1);
+    check!(batch.schema().field(0).name() == "timestamp");
+    check!(
         batch.schema().field(0).data_type()
             == &DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into()))
     );
-    assert2::assert!(batch.schema().field(1).name().as_str() == "labels");
-    assert2::assert!(batch.schema().field(2).name().as_str() == "line");
-    assert2::assert!(batch.schema().field(2).data_type() == &DataType::Utf8);
+    check!(batch.schema().field(1).name() == "labels");
+    check!(batch.schema().field(2).name() == "line");
+    check!(batch.schema().field(2).data_type() == &DataType::Utf8);
 
     let timestamps = batch
         .column(0)
         .as_any()
         .downcast_ref::<TimestampNanosecondArray>()
         .unwrap();
-    assert2::assert!(timestamps.value(0) == 19);
+    assert!(timestamps.value(0) == 19);
     let labels = batch.column(1).as_any().downcast_ref::<MapArray>().unwrap();
-    assert2::assert!(labels.value_offsets() == &[0, 3]);
+    assert!(labels.value_offsets() == &[0, 3]);
     let keys = labels
         .keys()
         .as_any()
@@ -11934,7 +11963,7 @@ async fn query_range_endpoint_returns_streams_as_parquet_when_requested() {
         .as_any()
         .downcast_ref::<StringArray>()
         .unwrap();
-    assert2::assert!(lines.value(0) == "api error");
+    assert!(lines.value(0) == "api error");
 }
 
 #[tokio::test]
@@ -11970,7 +11999,7 @@ async fn query_range_endpoint_ignores_zero_quality_parquet_accept() {
 
 #[tokio::test]
 async fn query_range_metric_endpoint_fans_out_pipe_separated_tenant_header() {
-    let (state, tenant_a_bytes, tenant_b_bytes) = multi_tenant_fixture();
+    let (state, prod_bytes, stage_bytes) = multi_tenant_fixture();
     let app = loki_router(state);
 
     let response = app
@@ -11986,8 +12015,8 @@ async fn query_range_metric_endpoint_fans_out_pipe_separated_tenant_header() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -12001,7 +12030,7 @@ async fn query_range_metric_endpoint_fans_out_pipe_separated_tenant_header() {
                                 "env": "prod"
                             },
                             "values": [
-                                [0.000000029, "1"]
+                                [0.000_000_029, "1"]
                             ]
                         },
                         {
@@ -12011,12 +12040,12 @@ async fn query_range_metric_endpoint_fans_out_pipe_separated_tenant_header() {
                                 "env": "stage"
                             },
                             "values": [
-                                [0.000000029, "1"]
+                                [0.000_000_029, "1"]
                             ]
                         }
                     ],
                     "stats": expected_loki_stats_with(
-                        tenant_a_bytes + tenant_b_bytes,
+                        prod_bytes + stage_bytes,
                         2,
                         2
                     )
@@ -12042,8 +12071,8 @@ async fn query_range_endpoint_returns_metrics_as_parquet_when_requested() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         response
             .headers()
             .get("content-type")
@@ -12053,17 +12082,17 @@ async fn query_range_endpoint_returns_metrics_as_parquet_when_requested() {
     let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
     let mut reader = ParquetRecordBatchReader::try_new(body, 1024).unwrap();
     let batch = reader.next().unwrap().unwrap();
-    assert2::assert!(reader.next().is_none());
+    assert!(reader.next().is_none());
 
-    assert2::assert!(batch.num_rows() == 3);
-    assert2::assert!(batch.schema().field(0).name().as_str() == "timestamp");
-    assert2::assert!(
+    assert!(batch.num_rows() == 3);
+    check!(batch.schema().field(0).name() == "timestamp");
+    check!(
         batch.schema().field(0).data_type()
             == &DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into()))
     );
-    assert2::assert!(batch.schema().field(1).name().as_str() == "labels");
-    assert2::assert!(batch.schema().field(2).name().as_str() == "value");
-    assert2::assert!(batch.schema().field(2).data_type() == &DataType::Float64);
+    check!(batch.schema().field(1).name() == "labels");
+    check!(batch.schema().field(2).name() == "value");
+    check!(batch.schema().field(2).data_type() == &DataType::Float64);
 
     let timestamps = batch
         .column(0)
@@ -12074,7 +12103,7 @@ async fn query_range_endpoint_returns_metrics_as_parquet_when_requested() {
         check!(timestamps.value(index) == want);
     }
     let labels = batch.column(1).as_any().downcast_ref::<MapArray>().unwrap();
-    assert2::assert!(labels.value_offsets() == &[0, 0, 0, 0]);
+    assert!(labels.value_offsets() == &[0, 0, 0, 0]);
     let values = batch
         .column(2)
         .as_any()
@@ -12101,9 +12130,9 @@ async fn query_range_endpoint_line_format_can_reference_log_timestamp() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
-    assert2::assert!(body.pointer("/data/result/0/values") == Some(&json!([["19", "19"]])));
+    assert!(body.pointer("/data/result/0/values") == Some(&json!([["19", "19"]])));
 }
 
 #[tokio::test]
@@ -12122,11 +12151,9 @@ async fn query_range_endpoint_line_format_accepts_line_and_timestamp_aliases() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
-    assert2::assert!(
-        body.pointer("/data/result/0/values") == Some(&json!([["19", "api error 19"]]))
-    );
+    assert!(body.pointer("/data/result/0/values") == Some(&json!([["19", "api error 19"]])));
 }
 
 #[tokio::test]
@@ -12149,9 +12176,9 @@ async fn query_range_endpoint_line_format_formats_timestamp_with_date_helper() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
-    assert2::assert!(body.pointer("/data/result/0/values") == Some(&json!([["19", "1970-01-01"]])));
+    assert!(body.pointer("/data/result/0/values") == Some(&json!([["19", "1970-01-01"]])));
 }
 
 #[tokio::test]
@@ -12185,7 +12212,7 @@ async fn query_range_endpoint_logfmt_sanitizes_ansi_prefixed_field_names() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
     let stream = body.pointer("/data/result/0/stream").unwrap();
     check!(stream.get("_31mstatus") == Some(&json!("503")));
@@ -12213,9 +12240,9 @@ async fn query_range_endpoint_line_format_converts_epoch_strings_with_unix_to_ti
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
-    assert2::assert!(body.pointer("/data/result/0/values") == Some(&json!([["19", "2023-03-23"]])));
+    assert!(body.pointer("/data/result/0/values") == Some(&json!([["19", "2023-03-23"]])));
 }
 
 #[tokio::test]
@@ -12238,9 +12265,9 @@ async fn query_range_endpoint_line_format_parses_dates_with_to_date_helpers() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
-    assert2::assert!(
+    assert!(
         body.pointer("/data/result/0/values") == Some(&json!([["19", "1635811200 1635825600"]]))
     );
 }
@@ -12267,7 +12294,7 @@ async fn query_range_endpoint_line_format_exposes_now_template_helper() {
         .unwrap();
     let after = current_unix_epoch_nanos();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
     let value = body
         .pointer("/data/result/0/values/0/1")
@@ -12275,8 +12302,8 @@ async fn query_range_endpoint_line_format_exposes_now_template_helper() {
         .unwrap()
         .parse::<u128>()
         .unwrap();
-    assert2::assert!(value >= before);
-    assert2::assert!(value <= after);
+    assert!(value >= before);
+    assert!(value <= after);
 }
 
 #[tokio::test]
@@ -12299,11 +12326,9 @@ async fn query_range_endpoint_line_format_ranges_over_from_json_arrays() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
-    assert2::assert!(
-        body.pointer("/data/result/0/values") == Some(&json!([["19", "rate=30;sum=15;"]]))
-    );
+    assert!(body.pointer("/data/result/0/values") == Some(&json!([["19", "rate=30;sum=15;"]])));
 }
 
 #[tokio::test]
@@ -12326,11 +12351,9 @@ async fn query_range_endpoint_line_format_ranges_with_current_dot_over_from_json
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
-    assert2::assert!(
-        body.pointer("/data/result/0/values") == Some(&json!([["19", "rate=30;sum=15;"]]))
-    );
+    assert!(body.pointer("/data/result/0/values") == Some(&json!([["19", "rate=30;sum=15;"]])));
 }
 
 #[tokio::test]
@@ -12353,11 +12376,9 @@ async fn query_range_endpoint_line_format_ranges_with_index_and_value_variables(
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
-    assert2::assert!(
-        body.pointer("/data/result/0/values") == Some(&json!([["19", "0:rate=30;1:sum=15;"]]))
-    );
+    assert!(body.pointer("/data/result/0/values") == Some(&json!([["19", "0:rate=30;1:sum=15;"]])));
 }
 
 #[tokio::test]
@@ -12380,11 +12401,9 @@ async fn query_range_endpoint_line_format_ranges_over_from_json_objects() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
-    assert2::assert!(
-        body.pointer("/data/result/0/values") == Some(&json!([["19", "rate=30;sum=15;"]]))
-    );
+    assert!(body.pointer("/data/result/0/values") == Some(&json!([["19", "rate=30;sum=15;"]])));
 }
 
 #[tokio::test]
@@ -12407,9 +12426,9 @@ async fn query_range_endpoint_line_format_uses_range_else_for_empty_from_json_ar
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
-    assert2::assert!(body.pointer("/data/result/0/values") == Some(&json!([["19", "none"]])));
+    assert!(body.pointer("/data/result/0/values") == Some(&json!([["19", "none"]])));
 }
 
 #[tokio::test]
@@ -12432,9 +12451,9 @@ async fn query_range_endpoint_line_format_applies_go_template_index_and_slice_he
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
-    assert2::assert!(body.pointer("/data/result/0/values") == Some(&json!([["19", "worker|bcd"]])));
+    assert!(body.pointer("/data/result/0/values") == Some(&json!([["19", "worker|bcd"]])));
 }
 
 #[tokio::test]
@@ -12457,11 +12476,9 @@ async fn query_range_endpoint_line_format_applies_integer_math_template_helpers(
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
-    assert2::assert!(
-        body.pointer("/data/result/0/values") == Some(&json!([["19", "10 3 30 5 1"]]))
-    );
+    assert!(body.pointer("/data/result/0/values") == Some(&json!([["19", "10 3 30 5 1"]])));
 }
 
 #[tokio::test]
@@ -12484,9 +12501,9 @@ async fn query_range_endpoint_line_format_applies_float_math_template_helpers() 
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
-    assert2::assert!(
+    assert!(
         body.pointer("/data/result/0/values")
             == Some(&json!([["19", "10.5 2 27.5 1.25 124 123.556"]]))
     );
@@ -12512,11 +12529,9 @@ async fn query_range_endpoint_line_format_applies_base64_template_helpers() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
-    assert2::assert!(
-        body.pointer("/data/result/0/values") == Some(&json!([["19", "aGVsbG8= hello"]]))
-    );
+    assert!(body.pointer("/data/result/0/values") == Some(&json!([["19", "aGVsbG8= hello"]])));
 }
 
 #[tokio::test]
@@ -12539,11 +12554,9 @@ async fn query_range_endpoint_line_format_applies_measurement_template_helpers()
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
-    assert2::assert!(
-        body.pointer("/data/result/0/values") == Some(&json!([["19", "90 0.25 1572864"]]))
-    );
+    assert!(body.pointer("/data/result/0/values") == Some(&json!([["19", "90 0.25 1572864"]])));
 }
 
 #[tokio::test]
@@ -12566,11 +12579,9 @@ async fn query_range_endpoint_line_format_applies_printf_template_helper() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
-    assert2::assert!(
-        body.pointer("/data/result/0/values") == Some(&json!([["19", "status=500 GET  "]]))
-    );
+    assert!(body.pointer("/data/result/0/values") == Some(&json!([["19", "status=500 GET  "]])));
 }
 
 #[tokio::test]
@@ -12593,9 +12604,9 @@ async fn query_range_endpoint_line_format_applies_go_template_print_helpers() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
-    assert2::assert!(
+    assert!(
         body.pointer("/data/result/0/values") == Some(&json!([["19", "status=500|a%3D1+b%3Dtwo"]]))
     );
 }
@@ -12620,9 +12631,9 @@ async fn query_range_endpoint_line_format_applies_go_template_escape_helpers() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
-    assert2::assert!(
+    assert!(
         body.pointer("/data/result/0/values")
             == Some(&json!([[
                 "19",
@@ -12651,9 +12662,9 @@ async fn query_range_endpoint_line_format_applies_conditional_template_blocks() 
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
-    assert2::assert!(body.pointer("/data/result/0/values") == Some(&json!([["19", "error"]])));
+    assert!(body.pointer("/data/result/0/values") == Some(&json!([["19", "error"]])));
 }
 
 #[tokio::test]
@@ -12676,9 +12687,9 @@ async fn query_range_endpoint_line_format_applies_control_template_variable_decl
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
-    assert2::assert!(
+    assert!(
         body.pointer("/data/result/0/values")
             == Some(&json!([["19", "line=api error|route=checkout/checkout"]]))
     );
@@ -12704,11 +12715,9 @@ async fn query_range_endpoint_line_format_can_reference_root_fields() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
-    assert2::assert!(
-        body.pointer("/data/result/0/values") == Some(&json!([["19", "inner=200 root=api"]]))
-    );
+    assert!(body.pointer("/data/result/0/values") == Some(&json!([["19", "inner=200 root=api"]])));
 }
 
 #[tokio::test]
@@ -12731,9 +12740,9 @@ async fn query_range_endpoint_line_format_applies_json_template_truthiness() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
-    assert2::assert!(
+    assert!(
         body.pointer("/data/result/0/values")
             == Some(&json!([[
                 "19",
@@ -12762,11 +12771,9 @@ async fn query_range_endpoint_line_format_applies_else_with_template_blocks() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
-    assert2::assert!(
-        body.pointer("/data/result/0/values") == Some(&json!([["19", "fallback=worker"]]))
-    );
+    assert!(body.pointer("/data/result/0/values") == Some(&json!([["19", "fallback=worker"]])));
 }
 
 #[tokio::test]
@@ -12789,9 +12796,9 @@ async fn query_range_endpoint_line_format_applies_boolean_template_combinators()
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
-    assert2::assert!(body.pointer("/data/result/0/values") == Some(&json!([["19", "matched"]])));
+    assert!(body.pointer("/data/result/0/values") == Some(&json!([["19", "matched"]])));
 }
 
 #[tokio::test]
@@ -12814,9 +12821,9 @@ async fn query_range_endpoint_line_format_applies_ordering_template_helpers() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
-    assert2::assert!(body.pointer("/data/result/0/values") == Some(&json!([["19", "matched"]])));
+    assert!(body.pointer("/data/result/0/values") == Some(&json!([["19", "matched"]])));
 }
 
 #[tokio::test]
@@ -12839,11 +12846,9 @@ async fn query_range_endpoint_line_format_applies_template_variable_assignments(
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
-    assert2::assert!(
-        body.pointer("/data/result/0/values") == Some(&json!([["19", "seen=api error"]]))
-    );
+    assert!(body.pointer("/data/result/0/values") == Some(&json!([["19", "seen=api error"]])));
 }
 
 #[tokio::test]
@@ -12866,11 +12871,9 @@ async fn query_range_endpoint_line_format_reassigns_template_variables() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
-    assert2::assert!(
-        body.pointer("/data/result/0/values") == Some(&json!([["19", "seen=api error"]]))
-    );
+    assert!(body.pointer("/data/result/0/values") == Some(&json!([["19", "seen=api error"]])));
 }
 
 #[tokio::test]
@@ -12893,8 +12896,8 @@ async fn query_range_endpoint_keep_stage_suppresses_detected_level_fallback() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -12931,8 +12934,8 @@ async fn query_range_endpoint_accepts_rfc3339_time_bounds() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(json_body(response).await == expected_api_error());
+    assert!(response.status() == StatusCode::OK);
+    assert!(json_body(response).await == expected_api_error());
 }
 
 #[tokio::test]
@@ -12974,8 +12977,8 @@ async fn query_range_endpoint_applies_interval_to_stream_results() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -13028,9 +13031,9 @@ async fn query_range_endpoint_excludes_stream_entries_at_end_bound() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
-    assert2::assert!(body.pointer("/data/result/0/values") == Some(&json!([["19", "api error"]])));
+    assert!(body.pointer("/data/result/0/values") == Some(&json!([["19", "api error"]])));
 }
 
 #[tokio::test]
@@ -13049,8 +13052,8 @@ async fn query_range_endpoint_accepts_zero_interval_as_noop() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(json_body(response).await == expected_api_error());
+    assert!(response.status() == StatusCode::OK);
+    assert!(json_body(response).await == expected_api_error());
 }
 
 #[tokio::test]
@@ -13069,8 +13072,8 @@ async fn query_range_endpoint_returns_loki_error_for_negative_interval() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert2::assert!(text_body(response).await == "interval must be >= 0");
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(text_body(response).await == "interval must be >= 0");
 }
 
 #[tokio::test]
@@ -13089,8 +13092,8 @@ async fn query_range_endpoint_applies_since_when_start_is_absent() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -13122,8 +13125,8 @@ async fn query_range_endpoint_uses_default_end_with_since() {
     // `since` with no explicit `end` resolves `end = now`, `start = now - since`, so the
     // resolved range equals `since` (= 2_000_000_000s). Real Loki 3.4.2 caps the resolved
     // query range at 30d1h (721h), so this 555555h33m20s window is rejected with 400.
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(
         text_body(response).await
             == "the query time range exceeds the limit (query length: 555555h33m20s, limit: 30d1h)"
     );
@@ -13145,8 +13148,8 @@ async fn query_range_endpoint_returns_loki_error_for_invalid_since() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(
         text_body(response).await
             == "could not parse 'since' parameter: not a valid duration string: \"-1\""
     );
@@ -13168,8 +13171,8 @@ async fn query_range_endpoint_defaults_to_recent_range() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -13198,8 +13201,8 @@ async fn query_range_endpoint_returns_count_over_time_matrix_json() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -13213,7 +13216,7 @@ async fn query_range_endpoint_returns_count_over_time_matrix_json() {
                                 "env": "prod"
                             },
                             "values": [
-                                [0.00000003, "1"]
+                                [0.000_000_03, "1"]
                             ]
                         }
                     ],
@@ -13239,8 +13242,8 @@ async fn query_range_endpoint_absent_over_time_uses_selector_labels_only() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -13253,8 +13256,8 @@ async fn query_range_endpoint_absent_over_time_uses_selector_labels_only() {
                                 "env": "prod"
                             },
                             "values": [
-                                [0.000000001, "1"],
-                                [0.000000002, "1"]
+                                [0.000_000_001, "1"],
+                                [0.000_000_002, "1"]
                             ]
                         }
                     ],
@@ -13280,8 +13283,8 @@ async fn query_range_endpoint_applies_negative_count_over_time_offset() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -13295,7 +13298,7 @@ async fn query_range_endpoint_applies_negative_count_over_time_offset() {
                                 "env": "prod"
                             },
                             "values": [
-                                [0.00000001, "1"]
+                                [0.000_000_01, "1"]
                             ]
                         }
                     ],
@@ -13321,8 +13324,8 @@ async fn query_range_endpoint_accepts_range_selector_before_pipeline() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -13336,7 +13339,7 @@ async fn query_range_endpoint_accepts_range_selector_before_pipeline() {
                                 "env": "prod"
                             },
                             "values": [
-                                [0.00000003, "1"]
+                                [0.000_000_03, "1"]
                             ]
                         }
                     ],
@@ -13365,8 +13368,8 @@ async fn query_range_endpoint_rejects_signed_vector_function_literals_like_loki(
     // Real Loki 3.4.2 rejects a signed literal inside `vector(...)`: a unary `-` is
     // not a NUMBER token, so the LogQL parser errors at column 8 (same as the instant
     // `/query` endpoint — see `query_endpoint_rejects_signed_vector_function_literals_like_loki`).
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(
         text_body(response).await
             == "parse error at line 1, col 8: syntax error: unexpected -, expecting NUMBER"
     );
@@ -13388,8 +13391,8 @@ async fn query_range_endpoint_accepts_scalar_expression_as_matrix() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -13400,8 +13403,8 @@ async fn query_range_endpoint_accepts_scalar_expression_as_matrix() {
                             "metric": {},
                             "values": [
                                 [0, "3"],
-                                [0.00000001, "3"],
-                                [0.00000002, "3"]
+                                [0.000_000_01, "3"],
+                                [0.000_000_02, "3"]
                             ]
                         }
                     ],
@@ -13427,8 +13430,8 @@ async fn query_range_endpoint_accepts_vector_arithmetic_expression() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -13439,8 +13442,8 @@ async fn query_range_endpoint_accepts_vector_arithmetic_expression() {
                             "metric": {},
                             "values": [
                                 [0, "1.5"],
-                                [0.00000001, "1.5"],
-                                [0.00000002, "1.5"]
+                                [0.000_000_01, "1.5"],
+                                [0.000_000_02, "1.5"]
                             ]
                         }
                     ],
@@ -13466,8 +13469,8 @@ async fn query_range_endpoint_accepts_vector_modulo_expression() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -13478,8 +13481,8 @@ async fn query_range_endpoint_accepts_vector_modulo_expression() {
                             "metric": {},
                             "values": [
                                 [0, "1"],
-                                [0.00000001, "1"],
-                                [0.00000002, "1"]
+                                [0.000_000_01, "1"],
+                                [0.000_000_02, "1"]
                             ]
                         }
                     ],
@@ -13505,8 +13508,8 @@ async fn query_range_endpoint_accepts_parenthesized_vector_expression() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -13517,8 +13520,8 @@ async fn query_range_endpoint_accepts_parenthesized_vector_expression() {
                             "metric": {},
                             "values": [
                                 [0, "2"],
-                                [0.00000001, "2"],
-                                [0.00000002, "2"]
+                                [0.000_000_01, "2"],
+                                [0.000_000_02, "2"]
                             ]
                         }
                     ],
@@ -13544,8 +13547,8 @@ async fn query_range_endpoint_accepts_literal_vector_arithmetic_expression() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -13556,8 +13559,8 @@ async fn query_range_endpoint_accepts_literal_vector_arithmetic_expression() {
                             "metric": {},
                             "values": [
                                 [0, "6"],
-                                [0.00000001, "6"],
-                                [0.00000002, "6"]
+                                [0.000_000_01, "6"],
+                                [0.000_000_02, "6"]
                             ]
                         }
                     ],
@@ -13583,8 +13586,8 @@ async fn query_range_endpoint_accepts_vector_bool_comparison_expression() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -13595,8 +13598,8 @@ async fn query_range_endpoint_accepts_vector_bool_comparison_expression() {
                             "metric": {},
                             "values": [
                                 [0, "0"],
-                                [0.00000001, "0"],
-                                [0.00000002, "0"]
+                                [0.000_000_01, "0"],
+                                [0.000_000_02, "0"]
                             ]
                         }
                     ],
@@ -13642,8 +13645,8 @@ async fn query_range_endpoint_returns_metric_timestamps_as_unix_seconds_numbers(
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -13687,8 +13690,8 @@ async fn query_range_endpoint_accepts_form_encoded_post_body() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -13702,7 +13705,7 @@ async fn query_range_endpoint_accepts_form_encoded_post_body() {
                                 "env": "prod"
                             },
                             "values": [
-                                [0.00000003, "1"]
+                                [0.000_000_03, "1"]
                             ]
                         }
                     ],
@@ -13728,9 +13731,9 @@ async fn query_range_endpoint_includes_loki_stats_object() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
-    assert2::assert!(
+    assert!(
         body.pointer("/data/stats")
             .and_then(Value::as_object)
             .is_some()
@@ -13753,8 +13756,8 @@ async fn query_range_endpoint_treats_integer_step_as_seconds() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -13768,8 +13771,8 @@ async fn query_range_endpoint_treats_integer_step_as_seconds() {
                                 "env": "prod"
                             },
                             "values": [
-                                [0.00000002, "1"],
-                                [10.00000002, "1"]
+                                [0.000_000_02, "1"],
+                                [10.000_000_02, "1"]
                             ]
                         }
                     ],
@@ -13795,8 +13798,8 @@ async fn query_range_endpoint_accepts_float_seconds_step_for_count_over_time_mat
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -13810,8 +13813,8 @@ async fn query_range_endpoint_accepts_float_seconds_step_for_count_over_time_mat
                                 "env": "prod"
                             },
                             "values": [
-                                [0.00000002, "1"],
-                                [0.00000003, "1"]
+                                [0.000_000_02, "1"],
+                                [0.000_000_03, "1"]
                             ]
                         }
                     ],
@@ -13837,8 +13840,8 @@ async fn query_range_endpoint_accepts_duration_step_for_count_over_time_matrix_j
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -13852,8 +13855,8 @@ async fn query_range_endpoint_accepts_duration_step_for_count_over_time_matrix_j
                                 "env": "prod"
                             },
                             "values": [
-                                [0.00000002, "1"],
-                                [10.00000002, "1"]
+                                [0.000_000_02, "1"],
+                                [10.000_000_02, "1"]
                             ]
                         }
                     ],
@@ -13879,8 +13882,8 @@ async fn query_range_endpoint_accepts_compound_duration_step_for_grafana() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -13894,7 +13897,7 @@ async fn query_range_endpoint_accepts_compound_duration_step_for_grafana() {
                                 "env": "prod"
                             },
                             "values": [
-                                [0.00000002, "1"]
+                                [0.000_000_02, "1"]
                             ]
                         }
                     ],
@@ -13920,8 +13923,8 @@ async fn query_range_endpoint_accepts_millisecond_duration_step_for_grafana() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -13935,8 +13938,8 @@ async fn query_range_endpoint_accepts_millisecond_duration_step_for_grafana() {
                                 "env": "prod"
                             },
                             "values": [
-                                [0.00000002, "1"],
-                                [1.00000002, "1"]
+                                [0.000_000_02, "1"],
+                                [1.000_000_02, "1"]
                             ]
                         }
                     ],
@@ -13962,8 +13965,8 @@ async fn query_range_endpoint_accepts_compound_duration_range_selector() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -13977,8 +13980,8 @@ async fn query_range_endpoint_accepts_compound_duration_range_selector() {
                                 "env": "prod"
                             },
                             "values": [
-                                [0.00000002, "1"],
-                                [0.00000003, "1"]
+                                [0.000_000_02, "1"],
+                                [0.000_000_03, "1"]
                             ]
                         }
                     ],
@@ -14004,8 +14007,8 @@ async fn query_range_endpoint_accepts_trailing_vector_grouping() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -14017,7 +14020,7 @@ async fn query_range_endpoint_accepts_trailing_vector_grouping() {
                                 "env": "prod"
                             },
                             "values": [
-                                [0.00000003, "1"]
+                                [0.000_000_03, "1"]
                             ]
                         }
                     ],
@@ -14045,8 +14048,8 @@ async fn query_endpoint_can_load_indexes_from_persisted_manifest() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(json_body(response).await == expected_api_error());
+    assert!(response.status() == StatusCode::OK);
+    assert!(json_body(response).await == expected_api_error());
 }
 
 #[tokio::test]
@@ -14067,8 +14070,8 @@ async fn query_endpoint_can_load_tenant_index_from_object_store_manifest() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(json_body(response).await == expected_api_error());
+    assert!(response.status() == StatusCode::OK);
+    assert!(json_body(response).await == expected_api_error());
 }
 
 #[tokio::test]
@@ -14089,8 +14092,8 @@ async fn query_endpoint_can_load_tenant_index_from_object_store_shard() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(json_body(response).await == expected_api_error());
+    assert!(response.status() == StatusCode::OK);
+    assert!(json_body(response).await == expected_api_error());
 }
 
 #[tokio::test]
@@ -14111,8 +14114,8 @@ async fn query_endpoint_can_load_tenant_index_from_object_store_shard_catalog() 
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(json_body(response).await == expected_api_error());
+    assert!(response.status() == StatusCode::OK);
+    assert!(json_body(response).await == expected_api_error());
 }
 
 #[tokio::test]
@@ -14133,8 +14136,8 @@ async fn query_endpoint_can_build_querier_from_object_store_shard_catalog_config
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(json_body(response).await == expected_api_error());
+    assert!(response.status() == StatusCode::OK);
+    assert!(json_body(response).await == expected_api_error());
 }
 
 #[tokio::test]
@@ -14157,8 +14160,8 @@ async fn service_router_builds_querier_role_from_object_store_shard_catalog_conf
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(json_body(response).await == expected_api_error());
+    assert!(response.status() == StatusCode::OK);
+    assert!(json_body(response).await == expected_api_error());
 }
 
 #[tokio::test]
@@ -14206,7 +14209,7 @@ async fn service_router_applies_query_authorizer_dependency_to_querier_role() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::FORBIDDEN);
+    assert!(response.status() == StatusCode::FORBIDDEN);
     assert_loki_error(
         &json_body(response).await,
         "forbidden",
@@ -14278,10 +14281,10 @@ async fn service_router_builds_querier_role_with_hot_tail_dependency() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
-            == expected_api_error_with_stats(expected_loki_ingester_stats_with(1))
+            == expected_api_error_with_stats(&expected_loki_ingester_stats_with(1))
     );
 }
 
@@ -14326,7 +14329,7 @@ async fn service_router_applies_configured_query_range_limit() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(response.status() == StatusCode::BAD_REQUEST);
     assert_loki_error(&json_body(response).await, "bad_data", "query range");
 }
 
@@ -14371,7 +14374,7 @@ async fn service_router_applies_configured_query_length_limit() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(response.status() == StatusCode::BAD_REQUEST);
     assert_loki_error(&json_body(response).await, "bad_data", "query length");
 }
 
@@ -14417,7 +14420,7 @@ async fn service_router_applies_configured_query_series_limit() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(response.status() == StatusCode::BAD_REQUEST);
     assert_loki_error(&json_body(response).await, "bad_data", "series");
 }
 
@@ -14470,7 +14473,7 @@ async fn service_router_applies_configured_query_bytes_limit() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(response.status() == StatusCode::BAD_REQUEST);
     assert_loki_error(&json_body(response).await, "bad_data", "bytes");
 }
 
@@ -14534,9 +14537,9 @@ async fn service_router_builds_querier_role_with_wal_consumer_hot_tail_poller() 
                 .await
                 .unwrap();
 
-            assert2::assert!(response.status() == StatusCode::OK);
+            assert!(response.status() == StatusCode::OK);
             let body = json_body(response).await;
-            if body == expected_api_error_with_stats(expected_loki_ingester_stats_with(1)) {
+            if body == expected_api_error_with_stats(&expected_loki_ingester_stats_with(1)) {
                 break body;
             }
             tokio::task::yield_now().await;
@@ -14545,7 +14548,7 @@ async fn service_router_builds_querier_role_with_wal_consumer_hot_tail_poller() 
     .await
     .unwrap();
 
-    assert2::assert!(body == expected_api_error_with_stats(expected_loki_ingester_stats_with(1)));
+    assert!(body == expected_api_error_with_stats(&expected_loki_ingester_stats_with(1)));
 }
 
 #[tokio::test]
@@ -14600,8 +14603,8 @@ async fn service_router_loads_persisted_frontier_for_configured_querier_hot_tail
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(json_body(response).await == expected_api_error());
+    assert!(response.status() == StatusCode::OK);
+    assert!(json_body(response).await == expected_api_error());
 }
 
 #[tokio::test]
@@ -14625,8 +14628,8 @@ async fn service_router_builds_configured_local_object_store_for_querier_role() 
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(json_body(response).await == expected_api_error());
+    assert!(response.status() == StatusCode::OK);
+    assert!(json_body(response).await == expected_api_error());
 }
 
 #[tokio::test]
@@ -14699,8 +14702,8 @@ async fn configured_object_store_query_returns_partial_warning_for_missing_block
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -14800,8 +14803,8 @@ async fn configured_object_store_backward_limited_query_stops_after_newest_block
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -14908,8 +14911,8 @@ async fn configured_object_store_query_merges_hot_tail_with_source_split_stats()
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -15007,8 +15010,8 @@ async fn configured_object_store_metric_query_returns_partial_warning_for_missin
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -15022,7 +15025,7 @@ async fn configured_object_store_metric_query_returns_partial_warning_for_missin
                                 "env": "prod"
                             },
                             "values": [
-                                [0.00000003, "1"]
+                                [0.000_000_03, "1"]
                             ]
                         }
                     ],
@@ -15050,7 +15053,7 @@ async fn query_endpoint_rejects_missing_tenant_header() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(response.status() == StatusCode::BAD_REQUEST);
     assert_loki_error(
         &json_body(response).await,
         "bad_data",
@@ -15074,7 +15077,7 @@ async fn query_endpoint_rejects_unauthorized_tenant_read() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::FORBIDDEN);
+    assert!(response.status() == StatusCode::FORBIDDEN);
     assert_loki_error(
         &json_body(response).await,
         "forbidden",
@@ -15098,8 +15101,8 @@ async fn query_endpoint_returns_loki_error_for_invalid_logql() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(
         text_body(response).await
             == "parse error at line 1, col 6: syntax error: unexpected $end, expecting STRING"
     );
@@ -15131,10 +15134,8 @@ async fn endpoints_return_loki_error_for_missing_query() {
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-        assert2::assert!(
-            text_body(response).await == "parse error : syntax error: unexpected $end"
-        );
+        assert!(response.status() == StatusCode::BAD_REQUEST);
+        assert!(text_body(response).await == "parse error : syntax error: unexpected $end");
     }
 }
 
@@ -15154,10 +15155,8 @@ async fn query_endpoint_returns_loki_error_for_invalid_limit() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert2::assert!(
-        text_body(response).await == "strconv.Atoi: parsing \"not-a-number\": invalid syntax"
-    );
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(text_body(response).await == "strconv.Atoi: parsing \"not-a-number\": invalid syntax");
 }
 
 #[tokio::test]
@@ -15176,8 +15175,8 @@ async fn query_endpoint_returns_loki_error_for_negative_limit() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert2::assert!(text_body(response).await == "limit must be a positive value");
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(text_body(response).await == "limit must be a positive value");
 }
 
 #[tokio::test]
@@ -15196,8 +15195,8 @@ async fn query_range_endpoint_returns_loki_error_for_invalid_step() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(
         text_body(response).await
             == "zero or negative query resolution step widths are not accepted. Try a positive integer"
     );
@@ -15219,10 +15218,8 @@ async fn query_range_endpoint_returns_loki_error_for_invalid_step_duration() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert2::assert!(
-        text_body(response).await == "cannot parse \"not-a-number\" to a valid duration"
-    );
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(text_body(response).await == "cannot parse \"not-a-number\" to a valid duration");
 }
 
 #[tokio::test]
@@ -15241,8 +15238,8 @@ async fn query_range_endpoint_returns_loki_error_for_excessive_resolution() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(
         text_body(response).await
             == "exceeded maximum resolution of 11,000 points per time series. Try increasing the value of the step parameter"
     );
@@ -15264,8 +15261,8 @@ async fn query_range_endpoint_rejects_loki_query_ranges_over_limit() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(
         text_body(response).await
             == "the query time range exceeds the limit (query length: 721h0m1s, limit: 30d1h)"
     );
@@ -15287,8 +15284,8 @@ async fn query_range_endpoint_returns_loki_error_for_invalid_start() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(
         text_body(response).await
             == "could not parse 'start' parameter: strconv.ParseInt: parsing \"not-a-number\": invalid syntax"
     );
@@ -15310,7 +15307,7 @@ async fn query_range_endpoint_rejects_ranges_over_configured_limit() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(response.status() == StatusCode::BAD_REQUEST);
     assert_loki_error(&json_body(response).await, "bad_data", "query range");
 }
 
@@ -15330,7 +15327,7 @@ async fn query_endpoint_rejects_series_over_configured_limit() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(response.status() == StatusCode::BAD_REQUEST);
     assert_loki_error(&json_body(response).await, "bad_data", "series");
 }
 
@@ -15350,7 +15347,7 @@ async fn query_endpoint_rejects_planned_block_bytes_over_configured_limit() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(response.status() == StatusCode::BAD_REQUEST);
     assert_loki_error(&json_body(response).await, "bad_data", "bytes");
 }
 
@@ -15377,8 +15374,8 @@ async fn metadata_endpoints_return_loki_parse_error_text_for_invalid_matcher() {
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-        assert2::assert!(
+        assert!(response.status() == StatusCode::BAD_REQUEST);
+        assert!(
             text_body(response).await
                 == "parse error at line 1, col 6: syntax error: unexpected $end, expecting STRING"
         );
@@ -15401,8 +15398,8 @@ async fn series_endpoint_returns_loki_error_for_invalid_time_bound() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(
         text_body(response).await
             == "could not parse 'start' parameter: strconv.ParseInt: parsing \"not-a-number\": invalid syntax"
     );
@@ -15426,8 +15423,8 @@ async fn series_endpoint_allows_missing_matcher_parameter_like_loki() {
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::OK);
-        assert2::assert!(
+        assert!(response.status() == StatusCode::OK, "{path}");
+        assert!(
             json_body(response).await
                 == json!({
                     "status": "success",
@@ -15460,8 +15457,8 @@ async fn metadata_endpoints_reject_loki_query_ranges_over_limit() {
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-        assert2::assert!(
+        assert!(response.status() == StatusCode::BAD_REQUEST);
+        assert!(
             text_body(response).await
                 == "the query time range exceeds the limit (query length: 721h0m1s, limit: 30d1h)"
         );
@@ -15486,8 +15483,8 @@ async fn labels_endpoint_returns_tenant_label_names() {
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::OK);
-        assert2::assert!(
+        assert!(response.status() == StatusCode::OK);
+        assert!(
             json_body(response).await
                 == json!({
                     "status": "success",
@@ -15523,8 +15520,8 @@ async fn empty_metadata_endpoints_return_loki_sparse_success_shapes() {
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::OK);
-        assert2::assert!(json_body(response).await == json!({ "status": "success" }));
+        assert!(response.status() == StatusCode::OK);
+        assert!(json_body(response).await == json!({ "status": "success" }));
     }
 
     for path in [
@@ -15546,8 +15543,8 @@ async fn empty_metadata_endpoints_return_loki_sparse_success_shapes() {
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::OK);
-        assert2::assert!(json_body(response).await == json!({}));
+        assert!(response.status() == StatusCode::OK);
+        assert!(json_body(response).await == json!({}));
     }
 }
 
@@ -15578,8 +15575,8 @@ async fn metadata_endpoints_hide_loki_detected_level_enrichment() {
         .await
         .unwrap();
 
-    assert2::assert!(labels_response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(labels_response.status() == StatusCode::OK);
+    assert!(
         json_body(labels_response).await
             == json!({
                 "status": "success",
@@ -15599,8 +15596,8 @@ async fn metadata_endpoints_hide_loki_detected_level_enrichment() {
         .await
         .unwrap();
 
-    assert2::assert!(series_response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(series_response.status() == StatusCode::OK);
+    assert!(
         json_body(series_response).await
             == json!({
                 "status": "success",
@@ -15643,8 +15640,8 @@ async fn labels_endpoint_includes_hot_wal_tail_label_names() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -15669,8 +15666,8 @@ async fn deprecated_api_prom_metadata_endpoints_return_loki_metadata() {
         )
         .await
         .unwrap();
-    assert2::assert!(label_response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(label_response.status() == StatusCode::OK);
+    assert!(
         json_body(label_response).await
             == json!({
                 "values": ["app", "env"]
@@ -15688,8 +15685,8 @@ async fn deprecated_api_prom_metadata_endpoints_return_loki_metadata() {
         )
         .await
         .unwrap();
-    assert2::assert!(values_response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(values_response.status() == StatusCode::OK);
+    assert!(
         json_body(values_response).await
             == json!({
                 "values": ["app", "env"]
@@ -15707,8 +15704,8 @@ async fn deprecated_api_prom_metadata_endpoints_return_loki_metadata() {
         )
         .await
         .unwrap();
-    assert2::assert!(series_response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(series_response.status() == StatusCode::OK);
+    assert!(
         json_body(series_response).await
             == json!({
                 "status": "success",
@@ -15735,8 +15732,8 @@ async fn deprecated_api_prom_metadata_endpoints_return_loki_metadata() {
         )
         .await
         .unwrap();
-    assert2::assert!(series_post_response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(series_post_response.status() == StatusCode::OK);
+    assert!(
         json_body(series_post_response).await
             == json!({
                 "status": "success",
@@ -15781,8 +15778,8 @@ async fn labels_endpoint_applies_time_range() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -15822,8 +15819,8 @@ async fn label_values_endpoint_applies_since_when_start_is_absent() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -15881,8 +15878,8 @@ async fn labels_endpoint_applies_since_with_default_end() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -15922,8 +15919,8 @@ async fn labels_endpoint_applies_selector_query() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -15951,8 +15948,8 @@ async fn label_metadata_endpoints_accept_form_encoded_post_body() {
         .await
         .unwrap();
 
-    assert2::assert!(labels_response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(labels_response.status() == StatusCode::OK);
+    assert!(
         json_body(labels_response).await
             == json!({
                 "status": "success",
@@ -15973,8 +15970,8 @@ async fn label_metadata_endpoints_accept_form_encoded_post_body() {
         .await
         .unwrap();
 
-    assert2::assert!(values_response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(values_response.status() == StatusCode::OK);
+    assert!(
         json_body(values_response).await
             == json!({
                 "status": "success",
@@ -15999,8 +15996,8 @@ async fn query_endpoint_accepts_grafana_loki_health_vector_expression() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -16009,7 +16006,7 @@ async fn query_endpoint_accepts_grafana_loki_health_vector_expression() {
                     "result": [
                         {
                             "metric": {},
-                            "value": [4000000000i64, "2"]
+                            "value": [4_000_000_000i64, "2"]
                         }
                     ],
                     "stats": expected_loki_stats()
@@ -16034,8 +16031,8 @@ async fn query_endpoint_accepts_vector_function_expression() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -16044,7 +16041,7 @@ async fn query_endpoint_accepts_vector_function_expression() {
                     "result": [
                         {
                             "metric": {},
-                            "value": [4000000000i64, "1.5"]
+                            "value": [4_000_000_000i64, "1.5"]
                         }
                     ],
                     "stats": expected_loki_stats()
@@ -16069,8 +16066,8 @@ async fn query_endpoint_accepts_scalar_arithmetic_expression() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -16099,8 +16096,8 @@ async fn query_endpoint_accepts_scientific_vector_function_expression() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -16109,7 +16106,7 @@ async fn query_endpoint_accepts_scientific_vector_function_expression() {
                     "result": [
                         {
                             "metric": {},
-                            "value": [4000000000i64, "0.25"]
+                            "value": [4_000_000_000i64, "0.25"]
                         }
                     ],
                     "stats": expected_loki_stats()
@@ -16136,8 +16133,8 @@ async fn query_endpoint_rejects_signed_vector_function_literals_like_loki() {
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-        assert2::assert!(
+        assert!(response.status() == StatusCode::BAD_REQUEST);
+        assert!(
             text_body(response).await
                 == format!(
                     "parse error at line 1, col 8: syntax error: unexpected {sign}, expecting NUMBER"
@@ -16167,8 +16164,8 @@ async fn query_endpoint_rejects_unspaced_vector_set_operators_like_loki() {
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-        assert2::assert!(
+        assert!(response.status() == StatusCode::BAD_REQUEST);
+        assert!(
             text_body(response).await
                 == "parse error at line 1, col 10: syntax error: unexpected IDENTIFIER"
         );
@@ -16191,8 +16188,8 @@ async fn query_endpoint_accepts_vector_arithmetic_expression() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -16201,7 +16198,7 @@ async fn query_endpoint_accepts_vector_arithmetic_expression() {
                     "result": [
                         {
                             "metric": {},
-                            "value": [4000000000i64, "2"]
+                            "value": [4_000_000_000i64, "2"]
                         }
                     ],
                     "stats": expected_loki_stats()
@@ -16226,8 +16223,8 @@ async fn query_endpoint_accepts_vector_power_and_modulo_expression() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -16236,7 +16233,7 @@ async fn query_endpoint_accepts_vector_power_and_modulo_expression() {
                     "result": [
                         {
                             "metric": {},
-                            "value": [4000000000i64, "9"]
+                            "value": [4_000_000_000i64, "9"]
                         }
                     ],
                     "stats": expected_loki_stats()
@@ -16261,8 +16258,8 @@ async fn query_endpoint_accepts_parenthesized_vector_expression() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -16271,7 +16268,7 @@ async fn query_endpoint_accepts_parenthesized_vector_expression() {
                     "result": [
                         {
                             "metric": {},
-                            "value": [4000000000i64, "9"]
+                            "value": [4_000_000_000i64, "9"]
                         }
                     ],
                     "stats": expected_loki_stats()
@@ -16296,8 +16293,8 @@ async fn query_endpoint_accepts_vector_literal_arithmetic_expression() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -16306,7 +16303,7 @@ async fn query_endpoint_accepts_vector_literal_arithmetic_expression() {
                     "result": [
                         {
                             "metric": {},
-                            "value": [4000000000i64, "6"]
+                            "value": [4_000_000_000i64, "6"]
                         }
                     ],
                     "stats": expected_loki_stats()
@@ -16331,8 +16328,8 @@ async fn query_endpoint_accepts_vector_and_expression() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -16341,7 +16338,7 @@ async fn query_endpoint_accepts_vector_and_expression() {
                     "result": [
                         {
                             "metric": {},
-                            "value": [4000000000i64, "2"]
+                            "value": [4_000_000_000i64, "2"]
                         }
                     ],
                     "stats": expected_loki_stats()
@@ -16366,8 +16363,8 @@ async fn query_endpoint_accepts_vector_or_expression() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -16376,7 +16373,7 @@ async fn query_endpoint_accepts_vector_or_expression() {
                     "result": [
                         {
                             "metric": {},
-                            "value": [4000000000i64, "2"]
+                            "value": [4_000_000_000i64, "2"]
                         }
                     ],
                     "stats": expected_loki_stats()
@@ -16401,8 +16398,8 @@ async fn query_endpoint_accepts_vector_unless_expression() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -16431,8 +16428,8 @@ async fn query_endpoint_accepts_vector_arithmetic_on_modifier() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -16441,7 +16438,7 @@ async fn query_endpoint_accepts_vector_arithmetic_on_modifier() {
                     "result": [
                         {
                             "metric": {},
-                            "value": [4000000000i64, "2"]
+                            "value": [4_000_000_000i64, "2"]
                         }
                     ],
                     "stats": expected_loki_stats()
@@ -16466,8 +16463,8 @@ async fn query_endpoint_accepts_vector_bool_comparison_ignoring_modifier() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -16476,7 +16473,7 @@ async fn query_endpoint_accepts_vector_bool_comparison_ignoring_modifier() {
                     "result": [
                         {
                             "metric": {},
-                            "value": [4000000000i64, "0"]
+                            "value": [4_000_000_000i64, "0"]
                         }
                     ],
                     "stats": expected_loki_stats()
@@ -16501,8 +16498,8 @@ async fn query_endpoint_accepts_vector_group_left_modifier() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -16511,7 +16508,7 @@ async fn query_endpoint_accepts_vector_group_left_modifier() {
                     "result": [
                         {
                             "metric": {},
-                            "value": [4000000000i64, "2"]
+                            "value": [4_000_000_000i64, "2"]
                         }
                     ],
                     "stats": expected_loki_stats()
@@ -16536,8 +16533,8 @@ async fn query_endpoint_accepts_vector_group_right_modifier() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -16546,7 +16543,7 @@ async fn query_endpoint_accepts_vector_group_right_modifier() {
                     "result": [
                         {
                             "metric": {},
-                            "value": [4000000000i64, "1"]
+                            "value": [4_000_000_000i64, "1"]
                         }
                     ],
                     "stats": expected_loki_stats()
@@ -16571,8 +16568,8 @@ async fn query_endpoint_accepts_label_replace_vector_function() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -16583,7 +16580,7 @@ async fn query_endpoint_accepts_label_replace_vector_function() {
                             "metric": {
                                 "service": "api-"
                             },
-                            "value": [4000000000i64, "1"]
+                            "value": [4_000_000_000i64, "1"]
                         }
                     ],
                     "stats": expected_loki_stats()
@@ -16608,8 +16605,8 @@ async fn query_endpoint_accepts_sort_label_replace_vector_function() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -16620,7 +16617,7 @@ async fn query_endpoint_accepts_sort_label_replace_vector_function() {
                             "metric": {
                                 "service": "api-"
                             },
-                            "value": [4000000000i64, "1"]
+                            "value": [4_000_000_000i64, "1"]
                         }
                     ],
                     "stats": expected_loki_stats()
@@ -16645,8 +16642,8 @@ async fn query_endpoint_accepts_sort_desc_label_replace_vector_function() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -16657,7 +16654,7 @@ async fn query_endpoint_accepts_sort_desc_label_replace_vector_function() {
                             "metric": {
                                 "service": "api-"
                             },
-                            "value": [4000000000i64, "1"]
+                            "value": [4_000_000_000i64, "1"]
                         }
                     ],
                     "stats": expected_loki_stats()
@@ -16682,8 +16679,8 @@ async fn query_endpoint_applies_label_replace_vector_arithmetic_operand() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -16692,7 +16689,7 @@ async fn query_endpoint_applies_label_replace_vector_arithmetic_operand() {
                     "result": [
                         {
                             "metric": {},
-                            "value": [4000000000i64, "3"]
+                            "value": [4_000_000_000i64, "3"]
                         }
                     ],
                     "stats": expected_loki_stats()
@@ -16717,8 +16714,8 @@ async fn query_endpoint_orders_label_replace_vector_set_or_like_loki() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -16727,13 +16724,13 @@ async fn query_endpoint_orders_label_replace_vector_set_or_like_loki() {
                     "result": [
                         {
                             "metric": {},
-                            "value": [4000000000i64, "2"]
+                            "value": [4_000_000_000i64, "2"]
                         },
                         {
                             "metric": {
                                 "service": "api-"
                             },
-                            "value": [4000000000i64, "1"]
+                            "value": [4_000_000_000i64, "1"]
                         }
                     ],
                     "stats": expected_loki_stats()
@@ -16758,8 +16755,8 @@ async fn query_endpoint_accepts_label_join_vector_function() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -16770,7 +16767,7 @@ async fn query_endpoint_accepts_label_join_vector_function() {
                             "metric": {
                                 "joined": "/"
                             },
-                            "value": [4000000000i64, "1"]
+                            "value": [4_000_000_000i64, "1"]
                         }
                     ],
                     "stats": expected_loki_stats()
@@ -16795,9 +16792,9 @@ async fn query_endpoint_rejects_parenthesized_label_join_vector_function_like_lo
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(response.status() == StatusCode::BAD_REQUEST);
     let body = text_body(response).await;
-    assert2::assert!(body.contains("expecting range aggregation"));
+    assert!(body.contains("expecting range aggregation"), "{body}");
 }
 
 #[tokio::test]
@@ -16816,8 +16813,11 @@ async fn query_endpoint_rejects_unsupported_scalar_vector_function_like_loki() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert2::assert!(
+    assert!(
+        response.status() == StatusCode::BAD_REQUEST,
+        "unsupported scalar functions must stay aligned with Loki's parser"
+    );
+    assert!(
         text_body(response).await
             == "parse error at line 1, col 1: syntax error: unexpected IDENTIFIER"
     );
@@ -16839,8 +16839,8 @@ async fn query_endpoint_accepts_vector_filter_comparison_expression() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -16869,8 +16869,8 @@ async fn label_values_endpoint_returns_tenant_values() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -16907,8 +16907,8 @@ async fn label_values_endpoint_includes_hot_wal_tail_values() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -16933,8 +16933,8 @@ async fn label_values_endpoint_applies_selector_query() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -16959,8 +16959,8 @@ async fn label_values_endpoint_applies_time_range() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -16985,8 +16985,8 @@ async fn series_endpoint_applies_matchers_time_range_and_tenant() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -17016,7 +17016,7 @@ async fn label_names_endpoint_rejects_unauthorized_tenant_read() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::FORBIDDEN);
+    assert!(response.status() == StatusCode::FORBIDDEN);
     assert_loki_error(
         &json_body(response).await,
         "forbidden",
@@ -17052,8 +17052,8 @@ async fn series_endpoint_includes_matching_hot_wal_tail_series() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -17087,8 +17087,8 @@ async fn series_endpoint_accepts_form_encoded_post_body() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -17119,8 +17119,8 @@ async fn series_endpoint_accepts_post_query_parameters_when_body_is_empty() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -17152,8 +17152,8 @@ async fn series_endpoint_merges_post_query_parameters_with_form_body() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -17197,8 +17197,8 @@ async fn series_endpoint_accepts_form_post_matcher_with_raw_ampersand() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -17243,8 +17243,8 @@ async fn index_stats_endpoint_returns_stream_chunk_entry_and_byte_counts() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "streams": 1,
@@ -17288,8 +17288,8 @@ async fn index_stats_endpoint_accepts_form_encoded_post_body() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "streams": 1,
@@ -17337,8 +17337,8 @@ async fn index_volume_endpoint_returns_series_vector_bytes() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -17391,8 +17391,8 @@ async fn index_volume_range_endpoint_returns_vector_with_target_labels() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -17444,8 +17444,8 @@ async fn index_volume_range_endpoint_accepts_form_post_query_with_raw_ampersand(
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -17493,8 +17493,8 @@ async fn index_volume_range_endpoint_returns_vector_without_target_labels() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -17539,8 +17539,8 @@ async fn index_volume_endpoints_default_missing_start_to_recent_range() {
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::OK);
-        assert2::assert!(
+        assert!(response.status() == StatusCode::OK);
+        assert!(
             json_body(response).await
                 == json!({
                     "status": "success",
@@ -17574,7 +17574,7 @@ async fn index_stats_endpoint_requires_start_parameter() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(response.status() == StatusCode::BAD_REQUEST);
     assert_loki_error(
         &json_body(response).await,
         "bad_data",
@@ -17606,8 +17606,8 @@ async fn index_volume_endpoints_default_missing_end_to_current_time() {
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-        assert2::assert!(
+        assert!(response.status() == StatusCode::BAD_REQUEST);
+        assert!(
             text_body(response)
                 .await
                 .starts_with("the query time range exceeds the limit (query length: ")
@@ -17635,7 +17635,7 @@ async fn index_stats_endpoint_requires_end_parameter() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(response.status() == StatusCode::BAD_REQUEST);
     assert_loki_error(
         &json_body(response).await,
         "bad_data",
@@ -17663,8 +17663,8 @@ async fn index_stats_endpoint_rejects_loki_query_ranges_over_limit() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(
         text_body(response).await
             == "the query time range exceeds the limit (query length: 721h0m1s, limit: 30d1h)"
     );
@@ -17690,9 +17690,9 @@ async fn index_volume_range_endpoint_returns_loki_error_for_zero_step() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(response.status() == StatusCode::BAD_REQUEST);
     let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
-    assert2::assert!(
+    assert!(
         std::str::from_utf8(&body).unwrap()
             == "zero or negative query resolution step widths are not accepted. Try a positive integer"
     );
@@ -17718,9 +17718,9 @@ async fn index_volume_endpoint_returns_loki_error_for_invalid_aggregate_by() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(response.status() == StatusCode::BAD_REQUEST);
     let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
-    assert2::assert!(std::str::from_utf8(&body).unwrap() == "invalid aggregation option");
+    assert!(std::str::from_utf8(&body).unwrap() == "invalid aggregation option");
 }
 
 #[tokio::test]
@@ -17747,8 +17747,8 @@ async fn index_endpoints_return_loki_error_for_invalid_logql() {
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-        assert2::assert!(
+        assert!(response.status() == StatusCode::BAD_REQUEST);
+        assert!(
             text_body(response).await
                 == "parse error at line 1, col 6: syntax error: unexpected $end, expecting STRING"
         );
@@ -17783,8 +17783,8 @@ async fn index_volume_endpoint_supports_label_aggregation_and_limit() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -17857,8 +17857,8 @@ async fn patterns_endpoint_groups_matching_logs_by_detected_pattern() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -17920,8 +17920,8 @@ async fn patterns_endpoint_collapses_json_logs_differing_only_by_timestamp() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -17983,8 +17983,8 @@ async fn patterns_endpoint_excludes_entries_at_end_bound() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -18050,8 +18050,8 @@ async fn patterns_endpoint_accepts_form_encoded_post_body() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -18118,8 +18118,8 @@ async fn patterns_endpoint_accepts_form_post_query_with_raw_ampersand() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -18192,8 +18192,8 @@ async fn compactor_delete_requests_filter_querier_patterns_results() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -18229,8 +18229,8 @@ async fn patterns_endpoint_returns_loki_error_for_invalid_logql() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(
         text_body(response).await
             == "parse error at line 1, col 6: syntax error: unexpected $end, expecting STRING"
     );
@@ -18284,8 +18284,8 @@ async fn detected_fields_endpoint_discovers_json_logfmt_and_structured_metadata(
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "fields": [
@@ -18378,8 +18378,8 @@ async fn detected_labels_endpoint_reports_stream_label_cardinality() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "detectedLabels": [
@@ -18423,8 +18423,8 @@ async fn detected_labels_endpoint_returns_empty_object_without_matches() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(json_body(response).await == json!({}));
+    assert!(response.status() == StatusCode::OK);
+    assert!(json_body(response).await == json!({}));
 }
 
 #[tokio::test]
@@ -18459,8 +18459,8 @@ async fn detected_labels_endpoint_defaults_missing_query_to_all_streams() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "detectedLabels": [
@@ -18509,8 +18509,8 @@ async fn detected_labels_endpoint_ignores_malformed_step_and_limit_like_loki() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "detectedLabels": [
@@ -18583,8 +18583,8 @@ async fn compactor_delete_requests_filter_querier_detected_fields_results() {
         )
         .await
         .unwrap();
-    assert2::assert!(fields_response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(fields_response.status() == StatusCode::OK);
+    assert!(
         json_body(fields_response).await
             == json!({
                 "fields": [
@@ -18627,8 +18627,8 @@ async fn compactor_delete_requests_filter_querier_detected_fields_results() {
         )
         .await
         .unwrap();
-    assert2::assert!(values_response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(values_response.status() == StatusCode::OK);
+    assert!(
         json_body(values_response).await
             == json!({
                 "values": ["200"],
@@ -18671,8 +18671,8 @@ async fn detected_field_values_endpoint_accepts_form_post_body() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "values": ["500"],
@@ -18715,8 +18715,8 @@ async fn detected_field_values_endpoint_accepts_form_post_query_with_raw_ampersa
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "values": ["500"],
@@ -18755,8 +18755,8 @@ async fn detected_fields_endpoint_derives_start_from_since_when_start_is_omitted
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "fields": [
@@ -18805,8 +18805,8 @@ async fn detected_field_values_endpoint_accepts_step_duration_parameter() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "values": ["200"],
@@ -18835,8 +18835,8 @@ async fn detected_fields_endpoint_rejects_invalid_step_parameter() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(
         text_body(response)
             .await
             .contains("cannot parse \"not-a-duration\" to a valid duration")
@@ -18863,8 +18863,8 @@ async fn detected_fields_endpoint_returns_loki_error_for_zero_step() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(
         text_body(response).await
             == "zero or negative query resolution step widths are not accepted. Try a positive integer"
     );
@@ -18890,8 +18890,8 @@ async fn detected_fields_endpoint_returns_loki_error_for_invalid_logql() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(
         text_body(response).await
             == "parse error at line 1, col 6: syntax error: unexpected $end, expecting STRING"
     );
@@ -18917,8 +18917,8 @@ async fn detected_fields_endpoint_rejects_loki_query_ranges_over_limit() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(
         text_body(response).await
             == "the query time range exceeds the limit (query length: 721h0m1s, limit: 30d1h)"
     );
@@ -18944,8 +18944,8 @@ async fn detected_labels_endpoint_rejects_loki_query_ranges_over_limit() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(
         text_body(response).await
             == "the query time range exceeds the limit (query length: 721h0m1s, limit: 30d1h)"
     );
@@ -18971,8 +18971,8 @@ async fn detected_field_values_endpoint_rejects_loki_query_ranges_over_limit() {
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(
         text_body(response).await
             == "the query time range exceeds the limit (query length: 721h0m1s, limit: 30d1h)"
     );
@@ -19044,8 +19044,8 @@ async fn configured_object_store_index_stats_endpoint_counts_entries_from_object
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "streams": 1,
@@ -19125,8 +19125,8 @@ async fn configured_object_store_index_stats_endpoint_loads_request_tenant_manif
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "streams": 1,
@@ -19206,8 +19206,8 @@ async fn configured_object_store_index_volume_endpoint_loads_request_tenant_mani
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -19310,8 +19310,8 @@ async fn configured_object_store_patterns_endpoint_loads_request_tenant_manifest
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -19396,8 +19396,8 @@ async fn configured_object_store_detected_fields_endpoint_loads_request_tenant_m
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "fields": [
@@ -19426,23 +19426,21 @@ async fn configured_object_store_detected_fields_endpoint_loads_request_tenant_m
 }
 
 #[tokio::test]
-#[allow(clippy::similar_names, clippy::too_many_lines)]
 async fn configured_object_store_querier_loads_manifest_for_request_tenant_header() {
     let object_dir = tempfile::tempdir().unwrap().keep();
     let data_root = tempfile::tempdir().unwrap().keep();
     let store = LocalFileSystem::new_with_prefix(&object_dir).unwrap();
     let prefix = ObjectPath::from("indexes");
     let mut label_index = LabelIndex::default();
-    let tenant_a_api =
-        label_index.insert_series("tenant-a", labels([("app", "api"), ("env", "prod")]));
-    let tenant_b_api =
+    let prod_api = label_index.insert_series("tenant-a", labels([("app", "api"), ("env", "prod")]));
+    let stage_api =
         label_index.insert_series("tenant-b", labels([("app", "api"), ("env", "stage")]));
-    let tenant_a_block = write_log_block_to_object_store(
+    let prod_block = write_log_block_to_object_store(
         &store,
         &prefix,
         &BlockKey::new("tenant-a", 0, 10, 19, TimeRange::new(10, 19).unwrap()),
         vec![LogRow::new(
-            tenant_a_api,
+            prod_api,
             19,
             "tenant-a api error",
             BTreeMap::new(),
@@ -19450,12 +19448,12 @@ async fn configured_object_store_querier_loads_manifest_for_request_tenant_heade
     )
     .await
     .unwrap();
-    let tenant_b_block = write_log_block_to_object_store(
+    let stage_block = write_log_block_to_object_store(
         &store,
         &prefix,
         &BlockKey::new("tenant-b", 0, 20, 29, TimeRange::new(20, 29).unwrap()),
         vec![LogRow::new(
-            tenant_b_api,
+            stage_api,
             29,
             "tenant-b api error",
             BTreeMap::new(),
@@ -19464,9 +19462,9 @@ async fn configured_object_store_querier_loads_manifest_for_request_tenant_heade
     .await
     .unwrap();
     let mut block_index = BlockIndex::default();
-    let tenant_b_block_bytes = tenant_b_block.size_bytes;
-    block_index.insert(tenant_a_block);
-    block_index.insert(tenant_b_block);
+    let stage_block_bytes = stage_block.size_bytes;
+    block_index.insert(prod_block);
+    block_index.insert(stage_block);
     write_tenant_log_index_manifest_to_object_store(
         &store,
         &prefix,
@@ -19522,8 +19520,8 @@ async fn configured_object_store_querier_loads_manifest_for_request_tenant_heade
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -19541,7 +19539,7 @@ async fn configured_object_store_querier_loads_manifest_for_request_tenant_heade
                             ]
                         }
                     ],
-                    "stats": expected_loki_stats_with(tenant_b_block_bytes, 1, 1)
+                    "stats": expected_loki_stats_with(stage_block_bytes, 1, 1)
                 }
             })
     );
@@ -19599,10 +19597,8 @@ async fn configured_object_store_labels_endpoint_loads_manifest_for_request_tena
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
-        json_body(response).await == json!({"status": "success", "data": ["app", "env"]})
-    );
+    assert!(response.status() == StatusCode::OK);
+    assert!(json_body(response).await == json!({"status": "success", "data": ["app", "env"]}));
 }
 
 #[tokio::test]
@@ -19677,8 +19673,8 @@ async fn configured_object_store_shard_catalog_querier_loads_shards_for_request_
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
+    assert!(response.status() == StatusCode::OK);
+    assert!(
         json_body(response).await
             == json!({
                 "status": "success",
@@ -19771,10 +19767,8 @@ async fn configured_object_store_shard_catalog_labels_endpoint_loads_request_ten
         .await
         .unwrap();
 
-    assert2::assert!(response.status() == StatusCode::OK);
-    assert2::assert!(
-        json_body(response).await == json!({"status": "success", "data": ["app", "env"]})
-    );
+    assert!(response.status() == StatusCode::OK);
+    assert!(json_body(response).await == json!({"status": "success", "data": ["app", "env"]}));
 }
 
 fn fixture() -> QuerierState {
@@ -19810,44 +19804,43 @@ fn fixture() -> QuerierState {
 fn multi_tenant_fixture() -> (QuerierState, u64, u64) {
     let dir = tempfile::tempdir().unwrap().keep();
     let mut label_index = LabelIndex::default();
-    let tenant_a_api =
-        label_index.insert_series("tenant-a", labels([("app", "api"), ("env", "prod")]));
-    let tenant_b_api =
+    let prod_api = label_index.insert_series("tenant-a", labels([("app", "api"), ("env", "prod")]));
+    let stage_api =
         label_index.insert_series("tenant-b", labels([("app", "api"), ("env", "stage")]));
 
-    let tenant_a_block = write_log_block(
+    let prod_block = write_log_block(
         &dir,
         &BlockKey::new("tenant-a", 0, 20, 29, TimeRange::new(20, 29).unwrap()),
         vec![LogRow::new(
-            tenant_a_api,
+            prod_api,
             29,
             "tenant-a api error",
             BTreeMap::new(),
         )],
     )
     .unwrap();
-    let tenant_b_block = write_log_block(
+    let stage_block = write_log_block(
         &dir,
         &BlockKey::new("tenant-b", 0, 20, 29, TimeRange::new(20, 29).unwrap()),
         vec![LogRow::new(
-            tenant_b_api,
+            stage_api,
             29,
             "tenant-b api error",
             BTreeMap::new(),
         )],
     )
     .unwrap();
-    let tenant_a_bytes = tenant_a_block.size_bytes;
-    let tenant_b_bytes = tenant_b_block.size_bytes;
+    let prod_bytes = prod_block.size_bytes;
+    let stage_bytes = stage_block.size_bytes;
 
     let mut block_index = BlockIndex::default();
-    block_index.insert(tenant_a_block);
-    block_index.insert(tenant_b_block);
+    block_index.insert(prod_block);
+    block_index.insert(stage_block);
 
     (
         QuerierState::new(dir, label_index, block_index),
-        tenant_a_bytes,
-        tenant_b_bytes,
+        prod_bytes,
+        stage_bytes,
     )
 }
 
@@ -20299,25 +20292,25 @@ async fn create_secret_delete_request(delete_requests: &SharedLogDeleteRequests)
         )
         .await
         .unwrap();
-    assert2::assert!(delete_response.status() == StatusCode::NO_CONTENT);
+    assert!(delete_response.status() == StatusCode::NO_CONTENT);
 }
 
 fn assert_loki_error(body: &Value, error_type: &str, error_contains: &str) {
-    assert2::assert!(body["status"] == "error");
-    assert2::assert!(body["errorType"] == error_type);
-    assert2::assert!(
+    assert!(body["status"] == "error");
+    assert!(body["errorType"] == error_type);
+    assert!(
         body["error"]
             .as_str()
             .is_some_and(|error| error.contains(error_contains))
     );
-    assert2::assert!(body["data"].is_null());
+    assert!(body["data"].is_null());
 }
 
 fn expected_api_error() -> Value {
-    expected_api_error_with_stats(expected_loki_stats_with(1819, 1, 1))
+    expected_api_error_with_stats(&expected_loki_stats_with(1819, 1, 1))
 }
 
-fn expected_api_error_with_stats(stats: Value) -> Value {
+fn expected_api_error_with_stats(stats: &Value) -> Value {
     json!({
         "status": "success",
         "data": {

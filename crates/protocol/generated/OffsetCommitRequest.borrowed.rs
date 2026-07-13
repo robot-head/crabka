@@ -16,7 +16,8 @@ pub const MIN_VERSION: i16 = 2;
 pub const MAX_VERSION: i16 = 10;
 pub const FLEXIBLE_MIN: i16 = 8;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,11 +39,15 @@ impl Default for OffsetCommitRequest<'_> {
             group_instance_id: None,
             retention_time_ms: -1i64,
             topics: Vec::new(),
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl OffsetCommitRequest<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::offset_commit_request::OffsetCommitRequest {
         crate::owned::offset_commit_request::OffsetCommitRequest {
             group_id: (self.group_id).to_string(),
@@ -69,9 +74,9 @@ impl Encode for OffsetCommitRequest<'_> {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.group_id);
+                let () = put_compact_string(buf, self.group_id);
             } else {
-                put_string(buf, self.group_id);
+                let () = put_string(buf, self.group_id);
             }
         }
         if version >= 1 {
@@ -79,16 +84,16 @@ impl Encode for OffsetCommitRequest<'_> {
         }
         if version >= 1 {
             if flex {
-                put_compact_string(buf, self.member_id);
+                let () = put_compact_string(buf, self.member_id);
             } else {
-                put_string(buf, self.member_id);
+                let () = put_string(buf, self.member_id);
             }
         }
         if version >= 7 {
             if flex {
-                put_compact_nullable_string(buf, self.group_instance_id);
+                let () = put_compact_nullable_string(buf, self.group_instance_id);
             } else {
-                put_nullable_string(buf, self.group_instance_id);
+                let () = put_nullable_string(buf, self.group_instance_id);
             }
         }
         if (2..=4).contains(&version) {
@@ -240,6 +245,10 @@ pub struct OffsetCommitRequestTopic<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl OffsetCommitRequestTopic<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::offset_commit_request::OffsetCommitRequestTopic {
         crate::owned::offset_commit_request::OffsetCommitRequestTopic {
             name: (self.name).to_string(),
@@ -257,9 +266,9 @@ impl Encode for OffsetCommitRequestTopic<'_> {
         let flex = version >= 8;
         if (0..=9).contains(&version) {
             if flex {
-                put_compact_string(buf, self.name);
+                let () = put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name);
+                let () = put_string(buf, self.name);
             }
         }
         if version >= 10 {
@@ -372,11 +381,15 @@ impl Default for OffsetCommitRequestPartition<'_> {
             committed_offset: 0i64,
             committed_leader_epoch: -1i32,
             committed_metadata: None,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl OffsetCommitRequestPartition<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::offset_commit_request::OffsetCommitRequestPartition {
         crate::owned::offset_commit_request::OffsetCommitRequestPartition {
             partition_index: (self.partition_index),
@@ -401,9 +414,9 @@ impl Encode for OffsetCommitRequestPartition<'_> {
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.committed_metadata);
+                let () = put_compact_nullable_string(buf, self.committed_metadata);
             } else {
-                put_nullable_string(buf, self.committed_metadata);
+                let () = put_nullable_string(buf, self.committed_metadata);
             }
         }
         if flex {

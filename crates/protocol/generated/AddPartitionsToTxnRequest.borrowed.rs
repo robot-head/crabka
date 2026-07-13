@@ -12,7 +12,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 5;
 pub const FLEXIBLE_MIN: i16 = 3;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -21,14 +22,14 @@ pub struct AddPartitionsToTxnRequest<'a> {
     pub v3_and_below_transactional_id: &'a str,
     pub v3_and_below_producer_id: i64,
     pub v3_and_below_producer_epoch: i16,
-    pub v3_and_below_topics: Vec<
-        super::common::add_partitions_to_txn_request::add_partitions_to_txn_topic::AddPartitionsToTxnTopic<
-            'a,
-        >,
-    >,
+    pub v3_and_below_topics: Vec<super::common::add_partitions_to_txn_request::add_partitions_to_txn_topic::AddPartitionsToTxnTopic<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl AddPartitionsToTxnRequest<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::add_partitions_to_txn_request::AddPartitionsToTxnRequest {
@@ -37,10 +38,7 @@ impl AddPartitionsToTxnRequest<'_> {
             v3_and_below_transactional_id: (self.v3_and_below_transactional_id).to_string(),
             v3_and_below_producer_id: (self.v3_and_below_producer_id),
             v3_and_below_producer_epoch: (self.v3_and_below_producer_epoch),
-            v3_and_below_topics: (self.v3_and_below_topics)
-                .iter()
-                .map(super::common::add_partitions_to_txn_request::add_partitions_to_txn_topic::AddPartitionsToTxnTopic::to_owned)
-                .collect(),
+            v3_and_below_topics: (self.v3_and_below_topics).iter().map(super::common::add_partitions_to_txn_request::add_partitions_to_txn_topic::AddPartitionsToTxnTopic::to_owned).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
@@ -64,9 +62,9 @@ impl Encode for AddPartitionsToTxnRequest<'_> {
         }
         if (0..=3).contains(&version) {
             if flex {
-                put_compact_string(buf, self.v3_and_below_transactional_id);
+                let () = put_compact_string(buf, self.v3_and_below_transactional_id);
             } else {
-                put_string(buf, self.v3_and_below_transactional_id);
+                let () = put_string(buf, self.v3_and_below_transactional_id);
             }
         }
         if (0..=3).contains(&version) {
@@ -178,12 +176,7 @@ impl<'de> DecodeBorrow<'de> for AddPartitionsToTxnRequest<'de> {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v.push(
-                        super::common::add_partitions_to_txn_request::add_partitions_to_txn_topic::AddPartitionsToTxnTopic::decode_borrow(
-                            buf,
-                            version,
-                        )?,
-                    );
+                    v.push(super::common::add_partitions_to_txn_request::add_partitions_to_txn_topic::AddPartitionsToTxnTopic::decode_borrow(buf, version)?);
                 }
                 v
             };
@@ -212,9 +205,7 @@ impl AddPartitionsToTxnRequest<'_> {
             m.v3_and_below_producer_epoch = 1i16;
         }
         if (0..=3).contains(&version) {
-            m.v3_and_below_topics = vec![
-                super::common::add_partitions_to_txn_request::add_partitions_to_txn_topic::AddPartitionsToTxnTopic::populated(version)
-            ];
+            m.v3_and_below_topics = vec![super::common::add_partitions_to_txn_request::add_partitions_to_txn_topic::AddPartitionsToTxnTopic::populated(version)];
         }
         m
     }
@@ -225,14 +216,14 @@ pub struct AddPartitionsToTxnTransaction<'a> {
     pub producer_id: i64,
     pub producer_epoch: i16,
     pub verify_only: bool,
-    pub topics: Vec<
-        super::common::add_partitions_to_txn_request::add_partitions_to_txn_topic::AddPartitionsToTxnTopic<
-            'a,
-        >,
-    >,
+    pub topics: Vec<super::common::add_partitions_to_txn_request::add_partitions_to_txn_topic::AddPartitionsToTxnTopic<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl AddPartitionsToTxnTransaction<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::add_partitions_to_txn_request::AddPartitionsToTxnTransaction {
@@ -251,9 +242,9 @@ impl Encode for AddPartitionsToTxnTransaction<'_> {
         let flex = version >= 3;
         if version >= 4 {
             if flex {
-                put_compact_string(buf, self.transactional_id);
+                let () = put_compact_string(buf, self.transactional_id);
             } else {
-                put_string(buf, self.transactional_id);
+                let () = put_string(buf, self.transactional_id);
             }
         }
         if version >= 4 {
@@ -338,12 +329,7 @@ impl<'de> DecodeBorrow<'de> for AddPartitionsToTxnTransaction<'de> {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v.push(
-                        super::common::add_partitions_to_txn_request::add_partitions_to_txn_topic::AddPartitionsToTxnTopic::decode_borrow(
-                            buf,
-                            version,
-                        )?,
-                    );
+                    v.push(super::common::add_partitions_to_txn_request::add_partitions_to_txn_topic::AddPartitionsToTxnTopic::decode_borrow(buf, version)?);
                 }
                 v
             };
@@ -372,9 +358,7 @@ impl AddPartitionsToTxnTransaction<'_> {
             m.verify_only = true;
         }
         if version >= 4 {
-            m.topics = vec![
-                super::common::add_partitions_to_txn_request::add_partitions_to_txn_topic::AddPartitionsToTxnTopic::populated(version)
-            ];
+            m.topics = vec![super::common::add_partitions_to_txn_request::add_partitions_to_txn_topic::AddPartitionsToTxnTopic::populated(version)];
         }
         m
     }

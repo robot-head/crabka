@@ -72,7 +72,6 @@ pub(crate) fn desired_local_set(node_id: NodeId, image: &MetadataImage) -> HashS
 ///
 /// Returns `Ok(())` if the partition is already present (no-op) or was
 /// successfully opened. Returns `Err(String)` on I/O failure.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn materialize_partition(
     partitions: &PartitionRegistry,
     topic: &str,
@@ -141,17 +140,17 @@ pub(crate) async fn push_topic_configs(
 /// Pure: reads each partition's current owning dir exactly once; no second load
 /// after the change-check, eliminating the TOCTOU race and O(n²) `Vec::contains`
 /// scan present in the previous double-iteration approach.
-#[allow(clippy::type_complexity)]
+type WireDirAssignment = (uuid::Uuid, i32, uuid::Uuid);
+type ReportedDirUpdate = (String, i32, uuid::Uuid);
+type ChangedAssignments = (Vec<WireDirAssignment>, Vec<ReportedDirUpdate>);
+
 pub(crate) fn collect_changed_assignments(
     local_set: &HashSet<TopicPartition>,
     partitions: &PartitionRegistry,
     log_dir_ids: &crate::log_dir_id::LogDirIds,
     image: &MetadataImage,
     reported_dirs: &dashmap::DashMap<TopicPartition, uuid::Uuid>,
-) -> (
-    Vec<(uuid::Uuid, i32, uuid::Uuid)>,
-    Vec<(String, i32, uuid::Uuid)>,
-) {
+) -> ChangedAssignments {
     let mut wire = Vec::new();
     let mut updates = Vec::new();
     for (topic, partition) in local_set {
@@ -268,28 +267,49 @@ pub(crate) struct ReplicatorSupervisor {
     assign_dirs_reporter: Arc<dyn AssignDirsReporter>,
 }
 
+pub(crate) struct ReplicatorSupervisorConfig {
+    pub node_id: NodeId,
+    pub broker_id: i32,
+    pub controller: Arc<dyn crate::metadata_source::MetadataSource>,
+    pub partitions: Arc<PartitionRegistry>,
+    pub log_dirs: Vec<PathBuf>,
+    pub log_config: LogConfig,
+    pub client_id: String,
+    pub shutdown: CancellationToken,
+    pub txn_coordinator: Option<Arc<TxnCoordinator>>,
+    pub share_coordinator: Option<Arc<crate::share_coordinator::coordinator::ShareCoordinator>>,
+    pub inter_broker_client: Arc<crate::network::client::InterBrokerClient>,
+    pub inter_broker_listener_protocol: crabka_security::ListenerProtocol,
+    pub inter_broker_listener_name: String,
+    pub throttle_state: Arc<ThrottleState>,
+    pub log_dir_status: crate::log_dir_status::LogDirRegistry,
+    pub producer_state: Arc<crate::producer_state::ProducerState>,
+    pub metrics: crate::metrics::BrokerMetrics,
+    pub log_dir_ids: crate::log_dir_id::LogDirIds,
+}
+
 impl ReplicatorSupervisor {
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
-        node_id: NodeId,
-        broker_id: i32,
-        controller: Arc<dyn crate::metadata_source::MetadataSource>,
-        partitions: Arc<PartitionRegistry>,
-        log_dirs: Vec<PathBuf>,
-        log_config: LogConfig,
-        client_id: String,
-        shutdown: CancellationToken,
-        txn_coordinator: Option<Arc<TxnCoordinator>>,
-        share_coordinator: Option<Arc<crate::share_coordinator::coordinator::ShareCoordinator>>,
-        inter_broker_client: Arc<crate::network::client::InterBrokerClient>,
-        inter_broker_listener_protocol: crabka_security::ListenerProtocol,
-        inter_broker_listener_name: String,
-        throttle_state: Arc<ThrottleState>,
-        log_dir_status: crate::log_dir_status::LogDirRegistry,
-        producer_state: Arc<crate::producer_state::ProducerState>,
-        metrics: crate::metrics::BrokerMetrics,
-        log_dir_ids: crate::log_dir_id::LogDirIds,
-    ) -> Self {
+    pub(crate) fn new(config: ReplicatorSupervisorConfig) -> Self {
+        let ReplicatorSupervisorConfig {
+            node_id,
+            broker_id,
+            controller,
+            partitions,
+            log_dirs,
+            log_config,
+            client_id,
+            shutdown,
+            txn_coordinator,
+            share_coordinator,
+            inter_broker_client,
+            inter_broker_listener_protocol,
+            inter_broker_listener_name,
+            throttle_state,
+            log_dir_status,
+            producer_state,
+            metrics,
+            log_dir_ids,
+        } = config;
         Self {
             node_id,
             broker_id,
@@ -316,7 +336,6 @@ impl ReplicatorSupervisor {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
     pub(crate) async fn reconcile(&self, image: &MetadataImage) {
         let local_set = desired_local_set(self.node_id, image);
 
@@ -325,38 +344,7 @@ impl ReplicatorSupervisor {
         //    Additionally: sync the partition's cached leader + epoch
         //    (idempotent), and for partitions where self is leader,
         //    install the ISR into ReplicaState for HW computation.
-        for key in &local_set {
-            if let Err(e) = self.materialize_local_partition(&key.0, key.1) {
-                warn!(
-                    topic = %key.0, partition = key.1, error = %e,
-                    "failed to materialize local partition"
-                );
-                continue;
-            }
-            let Some(part_record) = image.partition(&key.0, key.1).cloned() else {
-                continue;
-            };
-            let Some(part) = self.partitions.get(&key.0, PartitionIndex(key.1)) else {
-                continue;
-            };
-            // Always sync the partition's cached leader + epoch.
-            // `Partition::install_leader_change` is idempotent (atomic stores
-            // no-op on equal writes).
-            part.install_leader_change(part_record.leader.0, part_record.leader_epoch.0)
-                .await;
-            if part_record.leader == self.node_id {
-                // Install the *current* ISR from the metadata image (not the
-                // full replica set) as ISR membership: using `replicas` would
-                // undo any shrink applied via AlterPartition, so
-                // isr_maintenance's shrink would never stick (and producers
-                // with acks=-1 would stay blocked on lagging followers). The
-                // replica set is passed separately so follower-progress
-                // tracking survives across reconciles for replicas catching
-                // up toward ISR re-admission.
-                part.install_isr(&part_record.isr, &part_record.replicas, part_record.leader)
-                    .await;
-            }
-        }
+        self.reconcile_local_partitions(&local_set, image).await;
 
         // Push topic-config overrides onto every locally-hosted partition.
         // Pushes are idempotent — sending the same `LogConfig` is a cheap
@@ -441,7 +429,7 @@ impl ReplicatorSupervisor {
                 leader_port,
                 partitions: self.partitions.clone(),
                 log_dirs: self.log_dirs.clone(),
-                log_config: self.log_config.clone(),
+                log_settings: self.log_config.clone(),
                 client_id: self.client_id.clone(),
                 shutdown: token,
                 inter_broker_client: self.inter_broker_client.clone(),
@@ -474,6 +462,45 @@ impl ReplicatorSupervisor {
         //    (merges one replica's `directories` slot), so it can no longer
         //    revert a concurrent reassignment.
         self.report_dir_assignments(&local_set, image).await;
+    }
+
+    async fn reconcile_local_partitions(
+        &self,
+        local_set: &HashSet<TopicPartition>,
+        image: &MetadataImage,
+    ) {
+        for key in local_set {
+            if let Err(e) = self.materialize_local_partition(&key.0, key.1) {
+                warn!(
+                    topic = %key.0, partition = key.1, error = %e,
+                    "failed to materialize local partition"
+                );
+                continue;
+            }
+            let Some(part_record) = image.partition(&key.0, key.1).cloned() else {
+                continue;
+            };
+            let Some(part) = self.partitions.get(&key.0, PartitionIndex(key.1)) else {
+                continue;
+            };
+            // Always sync the partition's cached leader + epoch.
+            // `Partition::install_leader_change` is idempotent (atomic stores
+            // no-op on equal writes).
+            part.install_leader_change(part_record.leader.0, part_record.leader_epoch.0)
+                .await;
+            if part_record.leader == self.node_id {
+                // Install the *current* ISR from the metadata image (not the
+                // full replica set) as ISR membership: using `replicas` would
+                // undo any shrink applied via AlterPartition, so
+                // isr_maintenance's shrink would never stick (and producers
+                // with acks=-1 would stay blocked on lagging followers). The
+                // replica set is passed separately so follower-progress
+                // tracking survives across reconciles for replicas catching
+                // up toward ISR re-admission.
+                part.install_isr(&part_record.isr, &part_record.replicas, part_record.leader)
+                    .await;
+            }
+        }
     }
 
     /// Collect changed `(topic_id, partition, dir_uuid)` assignments from
@@ -561,7 +588,7 @@ mod tests {
         sync::atomic::{AtomicUsize, Ordering},
     };
 
-    use assert2::check;
+    use assert2::{assert, check};
     use crabka_metadata::{
         BrokerEndpoint, BrokerRegistrationRecord, MetadataImage, MetadataRecord, PartitionRecord,
         TopicRecord,
@@ -738,7 +765,7 @@ mod tests {
             _client_id: &str,
             req: crabka_protocol::owned::assign_replicas_to_dirs_request::AssignReplicasToDirsRequest,
         ) -> Result<(), String> {
-            assert2::assert!(!req.directories.is_empty());
+            assert!(!req.directories.is_empty());
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -755,26 +782,28 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let partitions = Arc::new(PartitionRegistry::new());
         let reporter = Arc::new(CountingAssignDirsReporter::default());
-        let mut supervisor = ReplicatorSupervisor::new(
-            NodeId(2),
-            2,
-            Arc::new(StaticMetadataSource::new(image)),
-            partitions.clone(),
-            vec![dir.path().to_path_buf()],
-            LogConfig::default(),
-            "supervisor-test".into(),
-            CancellationToken::new(),
-            None,
-            None,
-            Arc::new(crate::network::client::InterBrokerClient::new(None, None)),
-            crabka_security::ListenerProtocol::Plaintext,
-            "INTERNAL".into(),
-            Arc::new(ThrottleState::new()),
-            crate::log_dir_status::LogDirRegistry::default(),
-            Arc::new(crate::producer_state::ProducerState::new()),
-            crate::metrics::BrokerMetrics::default(),
-            crate::log_dir_id::LogDirIds::resolve(&[dir.path().to_path_buf()]),
-        );
+        let mut supervisor = ReplicatorSupervisor::new(ReplicatorSupervisorConfig {
+            node_id: NodeId(2),
+            broker_id: 2,
+            controller: Arc::new(StaticMetadataSource::new(image)),
+            partitions: partitions.clone(),
+            log_dirs: vec![dir.path().to_path_buf()],
+            log_config: LogConfig::default(),
+            client_id: "supervisor-test".into(),
+            shutdown: CancellationToken::new(),
+            txn_coordinator: None,
+            share_coordinator: None,
+            inter_broker_client: Arc::new(crate::network::client::InterBrokerClient::new(
+                None, None,
+            )),
+            inter_broker_listener_protocol: crabka_security::ListenerProtocol::Plaintext,
+            inter_broker_listener_name: "INTERNAL".into(),
+            throttle_state: Arc::new(ThrottleState::new()),
+            log_dir_status: crate::log_dir_status::LogDirRegistry::default(),
+            producer_state: Arc::new(crate::producer_state::ProducerState::new()),
+            metrics: crate::metrics::BrokerMetrics::default(),
+            log_dir_ids: crate::log_dir_id::LogDirIds::resolve(&[dir.path().to_path_buf()]),
+        });
         supervisor.assign_dirs_reporter = reporter.clone();
         (supervisor, partitions, reporter, dir)
     }
@@ -793,7 +822,7 @@ mod tests {
             )
             .await
             .expect_err("no controller leader must fail");
-        assert2::assert!(err == "no controller leader");
+        assert!(err == "no controller leader");
     }
 
     #[test]
@@ -803,8 +832,8 @@ mod tests {
             partition_record("t", 0, NodeId(1), vec![NodeId(1), NodeId(2), NodeId(3)], 0),
         ]);
         let d = desired_follower_set(NodeId(2), &img);
-        assert2::assert!(d.contains(&("t".into(), 0)));
-        assert2::assert!(d.len() == 1);
+        assert!(d.contains(&("t".into(), 0)));
+        assert!(d.len() == 1);
     }
 
     #[test]
@@ -839,18 +868,18 @@ mod tests {
         ]);
         let cases = [
             // Self is a follower replica → included.
-            (
-                "follower",
-                NodeId(2),
-                HashSet::from_iter([("t".to_string(), 0)]),
-            ),
+            (NodeId(2), HashSet::from_iter([("t".to_string(), 0)])),
             // Self is the leader → excluded.
-            ("leader", NodeId(1), HashSet::new()),
+            (NodeId(1), HashSet::new()),
             // Self is not a replica at all → excluded.
-            ("non-replica", NodeId(99), HashSet::new()),
+            (NodeId(99), HashSet::new()),
         ];
-        for (_case, node_id, want) in cases {
-            assert2::assert!(desired_follower_set(node_id, &img) == want);
+        for (node_id, want) in cases {
+            assert!(
+                desired_follower_set(node_id, &img) == want,
+                "node {}",
+                node_id.0
+            );
         }
     }
 
@@ -868,7 +897,7 @@ mod tests {
 
         let local = desired_local_set(NodeId(2), &img);
 
-        assert2::assert!(
+        assert!(
             local
                 == HashSet::from_iter([
                     ("a".to_string(), 0),
@@ -912,7 +941,7 @@ mod tests {
         )
         .await;
         let st = part.replica_state.lock().await;
-        assert2::assert!(st.isr.len() == 3);
+        assert!(st.isr.len() == 3);
     }
 
     #[test]
@@ -993,22 +1022,18 @@ mod tests {
         ]);
         let d = desired_follower_set(NodeId(2), &img);
         // b/1 is excluded: self is leader for it.
-        assert2::assert!(d == HashSet::from_iter([("a".to_string(), 0), ("b".to_string(), 0)]));
-        assert2::assert!(d.contains(&("a".into(), 0)));
-        assert2::assert!(d.contains(&("b".into(), 0)));
-        assert2::assert!(!d.contains(&("b".into(), 1))); // self is leader for b/1
-        assert2::assert!(d.len() == 2);
+        assert!(d == HashSet::from_iter([("a".to_string(), 0), ("b".to_string(), 0)]));
+        assert!(d.contains(&("a".into(), 0)));
+        assert!(d.contains(&("b".into(), 0)));
+        assert!(!d.contains(&("b".into(), 1))); // self is leader for b/1
+        assert!(d.len() == 2);
     }
 
     #[test]
     fn resolve_leader_endpoint_prefers_matching_listener() {
         let broker = broker_record(NodeId(1));
-        assert2::assert!(
-            resolve_leader_endpoint(&broker, "INTERNAL") == ("internal-host".into(), 19092)
-        );
-        assert2::assert!(
-            resolve_leader_endpoint(&broker, "EXTERNAL") == ("legacy-host".into(), 9092)
-        );
+        assert!(resolve_leader_endpoint(&broker, "INTERNAL") == ("internal-host".into(), 19092));
+        assert!(resolve_leader_endpoint(&broker, "EXTERNAL") == ("legacy-host".into(), 9092));
     }
 
     #[tokio::test]
@@ -1024,16 +1049,20 @@ mod tests {
         let part = partitions
             .get("t", PartitionIndex(0))
             .expect("local leader materialized");
-        assert2::assert!(
-            (
-                part.current_leader
-                    .load(std::sync::atomic::Ordering::Acquire),
-                part.current_leader_epoch
-                    .load(std::sync::atomic::Ordering::Acquire),
-            ) == (2, 7)
+        assert!(
+            part.current_leader
+                .load(std::sync::atomic::Ordering::Acquire)
+                == 2,
+            "leader cache updated"
+        );
+        assert!(
+            part.current_leader_epoch
+                .load(std::sync::atomic::Ordering::Acquire)
+                == 7,
+            "leader epoch cache updated"
         );
         let state = part.replica_state.lock().await;
-        assert2::assert!(state.isr == [NodeId(1), NodeId(2), NodeId(3)].into_iter().collect());
+        assert!(state.isr == [NodeId(1), NodeId(2), NodeId(3)].into_iter().collect());
     }
 
     #[tokio::test]
@@ -1050,7 +1079,7 @@ mod tests {
             .get("t", PartitionIndex(0))
             .expect("local follower materialized");
         let state = part.replica_state.lock().await;
-        assert2::assert!(state.isr.is_empty());
+        assert!(state.isr.is_empty());
     }
 
     #[tokio::test]
@@ -1067,7 +1096,8 @@ mod tests {
         supervisor.reconcile(&img).await;
 
         check!(token.is_cancelled());
-        check!((supervisor.tasks.len(), supervisor.task_targets.len()) == (0, 0));
+        check!(supervisor.tasks.len() == 0);
+        check!(supervisor.task_targets.len() == 0);
     }
 
     #[tokio::test]
@@ -1087,7 +1117,8 @@ mod tests {
         supervisor.reconcile(&img).await;
 
         check!(token.is_cancelled());
-        check!((supervisor.tasks.len(), supervisor.task_targets.len()) == (0, 0));
+        check!(supervisor.tasks.len() == 0);
+        check!(supervisor.task_targets.len() == 0);
     }
 
     #[tokio::test]
@@ -1109,15 +1140,15 @@ mod tests {
 
         supervisor.report_dir_assignments(&local_set, &img).await;
 
-        assert2::assert!(reporter.calls.load(Ordering::SeqCst) == 1);
-        assert2::assert!(supervisor.reported_dirs.contains_key(&("t".to_string(), 0)));
+        assert!(reporter.calls.load(Ordering::SeqCst) == 1);
+        assert!(supervisor.reported_dirs.contains_key(&("t".to_string(), 0)));
 
         let part = partitions
             .get("t", PartitionIndex(0))
             .expect("materialized");
         let dir = part.log_dir.load();
         let expected = supervisor.log_dir_ids.id_for(&dir).expect("dir id");
-        assert2::assert!(
+        assert!(
             supervisor
                 .reported_dirs
                 .get(&("t".to_string(), 0))
@@ -1133,7 +1164,7 @@ mod tests {
 
         supervisor.materialize_local_partition("t", 0).unwrap();
 
-        assert2::assert!(partitions.contains("t", PartitionIndex(0)));
+        assert!(partitions.contains("t", PartitionIndex(0)));
     }
 
     #[tokio::test]
@@ -1147,7 +1178,7 @@ mod tests {
 
         supervisor.run().await;
 
-        assert2::assert!(partitions.contains("t", PartitionIndex(0)));
+        assert!(partitions.contains("t", PartitionIndex(0)));
     }
 
     #[tokio::test]
@@ -1222,7 +1253,7 @@ mod tests {
         })
         .await;
         let snap = part.log.lock().expect("log lock").config_snapshot();
-        assert2::assert!(snap.retention_ms == Some(std::time::Duration::from_mins(1)));
+        assert!(snap.retention_ms == Some(std::time::Duration::from_mins(1)));
     }
 
     #[tokio::test]
@@ -1283,7 +1314,7 @@ mod tests {
         })
         .await;
         let snap = part.log.lock().expect("log lock").config_snapshot();
-        assert2::assert!(snap.retention_ms == LogConfig::default().retention_ms);
+        assert!(snap.retention_ms == LogConfig::default().retention_ms);
     }
 
     #[tokio::test]
@@ -1338,7 +1369,7 @@ mod tests {
             .get("t", PartitionIndex(0))
             .expect("part present");
         let loaded_dir = part.log_dir.load();
-        assert2::assert!(**loaded_dir == dir.path().to_path_buf());
+        assert!(**loaded_dir == dir.path().to_path_buf());
 
         let dir_uuid = log_dir_ids.id_for(dir.path()).expect("dir uuid resolvable");
 
@@ -1354,8 +1385,8 @@ mod tests {
             &img,
             &reported_dirs,
         );
-        assert2::assert!(wire == vec![(topic_id, 0, dir_uuid)]);
-        assert2::assert!(updates == vec![("t".to_string(), 0, dir_uuid)]);
+        assert!(wire == vec![(topic_id, 0, dir_uuid)]);
+        assert!(updates == vec![("t".to_string(), 0, dir_uuid)]);
 
         // Simulate a successful send: insert the tracker update.
         for (topic, partition, uuid) in updates {
@@ -1370,7 +1401,7 @@ mod tests {
             &img,
             &reported_dirs,
         );
-        assert2::assert!(wire2.is_empty());
-        assert2::assert!(updates2.is_empty());
+        assert!(wire2.is_empty());
+        assert!(updates2.is_empty());
     }
 }

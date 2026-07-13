@@ -13,7 +13,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 5;
 pub const FLEXIBLE_MIN: i16 = 3;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -21,9 +22,7 @@ pub struct AddPartitionsToTxnResponse {
     pub throttle_time_ms: i32,
     pub error_code: i16,
     pub results_by_transaction: Vec<AddPartitionsToTxnResult>,
-    pub results_by_topic_v3_and_below: Vec<
-        super::common::add_partitions_to_txn_response::add_partitions_to_txn_topic_result::AddPartitionsToTxnTopicResult,
-    >,
+    pub results_by_topic_v3_and_below: Vec<super::common::add_partitions_to_txn_response::add_partitions_to_txn_topic_result::AddPartitionsToTxnTopicResult>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl Encode for AddPartitionsToTxnResponse {
@@ -144,12 +143,7 @@ impl Decode<'_> for AddPartitionsToTxnResponse {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v.push(
-                        super::common::add_partitions_to_txn_response::add_partitions_to_txn_topic_result::AddPartitionsToTxnTopicResult::decode(
-                            buf,
-                            version,
-                        )?,
-                    );
+                    v.push(super::common::add_partitions_to_txn_response::add_partitions_to_txn_topic_result::AddPartitionsToTxnTopicResult::decode(buf, version)?);
                 }
                 v
             };
@@ -175,9 +169,7 @@ impl AddPartitionsToTxnResponse {
             m.results_by_transaction = vec![AddPartitionsToTxnResult::populated(version)];
         }
         if (0..=3).contains(&version) {
-            m.results_by_topic_v3_and_below = vec![
-                super::common::add_partitions_to_txn_response::add_partitions_to_txn_topic_result::AddPartitionsToTxnTopicResult::populated(version)
-            ];
+            m.results_by_topic_v3_and_below = vec![super::common::add_partitions_to_txn_response::add_partitions_to_txn_topic_result::AddPartitionsToTxnTopicResult::populated(version)];
         }
         m
     }
@@ -185,9 +177,7 @@ impl AddPartitionsToTxnResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AddPartitionsToTxnResult {
     pub transactional_id: String,
-    pub topic_results: Vec<
-        super::common::add_partitions_to_txn_response::add_partitions_to_txn_topic_result::AddPartitionsToTxnTopicResult,
-    >,
+    pub topic_results: Vec<super::common::add_partitions_to_txn_response::add_partitions_to_txn_topic_result::AddPartitionsToTxnTopicResult>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl Encode for AddPartitionsToTxnResult {
@@ -195,9 +185,9 @@ impl Encode for AddPartitionsToTxnResult {
         let flex = version >= 3;
         if version >= 4 {
             if flex {
-                put_compact_string(buf, &self.transactional_id);
+                let () = put_compact_string(buf, &self.transactional_id);
             } else {
-                put_string(buf, &self.transactional_id);
+                let () = put_string(buf, &self.transactional_id);
             }
         }
         if version >= 4 {
@@ -260,12 +250,7 @@ impl Decode<'_> for AddPartitionsToTxnResult {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v.push(
-                        super::common::add_partitions_to_txn_response::add_partitions_to_txn_topic_result::AddPartitionsToTxnTopicResult::decode(
-                            buf,
-                            version,
-                        )?,
-                    );
+                    v.push(super::common::add_partitions_to_txn_response::add_partitions_to_txn_topic_result::AddPartitionsToTxnTopicResult::decode(buf, version)?);
                 }
                 v
             };
@@ -285,9 +270,7 @@ impl AddPartitionsToTxnResult {
             m.transactional_id = "x".to_string();
         }
         if version >= 4 {
-            m.topic_results = vec![
-                super::common::add_partitions_to_txn_response::add_partitions_to_txn_topic_result::AddPartitionsToTxnTopicResult::populated(version)
-            ];
+            m.topic_results = vec![super::common::add_partitions_to_txn_response::add_partitions_to_txn_topic_result::AddPartitionsToTxnTopicResult::populated(version)];
         }
         m
     }

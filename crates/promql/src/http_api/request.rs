@@ -3,6 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use axum::http::HeaderMap;
 use crabka_blockstore::LabelMatcher;
 use crabka_metrics::{QueryEnforcer, validate_tenant};
+use num_traits::ToPrimitive;
 use promql_parser::parser::Expr;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use url::form_urlencoded;
@@ -133,13 +134,9 @@ pub(super) fn enforce_sample_count<S: MetricStore>(
     QueryEnforcer::check_sample_count(limits.for_tenant(tenant), processed).map_err(ApiError::from)
 }
 
-#[allow(
-    clippy::cast_possible_truncation,
-    reason = "Prometheus HTTP timestamps are decimal Unix seconds; internal evaluation uses millisecond integers."
-)]
 fn seconds_to_ms(value: &str) -> Result<i64, ()> {
     let seconds = value.parse::<f64>().map_err(|_| ())?;
-    Ok((seconds * 1000.0).round() as i64)
+    (seconds * 1000.0).round().to_i64().ok_or(())
 }
 
 fn prometheus_duration_ms(value: &str) -> Option<i64> {

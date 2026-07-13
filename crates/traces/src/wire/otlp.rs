@@ -97,6 +97,9 @@ fn kind_of(kind: i32) -> SpanKind {
 }
 
 /// Decode OTLP `TracesData` into internal spans.
+///
+/// # Errors
+/// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
 pub fn decode_otlp(data: &TracesData) -> Result<Vec<Span>, WireError> {
     let mut out = Vec::new();
     for resource_spans in &data.resource_spans {

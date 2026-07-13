@@ -285,7 +285,6 @@ fn constrained_assign(
 /// algorithm used when subscriptions are non-uniform.
 // Byte-port of the JVM constrained algorithm; splitting would obscure
 // the four-pass structure.
-#[allow(clippy::too_many_lines)]
 fn general_assign(
     member_ids: &[String],
     subs: &BTreeMap<String, BTreeSet<String>>,

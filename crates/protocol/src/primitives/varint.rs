@@ -7,14 +7,14 @@ const MAX_VARLONG_BYTES: usize = 10; // 64-bit
 
 pub fn put_uvarint<B: BufMut>(buf: &mut B, mut v: u32) {
     while (v & !0x7F) != 0 {
-        #[allow(clippy::cast_possible_truncation)]
-        buf.put_u8(((v & 0x7F) as u8) | 0x80);
+        buf.put_u8((v & 0x7F).to_le_bytes()[0] | 0x80);
         v >>= 7;
     }
-    #[allow(clippy::cast_possible_truncation)]
-    buf.put_u8(v as u8);
+    buf.put_u8(v.to_le_bytes()[0]);
 }
 
+/// # Errors
+/// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
 pub fn get_uvarint<B: Buf>(buf: &mut B) -> Result<u32, ProtocolError> {
     let mut result: u32 = 0;
     let mut shift = 0;
@@ -39,42 +39,38 @@ pub fn uvarint_len(v: u32) -> usize {
     if v == 0 {
         return 1;
     }
-    #[allow(clippy::cast_possible_truncation)]
-    let bits = 32 - v.leading_zeros() as usize;
+    let bits = usize::from((u32::BITS - v.leading_zeros()).to_le_bytes()[0]);
     bits.div_ceil(7)
 }
 
 pub fn put_varint<B: BufMut>(buf: &mut B, v: i32) {
-    // Zigzag encoding: intentional sign-reinterpreting cast.
-    #[allow(clippy::cast_sign_loss)]
-    let zz = ((v << 1) ^ (v >> 31)) as u32;
+    let zz = ((v << 1) ^ (v >> 31)).cast_unsigned();
     put_uvarint(buf, zz);
 }
 
+/// # Errors
+/// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
 pub fn get_varint<B: Buf>(buf: &mut B) -> Result<i32, ProtocolError> {
     let zz = get_uvarint(buf)?;
-    // Zigzag decoding: intentional wrapping casts.
-    #[allow(clippy::cast_possible_wrap)]
-    Ok(((zz >> 1) as i32) ^ -((zz & 1) as i32))
+    Ok((zz >> 1).cast_signed() ^ -(zz & 1).cast_signed())
 }
 
 #[must_use]
 pub fn varint_len(v: i32) -> usize {
-    #[allow(clippy::cast_sign_loss)]
-    let zz = ((v << 1) ^ (v >> 31)) as u32;
+    let zz = ((v << 1) ^ (v >> 31)).cast_unsigned();
     uvarint_len(zz)
 }
 
 pub fn put_uvarlong<B: BufMut>(buf: &mut B, mut v: u64) {
     while (v & !0x7F) != 0 {
-        #[allow(clippy::cast_possible_truncation)]
-        buf.put_u8(((v & 0x7F) as u8) | 0x80);
+        buf.put_u8((v & 0x7F).to_le_bytes()[0] | 0x80);
         v >>= 7;
     }
-    #[allow(clippy::cast_possible_truncation)]
-    buf.put_u8(v as u8);
+    buf.put_u8(v.to_le_bytes()[0]);
 }
 
+/// # Errors
+/// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
 pub fn get_uvarlong<B: Buf>(buf: &mut B) -> Result<u64, ProtocolError> {
     let mut result: u64 = 0;
     let mut shift = 0;
@@ -95,17 +91,15 @@ pub fn get_uvarlong<B: Buf>(buf: &mut B) -> Result<u64, ProtocolError> {
 }
 
 pub fn put_varlong<B: BufMut>(buf: &mut B, v: i64) {
-    // Zigzag encoding: intentional sign-reinterpreting cast.
-    #[allow(clippy::cast_sign_loss)]
-    let zz = ((v << 1) ^ (v >> 63)) as u64;
+    let zz = ((v << 1) ^ (v >> 63)).cast_unsigned();
     put_uvarlong(buf, zz);
 }
 
+/// # Errors
+/// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
 pub fn get_varlong<B: Buf>(buf: &mut B) -> Result<i64, ProtocolError> {
     let zz = get_uvarlong(buf)?;
-    // Zigzag decoding: intentional wrapping casts.
-    #[allow(clippy::cast_possible_wrap)]
-    Ok(((zz >> 1) as i64) ^ -((zz & 1) as i64))
+    Ok((zz >> 1).cast_signed() ^ -(zz & 1).cast_signed())
 }
 
 #[must_use]
@@ -113,15 +107,13 @@ pub fn uvarlong_len(v: u64) -> usize {
     if v == 0 {
         return 1;
     }
-    let bits = 64 - v.leading_zeros() as usize;
+    let bits = usize::from((u64::BITS - v.leading_zeros()).to_le_bytes()[0]);
     bits.div_ceil(7)
 }
 
 #[must_use]
 pub fn varlong_len(v: i64) -> usize {
-    // Zigzag encoding: intentional sign-reinterpreting cast.
-    #[allow(clippy::cast_sign_loss)]
-    let zz = ((v << 1) ^ (v >> 63)) as u64;
+    let zz = ((v << 1) ^ (v >> 63)).cast_unsigned();
     uvarlong_len(zz)
 }
 

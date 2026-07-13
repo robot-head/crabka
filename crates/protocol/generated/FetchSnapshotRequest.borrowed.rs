@@ -15,7 +15,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 1;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,11 +34,15 @@ impl Default for FetchSnapshotRequest<'_> {
             max_bytes: 2_147_483_647i32,
             topics: Vec::new(),
             cluster_id: None,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl FetchSnapshotRequest<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::fetch_snapshot_request::FetchSnapshotRequest {
         crate::owned::fetch_snapshot_request::FetchSnapshotRequest {
             replica_id: (self.replica_id),
@@ -73,7 +78,7 @@ impl Encode for FetchSnapshotRequest<'_> {
         }
         if flex {
             let mut tagged = WriteTaggedFields::new();
-            if !(self.cluster_id.is_none()) {
+            if self.cluster_id.is_some() {
                 let payload = encode_to_bytes(
                     if flex {
                         compact_nullable_string_len(self.cluster_id.as_deref())
@@ -82,9 +87,9 @@ impl Encode for FetchSnapshotRequest<'_> {
                     },
                     |b| {
                         if flex {
-                            put_compact_nullable_string(b, self.cluster_id.as_deref());
+                            let () = put_compact_nullable_string(b, self.cluster_id.as_deref());
                         } else {
-                            put_nullable_string(b, self.cluster_id.as_deref());
+                            let () = put_nullable_string(b, self.cluster_id.as_deref());
                         }
                         Ok(())
                     },
@@ -114,7 +119,7 @@ impl Encode for FetchSnapshotRequest<'_> {
         }
         if flex {
             let mut known_pairs: Vec<(u32, usize)> = Vec::new();
-            if !(self.cluster_id.is_none()) {
+            if self.cluster_id.is_some() {
                 known_pairs.push((
                     0,
                     if flex {
@@ -205,6 +210,10 @@ pub struct TopicSnapshot<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl TopicSnapshot<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::fetch_snapshot_request::TopicSnapshot {
         crate::owned::fetch_snapshot_request::TopicSnapshot {
             name: (self.name).to_string(),
@@ -221,9 +230,9 @@ impl Encode for TopicSnapshot<'_> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name);
+                let () = put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name);
+                let () = put_string(buf, self.name);
             }
         }
         if version >= 0 {
@@ -319,6 +328,10 @@ pub struct PartitionSnapshot {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl PartitionSnapshot {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::fetch_snapshot_request::PartitionSnapshot {
         crate::owned::fetch_snapshot_request::PartitionSnapshot {
             partition: (self.partition),
@@ -448,6 +461,10 @@ pub struct SnapshotId {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl SnapshotId {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::fetch_snapshot_request::SnapshotId {
         crate::owned::fetch_snapshot_request::SnapshotId {
             end_offset: (self.end_offset),

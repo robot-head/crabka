@@ -9,6 +9,8 @@ const MAX_TENANT_ID_LEN: usize = 150;
 /// (alphanumerics plus `! - _ . * ' ( )`).
 ///
 /// Returns a human-readable reason on rejection.
+/// # Errors
+/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub fn validate_tenant(id: &str) -> Result<(), String> {
     if id.is_empty() {
         return Err("tenant ID is empty".to_string());
@@ -41,6 +43,7 @@ fn is_allowed_tenant_byte(byte: u8) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
 
     use super::validate_tenant;
 
@@ -55,7 +58,7 @@ mod tests {
             "ascii!-_.*'()",
         ];
         for id in valid {
-            assert2::assert!(validate_tenant(id).is_ok());
+            assert!(validate_tenant(id).is_ok(), "expected `{id}` to be valid");
         }
 
         let invalid = [
@@ -69,11 +72,14 @@ mod tests {
             "tab\ttenant",
         ];
         for id in invalid {
-            assert2::assert!(validate_tenant(id).is_err());
+            assert!(
+                validate_tenant(id).is_err(),
+                "expected `{id}` to be invalid"
+            );
         }
 
         // Length boundary: exactly 150 bytes is allowed, 151 is rejected.
-        assert2::assert!(validate_tenant(&"x".repeat(150)).is_ok());
-        assert2::assert!(validate_tenant(&"x".repeat(151)).is_err());
+        assert!(validate_tenant(&"x".repeat(150)).is_ok());
+        assert!(validate_tenant(&"x".repeat(151)).is_err());
     }
 }

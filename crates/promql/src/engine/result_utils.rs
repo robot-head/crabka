@@ -1,14 +1,10 @@
 use std::collections::BTreeSet;
 
+use num_traits::ToPrimitive;
+
 use super::labels::labels_key;
 use crate::{PromqlError, error::Result, result::QueryResult};
 
-#[allow(
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "PromQL quantile interpolation works in f64 rank space, then indexes a sorted in-memory vector after bounding the rank."
-)]
 pub(super) fn quantile_value(quantile: f64, values: &mut [f64]) -> Option<f64> {
     if values.is_empty() {
         return None;
@@ -31,13 +27,13 @@ pub(super) fn quantile_value(quantile: f64, values: &mut [f64]) -> Option<f64> {
         return Some(values[0]);
     }
 
-    let rank = quantile * (values.len() - 1) as f64;
-    let lower = rank.floor() as usize;
-    let upper = rank.ceil() as usize;
+    let rank = quantile * (values.len() - 1).to_f64().unwrap_or(f64::MAX);
+    let lower = rank.floor().to_usize()?;
+    let upper = rank.ceil().to_usize()?;
     if lower == upper {
         return Some(values[lower]);
     }
-    let weight = rank - lower as f64;
+    let weight = rank - lower.to_f64().unwrap_or(f64::MAX);
     Some(values[lower] * (1.0 - weight) + values[upper] * weight)
 }
 

@@ -22,6 +22,8 @@ pub fn encode(id: u32, body: &[u8]) -> Bytes {
 
 /// Frame a Protobuf body with its message-index path.
 #[must_use]
+/// # Panics
+/// Panics if a schema previously validated by the registry is missing a definition or dependency required during resolution.
 pub fn encode_protobuf(id: u32, message_index: &[i32], body: &[u8]) -> Bytes {
     let mut buf = BytesMut::with_capacity(8 + body.len());
     buf.put_u8(MAGIC);
@@ -29,8 +31,9 @@ pub fn encode_protobuf(id: u32, message_index: &[i32], body: &[u8]) -> Bytes {
     if message_index == [0] {
         buf.put_u8(0); // optimized single-byte form
     } else {
-        #[allow(clippy::cast_possible_wrap)]
-        put_varint(&mut buf, message_index.len() as i64);
+        let index_count = i64::try_from(message_index.len())
+            .expect("Protobuf message-index count must fit in i64");
+        put_varint(&mut buf, index_count);
         for &ix in message_index {
             put_varint(&mut buf, i64::from(ix));
         }
@@ -40,23 +43,31 @@ pub fn encode_protobuf(id: u32, message_index: &[i32], body: &[u8]) -> Bytes {
 }
 
 /// Split a non-Protobuf frame into `(id, body)`.
+/// # Errors
+/// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
 pub fn decode(bytes: &[u8]) -> Result<(u32, &[u8]), SchemaSerdeError> {
     strip_header(bytes)
 }
 
 /// Split a Protobuf frame into `(id, message_index, body)`.
+/// # Errors
+/// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
 pub fn decode_protobuf(bytes: &[u8]) -> Result<(u32, Vec<i32>, &[u8]), SchemaSerdeError> {
     let (id, after_id) = strip_header(bytes)?;
     let (len, mut rest) = read_varint(after_id)?;
     let indices = if len == 0 {
         vec![0] // optimized single-byte form
     } else {
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let mut v = Vec::with_capacity(len as usize);
-        for _ in 0..len {
+        let index_count = usize::try_from(len).map_err(|_| {
+            SchemaSerdeError::Wire(format!("negative Protobuf message-index count {len}"))
+        })?;
+        let mut v = Vec::with_capacity(index_count.min(rest.len()));
+        for _ in 0..index_count {
             let (ix, r) = read_varint(rest)?;
-            #[allow(clippy::cast_possible_truncation)]
-            v.push(ix as i32);
+            let ix = i32::try_from(ix).map_err(|_| {
+                SchemaSerdeError::Wire(format!("Protobuf message index {ix} does not fit in i32"))
+            })?;
+            v.push(ix);
             rest = r;
         }
         v
@@ -82,16 +93,13 @@ fn strip_header(bytes: &[u8]) -> Result<(u32, &[u8]), SchemaSerdeError> {
 }
 
 fn put_varint(buf: &mut BytesMut, value: i64) {
-    #[allow(clippy::cast_sign_loss)]
-    let mut zig = ((value << 1) ^ (value >> 63)) as u64;
+    let mut zig = ((value << 1) ^ (value >> 63)).cast_unsigned();
     loop {
         if zig < 0x80 {
-            #[allow(clippy::cast_possible_truncation)]
-            buf.put_u8(zig as u8);
+            buf.put_u8(zig.to_le_bytes()[0]);
             break;
         }
-        #[allow(clippy::cast_possible_truncation)]
-        buf.put_u8((zig as u8 & 0x7f) | 0x80);
+        buf.put_u8((zig.to_le_bytes()[0] & 0x7f) | 0x80);
         zig >>= 7;
     }
 }
@@ -102,8 +110,7 @@ fn read_varint(bytes: &[u8]) -> Result<(i64, &[u8]), SchemaSerdeError> {
     for (i, &b) in bytes.iter().enumerate() {
         result |= u64::from(b & 0x7f) << shift;
         if b & 0x80 == 0 {
-            #[allow(clippy::cast_possible_wrap)]
-            let decoded = ((result >> 1) as i64) ^ -((result & 1) as i64);
+            let decoded = (result >> 1).cast_signed() ^ -(result & 1).cast_signed();
             return Ok((decoded, &bytes[i + 1..]));
         }
         shift += 7;
@@ -156,6 +163,29 @@ mod tests {
         let f = encode_protobuf(7, &[1, 0], b"pb");
         let (id, idx, body) = decode_protobuf(&f).unwrap();
         check!((id, idx, body) == (7, vec![1, 0], b"pb".as_slice()));
+    }
+
+    #[test]
+    fn protobuf_rejects_negative_index_count() {
+        let mut frame = BytesMut::from(&[MAGIC, 0, 0, 0, 7][..]);
+        put_varint(&mut frame, -1);
+
+        let error = decode_protobuf(&frame).unwrap_err();
+        check!(
+            error
+                .to_string()
+                .contains("negative Protobuf message-index count")
+        );
+    }
+
+    #[test]
+    fn protobuf_rejects_index_outside_i32() {
+        let mut frame = BytesMut::from(&[MAGIC, 0, 0, 0, 7][..]);
+        put_varint(&mut frame, 1);
+        put_varint(&mut frame, i64::from(i32::MAX) + 1);
+
+        let error = decode_protobuf(&frame).unwrap_err();
+        check!(error.to_string().contains("does not fit in i32"));
     }
 
     #[test]

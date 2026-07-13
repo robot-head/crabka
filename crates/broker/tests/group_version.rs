@@ -1,12 +1,11 @@
-#![allow(clippy::pedantic)]
-
 //! KIP-848 / KIP-584: the next-gen consumer-group protocol
-//! (`ConsumerGroupHeartbeat`, api_key 68) is gated on a finalized
+//! (`ConsumerGroupHeartbeat`, `api_key` 68) is gated on a finalized
 //! `group.version >= 1`. A freshly-bootstrapped broker finalizes
 //! `group.version=1` (so next-gen is enabled); downgrading it to 0 (a KIP-584
 //! tombstone) disables next-gen, and the broker then rejects heartbeats with
 //! `UNSUPPORTED_VERSION` so the client falls back to the classic protocol.
 
+use assert2::assert;
 mod support;
 
 use crabka_protocol::owned::{
@@ -42,7 +41,10 @@ async fn next_gen_accepted_when_group_version_finalized() {
     // The feature gate did NOT fire (would be UNSUPPORTED_VERSION=35). The
     // group may still be mid-rebalance / need a topic, but it must not be a
     // group.version gate rejection.
-    assert2::assert!(resp.error_code != UNSUPPORTED_VERSION);
+    assert!(
+        resp.error_code != UNSUPPORTED_VERSION,
+        "gate must pass at gv=1: {resp:?}"
+    );
     p.broker.shutdown().await;
 }
 
@@ -64,7 +66,7 @@ async fn next_gen_rejected_when_group_version_disabled() {
         })
         .await
         .expect("UpdateFeatures downgrade");
-    assert2::assert!(dg.error_code == 0);
+    assert!(dg.error_code == 0, "downgrade to 0 should succeed: {dg:?}");
 
     // Now a heartbeat must be rejected with UNSUPPORTED_VERSION (classic fallback).
     let resp = p
@@ -72,6 +74,9 @@ async fn next_gen_rejected_when_group_version_disabled() {
         .send(heartbeat("gv-reject"))
         .await
         .expect("heartbeat");
-    assert2::assert!(resp.error_code == UNSUPPORTED_VERSION);
+    assert!(
+        resp.error_code == UNSUPPORTED_VERSION,
+        "next-gen must be rejected once group.version is disabled: {resp:?}"
+    );
     p.broker.shutdown().await;
 }

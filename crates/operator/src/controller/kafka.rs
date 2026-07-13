@@ -162,6 +162,8 @@ pub(crate) fn rollup_condition(rollup: &ClusterRollup) -> (bool, &'static str, S
 /// (relevant for `NodePort` listeners) eventually trigger a reconcile.
 /// The mapper returns empty — the periodic requeue (30 s) picks up the
 /// change rather than enqueuing every Kafka on every Node event.
+/// # Errors
+/// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub async fn run(ctx: Context) -> anyhow::Result<()> {
     let api: Api<Kafka> = Api::all(ctx.client.clone());
     let pools: Api<KafkaNodePool> = Api::all(ctx.client.clone());
@@ -408,7 +410,7 @@ async fn apply_external_services(
 /// for the whole cluster.
 fn canonical_oauth_config(listeners: &[Listener]) -> Option<ListenerAuthenticationOAuth> {
     listeners.iter().find_map(|l| match &l.authentication {
-        Some(ListenerAuthentication::OAuth(cfg)) => Some(cfg.clone()),
+        Some(ListenerAuthentication::OAuth(cfg)) => Some((**cfg).clone()),
         _ => None,
     })
 }
@@ -466,7 +468,6 @@ pub(crate) fn oauth_introspection_secret_mount(kafka: &Kafka) -> Option<OauthInt
 /// In-pod mount info for the GSSAPI keytab. `key` is the user's source
 /// key; mounted via projected items to a fixed path so the broker reads
 /// `/etc/crabka/gssapi-keytab/keytab` regardless of key name.
-#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct GssapiKeytabMount {
     pub secret_name: String,
     pub key: String,
@@ -653,7 +654,13 @@ async fn apply_route(
 /// Returning `Ok(default)` rather than failing on any individual GET's
 /// 404 is intentional: a Pod that hasn't been created yet is not an
 /// error — it surfaces as `PodNotScheduled` in `compute_advertised`.
-#[allow(clippy::type_complexity)]
+type ExternalState = (
+    HashMap<String, Node>,
+    HashMap<String, Pod>,
+    HashMap<String, Service>,
+    HashMap<(String, i32), Service>,
+);
+
 #[tracing::instrument(
     level = "debug",
     skip_all,
@@ -667,15 +674,7 @@ async fn read_external_state(
     cluster_name: &str,
     effective_listeners: &[Listener],
     brokers: &[BrokerInfo],
-) -> Result<
-    (
-        HashMap<String, Node>,
-        HashMap<String, Pod>,
-        HashMap<String, Service>,
-        HashMap<(String, i32), Service>,
-    ),
-    ReconcileError,
-> {
+) -> Result<ExternalState, ReconcileError> {
     // Node + Pod state is only needed to resolve NodePort advertised hosts (the
     // node's external IP) / LoadBalancer scheduling. ingress/route advertised
     // hosts come from config, so an ingress/route-only cluster issues no
@@ -784,7 +783,7 @@ async fn patch_status_with_condition(
 
 /// Reconcile entry point. Thin wrapper that times the pass, records the
 /// `reconciliations_total{kind,result}` counter + `reconcile_duration_seconds`
-/// histogram, and delegates to [`reconcile_inner`]. Kept separate so the
+/// histogram, and delegates to the internal `reconcile_inner` operation. Kept separate so the
 /// per-outcome metric classification (ok / error) lives in one place and the
 /// long linear inner body's many early-return sites don't each need to record.
 #[tracing::instrument(
@@ -796,11 +795,861 @@ async fn patch_status_with_condition(
         generation = ?obj.meta().generation,
     )
 )]
+/// # Errors
+/// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, ReconcileError> {
     common::record_reconcile(&ctx, "Kafka", Box::pin(reconcile_inner(obj, ctx.clone()))).await
 }
 
-#[allow(clippy::too_many_lines)] // linear pipeline; the three branches (invalid / pending / ready) need direct condition + status binding
+struct CaPhaseInput<'a> {
+    obj: &'a Kafka,
+    ctx: &'a Context,
+    namespace: &'a str,
+    name: &'a str,
+    secret_api: &'a Api<Secret>,
+    rollout_converged: bool,
+    explicit_pin: Option<&'a str>,
+    logging_filter: Option<&'a str>,
+}
+
+struct CaArtifacts {
+    cluster: cluster_ca::CaReconcileOutcome,
+    clients: cluster_ca::CaReconcileOutcome,
+    cluster_condition: KafkaCondition,
+    clients_condition: KafkaCondition,
+    rotation_condition: KafkaCondition,
+    config_hash: String,
+}
+
+enum CaPhaseResult {
+    Ready(Box<CaArtifacts>),
+    Done(Action),
+}
+
+struct ListenerPhaseInput<'a> {
+    obj: &'a Kafka,
+    ctx: &'a Context,
+    namespace: &'a str,
+    name: &'a str,
+    effective_listeners: &'a [Listener],
+    inter_broker_name: &'a str,
+    logging_filter: Option<&'a str>,
+    service_api: &'a Api<Service>,
+    config_map_api: &'a Api<ConfigMap>,
+    secret_api: &'a Api<Secret>,
+    pool_api: &'a Api<KafkaNodePool>,
+    pools: &'a [KafkaNodePool],
+    config_hash: &'a str,
+    cluster_ca: &'a cluster_ca::CaReconcileOutcome,
+}
+
+struct ListenerArtifacts {
+    status: Vec<ListenerStatus>,
+    valid_condition: KafkaCondition,
+    ready_condition: KafkaCondition,
+    load_balancer_pending: Vec<(i32, String)>,
+}
+
+enum ListenerPhaseResult {
+    Ready(Box<ListenerArtifacts>),
+    Done(Action),
+}
+
+struct FinalizeKafkaInput<'a> {
+    obj: &'a Kafka,
+    ctx: &'a Context,
+    namespace: &'a str,
+    name: &'a str,
+    effective_listeners: &'a [Listener],
+    inter_broker_name: &'a str,
+    pools: &'a [KafkaNodePool],
+    listener_status: Vec<ListenerStatus>,
+    listeners_valid_condition: KafkaCondition,
+    listeners_ready_condition: KafkaCondition,
+    load_balancer_pending: Vec<(i32, String)>,
+    cluster_ca: &'a cluster_ca::CaReconcileOutcome,
+    clients_ca: &'a cluster_ca::CaReconcileOutcome,
+    cluster_ca_condition: KafkaCondition,
+    clients_ca_condition: KafkaCondition,
+    ca_rotation_condition: KafkaCondition,
+    version_condition: KafkaCondition,
+    logging_condition: KafkaCondition,
+    resolved_metadata: Option<String>,
+    finalized_metadata: Option<&'a str>,
+}
+
+// linear pipeline; the three branches (invalid / pending / ready) need direct condition + status binding
+async fn reconcile_cas(input: CaPhaseInput<'_>) -> Result<CaPhaseResult, ReconcileError> {
+    let CaPhaseInput {
+        obj,
+        ctx,
+        namespace: ns,
+        name,
+        secret_api,
+        rollout_converged,
+        explicit_pin,
+        logging_filter,
+    } = input;
+    // Reconcile both CAs with rotation. The cluster CA drives the
+    // staged key-replacement machine + the config-hash; the clients CA only
+    // creates / same-key-renews (its truststore is hot-reloaded). force-* and
+    // CronJob `ca-renew-after` annotations target the cluster CA. On
+    // BYO-missing, surface a False condition and requeue.
+    let cr_anns = obj.meta().annotations.clone().unwrap_or_default();
+    let force_renew = cr_anns.contains_key(cluster_ca::ANN_FORCE_RENEW)
+        || cr_anns.contains_key(cluster_ca::ANN_RENEW_AFTER);
+    let force_replace_key = cr_anns.contains_key(cluster_ca::ANN_FORCE_REPLACE_KEY);
+    let now = time::OffsetDateTime::now_utc();
+
+    let (cluster_ca_outcome, clients_ca_outcome, cluster_ca_cond, clients_ca_cond) = {
+        let cluster_result = cluster_ca::reconcile_ca(
+            secret_api,
+            obj,
+            cluster_ca::WhichCa::Cluster,
+            force_renew,
+            force_replace_key,
+            rollout_converged,
+            now,
+        )
+        .await;
+        let cluster_outcome = match cluster_result {
+            Ok(o) => o,
+            Err(ReconcileError::ByoCaMissing { ref which }) => {
+                let cond = condition(
+                    which,
+                    "False",
+                    "ByoCaMissing",
+                    "spec.clusterCa.generateCertificateAuthority=false but the CA Secret pair is absent",
+                );
+                let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), ns);
+                patch_status_with_condition(&kafka_api, name, cond).await?;
+                return Ok(CaPhaseResult::Done(Action::requeue(Duration::from_mins(1))));
+            }
+            Err(e) => return Err(e),
+        };
+        // Clients CA never enters the staged machine and takes no force flags.
+        let clients_result = cluster_ca::reconcile_ca(
+            secret_api,
+            obj,
+            cluster_ca::WhichCa::Clients,
+            false,
+            false,
+            true,
+            now,
+        )
+        .await;
+        let clients_outcome = match clients_result {
+            Ok(o) => o,
+            Err(ReconcileError::ByoCaMissing { ref which }) => {
+                let cond = condition(
+                    which,
+                    "False",
+                    "ByoCaMissing",
+                    "spec.clientsCa.generateCertificateAuthority=false but the CA Secret pair is absent",
+                );
+                let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), ns);
+                patch_status_with_condition(&kafka_api, name, cond).await?;
+                return Ok(CaPhaseResult::Done(Action::requeue(Duration::from_mins(1))));
+            }
+            Err(e) => return Err(e),
+        };
+        let cc = condition(
+            "ClusterCaReady",
+            "True",
+            "CaReady",
+            "cluster CA Secret pair present and parseable",
+        );
+        let clic = condition(
+            "ClientsCaReady",
+            "True",
+            "CaReady",
+            "clients CA Secret pair present and parseable",
+        );
+        (cluster_outcome, clients_outcome, cc, clic)
+    };
+
+    // Strip the one-shot rotation-trigger annotations once consumed (force
+    // renew/replace + CronJob nudge are all acted on this pass).
+    let strip_keys: Vec<&str> = [
+        cluster_ca::ANN_FORCE_RENEW,
+        cluster_ca::ANN_FORCE_REPLACE_KEY,
+        cluster_ca::ANN_RENEW_AFTER,
+    ]
+    .into_iter()
+    .filter(|k| cr_anns.contains_key(*k))
+    .collect();
+    if !strip_keys.is_empty() {
+        let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), ns);
+        strip_annotations(&kafka_api, name, &strip_keys).await?;
+    }
+
+    // A forced rotation the operator can't honor (BYO / clients-CA key
+    // replace) surfaces a Warning Event; the condition explains it too.
+    if cluster_ca_outcome.refused.is_some() {
+        emit_ca_rotation_refused_event(&ctx.client, ns, obj, &cluster_ca_outcome.rotation_message)
+            .await
+            .ok();
+    }
+
+    let ca_rotation_cond = condition(
+        "CaRotation",
+        if cluster_ca_outcome.rotation_in_progress {
+            "True"
+        } else {
+            "False"
+        },
+        cluster_ca_outcome.rotation_reason,
+        &cluster_ca_outcome.rotation_message,
+    );
+
+    // The config-hash covers the cluster-CA *trust bundle* (not just
+    // the signing cert), so adding / promoting / pruning a trust anchor rolls
+    // the cluster, while same-key leaf renewal (hot-reload) does not.
+    let cfg_hash = common::combined_config_hash(
+        &obj.spec,
+        Some(&cluster_ca_outcome.trust_bundle_pem),
+        explicit_pin,
+        logging_filter,
+    );
+
+    Ok(CaPhaseResult::Ready(Box::new(CaArtifacts {
+        cluster: cluster_ca_outcome,
+        clients: clients_ca_outcome,
+        cluster_condition: cluster_ca_cond,
+        clients_condition: clients_ca_cond,
+        rotation_condition: ca_rotation_cond,
+        config_hash: cfg_hash,
+    })))
+}
+
+struct ListenerDependencyInput<'a> {
+    obj: &'a Kafka,
+    ctx: &'a Context,
+    namespace: &'a str,
+    name: &'a str,
+    listeners: &'a [Listener],
+    inter_broker_name: &'a str,
+    secret_api: &'a Api<Secret>,
+}
+
+async fn validate_listener_dependencies(
+    input: ListenerDependencyInput<'_>,
+) -> Result<Option<Action>, ReconcileError> {
+    let ListenerDependencyInput {
+        obj,
+        ctx,
+        namespace: ns,
+        name,
+        listeners: effective_listeners,
+        inter_broker_name,
+        secret_api,
+    } = input;
+    // Assemble the OAUTHBEARER JWKS TLS trust bundle (if any).
+    // Failures here surface as Ready=False and short-circuit before
+    // any per-broker objects are rendered (an OAuth listener with a
+    // broken trust spec is not safe to bring brokers up against).
+    // The managed Secret's name (derived deterministically from the
+    // parent name) is recomputed by the pool reconciler via
+    // [`oauth_jwks_trust_secret_name`] when rendering the
+    // `StatefulSet`'s pod template, so it doesn't need to be
+    // threaded out of this function — calling
+    // `reconcile_oauth_jwks_trust` here is purely for its
+    // upsert-the-Secret side effect.
+    let oauth_canonical = canonical_oauth_config(effective_listeners);
+    match reconcile_oauth_jwks_trust(secret_api, obj, oauth_canonical.as_ref()).await {
+        Ok(_) => {}
+        Err(
+            e @ (ReconcileError::MissingOauthTrustSecret(_)
+            | ReconcileError::MissingOauthTrustKey { .. }
+            | ReconcileError::EmptyOauthTrustValue { .. }),
+        ) => {
+            let reason = match &e {
+                ReconcileError::MissingOauthTrustSecret(_) => "MissingOauthTrustSecret",
+                ReconcileError::MissingOauthTrustKey { .. } => "MissingOauthTrustKey",
+                ReconcileError::EmptyOauthTrustValue { .. } => "EmptyOauthTrustValue",
+                _ => unreachable!(),
+            };
+            let cond = condition("Ready", "False", reason, &e.to_string());
+            let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), ns);
+            patch_status_with_condition(&kafka_api, name, cond).await?;
+            return Ok(Some(Action::requeue(Duration::from_secs(30))));
+        }
+        Err(e) => return Err(e),
+    }
+
+    // Validate the OAUTHBEARER introspection client-secret
+    // Secret (when introspection is configured). The pod template
+    // derives the same mount independently via
+    // `oauth_introspection_secret_mount`, so we don't need to thread
+    // the value through here — calling
+    // `reconcile_oauth_introspection_secret` is purely for its
+    // validate-Secret-exists side effect.
+    match reconcile_oauth_introspection_secret(secret_api, obj, oauth_canonical.as_ref()).await {
+        Ok(_) => {}
+        Err(
+            e @ (ReconcileError::InvalidListenerOauthAccessTokenIsJwt(_)
+            | ReconcileError::MissingOauthIntrospectionSecret(_)
+            | ReconcileError::MissingOauthIntrospectionKey { .. }
+            | ReconcileError::EmptyOauthIntrospectionValue { .. }),
+        ) => {
+            let reason = match &e {
+                ReconcileError::InvalidListenerOauthAccessTokenIsJwt(_) => {
+                    "InvalidListenerOauthAccessTokenIsJwt"
+                }
+                ReconcileError::MissingOauthIntrospectionSecret(_) => {
+                    "MissingOauthIntrospectionSecret"
+                }
+                ReconcileError::MissingOauthIntrospectionKey { .. } => {
+                    "MissingOauthIntrospectionKey"
+                }
+                ReconcileError::EmptyOauthIntrospectionValue { .. } => {
+                    "EmptyOauthIntrospectionValue"
+                }
+                _ => unreachable!(),
+            };
+            let cond = condition("Ready", "False", reason, &e.to_string());
+            let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), ns);
+            patch_status_with_condition(&kafka_api, name, cond).await?;
+            return Ok(Some(Action::requeue(Duration::from_secs(30))));
+        }
+        Err(e) => return Err(e),
+    }
+
+    // Validate the GSSAPI keytab Secret (when a `type: gssapi`
+    // listener is configured) and the optional `spec.krb5ConfSecretRef`
+    // Secret. The pod template derives the same mounts independently
+    // via `gssapi_keytab_mount` / `krb5_conf_mount`, so we don't thread
+    // anything out — these checks are purely for the
+    // validate-Secret-exists side effect, mirroring the OAuth
+    // introspection check above.
+    let gssapi_secret_check: Result<(), ReconcileError> = async {
+        if let Some(m) = gssapi_keytab_mount(obj) {
+            let secret = secret_api
+                .get_opt(&m.secret_name)
+                .await?
+                .ok_or_else(|| ReconcileError::MissingGssapiKeytabSecret(m.secret_name.clone()))?;
+            let has_key = secret.data.as_ref().is_some_and(|d| d.contains_key(&m.key))
+                || secret
+                    .string_data
+                    .as_ref()
+                    .is_some_and(|d| d.contains_key(&m.key));
+            if !has_key {
+                return Err(ReconcileError::MissingGssapiKeytabKey {
+                    secret: m.secret_name,
+                    key: m.key,
+                });
+            }
+        }
+        if let Some((secret_name, key)) = krb5_conf_mount(obj) {
+            let secret = secret_api
+                .get_opt(&secret_name)
+                .await?
+                .ok_or_else(|| ReconcileError::MissingKrb5ConfSecret(secret_name.clone()))?;
+            let has_key = secret.data.as_ref().is_some_and(|d| d.contains_key(&key))
+                || secret
+                    .string_data
+                    .as_ref()
+                    .is_some_and(|d| d.contains_key(&key));
+            if !has_key {
+                return Err(ReconcileError::MissingKrb5ConfKey {
+                    secret: secret_name,
+                    key,
+                });
+            }
+        }
+        Ok(())
+    }
+    .await;
+    match gssapi_secret_check {
+        Ok(()) => {}
+        Err(
+            e @ (ReconcileError::MissingGssapiKeytabSecret(_)
+            | ReconcileError::MissingGssapiKeytabKey { .. }
+            | ReconcileError::MissingKrb5ConfSecret(_)
+            | ReconcileError::MissingKrb5ConfKey { .. }),
+        ) => {
+            let reason = match &e {
+                ReconcileError::MissingGssapiKeytabSecret(_) => "MissingGssapiKeytabSecret",
+                ReconcileError::MissingGssapiKeytabKey { .. } => "MissingGssapiKeytabKey",
+                ReconcileError::MissingKrb5ConfSecret(_) => "MissingKrb5ConfSecret",
+                ReconcileError::MissingKrb5ConfKey { .. } => "MissingKrb5ConfKey",
+                _ => unreachable!(),
+            };
+            let cond = condition("Ready", "False", reason, &e.to_string());
+            let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), ns);
+            patch_status_with_condition(&kafka_api, name, cond).await?;
+            return Ok(Some(Action::requeue(Duration::from_secs(30))));
+        }
+        Err(e) => return Err(e),
+    }
+
+    // Inter-broker Kerberos: when the resolved inter-broker listener
+    // uses GSSAPI, `spec.interBrokerKerberos` must be present (the
+    // broker needs initiate-side credentials). Surface a failure the
+    // same way `validate_listeners` does — `ListenersValid=False` with
+    // the `ValidationError`'s `reason()`/`message()`.
+    if let Err(e) = listeners::validate_inter_broker_gssapi(
+        effective_listeners,
+        inter_broker_name,
+        obj.spec.inter_broker_kerberos.is_some(),
+    ) {
+        let cond = condition("ListenersValid", "False", e.reason(), &e.message());
+        let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), ns);
+        patch_status_with_condition(&kafka_api, name, cond).await?;
+        return Ok(Some(Action::requeue(Duration::from_secs(30))));
+    }
+
+    Ok(None)
+}
+
+async fn reconcile_listener_resources(
+    input: ListenerPhaseInput<'_>,
+    validation: Result<(), listeners::ValidationError>,
+) -> Result<ListenerPhaseResult, ReconcileError> {
+    let ListenerPhaseInput {
+        obj,
+        ctx,
+        namespace: ns,
+        name,
+        effective_listeners,
+        inter_broker_name,
+        logging_filter,
+        service_api: svc_api,
+        config_map_api: cm_api,
+        secret_api,
+        pool_api,
+        pools,
+        config_hash: cfg_hash,
+        cluster_ca: cluster_ca_outcome,
+    } = input;
+    // If validation failed, leave the existing ConfigMap untouched —
+    // per the spec, "existing objects are not deleted; surface the
+    // error and wait." Stripping `broker-{id}.toml` keys would crash
+    // a previously-healthy cluster on the next pod restart. The pool
+    // is still adopted so the config-hash annotation reflects the
+    // (invalid) intent, but no roll fires until the user fixes the spec.
+    let listener_status: Vec<ListenerStatus>;
+    let (listeners_valid_cond, listeners_ready_cond);
+    let mut lb_pending: Vec<(i32, String)> = Vec::new();
+    if let Err(e) = validation {
+        adopt_pools(pool_api, obj, pools.iter(), cfg_hash).await?;
+        listener_status = vec![];
+        listeners_valid_cond = condition("ListenersValid", "False", e.reason(), &e.message());
+        listeners_ready_cond =
+            condition("ListenersReady", "False", "ListenersInvalid", &e.message());
+    } else {
+        if let Some(action) = validate_listener_dependencies(ListenerDependencyInput {
+            obj,
+            ctx,
+            namespace: ns,
+            name,
+            listeners: effective_listeners,
+            inter_broker_name,
+            secret_api,
+        })
+        .await?
+        {
+            return Ok(ListenerPhaseResult::Done(action));
+        }
+
+        // Enumerate brokers from sibling pools. Empty pool list ->
+        // empty broker list -> ConfigMap with no per-broker TOML keys,
+        // but listeners are still "valid" (just no consumers yet).
+        let pool_items: Vec<KafkaNodePool> = pools.to_vec();
+        let brokers = enumerate_brokers(name, ns, &pool_items);
+
+        // Observe external listener addresses for SAN extension.
+        let broker_ids: Vec<i32> = brokers.iter().map(|b| b.broker_id).collect();
+        let observed =
+            listeners::observe_listener_addresses(ctx, ns, name, effective_listeners, &broker_ids)
+                .await?;
+
+        // Brokers whose LB ingress isn't ready yet are skipped; a status condition will surface this.
+        let extra_sans_per_broker: BTreeMap<i32, Vec<crabka_security::ca::SubjectAltName>> =
+            brokers
+                .iter()
+                .filter_map(|b| {
+                    match listeners::compute_extra_sans(b.broker_id, effective_listeners, &observed)
+                    {
+                        Ok(sans) => Some((b.broker_id, sans)),
+                        Err(listeners::SanComputationError::SansNotReady {
+                            broker_id,
+                            listener,
+                        }) => {
+                            tracing::warn!(
+                                broker_id,
+                                %listener,
+                                "LB ingress not ready; skipping cert SAN extension for this broker"
+                            );
+                            lb_pending.push((broker_id, listener));
+                            None
+                        }
+                    }
+                })
+                .collect();
+
+        // Issue per-broker leaf certs into the broker-keystore Secret.
+        let keystore_requests: Vec<cluster_ca::BrokerCertRequest> = brokers
+            .iter()
+            .map(|b| {
+                let id = b.broker_id;
+                let cn = b.pod_name.clone();
+                let sans = vec![
+                    crabka_security::ca::SubjectAltName::Dns(b.pod_fqdn.clone()),
+                    crabka_security::ca::SubjectAltName::Dns(b.pod_name.clone()),
+                    crabka_security::ca::SubjectAltName::Dns(format!(
+                        "{name}-broker-headless.{ns}.svc.cluster.local"
+                    )),
+                    crabka_security::ca::SubjectAltName::Ip(std::net::IpAddr::V4(
+                        std::net::Ipv4Addr::LOCALHOST,
+                    )),
+                ];
+                let extra = extra_sans_per_broker.get(&id).cloned().unwrap_or_default();
+                cluster_ca::BrokerCertRequest {
+                    broker_id: id,
+                    cn,
+                    sans,
+                    extra_sans: extra,
+                }
+            })
+            .collect();
+        // Keystore status fields (issued/reused/pruned) are reserved
+        // for a future status surface; ignored for now.
+        cluster_ca::ensure_broker_keystore(
+            secret_api,
+            obj,
+            &keystore_requests,
+            &cluster_ca_outcome.signing_material,
+            cluster_ca_outcome.force_reissue_leafs,
+        )
+        .await?;
+
+        // Build per-broker TLS render map (paths inside the
+        // mounted broker-tls volume).
+        let tls_per_broker: std::collections::BTreeMap<i32, listeners::BrokerTlsRender> = brokers
+            .iter()
+            .map(|b| {
+                let id = b.broker_id;
+                (
+                    id,
+                    listeners::BrokerTlsRender {
+                        controller_listener_protocol: "Ssl".into(),
+                        cert_path: format!("/etc/crabka/broker-tls/{id}.crt"),
+                        key_path: format!("/etc/crabka/broker-tls/{id}.key"),
+                        client_ca_path: "/etc/crabka/cluster-ca/ca.crt".into(),
+                        client_auth: "Required".into(),
+                        trust_roots_path: "/etc/crabka/cluster-ca/ca.crt".into(),
+                    },
+                )
+            })
+            .collect();
+
+        let clients_ca_path: Option<&str> = if effective_listeners
+            .iter()
+            .any(|l| matches!(l.authentication, Some(ListenerAuthentication::Tls)))
+        {
+            Some("/etc/crabka/clients-ca/ca.crt")
+        } else {
+            None
+        };
+
+        // Helper to render+apply a ConfigMap with the supplied address map.
+        // Defined here (inside the validation-ok branch) so it can capture
+        // `tls_per_broker` and `clients_ca_path`. On the
+        // validation-fail path there is no `apply_cm` call.
+        let apply_cm = async |listeners_for_cm: &[Listener],
+                              addresses: &BTreeMap<i32, BTreeMap<String, AdvertisedAddress>>|
+               -> Result<(), ReconcileError> {
+            let cm = common::render_configmap(
+                obj,
+                listeners_for_cm,
+                addresses,
+                inter_broker_name,
+                Some(&tls_per_broker),
+                clients_ca_path,
+                logging_filter,
+            )?;
+            apply_object(cm_api, &cm_name(name), &cm).await?;
+            Ok(())
+        };
+
+        // Optimization: when every effective listener is internal (e.g. the
+        // synthesized default), `compute_advertised` only needs
+        // `pod_fqdn` (from `BrokerInfo`), so we skip per-broker object
+        // rendering and the Pod/Node/Service reads entirely. This preserves
+        // the internal-only request sequence exactly.
+        let has_external = effective_listeners
+            .iter()
+            .any(|l| l.type_ != ListenerType::Internal);
+
+        let (nodes, pods_by_name, bootstrap_services, broker_services) = if has_external {
+            apply_external_services(ctx, svc_api, obj, ns, name, effective_listeners, &brokers)
+                .await?;
+            read_external_state(ctx, svc_api, ns, name, effective_listeners, &brokers).await?
+        } else {
+            (
+                HashMap::new(),
+                HashMap::new(),
+                HashMap::new(),
+                HashMap::new(),
+            )
+        };
+
+        match resolve_addresses_per_broker(
+            effective_listeners,
+            &brokers,
+            &pods_by_name,
+            &nodes,
+            &broker_services,
+        ) {
+            Err(err) => {
+                // Pending external addresses (cold-start LB provisioning,
+                // node not scheduled yet). Leave the existing ConfigMap
+                // untouched — pods that are already running should not
+                // be disturbed; cold-start pods sit pending the CM,
+                // which arrives once the apiserver populates the
+                // Service status on a subsequent reconcile.
+                adopt_pools(pool_api, obj, pools.iter(), cfg_hash).await?;
+                listener_status = vec![];
+                listeners_valid_cond =
+                    condition("ListenersValid", "True", "Valid", "listeners validated");
+                listeners_ready_cond = condition(
+                    "ListenersReady",
+                    "False",
+                    "PendingExternalAddresses",
+                    &err.message(),
+                );
+            }
+            Ok(addresses_per_broker) => {
+                apply_cm(effective_listeners, &addresses_per_broker).await?;
+                adopt_pools(pool_api, obj, pools.iter(), cfg_hash).await?;
+                listener_status = build_listener_status(
+                    effective_listeners,
+                    &addresses_per_broker,
+                    &bootstrap_services,
+                    &nodes,
+                    name,
+                    ns,
+                );
+                listeners_valid_cond =
+                    condition("ListenersValid", "True", "Valid", "listeners validated");
+                let msg = format!("{} listener(s) ready", effective_listeners.len());
+                listeners_ready_cond = condition("ListenersReady", "True", "Ready", &msg);
+            }
+        }
+    }
+
+    Ok(ListenerPhaseResult::Ready(Box::new(ListenerArtifacts {
+        status: listener_status,
+        valid_condition: listeners_valid_cond,
+        ready_condition: listeners_ready_cond,
+        load_balancer_pending: lb_pending,
+    })))
+}
+
+async fn finalize_kafka(input: FinalizeKafkaInput<'_>) -> Result<Action, ReconcileError> {
+    let FinalizeKafkaInput {
+        obj,
+        ctx,
+        namespace: ns,
+        name,
+        effective_listeners,
+        inter_broker_name,
+        pools,
+        listener_status,
+        listeners_valid_condition: listeners_valid_cond,
+        listeners_ready_condition: listeners_ready_cond,
+        load_balancer_pending: lb_pending,
+        cluster_ca: cluster_ca_outcome,
+        clients_ca: clients_ca_outcome,
+        cluster_ca_condition: cluster_ca_cond,
+        clients_ca_condition: clients_ca_cond,
+        ca_rotation_condition: ca_rotation_cond,
+        version_condition: version_cond,
+        logging_condition,
+        resolved_metadata,
+        finalized_metadata,
+    } = input;
+    // Metrics resources: surface a MetricsReady condition regardless of
+    // whether spec.metricsConfig is set. MutuallyExclusive and
+    // PrometheusOperatorCrdsMissing are reported via the condition only —
+    // the reconcile continues so the rest of the status patch lands.
+    let metrics_outcome = crate::controller::metrics::reconcile_metrics(ctx, obj, name, ns).await;
+    let metrics_condition = match &metrics_outcome {
+        None => condition(
+            "MetricsReady",
+            "False",
+            "Disabled",
+            "spec.metricsConfig is not set",
+        ),
+        Some(Ok(())) => condition(
+            "MetricsReady",
+            "True",
+            "Available",
+            "metrics resources reconciled",
+        ),
+        Some(Err(ReconcileError::MetricsMutuallyExclusive)) => condition(
+            "MetricsReady",
+            "False",
+            "MutuallyExclusive",
+            "podMonitor and serviceMonitor are mutually exclusive",
+        ),
+        Some(Err(ReconcileError::PrometheusOperatorCrdsMissing)) => condition(
+            "MetricsReady",
+            "False",
+            "PrometheusOperatorCrdsMissing",
+            "monitoring.coreos.com/v1 is not served by the API server",
+        ),
+        Some(Err(_)) => condition("MetricsReady", "False", "Error", "metrics reconcile failed"),
+    };
+
+    // NetworkPolicy reconcile (opt-in via spec.networkPolicy).
+    // Inter-broker port: the listener whose name matches the effective
+    // inter-broker name. Falls back to the synthesized default's BROKER_PORT
+    // (defensive only; effective_listeners is always non-empty).
+    let inter_broker_port = effective_listeners
+        .iter()
+        .find(|l| l.name == inter_broker_name)
+        .map_or(common::BROKER_PORT, |l| l.port);
+
+    let np_outcome = network_policy::reconcile_network_policy(
+        ctx,
+        obj,
+        name,
+        ns,
+        effective_listeners,
+        inter_broker_port,
+    )
+    .await;
+    let np_condition = match &np_outcome {
+        None => condition(
+            "NetworkPolicyReady",
+            "False",
+            "Disabled",
+            "spec.networkPolicy is not set",
+        ),
+        Some(Ok(())) => condition(
+            "NetworkPolicyReady",
+            "True",
+            "Available",
+            "network policy reconciled",
+        ),
+        Some(Err(_)) => condition(
+            "NetworkPolicyReady",
+            "False",
+            "Error",
+            "network policy reconcile failed",
+        ),
+    };
+
+    // Aggregate + patch our own status.
+    let rollup = aggregate_pool_status(pools.iter());
+    // Surface the observed node-pool count for this cluster as a gauge. This is
+    // a coarse ownership/liveness signal (how many pools the parent reconciler
+    // saw this pass), complementing the per-pool `KafkaNodePool` reconciles.
+    ctx.metrics.set_managed_resources(
+        "KafkaNodePool",
+        i64::try_from(rollup.pool_count).unwrap_or(i64::MAX),
+    );
+    let (ready, reason, message) = rollup_condition(&rollup);
+    let (rolling, rolling_reason, rolling_message) = rolling_condition_from_rollup(&rollup);
+    let mut conditions = vec![
+        condition(
+            "Ready",
+            if ready { "True" } else { "False" },
+            reason,
+            &message,
+        ),
+        condition(
+            "Rolling",
+            if rolling { "True" } else { "False" },
+            rolling_reason,
+            &rolling_message,
+        ),
+        listeners_valid_cond,
+        listeners_ready_cond,
+        metrics_condition,
+        np_condition,
+        cluster_ca_cond,
+        clients_ca_cond,
+        ca_rotation_cond,
+        version_cond,
+        logging_condition,
+    ];
+    let has_lb_tls_listener = effective_listeners
+        .iter()
+        .any(|l| l.type_ == ListenerType::Loadbalancer && l.tls);
+    if has_lb_tls_listener {
+        if lb_pending.is_empty() {
+            conditions.push(condition(
+                "WaitingForLoadBalancerIp",
+                "False",
+                "LoadBalancerReady",
+                "all broker LB ingress addresses assigned",
+            ));
+        } else {
+            let detail: Vec<String> = lb_pending
+                .iter()
+                .map(|(id, l)| format!("broker {id} listener '{l}'"))
+                .collect();
+            conditions.push(condition(
+                "WaitingForLoadBalancerIp",
+                "True",
+                "LoadBalancerPending",
+                &format!("LB ingress not ready for: {}", detail.join(", ")),
+            ));
+        }
+    }
+    let status = KafkaStatus {
+        conditions,
+        replicas: Some(rollup.replicas.0),
+        ready_replicas: Some(rollup.ready_replicas.0),
+        listeners: listener_status,
+        cluster_ca: Some(crate::crd::CertificateAuthorityStatus {
+            not_after: cluster_ca_outcome.not_after.clone(),
+            generated: cluster_ca_outcome.generated,
+            cert_generation: cluster_ca_outcome.cert_generation,
+            key_generation: cluster_ca_outcome.key_generation,
+            rotation_phase: Some(cluster_ca_outcome.phase.as_str().to_string()),
+            trust_anchors: Some(cluster_ca_outcome.trust_anchors),
+        }),
+        clients_ca: Some(crate::crd::CertificateAuthorityStatus {
+            not_after: clients_ca_outcome.not_after.clone(),
+            generated: clients_ca_outcome.generated,
+            cert_generation: clients_ca_outcome.cert_generation,
+            key_generation: clients_ca_outcome.key_generation,
+            rotation_phase: Some(clients_ca_outcome.phase.as_str().to_string()),
+            trust_anchors: Some(clients_ca_outcome.trust_anchors),
+        }),
+        kafka_version: Some(obj.spec.kafka_version.clone()),
+        // Advance the finalized metadata version when valid; hold the
+        // previous value on a validation failure.
+        metadata_version: resolved_metadata
+            .clone()
+            .or_else(|| finalized_metadata.map(str::to_string)),
+    };
+    let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), ns);
+    patch_status::<Kafka, KafkaStatus>(&kafka_api, name, status).await?;
+
+    // Propagate any non-condition-mapped metrics error after the status
+    // patch — we want admins to see the condition update before bouncing.
+    if let Some(Err(e)) = metrics_outcome
+        && !matches!(
+            e,
+            ReconcileError::MetricsMutuallyExclusive
+                | ReconcileError::PrometheusOperatorCrdsMissing
+        )
+    {
+        return Err(e);
+    }
+
+    if let Some(Err(e)) = np_outcome {
+        return Err(e);
+    }
+
+    Ok(Action::requeue(Duration::from_secs(30)))
+}
+
 async fn reconcile_inner(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, ReconcileError> {
     let ns = obj.namespace().unwrap_or_else(|| "default".into());
     let name = obj.name_any();
@@ -973,687 +1822,82 @@ async fn reconcile_inner(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, R
     let pools = pool_api.list(&lp).await?;
     let rollout_converged = pools_converged(pools.iter());
 
-    // Reconcile both CAs with rotation. The cluster CA drives the
-    // staged key-replacement machine + the config-hash; the clients CA only
-    // creates / same-key-renews (its truststore is hot-reloaded). force-* and
-    // CronJob `ca-renew-after` annotations target the cluster CA. On
-    // BYO-missing, surface a False condition and requeue.
-    let cr_anns = obj.meta().annotations.clone().unwrap_or_default();
-    let force_renew = cr_anns.contains_key(cluster_ca::ANN_FORCE_RENEW)
-        || cr_anns.contains_key(cluster_ca::ANN_RENEW_AFTER);
-    let force_replace_key = cr_anns.contains_key(cluster_ca::ANN_FORCE_REPLACE_KEY);
-    let now = time::OffsetDateTime::now_utc();
-
-    let (cluster_ca_outcome, clients_ca_outcome, cluster_ca_cond, clients_ca_cond) = {
-        let cluster_result = cluster_ca::reconcile_ca(
-            &secret_api,
-            &obj,
-            cluster_ca::WhichCa::Cluster,
-            force_renew,
-            force_replace_key,
-            rollout_converged,
-            now,
-        )
-        .await;
-        let cluster_outcome = match cluster_result {
-            Ok(o) => o,
-            Err(ReconcileError::ByoCaMissing { ref which }) => {
-                let cond = condition(
-                    which,
-                    "False",
-                    "ByoCaMissing",
-                    "spec.clusterCa.generateCertificateAuthority=false but the CA Secret pair is absent",
-                );
-                let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &ns);
-                patch_status_with_condition(&kafka_api, &name, cond).await?;
-                return Ok(Action::requeue(Duration::from_mins(1)));
-            }
-            Err(e) => return Err(e),
-        };
-        // Clients CA never enters the staged machine and takes no force flags.
-        let clients_result = cluster_ca::reconcile_ca(
-            &secret_api,
-            &obj,
-            cluster_ca::WhichCa::Clients,
-            false,
-            false,
-            true,
-            now,
-        )
-        .await;
-        let clients_outcome = match clients_result {
-            Ok(o) => o,
-            Err(ReconcileError::ByoCaMissing { ref which }) => {
-                let cond = condition(
-                    which,
-                    "False",
-                    "ByoCaMissing",
-                    "spec.clientsCa.generateCertificateAuthority=false but the CA Secret pair is absent",
-                );
-                let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &ns);
-                patch_status_with_condition(&kafka_api, &name, cond).await?;
-                return Ok(Action::requeue(Duration::from_mins(1)));
-            }
-            Err(e) => return Err(e),
-        };
-        let cc = condition(
-            "ClusterCaReady",
-            "True",
-            "CaReady",
-            "cluster CA Secret pair present and parseable",
-        );
-        let clic = condition(
-            "ClientsCaReady",
-            "True",
-            "CaReady",
-            "clients CA Secret pair present and parseable",
-        );
-        (cluster_outcome, clients_outcome, cc, clic)
-    };
-
-    // Strip the one-shot rotation-trigger annotations once consumed (force
-    // renew/replace + CronJob nudge are all acted on this pass).
-    let strip_keys: Vec<&str> = [
-        cluster_ca::ANN_FORCE_RENEW,
-        cluster_ca::ANN_FORCE_REPLACE_KEY,
-        cluster_ca::ANN_RENEW_AFTER,
-    ]
-    .into_iter()
-    .filter(|k| cr_anns.contains_key(*k))
-    .collect();
-    if !strip_keys.is_empty() {
-        let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &ns);
-        strip_annotations(&kafka_api, &name, &strip_keys).await?;
-    }
-
-    // A forced rotation the operator can't honor (BYO / clients-CA key
-    // replace) surfaces a Warning Event; the condition explains it too.
-    if cluster_ca_outcome.refused.is_some() {
-        emit_ca_rotation_refused_event(
-            &ctx.client,
-            &ns,
-            &obj,
-            &cluster_ca_outcome.rotation_message,
-        )
-        .await
-        .ok();
-    }
-
-    let ca_rotation_cond = condition(
-        "CaRotation",
-        if cluster_ca_outcome.rotation_in_progress {
-            "True"
-        } else {
-            "False"
-        },
-        cluster_ca_outcome.rotation_reason,
-        &cluster_ca_outcome.rotation_message,
-    );
-
-    // The config-hash covers the cluster-CA *trust bundle* (not just
-    // the signing cert), so adding / promoting / pruning a trust anchor rolls
-    // the cluster, while same-key leaf renewal (hot-reload) does not.
-    let cfg_hash = common::combined_config_hash(
-        &obj.spec,
-        Some(&cluster_ca_outcome.trust_bundle_pem),
+    let CaArtifacts {
+        cluster: cluster_ca_outcome,
+        clients: clients_ca_outcome,
+        cluster_condition: cluster_ca_cond,
+        clients_condition: clients_ca_cond,
+        rotation_condition: ca_rotation_cond,
+        config_hash: cfg_hash,
+    } = match reconcile_cas(CaPhaseInput {
+        obj: &obj,
+        ctx: &ctx,
+        namespace: &ns,
+        name: &name,
+        secret_api: &secret_api,
+        rollout_converged,
         explicit_pin,
-        logging_filter.as_deref(),
-    );
-
-    // If validation failed, leave the existing ConfigMap untouched —
-    // per the spec, "existing objects are not deleted; surface the
-    // error and wait." Stripping `broker-{id}.toml` keys would crash
-    // a previously-healthy cluster on the next pod restart. The pool
-    // is still adopted so the config-hash annotation reflects the
-    // (invalid) intent, but no roll fires until the user fixes the spec.
-    let listener_status: Vec<ListenerStatus>;
-    let (listeners_valid_cond, listeners_ready_cond);
-    let mut lb_pending: Vec<(i32, String)> = Vec::new();
-    if let Err(e) = validation {
-        adopt_pools(&pool_api, &obj, pools.iter(), &cfg_hash).await?;
-        listener_status = vec![];
-        listeners_valid_cond = condition("ListenersValid", "False", e.reason(), &e.message());
-        listeners_ready_cond =
-            condition("ListenersReady", "False", "ListenersInvalid", &e.message());
-    } else {
-        // Assemble the OAUTHBEARER JWKS TLS trust bundle (if any).
-        // Failures here surface as Ready=False and short-circuit before
-        // any per-broker objects are rendered (an OAuth listener with a
-        // broken trust spec is not safe to bring brokers up against).
-        // The managed Secret's name (derived deterministically from the
-        // parent name) is recomputed by the pool reconciler via
-        // [`oauth_jwks_trust_secret_name`] when rendering the
-        // `StatefulSet`'s pod template, so it doesn't need to be
-        // threaded out of this function — calling
-        // `reconcile_oauth_jwks_trust` here is purely for its
-        // upsert-the-Secret side effect.
-        let oauth_canonical = canonical_oauth_config(&effective_listeners);
-        match reconcile_oauth_jwks_trust(&secret_api, &obj, oauth_canonical.as_ref()).await {
-            Ok(_) => {}
-            Err(
-                e @ (ReconcileError::MissingOauthTrustSecret(_)
-                | ReconcileError::MissingOauthTrustKey { .. }
-                | ReconcileError::EmptyOauthTrustValue { .. }),
-            ) => {
-                let reason = match &e {
-                    ReconcileError::MissingOauthTrustSecret(_) => "MissingOauthTrustSecret",
-                    ReconcileError::MissingOauthTrustKey { .. } => "MissingOauthTrustKey",
-                    ReconcileError::EmptyOauthTrustValue { .. } => "EmptyOauthTrustValue",
-                    _ => unreachable!(),
-                };
-                let cond = condition("Ready", "False", reason, &e.to_string());
-                let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &ns);
-                patch_status_with_condition(&kafka_api, &name, cond).await?;
-                return Ok(Action::requeue(Duration::from_secs(30)));
-            }
-            Err(e) => return Err(e),
-        }
-
-        // Validate the OAUTHBEARER introspection client-secret
-        // Secret (when introspection is configured). The pod template
-        // derives the same mount independently via
-        // `oauth_introspection_secret_mount`, so we don't need to thread
-        // the value through here — calling
-        // `reconcile_oauth_introspection_secret` is purely for its
-        // validate-Secret-exists side effect.
-        match reconcile_oauth_introspection_secret(&secret_api, &obj, oauth_canonical.as_ref())
-            .await
-        {
-            Ok(_) => {}
-            Err(
-                e @ (ReconcileError::InvalidListenerOauthAccessTokenIsJwt(_)
-                | ReconcileError::MissingOauthIntrospectionSecret(_)
-                | ReconcileError::MissingOauthIntrospectionKey { .. }
-                | ReconcileError::EmptyOauthIntrospectionValue { .. }),
-            ) => {
-                let reason = match &e {
-                    ReconcileError::InvalidListenerOauthAccessTokenIsJwt(_) => {
-                        "InvalidListenerOauthAccessTokenIsJwt"
-                    }
-                    ReconcileError::MissingOauthIntrospectionSecret(_) => {
-                        "MissingOauthIntrospectionSecret"
-                    }
-                    ReconcileError::MissingOauthIntrospectionKey { .. } => {
-                        "MissingOauthIntrospectionKey"
-                    }
-                    ReconcileError::EmptyOauthIntrospectionValue { .. } => {
-                        "EmptyOauthIntrospectionValue"
-                    }
-                    _ => unreachable!(),
-                };
-                let cond = condition("Ready", "False", reason, &e.to_string());
-                let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &ns);
-                patch_status_with_condition(&kafka_api, &name, cond).await?;
-                return Ok(Action::requeue(Duration::from_secs(30)));
-            }
-            Err(e) => return Err(e),
-        }
-
-        // Validate the GSSAPI keytab Secret (when a `type: gssapi`
-        // listener is configured) and the optional `spec.krb5ConfSecretRef`
-        // Secret. The pod template derives the same mounts independently
-        // via `gssapi_keytab_mount` / `krb5_conf_mount`, so we don't thread
-        // anything out — these checks are purely for the
-        // validate-Secret-exists side effect, mirroring the OAuth
-        // introspection check above.
-        let gssapi_secret_check: Result<(), ReconcileError> = async {
-            if let Some(m) = gssapi_keytab_mount(&obj) {
-                let secret = secret_api.get_opt(&m.secret_name).await?.ok_or_else(|| {
-                    ReconcileError::MissingGssapiKeytabSecret(m.secret_name.clone())
-                })?;
-                let has_key = secret.data.as_ref().is_some_and(|d| d.contains_key(&m.key))
-                    || secret
-                        .string_data
-                        .as_ref()
-                        .is_some_and(|d| d.contains_key(&m.key));
-                if !has_key {
-                    return Err(ReconcileError::MissingGssapiKeytabKey {
-                        secret: m.secret_name,
-                        key: m.key,
-                    });
-                }
-            }
-            if let Some((secret_name, key)) = krb5_conf_mount(&obj) {
-                let secret = secret_api
-                    .get_opt(&secret_name)
-                    .await?
-                    .ok_or_else(|| ReconcileError::MissingKrb5ConfSecret(secret_name.clone()))?;
-                let has_key = secret.data.as_ref().is_some_and(|d| d.contains_key(&key))
-                    || secret
-                        .string_data
-                        .as_ref()
-                        .is_some_and(|d| d.contains_key(&key));
-                if !has_key {
-                    return Err(ReconcileError::MissingKrb5ConfKey {
-                        secret: secret_name,
-                        key,
-                    });
-                }
-            }
-            Ok(())
-        }
-        .await;
-        match gssapi_secret_check {
-            Ok(()) => {}
-            Err(
-                e @ (ReconcileError::MissingGssapiKeytabSecret(_)
-                | ReconcileError::MissingGssapiKeytabKey { .. }
-                | ReconcileError::MissingKrb5ConfSecret(_)
-                | ReconcileError::MissingKrb5ConfKey { .. }),
-            ) => {
-                let reason = match &e {
-                    ReconcileError::MissingGssapiKeytabSecret(_) => "MissingGssapiKeytabSecret",
-                    ReconcileError::MissingGssapiKeytabKey { .. } => "MissingGssapiKeytabKey",
-                    ReconcileError::MissingKrb5ConfSecret(_) => "MissingKrb5ConfSecret",
-                    ReconcileError::MissingKrb5ConfKey { .. } => "MissingKrb5ConfKey",
-                    _ => unreachable!(),
-                };
-                let cond = condition("Ready", "False", reason, &e.to_string());
-                let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &ns);
-                patch_status_with_condition(&kafka_api, &name, cond).await?;
-                return Ok(Action::requeue(Duration::from_secs(30)));
-            }
-            Err(e) => return Err(e),
-        }
-
-        // Inter-broker Kerberos: when the resolved inter-broker listener
-        // uses GSSAPI, `spec.interBrokerKerberos` must be present (the
-        // broker needs initiate-side credentials). Surface a failure the
-        // same way `validate_listeners` does — `ListenersValid=False` with
-        // the `ValidationError`'s `reason()`/`message()`.
-        if let Err(e) = listeners::validate_inter_broker_gssapi(
-            &effective_listeners,
-            &inter_broker_name,
-            obj.spec.inter_broker_kerberos.is_some(),
-        ) {
-            let cond = condition("ListenersValid", "False", e.reason(), &e.message());
-            let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &ns);
-            patch_status_with_condition(&kafka_api, &name, cond).await?;
-            return Ok(Action::requeue(Duration::from_secs(30)));
-        }
-
-        // Enumerate brokers from sibling pools. Empty pool list ->
-        // empty broker list -> ConfigMap with no per-broker TOML keys,
-        // but listeners are still "valid" (just no consumers yet).
-        let pool_items: Vec<KafkaNodePool> = pools.items.clone();
-        let brokers = enumerate_brokers(&name, &ns, &pool_items);
-
-        // Observe external listener addresses for SAN extension.
-        let broker_ids: Vec<i32> = brokers.iter().map(|b| b.broker_id).collect();
-        let observed = listeners::observe_listener_addresses(
-            &ctx,
-            &ns,
-            &name,
-            &effective_listeners,
-            &broker_ids,
-        )
-        .await?;
-
-        // Brokers whose LB ingress isn't ready yet are skipped; a status condition will surface this.
-        let extra_sans_per_broker: BTreeMap<i32, Vec<crabka_security::ca::SubjectAltName>> =
-            brokers
-                .iter()
-                .filter_map(|b| {
-                    match listeners::compute_extra_sans(
-                        b.broker_id,
-                        &effective_listeners,
-                        &observed,
-                    ) {
-                        Ok(sans) => Some((b.broker_id, sans)),
-                        Err(listeners::SanComputationError::SansNotReady {
-                            broker_id,
-                            listener,
-                        }) => {
-                            tracing::warn!(
-                                broker_id,
-                                %listener,
-                                "LB ingress not ready; skipping cert SAN extension for this broker"
-                            );
-                            lb_pending.push((broker_id, listener));
-                            None
-                        }
-                    }
-                })
-                .collect();
-
-        // Issue per-broker leaf certs into the broker-keystore Secret.
-        let keystore_requests: Vec<cluster_ca::BrokerCertRequest> = brokers
-            .iter()
-            .map(|b| {
-                let id = b.broker_id;
-                let cn = b.pod_name.clone();
-                let sans = vec![
-                    crabka_security::ca::SubjectAltName::Dns(b.pod_fqdn.clone()),
-                    crabka_security::ca::SubjectAltName::Dns(b.pod_name.clone()),
-                    crabka_security::ca::SubjectAltName::Dns(format!(
-                        "{name}-broker-headless.{ns}.svc.cluster.local"
-                    )),
-                    crabka_security::ca::SubjectAltName::Ip(std::net::IpAddr::V4(
-                        std::net::Ipv4Addr::LOCALHOST,
-                    )),
-                ];
-                let extra = extra_sans_per_broker.get(&id).cloned().unwrap_or_default();
-                cluster_ca::BrokerCertRequest {
-                    broker_id: id,
-                    cn,
-                    sans,
-                    extra_sans: extra,
-                }
-            })
-            .collect();
-        // Keystore status fields (issued/reused/pruned) are reserved
-        // for a future status surface; ignored for now.
-        cluster_ca::ensure_broker_keystore(
-            &secret_api,
-            &obj,
-            &keystore_requests,
-            &cluster_ca_outcome.signing_material,
-            cluster_ca_outcome.force_reissue_leafs,
-        )
-        .await?;
-
-        // Build per-broker TLS render map (paths inside the
-        // mounted broker-tls volume).
-        let tls_per_broker: std::collections::BTreeMap<i32, listeners::BrokerTlsRender> = brokers
-            .iter()
-            .map(|b| {
-                let id = b.broker_id;
-                (
-                    id,
-                    listeners::BrokerTlsRender {
-                        controller_listener_protocol: "Ssl".into(),
-                        cert_path: format!("/etc/crabka/broker-tls/{id}.crt"),
-                        key_path: format!("/etc/crabka/broker-tls/{id}.key"),
-                        client_ca_path: "/etc/crabka/cluster-ca/ca.crt".into(),
-                        client_auth: "Required".into(),
-                        trust_roots_path: "/etc/crabka/cluster-ca/ca.crt".into(),
-                    },
-                )
-            })
-            .collect();
-
-        let clients_ca_path: Option<&str> = if effective_listeners
-            .iter()
-            .any(|l| matches!(l.authentication, Some(ListenerAuthentication::Tls)))
-        {
-            Some("/etc/crabka/clients-ca/ca.crt")
-        } else {
-            None
-        };
-
-        // Helper to render+apply a ConfigMap with the supplied address map.
-        // Defined here (inside the validation-ok branch) so it can capture
-        // `tls_per_broker` and `clients_ca_path`. On the
-        // validation-fail path there is no `apply_cm` call.
-        let apply_cm = async |listeners_for_cm: &[Listener],
-                              addresses: &BTreeMap<i32, BTreeMap<String, AdvertisedAddress>>|
-               -> Result<(), ReconcileError> {
-            let cm = common::render_configmap(
-                &obj,
-                listeners_for_cm,
-                addresses,
-                &inter_broker_name,
-                Some(&tls_per_broker),
-                clients_ca_path,
-                logging_filter.as_deref(),
-            )?;
-            apply_object(&cm_api, &cm_name(&name), &cm).await?;
-            Ok(())
-        };
-
-        // Optimization: when every effective listener is internal (e.g. the
-        // synthesized default), `compute_advertised` only needs
-        // `pod_fqdn` (from `BrokerInfo`), so we skip per-broker object
-        // rendering and the Pod/Node/Service reads entirely. This preserves
-        // the internal-only request sequence exactly.
-        let has_external = effective_listeners
-            .iter()
-            .any(|l| l.type_ != ListenerType::Internal);
-
-        let (nodes, pods_by_name, bootstrap_services, broker_services) = if has_external {
-            apply_external_services(
-                &ctx,
-                &svc_api,
-                &obj,
-                &ns,
-                &name,
-                &effective_listeners,
-                &brokers,
-            )
-            .await?;
-            read_external_state(&ctx, &svc_api, &ns, &name, &effective_listeners, &brokers).await?
-        } else {
-            (
-                HashMap::new(),
-                HashMap::new(),
-                HashMap::new(),
-                HashMap::new(),
-            )
-        };
-
-        match resolve_addresses_per_broker(
-            &effective_listeners,
-            &brokers,
-            &pods_by_name,
-            &nodes,
-            &broker_services,
-        ) {
-            Err(err) => {
-                // Pending external addresses (cold-start LB provisioning,
-                // node not scheduled yet). Leave the existing ConfigMap
-                // untouched — pods that are already running should not
-                // be disturbed; cold-start pods sit pending the CM,
-                // which arrives once the apiserver populates the
-                // Service status on a subsequent reconcile.
-                adopt_pools(&pool_api, &obj, pools.iter(), &cfg_hash).await?;
-                listener_status = vec![];
-                listeners_valid_cond =
-                    condition("ListenersValid", "True", "Valid", "listeners validated");
-                listeners_ready_cond = condition(
-                    "ListenersReady",
-                    "False",
-                    "PendingExternalAddresses",
-                    &err.message(),
-                );
-            }
-            Ok(addresses_per_broker) => {
-                apply_cm(&effective_listeners, &addresses_per_broker).await?;
-                adopt_pools(&pool_api, &obj, pools.iter(), &cfg_hash).await?;
-                listener_status = build_listener_status(
-                    &effective_listeners,
-                    &addresses_per_broker,
-                    &bootstrap_services,
-                    &nodes,
-                    &name,
-                    &ns,
-                );
-                listeners_valid_cond =
-                    condition("ListenersValid", "True", "Valid", "listeners validated");
-                let msg = format!("{} listener(s) ready", effective_listeners.len());
-                listeners_ready_cond = condition("ListenersReady", "True", "Ready", &msg);
-            }
-        }
-    }
-
-    // Metrics resources: surface a MetricsReady condition regardless of
-    // whether spec.metricsConfig is set. MutuallyExclusive and
-    // PrometheusOperatorCrdsMissing are reported via the condition only —
-    // the reconcile continues so the rest of the status patch lands.
-    let metrics_outcome =
-        crate::controller::metrics::reconcile_metrics(&ctx, &obj, &name, &ns).await;
-    let metrics_condition = match &metrics_outcome {
-        None => condition(
-            "MetricsReady",
-            "False",
-            "Disabled",
-            "spec.metricsConfig is not set",
-        ),
-        Some(Ok(())) => condition(
-            "MetricsReady",
-            "True",
-            "Available",
-            "metrics resources reconciled",
-        ),
-        Some(Err(ReconcileError::MetricsMutuallyExclusive)) => condition(
-            "MetricsReady",
-            "False",
-            "MutuallyExclusive",
-            "podMonitor and serviceMonitor are mutually exclusive",
-        ),
-        Some(Err(ReconcileError::PrometheusOperatorCrdsMissing)) => condition(
-            "MetricsReady",
-            "False",
-            "PrometheusOperatorCrdsMissing",
-            "monitoring.coreos.com/v1 is not served by the API server",
-        ),
-        Some(Err(_)) => condition("MetricsReady", "False", "Error", "metrics reconcile failed"),
-    };
-
-    // NetworkPolicy reconcile (opt-in via spec.networkPolicy).
-    // Inter-broker port: the listener whose name matches the effective
-    // inter-broker name. Falls back to the synthesized default's BROKER_PORT
-    // (defensive only; effective_listeners is always non-empty).
-    let inter_broker_port = effective_listeners
-        .iter()
-        .find(|l| l.name == inter_broker_name)
-        .map_or(common::BROKER_PORT, |l| l.port);
-
-    let np_outcome = network_policy::reconcile_network_policy(
-        &ctx,
-        &obj,
-        &name,
-        &ns,
-        &effective_listeners,
-        inter_broker_port,
-    )
-    .await;
-    let np_condition = match &np_outcome {
-        None => condition(
-            "NetworkPolicyReady",
-            "False",
-            "Disabled",
-            "spec.networkPolicy is not set",
-        ),
-        Some(Ok(())) => condition(
-            "NetworkPolicyReady",
-            "True",
-            "Available",
-            "network policy reconciled",
-        ),
-        Some(Err(_)) => condition(
-            "NetworkPolicyReady",
-            "False",
-            "Error",
-            "network policy reconcile failed",
-        ),
-    };
-
-    // Aggregate + patch our own status.
-    let rollup = aggregate_pool_status(pools.iter());
-    // Surface the observed node-pool count for this cluster as a gauge. This is
-    // a coarse ownership/liveness signal (how many pools the parent reconciler
-    // saw this pass), complementing the per-pool `KafkaNodePool` reconciles.
-    ctx.metrics.set_managed_resources(
-        "KafkaNodePool",
-        i64::try_from(rollup.pool_count).unwrap_or(i64::MAX),
-    );
-    let (ready, reason, message) = rollup_condition(&rollup);
-    let (rolling, rolling_reason, rolling_message) = rolling_condition_from_rollup(&rollup);
-    let mut conditions = vec![
-        condition(
-            "Ready",
-            if ready { "True" } else { "False" },
-            reason,
-            &message,
-        ),
-        condition(
-            "Rolling",
-            if rolling { "True" } else { "False" },
-            rolling_reason,
-            &rolling_message,
-        ),
-        listeners_valid_cond,
-        listeners_ready_cond,
-        metrics_condition,
-        np_condition,
-        cluster_ca_cond,
-        clients_ca_cond,
-        ca_rotation_cond,
-        version_cond,
-        logging_condition,
-    ];
-    let has_lb_tls_listener = effective_listeners
-        .iter()
-        .any(|l| l.type_ == ListenerType::Loadbalancer && l.tls);
-    if has_lb_tls_listener {
-        if lb_pending.is_empty() {
-            conditions.push(condition(
-                "WaitingForLoadBalancerIp",
-                "False",
-                "LoadBalancerReady",
-                "all broker LB ingress addresses assigned",
-            ));
-        } else {
-            let detail: Vec<String> = lb_pending
-                .iter()
-                .map(|(id, l)| format!("broker {id} listener '{l}'"))
-                .collect();
-            conditions.push(condition(
-                "WaitingForLoadBalancerIp",
-                "True",
-                "LoadBalancerPending",
-                &format!("LB ingress not ready for: {}", detail.join(", ")),
-            ));
-        }
-    }
-    let status = KafkaStatus {
-        conditions,
-        replicas: Some(rollup.replicas.0),
-        ready_replicas: Some(rollup.ready_replicas.0),
-        listeners: listener_status,
-        cluster_ca: Some(crate::crd::CertificateAuthorityStatus {
-            not_after: cluster_ca_outcome.not_after.clone(),
-            generated: cluster_ca_outcome.generated,
-            cert_generation: cluster_ca_outcome.cert_generation,
-            key_generation: cluster_ca_outcome.key_generation,
-            rotation_phase: Some(cluster_ca_outcome.phase.as_str().to_string()),
-            trust_anchors: Some(cluster_ca_outcome.trust_anchors),
-        }),
-        clients_ca: Some(crate::crd::CertificateAuthorityStatus {
-            not_after: clients_ca_outcome.not_after.clone(),
-            generated: clients_ca_outcome.generated,
-            cert_generation: clients_ca_outcome.cert_generation,
-            key_generation: clients_ca_outcome.key_generation,
-            rotation_phase: Some(clients_ca_outcome.phase.as_str().to_string()),
-            trust_anchors: Some(clients_ca_outcome.trust_anchors),
-        }),
-        kafka_version: Some(obj.spec.kafka_version.clone()),
-        // Advance the finalized metadata version when valid; hold the
-        // previous value on a validation failure.
-        metadata_version: resolved_metadata
-            .clone()
-            .or_else(|| finalized_metadata.map(str::to_string)),
-    };
-    let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &ns);
-    patch_status::<Kafka, KafkaStatus>(&kafka_api, &name, status).await?;
-
-    // Propagate any non-condition-mapped metrics error after the status
-    // patch — we want admins to see the condition update before bouncing.
-    if let Some(Err(e)) = metrics_outcome
-        && !matches!(
-            e,
-            ReconcileError::MetricsMutuallyExclusive
-                | ReconcileError::PrometheusOperatorCrdsMissing
-        )
+        logging_filter: logging_filter.as_deref(),
+    })
+    .await?
     {
-        return Err(e);
-    }
+        CaPhaseResult::Ready(artifacts) => *artifacts,
+        CaPhaseResult::Done(action) => return Ok(action),
+    };
 
-    if let Some(Err(e)) = np_outcome {
-        return Err(e);
-    }
+    let ListenerArtifacts {
+        status: listener_status,
+        valid_condition: listeners_valid_cond,
+        ready_condition: listeners_ready_cond,
+        load_balancer_pending: lb_pending,
+    } = match reconcile_listener_resources(
+        ListenerPhaseInput {
+            obj: &obj,
+            ctx: &ctx,
+            namespace: &ns,
+            name: &name,
+            effective_listeners: &effective_listeners,
+            inter_broker_name: &inter_broker_name,
+            logging_filter: logging_filter.as_deref(),
+            service_api: &svc_api,
+            config_map_api: &cm_api,
+            secret_api: &secret_api,
+            pool_api: &pool_api,
+            pools: &pools.items,
+            config_hash: &cfg_hash,
+            cluster_ca: &cluster_ca_outcome,
+        },
+        validation,
+    )
+    .await?
+    {
+        ListenerPhaseResult::Ready(artifacts) => *artifacts,
+        ListenerPhaseResult::Done(action) => return Ok(action),
+    };
 
-    Ok(Action::requeue(Duration::from_secs(30)))
+    finalize_kafka(FinalizeKafkaInput {
+        obj: &obj,
+        ctx: &ctx,
+        namespace: &ns,
+        name: &name,
+        effective_listeners: &effective_listeners,
+        inter_broker_name: &inter_broker_name,
+        pools: &pools.items,
+        listener_status,
+        listeners_valid_condition: listeners_valid_cond,
+        listeners_ready_condition: listeners_ready_cond,
+        load_balancer_pending: lb_pending,
+        cluster_ca: &cluster_ca_outcome,
+        clients_ca: &clients_ca_outcome,
+        cluster_ca_condition: cluster_ca_cond,
+        clients_ca_condition: clients_ca_cond,
+        ca_rotation_condition: ca_rotation_cond,
+        version_condition: version_cond,
+        logging_condition,
+        resolved_metadata,
+        finalized_metadata,
+    })
+    .await
 }
 
 /// For every pool labeled `crabka.io/cluster=<this Kafka>`, patch
@@ -1754,12 +1998,14 @@ async fn emit_weak_auth_event(
         client,
         namespace,
         kafka,
-        "Warning",
-        "WeakAuth",
-        message,
-        "crabka-listener-auth-",
-        "ListenerValidation",
-        "crabka-operator/listener-auth-check",
+        crate::controller::cluster_ca::EventDetails {
+            type_: "Warning",
+            reason: "WeakAuth",
+            message,
+            generate_name: "crabka-listener-auth-",
+            action: "ListenerValidation",
+            reporting_component: "crabka-operator/listener-auth-check",
+        },
     )
     .await
 }
@@ -1776,12 +2022,14 @@ async fn emit_ca_rotation_refused_event(
         client,
         namespace,
         kafka,
-        "Warning",
-        "CaRotationRefused",
-        message,
-        "crabka-ca-rotation-",
-        "CaRotation",
-        "crabka-operator/ca-rotation",
+        crate::controller::cluster_ca::EventDetails {
+            type_: "Warning",
+            reason: "CaRotationRefused",
+            message,
+            generate_name: "crabka-ca-rotation-",
+            action: "CaRotation",
+            reporting_component: "crabka-operator/ca-rotation",
+        },
     )
     .await
 }
@@ -1844,6 +2092,7 @@ fn cm_name(kafka: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
 
     use super::*;
     use crate::crd::{KafkaNodePoolSpec, KafkaNodePoolStatus, NodeRole};
@@ -1870,50 +2119,83 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_status_rollup_cases() {
-        for (_name, pools, expected) in [
-            ("no node pools", vec![], (false, "NoNodePools")),
-            (
-                "partially ready pool",
-                vec![pool_with_status("brokers", 3, 1)],
-                (false, "PartiallyReady"),
-            ),
-            (
-                "all pools ready",
-                vec![pool_with_status("brokers", 1, 1)],
-                (true, "Available"),
-            ),
-            (
-                "pool with zero replicas",
-                vec![pool_with_status("brokers", 0, 0)],
-                (false, "PartiallyReady"),
-            ),
-        ] {
-            let r = aggregate_pool_status(pools.iter());
-            let (ready, reason, _) = rollup_condition(&r);
-            let (expected_ready, expected_reason) = expected;
-            assert2::assert!(ready == expected_ready);
-            assert2::assert!(reason == expected_reason);
-        }
+    fn aggregate_status_no_pools_is_no_node_pools() {
+        let r = aggregate_pool_status(std::iter::empty::<&KafkaNodePool>());
+        let (ready, reason, _) = rollup_condition(&r);
+        assert!(!ready);
+        assert!(reason == "NoNodePools");
     }
 
     #[test]
-    fn rolling_condition_cases() {
-        for (_name, replicas, ready_replicas, pool_count, expected) in [
-            ("partial pool", 3, 1, 1, (true, "RollingUpdate")),
-            ("stable pool", 1, 1, 1, (false, "Stable")),
-            ("zero pools boundary", 3, 1, 0, (false, "Stable")),
-        ] {
-            let r = ClusterRollup {
-                replicas: ReplicaCount(replicas),
-                ready_replicas: ReadyReplicaCount(ready_replicas),
-                pool_count,
-            };
-            let (rolling, reason, _) = rolling_condition_from_rollup(&r);
-            let (expected_rolling, expected_reason) = expected;
-            assert2::assert!(rolling == expected_rolling);
-            assert2::assert!(reason == expected_reason);
-        }
+    fn aggregate_status_partial_pool_is_partially_ready() {
+        let p = pool_with_status("brokers", 3, 1);
+        let r = aggregate_pool_status([&p]);
+        let (ready, reason, _) = rollup_condition(&r);
+        assert!(!ready);
+        assert!(reason == "PartiallyReady");
+    }
+
+    #[test]
+    fn aggregate_status_all_ready_pools_is_available() {
+        let p = pool_with_status("brokers", 1, 1);
+        let r = aggregate_pool_status([&p]);
+        let (ready, reason, _) = rollup_condition(&r);
+        assert!(ready);
+        assert!(reason == "Available");
+    }
+
+    #[test]
+    fn rolling_condition_when_pool_partial() {
+        let r = ClusterRollup {
+            replicas: ReplicaCount(3),
+            ready_replicas: ReadyReplicaCount(1),
+            pool_count: 1,
+        };
+        let (rolling, reason, _) = rolling_condition_from_rollup(&r);
+        assert!(rolling);
+        assert!(reason == "RollingUpdate");
+    }
+
+    #[test]
+    fn rolling_condition_when_pool_stable() {
+        let r = ClusterRollup {
+            replicas: ReplicaCount(1),
+            ready_replicas: ReadyReplicaCount(1),
+            pool_count: 1,
+        };
+        let (rolling, reason, _) = rolling_condition_from_rollup(&r);
+        assert!(!rolling);
+        assert!(reason == "Stable");
+    }
+
+    // Boundary: with zero pools the cluster is never "rolling", even when the
+    // (defaulted) ready/replica totals disagree. Pins `pool_count > 0` so a
+    // `>=` mutant (which would treat pool_count==0 as rolling) fails here.
+    #[test]
+    fn rolling_condition_zero_pools_is_stable() {
+        let r = ClusterRollup {
+            replicas: ReplicaCount(3),
+            ready_replicas: ReadyReplicaCount(1),
+            pool_count: 0,
+        };
+        let (rolling, reason, _) = rolling_condition_from_rollup(&r);
+        assert!(!rolling);
+        assert!(reason == "Stable");
+    }
+
+    // Boundary: a pool that exists but reports zero replicas (ready==replicas==0)
+    // is PartiallyReady, not Available. Pins `replicas > 0` so a `>=` mutant
+    // (which would call an all-zero cluster "Available") fails here.
+    #[test]
+    fn rollup_condition_zero_replicas_is_partially_ready() {
+        let r = ClusterRollup {
+            replicas: ReplicaCount(0),
+            ready_replicas: ReadyReplicaCount(0),
+            pool_count: 1,
+        };
+        let (ready, reason, _) = rollup_condition(&r);
+        assert!(!ready);
+        assert!(reason == "PartiallyReady");
     }
 
     // Pure helper — picks the first OAuth listener as canonical.
@@ -2025,36 +2307,39 @@ mod tests {
     }
 
     #[test]
-    fn canonical_oauth_config_cases() {
-        let oauth = sample_oauth_cfg(vec![]);
-        for (_name, listeners, expected) in [
-            (
-                "no OAuth listener",
-                vec![
-                    listener_with_auth("plain", None),
-                    listener_with_auth("scram", Some(ListenerAuthentication::ScramSha512)),
-                ],
-                None,
+    fn canonical_oauth_config_none_when_no_oauth_listener() {
+        let ls = vec![
+            listener_with_auth("plain", None),
+            listener_with_auth("scram", Some(ListenerAuthentication::ScramSha512)),
+        ];
+        assert!(canonical_oauth_config(&ls).is_none());
+    }
+
+    #[test]
+    fn canonical_oauth_config_picks_first_oauth() {
+        let cfg = sample_oauth_cfg(vec![]);
+        let ls = vec![
+            listener_with_auth("plain", None),
+            listener_with_auth(
+                "oauth",
+                Some(ListenerAuthentication::OAuth(Box::new(cfg.clone()))),
             ),
-            (
-                "first OAuth listener",
-                vec![
-                    listener_with_auth("plain", None),
-                    listener_with_auth("oauth", Some(ListenerAuthentication::OAuth(oauth.clone()))),
-                ],
-                Some(oauth.clone()),
-            ),
-            (
-                "OAuth listener with empty trust certificates",
-                vec![listener_with_auth(
-                    "oauth",
-                    Some(ListenerAuthentication::OAuth(oauth.clone())),
-                )],
-                Some(oauth.clone()),
-            ),
-        ] {
-            assert2::assert!(canonical_oauth_config(&listeners) == expected);
-        }
+        ];
+        assert!(canonical_oauth_config(&ls) == Some(cfg));
+    }
+
+    #[test]
+    fn canonical_oauth_config_with_empty_trust_certs_is_some_but_empty() {
+        // The reconcile-level no-op check is
+        //   `canonical.tls_trusted_certificates.is_empty()` — guard that the
+        // helper still returns Some so the no-op branch is reached.
+        let cfg = sample_oauth_cfg(vec![]);
+        let ls = vec![listener_with_auth(
+            "oauth",
+            Some(ListenerAuthentication::OAuth(Box::new(cfg))),
+        )];
+        let got = canonical_oauth_config(&ls).expect("OAuth listener present");
+        assert!(got.tls_trusted_certificates.is_empty());
     }
 
     // Pure helper — derives the introspection client-secret
@@ -2063,32 +2348,38 @@ mod tests {
     // integration tests.
 
     #[test]
-    fn oauth_introspection_secret_mount_absence_cases() {
-        let no_oauth = kafka_with_listeners(vec![
+    fn oauth_introspection_secret_mount_returns_none_when_no_oauth_listener() {
+        let kafka = kafka_with_listeners(vec![
             listener_with_auth("plain", None),
             listener_with_auth("scram", Some(ListenerAuthentication::ScramSha512)),
         ]);
+        assert!(oauth_introspection_secret_mount(&kafka).is_none());
+    }
+
+    #[test]
+    fn oauth_introspection_secret_mount_returns_none_when_access_token_is_jwt_true() {
+        // sample_oauth_cfg defaults to access_token_is_jwt = true (JWT mode).
         let cfg = sample_oauth_cfg(vec![]);
-        let jwt_mode = kafka_with_listeners(vec![listener_with_auth(
+        let kafka = kafka_with_listeners(vec![listener_with_auth(
             "oauth",
-            Some(ListenerAuthentication::OAuth(cfg)),
+            Some(ListenerAuthentication::OAuth(Box::new(cfg))),
         )]);
+        assert!(oauth_introspection_secret_mount(&kafka).is_none());
+    }
+
+    #[test]
+    fn oauth_introspection_secret_mount_returns_none_when_client_secret_absent_introspection_mode()
+    {
+        // Introspection mode but clientSecret omitted (would fail
+        // validation, but the helper should still handle it gracefully —
+        // the pool reconciler must not panic on an invalid-but-applied CR).
         let mut cfg = sample_oauth_cfg_introspection("oauth-cs", "client-secret");
         cfg.client_secret = None;
-        let introspection_without_secret = kafka_with_listeners(vec![listener_with_auth(
+        let kafka = kafka_with_listeners(vec![listener_with_auth(
             "oauth",
-            Some(ListenerAuthentication::OAuth(cfg)),
+            Some(ListenerAuthentication::OAuth(Box::new(cfg))),
         )]);
-        for (_name, kafka) in [
-            ("no OAuth listener", no_oauth),
-            ("JWT mode", jwt_mode),
-            (
-                "introspection mode without client secret",
-                introspection_without_secret,
-            ),
-        ] {
-            assert2::assert!(oauth_introspection_secret_mount(&kafka) == None);
-        }
+        assert!(oauth_introspection_secret_mount(&kafka).is_none());
     }
 
     #[test]
@@ -2096,15 +2387,11 @@ mod tests {
         let cfg = sample_oauth_cfg_introspection("oauth-cs", "client-secret");
         let kafka = kafka_with_listeners(vec![listener_with_auth(
             "oauth",
-            Some(ListenerAuthentication::OAuth(cfg)),
+            Some(ListenerAuthentication::OAuth(Box::new(cfg))),
         )]);
-        assert2::assert!(
-            oauth_introspection_secret_mount(&kafka)
-                == Some(OauthIntrospectionMount {
-                    secret_name: "oauth-cs".to_string(),
-                    key: "client-secret".to_string(),
-                })
-        );
+        let mount = oauth_introspection_secret_mount(&kafka).expect("mount derived");
+        assert!(mount.secret_name == "oauth-cs");
+        assert!(mount.key == "client-secret");
     }
 
     #[test]
@@ -2123,31 +2410,27 @@ mod tests {
             "gss",
             Some(ListenerAuthentication::Gssapi(g)),
         )]);
-        assert2::assert!(
-            gssapi_keytab_mount(&k)
-                == Some(GssapiKeytabMount {
-                    secret_name: "kt".to_string(),
-                    key: "krb5.keytab".to_string(),
-                })
-        );
+        let m = gssapi_keytab_mount(&k).expect("keytab mount present");
+        assert!(m.secret_name == "kt");
+        assert!(m.key == "krb5.keytab");
     }
 
     #[test]
     fn no_keytab_mount_without_gssapi_listener() {
         let k = kafka_with_listeners(vec![listener_with_auth("plain", None)]);
-        assert2::assert!(gssapi_keytab_mount(&k).is_none());
+        assert!(gssapi_keytab_mount(&k).is_none());
     }
 
     #[test]
     fn krb5_conf_mount_extracted_from_spec() {
         let mut k = kafka_with_listeners(vec![listener_with_auth("plain", None)]);
-        assert2::assert!(krb5_conf_mount(&k).is_none());
+        assert!(krb5_conf_mount(&k).is_none());
         k.spec.krb5_conf_secret_ref = Some(crate::crd::Krb5ConfSecretRef {
             secret_name: "krb5".into(),
             key: "krb5.conf".into(),
         });
-        assert2::assert!(
-            krb5_conf_mount(&k) == Some(("krb5".to_string(), "krb5.conf".to_string()))
-        );
+        let (secret_name, key) = krb5_conf_mount(&k).expect("krb5.conf mount present");
+        assert!(secret_name == "krb5");
+        assert!(key == "krb5.conf");
     }
 }

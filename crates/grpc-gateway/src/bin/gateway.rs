@@ -376,7 +376,6 @@ fn build_bearer(
     }
 }
 
-#[allow(clippy::too_many_lines)]
 async fn run(
     config: GatewayConfig,
     bearer: Option<crabka_grpc_gateway::authz::auth_layer::BearerValidator>,

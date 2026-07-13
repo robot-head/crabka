@@ -9,6 +9,7 @@
 //! openraft's debug assertions race on the hosted Windows scheduler, so these
 //! are gated off Windows like the other multi-node suites.
 
+use assert2::assert;
 use crabka_raft::reconfig::{ReconfigOutcome, RemoveVoter};
 
 mod support;
@@ -67,8 +68,14 @@ async fn remove_voter_shrinks_quorum() {
         })
         .await
         .expect("remove_voter RPC");
-    assert2::assert!(matches!(outcome, ReconfigOutcome::Committed));
+    assert!(
+        matches!(outcome, ReconfigOutcome::Committed),
+        "remove_voter should commit on the leader, got {outcome:?}"
+    );
 
     leader.wait_for_image(|img| img.voters().len() == 2).await;
-    assert2::assert!(!leader.voter_ids_for_test().contains(&victim));
+    assert!(
+        !leader.voter_ids_for_test().contains(&victim),
+        "removed voter {victim} still present in committed voter set"
+    );
 }

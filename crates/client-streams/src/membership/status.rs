@@ -36,41 +36,30 @@ mod tests {
 
     #[test]
     fn maps_known_codes() {
-        for (name, code, detail, expected) in [
-            (
-                "stale topology",
-                0,
-                "t",
-                StreamsStatus::StaleTopology("t".into()),
-            ),
-            (
-                "missing source",
-                1,
-                "in",
-                StreamsStatus::MissingSourceTopics("in".into()),
-            ),
-            (
-                "incorrect partitioning",
-                2,
-                "p",
-                StreamsStatus::IncorrectlyPartitionedTopics("p".into()),
-            ),
-            (
-                "missing internal",
-                3,
-                "m",
-                StreamsStatus::MissingInternalTopics("m".into()),
-            ),
-            ("shutdown", 4, "", StreamsStatus::ShutdownApplication),
-            (
-                "assignment delayed",
-                5,
-                "a",
-                StreamsStatus::AssignmentDelayed("a".into()),
-            ),
-        ] {
-            check!(map_status(&s(code, detail)) == expected, "case {name}");
-        }
+        check!(
+            matches!(map_status(&s(1, "in")), StreamsStatus::MissingSourceTopics(d) if d == "in")
+        );
+        check!(matches!(
+            map_status(&s(4, "")),
+            StreamsStatus::ShutdownApplication
+        ));
+    }
+
+    #[test]
+    fn maps_all_remaining_known_codes() {
+        check!(matches!(map_status(&s(0, "t")), StreamsStatus::StaleTopology(d) if d == "t"));
+        check!(matches!(
+            map_status(&s(2, "p")),
+            StreamsStatus::IncorrectlyPartitionedTopics(d) if d == "p"
+        ));
+        check!(matches!(
+            map_status(&s(3, "m")),
+            StreamsStatus::MissingInternalTopics(d) if d == "m"
+        ));
+        check!(matches!(
+            map_status(&s(5, "a")),
+            StreamsStatus::AssignmentDelayed(d) if d == "a"
+        ));
     }
 
     #[test]

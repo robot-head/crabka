@@ -15,6 +15,10 @@ pub struct TopicPartitions<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl TopicPartitions<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::common::share_group_describe_response::topic_partitions::TopicPartitions
@@ -35,9 +39,9 @@ impl Encode for TopicPartitions<'_> {
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.topic_name);
+                let () = put_compact_string(buf, self.topic_name);
             } else {
-                put_string(buf, self.topic_name);
+                let () = put_string(buf, self.topic_name);
             }
         }
         if version >= 0 {

@@ -10,6 +10,8 @@ use super::{
 use crate::{MetricStore, PromqlEngine, PromqlError, QueryResult, SampleValue};
 
 /// Evaluate one alerting rule and dispatch active alerts to Alertmanager.
+/// # Errors
+/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub async fn evaluate_and_dispatch_alerting_rule<S, A>(
     engine: &PromqlEngine<S>,
     sink: &A,
@@ -34,6 +36,8 @@ where
 }
 
 /// Evaluate one alerting rule, track pending state, and dispatch only firing alerts.
+/// # Errors
+/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub async fn evaluate_and_dispatch_alerting_rule_with_state<S, A>(
     engine: &PromqlEngine<S>,
     sink: &A,
@@ -59,6 +63,8 @@ where
 }
 
 /// Evaluate one alerting rule, persist alert state, and dispatch only firing alerts.
+/// # Errors
+/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub async fn evaluate_and_persist_alerting_rule_with_state<S, A, R>(
     engine: &PromqlEngine<S>,
     sink: &A,
@@ -85,7 +91,6 @@ where
     .await
 }
 
-#[allow(clippy::too_many_lines)]
 async fn evaluate_alerting_rule_with_state_and_sink<S, A, R>(
     engine: &PromqlEngine<S>,
     sink: &A,
@@ -255,6 +260,8 @@ where
 }
 
 /// Evaluate all alerting rules in one rule group and dispatch firing alerts.
+/// # Errors
+/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub async fn evaluate_and_dispatch_alerting_rule_group<S, A>(
     engine: &PromqlEngine<S>,
     sink: &A,
@@ -292,6 +299,8 @@ where
 }
 
 /// Evaluate all alerting rules in one rule group, persist alert state, and dispatch firing alerts.
+/// # Errors
+/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub async fn evaluate_and_persist_alerting_rule_group<S, A, R>(
     engine: &PromqlEngine<S>,
     sink: &A,

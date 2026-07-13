@@ -14,6 +14,8 @@ pub fn put_uuid<B: BufMut>(buf: &mut B, u: Uuid) {
     buf.put_slice(&u.0);
 }
 
+/// # Errors
+/// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
 pub fn get_uuid<B: Buf>(buf: &mut B) -> Result<Uuid, ProtocolError> {
     if buf.remaining() < 16 {
         return Err(ProtocolError::UnexpectedEof {

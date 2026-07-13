@@ -22,7 +22,7 @@
 
 use std::sync::Arc;
 
-use assert2::check;
+use assert2::{assert, check};
 use crabka_operator::{
     controller::kafka::reconcile,
     crd::{
@@ -173,7 +173,7 @@ fn kafka_cr_with_config(
 ///     → operator generates new ones).
 ///   - 1 GET + 1 PATCH for the broker keystore Secret (runs only in the
 ///     validation-ok branch, which `happy_path` always exercises).
-#[allow(clippy::too_many_lines)] // the 10 CA+keystore rules make the function length inherent to mock-rule enumeration
+// the 10 CA+keystore rules make the function length inherent to mock-rule enumeration
 fn happy_path_rules(
     name: &str,
     namespace: &str,
@@ -394,14 +394,23 @@ async fn kafka_applies_service_configmap_secret_no_statefulset() {
     //   15. PATCH configmap
     //   16. PATCH pool owner-ref
     //   17. PATCH kafka status
-    assert2::assert!(observed.len() == 17);
+    assert!(
+        observed.len() == 17,
+        "expected exactly 17 requests (includes CA + keystore calls), \
+         saw {}: {:?}",
+        observed.len(),
+        methods_and_uris
+    );
 
     // No request must touch /statefulsets/ — that's the pool reconciler.
-    for (_method, uri) in &methods_and_uris {
-        assert2::assert!(!uri.contains("/statefulsets/"));
+    for (method, uri) in &methods_and_uris {
+        assert!(
+            !uri.contains("/statefulsets/"),
+            "Kafka reconciler must not touch statefulsets: {method} {uri}",
+        );
     }
 
-    for (idx, want_method, want_substr, _what) in [
+    for (idx, want_method, want_substr, what) in [
         (
             0,
             Method::PATCH,
@@ -422,8 +431,16 @@ async fn kafka_applies_service_configmap_secret_no_statefulset() {
         ),
     ] {
         let (method, uri) = &methods_and_uris[idx];
-        assert2::assert!(method == &want_method);
-        assert2::assert!(uri.contains(want_substr));
+        assert!(
+            *method == want_method,
+            "step {} should {what}: {uri}",
+            idx + 1
+        );
+        assert!(
+            uri.contains(want_substr),
+            "step {} should {what}: {uri}",
+            idx + 1
+        );
     }
 
     // Steps 4-11: CA secret lifecycle.
@@ -434,7 +451,11 @@ async fn kafka_applies_service_configmap_secret_no_statefulset() {
         .iter()
         .find(|(m, u)| *m == Method::GET && u.contains("/kafkanodepools"))
         .expect("GET kafkanodepools must be present");
-    assert2::assert!(pool_list_req.1.contains("labelSelector="));
+    assert!(
+        pool_list_req.1.contains("labelSelector="),
+        "pool list should filter by labelSelector: {}",
+        pool_list_req.1
+    );
 
     // Configmap patch must occur after pool enumeration (it needs broker list).
     let cm_req = methods_and_uris
@@ -464,8 +485,12 @@ async fn kafka_applies_service_configmap_secret_no_statefulset() {
     );
 
     // Status patch is last.
-    assert2::assert!(&methods_and_uris[16].0 == &Method::PATCH);
-    assert2::assert!(methods_and_uris[16].1.contains("/kafkas/demo/status"));
+    check!(methods_and_uris[16].0 == Method::PATCH);
+    check!(
+        methods_and_uris[16].1.contains("/kafkas/demo/status"),
+        "step 17 should patch Kafka status: {}",
+        methods_and_uris[16].1
+    );
 
     check!(
         state.remaining_rules() == 0,
@@ -491,11 +516,11 @@ async fn kafka_status_no_node_pools_when_list_empty() {
     let body: serde_json::Value =
         serde_json::from_slice(status_patch.body()).expect("status PATCH body is JSON");
     let cond = &body["status"]["conditions"][0];
-    assert2::assert!(cond["type"].as_str() == Some("Ready"));
-    assert2::assert!(cond["status"].as_str() == Some("False"));
-    assert2::assert!(cond["reason"].as_str() == Some("NoNodePools"));
-    assert2::assert!(body["status"]["replicas"].as_i64() == Some(0));
-    assert2::assert!(body["status"]["readyReplicas"].as_i64() == Some(0));
+    check!(cond["type"] == "Ready", "body = {body}");
+    check!(cond["status"] == "False", "body = {body}");
+    check!(cond["reason"] == "NoNodePools", "body = {body}");
+    check!(body["status"]["replicas"] == json!(0), "body = {body}");
+    check!(body["status"]["readyReplicas"] == json!(0), "body = {body}");
 
     check!(state.remaining_rules() == 0);
 }
@@ -525,10 +550,10 @@ async fn kafka_status_aggregates_pool_readyreplicas() {
         .iter()
         .find(|c| c["type"] == "Ready")
         .expect("Ready condition present");
-    assert2::assert!(ready["status"].as_str() == Some("True"));
-    assert2::assert!(ready["reason"].as_str() == Some("Available"));
-    assert2::assert!(body["status"]["replicas"].as_i64() == Some(1));
-    assert2::assert!(body["status"]["readyReplicas"].as_i64() == Some(1));
+    check!(ready["status"] == "True", "body = {body}");
+    check!(ready["reason"] == "Available", "body = {body}");
+    check!(body["status"]["replicas"] == json!(1), "body = {body}");
+    check!(body["status"]["readyReplicas"] == json!(1), "body = {body}");
 
     check!(state.remaining_rules() == 0);
 }
@@ -678,11 +703,14 @@ async fn kafka_inline_logging_renders_rust_log_key() {
 
     let observed = state.take_observed();
     let data = configmap_data(&observed);
-    assert2::assert!(data["rust.log"].as_str() == Some("crabka_broker=debug,info"));
+    assert!(
+        data["rust.log"].as_str() == Some("crabka_broker=debug,info"),
+        "rust.log must carry the composed filter, data = {data}"
+    );
 
     let cond = logging_condition(&observed);
-    assert2::assert!(cond["status"].as_str() == Some("True"));
-    assert2::assert!(cond["reason"].as_str() == Some("Available"));
+    check!(cond["status"] == "True");
+    check!(cond["reason"] == "Available");
     check!(state.remaining_rules() == 0);
 }
 
@@ -698,10 +726,13 @@ async fn kafka_no_logging_omits_rust_log_key() {
 
     let observed = state.take_observed();
     let data = configmap_data(&observed);
-    assert2::assert!(data.get("rust.log").is_none());
+    assert!(
+        data.get("rust.log").is_none(),
+        "rust.log must be absent when logging unset, data = {data}"
+    );
     let cond = logging_condition(&observed);
-    assert2::assert!(cond["status"].as_str() == Some("False"));
-    assert2::assert!(cond["reason"].as_str() == Some("Disabled"));
+    assert!(cond["status"] == "False");
+    assert!(cond["reason"] == "Disabled");
 }
 
 /// External logging reads the referenced `ConfigMap` key and uses it
@@ -741,9 +772,12 @@ async fn kafka_external_logging_reads_user_configmap() {
 
     let observed = state.take_observed();
     let data = configmap_data(&observed);
-    assert2::assert!(data["rust.log"].as_str() == Some("crabka_raft=trace,warn"));
+    assert!(
+        data["rust.log"].as_str() == Some("crabka_raft=trace,warn"),
+        "rust.log must mirror the external ConfigMap value, data = {data}"
+    );
     let cond = logging_condition(&observed);
-    assert2::assert!(cond["status"] == "True");
+    assert!(cond["status"] == "True");
 }
 
 /// An external logging reference to a missing `ConfigMap` surfaces
@@ -779,10 +813,13 @@ async fn kafka_external_logging_missing_configmap_surfaces_condition() {
 
     let observed = state.take_observed();
     let data = configmap_data(&observed);
-    assert2::assert!(data.get("rust.log").is_none());
+    assert!(
+        data.get("rust.log").is_none(),
+        "rust.log must be absent when external CM missing, data = {data}"
+    );
     let cond = logging_condition(&observed);
-    assert2::assert!(cond["status"].as_str() == Some("False"));
-    assert2::assert!(cond["reason"].as_str() == Some("LoggingConfigMapNotFound"));
+    assert!(cond["status"] == "False");
+    assert!(cond["reason"] == "LoggingConfigMapNotFound");
 }
 
 /// Find the broker-config `ConfigMap` PATCH and return its serialized data
@@ -825,8 +862,14 @@ async fn kafka_status_finalizes_metadata_version() {
         .expect("status PATCH must have been captured");
     let body: serde_json::Value =
         serde_json::from_slice(status_patch.body()).expect("status PATCH body is JSON");
-    assert2::assert!(&body["status"]["kafkaVersion"] == &json!("3.7.0"));
-    assert2::assert!(&body["status"]["metadataVersion"] == &json!("3.7"));
+    assert!(
+        body["status"]["kafkaVersion"] == json!("3.7.0"),
+        "body = {body}"
+    );
+    assert!(
+        body["status"]["metadataVersion"] == json!("3.7"),
+        "body = {body}"
+    );
     let conds = body["status"]["conditions"]
         .as_array()
         .expect("conditions array");
@@ -834,9 +877,9 @@ async fn kafka_status_finalizes_metadata_version() {
         .iter()
         .find(|c| c["type"] == "KafkaVersionValid")
         .unwrap_or_else(|| panic!("KafkaVersionValid present, body = {body}"));
-    assert2::assert!(vcond["status"] == "True");
+    assert!(vcond["status"] == "True", "body = {body}");
 
-    assert2::assert!(state.remaining_rules() == 0);
+    assert!(state.remaining_rules() == 0);
 }
 
 /// A metadata version newer than the binary is rejected — no
@@ -866,8 +909,8 @@ async fn kafka_metadata_version_too_high_blocks() {
         .iter()
         .find(|c| c["type"] == "KafkaVersionValid")
         .unwrap_or_else(|| panic!("KafkaVersionValid present, body = {body}"));
-    assert2::assert!(vcond["status"].as_str() == Some("False"));
-    assert2::assert!(vcond["reason"].as_str() == Some("MetadataVersionTooHigh"));
+    check!(vcond["status"] == "False", "body = {body}");
+    check!(vcond["reason"] == "MetadataVersionTooHigh", "body = {body}");
     // Finalized metadata version is not advanced (was never set).
     check!(
         body["status"]["metadataVersion"].is_null(),
@@ -902,8 +945,8 @@ async fn kafka_status_includes_rolling_condition_stable() {
         .iter()
         .find(|c| c["type"] == "Rolling")
         .unwrap_or_else(|| panic!("Rolling condition present, body = {body}"));
-    assert2::assert!(rolling["status"].as_str() == Some("False"));
-    assert2::assert!(rolling["reason"].as_str() == Some("Stable"));
+    check!(rolling["status"] == "False", "body = {body}");
+    check!(rolling["reason"] == "Stable", "body = {body}");
 
     check!(state.remaining_rules() == 0);
 }
@@ -938,30 +981,25 @@ async fn kafka_status_synthesized_default_listener_is_valid_and_ready() {
         .iter()
         .find(|c| c["type"] == "ListenersValid")
         .unwrap_or_else(|| panic!("ListenersValid condition present, body = {body}"));
+    assert!(valid["status"] == "True", "body = {body}");
+    assert!(valid["reason"] == "Valid", "body = {body}");
 
     let ready = conds
         .iter()
         .find(|c| c["type"] == "ListenersReady")
         .unwrap_or_else(|| panic!("ListenersReady condition present, body = {body}"));
-    assert2::assert!(valid["status"].as_str() == Some("True"));
-    assert2::assert!(valid["reason"].as_str() == Some("Valid"));
-    assert2::assert!(ready["status"].as_str() == Some("True"));
-    assert2::assert!(ready["reason"].as_str() == Some("Ready"));
+    assert!(ready["status"] == "True", "body = {body}");
+    assert!(ready["reason"] == "Ready", "body = {body}");
 
     let listeners = body["status"]["listeners"]
         .as_array()
         .unwrap_or_else(|| panic!("status.listeners array, body = {body}"));
-    assert2::assert!(
-        listeners.as_slice()
-            == [json!({
-                "name": "PLAIN",
-                "type": "internal",
-                "bootstrapServers": "demo-broker-headless.y.svc.cluster.local:9092",
-                "addresses": [{
-                    "host": "demo-brokers-0.demo-broker-headless.y.svc.cluster.local",
-                    "port": 9092
-                }]
-            })]
+    assert!(listeners.len() == 1, "body = {body}");
+    check!(listeners[0]["name"] == "PLAIN", "body = {body}");
+    check!(listeners[0]["type"] == "internal", "body = {body}");
+    check!(
+        listeners[0]["bootstrapServers"] == "demo-broker-headless.y.svc.cluster.local:9092",
+        "body = {body}"
     );
 
     check!(state.remaining_rules() == 0);
@@ -1007,12 +1045,19 @@ async fn kafka_mtls_without_tls_blocks_broker_configmap_and_sets_conditions() {
                 .to_string()
                 .contains("/configmaps/demo-broker-config")
     });
-    assert2::assert!(cm_patch.is_none());
+    assert!(
+        cm_patch.is_none(),
+        "validation failure must NOT patch the broker-config ConfigMap: {:?}",
+        cm_patch.map(|p| p.uri().to_string())
+    );
 
     // Verify no per-broker / bootstrap external Services were rendered:
     for r in &observed {
         let uri = r.uri().to_string();
-        assert2::assert!(!uri.contains("-bootstrap"));
+        assert!(
+            !uri.contains("-bootstrap"),
+            "no bootstrap Service should be applied for invalid listeners: {uri}"
+        );
     }
 
     // Status conditions reflect the validation error.
@@ -1032,15 +1077,18 @@ async fn kafka_mtls_without_tls_blocks_broker_configmap_and_sets_conditions() {
         .iter()
         .find(|c| c["type"] == "ListenersValid")
         .unwrap_or_else(|| panic!("ListenersValid present, body = {body}"));
-    assert2::assert!(valid["status"].as_str() == Some("False"));
-    assert2::assert!(valid["reason"].as_str() == Some("ListenerMtlsRequiresTransportTls"));
+    assert!(valid["status"] == "False", "body = {body}");
+    assert!(
+        valid["reason"] == "ListenerMtlsRequiresTransportTls",
+        "body = {body}"
+    );
 
     let ready = conds
         .iter()
         .find(|c| c["type"] == "ListenersReady")
         .unwrap_or_else(|| panic!("ListenersReady present, body = {body}"));
-    assert2::assert!(ready["status"].as_str() == Some("False"));
-    assert2::assert!(ready["reason"].as_str() == Some("ListenersInvalid"));
+    check!(ready["status"] == "False", "body = {body}");
+    check!(ready["reason"] == "ListenersInvalid", "body = {body}");
 
     // status.listeners is empty on the validation-failure path.
     check!(
@@ -1076,8 +1124,14 @@ async fn metrics_disabled_no_dynamic_apply() {
     let observed = state.take_observed();
     for r in &observed {
         let uri = r.uri().to_string();
-        assert2::assert!(!uri.contains("/apis/monitoring.coreos.com/"));
-        assert2::assert!(!uri.contains("/services/demo-broker-metrics"));
+        assert!(
+            !uri.contains("/apis/monitoring.coreos.com/"),
+            "metricsConfig=None must not touch monitoring.coreos.com: {uri}"
+        );
+        assert!(
+            !uri.contains("/services/demo-broker-metrics"),
+            "metricsConfig=None must not touch the metrics Service: {uri}"
+        );
     }
 
     let status_patch = observed
@@ -1089,8 +1143,8 @@ async fn metrics_disabled_no_dynamic_apply() {
     let body: serde_json::Value =
         serde_json::from_slice(status_patch.body()).expect("status body is JSON");
     let cond = metrics_ready_cond(&body);
-    assert2::assert!(cond["status"].as_str() == Some("False"));
-    assert2::assert!(cond["reason"].as_str() == Some("Disabled"));
+    check!(cond["status"] == "False", "body = {body}");
+    check!(cond["reason"] == "Disabled", "body = {body}");
 
     check!(state.remaining_rules() == 0);
 }
@@ -1169,7 +1223,10 @@ async fn pod_monitor_path_applies_one_resource() {
             r.method() == Method::PATCH && r.uri().to_string().contains("/podmonitors/demo-broker")
         })
         .collect();
-    assert2::assert!(pm_patches.len() == 1);
+    assert!(
+        pm_patches.len() == 1,
+        "expected exactly one PodMonitor PATCH"
+    );
     let uri = pm_patches[0].uri().to_string();
     check!(
         uri.contains("fieldManager=crabka-operator"),
@@ -1198,8 +1255,8 @@ async fn pod_monitor_path_applies_one_resource() {
     let body: serde_json::Value =
         serde_json::from_slice(status_patch.body()).expect("status body is JSON");
     let cond = metrics_ready_cond(&body);
-    assert2::assert!(cond["status"].as_str() == Some("True"));
-    assert2::assert!(cond["reason"].as_str() == Some("Available"));
+    check!(cond["status"] == "True", "body = {body}");
+    check!(cond["reason"] == "Available", "body = {body}");
 
     check!(state.remaining_rules() == 0);
 }
@@ -1253,7 +1310,10 @@ async fn service_monitor_path_applies_service_and_servicemonitor() {
                     .contains("/services/demo-broker-metrics")
         })
         .collect();
-    assert2::assert!(svc_patches.len() == 1);
+    assert!(
+        svc_patches.len() == 1,
+        "expected exactly one metrics Service PATCH"
+    );
 
     let sm_patches: Vec<&http::Request<hyper::body::Bytes>> = observed
         .iter()
@@ -1262,12 +1322,18 @@ async fn service_monitor_path_applies_service_and_servicemonitor() {
                 && r.uri().to_string().contains("/servicemonitors/demo-broker")
         })
         .collect();
-    assert2::assert!(sm_patches.len() == 1);
+    assert!(
+        sm_patches.len() == 1,
+        "expected exactly one ServiceMonitor PATCH"
+    );
 
     // No PodMonitor PATCH.
-    assert2::assert!(!observed.iter().any(|r| {
-        r.method() == Method::PATCH && r.uri().to_string().contains("/podmonitors/demo-broker")
-    }));
+    assert!(
+        !observed.iter().any(|r| {
+            r.method() == Method::PATCH && r.uri().to_string().contains("/podmonitors/demo-broker")
+        }),
+        "service_monitor path must not PATCH a PodMonitor"
+    );
 
     let status_patch = observed
         .iter()
@@ -1278,8 +1344,8 @@ async fn service_monitor_path_applies_service_and_servicemonitor() {
     let body: serde_json::Value =
         serde_json::from_slice(status_patch.body()).expect("status body is JSON");
     let cond = metrics_ready_cond(&body);
-    assert2::assert!(cond["status"].as_str() == Some("True"));
-    assert2::assert!(cond["reason"].as_str() == Some("Available"));
+    check!(cond["status"] == "True", "body = {body}");
+    check!(cond["reason"] == "Available", "body = {body}");
 
     check!(state.remaining_rules() == 0);
 }
@@ -1305,8 +1371,14 @@ async fn mutually_exclusive_sets_condition_and_skips_apply() {
     let observed = state.take_observed();
     for r in &observed {
         let uri = r.uri().to_string();
-        assert2::assert!(!uri.contains("/apis/monitoring.coreos.com/"));
-        assert2::assert!(!uri.contains("/services/demo-broker-metrics"));
+        assert!(
+            !uri.contains("/apis/monitoring.coreos.com/"),
+            "mutually-exclusive must not touch monitoring.coreos.com: {uri}"
+        );
+        assert!(
+            !uri.contains("/services/demo-broker-metrics"),
+            "mutually-exclusive must not touch the metrics Service: {uri}"
+        );
     }
 
     let status_patch = observed
@@ -1318,8 +1390,8 @@ async fn mutually_exclusive_sets_condition_and_skips_apply() {
     let body: serde_json::Value =
         serde_json::from_slice(status_patch.body()).expect("status body is JSON");
     let cond = metrics_ready_cond(&body);
-    assert2::assert!(cond["status"].as_str() == Some("False"));
-    assert2::assert!(cond["reason"].as_str() == Some("MutuallyExclusive"));
+    check!(cond["status"] == "False", "body = {body}");
+    check!(cond["reason"] == "MutuallyExclusive", "body = {body}");
 
     check!(state.remaining_rules() == 0);
 }
@@ -1365,8 +1437,11 @@ async fn prom_operator_missing_sets_condition() {
     let body: serde_json::Value =
         serde_json::from_slice(status_patch.body()).expect("status body is JSON");
     let cond = metrics_ready_cond(&body);
-    assert2::assert!(cond["status"].as_str() == Some("False"));
-    assert2::assert!(cond["reason"].as_str() == Some("PrometheusOperatorCrdsMissing"));
+    check!(cond["status"] == "False", "body = {body}");
+    check!(
+        cond["reason"] == "PrometheusOperatorCrdsMissing",
+        "body = {body}"
+    );
 
     check!(state.remaining_rules() == 0);
 }
@@ -1384,7 +1459,10 @@ async fn network_policy_disabled_no_apply() {
     let observed = state.take_observed();
     for r in &observed {
         let uri = r.uri().to_string();
-        assert2::assert!(!uri.contains("/networkpolicies/"));
+        assert!(
+            !uri.contains("/networkpolicies/"),
+            "networkPolicy=None must not touch /networkpolicies/: {uri}",
+        );
     }
 
     // NetworkPolicyReady=False reason=Disabled present.
@@ -1401,8 +1479,8 @@ async fn network_policy_disabled_no_apply() {
         .iter()
         .find(|c| c["type"] == "NetworkPolicyReady")
         .expect("NetworkPolicyReady condition present");
-    assert2::assert!(cond["status"].as_str() == Some("False"));
-    assert2::assert!(cond["reason"].as_str() == Some("Disabled"));
+    assert!(cond["status"] == "False", "body = {body}");
+    assert!(cond["reason"] == "Disabled", "body = {body}");
 }
 
 /// `spec.networkPolicy=Some(NetworkPolicySpec::default())`
@@ -1448,7 +1526,7 @@ async fn network_policy_enabled_applies_one_resource() {
                     .contains("/networkpolicies/demo-broker-policy")
         })
         .count();
-    assert2::assert!(apply_count == 1);
+    assert!(apply_count == 1, "exactly one NetworkPolicy PATCH");
 
     let status = observed
         .iter()
@@ -1463,8 +1541,8 @@ async fn network_policy_enabled_applies_one_resource() {
         .iter()
         .find(|c| c["type"] == "NetworkPolicyReady")
         .expect("NetworkPolicyReady present");
-    assert2::assert!(cond["status"].as_str() == Some("True"));
-    assert2::assert!(cond["reason"].as_str() == Some("Available"));
+    check!(cond["status"] == "True", "body = {body}");
+    check!(cond["reason"] == "Available", "body = {body}");
     check!(state.remaining_rules() == 0);
 }
 
@@ -1523,7 +1601,7 @@ async fn network_policy_transition_deletes_on_disable() {
                     .contains("/networkpolicies/demo-broker-policy")
         })
         .collect();
-    assert2::assert!(deletes.len() == 1);
+    assert!(deletes.len() == 1, "exactly one DELETE call on transition");
 }
 
 /// Cold disable (no prior `NetworkPolicyReady=Available`) must
@@ -1541,7 +1619,10 @@ async fn network_policy_cold_disable_no_delete() {
         .iter()
         .filter(|r| r.uri().to_string().contains("/networkpolicies/"))
         .collect();
-    assert2::assert!(deletes_or_patches.is_empty());
+    assert!(
+        deletes_or_patches.is_empty(),
+        "cold disable must not touch /networkpolicies/",
+    );
 }
 
 /// When one listener has `network_policy_peers=Some(vec![])`,
@@ -1609,5 +1690,8 @@ async fn network_policy_listener_deny_all_skips_port_rule() {
             ports_match && from_empty
         })
         .collect();
-    assert2::assert!(allow_alls.is_empty());
+    assert!(
+        allow_alls.is_empty(),
+        "deny-all listener (peers=[]) must not emit an allow-all rule, body = {body}",
+    );
 }

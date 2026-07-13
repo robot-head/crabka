@@ -16,7 +16,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 2;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -26,6 +27,10 @@ pub struct AlterConfigsRequest<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl AlterConfigsRequest<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::alter_configs_request::AlterConfigsRequest {
         crate::owned::alter_configs_request::AlterConfigsRequest {
             resources: (self.resources)
@@ -138,6 +143,10 @@ pub struct AlterConfigsResource<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl AlterConfigsResource<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::alter_configs_request::AlterConfigsResource {
         crate::owned::alter_configs_request::AlterConfigsResource {
             resource_type: (self.resource_type),
@@ -158,9 +167,9 @@ impl Encode for AlterConfigsResource<'_> {
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.resource_name);
+                let () = put_compact_string(buf, self.resource_name);
             } else {
-                put_string(buf, self.resource_name);
+                let () = put_string(buf, self.resource_name);
             }
         }
         if version >= 0 {
@@ -262,6 +271,10 @@ pub struct AlterableConfig<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl AlterableConfig<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::alter_configs_request::AlterableConfig {
         crate::owned::alter_configs_request::AlterableConfig {
             name: (self.name).to_string(),
@@ -275,16 +288,16 @@ impl Encode for AlterableConfig<'_> {
         let flex = version >= 2;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name);
+                let () = put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name);
+                let () = put_string(buf, self.name);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.value);
+                let () = put_compact_nullable_string(buf, self.value);
             } else {
-                put_nullable_string(buf, self.value);
+                let () = put_nullable_string(buf, self.value);
             }
         }
         if flex {

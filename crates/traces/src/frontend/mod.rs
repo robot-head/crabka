@@ -107,6 +107,9 @@ impl<B: QuerierBackend + 'static, C: BlockCatalog + 'static> QueryFrontend<B, C>
     /// so a failed shard means missing results — any job error propagates
     /// (an invalid query fails on every shard and must surface, not silently
     /// return an empty 200).
+    ///
+    /// # Errors
+    /// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
     pub async fn search(
         &self,
         tenant: &str,
@@ -162,6 +165,9 @@ impl<B: QuerierBackend + 'static, C: BlockCatalog + 'static> QueryFrontend<B, C>
     /// object storage; their live-stores differ only in recent spans), so
     /// per-querier failures are tolerated: the trace is assembled from any
     /// successes and an error propagates only when *every* querier failed.
+    ///
+    /// # Errors
+    /// Returns an error when every querier lookup fails.
     pub async fn trace_by_id(
         &self,
         tenant: &str,
@@ -211,6 +217,9 @@ impl<B: QuerierBackend + 'static, C: BlockCatalog + 'static> QueryFrontend<B, C>
     }
 
     /// Run `/api/v2/search/tags`: fan over the planned shards, union+dedupe.
+    ///
+    /// # Errors
+    /// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
     pub async fn tag_names(
         &self,
         tenant: &str,
@@ -255,6 +264,9 @@ impl<B: QuerierBackend + 'static, C: BlockCatalog + 'static> QueryFrontend<B, C>
     }
 
     /// Run `/api/v2/search/tag/{tag}/values`: fan over shards, union+dedupe.
+    ///
+    /// # Errors
+    /// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
     pub async fn tag_values(
         &self,
         tenant: &str,
@@ -309,20 +321,18 @@ impl<B: QuerierBackend + 'static, C: BlockCatalog + 'static> QueryFrontend<B, C>
     /// the non-additive aggregates (`min`/`max`/`avg`/`quantile_over_time`). A
     /// single unrestricted job lets one querier compute the full hot+cold union
     /// correctly for every aggregate; only exemplar limiting is applied here.
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "the metrics query surface (tenant/query/window/step/instant/exemplar-limit) is one cohesive request; grouping into a params struct would only relocate the fields"
-    )]
+    ///
+    /// # Errors
+    /// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
     pub async fn metrics_query(
         &self,
         tenant: &str,
         query: &str,
-        start_ns: i64,
-        end_ns: i64,
-        step_ns: i64,
+        window: (i64, i64, i64),
         instant: bool,
         exemplar_limit: Option<usize>,
     ) -> Result<MetricsResponseJson, BackendError> {
+        let (start_ns, end_ns, step_ns) = window;
         let req = MetricsJobRequest {
             tenant: tenant.to_string(),
             query: query.to_string(),

@@ -70,7 +70,7 @@ fn apply_image(image: &MetadataImage, node_id: NodeId, throttle: &ThrottleState)
 
 #[cfg(test)]
 mod tests {
-
+    use assert2::assert;
     use crabka_metadata::{BrokerConfigRecord, MetadataRecord};
     use uuid::Uuid;
 
@@ -91,8 +91,8 @@ mod tests {
         }));
         let throttle = ThrottleState::new();
         apply_image(&img, NodeId(1), &throttle);
-        assert2::assert!(throttle.leader_out.rate() == 2048);
-        assert2::assert!(throttle.follower_in.rate() == 1024);
+        assert!(throttle.leader_out.rate() == 2048);
+        assert!(throttle.follower_in.rate() == 1024);
     }
 
     #[test]
@@ -105,7 +105,7 @@ mod tests {
         }));
         let throttle = ThrottleState::new();
         apply_image(&img, NodeId(1), &throttle);
-        assert2::assert!(throttle.leader_out.rate() == 2048);
+        assert!(throttle.leader_out.rate() == 2048);
         // Delete the config.
         img.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
             node_id: NodeId(1),
@@ -113,6 +113,6 @@ mod tests {
             config_value: None,
         }));
         apply_image(&img, NodeId(1), &throttle);
-        assert2::assert!(throttle.leader_out.rate() == 0);
+        assert!(throttle.leader_out.rate() == 0);
     }
 }

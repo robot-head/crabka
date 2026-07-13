@@ -18,7 +18,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 4;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,18 +40,22 @@ impl Default for BrokerRegistrationRequest<'_> {
         Self {
             broker_id: 0i32,
             cluster_id: "",
-            incarnation_id: Default::default(),
+            incarnation_id: crate::primitives::uuid::Uuid::default(),
             listeners: Vec::new(),
             features: Vec::new(),
             rack: None,
             is_migrating_zk_broker: false,
             log_dirs: Vec::new(),
             previous_broker_epoch: -1i64,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
-impl BrokerRegistrationRequest<'_> {
+impl<'a> BrokerRegistrationRequest<'a> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::broker_registration_request::BrokerRegistrationRequest {
         crate::owned::broker_registration_request::BrokerRegistrationRequest {
             broker_id: (self.broker_id),
@@ -65,6 +70,231 @@ impl BrokerRegistrationRequest<'_> {
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
+    fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
+        if version >= 0 {
+            put_i32(buf, self.broker_id);
+        }
+    }
+    fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
+        if version >= 0 {
+            if flex {
+                let () = put_compact_string(buf, self.cluster_id);
+            } else {
+                let () = put_string(buf, self.cluster_id);
+            }
+        }
+    }
+    fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
+        if version >= 0 {
+            crate::primitives::uuid::put_uuid(buf, self.incarnation_id);
+        }
+    }
+    fn encode_field_3<B: BufMut>(
+        &self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.listeners).len(), flex);
+                for it in &self.listeners {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
+        Ok(())
+    }
+    fn encode_field_4<B: BufMut>(
+        &self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.features).len(), flex);
+                for it in &self.features {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
+        Ok(())
+    }
+    fn encode_field_5<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
+        if version >= 0 {
+            if flex {
+                let () = put_compact_nullable_string(buf, self.rack);
+            } else {
+                let () = put_nullable_string(buf, self.rack);
+            }
+        }
+    }
+    fn encode_field_6<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
+        if version >= 1 {
+            put_bool(buf, self.is_migrating_zk_broker);
+        }
+    }
+    fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
+        if version >= 2 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.log_dirs).len(), flex);
+                for it in &self.log_dirs {
+                    crate::primitives::uuid::put_uuid(buf, *it);
+                }
+            }
+        }
+    }
+    fn encode_field_8<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
+        if version >= 3 {
+            put_i64(buf, self.previous_broker_epoch);
+        }
+    }
+    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {
+        if flex {
+            let tagged = WriteTaggedFields::new();
+            tagged.write(buf, &self.unknown_tagged_fields);
+        }
+    }
+    fn decode_field_0(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.broker_id = get_i32(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_1(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.cluster_id = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_2(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.incarnation_id = crate::primitives::uuid::get_uuid(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_3(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.listeners = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(Listener::decode_borrow(buf, version)?);
+                }
+                v
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_4(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.features = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(Feature::decode_borrow(buf, version)?);
+                }
+                v
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_5(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.rack = if flex {
+                get_compact_nullable_string_borrowed(buf)?
+            } else {
+                get_nullable_string_borrowed(buf)?
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_6(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 1 {
+            out.is_migrating_zk_broker = get_bool(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_7(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 2 {
+            out.log_dirs = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(crate::primitives::uuid::get_uuid(buf)?);
+                }
+                v
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_8(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 3 {
+            out.previous_broker_epoch = get_i64(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_tagged_fields(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        _version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if flex {
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
+        }
+        Ok(())
+    }
 }
 impl Encode for BrokerRegistrationRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
@@ -75,60 +305,16 @@ impl Encode for BrokerRegistrationRequest<'_> {
             });
         }
         let flex = is_flexible(version);
-        if version >= 0 {
-            put_i32(buf, self.broker_id);
-        }
-        if version >= 0 {
-            if flex {
-                put_compact_string(buf, self.cluster_id);
-            } else {
-                put_string(buf, self.cluster_id);
-            }
-        }
-        if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.incarnation_id);
-        }
-        if version >= 0 {
-            {
-                crate::primitives::array::put_array_len(buf, (self.listeners).len(), flex);
-                for it in &self.listeners {
-                    it.encode(buf, version)?;
-                }
-            }
-        }
-        if version >= 0 {
-            {
-                crate::primitives::array::put_array_len(buf, (self.features).len(), flex);
-                for it in &self.features {
-                    it.encode(buf, version)?;
-                }
-            }
-        }
-        if version >= 0 {
-            if flex {
-                put_compact_nullable_string(buf, self.rack);
-            } else {
-                put_nullable_string(buf, self.rack);
-            }
-        }
-        if version >= 1 {
-            put_bool(buf, self.is_migrating_zk_broker);
-        }
-        if version >= 2 {
-            {
-                crate::primitives::array::put_array_len(buf, (self.log_dirs).len(), flex);
-                for it in &self.log_dirs {
-                    crate::primitives::uuid::put_uuid(buf, *it);
-                }
-            }
-        }
-        if version >= 3 {
-            put_i64(buf, self.previous_broker_epoch);
-        }
-        if flex {
-            let tagged = WriteTaggedFields::new();
-            tagged.write(buf, &self.unknown_tagged_fields);
-        }
+        self.encode_field_0(buf, version, flex);
+        self.encode_field_1(buf, version, flex);
+        self.encode_field_2(buf, version, flex);
+        self.encode_field_3(buf, version, flex)?;
+        self.encode_field_4(buf, version, flex)?;
+        self.encode_field_5(buf, version, flex);
+        self.encode_field_6(buf, version, flex);
+        self.encode_field_7(buf, version, flex);
+        self.encode_field_8(buf, version, flex);
+        self.encode_tagged_fields(buf, version, flex);
         Ok(())
     }
     fn encoded_len(&self, version: i16) -> usize {
@@ -207,65 +393,16 @@ impl<'de> DecodeBorrow<'de> for BrokerRegistrationRequest<'de> {
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 {
-            out.broker_id = get_i32(buf)?;
-        }
-        if version >= 0 {
-            out.cluster_id = if flex {
-                get_compact_string_borrowed(buf)?
-            } else {
-                get_string_borrowed(buf)?
-            };
-        }
-        if version >= 0 {
-            out.incarnation_id = crate::primitives::uuid::get_uuid(buf)?;
-        }
-        if version >= 0 {
-            out.listeners = {
-                let n = crate::primitives::array::get_array_len(buf, flex)?;
-                let mut v = Vec::with_capacity(n);
-                for _ in 0..n {
-                    v.push(Listener::decode_borrow(buf, version)?);
-                }
-                v
-            };
-        }
-        if version >= 0 {
-            out.features = {
-                let n = crate::primitives::array::get_array_len(buf, flex)?;
-                let mut v = Vec::with_capacity(n);
-                for _ in 0..n {
-                    v.push(Feature::decode_borrow(buf, version)?);
-                }
-                v
-            };
-        }
-        if version >= 0 {
-            out.rack = if flex {
-                get_compact_nullable_string_borrowed(buf)?
-            } else {
-                get_nullable_string_borrowed(buf)?
-            };
-        }
-        if version >= 1 {
-            out.is_migrating_zk_broker = get_bool(buf)?;
-        }
-        if version >= 2 {
-            out.log_dirs = {
-                let n = crate::primitives::array::get_array_len(buf, flex)?;
-                let mut v = Vec::with_capacity(n);
-                for _ in 0..n {
-                    v.push(crate::primitives::uuid::get_uuid(buf)?);
-                }
-                v
-            };
-        }
-        if version >= 3 {
-            out.previous_broker_epoch = get_i64(buf)?;
-        }
-        if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
-        }
+        Self::decode_field_0(&mut out, buf, version, flex)?;
+        Self::decode_field_1(&mut out, buf, version, flex)?;
+        Self::decode_field_2(&mut out, buf, version, flex)?;
+        Self::decode_field_3(&mut out, buf, version, flex)?;
+        Self::decode_field_4(&mut out, buf, version, flex)?;
+        Self::decode_field_5(&mut out, buf, version, flex)?;
+        Self::decode_field_6(&mut out, buf, version, flex)?;
+        Self::decode_field_7(&mut out, buf, version, flex)?;
+        Self::decode_field_8(&mut out, buf, version, flex)?;
+        Self::decode_tagged_fields(&mut out, buf, version, flex)?;
         Ok(out)
     }
 }
@@ -313,6 +450,10 @@ pub struct Listener<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl Listener<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::broker_registration_request::Listener {
         crate::owned::broker_registration_request::Listener {
             name: (self.name).to_string(),
@@ -328,16 +469,16 @@ impl Encode for Listener<'_> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name);
+                let () = put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name);
+                let () = put_string(buf, self.name);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.host);
+                let () = put_compact_string(buf, self.host);
             } else {
-                put_string(buf, self.host);
+                let () = put_string(buf, self.host);
             }
         }
         if version >= 0 {
@@ -440,6 +581,10 @@ pub struct Feature<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl Feature<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::broker_registration_request::Feature {
         crate::owned::broker_registration_request::Feature {
             name: (self.name).to_string(),
@@ -454,9 +599,9 @@ impl Encode for Feature<'_> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name);
+                let () = put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name);
+                let () = put_string(buf, self.name);
             }
         }
         if version >= 0 {

@@ -9,9 +9,9 @@ use std::path::Path;
 use crabka_schema_registry::{compat, format::SchemaType, store::StoreState};
 
 #[derive(serde::Deserialize)]
-#[allow(clippy::struct_field_names)]
 struct Case {
-    case: String,
+    #[serde(rename = "case")]
+    name: String,
     level: String,
     writer: String,
     reader: String,
@@ -43,20 +43,20 @@ fn assert_matrix_matches_cp(
             .expect("verdict")
             .is_compatible;
         let expected = *known_divergences
-            .get(&(c.case.as_str(), c.level.as_str()))
+            .get(&(c.name.as_str(), c.level.as_str()))
             .unwrap_or(&c.is_compatible);
         if got != expected {
             mismatches.push(format!(
                 "{}/{}: ours={got} cp={} (expected {expected})",
-                c.case, c.level, c.is_compatible
+                c.name, c.level, c.is_compatible
             ));
         }
     }
     assert2::assert!(mismatches.is_empty());
 }
 
-#[allow(clippy::unnecessary_wraps)]
 fn engine_matches_cp_verdicts(path: &Path) -> datatest_stable::Result<()> {
+    std::fs::metadata(path)?;
     let ty = match path.file_name().and_then(|name| name.to_str()) {
         Some("avro_matrix.json") => SchemaType::Avro,
         Some("protobuf_matrix.json") => SchemaType::Protobuf,

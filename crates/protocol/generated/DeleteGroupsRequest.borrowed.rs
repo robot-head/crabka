@@ -11,7 +11,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 2;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -20,6 +21,10 @@ pub struct DeleteGroupsRequest<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl DeleteGroupsRequest<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::delete_groups_request::DeleteGroupsRequest {
         crate::owned::delete_groups_request::DeleteGroupsRequest {
             groups_names: (self.groups_names)
@@ -44,9 +49,9 @@ impl Encode for DeleteGroupsRequest<'_> {
                 crate::primitives::array::put_array_len(buf, (self.groups_names).len(), flex);
                 for it in &self.groups_names {
                     if flex {
-                        put_compact_string(buf, it);
+                        let () = put_compact_string(buf, it);
                     } else {
-                        put_string(buf, it);
+                        let () = put_string(buf, it);
                     }
                 }
             }

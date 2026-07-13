@@ -92,8 +92,6 @@
 //! is acyclic ⇒ the prediction is **deadlock-free**, and the model proves it
 //! exhaustively across all task interleavings.
 
-#![allow(clippy::similar_names)]
-
 use std::time::Duration;
 
 use stateright::{Checker, Model, Property};

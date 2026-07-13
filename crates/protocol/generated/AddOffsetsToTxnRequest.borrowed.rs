@@ -12,7 +12,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 4;
 pub const FLEXIBLE_MIN: i16 = 3;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -24,6 +25,10 @@ pub struct AddOffsetsToTxnRequest<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl AddOffsetsToTxnRequest<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::add_offsets_to_txn_request::AddOffsetsToTxnRequest {
         crate::owned::add_offsets_to_txn_request::AddOffsetsToTxnRequest {
             transactional_id: (self.transactional_id).to_string(),
@@ -45,9 +50,9 @@ impl Encode for AddOffsetsToTxnRequest<'_> {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.transactional_id);
+                let () = put_compact_string(buf, self.transactional_id);
             } else {
-                put_string(buf, self.transactional_id);
+                let () = put_string(buf, self.transactional_id);
             }
         }
         if version >= 0 {
@@ -58,9 +63,9 @@ impl Encode for AddOffsetsToTxnRequest<'_> {
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.group_id);
+                let () = put_compact_string(buf, self.group_id);
             } else {
-                put_string(buf, self.group_id);
+                let () = put_string(buf, self.group_id);
             }
         }
         if flex {

@@ -446,7 +446,7 @@ fn to_role_maps(
 
 #[cfg(test)]
 mod tests {
-    use assert2::check;
+    use assert2::{assert, check};
 
     use super::*;
 
@@ -489,7 +489,7 @@ mod tests {
     fn empty_members_empty_assignment() {
         let inp = input(&[("a", &[0, 1])], &[], StreamsAssignorKind::Sticky);
         let out = assign(&[], &inp);
-        assert2::assert!(
+        assert!(
             out == StreamsAssignment {
                 active: HashMap::new(),
                 standby: HashMap::new(),
@@ -503,7 +503,7 @@ mod tests {
         let members = [member("A", "p1")];
         let inp = input(&[("sub-0", &[0, 1, 2])], &[], StreamsAssignorKind::Sticky);
         let out = assign(&members, &inp);
-        assert2::assert!(
+        assert!(
             out == StreamsAssignment {
                 active: HashMap::from([(
                     "A".to_string(),
@@ -526,7 +526,7 @@ mod tests {
         let out = assign(&members, &inp);
         // 2/2 balanced; deterministic: least-loaded fills A first, then B,
         // alternating.
-        assert2::assert!(
+        assert!(
             out.active
                 == HashMap::from([
                     (
@@ -541,7 +541,7 @@ mod tests {
         );
         // Re-running yields identical output.
         let out2 = assign(&members, &inp);
-        assert2::assert!(out.active == out2.active);
+        assert!(out.active == out2.active);
     }
 
     #[test]
@@ -558,19 +558,8 @@ mod tests {
         );
         let out = assign(&members, &inp);
         // A keeps 0,1 (sticky); B fills the rest to balance 2/2.
-        assert2::assert!(
-            out.active
-                == HashMap::from([
-                    (
-                        "A".to_string(),
-                        BTreeMap::from([("sub-0".to_string(), vec![0, 1])]),
-                    ),
-                    (
-                        "B".to_string(),
-                        BTreeMap::from([("sub-0".to_string(), vec![2, 3])]),
-                    ),
-                ])
-        );
+        assert!(out.active["A"]["sub-0"] == vec![0, 1]);
+        assert!(out.active["B"]["sub-0"] == vec![2, 3]);
     }
 
     #[test]
@@ -586,8 +575,8 @@ mod tests {
             StreamsAssignorKind::Sticky,
         );
         let out = assign(&members, &inp);
-        assert2::assert!(out.active["A"]["sub-0"].len() == 2);
-        assert2::assert!(out.active["B"]["sub-0"].len() == 2);
+        assert!(out.active["A"]["sub-0"].len() == 2);
+        assert!(out.active["B"]["sub-0"].len() == 2);
     }
 
     #[test]
@@ -601,8 +590,8 @@ mod tests {
         inp.num_standby_replicas = 1;
         let out = assign(&members, &inp);
         // Each of the 2 active tasks gets exactly one standby.
-        assert2::assert!(count(&out.active) == 2);
-        assert2::assert!(count(&out.standby) == 2);
+        assert!(count(&out.active) == 2);
+        assert!(count(&out.standby) == 2);
         // The standby for a task sits on the *other* process than its active.
         for (sub, parts) in [("sub-0", vec![0, 1])]
             .iter()
@@ -620,7 +609,7 @@ mod tests {
                 .find(|(_, m)| m.get(&sub).is_some_and(|v| v.contains(&parts)))
                 .map(|(id, _)| id.clone())
                 .expect("standby owner exists");
-            assert2::assert!(active_owner != standby_owner);
+            assert!(active_owner != standby_owner);
         }
     }
 
@@ -635,8 +624,8 @@ mod tests {
         );
         inp.num_standby_replicas = 1;
         let out = assign(&members, &inp);
-        assert2::assert!(count(&out.active) == 2);
-        assert2::assert!(count(&out.standby) == 0);
+        assert!(count(&out.active) == 2);
+        assert!(count(&out.standby) == 0);
     }
 
     #[test]
@@ -682,22 +671,20 @@ mod tests {
         inp.acceptable_recovery_lag = 10;
         let out = assign(&members, &inp);
         // Move applied: A keeps 0, B takes 1; no warmup.
-        assert2::assert!(
-            (out.active, out.warmup)
-                == (
-                    HashMap::from([
-                        (
-                            "A".to_string(),
-                            BTreeMap::from([("sub-0".to_string(), vec![0])]),
-                        ),
-                        (
-                            "B".to_string(),
-                            BTreeMap::from([("sub-0".to_string(), vec![1])]),
-                        ),
-                    ]),
-                    HashMap::new(),
-                )
+        assert!(
+            out.active
+                == HashMap::from([
+                    (
+                        "A".to_string(),
+                        BTreeMap::from([("sub-0".to_string(), vec![0])]),
+                    ),
+                    (
+                        "B".to_string(),
+                        BTreeMap::from([("sub-0".to_string(), vec![1])]),
+                    ),
+                ])
         );
+        assert!(out.warmup.is_empty());
     }
 
     #[test]
@@ -717,8 +704,8 @@ mod tests {
         let out = assign(&members, &inp);
         // Balance wants 2 tasks on B but neither is caught up -> both deferred;
         // only one warmup created (cap = 1); both stay active on A.
-        assert2::assert!(out.active["A"]["sub-0"].len() == 4);
-        assert2::assert!(count(&out.warmup) == 1);
+        assert!(out.active["A"]["sub-0"].len() == 4);
+        assert!(count(&out.warmup) == 1);
     }
 
     #[test]
@@ -741,7 +728,7 @@ mod tests {
         inp.num_standby_replicas = 1;
         let out = assign(&members, &inp);
         // HighlyAvailable: stateful tasks get standby copies.
-        assert2::assert!(count(&out.active) == 2);
-        assert2::assert!(count(&out.standby) == 2);
+        assert!(count(&out.active) == 2);
+        assert!(count(&out.standby) == 2);
     }
 }

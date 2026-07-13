@@ -15,6 +15,9 @@ impl Default for FrontendConfig {
     }
 }
 
+///
+/// # Errors
+/// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
 pub fn split_inclusive_range(
     start_ms: i64,
     end_ms: i64,
@@ -46,6 +49,7 @@ pub fn split_inclusive_range(
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
 
     use super::*;
 
@@ -53,17 +57,17 @@ mod tests {
     fn split_inclusive_range_keeps_adjacent_shards_non_overlapping() {
         let shards = split_inclusive_range(0, 10, 4).unwrap();
 
-        assert2::assert!(shards == vec![(0, 3), (4, 7), (8, 10)]);
+        assert!(shards == vec![(0, 3), (4, 7), (8, 10)]);
     }
 
     #[test]
     fn split_inclusive_range_keeps_small_ranges_single_shard() {
-        assert2::assert!(split_inclusive_range(5, 7, 10).unwrap() == vec![(5, 7)]);
+        assert!(split_inclusive_range(5, 7, 10).unwrap() == vec![(5, 7)]);
     }
 
     #[test]
     fn split_inclusive_range_rejects_invalid_inputs() {
-        assert2::assert!(split_inclusive_range(10, 0, 4).is_err());
-        assert2::assert!(split_inclusive_range(0, 10, 0).is_err());
+        assert!(split_inclusive_range(10, 0, 4).is_err());
+        assert!(split_inclusive_range(0, 10, 0).is_err());
     }
 }

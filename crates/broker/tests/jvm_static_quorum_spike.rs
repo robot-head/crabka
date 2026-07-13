@@ -84,7 +84,6 @@ fn docker_rm(name: &str) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker + a published controller port (throwaway spike)"]
-#[allow(clippy::too_many_lines)]
 async fn static_mixed_jvm_crabka_quorum() {
     support::init_tracing();
     docker_rm(CONTAINER);
@@ -183,7 +182,7 @@ async fn static_mixed_jvm_crabka_quorum() {
         ])
         .status()
         .expect("docker run JVM controller");
-    assert2::assert!(status.success());
+    assert!(status.success(), "docker run failed");
     eprintln!("JVM controller (id 3) container started");
 
     // ── observe for ~40s ────────────────────────────────────────────────────
@@ -196,8 +195,8 @@ async fn static_mixed_jvm_crabka_quorum() {
     let mut last_l2 = None;
     let mut tick = 0u32;
     while std::time::Instant::now() < deadline {
-        let l1 = c1.controller_leader_id().await;
-        let l2 = c2.controller_leader_id().await;
+        let l1 = c1.controller_leader_id();
+        let l2 = c2.controller_leader_id();
         last_l1 = l1;
         last_l2 = l2;
         if l1.is_some() && l1 == l2 {
@@ -325,7 +324,6 @@ const CONTESTED_CONTAINER: &str = "crabka-kip996-contested";
 /// ```
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker + a published controller port"]
-#[allow(clippy::too_many_lines)]
 async fn contested_election_crabka_counts_jvm_prevote() {
     support::init_tracing();
     docker_rm(CONTESTED_CONTAINER);
@@ -416,14 +414,14 @@ async fn contested_election_crabka_counts_jvm_prevote() {
         ])
         .status()
         .expect("docker run JVM controller");
-    assert2::assert!(status.success());
+    assert!(status.success(), "docker run failed");
 
     // ── Phase 1: a Crabka node leads and the JVM joins as a follower. ───────
     let deadline = std::time::Instant::now() + Duration::from_secs(50);
     let mut leader0: Option<u64> = None;
     while std::time::Instant::now() < deadline {
-        let l1 = c1.controller_leader_id().await;
-        let l2 = c2.controller_leader_id().await;
+        let l1 = c1.controller_leader_id();
+        let l2 = c2.controller_leader_id();
         if l1.is_some() && l1 == l2 && matches!(l1, Some(crabka_broker::NodeId(1 | 2))) {
             leader0 = l1.map(|n| n.0);
             break;
@@ -565,6 +563,25 @@ async fn contested_election_crabka_counts_jvm_prevote() {
         final_qs.current_leader, final_qs.current_term
     );
 
+    let jvm_fatal_fault = capture_contested_jvm_logs();
+
+    docker_rm(CONTESTED_CONTAINER);
+    survivor.shutdown().await;
+
+    assert!(
+        recovered,
+        "surviving Crabka voter {survivor_id} did not win a new election at a \
+         higher epoch after the leader died — the JVM's pre-vote grant was not \
+         counted (KIP-996 interop regression). survivor view: leader={:?} epoch={} (was {epoch0})",
+        final_qs.current_leader, final_qs.current_term
+    );
+    assert!(
+        !jvm_fatal_fault,
+        "JVM controller fatal-faulted during the contested election; see /tmp/jvm_contested.log"
+    );
+}
+
+fn capture_contested_jvm_logs() -> bool {
     // Capture JVM logs for diagnosis regardless of outcome.
     let logs = Command::new("docker")
         .args(["logs", CONTESTED_CONTAINER])
@@ -593,9 +610,5 @@ async fn contested_election_crabka_counts_jvm_prevote() {
         eprintln!("{line}");
     }
 
-    docker_rm(CONTESTED_CONTAINER);
-    survivor.shutdown().await;
-
-    assert2::assert!(recovered);
-    assert2::assert!(!jvm_fatal_fault);
+    jvm_fatal_fault
 }

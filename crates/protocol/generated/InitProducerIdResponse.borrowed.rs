@@ -8,7 +8,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 6;
 pub const FLEXIBLE_MIN: i16 = 2;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,11 +31,15 @@ impl Default for InitProducerIdResponse {
             producer_epoch: 0i16,
             ongoing_txn_producer_id: -1i64,
             ongoing_txn_producer_epoch: -1i16,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl InitProducerIdResponse {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::init_producer_id_response::InitProducerIdResponse {
         crate::owned::init_producer_id_response::InitProducerIdResponse {
             throttle_time_ms: (self.throttle_time_ms),

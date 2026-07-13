@@ -148,19 +148,22 @@ impl ShareGroupState {
 mod tests {
     use std::time::{Duration, Instant};
 
+    use assert2::assert;
+
     use super::*;
 
     #[test]
     fn add_member_bumps_nothing_until_reconcile() {
         let mut g = ShareGroupState::new("g1");
-        assert2::assert!(g.group_epoch == 0);
+        assert!(g.group_epoch == 0);
         g.add_or_update_member(ShareMemberState::joining(
             "m1",
             "c1",
             "h1",
             ["t1".to_string()].into_iter().collect(),
         ));
-        assert2::assert!((g.members.len(), g.dirty) == (1, true));
+        assert!(g.members.len() == 1);
+        assert!(g.dirty);
     }
 
     #[test]
@@ -176,11 +179,13 @@ mod tests {
         // A member seen within the session timeout is retained.
         let recent = Instant::now() + Duration::from_millis(50);
         let kept = g.evict_expired(recent, Duration::from_secs(45));
-        assert2::assert!((kept, g.members.len()) == (vec![], 1));
+        assert!(kept.is_empty());
+        assert!(g.members.len() == 1);
 
         // The same member is overdue once the timeout shrinks below its silence.
         let later = Instant::now() + Duration::from_millis(50);
         let evicted = g.evict_expired(later, Duration::from_millis(1));
-        assert2::assert!((evicted, g.members.len()) == (vec!["m1".to_string()], 0));
+        assert!(evicted == vec!["m1".to_string()]);
+        assert!(g.members.is_empty());
     }
 }

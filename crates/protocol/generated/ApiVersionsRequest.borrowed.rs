@@ -11,7 +11,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 4;
 pub const FLEXIBLE_MIN: i16 = 3;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -21,6 +22,10 @@ pub struct ApiVersionsRequest<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl ApiVersionsRequest<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::api_versions_request::ApiVersionsRequest {
         crate::owned::api_versions_request::ApiVersionsRequest {
             client_software_name: (self.client_software_name).to_string(),
@@ -40,16 +45,16 @@ impl Encode for ApiVersionsRequest<'_> {
         let flex = is_flexible(version);
         if version >= 3 {
             if flex {
-                put_compact_string(buf, self.client_software_name);
+                let () = put_compact_string(buf, self.client_software_name);
             } else {
-                put_string(buf, self.client_software_name);
+                let () = put_string(buf, self.client_software_name);
             }
         }
         if version >= 3 {
             if flex {
-                put_compact_string(buf, self.client_software_version);
+                let () = put_compact_string(buf, self.client_software_version);
             } else {
-                put_string(buf, self.client_software_version);
+                let () = put_string(buf, self.client_software_version);
             }
         }
         if flex {

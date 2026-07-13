@@ -15,11 +15,6 @@
 
 // All arithmetic here is bounded to a tiny cluster (≤ 3 brokers, log-len ≤ 3),
 // so the offset/length/id casts below can never wrap or truncate.
-#![allow(
-    clippy::cast_possible_wrap,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss
-)]
 
 use std::{
     collections::HashSet,
@@ -40,6 +35,7 @@ use crate::{
 };
 
 const NB: usize = 3; // brokers 0,1,2
+const NB_U8: u8 = 3;
 const MAX_LEN: usize = 4; // max log length (offsets 0..4)
 const MAX_EPOCH: u8 = 3;
 
@@ -47,6 +43,18 @@ const TARGET_STATE_COUNT: usize = 60_000_000;
 const MAX_UNIQUE_STATES: usize = 8_000_000;
 const MAX_DEPTH: usize = 70;
 const CHECK_TIMEOUT: Duration = Duration::from_mins(2);
+
+fn model_offset(value: usize) -> i64 {
+    i64::try_from(value).expect("bounded model offset fits in i64")
+}
+
+fn model_index(value: i64) -> usize {
+    usize::try_from(value).expect("model offsets are non-negative and bounded")
+}
+
+fn model_broker(value: u64) -> u8 {
+    u8::try_from(value).expect("model broker id fits in u8")
+}
 
 fn node(b: u8) -> u64 {
     u64::from(b)
@@ -67,12 +75,13 @@ struct DpState {
     lost: bool,         // ghost: an unclean loss has occurred
 }
 
+type StateProjection = (Vec<Vec<u8>>, i64, u8, u8, u8, u8, Vec<u8>, bool);
+
 impl DpState {
     fn leader_leo(&self) -> i64 {
-        self.log[self.leader as usize].len() as i64
+        model_offset(self.log[usize::from(self.leader)].len())
     }
-    #[allow(clippy::type_complexity)]
-    fn proj(&self) -> (Vec<Vec<u8>>, i64, u8, u8, u8, u8, Vec<u8>, bool) {
+    fn proj(&self) -> StateProjection {
         (
             self.log.to_vec(),
             self.hwm,
@@ -111,7 +120,9 @@ fn consistent_leo(follower_log: &[u8], leader_log: &[u8]) -> i64 {
         .iter()
         .zip(leader_log.iter())
         .take_while(|(f, l)| f == l)
-        .count() as i64
+        .count()
+        .try_into()
+        .expect("bounded model offset fits in i64")
 }
 
 /// Drive the REAL HWM core: reconstruct a `ReplicaState` from the model's ISR +
@@ -120,14 +131,13 @@ fn consistent_leo(follower_log: &[u8], leader_log: &[u8]) -> i64 {
 fn real_hwm(s: &DpState, base: Instant) -> i64 {
     let leader = s.leader;
     let leader_leo = s.leader_leo();
-    let leader_log = &s.log[leader as usize];
-    let isr_nodes: Vec<crabka_audit::NodeId> = (0..NB as u8)
+    let leader_log = &s.log[usize::from(leader)];
+    let isr_nodes: Vec<crabka_audit::NodeId> = (0..NB_U8)
         .filter(|&b| has(s.isr, b))
         .map(|b| crabka_audit::NodeId(node(b)))
         .collect();
-    let replica_nodes: Vec<crabka_audit::NodeId> = (0..NB as u8)
-        .map(|b| crabka_audit::NodeId(node(b)))
-        .collect();
+    let replica_nodes: Vec<crabka_audit::NodeId> =
+        (0..NB_U8).map(|b| crabka_audit::NodeId(node(b))).collect();
     let mut rs = ReplicaState::new();
     rs.install_isr(
         &isr_nodes,
@@ -135,9 +145,9 @@ fn real_hwm(s: &DpState, base: Instant) -> i64 {
         crabka_audit::NodeId(node(leader)),
         base,
     );
-    for b in 0..NB as u8 {
+    for b in 0..NB_U8 {
         if b != leader && has(s.isr, b) {
-            let leo = consistent_leo(&s.log[b as usize], leader_log);
+            let leo = consistent_leo(&s.log[usize::from(b)], leader_log);
             // Wrap this model's `i64` LEOs into `Offset` for the real HWM core.
             rs.update_follower_leo(
                 crabka_audit::NodeId(node(b)),
@@ -159,7 +169,7 @@ fn epoch_entries(log: &[u8]) -> Vec<EpochEntry> {
         if last != Some(e) {
             out.push(EpochEntry {
                 epoch: crabka_log::LeaderEpoch(i32::from(e)),
-                start_offset: Offset(off as i64),
+                start_offset: Offset(model_offset(off)),
             });
             last = Some(e);
         }
@@ -175,10 +185,10 @@ fn real_truncation_offset(follower_log: &[u8], leader_log: &[u8]) -> i64 {
     let (_, end) = epoch_and_offset_for_entries(
         &leader_entries,
         crabka_log::LeaderEpoch(follower_latest),
-        Offset(leader_log.len() as i64),
+        Offset(model_offset(leader_log.len())),
     );
     // Unwrap the log-layer `Offset` into this model's `i64` world at the seam.
-    end.0.min(follower_log.len() as i64)
+    end.0.min(model_offset(follower_log.len()))
 }
 
 /// Whether follower `b` is genuinely in-sync and may be (re)admitted to the
@@ -187,9 +197,9 @@ fn real_truncation_offset(follower_log: &[u8], leader_log: &[u8]) -> i64 {
 /// invariant — a follower's reported progress is only ever post-truncation
 /// consistent, so a divergent follower can never appear caught-up.
 fn isr_eligible(s: &DpState, b: u8) -> bool {
-    let f = &s.log[b as usize];
-    let l = &s.log[s.leader as usize];
-    (f.len() as i64) >= s.hwm && f.iter().enumerate().all(|(off, &e)| l.get(off) == Some(&e))
+    let f = &s.log[usize::from(b)];
+    let l = &s.log[usize::from(s.leader)];
+    model_offset(f.len()) >= s.hwm && f.iter().enumerate().all(|(off, &e)| l.get(off) == Some(&e))
 }
 
 /// Apply a leader election: set leader/ISR, bump the epoch, and — for an UNCLEAN
@@ -203,7 +213,7 @@ fn apply_elect(s: &mut DpState, new_leader: u8, isr_mask: u8, unclean: bool) {
     s.isr = isr_mask;
     s.leader_epoch += 1;
     if unclean {
-        let nl = &s.log[new_leader as usize];
+        let nl = &s.log[usize::from(new_leader)];
         let kept = s
             .committed
             .iter()
@@ -213,7 +223,7 @@ fn apply_elect(s: &mut DpState, new_leader: u8, isr_mask: u8, unclean: bool) {
         if kept < s.committed.len() {
             s.lost = true;
             s.committed.truncate(kept);
-            s.hwm = s.hwm.min(nl.len() as i64);
+            s.hwm = s.hwm.min(model_offset(nl.len()));
         }
     }
 }
@@ -223,13 +233,12 @@ fn apply_elect(s: &mut DpState, new_leader: u8, isr_mask: u8, unclean: bool) {
 /// in the unclean config — driving the real KIP-966 `select_best_replica` for
 /// the empty-ISR `Recover` path.
 fn do_failover(s: &mut DpState, dead: u8, unclean: bool) {
-    let isr_nodes: Vec<crabka_audit::NodeId> = (0..NB as u8)
+    let isr_nodes: Vec<crabka_audit::NodeId> = (0..NB_U8)
         .filter(|&b| has(s.isr, b))
         .map(|b| crabka_audit::NodeId(node(b)))
         .collect();
-    let replica_nodes: Vec<crabka_audit::NodeId> = (0..NB as u8)
-        .map(|b| crabka_audit::NodeId(node(b)))
-        .collect();
+    let replica_nodes: Vec<crabka_audit::NodeId> =
+        (0..NB_U8).map(|b| crabka_audit::NodeId(node(b))).collect();
     let pr = PartitionRecord {
         leader: crabka_audit::NodeId(node(s.leader)),
         replicas: replica_nodes,
@@ -237,7 +246,7 @@ fn do_failover(s: &mut DpState, dead: u8, unclean: bool) {
         leader_epoch: crabka_metadata::LeaderEpoch(i32::from(s.leader_epoch)),
         ..Default::default()
     };
-    let alive: HashSet<crabka_audit::NodeId> = (0..NB as u8)
+    let alive: HashSet<crabka_audit::NodeId> = (0..NB_U8)
         .filter(|&b| has(s.live, b))
         .map(|b| crabka_audit::NodeId(node(b)))
         .collect();
@@ -261,30 +270,39 @@ fn do_failover(s: &mut DpState, dead: u8, unclean: bool) {
             isr,
             unclean,
         } => {
-            let isr_mask = isr.iter().fold(0u8, |m, &n| m | (1u8 << (n.0 as u8)));
-            apply_elect(s, leader.0 as u8, isr_mask, unclean);
+            let isr_mask = isr
+                .iter()
+                .fold(0u8, |m, &n| m | (1u8 << (model_broker(n.0))));
+            apply_elect(s, model_broker(leader.0), isr_mask, unclean);
         }
         FailoverDecision::Recover(_) => {
             // KIP-966 unclean recovery: drive the REAL select_best_replica over
             // the live replicas' log info; the winner becomes leader with a
             // singleton ISR (may lose un-replicated committed data).
-            let infos: Vec<ReplicaLogInfo> = (0..NB as u8)
+            let infos: Vec<ReplicaLogInfo> = (0..NB_U8)
                 .filter(|&b| has(s.live, b))
                 .map(|b| ReplicaLogInfo {
                     broker_id: crabka_audit::NodeId(node(b)),
-                    last_written_leader_epoch: s.log[b as usize]
+                    last_written_leader_epoch: s.log[usize::from(b)]
                         .last()
                         .map_or(0, |&e| i32::from(e)),
-                    log_end_offset: s.log[b as usize].len() as i64,
+                    log_end_offset: model_offset(s.log[usize::from(b)].len()),
                     current_leader_epoch: i32::from(s.leader_epoch),
                 })
                 .collect();
             if let Some(winner) = select_best_replica(&infos) {
-                apply_elect(s, winner.0 as u8, 1u8 << (winner.0 as u8), true);
+                apply_elect(
+                    s,
+                    model_broker(winner.0),
+                    1u8 << (model_broker(winner.0)),
+                    true,
+                );
             }
         }
         FailoverDecision::ShrinkIsr { isr } => {
-            s.isr = isr.iter().fold(0u8, |m, &n| m | (1u8 << (n.0 as u8)));
+            s.isr = isr
+                .iter()
+                .fold(0u8, |m, &n| m | (1u8 << (model_broker(n.0))));
         }
         FailoverDecision::Unavailable | FailoverDecision::NoChange => {}
     }
@@ -333,13 +351,13 @@ impl Model for DpModel {
         let leader_live = has(s.live, s.leader);
         // Data-path actions require a live leader.
         if leader_live {
-            if s.log[s.leader as usize].len() < MAX_LEN && s.leader_epoch <= MAX_EPOCH {
+            if s.log[usize::from(s.leader)].len() < MAX_LEN && s.leader_epoch <= MAX_EPOCH {
                 acts.push(Act::Produce);
             }
-            for b in 0..NB as u8 {
+            for b in 0..NB_U8 {
                 if b != s.leader
                     && has(s.live, b)
-                    && (s.log[b as usize].len() as i64) < s.leader_leo()
+                    && model_offset(s.log[usize::from(b)].len()) < s.leader_leo()
                 {
                     acts.push(Act::Replicate(b));
                 }
@@ -358,7 +376,7 @@ impl Model for DpModel {
         }
         // Liveness + failover.
         let live_count = u32::from(s.live).count_ones();
-        for b in 0..NB as u8 {
+        for b in 0..NB_U8 {
             if has(s.live, b) && live_count > 1 {
                 acts.push(Act::Die(b));
             }
@@ -388,15 +406,16 @@ impl Model for DpModel {
         let mut s = last.clone();
         match a {
             Act::Produce => {
-                s.log[s.leader as usize].push(s.leader_epoch);
+                s.log[usize::from(s.leader)].push(s.leader_epoch);
             }
             Act::Replicate(b) => {
-                let leader_log = s.log[s.leader as usize].clone();
-                let trunc = real_truncation_offset(&s.log[b as usize], &leader_log) as usize;
-                s.log[b as usize].truncate(trunc);
-                if s.log[b as usize].len() < leader_log.len() {
-                    let off = s.log[b as usize].len();
-                    s.log[b as usize].push(leader_log[off]);
+                let leader_log = s.log[usize::from(s.leader)].clone();
+                let trunc =
+                    model_index(real_truncation_offset(&s.log[usize::from(b)], &leader_log));
+                s.log[usize::from(b)].truncate(trunc);
+                if s.log[usize::from(b)].len() < leader_log.len() {
+                    let off = s.log[usize::from(b)].len();
+                    s.log[usize::from(b)].push(leader_log[off]);
                 }
             }
             Act::AdvanceHwm => {
@@ -407,8 +426,8 @@ impl Model for DpModel {
                 // LEOs). So no monotonicity assert: durability is the
                 // `committed_durable` property, not HWM monotonicity.
                 s.hwm = real_hwm(&s, self.base);
-                let leader_log = &s.log[s.leader as usize];
-                while (s.committed.len() as i64) < s.hwm {
+                let leader_log = &s.log[usize::from(s.leader)];
+                while model_offset(s.committed.len()) < s.hwm {
                     let off = s.committed.len();
                     s.committed.push(leader_log[off]);
                 }
@@ -427,8 +446,13 @@ impl Model for DpModel {
                     Offset(leader_log_len),
                     Offset(fetch_offset),
                 );
-                assert2::assert!(vw.limit_offset <= s.hwm);
-                assert2::assert!(vw.response_hw == s.hwm);
+                assert!(
+                    vw.limit_offset <= s.hwm,
+                    "consumer limit {} exceeds HWM {}",
+                    vw.limit_offset,
+                    s.hwm
+                );
+                assert!(vw.response_hw == s.hwm, "response_hw drift");
             }
             Act::Die(b) => {
                 s.live &= !(1 << b);
@@ -447,7 +471,7 @@ impl Model for DpModel {
     fn properties(&self) -> Vec<Property<Self>> {
         let mut props = vec![
             Property::always("committed_durable", |_, s: &DpState| {
-                let lg = &s.log[s.leader as usize];
+                let lg = &s.log[usize::from(s.leader)];
                 s.committed
                     .iter()
                     .enumerate()
@@ -466,7 +490,7 @@ impl Model for DpModel {
             Property::sometimes("leader_changed", |_, s: &DpState| s.leader_epoch >= 2),
             // The ISR shrank below the full replica set.
             Property::sometimes("isr_shrunk", |_, s: &DpState| {
-                u32::from(s.isr).count_ones() < NB as u32
+                u32::from(s.isr).count_ones() < u32::from(NB_U8)
             }),
             // Two brokers hold different epochs at one offset — truncation
             // territory (a follower must truncate to reconcile).
@@ -519,9 +543,16 @@ fn run(model: DpModel, label: &str) {
         checker.state_count(),
         checker.max_depth()
     );
-    assert2::assert!(checker.max_depth() < MAX_DEPTH);
-    assert2::assert!(checker.state_count() < TARGET_STATE_COUNT);
-    assert2::assert!(checker.unique_state_count() < MAX_UNIQUE_STATES);
+    assert!(checker.max_depth() < MAX_DEPTH, "[{label}] depth cap hit");
+    assert!(
+        checker.state_count() < TARGET_STATE_COUNT,
+        "[{label}] truncated"
+    );
+    assert!(
+        checker.unique_state_count() < MAX_UNIQUE_STATES,
+        "[{label}] unique bound exceeded ({})",
+        checker.unique_state_count()
+    );
     checker.assert_properties();
 }
 

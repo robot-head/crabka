@@ -20,9 +20,9 @@ impl Encode for TopicInfo {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.name);
+                let () = put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name);
+                let () = put_string(buf, &self.name);
             }
         }
         if version >= 0 {

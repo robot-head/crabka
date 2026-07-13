@@ -52,6 +52,9 @@ pub trait LiveSource: Send + Sync {
     fn block_builder_frontier_ns(&self, tenant: &str) -> i64;
 }
 
+///
+/// # Errors
+/// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
 pub fn encode_span_batches(batches: &[RecordBatch]) -> Result<Vec<u8>> {
     let Some(first) = batches.first() else {
         return Ok(Vec::new());
@@ -467,6 +470,9 @@ impl LiveTier {
         Self { source }
     }
 
+    ///
+    /// # Errors
+    /// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
     pub async fn span_batches(
         &self,
         tenant: &str,
@@ -476,6 +482,9 @@ impl LiveTier {
         self.source.span_batches(tenant, start_ns, end_ns).await
     }
 
+    ///
+    /// # Errors
+    /// Returns an error when the live source query fails.
     pub async fn trace_spans(
         &self,
         tenant: &str,
@@ -484,6 +493,9 @@ impl LiveTier {
         self.source.trace_spans(tenant, trace_id).await
     }
 
+    ///
+    /// # Errors
+    /// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
     pub async fn tag_names(
         &self,
         tenant: &str,
@@ -494,6 +506,9 @@ impl LiveTier {
         self.source.tag_names(tenant, scope, start_ns, end_ns).await
     }
 
+    ///
+    /// # Errors
+    /// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
     pub async fn tag_values(
         &self,
         tenant: &str,

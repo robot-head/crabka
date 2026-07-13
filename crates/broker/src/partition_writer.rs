@@ -150,21 +150,253 @@ async fn run_produce_append_batch(
     }
 }
 
+async fn handle_produce(
+    first: ProduceJob,
+    rx: &mut mpsc::Receiver<WriterMessage>,
+    pending: &mut Option<WriterMessage>,
+    storage: (&Arc<Mutex<Log>>, &Arc<ArcSwap<PathBuf>>, &LogDirRegistry),
+    signals: (
+        &Arc<Notify>,
+        &Arc<tokio::sync::Mutex<ReplicaState>>,
+        &Arc<Notify>,
+    ),
+) {
+    let (log, log_dir, log_dir_status) = storage;
+    let (append_notify, replica_state, hw_advance_notify) = signals;
+    let mut jobs = vec![first];
+    while jobs.len() < MAX_PRODUCE_GROUP {
+        match rx.try_recv() {
+            Ok(WriterMessage::Produce(job)) => jobs.push(job),
+            Ok(other) => {
+                *pending = Some(other);
+                break;
+            }
+            Err(_) => break,
+        }
+    }
+
+    let mut acks = Vec::with_capacity(jobs.len());
+    let mut datas = Vec::with_capacity(jobs.len());
+    for ProduceJob { data, ack } in jobs {
+        acks.push(ack);
+        datas.push(data);
+    }
+
+    let (results, leo) = match run_produce_append_batch(Arc::clone(log), datas).await {
+        Ok(value) => value,
+        Err(err) => {
+            flag_storage_failure(&err, log_dir, log_dir_status);
+            for ack in acks {
+                let _ = ack.send(Err(storage_failure_error(
+                    "append task panicked",
+                    "group append panic",
+                )));
+            }
+            return;
+        }
+    };
+
+    let mut any_ok = false;
+    for (ack, result) in acks.into_iter().zip(results) {
+        match &result {
+            Ok(_) => any_ok = true,
+            Err(err) => {
+                flag_storage_failure(err, log_dir, log_dir_status);
+            }
+        }
+        let _ = ack.send(result);
+    }
+
+    if any_ok {
+        append_notify.notify_waiters();
+        let advanced = {
+            let mut state = replica_state.lock().await;
+            let previous = state.hw;
+            state.recompute_hw_for_leader_append(leo) > previous
+        };
+        if advanced {
+            hw_advance_notify.notify_waiters();
+        }
+    }
+}
+
+async fn handle_compact(
+    identity: (&str, PartitionIndex),
+    storage: (&Arc<Mutex<Log>>, &Arc<ArcSwap<PathBuf>>, &LogDirRegistry),
+    producer_state: &ProducerState,
+    ack: tokio::sync::oneshot::Sender<Result<(), crate::error::BrokerError>>,
+) {
+    let (topic, partition) = identity;
+    let (log, log_dir, log_dir_status) = storage;
+    let now = std::time::SystemTime::now();
+    let now_ms = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| {
+            i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
+        });
+    let active_producers = producer_state
+        .active_snapshot(topic, partition, now_ms, PRODUCER_ID_EXPIRATION_MS)
+        .await
+        .into_iter()
+        .map(|(producer_id, offset)| (crabka_log::ProducerId(producer_id), Offset(offset)))
+        .collect();
+    let context = crabka_log::CompactionContext {
+        now,
+        active_producers,
+    };
+    let log_for_blocking = Arc::clone(log);
+    let join = tokio::task::spawn_blocking(move || {
+        lock_log(&log_for_blocking)
+            .compact(&context)
+            .map_err(crate::error::BrokerError::from)
+    });
+    let result = match join.await {
+        Ok(value) => value,
+        Err(join_err) => Err(storage_failure_error("compact task panicked", join_err)),
+    };
+    if let Err(err) = &result {
+        flag_storage_failure(err, log_dir, log_dir_status);
+    }
+    let _ = ack.send(result);
+}
+
+async fn run_log_mutation<T: Send + 'static>(
+    operation: impl FnOnce() -> Result<T, crate::error::BrokerError> + Send + 'static,
+    panic_context: &'static str,
+    storage: (&Arc<ArcSwap<PathBuf>>, &LogDirRegistry),
+) -> Result<T, crate::error::BrokerError> {
+    let result = match tokio::task::spawn_blocking(operation).await {
+        Ok(value) => value,
+        Err(join_err) => Err(storage_failure_error(panic_context, join_err)),
+    };
+    if let Err(err) = &result {
+        flag_storage_failure(err, storage.0, storage.1);
+    }
+    result
+}
+
+async fn handle_replicate(
+    log: &Arc<Mutex<Log>>,
+    log_dir: &Arc<ArcSwap<PathBuf>>,
+    log_dir_status: &LogDirRegistry,
+    mut batch: crabka_protocol::records::RecordBatch,
+    ack: tokio::sync::oneshot::Sender<Result<(), crate::error::BrokerError>>,
+    append_notify: &Notify,
+) {
+    let offset = batch.base_offset;
+    let log_for_blocking = Arc::clone(log);
+    let result = run_log_mutation(
+        move || {
+            lock_log(&log_for_blocking)
+                .append_at(&mut batch, Offset(offset))
+                .map_err(crate::error::BrokerError::from)
+        },
+        "replicate task panicked",
+        (log_dir, log_dir_status),
+    )
+    .await;
+    let succeeded = result.is_ok();
+    let _ = ack.send(result);
+    if succeeded {
+        append_notify.notify_waiters();
+    }
+}
+
+async fn handle_truncate(
+    log: &Arc<Mutex<Log>>,
+    storage_status: (&Arc<ArcSwap<PathBuf>>, &LogDirRegistry),
+    replica_state: &tokio::sync::Mutex<ReplicaState>,
+    offset: Offset,
+    ack: tokio::sync::oneshot::Sender<Result<(), crate::error::BrokerError>>,
+) {
+    let log_for_blocking = Arc::clone(log);
+    let result = run_log_mutation(
+        move || {
+            lock_log(&log_for_blocking)
+                .truncate_to(offset)
+                .map_err(crate::error::BrokerError::from)
+        },
+        "truncate task panicked",
+        storage_status,
+    )
+    .await;
+    let succeeded = result.is_ok();
+    let _ = ack.send(result);
+    if succeeded {
+        let new_leo = lock_log(log).log_end_offset();
+        replica_state
+            .lock()
+            .await
+            .recompute_hw_for_leader_append(new_leo);
+    }
+}
+
+async fn handle_reset(
+    log: &Arc<Mutex<Log>>,
+    storage_status: (&Arc<ArcSwap<PathBuf>>, &LogDirRegistry),
+    replica_state: &tokio::sync::Mutex<ReplicaState>,
+    new_base: Offset,
+    ack: tokio::sync::oneshot::Sender<Result<(), crate::error::BrokerError>>,
+) {
+    let log_for_blocking = Arc::clone(log);
+    let result = run_log_mutation(
+        move || {
+            lock_log(&log_for_blocking)
+                .reset_to(new_base)
+                .map_err(crate::error::BrokerError::from)
+        },
+        "reset_to task panicked",
+        storage_status,
+    )
+    .await;
+    let succeeded = result.is_ok();
+    let _ = ack.send(result);
+    if succeeded {
+        let new_leo = lock_log(log).log_end_offset();
+        replica_state
+            .lock()
+            .await
+            .recompute_hw_for_leader_append(new_leo);
+    }
+}
+
+async fn handle_trim(
+    log: &Arc<Mutex<Log>>,
+    storage_status: (&Arc<ArcSwap<PathBuf>>, &LogDirRegistry),
+    new_start: Offset,
+    ack: tokio::sync::oneshot::Sender<Result<Offset, crate::error::BrokerError>>,
+) {
+    let log_for_blocking = Arc::clone(log);
+    let result = run_log_mutation(
+        move || {
+            lock_log(&log_for_blocking)
+                .trim_to_offset(new_start)
+                .map_err(crate::error::BrokerError::from)
+        },
+        "trim_to_offset task panicked",
+        storage_status,
+    )
+    .await;
+    let _ = ack.send(result);
+}
+
 /// Loop on the receive side of the partition's `WriterMessage` channel.
 /// Exits when the channel closes (every sender dropped).
-#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub async fn run(
-    topic: String,
-    partition: PartitionIndex,
-    log: Arc<Mutex<Log>>,
-    log_dir: Arc<ArcSwap<PathBuf>>,
+    identity: (String, PartitionIndex),
+    storage: (Arc<Mutex<Log>>, Arc<ArcSwap<PathBuf>>),
     mut rx: mpsc::Receiver<WriterMessage>,
-    append_notify: Arc<Notify>,
-    replica_state: Arc<tokio::sync::Mutex<ReplicaState>>,
-    hw_advance_notify: Arc<Notify>,
-    log_dir_status: LogDirRegistry,
-    producer_state: Arc<ProducerState>,
+    signals: (
+        Arc<Notify>,
+        Arc<tokio::sync::Mutex<ReplicaState>>,
+        Arc<Notify>,
+    ),
+    services: (LogDirRegistry, Arc<ProducerState>),
 ) {
+    let (topic, partition) = identity;
+    let (log, log_dir) = storage;
+    let (append_notify, replica_state, hw_advance_notify) = signals;
+    let (log_dir_status, producer_state) = services;
     // `pending` holds a non-Produce message that was pulled off the channel
     // while group-draining Produce jobs (see the Produce arm). It is handled on
     // the next iteration so control messages are never reordered ahead of the
@@ -180,266 +412,53 @@ pub async fn run(
         };
         match msg {
             WriterMessage::Produce(first) => {
-                // Group commit. The writer is the single serial appender for
-                // this partition, so instead of one append (lock + ack + HW
-                // recompute) per produce, drain every Produce job already queued
-                // and append them all under one lock acquisition, then fan out
-                // their acks. Under small-record load the per-message task
-                // handoff dominates CPU (futex wakeups); collapsing it is the
-                // win. A non-Produce message met while draining is stashed in
-                // `pending` so control messages keep their channel order relative
-                // to these appends.
-                //
-                // `try_recv` only pulls already-queued messages, so a lone
-                // produce still appends immediately (no added latency); the
-                // batch only grows when the broker is actually backed up.
-                let mut jobs = vec![first];
-                while jobs.len() < MAX_PRODUCE_GROUP {
-                    match rx.try_recv() {
-                        Ok(WriterMessage::Produce(j)) => jobs.push(j),
-                        Ok(other) => {
-                            pending = Some(other);
-                            break;
-                        }
-                        Err(_) => break, // Empty or Disconnected
-                    }
-                }
-
-                // Split acks from data: the (Send) data moves into the blocking
-                // append; the acks stay here, paired by index, to be resolved
-                // after it returns.
-                let mut acks = Vec::with_capacity(jobs.len());
-                let mut datas = Vec::with_capacity(jobs.len());
-                for ProduceJob { data, ack } in jobs {
-                    acks.push(ack);
-                    datas.push(data);
-                }
-
-                // Append the whole group under one lock, off the async poller
-                // (`block_in_place` on the multi-thread runtime, `spawn_blocking`
-                // on current-thread test runtimes — see `run_produce_append_batch`).
-                let (results, leo) = match run_produce_append_batch(log.clone(), datas).await {
-                    Ok(v) => v,
-                    Err(err) => {
-                        // The whole append section panicked — treat it as a
-                        // storage failure and fail every ack in the group.
-                        // `BrokerError` is not `Clone`, so build one per ack.
-                        flag_storage_failure(&err, &log_dir, &log_dir_status);
-                        for ack in acks {
-                            let _ = ack.send(Err(storage_failure_error(
-                                "append task panicked",
-                                "group append panic",
-                            )));
-                        }
-                        continue;
-                    }
-                };
-
-                let mut any_ok = false;
-                for (ack, result) in acks.into_iter().zip(results) {
-                    match &result {
-                        Ok(_) => any_ok = true,
-                        Err(e) => {
-                            flag_storage_failure(e, &log_dir, &log_dir_status);
-                        }
-                    }
-                    // If the receiver dropped, the handler timed out — fine.
-                    let _ = ack.send(result);
-                }
-
-                if any_ok {
-                    // Wake long-poll fetchers once for the whole group.
-                    append_notify.notify_waiters();
-                    // Advance HW from the final LEO (covers every append in the
-                    // group); recompute is idempotent so one notify suffices.
-                    let advanced = {
-                        let mut st = replica_state.lock().await;
-                        let prev = st.hw;
-                        let new = st.recompute_hw_for_leader_append(leo);
-                        new > prev
-                    };
-                    if advanced {
-                        hw_advance_notify.notify_waiters();
-                    }
-                }
+                handle_produce(
+                    first,
+                    &mut rx,
+                    &mut pending,
+                    (&log, &log_dir, &log_dir_status),
+                    (&append_notify, &replica_state, &hw_advance_notify),
+                )
+                .await;
             }
-            WriterMessage::Replicate { mut batch, ack } => {
-                // Replication appends preserve the leader-assigned offset
-                // (`batch.base_offset`) — `Log::append_at` rejects with
-                // `OffsetMismatch` if it doesn't line up with the local
-                // log's end.
-                let offset = batch.base_offset;
-                // Run the blocking `write_all` + `fsync` off the reactor;
-                // serial loop + `.await` preserves ordering.
-                let log_for_blocking = log.clone();
-                let join = tokio::task::spawn_blocking(move || {
-                    lock_log(&log_for_blocking)
-                        .append_at(&mut batch, Offset(offset))
-                        .map_err(crate::error::BrokerError::from)
-                });
-                let result = match join.await {
-                    Ok(v) => v,
-                    Err(join_err) => {
-                        let err = storage_failure_error("replicate task panicked", &join_err);
-                        flag_storage_failure(&err, &log_dir, &log_dir_status);
-                        let _ = ack.send(Err(err));
-                        continue;
-                    }
-                };
-                let ok = result.is_ok();
-                if let Err(ref e) = result {
-                    flag_storage_failure(e, &log_dir, &log_dir_status);
-                }
-                let _ = ack.send(result);
-                if ok {
-                    append_notify.notify_waiters();
-                }
+            WriterMessage::Replicate { batch, ack } => {
+                handle_replicate(&log, &log_dir, &log_dir_status, batch, ack, &append_notify).await;
             }
             WriterMessage::Truncate { offset, ack } => {
-                // Truncate rewrites segment files + fsyncs — run it off
-                // the reactor like the append paths.
-                let log_for_blocking = log.clone();
-                let join = tokio::task::spawn_blocking(move || {
-                    lock_log(&log_for_blocking)
-                        .truncate_to(offset)
-                        .map_err(crate::error::BrokerError::from)
-                });
-                let result = match join.await {
-                    Ok(v) => v,
-                    Err(join_err) => {
-                        let err = storage_failure_error("truncate task panicked", &join_err);
-                        flag_storage_failure(&err, &log_dir, &log_dir_status);
-                        let _ = ack.send(Err(err));
-                        continue;
-                    }
-                };
-                let ok = result.is_ok();
-                if let Err(ref e) = result {
-                    flag_storage_failure(e, &log_dir, &log_dir_status);
-                }
-                let _ = ack.send(result);
-                // No `append_notify` — truncate doesn't deliver new data. But a
-                // truncation that drops records below the high-watermark must
-                // lower the HW to preserve HW <= LEO: otherwise an acks=all gate
-                // can be satisfied by a stale HW pointing past the truncated end
-                // of the log (and a consumer told to read vanished offsets).
-                if ok {
-                    let new_leo = lock_log(&log).log_end_offset();
-                    replica_state
-                        .lock()
-                        .await
-                        .recompute_hw_for_leader_append(new_leo);
-                }
+                handle_truncate(
+                    &log,
+                    (&log_dir, &log_dir_status),
+                    &replica_state,
+                    offset,
+                    ack,
+                )
+                .await;
             }
             WriterMessage::ResetTo { new_base, ack } => {
-                let log_for_blocking = log.clone();
-                let join = tokio::task::spawn_blocking(move || {
-                    lock_log(&log_for_blocking)
-                        .reset_to(new_base)
-                        .map_err(crate::error::BrokerError::from)
-                });
-                let result = match join.await {
-                    Ok(v) => v,
-                    Err(join_err) => {
-                        let err = storage_failure_error("reset_to task panicked", &join_err);
-                        flag_storage_failure(&err, &log_dir, &log_dir_status);
-                        let _ = ack.send(Err(err));
-                        continue;
-                    }
-                };
-                let ok = result.is_ok();
-                if let Err(ref e) = result {
-                    flag_storage_failure(e, &log_dir, &log_dir_status);
-                }
-                let _ = ack.send(result);
-                // No `append_notify` — reset_to drops data rather than
-                // delivering it. Clamp the HW to the new (empty-at-new_base) LEO
-                // so a stale HW can't satisfy an acks=all gate for a vanished
-                // offset (see the Truncate handler).
-                if ok {
-                    let new_leo = lock_log(&log).log_end_offset();
-                    replica_state
-                        .lock()
-                        .await
-                        .recompute_hw_for_leader_append(new_leo);
-                }
+                handle_reset(
+                    &log,
+                    (&log_dir, &log_dir_status),
+                    &replica_state,
+                    new_base,
+                    ack,
+                )
+                .await;
             }
             WriterMessage::TrimToOffset { new_start, ack } => {
-                let log_for_blocking = log.clone();
-                let join = tokio::task::spawn_blocking(move || {
-                    lock_log(&log_for_blocking)
-                        .trim_to_offset(new_start)
-                        .map_err(crate::error::BrokerError::from)
-                });
-                let result = match join.await {
-                    Ok(v) => v,
-                    Err(join_err) => {
-                        let err = storage_failure_error("trim_to_offset task panicked", &join_err);
-                        flag_storage_failure(&err, &log_dir, &log_dir_status);
-                        let _ = ack.send(Err(err));
-                        continue;
-                    }
-                };
-                if let Err(ref e) = result {
-                    flag_storage_failure(e, &log_dir, &log_dir_status);
-                }
-                let _ = ack.send(result);
-                // No `append_notify` — trim drops data rather than producing it.
+                handle_trim(&log, (&log_dir, &log_dir_status), new_start, ack).await;
             }
             WriterMessage::SetLogConfig { config, ack } => {
                 lock_log(&log).set_config(config);
                 let _ = ack.send(());
             }
             WriterMessage::Compact { ack } => {
-                // Compaction rewrites segments + fsyncs — off the reactor.
-                //
-                // The `CompactionContext` carries the wall clock (for KIP-534
-                // delete-horizon stamping/expiry) and the set of active
-                // producers (so an active producer's last batch is preserved
-                // via `RETAIN_EMPTY` even when fully compacted away — its
-                // on-disk sequence/epoch state then survives the clean).
-                //
-                // We stamp `now` once and derive `now_ms` from the same
-                // instant so the active-producer inactivity window and the
-                // delete-horizon expiry agree on a single wall clock.
-                let now = std::time::SystemTime::now();
-                let now_ms = now
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
-                let active_producers = producer_state
-                    .active_snapshot(&topic, partition, now_ms, PRODUCER_ID_EXPIRATION_MS)
-                    .await
-                    // Wrap the broker-side `i64` pids/last-offsets into the log
-                    // layer's `ProducerId`/`Offset` at the compaction seam.
-                    .into_iter()
-                    .map(|(pid, off)| (crabka_log::ProducerId(pid), Offset(off)))
-                    .collect();
-                let ctx = crabka_log::CompactionContext {
-                    now,
-                    active_producers,
-                };
-                let log_for_blocking = log.clone();
-                let join = tokio::task::spawn_blocking(move || {
-                    lock_log(&log_for_blocking)
-                        .compact(&ctx)
-                        .map_err(crate::error::BrokerError::from)
-                });
-                let result = match join.await {
-                    Ok(v) => v,
-                    Err(join_err) => {
-                        let err = storage_failure_error("compact task panicked", &join_err);
-                        flag_storage_failure(&err, &log_dir, &log_dir_status);
-                        let _ = ack.send(Err(err));
-                        continue;
-                    }
-                };
-                if let Err(ref e) = result {
-                    flag_storage_failure(e, &log_dir, &log_dir_status);
-                }
-                let _ = ack.send(result);
-                // No `append_notify` — compaction doesn't produce new
-                // records, only consolidates existing ones at the same
-                // absolute offsets.
+                handle_compact(
+                    (&topic, partition),
+                    (&log, &log_dir, &log_dir_status),
+                    &producer_state,
+                    ack,
+                )
+                .await;
             }
             #[cfg(any(test, feature = "test-helpers"))]
             WriterMessage::TestSetLogStart { new_start, ack } => {
@@ -553,7 +572,7 @@ fn swap_future_log(
 
 #[cfg(test)]
 mod tests {
-    use assert2::check;
+    use assert2::{assert, check};
     use crabka_compression::CompressionType;
     use crabka_log::LogConfig;
     use crabka_protocol::records::{Record, RecordBatch};
@@ -561,6 +580,19 @@ mod tests {
     use tokio::sync::oneshot;
 
     use super::*;
+
+    macro_rules! run_writer {
+        ($topic:expr, $partition:expr, $log:expr, $log_dir:expr, $rx:expr,
+         $append:expr, $replica:expr, $hw:expr, $status:expr, $producer:expr $(,)?) => {
+            run(
+                ($topic, $partition),
+                ($log, $log_dir),
+                $rx,
+                ($append, $replica, $hw),
+                ($status, $producer),
+            )
+        };
+    }
 
     fn sample_batch(n: i32) -> RecordBatch {
         let mut b = RecordBatch {
@@ -591,14 +623,14 @@ mod tests {
         let log_dir = ArcSwap::from_pointee(dir.path().to_path_buf());
         let err = storage_failure_error("append failed", "synthetic EIO");
 
-        assert2::assert!(flag_storage_failure(&err, &log_dir, &status));
+        assert!(flag_storage_failure(&err, &log_dir, &status));
 
-        assert2::assert!(status.is_offline(dir.path()));
+        assert!(status.is_offline(dir.path()));
         let expected_offline = vec![(
             dir.path().to_path_buf(),
             "partition write/fsync failed: append failed: synthetic EIO".to_string(),
         )];
-        assert2::assert!(status.offline() == expected_offline);
+        assert!(status.offline() == expected_offline);
     }
 
     #[test]
@@ -624,7 +656,7 @@ mod tests {
         ));
         let (tx, rx) = mpsc::channel(1);
         let notify = Arc::new(Notify::new());
-        let writer = tokio::spawn(run(
+        let writer = tokio::spawn(run_writer!(
             "t".to_string(),
             PartitionIndex(0),
             log.clone(),
@@ -648,7 +680,7 @@ mod tests {
         .expect("send job");
 
         let assigned = ack_rx.await.expect("ack recv").expect("append ok");
-        assert2::assert!(assigned == 0);
+        assert!(assigned == 0);
 
         // Second append assigns offset 3.
         let (ack, ack_rx) = oneshot::channel();
@@ -658,7 +690,7 @@ mod tests {
         }))
         .await
         .expect("send job 2");
-        assert2::assert!(ack_rx.await.expect("ack recv 2").expect("append 2 ok") == 3);
+        assert!(ack_rx.await.expect("ack recv 2").expect("append 2 ok") == 3);
 
         drop(tx);
         writer.await.expect("writer join");
@@ -685,7 +717,7 @@ mod tests {
             acks.push(ack_rx);
         }
 
-        let writer = tokio::spawn(run(
+        let writer = tokio::spawn(run_writer!(
             "t".to_string(),
             PartitionIndex(0),
             log.clone(),
@@ -702,15 +734,15 @@ mod tests {
 
         let mut acks = acks.into_iter();
         let first = acks.next().expect("first ack");
-        assert2::assert!(first.await.expect("ack 0").expect("append 0 ok") == 0);
+        assert!(first.await.expect("ack 0").expect("append 0 ok") == 0);
         for (idx, mut ack) in acks.enumerate() {
             let assigned = ack
                 .try_recv()
                 .expect("same group ack is ready")
                 .expect("append ok");
-            assert2::assert!(assigned == i64::try_from(idx + 1).unwrap());
+            assert!(assigned == i64::try_from(idx + 1).unwrap());
         }
-        assert2::assert!(
+        assert!(
             log.lock().unwrap().log_end_offset()
                 == Offset(i64::try_from(MAX_PRODUCE_GROUP).unwrap())
         );
@@ -727,7 +759,7 @@ mod tests {
         ));
         let (tx, rx) = mpsc::channel(1);
         let notify = Arc::new(Notify::new());
-        let writer = tokio::spawn(run(
+        let writer = tokio::spawn(run_writer!(
             "t".to_string(),
             PartitionIndex(0),
             log.clone(),
@@ -751,7 +783,7 @@ mod tests {
         .expect("send job");
 
         let assigned = ack_rx.await.expect("ack recv").expect("append ok");
-        assert2::assert!(assigned == 0);
+        assert!(assigned == 0);
 
         drop(tx);
         writer.await.expect("writer join");
@@ -768,7 +800,7 @@ mod tests {
         ));
         let (tx, rx) = mpsc::channel(1);
         let notify = Arc::new(Notify::new());
-        let writer = tokio::spawn(run(
+        let writer = tokio::spawn(run_writer!(
             "t".to_string(),
             PartitionIndex(0),
             log.clone(),
@@ -807,7 +839,7 @@ mod tests {
         .await
         .expect("send verbatim job");
         let assigned = ack_rx.await.expect("ack").expect("append ok");
-        assert2::assert!(assigned == 0);
+        assert!(assigned == 0);
 
         // Read back: bytes 21.. must equal the producer's, only offset+epoch changed.
         let r = log
@@ -815,12 +847,13 @@ mod tests {
             .unwrap()
             .read_raw(Offset(0), Offset(1), 10 * 1024 * 1024)
             .unwrap();
-        assert2::assert!(&r.bytes[21..] == &wire[21..]);
-        assert2::assert!(&r.bytes[17..21] == &wire[17..21]);
+        assert!(&r.bytes[21..] == &wire[21..], "CRC-covered region verbatim");
+        assert!(&r.bytes[17..21] == &wire[17..21], "CRC unchanged");
         // Decodes with the assigned offset + stamped epoch.
         let mut cur: &[u8] = &r.bytes;
         let decoded = ProtoBatch::decode(&mut cur).unwrap();
-        assert2::assert!((decoded.base_offset, decoded.partition_leader_epoch) == (0, 5));
+        assert!(decoded.base_offset == 0);
+        assert!(decoded.partition_leader_epoch == 5);
 
         drop(tx);
         writer.await.expect("writer join");
@@ -841,26 +874,22 @@ mod tests {
         );
 
         let original = sample_batch(2);
-        assert2::assert!(original.attributes.compression() == CompressionType::None);
+        assert!(original.attributes.compression() == CompressionType::None);
 
         let (results, leo) = append_produce_batch(&log, vec![ProduceData::Owned(original)]);
-        assert2::assert!(results.len() == 1);
+        assert!(results.len() == 1);
         let assigned = results.into_iter().next().unwrap().expect("append ok");
-        assert2::assert!(assigned == 0);
-        assert2::assert!(leo == 2);
+        assert!(assigned == 0);
+        assert!(leo == 2);
 
         let read = log
             .lock()
             .unwrap()
             .read(Offset(0), 10 * 1024 * 1024)
             .unwrap();
-        assert2::assert!(
-            (
-                read.batches.len(),
-                read.batches[0].attributes.compression(),
-                read.batches[0].records.len(),
-            ) == (1, CompressionType::Lz4, 2)
-        );
+        assert!(read.batches.len() == 1);
+        check!(read.batches[0].attributes.compression() == CompressionType::Lz4);
+        check!(read.batches[0].records.len() == 2);
     }
 
     #[tokio::test]
@@ -871,7 +900,7 @@ mod tests {
         ));
         let (tx, rx) = mpsc::channel(1);
         let notify = Arc::new(Notify::new());
-        let writer = tokio::spawn(run(
+        let writer = tokio::spawn(run_writer!(
             "t".to_string(),
             PartitionIndex(0),
             log.clone(),
@@ -915,7 +944,7 @@ mod tests {
         ));
         let (tx, rx) = mpsc::channel(1);
         let notify = Arc::new(Notify::new());
-        let writer = tokio::spawn(run(
+        let writer = tokio::spawn(run_writer!(
             "t".to_string(),
             PartitionIndex(0),
             log.clone(),
@@ -939,7 +968,7 @@ mod tests {
             .await
             .expect("send replicate");
         ack_rx.await.expect("ack recv").expect("replicate ok");
-        assert2::assert!(log.lock().unwrap().log_end_offset() == 3);
+        assert!(log.lock().unwrap().log_end_offset() == 3);
 
         drop(tx);
         writer.await.expect("writer join");
@@ -953,7 +982,7 @@ mod tests {
         ));
         let (tx, rx) = mpsc::channel(1);
         let notify = Arc::new(Notify::new());
-        let writer = tokio::spawn(run(
+        let writer = tokio::spawn(run_writer!(
             "t".to_string(),
             PartitionIndex(0),
             log.clone(),
@@ -979,9 +1008,9 @@ mod tests {
             .await
             .expect("ack recv")
             .expect_err("expected offset mismatch");
-        assert2::assert!(matches!(err, crate::error::BrokerError::Log(_)));
+        assert!(matches!(err, crate::error::BrokerError::Log(_)));
         // Local log must not have advanced.
-        assert2::assert!(log.lock().unwrap().log_end_offset() == 0);
+        assert!(log.lock().unwrap().log_end_offset() == 0);
 
         drop(tx);
         writer.await.expect("writer join");
@@ -995,7 +1024,7 @@ mod tests {
         ));
         let (tx, rx) = mpsc::channel(1);
         let notify = Arc::new(Notify::new());
-        let writer = tokio::spawn(run(
+        let writer = tokio::spawn(run_writer!(
             "t".to_string(),
             PartitionIndex(0),
             log.clone(),
@@ -1021,7 +1050,7 @@ mod tests {
             .expect("send produce");
             ack_rx.await.expect("ack").expect("ok");
         }
-        assert2::assert!(log.lock().unwrap().log_end_offset() == 4);
+        assert!(log.lock().unwrap().log_end_offset() == 4);
 
         let (ack, ack_rx) = oneshot::channel();
         tx.send(WriterMessage::Truncate {
@@ -1031,7 +1060,7 @@ mod tests {
         .await
         .expect("send truncate");
         ack_rx.await.expect("ack").expect("truncate ok");
-        assert2::assert!(log.lock().unwrap().log_end_offset() == 0);
+        assert!(log.lock().unwrap().log_end_offset() == 0);
 
         drop(tx);
         writer.await.expect("writer join");
@@ -1058,7 +1087,7 @@ mod tests {
             );
         }
         let hw_advance_notify = Arc::new(Notify::new());
-        let writer = tokio::spawn(run(
+        let writer = tokio::spawn(run_writer!(
             "t".to_string(),
             PartitionIndex(0),
             log.clone(),
@@ -1086,7 +1115,7 @@ mod tests {
             .await
             .expect("hw_advance_notify did not fire");
 
-        assert2::assert!(replica_state.lock().await.hw == 2);
+        assert!(replica_state.lock().await.hw == 2);
 
         drop(tx);
         writer.await.expect("writer join");
@@ -1113,7 +1142,7 @@ mod tests {
             );
         }
         let hw_advance_notify = Arc::new(Notify::new());
-        let writer = tokio::spawn(run(
+        let writer = tokio::spawn(run_writer!(
             "t".to_string(),
             PartitionIndex(0),
             log.clone(),
@@ -1138,8 +1167,8 @@ mod tests {
         .expect("send job");
         ack_rx.await.expect("ack").expect("append ok");
 
-        assert2::assert!(replica_state.lock().await.hw == 0);
-        assert2::assert!(
+        assert!(replica_state.lock().await.hw == 0);
+        assert!(
             tokio::time::timeout(std::time::Duration::from_millis(10), waiter)
                 .await
                 .is_err()
@@ -1162,7 +1191,7 @@ mod tests {
             crate::replica_state::ReplicaState::new(),
         ));
         let hw_advance_notify = Arc::new(Notify::new());
-        let writer = tokio::spawn(run(
+        let writer = tokio::spawn(run_writer!(
             "t".to_string(),
             PartitionIndex(0),
             log.clone(),
@@ -1189,7 +1218,7 @@ mod tests {
         ack_rx.await.expect("ack");
 
         let observed = log.lock().expect("lock").config_snapshot();
-        assert2::assert!(observed.retention_ms == new_cfg.retention_ms);
+        assert!(observed.retention_ms == new_cfg.retention_ms);
 
         drop(tx);
         writer.await.expect("writer join");
@@ -1216,7 +1245,7 @@ mod tests {
             crate::replica_state::ReplicaState::new(),
         ));
         let hw_advance_notify = Arc::new(Notify::new());
-        let writer = tokio::spawn(run(
+        let writer = tokio::spawn(run_writer!(
             "t".to_string(),
             PartitionIndex(0),
             log.clone(),
@@ -1237,8 +1266,8 @@ mod tests {
         .await
         .expect("send");
         let new_start = ack_rx.await.expect("ack").expect("trim ok");
-        assert2::assert!(new_start >= 3);
-        assert2::assert!(log.lock().expect("lock").log_start_offset() == new_start);
+        assert!(new_start >= 3);
+        assert!(log.lock().expect("lock").log_start_offset() == new_start);
 
         drop(tx);
         writer.await.expect("writer join");
@@ -1273,7 +1302,7 @@ mod tests {
             );
         }
         let hw_advance_notify = Arc::new(Notify::new());
-        let writer = tokio::spawn(run(
+        let writer = tokio::spawn(run_writer!(
             "t".to_string(),
             PartitionIndex(0),
             log.clone(),
@@ -1295,7 +1324,7 @@ mod tests {
         .expect("send job");
         ack_rx.await.expect("ack").expect("append ok");
 
-        assert2::assert!(replica_state.lock().await.hw == 0);
+        assert!(replica_state.lock().await.hw == 0);
 
         drop(tx);
         writer.await.expect("writer join");

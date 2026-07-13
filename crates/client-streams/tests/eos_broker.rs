@@ -36,7 +36,8 @@ use std::time::Duration;
 
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_core::{
-    Client, Connection, ConnectionOptions, FetchedRecord, fetch_partition_with_isolation,
+    Client, Connection, ConnectionOptions, FetchedRecord, IsolatedFetch,
+    fetch_partition_with_isolation,
 };
 use crabka_client_streams::{
     I64Serde, KafkaStreams, NodeHandle, ProcessingGuarantee, Processor, ProcessorContext, Record,
@@ -81,7 +82,10 @@ async fn finalize_streams_version(client: &Client) {
         })
         .await
         .expect("UpdateFeatures");
-    assert2::assert!(resp.error_code == 0);
+    assert_eq!(
+        resp.error_code, 0,
+        "streams.version finalize failed: {resp:?}"
+    );
 }
 
 async fn create_topic(client: &Client, topic: &str, partitions: i32) {
@@ -98,7 +102,10 @@ async fn create_topic(client: &Client, topic: &str, partitions: i32) {
         })
         .await
         .expect("CreateTopics");
-    assert2::assert!(resp.topics[0].error_code == 0);
+    assert_eq!(
+        resp.topics[0].error_code, 0,
+        "topic create failed: {resp:?}"
+    );
 }
 
 async fn produce(producer: &crabka_client_producer::Producer, vals: &[&str]) {
@@ -203,13 +210,15 @@ async fn collect_committed(
     loop {
         let records: Vec<FetchedRecord> = fetch_partition_with_isolation(
             &conn,
-            OUT_TOPIC,
-            topic_id,
-            0,
-            next_offset,
-            500,
-            1 << 20,
-            READ_COMMITTED,
+            IsolatedFetch {
+                topic: OUT_TOPIC,
+                topic_id,
+                partition: 0,
+                fetch_offset: next_offset,
+                max_wait_ms: 500,
+                partition_max_bytes: 1 << 20,
+                isolation_level: READ_COMMITTED,
+            },
         )
         .await
         .unwrap_or_default();
@@ -367,7 +376,11 @@ async fn eos_v2_atomic_output_and_restart_resume() {
 
     // Expected committed aggregation: a→1, a→2, b→1 (no duplicates, no aborted
     // data). With EOS-v2 the only records below the LSO must be these three.
-    assert2::assert!(got.len() == 3);
+    assert_eq!(
+        got.len(),
+        3,
+        "exactly 3 committed records expected (no duplicates/aborted leakage); got {got:?}",
+    );
     let a_counts: Vec<i64> = got
         .iter()
         .filter(|(k, _)| k == "a")
@@ -378,8 +391,16 @@ async fn eos_v2_atomic_output_and_restart_resume() {
         .filter(|(k, _)| k == "b")
         .map(|(_, v)| *v)
         .collect();
-    assert2::assert!(a_counts == vec![1, 2]);
-    assert2::assert!(b_counts == vec![1]);
+    assert_eq!(
+        a_counts,
+        vec![1, 2],
+        "committed 'a' counts must be [1,2]; got {got:?}"
+    );
+    assert_eq!(
+        b_counts,
+        vec![1],
+        "committed 'b' count must be [1]; got {got:?}"
+    );
 
     // 4b. Source-offset atomicity. The streams runtime folds the consumed source
     // offsets into the SAME transaction as the output (`AddOffsetsToTxn` +
@@ -395,8 +416,16 @@ async fn eos_v2_atomic_output_and_restart_resume() {
     )
     .await
     .expect("committed source offset surfaced within 20s");
-    assert2::assert!(source_off != -1);
-    assert2::assert!(source_off == 3);
+    assert_ne!(
+        source_off, -1,
+        "committed source offset must be surfaced via OffsetFetch (txn offsets \
+         materialized on COMMIT), not -1",
+    );
+    assert_eq!(
+        source_off, 3,
+        "committed source offset must equal the consumed count (3 input records \
+         → next offset 3); got {source_off}",
+    );
 
     // 5. True cross-restart EOS. Close the first instance, produce one more "a",
     // start a FRESH instance with the SAME application_id under EXACTLY_ONCE_V2.
@@ -444,14 +473,18 @@ async fn eos_v2_atomic_output_and_restart_resume() {
     //     and the consumer reset to `earliest`, double-counting.
     //   * New input IS processed: the lone new "a" at input offset 3 advances the
     //     restored count a=2 → 3 and is committed as `a→3`.
-    assert2::assert!(
-        after_restart
-            == vec![
-                ("a".to_string(), 1),
-                ("a".to_string(), 2),
-                ("b".to_string(), 1),
-                ("a".to_string(), 3),
-            ]
+    assert_eq!(
+        after_restart,
+        vec![
+            ("a".to_string(), 1),
+            ("a".to_string(), 2),
+            ("b".to_string(), 1),
+            ("a".to_string(), 3),
+        ],
+        "after EOS restart the committed output must be EXACTLY [a→1, a→2, b→1, a→3]: \
+         the original three (committed input processed exactly once across the \
+         restart) plus the single new `a→3` (restored store a=2 + one new 'a'); \
+         got {after_restart:?}",
     );
 
     streams2.close().await.unwrap();

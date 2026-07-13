@@ -3,6 +3,8 @@
 
 use std::{collections::HashMap, sync::Arc};
 
+use num_traits::ToPrimitive;
+
 use crate::{
     capacity::BrokerCapacities,
     model::{ClusterState, Movement, PartitionView},
@@ -37,10 +39,7 @@ pub(crate) fn imbalance_pct_f64(totals: &HashMap<i32, f64>) -> u32 {
     let max = vals.iter().fold(0.0f64, |a, b| a.max(*b));
     let min = vals.iter().fold(f64::INFINITY, |a, b| a.min(*b));
     let pct = ((max - min) * 100.0 / total).clamp(0.0, f64::from(u32::MAX));
-    // Saturating cast: pct is clamped to [0, u32::MAX] above.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let out = pct as u32;
-    out
+    pct.to_u32().unwrap_or(u32::MAX)
 }
 
 pub(crate) fn replica_totals(

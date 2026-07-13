@@ -22,6 +22,7 @@ use connectrpc_axum::{
 use crabka_broker::throttle::TokenBucket;
 use crabka_client_producer::{Header, Producer, ProducerRecord};
 use crabka_pprof::PprofProfile;
+use num_traits::ToPrimitive as _;
 use prost::Message;
 use tokio::net::TcpListener;
 use tracing::Instrument as _;
@@ -126,6 +127,9 @@ pub struct DistributorState {
     pub metrics: ServiceMetrics,
 }
 
+///
+/// # Errors
+/// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
 pub async fn process_raw(
     state: &DistributorState,
     tenant: &str,
@@ -210,7 +214,7 @@ fn enforce_ingestion_rate(
     if limits.ingestion_burst_profiles > 0 && requested > limits.ingestion_burst_profiles {
         return Err(crate::limits::LimitError::IngestionRateExceeded {
             rate: limits.ingestion_rate_profiles_per_sec,
-            observed: requested as f64,
+            observed: requested.to_f64().unwrap_or(f64::MAX),
         }
         .into());
     }
@@ -221,7 +225,7 @@ fn enforce_ingestion_rate(
     if granted < requested {
         return Err(crate::limits::LimitError::IngestionRateExceeded {
             rate: limits.ingestion_rate_profiles_per_sec,
-            observed: requested as f64,
+            observed: requested.to_f64().unwrap_or(f64::MAX),
         }
         .into());
     }
@@ -229,7 +233,12 @@ fn enforce_ingestion_rate(
 }
 
 fn rate_tokens_per_sec(limits: &Limits) -> u64 {
-    let rate = limits.ingestion_rate_profiles_per_sec.ceil().max(1.0) as u64;
+    let rate = limits
+        .ingestion_rate_profiles_per_sec
+        .ceil()
+        .max(1.0)
+        .to_u64()
+        .unwrap_or(u64::MAX);
     if limits.ingestion_burst_profiles > 0 {
         rate.min(limits.ingestion_burst_profiles)
     } else {
@@ -430,6 +439,9 @@ pub fn router(state: Arc<DistributorState>) -> Router {
         .layer(Extension(state))
 }
 
+///
+/// # Errors
+/// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
 pub async fn serve(
     addr: SocketAddr,
     state: Arc<DistributorState>,
@@ -703,7 +715,9 @@ fn connect_error(err: ProfilesError) -> ConnectError {
         400 | 415 => Code::InvalidArgument,
         _ => Code::Internal,
     };
-    ConnectError::new(code, client_facing_message(&err))
+    let message = client_facing_message(&err);
+    drop(err);
+    ConnectError::new(code, message)
 }
 
 fn profiles_error_response(err: ProfilesError) -> Response {
@@ -812,10 +826,10 @@ fn extract_symbols(profile: &PprofProfile) -> Result<WalSymbolSet, ProfilesError
                     // Carry each pprof symbolization flag through independently;
                     // they are distinct signals (functions vs filenames vs line
                     // numbers vs inline frames) and must not be collapsed.
-                    has_functions: mapping.has_functions,
-                    has_filenames: mapping.has_filenames,
-                    has_line_numbers: mapping.has_line_numbers,
-                    has_inline_frames: mapping.has_inline_frames,
+                    has_functions: mapping.symbolization.has_functions().into(),
+                    has_filenames: mapping.symbolization.has_filenames().into(),
+                    has_line_numbers: mapping.symbolization.has_line_numbers().into(),
+                    has_inline_frames: mapping.symbolization.has_inline_frames().into(),
                 })
             })
             .collect::<Result<Vec<_>, ProfilesError>>()?,
@@ -852,7 +866,7 @@ fn u32_from_i64(value: i64, field: &str) -> Result<u32, ProfilesError> {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use assert2::check;
+    use assert2::{assert, check};
     use prost::Message;
 
     use super::*;
@@ -864,14 +878,14 @@ mod tests {
     fn ingest_span_tenant_reads_scope_orgid_header() {
         let mut present = HeaderMap::new();
         present.insert("x-scope-orgid", "acme".parse().unwrap());
-        assert2::assert!(ingest_span_tenant(&present) == "acme");
+        assert!(ingest_span_tenant(&present) == "acme");
 
         let missing = HeaderMap::new();
-        assert2::assert!(ingest_span_tenant(&missing) == "unknown");
+        assert!(ingest_span_tenant(&missing) == "unknown");
 
         let mut empty = HeaderMap::new();
         empty.insert("x-scope-orgid", "".parse().unwrap());
-        assert2::assert!(ingest_span_tenant(&empty) == "unknown");
+        assert!(ingest_span_tenant(&empty) == "unknown");
     }
 
     use crate::{
@@ -909,9 +923,9 @@ mod tests {
         Arc::new(DistributorState {
             sink,
             limits: TenantLimitConfig::default(),
-            profile_overrides: OverridesProvider::new(Default::default()),
-            active_series: Default::default(),
-            ingestion_buckets: Default::default(),
+            profile_overrides: OverridesProvider::new(Limits::default()),
+            active_series: Mutex::default(),
+            ingestion_buckets: Mutex::default(),
             relabel: vec![],
             max_decompressed: 1 << 24,
             metrics: ServiceMetrics::new(),
@@ -1004,9 +1018,9 @@ mod tests {
         process_raw(&state, "tenant-a", raws).await.unwrap();
 
         let recs = sink.0.lock().unwrap();
-        assert2::assert!(recs.len() == 2);
-        assert2::assert!(recs.iter().all(|rec| rec.tenant == "tenant-a"));
-        assert2::assert!(
+        check!(recs.len() == 2);
+        check!(recs.iter().all(|rec| rec.tenant == "tenant-a"));
+        check!(
             recs.iter()
                 .all(|rec| rec.labels.iter().any(|(name, _)| name == "service_name"))
         );
@@ -1090,8 +1104,8 @@ mod tests {
         .unwrap();
 
         let recs = sink.0.lock().unwrap();
-        assert2::assert!(recs[0].samples[0].stacktrace_location_refs.as_slice() == &[1][..]);
-        assert2::assert!(recs[0].symbols.locations[1].lines[0].0 == 1);
+        assert!(recs[0].samples[0].stacktrace_location_refs == vec![1]);
+        assert!(recs[0].symbols.locations[1].lines[0].0 == 1);
     }
 
     #[tokio::test]
@@ -1100,9 +1114,9 @@ mod tests {
         let state = Arc::new(DistributorState {
             sink: sink.clone(),
             limits: TenantLimitConfig::default(),
-            profile_overrides: OverridesProvider::new(Default::default()),
-            active_series: Default::default(),
-            ingestion_buckets: Default::default(),
+            profile_overrides: OverridesProvider::new(Limits::default()),
+            active_series: Mutex::default(),
+            ingestion_buckets: Mutex::default(),
             relabel: vec![RelabelConfig {
                 source_labels: vec!["__name__".to_string()],
                 regex: "process_cpu".to_string(),
@@ -1117,7 +1131,7 @@ mod tests {
 
         process_raw(&state, "t", raws).await.unwrap();
 
-        assert2::assert!(sink.0.lock().unwrap().is_empty());
+        assert!(sink.0.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1132,9 +1146,9 @@ mod tests {
                     ..Default::default()
                 },
             ),
-            profile_overrides: OverridesProvider::new(Default::default()),
-            active_series: Default::default(),
-            ingestion_buckets: Default::default(),
+            profile_overrides: OverridesProvider::new(Limits::default()),
+            active_series: Mutex::default(),
+            ingestion_buckets: Mutex::default(),
             relabel: vec![],
             max_decompressed: 1 << 24,
             metrics: ServiceMetrics::new(),
@@ -1155,7 +1169,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert2::assert!(err.to_string().contains("value exceeds"));
+        assert!(err.to_string().contains("value exceeds"));
     }
 
     #[tokio::test]
@@ -1170,9 +1184,9 @@ mod tests {
                     ..Default::default()
                 },
             ),
-            profile_overrides: OverridesProvider::new(Default::default()),
-            active_series: Default::default(),
-            ingestion_buckets: Default::default(),
+            profile_overrides: OverridesProvider::new(Limits::default()),
+            active_series: Mutex::default(),
+            ingestion_buckets: Mutex::default(),
             relabel: vec![],
             max_decompressed: 1 << 24,
             metrics: ServiceMetrics::new(),
@@ -1186,8 +1200,8 @@ mod tests {
         .await
         .unwrap_err();
 
-        assert2::assert!(err.to_string().contains("too many label names"));
-        assert2::assert!(sink.0.lock().unwrap().is_empty());
+        assert!(err.to_string().contains("too many label names"));
+        assert!(sink.0.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1197,15 +1211,15 @@ mod tests {
             sink,
             limits: TenantLimitConfig::default(),
             profile_overrides: OverridesProvider::from_yaml(
-                r#"
+                r"
 overrides:
   tenant-a:
     max_label_value_length: 3
-"#,
+",
             )
             .unwrap(),
-            active_series: Default::default(),
-            ingestion_buckets: Default::default(),
+            active_series: Mutex::default(),
+            ingestion_buckets: Mutex::default(),
             relabel: vec![],
             max_decompressed: 1 << 24,
             metrics: ServiceMetrics::new(),
@@ -1226,7 +1240,7 @@ overrides:
         .await
         .unwrap();
 
-        assert2::assert!(err.to_string().contains("value exceeds"));
+        assert!(err.to_string().contains("value exceeds"));
     }
 
     #[tokio::test]
@@ -1236,15 +1250,15 @@ overrides:
             sink: sink.clone(),
             limits: TenantLimitConfig::default(),
             profile_overrides: OverridesProvider::from_yaml(
-                r#"
+                r"
 overrides:
   tenant-a:
     max_series: 1
-"#,
+",
             )
             .unwrap(),
-            active_series: Default::default(),
-            ingestion_buckets: Default::default(),
+            active_series: Mutex::default(),
+            ingestion_buckets: Mutex::default(),
             relabel: vec![],
             max_decompressed: 1 << 24,
             metrics: ServiceMetrics::new(),
@@ -1258,8 +1272,8 @@ overrides:
         .await
         .unwrap_err();
 
-        assert2::assert!(err.to_string().contains("max series exceeded"));
-        assert2::assert!(sink.0.lock().unwrap().is_empty());
+        assert!(err.to_string().contains("max series exceeded"), "{err}");
+        assert!(sink.0.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1269,16 +1283,16 @@ overrides:
             sink: sink.clone(),
             limits: TenantLimitConfig::default(),
             profile_overrides: OverridesProvider::from_yaml(
-                r#"
+                r"
 overrides:
   tenant-a:
     ingestion_rate_profiles_per_sec: 100
     ingestion_burst_profiles: 1
-"#,
+",
             )
             .unwrap(),
-            active_series: Default::default(),
-            ingestion_buckets: Default::default(),
+            active_series: Mutex::default(),
+            ingestion_buckets: Mutex::default(),
             relabel: vec![],
             max_decompressed: 1 << 24,
             metrics: ServiceMetrics::new(),
@@ -1292,8 +1306,8 @@ overrides:
         .await
         .unwrap_err();
 
-        assert2::assert!(err.to_string().contains("ingestion rate exceeded"));
-        assert2::assert!(sink.0.lock().unwrap().is_empty());
+        assert!(err.to_string().contains("ingestion rate exceeded"), "{err}");
+        assert!(sink.0.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1303,16 +1317,16 @@ overrides:
             sink: sink.clone(),
             limits: TenantLimitConfig::default(),
             profile_overrides: OverridesProvider::from_yaml(
-                r#"
+                r"
 overrides:
   tenant-a:
     ingestion_rate_profiles_per_sec: 1
     ingestion_burst_profiles: 1
-"#,
+",
             )
             .unwrap(),
-            active_series: Default::default(),
-            ingestion_buckets: Default::default(),
+            active_series: Mutex::default(),
+            ingestion_buckets: Mutex::default(),
             relabel: vec![],
             max_decompressed: 1 << 24,
             metrics: ServiceMetrics::new(),
@@ -1340,8 +1354,8 @@ overrides:
         .await
         .unwrap();
 
-        assert2::assert!(err.to_string().contains("ingestion rate exceeded"));
-        assert2::assert!(sink.0.lock().unwrap().len() == 2);
+        assert!(err.to_string().contains("ingestion rate exceeded"), "{err}");
+        assert!(sink.0.lock().unwrap().len() == 2);
     }
 
     #[test]
@@ -1354,8 +1368,8 @@ overrides:
             .into(),
         );
 
-        assert2::assert!(err.code() == Code::ResourceExhausted);
-        assert2::assert!(
+        assert!(err.code() == Code::ResourceExhausted);
+        assert!(
             err.message()
                 .is_some_and(|message| message.contains("max series exceeded"))
         );
@@ -1478,11 +1492,11 @@ overrides:
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::OK);
+        assert!(response.status() == StatusCode::OK, "{response:?}");
         let recs = sink.0.lock().unwrap();
-        assert2::assert!(recs.len() == 1);
-        assert2::assert!(recs[0].tenant.as_str() == "tenant-a");
-        assert2::assert!(recs[0].labels.iter().any(|(name, value)| {
+        assert!(recs.len() == 1);
+        check!(recs[0].tenant == "tenant-a");
+        check!(recs[0].labels.iter().any(|(name, value)| {
             name == "__profile_type__" && value == "samples:samples:count:samples:count"
         }));
     }
@@ -1509,24 +1523,24 @@ overrides:
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::OK);
+        assert!(response.status() == StatusCode::OK, "{response:?}");
         let recs = sink.0.lock().unwrap();
-        assert2::assert!(recs.len() == 1);
-        assert2::assert!(recs[0].tenant.as_str() == "tenant-a");
-        assert2::assert!(
-            [
-                ("__profile_type__", "myapp:samples:samples:samples:samples"),
-                ("service_name", "api"),
-            ]
-            .map(|(name, value)| recs[0]
-                .labels
-                .iter()
-                .any(|(label_name, label_value)| { label_name == name && label_value == value }))
-                == [true, true]
-        );
-        assert2::assert!(recs[0].samples.len() == 1);
-        assert2::assert!(recs[0].samples[0].value == 3);
-        assert2::assert!(recs[0].samples[0].timestamp_ns == 1_700_000_000_000_000_000);
+        assert!(recs.len() == 1);
+        check!(recs[0].tenant == "tenant-a");
+        for (name, value) in [
+            ("__profile_type__", "myapp:samples:samples:samples:samples"),
+            ("service_name", "api"),
+        ] {
+            check!(
+                recs[0]
+                    .labels
+                    .iter()
+                    .any(|(label_name, label_value)| label_name == name && label_value == value)
+            );
+        }
+        assert!(recs[0].samples.len() == 1);
+        check!(recs[0].samples[0].value == 3);
+        check!(recs[0].samples[0].timestamp_ns == 1_700_000_000_000_000_000);
     }
 
     #[tokio::test]
@@ -1576,9 +1590,9 @@ overrides:
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
+        assert!(response.status() == StatusCode::BAD_REQUEST, "{response:?}");
         // A rejected tenant must not produce any WAL records.
-        assert2::assert!(sink.0.lock().unwrap().is_empty());
+        assert!(sink.0.lock().unwrap().is_empty());
     }
 
     // C1: an absent header still defaults to the anonymous tenant.
@@ -1603,10 +1617,10 @@ overrides:
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::OK);
+        assert!(response.status() == StatusCode::OK, "{response:?}");
         let recs = sink.0.lock().unwrap();
-        assert2::assert!(recs.len() == 1);
-        assert2::assert!(recs[0].tenant.as_str() == "anonymous");
+        assert!(recs.len() == 1);
+        assert!(recs[0].tenant == "anonymous");
     }
 
     #[test]
@@ -1614,13 +1628,13 @@ overrides:
         use axum::http::HeaderValue;
 
         let mut headers = HeaderMap::new();
-        assert2::assert!(tenant_from_headers(&headers).unwrap() == "anonymous");
+        assert!(tenant_from_headers(&headers).unwrap() == "anonymous");
 
         headers.insert("x-scope-orgid", HeaderValue::from_static("tenant-a"));
-        assert2::assert!(tenant_from_headers(&headers).unwrap() == "tenant-a");
+        assert!(tenant_from_headers(&headers).unwrap() == "tenant-a");
 
         headers.insert("x-scope-orgid", HeaderValue::from_static("a/b"));
-        assert2::assert!(tenant_from_headers(&headers).is_err());
+        assert!(tenant_from_headers(&headers).is_err());
     }
 
     // #3: when the WAL append fails, the max-series reservation is rolled back
@@ -1631,15 +1645,15 @@ overrides:
             sink: Arc::new(FailingSink),
             limits: TenantLimitConfig::default(),
             profile_overrides: OverridesProvider::from_yaml(
-                r#"
+                r"
 overrides:
   tenant-a:
     max_series: 100
-"#,
+",
             )
             .unwrap(),
-            active_series: Default::default(),
-            ingestion_buckets: Default::default(),
+            active_series: Mutex::default(),
+            ingestion_buckets: Mutex::default(),
             relabel: vec![],
             max_decompressed: 1 << 24,
             metrics: ServiceMetrics::new(),
@@ -1652,11 +1666,11 @@ overrides:
         )
         .await
         .unwrap_err();
-        assert2::assert!(matches!(err, ProfilesError::Produce(_)));
+        assert!(matches!(err, ProfilesError::Produce(_)), "{err}");
 
         // The reservation must have been rolled back: no leftover fingerprints.
         let active = state.active_series.lock().unwrap();
-        assert2::assert!(
+        assert!(
             active
                 .get("tenant-a")
                 .map_or(0, std::collections::BTreeSet::len)
@@ -1673,15 +1687,15 @@ overrides:
             sink: sink.clone(),
             limits: TenantLimitConfig::default(),
             profile_overrides: OverridesProvider::from_yaml(
-                r#"
+                r"
 overrides:
   tenant-a:
     max_series: 1
-"#,
+",
             )
             .unwrap(),
-            active_series: Default::default(),
-            ingestion_buckets: Default::default(),
+            active_series: Mutex::default(),
+            ingestion_buckets: Mutex::default(),
             relabel: vec![],
             max_decompressed: 1 << 24,
             metrics: ServiceMetrics::new(),
@@ -1695,7 +1709,7 @@ overrides:
         )
         .await
         .unwrap_err();
-        assert2::assert!(err.to_string().contains("max series exceeded"));
+        assert!(err.to_string().contains("max series exceeded"), "{err}");
 
         // Nothing was reserved, so a single-series write afterwards succeeds.
         process_raw(
@@ -1705,7 +1719,7 @@ overrides:
         )
         .await
         .unwrap();
-        assert2::assert!(sink.0.lock().unwrap().len() == 1);
+        assert!(sink.0.lock().unwrap().len() == 1);
     }
 
     // #4: the per-tenant maps are bounded; admitting tenant N+1 past the cap
@@ -1716,7 +1730,7 @@ overrides:
         for idx in 0..MAX_TENANTS {
             map.insert(format!("tenant-{idx}"), idx);
         }
-        assert2::assert!(map.len() == MAX_TENANTS);
+        assert!(map.len() == MAX_TENANTS);
 
         // Simulate the admission guard: evict before inserting a new tenant.
         if !map.contains_key("tenant-new") && map.len() >= MAX_TENANTS {
@@ -1724,8 +1738,8 @@ overrides:
         }
         map.insert("tenant-new".to_string(), 0);
 
-        assert2::assert!(map.len() == MAX_TENANTS);
-        assert2::assert!(map.contains_key("tenant-new"));
+        assert!(map.len() == MAX_TENANTS);
+        assert!(map.contains_key("tenant-new"));
     }
 
     #[tokio::test]
@@ -1742,8 +1756,8 @@ overrides:
                 ingestion_burst_profiles: 1000,
                 ..Default::default()
             }),
-            active_series: Default::default(),
-            ingestion_buckets: Default::default(),
+            active_series: Mutex::default(),
+            ingestion_buckets: Mutex::default(),
             relabel: vec![],
             max_decompressed: 1 << 24,
             metrics: ServiceMetrics::new(),
@@ -1756,7 +1770,7 @@ overrides:
         }
 
         let buckets = state.ingestion_buckets.lock().unwrap();
-        assert2::assert!(buckets.len() <= MAX_TENANTS);
+        assert!(buckets.len() <= MAX_TENANTS, "{}", buckets.len());
     }
 
     // #7: a 5xx/internal error returns a GENERIC body, not the detailed text.
@@ -1780,18 +1794,18 @@ overrides:
     #[test]
     fn client_input_error_keeps_specific_message() {
         let message = client_facing_message(&ProfilesError::Invalid("bad query param".to_string()));
-        assert2::assert!(message.contains("bad query param"));
+        assert!(message.contains("bad query param"), "{message}");
     }
 
     // #7: a poisoned lock is now an Internal/500 with a generic message, not a 400.
     #[test]
     fn poisoned_lock_maps_to_internal_500() {
         let err = ProfilesError::Internal("active series lock poisoned".to_string());
-        assert2::assert!(err.status_code() == 500);
+        assert!(err.status_code() == 500);
 
         let connect = connect_error(ProfilesError::Internal("secret detail".to_string()));
-        assert2::assert!(connect.code() == Code::Internal);
-        assert2::assert!(
+        assert!(connect.code() == Code::Internal);
+        assert!(
             connect
                 .message()
                 .is_some_and(|message| message == INTERNAL_ERROR_MESSAGE)
@@ -1840,10 +1854,9 @@ overrides:
                 // Deliberately mixed: functions+line numbers symbolized, but no
                 // filenames and no inline frames. A correct mapping must NOT
                 // collapse these onto `has_functions`.
-                has_functions: true,
-                has_filenames: false,
-                has_line_numbers: true,
-                has_inline_frames: false,
+                symbolization: crabka_pprof::proto::MappingSymbolization::from_parts((
+                    true, false, true, false,
+                )),
             }],
             string_table: vec![
                 String::new(),
@@ -1874,9 +1887,9 @@ overrides:
 
         let recs = sink.0.lock().unwrap();
         let mapping = &recs[0].symbols.mappings[0];
-        assert2::assert!(mapping.has_functions);
-        assert2::assert!(!mapping.has_filenames);
-        assert2::assert!(mapping.has_line_numbers);
-        assert2::assert!(!mapping.has_inline_frames);
+        check!(mapping.has_functions.get());
+        check!(!mapping.has_filenames.get());
+        check!(mapping.has_line_numbers.get());
+        check!(!mapping.has_inline_frames.get());
     }
 }

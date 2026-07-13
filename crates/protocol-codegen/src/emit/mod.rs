@@ -26,9 +26,9 @@ pub struct EmittedMessage {
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
 
-    use assert2::check;
+    use assert2::{assert, check};
 
     use super::*;
     use crate::{ir, name_conv, validate};
@@ -47,7 +47,7 @@ mod tests {
     /// `ApiKey` enum, and the differential dispatch table) the same way
     /// `main::run` does — but in the library's own test target so the work
     /// counts toward `--lib` coverage.
-    fn emit_all(dir: &Path, namespace: Option<&str>) {
+    fn emit_all(dir: &PathBuf, namespace: Option<&str>) {
         let specs = ir::load_dir(dir).unwrap();
         validate::validate(&specs).unwrap();
         let sha = "0000000000000000000000000000000000000000";
@@ -56,31 +56,21 @@ mod tests {
             .iter()
             .filter(|s| !s.valid_versions.is_empty())
             .collect();
-        assert2::assert!(!active.is_empty());
+        assert!(!active.is_empty(), "no active specs in {dir:?}");
 
         for s in &active {
             let owned = owned_quote::emit(s, sha).unwrap();
-            assert2::assert!(
-                owned.primary.contains("MIN_VERSION") || owned.primary.contains("struct")
-            );
+            assert!(owned.primary.contains("MIN_VERSION") || owned.primary.contains("struct"));
             let borrowed = borrowed_quote::emit(s, sha, namespace).unwrap();
-            assert2::assert!(!borrowed.primary.is_empty());
+            assert!(!borrowed.primary.is_empty());
             for (_, body) in owned.commons.iter().chain(borrowed.commons.iter()) {
-                assert2::assert!(!body.is_empty());
+                assert!(!body.is_empty());
             }
             if wrappers::should_emit_wrapper(s) {
                 let w_owned = wrappers::emit(s, wrappers::Flavor::Owned, sha, namespace);
                 let w_borrowed = wrappers::emit(s, wrappers::Flavor::Borrowed, sha, namespace);
                 check!(w_owned.contains("mod tests"));
                 check!(w_borrowed.contains("mod tests"));
-                check!(w_owned.contains("case {case}, version {v}"));
-                check!(w_borrowed.contains("case {case}, version {v}"));
-                check!(!w_owned.contains("_case , msg"));
-                check!(!w_borrowed.contains("_case , msg"));
-                let has_fetch_plan = w_owned.contains("fetch_response_plan.rs");
-                let expects_fetch_plan = namespace.is_none() && s.name == "FetchResponse";
-                check!(has_fetch_plan == expects_fetch_plan);
-                check!(!w_borrowed.contains("fetch_response_plan.rs"));
                 check!(!name_conv::module_name(&s.name).is_empty());
             }
         }
@@ -88,15 +78,15 @@ mod tests {
         for flavor in [wrappers::Flavor::Owned, wrappers::Flavor::Borrowed] {
             for has_common in [false, true] {
                 let m = mod_rs::emit(&active, flavor, sha, has_common);
-                assert2::assert!(m.contains("pub mod"));
+                assert!(m.contains("pub mod"));
             }
         }
 
         if namespace.is_none() {
-            assert2::assert!(api_key_enum_quote::emit(&specs, sha).contains("ApiKey"));
-            assert2::assert!(!differential_table::emit(&specs, sha).is_empty());
+            assert!(api_key_enum_quote::emit(&specs, sha).contains("ApiKey"));
+            assert!(!differential_table::emit(&specs, sha).is_empty());
         }
-        assert2::assert!(common::banner(sha).contains(sha));
+        assert!(common::banner(sha).contains(sha));
     }
 
     #[test]

@@ -56,6 +56,8 @@ impl MembershipStore {
 
     /// Owner advertised-addr for dedup-partition `p`, if any replica claims it.
     #[must_use]
+    /// # Panics
+    /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub fn owner_of(&self, p: u32) -> Option<String> {
         self.routing.read().expect("routing lock").get(&p).cloned()
     }
@@ -96,6 +98,8 @@ impl MembershipStore {
     /// `group` MUST be unique per process (node-scoped) so this replica is the
     /// sole member and is assigned every partition (a broadcast read). Closes
     /// the consumer on exit so the coordinator + group member don't leak.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn run_membership(
         self: Arc<Self>,
         bootstrap: String,
@@ -166,6 +170,8 @@ pub struct MembershipPublisher {
 
 impl MembershipPublisher {
     /// Build the publisher's idempotent producer.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn new(
         bootstrap: &str,
         client_id: &str,
@@ -193,6 +199,8 @@ impl MembershipPublisher {
 
     /// Publish the current owned set (bumps `epoch`). Keyed by `node_id` so the
     /// compacted topic keeps exactly one live record per replica.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn publish(&self, owned: &HashSet<u32>) -> Result<(), GatewayError> {
         let epoch = self.epoch.fetch_add(1, Ordering::SeqCst);
         let mut owned: Vec<u32> = owned.iter().copied().collect();

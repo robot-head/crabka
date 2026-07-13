@@ -15,6 +15,8 @@
 //! Prometheus yields no sample (fewer than two points, a zero-width sampled
 //! interval, etc.), which the UDF layer renders as a **NULL** cell.
 
+use num_traits::ToPrimitive;
+
 /// The reset-correcting / windowed range functions evaluated over a full
 /// `(t-range, t]` window: `rate`, `increase`, and `delta`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -47,11 +49,8 @@ pub enum InstantKind {
 
 /// Prometheus' extrapolated range estimator, shared by `rate`/`increase`/`delta`.
 ///
-/// This is a direct port of the engine's `extrapolated_rate`. The
-/// `#[allow(clippy::cast_precision_loss)]` mirrors the engine: timestamp deltas
-/// intentionally enter the f64-seconds domain, matching Prometheus exactly.
+/// This is a direct port of the engine's `extrapolated_rate`.
 #[must_use]
-#[allow(clippy::cast_precision_loss)]
 pub fn extrapolated_rate(
     timestamps: &[i64],
     values: &[f64],
@@ -78,15 +77,15 @@ pub fn extrapolated_rate(
 
     let first_ts = timestamps[0];
     let last_ts = timestamps[n - 1];
-    let sampled_interval = (last_ts - first_ts) as f64 / 1000.0;
+    let sampled_interval = (last_ts - first_ts).to_f64()? / 1000.0;
     if sampled_interval <= 0.0 {
         return None;
     }
 
-    let average_duration_between_samples = sampled_interval / (n - 1) as f64;
+    let average_duration_between_samples = sampled_interval / (n - 1).to_f64()?;
     let extrapolation_threshold = average_duration_between_samples * 1.1;
-    let mut duration_to_start = (first_ts - range_start_ms) as f64 / 1000.0;
-    let mut duration_to_end = (range_end_ms - last_ts) as f64 / 1000.0;
+    let mut duration_to_start = (first_ts - range_start_ms).to_f64()? / 1000.0;
+    let mut duration_to_end = (range_end_ms - last_ts).to_f64()? / 1000.0;
 
     if duration_to_start >= extrapolation_threshold {
         duration_to_start = average_duration_between_samples / 2.0;
@@ -106,7 +105,7 @@ pub fn extrapolated_rate(
     let extrapolate_to_interval = sampled_interval + duration_to_start + duration_to_end;
     result *= extrapolate_to_interval / sampled_interval;
     if kind == RangeKind::Rate {
-        let range_seconds = range_ms as f64 / 1000.0;
+        let range_seconds = range_ms.to_f64()? / 1000.0;
         if range_seconds <= 0.0 {
             return None;
         }
@@ -121,7 +120,6 @@ pub fn extrapolated_rate(
 /// samples, clamps a negative `irate` delta to the last value (counter reset),
 /// and divides by the inter-sample interval for `irate` only.
 #[must_use]
-#[allow(clippy::cast_precision_loss)]
 pub fn instant_delta(timestamps: &[i64], values: &[f64], kind: InstantKind) -> Option<f64> {
     let n = timestamps.len();
     if n < 2 || values.len() != n {
@@ -135,7 +133,7 @@ pub fn instant_delta(timestamps: &[i64], values: &[f64], kind: InstantKind) -> O
     }
 
     if matches!(kind, InstantKind::Irate) {
-        let interval = (timestamps[n - 1] - timestamps[n - 2]) as f64 / 1000.0;
+        let interval = (timestamps[n - 1] - timestamps[n - 2]).to_f64()? / 1000.0;
         if interval <= 0.0 {
             return None;
         }

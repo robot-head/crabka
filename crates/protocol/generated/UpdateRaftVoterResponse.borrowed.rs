@@ -14,7 +14,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 0;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -25,6 +26,10 @@ pub struct UpdateRaftVoterResponse {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl UpdateRaftVoterResponse {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::update_raft_voter_response::UpdateRaftVoterResponse {
         crate::owned::update_raft_voter_response::UpdateRaftVoterResponse {
             throttle_time_ms: (self.throttle_time_ms),
@@ -149,11 +154,15 @@ impl Default for CurrentLeader<'_> {
             leader_epoch: -1i32,
             host: "",
             port: 0i32,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl CurrentLeader<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::update_raft_voter_response::CurrentLeader {
         crate::owned::update_raft_voter_response::CurrentLeader {
             leader_id: (self.leader_id),
@@ -175,9 +184,9 @@ impl Encode for CurrentLeader<'_> {
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.host);
+                let () = put_compact_string(buf, self.host);
             } else {
-                put_string(buf, self.host);
+                let () = put_string(buf, self.host);
             }
         }
         if version >= 0 {

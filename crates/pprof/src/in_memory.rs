@@ -55,96 +55,67 @@ impl InMemoryProfileStore {
         &mut self.symbols
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn push_sample(
         &mut self,
-        tenant: &str,
-        profile_type: &str,
+        profile: (&str, &str),
         labels: Vec<(String, String)>,
-        partition: u64,
-        stacktrace_id: u32,
+        stack: (u64, u32),
         value: i64,
         timestamp_ms: i64,
     ) {
-        self.push_sample_with_total(
-            tenant,
-            profile_type,
-            labels,
-            partition,
-            stacktrace_id,
-            value,
-            value,
-            timestamp_ms,
-        );
+        self.push_sample_with_total(profile, labels, stack, (value, value), timestamp_ms);
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn push_sample_with_total(
         &mut self,
-        tenant: &str,
-        profile_type: &str,
+        profile: (&str, &str),
         labels: Vec<(String, String)>,
-        partition: u64,
-        stacktrace_id: u32,
-        value: i64,
-        total_value: i64,
+        stack: (u64, u32),
+        values: (i64, i64),
         timestamp_ms: i64,
     ) {
         self.push_sample_with_total_and_associations(
-            tenant,
-            profile_type,
+            profile,
             labels,
-            partition,
-            stacktrace_id,
-            value,
-            total_value,
+            stack,
+            values,
             timestamp_ms,
-            None,
-            None,
+            (None, None),
         );
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn push_sample_with_total_and_span(
         &mut self,
-        tenant: &str,
-        profile_type: &str,
+        profile: (&str, &str),
         labels: Vec<(String, String)>,
-        partition: u64,
-        stacktrace_id: u32,
-        value: i64,
-        total_value: i64,
+        stack: (u64, u32),
+        values: (i64, i64),
         timestamp_ms: i64,
         span_id: u64,
     ) {
         self.push_sample_with_total_and_associations(
-            tenant,
-            profile_type,
+            profile,
             labels,
-            partition,
-            stacktrace_id,
-            value,
-            total_value,
+            stack,
+            values,
             timestamp_ms,
-            Some(span_id),
-            None,
+            (Some(span_id), None),
         );
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn push_sample_with_total_and_associations(
         &mut self,
-        tenant: &str,
-        profile_type: &str,
+        profile: (&str, &str),
         labels: Vec<(String, String)>,
-        partition: u64,
-        stacktrace_id: u32,
-        value: i64,
-        total_value: i64,
+        stack: (u64, u32),
+        values: (i64, i64),
         timestamp_ms: i64,
-        span_id: Option<u64>,
-        trace_id: Option<Vec<u8>>,
+        associations: (Option<u64>, Option<Vec<u8>>),
     ) {
+        let (tenant, profile_type) = profile;
+        let (partition, stacktrace_id) = stack;
+        let (value, total_value) = values;
+        let (span_id, trace_id) = associations;
         let fingerprint = fingerprint_labels(&labels);
         self.samples
             .entry(tenant.to_string())
@@ -438,7 +409,7 @@ fn label_value<'a>(row: &'a SampleRow, name: &str) -> Option<&'a str> {
 
 #[cfg(test)]
 mod tests {
-
+    use assert2::assert;
     use crabka_blockstore::{LabelMatcher, MatchOp};
     use datafusion::arrow::{
         array::AsArray,
@@ -484,9 +455,9 @@ mod tests {
         let st_main = store.symbols_mut().intern_stacktrace(0, &[l_main]);
         let pt = "process_cpu:cpu:nanoseconds:cpu:nanoseconds";
         let labels = vec![("service_name".to_string(), "checkout".to_string())];
-        store.push_sample("t", pt, labels.clone(), 0, st_work, 10, 1000);
-        store.push_sample("t", pt, labels.clone(), 0, st_work, 5, 1000);
-        store.push_sample("t", pt, labels, 0, st_main, 3, 1000);
+        store.push_sample(("t", pt), labels.clone(), (0, st_work), 10, 1000);
+        store.push_sample(("t", pt), labels.clone(), (0, st_work), 5, 1000);
+        store.push_sample(("t", pt), labels, (0, st_main), 3, 1000);
         store
     }
 
@@ -510,24 +481,22 @@ mod tests {
             .unwrap();
         let out = df.collect().await.unwrap();
         let count = out[0].column(0).as_primitive::<Int64Type>().value(0);
-        assert2::assert!(count == 3);
-        assert2::assert!(
-            !scan.symbols.resolve(0, 0).is_empty() || !scan.symbols.resolve(0, 1).is_empty()
-        );
+        assert!(count == 3);
+        assert!(!scan.symbols.resolve(0, 0).is_empty() || !scan.symbols.resolve(0, 1).is_empty());
     }
 
     #[tokio::test]
     async fn profile_types_and_label_values() {
         let store = store_with_two_samples();
         let pts = store.profile_types("t", 0, 5000).await.unwrap();
-        assert2::assert!(pts == vec!["process_cpu:cpu:nanoseconds:cpu:nanoseconds".to_string()]);
+        assert!(pts == vec!["process_cpu:cpu:nanoseconds:cpu:nanoseconds".to_string()]);
         let vals = store
             .label_values("t", "service_name", &[], 0, 5000)
             .await
             .unwrap();
-        assert2::assert!(vals == vec!["checkout".to_string()]);
+        assert!(vals == vec!["checkout".to_string()]);
         let names = store.label_names("t", &[], 0, 5000).await.unwrap();
-        assert2::assert!(names == vec!["service_name".to_string()]);
+        assert!(names == vec!["service_name".to_string()]);
         let series = store
             .series(
                 "t",
@@ -538,9 +507,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert2::assert!(
-            series == vec![vec![("service_name".to_string(), "checkout".to_string())]]
-        );
+        assert!(series == vec![vec![("service_name".to_string(), "checkout".to_string())]]);
 
         // Empty `label_names` means "return the full label set" (the Pyroscope
         // `/series` convention), mirroring `crabka_blockstore`'s index. It must
@@ -551,9 +518,7 @@ mod tests {
             .series("t", &[] as &[LabelMatcher], &[], 0, 5000)
             .await
             .unwrap();
-        assert2::assert!(
-            unprojected == vec![vec![("service_name".to_string(), "checkout".to_string())]]
-        );
+        assert!(unprojected == vec![vec![("service_name".to_string(), "checkout".to_string())]]);
     }
 
     #[tokio::test]
@@ -561,20 +526,16 @@ mod tests {
         let mut store = InMemoryProfileStore::new();
         let pt = "process_cpu:cpu:nanoseconds:cpu:nanoseconds";
         store.push_sample(
-            "t",
-            pt,
+            ("t", pt),
             vec![("service_name".to_string(), "early".to_string())],
-            0,
-            0,
+            (0, 0),
             1,
             1000,
         );
         store.push_sample(
-            "t",
-            pt,
+            ("t", pt),
             vec![("service_name".to_string(), "inside".to_string())],
-            0,
-            0,
+            (0, 0),
             1,
             2000,
         );
@@ -585,8 +546,8 @@ mod tests {
             .unwrap();
         let stats = store.stats("t", 1500, 2500).await.unwrap();
 
-        assert2::assert!(values == vec!["inside".to_string()]);
-        assert2::assert!(
+        assert!(values == vec!["inside".to_string()]);
+        assert!(
             stats
                 == crate::ProfileStats {
                     data_ingested: true,
@@ -601,20 +562,16 @@ mod tests {
         let mut store = InMemoryProfileStore::new();
         let pt = "process_cpu:cpu:nanoseconds:cpu:nanoseconds";
         store.push_sample(
-            "t",
-            pt,
+            ("t", pt),
             vec![("service_name".to_string(), "api".to_string())],
-            0,
-            0,
+            (0, 0),
             1,
             1000,
         );
         store.push_sample(
-            "t",
-            pt,
+            ("t", pt),
             vec![("service_name".to_string(), "worker".to_string())],
-            0,
-            0,
+            (0, 0),
             1,
             1000,
         );
@@ -632,8 +589,8 @@ mod tests {
         let out = df.collect().await.unwrap();
         let fingerprints = out[0].column(0).as_primitive::<UInt64Type>();
 
-        assert2::assert!(fingerprints.len() == 2);
-        assert2::assert!(fingerprints.value(0) != fingerprints.value(1));
+        assert!(fingerprints.len() == 2);
+        assert!(fingerprints.value(0) != fingerprints.value(1));
     }
 
     #[tokio::test]
@@ -642,11 +599,9 @@ mod tests {
         let pt = "process_cpu:cpu:nanoseconds:cpu:nanoseconds";
         for service in ["checkout", "api"] {
             store.push_sample(
-                "t",
-                pt,
+                ("t", pt),
                 vec![("service_name".to_string(), service.to_string())],
-                0,
-                0,
+                (0, 0),
                 1,
                 1000,
             );
@@ -673,8 +628,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert2::assert!(neq == vec!["api".to_string()]);
-        assert2::assert!(nre == vec!["api".to_string()]);
+        assert!(neq == vec!["api".to_string()]);
+        assert!(nre == vec!["api".to_string()]);
     }
 
     #[tokio::test]
@@ -692,7 +647,7 @@ mod tests {
             ("__name__".to_string(), "process_cpu".to_string()),
             ("__profile_type__".to_string(), pt.to_string()),
         ];
-        store.push_sample("t", pt, labels, 0, 0, 1, 1000);
+        store.push_sample(("t", pt), labels, (0, 0), 1, 1000);
 
         // Projected onto the drilldown's exact label list (request order is
         // `service_name, __profile_type__`) — the response must still be sorted.
@@ -706,7 +661,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert2::assert!(
+        assert!(
             projected
                 == vec![vec![
                     ("__profile_type__".to_string(), pt.to_string()),
@@ -719,7 +674,7 @@ mod tests {
             .series("t", &[] as &[LabelMatcher], &[], 0, 5000)
             .await
             .unwrap();
-        assert2::assert!(
+        assert!(
             full == vec![vec![
                 ("__name__".to_string(), "process_cpu".to_string()),
                 ("__profile_type__".to_string(), pt.to_string()),

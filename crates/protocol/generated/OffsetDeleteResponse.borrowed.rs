@@ -11,8 +11,9 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 0;
 pub const FLEXIBLE_MIN: i16 = 32767;
 #[inline]
-fn is_flexible(version: i16) -> bool {
-    version >= FLEXIBLE_MIN
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
+    version == FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct OffsetDeleteResponse<'a> {
@@ -22,6 +23,10 @@ pub struct OffsetDeleteResponse<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl OffsetDeleteResponse<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::offset_delete_response::OffsetDeleteResponse {
         crate::owned::offset_delete_response::OffsetDeleteResponse {
             error_code: (self.error_code),
@@ -132,6 +137,10 @@ pub struct OffsetDeleteResponseTopic<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl OffsetDeleteResponseTopic<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::offset_delete_response::OffsetDeleteResponseTopic {
         crate::owned::offset_delete_response::OffsetDeleteResponseTopic {
             name: (self.name).to_string(),
@@ -145,12 +154,12 @@ impl OffsetDeleteResponseTopic<'_> {
 }
 impl Encode for OffsetDeleteResponseTopic<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
-        let flex = version >= 32767;
+        let flex = version == i16::MAX;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name);
+                let () = put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name);
+                let () = put_string(buf, self.name);
             }
         }
         if version >= 0 {
@@ -164,7 +173,7 @@ impl Encode for OffsetDeleteResponseTopic<'_> {
         Ok(())
     }
     fn encoded_len(&self, version: i16) -> usize {
-        let flex = version >= 32767;
+        let flex = version == i16::MAX;
         let mut n: usize = 0;
         if version >= 0 {
             n += if flex {
@@ -189,7 +198,7 @@ impl Encode for OffsetDeleteResponseTopic<'_> {
 }
 impl<'de> DecodeBorrow<'de> for OffsetDeleteResponseTopic<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
-        let flex = version >= 32767;
+        let flex = version == i16::MAX;
         let mut out = Self::default();
         if version >= 0 {
             out.name = if flex {
@@ -232,6 +241,10 @@ pub struct OffsetDeleteResponsePartition {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl OffsetDeleteResponsePartition {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::offset_delete_response::OffsetDeleteResponsePartition {
         crate::owned::offset_delete_response::OffsetDeleteResponsePartition {
             partition_index: (self.partition_index),
@@ -242,7 +255,6 @@ impl OffsetDeleteResponsePartition {
 }
 impl Encode for OffsetDeleteResponsePartition {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
-        let flex = version >= 32767;
         if version >= 0 {
             put_i32(buf, self.partition_index);
         }
@@ -252,7 +264,6 @@ impl Encode for OffsetDeleteResponsePartition {
         Ok(())
     }
     fn encoded_len(&self, version: i16) -> usize {
-        let flex = version >= 32767;
         let mut n: usize = 0;
         if version >= 0 {
             n += 4;
@@ -265,7 +276,6 @@ impl Encode for OffsetDeleteResponsePartition {
 }
 impl<'de> DecodeBorrow<'de> for OffsetDeleteResponsePartition {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
-        let flex = version >= 32767;
         let mut out = Self::default();
         if version >= 0 {
             out.partition_index = get_i32(buf)?;

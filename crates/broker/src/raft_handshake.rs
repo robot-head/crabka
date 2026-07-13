@@ -476,6 +476,7 @@ mod tests {
     //! Plaintext short-circuit predicate so a regression that flips
     //! `requires_*` would be caught at this layer.
 
+    use assert2::assert;
     use bytes::BufMut;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
@@ -613,8 +614,8 @@ mod tests {
         // `upgrade(TcpStream)` requires a real TCP socket, so we
         // exercise the short-circuit predicates directly here. The full
         // upgrade-path is exercised end-to-end in integration tests.
-        assert2::assert!(!cfg.protocol.requires_tls());
-        assert2::assert!(!cfg.protocol.requires_sasl());
+        assert!(!cfg.protocol.requires_tls());
+        assert!(!cfg.protocol.requires_sasl());
     }
 
     #[tokio::test]
@@ -629,7 +630,7 @@ mod tests {
             .expect("controller"),
         );
         let controller_cell = Arc::new(OnceCell::new());
-        assert2::assert!(controller_cell.set(controller.clone()).is_ok());
+        assert!(controller_cell.set(controller.clone()).is_ok());
 
         let cfg = BrokerRaftHandshake {
             tls_acceptor: None,
@@ -649,9 +650,7 @@ mod tests {
         let err = cfg
             .authorize_cluster_action(&principal, &peer)
             .expect_err("deny must reject");
-        assert2::assert!(
-            matches!(err, RaftHandshakeError::Sasl(msg) if msg.contains("not authorized"))
-        );
+        assert!(matches!(err, RaftHandshakeError::Sasl(msg) if msg.contains("not authorized")));
 
         drop(cfg);
         let controller = Arc::try_unwrap(controller)
@@ -670,7 +669,10 @@ mod tests {
             (API_KEY_SASL_AUTHENTICATE, 2, true),
         ];
         for (api_key, version, want) in request_cases {
-            assert2::assert!(is_request_header_flexible(api_key, version) == want);
+            assert!(
+                is_request_header_flexible(api_key, version) == want,
+                "request api_key {api_key} v{version}"
+            );
         }
 
         // Response headers mirror the request rules for SaslHandshake /
@@ -685,7 +687,10 @@ mod tests {
             (API_KEY_API_VERSIONS, 3, false),
         ];
         for (api_key, version, want) in response_cases {
-            assert2::assert!(is_response_header_flexible(api_key, version) == want);
+            assert!(
+                is_response_header_flexible(api_key, version) == want,
+                "response api_key {api_key} v{version}"
+            );
         }
     }
 
@@ -695,11 +700,11 @@ mod tests {
         let decoded = read_request_from_frame(nonflex)
             .await
             .expect("nonflex request");
-        assert2::assert!(decoded == (17, 1, 42, b"plain-body".to_vec()));
+        assert!(decoded == (17, 1, 42, b"plain-body".to_vec()));
 
         let flex = request_frame(36, 2, 43, Some(b"c"), true, b"auth-body");
         let decoded = read_request_from_frame(flex).await.expect("flex request");
-        assert2::assert!(decoded == (36, 2, 43, b"auth-body".to_vec()));
+        assert!(decoded == (36, 2, 43, b"auth-body".to_vec()));
     }
 
     #[tokio::test]
@@ -725,10 +730,13 @@ mod tests {
         ];
         for (frame, want_msg) in cases {
             let got = read_request_from_frame(frame).await;
-            assert2::assert!(matches!(
-                &got,
-                Err(RaftHandshakeError::Protocol(msg)) if msg.contains(want_msg)
-            ));
+            assert!(
+                matches!(
+                    &got,
+                    Err(RaftHandshakeError::Protocol(msg)) if msg.contains(want_msg)
+                ),
+                "want protocol error containing {want_msg:?}, got {got:?}"
+            );
         }
     }
 
@@ -736,7 +744,7 @@ mod tests {
     async fn read_kafka_request_accepts_exact_client_id_end_boundary() {
         let frame = request_frame(17, 1, 45, Some(b"client"), false, b"");
         let decoded = read_request_from_frame(frame).await.expect("exact header");
-        assert2::assert!(decoded == (17, 1, 45, Vec::new()));
+        assert!(decoded == (17, 1, 45, Vec::new()));
     }
 
     #[tokio::test]
@@ -746,7 +754,7 @@ mod tests {
         // only length where the short-header guard's strict `<` matters.
         let frame = request_frame(17, 1, 46, None, false, b"");
         let decoded = read_request_from_frame(frame).await.expect("exact prefix");
-        assert2::assert!(decoded == (17, 1, 46, Vec::new()));
+        assert!(decoded == (17, 1, 46, Vec::new()));
     }
 
     #[tokio::test]
@@ -767,7 +775,7 @@ mod tests {
         writer.await.expect("writer");
         // corr_id 77 BE + empty tagged-fields byte (flexible header) + body.
         let expected: Vec<u8> = [77i32.to_be_bytes().as_slice(), &[0x00], &[0xaa, 0xbb]].concat();
-        assert2::assert!(frame == expected);
+        assert!(frame == expected);
 
         let (mut client, mut server) = tokio::io::duplex(128);
         let writer = tokio::spawn(async move {
@@ -783,8 +791,8 @@ mod tests {
         });
         let frame = read_response_frame(&mut client).await;
         writer.await.expect("writer");
-        assert2::assert!(&frame[0..4] == &78i32.to_be_bytes());
-        assert2::assert!(&frame[4..] == &[0xcc]);
+        assert!(&frame[0..4] == &78i32.to_be_bytes());
+        assert!(&frame[4..] == &[0xcc]);
     }
 
     #[test]
@@ -810,7 +818,7 @@ mod tests {
             &0i32.to_be_bytes(),
         ]
         .concat();
-        assert2::assert!(bytes == expected);
+        assert!(bytes == expected);
     }
 
     #[tokio::test]
@@ -833,7 +841,7 @@ mod tests {
             .await
             .expect("write api versions");
         let api_versions = read_response_frame(&mut client).await;
-        assert2::assert!(&api_versions[0..4] == &1i32.to_be_bytes());
+        assert!(&api_versions[0..4] == &1i32.to_be_bytes());
 
         client
             .write_all(&request_frame(
@@ -847,8 +855,8 @@ mod tests {
             .await
             .expect("write handshake");
         let handshake = read_response_frame(&mut client).await;
-        assert2::assert!(&handshake[0..4] == &2i32.to_be_bytes());
-        assert2::assert!(&handshake[4..6] == &0i16.to_be_bytes());
+        assert!(&handshake[0..4] == &2i32.to_be_bytes());
+        assert!(&handshake[4..6] == &0i16.to_be_bytes());
 
         client
             .write_all(&request_frame(
@@ -864,13 +872,11 @@ mod tests {
         let authenticate = read_response_frame(&mut client).await;
         // corr_id 3 BE + empty tagged-fields byte (flexible header) +
         // error_code 0.
-        assert2::assert!(authenticate[0..7] == [0, 0, 0, 3, 0, 0, 0]);
+        assert!(authenticate[0..7] == [0, 0, 0, 3, 0, 0, 0]);
 
         let principal = server.await.expect("server task").expect("authenticated");
-        assert2::assert!(
-            (principal.name.as_str(), principal.auth_method)
-                == ("broker", crabka_security::AuthMethod::SaslPlain)
-        );
+        assert!(principal.name == "broker");
+        assert!(principal.auth_method == crabka_security::AuthMethod::SaslPlain);
     }
 
     #[tokio::test]
@@ -889,7 +895,7 @@ mod tests {
             .await
             .expect("server task")
             .expect_err("pre-auth request rejected");
-        assert2::assert!(
+        assert!(
             matches!(err, RaftHandshakeError::Sasl(msg) if msg.contains("pre-auth request api_key=1 rejected"))
         );
     }

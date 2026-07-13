@@ -284,6 +284,8 @@ pub struct RangeArray {
 
 impl RangeArray {
     /// Build from a backing array and windows; validates each window fits.
+    /// # Errors
+    /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
     pub fn from_ranges(
         values: ArrayRef,
         ranges: impl IntoIterator<Item = (u32, u32)>,
@@ -337,6 +339,8 @@ impl RangeArray {
     /// a value and a timestamp); every window is validated against that length.
     ///
     /// Returns `(value_ranges, timestamp_ranges)`; both share the same `ranges()`.
+    /// # Errors
+    /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
     pub fn from_paired_ranges(
         values: Float64Array,
         timestamps: Int64Array,
@@ -420,6 +424,8 @@ impl RangeArray {
     /// Arrow 59 validates dictionary keys as dictionary indices, so we use keys
     /// `0..len` and store each window as one list value. This is safe to pass as
     /// a `RecordBatch` column and preserves the public `RangeArray` behavior.
+    /// # Errors
+    /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
     pub fn into_dict_array(self) -> Result<DictionaryArray<Int64Type>, ArrowError> {
         let mut offsets = Vec::with_capacity(self.ranges.len() + 1);
         offsets.push(0_i32);
@@ -464,6 +470,8 @@ impl RangeArray {
     }
 
     /// Decode a dictionary-of-lists column back into a `RangeArray`.
+    /// # Errors
+    /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
     pub fn try_from_dict_array(dict: &DictionaryArray<Int64Type>) -> Result<Self, ArrowError> {
         let lists = dict
             .values()

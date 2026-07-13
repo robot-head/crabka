@@ -6,7 +6,9 @@
 
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
-use crabka_client_admin::{CreatePartitionsOp, CreateTopicSpec, IncrementalAlterOp};
+use crabka_client_admin::{
+    AdminClientLike, CreatePartitionsOp, CreateTopicSpec, IncrementalAlterOp,
+};
 use futures::StreamExt as _;
 use kube::{
     Resource, ResourceExt as _,
@@ -28,6 +30,8 @@ use crate::{
 const FINALIZER: &str = "crabka.io/topic-finalizer";
 
 /// Run the controller forever.
+/// # Errors
+/// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub async fn run(ctx: Context) -> anyhow::Result<()> {
     let topic_api: Api<KafkaTopic> = Api::all(ctx.client.clone());
     let kafka_api: Api<Kafka> = Api::all(ctx.client.clone());
@@ -58,7 +62,7 @@ pub fn error_policy(_obj: Arc<KafkaTopic>, err: &ReconcileError, _ctx: Arc<Conte
 }
 
 /// Reconcile entry point. Times the pass and records the reconcile
-/// counter/histogram, then delegates to [`reconcile_inner`].
+/// counter/histogram, then delegates to the internal `reconcile_inner` operation.
 #[tracing::instrument(
     level = "info",
     skip_all,
@@ -69,6 +73,8 @@ pub fn error_policy(_obj: Arc<KafkaTopic>, err: &ReconcileError, _ctx: Arc<Conte
         generation = ?obj.meta().generation,
     )
 )]
+/// # Errors
+/// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub async fn reconcile(obj: Arc<KafkaTopic>, ctx: Arc<Context>) -> Result<Action, ReconcileError> {
     common::record_reconcile(
         &ctx,
@@ -78,7 +84,166 @@ pub async fn reconcile(obj: Arc<KafkaTopic>, ctx: Arc<Context>) -> Result<Action
     .await
 }
 
-#[allow(clippy::too_many_lines)] // linear pipeline; extraction hurts more than helps
+enum TopicPreparation {
+    Ready {
+        cluster: String,
+        bootstrap: String,
+        topic_name: String,
+    },
+    Done(Action),
+}
+
+async fn create_topic(
+    admin: &mut dyn AdminClientLike,
+    ctx: &Context,
+    cluster: &str,
+    topic_api: &Api<KafkaTopic>,
+    resource_name: &str,
+    obj: &KafkaTopic,
+    topic_name: &str,
+) -> Result<Action, ReconcileError> {
+    let outcome = match admin
+        .create_topics(
+            &[CreateTopicSpec {
+                name: topic_name.to_string(),
+                partitions: obj.spec.partitions,
+                replicas: obj.spec.replicas,
+                configs: obj.spec.config.clone().unwrap_or_default(),
+            }],
+            30_000,
+        )
+        .await
+    {
+        Ok(mut outcomes) => outcomes.pop().expect("one spec produces one outcome"),
+        Err(error) => {
+            tracing::warn!(%error, "CreateTopics transport failure");
+            if matches!(error, crabka_client_admin::AdminError::Transport(_)) {
+                ctx.drop_admin_client(cluster).await;
+            }
+            return Ok(Action::requeue(Duration::from_secs(15)));
+        }
+    };
+    if let Some(error) = outcome.error {
+        patch_status(
+            topic_api,
+            resource_name,
+            obj,
+            (
+                "False",
+                "BrokerError",
+                &format!("CreateTopics: {} ({})", error.name, error.code),
+            ),
+            None,
+            false,
+        )
+        .await?;
+        return Ok(Action::requeue(Duration::from_secs(15)));
+    }
+    patch_status(
+        topic_api,
+        resource_name,
+        obj,
+        ("True", "Ready", "topic created"),
+        outcome.topic_id.map(|id| id.to_string()),
+        true,
+    )
+    .await?;
+    Ok(Action::requeue(Duration::from_mins(1)))
+}
+
+async fn prepare_topic(
+    obj: &KafkaTopic,
+    ctx: &Context,
+    topic_api: &Api<KafkaTopic>,
+    namespace: &str,
+    name: &str,
+) -> Result<TopicPreparation, ReconcileError> {
+    let Some(cluster) = obj
+        .meta()
+        .labels
+        .as_ref()
+        .and_then(|labels| labels.get("crabka.io/cluster").cloned())
+    else {
+        patch_status(
+            topic_api,
+            name,
+            obj,
+            (
+                "False",
+                "MissingClusterLabel",
+                "metadata.labels[\"crabka.io/cluster\"] is required",
+            ),
+            None,
+            false,
+        )
+        .await?;
+        return Ok(TopicPreparation::Done(Action::requeue(
+            Duration::from_mins(1),
+        )));
+    };
+    let topic_name = obj.spec.topic_name.clone().unwrap_or_else(|| name.into());
+    if let Err(message) = validate_kafka_topic_name(&topic_name) {
+        patch_status(
+            topic_api,
+            name,
+            obj,
+            ("False", "InvalidTopicName", &message),
+            None,
+            false,
+        )
+        .await?;
+        return Ok(TopicPreparation::Done(Action::requeue(
+            Duration::from_mins(5),
+        )));
+    }
+    let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), namespace);
+    let bootstrap = kafka_api
+        .get_opt(&cluster)
+        .await?
+        .as_ref()
+        .and_then(internal_listener_bootstrap);
+    let Some(bootstrap) = bootstrap else {
+        patch_status(
+            topic_api,
+            name,
+            obj,
+            (
+                "False",
+                "ClusterNotReady",
+                &format!("Kafka/{cluster} not Ready or no internal listener"),
+            ),
+            None,
+            false,
+        )
+        .await?;
+        return Ok(TopicPreparation::Done(Action::requeue(
+            Duration::from_secs(30),
+        )));
+    };
+    if obj.meta().deletion_timestamp.is_some() {
+        if !obj.spec.preserve_topic
+            && let Ok(client) = ctx.admin_client_for(&cluster, &bootstrap).await
+        {
+            let mut admin = client.lock().await;
+            if let Err(error) = admin.delete_topics(&[&topic_name], 30_000).await {
+                tracing::warn!(%error, %topic_name, "DeleteTopics failed during finalizer");
+            }
+        }
+        remove_finalizer(topic_api, name).await?;
+        return Ok(TopicPreparation::Done(Action::await_change()));
+    }
+    if !has_finalizer(obj) {
+        add_finalizer(topic_api, name).await?;
+        return Ok(TopicPreparation::Done(Action::requeue(Duration::ZERO)));
+    }
+    Ok(TopicPreparation::Ready {
+        cluster,
+        bootstrap,
+        topic_name,
+    })
+}
+
+// linear pipeline; extraction hurts more than helps
 async fn reconcile_inner(
     obj: Arc<KafkaTopic>,
     ctx: Arc<Context>,
@@ -86,90 +251,15 @@ async fn reconcile_inner(
     let ns = obj.namespace().unwrap_or_else(|| "default".into());
     let name = obj.name_any();
     let topic_api: Api<KafkaTopic> = Api::namespaced(ctx.client.clone(), &ns);
-
-    // 1. Cluster label
-    let cluster = obj
-        .meta()
-        .labels
-        .as_ref()
-        .and_then(|l| l.get("crabka.io/cluster").cloned());
-    let Some(cluster) = cluster else {
-        patch_status(
-            &topic_api,
-            &name,
-            &obj,
-            "False",
-            "MissingClusterLabel",
-            "metadata.labels[\"crabka.io/cluster\"] is required",
-            None,
-            false,
-        )
-        .await?;
-        return Ok(Action::requeue(Duration::from_mins(1)));
-    };
-
-    // 2. Effective topic name
-    let topic_name = obj.spec.topic_name.clone().unwrap_or_else(|| name.clone());
-    if let Err(msg) = validate_kafka_topic_name(&topic_name) {
-        patch_status(
-            &topic_api,
-            &name,
-            &obj,
-            "False",
-            "InvalidTopicName",
-            &msg,
-            None,
-            false,
-        )
-        .await?;
-        return Ok(Action::requeue(Duration::from_mins(5)));
-    }
-
-    // 3. Look up the Kafka + bootstrap
-    let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &ns);
-    let kafka = kafka_api.get_opt(&cluster).await?;
-    let bootstrap = kafka.as_ref().and_then(internal_listener_bootstrap);
-    let Some(bootstrap) = bootstrap else {
-        patch_status(
-            &topic_api,
-            &name,
-            &obj,
-            "False",
-            "ClusterNotReady",
-            &format!("Kafka/{cluster} not Ready or no internal listener"),
-            None,
-            false,
-        )
-        .await?;
-        return Ok(Action::requeue(Duration::from_secs(30)));
-    };
-
-    // 4. Finalizer / delete path
-    if obj.meta().deletion_timestamp.is_some() {
-        if !obj.spec.preserve_topic {
-            // Best-effort: log non-UNKNOWN_TOPIC errors but don't propagate
-            // (we want the finalizer removal to succeed even if the cluster
-            // is gone).
-            let client = ctx.admin_client_for(&cluster, &bootstrap).await;
-            if let Ok(client) = client {
-                let mut admin = client.lock().await;
-                match admin.delete_topics(&[&topic_name], 30_000).await {
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::warn!(error = %e, %topic_name, "DeleteTopics failed during finalizer");
-                    }
-                }
-            }
-        }
-        remove_finalizer(&topic_api, &name).await?;
-        return Ok(Action::await_change());
-    }
-
-    // 5. Ensure finalizer
-    if !has_finalizer(&obj) {
-        add_finalizer(&topic_api, &name).await?;
-        return Ok(Action::requeue(Duration::ZERO)); // re-enter
-    }
+    let (cluster, bootstrap, topic_name) =
+        match prepare_topic(&obj, &ctx, &topic_api, &ns, &name).await? {
+            TopicPreparation::Ready {
+                cluster,
+                bootstrap,
+                topic_name,
+            } => (cluster, bootstrap, topic_name),
+            TopicPreparation::Done(action) => return Ok(action),
+        };
 
     // 6. Connect and fetch current state
     let admin_handle = match ctx.admin_client_for(&cluster, &bootstrap).await {
@@ -202,56 +292,16 @@ async fn reconcile_inner(
     };
     match current {
         None => {
-            // CreateTopics
-            let outcome_vec = admin
-                .create_topics(
-                    &[CreateTopicSpec {
-                        name: topic_name.clone(),
-                        partitions: obj.spec.partitions,
-                        replicas: obj.spec.replicas,
-                        configs: obj.spec.config.clone().unwrap_or_default(),
-                    }],
-                    30_000,
-                )
-                .await;
-            let outcome = match outcome_vec {
-                Ok(mut v) => v.pop().expect("one spec → one outcome"),
-                Err(e) => {
-                    tracing::warn!(error = %e, "CreateTopics transport failure");
-                    let is_transport = matches!(e, crabka_client_admin::AdminError::Transport(_));
-                    drop(admin);
-                    if is_transport {
-                        ctx.drop_admin_client(&cluster).await;
-                    }
-                    return Ok(Action::requeue(Duration::from_secs(15)));
-                }
-            };
-            if let Some(err) = outcome.error {
-                patch_status(
-                    &topic_api,
-                    &name,
-                    &obj,
-                    "False",
-                    "BrokerError",
-                    &format!("CreateTopics: {} ({})", err.name, err.code),
-                    None,
-                    false,
-                )
-                .await?;
-                return Ok(Action::requeue(Duration::from_secs(15)));
-            }
-            patch_status(
+            create_topic(
+                &mut *admin,
+                &ctx,
+                &cluster,
                 &topic_api,
                 &name,
                 &obj,
-                "True",
-                "Ready",
-                "topic created",
-                outcome.topic_id.map(|u| u.to_string()),
-                true,
+                &topic_name,
             )
-            .await?;
-            Ok(Action::requeue(Duration::from_mins(1)))
+            .await
         }
         Some(cur) => {
             // Immutable fields
@@ -260,9 +310,11 @@ async fn reconcile_inner(
                     &topic_api,
                     &name,
                     &obj,
-                    "False",
-                    "ImmutableFieldChanged",
-                    "spec.replicas change requires partition reassignment",
+                    (
+                        "False",
+                        "ImmutableFieldChanged",
+                        "spec.replicas change requires partition reassignment",
+                    ),
                     cur.topic_id.map(|u| u.to_string()),
                     false,
                 )
@@ -274,9 +326,11 @@ async fn reconcile_inner(
                     &topic_api,
                     &name,
                     &obj,
-                    "False",
-                    "ImmutableFieldChanged",
-                    "spec.partitions decrease is not supported by Kafka",
+                    (
+                        "False",
+                        "ImmutableFieldChanged",
+                        "spec.partitions decrease is not supported by Kafka",
+                    ),
                     cur.topic_id.map(|u| u.to_string()),
                     false,
                 )
@@ -303,9 +357,11 @@ async fn reconcile_inner(
                                 &topic_api,
                                 &name,
                                 &obj,
-                                "False",
-                                "BrokerError",
-                                &format!("CreatePartitions: {} ({})", err.name, err.code),
+                                (
+                                    "False",
+                                    "BrokerError",
+                                    &format!("CreatePartitions: {} ({})", err.name, err.code),
+                                ),
                                 cur.topic_id.map(|u| u.to_string()),
                                 false,
                             )
@@ -353,9 +409,14 @@ async fn reconcile_inner(
                                 &topic_api,
                                 &name,
                                 &obj,
-                                "False",
-                                "BrokerError",
-                                &format!("IncrementalAlterConfigs: {} ({})", err.name, err.code),
+                                (
+                                    "False",
+                                    "BrokerError",
+                                    &format!(
+                                        "IncrementalAlterConfigs: {} ({})",
+                                        err.name, err.code
+                                    ),
+                                ),
                                 cur.topic_id.map(|u| u.to_string()),
                                 false,
                             )
@@ -380,9 +441,7 @@ async fn reconcile_inner(
                 &topic_api,
                 &name,
                 &obj,
-                "True",
-                "Ready",
-                "topic in sync",
+                ("True", "Ready", "topic in sync"),
                 cur.topic_id.map(|u| u.to_string()),
                 true,
             )
@@ -496,23 +555,22 @@ async fn remove_finalizer(api: &Api<KafkaTopic>, name: &str) -> Result<(), Recon
 /// Build + patch status. `advance_generation = true` writes
 /// `observedGeneration` to the current generation (only on successful
 /// True/Ready landings).
-#[allow(clippy::too_many_arguments)] // pure status helper; arity reflects the condition contract
+// pure status helper; arity reflects the condition contract
 #[tracing::instrument(
     level = "info",
     skip_all,
-    fields(topic = %name, status = %status, reason = %reason),
+    fields(topic = %name, condition = ?condition_state),
     err,
 )]
 async fn patch_status(
     api: &Api<KafkaTopic>,
     name: &str,
     obj: &KafkaTopic,
-    status: &str,
-    reason: &str,
-    message: &str,
+    condition_state: (&str, &str, &str),
     topic_id: Option<String>,
     advance_generation: bool,
 ) -> Result<(), ReconcileError> {
+    let (status, reason, message) = condition_state;
     let topic_name = obj
         .spec
         .topic_name
@@ -544,6 +602,7 @@ async fn patch_status(
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
 
     use super::*;
     use crate::crd::{KafkaCondition, KafkaSpec, KafkaStatus, ListenerStatus, ListenerType};
@@ -599,72 +658,68 @@ mod tests {
 
     #[test]
     fn validate_topic_name_accepts_typical() {
-        for (_case, name) in [
-            ("hyphenated lowercase", "demo-topic"),
-            ("mixed punctuation", "My.Topic_1"),
-        ] {
-            assert2::assert!(validate_kafka_topic_name(name).is_ok());
+        assert!(validate_kafka_topic_name("demo-topic").is_ok());
+        assert!(validate_kafka_topic_name("My.Topic_1").is_ok());
+    }
+
+    #[test]
+    fn validate_topic_name_rejects_empty() {
+        assert!(validate_kafka_topic_name("").is_err());
+    }
+
+    #[test]
+    fn validate_topic_name_rejects_dot_and_dotdot() {
+        assert!(validate_kafka_topic_name(".").is_err());
+        assert!(validate_kafka_topic_name("..").is_err());
+    }
+
+    #[test]
+    fn validate_topic_name_rejects_too_long() {
+        let n = "a".repeat(250);
+        assert!(validate_kafka_topic_name(&n).is_err());
+    }
+
+    #[test]
+    fn validate_topic_name_rejects_invalid_chars() {
+        for name in ["has space", "has/slash", "has@at"] {
+            assert!(validate_kafka_topic_name(name).is_err(), "case {name:?}");
         }
     }
 
     #[test]
-    fn validate_topic_name_rejection_cases() {
-        let too_long = "a".repeat(250);
-        for (_name, topic_name) in [
-            ("empty", ""),
-            ("single dot", "."),
-            ("double dot", ".."),
-            ("too long", too_long.as_str()),
-            ("contains space", "has space"),
-            ("contains slash", "has/slash"),
-            ("contains at sign", "has@at"),
-        ] {
-            assert2::assert!(validate_kafka_topic_name(topic_name).is_err());
-        }
+    fn diff_configs_set_adds_missing_key() {
+        let current = BTreeMap::new();
+        let desired = BTreeMap::from([("retention.ms".to_string(), "60000".to_string())]);
+        let ops = diff_configs(&current, &desired, "foo");
+        assert!(ops.len() == 1);
+        assert!(matches!(&ops[0], IncrementalAlterOp::Set { key, value, .. }
+            if key == "retention.ms" && value == "60000"));
     }
 
     #[test]
-    fn diff_configs_change_cases() {
-        for (_name, current, desired, expected) in [
-            (
-                "set missing key",
-                BTreeMap::new(),
-                BTreeMap::from([("retention.ms".to_string(), "60000".to_string())]),
-                vec![("set", "foo", "retention.ms", Some("60000"))],
-            ),
-            (
-                "update changed value",
-                BTreeMap::from([("retention.ms".to_string(), "30000".to_string())]),
-                BTreeMap::from([("retention.ms".to_string(), "60000".to_string())]),
-                vec![("set", "foo", "retention.ms", Some("60000"))],
-            ),
-            (
-                "delete extra key",
-                BTreeMap::from([("cleanup.policy".to_string(), "delete".to_string())]),
-                BTreeMap::new(),
-                vec![("delete", "foo", "cleanup.policy", None)],
-            ),
-        ] {
-            let ops = diff_configs(&current, &desired, "foo");
-            let actual: Vec<_> = ops
-                .iter()
-                .map(|op| match op {
-                    IncrementalAlterOp::Set { topic, key, value } => {
-                        ("set", topic.as_str(), key.as_str(), Some(value.as_str()))
-                    }
-                    IncrementalAlterOp::Delete { topic, key } => {
-                        ("delete", topic.as_str(), key.as_str(), None)
-                    }
-                })
-                .collect();
-            assert2::assert!(actual == expected);
-        }
+    fn diff_configs_set_updates_changed_value() {
+        let current = BTreeMap::from([("retention.ms".to_string(), "30000".to_string())]);
+        let desired = BTreeMap::from([("retention.ms".to_string(), "60000".to_string())]);
+        let ops = diff_configs(&current, &desired, "foo");
+        assert!(ops.len() == 1);
+        assert!(matches!(&ops[0], IncrementalAlterOp::Set { value, .. } if value == "60000"));
+    }
+
+    #[test]
+    fn diff_configs_delete_removes_extra_key() {
+        let current = BTreeMap::from([("cleanup.policy".to_string(), "delete".to_string())]);
+        let desired = BTreeMap::new();
+        let ops = diff_configs(&current, &desired, "foo");
+        assert!(ops.len() == 1);
+        assert!(
+            matches!(&ops[0], IncrementalAlterOp::Delete { key, .. } if key == "cleanup.policy")
+        );
     }
 
     #[test]
     fn diff_configs_noop_when_matching() {
         let m = BTreeMap::from([("retention.ms".to_string(), "60000".to_string())]);
-        assert2::assert!(diff_configs(&m, &m, "foo").is_empty());
+        assert!(diff_configs(&m, &m, "foo").is_empty());
     }
 
     #[test]
@@ -678,13 +733,16 @@ mod tests {
             ("segment.bytes".to_string(), "1048576".to_string()),
         ]);
         let ops = diff_configs(&current, &desired, "foo");
-        assert2::assert!(ops.len() == 3);
+        assert!(
+            ops.len() == 3,
+            "expected SET(retention.ms), SET(segment.bytes), DELETE(cleanup.policy)"
+        );
     }
 
     #[test]
     fn internal_listener_bootstrap_returns_listener_when_ready() {
         let k = kafka_ready("demo", "default", 9092);
-        assert2::assert!(
+        assert!(
             internal_listener_bootstrap(&k).as_deref()
                 == Some("demo-broker-headless.default.svc.cluster.local:9092")
         );
@@ -696,6 +754,6 @@ mod tests {
         if let Some(s) = k.status.as_mut() {
             s.conditions[0].status = "False".into();
         }
-        assert2::assert!(internal_listener_bootstrap(&k).is_none());
+        assert!(internal_listener_bootstrap(&k).is_none());
     }
 }

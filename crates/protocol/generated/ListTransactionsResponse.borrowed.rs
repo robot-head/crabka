@@ -12,7 +12,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -24,6 +25,10 @@ pub struct ListTransactionsResponse<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl ListTransactionsResponse<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::list_transactions_response::ListTransactionsResponse {
         crate::owned::list_transactions_response::ListTransactionsResponse {
             throttle_time_ms: (self.throttle_time_ms),
@@ -64,9 +69,9 @@ impl Encode for ListTransactionsResponse<'_> {
                 );
                 for it in &self.unknown_state_filters {
                     if flex {
-                        put_compact_string(buf, it);
+                        let () = put_compact_string(buf, it);
                     } else {
-                        put_string(buf, it);
+                        let () = put_string(buf, it);
                     }
                 }
             }
@@ -207,6 +212,10 @@ pub struct TransactionState<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl TransactionState<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::list_transactions_response::TransactionState {
         crate::owned::list_transactions_response::TransactionState {
             transactional_id: (self.transactional_id).to_string(),
@@ -221,9 +230,9 @@ impl Encode for TransactionState<'_> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.transactional_id);
+                let () = put_compact_string(buf, self.transactional_id);
             } else {
-                put_string(buf, self.transactional_id);
+                let () = put_string(buf, self.transactional_id);
             }
         }
         if version >= 0 {
@@ -231,9 +240,9 @@ impl Encode for TransactionState<'_> {
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.transaction_state);
+                let () = put_compact_string(buf, self.transaction_state);
             } else {
-                put_string(buf, self.transaction_state);
+                let () = put_string(buf, self.transaction_state);
             }
         }
         if flex {

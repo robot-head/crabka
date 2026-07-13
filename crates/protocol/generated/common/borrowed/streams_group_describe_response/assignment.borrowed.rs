@@ -10,6 +10,10 @@ pub struct Assignment<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl Assignment<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::common::streams_group_describe_response::assignment::Assignment {

@@ -11,6 +11,8 @@ use crate::{
 // ---- STRING (non-flexible) ----
 // Wire: INT16 length (>=0), then `length` bytes UTF-8. -1 = null.
 
+/// # Panics
+/// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
 pub fn put_string<B: BufMut>(buf: &mut B, s: &str) {
     let len = i16::try_from(s.len()).expect("string length must fit in i16");
     put_i16(buf, len);
@@ -24,6 +26,8 @@ pub fn put_nullable_string<B: BufMut>(buf: &mut B, s: Option<&str>) {
     }
 }
 
+/// # Errors
+/// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
 pub fn get_string_owned<B: Buf>(buf: &mut B) -> Result<String, ProtocolError> {
     match get_nullable_string_owned(buf)? {
         Some(s) => Ok(s),
@@ -31,13 +35,16 @@ pub fn get_string_owned<B: Buf>(buf: &mut B) -> Result<String, ProtocolError> {
     }
 }
 
+/// # Errors
+/// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
+/// # Panics
+/// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
 pub fn get_nullable_string_owned<B: Buf>(buf: &mut B) -> Result<Option<String>, ProtocolError> {
     let len = get_i16(buf)?;
     if len < 0 {
         return Ok(None);
     }
-    #[allow(clippy::cast_sign_loss)]
-    let n = len as usize;
+    let n = usize::try_from(len).expect("non-negative string length must fit in usize");
     if buf.remaining() < n {
         return Err(ProtocolError::UnexpectedEof {
             needed: n - buf.remaining(),
@@ -61,6 +68,8 @@ pub fn nullable_string_len(s: Option<&str>) -> usize {
 // ---- COMPACT_STRING (flexible) ----
 // Wire: UVARINT length+1 (0 = null), then `length` UTF-8 bytes.
 
+/// # Panics
+/// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
 pub fn put_compact_string<B: BufMut>(buf: &mut B, s: &str) {
     let len = u32::try_from(s.len() + 1).expect("string length too large");
     put_uvarint(buf, len);
@@ -74,6 +83,8 @@ pub fn put_compact_nullable_string<B: BufMut>(buf: &mut B, s: Option<&str>) {
     }
 }
 
+/// # Errors
+/// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
 pub fn get_compact_string_owned<B: Buf>(buf: &mut B) -> Result<String, ProtocolError> {
     match get_compact_nullable_string_owned(buf)? {
         Some(s) => Ok(s),
@@ -83,6 +94,8 @@ pub fn get_compact_string_owned<B: Buf>(buf: &mut B) -> Result<String, ProtocolE
     }
 }
 
+/// # Errors
+/// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
 pub fn get_compact_nullable_string_owned<B: Buf>(
     buf: &mut B,
 ) -> Result<Option<String>, ProtocolError> {
@@ -103,6 +116,8 @@ pub fn get_compact_nullable_string_owned<B: Buf>(
 }
 
 #[must_use]
+/// # Panics
+/// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
 pub fn compact_string_len(s: &str) -> usize {
     uvarint_len(u32::try_from(s.len() + 1).unwrap()) + s.len()
 }
@@ -118,6 +133,8 @@ pub fn compact_nullable_string_len(s: Option<&str>) -> usize {
 // BYTES: INT32 length, `length` bytes. -1 = null.
 // COMPACT_BYTES: UVARINT length+1 (0=null), `length` bytes.
 
+/// # Panics
+/// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
 pub fn put_bytes<B: BufMut>(buf: &mut B, b: &[u8]) {
     let len = i32::try_from(b.len()).expect("bytes length must fit in i32");
     put_i32(buf, len);
@@ -131,6 +148,8 @@ pub fn put_nullable_bytes<B: BufMut>(buf: &mut B, b: Option<&[u8]>) {
     }
 }
 
+/// # Errors
+/// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
 pub fn get_bytes_owned<B: Buf>(buf: &mut B) -> Result<Bytes, ProtocolError> {
     match get_nullable_bytes_owned(buf)? {
         Some(b) => Ok(b),
@@ -138,13 +157,16 @@ pub fn get_bytes_owned<B: Buf>(buf: &mut B) -> Result<Bytes, ProtocolError> {
     }
 }
 
+/// # Errors
+/// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
+/// # Panics
+/// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
 pub fn get_nullable_bytes_owned<B: Buf>(buf: &mut B) -> Result<Option<Bytes>, ProtocolError> {
     let len = get_i32(buf)?;
     if len < 0 {
         return Ok(None);
     }
-    #[allow(clippy::cast_sign_loss)]
-    let n = len as usize;
+    let n = usize::try_from(len).expect("non-negative bytes length must fit in usize");
     if buf.remaining() < n {
         return Err(ProtocolError::UnexpectedEof {
             needed: n - buf.remaining(),
@@ -164,6 +186,8 @@ pub fn nullable_bytes_len(b: Option<&[u8]>) -> usize {
     4 + b.map_or(0, <[u8]>::len)
 }
 
+/// # Panics
+/// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
 pub fn put_compact_bytes<B: BufMut>(buf: &mut B, b: &[u8]) {
     let len = u32::try_from(b.len() + 1).expect("bytes length too large");
     put_uvarint(buf, len);
@@ -178,6 +202,8 @@ pub fn put_compact_nullable_bytes<B: BufMut>(buf: &mut B, b: Option<&[u8]>) {
 }
 
 #[must_use]
+/// # Panics
+/// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
 pub fn compact_bytes_len(b: &[u8]) -> usize {
     uvarint_len(u32::try_from(b.len() + 1).unwrap()) + b.len()
 }
@@ -185,6 +211,8 @@ pub fn compact_bytes_len(b: &[u8]) -> usize {
 /// Like `compact_bytes_len` but takes the byte-count directly rather than a slice.
 /// Useful when the content size is known without materialising the buffer.
 #[must_use]
+/// # Panics
+/// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
 pub fn compact_bytes_len_from_size(n: usize) -> usize {
     uvarint_len(u32::try_from(n + 1).unwrap()) + n
 }
@@ -196,6 +224,8 @@ pub fn compact_nullable_bytes_len(b: Option<&[u8]>) -> usize {
     }
 }
 
+/// # Errors
+/// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
 pub fn get_compact_bytes_owned<B: Buf>(buf: &mut B) -> Result<Bytes, ProtocolError> {
     match get_compact_nullable_bytes_owned(buf)? {
         Some(b) => Ok(b),
@@ -205,6 +235,8 @@ pub fn get_compact_bytes_owned<B: Buf>(buf: &mut B) -> Result<Bytes, ProtocolErr
     }
 }
 
+/// # Errors
+/// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
 pub fn get_compact_nullable_bytes_owned<B: Buf>(
     buf: &mut B,
 ) -> Result<Option<Bytes>, ProtocolError> {

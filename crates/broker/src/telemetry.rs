@@ -76,7 +76,7 @@ pub fn api_name(api_key: i16) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use assert2::check;
+    use assert2::{assert, check};
 
     use super::*;
 
@@ -90,7 +90,7 @@ mod tests {
             (30, "CreateAcls"),
             (9999, "Unknown"),
         ] {
-            assert2::assert!(api_name(api_key) == want);
+            assert!(api_name(api_key) == want, "api key {api_key}");
         }
     }
 
@@ -148,9 +148,8 @@ mod tests {
         });
 
         let g = captured.lock().unwrap();
-        check!(
-            (g.name.as_deref(), g.kind.as_deref(), g.api_key)
-                == (Some("Produce"), Some("server"), Some(0))
-        );
+        check!(g.name.as_deref() == Some("Produce"));
+        check!(g.kind.as_deref() == Some("server"));
+        check!(g.api_key == Some(0));
     }
 }

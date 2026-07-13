@@ -24,6 +24,8 @@ impl ApiVersionTable {
 
     /// Highest version both sides support for `R`, or
     /// [`ClientError::IncompatibleVersion`] if the ranges don't overlap.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub fn negotiate<R: ProtocolRequest>(&self) -> Result<i16, ClientError> {
         let api_key = R::API_KEY;
         let client_min = R::MIN_VERSION;
@@ -58,7 +60,7 @@ impl ApiVersionTable {
 
 #[cfg(test)]
 mod tests {
-
+    use assert2::assert;
     use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
 
     use super::*;
@@ -80,7 +82,7 @@ mod tests {
     #[test]
     fn negotiate_errors_when_disjoint() {
         let t = ApiVersionTable::from_entries([(ApiVersionsRequest::API_KEY, 99, 100)]);
-        assert2::assert!(matches!(
+        assert!(matches!(
             t.negotiate::<ApiVersionsRequest>(),
             Err(ClientError::IncompatibleVersion { .. })
         ));
@@ -90,32 +92,20 @@ mod tests {
     fn negotiate_picks_lowest_supported_when_broker_caps_low() {
         let t = ApiVersionTable::from_entries([(ApiVersionsRequest::API_KEY, 0, 0)]);
         // Both sides support 0; that's what's chosen.
-        assert2::assert!(t.negotiate::<ApiVersionsRequest>().unwrap() == 0);
+        assert!(t.negotiate::<ApiVersionsRequest>().unwrap() == 0);
     }
 
     #[test]
     fn broker_range_reports_exact_advertised_bounds() {
         let t = ApiVersionTable::from_entries([(ApiVersionsRequest::API_KEY, 2, 4)]);
 
-        for (_name, api_key, expected) in [
-            ("advertised api", ApiVersionsRequest::API_KEY, Some((2, 4))),
-            ("missing api", ApiVersionsRequest::API_KEY + 1, None),
-        ] {
-            assert2::assert!(t.broker_range(api_key) == expected);
-        }
+        assert!(t.broker_range(ApiVersionsRequest::API_KEY) == Some((2, 4)));
+        assert!(t.broker_range(ApiVersionsRequest::API_KEY + 1).is_none());
     }
 
     #[test]
     fn is_empty_reflects_whether_any_versions_were_advertised() {
-        for (_name, table, expected) in [
-            ("default", ApiVersionTable::default(), true),
-            (
-                "one advertised api",
-                ApiVersionTable::from_entries([(ApiVersionsRequest::API_KEY, 0, 1)]),
-                false,
-            ),
-        ] {
-            assert2::assert!(table.is_empty() == expected);
-        }
+        assert!(ApiVersionTable::default().is_empty());
+        assert!(!ApiVersionTable::from_entries([(ApiVersionsRequest::API_KEY, 0, 1)]).is_empty());
     }
 }

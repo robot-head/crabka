@@ -18,9 +18,9 @@ impl Encode for TopicPartition {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.topic);
+                let () = put_compact_string(buf, &self.topic);
             } else {
-                put_string(buf, &self.topic);
+                let () = put_string(buf, &self.topic);
             }
         }
         if version >= 0 {

@@ -13,6 +13,7 @@
 //! is ever removed, this test panics on startup just like the broker
 //! binary did in the kind-oauth-introspection e2e job.
 
+use assert2::assert;
 use crabka_broker::{config::BrokerConfig, file_config::FileConfig};
 
 /// A self-contained CA cert. Avoids depending on the security crate's
@@ -68,7 +69,7 @@ idp_tls_trust                    = '{ca}'
     // `ReqwestIntrospectionClient::new` installs it idempotently and
     // `apply_to` returns Ok.
     file.apply_to(&mut cfg).expect("apply_to should not panic");
-    assert2::assert!(matches!(
+    assert!(matches!(
         cfg.oauthbearer_validator,
         crabka_security::OAuthBearerValidator::Introspection(_)
     ));

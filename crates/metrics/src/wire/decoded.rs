@@ -110,6 +110,8 @@ impl WireError {
 
 /// Dispatch on the `Content-Type` `proto=` param. Bare
 /// `application/x-protobuf` remains the v1 default.
+/// # Errors
+/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub fn negotiate(content_type: Option<&str>) -> Result<WireFormat, WireError> {
     let Some(content_type) = content_type else {
         return Ok(WireFormat::RemoteWriteV1);
@@ -143,6 +145,8 @@ fn proto_param_value(param: &str) -> Option<String> {
 /// huge length) is rejected without `snap` pre-allocating the declared buffer.
 // cargo-mutants: covered by remote-write snappy round-trip and limit tests.
 #[cfg_attr(test, mutants::skip)]
+/// # Errors
+/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub fn snappy_block_decode(body: &[u8], max_output: usize) -> Result<Vec<u8>, WireError> {
     snappy_block_decode_raw(
         body,
@@ -176,20 +180,19 @@ pub(super) fn snappy_block_decode_raw<E>(
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn negotiate_v1_default_protobuf() {
-        assert2::assert!(
-            negotiate(Some("application/x-protobuf")).unwrap() == WireFormat::RemoteWriteV1
-        );
-        assert2::assert!(negotiate(None).unwrap() == WireFormat::RemoteWriteV1);
+        assert!(negotiate(Some("application/x-protobuf")).unwrap() == WireFormat::RemoteWriteV1);
+        assert!(negotiate(None).unwrap() == WireFormat::RemoteWriteV1);
     }
 
     #[test]
     fn negotiate_v1_explicit_proto_param() {
-        assert2::assert!(
+        assert!(
             negotiate(Some(
                 "application/x-protobuf; proto=prometheus.WriteRequest"
             ))
@@ -200,7 +203,7 @@ mod tests {
 
     #[test]
     fn negotiate_v2_proto_param() {
-        assert2::assert!(
+        assert!(
             negotiate(Some(
                 "application/x-protobuf; proto=io.prometheus.write.v2.Request"
             ))
@@ -212,8 +215,8 @@ mod tests {
     #[test]
     fn negotiate_rejects_json() {
         let err = negotiate(Some("application/json")).unwrap_err();
-        assert2::assert!(matches!(err, WireError::UnsupportedContentType(_)));
-        assert2::assert!(err.status_code() == 415);
+        assert!(matches!(err, WireError::UnsupportedContentType(_)));
+        assert!(err.status_code() == 415);
     }
 
     #[test]
@@ -223,7 +226,7 @@ mod tests {
 
         let back = snappy_block_decode(&compressed, 1 << 20).unwrap();
 
-        assert2::assert!(back == input);
+        assert!(back == input);
     }
 
     #[test]
@@ -234,8 +237,8 @@ mod tests {
 
         let err = snappy_block_decode(&compressed, 4).unwrap_err();
 
-        assert2::assert!(matches!(err, WireError::SnappyOutputTooLarge(4)));
-        assert2::assert!(err.status_code() == 400);
+        assert!(matches!(err, WireError::SnappyOutputTooLarge(4)));
+        assert!(err.status_code() == 400);
     }
 
     /// A snappy block whose varint header *declares* a huge uncompressed length
@@ -258,11 +261,11 @@ mod tests {
         frame.push(0x00);
         frame.push(0x42);
 
-        assert2::assert!(snap::raw::decompress_len(&frame).unwrap() as u64 == huge);
+        assert!(snap::raw::decompress_len(&frame).unwrap() as u64 == huge);
 
         let err = snappy_block_decode(&frame, 1 << 20).unwrap_err();
 
-        assert2::assert!(matches!(err, WireError::SnappyOutputTooLarge(_)));
-        assert2::assert!(err.status_code() == 400);
+        assert!(matches!(err, WireError::SnappyOutputTooLarge(_)));
+        assert!(err.status_code() == 400);
     }
 }

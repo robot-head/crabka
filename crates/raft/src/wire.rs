@@ -67,10 +67,14 @@ pub struct CrabkaSubmitChangeRequest {
 }
 
 impl CrabkaSubmitChangeRequest {
+    /// # Errors
+    /// Returns an error if the record payload is too large for the wire format.
     pub fn encode_v0(&self, out: &mut Vec<u8>) -> Result<(), ProtocolError> {
         put_i32_len_prefixed_bytes(out, &self.records, "records length exceeds i32::MAX")
     }
 
+    /// # Errors
+    /// Returns an error if the payload is truncated or has an invalid length.
     pub fn decode_v0(buf: &mut &[u8]) -> Result<Self, ProtocolError> {
         let records = get_i32_len_prefixed_bytes(buf, "negative records length")?;
         Ok(Self { records })
@@ -93,6 +97,8 @@ impl CrabkaSubmitChangeResponse {
         out.put_i64(self.leader_hint);
     }
 
+    /// # Errors
+    /// Returns an error if the response payload is truncated.
     pub fn decode_v0(buf: &mut &[u8]) -> Result<Self, ProtocolError> {
         require_remaining(buf, SUBMIT_CHANGE_RESPONSE_LEN)?;
         Ok(Self {
@@ -116,6 +122,8 @@ impl CrabkaMetadataFetchRequest {
         out.put_i32(self.max_bytes);
     }
 
+    /// # Errors
+    /// Returns an error if the request payload is truncated.
     pub fn decode_v0(buf: &mut &[u8]) -> Result<Self, ProtocolError> {
         require_remaining(buf, METADATA_FETCH_REQUEST_LEN)?;
         Ok(Self {
@@ -140,6 +148,8 @@ pub struct CrabkaMetadataFetchResponse {
 }
 
 impl CrabkaMetadataFetchResponse {
+    /// # Errors
+    /// Returns an error if the record payload is too large for the wire format.
     pub fn encode_v0(&self, out: &mut Vec<u8>) -> Result<(), ProtocolError> {
         out.put_i16(self.error_code);
         out.put_i64(self.leader_hint);
@@ -148,6 +158,8 @@ impl CrabkaMetadataFetchResponse {
         put_i32_len_prefixed_bytes(out, &self.records, "records length exceeds i32::MAX")
     }
 
+    /// # Errors
+    /// Returns an error if the payload is truncated or has an invalid length.
     pub fn decode_v0(buf: &mut &[u8]) -> Result<Self, ProtocolError> {
         require_remaining(buf, METADATA_FETCH_RESPONSE_FIXED_LEN)?;
         let error_code = buf.get_i16();

@@ -50,15 +50,19 @@ impl Default for RemoteLogManagerConfig {
     }
 }
 
+pub(crate) struct RemoteLogManagerContext {
+    pub partitions: Arc<PartitionRegistry>,
+    pub controller: Arc<dyn crate::metadata_source::MetadataSource>,
+    pub rsm: Arc<dyn RemoteStorageManager>,
+    pub rlmm: Arc<dyn RemoteLogMetadataManager>,
+    pub node_id: NodeId,
+    pub broker_id: i32,
+}
+
 /// Spawned task entry point. Ticks every `cfg.interval` until `shutdown`.
-#[allow(clippy::too_many_arguments)] // task dependencies; bundling would obscure them
+// task dependencies; bundling would obscure them
 pub(crate) async fn run(
-    partitions: Arc<PartitionRegistry>,
-    controller: Arc<dyn crate::metadata_source::MetadataSource>,
-    rsm: Arc<dyn RemoteStorageManager>,
-    rlmm: Arc<dyn RemoteLogMetadataManager>,
-    node_id: NodeId,
-    broker_id: i32,
+    context: RemoteLogManagerContext,
     cfg: RemoteLogManagerConfig,
     shutdown: CancellationToken,
 ) {
@@ -71,7 +75,15 @@ pub(crate) async fn run(
                 return;
             }
         }
-        tick_all(&partitions, &*controller, &rsm, &rlmm, node_id, broker_id).await;
+        tick_all(
+            &context.partitions,
+            &*context.controller,
+            &context.rsm,
+            &context.rlmm,
+            context.node_id,
+            context.broker_id,
+        )
+        .await;
     }
 }
 
@@ -109,13 +121,9 @@ async fn tick_all(
         // Atomic stores the raw epoch; wrap for the remote-storage metadata seam.
         let leader_epoch =
             crabka_ids::LeaderEpoch(partition.current_leader_epoch.load(Ordering::Acquire));
-        let tp = TopicIdPartition::new(
-            topic_id,
-            partition.topic.clone(),
-            partition.partition_id.get(),
-        );
+        let tp = TopicIdPartition::new(topic_id, partition.topic.clone(), partition.index.get());
         copy_eligible(&tp, broker_id, leader_epoch, exports.clone(), rsm, rlmm).await;
-        local_retention_pass(&tp, &partition, &exports, &log_config, rlmm, now_ms()).await;
+        local_retention_pass(&tp, &partition, &exports, &log_config, rlmm, now_ms());
         remote_retention_pass(&tp, broker_id, &log_config, rsm, rlmm, now_ms()).await;
     }
 }
@@ -208,10 +216,7 @@ pub(crate) fn local_retention_target(
 /// remote copy is `CopySegmentFinished` and that fall outside the
 /// per-topic local-retention window. Returns the count of segments
 /// physically removed from disk.
-// Async mirrors `copy_eligible` and gives the call site a stable signature
-// for the day the RLMM SPI grows async fetch methods.
-#[allow(clippy::unused_async)]
-pub(crate) async fn local_retention_pass(
+pub(crate) fn local_retention_pass(
     tp: &TopicIdPartition,
     partition: &Partition,
     exports: &[SegmentExport],
@@ -576,9 +581,11 @@ async fn copy_one(
         ex.max_timestamp,
         broker_id,
         now_ms(),
-        size,
-        RemoteLogSegmentState::CopySegmentStarted,
-        epochs.clone(),
+        crabka_remote_storage::RemoteLogSegmentDetails::new(
+            size,
+            RemoteLogSegmentState::CopySegmentStarted,
+            epochs.clone(),
+        ),
     ) {
         Ok(m) => m,
         Err(e) => {
@@ -703,7 +710,7 @@ fn now_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use assert2::check;
+    use assert2::{assert, check};
     use crabka_ids::{LeaderEpoch, PartitionIndex};
     use crabka_log::{Log, LogConfig};
     use crabka_metadata::{MetadataImage, MetadataRecord, TopicRecord};
@@ -968,7 +975,7 @@ mod tests {
             .expect("partition log mutex poisoned")
             .tierable_segments()
             .len();
-        assert2::assert!(export_count >= 2);
+        assert!(export_count >= 2, "test needs multiple sealed segments");
         partitions.insert("orders".to_string(), PartitionIndex(0), partition);
 
         let controller: Arc<dyn crate::metadata_source::MetadataSource> =
@@ -979,12 +986,14 @@ mod tests {
             Arc::new(InmemoryRemoteLogMetadataManager::new());
         let shutdown = CancellationToken::new();
         let task = tokio::spawn(run(
-            partitions,
-            controller,
-            rsm,
-            rlmm.clone(),
-            NodeId(1),
-            1,
+            RemoteLogManagerContext {
+                partitions,
+                controller,
+                rsm,
+                rlmm: rlmm.clone(),
+                node_id: NodeId(1),
+                broker_id: 1,
+            },
             RemoteLogManagerConfig {
                 interval: Duration::from_millis(10),
             },
@@ -996,8 +1005,8 @@ mod tests {
         task.await.expect("remote-log-manager task panicked");
 
         let listed = rlmm.list_remote_log_segments(&tp()).unwrap();
-        assert2::assert!(listed.len() == export_count);
-        assert2::assert!(
+        assert!(listed.len() == export_count);
+        assert!(
             listed
                 .iter()
                 .all(|md| md.state() == RemoteLogSegmentState::CopySegmentFinished)
@@ -1016,7 +1025,7 @@ mod tests {
             .expect("partition log mutex poisoned")
             .tierable_segments()
             .len();
-        assert2::assert!(export_count >= 2);
+        assert!(export_count >= 2, "test needs multiple sealed segments");
         partitions.insert("orders".to_string(), PartitionIndex(0), partition);
 
         let controller = FixedMetadataSource::new(image_with_orders_topic());
@@ -1028,8 +1037,8 @@ mod tests {
         tick_all(&partitions, &controller, &rsm, &rlmm, NodeId(1), 1).await;
 
         let listed = rlmm.list_remote_log_segments(&tp()).unwrap();
-        assert2::assert!(listed.len() == export_count);
-        assert2::assert!(
+        assert!(listed.len() == export_count);
+        assert!(
             listed
                 .iter()
                 .all(|md| md.state() == RemoteLogSegmentState::CopySegmentFinished)
@@ -1053,7 +1062,7 @@ mod tests {
 
         tick_all(&partitions, &controller, &rsm, &rlmm, NodeId(1), 1).await;
 
-        assert2::assert!(rlmm.list_remote_log_segments(&tp()).unwrap().is_empty());
+        assert!(rlmm.list_remote_log_segments(&tp()).unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1081,7 +1090,7 @@ mod tests {
 
         tick_all(&partitions, &controller, &rsm, &rlmm, NodeId(1), 1).await;
 
-        assert2::assert!(rlmm.list_remote_log_segments(&tp()).unwrap().is_empty());
+        assert!(rlmm.list_remote_log_segments(&tp()).unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1090,7 +1099,7 @@ mod tests {
         let remote_dir = tempfile::tempdir().unwrap();
         let log = rolled_log(log_dir.path());
         let exports = log.tierable_segments();
-        assert2::assert!(exports.len() >= 2);
+        assert!(exports.len() >= 2, "test needs multiple sealed segments");
 
         let rsm: Arc<dyn RemoteStorageManager> =
             Arc::new(LocalTieredStorage::new(remote_dir.path()));
@@ -1098,10 +1107,10 @@ mod tests {
             Arc::new(InmemoryRemoteLogMetadataManager::new());
 
         let copied = copy_eligible(&tp(), 1, LeaderEpoch(0), exports.clone(), &rsm, &rlmm).await;
-        assert2::assert!(copied == exports.len());
+        assert!(copied == exports.len());
 
         let listed = rlmm.list_remote_log_segments(&tp()).unwrap();
-        assert2::assert!(listed.len() == exports.len());
+        assert!(listed.len() == exports.len());
         for md in &listed {
             // The data + offset/leader-epoch indexes are fetchable (non-empty)
             // from the remote store.
@@ -1129,11 +1138,11 @@ mod tests {
             Arc::new(InmemoryRemoteLogMetadataManager::new());
 
         let first = copy_eligible(&tp(), 1, LeaderEpoch(0), exports.clone(), &rsm, &rlmm).await;
-        assert2::assert!(first == exports.len());
+        assert!(first == exports.len());
         // Second pass: everything is already known → nothing re-copied.
         let second = copy_eligible(&tp(), 1, LeaderEpoch(0), exports.clone(), &rsm, &rlmm).await;
-        assert2::assert!(second == 0);
-        assert2::assert!(rlmm.list_remote_log_segments(&tp()).unwrap().len() == exports.len());
+        assert!(second == 0);
+        assert!(rlmm.list_remote_log_segments(&tp()).unwrap().len() == exports.len());
     }
 
     #[tokio::test]
@@ -1144,8 +1153,8 @@ mod tests {
         let rlmm: Arc<dyn RemoteLogMetadataManager> =
             Arc::new(InmemoryRemoteLogMetadataManager::new());
         let copied = copy_eligible(&tp(), 1, LeaderEpoch(0), Vec::new(), &rsm, &rlmm).await;
-        assert2::assert!(copied == 0);
-        assert2::assert!(rlmm.list_remote_log_segments(&tp()).unwrap().is_empty());
+        assert!(copied == 0);
+        assert!(rlmm.list_remote_log_segments(&tp()).unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1153,18 +1162,21 @@ mod tests {
         let log_dir = tempfile::tempdir().unwrap();
         let log = rolled_log(log_dir.path());
         let exports = log.tierable_segments();
-        assert2::assert!(!exports.is_empty());
+        assert!(!exports.is_empty());
 
         let rsm: Arc<dyn RemoteStorageManager> = Arc::new(AlwaysFailRsm);
         let rlmm: Arc<dyn RemoteLogMetadataManager> =
             Arc::new(InmemoryRemoteLogMetadataManager::new());
 
         let copied = copy_eligible(&tp(), 1, LeaderEpoch(0), exports.clone(), &rsm, &rlmm).await;
-        assert2::assert!(copied == 0);
+        assert!(copied == 0, "every copy failed");
         // Rollback (delete + DeleteSegmentStarted -> DeleteSegmentFinished)
         // drops the started metadata, so nothing is left behind and a later
         // run with a healthy store can retry the same segments.
-        assert2::assert!(rlmm.list_remote_log_segments(&tp()).unwrap().is_empty());
+        assert!(
+            rlmm.list_remote_log_segments(&tp()).unwrap().is_empty(),
+            "failed copies must not leave dangling metadata"
+        );
     }
 
     #[tokio::test]
@@ -1195,10 +1207,10 @@ mod tests {
         };
 
         let copied = copy_eligible(&tp(), 7, LeaderEpoch(3), vec![export], &rsm, &rlmm).await;
-        assert2::assert!(copied == 1);
+        assert!(copied == 1);
         let md = &rlmm.list_remote_log_segments(&tp()).unwrap()[0];
         // The fallback recorded the partition's current leader epoch (3).
-        assert2::assert!(md.segment_leader_epochs().get(&LeaderEpoch(3)) == Some(&0));
+        assert!(md.segment_leader_epochs().get(&LeaderEpoch(3)) == Some(&0));
     }
 
     fn synth_export(base: i64, last: i64, max_ts: i64, size: u64) -> SegmentExport {
@@ -1220,9 +1232,7 @@ mod tests {
         let exports = vec![synth_export(0, 9, 100, 64), synth_export(10, 19, 200, 64)];
         let finished: HashSet<i64> = HashSet::new();
         // Big enough time-pressure to delete everything, but nothing is finished.
-        assert2::assert!(
-            local_retention_target(&exports, &finished, Some(1), None, 10_000) == None
-        );
+        assert!(local_retention_target(&exports, &finished, Some(1), None, 10_000) == None);
     }
 
     #[test]
@@ -1236,7 +1246,7 @@ mod tests {
         // now=1000, retention=500ms → segs with max_ts<500 are deletable.
         // Only seg0 (max_ts=100) and seg1 (max_ts=200) qualify; seg2 stops it.
         let target = local_retention_target(&exports, &finished, Some(500), None, 1_000);
-        assert2::assert!(target == Some(20));
+        assert!(target == Some(20));
     }
 
     #[test]
@@ -1262,7 +1272,7 @@ mod tests {
         ];
         for (budget, expected) in cases {
             let target = local_retention_target(&exports, &finished, None, budget, 1_000);
-            assert2::assert!(target == expected);
+            assert!(target == expected, "budget: {budget:?}");
         }
     }
 
@@ -1271,7 +1281,7 @@ mod tests {
         let exports = vec![synth_export(0, 9, 100, 100), synth_export(10, 19, 200, 100)];
         let finished: HashSet<i64> = [0, 10].into_iter().collect();
         let target = local_retention_target(&exports, &finished, None, Some(200), 1_000);
-        assert2::assert!(target == None);
+        assert!(target == None);
     }
 
     #[test]
@@ -1284,7 +1294,10 @@ mod tests {
         // Segment at base=10 has NOT been copy-finished. Walk stops there.
         let finished: HashSet<i64> = [0, 20].into_iter().collect();
         let target = local_retention_target(&exports, &finished, Some(1), None, 10_000);
-        assert2::assert!(target == Some(10));
+        assert!(
+            target == Some(10),
+            "only seg0 deletable; walk stops at seg1"
+        );
     }
 
     #[test]
@@ -1297,7 +1310,7 @@ mod tests {
         let finished: HashSet<i64> = [0, 10].into_iter().collect();
         // Caller resolved effective_local_ms = retention_ms = 250ms; now=1000.
         let target = local_retention_target(&exports, &finished, Some(250), None, 1_000);
-        assert2::assert!(target == Some(20));
+        assert!(target == Some(20));
     }
 
     /// Test-only drive helper: mirrors the body of `local_retention_pass`
@@ -1348,7 +1361,7 @@ mod tests {
             log.append(&mut b).unwrap();
         }
         let exports = log.tierable_segments();
-        assert2::assert!(exports.len() >= 2);
+        assert!(exports.len() >= 2, "test needs multiple sealed segments");
         let log_config = log.config_snapshot();
 
         let rsm: Arc<dyn RemoteStorageManager> =
@@ -1356,7 +1369,7 @@ mod tests {
         let rlmm: Arc<dyn RemoteLogMetadataManager> =
             Arc::new(InmemoryRemoteLogMetadataManager::new());
         let copied = copy_eligible(&tp(), 1, LeaderEpoch(0), exports.clone(), &rsm, &rlmm).await;
-        assert2::assert!(copied == exports.len());
+        assert!(copied == exports.len());
 
         // Gather finished bases the same way `local_retention_pass` would.
         let finished_bases: HashSet<i64> = rlmm
@@ -1366,23 +1379,27 @@ mod tests {
             .filter(|md| md.state() == RemoteLogSegmentState::CopySegmentFinished)
             .map(RemoteLogSegmentMetadata::start_offset)
             .collect();
-        assert2::assert!(finished_bases.len() == exports.len());
+        assert!(finished_bases.len() == exports.len());
 
         // Drive retention with `now_ms` far in the future so every sealed
         // segment satisfies the 1ms time-based eviction.
         let future = now_ms() + 1_000_000;
         let removed = local_retention_drive(&mut log, &finished_bases, &log_config, future);
-        assert2::assert!(removed == exports.len());
+        assert!(removed == exports.len());
 
         // local_log_start_offset advanced; sealed log files are gone.
         let last = exports.last().unwrap().last_offset;
-        assert2::assert!(log.local_log_start_offset() == last + 1);
+        assert!(log.local_log_start_offset() == last + 1);
         for ex in &exports {
-            assert2::assert!(!ex.log_path.exists());
+            assert!(
+                !ex.log_path.exists(),
+                "sealed segment {:?} should be deleted",
+                ex.log_path
+            );
         }
         // Re-running is a no-op.
         let removed_again = local_retention_drive(&mut log, &finished_bases, &log_config, future);
-        assert2::assert!(removed_again == 0);
+        assert!(removed_again == 0);
     }
 
     #[tokio::test]
@@ -1402,14 +1419,14 @@ mod tests {
             let log = partition.log.lock().expect("partition log mutex poisoned");
             (log.tierable_segments(), log.config_snapshot())
         };
-        assert2::assert!(exports.len() >= 2);
+        assert!(exports.len() >= 2, "test needs multiple sealed segments");
 
         let rsm: Arc<dyn RemoteStorageManager> =
             Arc::new(LocalTieredStorage::new(remote_dir.path()));
         let rlmm: Arc<dyn RemoteLogMetadataManager> =
             Arc::new(InmemoryRemoteLogMetadataManager::new());
         let copied = copy_eligible(&tp(), 1, LeaderEpoch(0), exports.clone(), &rsm, &rlmm).await;
-        assert2::assert!(copied == exports.len());
+        assert!(copied == exports.len());
 
         let removed = local_retention_pass(
             &tp(),
@@ -1418,13 +1435,12 @@ mod tests {
             &log_config,
             &rlmm,
             now_ms() + 1_000_000,
-        )
-        .await;
+        );
 
-        assert2::assert!(removed == exports.len());
+        assert!(removed == exports.len());
         let log = partition.log.lock().expect("partition log mutex poisoned");
-        assert2::assert!(log.local_log_start_offset() == exports.last().unwrap().last_offset + 1);
-        assert2::assert!(log.tierable_segments().is_empty());
+        assert!(log.local_log_start_offset() == exports.last().unwrap().last_offset + 1);
+        assert!(log.tierable_segments().is_empty());
     }
 
     // ── remote-retention helper + cascade tests ────────────
@@ -1443,9 +1459,11 @@ mod tests {
             max_ts,
             1,
             max_ts,
-            size,
-            RemoteLogSegmentState::CopySegmentStarted,
-            BTreeMap::from([(LeaderEpoch(0), start)]),
+            crabka_remote_storage::RemoteLogSegmentDetails::new(
+                size,
+                RemoteLogSegmentState::CopySegmentStarted,
+                BTreeMap::from([(LeaderEpoch(0), start)]),
+            ),
         )
         .unwrap()
         .with_update(&RemoteLogSegmentMetadataUpdate {
@@ -1461,7 +1479,7 @@ mod tests {
     #[test]
     fn remote_retention_eviction_set_returns_empty_when_no_segments() {
         let out = remote_retention_eviction_set(&[], Some(1), Some(1), 10_000);
-        assert2::assert!(out.is_empty());
+        assert!(out.is_empty());
     }
 
     #[test]
@@ -1474,12 +1492,9 @@ mod tests {
         // now=10_000, retention=500ms → seg with max_ts < 9_500 is deletable.
         // seg0 (100) + seg1 (200) qualify; seg2 (9_500) stops the walk.
         let out = remote_retention_eviction_set(&segs, Some(500), None, 10_000);
-        assert2::assert!(
-            out.iter()
-                .map(crabka_remote_storage::RemoteLogSegmentMetadata::start_offset)
-                .collect::<Vec<_>>()
-                == vec![0, 10]
-        );
+        assert!(out.len() == 2);
+        check!(out[0].start_offset() == 0);
+        check!(out[1].start_offset() == 10);
     }
 
     #[test]
@@ -1499,7 +1514,7 @@ mod tests {
         ];
         for (budget, expected_len) in cases {
             let out = remote_retention_eviction_set(&segs, None, budget, 1_000);
-            assert2::assert!(out.len() == expected_len);
+            assert!(out.len() == expected_len, "budget: {budget:?}");
         }
     }
 
@@ -1507,7 +1522,7 @@ mod tests {
     fn remote_retention_eviction_set_equal_size_budget_keeps_all_segments() {
         let segs = vec![synth_remote_md(10, 0, 9, 100, 100)];
         let out = remote_retention_eviction_set(&segs, None, Some(100), 1_000);
-        assert2::assert!(out.is_empty());
+        assert!(out.is_empty());
     }
 
     #[test]
@@ -1520,14 +1535,14 @@ mod tests {
         // Time-window: seg0+seg1 qualify (max_ts<500). Budget very generous
         // so size-based evicts nothing. Result is the time-window prefix.
         let out = remote_retention_eviction_set(&segs, Some(500), Some(10_000), 1_000);
-        assert2::assert!(out.len() == 2);
+        assert!(out.len() == 2);
     }
 
     #[test]
     fn remote_retention_eviction_set_none_settings_disable_axis() {
         let segs = vec![synth_remote_md(10, 0, 9, 100, 100)];
         // No time or size → no eviction.
-        assert2::assert!(remote_retention_eviction_set(&segs, None, None, 10_000).is_empty());
+        assert!(remote_retention_eviction_set(&segs, None, None, 10_000).is_empty());
     }
 
     #[test]
@@ -1539,12 +1554,8 @@ mod tests {
                                                      // walk stopped at seg1 already.
         ];
         let out = remote_retention_eviction_set(&segs, Some(500), None, 10_000);
-        assert2::assert!(
-            out.iter()
-                .map(crabka_remote_storage::RemoteLogSegmentMetadata::start_offset)
-                .collect::<Vec<_>>()
-                == vec![0]
-        );
+        assert!(out.len() == 1);
+        assert!(out[0].start_offset() == 0);
     }
 
     #[tokio::test]
@@ -1558,9 +1569,9 @@ mod tests {
         let rlmm: Arc<dyn RemoteLogMetadataManager> =
             Arc::new(InmemoryRemoteLogMetadataManager::new());
         let copied = copy_eligible(&tp(), 1, LeaderEpoch(0), exports.clone(), &rsm, &rlmm).await;
-        assert2::assert!(copied == exports.len());
+        assert!(copied == exports.len());
         let pre = rlmm.list_remote_log_segments(&tp()).unwrap();
-        assert2::assert!(!pre.is_empty());
+        assert!(!pre.is_empty());
 
         let cfg = LogConfig {
             retention_ms: Some(Duration::from_millis(1)),
@@ -1569,14 +1580,18 @@ mod tests {
         // far-future `now_ms` → every finished segment is past the window.
         let deleted =
             remote_retention_pass(&tp(), 1, &cfg, &rsm, &rlmm, now_ms() + 1_000_000).await;
-        assert2::assert!(deleted == exports.len());
+        assert!(deleted == exports.len());
 
         // DeleteSegmentFinished drops the entries entirely from the cache.
         let post = rlmm.list_remote_log_segments(&tp()).unwrap();
-        assert2::assert!(post.is_empty());
+        assert!(
+            post.is_empty(),
+            "every segment should be gone, got {} left",
+            post.len()
+        );
         // RSM data is gone too.
         for md in &pre {
-            assert2::assert!(rsm.fetch_log_segment(md, 0, None).is_err());
+            assert!(rsm.fetch_log_segment(md, 0, None).is_err());
         }
     }
 
@@ -1603,8 +1618,8 @@ mod tests {
         // default base_timestamp=0, so picking now=1 keeps every segment
         // inside the year-long retention window.
         let deleted = remote_retention_pass(&tp(), 1, &cfg, &rsm, &rlmm, 1).await;
-        assert2::assert!(deleted == 0);
-        assert2::assert!(rlmm.list_remote_log_segments(&tp()).unwrap().len() == exports.len());
+        assert!(deleted == 0);
+        assert!(rlmm.list_remote_log_segments(&tp()).unwrap().len() == exports.len());
     }
 
     #[tokio::test]
@@ -1621,7 +1636,7 @@ mod tests {
             ..LogConfig::default()
         };
         let deleted = remote_retention_pass(&tp(), 1, &cfg, &rsm, &rlmm, now_ms()).await;
-        assert2::assert!(deleted == 0);
+        assert!(deleted == 0);
     }
 
     #[tokio::test]
@@ -1635,18 +1650,18 @@ mod tests {
         let rlmm_impl = Arc::new(InmemoryRemoteLogMetadataManager::new());
         let rlmm: Arc<dyn RemoteLogMetadataManager> = rlmm_impl.clone();
         let copied = copy_eligible(&tp(), 1, LeaderEpoch(0), exports.clone(), &rsm, &rlmm).await;
-        assert2::assert!(copied == exports.len());
+        assert!(copied == exports.len());
 
         cascade_remote_partition_delete(tp(), 1, rsm.clone(), rlmm.clone()).await;
 
         // All segments are gone from the cache.
-        assert2::assert!(rlmm.list_remote_log_segments(&tp()).unwrap().is_empty());
+        assert!(rlmm.list_remote_log_segments(&tp()).unwrap().is_empty());
         // The remote directory for this partition is empty (or absent).
         // LocalTieredStorage layout: <remote_dir>/<topic_id>/<partition>/.
         let part_dir = remote_dir.path().join(tp().topic_id.to_string()).join("0");
         if part_dir.exists() {
             let entries: Vec<_> = std::fs::read_dir(&part_dir).unwrap().collect();
-            assert2::assert!(entries.is_empty());
+            assert!(entries.is_empty(), "stray remote files: {entries:?}");
         }
         let dump = rlmm_impl.export();
         let partition = dump
@@ -1654,7 +1669,7 @@ mod tests {
             .iter()
             .find(|partition| partition.topic_id_partition == tp())
             .expect("partition delete state should be dumped");
-        assert2::assert!(
+        assert!(
             partition.delete_state == Some(RemotePartitionDeleteState::DeletePartitionFinished)
         );
     }
@@ -1670,7 +1685,7 @@ mod tests {
         // three partition-delete states without error.
         cascade_remote_partition_delete(tp(), 1, rsm, rlmm.clone()).await;
         // No segments after, no panics; that's the test.
-        assert2::assert!(rlmm.list_remote_log_segments(&tp()).unwrap().is_empty());
+        assert!(rlmm.list_remote_log_segments(&tp()).unwrap().is_empty());
     }
 
     #[test]
@@ -1691,7 +1706,7 @@ mod tests {
         )
         .unwrap();
 
-        assert2::assert!(observed >= before);
-        assert2::assert!(observed <= after);
+        assert!(observed >= before);
+        assert!(observed <= after);
     }
 }

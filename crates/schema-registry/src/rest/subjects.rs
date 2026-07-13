@@ -62,6 +62,8 @@ fn normalize_schema(ty: SchemaType, schema: &str) -> Result<String, SrError> {
     fields(subject = %subject, normalize = n.normalize, schema_type = tracing::field::Empty, id = tracing::field::Empty),
     err
 )]
+/// # Errors
+/// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
 pub async fn register(
     State(st): State<AppState>,
     Path(subject): Path<String>,
@@ -93,7 +95,8 @@ pub async fn register(
     Ok(ok_json(&serde_json::json!({ "id": reg.id.0 })))
 }
 
-/// POST /subjects/{subject}[?normalize=true][&deleted=true] -> `{subject,id,version,schema}` | 404
+/// `POST /subjects/{subject}?normalize=true&deleted=true` returns
+/// `{subject,id,version,schema}` or 404.
 #[tracing::instrument(
     level = "debug",
     name = "sr.lookup_by_schema",
@@ -101,6 +104,8 @@ pub async fn register(
     fields(subject = %subject, deleted = q.deleted, normalize = n.normalize, schema_type = tracing::field::Empty, id = tracing::field::Empty, version = tracing::field::Empty),
     err
 )]
+/// # Errors
+/// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
 pub async fn lookup(
     State(st): State<AppState>,
     Path(subject): Path<String>,
@@ -152,14 +157,15 @@ pub async fn lookup(
 
 /// GET /subjects
 // axum requires async handlers even when the body is synchronous.
-#[allow(clippy::unused_async)]
 #[tracing::instrument(level = "debug", name = "sr.list_subjects", skip_all, fields(deleted = q.deleted))]
-pub async fn list(State(st): State<AppState>, Query(q): Query<DeletedQ>) -> Response {
+pub fn list(State(st): State<AppState>, Query(q): Query<DeletedQ>) -> Response {
     ok_json(&st.store.store.read().subjects(q.deleted))
 }
 
 /// GET /subjects/{subject}/versions
 #[tracing::instrument(level = "debug", name = "sr.list_versions", skip_all, fields(subject = %subject, deleted = q.deleted), err)]
+/// # Errors
+/// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
 pub async fn versions(
     State(st): State<AppState>,
     Path(subject): Path<String>,
@@ -176,6 +182,10 @@ pub async fn versions(
 
 /// GET /subjects/{subject}/versions/{version}
 #[tracing::instrument(level = "debug", name = "sr.get_version", skip_all, fields(subject = %subject, version = %version, deleted = q.deleted), err)]
+/// # Errors
+/// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
+/// # Panics
+/// Panics if a schema previously validated by the registry is missing a definition or dependency required during resolution.
 pub async fn get_version(
     State(st): State<AppState>,
     Path((subject, version)): Path<(String, String)>,
@@ -211,6 +221,8 @@ pub async fn get_version(
 
 /// GET /subjects/{subject}/versions/{version}/schema -> raw schema text
 #[tracing::instrument(level = "debug", name = "sr.get_version_schema", skip_all, fields(subject = %subject, version = %version, deleted = q.deleted), err)]
+/// # Errors
+/// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
 pub async fn get_version_schema(
     State(st): State<AppState>,
     Path((subject, version)): Path<(String, String)>,
@@ -230,6 +242,8 @@ pub async fn get_version_schema(
 /// GET /subjects/{subject}/versions/{version}/referencedby -> ids of the live
 /// schemas that reference this `(subject, version)` (ascending; empty if none).
 #[tracing::instrument(level = "debug", name = "sr.referenced_by", skip_all, fields(subject = %subject, version = %version), err)]
+/// # Errors
+/// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
 pub async fn referencedby(
     State(st): State<AppState>,
     Path((subject, version)): Path<(String, String)>,

@@ -16,7 +16,8 @@ pub const MIN_VERSION: i16 = 1;
 pub const MAX_VERSION: i16 = 10;
 pub const FLEXIBLE_MIN: i16 = 6;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -28,6 +29,10 @@ pub struct OffsetFetchRequest<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl OffsetFetchRequest<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::offset_fetch_request::OffsetFetchRequest {
         crate::owned::offset_fetch_request::OffsetFetchRequest {
             group_id: (self.group_id).to_string(),
@@ -54,9 +59,9 @@ impl Encode for OffsetFetchRequest<'_> {
         let flex = is_flexible(version);
         if (0..=7).contains(&version) {
             if flex {
-                put_compact_string(buf, self.group_id);
+                let () = put_compact_string(buf, self.group_id);
             } else {
-                put_string(buf, self.group_id);
+                let () = put_string(buf, self.group_id);
             }
         }
         if (0..=7).contains(&version) {
@@ -235,6 +240,10 @@ pub struct OffsetFetchRequestTopic<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl OffsetFetchRequestTopic<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::offset_fetch_request::OffsetFetchRequestTopic {
         crate::owned::offset_fetch_request::OffsetFetchRequestTopic {
             name: (self.name).to_string(),
@@ -248,9 +257,9 @@ impl Encode for OffsetFetchRequestTopic<'_> {
         let flex = version >= 6;
         if (0..=7).contains(&version) {
             if flex {
-                put_compact_string(buf, self.name);
+                let () = put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name);
+                let () = put_string(buf, self.name);
             }
         }
         if (0..=7).contains(&version) {
@@ -350,11 +359,15 @@ impl Default for OffsetFetchRequestGroup<'_> {
             member_id: None,
             member_epoch: -1i32,
             topics: None,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl OffsetFetchRequestGroup<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::offset_fetch_request::OffsetFetchRequestGroup {
         crate::owned::offset_fetch_request::OffsetFetchRequestGroup {
             group_id: (self.group_id).to_string(),
@@ -372,16 +385,16 @@ impl Encode for OffsetFetchRequestGroup<'_> {
         let flex = version >= 6;
         if version >= 8 {
             if flex {
-                put_compact_string(buf, self.group_id);
+                let () = put_compact_string(buf, self.group_id);
             } else {
-                put_string(buf, self.group_id);
+                let () = put_string(buf, self.group_id);
             }
         }
         if version >= 9 {
             if flex {
-                put_compact_nullable_string(buf, self.member_id);
+                let () = put_compact_nullable_string(buf, self.member_id);
             } else {
-                put_nullable_string(buf, self.member_id);
+                let () = put_nullable_string(buf, self.member_id);
             }
         }
         if version >= 9 {
@@ -513,6 +526,10 @@ pub struct OffsetFetchRequestTopics<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl OffsetFetchRequestTopics<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::offset_fetch_request::OffsetFetchRequestTopics {
         crate::owned::offset_fetch_request::OffsetFetchRequestTopics {
             name: (self.name).to_string(),
@@ -527,9 +544,9 @@ impl Encode for OffsetFetchRequestTopics<'_> {
         let flex = version >= 6;
         if (8..=9).contains(&version) {
             if flex {
-                put_compact_string(buf, self.name);
+                let () = put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name);
+                let () = put_string(buf, self.name);
             }
         }
         if version >= 10 {

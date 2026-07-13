@@ -16,7 +16,8 @@ pub const MIN_VERSION: i16 = 2;
 pub const MAX_VERSION: i16 = 7;
 pub const FLEXIBLE_MIN: i16 = 5;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,11 +33,15 @@ impl Default for CreateTopicsRequest<'_> {
             topics: Vec::new(),
             timeout_ms: 60_000i32,
             validate_only: false,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl CreateTopicsRequest<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::create_topics_request::CreateTopicsRequest {
         crate::owned::create_topics_request::CreateTopicsRequest {
             topics: (self.topics).iter().map(CreatableTopic::to_owned).collect(),
@@ -158,6 +163,10 @@ pub struct CreatableTopic<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl CreatableTopic<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::create_topics_request::CreatableTopic {
         crate::owned::create_topics_request::CreatableTopic {
             name: (self.name).to_string(),
@@ -180,9 +189,9 @@ impl Encode for CreatableTopic<'_> {
         let flex = version >= 5;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name);
+                let () = put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name);
+                let () = put_string(buf, self.name);
             }
         }
         if version >= 0 {
@@ -331,6 +340,10 @@ pub struct CreatableReplicaAssignment {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl CreatableReplicaAssignment {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::create_topics_request::CreatableReplicaAssignment {
         crate::owned::create_topics_request::CreatableReplicaAssignment {
             partition_index: (self.partition_index),
@@ -424,6 +437,10 @@ pub struct CreatableTopicConfig<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl CreatableTopicConfig<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::create_topics_request::CreatableTopicConfig {
         crate::owned::create_topics_request::CreatableTopicConfig {
             name: (self.name).to_string(),
@@ -437,16 +454,16 @@ impl Encode for CreatableTopicConfig<'_> {
         let flex = version >= 5;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name);
+                let () = put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name);
+                let () = put_string(buf, self.name);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.value);
+                let () = put_compact_nullable_string(buf, self.value);
             } else {
-                put_nullable_string(buf, self.value);
+                let () = put_nullable_string(buf, self.value);
             }
         }
         if flex {

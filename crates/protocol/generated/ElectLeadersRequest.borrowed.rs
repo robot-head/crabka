@@ -12,7 +12,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 2;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,11 +29,15 @@ impl Default for ElectLeadersRequest<'_> {
             election_type: 0i8,
             topic_partitions: None,
             timeout_ms: 60_000i32,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl ElectLeadersRequest<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::elect_leaders_request::ElectLeadersRequest {
         crate::owned::elect_leaders_request::ElectLeadersRequest {
             election_type: (self.election_type),
@@ -165,6 +170,10 @@ pub struct TopicPartitions<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl TopicPartitions<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::elect_leaders_request::TopicPartitions {
         crate::owned::elect_leaders_request::TopicPartitions {
             topic: (self.topic).to_string(),
@@ -178,9 +187,9 @@ impl Encode for TopicPartitions<'_> {
         let flex = version >= 2;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.topic);
+                let () = put_compact_string(buf, self.topic);
             } else {
-                put_string(buf, self.topic);
+                let () = put_string(buf, self.topic);
             }
         }
         if version >= 0 {

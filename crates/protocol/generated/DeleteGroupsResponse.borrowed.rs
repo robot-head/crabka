@@ -12,7 +12,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 2;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -22,6 +23,10 @@ pub struct DeleteGroupsResponse<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl DeleteGroupsResponse<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::delete_groups_response::DeleteGroupsResponse {
         crate::owned::delete_groups_response::DeleteGroupsResponse {
             throttle_time_ms: (self.throttle_time_ms),
@@ -133,6 +138,10 @@ pub struct DeletableGroupResult<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl DeletableGroupResult<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::delete_groups_response::DeletableGroupResult {
         crate::owned::delete_groups_response::DeletableGroupResult {
             group_id: (self.group_id).to_string(),
@@ -146,9 +155,9 @@ impl Encode for DeletableGroupResult<'_> {
         let flex = version >= 2;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.group_id);
+                let () = put_compact_string(buf, self.group_id);
             } else {
-                put_string(buf, self.group_id);
+                let () = put_string(buf, self.group_id);
             }
         }
         if version >= 0 {

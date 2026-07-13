@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use bytes::{Buf, BufMut, BytesMut};
+use num_traits::ToPrimitive as _;
 
 use crate::metricsgen::{
     checkpoint::{CheckpointCodecError, encode_checkpoint_key, parse_checkpoint_key},
@@ -120,6 +121,9 @@ impl EdgeStore {
         }
     }
 
+    ///
+    /// # Panics
+    /// Panics if an internal synchronization primitive is poisoned.
     pub fn record_span(&mut self, span: &SpanRecord, now_ns: i64) -> RecordOutcome {
         let Some(is_client) = edge_side(span.kind) else {
             return RecordOutcome::Ignored;
@@ -177,6 +181,9 @@ impl EdgeStore {
         RecordOutcome::Recorded
     }
 
+    ///
+    /// # Panics
+    /// Panics if an internal synchronization primitive is poisoned.
     pub fn expire(&mut self, now_ns: i64) -> usize {
         let expired: Vec<_> = self
             .edges
@@ -212,6 +219,9 @@ impl EdgeStore {
         entries
     }
 
+    ///
+    /// # Errors
+    /// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
     pub fn restore_checkpoint_entry(
         &mut self,
         tenant: &str,
@@ -578,12 +588,8 @@ fn attr_value<'a>(span: &'a SpanRecord, name: &str) -> Option<&'a str> {
         .find_map(|(key, value)| (key == name && !value.is_empty()).then_some(value.as_str()))
 }
 
-#[expect(
-    clippy::cast_precision_loss,
-    reason = "Prometheus histogram bucket assignment uses f64 bucket edges"
-)]
 fn observe_latency(bucket_edges_ns: &[f64], bucket_counts: &mut [u64], ns: i64) {
-    let value_ns = ns.max(0) as f64;
+    let value_ns = ns.max(0).to_f64().unwrap_or(f64::MAX);
     let idx = bucket_edges_ns
         .iter()
         .position(|edge| value_ns <= *edge)
@@ -593,10 +599,6 @@ fn observe_latency(bucket_edges_ns: &[f64], bucket_counts: &mut [u64], ns: i64) 
     }
 }
 
-#[expect(
-    clippy::cast_precision_loss,
-    reason = "Prometheus histogram samples are f64 values on the output edge"
-)]
 fn cumulative_buckets_seconds(bucket_edges_ns: &[f64], bucket_counts: &[u64]) -> Vec<(f64, f64)> {
     let mut cumulative = 0_u64;
     bucket_edges_ns
@@ -604,17 +606,16 @@ fn cumulative_buckets_seconds(bucket_edges_ns: &[f64], bucket_counts: &[u64]) ->
         .enumerate()
         .map(|(idx, edge_ns)| {
             cumulative += bucket_counts.get(idx).copied().unwrap_or_default();
-            (*edge_ns / NS_PER_SEC, cumulative as f64)
+            (
+                *edge_ns / NS_PER_SEC,
+                cumulative.to_f64().unwrap_or(f64::MAX),
+            )
         })
         .collect()
 }
 
-#[expect(
-    clippy::cast_precision_loss,
-    reason = "Prometheus latency samples are f64 seconds on the output edge"
-)]
 fn ns_to_seconds(ns: i64) -> f64 {
-    ns.max(0) as f64 / NS_PER_SEC
+    ns.max(0).to_f64().unwrap_or(f64::MAX) / NS_PER_SEC
 }
 
 #[cfg(test)]

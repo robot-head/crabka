@@ -18,9 +18,9 @@ impl Encode for Endpoint {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.host);
+                let () = put_compact_string(buf, &self.host);
             } else {
-                put_string(buf, &self.host);
+                let () = put_string(buf, &self.host);
             }
         }
         if version >= 0 {

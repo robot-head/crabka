@@ -59,7 +59,10 @@ async fn finalize_streams_version(client: &Client) {
         })
         .await
         .expect("UpdateFeatures");
-    assert2::assert!(resp.error_code == 0);
+    assert_eq!(
+        resp.error_code, 0,
+        "streams.version finalize failed: {resp:?}"
+    );
 }
 
 async fn create_topic(client: &Client, topic: &str, partitions: i32) {
@@ -76,7 +79,10 @@ async fn create_topic(client: &Client, topic: &str, partitions: i32) {
         })
         .await
         .expect("CreateTopics");
-    assert2::assert!(resp.topics[0].error_code == 0);
+    assert_eq!(
+        resp.topics[0].error_code, 0,
+        "topic create failed: {resp:?}"
+    );
 }
 
 async fn produce(producer: &crabka_client_producer::Producer, topic: &str, key: &str, val: &str) {
@@ -317,7 +323,10 @@ async fn fk_join_resolves_and_restores_over_broker() {
     )
     .await
     .expect("inner FK join must converge k1 -> AX (a's fk 'A' resolves b's row 'X') within 45s");
-    assert2::assert!(got.contains(&("k1".to_string(), "AX".to_string())));
+    assert!(
+        got.contains(&("k1".to_string(), "AX".to_string())),
+        "expected k1 -> AX among the FK-join output; got {got:?}",
+    );
 
     // ── 4. Update the foreign row: b:(A -> "Y") re-emits k1 -> "AY" ───────────
     produce(&producer, "fk-b", "A", "Y").await;
@@ -334,7 +343,10 @@ async fn fk_join_resolves_and_restores_over_broker() {
              fk-out had: {dump:?}",
         );
     };
-    assert2::assert!(got2.contains(&("k1".to_string(), "AY".to_string())));
+    assert!(
+        got2.contains(&("k1".to_string(), "AY".to_string())),
+        "expected k1 -> AY after the foreign row updated; got {got2:?}",
+    );
 
     // ── 5. Close the first instance ───────────────────────────────────────────
     streams.close().await.unwrap();
@@ -362,7 +374,10 @@ async fn fk_join_resolves_and_restores_over_broker() {
         "after restart-restore, k2 must resolve against the restored foreign row \
          (b:A->Y) and emit k2 -> AY (without b re-produced) within 45s",
     );
-    assert2::assert!(got3.contains(&("k2".to_string(), "AY".to_string())));
+    assert!(
+        got3.contains(&("k2".to_string(), "AY".to_string())),
+        "expected k2 -> AY after restart-restore; got {got3:?}",
+    );
 
     streams2.close().await.unwrap();
     broker.shutdown().await;

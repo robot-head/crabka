@@ -95,6 +95,7 @@ impl AuditSink for KafkaTopicAuditSink {
 mod tests {
     use std::sync::Arc;
 
+    use assert2::assert;
     use crabka_log::{Log, LogConfig, Offset};
 
     use super::*;
@@ -147,7 +148,7 @@ mod tests {
             .expect("read audit partition");
         let records: Vec<_> = out.batches.iter().flat_map(|b| &b.records).collect();
 
-        assert2::assert!(
+        assert!(
             (
                 records.len(),
                 records[0].value.as_deref(),

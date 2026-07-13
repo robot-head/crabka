@@ -12,7 +12,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 5;
 pub const FLEXIBLE_MIN: i16 = 3;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -22,6 +23,10 @@ pub struct TxnOffsetCommitResponse<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl TxnOffsetCommitResponse<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::txn_offset_commit_response::TxnOffsetCommitResponse {
         crate::owned::txn_offset_commit_response::TxnOffsetCommitResponse {
             throttle_time_ms: (self.throttle_time_ms),
@@ -130,6 +135,10 @@ pub struct TxnOffsetCommitResponseTopic<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl TxnOffsetCommitResponseTopic<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::txn_offset_commit_response::TxnOffsetCommitResponseTopic {
@@ -148,9 +157,9 @@ impl Encode for TxnOffsetCommitResponseTopic<'_> {
         let flex = version >= 3;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name);
+                let () = put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name);
+                let () = put_string(buf, self.name);
             }
         }
         if version >= 0 {
@@ -245,6 +254,10 @@ pub struct TxnOffsetCommitResponsePartition {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl TxnOffsetCommitResponsePartition {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::txn_offset_commit_response::TxnOffsetCommitResponsePartition {

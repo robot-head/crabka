@@ -1,7 +1,5 @@
 //! Server-function seam for the Dioxus admin UI shell.
 
-#![allow(clippy::unused_async)]
-
 use std::{collections::BTreeMap, future::Future, pin::Pin};
 
 use crabka_client_admin::{
@@ -32,10 +30,14 @@ pub struct CurrentSession {
     pub principal: String,
 }
 
-pub async fn logout<F>(context: &ServerFunctionContext<'_, F>) -> Result<(), UiError> {
-    logout_with_context(context).await
+/// # Errors
+/// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
+pub fn logout<F>(context: &ServerFunctionContext<'_, F>) -> Result<(), UiError> {
+    logout_with_context(context)
 }
 
+/// # Errors
+/// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
 pub async fn create_topic<F: AdminSeamFactory>(
     context: &ServerFunctionContext<'_, F>,
     request: CreateTopicRequestDto,
@@ -43,6 +45,8 @@ pub async fn create_topic<F: AdminSeamFactory>(
     create_topic_with_context(context, request).await
 }
 
+/// # Errors
+/// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
 pub async fn delete_topic<F: AdminSeamFactory>(
     context: &ServerFunctionContext<'_, F>,
     request: DeleteTopicRequestDto,
@@ -50,6 +54,8 @@ pub async fn delete_topic<F: AdminSeamFactory>(
     delete_topic_with_context(context, request).await
 }
 
+/// # Errors
+/// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
 pub async fn create_partitions<F: AdminSeamFactory>(
     context: &ServerFunctionContext<'_, F>,
     request: CreatePartitionsRequestDto,
@@ -57,6 +63,8 @@ pub async fn create_partitions<F: AdminSeamFactory>(
     create_partitions_with_context(context, request).await
 }
 
+/// # Errors
+/// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
 pub async fn alter_configs<F: AdminSeamFactory>(
     context: &ServerFunctionContext<'_, F>,
     request: AlterConfigRequestDto,
@@ -64,6 +72,8 @@ pub async fn alter_configs<F: AdminSeamFactory>(
     alter_configs_with_context(context, request).await
 }
 
+/// # Errors
+/// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
 pub async fn create_acl<F: AdminSeamFactory>(
     context: &ServerFunctionContext<'_, F>,
     request: AclRequestDto,
@@ -71,6 +81,8 @@ pub async fn create_acl<F: AdminSeamFactory>(
     create_acl_with_context(context, request).await
 }
 
+/// # Errors
+/// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
 pub async fn delete_acl<F: AdminSeamFactory>(
     context: &ServerFunctionContext<'_, F>,
     request: AclRequestDto,
@@ -78,6 +90,8 @@ pub async fn delete_acl<F: AdminSeamFactory>(
     delete_acl_with_context(context, request).await
 }
 
+/// # Errors
+/// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
 pub async fn upsert_scram_sha512_user<F: AdminSeamFactory>(
     context: &ServerFunctionContext<'_, F>,
     request: ScramUserUpsertDto,
@@ -85,6 +99,8 @@ pub async fn upsert_scram_sha512_user<F: AdminSeamFactory>(
     upsert_scram_sha512_user_with_context(context, request).await
 }
 
+/// # Errors
+/// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
 pub async fn delete_scram_user<F: AdminSeamFactory>(
     context: &ServerFunctionContext<'_, F>,
     request: ScramUserDeleteDto,
@@ -92,6 +108,8 @@ pub async fn delete_scram_user<F: AdminSeamFactory>(
     delete_scram_user_with_context(context, request).await
 }
 
+/// # Errors
+/// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
 pub async fn upsert_quota<F: AdminSeamFactory>(
     context: &ServerFunctionContext<'_, F>,
     request: QuotaUpsertDto,
@@ -99,6 +117,8 @@ pub async fn upsert_quota<F: AdminSeamFactory>(
     upsert_quota_with_context(context, request).await
 }
 
+/// # Errors
+/// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
 pub async fn delete_quota<F: AdminSeamFactory>(
     context: &ServerFunctionContext<'_, F>,
     request: QuotaDeleteDto,
@@ -106,6 +126,8 @@ pub async fn delete_quota<F: AdminSeamFactory>(
     delete_quota_with_context(context, request).await
 }
 
+/// # Errors
+/// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
 pub async fn move_log_dir<F: AdminSeamFactory>(
     context: &ServerFunctionContext<'_, F>,
     request: LogDirMoveRequestDto,
@@ -204,12 +226,16 @@ pub trait AdminSeamFactory {
     where
         Self: 'a;
 
+    /// # Errors
+    /// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
     fn read_seam<'a>(
         &'a self,
         cfg: &AdminUiConfig,
         record: &SessionRecord,
     ) -> Result<Self::Reader<'a>, UiError>;
 
+    /// # Errors
+    /// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
     fn mutation_seam<'a>(
         &'a self,
         cfg: &AdminUiConfig,
@@ -265,6 +291,8 @@ impl<'a, F> ServerFunctionContext<'a, F> {
     }
 }
 
+/// # Errors
+/// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
 pub async fn login_with_context<B: LoginBroker>(
     cfg: &AdminUiConfig,
     sessions: &SessionStore,
@@ -276,6 +304,8 @@ pub async fn login_with_context<B: LoginBroker>(
         .await
 }
 
+/// # Errors
+/// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
 pub async fn login_with_app_state<B: LoginBroker>(
     state: &AppState,
     broker: &B,
@@ -284,13 +314,17 @@ pub async fn login_with_app_state<B: LoginBroker>(
     login_with_context(&state.cfg, &state.sessions, broker, request).await
 }
 
-pub async fn logout_with_context<F>(context: &ServerFunctionContext<'_, F>) -> Result<(), UiError> {
+/// # Errors
+/// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
+pub fn logout_with_context<F>(context: &ServerFunctionContext<'_, F>) -> Result<(), UiError> {
     let session_id = require_session_id(context.sessions, context.raw_session_id.as_deref())?;
 
     context.sessions.remove(&session_id);
     Ok(())
 }
 
+/// # Errors
+/// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
 pub fn current_session_with_store(
     sessions: &SessionStore,
     raw_session_id: Option<&str>,
@@ -303,12 +337,16 @@ pub fn current_session_with_store(
     })
 }
 
+/// # Errors
+/// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
 pub fn current_session_with_context<F>(
     context: &ServerFunctionContext<'_, F>,
 ) -> Result<CurrentSession, UiError> {
     current_session_with_store(context.sessions, context.raw_session_id.as_deref())
 }
 
+/// # Errors
+/// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
 pub async fn list_topics_with_reader<R: AdminReadSeam>(
     sessions: &SessionStore,
     raw_session_id: Option<&str>,
@@ -319,6 +357,8 @@ pub async fn list_topics_with_reader<R: AdminReadSeam>(
     reader.topics().await
 }
 
+/// # Errors
+/// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
 pub async fn list_topics_with_context<F: AdminSeamFactory>(
     context: &ServerFunctionContext<'_, F>,
 ) -> Result<Vec<TopicRow>, UiError> {
@@ -327,6 +367,8 @@ pub async fn list_topics_with_context<F: AdminSeamFactory>(
     reader.topics().await
 }
 
+/// # Errors
+/// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
 pub async fn list_groups_with_reader<R: AdminReadSeam>(
     sessions: &SessionStore,
     raw_session_id: Option<&str>,
@@ -337,6 +379,8 @@ pub async fn list_groups_with_reader<R: AdminReadSeam>(
     reader.groups().await
 }
 
+/// # Errors
+/// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
 pub async fn list_groups_with_context<F: AdminSeamFactory>(
     context: &ServerFunctionContext<'_, F>,
 ) -> Result<Vec<GroupRow>, UiError> {
@@ -345,6 +389,8 @@ pub async fn list_groups_with_context<F: AdminSeamFactory>(
     reader.groups().await
 }
 
+/// # Errors
+/// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
 pub async fn list_acls_with_reader<R: AdminReadSeam>(
     sessions: &SessionStore,
     raw_session_id: Option<&str>,
@@ -355,6 +401,8 @@ pub async fn list_acls_with_reader<R: AdminReadSeam>(
     reader.acls().await
 }
 
+/// # Errors
+/// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
 pub async fn list_acls<F: AdminSeamFactory>(
     context: &ServerFunctionContext<'_, F>,
 ) -> Result<Vec<AclRow>, UiError> {
@@ -363,6 +411,8 @@ pub async fn list_acls<F: AdminSeamFactory>(
     reader.acls().await
 }
 
+/// # Errors
+/// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
 pub async fn list_users_with_reader<R: AdminReadSeam>(
     sessions: &SessionStore,
     raw_session_id: Option<&str>,
@@ -373,6 +423,8 @@ pub async fn list_users_with_reader<R: AdminReadSeam>(
     reader.users().await
 }
 
+/// # Errors
+/// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
 pub async fn list_users<F: AdminSeamFactory>(
     context: &ServerFunctionContext<'_, F>,
 ) -> Result<Vec<UserRow>, UiError> {
@@ -381,6 +433,8 @@ pub async fn list_users<F: AdminSeamFactory>(
     reader.users().await
 }
 
+/// # Errors
+/// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
 pub async fn list_quotas_with_reader<R: AdminReadSeam>(
     sessions: &SessionStore,
     raw_session_id: Option<&str>,
@@ -391,6 +445,8 @@ pub async fn list_quotas_with_reader<R: AdminReadSeam>(
     reader.quotas().await
 }
 
+/// # Errors
+/// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
 pub async fn list_quotas<F: AdminSeamFactory>(
     context: &ServerFunctionContext<'_, F>,
 ) -> Result<Vec<QuotaRow>, UiError> {
@@ -399,6 +455,8 @@ pub async fn list_quotas<F: AdminSeamFactory>(
     reader.quotas().await
 }
 
+/// # Errors
+/// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
 pub async fn list_log_dirs_with_reader<R: AdminReadSeam>(
     sessions: &SessionStore,
     raw_session_id: Option<&str>,
@@ -409,6 +467,8 @@ pub async fn list_log_dirs_with_reader<R: AdminReadSeam>(
     reader.log_dirs().await
 }
 
+/// # Errors
+/// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
 pub async fn list_log_dirs_with_context<F: AdminSeamFactory>(
     context: &ServerFunctionContext<'_, F>,
 ) -> Result<Vec<LogDirRow>, UiError> {
@@ -417,6 +477,8 @@ pub async fn list_log_dirs_with_context<F: AdminSeamFactory>(
     reader.log_dirs().await
 }
 
+/// # Errors
+/// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
 pub async fn create_topic_with_mutations<M: AdminMutationSeam>(
     sessions: &SessionStore,
     raw_session_id: Option<&str>,
@@ -429,6 +491,8 @@ pub async fn create_topic_with_mutations<M: AdminMutationSeam>(
     mutations.create_topic(request).await
 }
 
+/// # Errors
+/// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
 pub async fn create_topic_with_context<F: AdminSeamFactory>(
     context: &ServerFunctionContext<'_, F>,
     request: CreateTopicRequestDto,
@@ -438,6 +502,8 @@ pub async fn create_topic_with_context<F: AdminSeamFactory>(
     mutations.create_topic(request).await
 }
 
+/// # Errors
+/// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
 pub async fn delete_topic_with_context<F: AdminSeamFactory>(
     context: &ServerFunctionContext<'_, F>,
     request: DeleteTopicRequestDto,
@@ -447,6 +513,8 @@ pub async fn delete_topic_with_context<F: AdminSeamFactory>(
     mutations.delete_topic(request).await
 }
 
+/// # Errors
+/// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
 pub async fn create_partitions_with_context<F: AdminSeamFactory>(
     context: &ServerFunctionContext<'_, F>,
     request: CreatePartitionsRequestDto,
@@ -456,6 +524,8 @@ pub async fn create_partitions_with_context<F: AdminSeamFactory>(
     mutations.create_partitions(request).await
 }
 
+/// # Errors
+/// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
 pub async fn alter_configs_with_context<F: AdminSeamFactory>(
     context: &ServerFunctionContext<'_, F>,
     request: AlterConfigRequestDto,
@@ -465,6 +535,8 @@ pub async fn alter_configs_with_context<F: AdminSeamFactory>(
     mutations.alter_configs(request).await
 }
 
+/// # Errors
+/// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
 pub async fn create_acl_with_context<F: AdminSeamFactory>(
     context: &ServerFunctionContext<'_, F>,
     request: AclRequestDto,
@@ -474,6 +546,8 @@ pub async fn create_acl_with_context<F: AdminSeamFactory>(
     mutations.create_acl(request).await
 }
 
+/// # Errors
+/// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
 pub async fn delete_acl_with_context<F: AdminSeamFactory>(
     context: &ServerFunctionContext<'_, F>,
     request: AclRequestDto,
@@ -483,6 +557,8 @@ pub async fn delete_acl_with_context<F: AdminSeamFactory>(
     mutations.delete_acl(request).await
 }
 
+/// # Errors
+/// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
 pub async fn upsert_scram_sha512_user_with_context<F: AdminSeamFactory>(
     context: &ServerFunctionContext<'_, F>,
     request: ScramUserUpsertDto,
@@ -492,6 +568,8 @@ pub async fn upsert_scram_sha512_user_with_context<F: AdminSeamFactory>(
     mutations.upsert_scram_sha512_user(request).await
 }
 
+/// # Errors
+/// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
 pub async fn delete_scram_user_with_context<F: AdminSeamFactory>(
     context: &ServerFunctionContext<'_, F>,
     request: ScramUserDeleteDto,
@@ -501,6 +579,8 @@ pub async fn delete_scram_user_with_context<F: AdminSeamFactory>(
     mutations.delete_scram_user(request).await
 }
 
+/// # Errors
+/// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
 pub async fn upsert_quota_with_context<F: AdminSeamFactory>(
     context: &ServerFunctionContext<'_, F>,
     request: QuotaUpsertDto,
@@ -510,6 +590,8 @@ pub async fn upsert_quota_with_context<F: AdminSeamFactory>(
     mutations.upsert_quota(request).await
 }
 
+/// # Errors
+/// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
 pub async fn delete_quota_with_context<F: AdminSeamFactory>(
     context: &ServerFunctionContext<'_, F>,
     request: QuotaDeleteDto,
@@ -519,6 +601,8 @@ pub async fn delete_quota_with_context<F: AdminSeamFactory>(
     mutations.delete_quota(request).await
 }
 
+/// # Errors
+/// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
 pub async fn move_log_dir_with_context<F: AdminSeamFactory>(
     context: &ServerFunctionContext<'_, F>,
     request: LogDirMoveRequestDto,
@@ -535,6 +619,8 @@ pub struct BrokerAdminReadSeam {
 }
 
 impl BrokerAdminReadSeam {
+    /// # Errors
+    /// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
     pub fn from_session(cfg: &AdminUiConfig, record: &SessionRecord) -> Result<Self, UiError> {
         let Some(credentials) = &record.credentials else {
             return Err(UiError::NotAuthenticated);
@@ -615,6 +701,8 @@ impl AdminReadSeam for BrokerAdminReadSeam {
 pub struct BrokerAdminMutationSeam(BrokerAdminReadSeam);
 
 impl BrokerAdminMutationSeam {
+    /// # Errors
+    /// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
     pub fn from_session(cfg: &AdminUiConfig, record: &SessionRecord) -> Result<Self, UiError> {
         Ok(Self(BrokerAdminReadSeam::from_session(cfg, record)?))
     }

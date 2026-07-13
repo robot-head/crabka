@@ -245,6 +245,7 @@ async fn describe_partition(
 mod tests {
     use std::{net::SocketAddr, sync::Arc};
 
+    use assert2::assert;
     use crabka_log::Offset;
     use crabka_metadata::{MetadataImage, MetadataRecord, TopicRecord};
     use crabka_protocol::{
@@ -323,7 +324,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::too_many_lines)]
     async fn handle_error_scenarios_preserve_expected_rows() {
         type Case<'a> = (
             &'a str,
@@ -419,7 +419,7 @@ mod tests {
                 },
             ),
         ];
-        for (_case, authorizer, share_enabled, groups, expected) in cases {
+        for (case, authorizer, share_enabled, groups, expected) in cases {
             let (broker_handle, _dir) = start_broker(authorizer, share_enabled).await;
             let broker = broker_handle.broker_arc_for_test();
             let principal = principal();
@@ -432,7 +432,7 @@ mod tests {
                 .expect("handle");
             let resp = decode_response(&resp);
 
-            assert2::assert!(resp == expected);
+            assert!(resp == expected, "case: {case}");
             broker_handle.shutdown().await;
         }
     }
@@ -482,7 +482,7 @@ mod tests {
             }],
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         };
-        assert2::assert!(topic == expected);
+        assert!(topic == expected);
         broker_handle.shutdown().await;
     }
 }

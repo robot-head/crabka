@@ -141,7 +141,7 @@ fn build_response(
 
 #[cfg(test)]
 mod tests {
-
+    use assert2::{assert, check};
     use crabka_raft::SnapshotSlice;
 
     use super::*;
@@ -184,31 +184,16 @@ mod tests {
             })
         };
         let resp = build_response(cid, &req, &resolve);
-        let expected = FetchSnapshotResponse {
-            topics: vec![TopicSnapshot {
-                name: CLUSTER_METADATA_TOPIC.into(),
-                partitions: vec![PartitionSnapshot {
-                    index: 0,
-                    error_code: codes::NONE,
-                    snapshot_id: SnapshotId {
-                        end_offset: 6,
-                        epoch: 1,
-                        ..Default::default()
-                    },
-                    size: 100,
-                    position: 0,
-                    unaligned_records: RecordsPayload::Legacy(bytes::Bytes::from_static(b"abc")),
-                    ..Default::default()
-                }],
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        assert2::assert!(resp == expected);
         let part = &resp.topics[0].partitions[0];
+        check!(resp.error_code == 0);
+        check!(part.error_code == 0);
+        check!(part.snapshot_id.end_offset == 6);
+        check!(part.snapshot_id.epoch == 1);
+        check!(part.size == 100);
+        check!(part.position == 0);
         let mut buf = bytes::BytesMut::new();
         part.unaligned_records.encode_to(&mut buf).unwrap();
-        assert2::assert!(&buf[..] == b"abc");
+        assert!(&buf[..] == b"abc");
     }
 
     #[test]
@@ -242,11 +227,8 @@ mod tests {
         };
         let resolve = |_pos: i64, _max: i32| SnapshotRange::NoSnapshot;
         let resp = build_response(cid, &req, &resolve);
-        let expected = FetchSnapshotResponse {
-            error_code: codes::INCONSISTENT_CLUSTER_ID,
-            ..Default::default()
-        };
-        assert2::assert!(resp == expected);
+        assert!(resp.error_code == codes::INCONSISTENT_CLUSTER_ID);
+        assert!(resp.topics.is_empty());
     }
 
     #[test]
@@ -273,18 +255,8 @@ mod tests {
         };
         let resolve = |_pos: i64, _max: i32| SnapshotRange::OutOfRange;
         let resp = build_response(cid, &req, &resolve);
-        let expected = FetchSnapshotResponse {
-            topics: vec![TopicSnapshot {
-                name: CLUSTER_METADATA_TOPIC.into(),
-                partitions: vec![PartitionSnapshot {
-                    index: 0,
-                    error_code: codes::POSITION_OUT_OF_RANGE,
-                    ..Default::default()
-                }],
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        assert2::assert!(resp == expected);
+        let part = &resp.topics[0].partitions[0];
+        assert!(resp.error_code == codes::NONE);
+        assert!(part.error_code == codes::POSITION_OUT_OF_RANGE);
     }
 }

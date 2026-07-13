@@ -70,6 +70,8 @@ impl InFlightFile {
         }
     }
 
+    /// # Errors
+    /// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
     pub fn write(&self, data_dir: &Path) -> Result<(), StateError> {
         let path = path_of(data_dir);
         let tmp = path.with_extension("json.tmp");
@@ -79,6 +81,8 @@ impl InFlightFile {
         Ok(())
     }
 
+    /// # Errors
+    /// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
     pub fn load(data_dir: &Path) -> Result<Option<Self>, StateError> {
         let path = path_of(data_dir);
         match fs::read(&path) {
@@ -97,6 +101,8 @@ impl InFlightFile {
         }
     }
 
+    /// # Errors
+    /// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
     pub fn delete(data_dir: &Path) -> Result<(), StateError> {
         let path = path_of(data_dir);
         match fs::remove_file(&path) {

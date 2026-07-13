@@ -16,7 +16,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 1;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,11 +37,15 @@ impl Default for AlterPartitionReassignmentsResponse<'_> {
             error_code: 0i16,
             error_message: None,
             responses: Vec::new(),
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl AlterPartitionReassignmentsResponse<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::alter_partition_reassignments_response::AlterPartitionReassignmentsResponse
@@ -78,9 +83,9 @@ impl Encode for AlterPartitionReassignmentsResponse<'_> {
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message);
+                let () = put_compact_nullable_string(buf, self.error_message);
             } else {
-                put_nullable_string(buf, self.error_message);
+                let () = put_nullable_string(buf, self.error_message);
             }
         }
         if version >= 0 {
@@ -206,6 +211,10 @@ pub struct ReassignableTopicResponse<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl ReassignableTopicResponse<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::alter_partition_reassignments_response::ReassignableTopicResponse {
@@ -224,9 +233,9 @@ impl Encode for ReassignableTopicResponse<'_> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name);
+                let () = put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name);
+                let () = put_string(buf, self.name);
             }
         }
         if version >= 0 {
@@ -320,6 +329,10 @@ pub struct ReassignablePartitionResponse<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl ReassignablePartitionResponse<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::alter_partition_reassignments_response::ReassignablePartitionResponse {
@@ -342,9 +355,9 @@ impl Encode for ReassignablePartitionResponse<'_> {
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message);
+                let () = put_compact_nullable_string(buf, self.error_message);
             } else {
-                put_nullable_string(buf, self.error_message);
+                let () = put_nullable_string(buf, self.error_message);
             }
         }
         if flex {

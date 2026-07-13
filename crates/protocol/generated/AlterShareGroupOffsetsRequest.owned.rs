@@ -13,7 +13,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 0;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -33,9 +34,9 @@ impl Encode for AlterShareGroupOffsetsRequest {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.group_id);
+                let () = put_compact_string(buf, &self.group_id);
             } else {
-                put_string(buf, &self.group_id);
+                let () = put_string(buf, &self.group_id);
             }
         }
         if version >= 0 {
@@ -135,9 +136,9 @@ impl Encode for AlterShareGroupOffsetsRequestTopic {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.topic_name);
+                let () = put_compact_string(buf, &self.topic_name);
             } else {
-                put_string(buf, &self.topic_name);
+                let () = put_string(buf, &self.topic_name);
             }
         }
         if version >= 0 {
@@ -296,7 +297,7 @@ impl AlterShareGroupOffsetsRequestPartition {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(version: i16) -> ::serde_json::Value {
+pub fn default_json(_version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert(
         "groupId".to_string(),

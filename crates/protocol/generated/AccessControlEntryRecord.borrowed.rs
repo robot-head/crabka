@@ -11,7 +11,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 0;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -26,7 +27,11 @@ pub struct AccessControlEntryRecord<'a> {
     pub permission_type: i8,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl AccessControlEntryRecord<'_> {
+impl<'a> AccessControlEntryRecord<'a> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::access_control_entry_record::AccessControlEntryRecord {
         crate::owned::access_control_entry_record::AccessControlEntryRecord {
             id: (self.id),
@@ -40,6 +45,175 @@ impl AccessControlEntryRecord<'_> {
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
+    fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
+        if version >= 0 {
+            crate::primitives::uuid::put_uuid(buf, self.id);
+        }
+    }
+    fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
+        if version >= 0 {
+            put_i8(buf, self.resource_type);
+        }
+    }
+    fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
+        if version >= 0 {
+            if flex {
+                let () = put_compact_string(buf, self.resource_name);
+            } else {
+                let () = put_string(buf, self.resource_name);
+            }
+        }
+    }
+    fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
+        if version >= 0 {
+            put_i8(buf, self.pattern_type);
+        }
+    }
+    fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
+        if version >= 0 {
+            if flex {
+                let () = put_compact_string(buf, self.principal);
+            } else {
+                let () = put_string(buf, self.principal);
+            }
+        }
+    }
+    fn encode_field_5<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
+        if version >= 0 {
+            if flex {
+                let () = put_compact_string(buf, self.host);
+            } else {
+                let () = put_string(buf, self.host);
+            }
+        }
+    }
+    fn encode_field_6<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
+        if version >= 0 {
+            put_i8(buf, self.operation);
+        }
+    }
+    fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
+        if version >= 0 {
+            put_i8(buf, self.permission_type);
+        }
+    }
+    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {
+        if flex {
+            let tagged = WriteTaggedFields::new();
+            tagged.write(buf, &self.unknown_tagged_fields);
+        }
+    }
+    fn decode_field_0(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.id = crate::primitives::uuid::get_uuid(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_1(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.resource_type = get_i8(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_2(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.resource_name = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_3(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.pattern_type = get_i8(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_4(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.principal = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_5(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.host = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_6(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.operation = get_i8(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_7(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.permission_type = get_i8(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_tagged_fields(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        _version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if flex {
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
+        }
+        Ok(())
+    }
 }
 impl Encode for AccessControlEntryRecord<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
@@ -49,46 +223,15 @@ impl Encode for AccessControlEntryRecord<'_> {
             ));
         }
         let flex = is_flexible(version);
-        if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.id);
-        }
-        if version >= 0 {
-            put_i8(buf, self.resource_type);
-        }
-        if version >= 0 {
-            if flex {
-                put_compact_string(buf, self.resource_name);
-            } else {
-                put_string(buf, self.resource_name);
-            }
-        }
-        if version >= 0 {
-            put_i8(buf, self.pattern_type);
-        }
-        if version >= 0 {
-            if flex {
-                put_compact_string(buf, self.principal);
-            } else {
-                put_string(buf, self.principal);
-            }
-        }
-        if version >= 0 {
-            if flex {
-                put_compact_string(buf, self.host);
-            } else {
-                put_string(buf, self.host);
-            }
-        }
-        if version >= 0 {
-            put_i8(buf, self.operation);
-        }
-        if version >= 0 {
-            put_i8(buf, self.permission_type);
-        }
-        if flex {
-            let tagged = WriteTaggedFields::new();
-            tagged.write(buf, &self.unknown_tagged_fields);
-        }
+        self.encode_field_0(buf, version, flex);
+        self.encode_field_1(buf, version, flex);
+        self.encode_field_2(buf, version, flex);
+        self.encode_field_3(buf, version, flex);
+        self.encode_field_4(buf, version, flex);
+        self.encode_field_5(buf, version, flex);
+        self.encode_field_6(buf, version, flex);
+        self.encode_field_7(buf, version, flex);
+        self.encode_tagged_fields(buf, version, flex);
         Ok(())
     }
     fn encoded_len(&self, version: i16) -> usize {
@@ -146,45 +289,15 @@ impl<'de> DecodeBorrow<'de> for AccessControlEntryRecord<'de> {
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 {
-            out.id = crate::primitives::uuid::get_uuid(buf)?;
-        }
-        if version >= 0 {
-            out.resource_type = get_i8(buf)?;
-        }
-        if version >= 0 {
-            out.resource_name = if flex {
-                get_compact_string_borrowed(buf)?
-            } else {
-                get_string_borrowed(buf)?
-            };
-        }
-        if version >= 0 {
-            out.pattern_type = get_i8(buf)?;
-        }
-        if version >= 0 {
-            out.principal = if flex {
-                get_compact_string_borrowed(buf)?
-            } else {
-                get_string_borrowed(buf)?
-            };
-        }
-        if version >= 0 {
-            out.host = if flex {
-                get_compact_string_borrowed(buf)?
-            } else {
-                get_string_borrowed(buf)?
-            };
-        }
-        if version >= 0 {
-            out.operation = get_i8(buf)?;
-        }
-        if version >= 0 {
-            out.permission_type = get_i8(buf)?;
-        }
-        if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
-        }
+        Self::decode_field_0(&mut out, buf, version, flex)?;
+        Self::decode_field_1(&mut out, buf, version, flex)?;
+        Self::decode_field_2(&mut out, buf, version, flex)?;
+        Self::decode_field_3(&mut out, buf, version, flex)?;
+        Self::decode_field_4(&mut out, buf, version, flex)?;
+        Self::decode_field_5(&mut out, buf, version, flex)?;
+        Self::decode_field_6(&mut out, buf, version, flex)?;
+        Self::decode_field_7(&mut out, buf, version, flex)?;
+        Self::decode_tagged_fields(&mut out, buf, version, flex)?;
         Ok(out)
     }
 }

@@ -67,7 +67,6 @@ struct PendingPartition {
     out: PartitionData,
 }
 
-#[allow(clippy::too_many_lines)]
 #[tracing::instrument(
     name = "handle_share_fetch",
     level = "info",
@@ -86,44 +85,20 @@ pub(crate) async fn handle(
     let req = ShareFetchRequest::decode(&mut cur, version)?;
 
     let cfg = broker.config.share_group.clone();
-    let lock_dur = cfg.record_lock_duration;
-    let lock_timeout_ms = i32::try_from(lock_dur.as_millis()).unwrap_or(i32::MAX);
+    let lock_timeout_ms = acquisition_timeout_ms(&cfg);
 
-    // Feature gate: a broker with share groups disabled does not implement the
-    // RPC at all.
-    if !cfg.enable {
-        return encode_error_response(version, codes::UNSUPPORTED_VERSION, lock_timeout_ms);
-    }
-
-    let group = req.group_id.clone().unwrap_or_default();
-    let member = req.member_id.clone().unwrap_or_default();
-
-    // Share-session epoch validation (open/close/incremental).
-    if let Err(code) =
-        broker
-            .share_partition_leaders
-            .validate_session(&group, &member, req.share_session_epoch)
-    {
-        return encode_error_response(version, code, lock_timeout_ms);
-    }
+    let (group, member) = match validate_request(broker, &req, &cfg) {
+        Ok(identity) => identity,
+        Err(code) => return encode_error_response(version, code, lock_timeout_ms),
+    };
 
     // Best-effort membership check: if the group has a live share actor, the
     // member must be present in its describe view. When no actor exists yet
     // (e.g. the group was never joined) we are lenient and skip the check —
     // the Task-7 tests always join via `ShareGroupHeartbeat` first, so a
     // present actor with an absent member is the only hard failure.
-    if let Some(handle) = broker.group_coordinator.find_share(&group) {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        if handle
-            .tx
-            .send(ShareGroupActorMessage::Describe { reply: tx })
-            .await
-            .is_ok()
-            && let Ok(view) = rx.await
-            && !view.members.iter().any(|m| m.member_id == member)
-        {
-            return encode_error_response(version, codes::UNKNOWN_MEMBER_ID, lock_timeout_ms);
-        }
+    if !member_is_valid(broker, &group, &member).await {
+        return encode_error_response(version, codes::UNKNOWN_MEMBER_ID, lock_timeout_ms);
     }
 
     let mgr = broker.share_partition_leaders.clone();
@@ -212,47 +187,32 @@ pub(crate) async fn handle(
         }
     }
 
-    // First acquire pass.
-    let mut total_acquired = acquire_pass(
+    let acquire = AcquireContext {
         broker,
-        &mgr,
-        &group,
-        &member,
-        req.max_records,
-        req.max_bytes,
-        req.is_renew_ack,
-        &cfg,
-        &mut pending,
-        true,
-    )
-    .await?;
+        manager: &mgr,
+        group: &group,
+        member: &member,
+        max_records: req.max_records,
+        max_bytes: req.max_bytes,
+        is_renew_ack: req.is_renew_ack,
+        config: &cfg,
+    };
 
-    // Long-poll: nothing acquired and the client asked to wait. Park on the
-    // leadable partitions' append/HW-advance notifies, then retry the acquire
-    // pass once. (Acks were already applied on the first pass; don't re-apply.)
-    if total_acquired == 0 && req.max_wait_ms > 0 {
-        long_poll(broker, &pending, req.max_wait_ms).await;
-        total_acquired = acquire_pass(
-            broker,
-            &mgr,
-            &group,
-            &member,
-            req.max_records,
-            req.max_bytes,
-            req.is_renew_ack,
-            &cfg,
-            &mut pending,
-            false,
-        )
-        .await?;
-    }
-    let _ = total_acquired;
+    acquire_records(&acquire, &mut pending, req.max_wait_ms).await?;
 
     // Group pending rows back into per-topic responses, preserving first-seen
     // topic order.
     let responses = group_responses(pending);
 
-    let resp = ShareFetchResponse {
+    encode_success_response(version, lock_timeout_ms, responses)
+}
+
+fn encode_success_response(
+    version: i16,
+    lock_timeout_ms: i32,
+    responses: Vec<ShareFetchableTopicResponse>,
+) -> Result<Bytes, BrokerError> {
+    let response = ShareFetchResponse {
         throttle_time_ms: 0,
         error_code: codes::NONE,
         error_message: None,
@@ -260,7 +220,66 @@ pub(crate) async fn handle(
         responses,
         ..Default::default()
     };
-    crate::handlers::encode_response(&resp, version)
+    crate::handlers::encode_response(&response, version)
+}
+
+async fn acquire_records(
+    context: &AcquireContext<'_>,
+    pending: &mut [PendingPartition],
+    max_wait_ms: i32,
+) -> Result<(), BrokerError> {
+    let acquired = acquire_pass(context, pending, true).await?;
+    if acquired == 0 && max_wait_ms > 0 {
+        long_poll(context.broker, pending, max_wait_ms).await;
+        acquire_pass(context, pending, false).await?;
+    }
+    Ok(())
+}
+
+fn validate_request(
+    broker: &Broker,
+    request: &ShareFetchRequest,
+    config: &crate::coordinator::unified::share::config::ShareGroupConfig,
+) -> Result<(String, String), i16> {
+    if !config.enable {
+        return Err(codes::UNSUPPORTED_VERSION);
+    }
+    let group = request.group_id.clone().unwrap_or_default();
+    let member = request.member_id.clone().unwrap_or_default();
+    broker.share_partition_leaders.validate_session(
+        &group,
+        &member,
+        request.share_session_epoch,
+    )?;
+    Ok((group, member))
+}
+
+fn acquisition_timeout_ms(
+    config: &crate::coordinator::unified::share::config::ShareGroupConfig,
+) -> i32 {
+    i32::try_from(config.record_lock_duration.as_millis()).unwrap_or(i32::MAX)
+}
+
+async fn member_is_valid(broker: &Broker, group: &str, member: &str) -> bool {
+    let Some(handle) = broker.group_coordinator.find_share(group) else {
+        return true;
+    };
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    if handle
+        .tx
+        .send(ShareGroupActorMessage::Describe { reply: tx })
+        .await
+        .is_err()
+    {
+        return true;
+    }
+    match rx.await {
+        Ok(view) => view
+            .members
+            .iter()
+            .any(|candidate| candidate.member_id == member),
+        Err(_) => true,
+    }
 }
 
 /// Collect the piggybacked acknowledgement batches off a request partition into
@@ -280,19 +299,33 @@ fn collect_ack_batches(fp: &FetchPartition) -> Vec<AckBatch> {
 /// the partition's last stable offset so uncommitted records are never
 /// acquired. Returns the total number of offsets acquired across all partitions
 /// in this pass.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-async fn acquire_pass(
-    broker: &Broker,
-    mgr: &Arc<crate::share_partition::manager::SharePartitionLeaderManager>,
-    group: &str,
-    member: &str,
+#[derive(Clone, Copy)]
+struct AcquireContext<'a> {
+    broker: &'a Broker,
+    manager: &'a Arc<crate::share_partition::manager::SharePartitionLeaderManager>,
+    group: &'a str,
+    member: &'a str,
     max_records: i32,
     max_bytes: i32,
     is_renew_ack: bool,
-    cfg: &crate::coordinator::unified::share::config::ShareGroupConfig,
+    config: &'a crate::coordinator::unified::share::config::ShareGroupConfig,
+}
+
+async fn acquire_pass(
+    context: &AcquireContext<'_>,
     pending: &mut [PendingPartition],
     apply_acks: bool,
 ) -> Result<i64, BrokerError> {
+    let &AcquireContext {
+        broker,
+        manager: mgr,
+        group,
+        member,
+        max_records,
+        max_bytes,
+        is_renew_ack,
+        config: cfg,
+    } = context;
     let now = Instant::now();
     let read_committed = matches!(
         cfg.isolation_level,
@@ -376,45 +409,7 @@ async fn acquire_pass(
         );
 
         if !acquired.is_empty() {
-            // `partition_max_bytes` is a v0-only ShareFetch field; at the
-            // supported versions (v1+, KIP-932) it is absent and decodes to 0.
-            // A 0 read budget makes `read_raw` read only one batch header's
-            // worth of bytes, which cannot skip a leading multi-record batch to
-            // reach an acquired offset that starts a later batch — yielding an
-            // empty read for a genuinely acquired range. Fall back to the
-            // request-level `max_bytes` budget when no per-partition cap is set.
-            let read_budget = if p.partition_max_bytes > 0 {
-                p.partition_max_bytes
-            } else {
-                max_bytes
-            };
-            // Read each acquired range independently (clamped at `upper`) and
-            // concatenate the verbatim bytes. Contiguous ranges still produce
-            // one logical blob; bytes in any gap between ranges are excluded.
-            let mut blob = BytesMut::new();
-            for r in &acquired {
-                let limit = (r.last + 1).min(upper);
-                if let Some(bytes) = read_acquired_bytes(&part, r.first, limit, read_budget).await?
-                {
-                    blob.extend_from_slice(&bytes);
-                }
-            }
-            if !blob.is_empty() {
-                p.out.records = Some(RecordsPayload::Raw(blob.freeze()));
-            }
-            p.out.acquired_records = acquired
-                .iter()
-                .map(|r| AcquiredRecords {
-                    first_offset: r.first.0,
-                    last_offset: r.last.0,
-                    delivery_count: r.delivery_count,
-                    ..Default::default()
-                })
-                .collect();
-            total += acquired
-                .iter()
-                .map(|r| r.last.0 - r.first.0 + 1)
-                .sum::<i64>();
+            total += populate_acquired_response(p, &part, &acquired, upper, max_bytes).await?;
         }
 
         p.out.error_code = codes::NONE;
@@ -422,6 +417,46 @@ async fn acquire_pass(
             .await;
     }
     Ok(total)
+}
+
+async fn populate_acquired_response(
+    pending: &mut PendingPartition,
+    partition: &Arc<crate::partition::Partition>,
+    acquired: &[crate::share_partition::state::AcquiredRange],
+    upper: Offset,
+    request_max_bytes: i32,
+) -> Result<i64, BrokerError> {
+    // The per-partition cap is absent at supported protocol versions and
+    // decodes to zero, so fall back to the request-wide byte budget.
+    let read_budget = if pending.partition_max_bytes > 0 {
+        pending.partition_max_bytes
+    } else {
+        request_max_bytes
+    };
+    let mut blob = BytesMut::new();
+    for range in acquired {
+        let limit = (range.last + 1).min(upper);
+        if let Some(bytes) = read_acquired_bytes(partition, range.first, limit, read_budget).await?
+        {
+            blob.extend_from_slice(&bytes);
+        }
+    }
+    if !blob.is_empty() {
+        pending.out.records = Some(RecordsPayload::Raw(blob.freeze()));
+    }
+    pending.out.acquired_records = acquired
+        .iter()
+        .map(|range| AcquiredRecords {
+            first_offset: range.first.0,
+            last_offset: range.last.0,
+            delivery_count: range.delivery_count,
+            ..Default::default()
+        })
+        .collect();
+    Ok(acquired
+        .iter()
+        .map(|range| range.last.0 - range.first.0 + 1)
+        .sum())
 }
 
 /// Apply a single acknowledgement batch to the state machine. Each
@@ -569,7 +604,7 @@ fn encode_error_response(
 
 #[cfg(test)]
 mod tests {
-
+    use assert2::assert;
     use crabka_protocol::{
         UnknownTaggedFields,
         owned::{share_fetch_request::AcknowledgementBatch, share_fetch_response},
@@ -601,7 +636,7 @@ mod tests {
             node_endpoints: Vec::new(),
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected);
     }
 
     #[test]
@@ -627,11 +662,10 @@ mod tests {
 
         let batches = collect_ack_batches(&partition);
 
-        assert2::assert!(batches == vec![(10, 12, vec![0, 1, 1]), (30, 30, Vec::new())]);
+        assert!(batches == vec![(10, 12, vec![0, 1, 1]), (30, 30, Vec::new())]);
     }
 
     #[test]
-    #[allow(clippy::too_many_lines)]
     fn group_responses_preserves_topic_order_and_partition_fields() {
         let first_topic = uuid::Uuid::from_u128(0xA1);
         let second_topic = uuid::Uuid::from_u128(0xB2);
@@ -758,6 +792,6 @@ mod tests {
                 unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
             },
         ];
-        assert2::assert!(responses == expected);
+        assert!(responses == expected);
     }
 }

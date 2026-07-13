@@ -65,8 +65,7 @@
 //!     tokio::runtime::Handle::current(),
 //!     PathBuf::from("/var/lib/crabka/rlmm-cache"),
 //!     Duration::from_secs(30),
-//! )
-//! .await?;
+//! )?;
 //!
 //! manager.reconcile_assignment(&[0, 1]).await;
 //! # Ok(())

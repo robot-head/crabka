@@ -1,4 +1,4 @@
-//! JVM-exact `suppress`-buffer changelog VALUE codec.
+﻿//! JVM-exact `suppress`-buffer changelog VALUE codec.
 //!
 //! When a `KTable.suppress(...)` buffer has logging enabled, each buffered entry
 //! is logged to a changelog topic. The changelog KEY is the record's serialized
@@ -231,7 +231,7 @@ mod tests {
     #[test]
     fn wc_first_matches_jvm_bytes() {
         let bytes = serialize_buffer_change(&ctx(10), None, None, Some(&count(1)), 10);
-        assert2::assert!(hex(&bytes) == WC_FIRST);
+        assert_eq!(hex(&bytes), WC_FIRST);
     }
 
     #[test]
@@ -243,13 +243,13 @@ mod tests {
             Some(&count(2)),
             12,
         );
-        assert2::assert!(hex(&bytes) == WC_CHANGE);
+        assert_eq!(hex(&bytes), WC_CHANGE);
     }
 
     #[test]
     fn tombstone_matches_jvm_bytes() {
         let bytes = serialize_buffer_change(&ctx(20), Some(&count(1)), Some(&count(1)), None, 20);
-        assert2::assert!(hex(&bytes) == TOMBSTONE);
+        assert_eq!(hex(&bytes), TOMBSTONE);
     }
 
     #[test]
@@ -257,22 +257,18 @@ mod tests {
         let mut b = BytesMut::new();
         ctx(10).write(&mut b);
         // ts:8 ‖ off:8 ‖ part:4 ‖ topicLen:4 ‖ "in":2 ‖ hdrs:4 = 30
-        assert2::assert!(b.len() == 30);
+        assert_eq!(b.len(), 30);
     }
 
     #[test]
     fn round_trips_wc_first() {
         let bytes = serialize_buffer_change(&ctx(10), None, None, Some(&count(1)), 10);
         let d = deserialize_buffer_change(&bytes);
-        assert2::assert!(
-            d == BufferedChange {
-                ctx: ctx(10),
-                prior: None,
-                old: None,
-                new: Some(count(1)),
-                buffer_time: 10,
-            }
-        );
+        assert_eq!(d.ctx, ctx(10));
+        assert_eq!(d.prior, None);
+        assert_eq!(d.old, None);
+        assert_eq!(d.new, Some(count(1)));
+        assert_eq!(d.buffer_time, 10);
     }
 
     #[test]
@@ -286,30 +282,19 @@ mod tests {
         );
         let d = deserialize_buffer_change(&bytes);
         // The -2 alias decodes old back to a copy of prior.
-        assert2::assert!(
-            d == BufferedChange {
-                ctx: ctx(12),
-                prior: Some(count(1)),
-                old: Some(count(1)),
-                new: Some(count(2)),
-                buffer_time: 12,
-            }
-        );
+        assert_eq!(d.prior, Some(count(1)));
+        assert_eq!(d.old, Some(count(1)));
+        assert_eq!(d.new, Some(count(2)));
+        assert_eq!(d.buffer_time, 12);
     }
 
     #[test]
     fn round_trips_tombstone() {
         let bytes = serialize_buffer_change(&ctx(20), Some(&count(1)), Some(&count(1)), None, 20);
         let d = deserialize_buffer_change(&bytes);
-        assert2::assert!(
-            d == BufferedChange {
-                ctx: ctx(20),
-                prior: Some(count(1)),
-                old: Some(count(1)),
-                new: None,
-                buffer_time: 20,
-            }
-        );
+        assert_eq!(d.new, None);
+        assert_eq!(d.old, Some(count(1)));
+        assert_eq!(d.buffer_time, 20);
     }
 
     #[test]
@@ -323,15 +308,10 @@ mod tests {
             33,
         );
         let d = deserialize_buffer_change(&bytes);
-        assert2::assert!(
-            d == BufferedChange {
-                ctx: ctx(33),
-                prior: Some(count(7)),
-                old: Some(count(9)),
-                new: Some(count(11)),
-                buffer_time: 33,
-            }
-        );
+        assert_eq!(d.prior, Some(count(7)));
+        assert_eq!(d.old, Some(count(9)));
+        assert_eq!(d.new, Some(count(11)));
+        assert_eq!(d.buffer_time, 33);
     }
 
     #[test]
@@ -344,14 +324,8 @@ mod tests {
         };
         let bytes = serialize_buffer_change(&c, None, Some(&count(5)), Some(&count(6)), 100);
         let d = deserialize_buffer_change(&bytes);
-        assert2::assert!(
-            d == BufferedChange {
-                ctx: c,
-                prior: None,
-                old: Some(count(5)),
-                new: Some(count(6)),
-                buffer_time: 100,
-            }
-        );
+        assert_eq!(d.ctx, c);
+        assert_eq!(d.old, Some(count(5)));
+        assert_eq!(d.new, Some(count(6)));
     }
 }

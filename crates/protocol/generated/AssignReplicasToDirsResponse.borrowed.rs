@@ -8,7 +8,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 0;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -19,6 +20,10 @@ pub struct AssignReplicasToDirsResponse {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl AssignReplicasToDirsResponse {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::assign_replicas_to_dirs_response::AssignReplicasToDirsResponse {
@@ -145,6 +150,10 @@ pub struct DirectoryData {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl DirectoryData {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::assign_replicas_to_dirs_response::DirectoryData {
         crate::owned::assign_replicas_to_dirs_response::DirectoryData {
             id: (self.id),
@@ -238,6 +247,10 @@ pub struct TopicData {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl TopicData {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::assign_replicas_to_dirs_response::TopicData {
         crate::owned::assign_replicas_to_dirs_response::TopicData {
             topic_id: (self.topic_id),
@@ -337,6 +350,10 @@ pub struct PartitionData {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl PartitionData {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::assign_replicas_to_dirs_response::PartitionData {
         crate::owned::assign_replicas_to_dirs_response::PartitionData {
             partition_index: (self.partition_index),

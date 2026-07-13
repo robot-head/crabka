@@ -403,7 +403,7 @@ fn parse_scope(name: &str) -> crabka_traceql::TagScope {
 /// Boot the query-frontend role: build the HTTP querier pool + a block catalog,
 /// then serve the router on `cfg.listen_addr` until `shutdown` fires.
 ///
-/// `catalog` is the production [`TraceIndexCatalog`] (or any [`BlockCatalog`]).
+/// `catalog` is the production [`TraceIndexCatalog`] (or any compatible block catalog).
 ///
 /// # Errors
 /// Propagates bind/serve `std::io` errors and backend-construction failures.

@@ -51,6 +51,8 @@ impl AnomalyStore {
         }
     }
 
+    /// # Errors
+    /// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
     pub fn open(data_dir: &Path, capacity: usize) -> Result<Self, StoreError> {
         fs::create_dir_all(data_dir)?;
         let path = data_dir.join(DEFAULT_FILENAME);
@@ -78,6 +80,8 @@ impl AnomalyStore {
     /// Returns `(id, is_new)`. `is_new = true` means a fresh record was
     /// inserted, so the caller's tick loop may fire auto-trigger; `false`
     /// means an existing open record was refreshed in place (dedup).
+    /// # Panics
+    /// Panics if an internal lock is poisoned or validated cluster state is missing an assignment required by the plan.
     pub fn upsert_open(
         &self,
         kind: AnomalyKind,
@@ -117,6 +121,8 @@ impl AnomalyStore {
         result
     }
 
+    /// # Panics
+    /// Panics if an internal lock is poisoned or validated cluster state is missing an assignment required by the plan.
     pub fn mark_resolved(&self, kind: AnomalyKind, key: &AnomalyKey, now_ms: i64) -> bool {
         let flipped = {
             let mut q = self.inner.lock().expect("AnomalyStore mutex poisoned");
@@ -133,6 +139,8 @@ impl AnomalyStore {
         flipped
     }
 
+    /// # Panics
+    /// Panics if an internal lock is poisoned or validated cluster state is missing an assignment required by the plan.
     pub fn set_triggered_proposal(&self, id: &str, proposal_id: String, mute_until_ms: i64) {
         let updated = {
             let mut q = self.inner.lock().expect("AnomalyStore mutex poisoned");
@@ -150,6 +158,8 @@ impl AnomalyStore {
     }
 
     #[must_use]
+    /// # Panics
+    /// Panics if an internal lock is poisoned or validated cluster state is missing an assignment required by the plan.
     pub fn find_open(&self, kind: AnomalyKind, key: &AnomalyKey) -> Option<Anomaly> {
         let q = self.inner.lock().expect("AnomalyStore mutex poisoned");
         q.iter()
@@ -159,12 +169,16 @@ impl AnomalyStore {
     }
 
     #[must_use]
+    /// # Panics
+    /// Panics if an internal lock is poisoned or validated cluster state is missing an assignment required by the plan.
     pub fn get(&self, id: &str) -> Option<Anomaly> {
         let q = self.inner.lock().expect("AnomalyStore mutex poisoned");
         q.iter().find(|a| a.id == id).cloned()
     }
 
     #[must_use]
+    /// # Panics
+    /// Panics if an internal lock is poisoned or validated cluster state is missing an assignment required by the plan.
     pub fn list(&self, limit: usize, include_resolved: bool) -> Vec<Anomaly> {
         let q = self.inner.lock().expect("AnomalyStore mutex poisoned");
         let n = if limit == 0 {

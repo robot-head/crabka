@@ -8,13 +8,16 @@ use crate::{
 
 /// Decode a `STRING` (non-flexible) borrowing from the input buffer.
 /// Wire: INT16 length (≥0), then `length` UTF-8 bytes. Length −1 = null (error here).
+/// # Errors
+/// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
+/// # Panics
+/// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
 pub fn get_string_borrowed<'de>(buf: &mut &'de [u8]) -> Result<&'de str, ProtocolError> {
     let len = get_i16(buf)?;
     if len < 0 {
         return Err(ProtocolError::InvalidValue("non-nullable STRING was null"));
     }
-    #[allow(clippy::cast_sign_loss)]
-    let n = len as usize;
+    let n = usize::try_from(len).expect("non-negative string length must fit in usize");
     if buf.len() < n {
         return Err(ProtocolError::UnexpectedEof {
             needed: n - buf.len(),
@@ -26,6 +29,10 @@ pub fn get_string_borrowed<'de>(buf: &mut &'de [u8]) -> Result<&'de str, Protoco
 }
 
 /// Decode a nullable `STRING` (non-flexible) borrowing from the input buffer.
+/// # Errors
+/// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
+/// # Panics
+/// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
 pub fn get_nullable_string_borrowed<'de>(
     buf: &mut &'de [u8],
 ) -> Result<Option<&'de str>, ProtocolError> {
@@ -33,8 +40,7 @@ pub fn get_nullable_string_borrowed<'de>(
     if len < 0 {
         return Ok(None);
     }
-    #[allow(clippy::cast_sign_loss)]
-    let n = len as usize;
+    let n = usize::try_from(len).expect("non-negative string length must fit in usize");
     if buf.len() < n {
         return Err(ProtocolError::UnexpectedEof {
             needed: n - buf.len(),
@@ -49,6 +55,8 @@ pub fn get_nullable_string_borrowed<'de>(
 
 /// Decode a `COMPACT_STRING` borrowing from the input buffer.
 /// Requires a contiguous buffer (i.e. `&[u8]`).
+/// # Errors
+/// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
 pub fn get_compact_string_borrowed<'de>(buf: &mut &'de [u8]) -> Result<&'de str, ProtocolError> {
     let raw = get_uvarint(buf)?;
     if raw == 0 {
@@ -67,6 +75,8 @@ pub fn get_compact_string_borrowed<'de>(buf: &mut &'de [u8]) -> Result<&'de str,
     std::str::from_utf8(head).map_err(ProtocolError::InvalidUtf8)
 }
 
+/// # Errors
+/// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
 pub fn get_compact_nullable_string_borrowed<'de>(
     buf: &mut &'de [u8],
 ) -> Result<Option<&'de str>, ProtocolError> {
@@ -89,13 +99,16 @@ pub fn get_compact_nullable_string_borrowed<'de>(
 
 /// Decode `BYTES` (non-flexible) borrowing from the input buffer.
 /// Wire: INT32 length, then `length` bytes. Length −1 = null (error here).
+/// # Errors
+/// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
+/// # Panics
+/// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
 pub fn get_bytes_borrowed<'de>(buf: &mut &'de [u8]) -> Result<&'de [u8], ProtocolError> {
     let len = get_i32(buf)?;
     if len < 0 {
         return Err(ProtocolError::InvalidValue("non-nullable BYTES was null"));
     }
-    #[allow(clippy::cast_sign_loss)]
-    let n = len as usize;
+    let n = usize::try_from(len).expect("non-negative bytes length must fit in usize");
     if buf.len() < n {
         return Err(ProtocolError::UnexpectedEof {
             needed: n - buf.len(),
@@ -107,6 +120,10 @@ pub fn get_bytes_borrowed<'de>(buf: &mut &'de [u8]) -> Result<&'de [u8], Protoco
 }
 
 /// Decode nullable `BYTES` (non-flexible) borrowing from the input buffer.
+/// # Errors
+/// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
+/// # Panics
+/// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
 pub fn get_nullable_bytes_borrowed<'de>(
     buf: &mut &'de [u8],
 ) -> Result<Option<&'de [u8]>, ProtocolError> {
@@ -114,8 +131,7 @@ pub fn get_nullable_bytes_borrowed<'de>(
     if len < 0 {
         return Ok(None);
     }
-    #[allow(clippy::cast_sign_loss)]
-    let n = len as usize;
+    let n = usize::try_from(len).expect("non-negative bytes length must fit in usize");
     if buf.len() < n {
         return Err(ProtocolError::UnexpectedEof {
             needed: n - buf.len(),
@@ -127,6 +143,8 @@ pub fn get_nullable_bytes_borrowed<'de>(
 }
 
 /// Decode `COMPACT_BYTES` (flexible) borrowing from the input buffer.
+/// # Errors
+/// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
 pub fn get_compact_bytes_borrowed<'de>(buf: &mut &'de [u8]) -> Result<&'de [u8], ProtocolError> {
     let raw = get_uvarint(buf)?;
     if raw == 0 {
@@ -146,6 +164,8 @@ pub fn get_compact_bytes_borrowed<'de>(buf: &mut &'de [u8]) -> Result<&'de [u8],
 }
 
 /// Decode nullable `COMPACT_BYTES` (flexible) borrowing from the input buffer.
+/// # Errors
+/// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
 pub fn get_compact_nullable_bytes_borrowed<'de>(
     buf: &mut &'de [u8],
 ) -> Result<Option<&'de [u8]>, ProtocolError> {

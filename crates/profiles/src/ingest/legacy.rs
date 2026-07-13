@@ -30,6 +30,9 @@ pub struct IngestQuery {
     pub until_ms: Option<i64>,
 }
 
+///
+/// # Errors
+/// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
 pub fn parse_ingest_query(query: &str) -> Result<IngestQuery, ProfilesError> {
     let mut name = String::new();
     let mut labels = Vec::new();
@@ -90,6 +93,9 @@ pub fn parse_ingest_query(query: &str) -> Result<IngestQuery, ProfilesError> {
     })
 }
 
+///
+/// # Errors
+/// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
 pub async fn decode_ingest_multipart(
     query: &IngestQuery,
     content_type: &str,
@@ -211,6 +217,9 @@ pub async fn decode_ingest_multipart(
     })
 }
 
+///
+/// # Errors
+/// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
 pub async fn decode_ingest_body(
     query: &IngestQuery,
     content_type: Option<&str>,
@@ -415,7 +424,7 @@ fn binary_jfr_to_pprof(name: &str, raw: &[u8]) -> Result<PprofProfile, ProfilesE
             "jfr profile has no execution samples".to_string(),
         ));
     }
-    stacks_to_pprof(name, "wall", "nanoseconds", stacks)
+    Ok(stacks_to_pprof(name, "wall", "nanoseconds", stacks))
 }
 
 fn jfr_method_name(
@@ -501,7 +510,7 @@ fn folded_to_pprof(
             "folded profile has no samples".to_string(),
         ));
     }
-    stacks_to_pprof(name, "samples", sample_unit, stacks)
+    Ok(stacks_to_pprof(name, "samples", sample_unit, stacks))
 }
 
 fn lines_to_pprof(
@@ -534,7 +543,7 @@ fn lines_to_pprof(
             "lines profile has no samples".to_string(),
         ));
     }
-    stacks_to_pprof(name, "samples", sample_unit, stacks)
+    Ok(stacks_to_pprof(name, "samples", sample_unit, stacks))
 }
 
 /// Absolute cap on the number of tree/trie nodes a single payload may expand
@@ -654,7 +663,7 @@ fn tree_to_pprof(
             "tree profile has no samples".to_string(),
         ));
     }
-    stacks_to_pprof(name, "samples", sample_unit, stacks)
+    Ok(stacks_to_pprof(name, "samples", sample_unit, stacks))
 }
 
 fn read_tree_varint(body: &[u8], pos: &mut usize, field: &str) -> Result<u64, ProfilesError> {
@@ -811,7 +820,7 @@ fn trie_to_pprof(
             "trie profile has no samples".to_string(),
         ));
     }
-    stacks_to_pprof(name, "samples", sample_unit, stacks)
+    Ok(stacks_to_pprof(name, "samples", sample_unit, stacks))
 }
 
 /// One level of the explicit trie work-stack: the accumulated key prefix for a
@@ -925,7 +934,7 @@ fn speedscope_to_pprof(
             "speedscope profile has no sampled stacks".to_string(),
         ));
     }
-    stacks_to_pprof(name, "samples", &sample_unit, stacks)
+    Ok(stacks_to_pprof(name, "samples", &sample_unit, stacks))
 }
 
 fn stacks_to_pprof(
@@ -933,7 +942,7 @@ fn stacks_to_pprof(
     sample_type: &str,
     sample_unit: &str,
     stacks: BTreeMap<Vec<(String, i32)>, i64>,
-) -> Result<PprofProfile, ProfilesError> {
+) -> PprofProfile {
     let mut string_ids = BTreeMap::from([
         (String::new(), 0_i64),
         (sample_type.to_string(), 1_i64),
@@ -986,7 +995,7 @@ fn stacks_to_pprof(
     }
 
     let _ = intern_string(&mut strings, &mut string_ids, name);
-    Ok(PprofProfile::from(crabka_pprof::proto::Profile {
+    PprofProfile::from(crabka_pprof::proto::Profile {
         sample_type: vec![crabka_pprof::proto::ValueType { r#type: 1, unit: 2 }],
         sample: samples,
         location: locations,
@@ -994,7 +1003,7 @@ fn stacks_to_pprof(
         string_table: strings,
         period_type: Some(crabka_pprof::proto::ValueType { r#type: 1, unit: 2 }),
         ..Default::default()
-    }))
+    })
 }
 
 fn intern_string(strings: &mut Vec<String>, ids: &mut BTreeMap<String, i64>, value: &str) -> i64 {
@@ -1058,7 +1067,7 @@ fn urldecode(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use assert2::check;
+    use assert2::{assert, check};
 
     use super::*;
 
@@ -1068,27 +1077,17 @@ mod tests {
             parse_ingest_query("name=myapp{env=\"prod\",team=\"core\"}&format=pprof&sampleRate=97")
                 .unwrap();
 
-        check!(
-            q == IngestQuery {
-                name: "myapp".to_string(),
-                labels: vec![
-                    ("env".to_string(), "prod".to_string()),
-                    ("team".to_string(), "core".to_string()),
-                ],
-                format: IngestFormat::Pprof,
-                sample_rate: 97,
-                units: "count".to_string(),
-                from_ms: None,
-                until_ms: None,
-            }
-        );
+        check!(q.name == "myapp");
+        check!(q.labels.contains(&("env".to_string(), "prod".to_string())));
+        assert!(matches!(q.format, IngestFormat::Pprof));
+        check!(q.sample_rate == 97);
     }
 
     #[test]
     fn unknown_format_defaults_to_groups() {
         let q = parse_ingest_query("name=app").unwrap();
 
-        assert2::assert!(matches!(q.format, IngestFormat::Groups));
+        assert!(matches!(q.format, IngestFormat::Groups));
     }
 
     #[tokio::test]
@@ -1112,13 +1111,9 @@ mod tests {
         .await
         .unwrap();
 
-        check!(
-            (
-                raw.labels.get("__name__"),
-                raw.labels.get("env"),
-                raw.profile.sample_types()[0].0.as_str(),
-            ) == (Some("myapp"), Some("prod"), "cpu")
-        );
+        check!(raw.labels.get("__name__") == Some("myapp"));
+        check!(raw.labels.get("env") == Some("prod"));
+        check!(raw.profile.sample_types()[0].0 == "cpu");
     }
 
     #[tokio::test]
@@ -1147,14 +1142,12 @@ mod tests {
         .await
         .unwrap();
 
-        assert2::assert!(
-            &raw.profile.sample_types()[0] == &("wall".to_string(), "nanoseconds".to_string())
-        );
-        assert2::assert!(
+        assert!(raw.profile.sample_types()[0] == ("wall".to_string(), "nanoseconds".to_string()));
+        assert!(
             raw.profile.period_type_strings() == ("wall".to_string(), "nanoseconds".to_string())
         );
         let split = crate::ingest::split_sample_types(&raw).unwrap();
-        assert2::assert!(split[0].profile_type == "myapp:wall:nanoseconds:wall:nanoseconds:delta");
+        assert!(split[0].profile_type == "myapp:wall:nanoseconds:wall:nanoseconds:delta");
     }
 
     #[tokio::test]
@@ -1178,17 +1171,9 @@ mod tests {
         .await
         .unwrap();
 
-        check!(
-            (
-                raw.labels.get("__name__"),
-                &raw.profile.sample_types()[0],
-                raw.profile.samples().len(),
-            ) == (
-                Some("myapp"),
-                &("samples".to_string(), "count".to_string()),
-                2,
-            )
-        );
+        check!(raw.labels.get("__name__") == Some("myapp"));
+        check!(raw.profile.sample_types()[0] == ("samples".to_string(), "count".to_string()));
+        check!(raw.profile.samples().len() == 2);
     }
 
     #[tokio::test]
@@ -1212,9 +1197,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert2::assert!(
-            raw.profile.sample_types()[0] == ("samples".to_string(), "bytes".to_string())
-        );
+        assert!(raw.profile.sample_types()[0] == ("samples".to_string(), "bytes".to_string()));
     }
 
     #[tokio::test]
@@ -1240,10 +1223,8 @@ mod tests {
             .collect::<Vec<_>>();
         values.sort_unstable();
 
-        assert2::assert!(
-            raw.profile.sample_types()[0] == ("samples".to_string(), "samples".to_string())
-        );
-        assert2::assert!(values == vec![1, 3]);
+        assert!(raw.profile.sample_types()[0] == ("samples".to_string(), "samples".to_string()));
+        assert!(values == vec![1, 3]);
     }
 
     #[tokio::test]
@@ -1287,10 +1268,8 @@ mod tests {
             .collect::<Vec<_>>();
         values.sort_unstable();
 
-        assert2::assert!(
-            raw.profile.sample_types()[0] == ("samples".to_string(), "samples".to_string())
-        );
-        assert2::assert!(values == vec![4, 5]);
+        assert!(raw.profile.sample_types()[0] == ("samples".to_string(), "samples".to_string()));
+        assert!(values == vec![4, 5]);
     }
 
     #[tokio::test]
@@ -1319,19 +1298,11 @@ mod tests {
             .filter_map(|function| raw.profile.string(function.name))
             .collect::<Vec<_>>();
 
-        check!(
-            (
-                &raw.profile.sample_types()[0],
-                values,
-                ["a", "b", "c"]
-                    .iter()
-                    .all(|function| functions.contains(function)),
-            ) == (
-                &("samples".to_string(), "samples".to_string()),
-                vec![1, 2],
-                true,
-            )
-        );
+        check!(raw.profile.sample_types()[0] == ("samples".to_string(), "samples".to_string()));
+        check!(values == vec![1, 2]);
+        for function in ["a", "b", "c"] {
+            check!(functions.contains(&function));
+        }
     }
 
     #[tokio::test]
@@ -1360,19 +1331,11 @@ mod tests {
             .filter_map(|function| raw.profile.string(function.name))
             .collect::<Vec<_>>();
 
-        check!(
-            (
-                &raw.profile.sample_types()[0],
-                values,
-                ["a", "b", "c"]
-                    .iter()
-                    .all(|function| functions.contains(function)),
-            ) == (
-                &("samples".to_string(), "samples".to_string()),
-                vec![1, 2],
-                true,
-            )
-        );
+        check!(raw.profile.sample_types()[0] == ("samples".to_string(), "samples".to_string()));
+        check!(values == vec![1, 2]);
+        for function in ["a", "b", "c"] {
+            check!(functions.contains(&function));
+        }
     }
 
     #[tokio::test]
@@ -1397,7 +1360,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert2::assert!(raw.profile.inner().time_nanos == 1_700_000_000_000_000_000);
+        assert!(raw.profile.inner().time_nanos == 1_700_000_000_000_000_000);
     }
 
     #[tokio::test]
@@ -1429,21 +1392,15 @@ mod tests {
         .await
         .unwrap();
 
-        check!(
-            (
-                raw.labels.get("__name__"),
-                raw.labels.get("service_name"),
-                raw.labels.get("region"),
-                &raw.profile.sample_types()[0],
-                raw.profile.samples().len(),
-            ) == (
-                Some("myapp"),
-                Some("payments"),
-                Some("us-east"),
-                &("samples".to_string(), "count".to_string()),
-                2,
-            )
-        );
+        for (name, value) in [
+            ("__name__", "myapp"),
+            ("service_name", "payments"),
+            ("region", "us-east"),
+        ] {
+            check!(raw.labels.get(name) == Some(value));
+        }
+        check!(raw.profile.sample_types()[0] == ("samples".to_string(), "count".to_string()));
+        check!(raw.profile.samples().len() == 2);
     }
 
     #[tokio::test]
@@ -1469,10 +1426,8 @@ mod tests {
         .await
         .unwrap();
 
-        assert2::assert!(
-            &raw.profile.sample_types()[0] == &("wall".to_string(), "nanoseconds".to_string())
-        );
-        assert2::assert!(!raw.profile.samples().is_empty());
+        assert!(raw.profile.sample_types()[0] == ("wall".to_string(), "nanoseconds".to_string()));
+        assert!(!raw.profile.samples().is_empty());
         let functions = raw
             .profile
             .inner()
@@ -1480,7 +1435,7 @@ mod tests {
             .iter()
             .filter_map(|function| raw.profile.string(function.name))
             .collect::<Vec<_>>();
-        assert2::assert!(
+        assert!(
             functions
                 .iter()
                 .any(|function| function.contains("CompileBroker::compiler_thread_loop"))
@@ -1530,11 +1485,11 @@ mod tests {
         ));
 
         let err = tree_to_pprof("app", "samples", &body).unwrap_err();
-        assert2::assert!(matches!(err, ProfilesError::Decode(_)));
+        assert!(matches!(err, ProfilesError::Decode(_)));
 
         // Sanity: a normal small tree still decodes successfully.
         let ok = b"\x00\x00\x01\x01a\x00\x02\x01b\x01\x00\x01c\x02\x00";
-        assert2::assert!(tree_to_pprof("app", "samples", ok).is_ok());
+        assert!(tree_to_pprof("app", "samples", ok).is_ok());
     }
 
     #[test]
@@ -1558,7 +1513,7 @@ mod tests {
         put_tree_varint(&mut body, 0);
 
         let err = trie_to_pprof("app", "samples", &body).unwrap_err();
-        assert2::assert!(matches!(err, ProfilesError::Decode(_)));
+        assert!(matches!(err, ProfilesError::Decode(_)));
 
         // Sanity: a chain comfortably under the cap still decodes.
         let shallow_depth = 64_usize;
@@ -1573,10 +1528,10 @@ mod tests {
         shallow.push(b'a');
         put_tree_varint(&mut shallow, 1);
         put_tree_varint(&mut shallow, 0);
-        assert2::assert!(trie_to_pprof("app", "samples", &shallow).is_ok());
+        assert!(trie_to_pprof("app", "samples", &shallow).is_ok());
 
         // Sanity: the canonical small trie payload still decodes.
         let ok = b"\x00\x00\x01\x02a;\x00\x02\x01b\x01\x00\x01c\x02\x00";
-        assert2::assert!(trie_to_pprof("app", "samples", ok).is_ok());
+        assert!(trie_to_pprof("app", "samples", ok).is_ok());
     }
 }

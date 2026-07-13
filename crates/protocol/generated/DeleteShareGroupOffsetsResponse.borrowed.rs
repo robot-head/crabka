@@ -16,7 +16,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 0;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -28,6 +29,10 @@ pub struct DeleteShareGroupOffsetsResponse<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl DeleteShareGroupOffsetsResponse<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::delete_share_group_offsets_response::DeleteShareGroupOffsetsResponse {
@@ -60,9 +65,9 @@ impl Encode for DeleteShareGroupOffsetsResponse<'_> {
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message);
+                let () = put_compact_nullable_string(buf, self.error_message);
             } else {
-                put_nullable_string(buf, self.error_message);
+                let () = put_nullable_string(buf, self.error_message);
             }
         }
         if version >= 0 {
@@ -183,6 +188,10 @@ pub struct DeleteShareGroupOffsetsResponseTopic<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl DeleteShareGroupOffsetsResponseTopic<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::delete_share_group_offsets_response::DeleteShareGroupOffsetsResponseTopic
@@ -201,9 +210,9 @@ impl Encode for DeleteShareGroupOffsetsResponseTopic<'_> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.topic_name);
+                let () = put_compact_string(buf, self.topic_name);
             } else {
-                put_string(buf, self.topic_name);
+                let () = put_string(buf, self.topic_name);
             }
         }
         if version >= 0 {
@@ -214,9 +223,9 @@ impl Encode for DeleteShareGroupOffsetsResponseTopic<'_> {
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message);
+                let () = put_compact_nullable_string(buf, self.error_message);
             } else {
-                put_nullable_string(buf, self.error_message);
+                let () = put_nullable_string(buf, self.error_message);
             }
         }
         if flex {

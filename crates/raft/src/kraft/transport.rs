@@ -352,11 +352,9 @@ pub mod wire {
     /// Consensus `Epoch` (u32) <-> wire `i32` (`KRaft` uses an i32 `leaderEpoch`).
     /// The KIP-595 wire carries the leader epoch as a raw `int32` and stays raw
     /// here; the consensus epoch is always non-negative.
-    #[allow(clippy::cast_possible_wrap)]
     fn epoch_to_wire(e: Epoch) -> i32 {
         i32::try_from(e).unwrap_or(i32::MAX)
     }
-    #[allow(clippy::cast_sign_loss)]
     fn epoch_from_wire(e: i32) -> Epoch {
         u32::try_from(e).unwrap_or(0)
     }
@@ -364,7 +362,6 @@ pub mod wire {
     fn node_to_wire(n: NodeId) -> i32 {
         i32::try_from(n.0).unwrap_or(i32::MAX)
     }
-    #[allow(clippy::cast_sign_loss)]
     fn node_from_wire(n: i32) -> NodeId {
         NodeId(u64::try_from(n).unwrap_or(0))
     }
@@ -379,7 +376,6 @@ pub mod wire {
 
     impl PeerRequest {
         #[must_use]
-        #[allow(clippy::too_many_lines)]
         pub fn encode(&self) -> Bytes {
             match *self {
                 PeerRequest::Vote {
@@ -643,7 +639,6 @@ pub mod wire {
 
     impl PeerResponse {
         #[must_use]
-        #[allow(clippy::too_many_lines)]
         pub fn encode(&self) -> Bytes {
             match self {
                 PeerResponse::Vote { epoch, granted } => {

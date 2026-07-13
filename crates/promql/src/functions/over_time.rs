@@ -21,6 +21,7 @@
 //! `quantile_over_time` takes a fourth leading argument, the quantile `phi`
 //! (`Float64` scalar), threaded ahead of the three windowed columns:
 //! `prom_quantile_over_time(phi, eval_timestamp, timestamp_range, value_range)`.
+
 //!
 //! The `eval_timestamp`/`timestamp_range` columns are accepted uniformly even
 //! though only `last_over_time` consults timestamps (to pick the latest sample);
@@ -43,6 +44,7 @@ use datafusion::{
     },
     prelude::SessionContext,
 };
+use num_traits::ToPrimitive;
 
 use crate::range_array::RangeArray;
 
@@ -275,17 +277,13 @@ fn quantile_value(phi: f64, values: &[f64]) -> Option<f64> {
     if sorted.len() == 1 {
         return Some(sorted[0]);
     }
-    #[allow(clippy::cast_precision_loss)]
-    let rank = phi * (sorted.len() - 1) as f64;
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let lower = rank.floor() as usize;
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let upper = rank.ceil() as usize;
+    let rank = phi * (sorted.len() - 1).to_f64()?;
+    let lower = rank.floor().to_usize()?;
+    let upper = rank.ceil().to_usize()?;
     if lower == upper {
         return Some(sorted[lower]);
     }
-    #[allow(clippy::cast_precision_loss)]
-    let weight = rank - lower as f64;
+    let weight = rank - lower.to_f64()?;
     Some(sorted[lower] * (1.0 - weight) + sorted[upper] * weight)
 }
 

@@ -14,7 +14,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 1;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,10 +34,10 @@ impl Default for AddRaftVoterRequest {
             cluster_id: None,
             timeout_ms: 0i32,
             voter_id: 0i32,
-            voter_directory_id: Default::default(),
+            voter_directory_id: crate::primitives::uuid::Uuid::default(),
             listeners: Vec::new(),
             ack_when_committed: true,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
@@ -51,9 +52,9 @@ impl Encode for AddRaftVoterRequest {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.cluster_id.as_deref());
+                let () = put_compact_nullable_string(buf, self.cluster_id.as_deref());
             } else {
-                put_nullable_string(buf, self.cluster_id.as_deref());
+                let () = put_nullable_string(buf, self.cluster_id.as_deref());
             }
         }
         if version >= 0 {
@@ -205,16 +206,16 @@ impl Encode for Listener {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.name);
+                let () = put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name);
+                let () = put_string(buf, &self.name);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.host);
+                let () = put_compact_string(buf, &self.host);
             } else {
-                put_string(buf, &self.host);
+                let () = put_string(buf, &self.host);
             }
         }
         if version >= 0 {

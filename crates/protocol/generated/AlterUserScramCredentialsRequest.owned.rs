@@ -17,7 +17,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 0;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -150,9 +151,9 @@ impl Encode for ScramCredentialDeletion {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.name);
+                let () = put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name);
+                let () = put_string(buf, &self.name);
             }
         }
         if version >= 0 {
@@ -232,9 +233,9 @@ impl Encode for ScramCredentialUpsertion {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.name);
+                let () = put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name);
+                let () = put_string(buf, &self.name);
             }
         }
         if version >= 0 {
@@ -245,16 +246,16 @@ impl Encode for ScramCredentialUpsertion {
         }
         if version >= 0 {
             if flex {
-                put_compact_bytes(buf, &self.salt);
+                let () = put_compact_bytes(buf, &self.salt);
             } else {
-                put_bytes(buf, &self.salt);
+                let () = put_bytes(buf, &self.salt);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_bytes(buf, &self.salted_password);
+                let () = put_compact_bytes(buf, &self.salted_password);
             } else {
-                put_bytes(buf, &self.salted_password);
+                let () = put_bytes(buf, &self.salted_password);
             }
         }
         if flex {
@@ -364,7 +365,7 @@ impl ScramCredentialUpsertion {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(version: i16) -> ::serde_json::Value {
+pub fn default_json(_version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("deletions".to_string(), ::serde_json::Value::Array(vec![]));
     obj.insert("upsertions".to_string(), ::serde_json::Value::Array(vec![]));

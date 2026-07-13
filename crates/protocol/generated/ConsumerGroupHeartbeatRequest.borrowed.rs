@@ -16,7 +16,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 1;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,11 +47,15 @@ impl Default for ConsumerGroupHeartbeatRequest<'_> {
             subscribed_topic_regex: None,
             server_assignor: None,
             topic_partitions: None,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
-impl ConsumerGroupHeartbeatRequest<'_> {
+impl<'a> ConsumerGroupHeartbeatRequest<'a> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::consumer_group_heartbeat_request::ConsumerGroupHeartbeatRequest {
@@ -73,50 +78,53 @@ impl ConsumerGroupHeartbeatRequest<'_> {
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
-}
-impl Encode for ConsumerGroupHeartbeatRequest<'_> {
-    fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
-        if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion {
-                api_key: API_KEY,
-                version,
-            });
-        }
-        let flex = is_flexible(version);
+    fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.group_id);
+                let () = put_compact_string(buf, self.group_id);
             } else {
-                put_string(buf, self.group_id);
+                let () = put_string(buf, self.group_id);
             }
         }
+    }
+    fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.member_id);
+                let () = put_compact_string(buf, self.member_id);
             } else {
-                put_string(buf, self.member_id);
+                let () = put_string(buf, self.member_id);
             }
         }
+    }
+    fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
             put_i32(buf, self.member_epoch);
         }
+    }
+    fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.instance_id);
+                let () = put_compact_nullable_string(buf, self.instance_id);
             } else {
-                put_nullable_string(buf, self.instance_id);
+                let () = put_nullable_string(buf, self.instance_id);
             }
         }
+    }
+    fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.rack_id);
+                let () = put_compact_nullable_string(buf, self.rack_id);
             } else {
-                put_nullable_string(buf, self.rack_id);
+                let () = put_nullable_string(buf, self.rack_id);
             }
         }
+    }
+    fn encode_field_5<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
             put_i32(buf, self.rebalance_timeout_ms);
         }
+    }
+    fn encode_field_6<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if version >= 0 {
             {
                 let len = (self.subscribed_topic_names).as_ref().map(Vec::len);
@@ -124,28 +132,39 @@ impl Encode for ConsumerGroupHeartbeatRequest<'_> {
                 if let Some(v) = &self.subscribed_topic_names {
                     for it in v {
                         if flex {
-                            put_compact_string(buf, it);
+                            let () = put_compact_string(buf, it);
                         } else {
-                            put_string(buf, it);
+                            let () = put_string(buf, it);
                         }
                     }
                 }
             }
         }
+    }
+    fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if version >= 1 {
             if flex {
-                put_compact_nullable_string(buf, self.subscribed_topic_regex);
+                let () = put_compact_nullable_string(buf, self.subscribed_topic_regex);
             } else {
-                put_nullable_string(buf, self.subscribed_topic_regex);
+                let () = put_nullable_string(buf, self.subscribed_topic_regex);
             }
         }
+    }
+    fn encode_field_8<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.server_assignor);
+                let () = put_compact_nullable_string(buf, self.server_assignor);
             } else {
-                put_nullable_string(buf, self.server_assignor);
+                let () = put_nullable_string(buf, self.server_assignor);
             }
         }
+    }
+    fn encode_field_9<B: BufMut>(
+        &self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
             {
                 let len = (self.topic_partitions).as_ref().map(Vec::len);
@@ -157,10 +176,208 @@ impl Encode for ConsumerGroupHeartbeatRequest<'_> {
                 }
             }
         }
+        Ok(())
+    }
+    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
         }
+    }
+    fn decode_field_0(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.group_id = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_1(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.member_id = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_2(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.member_epoch = get_i32(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_3(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.instance_id = if flex {
+                get_compact_nullable_string_borrowed(buf)?
+            } else {
+                get_nullable_string_borrowed(buf)?
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_4(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.rack_id = if flex {
+                get_compact_nullable_string_borrowed(buf)?
+            } else {
+                get_nullable_string_borrowed(buf)?
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_5(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.rebalance_timeout_ms = get_i32(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_6(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.subscribed_topic_names = {
+                let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?;
+                match opt {
+                    None => None,
+                    Some(n) => {
+                        let mut v = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            v.push(if flex {
+                                get_compact_string_borrowed(buf)?
+                            } else {
+                                get_string_borrowed(buf)?
+                            });
+                        }
+                        Some(v)
+                    }
+                }
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_7(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 1 {
+            out.subscribed_topic_regex = if flex {
+                get_compact_nullable_string_borrowed(buf)?
+            } else {
+                get_nullable_string_borrowed(buf)?
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_8(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.server_assignor = if flex {
+                get_compact_nullable_string_borrowed(buf)?
+            } else {
+                get_nullable_string_borrowed(buf)?
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_9(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.topic_partitions = {
+                let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?;
+                match opt {
+                    None => None,
+                    Some(n) => {
+                        let mut v = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            v.push(TopicPartitions::decode_borrow(buf, version)?);
+                        }
+                        Some(v)
+                    }
+                }
+            };
+        }
+        Ok(())
+    }
+    fn decode_tagged_fields(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        _version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if flex {
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
+        }
+        Ok(())
+    }
+}
+impl Encode for ConsumerGroupHeartbeatRequest<'_> {
+    fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
+        if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
+        }
+        let flex = is_flexible(version);
+        self.encode_field_0(buf, version, flex);
+        self.encode_field_1(buf, version, flex);
+        self.encode_field_2(buf, version, flex);
+        self.encode_field_3(buf, version, flex);
+        self.encode_field_4(buf, version, flex);
+        self.encode_field_5(buf, version, flex);
+        self.encode_field_6(buf, version, flex);
+        self.encode_field_7(buf, version, flex);
+        self.encode_field_8(buf, version, flex);
+        self.encode_field_9(buf, version, flex)?;
+        self.encode_tagged_fields(buf, version, flex);
         Ok(())
     }
     fn encoded_len(&self, version: i16) -> usize {
@@ -264,91 +481,17 @@ impl<'de> DecodeBorrow<'de> for ConsumerGroupHeartbeatRequest<'de> {
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 {
-            out.group_id = if flex {
-                get_compact_string_borrowed(buf)?
-            } else {
-                get_string_borrowed(buf)?
-            };
-        }
-        if version >= 0 {
-            out.member_id = if flex {
-                get_compact_string_borrowed(buf)?
-            } else {
-                get_string_borrowed(buf)?
-            };
-        }
-        if version >= 0 {
-            out.member_epoch = get_i32(buf)?;
-        }
-        if version >= 0 {
-            out.instance_id = if flex {
-                get_compact_nullable_string_borrowed(buf)?
-            } else {
-                get_nullable_string_borrowed(buf)?
-            };
-        }
-        if version >= 0 {
-            out.rack_id = if flex {
-                get_compact_nullable_string_borrowed(buf)?
-            } else {
-                get_nullable_string_borrowed(buf)?
-            };
-        }
-        if version >= 0 {
-            out.rebalance_timeout_ms = get_i32(buf)?;
-        }
-        if version >= 0 {
-            out.subscribed_topic_names = {
-                let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?;
-                match opt {
-                    None => None,
-                    Some(n) => {
-                        let mut v = Vec::with_capacity(n);
-                        for _ in 0..n {
-                            v.push(if flex {
-                                get_compact_string_borrowed(buf)?
-                            } else {
-                                get_string_borrowed(buf)?
-                            });
-                        }
-                        Some(v)
-                    }
-                }
-            };
-        }
-        if version >= 1 {
-            out.subscribed_topic_regex = if flex {
-                get_compact_nullable_string_borrowed(buf)?
-            } else {
-                get_nullable_string_borrowed(buf)?
-            };
-        }
-        if version >= 0 {
-            out.server_assignor = if flex {
-                get_compact_nullable_string_borrowed(buf)?
-            } else {
-                get_nullable_string_borrowed(buf)?
-            };
-        }
-        if version >= 0 {
-            out.topic_partitions = {
-                let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?;
-                match opt {
-                    None => None,
-                    Some(n) => {
-                        let mut v = Vec::with_capacity(n);
-                        for _ in 0..n {
-                            v.push(TopicPartitions::decode_borrow(buf, version)?);
-                        }
-                        Some(v)
-                    }
-                }
-            };
-        }
-        if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
-        }
+        Self::decode_field_0(&mut out, buf, version, flex)?;
+        Self::decode_field_1(&mut out, buf, version, flex)?;
+        Self::decode_field_2(&mut out, buf, version, flex)?;
+        Self::decode_field_3(&mut out, buf, version, flex)?;
+        Self::decode_field_4(&mut out, buf, version, flex)?;
+        Self::decode_field_5(&mut out, buf, version, flex)?;
+        Self::decode_field_6(&mut out, buf, version, flex)?;
+        Self::decode_field_7(&mut out, buf, version, flex)?;
+        Self::decode_field_8(&mut out, buf, version, flex)?;
+        Self::decode_field_9(&mut out, buf, version, flex)?;
+        Self::decode_tagged_fields(&mut out, buf, version, flex)?;
         Ok(out)
     }
 }
@@ -397,6 +540,10 @@ pub struct TopicPartitions {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl TopicPartitions {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::consumer_group_heartbeat_request::TopicPartitions {
         crate::owned::consumer_group_heartbeat_request::TopicPartitions {
             topic_id: (self.topic_id),

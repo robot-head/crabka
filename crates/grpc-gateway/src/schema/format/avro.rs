@@ -19,6 +19,8 @@ use crate::codec::CodecError;
 /// 3. Convert to [`apache_avro::types::Value`] via `apache_avro::to_value`,
 ///    then `Value::resolve` to coerce types (ints, enums, unions) to the schema.
 /// 4. Encode as Avro binary datum via `apache_avro::to_avro_datum`.
+/// # Errors
+/// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
 pub fn serialize(schema: &str, json: &[u8]) -> Result<Bytes, CodecError> {
     let avro_schema = Schema::parse_str(schema)
         .map_err(|e| CodecError::Serialize(format!("Avro schema parse: {e}")))?;
@@ -49,6 +51,8 @@ pub fn serialize(schema: &str, json: &[u8]) -> Result<Bytes, CodecError> {
 /// 3. Convert to [`serde_json::Value`] via `TryFrom` (provided by
 ///    `apache_avro` 0.21).
 /// 4. Serialize to JSON bytes.
+/// # Errors
+/// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
 pub fn deserialize(schema: &str, payload: &[u8]) -> Result<Bytes, CodecError> {
     let avro_schema = Schema::parse_str(schema)
         .map_err(|e| CodecError::Serialize(format!("Avro schema parse: {e}")))?;
@@ -71,6 +75,8 @@ pub fn deserialize(schema: &str, payload: &[u8]) -> Result<Bytes, CodecError> {
 ///
 /// Implemented as a round-trip through [`serialize`]: if the JSON can be
 /// encoded as an Avro datum, it is valid for the schema.
+/// # Errors
+/// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
 pub fn validate(schema: &str, json: &[u8]) -> Result<(), CodecError> {
     serialize(schema, json)
         .map(|_| ())
@@ -115,7 +121,7 @@ mod tests {
             ),
             ("missing_field", br#"{"id": 1}"#.as_slice(), false),
         ] {
-            assert2::assert!(validate(SCHEMA, json).is_ok() == valid);
+            assert2::assert!(validate(SCHEMA, json).is_ok() == valid, "case {name}");
         }
     }
 
@@ -128,7 +134,7 @@ mod tests {
                 serialize("not-a-valid-schema", br#"{"id":1,"name":"a"}"#),
             ),
         ] {
-            assert2::assert!(result.is_err());
+            assert2::assert!(result.is_err(), "case {name}");
         }
     }
 }

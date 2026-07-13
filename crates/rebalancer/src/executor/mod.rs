@@ -131,7 +131,6 @@ impl<C: ClientFacade + ?Sized + 'static> Execution<C> {
         skip_all,
         fields(proposal_id = %self.proposal.id, starting_phase = ?self.starting_phase),
     )]
-    #[allow(clippy::too_many_lines)]
     pub async fn run(self) {
         let mut phase = self.starting_phase;
         // Seed persisted target/reason from any resume file so that if

@@ -22,9 +22,9 @@ impl Encode for TopicPartitions {
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.topic_name);
+                let () = put_compact_string(buf, &self.topic_name);
             } else {
-                put_string(buf, &self.topic_name);
+                let () = put_string(buf, &self.topic_name);
             }
         }
         if version >= 0 {

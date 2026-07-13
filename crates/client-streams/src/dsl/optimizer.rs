@@ -130,7 +130,8 @@ mod tests {
         g.nodes.push(repartition_node(1, 0));
         g.nodes.push(repartition_node(2, 0));
         merge_repartition_topics(&mut g);
-        assert2::assert!(g.aliases == std::collections::HashMap::from([(2, 1)]));
+        assert_eq!(g.aliases.get(&2), Some(&1));
+        assert_eq!(g.aliases.get(&1), None);
     }
 
     #[test]
@@ -151,7 +152,7 @@ mod tests {
         });
         g.nodes.push(repartition_node(1, 0));
         merge_repartition_topics(&mut g);
-        assert2::assert!(g.aliases.is_empty());
+        assert!(g.aliases.is_empty());
     }
 
     #[test]
@@ -160,7 +161,7 @@ mod tests {
         g.nodes.push(repartition_node(0, 100));
         g.nodes.push(repartition_node(1, 200));
         merge_repartition_topics(&mut g);
-        assert2::assert!(g.aliases.is_empty());
+        assert!(g.aliases.is_empty());
     }
 
     fn table_source_node(id: NodeId, topic: &str, store: &str) -> GraphNode {
@@ -194,11 +195,11 @@ mod tests {
                 topic,
                 ..
             } => {
-                assert2::assert!(*reuse_source_for_changelog);
-                assert2::assert!(topic.as_str() == "in");
+                assert!(reuse_source_for_changelog);
+                assert_eq!(topic, "in");
             }
             _ => panic!("node 0 should be a TableSource"),
         }
-        assert2::assert!(matches!(g.nodes[1].kind, GraphNodeKind::Repartition { .. }));
+        assert!(matches!(g.nodes[1].kind, GraphNodeKind::Repartition { .. }));
     }
 }

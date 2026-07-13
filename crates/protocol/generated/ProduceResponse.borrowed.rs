@@ -18,7 +18,8 @@ pub const MIN_VERSION: i16 = 3;
 pub const MAX_VERSION: i16 = 13;
 pub const FLEXIBLE_MIN: i16 = 9;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -29,6 +30,10 @@ pub struct ProduceResponse<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl ProduceResponse<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::produce_response::ProduceResponse {
         crate::owned::produce_response::ProduceResponse {
             responses: (self.responses)
@@ -211,6 +216,10 @@ pub struct TopicProduceResponse<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl TopicProduceResponse<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::produce_response::TopicProduceResponse {
         crate::owned::produce_response::TopicProduceResponse {
             name: (self.name).to_string(),
@@ -228,9 +237,9 @@ impl Encode for TopicProduceResponse<'_> {
         let flex = version >= 9;
         if (0..=12).contains(&version) {
             if flex {
-                put_compact_string(buf, self.name);
+                let () = put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name);
+                let () = put_string(buf, self.name);
             }
         }
         if version >= 13 {
@@ -356,12 +365,16 @@ impl Default for PartitionProduceResponse<'_> {
             log_start_offset: -1i64,
             record_errors: Vec::new(),
             error_message: None,
-            current_leader: Default::default(),
-            unknown_tagged_fields: Default::default(),
+            current_leader: <LeaderIdAndEpoch>::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
-impl PartitionProduceResponse<'_> {
+impl<'a> PartitionProduceResponse<'a> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::produce_response::PartitionProduceResponse {
         crate::owned::produce_response::PartitionProduceResponse {
             index: (self.index),
@@ -378,25 +391,37 @@ impl PartitionProduceResponse<'_> {
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
-}
-impl Encode for PartitionProduceResponse<'_> {
-    fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
-        let flex = version >= 9;
+    fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
             put_i32(buf, self.index);
         }
+    }
+    fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
             put_i16(buf, self.error_code);
         }
+    }
+    fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
             put_i64(buf, self.base_offset);
         }
+    }
+    fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 2 {
             put_i64(buf, self.log_append_time_ms);
         }
+    }
+    fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 5 {
             put_i64(buf, self.log_start_offset);
         }
+    }
+    fn encode_field_5<B: BufMut>(
+        &self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 8 {
             {
                 crate::primitives::array::put_array_len(buf, (self.record_errors).len(), flex);
@@ -405,13 +430,18 @@ impl Encode for PartitionProduceResponse<'_> {
                 }
             }
         }
+        Ok(())
+    }
+    fn encode_field_6<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if version >= 8 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message);
+                let () = put_compact_nullable_string(buf, self.error_message);
             } else {
-                put_nullable_string(buf, self.error_message);
+                let () = put_nullable_string(buf, self.error_message);
             }
         }
+    }
+    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if flex {
             let mut tagged = WriteTaggedFields::new();
             if !(crate::codegen_helpers::is_default(&self.current_leader)) {
@@ -423,6 +453,131 @@ impl Encode for PartitionProduceResponse<'_> {
             }
             tagged.write(buf, &self.unknown_tagged_fields);
         }
+    }
+    fn decode_field_0(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.index = get_i32(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_1(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.error_code = get_i16(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_2(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.base_offset = get_i64(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_3(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 2 {
+            out.log_append_time_ms = get_i64(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_4(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 5 {
+            out.log_start_offset = get_i64(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_5(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 8 {
+            out.record_errors = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(BatchIndexAndErrorMessage::decode_borrow(buf, version)?);
+                }
+                v
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_6(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 8 {
+            out.error_message = if flex {
+                get_compact_nullable_string_borrowed(buf)?
+            } else {
+                get_nullable_string_borrowed(buf)?
+            };
+        }
+        Ok(())
+    }
+    fn decode_tagged_fields(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if flex {
+            let mut tag_current_leader = None;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |tag, payload| match tag {
+                0 => {
+                    tag_current_leader = Some({
+                        let b: &mut &[u8] = payload;
+                        LeaderIdAndEpoch::decode_borrow(b, version)?
+                    });
+                    Ok(true)
+                }
+                _ => Ok(false),
+            })?;
+            if let Some(v) = tag_current_leader {
+                out.current_leader = v;
+            }
+        }
+        Ok(())
+    }
+}
+impl Encode for PartitionProduceResponse<'_> {
+    fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
+        let flex = version >= 9;
+        self.encode_field_0(buf, version, flex);
+        self.encode_field_1(buf, version, flex);
+        self.encode_field_2(buf, version, flex);
+        self.encode_field_3(buf, version, flex);
+        self.encode_field_4(buf, version, flex);
+        self.encode_field_5(buf, version, flex)?;
+        self.encode_field_6(buf, version, flex);
+        self.encode_tagged_fields(buf, version, flex);
         Ok(())
     }
     fn encoded_len(&self, version: i16) -> usize {
@@ -477,54 +632,14 @@ impl<'de> DecodeBorrow<'de> for PartitionProduceResponse<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 9;
         let mut out = Self::default();
-        if version >= 0 {
-            out.index = get_i32(buf)?;
-        }
-        if version >= 0 {
-            out.error_code = get_i16(buf)?;
-        }
-        if version >= 0 {
-            out.base_offset = get_i64(buf)?;
-        }
-        if version >= 2 {
-            out.log_append_time_ms = get_i64(buf)?;
-        }
-        if version >= 5 {
-            out.log_start_offset = get_i64(buf)?;
-        }
-        if version >= 8 {
-            out.record_errors = {
-                let n = crate::primitives::array::get_array_len(buf, flex)?;
-                let mut v = Vec::with_capacity(n);
-                for _ in 0..n {
-                    v.push(BatchIndexAndErrorMessage::decode_borrow(buf, version)?);
-                }
-                v
-            };
-        }
-        if version >= 8 {
-            out.error_message = if flex {
-                get_compact_nullable_string_borrowed(buf)?
-            } else {
-                get_nullable_string_borrowed(buf)?
-            };
-        }
-        if flex {
-            let mut tag_current_leader = None;
-            out.unknown_tagged_fields = read_tagged_fields(buf, |tag, payload| match tag {
-                0 => {
-                    tag_current_leader = Some({
-                        let b: &mut &[u8] = payload;
-                        LeaderIdAndEpoch::decode_borrow(b, version)?
-                    });
-                    Ok(true)
-                }
-                _ => Ok(false),
-            })?;
-            if let Some(v) = tag_current_leader {
-                out.current_leader = v;
-            }
-        }
+        Self::decode_field_0(&mut out, buf, version, flex)?;
+        Self::decode_field_1(&mut out, buf, version, flex)?;
+        Self::decode_field_2(&mut out, buf, version, flex)?;
+        Self::decode_field_3(&mut out, buf, version, flex)?;
+        Self::decode_field_4(&mut out, buf, version, flex)?;
+        Self::decode_field_5(&mut out, buf, version, flex)?;
+        Self::decode_field_6(&mut out, buf, version, flex)?;
+        Self::decode_tagged_fields(&mut out, buf, version, flex)?;
         Ok(out)
     }
 }
@@ -567,6 +682,10 @@ pub struct BatchIndexAndErrorMessage<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl BatchIndexAndErrorMessage<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::produce_response::BatchIndexAndErrorMessage {
         crate::owned::produce_response::BatchIndexAndErrorMessage {
             batch_index: (self.batch_index),
@@ -584,9 +703,9 @@ impl Encode for BatchIndexAndErrorMessage<'_> {
         }
         if version >= 8 {
             if flex {
-                put_compact_nullable_string(buf, self.batch_index_error_message);
+                let () = put_compact_nullable_string(buf, self.batch_index_error_message);
             } else {
-                put_nullable_string(buf, self.batch_index_error_message);
+                let () = put_nullable_string(buf, self.batch_index_error_message);
             }
         }
         if flex {
@@ -660,11 +779,15 @@ impl Default for LeaderIdAndEpoch {
         Self {
             leader_id: -1i32,
             leader_epoch: -1i32,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl LeaderIdAndEpoch {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::produce_response::LeaderIdAndEpoch {
         crate::owned::produce_response::LeaderIdAndEpoch {
             leader_id: (self.leader_id),
@@ -743,6 +866,10 @@ pub struct NodeEndpoint<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl NodeEndpoint<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::produce_response::NodeEndpoint {
         crate::owned::produce_response::NodeEndpoint {
             node_id: (self.node_id),
@@ -761,9 +888,9 @@ impl Encode for NodeEndpoint<'_> {
         }
         if version >= 10 {
             if flex {
-                put_compact_string(buf, self.host);
+                let () = put_compact_string(buf, self.host);
             } else {
-                put_string(buf, self.host);
+                let () = put_string(buf, self.host);
             }
         }
         if version >= 10 {
@@ -771,9 +898,9 @@ impl Encode for NodeEndpoint<'_> {
         }
         if version >= 10 {
             if flex {
-                put_compact_nullable_string(buf, self.rack);
+                let () = put_compact_nullable_string(buf, self.rack);
             } else {
-                put_nullable_string(buf, self.rack);
+                let () = put_nullable_string(buf, self.rack);
             }
         }
         if flex {

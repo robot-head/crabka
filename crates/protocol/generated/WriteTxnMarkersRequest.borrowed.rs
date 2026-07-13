@@ -14,7 +14,8 @@ pub const MIN_VERSION: i16 = 1;
 pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 1;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -23,6 +24,10 @@ pub struct WriteTxnMarkersRequest<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl WriteTxnMarkersRequest<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::write_txn_markers_request::WriteTxnMarkersRequest {
         crate::owned::write_txn_markers_request::WriteTxnMarkersRequest {
             markers: (self.markers)
@@ -125,6 +130,10 @@ pub struct WritableTxnMarker<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl WritableTxnMarker<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::write_txn_markers_request::WritableTxnMarker {
         crate::owned::write_txn_markers_request::WritableTxnMarker {
             producer_id: (self.producer_id),
@@ -273,6 +282,10 @@ pub struct WritableTxnMarkerTopic<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl WritableTxnMarkerTopic<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::write_txn_markers_request::WritableTxnMarkerTopic {
         crate::owned::write_txn_markers_request::WritableTxnMarkerTopic {
             name: (self.name).to_string(),
@@ -286,9 +299,9 @@ impl Encode for WritableTxnMarkerTopic<'_> {
         let flex = version >= 1;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name);
+                let () = put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name);
+                let () = put_string(buf, self.name);
             }
         }
         if version >= 0 {

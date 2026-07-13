@@ -6,10 +6,6 @@
 //
 // Both are suppressed locally; the rest of the workspace still enforces the
 // full lint gate.
-#![allow(clippy::pedantic)]
-#![allow(clippy::unnecessary_unwrap)]
-#![allow(clippy::type_complexity)]
-
 //! Broker-level integration test for (user, client-id) tuple quota
 //! end-to-end enforcement.
 //!
@@ -21,8 +17,8 @@
 //!
 //! This test covers the end-to-end fix: the Produce
 //! handler must forward `ctx.client_id` to the quota lookup rather than "".
-//! Otherwise the tuple lookup always received client_id="" → no tuple match →
-//! throttle_time_ms == 0 for both cases.
+//! Otherwise the tuple lookup always received `client_id`="" → no tuple match →
+//! `throttle_time_ms` == 0 for both cases.
 //!
 //! Gated to non-Windows to match the multi-broker test convention from
 //! slices 10b/12b/14/15/15b/16/17a.
@@ -33,6 +29,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use assert2::assert;
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::{Broker, BrokerHandle, config::ListenerSpec};
 use crabka_metadata::{
@@ -58,6 +55,10 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
 };
+
+type QuotaEntity = Vec<(String, Option<String>)>;
+type QuotaOperations = Vec<(String, f64, bool)>;
+type QuotaEntries = Vec<(QuotaEntity, QuotaOperations)>;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Wire helpers — single length-prefixed request/response exchange.
@@ -234,6 +235,7 @@ async fn start_single_broker_sasl_plaintext_with_users(
 /// Create a topic via SASL/PLAIN as admin. Asserts success.
 async fn create_topic_as_admin(
     addr: SocketAddr,
+    password: &[u8],
     topic: &str,
     partitions: i32,
     replication_factor: i16,
@@ -253,7 +255,7 @@ async fn create_topic_as_admin(
         timeout_ms: 5_000,
         ..Default::default()
     };
-    let mut stream = sasl_plain_authenticate(addr, "admin", b"admin-secret")
+    let mut stream = sasl_plain_authenticate(addr, "admin", password)
         .await
         .expect("SASL authenticate for CreateTopics");
     let mut body = BytesMut::new();
@@ -263,7 +265,12 @@ async fn create_topic_as_admin(
         .expect("CreateTopics round-trip");
     let mut cur: &[u8] = &resp_bytes;
     let resp = CreateTopicsResponse::decode(&mut cur, 7).expect("decode CreateTopicsResponse");
-    assert2::assert!((resp.topics.len(), resp.topics[0].error_code) == (1, 0));
+    assert!(resp.topics.len() == 1);
+    assert!(
+        resp.topics[0].error_code == 0,
+        "CreateTopics({topic}) must succeed: {:?}",
+        resp.topics[0].error_message
+    );
 }
 
 /// Await until `handle` sees `(topic, partition)` present in its image.
@@ -316,7 +323,7 @@ async fn seed_alice_write_acl(handle: &BrokerHandle, topic: &str) {
 // Wire driver for AlterClientQuotas
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Drive `AlterClientQuotas` (api_key=49) over a SASL/PLAIN connection.
+/// Drive `AlterClientQuotas` (`api_key=49`) over a SASL/PLAIN connection.
 ///
 /// `entries` is a list of `(entity_components, ops)` where:
 /// - `entity_components` is `Vec<(entity_type, entity_name)>`
@@ -327,9 +334,11 @@ async fn drive_alter_client_quotas_sasl(
     addr: SocketAddr,
     user: &str,
     pass: &str,
-    entries: Vec<(Vec<(String, Option<String>)>, Vec<(String, f64, bool)>)>,
+    entries: QuotaEntries,
     validate_only: bool,
 ) -> Vec<(Vec<(String, Option<String>)>, i16)> {
+    const VERSION: i16 = 1; // flexible
+
     use crabka_protocol::owned::{
         alter_client_quotas_request::{AlterClientQuotasRequest, EntityData, EntryData, OpData},
         alter_client_quotas_response::AlterClientQuotasResponse,
@@ -362,8 +371,6 @@ async fn drive_alter_client_quotas_sasl(
         validate_only,
         ..Default::default()
     };
-
-    const VERSION: i16 = 1; // flexible
 
     let mut stream = sasl_plain_authenticate(addr, user, pass.as_bytes())
         .await
@@ -399,7 +406,7 @@ async fn drive_alter_client_quotas_sasl(
 ///
 /// `wire_client_id` is written into the Kafka request header — it's the value
 /// the broker sees as the connection's client.id and uses for quota lookup.
-/// This lets a single test send two produces with different client_ids.
+/// This lets a single test send two produces with different `client_ids`.
 ///
 /// Returns the full `ProduceResponse`.
 async fn drive_produce_sasl_with_client_id(
@@ -467,6 +474,39 @@ async fn drive_produce_sasl_with_client_id(
     ProduceResponse::decode(&mut cur, VERSION).expect("decode ProduceResponse")
 }
 
+async fn await_authorized_produce(
+    addr: SocketAddr,
+    password: &[u8],
+    client_id: &str,
+) -> ProduceResponse {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let response = drive_produce_sasl_with_client_id(
+            addr,
+            "alice",
+            password,
+            client_id,
+            "tuple-quota-topic",
+            1024,
+            4,
+        )
+        .await;
+        let error_code = response
+            .responses
+            .first()
+            .and_then(|topic| topic.partition_responses.first())
+            .map_or(-1, |partition| partition.error_code);
+        if error_code != 29 {
+            return response;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "ACL still not applied after 15s"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Integration test
 // ─────────────────────────────────────────────────────────────────────────────
@@ -477,7 +517,7 @@ async fn drive_produce_sasl_with_client_id(
 /// * Produce ~4 KB as (alice, other) → `throttle_time_ms == 0` (no quota match).
 ///
 /// The second assertion verifies that the tuple quota does NOT fire on an
-/// unmatched client_id, i.e., there is no `(user=alice)` fallback quota set.
+/// unmatched `client_id`, i.e., there is no `(user=alice)` fallback quota set.
 ///
 /// This test covers the end-to-end fix: the Produce handler
 /// must pass `ctx.client_id` to the quota lookup. Otherwise the handler always
@@ -490,16 +530,21 @@ async fn drive_produce_sasl_with_client_id(
 /// in the next CI run that includes T3.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tuple_quota_throttles_only_matching_client_id() {
+    let admin_password = uuid::Uuid::new_v4().to_string();
+    let alice_password = uuid::Uuid::new_v4().to_string();
     let (handle, _dir, addr) = start_single_broker_sasl_plaintext_with_users(
         "admin",
-        &[("admin", "admin-secret"), ("alice", "alice-secret")],
+        &[
+            ("admin", admin_password.as_str()),
+            ("alice", alice_password.as_str()),
+        ],
     )
     .await;
 
     // Seed ACL entries so the authorizer engages (compat shim disabled) and
     // alice can Write to the topic.
     seed_compat_shim_disable_acl(&handle).await;
-    create_topic_as_admin(addr, "tuple-quota-topic", 1, 1).await;
+    create_topic_as_admin(addr, admin_password.as_bytes(), "tuple-quota-topic", 1, 1).await;
     wait_partition_exists(&handle, "tuple-quota-topic", 0).await;
     seed_alice_write_acl(&handle, "tuple-quota-topic").await;
 
@@ -510,7 +555,7 @@ async fn tuple_quota_throttles_only_matching_client_id() {
     let alter_resp = drive_alter_client_quotas_sasl(
         addr,
         "admin",
-        "admin-secret",
+        &admin_password,
         vec![(
             vec![
                 ("user".into(), Some("alice".into())),
@@ -521,7 +566,15 @@ async fn tuple_quota_throttles_only_matching_client_id() {
         false,
     )
     .await;
-    assert2::assert!((alter_resp.len(), alter_resp[0].1) == (1, 0));
+    assert!(
+        alter_resp.len() == 1,
+        "one entry in AlterClientQuotas response"
+    );
+    assert!(
+        alter_resp[0].1 == 0,
+        "AlterClientQuotas must succeed; error_code={}",
+        alter_resp[0].1
+    );
 
     // Await until the quota appears in the metadata image (absorb raft latency).
     //
@@ -544,71 +597,42 @@ async fn tuple_quota_throttles_only_matching_client_id() {
     //
     // Retry loop: TOPIC_AUTHORIZATION_FAILED (29) can fire if the alice Write
     // ACL hasn't propagated to the handler's image snapshot yet.
-    let deadline = Instant::now() + Duration::from_secs(15);
-    let matching_resp = loop {
-        let r = drive_produce_sasl_with_client_id(
-            addr,
-            "alice",
-            b"alice-secret",
-            "app-x", // wire client_id — must match quota entity
-            "tuple-quota-topic",
-            1024, // bytes per record
-            4,    // 4 records × 1024 bytes = 4 KB
-        )
-        .await;
-        let ec = r
-            .responses
-            .first()
-            .and_then(|t| t.partition_responses.first())
-            .map(|p| p.error_code)
-            .unwrap_or(-1);
-        if ec != 29 {
-            // Not TOPIC_AUTHORIZATION_FAILED — use this response.
-            break r;
-        }
-        assert2::assert!(Instant::now() <= deadline);
-        // real-time wait (not a progress poll): retry cadence between network produce attempts (ACL propagation), deadline-guarded
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    };
+    let matching_resp = await_authorized_produce(addr, alice_password.as_bytes(), "app-x").await;
 
     let part = &matching_resp.responses[0].partition_responses[0];
-    assert2::assert!(part.error_code == 0);
-    assert2::assert!(matching_resp.throttle_time_ms > 0);
+    assert!(
+        part.error_code == 0,
+        "produce (alice, app-x) must succeed; error_code={}",
+        part.error_code
+    );
+    assert!(
+        matching_resp.throttle_time_ms > 0,
+        "expected throttle_time_ms > 0 for (alice, app-x) with producer_byte_rate=1024 \
+         and 4 KB payload; got {} — T3 may not have merged yet (T3 wires ctx.client_id \
+         into the quota call site)",
+        matching_resp.throttle_time_ms
+    );
 
     // ── Case 2: (alice, other) — no quota match, must NOT throttle ────────────
     //
     // A fresh TCP connection means the token bucket starts from scratch, so
     // there is no residual debt from Case 1.  No (user=alice)-only quota exists,
     // so the produce must complete with throttle_time_ms == 0.
-    let deadline = Instant::now() + Duration::from_secs(15);
-    let non_matching_resp = loop {
-        let r = drive_produce_sasl_with_client_id(
-            addr,
-            "alice",
-            b"alice-secret",
-            "other", // different wire client_id — no quota match
-            "tuple-quota-topic",
-            1024,
-            4,
-        )
-        .await;
-        let ec = r
-            .responses
-            .first()
-            .and_then(|t| t.partition_responses.first())
-            .map(|p| p.error_code)
-            .unwrap_or(-1);
-        if ec != 29 {
-            break r;
-        }
-        assert2::assert!(Instant::now() <= deadline);
-        // real-time wait (not a progress poll): retry cadence between network produce attempts (ACL propagation), deadline-guarded
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    };
+    let non_matching_resp =
+        await_authorized_produce(addr, alice_password.as_bytes(), "other").await;
 
     let part = &non_matching_resp.responses[0].partition_responses[0];
-    assert2::assert!(part.error_code == 0);
-    assert2::assert!(non_matching_resp.throttle_time_ms == 0);
+    assert!(
+        part.error_code == 0,
+        "produce (alice, other) must succeed; error_code={}",
+        part.error_code
+    );
+    assert!(
+        non_matching_resp.throttle_time_ms == 0,
+        "expected throttle_time_ms == 0 for (alice, other) — no tuple or user-only \
+         quota is set for this client_id; got {}",
+        non_matching_resp.throttle_time_ms
+    );
 
     handle.shutdown().await;
 }

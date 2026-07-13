@@ -242,7 +242,6 @@ async fn parse_response(resp: axum::response::Response) -> WR {
 // ---------------------------------------------------------------------------
 
 /// A valid HMAC produces into the target topic and returns 200.
-#[allow(clippy::too_many_lines)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn valid_hmac_produces() {
     let (broker, bootstrap, _dir) = boot().await;
@@ -370,7 +369,6 @@ signature_encoding = "hex"
 /// `JSONPath` idempotency source: two POSTs with the same `$.id` value (provider
 /// redelivery) dedup — the second returns `deduplicated=true` with the same
 /// offset, and exactly one record lands in the topic.
-#[allow(clippy::too_many_lines)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn jsonpath_idempotency_redelivery_dedups() {
     let (broker, bootstrap, _dir) = boot().await;
@@ -463,7 +461,6 @@ idempotency_source = "json:$.id"
 
 /// Header idempotency source (`header:X-Delivery`): two POSTs with the same
 /// header value dedup on the second request.
-#[allow(clippy::too_many_lines)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn header_idempotency_works() {
     let (broker, bootstrap, _dir) = boot().await;
@@ -553,7 +550,6 @@ idempotency_source = "header:X-Delivery"
 
 /// `POST /v1/produce/{topic}`: plain produce returns 200; a repeat with the
 /// same `Idempotency-Key` header is deduplicated.
-#[allow(clippy::too_many_lines)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn generic_produce_route() {
     let (broker, bootstrap, _dir) = boot().await;
@@ -803,7 +799,6 @@ fn topic_acl(
 /// (`webhook:acl-denied`) has no Write ACL on the target topic.
 ///
 /// After granting the ACL and refreshing the cache the same request succeeds.
-#[allow(clippy::too_many_lines)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn simpleacl_denies_webhook_principal() {
     let (broker, bootstrap, _dir) = boot().await;

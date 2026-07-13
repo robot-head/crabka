@@ -36,6 +36,8 @@ impl UnknownTaggedFields {
 /// field's payload (a `size`-byte slice) and return Ok if it recognised the
 /// tag. Anything `known` returns `Ok(false)` for is captured into the unknown
 /// vec instead.
+/// # Errors
+/// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
 pub fn read_tagged_fields<B, F>(
     buf: &mut B,
     mut known: F,
@@ -106,6 +108,8 @@ impl WriteTaggedFields {
         self.entries.push((tag, payload));
     }
 
+    /// # Panics
+    /// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
     pub fn write<B: BufMut>(mut self, buf: &mut B, unknown: &UnknownTaggedFields) {
         for u in &unknown.0 {
             self.entries.push((u.tag, u.bytes.clone()));
@@ -128,6 +132,8 @@ impl WriteTaggedFields {
 
 /// Predicted length of the tagged-fields trailer.
 #[must_use]
+/// # Panics
+/// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
 pub fn tagged_fields_len(known: &[(u32, usize)], unknown: &UnknownTaggedFields) -> usize {
     let total = known.len() + unknown.0.len();
     let mut n = uvarint_len(u32::try_from(total).unwrap());
@@ -147,6 +153,8 @@ pub fn tagged_fields_len(known: &[(u32, usize)], unknown: &UnknownTaggedFields) 
 /// The write closure may return an error (e.g. from nested struct encode);
 /// the error propagates as a panic since tagged-field encoding failures indicate
 /// a bug in the emitter's `encoded_len` prediction.
+/// # Panics
+/// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
 pub fn encode_to_bytes<F>(predicted_len: usize, write: F) -> Bytes
 where
     F: FnOnce(&mut BytesMut) -> Result<(), crate::ProtocolError>,

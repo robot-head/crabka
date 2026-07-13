@@ -17,28 +17,25 @@ pub(crate) const MIN_INTERVAL_MS: i64 = 100;
 pub(crate) const MAX_INTERVAL_MS: i64 = 3_600_000;
 pub(crate) const ALL_METRICS: &str = "*";
 
-// Variant names mirror the KIP-714 selector field names exactly (client_id,
-// client_software_name, …); keeping the Client prefix is intentional.
-#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MatchSelector {
-    ClientInstanceId,
-    ClientId,
-    ClientSoftwareName,
-    ClientSoftwareVersion,
-    ClientSourceAddress,
-    ClientSourcePort,
+    InstanceId,
+    Id,
+    SoftwareName,
+    SoftwareVersion,
+    SourceAddress,
+    SourcePort,
 }
 
 impl MatchSelector {
     fn parse(s: &str) -> Option<Self> {
         Some(match s {
-            "client_instance_id" => Self::ClientInstanceId,
-            "client_id" => Self::ClientId,
-            "client_software_name" => Self::ClientSoftwareName,
-            "client_software_version" => Self::ClientSoftwareVersion,
-            "client_source_address" => Self::ClientSourceAddress,
-            "client_source_port" => Self::ClientSourcePort,
+            "client_instance_id" => Self::InstanceId,
+            "client_id" => Self::Id,
+            "client_software_name" => Self::SoftwareName,
+            "client_software_version" => Self::SoftwareVersion,
+            "client_source_address" => Self::SourceAddress,
+            "client_source_port" => Self::SourcePort,
             _ => return None,
         })
     }
@@ -135,13 +132,16 @@ mod tests {
             ("3600001", false),
             ("not-a-number", false),
         ] {
-            assert2::assert!(validate("interval.ms", value).is_ok() == ok);
+            assert!(
+                validate("interval.ms", value).is_ok() == ok,
+                "interval.ms={value}"
+            );
         }
     }
 
     #[test]
     fn unknown_key_rejected() {
-        assert2::assert!(validate("bogus.key", "x").is_err());
+        assert!(validate("bogus.key", "x").is_err());
     }
 
     #[test]
@@ -156,7 +156,7 @@ mod tests {
             ("client_id", false),
             ("client_id=[unclosed", false),
         ] {
-            assert2::assert!(validate("match", value).is_ok() == ok);
+            assert!(validate("match", value).is_ok() == ok, "match={value}");
         }
     }
 
@@ -167,52 +167,32 @@ mod tests {
             "org.apache.kafka.consumer.,org.apache.kafka.producer.",
             "",
         ] {
-            assert2::assert!(validate("metrics", value).is_ok());
+            assert!(validate("metrics", value).is_ok(), "metrics={value}");
         }
     }
 
     #[test]
     fn effective_interval_defaults_and_clamps() {
-        for (_case, interval, expected) in [
-            ("default", None, DEFAULT_INTERVAL_MS),
-            ("configured", Some("60000"), 60_000),
-        ] {
-            let mut configs = std::collections::BTreeMap::new();
-            if let Some(interval) = interval {
-                configs.insert("interval.ms".to_string(), interval.to_string());
-            }
-            assert2::assert!(effective_interval_ms(&configs) == expected);
-        }
+        let mut m = std::collections::BTreeMap::new();
+        assert_eq!(effective_interval_ms(&m), DEFAULT_INTERVAL_MS);
+        m.insert("interval.ms".to_string(), "60000".to_string());
+        assert_eq!(effective_interval_ms(&m), 60_000);
     }
 
     #[test]
     fn parse_match_rules_roundtrip() {
         let rules = parse_match_rules("client_id=svc-.*,client_software_name=java").unwrap();
-        let parsed: Vec<_> = rules
-            .iter()
-            .map(|rule| (rule.selector, rule.pattern.as_str()))
-            .collect();
-        assert2::assert!(
-            parsed
-                == vec![
-                    (MatchSelector::ClientId, "svc-.*"),
-                    (MatchSelector::ClientSoftwareName, "java"),
-                ]
-        );
+        assert_eq!(rules.len(), 2);
+        assert!(rules.iter().any(|r| r.selector == MatchSelector::Id));
     }
 
     #[test]
     fn parse_metrics_collapses_star() {
-        for (_case, input, expected) in [
-            ("all metrics", "*", vec!["*".to_string()]),
-            ("empty", "", Vec::new()),
-            (
-                "prefixes",
-                "a.,b.",
-                vec!["a.".to_string(), "b.".to_string()],
-            ),
-        ] {
-            assert2::assert!(parse_metrics(input) == expected);
-        }
+        assert_eq!(parse_metrics("*"), vec!["*".to_string()]);
+        assert_eq!(parse_metrics(""), Vec::<String>::new());
+        assert_eq!(
+            parse_metrics("a.,b."),
+            vec!["a.".to_string(), "b.".to_string()]
+        );
     }
 }

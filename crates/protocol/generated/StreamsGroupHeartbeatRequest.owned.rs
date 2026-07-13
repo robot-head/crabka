@@ -14,7 +14,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 0;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,56 +65,68 @@ impl Default for StreamsGroupHeartbeatRequest {
             task_offsets: None,
             task_end_offsets: None,
             shutdown_application: false,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
-impl Encode for StreamsGroupHeartbeatRequest {
-    fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
-        if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion {
-                api_key: API_KEY,
-                version,
-            });
-        }
-        let flex = is_flexible(version);
+impl StreamsGroupHeartbeatRequest {
+    fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.group_id);
+                let () = put_compact_string(buf, &self.group_id);
             } else {
-                put_string(buf, &self.group_id);
+                let () = put_string(buf, &self.group_id);
             }
         }
+    }
+    fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.member_id);
+                let () = put_compact_string(buf, &self.member_id);
             } else {
-                put_string(buf, &self.member_id);
+                let () = put_string(buf, &self.member_id);
             }
         }
+    }
+    fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
             put_i32(buf, self.member_epoch);
         }
+    }
+    fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
             put_i32(buf, self.endpoint_information_epoch);
         }
+    }
+    fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.instance_id.as_deref());
+                let () = put_compact_nullable_string(buf, self.instance_id.as_deref());
             } else {
-                put_nullable_string(buf, self.instance_id.as_deref());
+                let () = put_nullable_string(buf, self.instance_id.as_deref());
             }
         }
+    }
+    fn encode_field_5<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.rack_id.as_deref());
+                let () = put_compact_nullable_string(buf, self.rack_id.as_deref());
             } else {
-                put_nullable_string(buf, self.rack_id.as_deref());
+                let () = put_nullable_string(buf, self.rack_id.as_deref());
             }
         }
+    }
+    fn encode_field_6<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
             put_i32(buf, self.rebalance_timeout_ms);
         }
+    }
+    fn encode_field_7<B: BufMut>(
+        &self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
             match &self.topology {
                 None => {
@@ -125,6 +138,14 @@ impl Encode for StreamsGroupHeartbeatRequest {
                 }
             }
         }
+        Ok(())
+    }
+    fn encode_field_8<B: BufMut>(
+        &self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
             {
                 let len = (self.active_tasks).as_ref().map(Vec::len);
@@ -136,6 +157,14 @@ impl Encode for StreamsGroupHeartbeatRequest {
                 }
             }
         }
+        Ok(())
+    }
+    fn encode_field_9<B: BufMut>(
+        &self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
             {
                 let len = (self.standby_tasks).as_ref().map(Vec::len);
@@ -147,6 +176,14 @@ impl Encode for StreamsGroupHeartbeatRequest {
                 }
             }
         }
+        Ok(())
+    }
+    fn encode_field_10<B: BufMut>(
+        &self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
             {
                 let len = (self.warmup_tasks).as_ref().map(Vec::len);
@@ -158,13 +195,23 @@ impl Encode for StreamsGroupHeartbeatRequest {
                 }
             }
         }
+        Ok(())
+    }
+    fn encode_field_11<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.process_id.as_deref());
+                let () = put_compact_nullable_string(buf, self.process_id.as_deref());
             } else {
-                put_nullable_string(buf, self.process_id.as_deref());
+                let () = put_nullable_string(buf, self.process_id.as_deref());
             }
         }
+    }
+    fn encode_field_12<B: BufMut>(
+        &self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
             match &self.user_endpoint {
                 None => {
@@ -176,6 +223,14 @@ impl Encode for StreamsGroupHeartbeatRequest {
                 }
             }
         }
+        Ok(())
+    }
+    fn encode_field_13<B: BufMut>(
+        &self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
             {
                 let len = (self.client_tags).as_ref().map(Vec::len);
@@ -187,6 +242,14 @@ impl Encode for StreamsGroupHeartbeatRequest {
                 }
             }
         }
+        Ok(())
+    }
+    fn encode_field_14<B: BufMut>(
+        &self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
             {
                 let len = (self.task_offsets).as_ref().map(Vec::len);
@@ -198,6 +261,14 @@ impl Encode for StreamsGroupHeartbeatRequest {
                 }
             }
         }
+        Ok(())
+    }
+    fn encode_field_15<B: BufMut>(
+        &self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
             {
                 let len = (self.task_end_offsets).as_ref().map(Vec::len);
@@ -209,13 +280,349 @@ impl Encode for StreamsGroupHeartbeatRequest {
                 }
             }
         }
+        Ok(())
+    }
+    fn encode_field_16<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
             put_bool(buf, self.shutdown_application);
         }
+    }
+    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
         }
+    }
+    fn decode_field_0<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.group_id = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_1<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.member_id = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_2<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.member_epoch = get_i32(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_3<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.endpoint_information_epoch = get_i32(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_4<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.instance_id = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_5<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.rack_id = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_6<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.rebalance_timeout_ms = get_i32(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_7<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.topology = if get_i8(buf)? < 0 {
+                None
+            } else {
+                Some(Topology::decode(buf, version)?)
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_8<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.active_tasks = {
+                let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?;
+                match opt {
+                    None => None,
+                    Some(n) => {
+                        let mut v = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            v.push(super::common::streams_group_heartbeat_request::task_ids::TaskIds::decode(buf, version)?);
+                        }
+                        Some(v)
+                    }
+                }
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_9<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.standby_tasks = {
+                let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?;
+                match opt {
+                    None => None,
+                    Some(n) => {
+                        let mut v = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            v.push(super::common::streams_group_heartbeat_request::task_ids::TaskIds::decode(buf, version)?);
+                        }
+                        Some(v)
+                    }
+                }
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_10<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.warmup_tasks = {
+                let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?;
+                match opt {
+                    None => None,
+                    Some(n) => {
+                        let mut v = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            v.push(super::common::streams_group_heartbeat_request::task_ids::TaskIds::decode(buf, version)?);
+                        }
+                        Some(v)
+                    }
+                }
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_11<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.process_id = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_12<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.user_endpoint = if get_i8(buf)? < 0 {
+                None
+            } else {
+                Some(
+                    super::common::streams_group_heartbeat_request::endpoint::Endpoint::decode(
+                        buf, version,
+                    )?,
+                )
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_13<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.client_tags = {
+                let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?;
+                match opt {
+                    None => None,
+                    Some(n) => {
+                        let mut v = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            v.push(super::common::streams_group_heartbeat_request::key_value::KeyValue::decode(buf, version)?);
+                        }
+                        Some(v)
+                    }
+                }
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_14<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.task_offsets = {
+                let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?;
+                match opt {
+                    None => None,
+                    Some(n) => {
+                        let mut v = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            v.push(super::common::streams_group_heartbeat_request::task_offset::TaskOffset::decode(buf, version)?);
+                        }
+                        Some(v)
+                    }
+                }
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_15<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.task_end_offsets = {
+                let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?;
+                match opt {
+                    None => None,
+                    Some(n) => {
+                        let mut v = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            v.push(super::common::streams_group_heartbeat_request::task_offset::TaskOffset::decode(buf, version)?);
+                        }
+                        Some(v)
+                    }
+                }
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_16<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.shutdown_application = get_bool(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_tagged_fields<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        _version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if flex {
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
+        }
+        Ok(())
+    }
+}
+impl Encode for StreamsGroupHeartbeatRequest {
+    fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
+        if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
+        }
+        let flex = is_flexible(version);
+        self.encode_field_0(buf, version, flex);
+        self.encode_field_1(buf, version, flex);
+        self.encode_field_2(buf, version, flex);
+        self.encode_field_3(buf, version, flex);
+        self.encode_field_4(buf, version, flex);
+        self.encode_field_5(buf, version, flex);
+        self.encode_field_6(buf, version, flex);
+        self.encode_field_7(buf, version, flex)?;
+        self.encode_field_8(buf, version, flex)?;
+        self.encode_field_9(buf, version, flex)?;
+        self.encode_field_10(buf, version, flex)?;
+        self.encode_field_11(buf, version, flex);
+        self.encode_field_12(buf, version, flex)?;
+        self.encode_field_13(buf, version, flex)?;
+        self.encode_field_14(buf, version, flex)?;
+        self.encode_field_15(buf, version, flex)?;
+        self.encode_field_16(buf, version, flex);
+        self.encode_tagged_fields(buf, version, flex);
         Ok(())
     }
     fn encoded_len(&self, version: i16) -> usize {
@@ -366,194 +773,24 @@ impl Decode<'_> for StreamsGroupHeartbeatRequest {
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 {
-            out.group_id = if flex {
-                get_compact_string_owned(buf)?
-            } else {
-                get_string_owned(buf)?
-            };
-        }
-        if version >= 0 {
-            out.member_id = if flex {
-                get_compact_string_owned(buf)?
-            } else {
-                get_string_owned(buf)?
-            };
-        }
-        if version >= 0 {
-            out.member_epoch = get_i32(buf)?;
-        }
-        if version >= 0 {
-            out.endpoint_information_epoch = get_i32(buf)?;
-        }
-        if version >= 0 {
-            out.instance_id = if flex {
-                get_compact_nullable_string_owned(buf)?
-            } else {
-                get_nullable_string_owned(buf)?
-            };
-        }
-        if version >= 0 {
-            out.rack_id = if flex {
-                get_compact_nullable_string_owned(buf)?
-            } else {
-                get_nullable_string_owned(buf)?
-            };
-        }
-        if version >= 0 {
-            out.rebalance_timeout_ms = get_i32(buf)?;
-        }
-        if version >= 0 {
-            out.topology = if get_i8(buf)? < 0 {
-                None
-            } else {
-                Some(Topology::decode(buf, version)?)
-            };
-        }
-        if version >= 0 {
-            out.active_tasks = {
-                let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?;
-                match opt {
-                    None => None,
-                    Some(n) => {
-                        let mut v = Vec::with_capacity(n);
-                        for _ in 0..n {
-                            v.push(
-                                super::common::streams_group_heartbeat_request::task_ids::TaskIds::decode(
-                                    buf,
-                                    version,
-                                )?,
-                            );
-                        }
-                        Some(v)
-                    }
-                }
-            };
-        }
-        if version >= 0 {
-            out.standby_tasks = {
-                let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?;
-                match opt {
-                    None => None,
-                    Some(n) => {
-                        let mut v = Vec::with_capacity(n);
-                        for _ in 0..n {
-                            v.push(
-                                super::common::streams_group_heartbeat_request::task_ids::TaskIds::decode(
-                                    buf,
-                                    version,
-                                )?,
-                            );
-                        }
-                        Some(v)
-                    }
-                }
-            };
-        }
-        if version >= 0 {
-            out.warmup_tasks = {
-                let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?;
-                match opt {
-                    None => None,
-                    Some(n) => {
-                        let mut v = Vec::with_capacity(n);
-                        for _ in 0..n {
-                            v.push(
-                                super::common::streams_group_heartbeat_request::task_ids::TaskIds::decode(
-                                    buf,
-                                    version,
-                                )?,
-                            );
-                        }
-                        Some(v)
-                    }
-                }
-            };
-        }
-        if version >= 0 {
-            out.process_id = if flex {
-                get_compact_nullable_string_owned(buf)?
-            } else {
-                get_nullable_string_owned(buf)?
-            };
-        }
-        if version >= 0 {
-            out.user_endpoint = if get_i8(buf)? < 0 {
-                None
-            } else {
-                Some(
-                    super::common::streams_group_heartbeat_request::endpoint::Endpoint::decode(
-                        buf, version,
-                    )?,
-                )
-            };
-        }
-        if version >= 0 {
-            out.client_tags = {
-                let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?;
-                match opt {
-                    None => None,
-                    Some(n) => {
-                        let mut v = Vec::with_capacity(n);
-                        for _ in 0..n {
-                            v.push(
-                                super::common::streams_group_heartbeat_request::key_value::KeyValue::decode(
-                                    buf,
-                                    version,
-                                )?,
-                            );
-                        }
-                        Some(v)
-                    }
-                }
-            };
-        }
-        if version >= 0 {
-            out.task_offsets = {
-                let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?;
-                match opt {
-                    None => None,
-                    Some(n) => {
-                        let mut v = Vec::with_capacity(n);
-                        for _ in 0..n {
-                            v.push(
-                                super::common::streams_group_heartbeat_request::task_offset::TaskOffset::decode(
-                                    buf,
-                                    version,
-                                )?,
-                            );
-                        }
-                        Some(v)
-                    }
-                }
-            };
-        }
-        if version >= 0 {
-            out.task_end_offsets = {
-                let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?;
-                match opt {
-                    None => None,
-                    Some(n) => {
-                        let mut v = Vec::with_capacity(n);
-                        for _ in 0..n {
-                            v.push(
-                                super::common::streams_group_heartbeat_request::task_offset::TaskOffset::decode(
-                                    buf,
-                                    version,
-                                )?,
-                            );
-                        }
-                        Some(v)
-                    }
-                }
-            };
-        }
-        if version >= 0 {
-            out.shutdown_application = get_bool(buf)?;
-        }
-        if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
-        }
+        Self::decode_field_0(&mut out, buf, version, flex)?;
+        Self::decode_field_1(&mut out, buf, version, flex)?;
+        Self::decode_field_2(&mut out, buf, version, flex)?;
+        Self::decode_field_3(&mut out, buf, version, flex)?;
+        Self::decode_field_4(&mut out, buf, version, flex)?;
+        Self::decode_field_5(&mut out, buf, version, flex)?;
+        Self::decode_field_6(&mut out, buf, version, flex)?;
+        Self::decode_field_7(&mut out, buf, version, flex)?;
+        Self::decode_field_8(&mut out, buf, version, flex)?;
+        Self::decode_field_9(&mut out, buf, version, flex)?;
+        Self::decode_field_10(&mut out, buf, version, flex)?;
+        Self::decode_field_11(&mut out, buf, version, flex)?;
+        Self::decode_field_12(&mut out, buf, version, flex)?;
+        Self::decode_field_13(&mut out, buf, version, flex)?;
+        Self::decode_field_14(&mut out, buf, version, flex)?;
+        Self::decode_field_15(&mut out, buf, version, flex)?;
+        Self::decode_field_16(&mut out, buf, version, flex)?;
+        Self::decode_tagged_fields(&mut out, buf, version, flex)?;
         Ok(out)
     }
 }
@@ -751,9 +988,9 @@ impl Encode for Subtopology {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.subtopology_id);
+                let () = put_compact_string(buf, &self.subtopology_id);
             } else {
-                put_string(buf, &self.subtopology_id);
+                let () = put_string(buf, &self.subtopology_id);
             }
         }
         if version >= 0 {
@@ -761,9 +998,9 @@ impl Encode for Subtopology {
                 crate::primitives::array::put_array_len(buf, (self.source_topics).len(), flex);
                 for it in &self.source_topics {
                     if flex {
-                        put_compact_string(buf, it);
+                        let () = put_compact_string(buf, it);
                     } else {
-                        put_string(buf, it);
+                        let () = put_string(buf, it);
                     }
                 }
             }
@@ -773,9 +1010,9 @@ impl Encode for Subtopology {
                 crate::primitives::array::put_array_len(buf, (self.source_topic_regex).len(), flex);
                 for it in &self.source_topic_regex {
                     if flex {
-                        put_compact_string(buf, it);
+                        let () = put_compact_string(buf, it);
                     } else {
-                        put_string(buf, it);
+                        let () = put_string(buf, it);
                     }
                 }
             }
@@ -801,9 +1038,9 @@ impl Encode for Subtopology {
                 );
                 for it in &self.repartition_sink_topics {
                     if flex {
-                        put_compact_string(buf, it);
+                        let () = put_compact_string(buf, it);
                     } else {
-                        put_string(buf, it);
+                        let () = put_string(buf, it);
                     }
                 }
             }
@@ -991,12 +1228,7 @@ impl Decode<'_> for Subtopology {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v.push(
-                        super::common::streams_group_heartbeat_request::topic_info::TopicInfo::decode(
-                            buf,
-                            version,
-                        )?,
-                    );
+                    v.push(super::common::streams_group_heartbeat_request::topic_info::TopicInfo::decode(buf, version)?);
                 }
                 v
             };
@@ -1020,12 +1252,7 @@ impl Decode<'_> for Subtopology {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v.push(
-                        super::common::streams_group_heartbeat_request::topic_info::TopicInfo::decode(
-                            buf,
-                            version,
-                        )?,
-                    );
+                    v.push(super::common::streams_group_heartbeat_request::topic_info::TopicInfo::decode(buf, version)?);
                 }
                 v
             };
@@ -1228,7 +1455,7 @@ impl CopartitionGroup {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(version: i16) -> ::serde_json::Value {
+pub fn default_json(_version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert(
         "groupId".to_string(),

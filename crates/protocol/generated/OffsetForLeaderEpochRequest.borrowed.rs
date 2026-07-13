@@ -12,7 +12,8 @@ pub const MIN_VERSION: i16 = 2;
 pub const MAX_VERSION: i16 = 4;
 pub const FLEXIBLE_MIN: i16 = 4;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,11 +27,15 @@ impl Default for OffsetForLeaderEpochRequest<'_> {
         Self {
             replica_id: -2i32,
             topics: Vec::new(),
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl OffsetForLeaderEpochRequest<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::offset_for_leader_epoch_request::OffsetForLeaderEpochRequest {
@@ -141,6 +146,10 @@ pub struct OffsetForLeaderTopic<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl OffsetForLeaderTopic<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::offset_for_leader_epoch_request::OffsetForLeaderTopic {
         crate::owned::offset_for_leader_epoch_request::OffsetForLeaderTopic {
             topic: (self.topic).to_string(),
@@ -157,9 +166,9 @@ impl Encode for OffsetForLeaderTopic<'_> {
         let flex = version >= 4;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.topic);
+                let () = put_compact_string(buf, self.topic);
             } else {
-                put_string(buf, self.topic);
+                let () = put_string(buf, self.topic);
             }
         }
         if version >= 0 {
@@ -258,11 +267,15 @@ impl Default for OffsetForLeaderPartition {
             partition: 0i32,
             current_leader_epoch: -1i32,
             leader_epoch: 0i32,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl OffsetForLeaderPartition {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::offset_for_leader_epoch_request::OffsetForLeaderPartition {

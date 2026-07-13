@@ -91,6 +91,9 @@ impl LiveStore {
     }
 
     /// Expose a tenant's recent spans as a `DataFusion` `MemTable`.
+    ///
+    /// # Errors
+    /// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
     pub fn mem_table(&self, tenant: &str) -> Result<MemTable, TracesError> {
         let schema = crabka_blockstore::span_block_schema();
         let mut batches = Vec::new();
@@ -120,6 +123,9 @@ impl LiveStore {
 }
 
 /// Decode WAL payloads and ingest them into the live store.
+///
+/// # Errors
+/// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
 pub fn ingest_wal_payloads<'a, I>(store: &mut LiveStore, payloads: I) -> Result<usize, TracesError>
 where
     I: IntoIterator<Item = &'a [u8]>,
@@ -133,6 +139,9 @@ where
 }
 
 /// Consume traces WAL records and rebuild the in-memory hot tier.
+///
+/// # Errors
+/// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
 pub async fn run(
     mut consumer: Consumer,
     store: Arc<RwLock<LiveStore>>,

@@ -14,7 +14,8 @@ pub const MIN_VERSION: i16 = 1;
 pub const MAX_VERSION: i16 = 5;
 pub const FLEXIBLE_MIN: i16 = 2;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -25,6 +26,10 @@ pub struct DescribeLogDirsResponse<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl DescribeLogDirsResponse<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_log_dirs_response::DescribeLogDirsResponse {
         crate::owned::describe_log_dirs_response::DescribeLogDirsResponse {
             throttle_time_ms: (self.throttle_time_ms),
@@ -161,11 +166,15 @@ impl Default for DescribeLogDirsResult<'_> {
             total_bytes: -1i64,
             usable_bytes: -1i64,
             is_cordoned: false,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl DescribeLogDirsResult<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_log_dirs_response::DescribeLogDirsResult {
         crate::owned::describe_log_dirs_response::DescribeLogDirsResult {
             error_code: (self.error_code),
@@ -189,9 +198,9 @@ impl Encode for DescribeLogDirsResult<'_> {
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.log_dir);
+                let () = put_compact_string(buf, self.log_dir);
             } else {
-                put_string(buf, self.log_dir);
+                let () = put_string(buf, self.log_dir);
             }
         }
         if version >= 0 {
@@ -326,6 +335,10 @@ pub struct DescribeLogDirsTopic<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl DescribeLogDirsTopic<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_log_dirs_response::DescribeLogDirsTopic {
         crate::owned::describe_log_dirs_response::DescribeLogDirsTopic {
             name: (self.name).to_string(),
@@ -342,9 +355,9 @@ impl Encode for DescribeLogDirsTopic<'_> {
         let flex = version >= 2;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name);
+                let () = put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name);
+                let () = put_string(buf, self.name);
             }
         }
         if version >= 0 {
@@ -439,6 +452,10 @@ pub struct DescribeLogDirsPartition {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl DescribeLogDirsPartition {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_log_dirs_response::DescribeLogDirsPartition {
         crate::owned::describe_log_dirs_response::DescribeLogDirsPartition {
             partition_index: (self.partition_index),

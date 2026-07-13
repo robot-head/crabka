@@ -56,6 +56,8 @@ impl Default for AdminUiConfig {
 }
 
 impl AdminUiConfig {
+    /// # Errors
+    /// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
     pub fn from_env() -> Result<Self, ConfigError> {
         let mut cfg = Self::default();
 
@@ -98,6 +100,8 @@ impl AdminUiConfig {
         cfg.validate()
     }
 
+    /// # Errors
+    /// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
     pub fn validate(self) -> Result<Self, ConfigError> {
         if self.bootstrap_addrs.is_empty() {
             return Err(ConfigError::MissingBootstrap);

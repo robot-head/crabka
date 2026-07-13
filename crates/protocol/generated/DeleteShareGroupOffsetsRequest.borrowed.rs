@@ -11,7 +11,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 0;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -21,6 +22,10 @@ pub struct DeleteShareGroupOffsetsRequest<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl DeleteShareGroupOffsetsRequest<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::delete_share_group_offsets_request::DeleteShareGroupOffsetsRequest {
@@ -45,9 +50,9 @@ impl Encode for DeleteShareGroupOffsetsRequest<'_> {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.group_id);
+                let () = put_compact_string(buf, self.group_id);
             } else {
-                put_string(buf, self.group_id);
+                let () = put_string(buf, self.group_id);
             }
         }
         if version >= 0 {
@@ -144,6 +149,10 @@ pub struct DeleteShareGroupOffsetsRequestTopic<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl DeleteShareGroupOffsetsRequestTopic<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::delete_share_group_offsets_request::DeleteShareGroupOffsetsRequestTopic {
@@ -158,9 +167,9 @@ impl Encode for DeleteShareGroupOffsetsRequestTopic<'_> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.topic_name);
+                let () = put_compact_string(buf, self.topic_name);
             } else {
-                put_string(buf, self.topic_name);
+                let () = put_string(buf, self.topic_name);
             }
         }
         if flex {

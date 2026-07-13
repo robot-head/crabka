@@ -18,9 +18,9 @@ impl Encode for AddPartitionsToTxnTopicResult {
         let flex = version >= 3;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.name);
+                let () = put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name);
+                let () = put_string(buf, &self.name);
             }
         }
         if version >= 0 {
@@ -87,12 +87,7 @@ impl Decode<'_> for AddPartitionsToTxnTopicResult {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v.push(
-                        super::add_partitions_to_txn_partition_result::AddPartitionsToTxnPartitionResult::decode(
-                            buf,
-                            version,
-                        )?,
-                    );
+                    v.push(super::add_partitions_to_txn_partition_result::AddPartitionsToTxnPartitionResult::decode(buf, version)?);
                 }
                 v
             };
@@ -112,9 +107,7 @@ impl AddPartitionsToTxnTopicResult {
             m.name = "x".to_string();
         }
         if version >= 0 {
-            m.results_by_partition = vec![
-                super::add_partitions_to_txn_partition_result::AddPartitionsToTxnPartitionResult::populated(version)
-            ];
+            m.results_by_partition = vec![super::add_partitions_to_txn_partition_result::AddPartitionsToTxnPartitionResult::populated(version)];
         }
         m
     }

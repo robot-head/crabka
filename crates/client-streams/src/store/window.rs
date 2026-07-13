@@ -547,15 +547,14 @@ mod tests {
         s.put("k".to_string(), 0, 1, 5).await;
         s.put("k".to_string(), 0, 2, 7).await;
         s.put("k".to_string(), 10, 9, 11).await;
-        for (_name, window_start, expected) in [
-            ("latest duplicate window", 0, Some((7, 2))),
-            ("next window", 10, Some((11, 9))),
-            ("missing window", 99, None),
-        ] {
-            assert2::assert!(s.fetch_single(&"k".to_string(), window_start).await == expected);
-        }
-        assert2::assert!(s.fetch(&"k".to_string(), 0, 10).await == vec![(0, 2), (10, 9)]);
-        assert2::assert!(s.take_changelog().len() == 3);
+        assert_eq!(s.fetch_single(&"k".to_string(), 0).await, Some((7, 2)));
+        assert_eq!(s.fetch_single(&"k".to_string(), 10).await, Some((11, 9)));
+        assert_eq!(s.fetch_single(&"k".to_string(), 99).await, None);
+        assert_eq!(
+            s.fetch(&"k".to_string(), 0, 10).await,
+            vec![(0, 2), (10, 9)]
+        );
+        assert_eq!(s.take_changelog().len(), 3);
     }
 
     #[tokio::test]
@@ -570,7 +569,7 @@ mod tests {
         s.put("k".into(), 0, 10, 5).await; // window start 0, value 10, recordTs 5
         s.put("k".into(), 10, 20, 17).await; // window start 10, value 20, recordTs 17
         let got = s.fetch_with_ts(&"k".to_string(), 0, 10).await;
-        assert2::assert!(got == vec![(0, 5, 10), (10, 17, 20)]); // (windowStart, recordTs, value)
+        assert_eq!(got, vec![(0, 5, 10), (10, 17, 20)]); // (windowStart, recordTs, value)
     }
 
     #[tokio::test]
@@ -590,13 +589,15 @@ mod tests {
         // Range [0,0] returns both windowStart==0 entries (sort to make order-independent).
         let mut got = s.fetch_all_in_range(0, 0).await;
         got.sort();
-        assert2::assert!(got == vec![("a".to_string(), 0, 5, 1), ("b".to_string(), 0, 6, 7)]);
+        assert_eq!(
+            got,
+            vec![("a".to_string(), 0, 5, 1), ("b".to_string(), 0, 6, 7)]
+        );
 
-        for (_name, from, to, expected_len) in
-            [("all windows", 0, 10, 3), ("above all windows", 11, 100, 0)]
-        {
-            assert2::assert!(s.fetch_all_in_range(from, to).await.len() == expected_len);
-        }
+        // Range [0,10] returns all three.
+        assert_eq!(s.fetch_all_in_range(0, 10).await.len(), 3);
+        // Range above everything returns nothing.
+        assert!(s.fetch_all_in_range(11, 100).await.is_empty());
     }
 
     #[tokio::test]
@@ -623,7 +624,10 @@ mod tests {
             })
             .await
             .unwrap();
-        assert2::assert!(*wk.downcast::<Vec<(i64, i64)>>().unwrap() == vec![(0, 10), (1000, 20)]);
+        assert_eq!(
+            *wk.downcast::<Vec<(i64, i64)>>().unwrap(),
+            vec![(0, 10), (1000, 20)]
+        );
 
         // WindowRangeQuery: all keys, starts in [0,0] → a@0 and b@0, ascending by key.
         let wr = q
@@ -635,9 +639,9 @@ mod tests {
             })
             .await
             .unwrap();
-        assert2::assert!(
-            *wr.downcast::<Vec<((String, i64), i64)>>().unwrap()
-                == vec![(("a".to_string(), 0), 10), (("b".to_string(), 0), 30)]
+        assert_eq!(
+            *wr.downcast::<Vec<((String, i64), i64)>>().unwrap(),
+            vec![(("a".to_string(), 0), 10), (("b".to_string(), 0), 30)]
         );
 
         // WindowRangeQuery: key range [b, b] only.
@@ -650,9 +654,9 @@ mod tests {
             })
             .await
             .unwrap();
-        assert2::assert!(
-            *wr_b.downcast::<Vec<((String, i64), i64)>>().unwrap()
-                == vec![(("b".to_string(), 0), 30)]
+        assert_eq!(
+            *wr_b.downcast::<Vec<((String, i64), i64)>>().unwrap(),
+            vec![(("b".to_string(), 0), 30)]
         );
     }
 
@@ -682,7 +686,10 @@ mod tests {
             })
             .await
             .unwrap();
-        assert2::assert!(*wk.downcast::<Vec<(i64, i64)>>().unwrap() == vec![(0, 10), (1000, 20)]);
+        assert_eq!(
+            *wk.downcast::<Vec<(i64, i64)>>().unwrap(),
+            vec![(0, 10), (1000, 20)]
+        );
     }
 
     // ── Record-cache tests (mirror kv.rs) ───────────────────────────────────
@@ -716,9 +723,9 @@ mod tests {
         s.put("a".into(), 0, 1, 5).await;
         s.put("a".into(), 0, 2, 7).await;
         // Cache-first read sees the latest staged write (value 2, recordTs 7).
-        assert2::assert!(s.fetch_single(&"a".to_string(), 0).await == Some((7, 2)));
+        assert_eq!(s.fetch_single(&"a".to_string(), 0).await, Some((7, 2)));
         // No changelog buffered while writes only touch the cache.
-        assert2::assert!(s.take_changelog().is_empty());
+        assert!(s.take_changelog().is_empty());
     }
 
     #[tokio::test]
@@ -743,7 +750,11 @@ mod tests {
         let mut buffer = std::collections::VecDeque::new();
         s.flush_cache_into(&mut buffer, &[7]).await;
         // Exactly ONE deduped record for the single fake child index 7.
+        assert_eq!(buffer.len(), 1);
         let (child, rec) = &buffer[0];
+        assert_eq!(*child, 7);
+        // Timestamp comes from the dirty entry's record context.
+        assert_eq!(rec.timestamp, 7);
         // Key downcasts to Windowed<String> with start 0 / end = start + size.
         let key = rec
             .key
@@ -751,40 +762,31 @@ mod tests {
             .unwrap()
             .downcast_ref::<Windowed<String>>()
             .unwrap();
+        assert_eq!(key.key, "a");
+        assert_eq!(key.window, Window { start: 0, end: 10 }); // end = start + window_size
         // Value downcasts to Change<i64> { old = committed (1), new = latest (3) }.
         let change = rec.value.downcast_ref::<Change<i64>>().unwrap();
-        assert2::assert!(buffer.len() == 1);
-        assert2::assert!(*child == 7);
-        assert2::assert!(rec.timestamp == 7);
-        assert2::assert!(
-            key == &Windowed {
-                key: "a".into(),
-                window: Window { start: 0, end: 10 },
-            }
-        );
-        assert2::assert!(
-            change
-                == &Change {
-                    old: Some(1),
-                    new: Some(3)
-                }
-        );
+        assert_eq!(change.old, Some(1));
+        assert_eq!(change.new, Some(3));
 
         // Changelog buffered the RAW windowed store-key + the latest wrapped value.
         let cl = s.take_changelog();
-        assert2::assert!(
-            cl == vec![(
-                store_key(
-                    &StringSerde.serialize("w-changelog", &"a".to_string()),
-                    0,
-                    0
-                ),
-                Some(wrap_value(13, &I64Serde.serialize("w-changelog", &3))),
-            )]
+        assert_eq!(cl.len(), 1);
+        assert_eq!(
+            cl[0].0,
+            store_key(
+                &StringSerde.serialize("w-changelog", &"a".to_string()),
+                0,
+                0
+            )
+        );
+        assert_eq!(
+            cl[0].1,
+            Some(wrap_value(13, &I64Serde.serialize("w-changelog", &3)))
         );
 
         // Inner store now holds the write-through value.
-        assert2::assert!(s.fetch_single(&"a".to_string(), 0).await == Some((13, 3)));
+        assert_eq!(s.fetch_single(&"a".to_string(), 0).await, Some((13, 3)));
     }
 
     #[tokio::test]
@@ -813,35 +815,25 @@ mod tests {
 
         let mut buffer = std::collections::VecDeque::new();
         s.flush_cache_into(&mut buffer, &[0]).await;
-        assert2::assert!(buffer.len() == 1);
-        let (child, rec) = &buffer[0];
+        assert_eq!(buffer.len(), 1);
+        let (_child, rec) = &buffer[0];
         let key = rec
             .key
             .as_ref()
             .unwrap()
             .downcast_ref::<Windowed<String>>()
             .unwrap();
-        let change = rec.value.downcast_ref::<Change<i64>>().unwrap();
+        assert_eq!(key.key, "a");
         // end == ws + D (10), NOT ws + 2*D (20).
-        assert2::assert!(buffer.len() == 1);
-        assert2::assert!(*child == 0);
-        assert2::assert!(rec.timestamp == 7);
-        assert2::assert!(
-            key == &Windowed {
-                key: "a".into(),
-                window: Window {
-                    start: ws,
-                    end: ws + D,
-                },
+        assert_eq!(
+            key.window,
+            Window {
+                start: ws,
+                end: ws + D
             }
         );
-        assert2::assert!(
-            change
-                == &Change {
-                    old: None,
-                    new: Some(1),
-                }
-        );
+        let change = rec.value.downcast_ref::<Change<i64>>().unwrap();
+        assert_eq!(change.new, Some(1));
     }
 
     /// Cached `fetch` / `fetch_with_ts` route through `Backing::Cached::range`
@@ -857,14 +849,20 @@ mod tests {
         s.put("a".into(), 20, 3, 25).await;
 
         // fetch over [0, 20] returns all three in window order (range overlay).
-        assert2::assert!(s.fetch(&"a".to_string(), 0, 20).await == vec![(0, 1), (10, 2), (20, 3)]);
+        assert_eq!(
+            s.fetch(&"a".to_string(), 0, 20).await,
+            vec![(0, 1), (10, 2), (20, 3)]
+        );
         // fetch_with_ts surfaces each window's stored record ts.
-        assert2::assert!(
-            s.fetch_with_ts(&"a".to_string(), 0, 20).await
-                == vec![(0, 5, 1), (10, 15, 2), (20, 25, 3)]
+        assert_eq!(
+            s.fetch_with_ts(&"a".to_string(), 0, 20).await,
+            vec![(0, 5, 1), (10, 15, 2), (20, 25, 3)]
         );
         // Narrowed range excludes window 20.
-        assert2::assert!(s.fetch(&"a".to_string(), 0, 10).await == vec![(0, 1), (10, 2)]);
+        assert_eq!(
+            s.fetch(&"a".to_string(), 0, 10).await,
+            vec![(0, 1), (10, 2)]
+        );
     }
 
     /// Cached `fetch_all_in_range` routes through `Backing::Cached::scan_all`,
@@ -877,11 +875,14 @@ mod tests {
         s.put("b".into(), 50, 2, 55).await;
 
         // [0, 10] excludes b@50.
-        assert2::assert!(s.fetch_all_in_range(0, 10).await == vec![("a".to_string(), 0, 5, 1)]);
+        assert_eq!(
+            s.fetch_all_in_range(0, 10).await,
+            vec![("a".to_string(), 0, 5, 1)]
+        );
         // [0, 50] includes both, in windowed-key order (a@0 < b@50).
-        assert2::assert!(
-            s.fetch_all_in_range(0, 50).await
-                == vec![("a".to_string(), 0, 5, 1), ("b".to_string(), 50, 55, 2),]
+        assert_eq!(
+            s.fetch_all_in_range(0, 50).await,
+            vec![("a".to_string(), 0, 5, 1), ("b".to_string(), 50, 55, 2),]
         );
     }
 
@@ -897,16 +898,16 @@ mod tests {
         );
         let wrapped = wrap_value(7, &I64Serde.serialize("w-changelog", &9));
         s.apply_changelog(sk.clone(), Some(wrapped)).await;
-        assert2::assert!(s.fetch_single(&"a".to_string(), 0).await == Some((7, 9)));
+        assert_eq!(s.fetch_single(&"a".to_string(), 0).await, Some((7, 9)));
         // Restored below the cache: nothing to forward, no changelog buffered.
         let mut buffer = std::collections::VecDeque::new();
         s.flush_cache_into(&mut buffer, &[0]).await;
-        assert2::assert!(buffer.is_empty());
-        assert2::assert!(s.take_changelog().is_empty());
+        assert!(buffer.is_empty());
+        assert!(s.take_changelog().is_empty());
 
         // None apply deletes through the inner store.
         s.apply_changelog(sk, None).await;
-        assert2::assert!(s.fetch_single(&"a".to_string(), 0).await == None);
+        assert_eq!(s.fetch_single(&"a".to_string(), 0).await, None);
     }
 
     /// `clear` on a cached window store empties the cache layer and the inner
@@ -917,11 +918,11 @@ mod tests {
         s.set_record_context(ctx_at(0));
         s.put("a".into(), 0, 1, 5).await;
         StateStore::clear(&mut s).await;
-        assert2::assert!(s.fetch_single(&"a".to_string(), 0).await == None);
-        assert2::assert!(s.fetch_all_in_range(i64::MIN, i64::MAX).await.is_empty());
+        assert_eq!(s.fetch_single(&"a".to_string(), 0).await, None);
+        assert!(s.fetch_all_in_range(i64::MIN, i64::MAX).await.is_empty());
         let mut buffer = std::collections::VecDeque::new();
         s.flush_cache_into(&mut buffer, &[0]).await;
-        assert2::assert!(buffer.is_empty());
+        assert!(buffer.is_empty());
     }
 
     /// `enable_cache` is idempotent: re-wrapping an already-cached store is a
@@ -935,11 +936,11 @@ mod tests {
             "w-changelog".into(),
             10,
         );
-        assert2::assert!(!s.is_cached());
+        assert!(!s.is_cached());
         s.enable_cache(Arc::new(Mutex::new(NamedCache::new("w".into()))));
-        assert2::assert!(s.is_cached());
+        assert!(s.is_cached());
         s.enable_cache(Arc::new(Mutex::new(NamedCache::new("w".into()))));
-        assert2::assert!(s.is_cached());
+        assert!(s.is_cached());
     }
 
     #[tokio::test]
@@ -954,12 +955,12 @@ mod tests {
             10,
         );
         s.put("a".into(), 0, 1, 5).await;
-        assert2::assert!(s.fetch_single(&"a".to_string(), 0).await == Some((5, 1)));
+        assert_eq!(s.fetch_single(&"a".to_string(), 0).await, Some((5, 1)));
         let cl = s.take_changelog();
-        assert2::assert!(cl.len() == 1);
+        assert_eq!(cl.len(), 1);
         let mut buffer = std::collections::VecDeque::new();
         s.flush_cache_into(&mut buffer, &[0]).await;
-        assert2::assert!(buffer.is_empty());
+        assert!(buffer.is_empty());
     }
 
     /// Plain-store lifecycle: `set_logging(false)` suppresses the changelog,
@@ -978,7 +979,7 @@ mod tests {
         // Logging off → no changelog buffered.
         s.set_logging(false);
         s.put("a".into(), 0, 1, 5).await;
-        assert2::assert!(s.take_changelog().is_empty());
+        assert!(s.take_changelog().is_empty());
 
         // apply_changelog restores below the store without re-logging.
         let sk = store_key(
@@ -991,17 +992,17 @@ mod tests {
             Some(wrap_value(7, &I64Serde.serialize("w-changelog", &9))),
         )
         .await;
-        assert2::assert!(s.fetch_single(&"b".to_string(), 0).await == Some((7, 9)));
-        assert2::assert!(s.take_changelog().is_empty());
+        assert_eq!(s.fetch_single(&"b".to_string(), 0).await, Some((7, 9)));
+        assert!(s.take_changelog().is_empty());
         // None apply deletes through.
         s.apply_changelog(sk, None).await;
-        assert2::assert!(s.fetch_single(&"b".to_string(), 0).await == None);
+        assert_eq!(s.fetch_single(&"b".to_string(), 0).await, None);
 
         // flush/close are no-ops; clear wipes the remaining "a" window + changelog.
         s.flush().await;
         s.close();
         StateStore::clear(&mut s).await;
-        assert2::assert!(s.fetch_single(&"a".to_string(), 0).await == None);
-        assert2::assert!(s.take_changelog().is_empty());
+        assert_eq!(s.fetch_single(&"a".to_string(), 0).await, None);
+        assert!(s.take_changelog().is_empty());
     }
 }

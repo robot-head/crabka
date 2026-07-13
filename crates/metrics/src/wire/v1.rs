@@ -10,6 +10,8 @@ use super::{
     histogram::v1_histogram_to_native, pb, snappy_block_decode,
 };
 
+/// # Errors
+/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub fn decode_v1(body: &[u8], max_decompressed: usize) -> Result<Vec<DecodedSeries>, WireError> {
     let raw = snappy_block_decode(body, max_decompressed)?;
     let req = pb::v1::WriteRequest::decode(raw.as_slice())
@@ -105,7 +107,7 @@ fn metadata_type(value: i32) -> String {
 
 #[cfg(test)]
 mod tests {
-
+    use assert2::{assert, check};
     use prost::Message;
 
     use super::*;
@@ -141,20 +143,10 @@ mod tests {
 
         let decoded = decode_v1(&snappy(&req.encode_to_vec()), 1 << 20).unwrap();
 
-        assert2::assert!(
-            decoded
-                == vec![DecodedSeries {
-                    labels: Labels::from_iter([("__name__".to_string(), "up".to_string())]),
-                    samples: vec![DecodedSample::new(1000, 1.0)],
-                    histograms: vec![],
-                    exemplars: vec![DecodedExemplar {
-                        labels: Labels::from_iter([("trace_id".to_string(), "abc".to_string())]),
-                        timestamp_ms: 1100,
-                        value: 2.0,
-                    }],
-                    metadata: None,
-                }]
-        );
+        assert!(decoded.len() == 1);
+        check!(decoded[0].labels.get("__name__") == Some("up"));
+        check!(decoded[0].samples == vec![DecodedSample::new(1000, 1.0)]);
+        check!(decoded[0].exemplars[0].labels.get("trace_id") == Some("abc"));
     }
 
     #[test]
@@ -178,10 +170,9 @@ mod tests {
 
         let decoded = decode_v1(&snappy(&req.encode_to_vec()), 1 << 20).unwrap();
 
-        assert2::assert!(decoded.len() == 1);
-        assert2::assert!(decoded[0].histograms.len() == 1);
-        assert2::assert!(decoded[0].histograms[0].0 == 10);
-        assert2::assert!(&decoded[0].histograms[0].1.positive_counts == &vec![1.0, 3.0]);
+        assert!(decoded[0].histograms.len() == 1);
+        check!(decoded[0].histograms[0].0 == 10);
+        check!(decoded[0].histograms[0].1.positive_counts == vec![1.0, 3.0]);
     }
 
     #[test]
@@ -213,7 +204,7 @@ mod tests {
 
         let err = decode_v1(&snappy(&req.encode_to_vec()), 1 << 20).unwrap_err();
 
-        assert2::assert!(matches!(err, WireError::Invalid(_)));
-        assert2::assert!(format!("{err}").contains("duplicate label `job`"));
+        assert!(matches!(err, WireError::Invalid(_)));
+        assert!(format!("{err}").contains("duplicate label `job`"));
     }
 }

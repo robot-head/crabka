@@ -17,7 +17,8 @@ pub const MIN_VERSION: i16 = 1;
 pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -30,6 +31,10 @@ pub struct ShareAcknowledgeRequest<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl ShareAcknowledgeRequest<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::share_acknowledge_request::ShareAcknowledgeRequest {
         crate::owned::share_acknowledge_request::ShareAcknowledgeRequest {
             group_id: (self.group_id).map(std::string::ToString::to_string),
@@ -55,16 +60,16 @@ impl Encode for ShareAcknowledgeRequest<'_> {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.group_id);
+                let () = put_compact_nullable_string(buf, self.group_id);
             } else {
-                put_nullable_string(buf, self.group_id);
+                let () = put_nullable_string(buf, self.group_id);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.member_id);
+                let () = put_compact_nullable_string(buf, self.member_id);
             } else {
-                put_nullable_string(buf, self.member_id);
+                let () = put_nullable_string(buf, self.member_id);
             }
         }
         if version >= 0 {
@@ -201,6 +206,10 @@ pub struct AcknowledgeTopic {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl AcknowledgeTopic {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::share_acknowledge_request::AcknowledgeTopic {
         crate::owned::share_acknowledge_request::AcknowledgeTopic {
             topic_id: (self.topic_id),
@@ -300,6 +309,10 @@ pub struct AcknowledgePartition {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl AcknowledgePartition {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::share_acknowledge_request::AcknowledgePartition {
         crate::owned::share_acknowledge_request::AcknowledgePartition {
             partition_index: (self.partition_index),
@@ -406,6 +419,10 @@ pub struct AcknowledgementBatch {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl AcknowledgementBatch {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::share_acknowledge_request::AcknowledgementBatch {
         crate::owned::share_acknowledge_request::AcknowledgementBatch {
             first_offset: (self.first_offset),

@@ -48,6 +48,8 @@ pub struct OptimizeOutput {
     ),
     err,
 )]
+/// # Errors
+/// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub fn optimize(
     state: &ClusterState,
     goals: &[&dyn Goal],
@@ -581,7 +583,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::too_many_lines)]
     fn soft_movement_that_violates_capacity_invariant_is_dropped() {
         use std::{sync::Arc, time::Duration};
 

@@ -17,7 +17,8 @@ pub const MIN_VERSION: i16 = 1;
 pub const MAX_VERSION: i16 = 3;
 pub const FLEXIBLE_MIN: i16 = 2;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -143,60 +144,82 @@ pub struct DescribedDelegationToken {
     pub renewers: Vec<DescribedDelegationTokenRenewer>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Encode for DescribedDelegationToken {
-    fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
-        let flex = version >= 2;
+impl DescribedDelegationToken {
+    fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.principal_type);
+                let () = put_compact_string(buf, &self.principal_type);
             } else {
-                put_string(buf, &self.principal_type);
+                let () = put_string(buf, &self.principal_type);
             }
         }
+    }
+    fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.principal_name);
+                let () = put_compact_string(buf, &self.principal_name);
             } else {
-                put_string(buf, &self.principal_name);
+                let () = put_string(buf, &self.principal_name);
             }
         }
+    }
+    fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if version >= 3 {
             if flex {
-                put_compact_string(buf, &self.token_requester_principal_type);
+                let () = put_compact_string(buf, &self.token_requester_principal_type);
             } else {
-                put_string(buf, &self.token_requester_principal_type);
+                let () = put_string(buf, &self.token_requester_principal_type);
             }
         }
+    }
+    fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if version >= 3 {
             if flex {
-                put_compact_string(buf, &self.token_requester_principal_name);
+                let () = put_compact_string(buf, &self.token_requester_principal_name);
             } else {
-                put_string(buf, &self.token_requester_principal_name);
+                let () = put_string(buf, &self.token_requester_principal_name);
             }
         }
+    }
+    fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
             put_i64(buf, self.issue_timestamp);
         }
+    }
+    fn encode_field_5<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
             put_i64(buf, self.expiry_timestamp);
         }
+    }
+    fn encode_field_6<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
             put_i64(buf, self.max_timestamp);
         }
+    }
+    fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.token_id);
+                let () = put_compact_string(buf, &self.token_id);
             } else {
-                put_string(buf, &self.token_id);
+                let () = put_string(buf, &self.token_id);
             }
         }
+    }
+    fn encode_field_8<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if version >= 0 {
             if flex {
-                put_compact_bytes(buf, &self.hmac);
+                let () = put_compact_bytes(buf, &self.hmac);
             } else {
-                put_bytes(buf, &self.hmac);
+                let () = put_bytes(buf, &self.hmac);
             }
         }
+    }
+    fn encode_field_9<B: BufMut>(
+        &self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
             {
                 crate::primitives::array::put_array_len(buf, (self.renewers).len(), flex);
@@ -205,10 +228,181 @@ impl Encode for DescribedDelegationToken {
                 }
             }
         }
+        Ok(())
+    }
+    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
         }
+    }
+    fn decode_field_0<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.principal_type = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_1<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.principal_name = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_2<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 3 {
+            out.token_requester_principal_type = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_3<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 3 {
+            out.token_requester_principal_name = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_4<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.issue_timestamp = get_i64(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_5<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.expiry_timestamp = get_i64(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_6<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.max_timestamp = get_i64(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_7<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.token_id = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_8<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.hmac = if flex {
+                get_compact_bytes_owned(buf)?
+            } else {
+                get_bytes_owned(buf)?
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_9<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.renewers = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(DescribedDelegationTokenRenewer::decode(buf, version)?);
+                }
+                v
+            };
+        }
+        Ok(())
+    }
+    fn decode_tagged_fields<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        _version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if flex {
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
+        }
+        Ok(())
+    }
+}
+impl Encode for DescribedDelegationToken {
+    fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
+        let flex = version >= 2;
+        self.encode_field_0(buf, version, flex);
+        self.encode_field_1(buf, version, flex);
+        self.encode_field_2(buf, version, flex);
+        self.encode_field_3(buf, version, flex);
+        self.encode_field_4(buf, version, flex);
+        self.encode_field_5(buf, version, flex);
+        self.encode_field_6(buf, version, flex);
+        self.encode_field_7(buf, version, flex);
+        self.encode_field_8(buf, version, flex);
+        self.encode_field_9(buf, version, flex)?;
+        self.encode_tagged_fields(buf, version, flex);
         Ok(())
     }
     fn encoded_len(&self, version: i16) -> usize {
@@ -287,70 +481,17 @@ impl Decode<'_> for DescribedDelegationToken {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 2;
         let mut out = Self::default();
-        if version >= 0 {
-            out.principal_type = if flex {
-                get_compact_string_owned(buf)?
-            } else {
-                get_string_owned(buf)?
-            };
-        }
-        if version >= 0 {
-            out.principal_name = if flex {
-                get_compact_string_owned(buf)?
-            } else {
-                get_string_owned(buf)?
-            };
-        }
-        if version >= 3 {
-            out.token_requester_principal_type = if flex {
-                get_compact_string_owned(buf)?
-            } else {
-                get_string_owned(buf)?
-            };
-        }
-        if version >= 3 {
-            out.token_requester_principal_name = if flex {
-                get_compact_string_owned(buf)?
-            } else {
-                get_string_owned(buf)?
-            };
-        }
-        if version >= 0 {
-            out.issue_timestamp = get_i64(buf)?;
-        }
-        if version >= 0 {
-            out.expiry_timestamp = get_i64(buf)?;
-        }
-        if version >= 0 {
-            out.max_timestamp = get_i64(buf)?;
-        }
-        if version >= 0 {
-            out.token_id = if flex {
-                get_compact_string_owned(buf)?
-            } else {
-                get_string_owned(buf)?
-            };
-        }
-        if version >= 0 {
-            out.hmac = if flex {
-                get_compact_bytes_owned(buf)?
-            } else {
-                get_bytes_owned(buf)?
-            };
-        }
-        if version >= 0 {
-            out.renewers = {
-                let n = crate::primitives::array::get_array_len(buf, flex)?;
-                let mut v = Vec::with_capacity(n);
-                for _ in 0..n {
-                    v.push(DescribedDelegationTokenRenewer::decode(buf, version)?);
-                }
-                v
-            };
-        }
-        if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
-        }
+        Self::decode_field_0(&mut out, buf, version, flex)?;
+        Self::decode_field_1(&mut out, buf, version, flex)?;
+        Self::decode_field_2(&mut out, buf, version, flex)?;
+        Self::decode_field_3(&mut out, buf, version, flex)?;
+        Self::decode_field_4(&mut out, buf, version, flex)?;
+        Self::decode_field_5(&mut out, buf, version, flex)?;
+        Self::decode_field_6(&mut out, buf, version, flex)?;
+        Self::decode_field_7(&mut out, buf, version, flex)?;
+        Self::decode_field_8(&mut out, buf, version, flex)?;
+        Self::decode_field_9(&mut out, buf, version, flex)?;
+        Self::decode_tagged_fields(&mut out, buf, version, flex)?;
         Ok(out)
     }
 }
@@ -403,16 +544,16 @@ impl Encode for DescribedDelegationTokenRenewer {
         let flex = version >= 2;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.principal_type);
+                let () = put_compact_string(buf, &self.principal_type);
             } else {
-                put_string(buf, &self.principal_type);
+                let () = put_string(buf, &self.principal_type);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.principal_name);
+                let () = put_compact_string(buf, &self.principal_name);
             } else {
-                put_string(buf, &self.principal_name);
+                let () = put_string(buf, &self.principal_name);
             }
         }
         if flex {
@@ -487,7 +628,7 @@ impl DescribedDelegationTokenRenewer {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(version: i16) -> ::serde_json::Value {
+pub fn default_json(_version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("errorCode".to_string(), ::serde_json::json!(0));
     obj.insert("tokens".to_string(), ::serde_json::Value::Array(vec![]));

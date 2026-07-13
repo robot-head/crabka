@@ -110,11 +110,17 @@ pub enum RulerStateWalRecord {
 }
 
 impl RulerStateWalRecord {
+    ///
+    /// # Errors
+    /// Returns an error if the operation cannot be completed.
     pub fn encode(&self) -> Result<Vec<u8>, RulerStateWalRecordError> {
         serde_json::to_vec(self)
             .map_err(|error| RulerStateWalRecordError::Encode(error.to_string()))
     }
 
+    ///
+    /// # Errors
+    /// Returns an error if the operation cannot be completed.
     pub fn decode(bytes: &[u8]) -> Result<Self, RulerStateWalRecordError> {
         serde_json::from_slice(bytes)
             .map_err(|error| RulerStateWalRecordError::Decode(error.to_string()))
@@ -158,6 +164,9 @@ pub fn apply_ruler_state_record<S: MetricStore>(
     fields(state_topic = %state_topic, records = records.len()),
     err
 )]
+///
+/// # Errors
+/// Returns an error if the operation cannot be completed.
 pub fn replay_ruler_state_records<S: MetricStore>(
     state: &PrometheusApiState<S>,
     state_topic: &str,
@@ -233,6 +242,9 @@ pub struct WalHeadConsumerLoopSummary {
     fields(wal_topic = %wal_topic, records = records.len()),
     err
 )]
+///
+/// # Errors
+/// Returns an error if the operation cannot be completed.
 pub fn replay_wal_head_records(
     head: &WalHead,
     wal_topic: &str,
@@ -268,7 +280,7 @@ pub fn replay_wal_head_records(
             .or_insert(record.offset + 1);
     }
     if let Some(timestamp_ms) = newest_timestamp_ms {
-        head.prune(timestamp_ms);
+        let _ = head.prune(timestamp_ms);
     }
 
     Ok(WalHeadReplayResult {
@@ -336,6 +348,9 @@ impl WalHeadConsumerCommit for Consumer {
     fields(wal_topic = %wal_topic, polled = tracing::field::Empty, replayed = tracing::field::Empty),
     err
 )]
+///
+/// # Errors
+/// Returns an error if the operation cannot be completed.
 pub async fn poll_wal_head_consumer_once<C>(
     consumer: &mut C,
     head: &WalHead,
@@ -372,6 +387,9 @@ where
     fields(state_topic = %state_topic, polled = tracing::field::Empty, replayed = tracing::field::Empty),
     err
 )]
+///
+/// # Errors
+/// Returns an error if the operation cannot be completed.
 pub async fn poll_ruler_state_consumer_once<S, C>(
     consumer: &mut C,
     state: &PrometheusApiState<S>,
@@ -408,6 +426,9 @@ where
     Ok(result)
 }
 
+///
+/// # Errors
+/// Returns an error if the operation cannot be completed.
 pub async fn run_ruler_state_consumer_loop<S, C, Stop>(
     consumer: &mut C,
     state: &PrometheusApiState<S>,
@@ -435,6 +456,9 @@ where
     Ok(summary)
 }
 
+///
+/// # Errors
+/// Returns an error if the operation cannot be completed.
 pub async fn run_wal_head_consumer_loop<C, Stop>(
     consumer: &mut C,
     head: &WalHead,
@@ -787,15 +811,12 @@ fn unix_ms_to_rfc3339(timestamp_ms: i64) -> String {
     fields(tenant = %tenant, eval_time_ms),
     err
 )]
-#[allow(
-    clippy::too_many_arguments,
-    reason = "One-shot ruler evaluation wires the API state plus independent sinks for focused tests and runtime reuse."
-)]
+///
+/// # Errors
+/// Returns an error if the operation cannot be completed.
 pub async fn evaluate_ruler_once<S, W, A, R>(
     state: &Arc<PrometheusApiState<S>>,
-    wal_sink: &W,
-    alert_sink: &A,
-    state_sink: &R,
+    sinks: (&W, &A, &R),
     alert_state: &mut RulerAlertState,
     group_state: &mut RulerGroupState,
     tenant: &str,
@@ -808,33 +829,27 @@ where
     A: AlertmanagerSink,
     R: RulerStateSink,
 {
+    let (wal_sink, alert_sink, state_sink) = sinks;
     state.set_ruler_evaluation_time_ms(eval_time_ms);
     let rules = state.ruler_rule_set(tenant);
     let engine = state.engine_for_tenant(tenant);
     evaluate_and_persist_ruler_rule_set_for_shard_due_for_eval(
         &engine,
-        wal_sink,
-        alert_sink,
-        state_sink,
+        (wal_sink, alert_sink, state_sink),
         alert_state,
         tenant,
         &rules,
-        group_state,
-        shard,
-        eval_time_ms,
+        (group_state, shard, eval_time_ms),
     )
     .await
 }
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "The runtime loop wires independent sinks and scheduling inputs explicitly for testability."
-)]
+///
+/// # Errors
+/// Returns an error if the operation cannot be completed.
 pub async fn run_ruler_evaluation_loop<S, W, A, R, Stop>(
     state: Arc<PrometheusApiState<S>>,
-    wal_sink: W,
-    alert_sink: A,
-    state_sink: R,
+    sinks: (W, A, R),
     tenant: String,
     shard: RulerShard,
     interval: Duration,
@@ -847,15 +862,14 @@ where
     R: RulerStateSink,
     Stop: FnMut() -> bool,
 {
+    let (wal_sink, alert_sink, state_sink) = sinks;
     let mut alert_state = RulerAlertState::default();
     let mut group_state = RulerGroupState::default();
     loop {
         let eval_time_ms = current_time_ms();
         evaluate_ruler_once(
             &state,
-            &wal_sink,
-            &alert_sink,
-            &state_sink,
+            (&wal_sink, &alert_sink, &state_sink),
             &mut alert_state,
             &mut group_state,
             &tenant,
@@ -913,6 +927,9 @@ pub fn refreshing_blockstore_prometheus_router_with_hot_store(
     ))
 }
 
+///
+/// # Errors
+/// Returns an error if the operation cannot be completed.
 pub async fn blockstore_prometheus_router(
     store: Arc<dyn ObjectStore>,
     base: Url,
@@ -1268,6 +1285,9 @@ impl MetricStore for RefreshingMetricBlockStore {
     }
 }
 
+///
+/// # Errors
+/// Returns an error if the operation cannot be completed.
 pub async fn load_compaction_manifests(
     store: Arc<dyn ObjectStore>,
     manifest_prefix: &str,
@@ -1275,6 +1295,9 @@ pub async fn load_compaction_manifests(
     load_compaction_manifests_filtered(store, manifest_prefix, None).await
 }
 
+///
+/// # Errors
+/// Returns an error if the operation cannot be completed.
 pub async fn load_compaction_manifests_for_range(
     store: Arc<dyn ObjectStore>,
     manifest_prefix: &str,
@@ -1367,6 +1390,9 @@ async fn load_compaction_manifests_filtered_with_cache(
     Ok(manifests)
 }
 
+///
+/// # Errors
+/// Returns an error if the operation cannot be completed.
 pub async fn serve_in_memory_prometheus(
     addr: SocketAddr,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
@@ -1374,6 +1400,9 @@ pub async fn serve_in_memory_prometheus(
     serve_prometheus_router(addr, in_memory_prometheus_router(), shutdown).await
 }
 
+///
+/// # Errors
+/// Returns an error if the operation cannot be completed.
 pub async fn serve_prometheus_router(
     addr: SocketAddr,
     router: Router,
@@ -1388,6 +1417,9 @@ pub async fn serve_prometheus_router(
 /// process drain in-flight requests (axum's `with_graceful_shutdown`) before exiting,
 /// rather than dropping the task detached. Used by the long-running service binaries,
 /// which join the handle before returning from their `run_*` entry points.
+///
+/// # Errors
+/// Returns an error if the operation cannot be completed.
 pub async fn serve_prometheus_router_joinable(
     addr: SocketAddr,
     router: Router,
@@ -1778,9 +1810,7 @@ rules:
         let mut group_state = crabka_promql::RulerGroupState::default();
         let evaluation = super::evaluate_ruler_once(
             &state,
-            &wal_sink,
-            &alert_sink,
-            &state_sink,
+            (&wal_sink, &alert_sink, &state_sink),
             &mut alert_state,
             &mut group_state,
             "tenant-a",
@@ -1856,9 +1886,7 @@ rules:
         let mut group_state = crabka_promql::RulerGroupState::default();
         let error = super::evaluate_ruler_once(
             &state,
-            &wal_sink,
-            &alert_sink,
-            &state_sink,
+            (&wal_sink, &alert_sink, &state_sink),
             &mut alert_state,
             &mut group_state,
             "tenant-a",

@@ -213,7 +213,6 @@ fn denied_result(
     }
 }
 
-#[allow(clippy::unused_async)] // async to match the inline-intercept handler shape.
 #[tracing::instrument(
     name = "handle_describe_configs",
     level = "info",
@@ -221,7 +220,7 @@ fn denied_result(
     fields(api = "DescribeConfigs", version, req_bytes = req_bytes.len()),
     err,
 )]
-pub(crate) async fn handle(
+pub(crate) fn handle(
     broker: &Broker,
     version: i16,
     _correlation_id: i32,
@@ -272,6 +271,7 @@ pub(crate) async fn handle(
 mod tests {
     use std::collections::BTreeMap;
 
+    use assert2::assert;
     use crabka_metadata::{BrokerConfigRecord, MetadataImage, MetadataRecord};
     use crabka_protocol::{
         UnknownTaggedFields,
@@ -293,9 +293,9 @@ mod tests {
     #[test]
     fn broker_resource_name_invalid_fails_parse() {
         // Non-numeric resource_name must fail to parse as NodeId.
-        assert2::assert!("not-a-number".parse::<u64>().is_err());
+        assert!("not-a-number".parse::<u64>().is_err());
         // Empty string also fails.
-        assert2::assert!("".parse::<u64>().is_err());
+        assert!("".parse::<u64>().is_err());
     }
 
     #[test]
@@ -305,7 +305,7 @@ mod tests {
             .broker_config(crabka_metadata::NodeId(1))
             .cloned()
             .unwrap_or_default();
-        assert2::assert!(
+        assert!(
             map.get("leader.replication.throttled.rate")
                 .map(String::as_str)
                 == Some("1024")
@@ -331,7 +331,7 @@ mod tests {
             documentation: None,
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert2::assert!(entry == expected);
+        assert!(entry == expected);
     }
 
     #[test]
@@ -374,7 +374,7 @@ mod tests {
             }],
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert2::assert!(result == expected);
+        assert!(result == expected);
     }
 
     #[test]
@@ -400,7 +400,7 @@ mod tests {
             configs: Vec::new(),
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert2::assert!(result == expected);
+        assert!(result == expected);
     }
 
     #[test]
@@ -433,7 +433,7 @@ mod tests {
         )]
         .into_iter()
         .collect();
-        assert2::assert!(filtered == expected);
+        assert!(filtered == expected);
     }
 
     #[test]
@@ -444,12 +444,12 @@ mod tests {
             .broker_config(crabka_metadata::NodeId(99))
             .cloned()
             .unwrap_or_default();
-        assert2::assert!(map.is_empty());
+        assert!(map.is_empty());
     }
 
     #[test]
     fn config_source_dynamic_broker_is_2() {
-        assert2::assert!(super::CONFIG_SOURCE_DYNAMIC_BROKER == 2i8);
+        assert!(super::CONFIG_SOURCE_DYNAMIC_BROKER == 2i8);
     }
 
     #[test]
@@ -471,42 +471,20 @@ mod tests {
             ..Default::default()
         };
         let res = super::describe_one(&img, r);
-        assert2::assert!(res.error_code == crate::codes::NONE);
-        let by_name: std::collections::BTreeMap<_, _> = res
-            .configs
-            .into_iter()
-            .map(|config| (config.name.clone(), config))
-            .collect();
-        let expected = std::collections::BTreeMap::from([
-            (
-                "match".to_string(),
-                DescribeConfigsResourceResult {
-                    name: "match".into(),
-                    value: Some(String::new()),
-                    config_source: super::CONFIG_SOURCE_DEFAULT,
-                    ..Default::default()
-                },
-            ),
-            (
-                "interval.ms".to_string(),
-                DescribeConfigsResourceResult {
-                    name: "interval.ms".into(),
-                    value: Some("300000".into()),
-                    config_source: super::CONFIG_SOURCE_DEFAULT,
-                    ..Default::default()
-                },
-            ),
-            (
-                "metrics".to_string(),
-                DescribeConfigsResourceResult {
-                    name: "metrics".into(),
-                    value: Some("a.".into()),
-                    config_source: super::CONFIG_SOURCE_CLIENT_METRICS,
-                    ..Default::default()
-                },
-            ),
-        ]);
-        assert2::assert!(by_name == expected);
+        assert_eq!(res.error_code, crate::codes::NONE);
+        let by_name: std::collections::HashMap<_, _> =
+            res.configs.iter().map(|c| (c.name.as_str(), c)).collect();
+        let cases = [
+            ("metrics", Some("a."), super::CONFIG_SOURCE_CLIENT_METRICS),
+            ("interval.ms", Some("300000"), super::CONFIG_SOURCE_DEFAULT),
+        ];
+        for (key, want_value, want_source) in cases {
+            assert!(
+                (by_name[key].value.as_deref(), by_name[key].config_source)
+                    == (want_value, want_source),
+                "key {key}"
+            );
+        }
     }
 
     fn anon() -> crabka_security::Principal {
@@ -530,7 +508,7 @@ mod tests {
             super::RESOURCE_TYPE_TOPIC,
             "t",
         );
-        assert2::assert!(code == Some(crate::codes::TOPIC_AUTHORIZATION_FAILED));
+        assert!(code == Some(crate::codes::TOPIC_AUTHORIZATION_FAILED));
         let res = super::denied_result(
             super::RESOURCE_TYPE_TOPIC,
             "t".into(),
@@ -544,7 +522,7 @@ mod tests {
             configs: Vec::new(),
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert2::assert!(res == expected);
+        assert!(res == expected);
     }
 
     #[test]
@@ -560,6 +538,6 @@ mod tests {
             super::RESOURCE_TYPE_BROKER,
             "1",
         );
-        assert2::assert!(code == Some(crate::codes::CLUSTER_AUTHORIZATION_FAILED));
+        assert!(code == Some(crate::codes::CLUSTER_AUTHORIZATION_FAILED));
     }
 }

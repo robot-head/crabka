@@ -17,6 +17,8 @@
 
 use std::time::{Duration, Instant};
 
+use assert2::assert;
+
 mod support;
 
 use crabka_protocol::{
@@ -62,7 +64,10 @@ async fn await_txn_coordinator(client: &crabka_client_core::Client, tid: &str) {
         if node >= 0 {
             return;
         }
-        assert2::assert!(Instant::now() <= deadline);
+        assert!(
+            Instant::now() <= deadline,
+            "txn coordinator never became available: {fc:?}"
+        );
         // intentional: the FindCoordinator RPC itself triggers the lazy
         // __transaction_state leader election; coordinator availability is not
         // in the metadata image and has no awaiter/metric, so poll the RPC.
@@ -87,7 +92,7 @@ async fn create_topic(client: &crabka_client_core::Client) {
         })
         .await
         .expect("create topic");
-    assert2::assert!(resp.topics[0].error_code == 0);
+    assert!(resp.topics[0].error_code == 0, "create topic: {resp:?}");
 }
 
 /// Resolve `TOPIC`'s `topic_id` via Metadata. The v8+ `OffsetFetch` `groups[]`
@@ -190,7 +195,10 @@ async fn begin_and_commit_offsets(
         if init.error_code == 0 {
             break (init.producer_id, init.producer_epoch);
         }
-        assert2::assert!(init.error_code == NOT_COORDINATOR && Instant::now() <= deadline);
+        assert!(
+            init.error_code == NOT_COORDINATOR && Instant::now() <= deadline,
+            "InitProducerId: {init:?}"
+        );
         // intentional: NOT_COORDINATOR clears once the elected leader installs
         // the txn coordinator locally — coordinator-local state, not in the
         // metadata image and with no awaiter/metric; bounded RPC-response poll.
@@ -209,7 +217,7 @@ async fn begin_and_commit_offsets(
         })
         .await
         .expect("add offsets to txn");
-    assert2::assert!(add.error_code == 0);
+    assert!(add.error_code == 0, "AddOffsetsToTxn: {add:?}");
 
     // TxnOffsetCommit: empty member_id + generation_id -1 = simple consumer (no
     // membership fencing). Appends a transactional offset record + buffers it.
@@ -234,7 +242,10 @@ async fn begin_and_commit_offsets(
         })
         .await
         .expect("txn offset commit");
-    assert2::assert!(toc.topics[0].partitions[0].error_code == 0);
+    assert!(
+        toc.topics[0].partitions[0].error_code == 0,
+        "TxnOffsetCommit: {toc:?}"
+    );
 
     (pid, epoch)
 }
@@ -255,7 +266,10 @@ async fn txn_offset_commit_visible_via_offset_fetch_after_commit_marker() {
 
     // Pre-commit: the transactional offset is held under the LSO and NOT yet
     // surfaced — Kafka makes it visible to OffsetFetch only after the marker.
-    assert2::assert!(fetch_offset(&p.client, group, topic_id).await == -1);
+    assert!(
+        fetch_offset(&p.client, group, topic_id).await == -1,
+        "txn offset must be invisible before the COMMIT marker"
+    );
 
     // EndTxn(commit) writes the COMMIT marker → materializes the buffer.
     let end = p
@@ -269,10 +283,13 @@ async fn txn_offset_commit_visible_via_offset_fetch_after_commit_marker() {
         })
         .await
         .expect("end txn commit");
-    assert2::assert!(end.error_code == 0);
+    assert!(end.error_code == 0, "EndTxn(commit): {end:?}");
 
     // Post-commit: the offset is now visible via OffsetFetch.
-    assert2::assert!(fetch_offset(&p.client, group, topic_id).await == 3);
+    assert!(
+        fetch_offset(&p.client, group, topic_id).await == 3,
+        "txn offset must be visible after the COMMIT marker"
+    );
 
     p.broker.shutdown().await;
 }
@@ -302,10 +319,13 @@ async fn txn_offset_commit_dropped_on_abort_marker() {
         })
         .await
         .expect("end txn abort");
-    assert2::assert!(end.error_code == 0);
+    assert!(end.error_code == 0, "EndTxn(abort): {end:?}");
 
     // Still absent: an aborted transactional offset is never committed.
-    assert2::assert!(fetch_offset(&p.client, group, topic_id).await == -1);
+    assert!(
+        fetch_offset(&p.client, group, topic_id).await == -1,
+        "txn offset must stay absent after the ABORT marker"
+    );
 
     p.broker.shutdown().await;
 }

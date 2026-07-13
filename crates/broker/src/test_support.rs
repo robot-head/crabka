@@ -86,7 +86,7 @@ pub(crate) fn encode_request<T: Encode>(req: &T, version: i16) -> Bytes {
 pub(crate) fn decode_response<T: Decode<'static>>(bytes: &Bytes, version: i16) -> T {
     let mut cur: &[u8] = bytes.as_ref();
     let resp = T::decode(&mut cur, version).expect("decode response");
-    assert2::assert!(cur.is_empty());
+    assert!(cur.is_empty(), "response decoder consumed all bytes");
     resp
 }
 

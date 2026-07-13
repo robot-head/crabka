@@ -5,8 +5,6 @@
 //! The batch either reaches the freshly elected leader quickly or fails within a
 //! bounded retry budget, and retry preserves producer identity.
 
-#![allow(clippy::struct_excessive_bools)]
-
 use std::{
     hash::{Hash, Hasher},
     time::Duration,
@@ -44,6 +42,13 @@ type StateProjection = (
     (Outcome, Batch, Batch, bool),
 );
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct RoutingState {
+    refresh_needed: bool,
+    failover_started: bool,
+    leader_hint_adopted: bool,
+}
+
 #[derive(Clone, Debug)]
 struct State {
     actual_leader: i32,
@@ -51,14 +56,12 @@ struct State {
     leader_hint: Option<i32>,
     live: u8,
     stale_refreshes_left: u8,
-    refresh_needed: bool,
-    failover_started: bool,
+    routing: RoutingState,
     steps_after_failover: u8,
     sends: u8,
     resends: u8,
     refreshes: u8,
     stale_leader_sends: u8,
-    leader_hint_adopted: bool,
     outcome: Outcome,
     batch: Batch,
     // Immutable identity of the prepared batch; resend transitions must not rewrite it.
@@ -83,16 +86,16 @@ impl State {
                 self.leader_hint,
                 self.live,
                 self.stale_refreshes_left,
-                self.refresh_needed,
+                self.routing.refresh_needed,
             ),
             (
-                self.failover_started,
+                self.routing.failover_started,
                 self.steps_after_failover,
                 self.sends,
                 self.resends,
                 self.refreshes,
                 self.stale_leader_sends,
-                self.leader_hint_adopted,
+                self.routing.leader_hint_adopted,
             ),
             (
                 self.outcome,
@@ -142,14 +145,16 @@ impl Model for ClientFailoverModel {
             leader_hint: None,
             live: 0b111,
             stale_refreshes_left: MAX_STALE_REFRESHES,
-            refresh_needed: false,
-            failover_started: false,
+            routing: RoutingState {
+                refresh_needed: false,
+                failover_started: false,
+                leader_hint_adopted: false,
+            },
             steps_after_failover: 0,
             sends: 0,
             resends: 0,
             refreshes: 0,
             stale_leader_sends: 0,
-            leader_hint_adopted: false,
             outcome: Outcome::Pending,
             batch: Batch {
                 producer_id: 1,
@@ -169,7 +174,7 @@ impl Model for ClientFailoverModel {
         if s.terminal() {
             return;
         }
-        if !s.failover_started && s.broker_live(s.cached_leader) {
+        if !s.routing.failover_started && s.broker_live(s.cached_leader) {
             acts.push(Act::KillCachedLeader);
         }
         for broker in BROKERS {
@@ -177,16 +182,16 @@ impl Model for ClientFailoverModel {
                 acts.push(Act::ElectNewLeader(broker));
             }
         }
-        if !s.refresh_needed && s.sends < MAX_SENDS {
+        if !s.routing.refresh_needed && s.sends < MAX_SENDS {
             acts.push(Act::Send);
         }
         if let Some(broker) = s.leader_hint
-            && s.refresh_needed
+            && s.routing.refresh_needed
             && s.broker_live(broker)
         {
             acts.push(Act::AdoptLeaderHint(broker));
         }
-        if s.refresh_needed && s.refreshes < MAX_REFRESHES {
+        if s.routing.refresh_needed && s.refreshes < MAX_REFRESHES {
             acts.push(Act::RefreshMetadata);
         }
         if s.sends >= MAX_SENDS || s.refreshes >= MAX_REFRESHES {
@@ -196,7 +201,7 @@ impl Model for ClientFailoverModel {
 
     fn next_state(&self, last: &Self::State, action: Self::Action) -> Option<Self::State> {
         let mut s = last.clone();
-        if s.failover_started && !s.terminal() {
+        if s.routing.failover_started && !s.terminal() {
             s.steps_after_failover = s.steps_after_failover.saturating_add(1);
             if s.steps_after_failover > MAX_STEPS_AFTER_FAILOVER {
                 s.outcome = Outcome::Failed;
@@ -207,17 +212,17 @@ impl Model for ClientFailoverModel {
         match action {
             Act::KillCachedLeader => {
                 s.live &= !(1u8 << s.cached_leader);
-                s.failover_started = true;
+                s.routing.failover_started = true;
             }
             Act::ElectNewLeader(broker) => {
                 if !s.broker_live(broker) {
                     return None;
                 }
                 s.actual_leader = broker;
-                s.failover_started = true;
+                s.routing.failover_started = true;
             }
             Act::Send => {
-                if s.refresh_needed {
+                if s.routing.refresh_needed {
                     return None;
                 }
                 if s.sends > 0 {
@@ -227,12 +232,12 @@ impl Model for ClientFailoverModel {
                 let target = s.cached_leader;
                 if !s.broker_live(target) {
                     s.stale_leader_sends = s.stale_leader_sends.saturating_add(1);
-                    s.refresh_needed = true;
+                    s.routing.refresh_needed = true;
                 } else if target == s.actual_leader {
                     s.outcome = Outcome::Acked;
                 } else {
                     s.leader_hint = Some(s.actual_leader);
-                    s.refresh_needed = true;
+                    s.routing.refresh_needed = true;
                 }
                 s.identity_preserved = s.batch == s.prepared_identity;
             }
@@ -242,21 +247,21 @@ impl Model for ClientFailoverModel {
                 }
                 s.cached_leader = broker;
                 s.leader_hint = None;
-                s.refresh_needed = false;
-                s.leader_hint_adopted = true;
+                s.routing.refresh_needed = false;
+                s.routing.leader_hint_adopted = true;
             }
             Act::RefreshMetadata => {
                 s.refreshes = s.refreshes.saturating_add(1);
                 if s.stale_refreshes_left > 0 {
                     s.stale_refreshes_left -= 1;
-                    s.refresh_needed = true;
+                    s.routing.refresh_needed = true;
                 } else if s.broker_live(s.actual_leader) {
                     s.cached_leader = s.actual_leader;
                     s.leader_hint = None;
-                    s.refresh_needed = false;
+                    s.routing.refresh_needed = false;
                 } else {
                     s.leader_hint = None;
-                    s.refresh_needed = true;
+                    s.routing.refresh_needed = true;
                 }
             }
             Act::ExpireBudget => {
@@ -275,7 +280,7 @@ impl Model for ClientFailoverModel {
                 s.refreshes <= MAX_REFRESHES
             }),
             Property::always("quick_recovery_or_failure", |_, s: &State| {
-                !s.failover_started
+                !s.routing.failover_started
                     || s.terminal()
                     || s.steps_after_failover <= MAX_STEPS_AFTER_FAILOVER
             }),
@@ -289,13 +294,13 @@ impl Model for ClientFailoverModel {
                 s.stale_leader_sends > 0
             }),
             Property::sometimes("acked_after_failover", |_, s: &State| {
-                s.failover_started && s.outcome == Outcome::Acked
+                s.routing.failover_started && s.outcome == Outcome::Acked
             }),
             Property::sometimes("budget_expiry_reachable", |_, s: &State| {
                 s.outcome == Outcome::Failed
             }),
             Property::sometimes("leader_hint_fast_reroute", |_, s: &State| {
-                s.leader_hint_adopted && s.refreshes == 0 && s.outcome == Outcome::Acked
+                s.routing.leader_hint_adopted && s.refreshes == 0 && s.outcome == Outcome::Acked
             }),
         ]
     }

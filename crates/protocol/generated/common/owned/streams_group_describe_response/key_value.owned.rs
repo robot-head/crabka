@@ -17,16 +17,16 @@ impl Encode for KeyValue {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.key);
+                let () = put_compact_string(buf, &self.key);
             } else {
-                put_string(buf, &self.key);
+                let () = put_string(buf, &self.key);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.value);
+                let () = put_compact_string(buf, &self.value);
             } else {
-                put_string(buf, &self.value);
+                let () = put_string(buf, &self.value);
             }
         }
         if flex {

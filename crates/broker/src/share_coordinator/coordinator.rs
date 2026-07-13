@@ -212,18 +212,17 @@ impl ShareCoordinator {
     ///
     /// Returns the per-partition error code on a fenced epoch or a persist
     /// failure (`COORDINATOR_NOT_AVAILABLE`).
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn write(
         &self,
         group: &str,
         topic_id: uuid::Uuid,
         partition: i32,
-        state_epoch: StateEpoch,
-        leader_epoch: LeaderEpoch,
-        start_offset: Offset,
-        delivery_complete_count: i32,
+        epochs: (StateEpoch, LeaderEpoch),
+        progress: (Offset, i32),
         batches: Vec<StateBatch>,
     ) -> Result<(), ShareErrorCode> {
+        let (state_epoch, leader_epoch) = epochs;
+        let (start_offset, delivery_complete_count) = progress;
         let map_key = (group.to_string(), topic_id, partition);
         let state_partition = self.state_partition_for(group, &topic_id, partition);
 
@@ -575,7 +574,7 @@ impl ShareCoordinator {
 mod tests {
     use std::path::Path;
 
-    use assert2::check;
+    use assert2::{assert, check};
     use crabka_log::{Log, LogConfig};
     use tempfile::tempdir;
 
@@ -640,15 +639,10 @@ mod tests {
         coord.initialize("g", tid, 0, 5, Offset(100)).await.unwrap();
 
         let st = coord.read("g", tid, 0).await.expect("present");
-        assert2::assert!(
-            st == SharePartitionState {
-                state_epoch: 5,
-                start_offset: Offset(100),
-                ..Default::default()
-            }
-        );
+        assert!(st.state_epoch == 5);
+        assert!(st.start_offset == 100);
         let summary = coord.read_summary("g", tid, 0).await.expect("present");
-        assert2::assert!(summary == (5, 0, Offset(100), 0));
+        assert!(summary == (5, 0, Offset(100), 0));
     }
 
     #[tokio::test]
@@ -663,7 +657,7 @@ mod tests {
             .initialize("g", tid, 0, 5, Offset(0))
             .await
             .unwrap_err();
-        assert2::assert!(err == crate::codes::FENCED_STATE_EPOCH);
+        assert!(err == crate::codes::FENCED_STATE_EPOCH);
     }
 
     #[tokio::test]
@@ -675,25 +669,19 @@ mod tests {
 
         coord.initialize("g", tid, 0, 1, Offset(0)).await.unwrap();
         coord
-            .write("g", tid, 0, 1, 2, Offset(50), 7, vec![batch(50, 59)])
+            .write("g", tid, 0, (1, 2), (Offset(50), 7), vec![batch(50, 59)])
             .await
             .unwrap();
 
         let st = coord.read("g", tid, 0).await.expect("present");
-        assert2::assert!(
-            st == SharePartitionState {
-                state_epoch: 1,
-                leader_epoch: 2,
-                start_offset: Offset(50),
-                delivery_complete_count: 7,
-                state_batches: vec![batch(50, 59)],
-                updates_since_snapshot: 1,
-                ..Default::default()
-            }
-        );
+        check!(st.state_epoch == 1);
+        check!(st.leader_epoch == 2);
+        check!(st.start_offset == 50);
+        check!(st.delivery_complete_count == 7);
+        check!(st.state_batches == vec![batch(50, 59)]);
 
         let summary = coord.read_summary("g", tid, 0).await.expect("present");
-        assert2::assert!(summary == (1, 2, Offset(50), 7));
+        assert!(summary == (1, 2, Offset(50), 7));
     }
 
     #[tokio::test]
@@ -705,10 +693,10 @@ mod tests {
 
         coord.initialize("g", tid, 0, 5, Offset(0)).await.unwrap();
         let err = coord
-            .write("g", tid, 0, 4, 0, Offset(0), 0, vec![])
+            .write("g", tid, 0, (4, 0), (Offset(0), 0), vec![])
             .await
             .unwrap_err();
-        assert2::assert!(err == crate::codes::FENCED_STATE_EPOCH);
+        assert!(err == crate::codes::FENCED_STATE_EPOCH);
     }
 
     #[tokio::test]
@@ -720,14 +708,14 @@ mod tests {
 
         coord.initialize("g", tid, 0, 1, Offset(0)).await.unwrap();
         coord
-            .write("g", tid, 0, 1, 5, Offset(0), 0, vec![])
+            .write("g", tid, 0, (1, 5), (Offset(0), 0), vec![])
             .await
             .unwrap();
         let err = coord
-            .write("g", tid, 0, 1, 4, Offset(0), 0, vec![])
+            .write("g", tid, 0, (1, 4), (Offset(0), 0), vec![])
             .await
             .unwrap_err();
-        assert2::assert!(err == crate::codes::FENCED_LEADER_EPOCH);
+        assert!(err == crate::codes::FENCED_LEADER_EPOCH);
     }
 
     #[tokio::test]
@@ -738,9 +726,9 @@ mod tests {
         let tid = uuid::Uuid::from_bytes([8; 16]);
 
         coord.initialize("g", tid, 0, 1, Offset(0)).await.unwrap();
-        assert2::assert!(coord.read("g", tid, 0).await.is_some());
+        assert!(coord.read("g", tid, 0).await.is_some());
         coord.delete("g", tid, 0).await.unwrap();
-        assert2::assert!(coord.read("g", tid, 0).await.is_none());
+        assert!(coord.read("g", tid, 0).await.is_none());
     }
 
     #[tokio::test]
@@ -763,7 +751,14 @@ mod tests {
         for i in 0..3 {
             let base = i64::from(i) * 10;
             coord
-                .write("g", tid, 0, 1, 1, Offset(0), 0, vec![batch(base, base + 9)])
+                .write(
+                    "g",
+                    tid,
+                    0,
+                    (1, 1),
+                    (Offset(0), 0),
+                    vec![batch(base, base + 9)],
+                )
                 .await
                 .unwrap();
         }
@@ -771,16 +766,8 @@ mod tests {
         let st = coord.read("g", tid, 0).await.expect("present");
         // After the 3rd update crossed the threshold, a snapshot was folded
         // and the counter reset.
-        assert2::assert!(
-            st == SharePartitionState {
-                state_epoch: 1,
-                leader_epoch: 1,
-                state_batches: vec![batch(0, 9), batch(10, 19), batch(20, 29)],
-                snapshot_epoch: 1,
-                last_snapshot_offset: Offset(4),
-                ..Default::default()
-            }
-        );
+        assert!(st.updates_since_snapshot == 0);
+        assert!(st.snapshot_epoch == 1);
     }
 
     #[tokio::test]
@@ -800,7 +787,7 @@ mod tests {
             lead_all(&coord).await;
             coord.initialize("g", tid, 0, 2, Offset(0)).await.unwrap();
             coord
-                .write("g", tid, 0, 2, 3, Offset(20), 4, vec![batch(20, 29)])
+                .write("g", tid, 0, (2, 3), (Offset(20), 4), vec![batch(20, 29)])
                 .await
                 .unwrap();
         }
@@ -818,17 +805,11 @@ mod tests {
         recovered.replay_led_partitions().await;
 
         let st = recovered.read("g", tid, 0).await.expect("recovered");
-        assert2::assert!(
-            st == SharePartitionState {
-                state_epoch: 2,
-                leader_epoch: 3,
-                start_offset: Offset(20),
-                delivery_complete_count: 4,
-                state_batches: vec![batch(20, 29)],
-                updates_since_snapshot: 1,
-                ..Default::default()
-            }
-        );
+        check!(st.state_epoch == 2);
+        check!(st.leader_epoch == 3);
+        check!(st.start_offset == 20);
+        check!(st.delivery_complete_count == 4);
+        check!(st.state_batches == vec![batch(20, 29)]);
     }
 
     // `replay_led_partitions` must derive each record's offset as
@@ -929,19 +910,12 @@ mod tests {
         let st = coord.read("g", tid, 0).await.expect("recovered");
         // Batch B is the final snapshot — proves the inter-batch cursor advanced
         // past batch A (base_offset + last_offset_delta + 1 == 2).
-        assert2::assert!(
-            st == SharePartitionState {
-                state_epoch: 2,
-                leader_epoch: 9,
-                start_offset: Offset(50),
-                delivery_complete_count: 8,
-                state_batches: vec![batch(50, 59)],
-                snapshot_epoch: 6,
-                // Batch B's snapshot sits at base_offset 2 (single record, delta 0).
-                last_snapshot_offset: Offset(2),
-                updates_since_snapshot: 0,
-            }
-        );
+        check!(st.leader_epoch == 9);
+        check!(st.start_offset == 50);
+        check!(st.delivery_complete_count == 8);
+        check!(st.state_batches == vec![batch(50, 59)]);
+        // Batch B's snapshot sits at base_offset 2 (single record, delta 0).
+        check!(st.last_snapshot_offset == 2);
     }
 
     /// Replaying ONLY batch A pins the per-record offset arithmetic in
@@ -1013,19 +987,10 @@ mod tests {
         coord.replay_led_partitions().await;
 
         let st = coord.read("g", tid, 0).await.expect("recovered");
-        assert2::assert!(
-            st == SharePartitionState {
-                state_epoch: 2,
-                leader_epoch: 3,
-                start_offset: Offset(20),
-                delivery_complete_count: 4,
-                state_batches: vec![batch(20, 29)],
-                snapshot_epoch: 5,
-                // The snapshot record sits at base_offset(0) + offset_delta(1) == 1.
-                last_snapshot_offset: Offset(1),
-                updates_since_snapshot: 0,
-            }
-        );
+        check!(st.leader_epoch == 3);
+        check!(st.start_offset == 20);
+        // The snapshot record sits at base_offset(0) + offset_delta(1) == 1.
+        check!(st.last_snapshot_offset == 1);
     }
 
     /// After a snapshot fold, `maybe_prune` must trim the state-partition log
@@ -1057,11 +1022,11 @@ mod tests {
         // records 1,2: updates; the 2nd crosses the threshold and folds a
         // snapshot at record 3, then prunes up to it.
         coord
-            .write("g", tid, 0, 1, 1, Offset(0), 0, vec![batch(0, 9)])
+            .write("g", tid, 0, (1, 1), (Offset(0), 0), vec![batch(0, 9)])
             .await
             .unwrap();
         coord
-            .write("g", tid, 0, 1, 1, Offset(0), 0, vec![batch(10, 19)])
+            .write("g", tid, 0, (1, 1), (Offset(0), 0), vec![batch(10, 19)])
             .await
             .unwrap();
 

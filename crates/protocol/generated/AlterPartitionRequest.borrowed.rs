@@ -8,7 +8,8 @@ pub const MIN_VERSION: i16 = 2;
 pub const MAX_VERSION: i16 = 3;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,11 +25,15 @@ impl Default for AlterPartitionRequest {
             broker_id: 0i32,
             broker_epoch: -1i64,
             topics: Vec::new(),
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl AlterPartitionRequest {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::alter_partition_request::AlterPartitionRequest {
         crate::owned::alter_partition_request::AlterPartitionRequest {
             broker_id: (self.broker_id),
@@ -147,6 +152,10 @@ pub struct TopicData {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl TopicData {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::alter_partition_request::TopicData {
         crate::owned::alter_partition_request::TopicData {
             topic_id: (self.topic_id),
@@ -250,6 +259,10 @@ pub struct PartitionData {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl PartitionData {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::alter_partition_request::PartitionData {
         crate::owned::alter_partition_request::PartitionData {
             partition_index: (self.partition_index),
@@ -428,11 +441,15 @@ impl Default for BrokerState {
         Self {
             broker_id: 0i32,
             broker_epoch: -1i64,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl BrokerState {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::alter_partition_request::BrokerState {
         crate::owned::alter_partition_request::BrokerState {
             broker_id: (self.broker_id),

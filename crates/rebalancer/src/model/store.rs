@@ -57,6 +57,8 @@ impl ProposalStore {
     /// Open or create a persisted store at `{data_dir}/proposals.json`.
     /// If the file is missing, returns an empty store and will create
     /// the file on first write.
+    /// # Errors
+    /// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
     pub fn open(data_dir: &Path, capacity: usize) -> Result<Self, StoreError> {
         fs::create_dir_all(data_dir)?;
         let path = data_dir.join(DEFAULT_FILENAME);
@@ -81,6 +83,8 @@ impl ProposalStore {
         })
     }
 
+    /// # Panics
+    /// Panics if an internal lock is poisoned or validated cluster state is missing an assignment required by the plan.
     pub fn insert(&self, p: Proposal) {
         {
             let mut q = self.inner.lock().expect("ProposalStore mutex poisoned");
@@ -94,6 +98,8 @@ impl ProposalStore {
 
     /// Apply `f` to the proposal with `id`. Returns the post-mutation
     /// clone, or `None` if no such id. Persists.
+    /// # Panics
+    /// Panics if an internal lock is poisoned or validated cluster state is missing an assignment required by the plan.
     pub fn mutate<F: FnOnce(&mut Proposal)>(&self, id: &str, f: F) -> Option<Proposal> {
         let updated = {
             let mut q = self.inner.lock().expect("ProposalStore mutex poisoned");
@@ -106,12 +112,16 @@ impl ProposalStore {
     }
 
     #[must_use]
+    /// # Panics
+    /// Panics if an internal lock is poisoned or validated cluster state is missing an assignment required by the plan.
     pub fn get(&self, id: &str) -> Option<Proposal> {
         let q = self.inner.lock().expect("ProposalStore mutex poisoned");
         q.iter().find(|p| p.id == id).cloned()
     }
 
     #[must_use]
+    /// # Panics
+    /// Panics if an internal lock is poisoned or validated cluster state is missing an assignment required by the plan.
     pub fn list(&self, limit: usize) -> Vec<Proposal> {
         let q = self.inner.lock().expect("ProposalStore mutex poisoned");
         let n = if limit == 0 {

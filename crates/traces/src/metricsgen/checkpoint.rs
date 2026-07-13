@@ -30,6 +30,9 @@ pub fn encode_checkpoint_key(tenant: &str, trace_id: &[u8; 16], edge_id: &[u8]) 
     buf.freeze()
 }
 
+///
+/// # Errors
+/// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
 pub fn parse_checkpoint_key(
     mut buf: &[u8],
 ) -> Result<(String, [u8; 16], Vec<u8>), CheckpointCodecError> {

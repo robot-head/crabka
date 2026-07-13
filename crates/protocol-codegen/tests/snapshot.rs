@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use assert2::check;
+use assert2::{assert, check};
 use crabka_protocol_codegen::{emit, emit::EmittedMessage, fmt, ir, resolve};
 
 const CURATED: &[&str] = &[
@@ -55,7 +55,11 @@ fn check(snap_path: &std::path::Path, generated: &str) {
             snap_path.display()
         )
     });
-    assert2::assert!(generated == expected);
+    assert!(
+        generated == expected,
+        "snapshot mismatch in {}; UPDATE_SNAPSHOTS=1 to refresh",
+        snap_path.display()
+    );
 }
 
 fn check_emitted(flavor: &str, em: &EmittedMessage, name: &str) {

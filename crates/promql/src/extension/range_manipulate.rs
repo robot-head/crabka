@@ -145,6 +145,8 @@ pub struct RangeManipulate {
 
 impl RangeManipulate {
     /// Construct the logical node and derive its extended output schema.
+    /// # Errors
+    /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
     pub fn new(
         start_ms: i64,
         end_ms: i64,

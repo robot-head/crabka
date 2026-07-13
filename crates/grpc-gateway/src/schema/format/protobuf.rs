@@ -45,6 +45,8 @@ fn first_message_desc(schema: &str) -> Result<MessageDescriptor, CodecError> {
 ///
 /// Uses the first message type in the schema (message-index 0, matching the
 /// Confluent wire default of `[0]`).
+/// # Errors
+/// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
 pub fn serialize(schema: &str, json: &[u8]) -> Result<Bytes, CodecError> {
     let msg_desc = first_message_desc(schema)?;
 
@@ -62,6 +64,8 @@ pub fn serialize(schema: &str, json: &[u8]) -> Result<Bytes, CodecError> {
 /// schema in `schema`.
 ///
 /// Uses the first message type in the schema (message-index 0).
+/// # Errors
+/// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
 pub fn deserialize(schema: &str, payload: &[u8]) -> Result<Bytes, CodecError> {
     let msg_desc = first_message_desc(schema)?;
 
@@ -82,6 +86,8 @@ pub fn deserialize(schema: &str, payload: &[u8]) -> Result<Bytes, CodecError> {
 ///
 /// Returns `Ok(())` when the JSON parses cleanly against the schema; returns
 /// [`CodecError::Validate`] on any parse or encoding failure.
+/// # Errors
+/// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
 pub fn validate(schema: &str, json: &[u8]) -> Result<(), CodecError> {
     serialize(schema, json).map(|_| ()).map_err(|e| match e {
         CodecError::Serialize(msg) => CodecError::Validate(msg),
@@ -125,7 +131,7 @@ mod tests {
             ("wrong_shape", b"[1,2,3]".as_slice(), false),
         ] {
             let result = validate(SCHEMA, payload);
-            assert2::assert!(result.is_ok() == valid);
+            assert2::assert!(result.is_ok() == valid, "case {name}");
         }
     }
 }

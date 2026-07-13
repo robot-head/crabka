@@ -10,6 +10,10 @@ pub struct Voter {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl Voter {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::common::leader_change_message::voter::Voter {
         crate::owned::common::leader_change_message::voter::Voter {
             voter_id: (self.voter_id),

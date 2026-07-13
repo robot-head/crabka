@@ -268,7 +268,7 @@ impl LeaderEpoch {
 /// A Kafka request API key, as the raw wire `int16`.
 ///
 /// This is the numeric code in a request header (`ApiKey` field). It is distinct
-/// from the typed [`crabka_protocol::ApiKey`] *enum*, which names each key
+/// from the typed `crabka_protocol::ApiKey` *enum*, which names each key
 /// (`Produce`, `Fetch`, …): this newtype is the boundary value threaded through
 /// hand-written header construction and the tap/proxy frame parsers, paired with
 /// an [`ApiVersion`] — two adjacent `i16`s that must not be transposed.

@@ -66,12 +66,16 @@ pub struct TopicMetadataEntry {
 impl AdminClient {
     /// Metadata for the named topics. Pass an empty slice to fetch all
     /// topics, per Kafka semantics.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn metadata(&mut self, topics: &[&str]) -> Result<TopicMetadata, AdminError> {
         let req = build_metadata(topics);
         let resp = self.conn.send(req).await?;
         Ok(parse_metadata(resp))
     }
 
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn create_topics(
         &mut self,
         specs: &[CreateTopicSpec],
@@ -97,6 +101,8 @@ impl AdminClient {
         Ok(second)
     }
 
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn delete_topics(
         &mut self,
         names: &[&str],
@@ -132,6 +138,8 @@ impl AdminClient {
         Ok(second)
     }
 
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn create_partitions(
         &mut self,
         ops: &[CreatePartitionsOp],

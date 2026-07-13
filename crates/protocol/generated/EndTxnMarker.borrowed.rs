@@ -6,8 +6,9 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 0;
 pub const FLEXIBLE_MIN: i16 = 32767;
 #[inline]
-fn is_flexible(version: i16) -> bool {
-    version >= FLEXIBLE_MIN
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
+    version == FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EndTxnMarker {
@@ -15,6 +16,10 @@ pub struct EndTxnMarker {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl EndTxnMarker {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::end_txn_marker::EndTxnMarker {
         crate::owned::end_txn_marker::EndTxnMarker {
             coordinator_epoch: (self.coordinator_epoch),
@@ -29,14 +34,12 @@ impl Encode for EndTxnMarker {
                 "EndTxnMarker version out of range",
             ));
         }
-        let flex = is_flexible(version);
         if version >= 0 {
             put_i32(buf, self.coordinator_epoch);
         }
         Ok(())
     }
     fn encoded_len(&self, version: i16) -> usize {
-        let flex = is_flexible(version);
         let mut n: usize = 0;
         if version >= 0 {
             n += 4;
@@ -51,7 +54,6 @@ impl<'de> DecodeBorrow<'de> for EndTxnMarker {
                 "EndTxnMarker version out of range",
             ));
         }
-        let flex = is_flexible(version);
         let mut out = Self::default();
         if version >= 0 {
             out.coordinator_epoch = get_i32(buf)?;

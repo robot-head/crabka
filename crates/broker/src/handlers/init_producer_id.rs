@@ -46,7 +46,6 @@ use crate::{
 // rest of `handle` (ACL branches, 2PC gates, coordinator routing) is covered
 // by the live-broker integration suite, not this in-file module.
 #[cfg_attr(test, mutants::skip)]
-#[allow(clippy::too_many_lines)]
 #[tracing::instrument(
     name = "handle_init_producer_id",
     level = "info",
@@ -135,7 +134,7 @@ pub(crate) async fn handle(
                 // (1) Cluster must have 2PC enabled. Kafka maps a disabled
                 //     cluster to TRANSACTIONAL_ID_AUTHORIZATION_FAILED (not an
                 //     UNSUPPORTED_*), so a client can't probe the feature flag.
-                if !broker.config.transaction_two_phase_commit_enable {
+                if !broker.config.features.transaction_two_phase_commit_enable {
                     return encode_err(version, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED);
                 }
                 // (2) Principal must hold the TWO_PHASE_COMMIT ACL on the tid,
@@ -172,7 +171,7 @@ pub(crate) async fn handle(
                 // uses `DashMap::entry()` to atomically check-and-insert,
                 // so two concurrent InitProducerId calls for the same
                 // partition cannot both spawn independent writer tasks.
-                let txn_partition = coord.partition_for(tid);
+                let txn_partition = crate::txn::coordinator::TxnCoordinator::partition_for(tid);
                 materialize_partition(
                     &coord.partitions,
                     crate::txn::bootstrap::TOPIC,
@@ -319,6 +318,7 @@ async fn dispatch_abort_markers(
 mod tests {
     use std::sync::Arc;
 
+    use assert2::assert;
     use crabka_ids::PartitionIndex;
     use crabka_log::{Log, LogConfig, ProducerId};
 
@@ -351,7 +351,7 @@ mod tests {
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(crate::producer_state::ProducerState::new()),
         );
-        assert2::assert!(part.log_end_offset() == 0);
+        assert!(part.log_end_offset() == 0);
         partitions.insert("orders".to_string(), PartitionIndex(0), Arc::clone(&part));
 
         // Build a txn entry that names this partition.
@@ -366,7 +366,11 @@ mod tests {
             .expect("dispatch markers");
 
         // The abort marker is a single control record → LEO advances to 1.
-        assert2::assert!(part.log_end_offset() == 1);
+        assert!(
+            part.log_end_offset() == 1,
+            "abort marker must be appended (LEO 1), got {:?}",
+            part.log_end_offset()
+        );
     }
 
     /// A partition in the entry that isn't hosted locally is skipped without

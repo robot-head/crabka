@@ -12,7 +12,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -21,6 +22,10 @@ pub struct DescribeQuorumRequest<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl DescribeQuorumRequest<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_quorum_request::DescribeQuorumRequest {
         crate::owned::describe_quorum_request::DescribeQuorumRequest {
             topics: (self.topics).iter().map(TopicData::to_owned).collect(),
@@ -113,6 +118,10 @@ pub struct TopicData<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl TopicData<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_quorum_request::TopicData {
         crate::owned::describe_quorum_request::TopicData {
             topic_name: (self.topic_name).to_string(),
@@ -129,9 +138,9 @@ impl Encode for TopicData<'_> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.topic_name);
+                let () = put_compact_string(buf, self.topic_name);
             } else {
-                put_string(buf, self.topic_name);
+                let () = put_string(buf, self.topic_name);
             }
         }
         if version >= 0 {
@@ -223,6 +232,10 @@ pub struct PartitionData {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl PartitionData {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_quorum_request::PartitionData {
         crate::owned::describe_quorum_request::PartitionData {
             partition_index: (self.partition_index),

@@ -5,132 +5,93 @@
 use super::diff::{Difference, Kind};
 
 #[must_use]
-#[allow(clippy::match_same_arms)]
 pub fn is_backward_compatible(kind: &Kind) -> bool {
-    match kind {
+    matches!(
+        kind,
         // --- Type ---
-        Kind::TypeNarrowed => false,
-        Kind::TypeChanged => false,
-        Kind::TypeExtended => true,
+        | Kind::TypeExtended
 
         // --- Properties ---
-        Kind::PropertyRemovedFromClosedContentModel => false,
         // cp is authority: adding a property to an open content model is
         // backward-INcompatible (the reader gains a property the writer's data
         // lacks); removing one is compatible. (add_prop_open BACKWARD=false /
         // remove_prop_open FORWARD=false in the cp golden matrix.)
-        Kind::PropertyAddedToOpenContentModel => false,
-        Kind::PropertyRemovedFromOpenContentModel => true,
-        Kind::PropertyAddedToClosedContentModel => true,
+        | Kind::PropertyRemovedFromOpenContentModel
+        | Kind::PropertyAddedToClosedContentModel
 
         // --- Required ---
-        Kind::RequiredAttributeAdded => false,
-        Kind::RequiredAttributeRemoved => true,
+        | Kind::RequiredAttributeRemoved
 
         // --- AdditionalProperties ---
-        Kind::AdditionalPropertiesRemoved => false,
-        Kind::AdditionalPropertiesAdded => true,
+        | Kind::AdditionalPropertiesAdded
 
         // --- Enum / const ---
         // Narrowed = fewer allowed values = breaking for readers expecting old values
-        Kind::EnumArrayNarrowed => false,
         // Extended = more allowed values = backward compatible
-        Kind::EnumArrayExtended => true,
+        | Kind::EnumArrayExtended
         // Changed = neither subset → breaking
-        Kind::EnumArrayChanged => false,
 
         // --- Numeric: maximum (max decreased = tighter = breaking) ---
-        Kind::MaximumAdded => false,  // new constraint added = tighter
-        Kind::MaximumRemoved => true, // constraint removed = looser
-        Kind::MaximumDecreased => false, // tighter
-        Kind::MaximumIncreased => true, // looser
+        | Kind::MaximumRemoved
+        | Kind::MaximumIncreased
 
         // --- Numeric: minimum (min increased = tighter = breaking) ---
-        Kind::MinimumAdded => false,
-        Kind::MinimumRemoved => true,
-        Kind::MinimumDecreased => true,  // looser
-        Kind::MinimumIncreased => false, // tighter
+        | Kind::MinimumRemoved
+        | Kind::MinimumDecreased
 
         // --- ExclusiveMaximum ---
-        Kind::ExclusiveMaximumAdded => false,
-        Kind::ExclusiveMaximumRemoved => true,
-        Kind::ExclusiveMaximumDecreased => false,
-        Kind::ExclusiveMaximumIncreased => true,
+        | Kind::ExclusiveMaximumRemoved
+        | Kind::ExclusiveMaximumIncreased
 
         // --- ExclusiveMinimum ---
-        Kind::ExclusiveMinimumAdded => false,
-        Kind::ExclusiveMinimumRemoved => true,
-        Kind::ExclusiveMinimumDecreased => true,
-        Kind::ExclusiveMinimumIncreased => false,
+        | Kind::ExclusiveMinimumRemoved
+        | Kind::ExclusiveMinimumDecreased
 
         // --- MultipleOf: added/changed = tighter ---
-        Kind::MultipleOfAdded => false,
-        Kind::MultipleOfRemoved => true,
-        Kind::MultipleOfChanged => false,
+        | Kind::MultipleOfRemoved
 
         // --- String: maxLength ---
-        Kind::MaxLengthAdded => false,
-        Kind::MaxLengthRemoved => true,
-        Kind::MaxLengthDecreased => false,
-        Kind::MaxLengthIncreased => true,
+        | Kind::MaxLengthRemoved
+        | Kind::MaxLengthIncreased
 
         // --- String: minLength ---
-        Kind::MinLengthAdded => false,
-        Kind::MinLengthRemoved => true,
-        Kind::MinLengthDecreased => true,
-        Kind::MinLengthIncreased => false,
+        | Kind::MinLengthRemoved
+        | Kind::MinLengthDecreased
 
         // --- String: pattern ---
-        Kind::PatternAdded => false,
-        Kind::PatternRemoved => true,
-        Kind::PatternChanged => false,
+        | Kind::PatternRemoved
 
         // --- Array: maxItems ---
-        Kind::MaxItemsAdded => false,
-        Kind::MaxItemsRemoved => true,
-        Kind::MaxItemsDecreased => false,
-        Kind::MaxItemsIncreased => true,
+        | Kind::MaxItemsRemoved
+        | Kind::MaxItemsIncreased
 
         // --- Array: minItems ---
-        Kind::MinItemsAdded => false,
-        Kind::MinItemsRemoved => true,
-        Kind::MinItemsDecreased => true,
-        Kind::MinItemsIncreased => false,
+        | Kind::MinItemsRemoved
+        | Kind::MinItemsDecreased
 
         // --- Array: additionalItems ---
-        Kind::AdditionalItemsRemoved => false,
-        Kind::AdditionalItemsAdded => true,
+        | Kind::AdditionalItemsAdded
 
         // --- Object size: maxProperties ---
-        Kind::MaxPropertiesAdded => false,
-        Kind::MaxPropertiesRemoved => true,
-        Kind::MaxPropertiesDecreased => false,
-        Kind::MaxPropertiesIncreased => true,
+        | Kind::MaxPropertiesRemoved
+        | Kind::MaxPropertiesIncreased
 
         // --- Object size: minProperties ---
-        Kind::MinPropertiesAdded => false,
-        Kind::MinPropertiesRemoved => true,
-        Kind::MinPropertiesDecreased => true,
-        Kind::MinPropertiesIncreased => false,
+        | Kind::MinPropertiesRemoved
+        | Kind::MinPropertiesDecreased
 
         // --- Combinators ---
-        Kind::CombinedTypeChanged => false,
-        Kind::ProductTypeExtended => true,
-        Kind::ProductTypeNarrowed => false,
-        Kind::SumTypeExtended => true,
-        Kind::SumTypeNarrowed => false,
-        Kind::NotTypeExtended => true,
-        Kind::NotTypeNarrowed => false,
-        Kind::CombinedTypeSubschemasChanged => false,
+        | Kind::ProductTypeExtended
+        | Kind::SumTypeExtended
+        | Kind::NotTypeExtended
 
         // --- $ref / dependencies / conditionals ---
         // cp is authority: cp's json.diff treats both adding and removing a
         // dependency/dependentRequired as compatible in either direction
         // (dependency_added BACKWARD=FORWARD=true in the cp golden matrix).
-        Kind::DependencyAdded => true,
-        Kind::DependencyRemoved => true,
-        Kind::ConditionalChanged => false,
-    }
+        | Kind::DependencyAdded
+        | Kind::DependencyRemoved
+    )
 }
 
 #[must_use]
@@ -148,7 +109,6 @@ mod tests {
 
     /// Exercise every `Kind` match arm so compat.rs is fully covered.
     #[test]
-    #[allow(clippy::too_many_lines)]
     fn every_kind_is_classified() {
         let all = [
             // --- Type ---
@@ -249,7 +209,10 @@ mod tests {
         for k in &all {
             let _ = is_backward_compatible(k);
         }
-        // Spot-check a representative selection of known verdicts.
+    }
+
+    #[test]
+    fn representative_verdicts_match() {
         for (kind, want) in [
             (Kind::TypeExtended, true),
             (Kind::TypeNarrowed, false),

@@ -151,7 +151,6 @@ impl ShareConsumer {
     ///
     /// With no assignment yet, sleeps for `timeout` and returns empty (mirroring
     /// the classic [`Consumer::poll`](crate::Consumer::poll)).
-    #[allow(clippy::too_many_lines)]
     #[tracing::instrument(
         name = "share_consumer.poll",
         level = "debug",
@@ -166,6 +165,8 @@ impl ShareConsumer {
         ),
         err
     )]
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn poll(
         &mut self,
         timeout: Duration,
@@ -389,6 +390,8 @@ impl ShareConsumer {
         fields(group_id = %self.group_id, pending_acks = self.pending_acks.len()),
         err
     )]
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn commit(&mut self) -> Result<(), ConsumerError> {
         self.flush_pending_acks().await
     }

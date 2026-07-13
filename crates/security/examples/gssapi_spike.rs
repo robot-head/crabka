@@ -17,17 +17,15 @@
 //! Prereqs (see crates/security/tests/fixtures/kdc/):
 //!   cd crates/security/tests/fixtures/kdc && docker compose up --build -d
 //! Then:
-//!   cargo run -p crabka-security --example gssapi_spike
+//!   cargo run -p crabka-security --example `gssapi_spike`
 //!
 //! Env overrides (all have sane defaults pointing at the fixture realm):
-//!   SSPI_KDC_URL=tcp://localhost:88
-//!   GSSAPI_SPIKE_KEYTAB=crates/security/tests/fixtures/kdc/kafka.keytab
-//!   KRB5_CONFIG=crates/security/tests/fixtures/kdc/krb5.conf
+//!   `SSPI_KDC_URL=tcp://localhost:88`
+//!   `GSSAPI_SPIKE_KEYTAB=crates/security/tests/fixtures/kdc/kafka.keytab`
+//!   `KRB5_CONFIG=crates/security/tests/fixtures/kdc/krb5.conf`
 
 // This is a throwaway spike binary, not production code; silence the workspace's
 // pedantic lints rather than gold-plating an example that gets deleted.
-#![allow(clippy::all, clippy::pedantic)]
-
 use std::error::Error;
 
 use sspi::{
@@ -41,7 +39,7 @@ const REALM: &str = "CRABKA.TEST";
 const SERVICE_SPN: &str = "kafka/localhost"; // realm is supplied via the client principal
 const CLIENT_PRINCIPAL: &str = "alice@CRABKA.TEST";
 const CLIENT_PASSWORD: &str = "alicepw";
-const MAX_TIME_SKEW: std::time::Duration = std::time::Duration::from_secs(300);
+const MAX_TIME_SKEW: std::time::Duration = std::time::Duration::from_mins(5);
 
 fn main() -> Result<(), Box<dyn Error>> {
     let kdc_url =
@@ -84,7 +82,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
 
     // ---- Build server credentials (Kerberos acceptor) ----------------------
-    let mut server = build_server(kdc_url.clone(), entry.key.clone())?;
+    let mut server = build_server(&kdc_url, entry.key.clone())?;
 
     // ---- Operation 2: client initiate (produce AP-REQ) --------------------
     let mut client = Kerberos::new_client_from_config(KerberosConfig::new(
@@ -252,7 +250,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 /// Build a Kerberos acceptor (server) from a KDC URL and the raw aes256 service
 /// key extracted from the keytab.
-fn build_server(kdc_url: String, service_key: Vec<u8>) -> Result<Kerberos, Box<dyn Error>> {
+fn build_server(kdc_url: &str, service_key: Vec<u8>) -> Result<Kerberos, Box<dyn Error>> {
     // service_name is the SPN components WITHOUT realm, e.g. ["kafka","localhost"].
     let sname: Vec<&str> = SERVICE_SPN.split('/').collect();
     let server_properties = ServerProperties::new(
@@ -262,7 +260,7 @@ fn build_server(kdc_url: String, service_key: Vec<u8>) -> Result<Kerberos, Box<d
         Some(Secret::new(service_key)), // raw ticket-decryption key bytes
     )?;
     let config = KerberosServerConfig {
-        kerberos_config: KerberosConfig::new(&kdc_url, "crabka-broker".to_string()),
+        kerberos_config: KerberosConfig::new(kdc_url, "crabka-broker".to_string()),
         server_properties,
     };
     Ok(Kerberos::new_server_from_config(
@@ -297,7 +295,7 @@ fn parse_keytab(bytes: &[u8]) -> Result<KeytabEntry, Box<dyn Error>> {
         *p += 2;
         v
     };
-    let rd_i32 = |b: &[u8], p: &mut usize| -> i32 {
+    let read_signed_len = |b: &[u8], p: &mut usize| -> i32 {
         let v = i32::from_be_bytes([b[*p], b[*p + 1], b[*p + 2], b[*p + 3]]);
         *p += 4;
         v
@@ -316,11 +314,11 @@ fn parse_keytab(bytes: &[u8]) -> Result<KeytabEntry, Box<dyn Error>> {
 
     // First entry only (spike). entry_size is the length of the entry payload
     // (NOT including the 4-byte size field itself; a negative size marks a hole).
-    let entry_size = rd_i32(bytes, &mut p);
+    let entry_size = read_signed_len(bytes, &mut p);
     if entry_size <= 0 {
         return Err("first keytab record is a hole".into());
     }
-    let entry_end = p + entry_size as usize;
+    let entry_end = p + usize::try_from(entry_size)?;
 
     // count-prefixed principal components (count does NOT include the realm).
     let num_components = rd_u16(bytes, &mut p);
@@ -331,7 +329,7 @@ fn parse_keytab(bytes: &[u8]) -> Result<KeytabEntry, Box<dyn Error>> {
     }
     let _name_type = rd_u32(bytes, &mut p); // NT_PRINCIPAL etc.
     let _timestamp = rd_u32(bytes, &mut p);
-    let kvno8 = rd_u8(bytes, &mut p) as u32;
+    let kvno8 = u32::from(rd_u8(bytes, &mut p));
 
     // keyblock: 16-bit enctype + 16-bit key length + key bytes.
     let enctype = rd_u16(bytes, &mut p);

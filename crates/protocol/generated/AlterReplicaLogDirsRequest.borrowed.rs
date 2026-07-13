@@ -12,7 +12,8 @@ pub const MIN_VERSION: i16 = 1;
 pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 2;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -21,6 +22,10 @@ pub struct AlterReplicaLogDirsRequest<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl AlterReplicaLogDirsRequest<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::alter_replica_log_dirs_request::AlterReplicaLogDirsRequest {
@@ -118,6 +123,10 @@ pub struct AlterReplicaLogDir<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl AlterReplicaLogDir<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::alter_replica_log_dirs_request::AlterReplicaLogDir {
         crate::owned::alter_replica_log_dirs_request::AlterReplicaLogDir {
             path: (self.path).to_string(),
@@ -134,9 +143,9 @@ impl Encode for AlterReplicaLogDir<'_> {
         let flex = version >= 2;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.path);
+                let () = put_compact_string(buf, self.path);
             } else {
-                put_string(buf, self.path);
+                let () = put_string(buf, self.path);
             }
         }
         if version >= 0 {
@@ -226,6 +235,10 @@ pub struct AlterReplicaLogDirTopic<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl AlterReplicaLogDirTopic<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::alter_replica_log_dirs_request::AlterReplicaLogDirTopic {
@@ -241,9 +254,9 @@ impl Encode for AlterReplicaLogDirTopic<'_> {
         let flex = version >= 2;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name);
+                let () = put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name);
+                let () = put_string(buf, self.name);
             }
         }
         if version >= 0 {

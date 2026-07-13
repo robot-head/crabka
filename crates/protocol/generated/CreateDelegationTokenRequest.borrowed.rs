@@ -16,7 +16,8 @@ pub const MIN_VERSION: i16 = 1;
 pub const MAX_VERSION: i16 = 3;
 pub const FLEXIBLE_MIN: i16 = 2;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -28,6 +29,10 @@ pub struct CreateDelegationTokenRequest<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl CreateDelegationTokenRequest<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::create_delegation_token_request::CreateDelegationTokenRequest {
@@ -54,16 +59,16 @@ impl Encode for CreateDelegationTokenRequest<'_> {
         let flex = is_flexible(version);
         if version >= 3 {
             if flex {
-                put_compact_nullable_string(buf, self.owner_principal_type);
+                let () = put_compact_nullable_string(buf, self.owner_principal_type);
             } else {
-                put_nullable_string(buf, self.owner_principal_type);
+                let () = put_nullable_string(buf, self.owner_principal_type);
             }
         }
         if version >= 3 {
             if flex {
-                put_compact_nullable_string(buf, self.owner_principal_name);
+                let () = put_compact_nullable_string(buf, self.owner_principal_name);
             } else {
-                put_nullable_string(buf, self.owner_principal_name);
+                let () = put_nullable_string(buf, self.owner_principal_name);
             }
         }
         if version >= 0 {
@@ -191,6 +196,10 @@ pub struct CreatableRenewers<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl CreatableRenewers<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::create_delegation_token_request::CreatableRenewers {
         crate::owned::create_delegation_token_request::CreatableRenewers {
             principal_type: (self.principal_type).to_string(),
@@ -204,16 +213,16 @@ impl Encode for CreatableRenewers<'_> {
         let flex = version >= 2;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.principal_type);
+                let () = put_compact_string(buf, self.principal_type);
             } else {
-                put_string(buf, self.principal_type);
+                let () = put_string(buf, self.principal_type);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.principal_name);
+                let () = put_compact_string(buf, self.principal_name);
             } else {
-                put_string(buf, self.principal_name);
+                let () = put_string(buf, self.principal_name);
             }
         }
         if flex {

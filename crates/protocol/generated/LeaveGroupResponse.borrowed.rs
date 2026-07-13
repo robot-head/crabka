@@ -16,7 +16,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 5;
 pub const FLEXIBLE_MIN: i16 = 4;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -27,6 +28,10 @@ pub struct LeaveGroupResponse<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl LeaveGroupResponse<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::leave_group_response::LeaveGroupResponse {
         crate::owned::leave_group_response::LeaveGroupResponse {
             throttle_time_ms: (self.throttle_time_ms),
@@ -152,6 +157,10 @@ pub struct MemberResponse<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl MemberResponse<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::leave_group_response::MemberResponse {
         crate::owned::leave_group_response::MemberResponse {
             member_id: (self.member_id).to_string(),
@@ -166,16 +175,16 @@ impl Encode for MemberResponse<'_> {
         let flex = version >= 4;
         if version >= 3 {
             if flex {
-                put_compact_string(buf, self.member_id);
+                let () = put_compact_string(buf, self.member_id);
             } else {
-                put_string(buf, self.member_id);
+                let () = put_string(buf, self.member_id);
             }
         }
         if version >= 3 {
             if flex {
-                put_compact_nullable_string(buf, self.group_instance_id);
+                let () = put_compact_nullable_string(buf, self.group_instance_id);
             } else {
-                put_nullable_string(buf, self.group_instance_id);
+                let () = put_nullable_string(buf, self.group_instance_id);
             }
         }
         if version >= 3 {

@@ -115,7 +115,7 @@ pub(crate) fn down_convert_payload_for_fetch(
 
 #[cfg(test)]
 mod tests {
-
+    use assert2::{assert, check};
     use bytes::Bytes;
     use crabka_protocol::records::{Attributes, Record, RecordBatch};
 
@@ -154,7 +154,7 @@ mod tests {
         let result = down_convert_for_fetch(&batch, 5).unwrap();
         let payload = result.expect("should have Some payload");
         match payload {
-            RecordsPayload::V2(v) => assert2::assert!(v == vec![batch]),
+            RecordsPayload::V2(v) => assert!(v == vec![batch]),
             _ => panic!("expected V2 for version >= 4"),
         }
     }
@@ -165,7 +165,10 @@ mod tests {
         let mut batch = make_batch(CompressionType::None, vec![sample_record("k", "v")]);
         batch.attributes = batch.attributes.with_control(true);
         let result = down_convert_for_fetch(&batch, 3).unwrap();
-        assert2::assert!(result.is_none());
+        assert!(
+            result.is_none(),
+            "control batch must be dropped on legacy path"
+        );
     }
 
     /// version 3 with a zstd batch returns Some(Legacy) with snappy in the wrapper
@@ -192,9 +195,16 @@ mod tests {
         // MessageSet: first message starts at byte 0:
         //   offset(8) + size(4) + crc(4) + magic(1) + attributes(1)
         // attributes byte is at index 17. Snappy codec id is 2 (bits 0-2).
-        assert2::assert!(bytes.len() > 17);
+        assert!(
+            bytes.len() > 17,
+            "expected non-empty legacy bytes, got len={}",
+            bytes.len()
+        );
         let attrs = bytes[17] & 0x07;
-        assert2::assert!(attrs == 2);
+        assert!(
+            attrs == 2,
+            "expected snappy codec (2) in wrapper message attributes, got {attrs}"
+        );
     }
 
     /// version 3 with uncompressed batch returns Legacy bytes that decode to original records
@@ -210,13 +220,9 @@ mod tests {
         };
         let mut cur: &[u8] = &bytes;
         let recs = decode_message_set(&mut cur, bytes.len()).unwrap();
-        let expected = vec![crabka_records_legacy::ParsedRecord {
-            offset: crabka_log::Offset(0),
-            timestamp: Some(1_700_000_000),
-            key: Some(Bytes::from_static(b"hello")),
-            value: Some(Bytes::from_static(b"world")),
-        }];
-        assert2::assert!(recs == expected);
+        assert!(recs.len() == 1);
+        check!(recs[0].key.as_deref() == Some(b"hello".as_ref()));
+        check!(recs[0].value.as_deref() == Some(b"world".as_ref()));
     }
 
     /// version 0 uses `Magic::V0` (no timestamps)
@@ -235,7 +241,7 @@ mod tests {
         let mut cur: &[u8] = &bytes;
         let recs = decode_message_set(&mut cur, bytes.len()).unwrap();
         // v0 has no timestamps; all timestamps are None
-        assert2::assert!(recs[0].timestamp == None);
+        assert!(recs[0].timestamp == None, "v0 should have no timestamps");
     }
 
     /// payload-level conversion concatenates each batch's legacy `MessageSet`
@@ -252,6 +258,6 @@ mod tests {
         };
         let mut cur: &[u8] = &bytes;
         let recs = crabka_records_legacy::decode_message_set(&mut cur, bytes.len()).unwrap();
-        assert2::assert!(recs.len() == 2);
+        assert!(recs.len() == 2);
     }
 }

@@ -48,6 +48,8 @@ impl std::fmt::Debug for FileEd25519Signer {
 impl FileEd25519Signer {
     /// Load a PKCS#8 Ed25519 key from `path`.
     #[tracing::instrument(level = "debug", skip_all, fields(key_id = %key_id), err)]
+    /// # Errors
+    /// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
     pub fn from_pkcs8_file(path: impl AsRef<Path>, key_id: String) -> Result<Self, AuditError> {
         let der = std::fs::read(path.as_ref())
             .map_err(|e| AuditError::Key(format!("read key file: {e}")))?;
@@ -56,6 +58,8 @@ impl FileEd25519Signer {
 
     /// Load a PKCS#8 Ed25519 key from DER bytes.
     #[tracing::instrument(level = "debug", skip_all, fields(key_id = %key_id, bytes = der.len()), err)]
+    /// # Errors
+    /// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
     pub fn from_pkcs8_bytes(der: &[u8], key_id: String) -> Result<Self, AuditError> {
         let key_pair = Ed25519KeyPair::from_pkcs8(der)
             .map_err(|_| AuditError::Key("invalid PKCS#8 Ed25519 key".to_string()))?;
@@ -85,6 +89,8 @@ impl SigningKeyProvider for FileEd25519Signer {
 /// Canonical checkpoint signed payload:
 /// `DOMAIN ‖ key_id_len(u16 BE) ‖ key_id ‖ seq_high(u64 BE) ‖ head(32) ‖ time_ms(i64 BE)`.
 #[must_use]
+/// # Panics
+/// Panics if synchronized state is poisoned or validated input is missing a field required to produce the output.
 pub fn checkpoint_signing_bytes(
     key_id: &str,
     seq_high: Seq,
@@ -92,8 +98,8 @@ pub fn checkpoint_signing_bytes(
     time_ms: EpochMs,
 ) -> Vec<u8> {
     let kid = key_id.as_bytes();
-    #[allow(clippy::cast_possible_truncation)]
-    let kid_len = kid.len().min(usize::from(u16::MAX)) as u16;
+    let kid_len = u16::try_from(kid.len().min(usize::from(u16::MAX)))
+        .expect("key id length is capped at u16::MAX");
     let mut v = Vec::with_capacity(CHECKPOINT_DOMAIN.len() + 2 + kid.len() + 8 + 32 + 8);
     v.extend_from_slice(CHECKPOINT_DOMAIN);
     v.extend_from_slice(&kid_len.to_be_bytes());

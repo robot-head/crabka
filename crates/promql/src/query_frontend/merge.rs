@@ -15,6 +15,8 @@ use crate::{PromqlError, QueryResult, RangeSeries, SampleValue};
 /// This is the query-frontend counterpart to [`super::plan_range_query`]: time-split
 /// subqueries for the same series are stitched together, while sharded subqueries
 /// naturally contribute distinct series.
+/// # Errors
+/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub fn merge_range_query_results(results: Vec<QueryResult>) -> Result<QueryResult, PromqlError> {
     merge_range_query_results_with_reducer(results, QueryShardReducer::Sum)
 }

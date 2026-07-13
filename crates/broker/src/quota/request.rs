@@ -9,7 +9,9 @@ use std::time::Duration;
 
 use crabka_metadata::MetadataImage;
 
-use super::{QuotaConsumption, buckets::QuotaBuckets, consume_configured_quota};
+use super::{
+    QuotaConsumption, buckets::QuotaBuckets, consume_configured_quota, positive_f64_to_u64,
+};
 
 /// Consume `elapsed_micros` of request-handler time from the
 /// `request_percentage` bucket for `(principal, client_id)`. Returns the
@@ -39,8 +41,7 @@ pub fn consume_request_quota(
         },
         |_| {},
         |rate_pct| {
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let rate_micros_per_sec = (rate_pct * 10_000.0) as u64;
+            let rate_micros_per_sec = positive_f64_to_u64(rate_pct * 10_000.0);
             (rate_micros_per_sec != 0).then_some(rate_micros_per_sec)
         },
         |overage_micros, _, rate_micros_per_sec| {
@@ -51,6 +52,7 @@ pub fn consume_request_quota(
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
 
     use super::*;
     use crate::quota::test_support::image_with_quota as quota_image;
@@ -63,16 +65,14 @@ mod tests {
     fn zero_elapsed_returns_zero_delay() {
         let img = img_with_quota(vec![("user", Some("alice"))], 100.0);
         let buckets = QuotaBuckets::new();
-        assert2::assert!(consume_request_quota(&img, &buckets, "alice", "", 0) == Duration::ZERO);
+        assert!(consume_request_quota(&img, &buckets, "alice", "", 0) == Duration::ZERO);
     }
 
     #[test]
     fn no_quota_returns_zero_delay() {
         let img = MetadataImage::new(uuid::Uuid::nil());
         let buckets = QuotaBuckets::new();
-        assert2::assert!(
-            consume_request_quota(&img, &buckets, "alice", "", 5_000) == Duration::ZERO
-        );
+        assert!(consume_request_quota(&img, &buckets, "alice", "", 5_000) == Duration::ZERO);
     }
 
     #[test]
@@ -81,9 +81,7 @@ mod tests {
         // second of capacity → no overage.
         let img = img_with_quota(vec![("user", Some("alice"))], 100.0);
         let buckets = QuotaBuckets::new();
-        assert2::assert!(
-            consume_request_quota(&img, &buckets, "alice", "", 5_000) == Duration::ZERO
-        );
+        assert!(consume_request_quota(&img, &buckets, "alice", "", 5_000) == Duration::ZERO);
     }
 
     #[test]
@@ -93,7 +91,7 @@ mod tests {
         let img = img_with_quota(vec![("user", Some("alice"))], 0.001);
         let buckets = QuotaBuckets::new();
         let delay = consume_request_quota(&img, &buckets, "alice", "", 1_000_000);
-        assert2::assert!(delay == Duration::from_secs(1));
+        assert!(delay == Duration::from_secs(1));
     }
 
     #[test]
@@ -105,6 +103,6 @@ mod tests {
 
         let delay = consume_request_quota(&img, &buckets, "alice", "", 1_500_000);
 
-        assert2::assert!(delay == Duration::from_millis(500));
+        assert!(delay == Duration::from_millis(500));
     }
 }

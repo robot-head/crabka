@@ -74,7 +74,7 @@ impl GatewayMetrics {
     /// metrics, and return the bundle. Typically called exactly once via the
     /// global [`metrics()`] accessor.
     #[must_use]
-    #[allow(clippy::too_many_lines)] // flat registration of every metric family
+    // flat registration of every metric family
     pub fn new() -> Self {
         let mut registry = Registry::with_prefix("crabka_gateway");
 

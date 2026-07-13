@@ -38,6 +38,8 @@ impl Checkpoint {
             .finish()
     }
 
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub fn from_bytes(key: &[u8], val: &[u8]) -> Result<Self, ReplicatorError> {
         let mut k = Reader::keyless(key);
         let mut v = Reader::new(val)?;

@@ -14,7 +14,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 9;
 pub const FLEXIBLE_MIN: i16 = 9;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -127,9 +128,9 @@ impl Encode for TopicProduceResponse {
         let flex = version >= 9;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.name);
+                let () = put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name);
+                let () = put_string(buf, &self.name);
             }
         }
         if version >= 0 {
@@ -242,7 +243,7 @@ impl Default for PartitionProduceResponse {
             log_start_offset: -1i64,
             record_errors: Vec::new(),
             error_message: None,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
@@ -274,9 +275,9 @@ impl Encode for PartitionProduceResponse {
         }
         if version >= 8 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message.as_deref());
+                let () = put_compact_nullable_string(buf, self.error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.error_message.as_deref());
+                let () = put_nullable_string(buf, self.error_message.as_deref());
             }
         }
         if flex {
@@ -415,9 +416,10 @@ impl Encode for BatchIndexAndErrorMessage {
         }
         if version >= 8 {
             if flex {
-                put_compact_nullable_string(buf, self.batch_index_error_message.as_deref());
+                let () =
+                    put_compact_nullable_string(buf, self.batch_index_error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.batch_index_error_message.as_deref());
+                let () = put_nullable_string(buf, self.batch_index_error_message.as_deref());
             }
         }
         if flex {

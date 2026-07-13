@@ -74,6 +74,9 @@ impl Limits {
         }
     }
 
+    ///
+    /// # Errors
+    /// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
     pub fn validate_query_range_ms(
         &self,
         start_ms: StartMs,
@@ -148,7 +151,7 @@ impl LimitError {
 
 #[cfg(test)]
 mod tests {
-    use assert2::check;
+    use assert2::{assert, check};
 
     use super::*;
 
@@ -156,7 +159,7 @@ mod tests {
     fn default_limits_are_generous_and_finite() {
         let limits = Limits::default();
 
-        assert2::assert!(
+        assert!(
             limits
                 == Limits {
                     ingestion_rate_profiles_per_sec: 10_000.0,
@@ -175,45 +178,34 @@ mod tests {
 
     #[test]
     fn limit_errors_carry_pyroscope_code_and_status() {
-        for (_name, error, expected) in [
-            (
-                "ingestion rate",
-                LimitError::IngestionRateExceeded {
-                    rate: 10_000.0,
-                    observed: 12_000.0,
-                },
-                (429, "resource_exhausted"),
-            ),
-            (
-                "label name length",
-                LimitError::LabelNameTooLong {
-                    limit: 1024,
-                    observed: 5000,
-                },
-                (400, "invalid_argument"),
-            ),
-            (
-                "label count",
-                LimitError::TooManyLabels {
-                    limit: 40,
-                    observed: 41,
-                },
-                (400, "invalid_argument"),
-            ),
-        ] {
-            let (expected_status, expected_code) = expected;
-            assert2::assert!(error.http_status() == expected_status);
-            assert2::assert!(error.connect_code() == expected_code);
-        }
+        let rate = LimitError::IngestionRateExceeded {
+            rate: 10_000.0,
+            observed: 12_000.0,
+        };
+        assert!(rate.http_status() == 429);
+        assert!(rate.connect_code() == "resource_exhausted");
+
+        let name = LimitError::LabelNameTooLong {
+            limit: 1024,
+            observed: 5000,
+        };
+        assert!(name.http_status() == 400);
+        assert!(name.connect_code() == "invalid_argument");
+
+        let many = LimitError::TooManyLabels {
+            limit: 40,
+            observed: 41,
+        };
+        assert!(many.http_status() == 400);
 
         let duration = LimitError::QueryLengthExceeded {
             limit_secs: 3600,
             observed_secs: 7200,
         };
-        assert2::assert!(duration.http_status() == 400);
+        assert!(duration.http_status() == 400);
 
         let cardinality = LimitError::SessionCardinalityExceeded { limit: 1000 };
-        assert2::assert!(cardinality.http_status() == 429);
+        assert!(cardinality.http_status() == 429);
     }
 
     #[test]
@@ -223,7 +215,7 @@ mod tests {
             observed: 5000,
         };
 
-        assert2::assert!(value.message().contains("2048"));
+        assert!(value.message().contains("2048"));
     }
 
     #[test]
@@ -246,7 +238,7 @@ mod tests {
             ..Limits::default()
         };
 
-        assert2::assert!(
+        assert!(
             limits
                 .validate_query_range_ms(StartMs(0), EndMs(60_000))
                 .is_ok()
@@ -254,7 +246,7 @@ mod tests {
         let err = limits
             .validate_query_range_ms(StartMs(0), EndMs(120_000))
             .unwrap_err();
-        assert2::assert!(
+        assert!(
             err == LimitError::QueryLengthExceeded {
                 limit_secs: 60,
                 observed_secs: 120,
@@ -273,7 +265,7 @@ mod tests {
             ..Limits::default()
         };
 
-        assert2::assert!(
+        assert!(
             limits
                 .validate_query_range_ms(StartMs(0), EndMs(120_000))
                 .is_ok()
@@ -291,7 +283,7 @@ mod tests {
             .validate_query_range_ms(StartMs(0), EndMs(i64::MAX))
             .unwrap_err();
 
-        assert2::assert!(matches!(
+        assert!(matches!(
             err,
             LimitError::QueryLengthExceeded {
                 limit_secs: 60,

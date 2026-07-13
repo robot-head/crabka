@@ -13,7 +13,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 6;
 pub const FLEXIBLE_MIN: i16 = 3;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -34,9 +35,9 @@ impl Encode for FindCoordinatorRequest {
         let flex = is_flexible(version);
         if (0..=3).contains(&version) {
             if flex {
-                put_compact_string(buf, &self.key);
+                let () = put_compact_string(buf, &self.key);
             } else {
-                put_string(buf, &self.key);
+                let () = put_string(buf, &self.key);
             }
         }
         if version >= 1 {
@@ -47,9 +48,9 @@ impl Encode for FindCoordinatorRequest {
                 crate::primitives::array::put_array_len(buf, (self.coordinator_keys).len(), flex);
                 for it in &self.coordinator_keys {
                     if flex {
-                        put_compact_string(buf, it);
+                        let () = put_compact_string(buf, it);
                     } else {
-                        put_string(buf, it);
+                        let () = put_string(buf, it);
                     }
                 }
             }

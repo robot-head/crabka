@@ -44,7 +44,6 @@ const UNKNOWN_TIMESTAMP: i64 = -1;
 /// Kafka's `ListOffsetsResponse.UNKNOWN_OFFSET`.
 const UNKNOWN_OFFSET: i64 = -1;
 
-#[allow(clippy::too_many_lines)]
 #[tracing::instrument(
     name = "handle_list_offsets",
     level = "info",
@@ -59,9 +58,7 @@ pub(crate) async fn handle(
     req_bytes: &[u8],
     ctx: &crate::handlers::RequestContext<'_>,
 ) -> Result<Bytes, BrokerError> {
-    let partitions = broker.partitions.clone();
     let controller = broker.controller.clone();
-    let remote_reader = broker.remote_reader.clone();
     {
         let mut cur: &[u8] = req_bytes;
         let req = ListOffsetsRequest::decode(&mut cur, version)?;
@@ -103,120 +100,7 @@ pub(crate) async fn handle(
             let mut parts_out: Vec<ListOffsetsPartitionResponse> =
                 Vec::with_capacity(topic.partitions.len());
             for part in topic.partitions {
-                let idx = part.partition_index;
-                let mut out = ListOffsetsPartitionResponse {
-                    partition_index: idx,
-                    timestamp: UNKNOWN_TIMESTAMP,
-                    ..Default::default()
-                };
-
-                let Some(p) = partitions.get(&topic.name, crabka_ids::PartitionIndex(idx)) else {
-                    out.error_code = codes::UNKNOWN_TOPIC_OR_PARTITION;
-                    parts_out.push(out);
-                    continue;
-                };
-
-                let (local_start, local_end, local_log_start, remote_storage_enable) = {
-                    let log = p.log.lock().expect("log mutex poisoned");
-                    (
-                        // Unwrap the log-layer `Offset`s into broker's `i64` world at the seam.
-                        log.log_start_offset().0,
-                        log.log_end_offset().0,
-                        log.local_log_start_offset().0,
-                        log.config_snapshot().remote_storage_enable,
-                    )
-                };
-
-                let tiered = remote_storage_enable && remote_reader.is_some();
-                let topic_id = if tiered {
-                    controller
-                        .current_image()
-                        .topic(&topic.name)
-                        .map(|t| t.topic_id)
-                } else {
-                    None
-                };
-
-                let (offset, resp_timestamp) = match part.timestamp {
-                    EARLIEST_TIMESTAMP => {
-                        let mut earliest = local_start;
-                        if let (Some(reader), Some(tid)) = (remote_reader.as_ref(), topic_id) {
-                            let tp = crabka_remote_storage::TopicIdPartition::new(
-                                tid,
-                                topic.name.clone(),
-                                idx,
-                            );
-                            match reader.earliest_offset(&tp) {
-                                Ok(Some(remote_start)) => earliest = earliest.min(remote_start),
-                                Ok(None) => {}
-                                // Includes RemoteStorageError::NotReady (metadata
-                                // partition catching up): warn + keep the local
-                                // earliest as the conservative answer.
-                                Err(e) => tracing::warn!(
-                                    topic = %topic.name, partition = idx, error = %e,
-                                    "list_offsets: remote earliest_offset failed"
-                                ),
-                            }
-                        }
-                        (earliest, UNKNOWN_TIMESTAMP)
-                    }
-                    LATEST_TIMESTAMP => (local_end, UNKNOWN_TIMESTAMP),
-                    EARLIEST_LOCAL_TIMESTAMP => (local_log_start, UNKNOWN_TIMESTAMP),
-                    MAX_TIMESTAMP => {
-                        let log = p.log.lock().expect("log mutex poisoned");
-                        // Unwrap the log-layer `Offset`s into broker's `i64` world at the seam.
-                        match log.max_timestamp_offset_and_ts() {
-                            Some((offset, ts)) => (offset.0, ts),
-                            None => (log.offset_of_max_timestamp().0, UNKNOWN_TIMESTAMP),
-                        }
-                    }
-                    ts if ts > 0 => {
-                        let remote_result =
-                            if let (Some(reader), Some(tid)) = (remote_reader.as_ref(), topic_id) {
-                                let tp = crabka_remote_storage::TopicIdPartition::new(
-                                    tid,
-                                    topic.name.clone(),
-                                    idx,
-                                );
-                                match reader.offset_for_timestamp(&tp, ts).await {
-                                    Ok(Some(o)) => Some(o),
-                                    Ok(None) => None,
-                                    // Includes RemoteStorageError::NotReady
-                                    // (metadata partition catching up): warn +
-                                    // fall back to the local answer below.
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            topic = %topic.name, partition = idx, error = %e,
-                                            "list_offsets: remote offset_for_timestamp failed"
-                                        );
-                                        None
-                                    }
-                                }
-                            } else {
-                                None
-                            };
-                        if let Some(o) = remote_result {
-                            // Remote hit covers the oldest records; the remote reader
-                            // does not surface the matched record timestamp, so echo -1.
-                            (o, UNKNOWN_TIMESTAMP)
-                        } else {
-                            let local = {
-                                let log = p.log.lock().expect("log mutex poisoned");
-                                log.offset_for_timestamp(ts)
-                            };
-                            // Unwrap the log-layer `Offset` into broker's `i64` world at the seam.
-                            local.map_or((UNKNOWN_OFFSET, UNKNOWN_TIMESTAMP), |(o, matched_ts)| {
-                                (o.0, matched_ts)
-                            })
-                        }
-                    }
-                    _ => (UNKNOWN_OFFSET, UNKNOWN_TIMESTAMP),
-                };
-
-                out.error_code = codes::NONE;
-                out.offset = offset;
-                out.timestamp = resp_timestamp;
-                parts_out.push(out);
+                parts_out.push(resolve_partition(broker, &topic.name, part).await);
             }
             topics_out.push(ListOffsetsTopicResponse {
                 name: topic.name,
@@ -234,10 +118,121 @@ pub(crate) async fn handle(
     }
 }
 
+async fn resolve_partition(
+    broker: &Broker,
+    topic_name: &str,
+    request: crabka_protocol::owned::list_offsets_request::ListOffsetsPartition,
+) -> ListOffsetsPartitionResponse {
+    let index = request.partition_index;
+    let mut response = ListOffsetsPartitionResponse {
+        partition_index: index,
+        timestamp: UNKNOWN_TIMESTAMP,
+        ..Default::default()
+    };
+    let Some(partition) = broker
+        .partitions
+        .get(topic_name, crabka_ids::PartitionIndex(index))
+    else {
+        response.error_code = codes::UNKNOWN_TOPIC_OR_PARTITION;
+        return response;
+    };
+    let (local_start, local_end, local_log_start, remote_enabled) = {
+        let log = partition.log.lock().expect("log mutex poisoned");
+        (
+            log.log_start_offset().0,
+            log.log_end_offset().0,
+            log.local_log_start_offset().0,
+            log.config_snapshot().remote_storage_enable,
+        )
+    };
+    let topic_id = if remote_enabled && broker.remote_reader.is_some() {
+        broker
+            .controller
+            .current_image()
+            .topic(topic_name)
+            .map(|topic| topic.topic_id)
+    } else {
+        None
+    };
+    let (offset, timestamp) = match request.timestamp {
+        EARLIEST_TIMESTAMP => {
+            let mut earliest = local_start;
+            if let (Some(reader), Some(id)) = (broker.remote_reader.as_ref(), topic_id) {
+                let topic_partition =
+                    crabka_remote_storage::TopicIdPartition::new(id, topic_name.to_string(), index);
+                match reader.earliest_offset(&topic_partition) {
+                    Ok(Some(remote_start)) => earliest = earliest.min(remote_start),
+                    Ok(None) => {}
+                    Err(error) => tracing::warn!(topic = topic_name, partition = index,
+                        error = %error, "list_offsets: remote earliest_offset failed"),
+                }
+            }
+            (earliest, UNKNOWN_TIMESTAMP)
+        }
+        LATEST_TIMESTAMP => (local_end, UNKNOWN_TIMESTAMP),
+        EARLIEST_LOCAL_TIMESTAMP => (local_log_start, UNKNOWN_TIMESTAMP),
+        MAX_TIMESTAMP => {
+            let log = partition.log.lock().expect("log mutex poisoned");
+            log.max_timestamp_offset_and_ts().map_or_else(
+                || (log.offset_of_max_timestamp().0, UNKNOWN_TIMESTAMP),
+                |(offset, timestamp)| (offset.0, timestamp),
+            )
+        }
+        requested_timestamp if requested_timestamp > 0 => {
+            resolve_timestamp_offset(
+                broker,
+                &partition,
+                topic_name,
+                index,
+                topic_id,
+                requested_timestamp,
+            )
+            .await
+        }
+        _ => (UNKNOWN_OFFSET, UNKNOWN_TIMESTAMP),
+    };
+    response.error_code = codes::NONE;
+    response.offset = offset;
+    response.timestamp = timestamp;
+    response
+}
+
+async fn resolve_timestamp_offset(
+    broker: &Broker,
+    partition: &crate::partition::Partition,
+    topic_name: &str,
+    partition_index: i32,
+    topic_id: Option<uuid::Uuid>,
+    timestamp: i64,
+) -> (i64, i64) {
+    if let (Some(reader), Some(id)) = (broker.remote_reader.as_ref(), topic_id) {
+        let topic_partition = crabka_remote_storage::TopicIdPartition::new(
+            id,
+            topic_name.to_string(),
+            partition_index,
+        );
+        match reader
+            .offset_for_timestamp(&topic_partition, timestamp)
+            .await
+        {
+            Ok(Some(offset)) => return (offset, UNKNOWN_TIMESTAMP),
+            Ok(None) => {}
+            Err(error) => tracing::warn!(topic = topic_name, partition = partition_index,
+                error = %error, "list_offsets: remote offset_for_timestamp failed"),
+        }
+    }
+    let log = partition.log.lock().expect("log mutex poisoned");
+    log.offset_for_timestamp(timestamp)
+        .map_or((UNKNOWN_OFFSET, UNKNOWN_TIMESTAMP), |(offset, matched)| {
+            (offset.0, matched)
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
+    use assert2::assert;
     use bytes::BytesMut;
     use crabka_protocol::{
         Encode,
@@ -262,8 +257,8 @@ mod tests {
             ("MAX_TIMESTAMP", MAX_TIMESTAMP, -3),
             ("EARLIEST_LOCAL_TIMESTAMP", EARLIEST_LOCAL_TIMESTAMP, -4),
         ];
-        for (_name, sentinel, want) in cases {
-            assert2::assert!(sentinel == want);
+        for (name, sentinel, want) in cases {
+            assert!(sentinel == want, "{name}");
         }
     }
 
@@ -292,7 +287,7 @@ mod tests {
             sendfile_capable: false,
             connection_listener_name: "PLAINTEXT",
         };
-        assert2::assert!(crate::handlers::acl_denied(
+        assert!(crate::handlers::acl_denied(
             &authorizer,
             &image,
             &ctx,
@@ -324,9 +319,7 @@ mod tests {
         let mut cur: &[u8] = &buf;
         let decoded =
             ListOffsetsResponse::decode(&mut cur, list_offsets_response::MAX_VERSION).unwrap();
-        assert2::assert!(
-            decoded.topics[0].partitions[0].error_code == codes::TOPIC_AUTHORIZATION_FAILED
-        );
+        assert!(decoded.topics[0].partitions[0].error_code == codes::TOPIC_AUTHORIZATION_FAILED);
     }
 
     #[tokio::test]
@@ -385,7 +378,7 @@ mod tests {
             }],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected, "{resp:?}");
         broker_handle.shutdown().await;
     }
 }

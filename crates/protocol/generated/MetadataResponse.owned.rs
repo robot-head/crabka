@@ -14,7 +14,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 13;
 pub const FLEXIBLE_MIN: i16 = 9;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,7 +39,7 @@ impl Default for MetadataResponse {
             topics: Vec::new(),
             cluster_authorized_operations: -2_147_483_648i32,
             error_code: 0i16,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
@@ -64,9 +65,9 @@ impl Encode for MetadataResponse {
         }
         if version >= 2 {
             if flex {
-                put_compact_nullable_string(buf, self.cluster_id.as_deref());
+                let () = put_compact_nullable_string(buf, self.cluster_id.as_deref());
             } else {
-                put_nullable_string(buf, self.cluster_id.as_deref());
+                let () = put_nullable_string(buf, self.cluster_id.as_deref());
             }
         }
         if version >= 1 {
@@ -240,9 +241,9 @@ impl Encode for MetadataResponseBroker {
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.host);
+                let () = put_compact_string(buf, &self.host);
             } else {
-                put_string(buf, &self.host);
+                let () = put_string(buf, &self.host);
             }
         }
         if version >= 0 {
@@ -250,9 +251,9 @@ impl Encode for MetadataResponseBroker {
         }
         if version >= 1 {
             if flex {
-                put_compact_nullable_string(buf, self.rack.as_deref());
+                let () = put_compact_nullable_string(buf, self.rack.as_deref());
             } else {
-                put_nullable_string(buf, self.rack.as_deref());
+                let () = put_nullable_string(buf, self.rack.as_deref());
             }
         }
         if flex {
@@ -356,11 +357,11 @@ impl Default for MetadataResponseTopic {
         Self {
             error_code: 0i16,
             name: None,
-            topic_id: Default::default(),
+            topic_id: crate::primitives::uuid::Uuid::default(),
             is_internal: false,
             partitions: Vec::new(),
             topic_authorized_operations: -2_147_483_648i32,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
@@ -373,15 +374,15 @@ impl Encode for MetadataResponseTopic {
         if version >= 0 {
             if version >= 12 {
                 if flex {
-                    put_compact_nullable_string(buf, self.name.as_deref());
+                    let () = put_compact_nullable_string(buf, self.name.as_deref());
                 } else {
-                    put_nullable_string(buf, self.name.as_deref());
+                    let () = put_nullable_string(buf, self.name.as_deref());
                 }
             } else {
                 if flex {
-                    put_compact_string(buf, (self.name).as_deref().unwrap_or(""));
+                    let () = put_compact_string(buf, (self.name).as_deref().unwrap_or(""));
                 } else {
-                    put_string(buf, (self.name).as_deref().unwrap_or(""));
+                    let () = put_string(buf, (self.name).as_deref().unwrap_or(""));
                 }
             }
         }
@@ -550,7 +551,7 @@ impl Default for MetadataResponsePartition {
             replica_nodes: Vec::new(),
             isr_nodes: Vec::new(),
             offline_replicas: Vec::new(),
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
@@ -750,7 +751,7 @@ pub fn default_json(version: i16) -> ::serde_json::Value {
     if (8..=10).contains(&version) {
         obj.insert(
             "clusterAuthorizedOperations".to_string(),
-            ::serde_json::json!(-2147483648),
+            ::serde_json::json!(-2_147_483_648),
         );
     }
     if version >= 13 {

@@ -1,7 +1,7 @@
 //! Multi-RPC sequences against an in-process broker, driven through
 //! `crabka-client-core`. These run on every push (no Docker required).
 
-use assert2::check;
+use assert2::{assert, check};
 mod support;
 
 use bytes::Bytes;
@@ -86,28 +86,6 @@ async fn topic_id_for(
         .unwrap_or_default()
 }
 
-async fn assert_latest_offset(client: &crabka_client_core::Client, topic: &str, expected: i64) {
-    let response = client
-        .send(ListOffsetsRequest {
-            replica_id: -1,
-            topics: vec![ListOffsetsTopic {
-                name: topic.into(),
-                partitions: vec![ListOffsetsPartition {
-                    partition_index: 0,
-                    timestamp: -1,
-                    ..Default::default()
-                }],
-                ..Default::default()
-            }],
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-    let partition = &response.topics[0].partitions[0];
-    assert2::assert!(partition.error_code == 0);
-    assert2::assert!(partition.offset == expected);
-}
-
 #[tokio::test]
 async fn list_offsets_by_timestamp_local() {
     let p = support::start().await;
@@ -171,31 +149,25 @@ async fn list_offsets_by_timestamp_local() {
 
     // Positive timestamp: first record with ts >= 150 is offset 1 (ts 200).
     let r = query(150).await;
-    check!(
-        (
-            r.topics[0].partitions[0].error_code,
-            r.topics[0].partitions[0].offset,
-            r.topics[0].partitions[0].timestamp,
-        ) == (0, 1, 200)
-    );
+    check!(r.topics[0].partitions[0].error_code == 0);
+    check!(r.topics[0].partitions[0].offset == 1);
+    check!(r.topics[0].partitions[0].timestamp == 200);
 
     // EARLIEST_LOCAL (-4) → local log start = 0.
     let r = query(-4).await;
-    assert2::assert!(r.topics[0].partitions[0].offset == 0);
+    assert!(r.topics[0].partitions[0].offset == 0);
 
     // MAX_TIMESTAMP (-3) → offset 2 (ts 300), echoes timestamp 300.
     let r = query(-3).await;
-    assert2::assert!(
-        (
-            r.topics[0].partitions[0].offset,
-            r.topics[0].partitions[0].timestamp
-        ) == (2, 300)
-    );
+    assert!(r.topics[0].partitions[0].offset == 2);
+    assert!(r.topics[0].partitions[0].timestamp == 300);
 }
 
 #[tokio::test]
 async fn end_to_end_create_produce_fetch_delete() {
     let p = support::start().await;
+
+    // 1. ApiVersions.
     let v = p
         .client
         .send(ApiVersionsRequest {
@@ -205,7 +177,9 @@ async fn end_to_end_create_produce_fetch_delete() {
         })
         .await
         .unwrap();
-    assert2::assert!(v.error_code == 0);
+    assert!(v.error_code == 0);
+
+    // 2. CreateTopics.
     let cr = p
         .client
         .send(CreateTopicsRequest {
@@ -220,10 +194,13 @@ async fn end_to_end_create_produce_fetch_delete() {
         })
         .await
         .unwrap();
-    assert2::assert!(cr.topics[0].error_code == 0);
+    assert!(cr.topics[0].error_code == 0);
+
+    // 3. Metadata — confirm topic is visible and grab its UUID.
     let meta = p.client.send(MetadataRequest::default()).await.unwrap();
-    assert2::assert!(meta.topics.iter().any(|t| t.name.as_deref() == Some("e2e")));
+    assert!(meta.topics.iter().any(|t| t.name.as_deref() == Some("e2e")));
     let topic_id = topic_id_for(&p.client, "e2e").await;
+
     // 4. Produce 3 records.
     let pr = p
         .client
@@ -244,8 +221,29 @@ async fn end_to_end_create_produce_fetch_delete() {
         })
         .await
         .unwrap();
-    assert2::assert!(pr.responses[0].partition_responses[0].error_code == 0);
-    assert_latest_offset(&p.client, "e2e", 3).await;
+    assert!(pr.responses[0].partition_responses[0].error_code == 0);
+
+    // 5. ListOffsets — latest after producing 3 records is 3.
+    let lo = p
+        .client
+        .send(ListOffsetsRequest {
+            replica_id: -1,
+            topics: vec![ListOffsetsTopic {
+                name: "e2e".into(),
+                partitions: vec![ListOffsetsPartition {
+                    partition_index: 0,
+                    timestamp: -1, // latest
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(lo.topics[0].partitions[0].error_code == 0);
+    assert!(lo.topics[0].partitions[0].offset == 3);
+
     // 6. Fetch and confirm 3 records are returned.
     let fr = p
         .client
@@ -269,14 +267,15 @@ async fn end_to_end_create_produce_fetch_delete() {
         .await
         .unwrap();
     let part = &fr.responses[0].partitions[0];
-    assert2::assert!(part.error_code == 0);
+    assert!(part.error_code == 0);
     let batches = part
         .records
         .as_ref()
         .and_then(|p| p.as_v2())
         .expect("v2 records present after produce");
     let total: usize = batches.iter().map(|b| b.records.len()).sum();
-    assert2::assert!(total == 3);
+    assert!(total == 3);
+
     p.broker.shutdown().await;
 }
 
@@ -306,7 +305,7 @@ async fn second_open_recovers_partitions_from_disk() {
             })
             .await
             .unwrap();
-        assert2::assert!(cr.topics[0].error_code == 0);
+        assert!(cr.topics[0].error_code == 0);
         handle.shutdown().await;
     }
     // Reopen on the same log_dir. Must use Rejoin because the raft log
@@ -327,6 +326,6 @@ async fn second_open_recovers_partitions_from_disk() {
         .iter()
         .find(|t| t.name.as_deref() == Some("persisted"))
         .expect("recovered topic visible in metadata");
-    assert2::assert!(t.partitions.len() == 2);
+    assert!(t.partitions.len() == 2);
     handle.shutdown().await;
 }

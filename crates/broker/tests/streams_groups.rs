@@ -1,5 +1,3 @@
-#![allow(clippy::pedantic)]
-
 //! End-to-end integration tests for KIP-1071 streams-group membership (the
 //! Streams Rebalance Protocol), driven against an in-process Crabka broker via
 //! `crabka-client-core`.
@@ -18,7 +16,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use assert2::check;
+use assert2::{assert, check};
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_core::Client;
 use crabka_protocol::owned::{
@@ -67,7 +65,10 @@ async fn create_topic(client: &Client, topic: &str, partitions: i32) {
         })
         .await
         .expect("CreateTopics");
-    assert2::assert!(resp.topics[0].error_code == 0);
+    assert!(
+        resp.topics[0].error_code == 0,
+        "topic create failed: {resp:?}"
+    );
 }
 
 /// Finalize `streams.version` to level 1 so the heartbeat/describe handlers
@@ -85,7 +86,10 @@ async fn finalize_streams_version(client: &Client) {
         })
         .await
         .expect("UpdateFeatures");
-    assert2::assert!(resp.error_code == 0);
+    assert!(
+        resp.error_code == 0,
+        "streams.version finalize failed: {resp:?}"
+    );
 }
 
 /// A single-subtopology topology subscribing to one source topic, with the
@@ -138,8 +142,7 @@ fn follow_up(
 fn active_partition_count(resp: &StreamsGroupHeartbeatResponse) -> usize {
     resp.active_tasks
         .as_ref()
-        .map(|v| v.iter().map(|t| t.partitions.len()).sum())
-        .unwrap_or(0)
+        .map_or(0, |v| v.iter().map(|t| t.partitions.len()).sum())
 }
 
 /// Active-task partitions for a given subtopology id, sorted.
@@ -158,7 +161,7 @@ fn active_partitions_for(resp: &StreamsGroupHeartbeatResponse, sub: &str) -> Vec
     parts
 }
 
-/// The response status codes (KIP-1071 status enum: 3 == MISSING_INTERNAL_TOPICS).
+/// The response status codes (KIP-1071 status enum: 3 == `MISSING_INTERNAL_TOPICS`).
 fn status_codes(resp: &StreamsGroupHeartbeatResponse) -> Vec<i8> {
     resp.status
         .as_ref()
@@ -206,7 +209,7 @@ async fn join_and_converge(
             member_id = resp.member_id.clone();
             continue;
         }
-        assert2::assert!(resp.error_code == 0);
+        assert!(resp.error_code == 0, "heartbeat error: {resp:?}");
         if active_partition_count(&resp) >= want_active {
             break;
         }
@@ -251,21 +254,29 @@ async fn stateless_single_member_converges() {
     )
     .await;
 
+    check!(resp.error_code == 0, "heartbeat error: {resp:?}");
+    check!(!member_id.is_empty(), "broker must mint a member id");
     check!(
-        (
-            resp.error_code,
-            member_id.is_empty(),
-            resp.member_epoch >= 1,
-            active_partition_count(&resp),
-            active_partitions_for(&resp, "0"),
-        ) == (0, false, true, 2, vec![0, 1]),
-        "single-member streams assignment mismatch: {resp:?}"
+        resp.member_epoch >= 1,
+        "first join advances the member epoch, got {}",
+        resp.member_epoch
+    );
+    // The single member owns both partitions of subtopology "0".
+    check!(
+        active_partition_count(&resp) == 2,
+        "lone member must own both input partitions, got {:?}",
+        resp.active_tasks
+    );
+    check!(
+        active_partitions_for(&resp, "0") == vec![0, 1],
+        "subtopology 0 must be assigned partitions [0, 1], got {:?}",
+        resp.active_tasks
     );
 }
 
 /// A stateful subtopology (a state-changelog topic) drives the broker to
 /// auto-create the changelog internal topic. Once it exists the member
-/// converges with no MISSING_INTERNAL_TOPICS (status code 3) status.
+/// converges with no `MISSING_INTERNAL_TOPICS` (status code 3) status.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stateful_member_triggers_internal_topic_creation() {
     let (broker, bootstrap, _dir) = boot().await;
@@ -302,7 +313,7 @@ async fn stateful_member_triggers_internal_topic_creation() {
             member_id = resp.member_id.clone();
             continue;
         }
-        assert2::assert!(resp.error_code == 0);
+        assert!(resp.error_code == 0, "heartbeat error: {resp:?}");
         let missing_internal = status_codes(&resp).contains(&3);
         if active_partitions_for(&resp, "0") == vec![0] && !missing_internal {
             converged = true;
@@ -329,8 +340,16 @@ async fn stateful_member_triggers_internal_topic_creation() {
         member_id = resp.member_id.clone();
     }
 
-    assert2::assert!(converged);
-    assert2::assert!(!status_codes(&resp).contains(&3));
+    assert!(
+        converged,
+        "member never converged to active task [0] with no MISSING_INTERNAL_TOPICS; \
+         last response: {resp:?}"
+    );
+    assert!(
+        !status_codes(&resp).contains(&3),
+        "no MISSING_INTERNAL_TOPICS (3) status once converged, got {:?}",
+        resp.status
+    );
 
     // The changelog internal topic must now exist in the controller image with
     // one partition (matching the single-partition source / subtopology task
@@ -343,7 +362,11 @@ async fn stateful_member_triggers_internal_topic_creation() {
             image.topics().map(|t| &t.name).collect::<Vec<_>>()
         )
     });
-    assert2::assert!(changelog_rec.partitions == 1);
+    assert!(
+        changelog_rec.partitions == 1,
+        "changelog topic must have 1 partition, got {}",
+        changelog_rec.partitions
+    );
 }
 
 /// After a member joins, `StreamsGroupDescribe` reports exactly one group row
@@ -364,21 +387,35 @@ async fn describe_returns_the_group() {
         10,
     )
     .await;
-    assert2::assert!(resp.error_code == 0);
-    assert2::assert!(!member_id.is_empty());
+    assert!(resp.error_code == 0, "join error: {resp:?}");
+    assert!(!member_id.is_empty());
 
     let desc = describe(&client, "streams-app-3").await;
-    assert2::assert!(desc.groups.len() == 1);
+    assert!(
+        desc.groups.len() == 1,
+        "expected exactly one described group, got {}",
+        desc.groups.len()
+    );
     let g = &desc.groups[0];
+    check!(g.error_code == 0, "describe error: {:?}", g.error_code);
     check!(
-        (
-            g.error_code,
-            g.group_id.as_str(),
-            g.members.is_empty(),
-            g.members.iter().any(|m| m.member_id == member_id),
-            g.group_state.is_empty(),
-        ) == (0, "streams-app-3", false, true, false),
-        "described group projection mismatch: {g:?}"
+        g.group_id == "streams-app-3",
+        "described group id mismatch: {:?}",
+        g.group_id
+    );
+    check!(
+        !g.members.is_empty(),
+        "described group must list the joined member"
+    );
+    check!(
+        g.members.iter().any(|m| m.member_id == member_id),
+        "described group must contain member {member_id}, got {:?}",
+        g.members.iter().map(|m| &m.member_id).collect::<Vec<_>>()
+    );
+    check!(
+        !g.group_state.is_empty(),
+        "group_state must be a non-empty phase string, got {:?}",
+        g.group_state
     );
 }
 
@@ -399,31 +436,39 @@ async fn leave_removes_member() {
         10,
     )
     .await;
-    assert2::assert!(resp.error_code == 0);
-    assert2::assert!(!member_id.is_empty());
+    assert!(resp.error_code == 0, "join error: {resp:?}");
+    assert!(!member_id.is_empty());
 
     // Leave: member_epoch == -1.
     let leave = client
         .send(follow_up("streams-app-4", &member_id, -1, None))
         .await
         .expect("leave heartbeat");
-    assert2::assert!(leave.error_code == 0);
+    assert!(leave.error_code == 0, "leave failed: {leave:?}");
 
     // The group is retained (Empty) but the member is gone.
     let desc = describe(&client, "streams-app-4").await;
+    assert!(
+        desc.groups.len() == 1,
+        "group row still present after leave, got {}",
+        desc.groups.len()
+    );
     let g = &desc.groups[0];
-    assert2::assert!(
-        (
-            desc.groups.len(),
-            g.error_code,
-            g.members.iter().any(|m| m.member_id == member_id),
-        ) == (1, 0, false)
+    assert!(
+        g.error_code == 0,
+        "retained group describe error: {:?}",
+        g.error_code
+    );
+    assert!(
+        !g.members.iter().any(|m| m.member_id == member_id),
+        "left member {member_id} must be gone, got {:?}",
+        g.members.iter().map(|m| &m.member_id).collect::<Vec<_>>()
     );
 }
 
 /// `ListGroups` surfaces a live streams group with `group_type = "streams"`,
 /// honoring `types_filter = ["streams"]` — the exact path the JVM
-/// `kafka-streams-groups.sh` AdminClient (`listGroups(typesFilter=[Streams])`)
+/// `kafka-streams-groups.sh` `AdminClient` (`listGroups(typesFilter=[Streams])`)
 /// uses before it will issue `StreamsGroupDescribe`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_groups_surfaces_streams_group() {
@@ -440,7 +485,7 @@ async fn list_groups_surfaces_streams_group() {
         10,
     )
     .await;
-    assert2::assert!(resp.error_code == 0);
+    assert!(resp.error_code == 0, "join error: {resp:?}");
 
     // Filtered list, as the JVM streams-groups admin tool issues it.
     let listed = client
@@ -450,13 +495,17 @@ async fn list_groups_surfaces_streams_group() {
         })
         .await
         .expect("ListGroups");
-    assert2::assert!(listed.error_code == 0);
+    assert!(listed.error_code == 0, "ListGroups error: {listed:?}");
     let g = listed
         .groups
         .iter()
         .find(|g| g.group_id == "streams-app-5")
         .unwrap_or_else(|| panic!("streams group not listed: {:?}", listed.groups));
-    assert2::assert!(g.group_type == "streams");
+    assert!(
+        g.group_type == "streams",
+        "group_type must be 'streams', got {:?}",
+        g.group_type
+    );
 
     // A non-streams type filter must exclude it.
     let consumer_only = client
@@ -466,10 +515,11 @@ async fn list_groups_surfaces_streams_group() {
         })
         .await
         .expect("ListGroups consumer");
-    assert2::assert!(
+    assert!(
         !consumer_only
             .groups
             .iter()
-            .any(|g| g.group_id == "streams-app-5")
+            .any(|g| g.group_id == "streams-app-5"),
+        "streams group must not appear under a consumer type filter"
     );
 }

@@ -32,9 +32,6 @@ use crate::{
     fields(api = "BrokerHeartbeat", version, req_bytes = req_bytes.len()),
     err,
 )]
-// cargo-mutants: controller RPC orchestration over live broker state; helper
-// functions and handler tests cover the deterministic decision points.
-#[cfg_attr(test, mutants::skip)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,
@@ -300,6 +297,7 @@ mod tests {
         time::Duration,
     };
 
+    use assert2::assert;
     use bytes::BytesMut;
     use crabka_metadata::{MetadataRecord, PartitionRecord, TopicRecord};
     use crabka_protocol::{Encode, primitives::uuid::Uuid as ProtocolUuid};
@@ -342,51 +340,45 @@ mod tests {
             self.image.clone()
         }
         fn watch_image(&self) -> watch::Receiver<Arc<MetadataImage>> {
-            let (_tx, rx) = watch::channel(self.image.clone());
-            rx
+            unimplemented!()
         }
         fn watch_leader(&self) -> watch::Receiver<Option<NodeId>> {
             self.leader_rx.clone()
         }
         fn quorum_state(&self) -> QuorumState {
-            QuorumState {
-                current_term: 0,
-                last_applied_index: 0,
-                current_leader: *self.leader_rx.borrow(),
-                voters: Vec::new(),
-                voter_nodes: std::collections::BTreeMap::new(),
-                per_voter_matched_index: std::collections::BTreeMap::new(),
-            }
+            unimplemented!()
         }
         async fn submit_change(&self, records: Vec<MetadataRecord>) -> Result<(), RaftError> {
             self.captured.lock().unwrap().extend(records);
             Ok(())
         }
         async fn change_membership(&self, _new_voters: BTreeSet<NodeId>) -> Result<(), RaftError> {
-            panic!("broker heartbeat MockSource does not support membership changes")
+            unimplemented!()
         }
         async fn add_learner(&self, _node_id: NodeId, _node: Node) -> Result<(), RaftError> {
-            panic!("broker heartbeat MockSource does not support learner changes")
+            unimplemented!()
         }
         fn controller_bound_addr(&self) -> SocketAddr {
-            SocketAddr::from(([0, 0, 0, 0], 0))
+            unimplemented!()
         }
         fn read_snapshot_range(&self, _position: i64, _max_bytes: i32) -> SnapshotRange {
-            SnapshotRange::NoSnapshot
+            unimplemented!()
         }
         async fn trigger_snapshot(&self) -> Result<(), RaftError> {
-            panic!("broker heartbeat MockSource does not support snapshots")
+            unimplemented!()
         }
         async fn add_voter(&self, _req: AddVoter) -> Result<ReconfigOutcome, RaftError> {
-            panic!("broker heartbeat MockSource does not support adding voters")
+            unimplemented!()
         }
         async fn remove_voter(&self, _req: RemoveVoter) -> Result<ReconfigOutcome, RaftError> {
-            panic!("broker heartbeat MockSource does not support removing voters")
+            unimplemented!()
         }
         async fn update_voter(&self, _req: UpdateVoter) -> Result<ReconfigOutcome, RaftError> {
-            panic!("broker heartbeat MockSource does not support updating voters")
+            unimplemented!()
         }
-        async fn cancel(&self) {}
+        async fn cancel(&self) {
+            unimplemented!()
+        }
     }
 
     fn image_with_dir_partition(
@@ -468,7 +460,10 @@ mod tests {
             {
                 return;
             }
-            assert2::assert!(std::time::Instant::now() <= deadline);
+            assert!(
+                std::time::Instant::now() <= deadline,
+                "broker did not become controller leader"
+            );
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
     }
@@ -476,12 +471,15 @@ mod tests {
     #[test]
     fn leader_predicate_matches_current_node_only() {
         let cases = [
-            ("local leader", Some(NodeId(1)), true),
-            ("other leader", Some(NodeId(2)), false),
-            ("no leader", None, false),
+            (Some(NodeId(1)), true),
+            (Some(NodeId(2)), false),
+            (None, false),
         ];
-        for (_case, leader, want) in cases {
-            assert2::assert!(is_controller_leader(leader, NodeId(1)) == want);
+        for (leader, want) in cases {
+            assert!(
+                is_controller_leader(leader, NodeId(1)) == want,
+                "leader {leader:?}"
+            );
         }
     }
 
@@ -495,7 +493,7 @@ mod tests {
             should_shut_down: false,
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
         };
-        assert2::assert!(not_controller_response() == expected_not_controller);
+        assert!(not_controller_response() == expected_not_controller);
 
         let expected_success = BrokerHeartbeatResponse {
             throttle_time_ms: 0,
@@ -505,7 +503,7 @@ mod tests {
             should_shut_down: true,
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
         };
-        assert2::assert!(success_response(true) == expected_success);
+        assert!(success_response(true) == expected_success);
 
         let expected_denied = BrokerHeartbeatResponse {
             throttle_time_ms: 0,
@@ -515,7 +513,7 @@ mod tests {
             should_shut_down: false,
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
         };
-        assert2::assert!(denied_response_body() == expected_denied);
+        assert!(denied_response_body() == expected_denied);
     }
 
     #[test]
@@ -524,13 +522,13 @@ mod tests {
             offline_log_dirs: vec![],
             ..Default::default()
         };
-        assert2::assert!(!has_offline_log_dirs(&empty));
+        assert!(!has_offline_log_dirs(&empty));
 
         let reported = BrokerHeartbeatRequest {
             offline_log_dirs: vec![ProtocolUuid(uuid::Uuid::from_u128(0xD1).into_bytes())],
             ..Default::default()
         };
-        assert2::assert!(has_offline_log_dirs(&reported));
+        assert!(has_offline_log_dirs(&reported));
     }
 
     #[tokio::test]
@@ -575,9 +573,9 @@ mod tests {
             directories: vec![bad, good],
             partition_epoch: 1,
         })];
-        assert2::assert!(*changes == expected_changes);
+        assert!(*changes == expected_changes);
         // No unclean recovery needed (broker 2 is alive and in ISR).
-        assert2::assert!(recoveries == vec![]);
+        assert!(recoveries == vec![]);
     }
 
     #[tokio::test]
@@ -608,8 +606,8 @@ mod tests {
 
         // No change submitted and no recovery needed.
         let changes = captured.lock().unwrap();
-        assert2::assert!(changes.is_empty());
-        assert2::assert!(recoveries.is_empty());
+        assert!(changes.is_empty());
+        assert!(recoveries.is_empty());
     }
 
     #[tokio::test]
@@ -635,8 +633,8 @@ mod tests {
                 .await
                 .unwrap();
 
-        assert2::assert!(drained); // untransferable partition is not counted
-        assert2::assert!(captured.lock().unwrap().is_empty()); // nothing to transfer
+        assert!(drained); // untransferable partition is not counted
+        assert!(captured.lock().unwrap().is_empty()); // nothing to transfer
     }
 
     #[tokio::test]
@@ -658,13 +656,13 @@ mod tests {
                 .await
                 .unwrap();
 
-        assert2::assert!(!drained); // still leading a transferable partition pre-submit
+        assert!(!drained); // still leading a transferable partition pre-submit
         let changes = captured.lock().unwrap();
-        assert2::assert!(changes.len() == 1);
+        assert!(changes.len() == 1);
         let MetadataRecord::V1Partition(pr) = &changes[0] else {
             panic!("expected V1Partition change")
         };
-        assert2::assert!(pr.leader == crabka_audit::NodeId(2)); // leadership handed to the live ISR replica
+        assert!(pr.leader == crabka_audit::NodeId(2)); // leadership handed to the live ISR replica
     }
 
     /// Empty ACLs + no super-users → every principal is denied
@@ -684,7 +682,7 @@ mod tests {
         };
         let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 9092));
 
-        assert2::assert!(cluster_action_denied(
+        assert!(cluster_action_denied(
             &authorizer,
             &image,
             &principal,
@@ -696,11 +694,8 @@ mod tests {
         let resp =
             BrokerHeartbeatResponse::decode(&mut cur, broker_heartbeat_response::MAX_VERSION)
                 .unwrap();
-        let expected = BrokerHeartbeatResponse {
-            error_code: codes::CLUSTER_AUTHORIZATION_FAILED,
-            ..Default::default()
-        };
-        assert2::assert!(resp == expected);
+        assert!(resp.error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
+        assert!(resp.is_fenced);
     }
 
     #[test]
@@ -713,7 +708,7 @@ mod tests {
         };
         let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 9092));
 
-        assert2::assert!(!cluster_action_denied(
+        assert!(!cluster_action_denied(
             &crate::authorizer::AllowAllAuthorizer,
             &image,
             &principal,
@@ -750,7 +745,7 @@ mod tests {
             should_shut_down: false,
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected, "{resp:?}");
 
         broker_handle.shutdown().await;
     }

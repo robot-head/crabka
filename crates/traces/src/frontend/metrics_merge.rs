@@ -119,10 +119,6 @@ pub fn merge_metrics(
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::float_cmp,
-    reason = "test assertions compare exact hand-constructed sample/exemplar values, not computed floats"
-)]
 mod tests {
 
     use super::*;

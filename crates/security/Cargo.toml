@@ -61,9 +61,6 @@ tempfile.workspace = true
 criterion = { version = "5.0.0", package = "codspeed-criterion-compat" }
 tokio = { workspace = true, features = ["macros", "rt", "sync"] }
 
-[[example]]
-name = "gssapi_spike"
-
 [[bench]]
 name = "scram"
 harness = false

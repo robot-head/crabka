@@ -15,7 +15,8 @@ pub const MIN_VERSION: i16 = 1;
 pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -38,16 +39,16 @@ impl Encode for ShareAcknowledgeRequest {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.group_id.as_deref());
+                let () = put_compact_nullable_string(buf, self.group_id.as_deref());
             } else {
-                put_nullable_string(buf, self.group_id.as_deref());
+                let () = put_nullable_string(buf, self.group_id.as_deref());
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.member_id.as_deref());
+                let () = put_compact_nullable_string(buf, self.member_id.as_deref());
             } else {
-                put_nullable_string(buf, self.member_id.as_deref());
+                let () = put_nullable_string(buf, self.member_id.as_deref());
             }
         }
         if version >= 0 {

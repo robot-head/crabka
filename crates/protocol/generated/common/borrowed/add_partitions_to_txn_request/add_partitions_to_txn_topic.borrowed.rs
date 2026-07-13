@@ -14,9 +14,11 @@ pub struct AddPartitionsToTxnTopic<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl AddPartitionsToTxnTopic<'_> {
-    pub fn to_owned(
-        &self,
-    ) -> crate::owned::common::add_partitions_to_txn_request::add_partitions_to_txn_topic::AddPartitionsToTxnTopic{
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
+    pub fn to_owned(&self) -> crate::owned::common::add_partitions_to_txn_request::add_partitions_to_txn_topic::AddPartitionsToTxnTopic{
         crate::owned::common::add_partitions_to_txn_request::add_partitions_to_txn_topic::AddPartitionsToTxnTopic {
             name: (self.name).to_string(),
             partitions: (self.partitions).clone(),
@@ -29,9 +31,9 @@ impl Encode for AddPartitionsToTxnTopic<'_> {
         let flex = version >= 3;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name);
+                let () = put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name);
+                let () = put_string(buf, self.name);
             }
         }
         if version >= 0 {

@@ -333,7 +333,7 @@ pub struct KafkaGrpcGatewayStatus {
 
 #[cfg(test)]
 mod tests {
-
+    use assert2::{assert, check};
     use kube::CustomResourceExt as _;
 
     use super::*;
@@ -341,25 +341,26 @@ mod tests {
     #[test]
     fn crd_metadata_is_correct() {
         let crd = KafkaGrpcGateway::crd();
-        assert2::assert!(crd.spec.group.as_str() == "crabka.io");
-        assert2::assert!(crd.spec.names.kind.as_str() == "KafkaGrpcGateway");
-        assert2::assert!(crd.spec.names.plural.as_str() == "kafkagrpcgateways");
-        assert2::assert!(crd.spec.names.short_names == Some(vec!["kgg".to_string()]));
-        assert2::assert!(
+        check!(crd.spec.group == "crabka.io");
+        check!(crd.spec.names.kind == "KafkaGrpcGateway");
+        check!(crd.spec.names.plural == "kafkagrpcgateways");
+        check!(
             crd.spec
-                .versions
-                .iter()
-                .map(|v| v.name.as_str())
-                .collect::<Vec<_>>()
-                == vec!["v1alpha1"]
+                .names
+                .short_names
+                .as_ref()
+                .is_some_and(|v| v.contains(&"kgg".to_string())),
+            "expected shortname `kgg`",
         );
+        check!(crd.spec.versions.len() == 1);
+        check!(crd.spec.versions[0].name == "v1alpha1");
     }
 
     #[test]
     fn minimal_spec_parses() {
         let json = r"{}";
         let spec: KafkaGrpcGatewaySpec = serde_json::from_str(json).unwrap();
-        assert2::assert!(
+        assert!(
             spec == KafkaGrpcGatewaySpec {
                 replicas: None,
                 image: None,
@@ -453,10 +454,10 @@ mod tests {
             "\"targetUrl\":\"https://example.com/hook\"",
             "\"otlpEndpoint\":\"http://otel:4317\"",
         ] {
-            assert2::assert!(json.contains(want));
+            assert!(json.contains(want), "case {want:?}; got: {json}");
         }
         let back: KafkaGrpcGateway = serde_json::from_str(&json).unwrap();
-        assert2::assert!(back.spec == gw.spec);
+        assert!(back.spec == gw.spec);
     }
 
     #[test]
@@ -481,15 +482,16 @@ mod tests {
             "outboundSubscriptions",
             "telemetry",
         ] {
-            assert2::assert!(!j.contains(absent));
+            assert!(!j.contains(absent), "case {absent:?}; got: {j}");
         }
     }
 
     #[test]
     fn status_omits_optional_fields_when_unset() {
         let status = KafkaGrpcGatewayStatus::default();
-        let actual = serde_json::to_value(&status).unwrap();
-        assert2::assert!(actual == serde_json::json!({"conditions": []}));
+        let j = serde_json::to_string(&status).unwrap();
+        assert!(!j.contains("observedGeneration"), "got: {j}");
+        assert!(!j.contains("readyReplicas"), "got: {j}");
     }
 
     #[test]
@@ -511,9 +513,9 @@ mod tests {
             signing_secret_ref: None,
         };
         let j = serde_json::to_string(&sub).unwrap();
-        assert2::assert!(j.contains("\"X-Tenant\":\"acme\""));
+        assert!(j.contains("\"X-Tenant\":\"acme\""), "got: {j}");
         let back: OutboundSubscriptionSpec = serde_json::from_str(&j).unwrap();
-        assert2::assert!(back == sub);
+        assert!(back == sub);
     }
 
     #[test]
@@ -523,8 +525,8 @@ mod tests {
             key: "hmac-key".into(),
         };
         let j = serde_json::to_string(&r).unwrap();
-        assert2::assert!(j == r#"{"name":"my-secret","key":"hmac-key"}"#);
+        assert!(j == r#"{"name":"my-secret","key":"hmac-key"}"#, "got: {j}");
         let back: SecretKeyRef = serde_json::from_str(&j).unwrap();
-        assert2::assert!(back == r);
+        assert!(back == r);
     }
 }

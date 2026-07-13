@@ -65,6 +65,8 @@ impl DedupStore {
 
     /// True if dedup-partition `p` is currently owned by this replica.
     #[must_use]
+    /// # Panics
+    /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub fn owns(&self, p: u32) -> bool {
         self.owned.read().expect("owned lock").contains(&p)
     }
@@ -96,6 +98,10 @@ impl DedupStore {
     /// partitions from earliest (never commits) to (re)build the claim map,
     /// re-arming the warm gate on each assignment change. Closes the consumer on
     /// exit so the coordinator task + group member don't leak.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
+    /// # Panics
+    /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub async fn run_ownership(
         self: Arc<Self>,
         bootstrap: String,
@@ -199,6 +205,8 @@ impl DedupStore {
 
     /// Test/helper writer: produce a single claim record (compacted topic key
     /// = idempotency key, value = JSON `ClaimValue`) to its hashed partition.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn write_claim(
         &self,
         bootstrap: &str,

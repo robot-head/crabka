@@ -56,7 +56,7 @@ impl DetectorMetrics {
     /// bundle of handles. Counter names omit `_total`; `prometheus-client`
     /// appends it at encode time.
     #[must_use]
-    #[allow(clippy::too_many_lines)] // Flat per-variant registration is intentional.
+    // Flat per-variant registration is intentional.
     pub fn register(registry: &mut Registry) -> Self {
         let m = Self::default();
 

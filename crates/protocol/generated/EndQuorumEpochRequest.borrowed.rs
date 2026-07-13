@@ -16,7 +16,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 1;
 pub const FLEXIBLE_MIN: i16 = 1;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -27,6 +28,10 @@ pub struct EndQuorumEpochRequest<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl EndQuorumEpochRequest<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::end_quorum_epoch_request::EndQuorumEpochRequest {
         crate::owned::end_quorum_epoch_request::EndQuorumEpochRequest {
             cluster_id: (self.cluster_id).map(std::string::ToString::to_string),
@@ -50,9 +55,9 @@ impl Encode for EndQuorumEpochRequest<'_> {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.cluster_id);
+                let () = put_compact_nullable_string(buf, self.cluster_id);
             } else {
-                put_nullable_string(buf, self.cluster_id);
+                let () = put_nullable_string(buf, self.cluster_id);
             }
         }
         if version >= 0 {
@@ -182,6 +187,10 @@ pub struct TopicData<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl TopicData<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::end_quorum_epoch_request::TopicData {
         crate::owned::end_quorum_epoch_request::TopicData {
             topic_name: (self.topic_name).to_string(),
@@ -198,9 +207,9 @@ impl Encode for TopicData<'_> {
         let flex = version >= 1;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.topic_name);
+                let () = put_compact_string(buf, self.topic_name);
             } else {
-                put_string(buf, self.topic_name);
+                let () = put_string(buf, self.topic_name);
             }
         }
         if version >= 0 {
@@ -296,6 +305,10 @@ pub struct PartitionData {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl PartitionData {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::end_quorum_epoch_request::PartitionData {
         crate::owned::end_quorum_epoch_request::PartitionData {
             partition_index: (self.partition_index),
@@ -463,6 +476,10 @@ pub struct ReplicaInfo {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl ReplicaInfo {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::end_quorum_epoch_request::ReplicaInfo {
         crate::owned::end_quorum_epoch_request::ReplicaInfo {
             candidate_id: (self.candidate_id),
@@ -540,6 +557,10 @@ pub struct LeaderEndpoint<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl LeaderEndpoint<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::end_quorum_epoch_request::LeaderEndpoint {
         crate::owned::end_quorum_epoch_request::LeaderEndpoint {
             name: (self.name).to_string(),
@@ -554,16 +575,16 @@ impl Encode for LeaderEndpoint<'_> {
         let flex = version >= 1;
         if version >= 1 {
             if flex {
-                put_compact_string(buf, self.name);
+                let () = put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name);
+                let () = put_string(buf, self.name);
             }
         }
         if version >= 1 {
             if flex {
-                put_compact_string(buf, self.host);
+                let () = put_compact_string(buf, self.host);
             } else {
-                put_string(buf, self.host);
+                let () = put_string(buf, self.host);
             }
         }
         if version >= 1 {

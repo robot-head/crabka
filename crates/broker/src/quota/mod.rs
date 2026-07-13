@@ -46,7 +46,7 @@ fn consume_configured_quota(
     ) else {
         return Duration::ZERO;
     };
-    if rate <= 0.0 {
+    if !rate.is_finite() || rate <= 0.0 {
         return Duration::ZERO;
     }
     let Some(initial_rate) = initial_rate(rate) else {
@@ -61,6 +61,20 @@ fn consume_configured_quota(
         return Duration::ZERO;
     }
     delay_for_overage(request.amount - granted, rate, initial_rate).min(Duration::from_secs(1))
+}
+
+pub(crate) fn positive_f64_to_u64(value: f64) -> u64 {
+    if !value.is_finite() || value <= 0.0 {
+        return 0;
+    }
+    value.trunc().to_string().parse().unwrap_or(u64::MAX)
+}
+
+fn u64_to_f64(value: u64) -> f64 {
+    value
+        .to_string()
+        .parse()
+        .expect("every u64 is a finite f64")
 }
 
 #[cfg(test)]
@@ -109,9 +123,18 @@ mod tests {
         atomic::{AtomicBool, Ordering},
     };
 
-    use assert2::check;
+    use assert2::{assert, check};
 
     use super::{test_support::image_with_quota, *};
+
+    #[test]
+    fn quota_rate_conversion_is_checked_and_saturating() {
+        assert!(positive_f64_to_u64(-1.0) == 0);
+        assert!(positive_f64_to_u64(f64::NAN) == 0);
+        assert!(positive_f64_to_u64(10.9) == 10);
+        assert!(positive_f64_to_u64(f64::MAX) == u64::MAX);
+        assert!(u64_to_f64(u64::MAX).is_finite());
+    }
 
     #[test]
     fn consume_configured_quota_returns_zero_without_mutating_bucket_for_zero_amount() {
@@ -154,12 +177,12 @@ mod tests {
         check!(buckets.is_empty());
         check!(!bucket_entity_key_called.load(Ordering::Relaxed));
         check!(!initial_rate_called.load(Ordering::Relaxed));
-        assert2::assert!(!delay_for_overage_called.load(Ordering::Relaxed));
+        assert!(!delay_for_overage_called.load(Ordering::Relaxed));
     }
 
     #[test]
     fn consume_configured_quota_ignores_non_positive_rates() {
-        for (case, rate) in [("negative", -1.0), ("zero", 0.0)] {
+        for rate in [-1.0, 0.0] {
             let image = image_with_quota(vec![("user", Some("alice"))], "producer_byte_rate", rate);
             let buckets = QuotaBuckets::new();
             let initial_rate_called = Arc::new(AtomicBool::new(false));
@@ -184,9 +207,9 @@ mod tests {
                 |_, _, _| Duration::from_secs(1),
             );
 
-            check!(delay == Duration::ZERO, "case {case}");
-            check!(buckets.is_empty(), "case {case}");
-            assert2::assert!(!initial_rate_called.load(Ordering::Relaxed));
+            check!(delay == Duration::ZERO);
+            check!(buckets.is_empty());
+            assert!(!initial_rate_called.load(Ordering::Relaxed));
         }
     }
 
@@ -214,7 +237,7 @@ mod tests {
         );
 
         check!(delay == Duration::ZERO);
-        assert2::assert!(buckets.is_empty());
+        assert!(buckets.is_empty());
     }
 
     #[test]
@@ -242,6 +265,6 @@ mod tests {
         );
 
         check!(delay == Duration::from_secs(1));
-        assert2::assert!(buckets.len() == 1);
+        assert!(buckets.len() == 1);
     }
 }

@@ -6,8 +6,8 @@
 //! ```
 //!
 //! Compression in v0/v1 is encoded as a *wrapper* message whose value is
-//! itself a compressed inner MessageSet. We handle that here: encoding
-//! optionally wraps a flat MessageSet in a single compressed outer
+//! itself a compressed inner `MessageSet`. We handle that here: encoding
+//! optionally wraps a flat `MessageSet` in a single compressed outer
 //! message; decoding transparently unwraps a single layer.
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -19,7 +19,7 @@ use crate::{
     message::{Magic, Message, attrs_with_compression, compression_from_attrs},
 };
 
-/// A single decoded MessageSet entry: the offset-tagged payload of one
+/// A single decoded `MessageSet` entry: the offset-tagged payload of one
 /// logical record after compression unwrapping.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedRecord {
@@ -30,11 +30,13 @@ pub struct ParsedRecord {
     pub value: Option<Bytes>,
 }
 
-/// Decode a flat (uncompressed) MessageSet from `buf`, expecting it to
+/// Decode a flat (uncompressed) `MessageSet` from `buf`, expecting it to
 /// consume exactly `set_size_bytes` bytes from the buffer. Compressed
 /// wrapper messages encountered at top level are unwrapped recursively
 /// once — nested compression (a compressed wrapper inside a compressed
 /// wrapper) is rejected.
+/// # Errors
+/// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
 pub fn decode_message_set<B: Buf>(
     buf: &mut B,
     set_size_bytes: usize,
@@ -71,7 +73,7 @@ fn decode_into(
                 len: size,
             });
         }
-        let size = size as usize;
+        let size = usize::try_from(size).expect("nonnegative i32 fits usize");
         if cur.remaining() < size {
             return Err(LegacyRecordsError::Truncated {
                 needed: size - cur.remaining(),
@@ -114,9 +116,10 @@ fn decode_into(
                 let count = out.len() - start_len;
                 if count > 0 {
                     let last_abs = offset;
-                    let base_abs = last_abs - (count as i64 - 1);
+                    let count = i64::try_from(count).unwrap_or(i64::MAX);
+                    let base_abs = last_abs - (count - 1);
                     for (i, rec) in out[start_len..].iter_mut().enumerate() {
-                        rec.offset = Offset(base_abs + i as i64);
+                        rec.offset = Offset(base_abs + i64::try_from(i).unwrap_or(i64::MAX));
                     }
                 }
             }
@@ -125,7 +128,7 @@ fn decode_into(
     Ok(())
 }
 
-/// Encode a flat MessageSet (one outer message per record) of magic
+/// Encode a flat `MessageSet` (one outer message per record) of magic
 /// `magic` into `buf`. Useful when emitting an uncompressed batch.
 pub fn encode_flat_message_set<B: BufMut, I: IntoIterator<Item = ParsedRecord>>(
     records: I,
@@ -152,9 +155,11 @@ pub fn encode_flat_message_set<B: BufMut, I: IntoIterator<Item = ParsedRecord>>(
     }
 }
 
-/// Encode a MessageSet wrapped in a single compressed outer message.
+/// Encode a `MessageSet` wrapped in a single compressed outer message.
 /// The inner set is uncompressed and contains one message per record,
 /// laid out per KIP-32 conventions (v1 inner offsets relative 0..N-1).
+/// # Errors
+/// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
 pub fn encode_compressed_message_set<B: BufMut>(
     records: &[ParsedRecord],
     magic: Magic,
@@ -179,12 +184,12 @@ pub fn encode_compressed_message_set<B: BufMut>(
 
     // Build inner uncompressed MessageSet.
     let mut inner = BytesMut::new();
-    let count = records.len() as i64;
+    let count = i64::try_from(records.len()).unwrap_or(i64::MAX);
     for (i, r) in records.iter().enumerate() {
         let inner_offset = match magic {
             Magic::V0 => r.offset.0,
             // v1: relative 0..count-1
-            Magic::V1 => i as i64,
+            Magic::V1 => i64::try_from(i).unwrap_or(i64::MAX),
         };
         let msg = Message {
             magic,
@@ -328,7 +333,7 @@ mod tests {
         let mut wire = BytesMut::new();
         let outer_len = outer_msg.encoded_len();
         wire.put_i64(0);
-        wire.put_i32(outer_len as i32);
+        wire.put_i32(i32::try_from(outer_len).unwrap());
         outer_msg.encode_into(&mut wire);
 
         let mut cur: &[u8] = &wire[..];
@@ -449,7 +454,7 @@ mod tests {
         // Inspect the raw wrapper message's own timestamp before unwrapping.
         let mut cur: &[u8] = &buf[..];
         let _wrapper_offset = cur.get_i64();
-        let wrapper_size = cur.get_i32() as usize;
+        let wrapper_size = usize::try_from(cur.get_i32()).unwrap();
         let wrapper = Message::decode_from(&mut cur, wrapper_size).unwrap();
         // The inner record's timestamp survives the unwrap as -1.
         let mut c2: &[u8] = &buf[..];

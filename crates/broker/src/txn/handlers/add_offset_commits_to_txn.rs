@@ -141,37 +141,34 @@ fn encode_response(version: i16, error_code: i16) -> Result<Bytes, BrokerError> 
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
 
     use super::*;
 
     fn decode(bytes: &Bytes, version: i16) -> AddOffsetsToTxnResponse {
         let mut cur: &[u8] = bytes.as_ref();
         let resp = AddOffsetsToTxnResponse::decode(&mut cur, version).expect("decode response");
-        assert2::assert!(cur.is_empty());
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
         resp
     }
 
     #[test]
-    fn encoded_responses_preserve_wire_fields() {
-        type TestCase1<'a> = (&'a str, fn(i16) -> Result<Bytes, BrokerError>, i16);
-        let cases: [TestCase1<'_>; 2] = [
-            (
-                "not coordinator",
-                |version| encode_err(version, codes::NOT_COORDINATOR),
-                codes::NOT_COORDINATOR,
-            ),
-            ("success", encode_ok, codes::NONE),
-        ];
+    fn encode_err_preserves_error_code_on_the_wire() {
+        let bytes = encode_err(4, codes::NOT_COORDINATOR).expect("encode error");
+        assert!(!bytes.is_empty());
+        let resp = decode(&bytes, 4);
 
-        for (case, encode, expected_code) in cases {
-            let bytes = encode(4).unwrap_or_else(|error| panic!("{case}: {error}"));
-            assert2::assert!(!bytes.is_empty());
-            let resp = decode(&bytes, 4);
-            let expected = AddOffsetsToTxnResponse {
-                error_code: expected_code,
-                ..Default::default()
-            };
-            assert2::assert!(resp == expected);
-        }
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.error_code == codes::NOT_COORDINATOR);
+    }
+
+    #[test]
+    fn encode_ok_preserves_success_code_on_the_wire() {
+        let bytes = encode_ok(4).expect("encode ok");
+        assert!(!bytes.is_empty());
+        let resp = decode(&bytes, 4);
+
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.error_code == codes::NONE);
     }
 }

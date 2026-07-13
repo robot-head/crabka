@@ -34,6 +34,8 @@ pub struct LayerChoice {
 }
 
 /// Decode the client's choice. Rejects any selected layer other than auth.
+/// # Errors
+/// Returns an error when credentials or key material are invalid, cryptographic verification fails, or the TLS, SASL, or Kerberos exchange is rejected.
 pub fn decode_choice(bytes: &[u8]) -> Result<LayerChoice, LayerError> {
     if bytes.len() < 4 {
         return Err(LayerError::Short);

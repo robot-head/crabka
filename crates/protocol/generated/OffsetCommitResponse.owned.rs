@@ -13,7 +13,8 @@ pub const MIN_VERSION: i16 = 2;
 pub const MAX_VERSION: i16 = 10;
 pub const FLEXIBLE_MIN: i16 = 8;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -124,9 +125,9 @@ impl Encode for OffsetCommitResponseTopic {
         let flex = version >= 8;
         if (0..=9).contains(&version) {
             if flex {
-                put_compact_string(buf, &self.name);
+                let () = put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name);
+                let () = put_string(buf, &self.name);
             }
         }
         if version >= 10 {

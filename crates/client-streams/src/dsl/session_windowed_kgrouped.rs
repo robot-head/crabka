@@ -224,8 +224,6 @@ where
         )
     }
 
-    #[allow(clippy::too_many_lines)]
-    #[allow(clippy::too_many_arguments)]
     fn lower_aggregate<KS, VS, VA, I, A, M>(
         mut self,
         materialized: Materialized<KS, VS>,
@@ -331,7 +329,6 @@ where
         .with_suppress_factory(Some(suppress_factory))
     }
 
-    #[allow(clippy::too_many_lines)]
     fn lower_reduce<KS, VS, R>(
         mut self,
         materialized: Materialized<KS, VS>,
@@ -550,18 +547,23 @@ mod tests {
             );
         }
         let p = || Produced::with(SessionWindowedSerde::new(StringSerde), I64Serde);
-        assert2::assert!(
-            d.read_output("out", p())
-                == Some((
-                    Some(Windowed {
-                        key: "a".into(),
-                        window: Window { start: 1, end: 4 }
-                    }),
-                    2
-                ))
+        assert_eq!(
+            d.read_output("out", p()),
+            Some((
+                Some(Windowed {
+                    key: "a".into(),
+                    window: Window { start: 1, end: 4 }
+                }),
+                2
+            )),
+            "emit-final forwards session [1,4] with final count 2 on close"
         );
         // No per-update / merge-tombstone emits and the still-open session
         // [1000,1000] is not emitted.
-        assert2::assert!(d.read_output("out", p()) == None);
+        assert_eq!(
+            d.read_output("out", p()),
+            None,
+            "exactly one emit-final record"
+        );
     }
 }

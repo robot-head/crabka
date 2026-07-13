@@ -22,7 +22,7 @@ use crate::{
     compression::Compression,
     error::ProducerError,
     partitioner::UniformStickyPartitioner,
-    producer::{Acks, Producer},
+    producer::{Acks, Producer, ProducerIdentity},
     sender,
     transactional::TxnState,
     transport::ClientTransport,
@@ -48,14 +48,14 @@ fn is_retriable_coordinator_code(code: i16) -> bool {
     )
 }
 
-#[allow(clippy::field_reassign_with_default)]
 // cargo-mutants: protocol-default InitProducerId shape, so `-> Default` is equivalent.
 #[cfg_attr(test, mutants::skip)]
 fn build_init_producer_id_request() -> InitProducerIdRequest {
-    let mut req = InitProducerIdRequest::default();
-    req.transactional_id = None;
-    req.transaction_timeout_ms = 0;
-    req
+    InitProducerIdRequest {
+        transactional_id: None,
+        transaction_timeout_ms: 0,
+        ..Default::default()
+    }
 }
 
 fn retry_deadline_elapsed(start: tokio::time::Instant, timeout: Duration) -> bool {
@@ -137,7 +137,7 @@ impl Producer {
     /// Setting `acks=Zero` together with idempotence is rejected with
     /// [`ProducerError::InvalidConfig`].
     #[builder(start_fn = builder, finish_fn = build)]
-    #[allow(clippy::too_many_arguments)] // bon builder; each arg is an independent knob
+    // bon builder; each arg is an independent knob
     #[tracing::instrument(
         level = "info",
         skip_all,
@@ -150,6 +150,8 @@ impl Producer {
         ),
         err,
     )]
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn start(
         #[builder(into)] bootstrap: String,
         #[builder(into, default = "crabka-producer".to_string())] client_id: String,
@@ -243,8 +245,10 @@ impl Producer {
             client,
             client_id,
             security,
-            producer_id,
-            producer_epoch,
+            identity: ProducerIdentity {
+                id: producer_id,
+                epoch: producer_epoch,
+            },
             acks,
             compression,
             batch_size,

@@ -98,6 +98,8 @@ impl InterBrokerClient {
     /// (TLS, SASL), and return an authenticated duplex stream. Callers
     /// drive normal Kafka RPCs (Fetch, Vote, `AppendEntries`, …) through
     /// the returned stream just as if it were a fresh `TcpStream`.
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
     pub async fn connect(
         &self,
         host: &str,
@@ -137,6 +139,8 @@ impl InterBrokerClient {
     /// connection is fully usable for normal typed Kafka requests —
     /// `Fetch`, `OffsetForLeaderEpoch`, `BrokerHeartbeat`, raft RPCs via
     /// `raw_request`, etc.
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
     pub async fn connect_as_connection(
         &self,
         host: &str,

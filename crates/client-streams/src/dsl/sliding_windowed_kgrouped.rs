@@ -221,7 +221,6 @@ where
         self.lower_aggregate::<KS, VS, VA, I, A>(materialized, store_name, init, agg)
     }
 
-    #[allow(clippy::too_many_lines)]
     fn lower_aggregate<KS, VS, VA, I, A>(
         mut self,
         materialized: Materialized<KS, VS>,
@@ -303,9 +302,11 @@ where
                 value_serde_for_lower.clone(),
                 // Retention basis = 2 * timeDiff (the [t-timeDiff, t+timeDiff] span);
                 // the true window size for the key end is 1 * timeDiff.
-                windows.time_difference_ms * 2,
-                windows.time_difference_ms,
-                windows.grace_ms,
+                (
+                    windows.time_difference_ms * 2,
+                    windows.time_difference_ms,
+                    windows.grace_ms,
+                ),
                 [h.name().to_string()],
             );
             // Cache only emit-on-update sliding aggregates: emit-final stays
@@ -330,7 +331,6 @@ where
         .with_suppress_factory(Some(suppress_factory))
     }
 
-    #[allow(clippy::too_many_lines)]
     fn lower_reduce<KS, VS, R>(
         mut self,
         materialized: Materialized<KS, VS>,
@@ -406,9 +406,11 @@ where
                 value_serde_for_lower.clone(),
                 // Retention basis = 2 * timeDiff (the [t-timeDiff, t+timeDiff] span);
                 // the true window size for the key end is 1 * timeDiff.
-                windows.time_difference_ms * 2,
-                windows.time_difference_ms,
-                windows.grace_ms,
+                (
+                    windows.time_difference_ms * 2,
+                    windows.time_difference_ms,
+                    windows.grace_ms,
+                ),
                 [h.name().to_string()],
             );
             // Cache only emit-on-update sliding reduces (see aggregate lower).

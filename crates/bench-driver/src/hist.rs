@@ -4,11 +4,13 @@
 
 use hdrhistogram::Histogram;
 
-use crate::scenario::LatencyPercentiles;
+use crate::{numeric::to_f64, scenario::LatencyPercentiles};
 
 /// One per-task latency histogram. Recommended way to construct, since
 /// the bounds matter for accuracy.
 #[must_use]
+/// # Panics
+/// Panics if synchronized state is poisoned or validated input is missing a field required to produce the output.
 pub fn new() -> Histogram<u64> {
     Histogram::<u64>::new_with_bounds(1, 60_000_000, 3).expect("histogram bounds are valid")
 }
@@ -23,7 +25,7 @@ pub fn record_us(h: &mut Histogram<u64>, us: u64) {
 /// Project a histogram into the public percentile shape (ms, not μs).
 #[must_use]
 pub fn percentiles(h: &Histogram<u64>) -> LatencyPercentiles {
-    let to_ms = |us: u64| (us as f64) / 1000.0;
+    let to_ms = |us: u64| (to_f64(us)) / 1000.0;
     LatencyPercentiles {
         p50_ms: to_ms(h.value_at_quantile(0.50)),
         p95_ms: to_ms(h.value_at_quantile(0.95)),

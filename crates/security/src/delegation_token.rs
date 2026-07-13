@@ -34,6 +34,8 @@ impl std::fmt::Debug for SecretBytes {
 }
 
 #[must_use]
+/// # Panics
+/// Panics if validated key material has an impossible size or synchronized credential state is poisoned.
 pub fn compute_token_hmac(secret_key: &[u8], token_id: &str) -> Vec<u8> {
     let mut mac =
         <Hmac<Sha256>>::new_from_slice(secret_key).expect("HMAC-SHA-256 accepts any key length");

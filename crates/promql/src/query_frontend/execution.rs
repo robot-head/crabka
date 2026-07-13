@@ -59,6 +59,8 @@ impl<S: MetricStore> RangeQueryExecutor for PromqlEngine<S> {
     ),
     err
 )]
+/// # Errors
+/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub async fn execute_range_query_frontend<E, C>(
     executor: &E,
     cache: &C,

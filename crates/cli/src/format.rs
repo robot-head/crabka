@@ -439,7 +439,6 @@ struct BootstrapManifest {
     skip_all,
     fields(log_dir = %args.log_dir.display(), standalone = args.standalone)
 )]
-#[allow(clippy::unused_async, clippy::too_many_lines)]
 pub async fn run(args: FormatArgs) -> i32 {
     // Refuse to overwrite a non-empty directory. We treat "exists with
     // any entry" as non-empty; an empty dir or missing path is OK.

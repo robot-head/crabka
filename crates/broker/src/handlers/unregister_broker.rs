@@ -112,6 +112,7 @@ fn encode_resp(version: i16, resp: &UnregisterBrokerResponse) -> Result<Bytes, B
 mod tests {
     use std::{net::SocketAddr, sync::Arc};
 
+    use assert2::assert;
     use crabka_protocol::owned::unregister_broker_response::{self, UnregisterBrokerResponse};
     use crabka_security::Principal;
 
@@ -155,7 +156,7 @@ mod tests {
             error_message: Some("submit failed".into()),
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected);
     }
 
     #[tokio::test]
@@ -182,7 +183,7 @@ mod tests {
             error_message: Some("unregister-broker denied".into()),
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected, "{resp:?}");
         broker_handle.shutdown().await;
     }
 
@@ -211,7 +212,7 @@ mod tests {
             error_message: Some("broker_id must be non-negative, got -1".into()),
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected, "{resp:?}");
         broker_handle.shutdown().await;
     }
 
@@ -240,7 +241,7 @@ mod tests {
             error_message: Some("broker 0 is not registered".into()),
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected, "{resp:?}");
         broker_handle.shutdown().await;
     }
 
@@ -269,7 +270,7 @@ mod tests {
             error_message: None,
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected, "{resp:?}");
         broker_handle.shutdown().await;
     }
 }

@@ -1,11 +1,10 @@
-#![allow(clippy::pedantic)]
-
-//! KIP-584 `UpdateFeatures` (api_key 57) write path. Finalizing
+//! KIP-584 `UpdateFeatures` (`api_key` 57) write path. Finalizing
 //! `metadata.version` lands a Raft-persisted `V1FeatureLevel` record and
 //! surfaces the finalized feature + a real epoch through `ApiVersions`.
 //! Validation rejects unsupported features and out-of-range levels;
 //! `validate_only` runs all checks without persisting.
 
+use assert2::assert;
 mod support;
 
 use crabka_protocol::owned::{
@@ -34,13 +33,13 @@ async fn finalizes_metadata_version_and_surfaces_in_api_versions() {
         .send(metadata_version_update(25))
         .await
         .expect("UpdateFeatures");
-    assert2::assert!(resp.error_code == 0);
+    assert!(resp.error_code == 0, "{resp:?}");
     if let Some(row) = resp
         .results
         .iter()
         .find(|r| r.feature == "metadata.version")
     {
-        assert2::assert!(row.error_code == 0);
+        assert!(row.error_code == 0, "{resp:?}");
     }
 
     // ApiVersions now surfaces the finalized feature with a real epoch.
@@ -58,8 +57,8 @@ async fn finalizes_metadata_version_and_surfaces_in_api_versions() {
         .iter()
         .find(|f| f.name == "metadata.version")
         .expect("metadata.version finalized");
-    assert2::assert!(fin.max_version_level == 25);
-    assert2::assert!(av.finalized_features_epoch >= 0);
+    assert!(fin.max_version_level == 25, "{av:?}");
+    assert!(av.finalized_features_epoch >= 0, "{av:?}");
 
     p.broker.shutdown().await;
 }
@@ -73,9 +72,12 @@ fn assert_feature_error(
     code: i16,
 ) {
     if let Some(row) = resp.results.iter().find(|r| r.feature == feature) {
-        assert2::assert!(row.error_code == code);
+        assert!(row.error_code == code, "per-row error: {resp:?}");
     } else {
-        assert2::assert!(resp.error_code == code);
+        assert!(
+            resp.error_code == code,
+            "promoted top-level error: {resp:?}"
+        );
     }
 }
 
@@ -103,6 +105,17 @@ async fn rejects_level_above_supported_max() {
     p.broker.shutdown().await;
 }
 
+fn metadata_version(
+    api_versions: &crabka_protocol::owned::api_versions_response::ApiVersionsResponse,
+) -> i16 {
+    api_versions
+        .finalized_features
+        .iter()
+        .find(|feature| feature.name == "metadata.version")
+        .expect("metadata.version finalized at bootstrap")
+        .max_version_level
+}
+
 #[tokio::test]
 async fn validate_only_does_not_persist() {
     let p = support::start().await;
@@ -112,15 +125,6 @@ async fn validate_only_does_not_persist() {
     // BEFORE, send a validate_only request that WOULD change metadata.version,
     // then assert neither moved — validate_only must run the checks without
     // persisting (no epoch bump, no level change).
-    fn metadata_version(
-        av: &crabka_protocol::owned::api_versions_response::ApiVersionsResponse,
-    ) -> i16 {
-        av.finalized_features
-            .iter()
-            .find(|f| f.name == "metadata.version")
-            .expect("metadata.version finalized at bootstrap")
-            .max_version_level
-    }
     let api_versions = || {
         p.client.send(ApiVersionsRequest {
             client_software_name: "crabka-test".into(),
@@ -130,9 +134,9 @@ async fn validate_only_does_not_persist() {
     };
 
     let before = api_versions().await.expect("ApiVersions");
-    assert2::assert!(metadata_version(&before) == 25);
+    assert!(metadata_version(&before) == 25, "{before:?}");
     let epoch_before = before.finalized_features_epoch;
-    assert2::assert!(epoch_before >= 0);
+    assert!(epoch_before >= 0, "{before:?}");
 
     // Request a SAFE_DOWNGRADE to level 24 with validate_only — this would
     // change metadata.version if persisted.
@@ -140,12 +144,18 @@ async fn validate_only_does_not_persist() {
     req.feature_updates[0].upgrade_type = 2; // SAFE_DOWNGRADE
     req.validate_only = true;
     let resp = p.client.send(req).await.expect("UpdateFeatures");
-    assert2::assert!(resp.error_code == 0);
+    assert!(resp.error_code == 0, "{resp:?}");
 
     // Nothing changed: same level, same epoch.
     let after = api_versions().await.expect("ApiVersions");
-    assert2::assert!(metadata_version(&after) == 25);
-    assert2::assert!(after.finalized_features_epoch == epoch_before);
+    assert!(
+        metadata_version(&after) == 25,
+        "validate_only must not change the level: {after:?}",
+    );
+    assert!(
+        after.finalized_features_epoch == epoch_before,
+        "validate_only must not bump the epoch: {after:?}",
+    );
     p.broker.shutdown().await;
 }
 

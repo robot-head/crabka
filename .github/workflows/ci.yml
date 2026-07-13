@@ -1069,11 +1069,38 @@ jobs:
   # cargo-mutants can skip its own baseline and spend the time budget on mutants.
   # PR-only: `--in-diff` needs a base branch to diff against, so this is skipped
   # on push to main (skipped != failure, so the gatekeeper still passes).
+  mutation-scope:
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' && github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.scope.outputs.run }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: scope
+        name: Check mutation diff size
+        shell: bash
+        run: |
+          git fetch --no-tags origin "${{ github.base_ref }}"
+          changed_lines=$(git diff --numstat "origin/${{ github.base_ref }}...HEAD" -- '*.rs' \
+            ':(exclude)crates/protocol/generated/**' \
+            | awk '{ added += $1; deleted += $2 } END { print added + deleted }')
+          echo "Changed non-generated Rust lines: ${changed_lines}"
+          if (( changed_lines <= 20000 )); then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Mutation testing skipped: ${changed_lines} changed Rust lines exceeds the 20000-line CI limit."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
   cargo-mutants:
     needs:
       - changes
       - rust
-    if: ${{ needs.changes.outputs.rust == 'true' && github.event_name == 'pull_request' }}
+      - mutation-scope
+    if: ${{ needs.mutation-scope.outputs.run == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 180
     strategy:

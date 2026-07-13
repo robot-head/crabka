@@ -222,6 +222,9 @@ impl ControllerHandle {
     /// applied on the leader. Pre-validation lives in the engine. On a follower
     /// (`NotLeader` with a known leader), forwards directly to the leader's
     /// controller listener via `API_KEY_SUBMIT_CHANGE`.
+    ///
+    /// # Errors
+    /// Returns an error if validation, replication, or forwarding fails.
     #[tracing::instrument(
         level = "debug",
         skip_all,
@@ -249,57 +252,56 @@ impl ControllerHandle {
     ///
     /// # Errors
     /// Always [`RaftError::Unsupported`].
-    #[allow(clippy::unused_async)] // async to match the stable handle API
-    pub async fn change_membership(
+    pub fn change_membership(
         &self,
         _new_voters: std::collections::BTreeSet<NodeId>,
-    ) -> Result<(), RaftError> {
-        Err(RaftError::Unsupported("dynamic reconfig unsupported"))
+    ) -> std::future::Ready<Result<(), RaftError>> {
+        std::future::ready(Err(RaftError::Unsupported("dynamic reconfig unsupported")))
     }
 
     /// Reconfiguration is static. KIP-853 dynamic voters are not supported.
     ///
     /// # Errors
     /// Always [`RaftError::Unsupported`].
-    #[allow(clippy::unused_async)] // async to match the stable handle API
-    pub async fn add_learner(&self, _node_id: NodeId, _node: Node) -> Result<(), RaftError> {
-        Err(RaftError::Unsupported("dynamic reconfig unsupported"))
+    pub fn add_learner(
+        &self,
+        _node_id: NodeId,
+        _node: Node,
+    ) -> std::future::Ready<Result<(), RaftError>> {
+        std::future::ready(Err(RaftError::Unsupported("dynamic reconfig unsupported")))
     }
 
     /// Reconfiguration is static. KIP-853 dynamic voters are not supported.
     ///
     /// # Errors
     /// Always [`RaftError::Unsupported`].
-    #[allow(clippy::unused_async)] // async to match the stable handle API
-    pub async fn add_voter(
+    pub fn add_voter(
         &self,
         _req: crate::reconfig::AddVoter,
-    ) -> Result<crate::reconfig::ReconfigOutcome, RaftError> {
-        Err(RaftError::Unsupported("dynamic reconfig unsupported"))
+    ) -> std::future::Ready<Result<crate::reconfig::ReconfigOutcome, RaftError>> {
+        std::future::ready(Err(RaftError::Unsupported("dynamic reconfig unsupported")))
     }
 
     /// Reconfiguration is static. KIP-853 dynamic voters are not supported.
     ///
     /// # Errors
     /// Always [`RaftError::Unsupported`].
-    #[allow(clippy::unused_async)] // async to match the stable handle API
-    pub async fn remove_voter(
+    pub fn remove_voter(
         &self,
         _req: crate::reconfig::RemoveVoter,
-    ) -> Result<crate::reconfig::ReconfigOutcome, RaftError> {
-        Err(RaftError::Unsupported("dynamic reconfig unsupported"))
+    ) -> std::future::Ready<Result<crate::reconfig::ReconfigOutcome, RaftError>> {
+        std::future::ready(Err(RaftError::Unsupported("dynamic reconfig unsupported")))
     }
 
     /// Reconfiguration is static. KIP-853 dynamic voters are not supported.
     ///
     /// # Errors
     /// Always [`RaftError::Unsupported`].
-    #[allow(clippy::unused_async)] // async to match the stable handle API
-    pub async fn update_voter(
+    pub fn update_voter(
         &self,
         _req: crate::reconfig::UpdateVoter,
-    ) -> Result<crate::reconfig::ReconfigOutcome, RaftError> {
-        Err(RaftError::Unsupported("dynamic reconfig unsupported"))
+    ) -> std::future::Ready<Result<crate::reconfig::ReconfigOutcome, RaftError>> {
+        std::future::ready(Err(RaftError::Unsupported("dynamic reconfig unsupported")))
     }
 
     /// Resolve a voter's controller listener `<host>:<port>` from the static
@@ -618,6 +620,9 @@ impl Controller {
     /// `bootstrap_mode` governs cluster formation: `Bootstrap` seeds a fresh
     /// quorum from `initial_voters`; `Join`/`Rejoin` recover or wait. Mismatches
     /// between mode and on-disk log state return [`RaftError::Startup`].
+    ///
+    /// # Errors
+    /// Returns an error if configuration, storage recovery, or startup fails.
     pub async fn start(config: ControllerConfig) -> Result<ControllerHandle, RaftError> {
         Self::start_with_listener(config, None).await
     }
@@ -626,7 +631,9 @@ impl Controller {
     /// controller listener instead of binding `controller_listen_addr` itself.
     /// The supplied listener's local address MUST equal
     /// `config.controller_listen_addr`.
-    #[allow(clippy::too_many_lines)]
+    ///
+    /// # Errors
+    /// Returns an error if the listener, storage, or controller cannot start.
     #[tracing::instrument(
         level = "info",
         skip_all,

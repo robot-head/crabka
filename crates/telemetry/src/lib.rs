@@ -297,6 +297,8 @@ impl TelemetryGuard {
 ///
 /// Must be called exactly once, from within the tokio runtime (the
 /// gRPC exporter captures the current runtime handle).
+/// # Errors
+/// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
 pub fn init(
     otlp: Option<OtlpConfig>,
     fmt_default_filter: &str,

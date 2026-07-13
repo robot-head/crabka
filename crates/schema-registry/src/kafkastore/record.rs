@@ -344,12 +344,16 @@ pub fn encode_schema_deleted_with_message_type(
 /// Build the `SCHEMA` key bytes for a permanent-delete tombstone (value is null,
 /// produced via [`crate::kafkastore::writer::SchemaWriter::produce_tombstone`]).
 #[must_use]
+/// # Panics
+/// Panics if a schema previously validated by the registry is missing a definition or dependency required during resolution.
 pub fn encode_tombstone(subject: &str, version: SchemaVersion) -> Vec<u8> {
     serde_json::to_vec(&SchemaKey::new(subject, version)).expect("schema key serialises")
 }
 
 /// Build a `MODE` record's (key, value). `subject = None` is the global mode.
 #[must_use]
+/// # Panics
+/// Panics if a schema previously validated by the registry is missing a definition or dependency required during resolution.
 pub fn encode_mode(subject: Option<&str>, mode: &str) -> (Vec<u8>, Vec<u8>) {
     let key = ModeKey {
         keytype: "MODE".to_string(),
@@ -367,6 +371,8 @@ pub fn encode_mode(subject: Option<&str>, mode: &str) -> (Vec<u8>, Vec<u8>) {
 
 /// Build the `MODE` key bytes for a mode-clear tombstone (value is null).
 #[must_use]
+/// # Panics
+/// Panics if a schema previously validated by the registry is missing a definition or dependency required during resolution.
 pub fn mode_key(subject: Option<&str>) -> Vec<u8> {
     let key = ModeKey {
         keytype: "MODE".to_string(),
@@ -378,6 +384,8 @@ pub fn mode_key(subject: Option<&str>) -> Vec<u8> {
 
 /// Serialise just the CONFIG key for a subject (or global when `subject` is
 /// `None`). Used to produce a tombstone that removes per-subject overrides.
+/// # Panics
+/// Panics if a schema previously validated by the registry is missing a definition or dependency required during resolution.
 pub fn config_key(subject: Option<&str>) -> Vec<u8> {
     let key = ConfigKey {
         keytype: "CONFIG".to_string(),
@@ -389,6 +397,8 @@ pub fn config_key(subject: Option<&str>) -> Vec<u8> {
 
 /// Build a `DELETE_SUBJECT` record's (key, value).
 #[must_use]
+/// # Panics
+/// Panics if a schema previously validated by the registry is missing a definition or dependency required during resolution.
 pub fn encode_delete_subject(subject: &str, version: SchemaVersion) -> (Vec<u8>, Vec<u8>) {
     let key = DeleteSubjectKey {
         keytype: "DELETE_SUBJECT".to_string(),

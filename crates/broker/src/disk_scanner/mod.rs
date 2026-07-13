@@ -73,6 +73,8 @@ impl DiskScanner {
 mod tests {
     use std::io::Write;
 
+    use assert2::assert;
+
     use super::*;
 
     #[test]
@@ -115,8 +117,8 @@ mod tests {
                 partition: 1,
             })
             .get();
-        assert2::assert!(g0 == 1234);
-        assert2::assert!(g1 == 5678);
+        assert!(g0 == 1234);
+        assert!(g1 == 5678);
     }
 
     #[tokio::test]
@@ -174,10 +176,11 @@ mod tests {
         };
         let mut handle = tokio::spawn(scanner.run());
 
-        assert2::assert!(
+        assert!(
             tokio::time::timeout(Duration::from_millis(25), &mut handle)
                 .await
-                .is_err()
+                .is_err(),
+            "disk scanner run loop exited before shutdown"
         );
 
         shutdown.cancel();

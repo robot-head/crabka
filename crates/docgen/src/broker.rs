@@ -10,6 +10,10 @@ use crate::schema_md::render_sectioned_field_table;
 /// Uses [`render_sectioned_field_table`] so each top-level TOML key/table is
 /// its own captioned section with a horizontal-rule separator, rather than one
 /// dense flat table.
+///
+/// # Panics
+///
+/// Panics if the generated schema cannot be represented as JSON.
 #[must_use]
 pub fn server_config_md() -> String {
     let schema = schemars::schema_for!(crabka_broker::file_config::FileConfig);

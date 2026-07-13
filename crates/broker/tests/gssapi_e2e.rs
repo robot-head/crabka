@@ -38,6 +38,7 @@ use std::{
     process::{Command, Stdio},
 };
 
+use assert2::assert;
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle, config::ListenerSpec};
 use crabka_security::{
     ListenerProtocol, SaslMechanism,
@@ -151,7 +152,12 @@ fn run_gssapi_tool(tool_args: &[&str]) -> std::process::Output {
         out.status,
         out.stderr.len()
     );
-    assert2::assert!(out.status.success());
+    assert!(
+        out.status.success(),
+        "gssapi tool {tool_args:?} failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
     out
 }
 
@@ -212,7 +218,12 @@ async fn cp_kafka_gssapi_client_round_trip() {
         .expect("write stdin");
     drop(child.stdin.take());
     let producer_out = child.wait_with_output().expect("wait producer");
-    assert2::assert!(producer_out.status.success());
+    assert!(
+        producer_out.status.success(),
+        "gssapi producer failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&producer_out.stdout),
+        String::from_utf8_lossy(&producer_out.stderr),
+    );
 
     // 3. Consume them back over a GSSAPI-authenticated consumer.
     let consumer_out = run_gssapi_tool(&[
@@ -233,7 +244,7 @@ async fn cp_kafka_gssapi_client_round_trip() {
     ]);
     let s = String::from_utf8_lossy(&consumer_out.stdout);
     for needle in ["alpha", "bravo", "charlie"] {
-        assert2::assert!(s.contains(needle));
+        assert!(s.contains(needle), "consumer didn't emit {needle}: {s:?}");
     }
 
     broker.shutdown().await;

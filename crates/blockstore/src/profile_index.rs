@@ -68,6 +68,8 @@ impl ProfileIndex {
         }
     }
 
+    /// # Errors
+    /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub fn resolve(
         &self,
         tenant: &str,
@@ -76,6 +78,8 @@ impl ProfileIndex {
         self.series.resolve(tenant, matchers)
     }
 
+    /// # Errors
+    /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub fn matching_fingerprints(
         &self,
         tenant: &str,
@@ -84,6 +88,8 @@ impl ProfileIndex {
         self.series.matching_fingerprints(tenant, matchers)
     }
 
+    /// # Errors
+    /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub fn select_fingerprints(
         &self,
         tenant: &str,
@@ -142,6 +148,8 @@ impl ProfileIndex {
             .unwrap_or_default()
     }
 
+    /// # Errors
+    /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub fn label_values_for_time(
         &self,
         tenant: &str,
@@ -186,6 +194,8 @@ impl ProfileIndex {
             .unwrap_or_default()
     }
 
+    /// # Errors
+    /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub fn label_names_for_time(
         &self,
         tenant: &str,
@@ -207,6 +217,8 @@ impl ProfileIndex {
         self.series.label_names_for_fingerprints(tenant, fps)
     }
 
+    /// # Errors
+    /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub fn series_for_time(
         &self,
         tenant: &str,
@@ -302,10 +314,14 @@ impl ProfileIndex {
         self.series.label_values(tenant, name)
     }
 
+    /// # Errors
+    /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub fn label_names_for(&self, tenant: &str, matchers: &[LabelMatcher]) -> Result<Vec<String>> {
         self.series.label_names_for(tenant, matchers)
     }
 
+    /// # Errors
+    /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub fn label_values_for(
         &self,
         tenant: &str,
@@ -315,6 +331,8 @@ impl ProfileIndex {
         self.series.label_values_for(tenant, name, matchers)
     }
 
+    /// # Errors
+    /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub fn series(
         &self,
         tenant: &str,
@@ -330,6 +348,8 @@ impl ProfileIndex {
     }
 
     #[instrument(skip_all, fields(key = %key, len = tracing::field::Empty), err)]
+    /// # Errors
+    /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub async fn save(&self, store: &Arc<dyn ObjectStore>, key: &str) -> Result<()> {
         let bytes = serde_json::to_vec(self)?;
         tracing::Span::current().record("len", bytes.len());
@@ -337,6 +357,8 @@ impl ProfileIndex {
         Ok(())
     }
 
+    /// # Errors
+    /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub async fn save_latest_snapshot(
         &self,
         store: &Arc<dyn ObjectStore>,
@@ -345,10 +367,14 @@ impl ProfileIndex {
         put_index_snapshot(store, key, serde_json::to_vec(self)?).await
     }
 
+    /// # Errors
+    /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub async fn load(store: &Arc<dyn ObjectStore>, key: &str) -> Result<Self> {
         Self::load_with_cap(store, key, MAX_PROFILE_INDEX_SNAPSHOT_BYTES).await
     }
 
+    /// # Errors
+    /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub async fn load_latest_snapshot(store: &Arc<dyn ObjectStore>, key: &str) -> Result<Self> {
         if let Some(path) = latest_index_snapshot_path(store, key).await? {
             return Self::load_path_with_cap(store, &path, MAX_PROFILE_INDEX_SNAPSHOT_BYTES).await;

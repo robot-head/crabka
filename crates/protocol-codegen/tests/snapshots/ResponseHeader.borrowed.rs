@@ -7,7 +7,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 1;
 pub const FLEXIBLE_MIN: i16 = 1;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,11 +20,14 @@ impl Default for ResponseHeader {
     fn default() -> Self {
         Self {
             correlation_id: 0i32,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl ResponseHeader {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
     pub fn to_owned(&self) -> crate::owned::response_header::ResponseHeader {
         crate::owned::response_header::ResponseHeader {
             correlation_id: (self.correlation_id),
@@ -34,9 +38,7 @@ impl ResponseHeader {
 impl Encode for ResponseHeader {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch(
-                "ResponseHeader version out of range",
-            ));
+            return Err(ProtocolError::SchemaMismatch("ResponseHeader version out of range"));
         }
         let flex = is_flexible(version);
         if version >= 0 {
@@ -64,9 +66,7 @@ impl Encode for ResponseHeader {
 impl<'de> DecodeBorrow<'de> for ResponseHeader {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch(
-                "ResponseHeader version out of range",
-            ));
+            return Err(ProtocolError::SchemaMismatch("ResponseHeader version out of range"));
         }
         let flex = is_flexible(version);
         let mut out = Self::default();

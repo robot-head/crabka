@@ -39,10 +39,14 @@ pub enum HaElectionRecordError {
 }
 
 impl HaElectionRecord {
+    /// # Errors
+    /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
     pub fn encode(&self) -> Result<Vec<u8>, HaElectionRecordError> {
         serde_json::to_vec(self).map_err(|error| HaElectionRecordError::Encode(error.to_string()))
     }
 
+    /// # Errors
+    /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
     pub fn decode(bytes: &[u8]) -> Result<Self, HaElectionRecordError> {
         serde_json::from_slice(bytes)
             .map_err(|error| HaElectionRecordError::Decode(error.to_string()))
@@ -51,6 +55,8 @@ impl HaElectionRecord {
 
 impl HaTracker {
     #[must_use]
+    /// # Panics
+    /// Panics if shared metric state is poisoned or validated series data is missing an index entry required by the operation.
     pub fn elected_replica(&self, tenant: &str, cluster: &str) -> Option<String> {
         self.elected
             .lock()
@@ -60,6 +66,8 @@ impl HaTracker {
     }
 
     #[must_use]
+    /// # Panics
+    /// Panics if shared metric state is poisoned or validated series data is missing an index entry required by the operation.
     pub fn election_record(&self, tenant: &str, cluster: &str) -> Option<HaElectionRecord> {
         self.elected
             .lock()
@@ -77,6 +85,8 @@ impl HaTracker {
         self.set_elected_at(tenant, cluster, replica, now_ms());
     }
 
+    /// # Panics
+    /// Panics if shared metric state is poisoned or validated series data is missing an index entry required by the operation.
     pub fn set_elected_at(
         &self,
         tenant: impl Into<String>,
@@ -101,6 +111,8 @@ impl HaTracker {
             );
     }
 
+    /// # Panics
+    /// Panics if shared metric state is poisoned or validated series data is missing an index entry required by the operation.
     pub fn persist_elected(&self, record: &HaElectionRecord) {
         self.elected
             .lock()
@@ -122,6 +134,8 @@ impl HaTracker {
     /// closes the elect TOCTOU: a second racing replica that locks afterwards
     /// observes the committed winner and is dropped. The DURABLE Kafka persist
     /// is left to the caller and may proceed asynchronously after this returns.
+    /// # Panics
+    /// Panics if shared metric state is poisoned or validated series data is missing an index entry required by the operation.
     pub fn elect(
         &self,
         tenant: &str,
@@ -190,6 +204,8 @@ pub fn ha_election_at(
 
 /// Timestamped HA election helper with an explicit failover timeout.
 #[must_use]
+/// # Panics
+/// Panics if shared metric state is poisoned or validated series data is missing an index entry required by the operation.
 pub fn ha_election_at_with_timeout(
     tracker: &HaTracker,
     tenant: &str,
@@ -289,7 +305,7 @@ pub fn strip_replica_label(series: &mut [DecodedSeries]) {
 
 #[cfg(test)]
 mod tests {
-    use assert2::check;
+    use assert2::{assert, check};
     use crabka_blockstore::Labels;
 
     use super::*;
@@ -315,7 +331,7 @@ mod tests {
         tracker.set_elected("tenant", "c1", "r1");
         let series = [series_with("c1", "r1")];
 
-        assert2::assert!(ha_decision(&tracker, "tenant", &series) == HaDecision::Accept);
+        assert!(ha_decision(&tracker, "tenant", &series) == HaDecision::Accept);
     }
 
     #[test]
@@ -324,7 +340,7 @@ mod tests {
         tracker.set_elected("tenant", "c1", "r1");
         let series = [series_with("c1", "r2")];
 
-        assert2::assert!(ha_decision(&tracker, "tenant", &series) == HaDecision::Drop);
+        assert!(ha_decision(&tracker, "tenant", &series) == HaDecision::Drop);
     }
 
     #[test]
@@ -344,7 +360,7 @@ mod tests {
         tracker.set_elected("tenant", "c1", "r1");
         let series = [series_with("c1", "r1")];
 
-        assert2::assert!(
+        assert!(
             ha_election_at(&tracker, "tenant", &series, 42_000)
                 == HaElection::Update(HaElectionRecord {
                     tenant: "tenant".to_string(),
@@ -366,7 +382,7 @@ mod tests {
         });
         let replacement = [series_with("c1", "r2")];
 
-        assert2::assert!(
+        assert!(
             ha_election_at_with_timeout(&tracker, "tenant", &replacement, 45_001, 30_000)
                 == HaElection::Elect(HaElectionRecord {
                     tenant: "tenant".to_string(),
@@ -390,7 +406,7 @@ mod tests {
             metadata: None,
         }];
 
-        assert2::assert!(ha_decision(&tracker, "tenant", &series) == HaDecision::Accept);
+        assert!(ha_decision(&tracker, "tenant", &series) == HaDecision::Accept);
     }
 
     #[test]
@@ -399,8 +415,8 @@ mod tests {
 
         strip_replica_label(&mut series);
 
-        assert2::assert!(series[0].labels.get("__replica__") == None);
-        assert2::assert!(series[0].labels.get("cluster") == Some("c1"));
+        assert!(series[0].labels.get("__replica__") == None);
+        assert!(series[0].labels.get("cluster") == Some("c1"));
     }
 
     #[test]
@@ -409,17 +425,17 @@ mod tests {
         let r1 = [series_with("c1", "r1")];
         let r2 = [series_with("c1", "r2")];
 
-        assert2::assert!(matches!(
+        assert!(matches!(
             tracker.elect("tenant", &r1, 1_000, DEFAULT_HA_FAILOVER_TIMEOUT_MS),
             HaElection::Elect(_)
         ));
         // The first elect already committed the winner under the lock, so a
         // competing replica observes it and is dropped without a separate
         // persist step.
-        assert2::assert!(
+        assert!(
             tracker.elect("tenant", &r2, 1_001, DEFAULT_HA_FAILOVER_TIMEOUT_MS) == HaElection::Drop
         );
-        assert2::assert!(tracker.elected_replica("tenant", "c1") == Some("r1".to_string()));
+        assert!(tracker.elected_replica("tenant", "c1") == Some("r1".to_string()));
     }
 
     #[test]
@@ -448,6 +464,6 @@ mod tests {
             .filter(|decision| matches!(decision, HaElection::Elect(_)))
             .count();
 
-        assert2::assert!(elects == 1);
+        assert!(elects == 1);
     }
 }

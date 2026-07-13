@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use assert2::assert;
 use crabka_operator::{
     controller::kafka::reconcile,
     crd::{Kafka, KafkaSpec, Listener, ListenerType},
@@ -109,13 +110,16 @@ async fn rendered_broker_config_carries_controller_listener_protocol_ssl_and_tls
         "client_ca_path = \"/etc/crabka/cluster-ca/ca.crt\"",
         "client_auth = \"Required\"",
     ] {
-        assert2::assert!(toml_str.contains(needle));
+        assert!(toml_str.contains(needle), "{needle} missing;\n{toml_str}");
     }
 
     // Round-trip parse through the broker's own FileConfig.
     let parsed: crabka_broker::file_config::FileConfig =
         toml::from_str(toml_str).expect("broker-0.toml must parse as FileConfig");
-    assert2::assert!(parsed.tls_config.is_some());
+    assert!(
+        parsed.tls_config.is_some(),
+        "FileConfig.tls_config must be Some after parsing rendered TOML"
+    );
 }
 
 // ── test 2: tls=true, authentication=None listener reconciles (anonymous TLS) ──
@@ -173,7 +177,10 @@ async fn data_plane_tls_listener_anonymous_now_reconciles() {
         });
 
     // The anonymous-TLS listener must render as protocol = "Ssl".
-    assert2::assert!(toml_str.contains("protocol = \"Ssl\""));
+    assert!(
+        toml_str.contains("protocol = \"Ssl\""),
+        "anonymous TLS listener must render protocol = \"Ssl\";\n{toml_str}"
+    );
 
     // Status conditions must reflect success.
     let status_patch = observed
@@ -191,9 +198,9 @@ async fn data_plane_tls_listener_anonymous_now_reconciles() {
         .iter()
         .find(|c| c["type"] == "ListenersValid")
         .unwrap_or_else(|| panic!("ListenersValid present; body = {sbody}"));
-    assert2::assert!(valid["status"] == "True");
+    assert!(valid["status"] == "True", "body = {sbody}");
 
-    assert2::assert!(state.remaining_rules() == 0);
+    assert!(state.remaining_rules() == 0);
 }
 
 // ── test 3: StatefulSet mounts all three Secrets ──────────────────────────────
@@ -269,7 +276,6 @@ fn pool_reconcile_rules(parent: &str, pool_name: &str, ns: &str) -> Vec<MockRule
 /// the right Secret names: `c1-cluster-ca-cert`, `c1-kafka-brokers`,
 /// `c1-clients-ca-cert`.
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn statefulset_mounts_cluster_ca_broker_tls_clients_ca() {
     use crabka_operator::controller::kafka_node_pool::reconcile as pool_reconcile;
 
@@ -307,21 +313,30 @@ async fn statefulset_mounts_cluster_ca_broker_tls_clients_ca() {
         .iter()
         .find(|v| v["name"] == "cluster-ca-cert")
         .unwrap_or_else(|| panic!("cluster-ca-cert volume missing; volumes = {volumes:?}"));
-    assert2::assert!(cluster_ca_vol["secret"]["secretName"] == "c1-cluster-ca-cert");
+    assert!(
+        cluster_ca_vol["secret"]["secretName"] == "c1-cluster-ca-cert",
+        "cluster-ca-cert volume must reference c1-cluster-ca-cert; body = {body}"
+    );
 
     // broker-tls volume -> Secret c1-kafka-brokers
     let broker_tls_vol = volumes
         .iter()
         .find(|v| v["name"] == "broker-tls")
         .unwrap_or_else(|| panic!("broker-tls volume missing; volumes = {volumes:?}"));
-    assert2::assert!(broker_tls_vol["secret"]["secretName"] == "c1-kafka-brokers");
+    assert!(
+        broker_tls_vol["secret"]["secretName"] == "c1-kafka-brokers",
+        "broker-tls volume must reference c1-kafka-brokers; body = {body}"
+    );
 
     // clients-ca-cert volume -> Secret c1-clients-ca-cert
     let clients_ca_vol = volumes
         .iter()
         .find(|v| v["name"] == "clients-ca-cert")
         .unwrap_or_else(|| panic!("clients-ca-cert volume missing; volumes = {volumes:?}"));
-    assert2::assert!(clients_ca_vol["secret"]["secretName"] == "c1-clients-ca-cert");
+    assert!(
+        clients_ca_vol["secret"]["secretName"] == "c1-clients-ca-cert",
+        "clients-ca-cert volume must reference c1-clients-ca-cert; body = {body}"
+    );
 
     // Broker container volumeMounts: must include all three mounts.
     let containers = body["spec"]["template"]["spec"]["containers"]
@@ -341,10 +356,13 @@ async fn statefulset_mounts_cluster_ca_broker_tls_clients_ca() {
         .collect();
 
     for expected_mount in &["cluster-ca-cert", "broker-tls", "clients-ca-cert"] {
-        assert2::assert!(mount_names.contains(expected_mount));
+        assert!(
+            mount_names.contains(expected_mount),
+            "broker container must have volumeMount '{expected_mount}'; mounts = {mount_names:?}"
+        );
     }
 
-    assert2::assert!(state.remaining_rules() == 0);
+    assert!(state.remaining_rules() == 0);
 }
 
 // ── test 4: render is idempotent across reconciles ───────────────────────────
@@ -415,7 +433,13 @@ async fn render_is_idempotent_across_reconciles() {
         .unwrap_or_else(|| panic!("broker-0.toml missing from second CM PATCH; body = {body2}"))
         .to_string();
 
-    assert2::assert!(toml1 == toml2);
+    assert!(
+        toml1 == toml2,
+        "broker-0.toml must be byte-identical across two reconciles with the same spec"
+    );
 
-    assert2::assert!(state1.remaining_rules() == 0);
+    assert!(
+        state1.remaining_rules() == 0,
+        "all mock rules must have been consumed"
+    );
 }

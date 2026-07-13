@@ -336,78 +336,76 @@ pub struct BrokerMetrics {
 }
 
 impl BrokerMetrics {
-    /// Build a fresh registry, register every metric, and return the
-    /// bundle. Idempotent register failures aren't a concern because we
-    /// only call this once per broker process.
-    #[must_use]
-    #[allow(clippy::too_many_lines)]
-    pub fn new() -> Self {
-        let mut registry = Registry::with_prefix("crabka_broker");
+    fn unregistered(registry: SharedRegistry) -> Self {
+        Self {
+            registry,
+            topic_bytes_in: Family::default(),
+            topic_bytes_out: Family::default(),
+            topic_messages_in: Family::default(),
+            topic_produce_requests: Family::default(),
+            topic_fetch_requests: Family::default(),
+            topic_failed_produce_requests: Family::default(),
+            topic_failed_fetch_requests: Family::default(),
+            partition_bytes_in: Family::default(),
+            partition_bytes_out: Family::default(),
+            replication_bytes_in: Family::default(),
+            replication_bytes_out: Family::default(),
+            partition_disk_bytes: Family::default(),
+            partition_cpu_micros: Family::default(),
+            partitions_led: Gauge::default(),
+            partitions_total: Gauge::default(),
+            under_replicated_partitions: Gauge::default(),
+            under_min_isr_partition_count: Gauge::default(),
+            offline_partitions_count: Gauge::default(),
+            active_controller: Gauge::default(),
+            controller_leader_changes_total: Counter::default(),
+            isr_shrinks_total: Counter::default(),
+            isr_expands_total: Counter::default(),
+            incremental_fetch_sessions: Gauge::default(),
+            incremental_fetch_session_evictions_total: Counter::default(),
+            incremental_fetch_partitions_cached: Gauge::default(),
+            client_software_versions: Family::default(),
+            successful_authentication: Family::default(),
+            failed_authentication: Family::default(),
+            api_requests: Family::default(),
+            unsupported_api_requests: Family::default(),
+            request_duration_seconds: Family::new_with_constructor(|| {
+                Histogram::new(REQUEST_DURATION_BUCKETS)
+            }),
+            in_flight_requests: Gauge::default(),
+            active_connections: Gauge::default(),
+            request_errors: Family::default(),
+            tiered_storage_rlmm_topic_backed: Gauge::default(),
+            tiered_storage_rlmm_bootstrap_attempts: Counter::default(),
+            produce_message_conversions: Family::default(),
+            fetch_message_conversions: Family::default(),
+            unclean_leader_elections_total: Counter::default(),
+            audit_events_total: Counter::default(),
+            audit_write_failures_total: Counter::default(),
+            audit_spool_depth: Gauge::default(),
+            audit_spool_bytes: Gauge::default(),
+            audit_records_spooled_total: Counter::default(),
+            audit_records_replayed_total: Counter::default(),
+            audit_records_dropped_total: Counter::default(),
+            log_cleaner_runs_total: Counter::default(),
+            log_compactions_total: Family::default(),
+        }
+    }
 
-        let topic_bytes_in: Family<TopicLabel, Counter> = Family::default();
-        let topic_bytes_out: Family<TopicLabel, Counter> = Family::default();
-        let topic_messages_in: Family<TopicLabel, Counter> = Family::default();
-        let topic_produce_requests: Family<TopicLabel, Counter> = Family::default();
-        let topic_fetch_requests: Family<TopicLabel, Counter> = Family::default();
-        let topic_failed_produce_requests: Family<TopicLabel, Counter> = Family::default();
-        let topic_failed_fetch_requests: Family<TopicLabel, Counter> = Family::default();
-        let partition_bytes_in: Family<PartitionLabel, Counter> = Family::default();
-        let partition_bytes_out: Family<PartitionLabel, Counter> = Family::default();
-        let replication_bytes_in: Family<PartitionLabel, Counter> = Family::default();
-        let replication_bytes_out: Family<PartitionLabel, Counter> = Family::default();
-        let partition_disk_bytes: Family<PartitionLabel, Gauge> = Family::default();
-        let partition_cpu_micros: Family<PartitionLabel, Counter> = Family::default();
-        let partitions_led = Gauge::default();
-        let partitions_total = Gauge::default();
-        let under_replicated_partitions = Gauge::default();
-        let under_min_isr_partition_count = Gauge::default();
-        let offline_partitions_count = Gauge::default();
-        let active_controller = Gauge::default();
-        let controller_leader_changes_total = Counter::default();
-        let isr_shrinks_total = Counter::default();
-        let isr_expands_total = Counter::default();
-        let incremental_fetch_sessions = Gauge::default();
-        let incremental_fetch_session_evictions_total = Counter::default();
-        let incremental_fetch_partitions_cached = Gauge::default();
-        let client_software_versions: Family<ClientSoftwareLabel, Counter> = Family::default();
-        let successful_authentication: Family<SaslMechanismLabel, Counter> = Family::default();
-        let failed_authentication: Family<SaslMechanismLabel, Counter> = Family::default();
-        let api_requests: Family<ApiKeyLabel, Counter> = Family::default();
-        let unsupported_api_requests: Family<ApiKeyLabel, Counter> = Family::default();
-        let request_duration_seconds: Family<ApiKeyLabel, Histogram> =
-            Family::new_with_constructor(|| Histogram::new(REQUEST_DURATION_BUCKETS));
-        let in_flight_requests = Gauge::default();
-        let active_connections = Gauge::default();
-        let request_errors: Family<ApiKeyLabel, Counter> = Family::default();
-        let tiered_storage_rlmm_topic_backed = Gauge::default();
-        let tiered_storage_rlmm_bootstrap_attempts = Counter::default();
-        let produce_message_conversions: Family<TopicLabel, Counter> = Family::default();
-        let fetch_message_conversions: Family<TopicLabel, Counter> = Family::default();
-        let unclean_leader_elections_total = Counter::default();
-        let audit_events_total = Counter::default();
-        let audit_write_failures_total = Counter::default();
-        let audit_spool_depth = Gauge::default();
-        let audit_spool_bytes = Gauge::default();
-        let audit_records_spooled_total = Counter::default();
-        let audit_records_replayed_total = Counter::default();
-        let audit_records_dropped_total = Counter::default();
-        let log_cleaner_runs_total = Counter::default();
-        let log_compactions_total: Family<PartitionLabel, Counter> = Family::default();
-
+    fn register_group_1(&self, registry: &mut Registry) {
         registry.register(
             "topic_bytes_in",
             "Bytes received from producers, per topic (cumulative). \
              Operators compute throughput via rate(...).",
-            topic_bytes_in.clone(),
+            self.topic_bytes_in.clone(),
         );
+
         registry.register(
             "topic_bytes_out",
             "Bytes delivered to fetchers, per topic (cumulative).",
-            topic_bytes_out.clone(),
+            self.topic_bytes_out.clone(),
         );
-        // Renders as `crabka_broker_messages_in_total`. Suffix `_total`
-        // is appended automatically by prometheus-client for Counter,
-        // so the registered name omits it.
+
         registry.register(
             "messages_in",
             "Cumulative count of records received from \
@@ -418,20 +416,23 @@ impl BrokerMetrics {
              produce_message_conversions counter tracks the \
              legacy-arrival rate so operators can detect \
              under-counting.",
-            topic_messages_in.clone(),
+            self.topic_messages_in.clone(),
         );
+
         registry.register(
             "topic_produce_requests",
             "Produce requests handled, per topic (cumulative). One \
              increment per topic per Produce request.",
-            topic_produce_requests.clone(),
+            self.topic_produce_requests.clone(),
         );
+
         registry.register(
             "topic_fetch_requests",
             "Fetch requests handled, per topic (cumulative). One \
              increment per topic per Fetch request.",
-            topic_fetch_requests.clone(),
+            self.topic_fetch_requests.clone(),
         );
+
         registry.register(
             "topic_failed_produce_requests",
             "Cumulative count of Produce partition \
@@ -441,8 +442,9 @@ impl BrokerMetrics {
              Operators alert on rate(...) > 0 to catch quota / ACL \
              / NOT_ENOUGH_REPLICAS storms; the ratio against \
              topic_produce_requests yields the per-topic error rate.",
-            topic_failed_produce_requests.clone(),
+            self.topic_failed_produce_requests.clone(),
         );
+
         registry.register(
             "topic_failed_fetch_requests",
             "Cumulative count of Fetch partition \
@@ -450,20 +452,23 @@ impl BrokerMetrics {
              topic. Mirrors Kafka's \
              BrokerTopicMetrics.FailedFetchRequestsPerSec. Pairs \
              with topic_fetch_requests for per-topic error rate.",
-            topic_failed_fetch_requests.clone(),
+            self.topic_failed_fetch_requests.clone(),
         );
+
         registry.register(
             "partitions_led",
             "Number of partitions for which this broker is currently leader.",
-            partitions_led.clone(),
+            self.partitions_led.clone(),
         );
+
         registry.register(
             "partitions_total",
             "Total number of partitions (leader + follower \
              replicas) this broker hosts. Mirrors Kafka's \
              ReplicaManager.PartitionCount.",
-            partitions_total.clone(),
+            self.partitions_total.clone(),
         );
+
         registry.register(
             "under_replicated_partitions",
             "Count of partitions this broker leads whose ISR \
@@ -471,8 +476,11 @@ impl BrokerMetrics {
              ReplicaManager.UnderReplicatedPartitions; alert on > 0 \
              to spot stuck followers before they fail an unclean \
              election.",
-            under_replicated_partitions.clone(),
+            self.under_replicated_partitions.clone(),
         );
+    }
+
+    fn register_group_2(&self, registry: &mut Registry) {
         registry.register(
             "under_min_isr_partition_count",
             "Count of partitions this broker leads whose ISR \
@@ -480,8 +488,9 @@ impl BrokerMetrics {
              Mirrors Kafka's ReplicaManager.UnderMinIsrPartitionCount; \
              alert on > 0 — these partitions reject acks=all produces \
              with NOT_ENOUGH_REPLICAS.",
-            under_min_isr_partition_count.clone(),
+            self.under_min_isr_partition_count.clone(),
         );
+
         registry.register(
             "offline_partitions_count",
             "Count of partitions this broker leads that have \
@@ -490,13 +499,15 @@ impl BrokerMetrics {
              ReplicaManager.OfflinePartitionsCount; alert on > 0 — \
              these partitions are wholly unavailable until an ISR \
              member returns or an unclean election runs.",
-            offline_partitions_count.clone(),
+            self.offline_partitions_count.clone(),
         );
+
         registry.register(
             "active_controller",
             "1 if this broker is the raft (controller) leader, 0 otherwise.",
-            active_controller.clone(),
+            self.active_controller.clone(),
         );
+
         registry.register(
             "controller_leader_changes",
             "Cumulative count of distinct controller-leader \
@@ -505,89 +516,100 @@ impl BrokerMetrics {
              to be leader). Mirrors Kafka's \
              KafkaController.LeaderElectionRateAndTimeMs; alert on a \
              sustained rate() > 0 to spot flapping raft leadership.",
-            controller_leader_changes_total.clone(),
+            self.controller_leader_changes_total.clone(),
         );
-        // Counter names omit the `_total` suffix — `prometheus-client`
-        // appends it automatically when encoding (so emitting
-        // `isr_shrinks` here renders as `crabka_broker_isr_shrinks_total`
-        // on the wire).
+
         registry.register(
             "isr_shrinks",
             "Cumulative count of ISR shrinks proposed by this broker's \
              ISR-maintenance loop.",
-            isr_shrinks_total.clone(),
+            self.isr_shrinks_total.clone(),
         );
+
         registry.register(
             "isr_expands",
             "Cumulative count of ISR expands proposed by this broker's \
              ISR-maintenance loop.",
-            isr_expands_total.clone(),
+            self.isr_expands_total.clone(),
         );
+
         registry.register(
             "partition_bytes_in",
             "Bytes received from producers, per partition (cumulative). \
              Rebalancer-targeted; rate(...) for throughput.",
-            partition_bytes_in.clone(),
+            self.partition_bytes_in.clone(),
         );
+
         registry.register(
             "partition_bytes_out",
             "Bytes served to consumers, per partition (cumulative). \
              Rebalancer-targeted; rate(...) for throughput.",
-            partition_bytes_out.clone(),
+            self.partition_bytes_out.clone(),
         );
+
         registry.register(
             "replication_bytes_in",
             "Bytes received from the partition leader by this broker as a \
              follower (cumulative). Rate(...) for follower throughput; \
              plotted alongside partition_bytes_in surfaces ingest vs. \
              replication-driven traffic.",
-            replication_bytes_in.clone(),
+            self.replication_bytes_in.clone(),
         );
+
         registry.register(
             "replication_bytes_out",
             "Bytes this broker served to followers as the partition leader \
              (cumulative). Rate(...) for leader-out-to-followers throughput; \
              together with partition_bytes_out (consumer reads) it attributes \
              outbound traffic to its source.",
-            replication_bytes_out.clone(),
+            self.replication_bytes_out.clone(),
         );
+    }
+
+    fn register_group_3(&self, registry: &mut Registry) {
         registry.register(
             "partition_disk_bytes",
             "On-disk size of a partition's log directory (gauge). Updated by \
              the broker's periodic disk scanner; suppress if scanner is disabled.",
-            partition_disk_bytes.clone(),
+            self.partition_disk_bytes.clone(),
         );
+
         registry.register(
             "partition_cpu_micros",
             "Cumulative handler-thread microseconds spent processing each \
              (topic, partition). Rebalancer-targeted; rate(...) divided by \
              1_000_000 yields core occupancy.",
-            partition_cpu_micros.clone(),
+            self.partition_cpu_micros.clone(),
         );
+
         registry.register(
             "incremental_fetch_sessions",
             "KIP-227: live incremental-fetch sessions cached by this broker (gauge).",
-            incremental_fetch_sessions.clone(),
+            self.incremental_fetch_sessions.clone(),
         );
+
         registry.register(
             "incremental_fetch_session_evictions",
             "KIP-227: cumulative count of incremental-fetch sessions evicted from \
              the cache to make room for a new allocation.",
-            incremental_fetch_session_evictions_total.clone(),
+            self.incremental_fetch_session_evictions_total.clone(),
         );
+
         registry.register(
             "incremental_fetch_partitions_cached",
             "KIP-227: total (topic, partition) tuples held across every live \
              incremental-fetch session (gauge).",
-            incremental_fetch_partitions_cached.clone(),
+            self.incremental_fetch_partitions_cached.clone(),
         );
+
         registry.register(
             "client_software_versions",
             "KIP-511: cumulative count of accepted ApiVersions handshakes, \
              labelled by client software name and version. One increment \
              per successful v3+ ApiVersions call.",
-            client_software_versions.clone(),
+            self.client_software_versions.clone(),
         );
+
         registry.register(
             "successful_authentication",
             "Cumulative count of SaslAuthenticate frames per \
@@ -598,8 +620,9 @@ impl BrokerMetrics {
              (PLAIN, SCRAM-SHA-256, SCRAM-SHA-512, OAUTHBEARER). \
              Paired with failed_authentication so rate(...) ratios \
              expose per-mechanism credential-failure rates.",
-            successful_authentication.clone(),
+            self.successful_authentication.clone(),
         );
+
         registry.register(
             "failed_authentication",
             "Cumulative count of SaslAuthenticate frames per \
@@ -607,8 +630,9 @@ impl BrokerMetrics {
              Kafka's failed-authentication-total. ILLEGAL_SASL_STATE \
              rejects (SaslAuthenticate without prior SaslHandshake) \
              land under the `Unknown` mechanism label.",
-            failed_authentication.clone(),
+            self.failed_authentication.clone(),
         );
+
         registry.register(
             "api_requests",
             "Cumulative count of dispatched requests per \
@@ -617,8 +641,9 @@ impl BrokerMetrics {
              under the `Unknown` label. Mirrors Kafka's \
              RequestMetrics.RequestsPerSec; rate(...) yields per-API \
              throughput.",
-            api_requests.clone(),
+            self.api_requests.clone(),
         );
+
         registry.register(
             "unsupported_api_requests",
             "Cumulative count of requests the dispatcher \
@@ -627,8 +652,11 @@ impl BrokerMetrics {
              the ApiKey variant name (or `Unknown` for unrecognised \
              keys). Alert on rate(...) > 0 to catch upgrade-skew or \
              misconfigured clients.",
-            unsupported_api_requests.clone(),
+            self.unsupported_api_requests.clone(),
         );
+    }
+
+    fn register_group_4(&self, registry: &mut Registry) {
         registry.register(
             "request_duration_seconds",
             "Per-Kafka-API request-handling latency in \
@@ -637,22 +665,25 @@ impl BrokerMetrics {
              the ApiKey variant name. Operators graph \
              histogram_quantile(0.99, rate(..._bucket[5m])) per api to \
              spot tail-latency regressions.",
-            request_duration_seconds.clone(),
+            self.request_duration_seconds.clone(),
         );
+
         registry.register(
             "in_flight_requests",
             "Number of requests currently being handled by this broker \
              (gauge). Incremented on dispatch entry, decremented on exit; \
              a sustained climb signals handler stalls.",
-            in_flight_requests.clone(),
+            self.in_flight_requests.clone(),
         );
+
         registry.register(
             "active_connections",
             "Number of client connections currently open to this broker \
              (gauge). Incremented when the per-connection serve loop \
              starts, decremented when it exits (EOF / error / SASL expiry).",
-            active_connections.clone(),
+            self.active_connections.clone(),
         );
+
         registry.register(
             "request_errors",
             "Per-Kafka-API count of requests whose handler \
@@ -660,8 +691,9 @@ impl BrokerMetrics {
              Labelled by the ApiKey variant name; disjoint from \
              unsupported_api_requests. Alert on rate(...) > 0 to catch \
              handler-level faults.",
-            request_errors.clone(),
+            self.request_errors.clone(),
         );
+
         registry.register(
             "tiered_storage_rlmm_topic_backed",
             "KIP-405: 1 when this broker is answering remote-log \
@@ -670,15 +702,17 @@ impl BrokerMetrics {
              NotReadyRlmm placeholder. Bumped to 1 by the bootstrap task \
              after a successful SwappableRlmm swap; stays at 0 for \
              clusters that never asked for `metadataManager: Topic`.",
-            tiered_storage_rlmm_topic_backed.clone(),
+            self.tiered_storage_rlmm_topic_backed.clone(),
         );
+
         registry.register(
             "tiered_storage_rlmm_bootstrap_attempts",
             "Number of topic-backed RLMM bootstrap attempts; climbs while \
              stuck retrying, flat once tiered_storage_rlmm_topic_backed \
              flips to 1.",
-            tiered_storage_rlmm_bootstrap_attempts.clone(),
+            self.tiered_storage_rlmm_bootstrap_attempts.clone(),
         );
+
         registry.register(
             "produce_message_conversions",
             "Cumulative count of v0/v1 → v2 record-batch \
@@ -686,8 +720,9 @@ impl BrokerMetrics {
              Kafka's BrokerTopicMetrics.ProduceMessageConversionsPerSec; \
              rate(...) lets operators spot the overhead of legacy \
              producers in the cluster.",
-            produce_message_conversions.clone(),
+            self.produce_message_conversions.clone(),
         );
+
         registry.register(
             "fetch_message_conversions",
             "Cumulative count of v2 → v0/v1 record-batch \
@@ -695,8 +730,9 @@ impl BrokerMetrics {
              Kafka's BrokerTopicMetrics.FetchMessageConversionsPerSec; \
              rate(...) lets operators spot the overhead of legacy \
              consumers in the cluster.",
-            fetch_message_conversions.clone(),
+            self.fetch_message_conversions.clone(),
         );
+
         registry.register(
             "unclean_leader_elections",
             "KIP-841: cumulative count of unclean leader \
@@ -709,107 +745,87 @@ impl BrokerMetrics {
              ControllerStats.UncleanLeaderElectionsPerSec; an operator \
              alert on rate(unclean_leader_elections_total[5m]) > 0 \
              flags the data-loss footgun.",
-            unclean_leader_elections_total.clone(),
+            self.unclean_leader_elections_total.clone(),
         );
+
         registry.register(
             "audit_events_total",
             "Cumulative audit records successfully written to the audit topic",
-            audit_events_total.clone(),
+            self.audit_events_total.clone(),
         );
+    }
+
+    fn register_group_5(&self, registry: &mut Registry) {
         registry.register(
             "audit_write_failures_total",
             "Cumulative audit records that failed to write to the audit topic",
-            audit_write_failures_total.clone(),
+            self.audit_write_failures_total.clone(),
         );
+
         registry.register(
             "audit_spool_depth",
             "Current count of audit records buffered in the durable spool",
-            audit_spool_depth.clone(),
+            self.audit_spool_depth.clone(),
         );
+
         registry.register(
             "audit_spool_bytes",
             "Current bytes buffered in the durable audit spool",
-            audit_spool_bytes.clone(),
+            self.audit_spool_bytes.clone(),
         );
+
         registry.register(
             "audit_records_spooled",
             "Cumulative audit records diverted to the spool on topic-write failure",
-            audit_records_spooled_total.clone(),
+            self.audit_records_spooled_total.clone(),
         );
+
         registry.register(
             "audit_records_replayed",
             "Cumulative audit records drained from the spool back to the topic",
-            audit_records_replayed_total.clone(),
+            self.audit_records_replayed_total.clone(),
         );
+
         registry.register(
             "audit_records_dropped",
             "Cumulative audit records lost (channel-full or spool-full)",
-            audit_records_dropped_total.clone(),
+            self.audit_records_dropped_total.clone(),
         );
+
         registry.register(
             "log_cleaner_runs",
             "Cumulative count of completed log-compaction sweeps run by \
              this broker's cleaner (one per tick_all pass).",
-            log_cleaner_runs_total.clone(),
+            self.log_cleaner_runs_total.clone(),
         );
+
         registry.register(
             "log_compactions",
             "Per-partition cumulative count of compaction passes this \
              broker's cleaner completed successfully.",
-            log_compactions_total.clone(),
+            self.log_compactions_total.clone(),
         );
+    }
 
-        Self {
-            registry: Arc::new(Mutex::new(registry)),
-            topic_bytes_in,
-            topic_bytes_out,
-            topic_messages_in,
-            topic_produce_requests,
-            topic_fetch_requests,
-            topic_failed_produce_requests,
-            topic_failed_fetch_requests,
-            partition_bytes_in,
-            partition_bytes_out,
-            replication_bytes_in,
-            replication_bytes_out,
-            partition_disk_bytes,
-            partition_cpu_micros,
-            partitions_led,
-            partitions_total,
-            under_replicated_partitions,
-            under_min_isr_partition_count,
-            offline_partitions_count,
-            active_controller,
-            controller_leader_changes_total,
-            isr_shrinks_total,
-            isr_expands_total,
-            incremental_fetch_sessions,
-            incremental_fetch_session_evictions_total,
-            incremental_fetch_partitions_cached,
-            client_software_versions,
-            successful_authentication,
-            failed_authentication,
-            api_requests,
-            unsupported_api_requests,
-            request_duration_seconds,
-            in_flight_requests,
-            active_connections,
-            request_errors,
-            tiered_storage_rlmm_topic_backed,
-            tiered_storage_rlmm_bootstrap_attempts,
-            produce_message_conversions,
-            fetch_message_conversions,
-            unclean_leader_elections_total,
-            audit_events_total,
-            audit_write_failures_total,
-            audit_spool_depth,
-            audit_spool_bytes,
-            audit_records_spooled_total,
-            audit_records_replayed_total,
-            audit_records_dropped_total,
-            log_cleaner_runs_total,
-            log_compactions_total,
+    /// Build and register every broker metric.
+    #[must_use]
+    /// # Panics
+    /// Panics if synchronized log state is poisoned or a segment previously validated as nonempty is unexpectedly missing its required batch or index entry.
+    pub fn new() -> Self {
+        let registry = Arc::new(Mutex::new(Registry::with_prefix("crabka_broker")));
+        let metrics = Self::unregistered(registry);
+        {
+            let mut registry = metrics
+                .registry
+                .try_lock()
+                .expect("fresh metrics registry cannot be locked");
+            metrics.register_group_1(&mut registry);
+            metrics.register_group_2(&mut registry);
+            metrics.register_group_3(&mut registry);
+            metrics.register_group_4(&mut registry);
+            metrics.register_group_5(&mut registry);
         }
+        metrics
     }
 
     /// KIP-511: bump the per-(name, version) handshake counter.
@@ -1092,6 +1108,7 @@ fn api_key_label_name(api_key: crate::handlers::ApiKeyCode) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
 
     use super::*;
 
@@ -1187,16 +1204,16 @@ mod tests {
             "crabka_broker_successful_authentication_total",
             "crabka_broker_failed_authentication_total",
         ] {
-            assert2::assert!(buf.contains(needle));
+            assert!(buf.contains(needle), "missing {needle} in:\n{buf}");
         }
         // Topic label and values made it through.
-        for (needle, _what) in [
+        for (needle, what) in [
             ("topic=\"topic-a\"", "topic label"),
             ("100", "bytes_in=100"),
             ("50", "bytes_out=50"),
             ("7", "partitions_led=7"),
         ] {
-            assert2::assert!(buf.contains(needle));
+            assert!(buf.contains(needle), "expected {what} in:\n{buf}");
         }
     }
 
@@ -1208,8 +1225,8 @@ mod tests {
         };
         // Pre-condition: no entry for the label yet.
         m.record_fetch("t", 0);
-        assert2::assert!(m.topic_fetch_requests.get_or_create(&lbl).get() == 1);
-        assert2::assert!(m.topic_bytes_out.get_or_create(&lbl).get() == 0);
+        assert!(m.topic_fetch_requests.get_or_create(&lbl).get() == 1);
+        assert!(m.topic_bytes_out.get_or_create(&lbl).get() == 0);
     }
 
     #[test]
@@ -1220,8 +1237,8 @@ mod tests {
         };
         m.record_produce("t", 1024);
         m.record_produce("t", 2048);
-        assert2::assert!(m.topic_produce_requests.get_or_create(&lbl).get() == 2);
-        assert2::assert!(m.topic_bytes_in.get_or_create(&lbl).get() == 3072);
+        assert!(m.topic_produce_requests.get_or_create(&lbl).get() == 2);
+        assert!(m.topic_bytes_in.get_or_create(&lbl).get() == 3072);
     }
 
     #[test]
@@ -1238,7 +1255,7 @@ mod tests {
         // 0, not a phantom series.
         m.record_produce_messages("t", 3);
         m.record_produce_messages("t", 7);
-        assert2::assert!(m.topic_messages_in.get_or_create(&lbl).get() == 10);
+        assert!(m.topic_messages_in.get_or_create(&lbl).get() == 10);
     }
 
     #[test]
@@ -1269,13 +1286,13 @@ mod tests {
             ("failed", &m.failed_authentication, &unknown, 1),
             ("successful", &m.successful_authentication, &unknown, 0),
         ];
-        for (_outcome, family, label, want) in cases {
+        for (outcome, family, label, want) in cases {
             // Each read is its own statement: `get_or_create` returns a
             // read guard, and a first-materialization on the same family
             // takes the write lock — holding several guards in one
             // expression self-deadlocks.
             let got = family.get_or_create(label).get();
-            assert2::assert!(got == want);
+            assert!(got == want, "{outcome} auth for {:?}", label.mechanism);
         }
     }
 
@@ -1302,7 +1319,7 @@ mod tests {
 
         for (label, want) in [(&crabka_100, 2), (&crabka_101, 1), (&other, 1)] {
             let got = m.client_software_versions.get_or_create(label).get();
-            assert2::assert!(got == want);
+            assert!(got == want, "label {label:?}");
         }
     }
 
@@ -1315,7 +1332,7 @@ mod tests {
         let mut body = String::new();
         let registry = m.registry.lock().await;
         prometheus_client::encoding::text::encode(&mut body, &registry).unwrap();
-        assert2::assert!(body.contains(
+        assert!(body.contains(
             "crabka_broker_client_software_versions_total{software_name=\"render-lib\",software_version=\"2.0.0\"} 1"
         ));
     }
@@ -1348,18 +1365,22 @@ mod tests {
             ("bytes_out", &m.partition_bytes_out, &lbl_p0, 2048),
             ("cpu_micros", &m.partition_cpu_micros, &lbl_p0, 500),
         ];
-        for (_family_name, family, label, want) in cases {
+        for (family_name, family, label, want) in cases {
             // Each read is its own statement: `get_or_create` returns a
             // read guard, and a first-materialization on the same family
             // takes the write lock — holding several guards in one
             // expression self-deadlocks.
             let got = family.get_or_create(label).get();
-            assert2::assert!(got == want);
+            assert!(
+                got == want,
+                "{family_name} for partition {}",
+                label.partition
+            );
         }
         // `partition_disk_bytes` is a Gauge family (i64), so it stays
         // out of the Counter table above.
         let disk_p0 = m.partition_disk_bytes.get_or_create(&lbl_p0).get();
-        assert2::assert!(disk_p0 == 1_000_000);
+        assert!(disk_p0 == 1_000_000);
     }
 
     #[test]
@@ -1389,11 +1410,11 @@ mod tests {
             ("failed_fetch", &m.topic_failed_fetch_requests, &good, 1),
             ("failed_fetch", &m.topic_failed_fetch_requests, &bad, 0),
         ];
-        for (_family_name, family, label, want) in cases {
+        for (family_name, family, label, want) in cases {
             // One `get_or_create` guard per statement (first
             // materialization takes the family write lock).
             let got = family.get_or_create(label).get();
-            assert2::assert!(got == want);
+            assert!(got == want, "{family_name} for {:?}", label.topic);
         }
     }
 
@@ -1407,8 +1428,8 @@ mod tests {
             partition: 0,
         };
         // Counters still exist (get_or_create creates them) but at 0.
-        assert2::assert!(m.partition_bytes_in.get_or_create(&lbl).get() == 0);
-        assert2::assert!(m.partition_bytes_out.get_or_create(&lbl).get() == 0);
+        assert!(m.partition_bytes_in.get_or_create(&lbl).get() == 0);
+        assert!(m.partition_bytes_out.get_or_create(&lbl).get() == 0);
     }
 
     #[test]
@@ -1420,7 +1441,7 @@ mod tests {
             partition: 0,
         };
         // Helper short-circuits at 0; the label entry isn't created.
-        assert2::assert!(m.partition_cpu_micros.get_or_create(&lbl).get() == 0);
+        assert!(m.partition_cpu_micros.get_or_create(&lbl).get() == 0);
     }
 
     #[test]
@@ -1428,20 +1449,20 @@ mod tests {
         let m = BrokerMetrics::new();
         // Default for a fresh broker (in-memory placeholder, or no
         // tiered-storage at all) is `0`.
-        assert2::assert!(m.tiered_storage_rlmm_topic_backed.get() == 0);
+        assert!(m.tiered_storage_rlmm_topic_backed.get() == 0);
         // The bootstrap task bumps it to `1` after a successful
         // SwappableRlmm swap.
         m.tiered_storage_rlmm_topic_backed.set(1);
-        assert2::assert!(m.tiered_storage_rlmm_topic_backed.get() == 1);
+        assert!(m.tiered_storage_rlmm_topic_backed.get() == 1);
     }
 
     #[test]
     fn tiered_storage_rlmm_bootstrap_attempts_counts_up() {
         let m = BrokerMetrics::new();
-        assert2::assert!(m.tiered_storage_rlmm_bootstrap_attempts.get() == 0);
+        assert!(m.tiered_storage_rlmm_bootstrap_attempts.get() == 0);
         m.tiered_storage_rlmm_bootstrap_attempts.inc();
         m.tiered_storage_rlmm_bootstrap_attempts.inc();
-        assert2::assert!(m.tiered_storage_rlmm_bootstrap_attempts.get() == 2);
+        assert!(m.tiered_storage_rlmm_bootstrap_attempts.get() == 2);
     }
 
     #[test]
@@ -1486,11 +1507,11 @@ mod tests {
                 2,
             ),
         ];
-        for (_family_name, family, label, want) in cases {
+        for (family_name, family, label, want) in cases {
             // One `get_or_create` guard per statement (first
             // materialization takes the family write lock).
             let got = family.get_or_create(label).get();
-            assert2::assert!(got == want);
+            assert!(got == want, "{family_name} for {:?}", label.topic);
         }
     }
 
@@ -1530,11 +1551,11 @@ mod tests {
             ("api_requests", &m.api_requests, &produce, 0),
             ("api_requests", &m.api_requests, &unknown, 0),
         ];
-        for (_family_name, family, label, want) in cases {
+        for (family_name, family, label, want) in cases {
             // One `get_or_create` guard per statement (first
             // materialization takes the family write lock).
             let got = family.get_or_create(label).get();
-            assert2::assert!(got == want);
+            assert!(got == want, "{family_name} for {:?}", label.api_key);
         }
     }
 
@@ -1558,7 +1579,7 @@ mod tests {
         };
         for (label, want) in [(&produce, 2), (&fetch, 1), (&unknown, 1)] {
             let got = m.api_requests.get_or_create(label).get();
-            assert2::assert!(got == want);
+            assert!(got == want, "api_key {:?}", label.api_key);
         }
     }
 
@@ -1597,11 +1618,15 @@ mod tests {
             ("replication_out", &m.replication_bytes_out, &lbl3, 4_000),
             ("replication_out", &m.replication_bytes_out, &lbl4, 0),
         ];
-        for (_family_name, family, label, want) in cases {
+        for (family_name, family, label, want) in cases {
             // One `get_or_create` guard per statement (first
             // materialization takes the family write lock).
             let got = family.get_or_create(label).get();
-            assert2::assert!(got == want);
+            assert!(
+                got == want,
+                "{family_name} for partition {}",
+                label.partition
+            );
         }
     }
 
@@ -1627,21 +1652,25 @@ mod tests {
         };
         // Histogram Family exposes sample count via the encoded `_count`;
         // assert the render + the error/gauge values here.
-        assert2::assert!(m.request_errors.get_or_create(&fetch).get() == 2);
-        assert2::assert!(m.in_flight_requests.get() == 1);
-        assert2::assert!(m.active_connections.get() == 5);
+        assert!(m.request_errors.get_or_create(&fetch).get() == 2);
+        assert!(m.in_flight_requests.get() == 1);
+        assert!(m.active_connections.get() == 5);
 
         let mut buf = String::new();
         let r = m.registry.lock().await;
         prometheus_client::encoding::text::encode(&mut buf, &r).unwrap();
-        assert2::assert!(
-            buf.contains("crabka_broker_request_duration_seconds_count{api_key=\"Produce\"} 2")
+        assert!(
+            buf.contains("crabka_broker_request_duration_seconds_count{api_key=\"Produce\"} 2"),
+            "expected 2 Produce latency samples in:\n{buf}"
         );
-        assert2::assert!(buf.contains("crabka_broker_request_errors_total{api_key=\"Fetch\"} 2"));
-        assert2::assert!(buf.contains("crabka_broker_in_flight_requests 1"));
-        assert2::assert!(buf.contains("crabka_broker_active_connections 5"));
+        assert!(
+            buf.contains("crabka_broker_request_errors_total{api_key=\"Fetch\"} 2"),
+            "expected 2 Fetch request errors in:\n{buf}"
+        );
+        assert!(buf.contains("crabka_broker_in_flight_requests 1"));
+        assert!(buf.contains("crabka_broker_active_connections 5"));
         // Unknown api_key folds under the shared "Unknown" label.
-        assert2::assert!(buf.contains("api_key=\"Unknown\""));
+        assert!(buf.contains("api_key=\"Unknown\""), "unknown label missing");
         // Keep `produce` referenced to document the intended label.
         let _ = produce;
     }

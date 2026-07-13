@@ -88,7 +88,6 @@ fn key_authz_failure(
 // live-broker TXN/GROUP coordinator-resolution behaviour is covered by the
 // integration suite, not this in-file module.
 #[cfg_attr(test, mutants::skip)]
-#[allow(clippy::too_many_lines)]
 #[tracing::instrument(
     name = "handle_find_coordinator",
     level = "info",
@@ -104,7 +103,6 @@ pub(crate) async fn handle(
     ctx: &crate::handlers::RequestContext<'_>,
 ) -> Result<Bytes, BrokerError> {
     let broker_id = broker.config.broker_id;
-    let node_id = broker.config.node_id;
     // The local broker's advertised `host:port` for the listener this request
     // arrived on (Kafka returns the connection listener's address). Falls back
     // to the legacy top-level `advertised_listener` when the connection
@@ -132,41 +130,11 @@ pub(crate) async fn handle(
         // array; the v0-v3 top-level fields are derived from the first
         // entry below). Authorized keys resolve normally — so we split
         // `keys` into denied entries + the still-to-resolve list.
-        let acl_image = controller.current_image();
-        let mut denied_entries: Vec<Coordinator> = Vec::new();
-        let mut allowed_keys: Vec<String> = Vec::with_capacity(keys.len());
-        for k in keys {
-            if let Some(code) = key_authz_failure(
-                broker.config.authorizer.as_ref(),
-                &acl_image,
-                ctx.principal,
-                ctx.peer,
-                req.key_type,
-                &k,
-            ) {
-                denied_entries.push(denied_coordinator(k, code));
-            } else {
-                allowed_keys.push(k);
-            }
-        }
-        let keys = allowed_keys;
+        let (mut denied_entries, keys) =
+            authorize_keys(broker, &controller.current_image(), ctx, req.key_type, keys);
 
         let mut coordinators: Vec<Coordinator> = match req.key_type {
-            KEY_TYPE_GROUP => {
-                let (host, port) = parse_host_port(&advertised);
-                let port_i32 = i32::from(port);
-                keys.into_iter()
-                    .map(|k| Coordinator {
-                        key: k,
-                        node_id: broker_id,
-                        host: host.clone(),
-                        port: port_i32,
-                        error_code: codes::NONE,
-                        error_message: None,
-                        ..Default::default()
-                    })
-                    .collect()
-            }
+            KEY_TYPE_GROUP => local_coordinators(keys, broker_id, &advertised),
             KEY_TYPE_TRANSACTION => {
                 // Ensure __transaction_state topic exists before we try to
                 // look up partitions in it.
@@ -184,66 +152,7 @@ pub(crate) async fn handle(
                     );
                 }
 
-                let mut result = Vec::with_capacity(keys.len());
-                for k in keys {
-                    let p = crate::txn::partitioner::partition_for_tid(
-                        &k,
-                        crate::txn::bootstrap::NUM_PARTITIONS,
-                    );
-                    let image = controller.current_image();
-                    let Some(pr) = image.partition(crate::txn::bootstrap::TOPIC, p) else {
-                        result.push(Coordinator {
-                            key: k,
-                            node_id: -1,
-                            host: String::new(),
-                            port: -1,
-                            error_code: codes::COORDINATOR_NOT_AVAILABLE,
-                            error_message: Some("partition not found".into()),
-                            ..Default::default()
-                        });
-                        continue;
-                    };
-                    let leader = pr.leader;
-                    let Some(broker_info) = image.broker(leader) else {
-                        result.push(Coordinator {
-                            key: k,
-                            node_id: -1,
-                            host: String::new(),
-                            port: -1,
-                            error_code: codes::COORDINATOR_NOT_AVAILABLE,
-                            error_message: Some("leader broker not registered".into()),
-                            ..Default::default()
-                        });
-                        continue;
-                    };
-                    let node_id_i32 = i32::try_from(leader.0).unwrap_or(-1);
-                    // Resolve the coordinator's address for the listener this
-                    // request arrived on. For the local broker prefer our own
-                    // connection-listener advertised address (the metadata
-                    // record may carry the pre-bind port 0 in test setups
-                    // where the OS assigns the port); for a remote leader pick
-                    // its connection-listener endpoint from the image record.
-                    let (host, port_i32) = if leader == node_id {
-                        let (h, p) = parse_host_port(&advertised);
-                        (h, i32::from(p))
-                    } else {
-                        crate::handlers::metadata::pick_endpoint_host_port(
-                            broker_info,
-                            ctx.connection_listener_name,
-                            broker.config.inter_broker_listener_name.as_str(),
-                        )
-                    };
-                    result.push(Coordinator {
-                        key: k,
-                        node_id: node_id_i32,
-                        host,
-                        port: port_i32,
-                        error_code: codes::NONE,
-                        error_message: None,
-                        ..Default::default()
-                    });
-                }
-                result
+                resolve_transaction_keys(broker, keys, &advertised, ctx)
             }
             KEY_TYPE_SHARE => {
                 // Ensure __share_group_state exists before resolving its
@@ -289,75 +198,21 @@ pub(crate) async fn handle(
                         crate::share_coordinator::bootstrap::NUM_PARTITIONS,
                     );
                     let image = controller.current_image();
-                    let Some(pr) = image.partition(crate::share_coordinator::bootstrap::TOPIC, p)
-                    else {
-                        result.push(Coordinator {
-                            key: k,
-                            node_id: -1,
-                            host: String::new(),
-                            port: -1,
-                            error_code: codes::COORDINATOR_NOT_AVAILABLE,
-                            error_message: Some("partition not found".into()),
-                            ..Default::default()
-                        });
-                        continue;
-                    };
-                    let leader = pr.leader;
-                    let Some(broker_info) = image.broker(leader) else {
-                        result.push(Coordinator {
-                            key: k,
-                            node_id: -1,
-                            host: String::new(),
-                            port: -1,
-                            error_code: codes::COORDINATOR_NOT_AVAILABLE,
-                            error_message: Some("leader broker not registered".into()),
-                            ..Default::default()
-                        });
-                        continue;
-                    };
-                    let node_id_i32 = i32::try_from(leader.0).unwrap_or(-1);
-                    // Resolve the coordinator's address for the connection
-                    // listener (see the TXN branch). Local broker → our own
-                    // connection-listener advertised address (test setups may
-                    // record a pre-bind port); remote leader → its
-                    // connection-listener endpoint from the image record.
-                    let (host, port_i32) = if leader == node_id {
-                        let (h, p) = parse_host_port(&advertised);
-                        (h, i32::from(p))
-                    } else {
-                        crate::handlers::metadata::pick_endpoint_host_port(
-                            broker_info,
-                            ctx.connection_listener_name,
-                            broker.config.inter_broker_listener_name.as_str(),
-                        )
-                    };
-                    result.push(Coordinator {
-                        key: k,
-                        node_id: node_id_i32,
-                        host,
-                        port: port_i32,
-                        error_code: codes::NONE,
-                        error_message: None,
-                        ..Default::default()
-                    });
+                    result.push(resolve_partition_coordinator(
+                        broker,
+                        &image,
+                        crate::share_coordinator::bootstrap::TOPIC,
+                        p,
+                        k,
+                        &advertised,
+                        ctx,
+                    ));
                 }
                 result
             }
             unknown => {
                 tracing::warn!(key_type = unknown, "unknown FindCoordinator key_type");
-                let (host, port) = parse_host_port(&advertised);
-                let port_i32 = i32::from(port);
-                keys.into_iter()
-                    .map(|k| Coordinator {
-                        key: k,
-                        node_id: broker_id,
-                        host: host.clone(),
-                        port: port_i32,
-                        error_code: codes::NONE,
-                        error_message: None,
-                        ..Default::default()
-                    })
-                    .collect()
+                local_coordinators(keys, broker_id, &advertised)
             }
         };
 
@@ -369,33 +224,158 @@ pub(crate) async fn handle(
             coordinators = denied_entries;
         }
 
-        // Derive the legacy top-level fields from the first coordinator in
-        // the list (matches Apache Kafka v0-v3 behaviour).
-        let (top_node_id, top_host, top_port, top_error, top_error_message) =
-            if let Some(first) = coordinators.first() {
-                (
-                    first.node_id,
-                    first.host.clone(),
-                    first.port,
-                    first.error_code,
-                    first.error_message.clone(),
-                )
-            } else {
-                let (host, port) = parse_host_port(&advertised);
-                (broker_id, host, i32::from(port), codes::NONE, None)
-            };
+        encode_coordinators(broker_id, &advertised, version, coordinators)
+    }
+}
 
-        let resp = FindCoordinatorResponse {
+fn local_coordinators(keys: Vec<String>, broker_id: i32, advertised: &str) -> Vec<Coordinator> {
+    let (host, port) = parse_host_port(advertised);
+    keys.into_iter()
+        .map(|key| Coordinator {
+            key,
+            node_id: broker_id,
+            host: host.clone(),
+            port: i32::from(port),
+            error_code: codes::NONE,
+            error_message: None,
+            ..Default::default()
+        })
+        .collect()
+}
+
+fn resolve_transaction_keys(
+    broker: &Broker,
+    keys: Vec<String>,
+    advertised: &str,
+    context: &crate::handlers::RequestContext<'_>,
+) -> Vec<Coordinator> {
+    keys.into_iter()
+        .map(|key| {
+            let partition = crate::txn::partitioner::partition_for_tid(
+                &key,
+                crate::txn::bootstrap::NUM_PARTITIONS,
+            );
+            resolve_partition_coordinator(
+                broker,
+                &broker.controller.current_image(),
+                crate::txn::bootstrap::TOPIC,
+                partition,
+                key,
+                advertised,
+                context,
+            )
+        })
+        .collect()
+}
+
+fn authorize_keys(
+    broker: &Broker,
+    image: &crabka_metadata::MetadataImage,
+    context: &crate::handlers::RequestContext<'_>,
+    key_type: i8,
+    keys: Vec<String>,
+) -> (Vec<Coordinator>, Vec<String>) {
+    let mut denied = Vec::new();
+    let mut allowed = Vec::with_capacity(keys.len());
+    for key in keys {
+        if let Some(code) = key_authz_failure(
+            broker.config.authorizer.as_ref(),
+            image,
+            context.principal,
+            context.peer,
+            key_type,
+            &key,
+        ) {
+            denied.push(denied_coordinator(key, code));
+        } else {
+            allowed.push(key);
+        }
+    }
+    (denied, allowed)
+}
+
+fn encode_coordinators(
+    broker_id: i32,
+    advertised: &str,
+    version: i16,
+    coordinators: Vec<Coordinator>,
+) -> Result<Bytes, BrokerError> {
+    let (node_id, host, port, error_code, error_message) = coordinators.first().map_or_else(
+        || {
+            let (host, port) = parse_host_port(advertised);
+            (broker_id, host, i32::from(port), codes::NONE, None)
+        },
+        |first| {
+            (
+                first.node_id,
+                first.host.clone(),
+                first.port,
+                first.error_code,
+                first.error_message.clone(),
+            )
+        },
+    );
+    crate::handlers::encode_response(
+        &FindCoordinatorResponse {
             throttle_time_ms: 0,
-            error_code: top_error,
-            error_message: top_error_message,
-            node_id: top_node_id,
-            host: top_host,
-            port: top_port,
+            error_code,
+            error_message,
+            node_id,
+            host,
+            port,
             coordinators,
             ..Default::default()
-        };
-        crate::handlers::encode_response(&resp, version)
+        },
+        version,
+    )
+}
+
+fn resolve_partition_coordinator(
+    broker: &Broker,
+    image: &crabka_metadata::MetadataImage,
+    state_topic: &str,
+    partition: i32,
+    key: String,
+    advertised: &str,
+    context: &crate::handlers::RequestContext<'_>,
+) -> Coordinator {
+    let Some(record) = image.partition(state_topic, partition) else {
+        return unavailable_coordinator(key, "partition not found");
+    };
+    let leader = record.leader;
+    let Some(registration) = image.broker(leader) else {
+        return unavailable_coordinator(key, "leader broker not registered");
+    };
+    let (host, port) = if leader == broker.config.node_id {
+        let (host, port) = parse_host_port(advertised);
+        (host, i32::from(port))
+    } else {
+        crate::handlers::metadata::pick_endpoint_host_port(
+            registration,
+            context.connection_listener_name,
+            &broker.config.inter_broker_listener_name,
+        )
+    };
+    Coordinator {
+        key,
+        node_id: i32::try_from(leader.0).unwrap_or(-1),
+        host,
+        port,
+        error_code: codes::NONE,
+        error_message: None,
+        ..Default::default()
+    }
+}
+
+fn unavailable_coordinator(key: String, message: &str) -> Coordinator {
+    Coordinator {
+        key,
+        node_id: -1,
+        host: String::new(),
+        port: -1,
+        error_code: codes::COORDINATOR_NOT_AVAILABLE,
+        error_message: Some(message.to_string()),
+        ..Default::default()
     }
 }
 
@@ -459,6 +439,7 @@ fn local_advertised_for_listener(
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
 
     use super::*;
 
@@ -475,44 +456,28 @@ mod tests {
     }
 
     #[test]
-    fn denied_keys_map_to_resource_specific_authorization_errors() {
+    fn group_key_denied_maps_to_group_authorization_failed() {
         let authz = deny_authorizer();
         let image = crabka_metadata::MetadataImage::new(uuid::Uuid::nil());
         let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 9092));
-        let cases = [
-            (
-                "group key",
-                KEY_TYPE_GROUP,
-                "g",
-                codes::GROUP_AUTHORIZATION_FAILED,
-            ),
-            (
-                "transactional id key",
-                KEY_TYPE_TRANSACTION,
-                "t",
-                codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED,
-            ),
-        ];
+        let code = key_authz_failure(&authz, &image, &anon(), &peer, KEY_TYPE_GROUP, "g");
+        assert!(code == Some(codes::GROUP_AUTHORIZATION_FAILED));
+    }
 
-        for (_case, key_type, key, expected) in cases {
-            let code = key_authz_failure(&authz, &image, &anon(), &peer, key_type, key);
-            assert2::assert!(code == Some(expected));
-        }
+    #[test]
+    fn txn_key_denied_maps_to_transactional_id_authorization_failed() {
+        let authz = deny_authorizer();
+        let image = crabka_metadata::MetadataImage::new(uuid::Uuid::nil());
+        let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 9092));
+        let code = key_authz_failure(&authz, &image, &anon(), &peer, KEY_TYPE_TRANSACTION, "t");
+        assert!(code == Some(codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED));
     }
 
     #[test]
     fn denied_entry_carries_the_failure_code() {
         let c = denied_coordinator("g".into(), codes::GROUP_AUTHORIZATION_FAILED);
-        let expected = Coordinator {
-            key: "g".into(),
-            node_id: -1,
-            host: String::new(),
-            port: -1,
-            error_code: codes::GROUP_AUTHORIZATION_FAILED,
-            error_message: Some("authorization failed".into()),
-            ..Default::default()
-        };
-        assert2::assert!(c == expected);
+        assert!(c.error_code == codes::GROUP_AUTHORIZATION_FAILED);
+        assert!(c.node_id == -1);
     }
 
     fn listener(name: &str, advertised: &str) -> crate::config::ListenerSpec {
@@ -539,8 +504,8 @@ mod tests {
             ],
             ..Default::default()
         };
-        assert2::assert!(local_advertised_for_listener(&config, "tls") == "tls-host:9094");
-        assert2::assert!(local_advertised_for_listener(&config, "plain") == "plain-host:9092");
+        assert!(local_advertised_for_listener(&config, "tls") == "tls-host:9094");
+        assert!(local_advertised_for_listener(&config, "plain") == "plain-host:9092");
     }
 
     /// When the connection listener isn't configured, fall back to the legacy
@@ -552,6 +517,6 @@ mod tests {
             listeners: vec![listener("plain", "plain-host:9092")],
             ..Default::default()
         };
-        assert2::assert!(local_advertised_for_listener(&config, "external") == "legacy:1000");
+        assert!(local_advertised_for_listener(&config, "external") == "legacy:1000");
     }
 }

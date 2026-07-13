@@ -18,20 +18,15 @@ use crabka_remote_storage::TopicIdPartition;
 /// Panics when `partition_count <= 0`.
 #[must_use]
 pub fn metadata_partition_for(tp: &TopicIdPartition, partition_count: i32) -> i32 {
-    assert2::assert!(partition_count > 0);
+    assert!(partition_count > 0, "partition_count must be positive");
     let mut h = DefaultHasher::new();
     for byte in tp.topic_id.as_bytes() {
         h.write_u8(*byte);
     }
     h.write_i32(tp.partition);
-    // Strip sign bit so `%` yields a non-negative bucket; the mask
-    // keeps the result in [0, i64::MAX] so the i32 truncation after
-    // the `%` is safe (bucket < partition_count < i32::MAX).
-    #[allow(clippy::cast_possible_wrap)] // masked to i64::MAX
-    let bucket = (h.finish() & i64::MAX as u64) as i64;
-    #[allow(clippy::cast_possible_truncation)] // bucket % count fits in i32
-    let p = (bucket % i64::from(partition_count)) as i32;
-    p
+    let partition_count = u64::try_from(partition_count).expect("partition count is positive");
+    let partition = h.finish() % partition_count;
+    i32::try_from(partition).expect("partition is less than the i32 partition count")
 }
 
 /// Deduped, sorted set of `__remote_log_metadata` partitions that carry
@@ -58,7 +53,7 @@ where
 
 #[cfg(test)]
 mod tests {
-
+    use assert2::assert;
     use uuid::Uuid;
 
     use super::*;
@@ -75,7 +70,7 @@ mod tests {
     fn is_in_range() {
         for p in 0..10 {
             let bucket = metadata_partition_for(&tp("orders", p), 50);
-            assert2::assert!((0..50).contains(&bucket));
+            assert!((0..50).contains(&bucket), "bucket {bucket} out of [0,50)");
         }
     }
 
@@ -83,7 +78,7 @@ mod tests {
     fn is_deterministic_across_calls() {
         let a = metadata_partition_for(&tp("orders", 7), 50);
         let b = metadata_partition_for(&tp("orders", 7), 50);
-        assert2::assert!(a == b);
+        assert!(a == b);
     }
 
     #[test]
@@ -91,7 +86,7 @@ mod tests {
         // Identity is (topic_id, partition); name is informational.
         let a = metadata_partition_for(&tp("orders", 3), 50);
         let b = metadata_partition_for(&tp("renamed", 3), 50);
-        assert2::assert!(a == b);
+        assert!(a == b, "renaming a topic must not re-bucket its metadata");
     }
 
     #[test]
@@ -101,18 +96,22 @@ mod tests {
             seen.insert(metadata_partition_for(&tp("orders", p), 50));
         }
         // Sanity: a hash that always returned 0 would land only one bucket.
-        assert2::assert!(seen.len() > 5);
+        assert!(
+            seen.len() > 5,
+            "hash should spread across buckets, got {}",
+            seen.len()
+        );
     }
 
     #[test]
     fn single_partition_count_collapses_to_zero() {
         for p in 0..20 {
-            assert2::assert!(metadata_partition_for(&tp("t", p), 1) == 0);
+            assert!(metadata_partition_for(&tp("t", p), 1) == 0);
         }
     }
 
     #[test]
-    #[should_panic(expected = "assertion failed")]
+    #[should_panic(expected = "partition_count must be positive")]
     fn rejects_zero_partition_count() {
         let _ = metadata_partition_for(&tp("t", 0), 0);
     }
@@ -129,12 +128,13 @@ mod tests {
         let mut expected: Vec<i32> = vec![pa, pb];
         expected.sort_unstable();
         expected.dedup();
-        assert2::assert!(got == expected);
+        assert!(got == expected);
+        assert!(got.windows(2).all(|w| w[0] < w[1]), "sorted, deduped");
     }
 
     #[test]
     fn metadata_partitions_for_empty_is_empty() {
         let none: [TopicIdPartition; 0] = [];
-        assert2::assert!(metadata_partitions_for(none.iter(), 50).is_empty());
+        assert!(metadata_partitions_for(none.iter(), 50).is_empty());
     }
 }

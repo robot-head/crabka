@@ -12,7 +12,8 @@ pub const MIN_VERSION: i16 = 1;
 pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 2;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -22,6 +23,10 @@ pub struct AlterReplicaLogDirsResponse<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl AlterReplicaLogDirsResponse<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::alter_replica_log_dirs_response::AlterReplicaLogDirsResponse {
@@ -135,6 +140,10 @@ pub struct AlterReplicaLogDirTopicResult<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl AlterReplicaLogDirTopicResult<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::alter_replica_log_dirs_response::AlterReplicaLogDirTopicResult {
@@ -153,9 +162,9 @@ impl Encode for AlterReplicaLogDirTopicResult<'_> {
         let flex = version >= 2;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.topic_name);
+                let () = put_compact_string(buf, self.topic_name);
             } else {
-                put_string(buf, self.topic_name);
+                let () = put_string(buf, self.topic_name);
             }
         }
         if version >= 0 {
@@ -250,6 +259,10 @@ pub struct AlterReplicaLogDirPartitionResult {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl AlterReplicaLogDirPartitionResult {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::alter_replica_log_dirs_response::AlterReplicaLogDirPartitionResult {

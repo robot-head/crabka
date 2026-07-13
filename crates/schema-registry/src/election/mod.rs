@@ -27,25 +27,24 @@ impl Election {
     /// Parse `advertised_url` into a `SchemaRegistryIdentity`, spawn the `"sr"`
     /// group loop, and return a watch receiver of `PrimaryState`. The task runs
     /// until `cancel` fires (then it `LeaveGroup`s).
-    // `async` is part of the public contract (callers `.await` it; future wiring
-    // will perform async setup here) even though the body is currently sync.
-    #[allow(clippy::unused_async)]
-    pub async fn start(
+    pub fn start(
         cfg: &RegistryConfig,
         cancel: CancellationToken,
-    ) -> anyhow::Result<watch::Receiver<PrimaryState>> {
-        let identity = parse_identity(&cfg.advertised_url, cfg.leader_eligibility)?;
-        let (tx, rx) = watch::channel(PrimaryState::default());
-        let client = ElectionClient {
-            bootstrap: cfg.bootstrap.clone(),
-            client_id: format!("{}-election", cfg.client_id),
-            group_id: cfg.group_id.clone(),
-            identity,
-            tx,
-            security: cfg.security.client.clone(),
-        };
-        tokio::spawn(client.run(cancel));
-        Ok(rx)
+    ) -> std::future::Ready<anyhow::Result<watch::Receiver<PrimaryState>>> {
+        std::future::ready((|| {
+            let identity = parse_identity(&cfg.advertised_url, cfg.leader_eligibility)?;
+            let (tx, rx) = watch::channel(PrimaryState::default());
+            let client = ElectionClient {
+                bootstrap: cfg.bootstrap.clone(),
+                client_id: format!("{}-election", cfg.client_id),
+                group_id: cfg.group_id.clone(),
+                identity,
+                tx,
+                security: cfg.security.client.clone(),
+            };
+            tokio::spawn(client.run(cancel));
+            Ok(rx)
+        })())
     }
 }
 

@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 
+use num_traits::ToPrimitive;
 use regex::Regex;
 
 use crate::{
@@ -15,6 +16,8 @@ pub struct LabelFormat {
 }
 
 impl LabelFormat {
+    /// # Errors
+    /// Returns an error when the query or template is malformed, a requested conversion is invalid, or evaluation cannot read its input data.
     pub fn new(assignments: Vec<LabelFormatAssignment>) -> Result<Self, ParseError> {
         let mut destinations = BTreeSet::new();
         for assignment in &assignments {
@@ -51,6 +54,8 @@ pub struct LabelFormatAssignment {
 }
 
 impl LabelFormatAssignment {
+    /// # Errors
+    /// Returns an error when the query or template is malformed, a requested conversion is invalid, or evaluation cannot read its input data.
     pub fn rename(
         destination: impl Into<String>,
         source: impl Into<String>,
@@ -61,6 +66,8 @@ impl LabelFormatAssignment {
         })
     }
 
+    /// # Errors
+    /// Returns an error when the query or template is malformed, a requested conversion is invalid, or evaluation cannot read its input data.
     pub fn template(
         destination: impl Into<String>,
         template: impl Into<String>,
@@ -113,6 +120,8 @@ pub struct UnwrapExpression {
 }
 
 impl UnwrapExpression {
+    /// # Errors
+    /// Returns an error when the query or template is malformed, a requested conversion is invalid, or evaluation cannot read its input data.
     pub fn new(label: impl Into<String>) -> Result<Self, ParseError> {
         let expression = Self {
             label: label.into(),
@@ -122,6 +131,8 @@ impl UnwrapExpression {
         Ok(expression)
     }
 
+    /// # Errors
+    /// Returns an error when the query or template is malformed, a requested conversion is invalid, or evaluation cannot read its input data.
     pub fn bytes(label: impl Into<String>) -> Result<Self, ParseError> {
         let expression = Self {
             label: label.into(),
@@ -131,6 +142,8 @@ impl UnwrapExpression {
         Ok(expression)
     }
 
+    /// # Errors
+    /// Returns an error when the query or template is malformed, a requested conversion is invalid, or evaluation cannot read its input data.
     pub fn duration(label: impl Into<String>) -> Result<Self, ParseError> {
         let expression = Self {
             label: label.into(),
@@ -160,17 +173,14 @@ impl UnwrapExpression {
             );
             return;
         };
-        match self.convert_sample_value(value) {
-            Some(value) => {
-                fields.insert(UNWRAP_SAMPLE_VALUE_LABEL.to_string(), value.to_string());
-            }
-            None => {
-                fields.insert("__error__".to_string(), "SampleExtractionErr".to_string());
-                fields.insert(
-                    "__error_details__".to_string(),
-                    format!("unwrap label `{}` cannot be converted", self.label),
-                );
-            }
+        if let Some(value) = self.convert_sample_value(value) {
+            fields.insert(UNWRAP_SAMPLE_VALUE_LABEL.to_string(), value.clone());
+        } else {
+            fields.insert("__error__".to_string(), "SampleExtractionErr".to_string());
+            fields.insert(
+                "__error_details__".to_string(),
+                format!("unwrap label `{}` cannot be converted", self.label),
+            );
         }
     }
 
@@ -179,8 +189,8 @@ impl UnwrapExpression {
             UnwrapConversion::Raw => parse_raw_sample_literal(value),
             UnwrapConversion::Bytes => {
                 let bytes = parse_bytes_literal(value)?;
-                if bytes.fract() == 0.0 && bytes <= u64::MAX as f64 {
-                    Some((bytes as u64).to_string())
+                if bytes.fract() == 0.0 {
+                    Some(bytes.to_u64()?.to_string())
                 } else {
                     None
                 }
@@ -297,6 +307,8 @@ pub struct LabelSelectionSet {
 }
 
 impl LabelSelectionSet {
+    /// # Errors
+    /// Returns an error when the query or template is malformed, a requested conversion is invalid, or evaluation cannot read its input data.
     pub fn new(selections: Vec<LabelSelection>) -> Result<Self, ParseError> {
         if selections.is_empty() {
             return Err(template_parse_error("expected label selection"));
@@ -343,6 +355,8 @@ pub struct LabelSelection {
 }
 
 impl LabelSelection {
+    /// # Errors
+    /// Returns an error when the query or template is malformed, a requested conversion is invalid, or evaluation cannot read its input data.
     pub fn name(name: impl Into<String>) -> Result<Self, ParseError> {
         let selection = Self {
             name: name.into(),
@@ -352,6 +366,8 @@ impl LabelSelection {
         Ok(selection)
     }
 
+    /// # Errors
+    /// Returns an error when the query or template is malformed, a requested conversion is invalid, or evaluation cannot read its input data.
     pub fn equal(name: impl Into<String>, value: impl Into<String>) -> Result<Self, ParseError> {
         let selection = Self {
             name: name.into(),
@@ -361,6 +377,8 @@ impl LabelSelection {
         Ok(selection)
     }
 
+    /// # Errors
+    /// Returns an error when the query or template is malformed, a requested conversion is invalid, or evaluation cannot read its input data.
     pub fn regex(name: impl Into<String>, pattern: impl Into<String>) -> Result<Self, ParseError> {
         let selection = Self {
             name: name.into(),
@@ -438,19 +456,17 @@ mod tests {
             LabelFormatAssignment::template("summary", "{{.method}} {{.status}}").unwrap();
         let format = LabelFormat::new(vec![route.clone(), summary.clone()]).unwrap();
 
-        assert2::assert!(format.assignments() == &[route.clone(), summary]);
-        assert2::assert!(route.destination() == "route");
-        assert2::assert!(
-            matches!(route.value(), LabelFormatValue::Rename(source) if source == "path")
-        );
+        assert_eq!(format.assignments(), &[route.clone(), summary]);
+        assert_eq!(route.destination(), "route");
+        assert!(matches!(route.value(), LabelFormatValue::Rename(source) if source == "path"));
     }
 
     #[test]
     fn unwrap_expression_accessors_and_validation_use_label() {
         let expression = UnwrapExpression::bytes("size").unwrap();
 
-        assert2::assert!(expression.label() == "size");
-        assert2::assert!(expression.conversion() == UnwrapConversion::Bytes);
+        assert_eq!(expression.label(), "size");
+        assert_eq!(expression.conversion(), UnwrapConversion::Bytes);
         check!(UnwrapExpression::new("").is_err());
         check!(UnwrapExpression::bytes("").is_err());
         check!(UnwrapExpression::duration("").is_err());
@@ -460,46 +476,30 @@ mod tests {
     fn unwrap_bytes_conversion_accepts_only_integer_bytes_in_range() {
         let expression = UnwrapExpression::bytes("size").unwrap();
 
-        for (_name, input, expected) in [
-            ("integer bytes", "1B", Some("1".to_string())),
-            ("fractional bytes", "1.5B", None),
-        ] {
-            assert2::assert!(expression.convert_sample_value(input) == expected);
-        }
+        assert_eq!(expression.convert_sample_value("1B"), Some("1".to_string()));
+        assert_eq!(expression.convert_sample_value("1.5B"), None);
     }
 
     #[test]
     fn raw_sample_literals_preserve_zero_and_signs() {
-        for (_name, input, expected) in [
-            ("zero", "0", Some("0".to_string())),
-            ("explicit positive", "+12.5", Some("12.5".to_string())),
-            ("negative", "-12.5", Some("-12.5".to_string())),
-        ] {
-            assert2::assert!(parse_raw_sample_literal(input) == expected);
-        }
+        assert_eq!(parse_raw_sample_literal("0"), Some("0".to_string()));
+        assert_eq!(parse_raw_sample_literal("+12.5"), Some("12.5".to_string()));
+        assert_eq!(parse_raw_sample_literal("-12.5"), Some("-12.5".to_string()));
     }
 
     #[test]
     fn raw_sample_literals_accept_fractional_boundary_forms() {
-        for (_name, input, expected) in [
-            ("leading decimal point", ".5", "0.5"),
-            ("trailing decimal point", "1.", "1"),
-            ("positive exponent", "1e2", "100"),
-            ("negative exponent", "1e-2", "0.01"),
-        ] {
-            assert2::assert!(parse_raw_sample_literal(input) == Some(expected.to_string()));
-        }
+        assert_eq!(parse_raw_sample_literal(".5"), Some("0.5".to_string()));
+        assert_eq!(parse_raw_sample_literal("1."), Some("1".to_string()));
+        assert_eq!(parse_raw_sample_literal("1e2"), Some("100".to_string()));
+        assert_eq!(parse_raw_sample_literal("1e-2"), Some("0.01".to_string()));
     }
 
     #[test]
     fn raw_sample_literals_reject_invalid_digits() {
-        for (_name, input) in [
-            ("letter before decimal", "12a.3"),
-            ("letter after decimal", "12.3a"),
-            ("repeated exponent", "1e2e3"),
-        ] {
-            assert2::assert!(parse_raw_sample_literal(input) == None);
-        }
+        assert_eq!(parse_raw_sample_literal("12a.3"), None);
+        assert_eq!(parse_raw_sample_literal("12.3a"), None);
+        assert_eq!(parse_raw_sample_literal("1e2e3"), None);
     }
 
     #[test]
@@ -509,12 +509,14 @@ mod tests {
         let selections =
             LabelSelectionSet::new(vec![drop_level.clone(), drop_debug_app.clone()]).unwrap();
 
-        assert2::assert!(selections.selections() == &[drop_level, drop_debug_app]);
+        assert_eq!(selections.selections(), &[drop_level, drop_debug_app]);
 
         let mut fields = labels(&[("app", "debug-api"), ("level", "warn"), ("status", "500")]);
         selections.apply_drop(&mut fields);
 
-        assert2::assert!(fields == labels(&[("status", "500")]));
+        assert_eq!(fields.get("status"), Some(&"500".to_string()));
+        assert!(!fields.contains_key("app"));
+        assert!(!fields.contains_key("level"));
     }
 
     #[test]
@@ -523,11 +525,15 @@ mod tests {
         let regex = LabelSelection::regex("app", "api|worker").unwrap();
         let bare = LabelSelection::name("level").unwrap();
 
-        assert2::assert!(exact.matcher() == Some(&LabelSelectionMatcher::Equal("500".to_string())));
-        assert2::assert!(
-            regex.matcher() == Some(&LabelSelectionMatcher::Regex("api|worker".to_string()))
+        assert_eq!(
+            exact.matcher(),
+            Some(&LabelSelectionMatcher::Equal("500".to_string()))
         );
-        assert2::assert!(bare.matcher() == None);
+        assert_eq!(
+            regex.matcher(),
+            Some(&LabelSelectionMatcher::Regex("api|worker".to_string()))
+        );
+        assert_eq!(bare.matcher(), None);
     }
 
     #[test]
@@ -546,7 +552,11 @@ mod tests {
             (&regex, &fields, true),
             (&regex, &frontend, false),
         ] {
-            assert2::assert!(selection.matches(candidate) == expected);
+            assert_eq!(
+                selection.matches(candidate),
+                expected,
+                "{selection:?} against {candidate:?}"
+            );
         }
     }
 

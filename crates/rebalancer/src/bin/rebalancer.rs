@@ -35,6 +35,34 @@ fn detector_enabled(tick_interval_secs: u64) -> bool {
     tick_interval_secs > 0
 }
 
+fn init_tracing() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "crabka_rebalancer=info,info".into()),
+        )
+        .init();
+}
+
+fn prepare_data_dir(args: &Args) -> anyhow::Result<()> {
+    info!(
+        listen = %args.listen_addr,
+        bootstrap = %args.bootstrap_servers,
+        data_dir = ?args.data_dir,
+        "crabka-rebalancer starting"
+    );
+    std::fs::create_dir_all(&args.data_dir)?;
+    Ok(())
+}
+
+async fn connect_client(args: &Args) -> anyhow::Result<crabka_client_core::Client> {
+    Ok(crabka_client_core::Client::builder()
+        .bootstrap(args.bootstrap_servers.clone())
+        .client_id("crabka-rebalancer")
+        .build()
+        .await?)
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "crabka-rebalancer",
@@ -250,31 +278,149 @@ struct Args {
     reassignment_batch_size: usize,
 }
 
+struct StateTopicSetup {
+    backend: Arc<dyn crabka_rebalancer::state_topic::StateBackend>,
+}
+
+async fn start_state_topic(
+    args: &Args,
+    client: &crabka_client_core::Client,
+    shutdown: &CancellationToken,
+) -> anyhow::Result<StateTopicSetup> {
+    let addrs: Vec<String> = args
+        .bootstrap_servers
+        .split(',')
+        .map(|address| address.trim().to_string())
+        .collect();
+    let mut admin = crabka_client_admin::AdminClient::connect(&addrs)
+        .await
+        .map_err(|error| anyhow::anyhow!("admin client connect: {error}"))?;
+    crabka_rebalancer::state_topic::topic_admin::ensure_topic(
+        &mut admin,
+        &args.state_topic_name,
+        args.state_topic_replication,
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("ensure state topic: {error}"))?;
+
+    let client = Arc::new(client.clone());
+    let loaded = crabka_rebalancer::state_topic::LoadedState::new();
+    let backend: Arc<dyn crabka_rebalancer::state_topic::StateBackend> =
+        Arc::new(crabka_rebalancer::state_topic::StateTopic::new(
+            Arc::clone(&client),
+            args.state_topic_name.clone(),
+            loaded.clone(),
+        ));
+    let state_loader = crabka_rebalancer::state_topic::StateTopicLoader {
+        client,
+        topic: args.state_topic_name.clone(),
+        state: loaded.clone(),
+        shutdown: shutdown.clone(),
+    };
+    tokio::spawn(state_loader.run());
+
+    let warn_state = loaded.clone();
+    let timeout_secs = args.state_load_timeout_secs;
+    let topic = args.state_topic_name.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(timeout_secs)).await;
+        if should_warn_state_topic_load(warn_state.is_loaded()) {
+            warn!(
+                %topic,
+                timeout_secs,
+                "state topic has not loaded within the soft deadline; /readyz will remain 503"
+            );
+        }
+    });
+
+    info!(topic = %args.state_topic_name, "state topic ready; loader spawned");
+    Ok(StateTopicSetup { backend })
+}
+
+fn spawn_recovery(
+    state_topic: Arc<dyn crabka_rebalancer::state_topic::StateBackend>,
+    store: Arc<ProposalStore>,
+    in_flight_slot: Arc<Mutex<Option<ExecutionHandle>>>,
+    executor_state: ExecutorState,
+    client: Arc<dyn crabka_rebalancer::executor::phases::ClientFacade>,
+    shutdown: CancellationToken,
+    load_timeout: Duration,
+) {
+    tokio::spawn(async move {
+        let start = std::time::Instant::now();
+        while should_continue_recovery_load_wait(state_topic.is_loaded()) {
+            if recovery_load_timed_out(start.elapsed(), load_timeout) {
+                warn!(
+                    timeout_secs = load_timeout.as_secs(),
+                    "state-topic load did not converge within timeout; skipping in-flight recovery"
+                );
+                return;
+            }
+            if shutdown.is_cancelled() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let Some(in_flight) = state_topic.loaded() else {
+            return;
+        };
+        info!(
+            proposal_id = %in_flight.proposal_id,
+            phase = ?in_flight.phase,
+            "resuming in-flight executor state from state topic"
+        );
+        let Some(proposal) = store.get(&in_flight.proposal_id) else {
+            warn!(
+                proposal_id = %in_flight.proposal_id,
+                "state topic references unknown proposal; clearing"
+            );
+            let _ = state_topic.delete().await;
+            return;
+        };
+        let proposal = store
+            .mutate(&in_flight.proposal_id, |proposal| {
+                proposal.status = ProposalStatus::Executing;
+            })
+            .unwrap_or(proposal);
+        let cancel = CancellationToken::new();
+        let handle_cancel = cancel.clone();
+        let resumed = in_flight.clone();
+        let task = tokio::spawn(async move {
+            Execution::resume(client, executor_state, proposal, &resumed, cancel)
+                .run()
+                .await;
+        });
+        *in_flight_slot.lock().await = Some(ExecutionHandle {
+            proposal_id: in_flight.proposal_id.clone(),
+            task,
+            cancel: handle_cancel,
+            started_at: std::time::Instant::now(),
+        });
+    });
+}
+
+async fn drain_execution(in_flight_slot: &Mutex<Option<ExecutionHandle>>) {
+    let Some(handle) = in_flight_slot.lock().await.take() else {
+        return;
+    };
+    info!(proposal_id = %handle.proposal_id, "draining in-flight executor on shutdown");
+    handle.cancel.cancel();
+    match tokio::time::timeout(Duration::from_secs(10), handle.task).await {
+        Ok(Ok(())) => info!(proposal_id = %handle.proposal_id, "executor drained cleanly"),
+        Ok(Err(error)) => warn!(%error, "executor task join error"),
+        Err(_) => {
+            warn!(proposal_id = %handle.proposal_id, "executor drain timed out after 10s; aborting");
+        }
+    }
+}
+
 #[tokio::main]
-#[allow(clippy::too_many_lines)]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "crabka_rebalancer=info,info".into()),
-        )
-        .init();
-
+    init_tracing();
     let args = Args::parse();
-    info!(
-        listen = %args.listen_addr,
-        bootstrap = %args.bootstrap_servers,
-        data_dir = ?args.data_dir,
-        "crabka-rebalancer starting"
-    );
+    prepare_data_dir(&args)?;
 
-    std::fs::create_dir_all(&args.data_dir)?;
-
-    let client = crabka_client_core::Client::builder()
-        .bootstrap(args.bootstrap_servers.clone())
-        .client_id("crabka-rebalancer")
-        .build()
-        .await?;
+    let client = connect_client(&args).await?;
 
     let snapshot = new_shared_snapshot();
     let shutdown = CancellationToken::new();
@@ -308,67 +454,9 @@ async fn main() -> anyhow::Result<()> {
 
     let in_flight_slot: Arc<Mutex<Option<ExecutionHandle>>> = Arc::new(Mutex::new(None));
 
-    // Ensure the state topic exists; spawn the background loader.
-    // `topic_admin::ensure_topic` takes `&mut crabka_client_admin::AdminClient`.
-    // We connect a short-lived admin client just for topic creation; the
-    // `StateTopic` and `StateTopicLoader` then run on the main `Client`.
-    {
-        let addrs: Vec<String> = args
-            .bootstrap_servers
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .collect();
-        let mut admin = crabka_client_admin::AdminClient::connect(&addrs)
-            .await
-            .map_err(|e| anyhow::anyhow!("admin client connect: {e}"))?;
-        crabka_rebalancer::state_topic::topic_admin::ensure_topic(
-            &mut admin,
-            &args.state_topic_name,
-            args.state_topic_replication,
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("ensure state topic: {e}"))?;
-    }
-
-    let arc_client = Arc::new(client.clone());
-    let loaded_state = crabka_rebalancer::state_topic::LoadedState::new();
-    let state_topic: Arc<dyn crabka_rebalancer::state_topic::StateBackend> =
-        Arc::new(crabka_rebalancer::state_topic::StateTopic::new(
-            arc_client.clone(),
-            args.state_topic_name.clone(),
-            loaded_state.clone(),
-        ));
-
-    let loader = crabka_rebalancer::state_topic::StateTopicLoader {
-        client: arc_client.clone(),
-        topic: args.state_topic_name.clone(),
-        state: loaded_state.clone(),
-        shutdown: shutdown.clone(),
-    };
-    tokio::spawn(loader.run());
-
-    // Soft deadline: warn if the loader hasn't converged within the configured
-    // timeout. The loader keeps retrying; /readyz stays 503 until it finishes.
-    {
-        let warn_state = loaded_state.clone();
-        let timeout_secs = args.state_load_timeout_secs;
-        let topic_for_warn = args.state_topic_name.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(timeout_secs)).await;
-            if should_warn_state_topic_load(warn_state.is_loaded()) {
-                warn!(
-                    topic = %topic_for_warn,
-                    timeout_secs,
-                    "state topic has not loaded within the soft deadline; /readyz will remain 503"
-                );
-            }
-        });
-    }
-
-    info!(
-        topic = %args.state_topic_name,
-        "state topic ready; loader spawned"
-    );
+    let StateTopicSetup {
+        backend: state_topic,
+    } = start_state_topic(&args, &client, &shutdown).await?;
 
     let executor_state = ExecutorState {
         store: store.clone(),
@@ -381,77 +469,15 @@ async fn main() -> anyhow::Result<()> {
     let live_client: Arc<dyn crabka_rebalancer::executor::phases::ClientFacade> =
         Arc::new(LiveClient::new(client.clone()));
 
-    // Recovery on startup: resume an in-flight execution from the state topic.
-    // We spawn a background task that polls until the loader has finished its
-    // initial replay (is_loaded() == true), then checks for a stored record.
-    // This preserves fast boot-to-/healthz latency — recovery happens
-    // out-of-band of the synchronous startup path.
-    tokio::spawn({
-        let state_topic = state_topic.clone();
-        let store = store.clone();
-        let in_flight_slot = in_flight_slot.clone();
-        let exec_state = executor_state.clone();
-        let exec_client = live_client.clone();
-        let shutdown = shutdown.clone();
-        let load_timeout = Duration::from_secs(args.state_load_timeout_secs);
-        async move {
-            let start = std::time::Instant::now();
-            while should_continue_recovery_load_wait(state_topic.is_loaded()) {
-                if recovery_load_timed_out(start.elapsed(), load_timeout) {
-                    warn!(
-                        timeout_secs = load_timeout.as_secs(),
-                        "state-topic load did not converge within timeout; \
-                         skipping in-flight recovery"
-                    );
-                    return;
-                }
-                if shutdown.is_cancelled() {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-            if let Some(in_flight) = state_topic.loaded() {
-                info!(
-                    proposal_id = %in_flight.proposal_id,
-                    phase = ?in_flight.phase,
-                    "resuming in-flight executor state from state topic"
-                );
-                if let Some(proposal) = store.get(&in_flight.proposal_id) {
-                    let prop_for_resume = store
-                        .mutate(&in_flight.proposal_id, |p| {
-                            p.status = ProposalStatus::Executing;
-                        })
-                        .unwrap_or(proposal);
-                    let cancel = CancellationToken::new();
-                    let handle_cancel = cancel.clone();
-                    let in_flight_for_resume = in_flight.clone();
-                    let task = tokio::spawn(async move {
-                        Execution::resume(
-                            exec_client,
-                            exec_state,
-                            prop_for_resume,
-                            &in_flight_for_resume,
-                            cancel,
-                        )
-                        .run()
-                        .await;
-                    });
-                    *in_flight_slot.lock().await = Some(ExecutionHandle {
-                        proposal_id: in_flight.proposal_id.clone(),
-                        task,
-                        cancel: handle_cancel,
-                        started_at: std::time::Instant::now(),
-                    });
-                } else {
-                    warn!(
-                        proposal_id = %in_flight.proposal_id,
-                        "state topic references unknown proposal; clearing"
-                    );
-                    let _ = state_topic.delete().await;
-                }
-            }
-        }
-    });
+    spawn_recovery(
+        state_topic.clone(),
+        store.clone(),
+        in_flight_slot.clone(),
+        executor_state.clone(),
+        live_client.clone(),
+        shutdown.clone(),
+        Duration::from_secs(args.state_load_timeout_secs),
+    );
 
     // Load broker capacity config (optional).
     let broker_capacities = if args.broker_capacity_file.is_empty() {
@@ -563,14 +589,16 @@ async fn main() -> anyhow::Result<()> {
         let detector = crabka_rebalancer::detector::Detector::new(
             detector_cfg,
             snapshot.clone(),
-            usage_store.clone(),
-            broker_capacities.clone(),
-            anomaly_store.clone(),
-            store.clone(),
-            executor_state.clone(),
-            goal_registry.clone(),
-            goal_ctx.clone(),
-            detector_metrics,
+            crabka_rebalancer::detector::DetectorDependencies {
+                usage_store: usage_store.clone(),
+                capacities: broker_capacities.clone(),
+                anomaly_store: anomaly_store.clone(),
+                proposal_store: store.clone(),
+                executor_state: executor_state.clone(),
+                goal_registry: goal_registry.clone(),
+                goal_ctx: goal_ctx.clone(),
+                metrics: detector_metrics,
+            },
             shutdown.clone(),
         );
         tokio::spawn(detector.run());
@@ -606,21 +634,7 @@ async fn main() -> anyhow::Result<()> {
         })
         .await?;
 
-    // Drain the in-flight executor task, if any. The cancel + clear path
-    // runs in the executor's run() loop and reaches ClearThrottle for
-    // every terminal — bounded by execute_deadline + clear_throttle RPC
-    // time, so a 10s timeout is generous.
-    if let Some(handle) = in_flight_slot.lock().await.take() {
-        info!(proposal_id = %handle.proposal_id, "draining in-flight executor on shutdown");
-        handle.cancel.cancel();
-        match tokio::time::timeout(Duration::from_secs(10), handle.task).await {
-            Ok(Ok(())) => info!(proposal_id = %handle.proposal_id, "executor drained cleanly"),
-            Ok(Err(e)) => warn!(error = %e, "executor task join error"),
-            Err(_) => {
-                warn!(proposal_id = %handle.proposal_id, "executor drain timed out after 10s; aborting");
-            }
-        }
-    }
+    drain_execution(&in_flight_slot).await;
 
     let _ = tokio::time::timeout(Duration::from_secs(5), ingester_handle).await;
     Ok(())

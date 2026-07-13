@@ -382,13 +382,6 @@ mod tests {
         stores
     }
 
-    fn expected_change(value: i64) -> Change<i64> {
-        Change {
-            old: None,
-            new: Some(value),
-        }
-    }
-
     #[tokio::test]
     async fn merge_within_gap_tombstones_then_updates() {
         let mut stores = registry();
@@ -401,6 +394,7 @@ mod tests {
             offset: 0,
             timestamp: 0,
         };
+
         let mut proc = KStreamSessionAggregateProcessor {
             store_name: "s".into(),
             gap_ms: 60,
@@ -414,6 +408,7 @@ mod tests {
             forwarder: TupleForwarder::default(),
             _pd: PhantomData::<fn() -> (String, String, i64)>,
         };
+
         // record 1 @ ts=0 → new session [0,0] count 1, no candidates → one update.
         {
             let globals = crate::runtime::global::GlobalStateManager::default();
@@ -434,17 +429,13 @@ mod tests {
             proc.process(&mut ctx, Record::new(Some("a".into()), "x".into(), 0))
                 .await;
         }
-        assert2::assert!(buffer.len() == 1);
+        assert_eq!(buffer.len(), 1);
         let (_, rec) = buffer.pop_front().unwrap();
         let ch = rec.value.downcast::<Change<i64>>().unwrap();
         let wk = rec.key.unwrap().downcast::<Windowed<String>>().unwrap();
-        assert2::assert!(
-            *wk == Windowed {
-                key: "a".into(),
-                window: Window { start: 0, end: 0 },
-            }
-        );
-        assert2::assert!(*ch == expected_change(1));
+        assert_eq!(wk.window, Window { start: 0, end: 0 });
+        assert_eq!((ch.old, ch.new), (None, Some(1)));
+
         // record 2 @ ts=30 (within gap 60 of session [0,0]) → merge:
         //   tombstone [0,0], update merged [0,30] count 2.
         {
@@ -466,23 +457,17 @@ mod tests {
             proc.process(&mut ctx, Record::new(Some("a".into()), "x".into(), 30))
                 .await;
         }
-        assert2::assert!(buffer.len() == 2);
+        assert_eq!(buffer.len(), 2);
         let (_, tomb) = buffer.pop_front().unwrap();
         let tch = tomb.value.downcast::<Change<i64>>().unwrap();
         let tkey = tomb.key.unwrap().downcast::<Windowed<String>>().unwrap();
-        assert2::assert!(tkey.window == Window { start: 0, end: 0 });
-        assert2::assert!(tch.is_tombstone());
+        assert_eq!(tkey.window, Window { start: 0, end: 0 });
+        assert!(tch.is_tombstone());
         let (_, upd) = buffer.pop_front().unwrap();
         let uch = upd.value.downcast::<Change<i64>>().unwrap();
         let ukey = upd.key.unwrap().downcast::<Windowed<String>>().unwrap();
-        assert2::assert!(
-            *ukey
-                == Windowed {
-                    key: "a".into(),
-                    window: Window { start: 0, end: 30 },
-                }
-        );
-        assert2::assert!(*uch == expected_change(2));
+        assert_eq!(ukey.window, Window { start: 0, end: 30 });
+        assert_eq!((uch.old, uch.new), (None, Some(2)));
     }
 
     #[tokio::test]
@@ -530,9 +515,9 @@ mod tests {
                 .await;
         }
         // No merge: two updates, no tombstone (200 is > gap 60 from [0,0]).
-        assert2::assert!(buffer.len() == 2);
+        assert_eq!(buffer.len(), 2);
         for (_, rec) in buffer.drain(..) {
-            assert2::assert!(!rec.value.downcast::<Change<i64>>().unwrap().is_tombstone());
+            assert!(!rec.value.downcast::<Change<i64>>().unwrap().is_tombstone());
         }
     }
 
@@ -604,38 +589,43 @@ mod tests {
         }
         // Deterministic emit order: tombstone candidates in store order (end asc) —
         // [0,0] then [100,100] — then the merged update [0,100] = 3.
-        let actual = buffer
-            .drain(..)
-            .map(|(_, record)| {
-                let window = record
-                    .key
-                    .unwrap()
-                    .downcast::<Windowed<String>>()
-                    .unwrap()
-                    .window;
-                let change = record.value.downcast::<Change<i64>>().unwrap();
-                (window, change.is_tombstone(), change.new)
-            })
-            .collect::<Vec<_>>();
-        assert2::assert!(
-            actual
-                == vec![
-                    (Window { start: 0, end: 0 }, true, None),
-                    (
-                        Window {
-                            start: 100,
-                            end: 100
-                        },
-                        true,
-                        None
-                    ),
-                    (Window { start: 0, end: 100 }, false, Some(3)),
-                ]
+        assert_eq!(buffer.len(), 3);
+        let (_, t0) = buffer.pop_front().unwrap();
+        assert!(t0.value.downcast::<Change<i64>>().unwrap().is_tombstone());
+        assert_eq!(
+            t0.key
+                .unwrap()
+                .downcast::<Windowed<String>>()
+                .unwrap()
+                .window,
+            Window { start: 0, end: 0 }
         );
+        let (_, t1) = buffer.pop_front().unwrap();
+        assert!(t1.value.downcast::<Change<i64>>().unwrap().is_tombstone());
+        assert_eq!(
+            t1.key
+                .unwrap()
+                .downcast::<Windowed<String>>()
+                .unwrap()
+                .window,
+            Window {
+                start: 100,
+                end: 100
+            }
+        );
+        let (_, upd) = buffer.pop_front().unwrap();
+        assert_eq!(
+            upd.key
+                .unwrap()
+                .downcast::<Windowed<String>>()
+                .unwrap()
+                .window,
+            Window { start: 0, end: 100 }
+        );
+        assert_eq!(upd.value.downcast::<Change<i64>>().unwrap().new, Some(3));
     }
 
     #[tokio::test]
-    #[allow(clippy::too_many_lines)]
     async fn session_count_emit_final_emits_only_on_close() {
         let mut stores = registry();
         let children = [0usize];
@@ -687,7 +677,10 @@ mod tests {
             proc.process(&mut ctx, Record::new(Some("a".into()), "x".into(), ts))
                 .await;
         }
-        assert2::assert!(buffer.is_empty());
+        assert!(
+            buffer.is_empty(),
+            "emit-final must suppress on-update forwards"
+        );
 
         // ts=1000 advances stream_time → window_close_time 1000; session [0,4]
         // (end 4 <= 1000) closes. The new session [1000,1000] is NOT yet closed.
@@ -710,22 +703,13 @@ mod tests {
             proc.process(&mut ctx, Record::new(Some("a".into()), "x".into(), 1000))
                 .await;
         }
-        assert2::assert!(buffer.len() == 1);
+        assert_eq!(buffer.len(), 1, "exactly one closed-session emit");
         let (_, rec) = buffer.pop_front().unwrap();
         let wk = rec.key.unwrap().downcast::<Windowed<String>>().unwrap();
+        assert_eq!(wk.key, "a");
+        assert_eq!(wk.window, Window { start: 0, end: 4 });
         let ch = rec.value.downcast::<Change<i64>>().unwrap();
-        assert2::assert!(
-            *wk == Windowed {
-                key: "a".into(),
-                window: Window { start: 0, end: 4 },
-            }
-        );
-        assert2::assert!(
-            *ch == Change {
-                old: None,
-                new: Some(2)
-            }
-        );
+        assert_eq!((ch.old, ch.new), (None, Some(2)));
     }
 
     #[tokio::test]
@@ -779,21 +763,23 @@ mod tests {
                 .await;
         }
         // buffer = [update[0,0]="x", tombstone[0,0], update[0,30]="xy"].
+        assert_eq!(buffer.len(), 3);
         let (_, last) = buffer.pop_back().unwrap();
-        let window = last
-            .key
-            .unwrap()
-            .downcast::<Windowed<String>>()
-            .unwrap()
-            .window;
-        let change = last.value.downcast::<Change<String>>().unwrap();
-        assert2::assert!(buffer.len() == 2);
-        assert2::assert!(window == Window { start: 0, end: 30 });
-        assert2::assert!(change.new == Some("xy".to_string()));
+        assert_eq!(
+            last.key
+                .unwrap()
+                .downcast::<Windowed<String>>()
+                .unwrap()
+                .window,
+            Window { start: 0, end: 30 }
+        );
+        assert_eq!(
+            last.value.downcast::<Change<String>>().unwrap().new,
+            Some("xy".to_string())
+        );
     }
 
     #[tokio::test]
-    #[allow(clippy::too_many_lines)]
     async fn session_reduce_emit_final_emits_only_on_close() {
         let mut stores = StoreRegistry::default();
         stores.insert(Box::new(SessionBytesStore::<String, String>::in_memory(
@@ -848,7 +834,10 @@ mod tests {
             proc.process(&mut ctx, Record::new(Some("a".into()), v.into(), ts))
                 .await;
         }
-        assert2::assert!(buffer.is_empty());
+        assert!(
+            buffer.is_empty(),
+            "emit-final must suppress on-update forwards"
+        );
 
         // "z"@1000 advances stream_time → window_close_time 1000; session [0,4]
         // (end 4 <= 1000) closes. The new session [1000,1000] is NOT yet closed.
@@ -871,22 +860,13 @@ mod tests {
             proc.process(&mut ctx, Record::new(Some("a".into()), "z".into(), 1000))
                 .await;
         }
-        assert2::assert!(buffer.len() == 1);
+        assert_eq!(buffer.len(), 1, "exactly one closed-session emit");
         let (_, rec) = buffer.pop_front().unwrap();
         let wk = rec.key.unwrap().downcast::<Windowed<String>>().unwrap();
+        assert_eq!(wk.key, "a");
+        assert_eq!(wk.window, Window { start: 0, end: 4 });
         let ch = rec.value.downcast::<Change<String>>().unwrap();
-        assert2::assert!(
-            *wk == Windowed {
-                key: "a".into(),
-                window: Window { start: 0, end: 4 },
-            }
-        );
-        assert2::assert!(
-            *ch == Change {
-                old: None,
-                new: Some("xy".to_string())
-            }
-        );
+        assert_eq!((ch.old, ch.new), (None, Some("xy".to_string())));
     }
 
     // ── Record-cache suppression (sub-task 3d-ii) ─────────────────────────────
@@ -968,7 +948,7 @@ mod tests {
     #[tokio::test]
     async fn uncached_session_aggregate_forwards_each_record() {
         let mut stores = session_registry(false);
-        assert2::assert!(run_merge(&mut stores).await == 3);
+        assert_eq!(run_merge(&mut stores).await, 3);
     }
 
     /// Cached → ALL on-update forwards (the initial update, the merge tombstone,
@@ -978,7 +958,11 @@ mod tests {
     #[tokio::test]
     async fn cached_session_aggregate_suppresses_then_flushes_merge() {
         let mut stores = session_registry(true);
-        assert2::assert!(run_merge(&mut stores).await == 0);
+        assert_eq!(
+            run_merge(&mut stores).await,
+            0,
+            "cached session store must suppress every immediate forward"
+        );
         // Flush the cache: the staged remove([0,0]) + put([0,30]) emit as two
         // changes — a tombstone for the merged-away session and an update for the
         // live one.
@@ -999,7 +983,13 @@ mod tests {
             .collect();
         got.sort_by_key(|(w, _, _)| (w.start, w.end));
         // The merged-away [0,0] is a tombstone; the live [0,30] carries count 2.
-        assert2::assert!(got.contains(&(Window { start: 0, end: 0 }, true, None)));
-        assert2::assert!(got.contains(&(Window { start: 0, end: 30 }, false, Some(2))));
+        assert!(
+            got.contains(&(Window { start: 0, end: 0 }, true, None)),
+            "flush must emit a tombstone for merged-away session [0,0], got {got:?}"
+        );
+        assert!(
+            got.contains(&(Window { start: 0, end: 30 }, false, Some(2))),
+            "flush must emit the live session [0,30] with count 2, got {got:?}"
+        );
     }
 }

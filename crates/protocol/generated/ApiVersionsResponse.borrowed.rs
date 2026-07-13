@@ -16,7 +16,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 4;
 pub const FLEXIBLE_MIN: i16 = 3;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,11 +41,15 @@ impl Default for ApiVersionsResponse {
             finalized_features_epoch: -1i64,
             finalized_features: Vec::new(),
             zk_migration_ready: false,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl ApiVersionsResponse {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::api_versions_response::ApiVersionsResponse {
         crate::owned::api_versions_response::ApiVersionsResponse {
             error_code: (self.error_code),
@@ -112,7 +117,7 @@ impl Encode for ApiVersionsResponse {
                 );
                 tagged.add(0, payload);
             }
-            if !(self.finalized_features_epoch == -1i64) {
+            if self.finalized_features_epoch != -1i64 {
                 let payload = encode_to_bytes(8, |b| {
                     put_i64(b, self.finalized_features_epoch);
                     Ok(())
@@ -148,7 +153,7 @@ impl Encode for ApiVersionsResponse {
                 );
                 tagged.add(2, payload);
             }
-            if !(!self.zk_migration_ready) {
+            if self.zk_migration_ready {
                 let payload = encode_to_bytes(1, |b| {
                     put_bool(b, self.zk_migration_ready);
                     Ok(())
@@ -194,7 +199,7 @@ impl Encode for ApiVersionsResponse {
                     prefix + body
                 }));
             }
-            if !(self.finalized_features_epoch == -1i64) {
+            if self.finalized_features_epoch != -1i64 {
                 known_pairs.push((1, 8));
             }
             if !(crate::codegen_helpers::is_default(&self.finalized_features)) {
@@ -210,7 +215,7 @@ impl Encode for ApiVersionsResponse {
                     prefix + body
                 }));
             }
-            if !(!self.zk_migration_ready) {
+            if self.zk_migration_ready {
                 known_pairs.push((3, 1));
             }
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -257,12 +262,7 @@ impl<'de> DecodeBorrow<'de> for ApiVersionsResponse {
                             let n = crate::primitives::array::get_array_len(b, flex)?;
                             let mut v = Vec::with_capacity(n);
                             for _ in 0..n {
-                                v.push(
-                                            crate::owned::api_versions_response::SupportedFeatureKey::decode(
-                                                b,
-                                                version,
-                                            )?,
-                                        );
+                                v.push(crate::owned::api_versions_response::SupportedFeatureKey::decode(b, version)?);
                             }
                             v
                         }
@@ -283,12 +283,7 @@ impl<'de> DecodeBorrow<'de> for ApiVersionsResponse {
                             let n = crate::primitives::array::get_array_len(b, flex)?;
                             let mut v = Vec::with_capacity(n);
                             for _ in 0..n {
-                                v.push(
-                                            crate::owned::api_versions_response::FinalizedFeatureKey::decode(
-                                                b,
-                                                version,
-                                            )?,
-                                        );
+                                v.push(crate::owned::api_versions_response::FinalizedFeatureKey::decode(b, version)?);
                             }
                             v
                         }
@@ -359,6 +354,10 @@ pub struct ApiVersion {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl ApiVersion {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::api_versions_response::ApiVersion {
         crate::owned::api_versions_response::ApiVersion {
             api_key: (self.api_key),
@@ -449,6 +448,10 @@ pub struct SupportedFeatureKey<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl SupportedFeatureKey<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::api_versions_response::SupportedFeatureKey {
         crate::owned::api_versions_response::SupportedFeatureKey {
             name: (self.name).to_string(),
@@ -463,9 +466,9 @@ impl Encode for SupportedFeatureKey<'_> {
         let flex = version >= 3;
         if version >= 3 {
             if flex {
-                put_compact_string(buf, self.name);
+                let () = put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name);
+                let () = put_string(buf, self.name);
             }
         }
         if version >= 3 {
@@ -551,6 +554,10 @@ pub struct FinalizedFeatureKey<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl FinalizedFeatureKey<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::api_versions_response::FinalizedFeatureKey {
         crate::owned::api_versions_response::FinalizedFeatureKey {
             name: (self.name).to_string(),
@@ -565,9 +572,9 @@ impl Encode for FinalizedFeatureKey<'_> {
         let flex = version >= 3;
         if version >= 3 {
             if flex {
-                put_compact_string(buf, self.name);
+                let () = put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name);
+                let () = put_string(buf, self.name);
             }
         }
         if version >= 3 {

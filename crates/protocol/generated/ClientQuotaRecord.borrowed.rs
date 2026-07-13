@@ -15,7 +15,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 0;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq)]
@@ -33,11 +34,15 @@ impl Default for ClientQuotaRecord<'_> {
             key: "",
             value: 0.0f64,
             remove: false,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl ClientQuotaRecord<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::client_quota_record::ClientQuotaRecord {
         crate::owned::client_quota_record::ClientQuotaRecord {
             entity: (self.entity).iter().map(EntityData::to_owned).collect(),
@@ -66,9 +71,9 @@ impl Encode for ClientQuotaRecord<'_> {
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.key);
+                let () = put_compact_string(buf, self.key);
             } else {
-                put_string(buf, self.key);
+                let () = put_string(buf, self.key);
             }
         }
         if version >= 0 {
@@ -179,6 +184,10 @@ pub struct EntityData<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl EntityData<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::client_quota_record::EntityData {
         crate::owned::client_quota_record::EntityData {
             entity_type: (self.entity_type).to_string(),
@@ -192,16 +201,16 @@ impl Encode for EntityData<'_> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.entity_type);
+                let () = put_compact_string(buf, self.entity_type);
             } else {
-                put_string(buf, self.entity_type);
+                let () = put_string(buf, self.entity_type);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.entity_name);
+                let () = put_compact_nullable_string(buf, self.entity_name);
             } else {
-                put_nullable_string(buf, self.entity_name);
+                let () = put_nullable_string(buf, self.entity_name);
             }
         }
         if flex {

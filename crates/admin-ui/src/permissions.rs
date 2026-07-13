@@ -1,19 +1,69 @@
 use crabka_client_admin::{AclEntry, AclOperation, PermissionType, ResourceType};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-#[allow(clippy::struct_excessive_bools)]
-pub struct Capabilities {
-    pub can_view_topics: bool,
-    pub can_create_topics: bool,
-    pub can_alter_topics: bool,
-    pub can_delete_topics: bool,
-    pub can_view_groups: bool,
-    pub can_view_acls: bool,
-    pub can_alter_acls: bool,
-    pub can_alter_users: bool,
-    pub can_view_quotas: bool,
-    pub can_alter_quotas: bool,
-    pub can_view_log_dirs: bool,
+pub struct Capabilities(u16);
+
+impl Capabilities {
+    const VIEW_TOPICS: u16 = 1 << 0;
+    const CREATE_TOPICS: u16 = 1 << 1;
+    const ALTER_TOPICS: u16 = 1 << 2;
+    const DELETE_TOPICS: u16 = 1 << 3;
+    const VIEW_GROUPS: u16 = 1 << 4;
+    const VIEW_ACLS: u16 = 1 << 5;
+    const ALTER_ACLS: u16 = 1 << 6;
+    const ALTER_USERS: u16 = 1 << 7;
+    const VIEW_QUOTAS: u16 = 1 << 8;
+    const ALTER_QUOTAS: u16 = 1 << 9;
+    const VIEW_LOG_DIRS: u16 = 1 << 10;
+
+    const fn contains(self, capability: u16) -> bool {
+        self.0 & capability != 0
+    }
+
+    #[must_use]
+    pub const fn can_view_topics(self) -> bool {
+        self.contains(Self::VIEW_TOPICS)
+    }
+    #[must_use]
+    pub const fn can_create_topics(self) -> bool {
+        self.contains(Self::CREATE_TOPICS)
+    }
+    #[must_use]
+    pub const fn can_alter_topics(self) -> bool {
+        self.contains(Self::ALTER_TOPICS)
+    }
+    #[must_use]
+    pub const fn can_delete_topics(self) -> bool {
+        self.contains(Self::DELETE_TOPICS)
+    }
+    #[must_use]
+    pub const fn can_view_groups(self) -> bool {
+        self.contains(Self::VIEW_GROUPS)
+    }
+    #[must_use]
+    pub const fn can_view_acls(self) -> bool {
+        self.contains(Self::VIEW_ACLS)
+    }
+    #[must_use]
+    pub const fn can_alter_acls(self) -> bool {
+        self.contains(Self::ALTER_ACLS)
+    }
+    #[must_use]
+    pub const fn can_alter_users(self) -> bool {
+        self.contains(Self::ALTER_USERS)
+    }
+    #[must_use]
+    pub const fn can_view_quotas(self) -> bool {
+        self.contains(Self::VIEW_QUOTAS)
+    }
+    #[must_use]
+    pub const fn can_alter_quotas(self) -> bool {
+        self.contains(Self::ALTER_QUOTAS)
+    }
+    #[must_use]
+    pub const fn can_view_log_dirs(self) -> bool {
+        self.contains(Self::VIEW_LOG_DIRS)
+    }
 }
 
 #[must_use]
@@ -39,20 +89,58 @@ fn derive_capabilities_for_optional_host(
         has_effective_permission(principal, peer_host, entries, resource_type, operation)
     };
 
-    Capabilities {
-        can_view_topics: effective(ResourceType::Topic, AclOperation::Describe),
-        can_create_topics: effective(ResourceType::Cluster, AclOperation::Create),
-        can_alter_topics: effective(ResourceType::Topic, AclOperation::Alter)
+    let mut bits = 0;
+    let mut grant = |capability, granted| {
+        if granted {
+            bits |= capability;
+        }
+    };
+    grant(
+        Capabilities::VIEW_TOPICS,
+        effective(ResourceType::Topic, AclOperation::Describe),
+    );
+    grant(
+        Capabilities::CREATE_TOPICS,
+        effective(ResourceType::Cluster, AclOperation::Create),
+    );
+    grant(
+        Capabilities::ALTER_TOPICS,
+        effective(ResourceType::Topic, AclOperation::Alter)
             || effective(ResourceType::Topic, AclOperation::AlterConfigs),
-        can_delete_topics: effective(ResourceType::Topic, AclOperation::Delete),
-        can_view_groups: effective(ResourceType::Group, AclOperation::Describe),
-        can_view_acls: effective(ResourceType::Cluster, AclOperation::Describe),
-        can_alter_acls: effective(ResourceType::Cluster, AclOperation::Alter),
-        can_alter_users: effective(ResourceType::Cluster, AclOperation::Alter),
-        can_view_quotas: effective(ResourceType::Cluster, AclOperation::Describe),
-        can_alter_quotas: effective(ResourceType::Cluster, AclOperation::Alter),
-        can_view_log_dirs: effective(ResourceType::Cluster, AclOperation::Describe),
-    }
+    );
+    grant(
+        Capabilities::DELETE_TOPICS,
+        effective(ResourceType::Topic, AclOperation::Delete),
+    );
+    grant(
+        Capabilities::VIEW_GROUPS,
+        effective(ResourceType::Group, AclOperation::Describe),
+    );
+    grant(
+        Capabilities::VIEW_ACLS,
+        effective(ResourceType::Cluster, AclOperation::Describe),
+    );
+    grant(
+        Capabilities::ALTER_ACLS,
+        effective(ResourceType::Cluster, AclOperation::Alter),
+    );
+    grant(
+        Capabilities::ALTER_USERS,
+        effective(ResourceType::Cluster, AclOperation::Alter),
+    );
+    grant(
+        Capabilities::VIEW_QUOTAS,
+        effective(ResourceType::Cluster, AclOperation::Describe),
+    );
+    grant(
+        Capabilities::ALTER_QUOTAS,
+        effective(ResourceType::Cluster, AclOperation::Alter),
+    );
+    grant(
+        Capabilities::VIEW_LOG_DIRS,
+        effective(ResourceType::Cluster, AclOperation::Describe),
+    );
+    Capabilities(bits)
 }
 
 fn is_for_principal_and_host(entry: &AclEntry, principal: &str, peer_host: Option<&str>) -> bool {

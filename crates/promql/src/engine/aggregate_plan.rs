@@ -201,7 +201,6 @@ impl<S: MetricStore> PromqlEngine<S> {
     /// - a non-param op (handled by [`Self::plan_simple_aggregate_expr`]),
     /// - an inner expression the recursive planner cannot evaluate, or a
     ///   histogram-bearing inner.
-    #[allow(clippy::too_many_lines)]
     pub(super) async fn plan_param_aggregate_expr(
         &self,
         tenant: &str,

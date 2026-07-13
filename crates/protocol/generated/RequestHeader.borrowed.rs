@@ -14,7 +14,8 @@ pub const MIN_VERSION: i16 = 1;
 pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 2;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -26,6 +27,10 @@ pub struct RequestHeader<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl RequestHeader<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::request_header::RequestHeader {
         crate::owned::request_header::RequestHeader {
             request_api_key: (self.request_api_key),
@@ -57,9 +62,9 @@ impl Encode for RequestHeader<'_> {
             {
                 let flex = false;
                 if flex {
-                    put_compact_nullable_string(buf, self.client_id);
+                    let () = put_compact_nullable_string(buf, self.client_id);
                 } else {
-                    put_nullable_string(buf, self.client_id);
+                    let () = put_nullable_string(buf, self.client_id);
                 }
             }
         }

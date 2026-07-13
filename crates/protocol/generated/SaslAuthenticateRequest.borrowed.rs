@@ -9,7 +9,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 2;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -18,6 +19,10 @@ pub struct SaslAuthenticateRequest<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl SaslAuthenticateRequest<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::sasl_authenticate_request::SaslAuthenticateRequest {
         crate::owned::sasl_authenticate_request::SaslAuthenticateRequest {
             auth_bytes: Bytes::copy_from_slice(self.auth_bytes),
@@ -36,9 +41,9 @@ impl Encode for SaslAuthenticateRequest<'_> {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_bytes(buf, self.auth_bytes);
+                let () = put_compact_bytes(buf, self.auth_bytes);
             } else {
-                put_bytes(buf, self.auth_bytes);
+                let () = put_bytes(buf, self.auth_bytes);
             }
         }
         if flex {

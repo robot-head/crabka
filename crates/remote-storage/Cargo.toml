@@ -18,7 +18,6 @@ categories = ["database-implementations", "filesystem"]
 workspace = true
 
 [dependencies]
-assert2 = { workspace = true }
 bytes = { workspace = true }
 crabka-ids = { version = "0.3.8", path = "../ids" }
 object_store = { workspace = true }
@@ -28,5 +27,6 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+assert2 = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

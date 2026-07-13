@@ -9,7 +9,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,7 +34,7 @@ impl Default for PartitionRecord {
     fn default() -> Self {
         Self {
             partition_id: -1i32,
-            topic_id: Default::default(),
+            topic_id: crate::primitives::uuid::Uuid::default(),
             replicas: Vec::new(),
             isr: Vec::new(),
             removing_replicas: Vec::new(),
@@ -45,11 +46,15 @@ impl Default for PartitionRecord {
             leader_recovery_state: 0i8,
             eligible_leader_replicas: None,
             last_known_elr: None,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl PartitionRecord {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::partition_record::PartitionRecord {
         crate::owned::partition_record::PartitionRecord {
             partition_id: (self.partition_id),
@@ -68,21 +73,17 @@ impl PartitionRecord {
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
-}
-impl Encode for PartitionRecord {
-    fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
-        if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch(
-                "PartitionRecord version out of range",
-            ));
-        }
-        let flex = is_flexible(version);
+    fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
             put_i32(buf, self.partition_id);
         }
+    }
+    fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
             crate::primitives::uuid::put_uuid(buf, self.topic_id);
         }
+    }
+    fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if version >= 0 {
             {
                 crate::primitives::array::put_array_len(buf, (self.replicas).len(), flex);
@@ -91,6 +92,8 @@ impl Encode for PartitionRecord {
                 }
             }
         }
+    }
+    fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if version >= 0 {
             {
                 crate::primitives::array::put_array_len(buf, (self.isr).len(), flex);
@@ -99,6 +102,8 @@ impl Encode for PartitionRecord {
                 }
             }
         }
+    }
+    fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if version >= 0 {
             {
                 crate::primitives::array::put_array_len(buf, (self.removing_replicas).len(), flex);
@@ -107,6 +112,8 @@ impl Encode for PartitionRecord {
                 }
             }
         }
+    }
+    fn encode_field_5<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if version >= 0 {
             {
                 crate::primitives::array::put_array_len(buf, (self.adding_replicas).len(), flex);
@@ -115,15 +122,23 @@ impl Encode for PartitionRecord {
                 }
             }
         }
+    }
+    fn encode_field_6<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
             put_i32(buf, self.leader);
         }
+    }
+    fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
             put_i32(buf, self.leader_epoch);
         }
+    }
+    fn encode_field_8<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
             put_i32(buf, self.partition_epoch);
         }
+    }
+    fn encode_field_9<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if version >= 1 {
             {
                 crate::primitives::array::put_array_len(buf, (self.directories).len(), flex);
@@ -132,16 +147,18 @@ impl Encode for PartitionRecord {
                 }
             }
         }
+    }
+    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {
         if flex {
             let mut tagged = WriteTaggedFields::new();
-            if !(self.leader_recovery_state == 0i8) {
+            if self.leader_recovery_state != 0i8 {
                 let payload = encode_to_bytes(1, |b| {
                     put_i8(b, self.leader_recovery_state);
                     Ok(())
                 });
                 tagged.add(0, payload);
             }
-            if !(self.eligible_leader_replicas.is_none()) {
+            if self.eligible_leader_replicas.is_some() {
                 let payload = encode_to_bytes(
                     {
                         let opt: Option<&Vec<_>> = (self.eligible_leader_replicas).as_ref();
@@ -167,7 +184,7 @@ impl Encode for PartitionRecord {
                 );
                 tagged.add(1, payload);
             }
-            if !(self.last_known_elr.is_none()) {
+            if self.last_known_elr.is_some() {
                 let payload = encode_to_bytes(
                     {
                         let opt: Option<&Vec<_>> = (self.last_known_elr).as_ref();
@@ -195,6 +212,242 @@ impl Encode for PartitionRecord {
             }
             tagged.write(buf, &self.unknown_tagged_fields);
         }
+    }
+    fn decode_field_0(
+        out: &mut Self,
+        buf: &mut &[u8],
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.partition_id = get_i32(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_1(
+        out: &mut Self,
+        buf: &mut &[u8],
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.topic_id = crate::primitives::uuid::get_uuid(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_2(
+        out: &mut Self,
+        buf: &mut &[u8],
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.replicas = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(get_i32(buf)?);
+                }
+                v
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_3(
+        out: &mut Self,
+        buf: &mut &[u8],
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.isr = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(get_i32(buf)?);
+                }
+                v
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_4(
+        out: &mut Self,
+        buf: &mut &[u8],
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.removing_replicas = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(get_i32(buf)?);
+                }
+                v
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_5(
+        out: &mut Self,
+        buf: &mut &[u8],
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.adding_replicas = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(get_i32(buf)?);
+                }
+                v
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_6(
+        out: &mut Self,
+        buf: &mut &[u8],
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.leader = get_i32(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_7(
+        out: &mut Self,
+        buf: &mut &[u8],
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.leader_epoch = get_i32(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_8(
+        out: &mut Self,
+        buf: &mut &[u8],
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.partition_epoch = get_i32(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_9(
+        out: &mut Self,
+        buf: &mut &[u8],
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 1 {
+            out.directories = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(crate::primitives::uuid::get_uuid(buf)?);
+                }
+                v
+            };
+        }
+        Ok(())
+    }
+    fn decode_tagged_fields(
+        out: &mut Self,
+        buf: &mut &[u8],
+        _version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if flex {
+            let mut tag_leader_recovery_state = None;
+            let mut tag_eligible_leader_replicas = None;
+            let mut tag_last_known_elr = None;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |tag, payload| match tag {
+                0 => {
+                    tag_leader_recovery_state = Some({
+                        let b: &mut &[u8] = payload;
+                        get_i8(b)?
+                    });
+                    Ok(true)
+                }
+                1 => {
+                    tag_eligible_leader_replicas = Some({
+                        let b: &mut &[u8] = payload;
+                        {
+                            let opt = crate::primitives::array::get_nullable_array_len(b, flex)?;
+                            match opt {
+                                None => None,
+                                Some(n) => {
+                                    let mut v = Vec::with_capacity(n);
+                                    for _ in 0..n {
+                                        v.push(get_i32(b)?);
+                                    }
+                                    Some(v)
+                                }
+                            }
+                        }
+                    });
+                    Ok(true)
+                }
+                2 => {
+                    tag_last_known_elr = Some({
+                        let b: &mut &[u8] = payload;
+                        {
+                            let opt = crate::primitives::array::get_nullable_array_len(b, flex)?;
+                            match opt {
+                                None => None,
+                                Some(n) => {
+                                    let mut v = Vec::with_capacity(n);
+                                    for _ in 0..n {
+                                        v.push(get_i32(b)?);
+                                    }
+                                    Some(v)
+                                }
+                            }
+                        }
+                    });
+                    Ok(true)
+                }
+                _ => Ok(false),
+            })?;
+            if let Some(v) = tag_leader_recovery_state {
+                out.leader_recovery_state = v;
+            }
+            if let Some(v) = tag_eligible_leader_replicas {
+                out.eligible_leader_replicas = v;
+            }
+            if let Some(v) = tag_last_known_elr {
+                out.last_known_elr = v;
+            }
+        }
+        Ok(())
+    }
+}
+impl Encode for PartitionRecord {
+    fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
+        if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
+            return Err(ProtocolError::SchemaMismatch(
+                "PartitionRecord version out of range",
+            ));
+        }
+        let flex = is_flexible(version);
+        self.encode_field_0(buf, version, flex);
+        self.encode_field_1(buf, version, flex);
+        self.encode_field_2(buf, version, flex);
+        self.encode_field_3(buf, version, flex);
+        self.encode_field_4(buf, version, flex);
+        self.encode_field_5(buf, version, flex);
+        self.encode_field_6(buf, version, flex);
+        self.encode_field_7(buf, version, flex);
+        self.encode_field_8(buf, version, flex);
+        self.encode_field_9(buf, version, flex);
+        self.encode_tagged_fields(buf, version, flex);
         Ok(())
     }
     fn encoded_len(&self, version: i16) -> usize {
@@ -260,10 +513,10 @@ impl Encode for PartitionRecord {
         }
         if flex {
             let mut known_pairs: Vec<(u32, usize)> = Vec::new();
-            if !(self.leader_recovery_state == 0i8) {
+            if self.leader_recovery_state != 0i8 {
                 known_pairs.push((0, 1));
             }
-            if !(self.eligible_leader_replicas.is_none()) {
+            if self.eligible_leader_replicas.is_some() {
                 known_pairs.push((1, {
                     let opt: Option<&Vec<_>> = (self.eligible_leader_replicas).as_ref();
                     let prefix = crate::primitives::array::nullable_array_len_prefix_len(
@@ -274,7 +527,7 @@ impl Encode for PartitionRecord {
                     prefix + body
                 }));
             }
-            if !(self.last_known_elr.is_none()) {
+            if self.last_known_elr.is_some() {
                 known_pairs.push((2, {
                     let opt: Option<&Vec<_>> = (self.last_known_elr).as_ref();
                     let prefix = crate::primitives::array::nullable_array_len_prefix_len(
@@ -299,133 +552,17 @@ impl<'de> DecodeBorrow<'de> for PartitionRecord {
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 {
-            out.partition_id = get_i32(buf)?;
-        }
-        if version >= 0 {
-            out.topic_id = crate::primitives::uuid::get_uuid(buf)?;
-        }
-        if version >= 0 {
-            out.replicas = {
-                let n = crate::primitives::array::get_array_len(buf, flex)?;
-                let mut v = Vec::with_capacity(n);
-                for _ in 0..n {
-                    v.push(get_i32(buf)?);
-                }
-                v
-            };
-        }
-        if version >= 0 {
-            out.isr = {
-                let n = crate::primitives::array::get_array_len(buf, flex)?;
-                let mut v = Vec::with_capacity(n);
-                for _ in 0..n {
-                    v.push(get_i32(buf)?);
-                }
-                v
-            };
-        }
-        if version >= 0 {
-            out.removing_replicas = {
-                let n = crate::primitives::array::get_array_len(buf, flex)?;
-                let mut v = Vec::with_capacity(n);
-                for _ in 0..n {
-                    v.push(get_i32(buf)?);
-                }
-                v
-            };
-        }
-        if version >= 0 {
-            out.adding_replicas = {
-                let n = crate::primitives::array::get_array_len(buf, flex)?;
-                let mut v = Vec::with_capacity(n);
-                for _ in 0..n {
-                    v.push(get_i32(buf)?);
-                }
-                v
-            };
-        }
-        if version >= 0 {
-            out.leader = get_i32(buf)?;
-        }
-        if version >= 0 {
-            out.leader_epoch = get_i32(buf)?;
-        }
-        if version >= 0 {
-            out.partition_epoch = get_i32(buf)?;
-        }
-        if version >= 1 {
-            out.directories = {
-                let n = crate::primitives::array::get_array_len(buf, flex)?;
-                let mut v = Vec::with_capacity(n);
-                for _ in 0..n {
-                    v.push(crate::primitives::uuid::get_uuid(buf)?);
-                }
-                v
-            };
-        }
-        if flex {
-            let mut tag_leader_recovery_state = None;
-            let mut tag_eligible_leader_replicas = None;
-            let mut tag_last_known_elr = None;
-            out.unknown_tagged_fields = read_tagged_fields(buf, |tag, payload| match tag {
-                0 => {
-                    tag_leader_recovery_state = Some({
-                        let b: &mut &[u8] = payload;
-                        get_i8(b)?
-                    });
-                    Ok(true)
-                }
-                1 => {
-                    tag_eligible_leader_replicas = Some({
-                        let b: &mut &[u8] = payload;
-                        {
-                            let opt = crate::primitives::array::get_nullable_array_len(b, flex)?;
-                            match opt {
-                                None => None,
-                                Some(n) => {
-                                    let mut v = Vec::with_capacity(n);
-                                    for _ in 0..n {
-                                        v.push(get_i32(b)?);
-                                    }
-                                    Some(v)
-                                }
-                            }
-                        }
-                    });
-                    Ok(true)
-                }
-                2 => {
-                    tag_last_known_elr = Some({
-                        let b: &mut &[u8] = payload;
-                        {
-                            let opt = crate::primitives::array::get_nullable_array_len(b, flex)?;
-                            match opt {
-                                None => None,
-                                Some(n) => {
-                                    let mut v = Vec::with_capacity(n);
-                                    for _ in 0..n {
-                                        v.push(get_i32(b)?);
-                                    }
-                                    Some(v)
-                                }
-                            }
-                        }
-                    });
-                    Ok(true)
-                }
-                _ => Ok(false),
-            })?;
-            if let Some(v) = tag_leader_recovery_state {
-                out.leader_recovery_state = v;
-            }
-            if let Some(v) = tag_eligible_leader_replicas {
-                out.eligible_leader_replicas = v;
-            }
-            if let Some(v) = tag_last_known_elr {
-                out.last_known_elr = v;
-            }
-        }
+        Self::decode_field_0(&mut out, buf, version, flex)?;
+        Self::decode_field_1(&mut out, buf, version, flex)?;
+        Self::decode_field_2(&mut out, buf, version, flex)?;
+        Self::decode_field_3(&mut out, buf, version, flex)?;
+        Self::decode_field_4(&mut out, buf, version, flex)?;
+        Self::decode_field_5(&mut out, buf, version, flex)?;
+        Self::decode_field_6(&mut out, buf, version, flex)?;
+        Self::decode_field_7(&mut out, buf, version, flex)?;
+        Self::decode_field_8(&mut out, buf, version, flex)?;
+        Self::decode_field_9(&mut out, buf, version, flex)?;
+        Self::decode_tagged_fields(&mut out, buf, version, flex)?;
         Ok(out)
     }
 }

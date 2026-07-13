@@ -9,6 +9,9 @@ use crabka_pprof::PprofProfile;
 use crate::{error::ProfilesError, ingest::RawProfile, wire::pb};
 
 /// Gunzip a gzipped body with an output-size cap.
+///
+/// # Errors
+/// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
 pub fn gunzip(body: &[u8], max_output: usize) -> Result<Vec<u8>, ProfilesError> {
     let mut decoder = flate2::read::GzDecoder::new(body);
     let mut out = Vec::new();
@@ -31,6 +34,9 @@ pub fn gunzip(body: &[u8], max_output: usize) -> Result<Vec<u8>, ProfilesError> 
 }
 
 /// Decode a `push.v1` `PushRequest` into per-(series, sample) `RawProfile`s.
+///
+/// # Errors
+/// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
 pub fn decode_push(
     req: &pb::push::v1::PushRequest,
     max_decompressed: usize,
@@ -66,6 +72,8 @@ pub fn decode_push(
 mod tests {
     use std::io::Write;
 
+    use assert2::assert;
+
     use super::*;
     use crate::wire::pb;
 
@@ -79,8 +87,8 @@ mod tests {
     fn gunzip_round_trips_and_caps() {
         let raw = b"the quick brown fox";
         let gz = gzip(raw);
-        assert2::assert!(gunzip(&gz, 1 << 20).unwrap() == raw);
-        assert2::assert!(gunzip(&gz, 4).is_err());
+        assert!(gunzip(&gz, 1 << 20).unwrap() == raw);
+        assert!(gunzip(&gz, 4).is_err());
     }
 
     #[test]
@@ -108,8 +116,8 @@ mod tests {
 
         let out = decode_push(&req, 1 << 20).unwrap();
 
-        assert2::assert!(out.len() == 1);
-        assert2::assert!(out[0].labels.get("__name__") == Some("process_cpu"));
+        assert!(out.len() == 1);
+        assert!(out[0].labels.get("__name__") == Some("process_cpu"));
     }
 
     #[test]
@@ -137,7 +145,7 @@ mod tests {
 
         let out = decode_push(&req, 1 << 20).unwrap();
 
-        assert2::assert!(out.len() == 1);
-        assert2::assert!(out[0].labels.get("__profile_id__") == Some("profile-a"));
+        assert!(out.len() == 1);
+        assert!(out[0].labels.get("__profile_id__") == Some("profile-a"));
     }
 }

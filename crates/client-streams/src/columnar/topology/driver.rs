@@ -35,7 +35,6 @@ impl<'t> ColumnarTestDriver<'t> {
     /// Returns the codec/operator error string if processing the batch fails.
     // Takes the batch by value (the driver owns piped input, like `TopologyTestDriver`);
     // `run_batch` only needs a borrow, hence the lint suppression.
-    #[allow(clippy::needless_pass_by_value)]
     pub fn pipe_batch(&mut self, topic: &str, records: Vec<ConsumedRecord>) -> Result<(), String> {
         let produced = self
             .built

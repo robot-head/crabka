@@ -2,15 +2,18 @@
 //! record + a oneshot tx; the sender drains in-flight batches and
 //! resolves the oneshots from the `ProduceResponse`.
 
-use std::{collections::VecDeque, time::Instant};
+use std::{collections::VecDeque, sync::Arc, time::Instant};
 
 use bytes::Bytes;
-use tokio::sync::oneshot;
+use dashmap::DashMap;
+use tokio::sync::{Mutex, oneshot};
 
 use crate::{
     error::ProducerError,
     record::{Header, RecordMetadata},
 };
+
+pub(crate) type AccumulatorMap = Arc<DashMap<(String, i32), Arc<Mutex<Accumulator>>>>;
 
 /// A record waiting inside an in-progress batch.
 #[derive(Debug)]

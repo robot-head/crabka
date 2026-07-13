@@ -13,6 +13,7 @@
 
 #![allow(dead_code)]
 
+use assert2::assert;
 pub mod fake_admin;
 pub mod fake_rebalancer;
 
@@ -468,7 +469,6 @@ pub fn fake_keystore_secret(sname: &str, namespace: &str) -> serde_json::Value {
 /// Full happy-path FIFO rule list for a Kafka reconcile of cluster `name` in
 /// `namespace`. Covers headless-service, cluster-id, cluster-CA, clients-CA,
 /// pool-list, broker-keystore, config-map, pool owner-ref, and status PATCH.
-#[allow(clippy::too_many_lines)]
 pub fn happy_path_rules(
     name: &str,
     namespace: &str,
@@ -707,8 +707,8 @@ pub fn assert_ready_false_with_reason(
         .iter()
         .find(|c| c["type"] == "Ready")
         .unwrap_or_else(|| panic!("Ready condition present; body = {body}"));
-    assert2::assert!(ready["status"] == "False");
-    assert2::assert!(ready["reason"] == expected_reason);
+    assert!(ready["status"] == "False", "body = {body}");
+    assert!(ready["reason"] == expected_reason, "body = {body}");
 }
 
 /// Extract the `broker-0.toml` string from the `ConfigMap` PATCH captured

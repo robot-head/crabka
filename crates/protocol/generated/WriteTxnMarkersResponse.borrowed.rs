@@ -12,7 +12,8 @@ pub const MIN_VERSION: i16 = 1;
 pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 1;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -21,6 +22,10 @@ pub struct WriteTxnMarkersResponse<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl WriteTxnMarkersResponse<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::write_txn_markers_response::WriteTxnMarkersResponse {
         crate::owned::write_txn_markers_response::WriteTxnMarkersResponse {
             markers: (self.markers)
@@ -119,6 +124,10 @@ pub struct WritableTxnMarkerResult<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl WritableTxnMarkerResult<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::write_txn_markers_response::WritableTxnMarkerResult {
         crate::owned::write_txn_markers_response::WritableTxnMarkerResult {
             producer_id: (self.producer_id),
@@ -215,6 +224,10 @@ pub struct WritableTxnMarkerTopicResult<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl WritableTxnMarkerTopicResult<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::write_txn_markers_response::WritableTxnMarkerTopicResult {
@@ -233,9 +246,9 @@ impl Encode for WritableTxnMarkerTopicResult<'_> {
         let flex = version >= 1;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name);
+                let () = put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name);
+                let () = put_string(buf, self.name);
             }
         }
         if version >= 0 {
@@ -330,6 +343,10 @@ pub struct WritableTxnMarkerPartitionResult {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl WritableTxnMarkerPartitionResult {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::write_txn_markers_response::WritableTxnMarkerPartitionResult {

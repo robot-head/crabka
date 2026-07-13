@@ -12,7 +12,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 1;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,11 +29,15 @@ impl Default for AlterPartitionReassignmentsRequest<'_> {
             timeout_ms: 60_000i32,
             allow_replication_factor_change: true,
             topics: Vec::new(),
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl AlterPartitionReassignmentsRequest<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::alter_partition_reassignments_request::AlterPartitionReassignmentsRequest
@@ -157,6 +162,10 @@ pub struct ReassignableTopic<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl ReassignableTopic<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::alter_partition_reassignments_request::ReassignableTopic {
@@ -175,9 +184,9 @@ impl Encode for ReassignableTopic<'_> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name);
+                let () = put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name);
+                let () = put_string(buf, self.name);
             }
         }
         if version >= 0 {
@@ -270,6 +279,10 @@ pub struct ReassignablePartition {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl ReassignablePartition {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::alter_partition_reassignments_request::ReassignablePartition {

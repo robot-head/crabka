@@ -1,8 +1,5 @@
 // rustc 1.95 clippy ICEs on this file in the same places as elect_leaders.rs:
 // `clippy::pedantic` lints — annotate-snippets upstream bug.
-#![allow(clippy::pedantic)]
-#![allow(clippy::unnecessary_unwrap)]
-#![allow(clippy::type_complexity)]
 
 //! Log compaction end-to-end broker integration test.
 //!
@@ -17,6 +14,7 @@
 
 use std::{io, net::SocketAddr, time::Duration};
 
+use assert2::assert;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle, metrics::PartitionLabel};
 use crabka_protocol::{
@@ -135,20 +133,25 @@ async fn create_topic_with_configs(
         ..Default::default()
     };
 
-    const VERSION: i16 = 7; // flexible
+    let version: i16 = 7; // flexible
     let mut stream = TcpStream::connect(addr).await.expect("connect");
     let mut body = BytesMut::new();
-    req.encode(&mut body, VERSION).expect("encode CreateTopics");
-    let resp_bytes = round_trip(&mut stream, 19, VERSION, 1, true, &body)
+    req.encode(&mut body, version).expect("encode CreateTopics");
+    let resp_bytes = round_trip(&mut stream, 19, version, 1, true, &body)
         .await
         .expect("CreateTopics round-trip");
     let mut cur: &[u8] = &resp_bytes;
     let resp =
-        CreateTopicsResponse::decode(&mut cur, VERSION).expect("decode CreateTopicsResponse");
-    assert2::assert!((resp.topics.len(), resp.topics[0].error_code) == (1, 0));
+        CreateTopicsResponse::decode(&mut cur, version).expect("decode CreateTopicsResponse");
+    assert!(resp.topics.len() == 1);
+    assert!(
+        resp.topics[0].error_code == 0,
+        "CreateTopics({topic}) must succeed: {:?}",
+        resp.topics[0].error_message
+    );
 }
 
-/// Get topic_id via Metadata (needed for Produce/Fetch v9+).
+/// Get `topic_id` via Metadata (needed for Produce/Fetch v9+).
 async fn get_topic_id(addr: SocketAddr, topic: &str) -> Uuid {
     let req = MetadataRequest {
         topics: Some(vec![MetadataRequestTopic {
@@ -157,15 +160,15 @@ async fn get_topic_id(addr: SocketAddr, topic: &str) -> Uuid {
         }]),
         ..Default::default()
     };
-    const VERSION: i16 = 12; // flexible
+    let version: i16 = 12; // flexible
     let mut stream = TcpStream::connect(addr).await.expect("connect");
     let mut body = BytesMut::new();
-    req.encode(&mut body, VERSION).expect("encode Metadata");
-    let resp_bytes = round_trip(&mut stream, 3, VERSION, 1, true, &body)
+    req.encode(&mut body, version).expect("encode Metadata");
+    let resp_bytes = round_trip(&mut stream, 3, version, 1, true, &body)
         .await
         .expect("Metadata round-trip");
     let mut cur: &[u8] = &resp_bytes;
-    let resp = MetadataResponse::decode(&mut cur, VERSION).expect("decode MetadataResponse");
+    let resp = MetadataResponse::decode(&mut cur, version).expect("decode MetadataResponse");
     resp.topics
         .iter()
         .find(|t| t.name.as_deref() == Some(topic))
@@ -203,17 +206,21 @@ async fn produce_record(addr: SocketAddr, topic: &str, topic_id: Uuid, key: &[u8
         ..Default::default()
     };
 
-    const VERSION: i16 = 9; // flexible, pre-KIP-516 (no topic_id required on the wire at v9)
+    let version: i16 = 9; // flexible, pre-KIP-516 (no topic_id required on the wire at v9)
     let mut stream = TcpStream::connect(addr).await.expect("connect");
     let mut body = BytesMut::new();
-    req.encode(&mut body, VERSION).expect("encode Produce");
-    let resp_bytes = round_trip(&mut stream, 0, VERSION, 1, true, &body)
+    req.encode(&mut body, version).expect("encode Produce");
+    let resp_bytes = round_trip(&mut stream, 0, version, 1, true, &body)
         .await
         .expect("Produce round-trip");
     let mut cur: &[u8] = &resp_bytes;
-    let resp = ProduceResponse::decode(&mut cur, VERSION).expect("decode ProduceResponse");
+    let resp = ProduceResponse::decode(&mut cur, version).expect("decode ProduceResponse");
     let part = &resp.responses[0].partition_responses[0];
-    assert2::assert!(part.error_code == 0);
+    assert!(
+        part.error_code == 0,
+        "Produce must succeed: error_code={}",
+        part.error_code
+    );
 }
 
 /// A flattened record: key and value as plain byte vecs.
@@ -232,7 +239,7 @@ struct FlatRecord {
 /// advancing `fetch_offset` past the last batch we saw, until the broker
 /// returns no batch.
 async fn fetch_all(addr: SocketAddr, topic: &str, topic_id: Uuid) -> Vec<FlatRecord> {
-    const VERSION: i16 = 12; // flexible
+    let version: i16 = 12; // flexible
     let mut out: Vec<FlatRecord> = Vec::new();
     let mut next_offset: i64 = 0;
     loop {
@@ -256,17 +263,21 @@ async fn fetch_all(addr: SocketAddr, topic: &str, topic_id: Uuid) -> Vec<FlatRec
         };
         let mut stream = TcpStream::connect(addr).await.expect("connect");
         let mut body = BytesMut::new();
-        req.encode(&mut body, VERSION).expect("encode Fetch");
-        let resp_bytes = round_trip(&mut stream, 1, VERSION, 1, true, &body)
+        req.encode(&mut body, version).expect("encode Fetch");
+        let resp_bytes = round_trip(&mut stream, 1, version, 1, true, &body)
             .await
             .expect("Fetch round-trip");
         let mut cur: &[u8] = &resp_bytes;
-        let resp = FetchResponse::decode(&mut cur, VERSION).expect("decode FetchResponse");
+        let resp = FetchResponse::decode(&mut cur, version).expect("decode FetchResponse");
 
         let mut got_any = false;
         for topic_resp in &resp.responses {
             for part_resp in &topic_resp.partitions {
-                assert2::assert!(part_resp.error_code == 0);
+                assert!(
+                    part_resp.error_code == 0,
+                    "Fetch partition error: {}",
+                    part_resp.error_code
+                );
                 if let Some(batches) = part_resp.records.as_ref().and_then(|p| p.as_v2()) {
                     for batch in batches {
                         got_any = true;
@@ -292,6 +303,41 @@ async fn fetch_all(addr: SocketAddr, topic: &str, topic_id: Uuid) -> Vec<FlatRec
         }
     }
     out
+}
+
+fn assert_latest_records_survive(records: &[FlatRecord]) {
+    let distinct_keys: std::collections::BTreeSet<String> = records
+        .iter()
+        .map(|record| String::from_utf8(record.key.clone()).unwrap())
+        .filter(|key| key != "__pad__")
+        .collect();
+    assert!(
+        distinct_keys
+            == ["k1".to_string(), "k2".to_string(), "k3".to_string()]
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>(),
+        "k1, k2, k3 must all survive compaction; got: {distinct_keys:?}"
+    );
+
+    for key in ["k1", "k2", "k3"] {
+        let values_for_key: Vec<String> = records
+            .iter()
+            .filter(|record| record.key == key.as_bytes())
+            .map(|record| String::from_utf8(record.value.clone()).unwrap())
+            .collect();
+        let expected_latest = format!("v10-{key}");
+        assert!(
+            values_for_key.contains(&expected_latest),
+            "key {key} must have latest value {expected_latest}; got {values_for_key:?}"
+        );
+        for stale_round in 0..10u32 {
+            let stale = format!("v{stale_round}-{key}");
+            assert!(
+                !values_for_key.contains(&stale),
+                "key {key} must NOT retain stale value {stale}; got {values_for_key:?}"
+            );
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -450,38 +496,7 @@ async fn compaction_dedupes_via_native_client() {
     // Fetch all records from offset 0.
     let records = fetch_all(addr, "compacted", topic_id).await;
 
-    // Assert k1, k2, k3 all survive. The `__pad__` sentinel may also be
-    // present (it's used to force a segment roll) and is ignored here.
-    let distinct_keys: std::collections::BTreeSet<String> = records
-        .iter()
-        .map(|r| String::from_utf8(r.key.clone()).unwrap())
-        .filter(|k| k != "__pad__")
-        .collect();
-    assert2::assert!(
-        distinct_keys
-            == ["k1".to_string(), "k2".to_string(), "k3".to_string()]
-                .into_iter()
-                .collect::<std::collections::BTreeSet<_>>()
-    );
-
-    // For each key, assert:
-    //   - the latest value (v10-kN) is present
-    //   - no stale value (v0-kN .. v9-kN) survives
-    for key in ["k1", "k2", "k3"] {
-        let values_for_key: Vec<String> = records
-            .iter()
-            .filter(|r| r.key == key.as_bytes())
-            .map(|r| String::from_utf8(r.value.clone()).unwrap())
-            .collect();
-
-        let expected_latest = format!("v10-{key}");
-        assert2::assert!(values_for_key.contains(&expected_latest));
-
-        for stale_round in 0..10u32 {
-            let stale = format!("v{stale_round}-{key}");
-            assert2::assert!(!values_for_key.contains(&stale));
-        }
-    }
+    assert_latest_records_survive(&records);
 
     handle.shutdown().await;
 }

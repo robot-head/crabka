@@ -57,8 +57,11 @@ fn main() {
         );
     }
     let elapsed = start.elapsed().as_secs_f64();
-    #[allow(clippy::cast_precision_loss)]
-    let rate = n as f64 / elapsed;
+    let rate = n
+        .to_string()
+        .parse::<f64>()
+        .expect("usize is representable as finite f64")
+        / elapsed;
     eprintln!(
         "profile_streams: n={n} keys={keys} value={value_bytes}B | {rate:.0} rec/s in {elapsed:.2}s"
     );

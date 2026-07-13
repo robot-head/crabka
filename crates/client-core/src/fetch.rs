@@ -54,6 +54,18 @@ pub struct FetchedRecord {
     pub timestamp: i64,
 }
 
+/// Parameters for a single-partition fetch with an explicit isolation level.
+#[derive(Debug, Clone, Copy)]
+pub struct IsolatedFetch<'a> {
+    pub topic: &'a str,
+    pub topic_id: WireUuid,
+    pub partition: i32,
+    pub fetch_offset: i64,
+    pub max_wait_ms: i32,
+    pub partition_max_bytes: i32,
+    pub isolation_level: i8,
+}
+
 /// Fetch up to `partition_max_bytes` from `(topic, partition)` starting
 /// at `fetch_offset`, decoding every v2 `RecordBatch` into
 /// [`FetchedRecord`]s.
@@ -113,13 +125,15 @@ async fn fetch_partition_on<T: FetchTransport + ?Sized>(
     // Default to READ_UNCOMMITTED (isolation_level = 0): every record visible.
     fetch_partition_with_isolation_on(
         conn,
-        topic,
-        topic_id,
-        partition,
-        fetch_offset,
-        max_wait_ms,
-        partition_max_bytes,
-        0,
+        IsolatedFetch {
+            topic,
+            topic_id,
+            partition,
+            fetch_offset,
+            max_wait_ms,
+            partition_max_bytes,
+            isolation_level: 0,
+        },
     )
     .await
 }
@@ -135,87 +149,44 @@ async fn fetch_partition_on<T: FetchTransport + ?Sized>(
 ///
 /// Same as [`fetch_partition`].
 // cargo-mutants: thin wrapper over fetch_partition_with_isolation_on (tested core)
-#[allow(clippy::too_many_arguments)]
 #[cfg_attr(test, mutants::skip)]
 #[tracing::instrument(
     level = "debug",
     skip_all,
-    fields(topic = %topic, partition, fetch_offset, isolation_level),
+    fields(topic = %fetch.topic, partition = fetch.partition, fetch_offset = fetch.fetch_offset, isolation_level = fetch.isolation_level),
     err,
 )]
 pub async fn fetch_partition_with_isolation(
     conn: &Connection,
-    topic: &str,
-    topic_id: WireUuid,
-    partition: i32,
-    fetch_offset: i64,
-    max_wait_ms: i32,
-    partition_max_bytes: i32,
-    isolation_level: i8,
+    fetch: IsolatedFetch<'_>,
 ) -> Result<Vec<FetchedRecord>, ClientError> {
-    fetch_partition_with_isolation_on(
-        conn,
-        topic,
-        topic_id,
-        partition,
-        fetch_offset,
-        max_wait_ms,
-        partition_max_bytes,
-        isolation_level,
-    )
-    .await
+    fetch_partition_with_isolation_on(conn, fetch).await
 }
 
 /// `FetchTransport`-generic body of [`fetch_partition_with_isolation`]. Holds the
 /// build-request → send → decode-response logic so it is killable against a
 /// `mockall` `FetchTransport` without a live broker socket.
-#[allow(clippy::too_many_arguments)]
 async fn fetch_partition_with_isolation_on<T: FetchTransport + ?Sized>(
     conn: &T,
-    topic: &str,
-    topic_id: WireUuid,
-    partition: i32,
-    fetch_offset: i64,
-    max_wait_ms: i32,
-    partition_max_bytes: i32,
-    isolation_level: i8,
+    fetch: IsolatedFetch<'_>,
 ) -> Result<Vec<FetchedRecord>, ClientError> {
-    let resp = conn
-        .fetch(build_fetch_request(
-            topic,
-            topic_id,
-            partition,
-            fetch_offset,
-            max_wait_ms,
-            partition_max_bytes,
-            isolation_level,
-        ))
-        .await?;
-    decode_fetch_response(&resp, partition)
+    let resp = conn.fetch(build_fetch_request(fetch)).await?;
+    decode_fetch_response(&resp, fetch.partition)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn build_fetch_request(
-    topic: &str,
-    topic_id: WireUuid,
-    partition: i32,
-    fetch_offset: i64,
-    max_wait_ms: i32,
-    partition_max_bytes: i32,
-    isolation_level: i8,
-) -> FetchRequest {
+fn build_fetch_request(fetch: IsolatedFetch<'_>) -> FetchRequest {
     FetchRequest {
-        max_wait_ms,
+        max_wait_ms: fetch.max_wait_ms,
         min_bytes: 1,
         max_bytes: 50 * 1024 * 1024,
-        isolation_level,
+        isolation_level: fetch.isolation_level,
         topics: vec![FetchTopic {
-            topic: topic.to_string(),
-            topic_id,
+            topic: fetch.topic.to_string(),
+            topic_id: fetch.topic_id,
             partitions: vec![FetchPartition {
-                partition,
-                fetch_offset,
-                partition_max_bytes,
+                partition: fetch.partition,
+                fetch_offset: fetch.fetch_offset,
+                partition_max_bytes: fetch.partition_max_bytes,
                 ..Default::default()
             }],
             ..Default::default()
@@ -273,7 +244,7 @@ fn decode_fetch_response(
 
 #[cfg(test)]
 mod tests {
-
+    use assert2::assert;
     use crabka_protocol::{
         UnknownTaggedFields,
         owned::{
@@ -331,7 +302,7 @@ mod tests {
             ..Default::default()
         };
         let got = decode_fetch_response(&resp, 0).unwrap();
-        assert2::assert!(
+        assert!(
             got == vec![
                 FetchedRecord {
                     offset: 5,
@@ -352,9 +323,17 @@ mod tests {
     #[test]
     fn build_fetch_request_preserves_single_partition_settings() {
         let topic_id = WireUuid([7; 16]);
-        let req = build_fetch_request("orders", topic_id, 3, 123, 250, 64 * 1024, 1);
+        let req = build_fetch_request(IsolatedFetch {
+            topic: "orders",
+            topic_id,
+            partition: 3,
+            fetch_offset: 123,
+            max_wait_ms: 250,
+            partition_max_bytes: 64 * 1024,
+            isolation_level: 1,
+        });
 
-        assert2::assert!(
+        assert!(
             req == FetchRequest {
                 replica_id: -1,
                 max_wait_ms: 250,
@@ -412,7 +391,7 @@ mod tests {
             ..Default::default()
         };
         let err = decode_fetch_response(&resp, 0).unwrap_err();
-        assert2::assert!(matches!(err, ClientError::Server { error_code: 1 }));
+        assert!(matches!(err, ClientError::Server { error_code: 1 }));
     }
 
     // ── socket-free end-to-end drive via MockFetchTransport ──────────────────
@@ -463,7 +442,7 @@ mod tests {
         let got = super::fetch_partition_on(&transport, "t", topic_id, 2, 5, 250, 4096)
             .await
             .unwrap();
-        assert2::assert!(
+        assert!(
             got == vec![
                 FetchedRecord {
                     offset: 5,
@@ -491,11 +470,21 @@ mod tests {
             .withf(|req: &FetchRequest| req.isolation_level == 1)
             .returning(|_req| Ok(FetchResponse::default()));
 
-        let got =
-            super::fetch_partition_with_isolation_on(&transport, "t", topic_id, 0, 0, 100, 1024, 1)
-                .await
-                .unwrap();
-        assert2::assert!(got.is_empty());
+        let got = super::fetch_partition_with_isolation_on(
+            &transport,
+            IsolatedFetch {
+                topic: "t",
+                topic_id,
+                partition: 0,
+                fetch_offset: 0,
+                max_wait_ms: 100,
+                partition_max_bytes: 1024,
+                isolation_level: 1,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(got.is_empty());
     }
 
     /// A transport error from the seam propagates unchanged.
@@ -509,7 +498,7 @@ mod tests {
         let err = super::fetch_partition_on(&transport, "t", WireUuid([0; 16]), 0, 0, 100, 1024)
             .await
             .unwrap_err();
-        assert2::assert!(matches!(err, ClientError::Disconnected));
+        assert!(matches!(err, ClientError::Disconnected));
     }
 
     /// A partition-level error code surfaces as `ClientError::Server` through the
@@ -535,6 +524,6 @@ mod tests {
         let err = super::fetch_partition_on(&transport, "t", WireUuid([0; 16]), 0, 0, 100, 1024)
             .await
             .unwrap_err();
-        assert2::assert!(matches!(err, ClientError::Server { error_code: 1 }));
+        assert!(matches!(err, ClientError::Server { error_code: 1 }));
     }
 }

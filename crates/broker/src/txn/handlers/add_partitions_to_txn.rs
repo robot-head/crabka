@@ -78,46 +78,46 @@ pub(crate) async fn handle(
     let txnv = crate::txn::version::resolve_txn_version(&image);
     coord.refresh_leader_partitions(&image).await;
 
+    let dependencies = HandlerDependencies {
+        coord: &coord,
+        image: &image,
+        txnv,
+        authorizer,
+        principal: ctx.principal,
+        peer: ctx.peer,
+    };
     if version >= 4 {
-        handle_v4(
-            &coord,
-            version,
-            &req,
-            &image,
-            txnv,
-            authorizer,
-            ctx.principal,
-            ctx.peer,
-        )
-        .await
+        handle_v4(&dependencies, version, &req).await
     } else {
-        handle_v3(
-            &coord,
-            version,
-            &req,
-            &image,
-            txnv,
-            authorizer,
-            ctx.principal,
-            ctx.peer,
-        )
-        .await
+        handle_v3(&dependencies, version, &req).await
     }
+}
+
+#[derive(Clone, Copy)]
+struct HandlerDependencies<'a> {
+    coord: &'a crate::txn::coordinator::TxnCoordinator,
+    image: &'a MetadataImage,
+    txnv: crate::txn::version::TxnVersion,
+    authorizer: &'a dyn Authorizer,
+    principal: &'a Principal,
+    peer: &'a SocketAddr,
 }
 
 // ── v4+ path ─────────────────────────────────────────────────────────────────
 
-#[allow(clippy::too_many_arguments)]
 async fn handle_v4(
-    coord: &crate::txn::coordinator::TxnCoordinator,
+    dependencies: &HandlerDependencies<'_>,
     version: i16,
     req: &AddPartitionsToTxnRequest,
-    image: &MetadataImage,
-    txnv: crate::txn::version::TxnVersion,
-    authorizer: &dyn Authorizer,
-    principal: &Principal,
-    peer: &SocketAddr,
 ) -> Result<Bytes, BrokerError> {
+    let &HandlerDependencies {
+        coord,
+        image,
+        txnv,
+        authorizer,
+        principal,
+        peer,
+    } = dependencies;
     let mut results_by_transaction: Vec<AddPartitionsToTxnResult> =
         Vec::with_capacity(req.transactions.len());
 
@@ -137,13 +137,15 @@ async fn handle_v4(
             let denied = denied_topics(authorizer, image, principal, peer, &txn.topics);
             process_one_txn(
                 coord,
-                txn.transactional_id.as_str(),
-                crabka_log::ProducerId(txn.producer_id),
-                txn.producer_epoch,
-                &txn.topics,
-                &denied,
-                txnv,
-                txn.verify_only,
+                TransactionRequest {
+                    transactional_id: txn.transactional_id.as_str(),
+                    producer_id: crabka_log::ProducerId(txn.producer_id),
+                    producer_epoch: txn.producer_epoch,
+                    topics: &txn.topics,
+                    denied: &denied,
+                    txnv,
+                    verify_only: txn.verify_only,
+                },
             )
             .await
         };
@@ -163,17 +165,19 @@ async fn handle_v4(
 
 // ── v0-3 path ─────────────────────────────────────────────────────────────────
 
-#[allow(clippy::too_many_arguments)]
 async fn handle_v3(
-    coord: &crate::txn::coordinator::TxnCoordinator,
+    dependencies: &HandlerDependencies<'_>,
     version: i16,
     req: &AddPartitionsToTxnRequest,
-    image: &MetadataImage,
-    txnv: crate::txn::version::TxnVersion,
-    authorizer: &dyn Authorizer,
-    principal: &Principal,
-    peer: &SocketAddr,
 ) -> Result<Bytes, BrokerError> {
+    let &HandlerDependencies {
+        coord,
+        image,
+        txnv,
+        authorizer,
+        principal,
+        peer,
+    } = dependencies;
     // ── ACL preamble: Write on TransactionalId ────────────────
     let tid_req = AuthorizationRequest {
         principal,
@@ -191,14 +195,16 @@ async fn handle_v3(
         let denied = denied_topics(authorizer, image, principal, peer, &req.v3_and_below_topics);
         process_one_txn(
             coord,
-            req.v3_and_below_transactional_id.as_str(),
-            crabka_log::ProducerId(req.v3_and_below_producer_id),
-            req.v3_and_below_producer_epoch,
-            &req.v3_and_below_topics,
-            &denied,
-            txnv,
-            // v0-3 has no `verify_only` field (predates KIP-890); always add.
-            false,
+            TransactionRequest {
+                transactional_id: req.v3_and_below_transactional_id.as_str(),
+                producer_id: crabka_log::ProducerId(req.v3_and_below_producer_id),
+                producer_epoch: req.v3_and_below_producer_epoch,
+                topics: &req.v3_and_below_topics,
+                denied: &denied,
+                txnv,
+                // v0-3 has no `verify_only` field (predates KIP-890); always add.
+                verify_only: false,
+            },
         )
         .await
     };
@@ -246,19 +252,31 @@ fn denied_topics(
 /// Returns per-topic, per-partition result entries. Topics named in
 /// `denied` short-circuit with `TOPIC_AUTHORIZATION_FAILED`; the remaining
 /// topics go through the state-machine check and partition registration.
-#[allow(clippy::too_many_arguments)]
 // cargo-mutants: I/O over live txn state + partition registration
+struct TransactionRequest<'a> {
+    transactional_id: &'a str,
+    producer_id: crabka_log::ProducerId,
+    producer_epoch: i16,
+    topics: &'a [AddPartitionsToTxnTopic],
+    denied: &'a std::collections::HashSet<String>,
+    txnv: crate::txn::version::TxnVersion,
+    verify_only: bool,
+}
+
 #[cfg_attr(test, mutants::skip)]
 async fn process_one_txn(
     coord: &crate::txn::coordinator::TxnCoordinator,
-    tid: &str,
-    producer_id: crabka_log::ProducerId,
-    producer_epoch: i16,
-    topics: &[AddPartitionsToTxnTopic],
-    denied: &std::collections::HashSet<String>,
-    txnv: crate::txn::version::TxnVersion,
-    verify_only: bool,
+    request: TransactionRequest<'_>,
 ) -> Vec<AddPartitionsToTxnTopicResult> {
+    let TransactionRequest {
+        transactional_id: tid,
+        producer_id,
+        producer_epoch,
+        topics,
+        denied,
+        txnv,
+        verify_only,
+    } = request;
     // Topics allowed to proceed past the per-topic Write ACL gate.
     let allowed_topics: Vec<&AddPartitionsToTxnTopic> = topics
         .iter()
@@ -467,6 +485,7 @@ fn encode_response(resp: &AddPartitionsToTxnResponse, version: i16) -> Result<By
 mod tests {
     use std::{collections::HashSet, sync::Arc};
 
+    use assert2::assert;
     use crabka_protocol::owned::add_partitions_to_txn_request::AddPartitionsToTxnTransaction;
     use crabka_security::Principal;
 
@@ -488,8 +507,8 @@ mod tests {
             topic: "b".into(),
             partition: PartitionIndex(0),
         };
-        assert2::assert!(verify_partition_code(&e, &present) == codes::NONE);
-        assert2::assert!(verify_partition_code(&e, &absent) == codes::TRANSACTION_ABORTABLE);
+        assert!(verify_partition_code(&e, &present) == codes::NONE);
+        assert!(verify_partition_code(&e, &absent) == codes::TRANSACTION_ABORTABLE);
     }
 
     fn topic(name: &str, partitions: &[i32]) -> AddPartitionsToTxnTopic {
@@ -538,7 +557,7 @@ mod tests {
             ),
             topic_result("denied", &[(3, codes::TOPIC_AUTHORIZATION_FAILED)]),
         ];
-        assert2::assert!(rows == expected);
+        assert!(rows == expected);
     }
 
     #[test]
@@ -555,7 +574,7 @@ mod tests {
             ),
             topic_result("denied", &[(3, codes::TOPIC_AUTHORIZATION_FAILED)]),
         ];
-        assert2::assert!(rows == expected);
+        assert!(rows == expected);
     }
 
     #[test]
@@ -571,7 +590,7 @@ mod tests {
                 (5, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED),
             ],
         )];
-        assert2::assert!(rows == expected);
+        assert!(rows == expected);
     }
 
     crate::test_support::wire_helpers!(
@@ -592,7 +611,7 @@ mod tests {
         };
 
         let bytes = encode_response(&resp, 4).expect("encode response");
-        assert2::assert!(!bytes.is_empty());
+        assert!(!bytes.is_empty());
         let decoded = decode_response(&bytes, 4);
 
         let expected = AddPartitionsToTxnResponse {
@@ -606,7 +625,7 @@ mod tests {
             results_by_topic_v3_and_below: vec![],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
         };
-        assert2::assert!(decoded == expected);
+        assert!(decoded == expected);
     }
 
     #[test]
@@ -617,7 +636,7 @@ mod tests {
         };
 
         let bytes = encode_response(&resp, 3).expect("encode response");
-        assert2::assert!(!bytes.is_empty());
+        assert!(!bytes.is_empty());
         let decoded = decode_response(&bytes, 3);
 
         let expected = AddPartitionsToTxnResponse {
@@ -627,7 +646,7 @@ mod tests {
             results_by_topic_v3_and_below: vec![topic_result("alpha", &[(7, codes::NONE)])],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
         };
-        assert2::assert!(decoded == expected);
+        assert!(decoded == expected);
     }
 
     fn principal() -> Principal {
@@ -683,7 +702,7 @@ mod tests {
             results_by_topic_v3_and_below: vec![],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -726,7 +745,7 @@ mod tests {
             )],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 }

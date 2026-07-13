@@ -8,7 +8,8 @@ pub const MIN_VERSION: i16 = 2;
 pub const MAX_VERSION: i16 = 3;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -19,6 +20,10 @@ pub struct AlterPartitionResponse {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl AlterPartitionResponse {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::alter_partition_response::AlterPartitionResponse {
         crate::owned::alter_partition_response::AlterPartitionResponse {
             throttle_time_ms: (self.throttle_time_ms),
@@ -137,6 +142,10 @@ pub struct TopicData {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl TopicData {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::alter_partition_response::TopicData {
         crate::owned::alter_partition_response::TopicData {
             topic_id: (self.topic_id),
@@ -241,6 +250,10 @@ pub struct PartitionData {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl PartitionData {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::alter_partition_response::PartitionData {
         crate::owned::alter_partition_response::PartitionData {
             partition_index: (self.partition_index),

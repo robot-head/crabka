@@ -118,7 +118,6 @@ struct Gw {
 /// `serve::build_and_watch_tls` + `serve::serve`, build the forwarder over mTLS
 /// (`Forwarder::with_tls`), and start ownership + membership. Models
 /// `tests/forwarding.rs::spawn_gateway` but with the TLS transport.
-#[allow(clippy::too_many_lines)]
 async fn spawn_gateway_tls(bootstrap: &str, client: &str, settings: TlsSettings) -> Gw {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();
@@ -296,7 +295,6 @@ async fn count_in_user_topic(bootstrap: &str, key_filter: &str) -> usize {
 /// (1) Server-side TLS: a reqwest client trusting only the test CA completes the
 /// rustls handshake (gateway cert SAN = 127.0.0.1) and gets `/healthz` ⇒ 200.
 /// `client_auth = Optional` ⇒ a client with no identity is still accepted.
-#[allow(clippy::too_many_lines)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn server_tls_handshake_and_health() {
     install_provider();
@@ -341,7 +339,6 @@ async fn server_tls_handshake_and_health() {
 
 /// (2) mTLS `Required` rejects a client with no certificate: the rustls
 /// handshake fails, so reqwest's `.send()` returns an error.
-#[allow(clippy::too_many_lines)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn mtls_required_rejects_no_client_cert() {
     install_provider();
@@ -387,7 +384,6 @@ async fn mtls_required_rejects_no_client_cert() {
 /// produced once, then deduplicated on resend — proving A's forward identity,
 /// B's server mTLS verification, and B's `/internal/forward` principal gate all
 /// line up.
-#[allow(clippy::too_many_lines)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn tls_forward_between_two_gateways() {
     install_provider();

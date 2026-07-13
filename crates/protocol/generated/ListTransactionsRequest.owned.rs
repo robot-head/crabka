@@ -14,7 +14,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,7 +33,7 @@ impl Default for ListTransactionsRequest {
             producer_id_filters: Vec::new(),
             duration_filter: -1i64,
             transactional_id_pattern: None,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
@@ -50,9 +51,9 @@ impl Encode for ListTransactionsRequest {
                 crate::primitives::array::put_array_len(buf, (self.state_filters).len(), flex);
                 for it in &self.state_filters {
                     if flex {
-                        put_compact_string(buf, it);
+                        let () = put_compact_string(buf, it);
                     } else {
-                        put_string(buf, it);
+                        let () = put_string(buf, it);
                     }
                 }
             }
@@ -74,9 +75,9 @@ impl Encode for ListTransactionsRequest {
         }
         if version >= 2 {
             if flex {
-                put_compact_nullable_string(buf, self.transactional_id_pattern.as_deref());
+                let () = put_compact_nullable_string(buf, self.transactional_id_pattern.as_deref());
             } else {
-                put_nullable_string(buf, self.transactional_id_pattern.as_deref());
+                let () = put_nullable_string(buf, self.transactional_id_pattern.as_deref());
             }
         }
         if flex {

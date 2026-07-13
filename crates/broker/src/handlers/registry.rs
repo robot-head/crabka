@@ -233,11 +233,15 @@ macro_rules! plain_dispatches {
     ($register_fn:ident; $(($api:ident, $request:ident, $handler:path)),+ $(,)?) => {
         fn $register_fn(registry: &mut DispatchRegistry) {
             $(
-                assert2::assert!(registry.register(DispatchEntry::plain(
+                assert!(
+                    registry.register(DispatchEntry::plain(
                         ApiKey::$api,
                         crabka_protocol::owned::$request::FLEXIBLE_MIN,
                         $handler,
-                    )));
+                    )),
+                    "duplicate dispatch registration for {:?}",
+                    ApiKey::$api
+                );
             )+
         }
     };
@@ -278,11 +282,47 @@ macro_rules! context_dispatches {
 
         fn $register_fn(registry: &mut DispatchRegistry) {
             $(
-                assert2::assert!(registry.register(DispatchEntry::context(
+                assert!(
+                    registry.register(DispatchEntry::context(
                         ApiKey::$api,
                         crabka_protocol::owned::$request::FLEXIBLE_MIN,
                         $adapter,
-                    )));
+                    )),
+                    "duplicate dispatch registration for {:?}",
+                    ApiKey::$api
+                );
+            )+
+        }
+    };
+}
+
+macro_rules! sync_context_dispatches {
+    ($register_fn:ident; $(($adapter:ident, $api:ident, $request:ident, $handler:path)),+ $(,)?) => {
+        $(
+            fn $adapter<'a>(
+                broker: &'a Broker,
+                version: ApiVersion,
+                correlation_id: CorrelationId,
+                body: &'a [u8],
+                ctx: &'a RequestContext<'a>,
+            ) -> BoxFuture<'a, Result<Bytes, BrokerError>> {
+                Box::pin(std::future::ready($handler(
+                    broker, version, correlation_id, body, ctx,
+                )))
+            }
+        )+
+
+        fn $register_fn(registry: &mut DispatchRegistry) {
+            $(
+                assert!(
+                    registry.register(DispatchEntry::context(
+                        ApiKey::$api,
+                        crabka_protocol::owned::$request::FLEXIBLE_MIN,
+                        $adapter,
+                    )),
+                    "duplicate dispatch registration for {:?}",
+                    ApiKey::$api
+                );
             )+
         }
     };
@@ -312,11 +352,52 @@ macro_rules! decoded_context_dispatches {
 
         fn $register_fn(registry: &mut DispatchRegistry) {
             $(
-                assert2::assert!(registry.register(DispatchEntry::decoded_context(
+                assert!(
+                    registry.register(DispatchEntry::decoded_context(
                         ApiKey::$api,
                         crabka_protocol::owned::$request_mod::FLEXIBLE_MIN,
                         $adapter,
-                    )));
+                    )),
+                    "duplicate dispatch registration for {:?}",
+                    ApiKey::$api
+                );
+            )+
+        }
+    };
+}
+
+macro_rules! decoded_sync_context_dispatches {
+    ($register_fn:ident; $(($adapter:ident, $api:ident, $request_mod:ident, $request_ty:ident, $handler:path)),+ $(,)?) => {
+        $(
+            fn $adapter<'a>(
+                broker: &'a Broker,
+                version: ApiVersion,
+                _correlation_id: CorrelationId,
+                body: &'a [u8],
+                ctx: &'a RequestContext<'a>,
+            ) -> BoxFuture<'a, Result<Bytes, BrokerError>> {
+                Box::pin(std::future::ready((|| {
+                    use crabka_protocol::Decode;
+                    let mut cur = body;
+                    let req = crabka_protocol::owned::$request_mod::$request_ty::decode(
+                        &mut cur, version,
+                    )?;
+                    $handler(broker, req, ctx, version)
+                })()))
+            }
+        )+
+
+        fn $register_fn(registry: &mut DispatchRegistry) {
+            $(
+                assert!(
+                    registry.register(DispatchEntry::decoded_context(
+                        ApiKey::$api,
+                        crabka_protocol::owned::$request_mod::FLEXIBLE_MIN,
+                        $adapter,
+                    )),
+                    "duplicate dispatch registration for {:?}",
+                    ApiKey::$api
+                );
             )+
         }
     };
@@ -331,7 +412,13 @@ macro_rules! telemetry_adapter {
             body: &'a [u8],
             ctx: &'a TelemetryContext<'a>,
         ) -> BoxFuture<'a, Result<Bytes, BrokerError>> {
-            Box::pin(($handler)(broker, version, correlation_id, body, ctx))
+            Box::pin(std::future::ready(($handler)(
+                broker,
+                version,
+                correlation_id,
+                body,
+                ctx,
+            )))
         }
     };
 }
@@ -355,14 +442,17 @@ fn produce_adapter<'a>(
 }
 
 decoded_context_dispatches!(register_decoded_context_dispatches;
-    (describe_acls_adapter, DescribeAcls, describe_acls_request, DescribeAclsRequest, crate::handlers::describe_acls::handle),
     (create_acls_adapter, CreateAcls, create_acls_request, CreateAclsRequest, crate::handlers::create_acls::handle),
     (delete_acls_adapter, DeleteAcls, delete_acls_request, DeleteAclsRequest, crate::handlers::delete_acls::handle),
     (elect_leaders_adapter, ElectLeaders, elect_leaders_request, ElectLeadersRequest, crate::handlers::elect_leaders::handle),
     (alter_partition_reassignments_adapter, AlterPartitionReassignments, alter_partition_reassignments_request, AlterPartitionReassignmentsRequest, crate::handlers::alter_partition_reassignments::handle),
+    (alter_client_quotas_adapter, AlterClientQuotas, alter_client_quotas_request, AlterClientQuotasRequest, crate::handlers::alter_client_quotas::handle),
+);
+
+decoded_sync_context_dispatches!(register_decoded_sync_context_dispatches;
+    (describe_acls_adapter, DescribeAcls, describe_acls_request, DescribeAclsRequest, crate::handlers::describe_acls::handle),
     (list_partition_reassignments_adapter, ListPartitionReassignments, list_partition_reassignments_request, ListPartitionReassignmentsRequest, crate::handlers::list_partition_reassignments::handle),
     (describe_client_quotas_adapter, DescribeClientQuotas, describe_client_quotas_request, DescribeClientQuotasRequest, crate::handlers::describe_client_quotas::handle),
-    (alter_client_quotas_adapter, AlterClientQuotas, alter_client_quotas_request, AlterClientQuotasRequest, crate::handlers::alter_client_quotas::handle),
     (describe_user_scram_credentials_adapter, DescribeUserScramCredentials, describe_user_scram_credentials_request, DescribeUserScramCredentialsRequest, crate::handlers::describe_user_scram_credentials::handle),
 );
 
@@ -599,14 +689,12 @@ fn describe_delegation_token_adapter<'a>(
             &*broker.controller,
             peer,
             broker.config.authorizer.as_ref(),
-        )
-        .await;
+        );
         crate::handlers::encode_response(&resp, version)
     })
 }
 
 context_dispatches!(register_context_dispatches;
-    (metadata_adapter, Metadata, metadata_request, crate::handlers::metadata::handle),
     (create_topics_adapter, CreateTopics, create_topics_request, crate::handlers::create_topics::handle),
     (delete_topics_adapter, DeleteTopics, delete_topics_request, crate::handlers::delete_topics::handle),
     (alter_configs_adapter, AlterConfigs, alter_configs_request, crate::handlers::alter_configs::handle),
@@ -626,20 +714,15 @@ context_dispatches!(register_context_dispatches;
     (offset_commit_adapter, OffsetCommit, offset_commit_request, crate::handlers::offset_commit::handle),
     (offset_fetch_adapter, OffsetFetch, offset_fetch_request, crate::handlers::offset_fetch::handle),
     (offset_delete_adapter, OffsetDelete, offset_delete_request, crate::handlers::offset_delete::handle),
-    (describe_cluster_adapter, DescribeCluster, describe_cluster_request, crate::handlers::describe_cluster::handle),
     (describe_producers_adapter, DescribeProducers, describe_producers_request, crate::handlers::describe_producers::handle),
     (describe_transactions_adapter, DescribeTransactions, describe_transactions_request, crate::handlers::describe_transactions::handle),
     (list_transactions_adapter, ListTransactions, list_transactions_request, crate::handlers::list_transactions::handle),
     (unregister_broker_adapter, UnregisterBroker, unregister_broker_request, crate::handlers::unregister_broker::handle),
-    (describe_topic_partitions_adapter, DescribeTopicPartitions, describe_topic_partitions_request, crate::handlers::describe_topic_partitions::handle),
-    (list_config_resources_adapter, ListConfigResources, list_config_resources_request, crate::handlers::list_config_resources::handle),
-    (describe_quorum_adapter, DescribeQuorum, describe_quorum_request, crate::handlers::describe_quorum::handle),
     (add_raft_voter_adapter, AddRaftVoter, add_raft_voter_request, crate::handlers::add_raft_voter::handle),
     (remove_raft_voter_adapter, RemoveRaftVoter, remove_raft_voter_request, crate::handlers::remove_raft_voter::handle),
     (update_raft_voter_adapter, UpdateRaftVoter, update_raft_voter_request, crate::handlers::update_raft_voter::handle),
     (alter_partition_adapter, AlterPartition, alter_partition_request, crate::handlers::alter_partition::handle),
     (broker_heartbeat_adapter, BrokerHeartbeat, broker_heartbeat_request, crate::handlers::broker_heartbeat::handle),
-    (get_replica_log_info_adapter, GetReplicaLogInfo, get_replica_log_info_request, crate::handlers::get_replica_log_info::handle),
     (heartbeat_adapter, Heartbeat, heartbeat_request, crate::handlers::heartbeat::handle),
     (sync_group_adapter, SyncGroup, sync_group_request, crate::handlers::sync_group::handle),
     (leave_group_adapter, LeaveGroup, leave_group_request, crate::handlers::leave_group::handle),
@@ -648,13 +731,22 @@ context_dispatches!(register_context_dispatches;
     (streams_group_heartbeat_adapter, StreamsGroupHeartbeat, streams_group_heartbeat_request, crate::handlers::streams_group_heartbeat::handle),
     (find_coordinator_adapter, FindCoordinator, find_coordinator_request, crate::handlers::find_coordinator::handle),
     (list_offsets_adapter, ListOffsets, list_offsets_request, crate::handlers::list_offsets::handle),
-    (offset_for_leader_epoch_adapter, OffsetForLeaderEpoch, offset_for_leader_epoch_request, crate::handlers::offset_for_leader_epoch::handle),
-    (describe_configs_adapter, DescribeConfigs, describe_configs_request, crate::handlers::describe_configs::handle),
     (describe_log_dirs_adapter, DescribeLogDirs, describe_log_dirs_request, crate::handlers::describe_log_dirs::handle),
     (init_producer_id_adapter, InitProducerId, init_producer_id_request, crate::handlers::init_producer_id::handle),
     (add_partitions_to_txn_adapter, AddPartitionsToTxn, add_partitions_to_txn_request, crate::txn::handlers::add_partitions_to_txn::handle),
     (end_txn_adapter, EndTxn, end_txn_request, crate::txn::handlers::end_txn::handle),
     (txn_offset_commit_adapter, TxnOffsetCommit, txn_offset_commit_request, crate::txn::handlers::txn_offset_commit::handle),
+);
+
+sync_context_dispatches!(register_sync_context_dispatches;
+    (metadata_adapter, Metadata, metadata_request, crate::handlers::metadata::handle),
+    (describe_cluster_adapter, DescribeCluster, describe_cluster_request, crate::handlers::describe_cluster::handle),
+    (describe_topic_partitions_adapter, DescribeTopicPartitions, describe_topic_partitions_request, crate::handlers::describe_topic_partitions::handle),
+    (list_config_resources_adapter, ListConfigResources, list_config_resources_request, crate::handlers::list_config_resources::handle),
+    (describe_quorum_adapter, DescribeQuorum, describe_quorum_request, crate::handlers::describe_quorum::handle),
+    (get_replica_log_info_adapter, GetReplicaLogInfo, get_replica_log_info_request, crate::handlers::get_replica_log_info::handle),
+    (offset_for_leader_epoch_adapter, OffsetForLeaderEpoch, offset_for_leader_epoch_request, crate::handlers::offset_for_leader_epoch::handle),
+    (describe_configs_adapter, DescribeConfigs, describe_configs_request, crate::handlers::describe_configs::handle),
 );
 
 telemetry_adapter!(
@@ -666,7 +758,6 @@ telemetry_adapter!(
     crate::handlers::push_telemetry::handle
 );
 
-#[allow(clippy::too_many_lines)]
 pub(crate) fn build_registry() -> DispatchRegistry {
     let mut registry = DispatchRegistry::new();
 
@@ -688,7 +779,9 @@ pub(crate) fn build_registry() -> DispatchRegistry {
         crabka_protocol::owned::sasl_authenticate_request::FLEXIBLE_MIN,
     ));
     register_context_dispatches(&mut registry);
+    register_sync_context_dispatches(&mut registry);
     register_decoded_context_dispatches(&mut registry);
+    register_decoded_sync_context_dispatches(&mut registry);
     registry.register(DispatchEntry::encoded_context(
         ApiKey::AlterUserScramCredentials,
         crabka_protocol::owned::alter_user_scram_credentials_request::FLEXIBLE_MIN,
@@ -742,14 +835,10 @@ pub(crate) fn build_registry() -> DispatchRegistry {
 mod tests {
     use std::collections::BTreeSet;
 
+    use assert2::assert;
+
     use super::*;
     use crate::handlers;
-
-    macro_rules! named_api_keys {
-        ($($key:ident),+ $(,)?) => {
-            [$( (stringify!($key), ApiKey::$key) ),+]
-        };
-    }
 
     #[test]
     fn registry_registers_plain_handlers() {
@@ -758,30 +847,16 @@ mod tests {
         let api_versions = registry
             .get(ApiKey::ApiVersions as i16)
             .expect("ApiVersions");
-        assert2::assert!(api_versions.is_plain());
-        assert2::assert!(
-            api_versions.quota_policy() == RequestQuotaPolicy::ApplyFallbackAccounting
-        );
-        assert2::assert!(api_versions.body_flexible(3));
-        assert2::assert!(!api_versions.body_flexible(2));
+        assert!(api_versions.is_plain());
+        assert!(api_versions.quota_policy() == RequestQuotaPolicy::ApplyFallbackAccounting);
+        assert!(api_versions.body_flexible(3));
+        assert!(!api_versions.body_flexible(2));
 
-        for (_case, key) in [
-            ("add offsets to transaction", 25),
-            ("write transaction markers", 27),
-            ("fetch snapshot", 59),
-            ("consumer group heartbeat", 69),
-            ("share group heartbeat", 73),
-            ("initialize share group state", 83),
-            ("read share group state", 84),
-            ("write share group state", 85),
-            ("delete share group state", 86),
-            ("read share group state summary", 87),
-            ("delete share group offsets", 89),
-        ] {
+        for key in [25, 27, 59, 69, 73, 83, 84, 85, 86, 87, 89] {
             let entry = registry
                 .get(key)
                 .unwrap_or_else(|| panic!("registered api_key {key}"));
-            assert2::assert!(entry.is_plain());
+            assert!(entry.is_plain(), "api_key {key}");
         }
     }
 
@@ -789,64 +864,67 @@ mod tests {
     fn registry_registers_raw_context_handlers() {
         let registry = build_registry();
 
-        for (_case, api_key) in named_api_keys![
-            Produce,
-            Metadata,
-            OffsetCommit,
-            OffsetFetch,
-            FindCoordinator,
-            JoinGroup,
-            Heartbeat,
-            LeaveGroup,
-            SyncGroup,
-            DeleteGroups,
-            ListOffsets,
-            OffsetForLeaderEpoch,
-            CreateTopics,
-            DeleteTopics,
-            AlterConfigs,
-            IncrementalAlterConfigs,
-            DeleteRecords,
-            CreatePartitions,
-            DescribeGroups,
-            ListGroups,
-            OffsetDelete,
-            DescribeCluster,
-            DescribeProducers,
-            DescribeTransactions,
-            ListTransactions,
-            UnregisterBroker,
-            DescribeTopicPartitions,
-            ListConfigResources,
-            DescribeQuorum,
-            AddRaftVoter,
-            RemoveRaftVoter,
-            UpdateRaftVoter,
-            AlterPartition,
-            BrokerHeartbeat,
-            GetReplicaLogInfo,
-            ConsumerGroupHeartbeat,
-            ShareGroupDescribe,
-            ShareFetch,
-            ShareAcknowledge,
-            ShareGroupHeartbeat,
-            StreamsGroupHeartbeat,
-            DescribeShareGroupOffsets,
-            AlterShareGroupOffsets,
-            DeleteShareGroupOffsets,
-            InitProducerId,
-            AddPartitionsToTxn,
-            EndTxn,
-            TxnOffsetCommit,
+        for api_key in [
+            ApiKey::Produce,
+            ApiKey::Metadata,
+            ApiKey::OffsetCommit,
+            ApiKey::OffsetFetch,
+            ApiKey::FindCoordinator,
+            ApiKey::JoinGroup,
+            ApiKey::Heartbeat,
+            ApiKey::LeaveGroup,
+            ApiKey::SyncGroup,
+            ApiKey::DeleteGroups,
+            ApiKey::ListOffsets,
+            ApiKey::OffsetForLeaderEpoch,
+            ApiKey::CreateTopics,
+            ApiKey::DeleteTopics,
+            ApiKey::AlterConfigs,
+            ApiKey::IncrementalAlterConfigs,
+            ApiKey::DeleteRecords,
+            ApiKey::CreatePartitions,
+            ApiKey::DescribeGroups,
+            ApiKey::ListGroups,
+            ApiKey::OffsetDelete,
+            ApiKey::DescribeCluster,
+            ApiKey::DescribeProducers,
+            ApiKey::DescribeTransactions,
+            ApiKey::ListTransactions,
+            ApiKey::UnregisterBroker,
+            ApiKey::DescribeTopicPartitions,
+            ApiKey::ListConfigResources,
+            ApiKey::DescribeQuorum,
+            ApiKey::AddRaftVoter,
+            ApiKey::RemoveRaftVoter,
+            ApiKey::UpdateRaftVoter,
+            ApiKey::AlterPartition,
+            ApiKey::BrokerHeartbeat,
+            ApiKey::GetReplicaLogInfo,
+            ApiKey::ConsumerGroupHeartbeat,
+            ApiKey::ShareGroupDescribe,
+            ApiKey::ShareFetch,
+            ApiKey::ShareAcknowledge,
+            ApiKey::ShareGroupHeartbeat,
+            ApiKey::StreamsGroupHeartbeat,
+            ApiKey::DescribeShareGroupOffsets,
+            ApiKey::AlterShareGroupOffsets,
+            ApiKey::DeleteShareGroupOffsets,
+            ApiKey::InitProducerId,
+            ApiKey::AddPartitionsToTxn,
+            ApiKey::EndTxn,
+            ApiKey::TxnOffsetCommit,
         ] {
             let key = api_key as i16;
             let entry = registry
                 .get(key)
                 .unwrap_or_else(|| panic!("registered api_key {key}"));
-            assert2::assert!(matches!(
-                entry.kind(),
-                DispatchKind::Context(_) | DispatchKind::Produce(_)
-            ));
+            assert!(
+                matches!(
+                    entry.kind(),
+                    DispatchKind::Context(_) | DispatchKind::Produce(_)
+                ),
+                "api_key {key}"
+            );
         }
     }
 
@@ -854,11 +932,14 @@ mod tests {
     fn registry_registers_telemetry_handlers() {
         let registry = build_registry();
 
-        for (_case, key) in [("get telemetry subscriptions", 71), ("push telemetry", 72)] {
+        for key in [71, 72] {
             let entry = registry
                 .get(key)
                 .unwrap_or_else(|| panic!("registered api_key {key}"));
-            assert2::assert!(matches!(entry.kind(), DispatchKind::Telemetry(_)));
+            assert!(
+                matches!(entry.kind(), DispatchKind::Telemetry(_)),
+                "api_key {key}"
+            );
         }
     }
 
@@ -866,27 +947,30 @@ mod tests {
     fn registry_registers_decoded_context_handlers() {
         let registry = build_registry();
 
-        for (_case, api_key) in named_api_keys![
-            DescribeAcls,
-            CreateAcls,
-            DeleteAcls,
-            ElectLeaders,
-            AlterPartitionReassignments,
-            ListPartitionReassignments,
-            DescribeClientQuotas,
-            AlterClientQuotas,
-            DescribeUserScramCredentials,
-            AlterUserScramCredentials,
-            UpdateFeatures,
+        for api_key in [
+            ApiKey::DescribeAcls,
+            ApiKey::CreateAcls,
+            ApiKey::DeleteAcls,
+            ApiKey::ElectLeaders,
+            ApiKey::AlterPartitionReassignments,
+            ApiKey::ListPartitionReassignments,
+            ApiKey::DescribeClientQuotas,
+            ApiKey::AlterClientQuotas,
+            ApiKey::DescribeUserScramCredentials,
+            ApiKey::AlterUserScramCredentials,
+            ApiKey::UpdateFeatures,
         ] {
             let key = api_key as i16;
             let entry = registry
                 .get(key)
                 .unwrap_or_else(|| panic!("registered api_key {key}"));
-            assert2::assert!(matches!(
-                entry.kind(),
-                DispatchKind::DecodedContext(_) | DispatchKind::EncodedContext(_)
-            ));
+            assert!(
+                matches!(
+                    entry.kind(),
+                    DispatchKind::DecodedContext(_) | DispatchKind::EncodedContext(_)
+                ),
+                "api_key {key}"
+            );
         }
     }
 
@@ -894,17 +978,14 @@ mod tests {
     fn registry_registers_auth_handlers() {
         let registry = build_registry();
 
-        for (_case, key) in [
-            ("alter replica log directories", 34),
-            ("create delegation token", 38),
-            ("renew delegation token", 39),
-            ("expire delegation token", 40),
-            ("describe delegation token", 41),
-        ] {
+        for key in [34, 38, 39, 40, 41] {
             let entry = registry
                 .get(key)
                 .unwrap_or_else(|| panic!("registered api_key {key}"));
-            assert2::assert!(matches!(entry.kind(), DispatchKind::Auth(_)));
+            assert!(
+                matches!(entry.kind(), DispatchKind::Auth(_)),
+                "api_key {key}"
+            );
         }
     }
 
@@ -912,7 +993,7 @@ mod tests {
     fn registry_reports_missing_keys() {
         let registry = build_registry();
 
-        assert2::assert!(registry.get(9999).is_none());
+        assert!(registry.get(9999).is_none());
     }
 
     #[test]
@@ -924,7 +1005,7 @@ mod tests {
             .map(|api| api.api_key)
             .collect();
 
-        assert2::assert!(registered == advertised);
+        assert!(registered == advertised);
     }
 
     #[test]
@@ -933,48 +1014,25 @@ mod tests {
 
         let registry = build_registry();
         let cases = [
+            (0, owned::produce_request::FLEXIBLE_MIN - 1, false),
+            (0, owned::produce_request::FLEXIBLE_MIN, true),
+            (1, owned::fetch_request::FLEXIBLE_MIN - 1, false),
+            (1, owned::fetch_request::FLEXIBLE_MIN, true),
             (
-                "produce before flexible minimum",
-                0,
-                owned::produce_request::FLEXIBLE_MIN - 1,
-                false,
-            ),
-            (
-                "produce at flexible minimum",
-                0,
-                owned::produce_request::FLEXIBLE_MIN,
-                true,
-            ),
-            (
-                "fetch before flexible minimum",
-                1,
-                owned::fetch_request::FLEXIBLE_MIN - 1,
-                false,
-            ),
-            (
-                "fetch at flexible minimum",
-                1,
-                owned::fetch_request::FLEXIBLE_MIN,
-                true,
-            ),
-            (
-                "SASL authenticate before flexible minimum",
                 36,
                 owned::sasl_authenticate_request::FLEXIBLE_MIN - 1,
                 false,
             ),
-            (
-                "SASL authenticate at flexible minimum",
-                36,
-                owned::sasl_authenticate_request::FLEXIBLE_MIN,
-                true,
-            ),
-            ("non-flexible SASL handshake", 17, i16::MAX, false),
-            ("unknown API", 999, 0, false),
+            (36, owned::sasl_authenticate_request::FLEXIBLE_MIN, true),
+            (17, i16::MAX, false),
+            (999, 0, false),
         ];
 
-        for (_case, api_key, version, want) in cases {
-            assert2::assert!(registry.body_flexible(api_key, version) == want);
+        for (api_key, version, want) in cases {
+            assert!(
+                registry.body_flexible(api_key, version) == want,
+                "api_key {api_key} version {version}"
+            );
         }
     }
 
@@ -985,7 +1043,7 @@ mod tests {
             .get_plain(ApiKey::ApiVersions as i16)
             .expect("plain ApiVersions handler");
 
-        assert2::assert!(std::ptr::fn_addr_eq(
+        assert!(std::ptr::fn_addr_eq(
             handler,
             handlers::api_versions::handle as PlainHandler
         ));

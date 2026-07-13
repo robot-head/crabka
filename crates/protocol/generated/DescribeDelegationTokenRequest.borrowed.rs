@@ -11,7 +11,8 @@ pub const MIN_VERSION: i16 = 1;
 pub const MAX_VERSION: i16 = 3;
 pub const FLEXIBLE_MIN: i16 = 2;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -20,6 +21,10 @@ pub struct DescribeDelegationTokenRequest<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl DescribeDelegationTokenRequest<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::describe_delegation_token_request::DescribeDelegationTokenRequest {
@@ -130,6 +135,10 @@ pub struct DescribeDelegationTokenOwner<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl DescribeDelegationTokenOwner<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::describe_delegation_token_request::DescribeDelegationTokenOwner {
@@ -145,16 +154,16 @@ impl Encode for DescribeDelegationTokenOwner<'_> {
         let flex = version >= 2;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.principal_type);
+                let () = put_compact_string(buf, self.principal_type);
             } else {
-                put_string(buf, self.principal_type);
+                let () = put_string(buf, self.principal_type);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.principal_name);
+                let () = put_compact_string(buf, self.principal_name);
             } else {
-                put_string(buf, self.principal_name);
+                let () = put_string(buf, self.principal_name);
             }
         }
         if flex {

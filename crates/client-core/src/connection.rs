@@ -88,6 +88,8 @@ struct DispatchItem {
 impl Connection {
     /// Connect to `addr`, negotiate API versions, return a usable `Connection`.
     #[tracing::instrument(level = "debug", skip_all, fields(addr = %addr), err)]
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn connect(
         addr: SocketAddr,
         options: ConnectionOptions,
@@ -204,6 +206,10 @@ impl Connection {
     /// authenticated. From here on the connection's normal request /
     /// response framing applies.
     #[tracing::instrument(level = "debug", skip_all, err)]
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
+    /// # Panics
+    /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub async fn from_stream(
         stream: Box<dyn ClientDuplex>,
         options: ConnectionOptions,
@@ -732,8 +738,14 @@ mod io_task_tests {
         let started = Instant::now();
         // Hand-framed Metadata request; the server reads it then closes.
         let result = conn.raw_request(3, 0, Bytes::new()).await;
-        assert2::assert!(matches!(result, Err(ClientError::Disconnected)));
-        assert2::assert!(started.elapsed() < Duration::from_secs(4));
+        assert!(
+            matches!(result, Err(ClientError::Disconnected)),
+            "server close mid-request must yield Disconnected, got {result:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "drain must be prompt (reader EOF), not a request-timeout stall"
+        );
         server.await.unwrap();
     }
 }

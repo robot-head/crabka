@@ -205,10 +205,6 @@ fn assert_sparse_aggregate_excludes_no_value(query: &str, via_operators: &[crate
 }
 
 #[tokio::test]
-#[allow(
-    clippy::too_many_lines,
-    reason = "test defines an inline CountingStore mock with a full MetricStore impl"
-)]
 async fn range_query_scans_store_once_per_matcher_set_not_per_step() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -812,10 +808,6 @@ async fn instant_hyperbolic_functions_transform_vector_values() {
     }
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "table-driven coverage keeps related PromQL trig functions readable"
-)]
 #[tokio::test]
 async fn instant_trigonometric_functions_transform_vector_values() {
     let mut store = InMemoryMetricStore::new();
@@ -5278,7 +5270,6 @@ fn range_planner_gate_routes_expected_shapes() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn range_planner_path_matches_interpreter() {
     use promql_parser::parser::Expr;
 
@@ -6056,7 +6047,6 @@ async fn range_scalar_expr_planner_path_matches_interpreter() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn rate_range_planner_path_matches_interpreter() {
     use promql_parser::parser::Expr;
 
@@ -6183,7 +6173,6 @@ async fn rate_range_planner_path_matches_interpreter() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn over_time_range_planner_path_matches_interpreter() {
     use crate::{DurationExprContext, parse_promql_with_duration_context};
 
@@ -6393,7 +6382,6 @@ async fn over_time_range_planner_path_matches_interpreter() {
 /// planner and the shared outer fold is applied; the result must equal the
 /// interpreter's `eval_subquery` + outer fold byte-for-byte (NaN-aware).
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn subquery_planner_path_matches_interpreter() {
     use crate::{DurationExprContext, parse_promql_with_duration_context};
 
@@ -6525,7 +6513,6 @@ async fn subquery_planner_path_matches_interpreter() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn scalar_math_planner_path_matches_interpreter() {
     use crate::{DurationExprContext, parse_promql_with_duration_context};
 
@@ -6646,7 +6633,6 @@ async fn scalar_math_planner_path_matches_interpreter() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn label_ops_planner_path_matches_interpreter() {
     use crate::{DurationExprContext, parse_promql_with_duration_context};
 
@@ -6859,7 +6845,6 @@ async fn label_ops_planner_path_matches_interpreter() {
 /// and the shared `apply_info` join is applied. The result must equal the
 /// interpreter's `eval_info_call` byte-for-byte.
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn info_planner_path_matches_interpreter() {
     use crate::{DurationExprContext, parse_promql_with_duration_context};
 
@@ -7008,7 +6993,6 @@ async fn info_planner_path_matches_interpreter() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn simple_aggregate_planner_path_matches_interpreter() {
     use crate::{DurationExprContext, parse_promql_with_duration_context};
 
@@ -7240,9 +7224,11 @@ async fn simple_aggregate_planner_path_matches_interpreter() {
 /// (NaN ignored by min/max), comparing the operator path against the interpreter
 /// and asserting the absolute Prometheus outcomes.
 #[tokio::test]
-#[allow(clippy::too_many_lines, clippy::type_complexity)]
 async fn aggregate_genuine_nan_group_parity() {
     use crate::{DurationExprContext, parse_promql_with_duration_context};
+
+    type ExpectedGroup = (&'static str, Option<f64>);
+    type AggregationCase = (&'static str, &'static [ExpectedGroup]);
 
     let mut store = InMemoryMetricStore::new();
     // `g` exercises every NaN/stale shape across DISTINCT `by (l)` groups:
@@ -7270,7 +7256,7 @@ async fn aggregate_genuine_nan_group_parity() {
     // Each op must (a) route through the planner, (b) match the interpreter
     // byte-for-byte (NaN-aware), and (c) hit the documented absolute outcome.
     // `expect` maps l -> Some(value) for present groups; l=d is always absent.
-    let cases: &[(&str, &[(&str, Option<f64>)])] = &[
+    let cases: &[AggregationCase] = &[
         (
             "sum by (l) (g)",
             &[
@@ -7387,7 +7373,6 @@ async fn aggregate_genuine_nan_group_parity() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn param_aggregate_planner_path_matches_interpreter() {
     use crate::{DurationExprContext, parse_promql_with_duration_context};
 
@@ -7634,7 +7619,6 @@ async fn abusive_subquery_resolution_errors_before_looping() {
 /// sign bit; routing through the shared `apply_simple_aggregate` kernel must
 /// not.
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn sum_avg_collapsed_is_deterministic_and_matches_interpreter() {
     use crate::{DurationExprContext, parse_promql_with_duration_context};
 
@@ -7839,7 +7823,6 @@ fn sort_instant_result(result: QueryResult) -> QueryResult {
 /// planner — the byte-exact result the interpreter's `eval_instant_expr`
 /// produces.
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn structural_node_planner_path_matches_interpreter() {
     use crate::{DurationExprContext, parse_promql_with_duration_context};
 
@@ -7970,7 +7953,6 @@ async fn structural_node_planner_path_matches_interpreter() {
 /// method, so the result is parity-exact by construction.
 #[cfg(feature = "experimental-functions")]
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn experimental_call_planner_path_matches_interpreter() {
     use crate::{DurationExprContext, parse_promql_with_duration_context};
 
@@ -8030,7 +8012,6 @@ async fn experimental_call_planner_path_matches_interpreter() {
 /// match.
 #[cfg(feature = "experimental-functions")]
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn experimental_param_aggregate_planner_path_matches_interpreter() {
     use crate::{DurationExprContext, parse_promql_with_duration_context};
 
@@ -8125,7 +8106,6 @@ async fn experimental_param_aggregate_planner_path_matches_interpreter() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn classic_histogram_quantile_planner_path_matches_interpreter() {
     use crate::{DurationExprContext, parse_promql_with_duration_context};
 
@@ -8257,7 +8237,6 @@ async fn classic_histogram_quantile_planner_path_matches_interpreter() {
 /// (`Precomputed`) path and match the interpreter byte-for-byte, with the
 /// histogram payloads compared by value (not float `==`).
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn native_histogram_planner_path_matches_interpreter() {
     use crate::{DurationExprContext, parse_promql_with_duration_context};
 
@@ -8430,7 +8409,6 @@ async fn native_histogram_planner_path_matches_interpreter() {
 ///   histogram samples (drop them), reducing only the floats;
 /// - `count_values` formats a histogram value as its JSON label value.
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn histogram_aggregation_planner_path_matches_interpreter() {
     use crate::{DurationExprContext, parse_promql_with_duration_context};
 
@@ -8653,7 +8631,6 @@ async fn histogram_aggregation_planner_path_matches_interpreter() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn histogram_range_planner_path_matches_interpreter() {
     use crate::{DurationExprContext, parse_promql_with_duration_context};
 
@@ -8821,7 +8798,6 @@ async fn histogram_range_planner_path_matches_interpreter() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn binary_planner_path_matches_interpreter() {
     use crate::{DurationExprContext, parse_promql_with_duration_context};
 
@@ -9011,7 +8987,6 @@ async fn binary_planner_path_matches_interpreter() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn util_planner_path_matches_interpreter() {
     use crate::{DurationExprContext, parse_promql_with_duration_context};
 
@@ -9253,7 +9228,6 @@ async fn conformance_corpus_runs_green_through_planner() {
 /// every INVALID query, it must return `Err(..)` — never `Ok(None)`. This is
 /// the per-construct complement to the corpus-wide counter proof.
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn plan_instant_expr_is_total_over_construct_sweep() {
     use crate::{DurationExprContext, parse_promql_with_duration_context};
 

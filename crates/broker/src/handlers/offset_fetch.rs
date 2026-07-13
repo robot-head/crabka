@@ -30,7 +30,6 @@ use crate::{
     error::BrokerError,
 };
 
-#[allow(clippy::too_many_lines)]
 // ACL preamble (group + per-topic) + fetch-all vs named-topic branches; splitting hurts readability
 #[tracing::instrument(
     name = "handle_offset_fetch",
@@ -62,15 +61,7 @@ pub(crate) async fn handle(
     // Step 1: `Describe` on `Group(group_id)`. On Deny → whole-response
     // `error_code = GROUP_AUTHORIZATION_FAILED (30)`.
     {
-        let image = broker.controller.current_image();
-        let acl_req = AuthorizationRequest {
-            principal: ctx.principal,
-            host: ctx.peer,
-            resource_type: ResourceType::Group,
-            resource_name: req.group_id.as_str(),
-            operation: AclOperation::Describe,
-        };
-        if broker.config.authorizer.authorize(&*image, &acl_req) == AuthorizationResult::Deny {
+        if !group_authorized(broker, ctx, &req.group_id) {
             let resp = OffsetFetchResponse {
                 topics: Vec::new(),
                 error_code: codes::GROUP_AUTHORIZATION_FAILED,
@@ -84,97 +75,12 @@ pub(crate) async fn handle(
     // Fetch the group's committed offsets from its actor (a classic actor is
     // created for an unknown id; offsets are protocol-agnostic, so an existing
     // actor of either kind serves `FetchCommitted` the same way).
-    let committed = {
-        let h = broker
-            .group_coordinator
-            .find(&req.group_id)
-            .unwrap_or_else(|| {
-                broker
-                    .group_coordinator
-                    .get_or_create_group(&req.group_id, GroupKindTag::Classic)
-            });
-        let (tx, rx) = oneshot::channel();
-        if h.tx
-            .send(GroupActorMessage::FetchCommitted { reply: tx })
-            .await
-            .is_ok()
-        {
-            rx.await.unwrap_or_default()
-        } else {
-            std::collections::HashMap::new()
-        }
-    };
+    let committed = fetch_committed(broker, &req.group_id).await;
 
     // A `None` `topics` field (v ≥ 2) is the "fetch all" sentinel:
     // return every committed offset stored for this group.
     let topics_out: Vec<OffsetFetchResponseTopic> = if req.topics.is_none() {
-        // Aggregate all committed offsets grouped by topic name.
-        let mut by_topic: std::collections::HashMap<String, Vec<OffsetFetchResponsePartition>> =
-            std::collections::HashMap::new();
-        for ((topic, pid), entry) in &committed {
-            by_topic
-                .entry(topic.clone())
-                .or_default()
-                .push(OffsetFetchResponsePartition {
-                    partition_index: *pid,
-                    committed_offset: entry.offset.0,
-                    committed_leader_epoch: entry.leader_epoch,
-                    metadata: Some(entry.metadata.clone()),
-                    error_code: codes::NONE,
-                    ..Default::default()
-                });
-        }
-
-        // ── ACL preamble ─────────────────────────────────────
-        // Step 2 (fetch-all): `Read` on each discovered topic. On Deny →
-        // per-topic `error_code = TOPIC_AUTHORIZATION_FAILED (29)`.
-        let discovered_topics: Vec<String> = by_topic.keys().cloned().collect();
-        let topic_decisions = {
-            let image = broker.controller.current_image();
-            authorize_topics(
-                broker.config.authorizer.as_ref(),
-                &*image,
-                ctx.principal,
-                ctx.peer,
-                AclOperation::Read,
-                discovered_topics.iter().map(String::as_str),
-            )
-        };
-
-        by_topic
-            .into_iter()
-            .map(|(name, partitions)| {
-                let denied = topic_decisions
-                    .get(name.as_str())
-                    .copied()
-                    .unwrap_or(AuthorizationResult::Deny)
-                    == AuthorizationResult::Deny;
-                if denied {
-                    // Return the topic with TOPIC_AUTHORIZATION_FAILED on each partition.
-                    OffsetFetchResponseTopic {
-                        name,
-                        partitions: partitions
-                            .into_iter()
-                            .map(|p| OffsetFetchResponsePartition {
-                                partition_index: p.partition_index,
-                                committed_offset: -1,
-                                committed_leader_epoch: -1,
-                                metadata: None,
-                                error_code: codes::TOPIC_AUTHORIZATION_FAILED,
-                                ..Default::default()
-                            })
-                            .collect(),
-                        ..Default::default()
-                    }
-                } else {
-                    OffsetFetchResponseTopic {
-                        name,
-                        partitions,
-                        ..Default::default()
-                    }
-                }
-            })
-            .collect()
+        legacy_fetch_all(broker, ctx, &committed)
     } else {
         let req_topics = req.topics.as_deref().unwrap_or(&[]);
 
@@ -262,11 +168,103 @@ pub(crate) async fn handle(
     crate::handlers::encode_response(&resp, version)
 }
 
+fn legacy_fetch_all(
+    broker: &Broker,
+    context: &crate::handlers::RequestContext<'_>,
+    committed: &std::collections::HashMap<
+        (String, i32),
+        crate::coordinator::unified::classic_state::OffsetEntry,
+    >,
+) -> Vec<OffsetFetchResponseTopic> {
+    let mut by_topic: std::collections::HashMap<String, Vec<OffsetFetchResponsePartition>> =
+        std::collections::HashMap::new();
+    for ((topic, partition), entry) in committed {
+        by_topic
+            .entry(topic.clone())
+            .or_default()
+            .push(OffsetFetchResponsePartition {
+                partition_index: *partition,
+                committed_offset: entry.offset.0,
+                committed_leader_epoch: entry.leader_epoch,
+                metadata: Some(entry.metadata.clone()),
+                error_code: codes::NONE,
+                ..Default::default()
+            });
+    }
+    let names: Vec<_> = by_topic.keys().cloned().collect();
+    let image = broker.controller.current_image();
+    let decisions = authorize_topics(
+        broker.config.authorizer.as_ref(),
+        &*image,
+        context.principal,
+        context.peer,
+        AclOperation::Read,
+        names.iter().map(String::as_str),
+    );
+    by_topic
+        .into_iter()
+        .map(|(name, mut partitions)| {
+            if decisions.get(name.as_str()).copied() != Some(AuthorizationResult::Allow) {
+                for partition in &mut partitions {
+                    partition.committed_offset = -1;
+                    partition.committed_leader_epoch = -1;
+                    partition.metadata = None;
+                    partition.error_code = codes::TOPIC_AUTHORIZATION_FAILED;
+                }
+            }
+            OffsetFetchResponseTopic {
+                name,
+                partitions,
+                ..Default::default()
+            }
+        })
+        .collect()
+}
+
+fn group_authorized(
+    broker: &Broker,
+    context: &crate::handlers::RequestContext<'_>,
+    group_id: &str,
+) -> bool {
+    broker.config.authorizer.authorize(
+        &*broker.controller.current_image(),
+        &AuthorizationRequest {
+            principal: context.principal,
+            host: context.peer,
+            resource_type: ResourceType::Group,
+            resource_name: group_id,
+            operation: AclOperation::Describe,
+        },
+    ) == AuthorizationResult::Allow
+}
+
+async fn fetch_committed(
+    broker: &Broker,
+    group_id: &str,
+) -> std::collections::HashMap<(String, i32), crate::coordinator::unified::classic_state::OffsetEntry>
+{
+    let handle = broker.group_coordinator.find(group_id).unwrap_or_else(|| {
+        broker
+            .group_coordinator
+            .get_or_create_group(group_id, GroupKindTag::Classic)
+    });
+    let (reply, response) = oneshot::channel();
+    if handle
+        .tx
+        .send(GroupActorMessage::FetchCommitted { reply })
+        .await
+        .is_err()
+    {
+        return std::collections::HashMap::new();
+    }
+    response.await.unwrap_or_default()
+}
+
 /// v8+ per-group fetch. Processes `req.groups` into `resp.groups`, leaving
 /// `resp.topics` empty (it is only encoded for v < 8). Offset storage is
 /// name-keyed, so at v10 we resolve each requested `topic_id` → name and
 /// echo the id back; unknown ids return `UNKNOWN_TOPIC_ID` per partition.
-#[allow(clippy::too_many_lines)] // per-group loop: ACL + id→name resolve + named/fetch-all branches
+// per-group loop: ACL + id→name resolve + named/fetch-all branches
 async fn handle_groups(
     broker: &Broker,
     version: i16,
@@ -278,15 +276,7 @@ async fn handle_groups(
     for grp in &req.groups {
         // ── ACL: `Describe` on `Group(group_id)` ────────────────
         {
-            let image = broker.controller.current_image();
-            let acl_req = AuthorizationRequest {
-                principal: ctx.principal,
-                host: ctx.peer,
-                resource_type: ResourceType::Group,
-                resource_name: grp.group_id.as_str(),
-                operation: AclOperation::Describe,
-            };
-            if broker.config.authorizer.authorize(&*image, &acl_req) == AuthorizationResult::Deny {
+            if !group_authorized(broker, ctx, &grp.group_id) {
                 groups_out.push(OffsetFetchResponseGroup {
                     group_id: grp.group_id.clone(),
                     topics: Vec::new(),
@@ -300,137 +290,14 @@ async fn handle_groups(
         // Fetch the group's committed offsets from its actor (a classic actor
         // is created for an unknown id; offsets are protocol-agnostic, so an
         // existing actor of either kind serves `FetchCommitted` the same way).
-        let committed = {
-            let h = broker
-                .group_coordinator
-                .find(&grp.group_id)
-                .unwrap_or_else(|| {
-                    broker
-                        .group_coordinator
-                        .get_or_create_group(&grp.group_id, GroupKindTag::Classic)
-                });
-            let (tx, rx) = oneshot::channel();
-            if h.tx
-                .send(GroupActorMessage::FetchCommitted { reply: tx })
-                .await
-                .is_ok()
-            {
-                rx.await.unwrap_or_default()
-            } else {
-                std::collections::HashMap::new()
-            }
-        };
+        let committed = fetch_committed(broker, &grp.group_id).await;
         let image = broker.controller.current_image();
 
         // Named/id'd topics: resolve id→name (v10) and read each requested
         // partition from the name-keyed store. `None` topics → fetch-all.
         let topics_out: Vec<OffsetFetchResponseTopics> =
             if let Some(req_topics) = grp.topics.as_deref() {
-                // Resolve each requested topic to a name first (id→name at
-                // v10); an unknown id is flagged so it short-circuits to
-                // UNKNOWN_TOPIC_ID without an ACL lookup.
-                let resolved: Vec<(&_, Option<String>)> = req_topics
-                    .iter()
-                    .map(|t| {
-                        let name = if t.topic_id == WireUuid::ZERO {
-                            Some(t.name.clone())
-                        } else {
-                            image
-                                .topic_name_by_id(&uuid::Uuid::from_bytes(t.topic_id.0))
-                                .map(str::to_string)
-                        };
-                        (t, name)
-                    })
-                    .collect();
-
-                // ── ACL: `Read` on each resolved topic. On Deny → per-partition
-                // TOPIC_AUTHORIZATION_FAILED (mirrors the v0–v7 path). The
-                // names are collected into an owned Vec so the decisions map
-                // doesn't borrow `resolved` (which is consumed below).
-                let auth_names: Vec<String> =
-                    resolved.iter().filter_map(|(_, n)| n.clone()).collect();
-                let decisions = authorize_topics(
-                    broker.config.authorizer.as_ref(),
-                    &*image,
-                    ctx.principal,
-                    ctx.peer,
-                    AclOperation::Read,
-                    auth_names.iter().map(String::as_str),
-                );
-
-                resolved
-                    .into_iter()
-                    .map(|(t, name)| {
-                        let Some(name) = name else {
-                            // Unknown id → UNKNOWN_TOPIC_ID per partition.
-                            return OffsetFetchResponseTopics {
-                                name: String::new(),
-                                topic_id: t.topic_id,
-                                partitions: t
-                                    .partition_indexes
-                                    .iter()
-                                    .map(|&pid| OffsetFetchResponsePartitions {
-                                        partition_index: pid,
-                                        committed_offset: -1,
-                                        committed_leader_epoch: -1,
-                                        metadata: None,
-                                        error_code: codes::UNKNOWN_TOPIC_ID,
-                                        ..Default::default()
-                                    })
-                                    .collect(),
-                                ..Default::default()
-                            };
-                        };
-
-                        let denied = decisions
-                            .get(name.as_str())
-                            .copied()
-                            .unwrap_or(AuthorizationResult::Deny)
-                            == AuthorizationResult::Deny;
-
-                        let partitions = t
-                            .partition_indexes
-                            .iter()
-                            .map(|&pid| {
-                                if denied {
-                                    return OffsetFetchResponsePartitions {
-                                        partition_index: pid,
-                                        committed_offset: -1,
-                                        committed_leader_epoch: -1,
-                                        metadata: None,
-                                        error_code: codes::TOPIC_AUTHORIZATION_FAILED,
-                                        ..Default::default()
-                                    };
-                                }
-                                match committed.get(&(name.clone(), pid)) {
-                                    Some(entry) => OffsetFetchResponsePartitions {
-                                        partition_index: pid,
-                                        committed_offset: entry.offset.0,
-                                        committed_leader_epoch: entry.leader_epoch,
-                                        metadata: Some(entry.metadata.clone()),
-                                        error_code: codes::NONE,
-                                        ..Default::default()
-                                    },
-                                    None => OffsetFetchResponsePartitions {
-                                        partition_index: pid,
-                                        committed_offset: -1,
-                                        committed_leader_epoch: -1,
-                                        metadata: None,
-                                        error_code: codes::NONE,
-                                        ..Default::default()
-                                    },
-                                }
-                            })
-                            .collect();
-
-                        OffsetFetchResponseTopics {
-                            name,
-                            topic_id: t.topic_id,
-                            partitions,
-                            ..Default::default()
-                        }
-                    })
-                    .collect()
+                group_named_topics(broker, ctx, &image, req_topics, &committed)
             } else {
                 // fetch-all: every committed offset for the group, grouped by
                 // topic name. Echo each topic's id (required at v10, where the
@@ -520,10 +387,86 @@ async fn handle_groups(
     crate::handlers::encode_response(&resp, version)
 }
 
+fn group_named_topics(
+    broker: &Broker,
+    context: &crate::handlers::RequestContext<'_>,
+    image: &crabka_metadata::MetadataImage,
+    requested: &[crabka_protocol::owned::offset_fetch_request::OffsetFetchRequestTopics],
+    committed: &std::collections::HashMap<
+        (String, i32),
+        crate::coordinator::unified::classic_state::OffsetEntry,
+    >,
+) -> Vec<OffsetFetchResponseTopics> {
+    let resolved: Vec<_> = requested
+        .iter()
+        .map(|topic| {
+            let name = if topic.topic_id == WireUuid::ZERO {
+                Some(topic.name.clone())
+            } else {
+                image
+                    .topic_name_by_id(&uuid::Uuid::from_bytes(topic.topic_id.0))
+                    .map(str::to_string)
+            };
+            (topic, name)
+        })
+        .collect();
+    let names: Vec<_> = resolved
+        .iter()
+        .filter_map(|(_, name)| name.clone())
+        .collect();
+    let decisions = authorize_topics(
+        broker.config.authorizer.as_ref(),
+        image,
+        context.principal,
+        context.peer,
+        AclOperation::Read,
+        names.iter().map(String::as_str),
+    );
+    resolved
+        .into_iter()
+        .map(|(topic, name)| {
+            let error = match name.as_deref() {
+                None => codes::UNKNOWN_TOPIC_ID,
+                Some(name) if decisions.get(name).copied() != Some(AuthorizationResult::Allow) => {
+                    codes::TOPIC_AUTHORIZATION_FAILED
+                }
+                Some(_) => codes::NONE,
+            };
+            let partitions = topic
+                .partition_indexes
+                .iter()
+                .map(|partition| {
+                    let entry = if error == codes::NONE {
+                        name.as_ref()
+                            .and_then(|name| committed.get(&(name.clone(), *partition)))
+                    } else {
+                        None
+                    };
+                    OffsetFetchResponsePartitions {
+                        partition_index: *partition,
+                        committed_offset: entry.map_or(-1, |value| value.offset.0),
+                        committed_leader_epoch: entry.map_or(-1, |value| value.leader_epoch),
+                        metadata: entry.map(|value| value.metadata.clone()),
+                        error_code: error,
+                        ..Default::default()
+                    }
+                })
+                .collect();
+            OffsetFetchResponseTopics {
+                name: name.unwrap_or_default(),
+                topic_id: topic.topic_id,
+                partitions,
+                ..Default::default()
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
+    use assert2::assert;
     use crabka_log::Offset;
 
     use super::*;
@@ -605,7 +548,11 @@ mod tests {
             .iter()
             .find(|p| p.partition_index == 0)
             .expect("partition 0 row");
-        assert2::assert!(part.committed_offset == 42);
+        assert!(
+            part.committed_offset == 42,
+            "committed_offset must echo the seeded value (42), got {}",
+            part.committed_offset
+        );
         broker_handle.shutdown().await;
     }
 }

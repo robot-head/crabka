@@ -19,7 +19,8 @@ pub const MIN_VERSION: i16 = 1;
 pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -49,9 +50,9 @@ impl Encode for ShareFetchResponse {
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message.as_deref());
+                let () = put_compact_nullable_string(buf, self.error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.error_message.as_deref());
+                let () = put_nullable_string(buf, self.error_message.as_deref());
             }
         }
         if version >= 1 {
@@ -306,43 +307,66 @@ pub struct PartitionData {
     pub acquired_records: Vec<AcquiredRecords>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Encode for PartitionData {
-    fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
-        let flex = version >= 0;
+impl PartitionData {
+    fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
             put_i32(buf, self.partition_index);
         }
+    }
+    fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
             put_i16(buf, self.error_code);
         }
+    }
+    fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message.as_deref());
+                let () = put_compact_nullable_string(buf, self.error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.error_message.as_deref());
+                let () = put_nullable_string(buf, self.error_message.as_deref());
             }
         }
+    }
+    fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
             put_i16(buf, self.acknowledge_error_code);
         }
+    }
+    fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.acknowledge_error_message.as_deref());
+                let () =
+                    put_compact_nullable_string(buf, self.acknowledge_error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.acknowledge_error_message.as_deref());
+                let () = put_nullable_string(buf, self.acknowledge_error_message.as_deref());
             }
         }
+    }
+    fn encode_field_5<B: BufMut>(
+        &self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
             self.current_leader.encode(buf, version)?;
         }
+        Ok(())
+    }
+    fn encode_field_6<B: BufMut>(
+        &self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
             if version <= 0 {
                 match &self.records {
                     None => {
                         if flex {
-                            put_compact_nullable_bytes(buf, None);
+                            let () = put_compact_nullable_bytes(buf, None);
                         } else {
-                            put_nullable_bytes(buf, None);
+                            let () = put_nullable_bytes(buf, None);
                         }
                     }
                     Some(__rb) => {
@@ -353,9 +377,9 @@ impl Encode for PartitionData {
                             version,
                         )?;
                         if flex {
-                            put_compact_bytes(buf, &__rb_buf);
+                            let () = put_compact_bytes(buf, &__rb_buf);
                         } else {
-                            put_bytes(buf, &__rb_buf);
+                            let () = put_bytes(buf, &__rb_buf);
                         }
                     }
                 }
@@ -364,9 +388,9 @@ impl Encode for PartitionData {
                     None => {
                         let __rb_buf = bytes::BytesMut::new();
                         if flex {
-                            put_compact_bytes(buf, &__rb_buf);
+                            let () = put_compact_bytes(buf, &__rb_buf);
                         } else {
-                            put_bytes(buf, &__rb_buf);
+                            let () = put_bytes(buf, &__rb_buf);
                         }
                     }
                     Some(__rb) => {
@@ -377,14 +401,22 @@ impl Encode for PartitionData {
                             version,
                         )?;
                         if flex {
-                            put_compact_bytes(buf, &__rb_buf);
+                            let () = put_compact_bytes(buf, &__rb_buf);
                         } else {
-                            put_bytes(buf, &__rb_buf);
+                            let () = put_bytes(buf, &__rb_buf);
                         }
                     }
                 }
             }
         }
+        Ok(())
+    }
+    fn encode_field_7<B: BufMut>(
+        &self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
             {
                 crate::primitives::array::put_array_len(buf, (self.acquired_records).len(), flex);
@@ -393,10 +425,169 @@ impl Encode for PartitionData {
                 }
             }
         }
+        Ok(())
+    }
+    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
         }
+    }
+    fn decode_field_0<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.partition_index = get_i32(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_1<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.error_code = get_i16(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_2<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.error_message = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_3<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.acknowledge_error_code = get_i16(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_4<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.acknowledge_error_message = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_5<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.current_leader = LeaderIdAndEpoch::decode(buf, version)?;
+        }
+        Ok(())
+    }
+    fn decode_field_6<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.records = if version <= 0 {
+                {
+                    let __rb_opt = if flex {
+                        get_compact_nullable_bytes_owned(buf)?
+                    } else {
+                        get_nullable_bytes_owned(buf)?
+                    };
+                    match __rb_opt {
+                        None => None,
+                        Some(__rb_bytes) => {
+                            let mut __rb_cur: &[u8] = &__rb_bytes;
+                            Some(crate::records::RecordsPayload::decode_lenient(
+                                &mut __rb_cur,
+                                version,
+                            )?)
+                        }
+                    }
+                }
+            } else {
+                Some({
+                    let __rb_bytes = if flex {
+                        get_compact_bytes_owned(buf)?
+                    } else {
+                        get_bytes_owned(buf)?
+                    };
+                    let mut __rb_cur: &[u8] = &__rb_bytes;
+                    crate::records::RecordsPayload::decode_lenient(&mut __rb_cur, version)?
+                })
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_7<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.acquired_records = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(AcquiredRecords::decode(buf, version)?);
+                }
+                v
+            };
+        }
+        Ok(())
+    }
+    fn decode_tagged_fields<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        _version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if flex {
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
+        }
+        Ok(())
+    }
+}
+impl Encode for PartitionData {
+    fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
+        let flex = version >= 0;
+        self.encode_field_0(buf, version, flex);
+        self.encode_field_1(buf, version, flex);
+        self.encode_field_2(buf, version, flex);
+        self.encode_field_3(buf, version, flex);
+        self.encode_field_4(buf, version, flex);
+        self.encode_field_5(buf, version, flex)?;
+        self.encode_field_6(buf, version, flex)?;
+        self.encode_field_7(buf, version, flex)?;
+        self.encode_tagged_fields(buf, version, flex);
         Ok(())
     }
     fn encoded_len(&self, version: i16) -> usize {
@@ -497,76 +688,15 @@ impl Decode<'_> for PartitionData {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
-        if version >= 0 {
-            out.partition_index = get_i32(buf)?;
-        }
-        if version >= 0 {
-            out.error_code = get_i16(buf)?;
-        }
-        if version >= 0 {
-            out.error_message = if flex {
-                get_compact_nullable_string_owned(buf)?
-            } else {
-                get_nullable_string_owned(buf)?
-            };
-        }
-        if version >= 0 {
-            out.acknowledge_error_code = get_i16(buf)?;
-        }
-        if version >= 0 {
-            out.acknowledge_error_message = if flex {
-                get_compact_nullable_string_owned(buf)?
-            } else {
-                get_nullable_string_owned(buf)?
-            };
-        }
-        if version >= 0 {
-            out.current_leader = LeaderIdAndEpoch::decode(buf, version)?;
-        }
-        if version >= 0 {
-            out.records = if version <= 0 {
-                {
-                    let __rb_opt = if flex {
-                        get_compact_nullable_bytes_owned(buf)?
-                    } else {
-                        get_nullable_bytes_owned(buf)?
-                    };
-                    match __rb_opt {
-                        None => None,
-                        Some(__rb_bytes) => {
-                            let mut __rb_cur: &[u8] = &__rb_bytes;
-                            Some(crate::records::RecordsPayload::decode_lenient(
-                                &mut __rb_cur,
-                                version,
-                            )?)
-                        }
-                    }
-                }
-            } else {
-                Some({
-                    let __rb_bytes = if flex {
-                        get_compact_bytes_owned(buf)?
-                    } else {
-                        get_bytes_owned(buf)?
-                    };
-                    let mut __rb_cur: &[u8] = &__rb_bytes;
-                    crate::records::RecordsPayload::decode_lenient(&mut __rb_cur, version)?
-                })
-            };
-        }
-        if version >= 0 {
-            out.acquired_records = {
-                let n = crate::primitives::array::get_array_len(buf, flex)?;
-                let mut v = Vec::with_capacity(n);
-                for _ in 0..n {
-                    v.push(AcquiredRecords::decode(buf, version)?);
-                }
-                v
-            };
-        }
-        if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
-        }
+        Self::decode_field_0(&mut out, buf, version, flex)?;
+        Self::decode_field_1(&mut out, buf, version, flex)?;
+        Self::decode_field_2(&mut out, buf, version, flex)?;
+        Self::decode_field_3(&mut out, buf, version, flex)?;
+        Self::decode_field_4(&mut out, buf, version, flex)?;
+        Self::decode_field_5(&mut out, buf, version, flex)?;
+        Self::decode_field_6(&mut out, buf, version, flex)?;
+        Self::decode_field_7(&mut out, buf, version, flex)?;
+        Self::decode_tagged_fields(&mut out, buf, version, flex)?;
         Ok(out)
     }
 }
@@ -762,9 +892,9 @@ impl Encode for NodeEndpoint {
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.host);
+                let () = put_compact_string(buf, &self.host);
             } else {
-                put_string(buf, &self.host);
+                let () = put_string(buf, &self.host);
             }
         }
         if version >= 0 {
@@ -772,9 +902,9 @@ impl Encode for NodeEndpoint {
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.rack.as_deref());
+                let () = put_compact_nullable_string(buf, self.rack.as_deref());
             } else {
-                put_nullable_string(buf, self.rack.as_deref());
+                let () = put_nullable_string(buf, self.rack.as_deref());
             }
         }
         if flex {

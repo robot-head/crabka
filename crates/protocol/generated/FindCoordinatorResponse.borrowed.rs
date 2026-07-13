@@ -16,7 +16,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 6;
 pub const FLEXIBLE_MIN: i16 = 3;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -31,6 +32,10 @@ pub struct FindCoordinatorResponse<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl FindCoordinatorResponse<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::find_coordinator_response::FindCoordinatorResponse {
         crate::owned::find_coordinator_response::FindCoordinatorResponse {
             throttle_time_ms: (self.throttle_time_ms),
@@ -64,9 +69,9 @@ impl Encode for FindCoordinatorResponse<'_> {
         }
         if (1..=3).contains(&version) {
             if flex {
-                put_compact_nullable_string(buf, self.error_message);
+                let () = put_compact_nullable_string(buf, self.error_message);
             } else {
-                put_nullable_string(buf, self.error_message);
+                let () = put_nullable_string(buf, self.error_message);
             }
         }
         if (0..=3).contains(&version) {
@@ -74,9 +79,9 @@ impl Encode for FindCoordinatorResponse<'_> {
         }
         if (0..=3).contains(&version) {
             if flex {
-                put_compact_string(buf, self.host);
+                let () = put_compact_string(buf, self.host);
             } else {
-                put_string(buf, self.host);
+                let () = put_string(buf, self.host);
             }
         }
         if (0..=3).contains(&version) {
@@ -235,6 +240,10 @@ pub struct Coordinator<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl Coordinator<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::find_coordinator_response::Coordinator {
         crate::owned::find_coordinator_response::Coordinator {
             key: (self.key).to_string(),
@@ -252,9 +261,9 @@ impl Encode for Coordinator<'_> {
         let flex = version >= 3;
         if version >= 4 {
             if flex {
-                put_compact_string(buf, self.key);
+                let () = put_compact_string(buf, self.key);
             } else {
-                put_string(buf, self.key);
+                let () = put_string(buf, self.key);
             }
         }
         if version >= 4 {
@@ -262,9 +271,9 @@ impl Encode for Coordinator<'_> {
         }
         if version >= 4 {
             if flex {
-                put_compact_string(buf, self.host);
+                let () = put_compact_string(buf, self.host);
             } else {
-                put_string(buf, self.host);
+                let () = put_string(buf, self.host);
             }
         }
         if version >= 4 {
@@ -275,9 +284,9 @@ impl Encode for Coordinator<'_> {
         }
         if version >= 4 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message);
+                let () = put_compact_nullable_string(buf, self.error_message);
             } else {
-                put_nullable_string(buf, self.error_message);
+                let () = put_nullable_string(buf, self.error_message);
             }
         }
         if flex {

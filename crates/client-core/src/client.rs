@@ -35,6 +35,8 @@ impl Client {
         fields(bootstrap = %bootstrap, client_id = %client_id),
         err,
     )]
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn start(
         #[builder(into)] bootstrap: String,
         #[builder(into, default = "crabka".to_string())] client_id: String,
@@ -76,6 +78,8 @@ impl Client {
 
     /// Send a request to the bootstrap broker (or any cached open connection).
     #[tracing::instrument(level = "debug", skip_all, fields(api_key = R::API_KEY), err)]
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn send<R: ProtocolRequest>(&self, req: R) -> Result<R::Response, ClientError> {
         let conn = self.pool.bootstrap_connection().await?;
         conn.send(req).await
@@ -136,6 +140,8 @@ impl Client {
         fields(brokers = tracing::field::Empty),
         err,
     )]
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn refresh_metadata(
         &self,
     ) -> Result<crabka_protocol::owned::metadata_response::MetadataResponse, ClientError> {
@@ -308,6 +314,8 @@ impl BrokerHandle<'_> {
         fields(broker_id = self.broker_id, api_key = R::API_KEY),
         err,
     )]
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn send<R: ProtocolRequest>(&self, req: R) -> Result<R::Response, ClientError> {
         let conn = match self.client.pool.get(self.broker_id).await {
             Ok(conn) => conn,

@@ -97,7 +97,7 @@ pub trait RecordProducer: Send + Sync + 'static {
     async fn flush(&self) -> Result<(), StreamsClientError>;
 }
 
-/// Lazy "begin the transaction" gate handed to [`StreamTask::process_once`]
+/// Lazy "begin the transaction" gate handed to the stream task's `process_once` operation
 /// under EOS-v2. The task invokes [`BeginTxnGate::ensure_begun`] exactly before
 /// its first produced record in a commit interval, so an interval that fetches
 /// no records opens no transaction (no empty-txn churn on an idle app). Under

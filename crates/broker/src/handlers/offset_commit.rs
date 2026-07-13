@@ -37,7 +37,7 @@ use crate::{
     partition_registry::PartitionRegistry,
 };
 
-#[allow(clippy::too_many_lines)] // ACL preamble (group + per-topic) + commit pipeline; splitting hurts readability
+// ACL preamble (group + per-topic) + commit pipeline; splitting hurts readability
 #[tracing::instrument(
     name = "handle_offset_commit",
     level = "info",
@@ -62,40 +62,7 @@ pub(crate) async fn handle(
     // are split off: they get UNKNOWN_TOPIC_ID on every partition and are
     // not committed. `finalize` appends those rows to every response, and
     // the response echoes each topic's `topic_id`.
-    let mut unknown_id_topics: Vec<OffsetCommitResponseTopic> = Vec::new();
-    {
-        let image = broker.controller.current_image();
-        let mut resolved = Vec::with_capacity(req.topics.len());
-        for mut topic in req.topics.drain(..) {
-            if topic.name.is_empty() && topic.topic_id != WireUuid::ZERO {
-                match image.topic_name_by_id(&uuid::Uuid::from_bytes(topic.topic_id.0)) {
-                    Some(name) => {
-                        topic.name = name.to_string();
-                        resolved.push(topic);
-                    }
-                    None => {
-                        unknown_id_topics.push(OffsetCommitResponseTopic {
-                            name: String::new(),
-                            topic_id: topic.topic_id,
-                            partitions: topic
-                                .partitions
-                                .iter()
-                                .map(|p| OffsetCommitResponsePartition {
-                                    partition_index: p.partition_index,
-                                    error_code: codes::UNKNOWN_TOPIC_ID,
-                                    ..Default::default()
-                                })
-                                .collect(),
-                            ..Default::default()
-                        });
-                    }
-                }
-            } else {
-                resolved.push(topic);
-            }
-        }
-        req.topics = resolved;
-    }
+    let unknown_id_topics = normalize_topic_ids(&mut req, &broker.controller.current_image());
 
     // ── ACL preamble ────────────────────────────────────────────
     // Step 1: `Read` on `Group(group_id)`. On Deny → whole-response
@@ -160,86 +127,14 @@ pub(crate) async fn handle(
     if any_denied {
         // Build a mixed response: denied topics get TOPIC_AUTHORIZATION_FAILED,
         // allowed topics proceed normally but we need to do the real work for them.
-        let topics_out = req
-            .topics
-            .iter()
-            .map(|t| {
-                let denied = topic_decisions
-                    .get(t.name.as_str())
-                    .copied()
-                    .unwrap_or(AuthorizationResult::Deny)
-                    == AuthorizationResult::Deny;
-                let code = if denied {
-                    codes::TOPIC_AUTHORIZATION_FAILED
-                } else {
-                    codes::NONE
-                };
-                OffsetCommitResponseTopic {
-                    name: t.name.clone(),
-                    topic_id: t.topic_id,
-                    partitions: t
-                        .partitions
-                        .iter()
-                        .map(|p| OffsetCommitResponsePartition {
-                            partition_index: p.partition_index,
-                            error_code: code,
-                            ..Default::default()
-                        })
-                        .collect(),
-                    ..Default::default()
-                }
-            })
-            .collect();
+        let topics_out = mixed_response_topics(&req, &topic_decisions, codes::NONE);
 
         // Only proceed with allowed topics (append + update).
-        let allowed_req = OffsetCommitRequest {
-            topics: req
-                .topics
-                .iter()
-                .filter(|t| {
-                    topic_decisions
-                        .get(t.name.as_str())
-                        .copied()
-                        .unwrap_or(AuthorizationResult::Deny)
-                        == AuthorizationResult::Allow
-                })
-                .cloned()
-                .collect(),
-            ..req.clone()
-        };
+        let allowed_req = allowed_request(&req, &topic_decisions);
         if !allowed_req.topics.is_empty() {
             if let Err(code) = append_batch(&allowed_req, &broker.partitions, now_ms).await {
                 // If append fails, overwrite allowed topics with the error code.
-                let topics_out_err: Vec<OffsetCommitResponseTopic> = req
-                    .topics
-                    .iter()
-                    .map(|t| {
-                        let denied = topic_decisions
-                            .get(t.name.as_str())
-                            .copied()
-                            .unwrap_or(AuthorizationResult::Deny)
-                            == AuthorizationResult::Deny;
-                        let final_code = if denied {
-                            codes::TOPIC_AUTHORIZATION_FAILED
-                        } else {
-                            code
-                        };
-                        OffsetCommitResponseTopic {
-                            name: t.name.clone(),
-                            topic_id: t.topic_id,
-                            partitions: t
-                                .partitions
-                                .iter()
-                                .map(|p| OffsetCommitResponsePartition {
-                                    partition_index: p.partition_index,
-                                    error_code: final_code,
-                                    ..Default::default()
-                                })
-                                .collect(),
-                            ..Default::default()
-                        }
-                    })
-                    .collect();
+                let topics_out_err = mixed_response_topics(&req, &topic_decisions, code);
                 let resp = OffsetCommitResponse {
                     topics: topics_out_err,
                     throttle_time_ms: 0,
@@ -270,6 +165,95 @@ pub(crate) async fn handle(
     // 4. Uniform per-(topic, partition) success.
     let resp = build_response_all(&req, codes::NONE);
     finalize(version, resp, unknown_id_topics)
+}
+
+fn topic_allowed(
+    decisions: &std::collections::HashMap<&str, AuthorizationResult>,
+    name: &str,
+) -> bool {
+    decisions.get(name).copied() == Some(AuthorizationResult::Allow)
+}
+
+fn allowed_request(
+    request: &OffsetCommitRequest,
+    decisions: &std::collections::HashMap<&str, AuthorizationResult>,
+) -> OffsetCommitRequest {
+    OffsetCommitRequest {
+        topics: request
+            .topics
+            .iter()
+            .filter(|topic| topic_allowed(decisions, &topic.name))
+            .cloned()
+            .collect(),
+        ..request.clone()
+    }
+}
+
+fn mixed_response_topics(
+    request: &OffsetCommitRequest,
+    decisions: &std::collections::HashMap<&str, AuthorizationResult>,
+    allowed_error_code: i16,
+) -> Vec<OffsetCommitResponseTopic> {
+    request
+        .topics
+        .iter()
+        .map(|topic| {
+            let error_code = if topic_allowed(decisions, &topic.name) {
+                allowed_error_code
+            } else {
+                codes::TOPIC_AUTHORIZATION_FAILED
+            };
+            OffsetCommitResponseTopic {
+                name: topic.name.clone(),
+                topic_id: topic.topic_id,
+                partitions: topic
+                    .partitions
+                    .iter()
+                    .map(|partition| OffsetCommitResponsePartition {
+                        partition_index: partition.partition_index,
+                        error_code,
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            }
+        })
+        .collect()
+}
+
+fn normalize_topic_ids(
+    request: &mut OffsetCommitRequest,
+    image: &crabka_metadata::MetadataImage,
+) -> Vec<OffsetCommitResponseTopic> {
+    let mut unknown = Vec::new();
+    let mut resolved = Vec::with_capacity(request.topics.len());
+    for mut topic in request.topics.drain(..) {
+        if topic.name.is_empty() && topic.topic_id != WireUuid::ZERO {
+            if let Some(name) = image.topic_name_by_id(&uuid::Uuid::from_bytes(topic.topic_id.0)) {
+                topic.name = name.to_string();
+                resolved.push(topic);
+            } else {
+                unknown.push(OffsetCommitResponseTopic {
+                    name: String::new(),
+                    topic_id: topic.topic_id,
+                    partitions: topic
+                        .partitions
+                        .iter()
+                        .map(|partition| OffsetCommitResponsePartition {
+                            partition_index: partition.partition_index,
+                            error_code: codes::UNKNOWN_TOPIC_ID,
+                            ..Default::default()
+                        })
+                        .collect(),
+                    ..Default::default()
+                });
+            }
+        } else {
+            resolved.push(topic);
+        }
+    }
+    request.topics = resolved;
+    unknown
 }
 
 /// Append the KIP-516 unknown-`topic_id` rows (if any) to the response and

@@ -77,7 +77,7 @@ fn entry_is_expired(
 /// replace it with an object-store/topic-backed implementation while preserving
 /// the key contract tested here.
 ///
-/// Entries carry an insertion timestamp (from the configured [`Clock`]). When a
+/// Entries carry an insertion timestamp (from the configured internal clock). When a
 /// TTL is set via [`QueryFrontendCache::with_ttl`], a `get` for an entry older
 /// than the TTL evicts it and reports a miss. With no TTL (the default) entries
 /// never expire.
@@ -115,6 +115,8 @@ impl QueryFrontendCache {
     }
 
     #[must_use]
+    /// # Panics
+    /// Panics if shared metric state is poisoned or validated series data is missing an index entry required by the operation.
     pub fn get(&self, tenant: &str, query: &FrontendRangeQuery) -> Option<QueryResult> {
         let key = RangeCacheKey::new(tenant, query);
         let mut entries = self
@@ -129,6 +131,8 @@ impl QueryFrontendCache {
         Some(result.clone())
     }
 
+    /// # Panics
+    /// Panics if shared metric state is poisoned or validated series data is missing an index entry required by the operation.
     pub fn insert(&self, tenant: &str, query: &FrontendRangeQuery, result: QueryResult) {
         let inserted = self.clock.now_epoch_millis();
         self.range_results
@@ -222,6 +226,8 @@ impl ObjectStoreQueryFrontendCache {
         self
     }
 
+    /// # Errors
+    /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
     pub async fn get(
         &self,
         tenant: &str,
@@ -230,6 +236,8 @@ impl ObjectStoreQueryFrontendCache {
         <Self as RangeQueryCache>::get(self, tenant, query).await
     }
 
+    /// # Errors
+    /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
     pub async fn insert(
         &self,
         tenant: &str,

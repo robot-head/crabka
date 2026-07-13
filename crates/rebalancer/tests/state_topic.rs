@@ -2,8 +2,6 @@
 //!
 //! Requires Docker; gated `#[ignore]` and CI runs with `--include-ignored`.
 
-#![allow(clippy::pedantic)]
-
 use std::{sync::Arc, time::Duration};
 
 use crabka_broker::{Broker, BrokerConfig};
@@ -30,9 +28,10 @@ async fn boot_broker() -> (crabka_broker::BrokerHandle, String, tempfile::TempDi
 async fn drive_loader_until_loaded(state: Arc<LoadedState>, timeout: Duration) {
     let start = std::time::Instant::now();
     while !state.is_loaded() {
-        if start.elapsed() > timeout {
-            panic!("loader did not converge within {timeout:?}");
-        }
+        assert!(
+            start.elapsed() <= timeout,
+            "loader did not converge within {timeout:?}"
+        );
         tokio::task::yield_now().await;
     }
 }
@@ -87,13 +86,13 @@ async fn write_load_round_trip_via_real_broker() {
     st.write(&f).await.expect("write");
 
     let shutdown = CancellationToken::new();
-    let loader = StateTopicLoader {
+    let loader_task = StateTopicLoader {
         client: client.clone(),
         topic: topic.clone(),
         state: state.clone(),
         shutdown: shutdown.clone(),
     };
-    let handle = tokio::spawn(loader.run());
+    let handle = tokio::spawn(loader_task.run());
 
     drive_loader_until_loaded(state.clone(), Duration::from_secs(10)).await;
     let loaded = state.current().expect("non-tombstone");

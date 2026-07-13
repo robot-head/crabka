@@ -15,7 +15,8 @@ pub const MIN_VERSION: i16 = 1;
 pub const MAX_VERSION: i16 = 3;
 pub const FLEXIBLE_MIN: i16 = 2;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -25,6 +26,10 @@ pub struct CreateAclsResponse<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl CreateAclsResponse<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::create_acls_response::CreateAclsResponse {
         crate::owned::create_acls_response::CreateAclsResponse {
             throttle_time_ms: (self.throttle_time_ms),
@@ -136,6 +141,10 @@ pub struct AclCreationResult<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl AclCreationResult<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::create_acls_response::AclCreationResult {
         crate::owned::create_acls_response::AclCreationResult {
             error_code: (self.error_code),
@@ -152,9 +161,9 @@ impl Encode for AclCreationResult<'_> {
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message);
+                let () = put_compact_nullable_string(buf, self.error_message);
             } else {
-                put_nullable_string(buf, self.error_message);
+                let () = put_nullable_string(buf, self.error_message);
             }
         }
         if flex {

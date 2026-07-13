@@ -26,8 +26,6 @@
 //!
 //! Re-running this test regenerates both fixture files verbatim.
 
-#![allow(clippy::pedantic)]
-
 use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -181,7 +179,7 @@ impl Drop for ContainerGuard {
 // ── REST helpers ──────────────────────────────────────────────────────────────
 
 async fn wait_for_registry(http: &reqwest::Client, base: &str, container_id: &str) {
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + Duration::from_mins(2);
     let url = format!("{base}/subjects");
     let mut last: Option<String> = None;
     while Instant::now() < deadline {
@@ -274,19 +272,31 @@ fn id_from(result: &serde_json::Value) -> i64 {
 ///   4. GET .../{base}/v1/referencedby → expected `[referrer_id]`
 ///   5. DELETE referenced base v1    → the delete-protection code (~42206)
 ///   6. register dangling-ref schema → the reference-not-found code
-#[allow(clippy::too_many_arguments)]
+struct FormatLifecycle {
+    fmt: &'static str,
+    base_subject: &'static str,
+    referrer_subject: &'static str,
+    bad_subject: &'static str,
+    base_body: serde_json::Value,
+    referrer_body: serde_json::Value,
+    missing_body: serde_json::Value,
+}
+
 async fn run_format_lifecycle(
     http: &reqwest::Client,
     base: &str,
     results: &mut Vec<serde_json::Value>,
-    fmt: &str,
-    base_subject: &str,
-    referrer_subject: &str,
-    bad_subject: &str,
-    base_body: serde_json::Value,
-    referrer_body: serde_json::Value,
-    missing_body: serde_json::Value,
+    lifecycle: FormatLifecycle,
 ) {
+    let FormatLifecycle {
+        fmt,
+        base_subject,
+        referrer_subject,
+        bad_subject,
+        base_body,
+        referrer_body,
+        missing_body,
+    } = lifecycle;
     // 1. Register the base schema (its first version is v1).
     results.push(
         drive(
@@ -378,21 +388,23 @@ async fn run_references_lifecycle(http: &reqwest::Client, base: &str) -> Vec<ser
         http,
         base,
         &mut results,
-        "avro",
-        "av_money",
-        "av_order",
-        "av_bad",
-        serde_json::json!({
+        FormatLifecycle {
+            fmt: "avro",
+            base_subject: "av_money",
+            referrer_subject: "av_order",
+            bad_subject: "av_bad",
+            base_body: serde_json::json!({
             "schema": "{\"type\":\"record\",\"name\":\"Money\",\"fields\":[{\"name\":\"cents\",\"type\":\"long\"}]}"
         }),
-        serde_json::json!({
+            referrer_body: serde_json::json!({
             "schema": "{\"type\":\"record\",\"name\":\"Order\",\"fields\":[{\"name\":\"price\",\"type\":\"Money\"}]}",
             "references": [{ "name": "Money", "subject": "av_money", "version": 1 }]
         }),
-        serde_json::json!({
+            missing_body: serde_json::json!({
             "schema": "{\"type\":\"record\",\"name\":\"Bad\",\"fields\":[{\"name\":\"x\",\"type\":\"Missing\"}]}",
             "references": [{ "name": "Missing", "subject": "nope", "version": 1 }]
         }),
+        },
     )
     .await;
 
@@ -401,24 +413,26 @@ async fn run_references_lifecycle(http: &reqwest::Client, base: &str) -> Vec<ser
         http,
         base,
         &mut results,
-        "protobuf",
-        "pb_money",
-        "pb_order",
-        "pb_bad",
-        serde_json::json!({
+        FormatLifecycle {
+            fmt: "protobuf",
+            base_subject: "pb_money",
+            referrer_subject: "pb_order",
+            bad_subject: "pb_bad",
+            base_body: serde_json::json!({
             "schemaType": "PROTOBUF",
             "schema": "syntax=\"proto3\"; package m; message Money{int64 cents=1;}"
         }),
-        serde_json::json!({
+            referrer_body: serde_json::json!({
             "schemaType": "PROTOBUF",
             "schema": "syntax=\"proto3\"; import \"money.proto\"; message Order{m.Money price=1;}",
             "references": [{ "name": "money.proto", "subject": "pb_money", "version": 1 }]
         }),
-        serde_json::json!({
+            missing_body: serde_json::json!({
             "schemaType": "PROTOBUF",
             "schema": "syntax=\"proto3\"; import \"missing.proto\"; message Bad{m.Missing x=1;}",
             "references": [{ "name": "missing.proto", "subject": "nope", "version": 1 }]
         }),
+        },
     )
     .await;
 
@@ -427,24 +441,26 @@ async fn run_references_lifecycle(http: &reqwest::Client, base: &str) -> Vec<ser
         http,
         base,
         &mut results,
-        "json",
-        "js_amount",
-        "js_order",
-        "js_bad",
-        serde_json::json!({
-            "schemaType": "JSON",
-            "schema": "{\"type\":\"integer\",\"maximum\":10}"
-        }),
-        serde_json::json!({
-            "schemaType": "JSON",
-            "schema": "{\"type\":\"object\",\"properties\":{\"a\":{\"$ref\":\"Amount\"}}}",
-            "references": [{ "name": "Amount", "subject": "js_amount", "version": 1 }]
-        }),
-        serde_json::json!({
-            "schemaType": "JSON",
-            "schema": "{\"type\":\"object\",\"properties\":{\"a\":{\"$ref\":\"Missing\"}}}",
-            "references": [{ "name": "Missing", "subject": "nope", "version": 1 }]
-        }),
+        FormatLifecycle {
+            fmt: "json",
+            base_subject: "js_amount",
+            referrer_subject: "js_order",
+            bad_subject: "js_bad",
+            base_body: serde_json::json!({
+                "schemaType": "JSON",
+                "schema": "{\"type\":\"integer\",\"maximum\":10}"
+            }),
+            referrer_body: serde_json::json!({
+                "schemaType": "JSON",
+                "schema": "{\"type\":\"object\",\"properties\":{\"a\":{\"$ref\":\"Amount\"}}}",
+                "references": [{ "name": "Amount", "subject": "js_amount", "version": 1 }]
+            }),
+            missing_body: serde_json::json!({
+                "schemaType": "JSON",
+                "schema": "{\"type\":\"object\",\"properties\":{\"a\":{\"$ref\":\"Missing\"}}}",
+                "references": [{ "name": "Missing", "subject": "nope", "version": 1 }]
+            }),
+        },
     )
     .await;
 

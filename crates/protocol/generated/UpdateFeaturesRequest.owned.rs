@@ -15,7 +15,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,7 +32,7 @@ impl Default for UpdateFeaturesRequest {
             timeout_ms: 60_000i32,
             feature_updates: Vec::new(),
             validate_only: false,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
@@ -157,7 +158,7 @@ impl Default for FeatureUpdateKey {
             max_version_level: 0i16,
             allow_downgrade: false,
             upgrade_type: 1i8,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
@@ -166,9 +167,9 @@ impl Encode for FeatureUpdateKey {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.feature);
+                let () = put_compact_string(buf, &self.feature);
             } else {
-                put_string(buf, &self.feature);
+                let () = put_string(buf, &self.feature);
             }
         }
         if version >= 0 {
@@ -264,7 +265,7 @@ impl FeatureUpdateKey {
 #[allow(unused_comparisons)]
 pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
-    obj.insert("timeoutMs".to_string(), ::serde_json::json!(60000));
+    obj.insert("timeoutMs".to_string(), ::serde_json::json!(60_000));
     obj.insert(
         "featureUpdates".to_string(),
         ::serde_json::Value::Array(vec![]),

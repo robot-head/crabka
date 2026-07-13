@@ -13,7 +13,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 5;
 pub const FLEXIBLE_MIN: i16 = 4;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -34,16 +35,16 @@ impl Encode for LeaveGroupRequest {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.group_id);
+                let () = put_compact_string(buf, &self.group_id);
             } else {
-                put_string(buf, &self.group_id);
+                let () = put_string(buf, &self.group_id);
             }
         }
         if (0..=2).contains(&version) {
             if flex {
-                put_compact_string(buf, &self.member_id);
+                let () = put_compact_string(buf, &self.member_id);
             } else {
-                put_string(buf, &self.member_id);
+                let () = put_string(buf, &self.member_id);
             }
         }
         if version >= 3 {
@@ -164,23 +165,23 @@ impl Encode for MemberIdentity {
         let flex = version >= 4;
         if version >= 3 {
             if flex {
-                put_compact_string(buf, &self.member_id);
+                let () = put_compact_string(buf, &self.member_id);
             } else {
-                put_string(buf, &self.member_id);
+                let () = put_string(buf, &self.member_id);
             }
         }
         if version >= 3 {
             if flex {
-                put_compact_nullable_string(buf, self.group_instance_id.as_deref());
+                let () = put_compact_nullable_string(buf, self.group_instance_id.as_deref());
             } else {
-                put_nullable_string(buf, self.group_instance_id.as_deref());
+                let () = put_nullable_string(buf, self.group_instance_id.as_deref());
             }
         }
         if version >= 5 {
             if flex {
-                put_compact_nullable_string(buf, self.reason.as_deref());
+                let () = put_compact_nullable_string(buf, self.reason.as_deref());
             } else {
-                put_nullable_string(buf, self.reason.as_deref());
+                let () = put_nullable_string(buf, self.reason.as_deref());
             }
         }
         if flex {

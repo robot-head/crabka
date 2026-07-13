@@ -17,8 +17,6 @@
 //!
 //! The test tears down the container on both success and failure (via `ContainerGuard`).
 
-#![allow(clippy::pedantic)]
-
 use std::{
     net::SocketAddr,
     process::Command,
@@ -159,7 +157,7 @@ impl Drop for ContainerGuard {
 
 /// Poll `GET /subjects` until 200 or 120s.
 async fn wait_for_registry(http: &reqwest::Client, base: &str, container_id: &str) {
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + Duration::from_mins(2);
     let url = format!("{base}/subjects");
     let mut last: Option<String> = None;
     while Instant::now() < deadline {

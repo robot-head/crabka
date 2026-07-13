@@ -1,5 +1,6 @@
 //! FNV-sharded trace-id bloom filter for index-less trace lookup.
 
+use num_traits::ToPrimitive;
 use serde::{Deserialize, Serialize};
 
 /// FNV-1 32-bit hash.
@@ -36,19 +37,21 @@ struct BloomShard {
 }
 
 impl BloomShard {
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_precision_loss,
-        clippy::cast_sign_loss
-    )]
     fn new(expected_items: usize, fp_rate: f64) -> Self {
-        let n = expected_items.max(1) as f64;
+        let n = expected_items
+            .max(1)
+            .to_f64()
+            .expect("usize is representable as a finite f64");
         let fp_rate = fp_rate.clamp(0.000_001, 0.5);
         let m = (-(n * fp_rate.ln()) / (std::f64::consts::LN_2 * std::f64::consts::LN_2))
             .ceil()
             .max(64.0);
-        let k = ((m / n) * std::f64::consts::LN_2).round().max(1.0) as u32;
-        let num_bits = m as u64;
+        let k = ((m / n) * std::f64::consts::LN_2)
+            .round()
+            .max(1.0)
+            .to_u32()
+            .expect("bounded bloom probe count fits u32");
+        let num_bits = m.to_u64().expect("bounded bloom size fits u64");
         let words = usize::try_from(num_bits.div_ceil(64)).unwrap_or(usize::MAX);
         Self {
             bits: vec![0_u64; words],

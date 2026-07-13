@@ -16,7 +16,8 @@ pub const MIN_VERSION: i16 = 1;
 pub const MAX_VERSION: i16 = 6;
 pub const FLEXIBLE_MIN: i16 = 4;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -26,6 +27,10 @@ pub struct DeleteTopicsResponse<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl DeleteTopicsResponse<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::delete_topics_response::DeleteTopicsResponse {
         crate::owned::delete_topics_response::DeleteTopicsResponse {
             throttle_time_ms: (self.throttle_time_ms),
@@ -139,6 +144,10 @@ pub struct DeletableTopicResult<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl DeletableTopicResult<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::delete_topics_response::DeletableTopicResult {
         crate::owned::delete_topics_response::DeletableTopicResult {
             name: (self.name).map(std::string::ToString::to_string),
@@ -155,15 +164,15 @@ impl Encode for DeletableTopicResult<'_> {
         if version >= 0 {
             if version >= 6 {
                 if flex {
-                    put_compact_nullable_string(buf, self.name);
+                    let () = put_compact_nullable_string(buf, self.name);
                 } else {
-                    put_nullable_string(buf, self.name);
+                    let () = put_nullable_string(buf, self.name);
                 }
             } else {
                 if flex {
-                    put_compact_string(buf, (self.name).unwrap_or(""));
+                    let () = put_compact_string(buf, (self.name).unwrap_or(""));
                 } else {
-                    put_string(buf, (self.name).unwrap_or(""));
+                    let () = put_string(buf, (self.name).unwrap_or(""));
                 }
             }
         }
@@ -175,9 +184,9 @@ impl Encode for DeletableTopicResult<'_> {
         }
         if version >= 5 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message);
+                let () = put_compact_nullable_string(buf, self.error_message);
             } else {
-                put_nullable_string(buf, self.error_message);
+                let () = put_nullable_string(buf, self.error_message);
             }
         }
         if flex {

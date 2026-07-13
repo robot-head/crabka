@@ -1,46 +1,76 @@
 // rustc 1.95 clippy::pedantic ICEs on some broker integration test files
 // (an upstream bug in clippy's body-analysis pass). Disable pedantic
 // locally; the rest of the workspace still enforces the full pedantic gate.
-#![allow(clippy::pedantic)]
 
 //! Byte-exactness pin for `DescribeGroups` (`api_key=15`) on a CLASSIC
-//! consumer group: the response must carry, per member, the JoinGroup
+//! consumer group: the response must carry, per member, the `JoinGroup`
 //! protocol-metadata bytes (`member_metadata`) and, at the group level,
 //! the SELECTED protocol name (`protocol_data`). Both were previously
 //! dropped in the snapshot projection, returning empties and breaking
 //! wire byte-exactness with Apache Kafka (`kafka-consumer-groups
 //! --describe --members`, `AdminClient.describeClassicGroups`).
 //!
-//! Drives a real classic JoinGroup → SyncGroup → DescribeGroups against
+//! Drives a real classic `JoinGroup` → `SyncGroup` → `DescribeGroups` against
 //! the in-process broker over `crabka_client_core::Client`, mirroring
-//! `group_protocol_negotiation.rs` (the MEMBER_ID_REQUIRED two-step +
-//! INITIAL_REBALANCE_DELAY wait) and `unit.rs` (the SyncGroup shape).
+//! `group_protocol_negotiation.rs` (the `MEMBER_ID_REQUIRED` two-step +
+//! `INITIAL_REBALANCE_DELAY` wait) and `unit.rs` (the `SyncGroup` shape).
 
 use std::time::Duration;
 
-use assert2::check;
+use assert2::{assert, check};
 use bytes::Bytes;
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_core::Client;
 use crabka_protocol::owned::{
     describe_groups_request::DescribeGroupsRequest,
+    describe_groups_response::DescribeGroupsResponse,
     join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol},
     sync_group_request::{SyncGroupRequest, SyncGroupRequestAssignment},
 };
+
+fn assert_described_group(resp: &DescribeGroupsResponse) {
+    assert!(
+        resp.groups.len() == 1,
+        "exactly one described group, got {resp:?}"
+    );
+    let group = &resp.groups[0];
+    check!(
+        group.error_code == ERR_NONE,
+        "described group must be error-free: {group:?}"
+    );
+    check!(
+        group.protocol_type == "consumer",
+        "unexpected protocol type: {group:?}"
+    );
+    check!(
+        group.protocol_data == "range",
+        "unexpected protocol name: {group:?}"
+    );
+    check!(group.members.len() == 1, "expected one member: {group:?}");
+    let member = &group.members[0];
+    assert!(
+        member.member_metadata.as_ref() == KNOWN_METADATA,
+        "unexpected member metadata"
+    );
+    assert!(
+        member.member_assignment.as_ref() == ASSIGN,
+        "unexpected member assignment"
+    );
+}
 
 // Kafka error code consumed by the JoinGroup two-step.
 const ERR_NONE: i16 = 0;
 const ERR_MEMBER_ID_REQUIRED: i16 = 79;
 
-/// Upper bound on a rejoin JoinGroup round-trip: covers the broker's ~3 s
+/// Upper bound on a rejoin `JoinGroup` round-trip: covers the broker's ~3 s
 /// initial-rebalance delay with generous headroom.
 const JOIN_GROUP_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// A fixed, recognizable JoinGroup protocol-metadata blob. The byte
+/// A fixed, recognizable `JoinGroup` protocol-metadata blob. The byte
 /// shape is arbitrary (not a real `ConsumerProtocolSubscription`) — the
 /// point is exact round-trip through stored state into `member_metadata`.
 const KNOWN_METADATA: &[u8] = b"\x00\x01rangemeta\xde\xad";
-/// The leader's SyncGroup assignment blob, echoed back as
+/// The leader's `SyncGroup` assignment blob, echoed back as
 /// `member_assignment`.
 const ASSIGN: &[u8] = b"assign-bytes";
 
@@ -89,9 +119,9 @@ fn join_request(group_id: &str, member_id: &str, metadata: &'static [u8]) -> Joi
     }
 }
 
-/// A single-member classic consumer group: drive JoinGroup (handling the
-/// MEMBER_ID_REQUIRED two-step), then a leader SyncGroup, then assert
-/// DescribeGroups surfaces the protocol name + per-member metadata.
+/// A single-member classic consumer group: drive `JoinGroup` (handling the
+/// `MEMBER_ID_REQUIRED` two-step), then a leader `SyncGroup`, then assert
+/// `DescribeGroups` surfaces the protocol name + per-member metadata.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn describe_groups_reports_member_metadata_and_protocol_name() {
     let (handle, bootstrap, _tempdir) = start_broker().await;
@@ -108,9 +138,15 @@ async fn describe_groups_reports_member_metadata_and_protocol_name() {
         .send(join_request(group_id, "", KNOWN_METADATA))
         .await
         .expect("first JoinGroup must round-trip");
-    assert2::assert!(r1.error_code == ERR_MEMBER_ID_REQUIRED);
+    assert!(
+        r1.error_code == ERR_MEMBER_ID_REQUIRED,
+        "first JoinGroup (empty member_id) must return MEMBER_ID_REQUIRED (79), got {r1:?}"
+    );
     let member_id = r1.member_id;
-    assert2::assert!(!member_id.is_empty());
+    assert!(
+        !member_id.is_empty(),
+        "broker must return a generated member_id"
+    );
 
     // ── JoinGroup round 2: with the supplied id. Blocks for up to the
     // ~3 s initial-rebalance-delay before the broker completes the
@@ -123,11 +159,15 @@ async fn describe_groups_reports_member_metadata_and_protocol_name() {
     .expect("second JoinGroup timed out")
     .expect("second JoinGroup must round-trip");
     check!(
-        (
-            r2.error_code,
-            r2.protocol_name.as_deref(),
-            r2.leader.as_str()
-        ) == (ERR_NONE, Some("range"), member_id.as_str()),
+        r2.error_code == ERR_NONE,
+        "second JoinGroup must succeed, got {r2:?}"
+    );
+    check!(
+        r2.protocol_name.as_deref() == Some("range"),
+        "second JoinGroup must select protocol 'range', got {r2:?}"
+    );
+    check!(
+        r2.leader.as_str() == member_id.as_str(),
         "second JoinGroup must elect the lone member as leader, got {r2:?}"
     );
     let generation_id = r2.generation_id;
@@ -149,7 +189,14 @@ async fn describe_groups_reports_member_metadata_and_protocol_name() {
         })
         .await
         .expect("SyncGroup must round-trip");
-    assert2::assert!((r3.error_code, r3.assignment.as_ref()) == (ERR_NONE, ASSIGN));
+    assert!(
+        r3.error_code == ERR_NONE,
+        "SyncGroup must succeed, got {r3:?}"
+    );
+    assert!(
+        r3.assignment.as_ref() == ASSIGN,
+        "SyncGroup must echo the assignment"
+    );
 
     // ── DescribeGroups: the populated fields are the contract. ──
     let resp = client
@@ -161,21 +208,7 @@ async fn describe_groups_reports_member_metadata_and_protocol_name() {
         .expect("DescribeGroups must round-trip");
     handle.shutdown().await;
 
-    assert2::assert!(resp.groups.len() == 1);
-    let g = &resp.groups[0];
-    check!(
-        (
-            g.error_code,
-            g.protocol_type.as_str(),
-            g.protocol_data.as_str(),
-            g.members.len(),
-        ) == (ERR_NONE, "consumer", "range", 1),
-        "described group projection mismatch: {g:?}"
-    );
-    let m = &g.members[0];
-    assert2::assert!(
-        (m.member_metadata.as_ref(), m.member_assignment.as_ref()) == (KNOWN_METADATA, ASSIGN)
-    );
+    assert_described_group(&resp);
 }
 
 /// cp/JVM cross-validation: drive the SAME classic flow but with the EXACT
@@ -202,7 +235,10 @@ async fn describe_groups_matches_real_kafka_range_subscription() {
         .send(join_request(group_id, "", REAL_KAFKA_SUBSCRIPTION))
         .await
         .expect("first JoinGroup must round-trip");
-    assert2::assert!(r1.error_code == ERR_MEMBER_ID_REQUIRED);
+    assert!(
+        r1.error_code == ERR_MEMBER_ID_REQUIRED,
+        "first JoinGroup must return MEMBER_ID_REQUIRED (79), got {r1:?}"
+    );
     let member_id = r1.member_id;
 
     let r2 = tokio::time::timeout(
@@ -212,7 +248,14 @@ async fn describe_groups_matches_real_kafka_range_subscription() {
     .await
     .expect("second JoinGroup timed out")
     .expect("second JoinGroup must round-trip");
-    assert2::assert!((r2.error_code, r2.protocol_name.as_deref()) == (ERR_NONE, Some("range")));
+    assert!(
+        r2.error_code == ERR_NONE,
+        "second JoinGroup must succeed, got {r2:?}"
+    );
+    assert!(
+        r2.protocol_name.as_deref() == Some("range"),
+        "single member must land on 'range', got {r2:?}"
+    );
     let generation_id = r2.generation_id;
 
     // SyncGroup: leader supplies the REAL captured assignment bytes.
@@ -232,7 +275,10 @@ async fn describe_groups_matches_real_kafka_range_subscription() {
         })
         .await
         .expect("SyncGroup must round-trip");
-    assert2::assert!(r3.error_code == ERR_NONE);
+    assert!(
+        r3.error_code == ERR_NONE,
+        "SyncGroup must succeed, got {r3:?}"
+    );
 
     let resp = client
         .send(DescribeGroupsRequest {
@@ -246,16 +292,26 @@ async fn describe_groups_matches_real_kafka_range_subscription() {
     let g = &resp.groups[0];
     // Real-Kafka authority (from real_kafka_classic.json).
     check!(
-        (
-            g.error_code,
-            g.protocol_type.as_str(),
-            g.protocol_data.as_str()
-        ) == (ERR_NONE, "consumer", "range"),
+        g.error_code == ERR_NONE,
+        "DescribeGroups must match real Kafka's authority (error-free), got {g:?}"
+    );
+    check!(
+        g.protocol_type.as_str() == "consumer",
+        "DescribeGroups must match real Kafka's authority (protocol_type 'consumer'), got {g:?}"
+    );
+    check!(
+        g.protocol_data.as_str() == "range",
         "DescribeGroups must match real Kafka's authority (selected assignor 'range'), got {g:?}"
     );
     let m = &g.members[0];
-    assert2::assert!(
-        (m.member_metadata.as_ref(), m.member_assignment.as_ref())
-            == (REAL_KAFKA_SUBSCRIPTION, REAL_KAFKA_ASSIGNMENT)
+    assert!(
+        m.member_metadata.as_ref() == REAL_KAFKA_SUBSCRIPTION,
+        "member_metadata must be the byte-exact real-Kafka ConsumerProtocolSubscription, got {:02x?}",
+        m.member_metadata.as_ref()
+    );
+    assert!(
+        m.member_assignment.as_ref() == REAL_KAFKA_ASSIGNMENT,
+        "member_assignment must be the byte-exact real-Kafka ConsumerProtocolAssignment, got {:02x?}",
+        m.member_assignment.as_ref()
     );
 }

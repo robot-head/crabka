@@ -55,7 +55,10 @@ async fn finalize_streams_version(client: &Client) {
         })
         .await
         .expect("UpdateFeatures");
-    assert2::assert!(resp.error_code == 0);
+    assert_eq!(
+        resp.error_code, 0,
+        "streams.version finalize failed: {resp:?}"
+    );
 }
 
 async fn create_topic(client: &Client, topic: &str, partitions: i32) {
@@ -72,7 +75,10 @@ async fn create_topic(client: &Client, topic: &str, partitions: i32) {
         })
         .await
         .expect("CreateTopics");
-    assert2::assert!(resp.topics[0].error_code == 0);
+    assert_eq!(
+        resp.topics[0].error_code, 0,
+        "topic create failed: {resp:?}"
+    );
 }
 
 async fn topic_id(admin: &Client, name: &str) -> WireUuid {
@@ -259,7 +265,7 @@ async fn columnar_runtime_bridge_against_live_broker() {
     let next = run_partition_once(&t, &fetcher, &bridge_out, "in", 0, 0)
         .await
         .expect("run_partition_once");
-    assert2::assert!(next == 2);
+    assert_eq!(next, 2, "offset advances past both seeded records");
 
     // Read `out` and assert exactly one filtered row survived (amount 9 > 4).
     let out_id = topic_id(&admin, "out").await;
@@ -285,7 +291,7 @@ async fn columnar_runtime_bridge_against_live_broker() {
         // inside a deadline-guarded poll loop.
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert2::assert!(total_rows == 1);
+    assert_eq!(total_rows, 1, "only amount=9 passes the amount>4 filter");
 
     broker.shutdown().await;
 }

@@ -87,7 +87,10 @@ mod tests {
     #[test]
     fn empty_input() {
         // Murmur3.hash128("", seed=104729) — captured value (non-zero; seed != 0).
-        assert2::assert!(hex_bytes("9d2764a018e329428c3cf3b035938518") == hash128(b"").to_vec());
+        assert_eq!(
+            hex_bytes("9d2764a018e329428c3cf3b035938518"),
+            hash128(b"").to_vec()
+        );
     }
 
     #[test]
@@ -99,7 +102,12 @@ mod tests {
         for e in v["murmur3"].as_array().unwrap() {
             let input = hex_bytes(e["input_hex"].as_str().unwrap());
             let want = hex_bytes(e["hash_hex"].as_str().unwrap());
-            assert2::assert!(hash128(&input).as_slice() == want.as_slice());
+            assert_eq!(
+                hash128(&input).as_slice(),
+                want.as_slice(),
+                "murmur3 mismatch for input {}",
+                e["input_hex"]
+            );
         }
     }
 

@@ -16,7 +16,8 @@ pub const MIN_VERSION: i16 = 1;
 pub const MAX_VERSION: i16 = 3;
 pub const FLEXIBLE_MIN: i16 = 2;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -28,6 +29,10 @@ pub struct DescribeAclsResponse<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl DescribeAclsResponse<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_acls_response::DescribeAclsResponse {
         crate::owned::describe_acls_response::DescribeAclsResponse {
             throttle_time_ms: (self.throttle_time_ms),
@@ -58,9 +63,9 @@ impl Encode for DescribeAclsResponse<'_> {
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message);
+                let () = put_compact_nullable_string(buf, self.error_message);
             } else {
-                put_nullable_string(buf, self.error_message);
+                let () = put_nullable_string(buf, self.error_message);
             }
         }
         if version >= 0 {
@@ -185,11 +190,15 @@ impl Default for DescribeAclsResource<'_> {
             resource_name: "",
             pattern_type: 3i8,
             acls: Vec::new(),
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl DescribeAclsResource<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_acls_response::DescribeAclsResource {
         crate::owned::describe_acls_response::DescribeAclsResource {
             resource_type: (self.resource_type),
@@ -208,9 +217,9 @@ impl Encode for DescribeAclsResource<'_> {
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.resource_name);
+                let () = put_compact_string(buf, self.resource_name);
             } else {
-                put_string(buf, self.resource_name);
+                let () = put_string(buf, self.resource_name);
             }
         }
         if version >= 1 {
@@ -323,6 +332,10 @@ pub struct AclDescription<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl AclDescription<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_acls_response::AclDescription {
         crate::owned::describe_acls_response::AclDescription {
             principal: (self.principal).to_string(),
@@ -338,16 +351,16 @@ impl Encode for AclDescription<'_> {
         let flex = version >= 2;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.principal);
+                let () = put_compact_string(buf, self.principal);
             } else {
-                put_string(buf, self.principal);
+                let () = put_string(buf, self.principal);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.host);
+                let () = put_compact_string(buf, self.host);
             } else {
-                put_string(buf, self.host);
+                let () = put_string(buf, self.host);
             }
         }
         if version >= 0 {

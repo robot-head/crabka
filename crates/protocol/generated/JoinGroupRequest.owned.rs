@@ -18,7 +18,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 9;
 pub const FLEXIBLE_MIN: i16 = 6;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,8 +45,213 @@ impl Default for JoinGroupRequest {
             protocol_type: String::new(),
             protocols: Vec::new(),
             reason: None,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
+    }
+}
+impl JoinGroupRequest {
+    fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
+        if version >= 0 {
+            if flex {
+                let () = put_compact_string(buf, &self.group_id);
+            } else {
+                let () = put_string(buf, &self.group_id);
+            }
+        }
+    }
+    fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
+        if version >= 0 {
+            put_i32(buf, self.session_timeout_ms);
+        }
+    }
+    fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
+        if version >= 1 {
+            put_i32(buf, self.rebalance_timeout_ms);
+        }
+    }
+    fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
+        if version >= 0 {
+            if flex {
+                let () = put_compact_string(buf, &self.member_id);
+            } else {
+                let () = put_string(buf, &self.member_id);
+            }
+        }
+    }
+    fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
+        if version >= 5 {
+            if flex {
+                let () = put_compact_nullable_string(buf, self.group_instance_id.as_deref());
+            } else {
+                let () = put_nullable_string(buf, self.group_instance_id.as_deref());
+            }
+        }
+    }
+    fn encode_field_5<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
+        if version >= 0 {
+            if flex {
+                let () = put_compact_string(buf, &self.protocol_type);
+            } else {
+                let () = put_string(buf, &self.protocol_type);
+            }
+        }
+    }
+    fn encode_field_6<B: BufMut>(
+        &self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.protocols).len(), flex);
+                for it in &self.protocols {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
+        Ok(())
+    }
+    fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
+        if version >= 8 {
+            if flex {
+                let () = put_compact_nullable_string(buf, self.reason.as_deref());
+            } else {
+                let () = put_nullable_string(buf, self.reason.as_deref());
+            }
+        }
+    }
+    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {
+        if flex {
+            let tagged = WriteTaggedFields::new();
+            tagged.write(buf, &self.unknown_tagged_fields);
+        }
+    }
+    fn decode_field_0<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.group_id = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_1<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.session_timeout_ms = get_i32(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_2<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 1 {
+            out.rebalance_timeout_ms = get_i32(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_3<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.member_id = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_4<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 5 {
+            out.group_instance_id = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_5<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.protocol_type = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_6<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.protocols = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(JoinGroupRequestProtocol::decode(buf, version)?);
+                }
+                v
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_7<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 8 {
+            out.reason = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
+        }
+        Ok(())
+    }
+    fn decode_tagged_fields<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        _version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if flex {
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
+        }
+        Ok(())
     }
 }
 impl Encode for JoinGroupRequest {
@@ -57,59 +263,15 @@ impl Encode for JoinGroupRequest {
             });
         }
         let flex = is_flexible(version);
-        if version >= 0 {
-            if flex {
-                put_compact_string(buf, &self.group_id);
-            } else {
-                put_string(buf, &self.group_id);
-            }
-        }
-        if version >= 0 {
-            put_i32(buf, self.session_timeout_ms);
-        }
-        if version >= 1 {
-            put_i32(buf, self.rebalance_timeout_ms);
-        }
-        if version >= 0 {
-            if flex {
-                put_compact_string(buf, &self.member_id);
-            } else {
-                put_string(buf, &self.member_id);
-            }
-        }
-        if version >= 5 {
-            if flex {
-                put_compact_nullable_string(buf, self.group_instance_id.as_deref());
-            } else {
-                put_nullable_string(buf, self.group_instance_id.as_deref());
-            }
-        }
-        if version >= 0 {
-            if flex {
-                put_compact_string(buf, &self.protocol_type);
-            } else {
-                put_string(buf, &self.protocol_type);
-            }
-        }
-        if version >= 0 {
-            {
-                crate::primitives::array::put_array_len(buf, (self.protocols).len(), flex);
-                for it in &self.protocols {
-                    it.encode(buf, version)?;
-                }
-            }
-        }
-        if version >= 8 {
-            if flex {
-                put_compact_nullable_string(buf, self.reason.as_deref());
-            } else {
-                put_nullable_string(buf, self.reason.as_deref());
-            }
-        }
-        if flex {
-            let tagged = WriteTaggedFields::new();
-            tagged.write(buf, &self.unknown_tagged_fields);
-        }
+        self.encode_field_0(buf, version, flex);
+        self.encode_field_1(buf, version, flex);
+        self.encode_field_2(buf, version, flex);
+        self.encode_field_3(buf, version, flex);
+        self.encode_field_4(buf, version, flex);
+        self.encode_field_5(buf, version, flex);
+        self.encode_field_6(buf, version, flex)?;
+        self.encode_field_7(buf, version, flex);
+        self.encode_tagged_fields(buf, version, flex);
         Ok(())
     }
     fn encoded_len(&self, version: i16) -> usize {
@@ -184,60 +346,15 @@ impl Decode<'_> for JoinGroupRequest {
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 {
-            out.group_id = if flex {
-                get_compact_string_owned(buf)?
-            } else {
-                get_string_owned(buf)?
-            };
-        }
-        if version >= 0 {
-            out.session_timeout_ms = get_i32(buf)?;
-        }
-        if version >= 1 {
-            out.rebalance_timeout_ms = get_i32(buf)?;
-        }
-        if version >= 0 {
-            out.member_id = if flex {
-                get_compact_string_owned(buf)?
-            } else {
-                get_string_owned(buf)?
-            };
-        }
-        if version >= 5 {
-            out.group_instance_id = if flex {
-                get_compact_nullable_string_owned(buf)?
-            } else {
-                get_nullable_string_owned(buf)?
-            };
-        }
-        if version >= 0 {
-            out.protocol_type = if flex {
-                get_compact_string_owned(buf)?
-            } else {
-                get_string_owned(buf)?
-            };
-        }
-        if version >= 0 {
-            out.protocols = {
-                let n = crate::primitives::array::get_array_len(buf, flex)?;
-                let mut v = Vec::with_capacity(n);
-                for _ in 0..n {
-                    v.push(JoinGroupRequestProtocol::decode(buf, version)?);
-                }
-                v
-            };
-        }
-        if version >= 8 {
-            out.reason = if flex {
-                get_compact_nullable_string_owned(buf)?
-            } else {
-                get_nullable_string_owned(buf)?
-            };
-        }
-        if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
-        }
+        Self::decode_field_0(&mut out, buf, version, flex)?;
+        Self::decode_field_1(&mut out, buf, version, flex)?;
+        Self::decode_field_2(&mut out, buf, version, flex)?;
+        Self::decode_field_3(&mut out, buf, version, flex)?;
+        Self::decode_field_4(&mut out, buf, version, flex)?;
+        Self::decode_field_5(&mut out, buf, version, flex)?;
+        Self::decode_field_6(&mut out, buf, version, flex)?;
+        Self::decode_field_7(&mut out, buf, version, flex)?;
+        Self::decode_tagged_fields(&mut out, buf, version, flex)?;
         Ok(out)
     }
 }
@@ -284,16 +401,16 @@ impl Encode for JoinGroupRequestProtocol {
         let flex = version >= 6;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.name);
+                let () = put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name);
+                let () = put_string(buf, &self.name);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_bytes(buf, &self.metadata);
+                let () = put_compact_bytes(buf, &self.metadata);
             } else {
-                put_bytes(buf, &self.metadata);
+                let () = put_bytes(buf, &self.metadata);
             }
         }
         if flex {

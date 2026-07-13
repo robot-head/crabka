@@ -16,7 +16,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 1;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,7 +35,7 @@ impl Default for FetchSnapshotRequest {
             max_bytes: 2_147_483_647i32,
             topics: Vec::new(),
             cluster_id: None,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
@@ -63,7 +64,7 @@ impl Encode for FetchSnapshotRequest {
         }
         if flex {
             let mut tagged = WriteTaggedFields::new();
-            if !(self.cluster_id.is_none()) {
+            if self.cluster_id.is_some() {
                 let payload = encode_to_bytes(
                     if flex {
                         compact_nullable_string_len(self.cluster_id.as_deref())
@@ -72,9 +73,9 @@ impl Encode for FetchSnapshotRequest {
                     },
                     |b| {
                         if flex {
-                            put_compact_nullable_string(b, self.cluster_id.as_deref());
+                            let () = put_compact_nullable_string(b, self.cluster_id.as_deref());
                         } else {
-                            put_nullable_string(b, self.cluster_id.as_deref());
+                            let () = put_nullable_string(b, self.cluster_id.as_deref());
                         }
                         Ok(())
                     },
@@ -104,7 +105,7 @@ impl Encode for FetchSnapshotRequest {
         }
         if flex {
             let mut known_pairs: Vec<(u32, usize)> = Vec::new();
-            if !(self.cluster_id.is_none()) {
+            if self.cluster_id.is_some() {
                 known_pairs.push((
                     0,
                     if flex {
@@ -199,9 +200,9 @@ impl Encode for TopicSnapshot {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.name);
+                let () = put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name);
+                let () = put_string(buf, &self.name);
             }
         }
         if version >= 0 {
@@ -478,11 +479,11 @@ impl SnapshotId {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(version: i16) -> ::serde_json::Value {
+pub fn default_json(_version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("clusterId".to_string(), ::serde_json::Value::Null);
     obj.insert("replicaId".to_string(), ::serde_json::json!(-1));
-    obj.insert("maxBytes".to_string(), ::serde_json::json!(2147483647));
+    obj.insert("maxBytes".to_string(), ::serde_json::json!(2_147_483_647));
     obj.insert("topics".to_string(), ::serde_json::Value::Array(vec![]));
     ::serde_json::Value::Object(obj)
 }

@@ -19,7 +19,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 15;
 pub const FLEXIBLE_MIN: i16 = 12;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -159,9 +160,9 @@ impl Encode for FetchableTopicResponse {
         let flex = version >= 12;
         if (0..=12).contains(&version) {
             if flex {
-                put_compact_string(buf, &self.topic);
+                let () = put_compact_string(buf, &self.topic);
             } else {
-                put_string(buf, &self.topic);
+                let () = put_string(buf, &self.topic);
             }
         }
         if version >= 13 {
@@ -285,31 +286,45 @@ impl Default for PartitionData {
             aborted_transactions: None,
             preferred_read_replica: -1i32,
             records: None,
-            diverging_epoch: Default::default(),
-            current_leader: Default::default(),
-            snapshot_id: Default::default(),
-            unknown_tagged_fields: Default::default(),
+            diverging_epoch: EpochEndOffset::default(),
+            current_leader: LeaderIdAndEpoch::default(),
+            snapshot_id: SnapshotId::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
-impl Encode for PartitionData {
-    fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
-        let flex = version >= 12;
+impl PartitionData {
+    fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
             put_i32(buf, self.partition_index);
         }
+    }
+    fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
             put_i16(buf, self.error_code);
         }
+    }
+    fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
             put_i64(buf, self.high_watermark);
         }
+    }
+    fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 4 {
             put_i64(buf, self.last_stable_offset);
         }
+    }
+    fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 5 {
             put_i64(buf, self.log_start_offset);
         }
+    }
+    fn encode_field_5<B: BufMut>(
+        &self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 4 {
             {
                 let len = (self.aborted_transactions).as_ref().map(Vec::len);
@@ -321,16 +336,26 @@ impl Encode for PartitionData {
                 }
             }
         }
+        Ok(())
+    }
+    fn encode_field_6<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 11 {
             put_i32(buf, self.preferred_read_replica);
         }
+    }
+    fn encode_field_7<B: BufMut>(
+        &self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
             match &self.records {
                 None => {
                     if flex {
-                        put_compact_nullable_bytes(buf, None);
+                        let () = put_compact_nullable_bytes(buf, None);
                     } else {
-                        put_nullable_bytes(buf, None);
+                        let () = put_nullable_bytes(buf, None);
                     }
                 }
                 Some(__rb) => {
@@ -341,13 +366,16 @@ impl Encode for PartitionData {
                         version,
                     )?;
                     if flex {
-                        put_compact_bytes(buf, &__rb_buf);
+                        let () = put_compact_bytes(buf, &__rb_buf);
                     } else {
-                        put_bytes(buf, &__rb_buf);
+                        let () = put_bytes(buf, &__rb_buf);
                     }
                 }
             }
         }
+        Ok(())
+    }
+    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if flex {
             let mut tagged = WriteTaggedFields::new();
             if !(crate::codegen_helpers::is_default(&self.diverging_epoch)) {
@@ -373,6 +401,182 @@ impl Encode for PartitionData {
             }
             tagged.write(buf, &self.unknown_tagged_fields);
         }
+    }
+    fn decode_field_0<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.partition_index = get_i32(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_1<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.error_code = get_i16(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_2<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.high_watermark = get_i64(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_3<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 4 {
+            out.last_stable_offset = get_i64(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_4<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 5 {
+            out.log_start_offset = get_i64(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_5<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 4 {
+            out.aborted_transactions = {
+                let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?;
+                match opt {
+                    None => None,
+                    Some(n) => {
+                        let mut v = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            v.push(AbortedTransaction::decode(buf, version)?);
+                        }
+                        Some(v)
+                    }
+                }
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_6<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 11 {
+            out.preferred_read_replica = get_i32(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_7<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.records = {
+                let __rb_opt = if flex {
+                    get_compact_nullable_bytes_owned(buf)?
+                } else {
+                    get_nullable_bytes_owned(buf)?
+                };
+                match __rb_opt {
+                    None => None,
+                    Some(__rb_bytes) => {
+                        let mut __rb_cur: &[u8] = &__rb_bytes;
+                        Some(crate::records::RecordsPayload::decode_lenient(
+                            &mut __rb_cur,
+                            version,
+                        )?)
+                    }
+                }
+            };
+        }
+        Ok(())
+    }
+    fn decode_tagged_fields<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if flex {
+            let mut tag_diverging_epoch = None;
+            let mut tag_current_leader = None;
+            let mut tag_snapshot_id = None;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |tag, payload| match tag {
+                0 => {
+                    tag_diverging_epoch = Some({
+                        let b: &mut &[u8] = payload;
+                        EpochEndOffset::decode(b, version)?
+                    });
+                    Ok(true)
+                }
+                1 => {
+                    tag_current_leader = Some({
+                        let b: &mut &[u8] = payload;
+                        LeaderIdAndEpoch::decode(b, version)?
+                    });
+                    Ok(true)
+                }
+                2 => {
+                    tag_snapshot_id = Some({
+                        let b: &mut &[u8] = payload;
+                        SnapshotId::decode(b, version)?
+                    });
+                    Ok(true)
+                }
+                _ => Ok(false),
+            })?;
+            if let Some(v) = tag_diverging_epoch {
+                out.diverging_epoch = v;
+            }
+            if let Some(v) = tag_current_leader {
+                out.current_leader = v;
+            }
+            if let Some(v) = tag_snapshot_id {
+                out.snapshot_id = v;
+            }
+        }
+        Ok(())
+    }
+}
+impl Encode for PartitionData {
+    fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
+        let flex = version >= 12;
+        self.encode_field_0(buf, version, flex);
+        self.encode_field_1(buf, version, flex);
+        self.encode_field_2(buf, version, flex);
+        self.encode_field_3(buf, version, flex);
+        self.encode_field_4(buf, version, flex);
+        self.encode_field_5(buf, version, flex)?;
+        self.encode_field_6(buf, version, flex);
+        self.encode_field_7(buf, version, flex)?;
+        self.encode_tagged_fields(buf, version, flex);
         Ok(())
     }
     fn encoded_len(&self, version: i16) -> usize {
@@ -449,96 +653,15 @@ impl Decode<'_> for PartitionData {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 12;
         let mut out = Self::default();
-        if version >= 0 {
-            out.partition_index = get_i32(buf)?;
-        }
-        if version >= 0 {
-            out.error_code = get_i16(buf)?;
-        }
-        if version >= 0 {
-            out.high_watermark = get_i64(buf)?;
-        }
-        if version >= 4 {
-            out.last_stable_offset = get_i64(buf)?;
-        }
-        if version >= 5 {
-            out.log_start_offset = get_i64(buf)?;
-        }
-        if version >= 4 {
-            out.aborted_transactions = {
-                let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?;
-                match opt {
-                    None => None,
-                    Some(n) => {
-                        let mut v = Vec::with_capacity(n);
-                        for _ in 0..n {
-                            v.push(AbortedTransaction::decode(buf, version)?);
-                        }
-                        Some(v)
-                    }
-                }
-            };
-        }
-        if version >= 11 {
-            out.preferred_read_replica = get_i32(buf)?;
-        }
-        if version >= 0 {
-            out.records = {
-                let __rb_opt = if flex {
-                    get_compact_nullable_bytes_owned(buf)?
-                } else {
-                    get_nullable_bytes_owned(buf)?
-                };
-                match __rb_opt {
-                    None => None,
-                    Some(__rb_bytes) => {
-                        let mut __rb_cur: &[u8] = &__rb_bytes;
-                        Some(crate::records::RecordsPayload::decode_lenient(
-                            &mut __rb_cur,
-                            version,
-                        )?)
-                    }
-                }
-            };
-        }
-        if flex {
-            let mut tag_diverging_epoch = None;
-            let mut tag_current_leader = None;
-            let mut tag_snapshot_id = None;
-            out.unknown_tagged_fields = read_tagged_fields(buf, |tag, payload| match tag {
-                0 => {
-                    tag_diverging_epoch = Some({
-                        let b: &mut &[u8] = payload;
-                        EpochEndOffset::decode(b, version)?
-                    });
-                    Ok(true)
-                }
-                1 => {
-                    tag_current_leader = Some({
-                        let b: &mut &[u8] = payload;
-                        LeaderIdAndEpoch::decode(b, version)?
-                    });
-                    Ok(true)
-                }
-                2 => {
-                    tag_snapshot_id = Some({
-                        let b: &mut &[u8] = payload;
-                        SnapshotId::decode(b, version)?
-                    });
-                    Ok(true)
-                }
-                _ => Ok(false),
-            })?;
-            if let Some(v) = tag_diverging_epoch {
-                out.diverging_epoch = v;
-            }
-            if let Some(v) = tag_current_leader {
-                out.current_leader = v;
-            }
-            if let Some(v) = tag_snapshot_id {
-                out.snapshot_id = v;
-            }
-        }
+        Self::decode_field_0(&mut out, buf, version, flex)?;
+        Self::decode_field_1(&mut out, buf, version, flex)?;
+        Self::decode_field_2(&mut out, buf, version, flex)?;
+        Self::decode_field_3(&mut out, buf, version, flex)?;
+        Self::decode_field_4(&mut out, buf, version, flex)?;
+        Self::decode_field_5(&mut out, buf, version, flex)?;
+        Self::decode_field_6(&mut out, buf, version, flex)?;
+        Self::decode_field_7(&mut out, buf, version, flex)?;
+        Self::decode_tagged_fields(&mut out, buf, version, flex)?;
         Ok(out)
     }
 }
@@ -591,7 +714,7 @@ impl Default for EpochEndOffset {
         Self {
             epoch: -1i32,
             end_offset: -1i64,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
@@ -667,7 +790,7 @@ impl Default for LeaderIdAndEpoch {
         Self {
             leader_id: -1i32,
             leader_epoch: -1i32,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
@@ -743,7 +866,7 @@ impl Default for SnapshotId {
         Self {
             end_offset: -1i64,
             epoch: -1i32,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }

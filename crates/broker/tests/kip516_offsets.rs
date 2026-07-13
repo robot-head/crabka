@@ -1,5 +1,5 @@
 //! KIP-516: `OffsetCommit` v10 / `OffsetFetch` v8+ by `topic_id`.
-use assert2::check;
+use assert2::{assert, check};
 mod support;
 
 use crabka_protocol::{
@@ -102,7 +102,8 @@ async fn offset_commit_and_fetch_by_topic_id_round_trip() {
         .find(|t| t.topic_id == id)
         .expect("topic by id");
     let part = t.partitions.first().expect("partition 0");
-    check!((part.committed_offset, part.error_code) == (42, 0));
+    check!(part.committed_offset == 42);
+    check!(part.error_code == 0);
     check!(t.topic_id == id); // id echoed
 }
 
@@ -133,7 +134,7 @@ async fn offset_fetch_unknown_topic_id_returns_unknown_topic_id() {
         .find(|g| g.group_id == "g2")
         .expect("group g2");
     let t = grp.topics.first().expect("a topic row");
-    assert2::assert!(t.partitions.first().expect("a partition").error_code == 100);
+    assert!(t.partitions.first().expect("a partition").error_code == 100);
 }
 
 /// `OffsetCommit` v10 with a mix of a known `topic_id` and an unknown one: the
@@ -194,13 +195,13 @@ async fn offset_commit_unknown_topic_id_returns_unknown_topic_id() {
         .iter()
         .find(|t| t.topic_id == known)
         .expect("known topic row");
-    assert2::assert!(ok.partitions[0].error_code == 0);
+    assert!(ok.partitions[0].error_code == 0);
     let bad = resp
         .topics
         .iter()
         .find(|t| t.topic_id == bogus)
         .expect("unknown topic row echoing its id");
-    assert2::assert!(bad.partitions[0].error_code == 100); // UNKNOWN_TOPIC_ID
+    assert!(bad.partitions[0].error_code == 100); // UNKNOWN_TOPIC_ID
 }
 
 /// Fetch-all (null `topics`) at v10 must echo each topic's `topic_id`, since
@@ -264,5 +265,5 @@ async fn offset_fetch_all_echoes_topic_id() {
         .iter()
         .find(|t| t.topic_id == id)
         .expect("topic row with echoed id");
-    assert2::assert!(t.partitions.first().expect("a partition").committed_offset == 7);
+    assert!(t.partitions.first().expect("a partition").committed_offset == 7);
 }

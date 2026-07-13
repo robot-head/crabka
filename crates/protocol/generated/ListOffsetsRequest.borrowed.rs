@@ -12,7 +12,8 @@ pub const MIN_VERSION: i16 = 1;
 pub const MAX_VERSION: i16 = 11;
 pub const FLEXIBLE_MIN: i16 = 6;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -24,6 +25,10 @@ pub struct ListOffsetsRequest<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl ListOffsetsRequest<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::list_offsets_request::ListOffsetsRequest {
         crate::owned::list_offsets_request::ListOffsetsRequest {
             replica_id: (self.replica_id),
@@ -158,6 +163,10 @@ pub struct ListOffsetsTopic<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl ListOffsetsTopic<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::list_offsets_request::ListOffsetsTopic {
         crate::owned::list_offsets_request::ListOffsetsTopic {
             name: (self.name).to_string(),
@@ -174,9 +183,9 @@ impl Encode for ListOffsetsTopic<'_> {
         let flex = version >= 6;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name);
+                let () = put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name);
+                let () = put_string(buf, self.name);
             }
         }
         if version >= 0 {
@@ -275,11 +284,15 @@ impl Default for ListOffsetsPartition {
             partition_index: 0i32,
             current_leader_epoch: -1i32,
             timestamp: 0i64,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl ListOffsetsPartition {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::list_offsets_request::ListOffsetsPartition {
         crate::owned::list_offsets_request::ListOffsetsPartition {
             partition_index: (self.partition_index),

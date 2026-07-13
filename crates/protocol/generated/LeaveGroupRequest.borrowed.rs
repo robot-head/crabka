@@ -15,7 +15,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 5;
 pub const FLEXIBLE_MIN: i16 = 4;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -26,6 +27,10 @@ pub struct LeaveGroupRequest<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl LeaveGroupRequest<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::leave_group_request::LeaveGroupRequest {
         crate::owned::leave_group_request::LeaveGroupRequest {
             group_id: (self.group_id).to_string(),
@@ -49,16 +54,16 @@ impl Encode for LeaveGroupRequest<'_> {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.group_id);
+                let () = put_compact_string(buf, self.group_id);
             } else {
-                put_string(buf, self.group_id);
+                let () = put_string(buf, self.group_id);
             }
         }
         if (0..=2).contains(&version) {
             if flex {
-                put_compact_string(buf, self.member_id);
+                let () = put_compact_string(buf, self.member_id);
             } else {
-                put_string(buf, self.member_id);
+                let () = put_string(buf, self.member_id);
             }
         }
         if version >= 3 {
@@ -175,6 +180,10 @@ pub struct MemberIdentity<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl MemberIdentity<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::leave_group_request::MemberIdentity {
         crate::owned::leave_group_request::MemberIdentity {
             member_id: (self.member_id).to_string(),
@@ -189,23 +198,23 @@ impl Encode for MemberIdentity<'_> {
         let flex = version >= 4;
         if version >= 3 {
             if flex {
-                put_compact_string(buf, self.member_id);
+                let () = put_compact_string(buf, self.member_id);
             } else {
-                put_string(buf, self.member_id);
+                let () = put_string(buf, self.member_id);
             }
         }
         if version >= 3 {
             if flex {
-                put_compact_nullable_string(buf, self.group_instance_id);
+                let () = put_compact_nullable_string(buf, self.group_instance_id);
             } else {
-                put_nullable_string(buf, self.group_instance_id);
+                let () = put_nullable_string(buf, self.group_instance_id);
             }
         }
         if version >= 5 {
             if flex {
-                put_compact_nullable_string(buf, self.reason);
+                let () = put_compact_nullable_string(buf, self.reason);
             } else {
-                put_nullable_string(buf, self.reason);
+                let () = put_nullable_string(buf, self.reason);
             }
         }
         if flex {

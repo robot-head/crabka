@@ -1,15 +1,30 @@
 //! Real broker-backed implementations of the [`RecordFetcher`],
 //! [`RecordProducer`], and [`OffsetStore`] I/O traits.
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+//!
+//! # Multi-broker routing limitation
+//!
+//! `BrokerFetcher` opens a single connection to the bootstrap address and uses
+//! that connection for every `fetch_partition` call. In a single-node broker
+//! setup (the common test scenario) this is always correct because the
+//! bootstrap broker is the leader for all partitions. In a multi-broker
+//! cluster the fetch may be routed to a broker that is not the partition
+//! leader, resulting in `NOT_LEADER_OR_FOLLOWER` errors.
+//!
+//! TODO: implement per-partition leader routing for `BrokerFetcher` to support
+//! multi-broker deployments (look up `leader_id` from metadata, dial the
+//! correct broker connection from a pool).
+
+use std::{collections::HashMap, sync::Arc};
 
 use bytes::Bytes;
-use crabka_client_core::{Client, Connection, ConnectionOptions, fetch_partition_with_isolation};
+use crabka_client_core::{
+    Client, Connection, ConnectionOptions, IsolatedFetch, fetch_partition_with_isolation,
+};
 use crabka_client_producer::{Acks, Producer, ProducerError, ProducerRecord, RecordMetadata};
 use crabka_protocol::{
     owned::{
         list_offsets_request::{ListOffsetsPartition, ListOffsetsRequest, ListOffsetsTopic},
         metadata_request::{MetadataRequest, MetadataRequestTopic},
-        metadata_response::MetadataResponse,
         offset_commit_request::{
             OffsetCommitRequest, OffsetCommitRequestPartition, OffsetCommitRequestTopic,
         },
@@ -34,47 +49,20 @@ use crate::{
 
 /// A [`RecordFetcher`] backed by a real Kafka broker.
 ///
-/// Routes each fetch to the current partition leader learned from metadata.
+/// Uses a single connection to the bootstrap broker for all fetch calls.
+/// See module-level doc for the multi-broker routing limitation.
 pub(crate) struct BrokerFetcher {
-    /// Original bootstrap address used when metadata lacks a dialable endpoint.
-    bootstrap: String,
+    /// Dedicated connection used for every `fetch_partition` call.
+    conn: Connection,
     /// Metadata client used to resolve `topic_id` on cache miss.
     client: Client,
-    /// Options used when dialing per-leader fetch connections.
-    connection_options: ConnectionOptions,
-    /// Metadata-derived fetch routing cache.
-    routes: Mutex<FetchRoutes>,
-    /// Cached fetch connections by broker id.
-    connections: Mutex<HashMap<i32, Connection>>,
-    /// Cached fallback connection to the bootstrap address.
-    bootstrap_connection: Mutex<Option<Connection>>,
+    /// Cache of topic name → `topic_id` (populated lazily via metadata refresh).
+    topic_ids: Mutex<HashMap<String, WireUuid>>,
     /// Maximum time the broker waits before returning an empty fetch (ms).
     max_wait_ms: i32,
     /// Maximum bytes the broker returns per partition per fetch.
     partition_max_bytes: i32,
 }
-
-#[derive(Debug, Default)]
-struct FetchRoutes {
-    topic_ids: HashMap<String, WireUuid>,
-    partition_leaders: HashMap<(String, i32), i32>,
-    broker_endpoints: HashMap<i32, BrokerEndpoint>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct BrokerEndpoint {
-    host: String,
-    port: u16,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct FetchRoute {
-    topic_id: WireUuid,
-    leader_id: i32,
-}
-
-const NOT_LEADER_OR_FOLLOWER: i16 = 6;
-const UNKNOWN_TOPIC_ID: i16 = 100;
 
 #[async_trait::async_trait]
 impl RecordFetcher for BrokerFetcher {
@@ -85,7 +73,7 @@ impl RecordFetcher for BrokerFetcher {
         offset: i64,
         isolation: IsolationLevel,
     ) -> Result<FetchBatch, StreamsClientError> {
-        let route = self.resolve_fetch_route(topic, partition).await?;
+        let topic_id = self.resolve_topic_id(topic).await?;
 
         // Map the runtime isolation level to the Kafka `Fetch.isolation_level`
         // wire value (READ_UNCOMMITTED = 0, READ_COMMITTED = 1).
@@ -94,58 +82,19 @@ impl RecordFetcher for BrokerFetcher {
             IsolationLevel::ReadCommitted => 1,
         };
 
-        let conn = self.connection_for_leader(route.leader_id).await?;
-        let fetched = match fetch_partition_with_isolation(
-            &conn,
-            topic,
-            route.topic_id,
-            partition,
-            offset,
-            self.max_wait_ms,
-            self.partition_max_bytes,
-            isolation_level,
+        let fetched = fetch_partition_with_isolation(
+            &self.conn,
+            IsolatedFetch {
+                topic,
+                topic_id,
+                partition,
+                fetch_offset: offset,
+                max_wait_ms: self.max_wait_ms,
+                partition_max_bytes: self.partition_max_bytes,
+                isolation_level,
+            },
         )
-        .await
-        {
-            Ok(fetched) => fetched,
-            Err(crabka_client_core::ClientError::Server { error_code })
-                if is_stale_fetch_route_error(error_code) =>
-            {
-                self.refresh_fetch_routes().await?;
-                let route = self.resolve_fetch_route(topic, partition).await?;
-                let conn = self.connection_for_leader(route.leader_id).await?;
-                fetch_partition_with_isolation(
-                    &conn,
-                    topic,
-                    route.topic_id,
-                    partition,
-                    offset,
-                    self.max_wait_ms,
-                    self.partition_max_bytes,
-                    isolation_level,
-                )
-                .await?
-            }
-            Err(e) if is_retryable_fetch_transport_error(&e) => {
-                self.connections.lock().await.remove(&route.leader_id);
-                *self.bootstrap_connection.lock().await = None;
-                self.refresh_fetch_routes().await?;
-                let route = self.resolve_fetch_route(topic, partition).await?;
-                let conn = self.connection_for_leader(route.leader_id).await?;
-                fetch_partition_with_isolation(
-                    &conn,
-                    topic,
-                    route.topic_id,
-                    partition,
-                    offset,
-                    self.max_wait_ms,
-                    self.partition_max_bytes,
-                    isolation_level,
-                )
-                .await?
-            }
-            Err(e) => return Err(e.into()),
-        };
+        .await?;
 
         let records = fetched
             .into_iter()
@@ -195,198 +144,27 @@ impl RecordFetcher for BrokerFetcher {
 }
 
 impl BrokerFetcher {
-    /// Look up the route for `(topic, partition)`; on miss, refresh metadata.
-    async fn resolve_fetch_route(
-        &self,
-        topic: &str,
-        partition: i32,
-    ) -> Result<FetchRoute, StreamsClientError> {
+    /// Look up the `topic_id` in the local cache; on miss, refresh metadata
+    /// from the broker and populate the cache.
+    async fn resolve_topic_id(&self, topic: &str) -> Result<WireUuid, StreamsClientError> {
         {
-            let routes = self.routes.lock().await;
-            if let Some(route) = routes.fetch_route(topic, partition) {
-                return Ok(route);
+            let cache = self.topic_ids.lock().await;
+            if let Some(&id) = cache.get(topic) {
+                return Ok(id);
             }
         }
 
-        self.refresh_fetch_routes().await?;
-        let routes = self.routes.lock().await;
-        routes.fetch_route(topic, partition).ok_or_else(|| {
-            StreamsClientError::Runtime(format!(
-                "Metadata: no leader for topic {topic} partition {partition}"
-            ))
-        })
-    }
-
-    async fn refresh_fetch_routes(&self) -> Result<(), StreamsClientError> {
+        // Cache miss — fetch fresh metadata.
         let meta = self.client.refresh_metadata().await?;
-        *self.routes.lock().await = FetchRoutes::from_metadata(&meta);
-        Ok(())
-    }
-
-    async fn connection_for_leader(
-        &self,
-        leader_id: i32,
-    ) -> Result<Connection, StreamsClientError> {
-        if leader_id < 0 {
-            return Err(StreamsClientError::Runtime(format!(
-                "Metadata: partition has no available leader ({leader_id})"
-            )));
-        }
-
-        {
-            let connections = self.connections.lock().await;
-            if let Some(conn) = connections.get(&leader_id) {
-                return Ok(conn.clone());
+        let mut cache = self.topic_ids.lock().await;
+        for t in &meta.topics {
+            if let Some(name) = &t.name {
+                cache.insert(name.clone(), t.topic_id);
             }
         }
-
-        let Some(endpoint) = self.broker_endpoint(leader_id).await? else {
-            return self.bootstrap_connection().await;
-        };
-        let addr = endpoint.resolve_socket_addr().await?;
-        let conn = Connection::connect_with_options(addr, self.connection_options.clone()).await?;
-
-        let mut connections = self.connections.lock().await;
-        let conn = connections.entry(leader_id).or_insert(conn);
-        Ok(conn.clone())
+        // Return the id for the requested topic (fall back to ZERO if not found).
+        Ok(cache.get(topic).copied().unwrap_or_default())
     }
-
-    async fn broker_endpoint(
-        &self,
-        broker_id: i32,
-    ) -> Result<Option<BrokerEndpoint>, StreamsClientError> {
-        {
-            let routes = self.routes.lock().await;
-            if let Some(endpoint) = routes.broker_endpoints.get(&broker_id) {
-                return Ok(Some(endpoint.clone()));
-            }
-        }
-
-        self.refresh_fetch_routes().await?;
-        let routes = self.routes.lock().await;
-        Ok(routes.broker_endpoints.get(&broker_id).cloned())
-    }
-
-    async fn bootstrap_connection(&self) -> Result<Connection, StreamsClientError> {
-        {
-            let connection = self.bootstrap_connection.lock().await;
-            if let Some(conn) = &*connection {
-                return Ok(conn.clone());
-            }
-        }
-
-        let addr = tokio::net::lookup_host(&self.bootstrap)
-            .await
-            .map_err(|e| {
-                StreamsClientError::Runtime(format!("failed to resolve bootstrap address: {e}"))
-            })?
-            .next()
-            .ok_or_else(|| {
-                StreamsClientError::Runtime(format!(
-                    "no addresses resolved for bootstrap: {}",
-                    self.bootstrap
-                ))
-            })?;
-        let conn = Connection::connect_with_options(addr, self.connection_options.clone()).await?;
-
-        let mut connection = self.bootstrap_connection.lock().await;
-        let conn = connection.get_or_insert(conn);
-        Ok(conn.clone())
-    }
-}
-
-impl FetchRoutes {
-    fn from_metadata(meta: &MetadataResponse) -> Self {
-        let broker_endpoints = meta
-            .brokers
-            .iter()
-            .filter_map(|broker| {
-                BrokerEndpoint::new(broker.host.clone(), broker.port)
-                    .map(|endpoint| (broker.node_id, endpoint))
-            })
-            .collect();
-
-        let mut topic_ids = HashMap::new();
-        let mut partition_leaders = HashMap::new();
-        for topic in &meta.topics {
-            if topic.error_code != 0 {
-                continue;
-            }
-            let Some(name) = topic.name.clone() else {
-                continue;
-            };
-            topic_ids.insert(name.clone(), topic.topic_id);
-            for partition in &topic.partitions {
-                if partition.error_code != 0 {
-                    continue;
-                }
-                partition_leaders.insert(
-                    (name.clone(), partition.partition_index),
-                    partition.leader_id,
-                );
-            }
-        }
-
-        Self {
-            topic_ids,
-            partition_leaders,
-            broker_endpoints,
-        }
-    }
-
-    fn fetch_route(&self, topic: &str, partition: i32) -> Option<FetchRoute> {
-        let topic_id = self.topic_ids.get(topic).copied().unwrap_or_default();
-        let leader_id = *self
-            .partition_leaders
-            .get(&(topic.to_string(), partition))?;
-        Some(FetchRoute {
-            topic_id,
-            leader_id,
-        })
-    }
-}
-
-impl BrokerEndpoint {
-    fn new(host: String, port: i32) -> Option<Self> {
-        let port = u16::try_from(port).ok()?;
-        if port == 0 {
-            return None;
-        }
-
-        Some(Self { host, port })
-    }
-
-    async fn resolve_socket_addr(&self) -> Result<SocketAddr, StreamsClientError> {
-        tokio::net::lookup_host((self.host.as_str(), self.port))
-            .await
-            .map_err(|e| {
-                StreamsClientError::Runtime(format!(
-                    "failed to resolve broker endpoint {}:{}: {e}",
-                    self.host, self.port
-                ))
-            })?
-            .next()
-            .ok_or_else(|| {
-                StreamsClientError::Runtime(format!(
-                    "no addresses resolved for broker endpoint {}:{}",
-                    self.host, self.port
-                ))
-            })
-    }
-}
-
-fn is_stale_fetch_route_error(error_code: i16) -> bool {
-    matches!(error_code, NOT_LEADER_OR_FOLLOWER | UNKNOWN_TOPIC_ID)
-}
-
-fn is_retryable_fetch_transport_error(error: &crabka_client_core::ClientError) -> bool {
-    matches!(
-        error,
-        crabka_client_core::ClientError::Connect { .. }
-            | crabka_client_core::ClientError::Timeout(_)
-            | crabka_client_core::ClientError::Disconnected
-            | crabka_client_core::ClientError::Io(_)
-    )
 }
 
 // ─── BrokerProducer ───────────────────────────────────────────────────────────
@@ -589,10 +367,10 @@ impl TransactionalProducer for BrokerTransactionalProducer {
         m: &StreamsGroupMeta,
     ) -> Result<(), StreamsClientError> {
         let meta = crabka_client_consumer::ConsumerGroupMetadata {
-            group_id: m.group_id.clone(),
-            generation_id: m.generation_id,
-            member_id: m.member_id.clone(),
-            group_instance_id: m.group_instance_id.clone(),
+            group_id: m.group.clone(),
+            generation_id: m.generation,
+            member_id: m.member.clone(),
+            group_instance_id: m.group_instance.clone(),
         };
         let off = offsets.iter().map(|(t, p, o)| ((t.clone(), *p), *o));
         self.inner
@@ -941,7 +719,27 @@ pub(crate) async fn build(
         .build()
         .await?;
 
-    // 2. Idempotent producer.
+    // 2. Dedicated fetch connection (single bootstrap broker).
+    // Resolve the bootstrap address (e.g. "localhost:9092") to a SocketAddr.
+    let addr = tokio::net::lookup_host(bootstrap)
+        .await
+        .map_err(|e| {
+            StreamsClientError::Runtime(format!("failed to resolve bootstrap address: {e}"))
+        })?
+        .next()
+        .ok_or_else(|| {
+            StreamsClientError::Runtime(format!("no addresses resolved for bootstrap: {bootstrap}"))
+        })?;
+    let fetch_conn = Connection::connect_with_options(
+        addr,
+        ConnectionOptions {
+            client_id: client_id.to_string(),
+            ..Default::default()
+        },
+    )
+    .await?;
+
+    // 3. Idempotent producer.
     let producer = Producer::builder()
         .bootstrap(bootstrap)
         .client_id(format!("{client_id}-producer"))
@@ -951,7 +749,7 @@ pub(crate) async fn build(
         .await
         .map_err(|e| StreamsClientError::Runtime(e.to_string()))?;
 
-    // 3. Offset client — re-use a second Client for offset RPCs so the
+    // 4. Offset client — re-use a second Client for offset RPCs so the
     //    metadata client's connection isn't head-of-line-blocked by slow
     //    OffsetFetch or OffsetCommit calls.
     let offset_client = Client::builder()
@@ -961,15 +759,9 @@ pub(crate) async fn build(
         .await?;
 
     let fetcher = BrokerFetcher {
-        bootstrap: bootstrap.to_string(),
+        conn: fetch_conn,
         client: metadata_client,
-        connection_options: ConnectionOptions {
-            client_id: client_id.to_string(),
-            ..Default::default()
-        },
-        routes: Mutex::new(FetchRoutes::default()),
-        connections: Mutex::new(HashMap::new()),
-        bootstrap_connection: Mutex::new(None),
+        topic_ids: Mutex::new(HashMap::new()),
         max_wait_ms: 500,
         partition_max_bytes: 1 << 20,
     };
@@ -1010,7 +802,27 @@ pub(crate) async fn build_eos(
         .build()
         .await?;
 
-    // 2. Transactional producer (idempotence is implied by transactions).
+    // 2. Dedicated fetch connection (single bootstrap broker).
+    // Resolve the bootstrap address (e.g. "localhost:9092") to a SocketAddr.
+    let addr = tokio::net::lookup_host(bootstrap)
+        .await
+        .map_err(|e| {
+            StreamsClientError::Runtime(format!("failed to resolve bootstrap address: {e}"))
+        })?
+        .next()
+        .ok_or_else(|| {
+            StreamsClientError::Runtime(format!("no addresses resolved for bootstrap: {bootstrap}"))
+        })?;
+    let fetch_conn = Connection::connect_with_options(
+        addr,
+        ConnectionOptions {
+            client_id: client_id.to_string(),
+            ..Default::default()
+        },
+    )
+    .await?;
+
+    // 3. Transactional producer (idempotence is implied by transactions).
     let producer = Producer::builder()
         .bootstrap(bootstrap)
         .client_id(format!("{client_id}-producer"))
@@ -1021,7 +833,7 @@ pub(crate) async fn build_eos(
         .await
         .map_err(|e| StreamsClientError::Runtime(e.to_string()))?;
 
-    // 3. Offset client — re-use a second Client for offset RPCs so the
+    // 4. Offset client — re-use a second Client for offset RPCs so the
     //    metadata client's connection isn't head-of-line-blocked by slow
     //    OffsetFetch or OffsetCommit calls.
     let offset_client = Client::builder()
@@ -1031,15 +843,9 @@ pub(crate) async fn build_eos(
         .await?;
 
     let fetcher = BrokerFetcher {
-        bootstrap: bootstrap.to_string(),
+        conn: fetch_conn,
         client: metadata_client,
-        connection_options: ConnectionOptions {
-            client_id: client_id.to_string(),
-            ..Default::default()
-        },
-        routes: Mutex::new(FetchRoutes::default()),
-        connections: Mutex::new(HashMap::new()),
-        bootstrap_connection: Mutex::new(None),
+        topic_ids: Mutex::new(HashMap::new()),
         max_wait_ms: 500,
         partition_max_bytes: 1 << 20,
     };
@@ -1063,19 +869,10 @@ mod tests {
     use crabka_broker::{Broker, BrokerConfig};
     use crabka_client_core::Client;
     use crabka_client_producer::Producer;
-    use crabka_protocol::{
-        owned::{
-            create_topics_request::{CreatableTopic, CreateTopicsRequest},
-            metadata_response::{
-                MetadataResponse, MetadataResponseBroker, MetadataResponsePartition,
-                MetadataResponseTopic,
-            },
-        },
-        primitives::uuid::Uuid as WireUuid,
-    };
+    use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
     use tokio::sync::Mutex;
 
-    use super::{BrokerEndpoint, BrokerOffsetStore, BrokerTransactionalProducer, FetchRoutes};
+    use super::{BrokerOffsetStore, BrokerTransactionalProducer};
     use crate::{
         error::StreamsClientError,
         runtime::{
@@ -1107,99 +904,10 @@ mod tests {
             })
             .await
             .expect("CreateTopics");
-        assert2::assert!(resp.topics[0].error_code == 0);
-    }
-
-    #[test]
-    fn fetch_routes_map_partitions_to_their_metadata_leaders() {
-        let topic_id = WireUuid([7; 16]);
-        let routes = FetchRoutes::from_metadata(&MetadataResponse {
-            brokers: vec![
-                MetadataResponseBroker {
-                    node_id: 1,
-                    host: "broker-one".into(),
-                    port: 19_092,
-                    ..Default::default()
-                },
-                MetadataResponseBroker {
-                    node_id: 2,
-                    host: "broker-two".into(),
-                    port: 29_092,
-                    ..Default::default()
-                },
-            ],
-            topics: vec![MetadataResponseTopic {
-                name: Some("routed-topic".into()),
-                topic_id,
-                partitions: vec![
-                    MetadataResponsePartition {
-                        partition_index: 0,
-                        leader_id: 1,
-                        ..Default::default()
-                    },
-                    MetadataResponsePartition {
-                        partition_index: 1,
-                        leader_id: 2,
-                        ..Default::default()
-                    },
-                ],
-                ..Default::default()
-            }],
-            ..Default::default()
-        });
-
-        assert2::assert!(routes.fetch_route("routed-topic", 0).unwrap().topic_id == topic_id);
-        assert2::assert!(routes.fetch_route("routed-topic", 0).unwrap().leader_id == 1);
-        assert2::assert!(routes.fetch_route("routed-topic", 1).unwrap().leader_id == 2);
-        assert2::assert!(
-            routes.broker_endpoints.get(&2)
-                == Some(&BrokerEndpoint {
-                    host: "broker-two".into(),
-                    port: 29_092,
-                })
+        assert_eq!(
+            resp.topics[0].error_code, 0,
+            "topic create failed: {resp:?}"
         );
-    }
-
-    #[test]
-    fn fetch_routes_ignore_unusable_metadata_entries() {
-        let routes = FetchRoutes::from_metadata(&MetadataResponse {
-            brokers: vec![
-                MetadataResponseBroker {
-                    node_id: 1,
-                    host: "broker-one".into(),
-                    port: 0,
-                    ..Default::default()
-                },
-                MetadataResponseBroker {
-                    node_id: 2,
-                    host: "broker-two".into(),
-                    port: i32::from(u16::MAX) + 1,
-                    ..Default::default()
-                },
-            ],
-            topics: vec![MetadataResponseTopic {
-                name: Some("routed-topic".into()),
-                partitions: vec![
-                    MetadataResponsePartition {
-                        error_code: 3,
-                        partition_index: 0,
-                        leader_id: 1,
-                        ..Default::default()
-                    },
-                    MetadataResponsePartition {
-                        partition_index: 1,
-                        leader_id: 2,
-                        ..Default::default()
-                    },
-                ],
-                ..Default::default()
-            }],
-            ..Default::default()
-        });
-
-        assert2::assert!(routes.fetch_route("routed-topic", 0).is_none());
-        assert2::assert!(routes.fetch_route("routed-topic", 1).unwrap().leader_id == 2);
-        assert2::assert!(routes.broker_endpoints.is_empty());
     }
 
     /// Round-trip test: `committed` returns `None` before any commit, `Some(42)`
@@ -1232,7 +940,10 @@ mod tests {
 
         // 1. No commit yet → None.
         let before = store.committed("ostore-topic", 0).await.unwrap();
-        assert2::assert!(before == None);
+        assert_eq!(
+            before, None,
+            "expected no committed offset before first commit"
+        );
 
         // 2. Commit offset 42.
         store
@@ -1242,7 +953,7 @@ mod tests {
 
         // 3. Now reads back Some(42).
         let after = store.committed("ostore-topic", 0).await.unwrap();
-        assert2::assert!(after == Some(42));
+        assert_eq!(after, Some(42), "expected committed offset 42 after commit");
     }
 
     /// `abort_transaction` must consume the open guard: a second call with no
@@ -1298,7 +1009,7 @@ mod tests {
         // No transaction is open now, so a second abort must fail rather than
         // silently succeed again.
         let err = txn_producer.abort_transaction().await.unwrap_err();
-        assert2::assert!(matches!(
+        assert!(matches!(
             &err,
             StreamsClientError::Runtime(msg) if msg.contains("without an open transaction")
         ));

@@ -13,7 +13,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 1;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,7 +30,7 @@ impl Default for AlterPartitionReassignmentsRequest {
             timeout_ms: 60_000i32,
             allow_replication_factor_change: true,
             topics: Vec::new(),
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
@@ -146,9 +147,9 @@ impl Encode for ReassignableTopic {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.name);
+                let () = put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name);
+                let () = put_string(buf, &self.name);
             }
         }
         if version >= 0 {
@@ -335,7 +336,7 @@ impl ReassignablePartition {
 #[allow(unused_comparisons)]
 pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
-    obj.insert("timeoutMs".to_string(), ::serde_json::json!(60000));
+    obj.insert("timeoutMs".to_string(), ::serde_json::json!(60_000));
     if version >= 1 {
         obj.insert(
             "allowReplicationFactorChange".to_string(),

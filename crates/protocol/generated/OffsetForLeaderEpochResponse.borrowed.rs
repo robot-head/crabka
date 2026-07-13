@@ -12,7 +12,8 @@ pub const MIN_VERSION: i16 = 2;
 pub const MAX_VERSION: i16 = 4;
 pub const FLEXIBLE_MIN: i16 = 4;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -22,6 +23,10 @@ pub struct OffsetForLeaderEpochResponse<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl OffsetForLeaderEpochResponse<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::offset_for_leader_epoch_response::OffsetForLeaderEpochResponse {
@@ -132,6 +137,10 @@ pub struct OffsetForLeaderTopicResult<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl OffsetForLeaderTopicResult<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::offset_for_leader_epoch_response::OffsetForLeaderTopicResult {
@@ -150,9 +159,9 @@ impl Encode for OffsetForLeaderTopicResult<'_> {
         let flex = version >= 4;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.topic);
+                let () = put_compact_string(buf, self.topic);
             } else {
-                put_string(buf, self.topic);
+                let () = put_string(buf, self.topic);
             }
         }
         if version >= 0 {
@@ -253,11 +262,15 @@ impl Default for EpochEndOffset {
             partition: 0i32,
             leader_epoch: -1i32,
             end_offset: -1i64,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl EpochEndOffset {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::offset_for_leader_epoch_response::EpochEndOffset {
         crate::owned::offset_for_leader_epoch_response::EpochEndOffset {
             error_code: (self.error_code),

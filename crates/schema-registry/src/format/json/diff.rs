@@ -358,10 +358,12 @@ fn compare_numeric(path: &str, orig: &Value, upd: &Value, out: &mut Vec<Differen
         upd,
         out,
         "maximum",
-        Kind::MaximumAdded,
-        Kind::MaximumRemoved,
-        Kind::MaximumDecreased,
-        Kind::MaximumIncreased,
+        (
+            Kind::MaximumAdded,
+            Kind::MaximumRemoved,
+            Kind::MaximumDecreased,
+            Kind::MaximumIncreased,
+        ),
     );
     compare_bound(
         path,
@@ -369,10 +371,12 @@ fn compare_numeric(path: &str, orig: &Value, upd: &Value, out: &mut Vec<Differen
         upd,
         out,
         "minimum",
-        Kind::MinimumAdded,
-        Kind::MinimumRemoved,
-        Kind::MinimumDecreased,
-        Kind::MinimumIncreased,
+        (
+            Kind::MinimumAdded,
+            Kind::MinimumRemoved,
+            Kind::MinimumDecreased,
+            Kind::MinimumIncreased,
+        ),
     );
     compare_bound(
         path,
@@ -380,10 +384,12 @@ fn compare_numeric(path: &str, orig: &Value, upd: &Value, out: &mut Vec<Differen
         upd,
         out,
         "exclusiveMaximum",
-        Kind::ExclusiveMaximumAdded,
-        Kind::ExclusiveMaximumRemoved,
-        Kind::ExclusiveMaximumDecreased,
-        Kind::ExclusiveMaximumIncreased,
+        (
+            Kind::ExclusiveMaximumAdded,
+            Kind::ExclusiveMaximumRemoved,
+            Kind::ExclusiveMaximumDecreased,
+            Kind::ExclusiveMaximumIncreased,
+        ),
     );
     compare_bound(
         path,
@@ -391,10 +397,12 @@ fn compare_numeric(path: &str, orig: &Value, upd: &Value, out: &mut Vec<Differen
         upd,
         out,
         "exclusiveMinimum",
-        Kind::ExclusiveMinimumAdded,
-        Kind::ExclusiveMinimumRemoved,
-        Kind::ExclusiveMinimumDecreased,
-        Kind::ExclusiveMinimumIncreased,
+        (
+            Kind::ExclusiveMinimumAdded,
+            Kind::ExclusiveMinimumRemoved,
+            Kind::ExclusiveMinimumDecreased,
+            Kind::ExclusiveMinimumIncreased,
+        ),
     );
     // multipleOf: added or changed = tighter
     match (num(orig, "multipleOf"), num(upd, "multipleOf")) {
@@ -407,18 +415,15 @@ fn compare_numeric(path: &str, orig: &Value, upd: &Value, out: &mut Vec<Differen
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn compare_bound(
     path: &str,
     orig: &Value,
     upd: &Value,
     out: &mut Vec<Difference>,
     key: &str,
-    kind_added: Kind,
-    kind_removed: Kind,
-    kind_decreased: Kind,
-    kind_increased: Kind,
+    kinds: (Kind, Kind, Kind, Kind),
 ) {
+    let (kind_added, kind_removed, kind_decreased, kind_increased) = kinds;
     match (num(orig, key), num(upd, key)) {
         (None, Some(_)) => out.push(d(kind_added, path)),
         (Some(_), None) => out.push(d(kind_removed, path)),
@@ -446,10 +451,12 @@ fn compare_string_constraints(path: &str, orig: &Value, upd: &Value, out: &mut V
         upd,
         out,
         "maxLength",
-        Kind::MaxLengthAdded,
-        Kind::MaxLengthRemoved,
-        Kind::MaxLengthDecreased,
-        Kind::MaxLengthIncreased,
+        (
+            Kind::MaxLengthAdded,
+            Kind::MaxLengthRemoved,
+            Kind::MaxLengthDecreased,
+            Kind::MaxLengthIncreased,
+        ),
     );
     compare_bound(
         path,
@@ -457,10 +464,12 @@ fn compare_string_constraints(path: &str, orig: &Value, upd: &Value, out: &mut V
         upd,
         out,
         "minLength",
-        Kind::MinLengthAdded,
-        Kind::MinLengthRemoved,
-        Kind::MinLengthDecreased,
-        Kind::MinLengthIncreased,
+        (
+            Kind::MinLengthAdded,
+            Kind::MinLengthRemoved,
+            Kind::MinLengthDecreased,
+            Kind::MinLengthIncreased,
+        ),
     );
     // pattern
     let op = orig.get("pattern").and_then(Value::as_str);
@@ -500,10 +509,12 @@ fn compare_array_constraints(
         upd,
         out,
         "maxItems",
-        Kind::MaxItemsAdded,
-        Kind::MaxItemsRemoved,
-        Kind::MaxItemsDecreased,
-        Kind::MaxItemsIncreased,
+        (
+            Kind::MaxItemsAdded,
+            Kind::MaxItemsRemoved,
+            Kind::MaxItemsDecreased,
+            Kind::MaxItemsIncreased,
+        ),
     );
     compare_bound(
         path,
@@ -511,10 +522,12 @@ fn compare_array_constraints(
         upd,
         out,
         "minItems",
-        Kind::MinItemsAdded,
-        Kind::MinItemsRemoved,
-        Kind::MinItemsDecreased,
-        Kind::MinItemsIncreased,
+        (
+            Kind::MinItemsAdded,
+            Kind::MinItemsRemoved,
+            Kind::MinItemsDecreased,
+            Kind::MinItemsIncreased,
+        ),
     );
 
     // additionalItems: false in update = tighter
@@ -540,10 +553,12 @@ fn compare_object_size(path: &str, orig: &Value, upd: &Value, out: &mut Vec<Diff
         upd,
         out,
         "maxProperties",
-        Kind::MaxPropertiesAdded,
-        Kind::MaxPropertiesRemoved,
-        Kind::MaxPropertiesDecreased,
-        Kind::MaxPropertiesIncreased,
+        (
+            Kind::MaxPropertiesAdded,
+            Kind::MaxPropertiesRemoved,
+            Kind::MaxPropertiesDecreased,
+            Kind::MaxPropertiesIncreased,
+        ),
     );
     compare_bound(
         path,
@@ -551,10 +566,12 @@ fn compare_object_size(path: &str, orig: &Value, upd: &Value, out: &mut Vec<Diff
         upd,
         out,
         "minProperties",
-        Kind::MinPropertiesAdded,
-        Kind::MinPropertiesRemoved,
-        Kind::MinPropertiesDecreased,
-        Kind::MinPropertiesIncreased,
+        (
+            Kind::MinPropertiesAdded,
+            Kind::MinPropertiesRemoved,
+            Kind::MinPropertiesDecreased,
+            Kind::MinPropertiesIncreased,
+        ),
     );
 }
 

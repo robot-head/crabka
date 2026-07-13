@@ -38,12 +38,27 @@ pub struct WalLocation {
     pub lines: Vec<(u32, i64)>,
 }
 
-/// A mapping. `has_functions == false` marks an unsymbolized mapping.
-///
-/// The four `has_*` booleans mirror the pprof `Mapping` message fields
-/// one-to-one; they are an exact wire shape, not a state machine that would
-/// benefit from being collapsed into an enum.
-#[allow(clippy::struct_excessive_bools)]
+/// A wire-compatible boolean flag used by [`WalMapping`].
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct WalFlag(bool);
+
+impl WalFlag {
+    /// Return the contained flag value.
+    #[must_use]
+    pub const fn get(self) -> bool {
+        self.0
+    }
+}
+
+impl From<bool> for WalFlag {
+    fn from(value: bool) -> Self {
+        Self(value)
+    }
+}
+
+/// A mapping. A false `has_functions` flag marks an unsymbolized mapping.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WalMapping {
     pub memory_start: u64,
@@ -51,10 +66,10 @@ pub struct WalMapping {
     pub file_offset: u64,
     pub filename: u32,
     pub build_id: u32,
-    pub has_functions: bool,
-    pub has_filenames: bool,
-    pub has_line_numbers: bool,
-    pub has_inline_frames: bool,
+    pub has_functions: WalFlag,
+    pub has_filenames: WalFlag,
+    pub has_line_numbers: WalFlag,
+    pub has_inline_frames: WalFlag,
 }
 
 /// The profile's symbol tables, index-encoded in pprof shape.
@@ -78,12 +93,18 @@ pub struct ProfileRecord {
 
 impl ProfileRecord {
     /// Encode via `serde-wincode`.
+    ///
+    /// # Errors
+    /// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
     pub fn encode(&self) -> Result<Vec<u8>, ProfilesError> {
         <SerdeCompat<Self> as WincodeSerialize>::serialize(self)
             .map_err(|err| ProfilesError::Wal(err.to_string()))
     }
 
     /// Decode from `serde-wincode` bytes.
+    ///
+    /// # Errors
+    /// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
     pub fn decode(bytes: &[u8]) -> Result<Self, ProfilesError> {
         <SerdeCompat<Self> as WincodeDeserialize>::deserialize(bytes)
             .map_err(|err| ProfilesError::Wal(err.to_string()))
@@ -111,7 +132,7 @@ pub fn partition_key(tenant: &str, fingerprint: u64) -> Bytes {
 
 #[cfg(test)]
 mod tests {
-    use assert2::check;
+    use assert2::{assert, check};
 
     use super::*;
 
@@ -135,10 +156,10 @@ mod tests {
                 file_offset: 0,
                 filename: 2,
                 build_id: 0,
-                has_functions: true,
-                has_filenames: true,
-                has_line_numbers: true,
-                has_inline_frames: false,
+                has_functions: true.into(),
+                has_filenames: true.into(),
+                has_line_numbers: true.into(),
+                has_inline_frames: false.into(),
             }],
         }
     }
@@ -167,7 +188,7 @@ mod tests {
         let record = record();
         let bytes = record.encode().unwrap();
         let decoded = ProfileRecord::decode(&bytes).unwrap();
-        assert2::assert!(decoded == record);
+        assert!(decoded == record);
     }
 
     #[test]
@@ -178,7 +199,7 @@ mod tests {
             ("service_name".to_string(), "api".to_string()),
             ("__name__".to_string(), "process_cpu".to_string()),
         ];
-        assert2::assert!(a.series_fingerprint() == b.series_fingerprint());
+        assert!(a.series_fingerprint() == b.series_fingerprint());
     }
 
     #[test]

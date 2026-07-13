@@ -107,7 +107,7 @@ pub fn membership_topic_ids(group: &GroupState, input: &ReconcileInput) -> HashS
 mod tests {
     use std::time::{Duration, Instant};
 
-    use assert2::check;
+    use assert2::{assert, check};
 
     use super::{super::assignor::UniformAssignor, *};
     use crate::coordinator::unified::{
@@ -125,7 +125,7 @@ mod tests {
             client_host: "/127.0.0.1".into(),
             subscribed_topic_names: sub,
             subscribed_topic_regex: None,
-            compiled_regex: None,
+            compiled_regex: crate::coordinator::unified::consumer_state::CompiledRegex::Absent,
             server_assignor: None,
             rebalance_timeout: Duration::from_mins(1),
             member_epoch: 0,
@@ -156,10 +156,9 @@ mod tests {
         g.add_or_update_member(fresh_member("m1", "t"));
         let (inp, t) = input("t", 4);
         let outcome = reconcile_if_dirty(&mut g, &inp, &UniformAssignor);
-        check!(
-            (outcome, g.target.per_member["m1"][&t].as_slice(), g.dirty,)
-                == (ReconcileOutcome::Recomputed, &[0, 1, 2, 3][..], false,)
-        );
+        check!(outcome == ReconcileOutcome::Recomputed);
+        check!(g.target.per_member["m1"][&t] == vec![0, 1, 2, 3]);
+        check!(!g.dirty);
     }
 
     #[test]
@@ -167,9 +166,7 @@ mod tests {
         let mut g = GroupState::new("g");
         g.dirty = false;
         let (inp, _) = input("t", 4);
-        assert2::assert!(
-            reconcile_if_dirty(&mut g, &inp, &UniformAssignor) == ReconcileOutcome::NoChange
-        );
+        assert!(reconcile_if_dirty(&mut g, &inp, &UniformAssignor) == ReconcileOutcome::NoChange);
     }
 
     #[test]
@@ -180,7 +177,8 @@ mod tests {
         reconcile_if_dirty(&mut g, &inp, &UniformAssignor);
         let epoch1 = g.group_epoch;
         let outcome = reconcile_if_dirty(&mut g, &inp, &UniformAssignor);
-        assert2::assert!((outcome, g.group_epoch) == (ReconcileOutcome::NoChange, epoch1));
+        assert!(outcome == ReconcileOutcome::NoChange);
+        assert!(g.group_epoch == epoch1);
     }
 
     #[test]
@@ -193,9 +191,8 @@ mod tests {
         let (inp2, _) = input("t", 4);
         g.dirty = true;
         let outcome = reconcile_if_dirty(&mut g, &inp2, &UniformAssignor);
-        assert2::assert!(
-            (outcome, g.group_epoch > epoch_before) == (ReconcileOutcome::Recomputed, true)
-        );
+        assert!(outcome == ReconcileOutcome::Recomputed);
+        assert!(g.group_epoch > epoch_before);
     }
 
     #[test]
@@ -204,7 +201,7 @@ mod tests {
         g.add_or_update_member(fresh_member("m1", "t"));
         let (inp, t) = input("t", 2);
         let ids = membership_topic_ids(&g, &inp);
-        assert2::assert!(ids.contains(&t));
+        assert!(ids.contains(&t));
     }
 
     // ── subscribed_topic_regex resolution ───────────────────
@@ -237,7 +234,7 @@ mod tests {
             client_host: "/127.0.0.1".into(),
             subscribed_topic_names: sub,
             subscribed_topic_regex: regex.map(String::from),
-            compiled_regex: None,
+            compiled_regex: crate::coordinator::unified::consumer_state::CompiledRegex::Absent,
             server_assignor: None,
             rebalance_timeout: Duration::from_mins(1),
             member_epoch: 0,
@@ -260,7 +257,7 @@ mod tests {
         reconcile_if_dirty(&mut g, &inp, &UniformAssignor);
         let assigned: HashSet<Uuid> = g.target.per_member["m1"].keys().copied().collect();
         // Both `orders-*` topics match; `shipments` must not.
-        assert2::assert!(assigned == HashSet::from([orders_eu, orders_us]));
+        assert!(assigned == HashSet::from([orders_eu, orders_us]));
     }
 
     #[test]
@@ -274,7 +271,7 @@ mod tests {
         let assigned: HashSet<Uuid> = g.target.per_member["m1"].keys().copied().collect();
         // Union of the regex match (`orders-eu`) and the explicit name
         // (`audit`); `shipments` must not appear.
-        assert2::assert!(assigned == HashSet::from([orders_eu, audit]));
+        assert!(assigned == HashSet::from([orders_eu, audit]));
     }
 
     #[test]
@@ -289,8 +286,14 @@ mod tests {
         let orders_eu = inp.topic_id_by_name["orders-eu"];
         reconcile_if_dirty(&mut g, &inp, &UniformAssignor);
         let assigned: HashSet<Uuid> = g.target.per_member["m1"].keys().copied().collect();
-        assert2::assert!(assigned.contains(&audit));
-        assert2::assert!(!assigned.contains(&orders_eu));
+        assert!(
+            assigned.contains(&audit),
+            "names-only subscription still applied"
+        );
+        assert!(
+            !assigned.contains(&orders_eu),
+            "invalid regex must not silently match every topic"
+        );
     }
 
     #[test]
@@ -303,7 +306,10 @@ mod tests {
         let inp = input_with_topics(&[("a", 1), ("b", 1), ("c", 1)]);
         reconcile_if_dirty(&mut g, &inp, &UniformAssignor);
         let assigned: HashSet<Uuid> = g.target.per_member["m1"].keys().copied().collect();
-        assert2::assert!(assigned.len() == 3);
+        assert!(
+            assigned.len() == 3,
+            "empty regex matches every topic; got {assigned:?}"
+        );
     }
 
     #[test]
@@ -312,17 +318,16 @@ mod tests {
         g.add_or_update_member(member_with_regex("m1", &[], Some("^a")));
         let inp = input_with_topics(&[("a1", 1), ("b1", 1)]);
         reconcile_if_dirty(&mut g, &inp, &UniformAssignor);
-        assert2::assert!(!g.dirty);
+        assert!(!g.dirty, "fresh recompute clears dirty");
         let epoch_before = g.group_epoch;
 
         // Change the regex pattern → must dirty the group so the next
         // reconcile re-runs.
         g.add_or_update_member(member_with_regex("m1", &[], Some("^b")));
-        assert2::assert!(g.dirty);
+        assert!(g.dirty, "regex change must mark group dirty");
         let outcome = reconcile_if_dirty(&mut g, &inp, &UniformAssignor);
-        assert2::assert!(
-            (outcome, g.group_epoch > epoch_before) == (ReconcileOutcome::Recomputed, true)
-        );
+        assert!(outcome == ReconcileOutcome::Recomputed);
+        assert!(g.group_epoch > epoch_before);
     }
 
     #[test]
@@ -332,6 +337,9 @@ mod tests {
         let inp = input_with_topics(&[("orders-eu", 1), ("shipments", 1)]);
         let orders = inp.topic_id_by_name["orders-eu"];
         let ids = membership_topic_ids(&g, &inp);
-        assert2::assert!(ids.contains(&orders));
+        assert!(
+            ids.contains(&orders),
+            "regex match flows into membership set"
+        );
     }
 }

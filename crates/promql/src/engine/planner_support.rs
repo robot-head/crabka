@@ -79,18 +79,13 @@ pub(super) fn validate_extended_selector_modifier(
 /// Scalar-typed sub-expressions (a bound arg, a scalar binary operand) are
 /// always treated as plannable: the planner evaluates them through the
 /// interpreter's pure scalar path, which carries no staleness/NaN subtlety.
-///
-/// The arms returning a bare `true` (`VectorSelector`, `NumberLiteral`,
-/// `Extension`) are kept separate for their per-variant documentation rather
-/// than merged.
-#[allow(clippy::match_same_arms)]
 pub(super) fn instant_expr_is_plannable(expr: &Expr) -> bool {
     match expr {
         Expr::Paren(paren) => instant_expr_is_plannable(&paren.expr),
-        // A bare instant-vector selector. A histogram-bearing series falls back
-        // per-step; an empty-valued-label series now rides the operator leaf
-        // (NULL = absent, `""` = present-empty).
-        Expr::VectorSelector(_) => true,
+        // Bare selectors, numeric literals, and extended selectors all have
+        // dedicated planner paths. Histogram-bearing vectors can still fall
+        // back per step inside those paths.
+        Expr::VectorSelector(_) | Expr::NumberLiteral(_) | Expr::Extension(_) => true,
         Expr::Call(call) => {
             // Rate-family or `*_over_time` range call (incl. the experimental
             // `mad`/`first`/`ts_of_*_over_time` members) over a bare matrix
@@ -229,14 +224,6 @@ pub(super) fn instant_expr_is_plannable(expr: &Expr) -> bool {
         // A unary `-`/`+` over a plannable operand. A scalar operand folds to a
         // scalar; a vector operand to a vector. Both nest and range-stitch.
         Expr::Unary(unary) => instant_expr_is_plannable(&unary.expr),
-        // A bare numeric literal is a scalar carried through `PrecomputedScalar`.
-        Expr::NumberLiteral(_) => true,
-        // An `anchored`/`smoothed` extended selector is handled by
-        // `plan_extension_expr` (the `smoothed` kernel, or the `anchored`-on-
-        // instant hard error). Structurally plannable so nested forms
-        // (`sum(smoothed(m))`) route too; a non-selector / unknown extension falls
-        // back inside the planner.
-        Expr::Extension(_) => true,
         // A string literal (no numeric/vector result to nest or range-stitch) and
         // a raw matrix selector / subquery (range-vector result, only meaningful
         // at the top level of an instant query) are handled directly in the

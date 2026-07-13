@@ -27,9 +27,10 @@ use tokio::{
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument as _;
 
 use crate::{
-    accumulator::{Accumulator, AppendResult},
+    accumulator::{Accumulator, AccumulatorMap, AppendResult},
     compression::Compression,
     error::ProducerError,
     partitioner::UniformStickyPartitioner,
@@ -70,8 +71,13 @@ pub(crate) struct TopicMetadata {
     pub topic_id: crabka_protocol::primitives::uuid::Uuid,
 }
 
-#[allow(clippy::struct_field_names)] // producer_id / producer_epoch intentionally match struct name
-#[allow(clippy::type_complexity)] // accumulators map is inherently complex
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ProducerIdentity {
+    pub id: i64,
+    pub epoch: i16,
+}
+
+// accumulators map is inherently complex
 pub struct Producer {
     pub(crate) client: Client,
     pub(crate) client_id: String,
@@ -82,8 +88,7 @@ pub struct Producer {
     /// connections would be plaintext/unauthenticated and a secured listener
     /// drops them, failing the transactional flow with `Client(Disconnected)`.
     pub(crate) security: Option<ClientSecurity>,
-    pub(crate) producer_id: i64,
-    pub(crate) producer_epoch: i16,
+    pub(crate) identity: ProducerIdentity,
     // The following config knobs are also copied into `SenderConfig` at
     // construction time. They live on `Producer` for diagnostic
     // introspection and to support future reconnect / re-init flows.
@@ -111,7 +116,7 @@ pub struct Producer {
     /// connection". A leader id `< 0` is also treated as unknown. Shared with
     /// the sender task via `Arc`.
     pub(crate) partition_leaders: Arc<DashMap<(String, i32), i32>>,
-    pub(crate) accumulators: Arc<DashMap<(String, i32), Arc<Mutex<Accumulator>>>>,
+    pub(crate) accumulators: AccumulatorMap,
     #[allow(dead_code)]
     pub(crate) next_seq: Arc<DashMap<(String, i32), i32>>,
     pub(crate) partitioner: Arc<UniformStickyPartitioner>,
@@ -144,12 +149,12 @@ pub struct Producer {
 impl Producer {
     #[must_use]
     pub fn producer_id(&self) -> i64 {
-        self.producer_id
+        self.identity.id
     }
 
     #[must_use]
     pub fn producer_epoch(&self) -> i16 {
-        self.producer_epoch
+        self.identity.epoch
     }
 
     // ── Transactional API ────────────────────────────────────────────────────
@@ -583,17 +588,19 @@ impl Producer {
     ///
     /// Returns a `oneshot::Receiver`. The outer call is `async` because
     /// partition resolution may need to fetch metadata over the wire.
-    // The instrument macro wraps the body in an async block whose value is the
-    // returned `oneshot::Receiver` — itself awaitable — which trips
-    // `async_yields_async`. Returning the un-awaited receiver is intentional
-    // here (the caller awaits the broker ack), so allow the lint.
-    #[allow(clippy::async_yields_async)]
-    #[tracing::instrument(
-        level = "debug",
-        skip_all,
-        fields(topic = %record.topic, partition = tracing::field::Empty),
-    )]
     pub async fn send(
+        &self,
+        record: ProducerRecord,
+    ) -> oneshot::Receiver<Result<RecordMetadata, ProducerError>> {
+        let span = tracing::debug_span!(
+            "producer.send",
+            topic = %record.topic,
+            partition = tracing::field::Empty,
+        );
+        self.send_inner(record).instrument(span).await
+    }
+
+    async fn send_inner(
         &self,
         record: ProducerRecord,
     ) -> oneshot::Receiver<Result<RecordMetadata, ProducerError>> {
@@ -739,6 +746,8 @@ impl Producer {
         fields(client_id = %self.client_id, transactional_id = self.transactional_id.as_deref()),
         err,
     )]
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn close(mut self) -> Result<(), ProducerError> {
         self.flush().await?;
         self.state.store(STATE_CLOSED, Ordering::Release);
@@ -750,6 +759,8 @@ impl Producer {
     }
 
     #[tracing::instrument(level = "debug", skip_all, err)]
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn flush(&self) -> Result<(), ProducerError> {
         self.is_active()?;
         let _ = self.wake_tx.send(()).await;
@@ -780,8 +791,8 @@ impl Producer {
 impl std::fmt::Debug for Producer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Producer")
-            .field("producer_id", &self.producer_id)
-            .field("producer_epoch", &self.producer_epoch)
+            .field("producer_id", &self.identity.id)
+            .field("producer_epoch", &self.identity.epoch)
             .field("transactional_id", &self.transactional_id)
             .field("compression", &self.compression)
             .finish_non_exhaustive()

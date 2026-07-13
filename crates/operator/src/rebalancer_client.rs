@@ -203,11 +203,10 @@ pub fn proposal_from_json(body: &Value) -> RebalancerProposal {
 /// Read an int32 proto field that pbjson may have emitted as a JSON
 /// number, omitted entirely (proto3 default → `0`), or — defensively —
 /// stringified. Accepts either the `camelCase` or `snake_case` key.
-#[allow(clippy::cast_possible_truncation)]
 fn json_i32(obj: &Value, camel: &str, snake: &str) -> i32 {
     let v = obj.get(camel).or_else(|| obj.get(snake));
     match v {
-        Some(Value::Number(n)) => n.as_i64().unwrap_or(0) as i32,
+        Some(Value::Number(n)) => n.as_i64().and_then(|v| i32::try_from(v).ok()).unwrap_or(0),
         Some(Value::String(s)) => s.parse().unwrap_or(0),
         _ => 0,
     }
@@ -322,6 +321,7 @@ impl RebalancerClientLike for ConnectRebalancerClient {
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
 
     use super::*;
 
@@ -334,7 +334,10 @@ mod tests {
             ("PROPOSAL_STATUS_FAILED", ProposalStatus::Failed),
             ("PROPOSAL_STATUS_CANCELLED", ProposalStatus::Cancelled),
         ] {
-            assert2::assert!(ProposalStatus::from_json(&json!(input)) == want);
+            assert!(
+                ProposalStatus::from_json(&json!(input)) == want,
+                "case {input:?}"
+            );
         }
     }
 
@@ -346,7 +349,7 @@ mod tests {
             (json!("WAT"), ProposalStatus::Unspecified),
             (Value::Null, ProposalStatus::Unspecified),
         ] {
-            assert2::assert!(ProposalStatus::from_json(&input) == want);
+            assert!(ProposalStatus::from_json(&input) == want, "case {input:?}");
         }
     }
 
@@ -369,7 +372,7 @@ mod tests {
             "throttleBytesPerSec": "52428800"
         });
         let p = proposal_from_json(&body);
-        assert2::assert!(
+        assert!(
             p == RebalancerProposal {
                 id: "abc-123".to_string(),
                 status: ProposalStatus::Computed,
@@ -398,8 +401,8 @@ mod tests {
             }
         });
         let p = proposal_from_json(&body);
-        assert2::assert!(p.id.as_str() == "xyz");
-        assert2::assert!(p.status == ProposalStatus::Executing);
+        assert!(p.id == "xyz");
+        assert!(p.status == ProposalStatus::Executing);
     }
 
     #[test]
@@ -411,7 +414,7 @@ mod tests {
             "status": "PROPOSAL_STATUS_COMPUTED"
         });
         let p = proposal_from_json(&body);
-        assert2::assert!(
+        assert!(
             p == RebalancerProposal {
                 id: "empty".to_string(),
                 status: ProposalStatus::Computed,
@@ -438,34 +441,34 @@ mod tests {
             "failureReason": "broker 3 unreachable"
         });
         let p = proposal_from_json(&body);
-        assert2::assert!(p.status == ProposalStatus::Failed);
-        assert2::assert!(p.failure_reason.as_deref() == Some("broker 3 unreachable"));
+        assert!(p.status == ProposalStatus::Failed);
+        assert!(p.failure_reason.as_deref() == Some("broker 3 unreachable"));
     }
 
     #[test]
-    fn connect_error_cases() {
-        for (name, body, status, expected) in [
-            (
-                "structured Connect error",
-                r#"{"code":"failed_precondition","message":"proposal not in Computed state"}"#,
-                400,
-                ("failed_precondition", "proposal not in Computed state"),
-            ),
-            (
-                "HTTP fallback",
-                "upstream exploded",
-                503,
-                ("http_503", "upstream exploded"),
-            ),
-        ] {
-            match connect_error(body, status) {
-                RebalancerError::Rpc { code, message } => {
-                    let (expected_code, expected_message) = expected;
-                    assert2::assert!(code.as_str() == expected_code);
-                    assert2::assert!(message.as_str() == expected_message);
-                }
-                other => panic!("case {name}: expected Rpc, got {other:?}"),
+    fn connect_error_parses_code_and_message() {
+        let e = connect_error(
+            r#"{"code":"failed_precondition","message":"proposal not in Computed state"}"#,
+            400,
+        );
+        match e {
+            RebalancerError::Rpc { code, message } => {
+                assert!(code == "failed_precondition");
+                assert!(message == "proposal not in Computed state");
             }
+            other => panic!("expected Rpc, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn connect_error_falls_back_to_http_status() {
+        let e = connect_error("upstream exploded", 503);
+        match e {
+            RebalancerError::Rpc { code, message } => {
+                assert!(code == "http_503");
+                assert!(message == "upstream exploded");
+            }
+            other => panic!("expected Rpc, got {other:?}"),
         }
     }
 
@@ -473,13 +476,13 @@ mod tests {
     fn json_i32_accepts_number_string_and_missing() {
         let obj = json!({ "a": 5, "b": "9" });
         for (key, want) in [("a", 5), ("b", 9), ("missing", 0)] {
-            assert2::assert!(json_i32(&obj, key, key) == want);
+            assert!(json_i32(&obj, key, key) == want, "case {key:?}");
         }
     }
 
     #[test]
     fn base_url_trailing_slash_trimmed() {
         let c = ConnectRebalancerClient::new("http://host:9300/");
-        assert2::assert!(c.base_url == "http://host:9300");
+        assert!(c.base_url == "http://host:9300");
     }
 }

@@ -14,7 +14,8 @@ pub const MIN_VERSION: i16 = 1;
 pub const MAX_VERSION: i16 = 6;
 pub const FLEXIBLE_MIN: i16 = 4;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -46,9 +47,9 @@ impl Encode for DeleteTopicsRequest {
                 crate::primitives::array::put_array_len(buf, (self.topic_names).len(), flex);
                 for it in &self.topic_names {
                     if flex {
-                        put_compact_string(buf, it);
+                        let () = put_compact_string(buf, it);
                     } else {
-                        put_string(buf, it);
+                        let () = put_string(buf, it);
                     }
                 }
             }
@@ -171,9 +172,9 @@ impl Encode for DeleteTopicState {
         let flex = version >= 4;
         if version >= 6 {
             if flex {
-                put_compact_nullable_string(buf, self.name.as_deref());
+                let () = put_compact_nullable_string(buf, self.name.as_deref());
             } else {
-                put_nullable_string(buf, self.name.as_deref());
+                let () = put_nullable_string(buf, self.name.as_deref());
             }
         }
         if version >= 6 {

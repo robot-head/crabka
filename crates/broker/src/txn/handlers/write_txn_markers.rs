@@ -128,6 +128,7 @@ pub(crate) fn handle(
 mod tests {
     use std::{path::Path, sync::Arc};
 
+    use assert2::assert;
     use crabka_log::{Log, LogConfig};
     use crabka_protocol::{
         UnknownTaggedFields,
@@ -224,7 +225,7 @@ mod tests {
             }],
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 }

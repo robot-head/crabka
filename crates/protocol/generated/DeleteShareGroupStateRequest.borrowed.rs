@@ -12,7 +12,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 0;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -22,6 +23,10 @@ pub struct DeleteShareGroupStateRequest<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl DeleteShareGroupStateRequest<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::delete_share_group_state_request::DeleteShareGroupStateRequest {
@@ -46,9 +51,9 @@ impl Encode for DeleteShareGroupStateRequest<'_> {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.group_id);
+                let () = put_compact_string(buf, self.group_id);
             } else {
-                put_string(buf, self.group_id);
+                let () = put_string(buf, self.group_id);
             }
         }
         if version >= 0 {
@@ -144,6 +149,10 @@ pub struct DeleteStateData {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl DeleteStateData {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::delete_share_group_state_request::DeleteStateData {
         crate::owned::delete_share_group_state_request::DeleteStateData {
             topic_id: (self.topic_id),
@@ -242,6 +251,10 @@ pub struct PartitionData {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl PartitionData {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::delete_share_group_state_request::PartitionData {
         crate::owned::delete_share_group_state_request::PartitionData {
             partition: (self.partition),

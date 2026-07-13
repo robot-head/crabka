@@ -34,6 +34,8 @@ impl Magic {
         }
     }
 
+    /// # Errors
+    /// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
     pub fn from_i8(b: i8) -> Result<Self, LegacyRecordsError> {
         match b {
             0 => Ok(Self::V0),
@@ -55,6 +57,8 @@ pub mod attrs {
 ///
 /// `0` => `None`, `1` => `Gzip`, `2` => `Snappy`, `3` => `Lz4`. v0/v1
 /// never carried Zstd on the wire (KIP-110 was v2-only).
+/// # Errors
+/// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
 pub fn compression_from_attrs(byte: i8) -> Result<CompressionType, LegacyRecordsError> {
     match byte & attrs::COMPRESSION_MASK {
         0 => Ok(CompressionType::None),
@@ -68,6 +72,8 @@ pub fn compression_from_attrs(byte: i8) -> Result<CompressionType, LegacyRecords
 }
 
 #[must_use]
+/// # Panics
+/// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
 pub fn attrs_with_compression(byte: i8, codec: CompressionType) -> i8 {
     let code: i8 = match codec {
         CompressionType::None => 0,
@@ -112,8 +118,8 @@ impl Message {
         // Build the CRC-covered payload first, then prefix it with the CRC.
         let body_len = self.encoded_len() - 4;
         let mut body = Vec::with_capacity(body_len);
-        body.push(self.magic.as_i8() as u8);
-        body.push(self.attributes as u8);
+        body.push(self.magic.as_i8().cast_unsigned());
+        body.push(self.attributes.cast_unsigned());
         if matches!(self.magic, Magic::V1) {
             let ts = self.timestamp.unwrap_or(-1);
             body.extend_from_slice(&ts.to_be_bytes());
@@ -128,7 +134,11 @@ impl Message {
 
     /// Decode a message from `buf`. `buf` must be positioned at the CRC and
     /// must contain at least `frame_size` bytes; `frame_size` is the
-    /// `message_size` from the outer MessageSet frame.
+    /// `message_size` from the outer `MessageSet` frame.
+    /// # Errors
+    /// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
+    /// # Panics
+    /// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
     pub fn decode_from<B: Buf>(buf: &mut B, frame_size: usize) -> Result<Self, LegacyRecordsError> {
         if buf.remaining() < frame_size {
             return Err(LegacyRecordsError::Truncated {
@@ -220,7 +230,7 @@ fn get_nullable_bytes(
         }
         return Err(LegacyRecordsError::NegativeLength { label, len });
     }
-    let n = len as usize;
+    let n = usize::try_from(len).expect("nonnegative i32 fits usize");
     if buf.remaining() < n {
         return Err(LegacyRecordsError::Truncated {
             needed: n - buf.remaining(),

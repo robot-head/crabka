@@ -108,6 +108,8 @@ pub struct MemorySink {
 
 impl MemorySink {
     #[must_use]
+    /// # Panics
+    /// Panics if synchronized state is poisoned or validated input is missing a field required to produce the output.
     pub fn records(&self) -> Vec<AuditRecord> {
         self.records
             .lock()

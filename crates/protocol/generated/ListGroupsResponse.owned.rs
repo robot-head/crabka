@@ -13,7 +13,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 5;
 pub const FLEXIBLE_MIN: i16 = 3;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -138,30 +139,30 @@ impl Encode for ListedGroup {
         let flex = version >= 3;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.group_id);
+                let () = put_compact_string(buf, &self.group_id);
             } else {
-                put_string(buf, &self.group_id);
+                let () = put_string(buf, &self.group_id);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.protocol_type);
+                let () = put_compact_string(buf, &self.protocol_type);
             } else {
-                put_string(buf, &self.protocol_type);
+                let () = put_string(buf, &self.protocol_type);
             }
         }
         if version >= 4 {
             if flex {
-                put_compact_string(buf, &self.group_state);
+                let () = put_compact_string(buf, &self.group_state);
             } else {
-                put_string(buf, &self.group_state);
+                let () = put_string(buf, &self.group_state);
             }
         }
         if version >= 5 {
             if flex {
-                put_compact_string(buf, &self.group_type);
+                let () = put_compact_string(buf, &self.group_type);
             } else {
-                put_string(buf, &self.group_type);
+                let () = put_string(buf, &self.group_type);
             }
         }
         if flex {

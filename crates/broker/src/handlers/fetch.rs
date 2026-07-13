@@ -27,6 +27,7 @@ use crabka_protocol::{
     primitives::uuid::Uuid as WireUuid,
     records::{RecordBatch, RecordsPayload},
 };
+use num_traits::ToPrimitive as _;
 use tokio::sync::Notify;
 
 use crate::{
@@ -71,13 +72,36 @@ struct PendingRead {
     cpu_micros: u64,
 }
 
+impl PendingRead {
+    fn planned(
+        topic_name: &str,
+        topic_id: WireUuid,
+        partition: &EffectivePartition,
+        mode: (bool, bool),
+        resolved: Option<Arc<Partition>>,
+        out: PartitionData,
+    ) -> Self {
+        Self {
+            topic_name: topic_name.to_owned(),
+            topic_id,
+            partition_index: partition.partition,
+            fetch_offset: partition.fetch_offset,
+            max_bytes: partition.partition_max_bytes,
+            read_committed: mode.0,
+            is_follower_fetch: mode.1,
+            partition: resolved,
+            out,
+            cpu_micros: 0,
+        }
+    }
+}
+
 /// Handle a `Fetch` request, returning the response **struct** (not yet
 /// encoded) plus the negotiated `version`. The dispatch layer turns this into
 /// either a zero-copy write-plan (v4+, the canonical codec) or a legacy
 /// copy-encoded frame (v0–v3). Returning the struct — rather than `Bytes` —
 /// lets the connection writer split out each partition's records region as a
 /// separate write segment instead of materializing the whole body.
-#[allow(clippy::too_many_lines)]
 #[tracing::instrument(
     name = "handle_fetch",
     level = "info",
@@ -96,9 +120,6 @@ pub(crate) async fn handle(
     // start so the request throttle can be combined with the consumer
     // byte-rate throttle below (KIP-219).
     let handler_start = std::time::Instant::now();
-    let partitions = broker.partitions.clone();
-    let controller = broker.controller.clone();
-    let log_dir_status = broker.log_dir_status.clone();
     let mut cur: &[u8] = req_bytes;
     let req: FetchRequest = if version < 4 {
         crabka_protocol::kafka_3_6_2::owned::fetch_request::FetchRequest::decode(&mut cur, version)?
@@ -107,664 +128,69 @@ pub(crate) async fn handle(
         FetchRequest::decode(&mut cur, version)?
     };
 
-    // `replica_id >= 0` means follower fetch (Apache Kafka convention).
-    // KIP-903 (Kafka 3.5) moved `replica_id` into a tagged `replica_state`
-    // struct on Fetch v15+; on v0-14 the original top-level field is used.
-    // The codegen serializes whichever the negotiated version requires, so
-    // here we accept whichever field is populated. Without this fallback,
-    // every v15+ follower fetch decodes with `replica_id = -1` (the default
-    // for the deprecated top-level field), the handler treats it as a
-    // consumer fetch, clamps records at HW=0, and replication silently
-    // stalls — which is exactly the byte-compare test's failure mode.
-    let effective_replica_id = if req.replica_id >= 0 {
-        req.replica_id
-    } else {
-        req.replica_state.replica_id
-    };
-    let is_follower_fetch = effective_replica_id >= 0;
-    // isolation_level=1 (read_committed) only applies to consumer fetches.
-    // Follower fetches always see all records regardless of isolation.
-    let read_committed = !is_follower_fetch && req.isolation_level == 1;
-
-    // ── KIP-227 session classification ───────────────────────────────
-    // Decide whether this request is sessionless, opening a new
-    // session, an incremental delta on an existing one, or closing
-    // one. For incremental fetches the cache has already merged
-    // `req.topics` into the cached subscription set and removed
-    // anything in `forgotten_topics_data`, so `effective_topics`
-    // below works off the resulting full subscription.
-    let decision = broker.fetch_session_cache.classify(&req);
-    if let SessionDecision::Error { code } = decision {
-        let resp = FetchResponse {
-            error_code: code,
-            session_id: INVALID_SESSION_ID,
-            responses: Vec::new(),
-            ..Default::default()
-        };
-        return Ok((resp, version));
-    }
-
-    let effective_topics: Vec<EffectiveTopic> = match &decision {
-        SessionDecision::Incremental { partitions, .. } => {
-            group_cached_into_effective_topics(partitions)
-        }
-        _ => req
-            .topics
-            .iter()
-            .map(|t| EffectiveTopic {
-                topic: t.topic.clone(),
-                topic_id: t.topic_id,
-                partitions: t
-                    .partitions
-                    .iter()
-                    .map(|fp| EffectivePartition {
-                        partition: fp.partition,
-                        current_leader_epoch: fp.current_leader_epoch,
-                        last_fetched_epoch: fp.last_fetched_epoch,
-                        fetch_offset: fp.fetch_offset,
-                        partition_max_bytes: fp.partition_max_bytes,
-                    })
-                    .collect(),
-            })
-            .collect(),
-    };
-
-    // ── ACL preamble ────────────────────────────────────────
-    // Batch-authorize every topic in the request for `Read` (the
-    // operation Fetch requires). Topics that come back `Deny` will
-    // short-circuit the per-partition log read below and emit
-    // TOPIC_AUTHORIZATION_FAILED on every partition row of that topic
-    // with empty records.
-    //
-    // Fetch v ≥ 13 sends only topic_id on the wire; ACLs are keyed
-    // by topic *name*, so we resolve the names here too for
-    // the authorize call (and re-resolve inline below for log lookup).
-    let image = controller.current_image();
-    let topic_names_for_acl: Vec<String> = effective_topics
-        .iter()
-        .map(|t| {
-            if !t.topic.is_empty() {
-                t.topic.clone()
-            } else if t.topic_id != WireUuid::ZERO {
-                image
-                    .topic_name_by_id(&uuid::Uuid::from_bytes(t.topic_id.0))
-                    .map(str::to_string)
-                    .unwrap_or_default()
-            } else {
-                String::new()
-            }
-        })
-        .collect();
-    let acl_results = authorize_topics(
-        broker.config.authorizer.as_ref(),
-        &*image,
-        ctx.principal,
-        ctx.peer,
-        AclOperation::Read,
-        topic_names_for_acl.iter().map(String::as_str),
-    );
-    let denied_topics: std::collections::HashSet<String> = acl_results
-        .iter()
-        .filter_map(|(name, r)| {
-            if *r == AuthorizationResult::Deny {
-                Some((*name).to_string())
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    // Resolve every requested partition up front. We collect pending
-    // reads (rather than just doing them inline) so we can re-read once
-    // after a long-poll wake without re-decoding the request.
-    let mut pending: Vec<PendingRead> = Vec::new();
-    for topic in &effective_topics {
-        // KIP-516 strict resolution. v ≤ 12 sends the name (id zero); v ≥ 13
-        // sends only topic_id. An explicit, unknown id ⇒ every partition row
-        // gets UNKNOWN_TOPIC_ID. A name-only miss keeps the legacy
-        // UNKNOWN_TOPIC_OR_PARTITION via the partition lookup below.
-        let (topic_name, topic_id, topic_id_error) =
-            match crate::topic_resolve::resolve(&image, &topic.topic, topic.topic_id) {
-                Ok(rec) => (rec.name.clone(), WireUuid(rec.topic_id.into_bytes()), None),
-                Err(codes::UNKNOWN_TOPIC_OR_PARTITION) => {
-                    (topic.topic.clone(), topic.topic_id, None)
-                }
-                Err(code) => (topic.topic.clone(), topic.topic_id, Some(code)),
-            };
-
-        // If the topic was denied by the ACL preamble,
-        // every partition row gets TOPIC_AUTHORIZATION_FAILED and
-        // the real log read is skipped. `records` stays `None`
-        // (no batch returned). An empty topic_name (v ≥ 13 with
-        // an unknown topic_id) maps to "" in the denied set iff
-        // its authorize result was Deny; the no-ACL compat shim
-        // returns Allow uniformly, so existing tests are unaffected.
-        let topic_denied = denied_topics.contains(&topic_name);
-
-        for fp in &topic.partitions {
-            let idx = fp.partition;
-            let fetch_offset = fp.fetch_offset;
-            let max_bytes = fp.partition_max_bytes;
-            let req_current_leader_epoch = fp.current_leader_epoch;
-            // KIP-320: epoch of the last record the fetcher has already consumed.
-            // -1 means "not set" (v0–v11 or incremental partitions that never
-            // carried the field).
-            let req_last_fetched_epoch = fp.last_fetched_epoch;
-
-            let mut out = PartitionData {
-                partition_index: idx,
+    let preparation = match prepare_fetch(broker, &req, ctx) {
+        Ok(preparation) => preparation,
+        Err(code) => {
+            let resp = FetchResponse {
+                error_code: code,
+                session_id: INVALID_SESSION_ID,
+                responses: Vec::new(),
                 ..Default::default()
             };
-
-            if topic_denied {
-                out.error_code = codes::TOPIC_AUTHORIZATION_FAILED;
-                // Records stays `None` — the codegen encodes this as
-                // an empty/null record buffer.
-                pending.push(PendingRead {
-                    topic_name: topic_name.clone(),
-                    topic_id,
-                    partition_index: idx,
-                    fetch_offset,
-                    max_bytes,
-                    read_committed,
-                    is_follower_fetch,
-                    partition: None,
-                    out,
-                    cpu_micros: 0,
-                });
-                continue;
-            }
-
-            if let Some(code) = topic_id_error {
-                out.error_code = code;
-                pending.push(PendingRead {
-                    topic_name: topic_name.clone(),
-                    topic_id,
-                    partition_index: idx,
-                    fetch_offset,
-                    max_bytes,
-                    read_committed,
-                    is_follower_fetch,
-                    partition: None,
-                    out,
-                    cpu_micros: 0,
-                });
-                continue;
-            }
-
-            let part_opt = partitions.get(&topic_name, crabka_ids::PartitionIndex(idx));
-
-            // KIP-101 epoch fence. The follower (or consumer using KIP-320)
-            // includes its `current_leader_epoch`; we reject stale or future
-            // epochs without serving data.
-            if let Some(part) = part_opt.as_ref() {
-                let our_epoch = part
-                    .current_leader_epoch
-                    .load(std::sync::atomic::Ordering::Acquire);
-                if req_current_leader_epoch >= 0 && req_current_leader_epoch != our_epoch {
-                    out.error_code = if req_current_leader_epoch < our_epoch {
-                        codes::FENCED_LEADER_EPOCH
-                    } else {
-                        codes::UNKNOWN_LEADER_EPOCH
-                    };
-                    // KIP-320: tell the fetcher who the current leader is so it
-                    // can re-target without a full Metadata round-trip. Encodes
-                    // only at Fetch v12+ (codegen gates the tagged field).
-                    let leader_id = image
-                        .partition(&topic_name, idx)
-                        .map_or(-1, |pr| i32::try_from(pr.leader.0).unwrap_or(-1));
-                    out.current_leader = LeaderIdAndEpoch {
-                        leader_id,
-                        leader_epoch: our_epoch,
-                        ..Default::default()
-                    };
-                    pending.push(PendingRead {
-                        topic_name: topic_name.clone(),
-                        topic_id,
-                        partition_index: idx,
-                        fetch_offset,
-                        max_bytes,
-                        read_committed,
-                        is_follower_fetch,
-                        partition: None,
-                        out,
-                        cpu_micros: 0,
-                    });
-                    continue;
-                }
-            }
-
-            // KIP-320 divergence detection. A v12+ fetcher includes the leader
-            // epoch of its last fetched record (`last_fetched_epoch`). If the
-            // leader's epoch history says that epoch/offset diverged, return a
-            // `diverging_epoch` and serve no records, so the follower/consumer
-            // truncates instead of appending on top of a divergent suffix.
-            if req_last_fetched_epoch >= 0
-                && let Some(part) = part_opt.as_ref()
-            {
-                let (found_epoch, end_offset) = {
-                    let log = part.log.lock().expect("log mutex poisoned");
-                    let leo = log.log_end_offset();
-                    // Wrap the raw wire `last_fetched_epoch` into a `LeaderEpoch`
-                    // for the log-crate seam; unwrap `found_epoch.0` below when it
-                    // flows back to the wire `diverging_epoch` field.
-                    log.epoch_checkpoint()
-                        .epoch_and_offset_for(LeaderEpoch(req_last_fetched_epoch), leo)
-                };
-                if found_epoch < req_last_fetched_epoch || end_offset < fetch_offset {
-                    out.error_code = codes::NONE;
-                    out.diverging_epoch = EpochEndOffset {
-                        epoch: found_epoch.0,
-                        end_offset: end_offset.0,
-                        ..Default::default()
-                    };
-                    pending.push(PendingRead {
-                        topic_name: topic_name.clone(),
-                        topic_id,
-                        partition_index: idx,
-                        fetch_offset,
-                        max_bytes,
-                        read_committed,
-                        is_follower_fetch,
-                        partition: None,
-                        out,
-                        cpu_micros: 0,
-                    });
-                    continue;
-                }
-            }
-
-            // KIP-113 offline-dir handling: refuse to read partitions on
-            // a log dir flagged offline. The Log handle is still open and
-            // a read would (probably) succeed against the page cache,
-            // but serving stale bytes from a dir we've told the rest of
-            // the cluster is unhealthy hides the failure.
-            if let Some(part) = part_opt.as_ref()
-                && log_dir_status.is_offline(&part.log_dir.load())
-            {
-                out.error_code = codes::KAFKA_STORAGE_ERROR;
-                pending.push(PendingRead {
-                    topic_name: topic_name.clone(),
-                    topic_id,
-                    partition_index: idx,
-                    fetch_offset,
-                    max_bytes,
-                    read_committed,
-                    is_follower_fetch,
-                    partition: None,
-                    out,
-                    cpu_micros: 0,
-                });
-                continue;
-            }
-
-            // Follower-fetch HW maintenance. ISR maintenance prevents stalls
-            // by shrinking lagging followers out of the ISR within 2s on CI.
-            if is_follower_fetch && let Some(part) = part_opt.as_ref() {
-                let leader_leo = part.log_end_offset();
-                let advanced = {
-                    let mut st = part.replica_state.lock().await;
-                    let prev = st.hw;
-                    let new = st.update_follower_leo(
-                        crabka_metadata::NodeId(u64::try_from(effective_replica_id).unwrap_or(0)),
-                        // Wrap the decoded-request wire offset into `Offset`.
-                        Offset(fetch_offset),
-                        leader_leo,
-                        std::time::Instant::now(),
-                    );
-                    new > prev
-                };
-                if advanced {
-                    part.hw_advance_notify.notify_waiters();
-                }
-            }
-
-            if part_opt.is_none() || topic_name.is_empty() {
-                out.error_code = codes::UNKNOWN_TOPIC_OR_PARTITION;
-                pending.push(PendingRead {
-                    topic_name: topic_name.clone(),
-                    topic_id,
-                    partition_index: idx,
-                    fetch_offset,
-                    max_bytes,
-                    read_committed,
-                    is_follower_fetch,
-                    partition: None,
-                    out,
-                    cpu_micros: 0,
-                });
-                continue;
-            }
-
-            // KIP-392: for a consumer fetch advertising client.rack, ask the
-            // configured replica selector which replica it should prefer to
-            // read from, and report it in `preferred_read_replica`. The field
-            // only encodes at Fetch v11+ (where `rack_id` first appears), so
-            // older clients are unaffected. `-1` (the default) means
-            // "use the leader".
-            if !is_follower_fetch
-                && !req.rack_id.is_empty()
-                && let Some(pr) = image.partition(&topic_name, idx)
-            {
-                let isr: std::collections::HashSet<crabka_metadata::NodeId> =
-                    pr.isr.iter().copied().collect();
-                let views: Vec<crate::replica_selector::ReplicaView> = pr
-                    .replicas
-                    .iter()
-                    .map(|&nid| crate::replica_selector::ReplicaView {
-                        node_id: i32::try_from(nid.0).unwrap_or(-1),
-                        rack: image.broker(nid).and_then(|b| b.rack.clone()),
-                        in_isr: isr.contains(&nid),
-                    })
-                    .collect();
-                let leader_id = i32::try_from(pr.leader.0).unwrap_or(-1);
-                out.preferred_read_replica = broker.config.replica_selector.select(
-                    Some(req.rack_id.as_str()),
-                    leader_id,
-                    &views,
-                );
-            }
-
-            pending.push(PendingRead {
-                topic_name: topic_name.clone(),
-                topic_id,
-                partition_index: idx,
-                fetch_offset,
-                max_bytes,
-                read_committed,
-                is_follower_fetch,
-                partition: part_opt,
-                out,
-                cpu_micros: 0,
-            });
+            return Ok((resp, version));
         }
-    }
+    };
+    let FetchPreparation {
+        decision,
+        effective_topics,
+        image,
+        denied_topics,
+        effective_replica_id,
+        is_follower_fetch,
+        read_committed,
+    } = preparation;
 
-    // First read pass. We time each `do_read` with a wall-clock `Instant`
-    // delta and charge it into p.cpu_micros. The heavy byte read now runs in
-    // `spawn_blocking` (see `do_read`), so the awaited future itself does
-    // little besides the cheap metadata lock + result application; a plain
-    // elapsed-time delta is an adequate stand-in for the previous
-    // per-partition `TaskMonitor` poll-duration sample without allocating a
-    // monitor per partition per fetch.
-    let mut total_bytes = 0_usize;
-    for p in &mut pending {
-        let Some(part) = p.partition.clone() else {
-            continue;
-        };
-        let read_start = std::time::Instant::now();
-        total_bytes += do_read(
-            &part,
-            // Wrap the decoded-request wire offset into `Offset` for the read.
-            Offset(p.fetch_offset),
-            p.max_bytes,
-            p.read_committed,
-            p.is_follower_fetch,
-            ctx.sendfile_capable,
-            &mut p.out,
-        )
-        .await?;
-        let micros = u64::try_from(read_start.elapsed().as_micros()).unwrap_or(u64::MAX);
-        p.cpu_micros = p.cpu_micros.saturating_add(micros);
+    let plan_context = PendingPlanContext {
+        broker,
+        image: &image,
+        denied_topics: &denied_topics,
+        rack_id: &req.rack_id,
+        mode: (read_committed, is_follower_fetch),
+        follower_id: effective_replica_id,
+    };
+    let pending = build_pending_reads(&plan_context, &effective_topics).await;
 
-        // KIP-405: if the local read came back
-        // OFFSET_OUT_OF_RANGE because the requested offset is below
-        // `local_log_start_offset()` on a tiered topic, attempt to
-        // serve the batch from the remote tier.
-        if p.out.error_code == codes::OFFSET_OUT_OF_RANGE
-            && let Some(serviced_bytes) = try_remote_read(broker, p, &part).await
-        {
-            total_bytes += serviced_bytes;
-        }
-    }
+    let (mut responses, cpu_micros_by_idx) = execute_pending_reads(
+        broker,
+        pending,
+        req.min_bytes,
+        req.max_wait_ms,
+        ctx.sendfile_capable,
+    )
+    .await?;
 
-    // Long-poll: if we didn't satisfy min_bytes, wait on each readable
-    // partition's append_notify with a single timeout, then re-read.
-    let want_more = total_bytes < usize::try_from(req.min_bytes.max(0)).unwrap_or(0);
-    if want_more && req.max_wait_ms > 0 {
-        long_poll_then_reread(broker, &mut pending, req.max_wait_ms, ctx.sendfile_capable).await?;
-    }
+    downconvert_legacy_responses(broker, version, &mut responses);
 
-    // Drain per-partition cpu_micros accumulators before
-    // `group_into_topic_responses` consumes `pending`. `cpu_micros_by_idx`
-    // is aligned positionally with `responses` — `cpu_micros_by_idx[ti][pi]`
-    // is the accumulator for `responses[ti].partitions[pi]` — so the
-    // response-emit loop indexes it directly rather than re-cloning topic
-    // names into a string-keyed map.
-    let (mut responses, cpu_micros_by_idx) = group_into_topic_responses(pending);
-
-    // Down-convert v2 batches to legacy MessageSet bytes for Fetch v0-3.
-    // Control batches are dropped (records set to None); zstd-compressed
-    // batches are re-compressed as snappy (v0/v1 has no zstd codec).
-    if version < 4 {
-        for topic_resp in &mut responses {
-            for part in &mut topic_resp.partitions {
-                if let Some(payload) = part.records.take() {
-                    match crate::handlers::fetch_downconvert::down_convert_payload_for_fetch(
-                        &payload, version,
-                    ) {
-                        Ok(Some(converted)) => {
-                            // Only store the payload if it has content.
-                            if converted.payload_len() > 0 {
-                                part.records = Some(converted);
-                            }
-                            // Account this Fetch-path down-conversion.
-                            // Counted even when the converted batch was empty
-                            // (drops + control skips) — the work happened.
-                            if !topic_resp.topic.is_empty() {
-                                broker
-                                    .metrics
-                                    .record_fetch_message_conversion(&topic_resp.topic);
-                            }
-                        }
-                        Ok(None) => {
-                            // All batches dropped — records stays None.
-                        }
-                        Err(error_code) => {
-                            part.error_code = error_code;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // KIP-73 leader-side throttle: only applies to follower (inter-broker)
-    // fetch requests. Consumer fetches have replica_id < 0.
     if is_follower_fetch {
-        use crate::throttle::TopicThrottle;
-        // `leader.replication.throttled.replicas` stores (partition, follower_id) pairs.
-        // The leader throttles a follower fetch when (partition, effective_replica_id) is
-        // in that set. We cast the i32 replica_id to the u64 `NodeId` inner; a
-        // valid follower id is always positive so the cast is safe.
-        let follower_id = crabka_metadata::NodeId(u64::try_from(effective_replica_id).unwrap_or(0));
-        let mut throttled_byte_count: u64 = 0;
-        // (topic_idx, partition_idx) pairs for throttled chunks.
-        let mut throttled_idxs: Vec<(usize, usize)> = Vec::new();
-        for (ti, topic_resp) in responses.iter().enumerate() {
-            let throttle = TopicThrottle::for_topic(&image, &topic_resp.topic);
-            for (pi, part) in topic_resp.partitions.iter().enumerate() {
-                if throttle.leader.contains(part.partition_index, follower_id) {
-                    let chunk_bytes =
-                        part.records.as_ref().map_or(0, RecordsPayload::payload_len) as u64;
-                    throttled_byte_count += chunk_bytes;
-                    throttled_idxs.push((ti, pi));
-                }
-            }
-        }
-        if throttled_byte_count > 0 {
-            let granted = broker
-                .throttle_state
-                .leader_out
-                .try_consume(throttled_byte_count);
-            if granted < throttled_byte_count {
-                truncate_throttled_responses(&mut responses, &throttled_idxs, granted);
-            }
-        }
+        throttle_follower_responses(broker, &image, effective_replica_id, &mut responses);
     }
 
-    // Consumer fetches (replica_id < 0) use client quotas; inter-broker
-    // fetches (replica_id >= 0) use the KIP-73 throttle.
-    let mut throttle_time_ms_val: i32 = 0;
-    if !is_follower_fetch {
-        // KIP-13 consumer_byte_rate + KIP-124 request_percentage. Combine the
-        // data and request throttles as their max, surface it in
-        // throttle_time_ms, and mute the channel once before responding
-        // (KIP-219). The dispatch loop skips request_percentage for Fetch so it
-        // is charged exactly once, here. (Inter-broker follower fetches use the
-        // KIP-73 leader throttle above, which fires only when replica_id >= 0,
-        // and are not client-quota traffic.)
-        let total_bytes = sum_response_bytes(&responses);
-        let data_delay = consume_consumer_quota(
-            &image,
-            &broker.quota_buckets,
-            &ctx.principal.name,
-            ctx.client_id,
-            total_bytes,
-        );
-        #[allow(clippy::cast_possible_truncation)]
-        let elapsed_micros = handler_start
-            .elapsed()
-            .as_micros()
-            .min(u128::from(u64::MAX)) as u64;
-        let request_delay = crate::quota::consume_request_quota(
-            &image,
-            &broker.quota_buckets,
-            &ctx.principal.name,
-            ctx.client_id,
-            elapsed_micros,
-        );
-        let delay = data_delay.max(request_delay);
-        if delay > Duration::ZERO {
-            throttle_time_ms_val = i32::try_from(delay.as_millis()).unwrap_or(i32::MAX);
-            tokio::time::sleep(delay).await;
-        }
-    }
-
-    // Per-topic Prometheus accounting. Sum the encoded
-    // record-batch bytes the response is about to ship, per topic.
-    // Topics that returned an error (empty `records`) still get a
-    // request count (the fetch arrived), matching Kafka's
-    // BrokerTopicMetrics:TotalFetchRequestsPerSec semantics.
-    for (ti, topic_resp) in responses.iter().enumerate() {
-        if topic_resp.topic.is_empty() {
-            continue;
-        }
-        let mut bytes: u64 = 0;
-        for (pi, p) in topic_resp.partitions.iter().enumerate() {
-            let partition_bytes = p.records.as_ref().map_or(0, RecordsPayload::payload_len) as u64;
-            broker.metrics.record_partition_fetch(
-                &topic_resp.topic,
-                p.partition_index,
-                partition_bytes,
-            );
-            // Per-partition failure accounting. Each
-            // partition-response error row (OFFSET_OUT_OF_RANGE,
-            // KAFKA_STORAGE_ERROR, FENCED_LEADER_EPOCH, etc.) bumps
-            // the per-topic counter — mirrors JVM's
-            // `failedFetchRequestRate.mark()`.
-            if p.error_code != 0 {
-                broker.metrics.record_failed_fetch(&topic_resp.topic);
-            }
-            // When this Fetch arrived from a follower
-            // (`replica_id >= 0`), the bytes leaving the leader are
-            // replication outbound, not consumer outbound. We emit a
-            // separate counter rather than splitting `partition_bytes_out`
-            // — the existing counter keeps its established semantics
-            // (rebalancer + general broker outbound) and operators get a
-            // dedicated `replication_bytes_out` counter for inter-broker
-            // traffic.
-            if is_follower_fetch {
-                broker.metrics.record_replication_out(
-                    &topic_resp.topic,
-                    p.partition_index,
-                    partition_bytes,
-                );
-            }
-            // Drain the per-partition CPU accumulator. Tracks
-            // actual poll duration across both the first read pass and any
-            // long-poll re-reads, attributing only on-CPU time.
-            // `cpu_micros_by_idx` is positionally aligned with `responses`
-            // (built by `group_into_topic_responses`); the down-convert and
-            // throttle passes above mutate `records` but never add or remove
-            // partition rows, so indexing by `(ti, pi)` stays valid here.
-            if let Some(micros) = cpu_micros_by_idx
-                .get(ti)
-                .and_then(|parts| parts.get(pi))
-                .copied()
-            {
-                broker.metrics.record_partition_cpu_micros(
-                    &topic_resp.topic,
-                    p.partition_index,
-                    micros,
-                );
-            }
-            bytes += partition_bytes;
-        }
-        broker.metrics.record_fetch(&topic_resp.topic, bytes);
-    }
-
-    // ── KIP-227 response shaping + cache finalize ────────────────────
-    // Decide the response `session_id` and (for Incremental) filter
-    // out partitions whose state hasn't changed since the previous
-    // response. Then update the cache so the next request's diff
-    // comparison sees what we just sent.
-    let response_session_id = match &decision {
-        SessionDecision::Sessionless => INVALID_SESSION_ID,
-        SessionDecision::Close { session_id } => {
-            broker.fetch_session_cache.close(*session_id);
-            INVALID_SESSION_ID
-        }
-        SessionDecision::NewSession => {
-            // Snapshot what we just sent (for last_* comparison) and the
-            // request's desired state (fetch_offset/max_bytes/leader_epoch)
-            // so subsequent incremental reads know where to look.
-            let snapshot = snapshot_response_state(&effective_topics, &responses);
-            broker.fetch_session_cache.try_allocate(
-                is_follower_fetch,
-                ctx.principal.name.clone(),
-                snapshot,
-            )
-        }
-        SessionDecision::Incremental {
-            session_id,
-            partitions,
-            ..
-        } => {
-            let cached_by_key: std::collections::HashMap<FetchSessionKey, CachedPartitionState> =
-                partitions.iter().cloned().collect();
-            let sent = filter_incremental_response(&mut responses, &cached_by_key);
-            broker
-                .fetch_session_cache
-                .finalize_incremental(*session_id, &sent);
-            *session_id
-        }
-        SessionDecision::Error { .. } => unreachable!("returned above"),
+    let throttle_time_ms_val = if is_follower_fetch {
+        0
+    } else {
+        apply_consumer_fetch_quota(broker, &image, ctx, handler_start, &responses).await
     };
 
-    // Refresh KIP-227 gauges. Cheap: `len()` and
-    // `total_partitions_cached()` read lock-free `AtomicUsize` counters
-    // (no mutex, no HashMap scan), so this never contends the cache lock
-    // on the hot fetch path and avoids the need for a background sampling
-    // task.
-    broker
-        .metrics
-        .incremental_fetch_sessions
-        .set(i64::try_from(broker.fetch_session_cache.len()).unwrap_or(i64::MAX));
-    broker.metrics.incremental_fetch_partitions_cached.set(
-        i64::try_from(broker.fetch_session_cache.total_partitions_cached()).unwrap_or(i64::MAX),
+    record_fetch_metrics(broker, &responses, &cpu_micros_by_idx, is_follower_fetch);
+
+    let response_session_id = finalize_fetch_session(
+        broker,
+        &decision,
+        &effective_topics,
+        &mut responses,
+        is_follower_fetch,
+        &ctx.principal.name,
     );
-    let cur_evictions = broker.fetch_session_cache.evictions_total();
-    let prev_evictions = broker
-        .metrics
-        .incremental_fetch_session_evictions_total
-        .get();
-    if cur_evictions > prev_evictions {
-        broker
-            .metrics
-            .incremental_fetch_session_evictions_total
-            .inc_by(cur_evictions - prev_evictions);
-    }
 
     let resp = FetchResponse {
         throttle_time_ms: throttle_time_ms_val,
@@ -794,6 +220,542 @@ struct EffectivePartition {
     last_fetched_epoch: i32,
     fetch_offset: i64,
     partition_max_bytes: i32,
+}
+
+struct FetchPreparation {
+    decision: SessionDecision,
+    effective_topics: Vec<EffectiveTopic>,
+    image: Arc<crabka_metadata::MetadataImage>,
+    denied_topics: std::collections::HashSet<String>,
+    effective_replica_id: i32,
+    is_follower_fetch: bool,
+    read_committed: bool,
+}
+
+fn prepare_fetch(
+    broker: &Broker,
+    request: &FetchRequest,
+    context: &crate::handlers::RequestContext<'_>,
+) -> Result<FetchPreparation, i16> {
+    let effective_replica_id = if request.replica_id >= 0 {
+        request.replica_id
+    } else {
+        request.replica_state.replica_id
+    };
+    let is_follower_fetch = effective_replica_id >= 0;
+    let decision = broker.fetch_session_cache.classify(request);
+    if let SessionDecision::Error { code } = decision {
+        return Err(code);
+    }
+    let effective_topics = match &decision {
+        SessionDecision::Incremental { partitions, .. } => {
+            group_cached_into_effective_topics(partitions)
+        }
+        _ => request
+            .topics
+            .iter()
+            .map(|topic| EffectiveTopic {
+                topic: topic.topic.clone(),
+                topic_id: topic.topic_id,
+                partitions: topic
+                    .partitions
+                    .iter()
+                    .map(|partition| EffectivePartition {
+                        partition: partition.partition,
+                        current_leader_epoch: partition.current_leader_epoch,
+                        last_fetched_epoch: partition.last_fetched_epoch,
+                        fetch_offset: partition.fetch_offset,
+                        partition_max_bytes: partition.partition_max_bytes,
+                    })
+                    .collect(),
+            })
+            .collect(),
+    };
+    let image = broker.controller.current_image();
+    let names: Vec<String> = effective_topics
+        .iter()
+        .map(|topic| {
+            if !topic.topic.is_empty() {
+                topic.topic.clone()
+            } else if topic.topic_id != WireUuid::ZERO {
+                image
+                    .topic_name_by_id(&uuid::Uuid::from_bytes(topic.topic_id.0))
+                    .map(str::to_owned)
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            }
+        })
+        .collect();
+    let denied_topics = authorize_topics(
+        broker.config.authorizer.as_ref(),
+        &*image,
+        context.principal,
+        context.peer,
+        AclOperation::Read,
+        names.iter().map(String::as_str),
+    )
+    .into_iter()
+    .filter(|(_, result)| *result == AuthorizationResult::Deny)
+    .map(|(name, _)| name.to_owned())
+    .collect();
+    Ok(FetchPreparation {
+        decision,
+        effective_topics,
+        image,
+        denied_topics,
+        effective_replica_id,
+        is_follower_fetch,
+        read_committed: !is_follower_fetch && request.isolation_level == 1,
+    })
+}
+
+async fn update_follower_progress(partition: &Partition, follower_id: i32, fetch_offset: i64) {
+    let leader_leo = partition.log_end_offset();
+    let advanced = {
+        let mut state = partition.replica_state.lock().await;
+        let previous = state.hw;
+        state.update_follower_leo(
+            crabka_metadata::NodeId(u64::try_from(follower_id).unwrap_or(0)),
+            Offset(fetch_offset),
+            leader_leo,
+            std::time::Instant::now(),
+        ) > previous
+    };
+    if advanced {
+        partition.hw_advance_notify.notify_waiters();
+    }
+}
+
+fn preferred_read_replica(
+    broker: &Broker,
+    image: &crabka_metadata::MetadataImage,
+    topic: &str,
+    partition: i32,
+    rack_id: &str,
+) -> i32 {
+    if rack_id.is_empty() {
+        return -1;
+    }
+    let Some(record) = image.partition(topic, partition) else {
+        return -1;
+    };
+    let isr: std::collections::HashSet<crabka_metadata::NodeId> =
+        record.isr.iter().copied().collect();
+    let replicas: Vec<crate::replica_selector::ReplicaView> = record
+        .replicas
+        .iter()
+        .map(|&node_id| crate::replica_selector::ReplicaView {
+            node_id: i32::try_from(node_id.0).unwrap_or(-1),
+            rack: image.broker(node_id).and_then(|broker| broker.rack.clone()),
+            in_isr: isr.contains(&node_id),
+        })
+        .collect();
+    broker.config.replica_selector.select(
+        Some(rack_id),
+        i32::try_from(record.leader.0).unwrap_or(-1),
+        &replicas,
+    )
+}
+
+fn apply_epoch_checks(
+    image: &crabka_metadata::MetadataImage,
+    topic: &str,
+    partition_index: i32,
+    request: &EffectivePartition,
+    partition: &Partition,
+    output: &mut PartitionData,
+) -> bool {
+    let current_epoch = partition
+        .current_leader_epoch
+        .load(std::sync::atomic::Ordering::Acquire);
+    if request.current_leader_epoch >= 0 && request.current_leader_epoch != current_epoch {
+        output.error_code = if request.current_leader_epoch < current_epoch {
+            codes::FENCED_LEADER_EPOCH
+        } else {
+            codes::UNKNOWN_LEADER_EPOCH
+        };
+        output.current_leader = LeaderIdAndEpoch {
+            leader_id: image
+                .partition(topic, partition_index)
+                .map_or(-1, |record| i32::try_from(record.leader.0).unwrap_or(-1)),
+            leader_epoch: current_epoch,
+            ..Default::default()
+        };
+        return true;
+    }
+    if request.last_fetched_epoch < 0 {
+        return false;
+    }
+    let (found_epoch, end_offset) = {
+        let log = partition.log.lock().expect("log mutex poisoned");
+        log.epoch_checkpoint().epoch_and_offset_for(
+            LeaderEpoch(request.last_fetched_epoch),
+            log.log_end_offset(),
+        )
+    };
+    if found_epoch >= request.last_fetched_epoch && end_offset.0 >= request.fetch_offset {
+        return false;
+    }
+    output.error_code = codes::NONE;
+    output.diverging_epoch = EpochEndOffset {
+        epoch: found_epoch.0,
+        end_offset: end_offset.0,
+        ..Default::default()
+    };
+    true
+}
+
+struct PendingPlanContext<'a> {
+    broker: &'a Broker,
+    image: &'a crabka_metadata::MetadataImage,
+    denied_topics: &'a std::collections::HashSet<String>,
+    rack_id: &'a str,
+    mode: (bool, bool),
+    follower_id: i32,
+}
+
+async fn plan_partition_read(
+    context: &PendingPlanContext<'_>,
+    topic_name: &str,
+    topic_id: WireUuid,
+    topic_error: Option<i16>,
+    request: &EffectivePartition,
+) -> PendingRead {
+    let mut output = PartitionData {
+        partition_index: request.partition,
+        ..Default::default()
+    };
+    if context.denied_topics.contains(topic_name) {
+        output.error_code = codes::TOPIC_AUTHORIZATION_FAILED;
+        return PendingRead::planned(topic_name, topic_id, request, context.mode, None, output);
+    }
+    if let Some(error_code) = topic_error {
+        output.error_code = error_code;
+        return PendingRead::planned(topic_name, topic_id, request, context.mode, None, output);
+    }
+    let partition = context
+        .broker
+        .partitions
+        .get(topic_name, crabka_ids::PartitionIndex(request.partition));
+    if let Some(partition) = partition.as_ref()
+        && apply_epoch_checks(
+            context.image,
+            topic_name,
+            request.partition,
+            request,
+            partition,
+            &mut output,
+        )
+    {
+        return PendingRead::planned(topic_name, topic_id, request, context.mode, None, output);
+    }
+    if let Some(partition) = partition.as_ref()
+        && context
+            .broker
+            .log_dir_status
+            .is_offline(&partition.log_dir.load())
+    {
+        output.error_code = codes::KAFKA_STORAGE_ERROR;
+        return PendingRead::planned(topic_name, topic_id, request, context.mode, None, output);
+    }
+    if context.mode.1
+        && let Some(partition) = partition.as_ref()
+    {
+        update_follower_progress(partition, context.follower_id, request.fetch_offset).await;
+    }
+    if partition.is_none() || topic_name.is_empty() {
+        output.error_code = codes::UNKNOWN_TOPIC_OR_PARTITION;
+        return PendingRead::planned(topic_name, topic_id, request, context.mode, None, output);
+    }
+    if !context.mode.1 {
+        output.preferred_read_replica = preferred_read_replica(
+            context.broker,
+            context.image,
+            topic_name,
+            request.partition,
+            context.rack_id,
+        );
+    }
+    PendingRead::planned(
+        topic_name,
+        topic_id,
+        request,
+        context.mode,
+        partition,
+        output,
+    )
+}
+
+async fn build_pending_reads(
+    context: &PendingPlanContext<'_>,
+    topics: &[EffectiveTopic],
+) -> Vec<PendingRead> {
+    let mut pending = Vec::new();
+    for topic in topics {
+        let (name, id, error) =
+            match crate::topic_resolve::resolve(context.image, &topic.topic, topic.topic_id) {
+                Ok(record) => (
+                    record.name.clone(),
+                    WireUuid(record.topic_id.into_bytes()),
+                    None,
+                ),
+                Err(codes::UNKNOWN_TOPIC_OR_PARTITION) => {
+                    (topic.topic.clone(), topic.topic_id, None)
+                }
+                Err(error_code) => (topic.topic.clone(), topic.topic_id, Some(error_code)),
+            };
+        for partition in &topic.partitions {
+            pending.push(plan_partition_read(context, &name, id, error, partition).await);
+        }
+    }
+    pending
+}
+
+fn downconvert_legacy_responses(
+    broker: &Broker,
+    version: i16,
+    responses: &mut [FetchableTopicResponse],
+) {
+    if version >= 4 {
+        return;
+    }
+    for topic in responses {
+        for partition in &mut topic.partitions {
+            let Some(payload) = partition.records.take() else {
+                continue;
+            };
+            match crate::handlers::fetch_downconvert::down_convert_payload_for_fetch(
+                &payload, version,
+            ) {
+                Ok(Some(converted)) => {
+                    if converted.payload_len() > 0 {
+                        partition.records = Some(converted);
+                    }
+                    if !topic.topic.is_empty() {
+                        broker.metrics.record_fetch_message_conversion(&topic.topic);
+                    }
+                }
+                Ok(None) => {}
+                Err(error_code) => partition.error_code = error_code,
+            }
+        }
+    }
+}
+
+fn record_fetch_metrics(
+    broker: &Broker,
+    responses: &[FetchableTopicResponse],
+    cpu_micros_by_index: &[Vec<u64>],
+    is_follower_fetch: bool,
+) {
+    for (topic_index, topic) in responses.iter().enumerate() {
+        if topic.topic.is_empty() {
+            continue;
+        }
+        let mut topic_bytes = 0;
+        for (partition_index, partition) in topic.partitions.iter().enumerate() {
+            let bytes = partition
+                .records
+                .as_ref()
+                .map_or(0, RecordsPayload::payload_len) as u64;
+            broker
+                .metrics
+                .record_partition_fetch(&topic.topic, partition.partition_index, bytes);
+            if partition.error_code != 0 {
+                broker.metrics.record_failed_fetch(&topic.topic);
+            }
+            if is_follower_fetch {
+                broker.metrics.record_replication_out(
+                    &topic.topic,
+                    partition.partition_index,
+                    bytes,
+                );
+            }
+            if let Some(micros) = cpu_micros_by_index
+                .get(topic_index)
+                .and_then(|partitions| partitions.get(partition_index))
+            {
+                broker.metrics.record_partition_cpu_micros(
+                    &topic.topic,
+                    partition.partition_index,
+                    *micros,
+                );
+            }
+            topic_bytes += bytes;
+        }
+        broker.metrics.record_fetch(&topic.topic, topic_bytes);
+    }
+}
+
+fn throttle_follower_responses(
+    broker: &Broker,
+    image: &crabka_metadata::MetadataImage,
+    follower_id: i32,
+    responses: &mut [FetchableTopicResponse],
+) {
+    use crate::throttle::TopicThrottle;
+    let follower_id = crabka_metadata::NodeId(u64::try_from(follower_id).unwrap_or(0));
+    let mut byte_count = 0;
+    let mut indexes = Vec::new();
+    for (topic_index, topic) in responses.iter().enumerate() {
+        let throttle = TopicThrottle::for_topic(image, &topic.topic);
+        for (partition_index, partition) in topic.partitions.iter().enumerate() {
+            if throttle
+                .leader
+                .contains(partition.partition_index, follower_id)
+            {
+                byte_count += partition
+                    .records
+                    .as_ref()
+                    .map_or(0, RecordsPayload::payload_len) as u64;
+                indexes.push((topic_index, partition_index));
+            }
+        }
+    }
+    if byte_count > 0 {
+        let granted = broker.throttle_state.leader_out.try_consume(byte_count);
+        if granted < byte_count {
+            truncate_throttled_responses(responses, &indexes, granted);
+        }
+    }
+}
+
+async fn apply_consumer_fetch_quota(
+    broker: &Broker,
+    image: &crabka_metadata::MetadataImage,
+    context: &crate::handlers::RequestContext<'_>,
+    handler_start: std::time::Instant,
+    responses: &[FetchableTopicResponse],
+) -> i32 {
+    let data_delay = consume_consumer_quota(
+        image,
+        &broker.quota_buckets,
+        &context.principal.name,
+        context.client_id,
+        sum_response_bytes(responses),
+    );
+    let elapsed_micros = u64::try_from(
+        handler_start
+            .elapsed()
+            .as_micros()
+            .min(u128::from(u64::MAX)),
+    )
+    .expect("elapsed microseconds clamped to u64");
+    let request_delay = crate::quota::consume_request_quota(
+        image,
+        &broker.quota_buckets,
+        &context.principal.name,
+        context.client_id,
+        elapsed_micros,
+    );
+    let delay = data_delay.max(request_delay);
+    if delay == Duration::ZERO {
+        return 0;
+    }
+    tokio::time::sleep(delay).await;
+    i32::try_from(delay.as_millis()).unwrap_or(i32::MAX)
+}
+
+fn finalize_fetch_session(
+    broker: &Broker,
+    decision: &SessionDecision,
+    effective_topics: &[EffectiveTopic],
+    responses: &mut Vec<FetchableTopicResponse>,
+    is_follower_fetch: bool,
+    principal_name: &str,
+) -> i32 {
+    let session_id = match decision {
+        SessionDecision::Sessionless => INVALID_SESSION_ID,
+        SessionDecision::Close { session_id } => {
+            broker.fetch_session_cache.close(*session_id);
+            INVALID_SESSION_ID
+        }
+        SessionDecision::NewSession => {
+            let snapshot = snapshot_response_state(effective_topics, responses);
+            broker.fetch_session_cache.try_allocate(
+                is_follower_fetch,
+                principal_name.to_owned(),
+                snapshot,
+            )
+        }
+        SessionDecision::Incremental {
+            session_id,
+            partitions,
+            ..
+        } => {
+            let cached: std::collections::HashMap<FetchSessionKey, CachedPartitionState> =
+                partitions.iter().cloned().collect();
+            let sent = filter_incremental_response(responses, &cached);
+            broker
+                .fetch_session_cache
+                .finalize_incremental(*session_id, &sent);
+            *session_id
+        }
+        SessionDecision::Error { .. } => unreachable!("returned above"),
+    };
+    refresh_fetch_session_metrics(broker);
+    session_id
+}
+
+fn refresh_fetch_session_metrics(broker: &Broker) {
+    broker
+        .metrics
+        .incremental_fetch_sessions
+        .set(i64::try_from(broker.fetch_session_cache.len()).unwrap_or(i64::MAX));
+    broker.metrics.incremental_fetch_partitions_cached.set(
+        i64::try_from(broker.fetch_session_cache.total_partitions_cached()).unwrap_or(i64::MAX),
+    );
+    let current = broker.fetch_session_cache.evictions_total();
+    let previous = broker
+        .metrics
+        .incremental_fetch_session_evictions_total
+        .get();
+    if current > previous {
+        broker
+            .metrics
+            .incremental_fetch_session_evictions_total
+            .inc_by(current - previous);
+    }
+}
+
+async fn execute_pending_reads(
+    broker: &Broker,
+    mut pending: Vec<PendingRead>,
+    min_bytes: i32,
+    max_wait_ms: i32,
+    sendfile_capable: bool,
+) -> Result<(Vec<FetchableTopicResponse>, Vec<Vec<u64>>), BrokerError> {
+    let mut total_bytes = 0;
+    for read in &mut pending {
+        let Some(partition) = read.partition.clone() else {
+            continue;
+        };
+        let started = std::time::Instant::now();
+        total_bytes += do_read(
+            &partition,
+            Offset(read.fetch_offset),
+            read.max_bytes,
+            read.read_committed,
+            read.is_follower_fetch,
+            sendfile_capable,
+            &mut read.out,
+        )
+        .await?;
+        read.cpu_micros = read
+            .cpu_micros
+            .saturating_add(u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX));
+        if read.out.error_code == codes::OFFSET_OUT_OF_RANGE
+            && let Some(remote_bytes) = try_remote_read(broker, read, &partition).await
+        {
+            total_bytes += remote_bytes;
+        }
+    }
+    let wants_more = total_bytes < usize::try_from(min_bytes.max(0)).unwrap_or(0);
+    if wants_more && max_wait_ms > 0 {
+        long_poll_then_reread(broker, &mut pending, max_wait_ms, sendfile_capable).await?;
+    }
+    Ok(group_into_topic_responses(pending))
 }
 
 /// Re-group the flat `(key, state)` list returned by
@@ -1062,7 +1024,16 @@ pub(crate) fn compute_visibility_window(
 /// - raw bytes are clamped at HW (`base_offset < hw`)
 /// - `out.high_watermark` and `out.last_stable_offset` are set to `hw`
 /// - `out.aborted_transactions` is `None`
-#[allow(clippy::too_many_lines)]
+enum ReadPlan {
+    OffsetOutOfRange,
+    Empty,
+    Read {
+        limit_offset: Offset,
+        effective_lso: Offset,
+        read_committed_aborts: bool,
+    },
+}
+
 async fn do_read(
     part: &Partition,
     fetch_offset: Offset,
@@ -1072,59 +1043,15 @@ async fn do_read(
     sendfile_capable: bool,
     out: &mut PartitionData,
 ) -> Result<usize, BrokerError> {
-    // Decision derived from a brief metadata-only hold of the log mutex.
-    // The actual byte read (`read_raw` + the optional `aborted_in_range`
-    // scan, both synchronous syscalls) is deferred to `spawn_blocking` so it
-    // never runs on the reactor thread under the lock.
-    enum ReadPlan {
-        /// `fetch_offset` is below `log_start` — `OFFSET_OUT_OF_RANGE` early
-        /// return; `out` has already been fully populated.
-        OffsetOutOfRange,
-        /// `fetch_offset >= upper_bound` — nothing to read.
-        Empty,
-        /// Read bytes in `[fetch_offset, limit_offset)`.
-        Read {
-            limit_offset: Offset,
-            effective_lso: Offset,
-            read_committed_aborts: bool,
-        },
-    }
-
     let hw = part.high_watermark().await;
-
-    let (log_start, w, plan) = {
-        let log = part.log.lock().expect("log mutex poisoned");
-        let log_start = log.log_start_offset();
-        let log_end = log.log_end_offset();
-        let lso = log.lso();
-        let w = compute_visibility_window(
-            is_follower_fetch,
-            read_committed,
-            log_start,
-            hw,
-            lso,
-            log_end,
-            fetch_offset,
-        );
-
-        let plan = if w.out_of_range {
-            out.error_code = codes::OFFSET_OUT_OF_RANGE;
-            // Unwrap `Offset`s into the wire `i64` response fields.
-            out.log_start_offset = log_start.0;
-            out.high_watermark = w.response_hw.0;
-            out.last_stable_offset = w.response_lso.0;
-            ReadPlan::OffsetOutOfRange
-        } else if w.empty {
-            ReadPlan::Empty
-        } else {
-            ReadPlan::Read {
-                limit_offset: w.limit_offset,
-                effective_lso: w.effective_lso,
-                read_committed_aborts: w.read_committed_aborts,
-            }
-        };
-        (log_start, w, plan)
-    };
+    let (log_start, w, plan) = plan_read(
+        part,
+        fetch_offset,
+        hw,
+        read_committed,
+        is_follower_fetch,
+        out,
+    );
     // Log mutex released here.
 
     let (records, aborted_txns): (Option<RecordsPayload>, Vec<AbortedTransaction>) = match plan {
@@ -1228,43 +1155,89 @@ async fn do_read(
 
                 Ok::<_, BrokerError>((records, aborted))
             });
-            let (records, aborted) = match join.await {
-                Ok(res) => res?,
-                Err(join_err) => {
-                    // A panic inside the blocking read poisoned/aborted the
-                    // closure. Surface it as an I/O failure rather than
-                    // propagating the panic across the await point.
-                    return Err(BrokerError::Io(std::io::Error::other(format!(
-                        "fetch read task panicked: {join_err}"
-                    ))));
-                }
-            };
-
-            let records = if records.payload_len() > 0 {
-                Some(records)
-            } else {
-                None
-            };
-            (records, aborted)
+            await_blocking_read(join).await?
         }
     };
 
-    out.error_code = codes::NONE;
-    // Unwrap `Offset`s into the wire `i64` response fields.
-    out.high_watermark = w.response_hw.0;
-    out.log_start_offset = log_start.0;
-    out.last_stable_offset = w.response_lso.0;
+    Ok(finish_read(
+        out,
+        &w,
+        log_start,
+        read_committed,
+        is_follower_fetch,
+        aborted_txns,
+        records,
+    ))
+}
 
-    if read_committed && !is_follower_fetch {
-        // Populate aborted_transactions: None means "no list" (same as not
-        // providing it); Some(empty) means "committed window with no aborts".
-        // Apache Kafka sends Some(empty) when in read_committed mode.
-        out.aborted_transactions = Some(aborted_txns);
+async fn await_blocking_read(
+    join: tokio::task::JoinHandle<Result<(RecordsPayload, Vec<AbortedTransaction>), BrokerError>>,
+) -> Result<(Option<RecordsPayload>, Vec<AbortedTransaction>), BrokerError> {
+    let (records, aborted) = join.await.map_err(|error| {
+        BrokerError::Io(std::io::Error::other(format!(
+            "fetch read task panicked: {error}"
+        )))
+    })??;
+    let records = (records.payload_len() > 0).then_some(records);
+    Ok((records, aborted))
+}
+
+fn finish_read(
+    response: &mut PartitionData,
+    window: &VisibilityWindow,
+    log_start: Offset,
+    read_committed: bool,
+    follower_fetch: bool,
+    aborted: Vec<AbortedTransaction>,
+    records: Option<RecordsPayload>,
+) -> usize {
+    response.error_code = codes::NONE;
+    response.high_watermark = window.response_hw.0;
+    response.log_start_offset = log_start.0;
+    response.last_stable_offset = window.response_lso.0;
+    if read_committed && !follower_fetch {
+        response.aborted_transactions = Some(aborted);
     }
+    let bytes = records.as_ref().map_or(0, RecordsPayload::payload_len);
+    response.records = records;
+    bytes
+}
 
-    let bytes_est = records.as_ref().map_or(0, RecordsPayload::payload_len);
-    out.records = records;
-    Ok(bytes_est)
+fn plan_read(
+    partition: &Partition,
+    fetch_offset: Offset,
+    high_watermark: Offset,
+    read_committed: bool,
+    follower_fetch: bool,
+    response: &mut PartitionData,
+) -> (Offset, VisibilityWindow, ReadPlan) {
+    let log = partition.log.lock().expect("log mutex poisoned");
+    let log_start = log.log_start_offset();
+    let window = compute_visibility_window(
+        follower_fetch,
+        read_committed,
+        log_start,
+        high_watermark,
+        log.lso(),
+        log.log_end_offset(),
+        fetch_offset,
+    );
+    let plan = if window.out_of_range {
+        response.error_code = codes::OFFSET_OUT_OF_RANGE;
+        response.log_start_offset = log_start.0;
+        response.high_watermark = window.response_hw.0;
+        response.last_stable_offset = window.response_lso.0;
+        ReadPlan::OffsetOutOfRange
+    } else if window.empty {
+        ReadPlan::Empty
+    } else {
+        ReadPlan::Read {
+            limit_offset: window.limit_offset,
+            effective_lso: window.effective_lso,
+            read_committed_aborts: window.read_committed_aborts,
+        }
+    };
+    (log_start, window, plan)
 }
 
 /// KIP-405: try to serve `p`'s requested offset from the remote
@@ -1512,11 +1485,6 @@ fn sum_response_bytes(responses: &[FetchableTopicResponse]) -> u64 {
 /// `(principal, client_id)`, consumes `bytes` from the bucket, and returns
 /// the throttle delay capped at 1 second. Returns `Duration::ZERO` when no
 /// quota is configured or the bucket has sufficient capacity.
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss
-)]
 fn consume_consumer_quota(
     image: &crabka_metadata::MetadataImage,
     buckets: &crate::quota::QuotaBuckets,
@@ -1532,14 +1500,18 @@ fn consume_consumer_quota(
     if rate <= 0.0 {
         return Duration::ZERO;
     }
-    let bucket = buckets.get_or_create("consumer_byte_rate", &entity_key, rate as u64);
+    let bucket = buckets.get_or_create(
+        "consumer_byte_rate",
+        &entity_key,
+        rate.to_u64().unwrap_or(u64::MAX),
+    );
     let granted = bucket.try_consume(bytes);
     if granted >= bytes {
         return Duration::ZERO;
     }
     let overage = bytes - granted;
-    let delay_secs = overage as f64 / rate;
-    Duration::from_micros((delay_secs * 1_000_000.0) as u64).min(Duration::from_secs(1))
+    let delay_secs = overage.to_f64().unwrap_or(f64::MAX) / rate;
+    Duration::from_secs_f64(delay_secs.min(1.0))
 }
 
 /// Group resolved `PendingRead`s back into per-topic response entries,
@@ -1602,7 +1574,7 @@ pub(crate) fn encode_fetch_response(
 
 #[cfg(test)]
 mod tests {
-
+    use assert2::assert;
     #[test]
     fn consume_consumer_quota_tuple_match_overage_throttles() {
         use crabka_metadata::{ClientQuotaRecord, MetadataImage, MetadataRecord, QuotaEntity};
@@ -1623,10 +1595,16 @@ mod tests {
         }));
         let buckets = crate::quota::QuotaBuckets::new();
         let delay_match = super::consume_consumer_quota(&img, &buckets, "alice", "app-x", 4096);
-        assert2::assert!(delay_match > std::time::Duration::ZERO);
+        assert!(
+            delay_match > std::time::Duration::ZERO,
+            "tuple quota match should throttle on overage; got {delay_match:?}"
+        );
         let buckets2 = crate::quota::QuotaBuckets::new();
         let delay_other = super::consume_consumer_quota(&img, &buckets2, "alice", "other", 4096);
-        assert2::assert!(delay_other == std::time::Duration::ZERO);
+        assert!(
+            delay_other == std::time::Duration::ZERO,
+            "non-matching client_id should not throttle; got {delay_other:?}"
+        );
     }
 }
 

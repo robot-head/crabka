@@ -28,6 +28,8 @@ use crate::error::SchemaSerdeError;
 pub trait SchemaSerializer<T>: Send + Sync + 'static {
     /// Frame `value`: resolve the id from the cache, encode the body, prepend
     /// the wire header. Errors if pre-warm has not resolved the subject id.
+    /// # Errors
+    /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
     fn serialize(&self, topic: &str, value: &T) -> Result<Bytes, SchemaSerdeError>;
 }
 
@@ -36,6 +38,8 @@ pub trait SchemaSerializer<T>: Send + Sync + 'static {
 pub trait SchemaDeserializer<T>: Send + Sync + 'static {
     /// Decode `bytes`: strip the header, fetch the writer schema by id, decode
     /// the body. May return `WriterSchemaPending` (retriable) on a cache miss.
+    /// # Errors
+    /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
     fn deserialize(&self, topic: &str, bytes: &[u8]) -> Result<T, SchemaSerdeError>;
 }
 

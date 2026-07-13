@@ -233,7 +233,11 @@ impl Model for FsModel {
         apply_incremental(&mut s.partitions, &forgotten, &topics);
 
         // Headline safety, per transition (fires the moment a shadow appears).
-        assert2::assert!(no_shadow(&s.partitions));
+        assert!(
+            no_shadow(&s.partitions),
+            "shadow entry after {a:?}: {:?}",
+            s.proj()
+        );
 
         // Subscription fidelity: a subscribed partition is reflected with the
         // requested max_bytes by some key matching the request's identity.
@@ -242,7 +246,11 @@ impl Model for FsModel {
                 .partitions
                 .iter()
                 .any(|(k, st)| ref_matches(k, r, p) && st.max_bytes == mb);
-            assert2::assert!(present);
+            assert!(
+                present,
+                "subscription not reflected after {a:?}: {:?}",
+                s.proj()
+            );
         }
 
         Some(s)
@@ -288,9 +296,16 @@ fn run(model: FsModel, label: &str) {
         checker.state_count(),
         checker.max_depth()
     );
-    assert2::assert!(checker.max_depth() < MAX_DEPTH);
-    assert2::assert!(checker.state_count() < TARGET_STATE_COUNT);
-    assert2::assert!(checker.unique_state_count() < MAX_UNIQUE_STATES);
+    assert!(checker.max_depth() < MAX_DEPTH, "[{label}] depth cap hit");
+    assert!(
+        checker.state_count() < TARGET_STATE_COUNT,
+        "[{label}] truncated — not exhaustive"
+    );
+    assert!(
+        checker.unique_state_count() < MAX_UNIQUE_STATES,
+        "[{label}] unique-state bound exceeded ({})",
+        checker.unique_state_count()
+    );
     checker.assert_properties();
 }
 

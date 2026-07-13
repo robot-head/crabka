@@ -83,6 +83,9 @@ impl SpanSource for KafkaSpanSource {
     }
 }
 
+///
+/// # Errors
+/// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
 pub fn decode_consumer_records(records: Vec<ConsumerRecord>) -> Result<Vec<SpanRecord>, SinkError> {
     records
         .into_iter()
@@ -155,10 +158,18 @@ pub struct MockRemoteWriteSink {
 }
 
 impl MockRemoteWriteSink {
+    /// Configure the next write to fail.
+    ///
+    /// # Panics
+    /// Panics if the mock sink mutex is poisoned.
     pub fn fail_next(&self) {
         *self.fail_next.lock().expect("mock sink mutex poisoned") = true;
     }
 
+    /// Configure the sink to fail after the requested successful writes.
+    ///
+    /// # Panics
+    /// Panics if the mock sink mutex is poisoned.
     pub fn fail_after_successes(&self, successes: usize) {
         *self
             .fail_after_successes
@@ -166,6 +177,10 @@ impl MockRemoteWriteSink {
             .expect("mock sink mutex poisoned") = Some(successes);
     }
 
+    /// Return all recorded writes.
+    ///
+    /// # Panics
+    /// Panics if the mock sink mutex is poisoned.
     #[must_use]
     pub fn writes(&self) -> Vec<SeriesPayload> {
         self.writes
@@ -213,6 +228,10 @@ pub struct MockSpanSource {
 }
 
 impl MockSpanSource {
+    /// Queue a batch for the next poll.
+    ///
+    /// # Panics
+    /// Panics if the mock source mutex is poisoned.
     pub fn push_batch(&self, batch: Vec<SpanRecord>) {
         self.batches
             .lock()
@@ -220,6 +239,10 @@ impl MockSpanSource {
             .push_back(batch);
     }
 
+    /// Return the number of committed batches.
+    ///
+    /// # Panics
+    /// Panics if the mock source mutex is poisoned.
     #[must_use]
     pub fn commits(&self) -> usize {
         *self.commits.lock().expect("mock source mutex poisoned")

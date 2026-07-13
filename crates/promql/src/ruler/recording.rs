@@ -17,6 +17,8 @@ use crate::{MetricStore, PromqlEngine, PromqlError, QueryResult, SampleValue};
 /// rule fails — Prometheus rejects this as "vector contains metrics with the
 /// same labelset after applying rule labels" — instead of writing duplicate
 /// WAL records.
+/// # Errors
+/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub async fn evaluate_recording_rule<S: MetricStore>(
     engine: &PromqlEngine<S>,
     tenant: &str,
@@ -66,6 +68,8 @@ pub async fn evaluate_recording_rule<S: MetricStore>(
 }
 
 /// Evaluate one recording rule and append its materialized samples to the WAL sink.
+/// # Errors
+/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub async fn evaluate_and_append_recording_rule<S, W>(
     engine: &PromqlEngine<S>,
     sink: &W,
@@ -90,6 +94,8 @@ where
 }
 
 /// Evaluate all recording rules in one rule group and append their outputs.
+/// # Errors
+/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub async fn evaluate_and_append_recording_rule_group<S, W>(
     engine: &PromqlEngine<S>,
     sink: &W,

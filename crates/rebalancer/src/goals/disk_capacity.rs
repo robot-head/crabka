@@ -4,6 +4,8 @@
 
 use std::collections::HashMap;
 
+use num_traits::ToPrimitive;
+
 use crate::{
     goals::{Goal, GoalContext, GoalPriority, OriginalReplicaState},
     model::{ClusterState, Movement, PartitionView},
@@ -39,7 +41,6 @@ impl Goal for DiskCapacity {
         GoalPriority::Hard
     }
 
-    #[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
     fn propose(&self, state: &ClusterState, ctx: &GoalContext) -> Vec<Movement> {
         let now_ms = crate::goals::now_ms();
         let broker_ids: Vec<i32> = state.brokers.iter().map(|b| b.id).collect();
@@ -59,7 +60,7 @@ impl Goal for DiskCapacity {
                 let Some(limit) = cap.disk_bytes else {
                     continue;
                 };
-                let limit_f = limit as f64;
+                let limit_f = limit.to_f64().expect("u64 capacity must convert to f64");
                 if *current > limit_f {
                     let excess = current - limit_f;
                     let prior_excess = over.map_or(0.0, |(_, c, l)| c - l);
@@ -85,12 +86,12 @@ impl Goal for DiskCapacity {
                     .broker_capacities
                     .for_broker(*a)
                     .and_then(|c| c.disk_bytes)
-                    .map(|l| l as f64 - cur_a);
+                    .map(|limit| limit.to_f64().expect("u64 capacity must convert to f64") - cur_a);
                 let headroom_b = ctx
                     .broker_capacities
                     .for_broker(*b)
                     .and_then(|c| c.disk_bytes)
-                    .map(|l| l as f64 - cur_b);
+                    .map(|limit| limit.to_f64().expect("u64 capacity must convert to f64") - cur_b);
                 match (headroom_a, headroom_b) {
                     (Some(ha), Some(hb)) if ha > 0.0 && hb > 0.0 => hb
                         .partial_cmp(&ha)
@@ -131,7 +132,6 @@ impl Goal for DiskCapacity {
         out
     }
 
-    #[allow(clippy::cast_precision_loss)]
     fn is_satisfied_with_ctx(&self, state: &ClusterState, ctx: &GoalContext) -> bool {
         let now_ms = crate::goals::now_ms();
         let broker_ids: Vec<i32> = state.brokers.iter().map(|b| b.id).collect();
@@ -143,7 +143,7 @@ impl Goal for DiskCapacity {
             let Some(limit) = cap.disk_bytes else {
                 continue;
             };
-            if *current > limit as f64 {
+            if *current > limit.to_f64().expect("u64 capacity must convert to f64") {
                 return false;
             }
         }

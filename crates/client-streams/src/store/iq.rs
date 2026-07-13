@@ -165,15 +165,15 @@ mod tests {
             s.put(k.into(), v).await;
         }
         let q: &dyn IqQueryable = s.as_iq().unwrap();
-        let hits = (q.iq_kv_get(b"b").await, q.iq_kv_get(b"z").await);
+        assert_eq!(q.iq_kv_get(b"b").await, Some(I64Serde.serialize("t", &2)));
+        assert_eq!(q.iq_kv_get(b"z").await, None);
         let r = q.iq_kv_range(b"a", b"b").await; // inclusive => a,b
-        let range_keys = r.iter().map(|(key, _)| key.as_ref()).collect::<Vec<_>>();
-        let reverse_range = q.iq_kv_range(b"c", b"a").await;
-        let counts = (q.iq_kv_all().await.len(), q.iq_kv_approx_count().await);
-        assert2::assert!(hits == (Some(I64Serde.serialize("t", &2)), None));
-        assert2::assert!(range_keys == vec![b"a".as_slice(), b"b".as_slice()]);
-        assert2::assert!(reverse_range.is_empty());
-        assert2::assert!(counts == (3, 3));
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[0].0, bytes::Bytes::from_static(b"a"));
+        assert_eq!(r[1].0, bytes::Bytes::from_static(b"b"));
+        assert!(q.iq_kv_range(b"c", b"a").await.is_empty()); // lo>hi => empty
+        assert_eq!(q.iq_kv_all().await.len(), 3);
+        assert_eq!(q.iq_kv_approx_count().await, 3);
     }
 
     #[tokio::test]
@@ -188,12 +188,13 @@ mod tests {
         s.put("k".into(), 0, 10, 5).await;
         s.put("k".into(), 1000, 20, 1005).await;
         let q: &dyn IqQueryable = s.as_iq().unwrap();
-        assert2::assert!(
-            q.iq_window_fetch_single(b"k", 0).await == Some(I64Serde.serialize("t", &10))
+        assert_eq!(
+            q.iq_window_fetch_single(b"k", 0).await,
+            Some(I64Serde.serialize("t", &10))
         );
-        assert2::assert!(q.iq_window_fetch_single(b"k", 500).await == None);
+        assert_eq!(q.iq_window_fetch_single(b"k", 500).await, None);
         let r = q.iq_window_fetch(b"k", 0, 1000).await;
-        assert2::assert!(r.iter().map(|(t, _)| *t).collect::<Vec<_>>() == vec![0, 1000]);
+        assert_eq!(r.iter().map(|(t, _)| *t).collect::<Vec<_>>(), vec![0, 1000]);
     }
 
     #[tokio::test]
@@ -209,15 +210,14 @@ mod tests {
         s.put("k".into(), Some(10), 100).await;
         s.put("k".into(), Some(20), 200).await;
         let q: &dyn IqQueryable = s.as_iq().unwrap();
-        assert2::assert!(q.kind() == StoreKind::Versioned);
-        assert2::assert!(
-            q.iq_versioned_get(b"k").await == Some((200, None, I64Serde.serialize("t", &20)))
-        );
-        assert2::assert!(
-            q.iq_versioned_get_as_of(b"k", 150).await
-                == Some((100, Some(200), I64Serde.serialize("t", &10)))
-        );
-        assert2::assert!(q.iq_versioned_get_as_of(b"k", 50).await == None);
+        assert_eq!(q.kind(), StoreKind::Versioned);
+        let (vf, vt, raw) = q.iq_versioned_get(b"k").await.unwrap();
+        assert_eq!((vf, vt), (200, None));
+        assert_eq!(raw, I64Serde.serialize("t", &20));
+        let (vf2, vt2, raw2) = q.iq_versioned_get_as_of(b"k", 150).await.unwrap();
+        assert_eq!((vf2, vt2), (100, Some(200)));
+        assert_eq!(raw2, I64Serde.serialize("t", &10));
+        assert_eq!(q.iq_versioned_get_as_of(b"k", 50).await, None);
     }
 
     #[tokio::test]
@@ -233,7 +233,7 @@ mod tests {
         let q: &dyn IqQueryable = s.as_iq().unwrap();
         let r = q.iq_session_fetch_key(b"k").await;
         let windows: Vec<(i64, i64)> = r.iter().map(|((st, en), _)| (*st, *en)).collect();
-        assert2::assert!(windows.contains(&(0, 10)) && windows.contains(&(20, 30)));
+        assert!(windows.contains(&(0, 10)) && windows.contains(&(20, 30)));
     }
 
     #[tokio::test]
@@ -250,7 +250,10 @@ mod tests {
         let query = Iq2Query::Key {
             key: Box::new("k".to_string()),
         };
-        assert2::assert!(q.iq2_execute(&query).await.err() == Some(Iq2Failure::UnknownQueryType));
+        assert_eq!(
+            q.iq2_execute(&query).await.err(),
+            Some(Iq2Failure::UnknownQueryType)
+        );
 
         // Versioned variants also hit the default (a session store has no handler).
         let mv = Iq2Query::MultiVersionedKey {
@@ -259,6 +262,9 @@ mod tests {
             to_ts: None,
             descending: false,
         };
-        assert2::assert!(q.iq2_execute(&mv).await.err() == Some(Iq2Failure::UnknownQueryType));
+        assert_eq!(
+            q.iq2_execute(&mv).await.err(),
+            Some(Iq2Failure::UnknownQueryType)
+        );
     }
 }

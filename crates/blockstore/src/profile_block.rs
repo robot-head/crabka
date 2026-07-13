@@ -28,6 +28,8 @@ pub struct ProfileSampleRow {
 }
 
 /// Encode rows into a `RecordBatch` matching `profile_samples_schema()`.
+/// # Errors
+/// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
 pub fn encode_profile_samples(rows: &[ProfileSampleRow]) -> Result<RecordBatch> {
     let mut fp = UInt64Builder::new();
     let mut ts = Int64Builder::new();

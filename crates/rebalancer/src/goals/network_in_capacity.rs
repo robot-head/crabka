@@ -4,6 +4,8 @@
 
 use std::collections::HashMap;
 
+use num_traits::ToPrimitive;
+
 use crate::{
     goals::{Goal, GoalContext, GoalPriority, OriginalReplicaState},
     model::{ClusterState, Movement, PartitionView},
@@ -35,7 +37,6 @@ impl Goal for NetworkInCapacity {
     fn priority(&self) -> GoalPriority {
         GoalPriority::Hard
     }
-    #[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
     fn propose(&self, state: &ClusterState, ctx: &GoalContext) -> Vec<Movement> {
         let now_ms = crate::goals::now_ms();
         let broker_ids: Vec<i32> = state.brokers.iter().map(|b| b.id).collect();
@@ -53,7 +54,7 @@ impl Goal for NetworkInCapacity {
                 let Some(limit) = cap.network_in_bytes_per_sec else {
                     continue;
                 };
-                let limit_f = limit as f64;
+                let limit_f = limit.to_f64().expect("u64 capacity must convert to f64");
                 if *current > limit_f {
                     let excess = current - limit_f;
                     let prior = over.map_or(0.0, |(_, c, l)| c - l);
@@ -104,7 +105,6 @@ impl Goal for NetworkInCapacity {
         out
     }
 
-    #[allow(clippy::cast_precision_loss)]
     fn is_satisfied_with_ctx(&self, state: &ClusterState, ctx: &GoalContext) -> bool {
         let now_ms = crate::goals::now_ms();
         let broker_ids: Vec<i32> = state.brokers.iter().map(|b| b.id).collect();
@@ -116,7 +116,7 @@ impl Goal for NetworkInCapacity {
             let Some(limit) = cap.network_in_bytes_per_sec else {
                 continue;
             };
-            if *current > limit as f64 {
+            if *current > limit.to_f64().expect("u64 capacity must convert to f64") {
                 return false;
             }
         }

@@ -92,8 +92,8 @@ mod tests {
                 return None;
             }
             let mut position = OffsetMap::new();
-            #[allow(clippy::cast_possible_wrap)]
-            position.insert("index".into(), OffsetValue::Long(self.pos as i64));
+            let index = i64::try_from(self.pos).expect("test source position fits in i64");
+            position.insert("index".into(), OffsetValue::Long(index));
             Some(SourceOffset::new(OffsetMap::new().into(), position.into()))
         }
 

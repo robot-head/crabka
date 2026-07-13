@@ -73,6 +73,8 @@ impl BlockStore {
         Self::new(self.store.clone(), self.base.clone())
     }
 
+    /// # Errors
+    /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub async fn scan_context(
         &self,
         tenant: &str,
@@ -110,6 +112,8 @@ impl BlockStore {
         ),
         err
     )]
+    /// # Errors
+    /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub async fn register_scan_table(
         &self,
         ctx: &SessionContext,
@@ -151,6 +155,8 @@ impl BlockStore {
     }
 
     #[instrument(level = "debug", skip_all, fields(keys = keys.len()), err)]
+    /// # Errors
+    /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub async fn scan_block_keys(
         &self,
         keys: &[String],
@@ -196,6 +202,8 @@ impl BlockStore {
         fields(object_key = %object_key, row_groups = row_groups.len()),
         err
     )]
+    /// # Errors
+    /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub async fn scan_block_row_groups(
         &self,
         object_key: &str,

@@ -138,7 +138,6 @@ fn is_local_leader(leader: NodeId, node_id: NodeId) -> bool {
     leader == node_id
 }
 
-#[allow(clippy::too_many_lines)]
 #[tracing::instrument(
     name = "handle_create_partitions",
     level = "info",
@@ -156,7 +155,6 @@ pub(crate) async fn handle(
     let mut cur: &[u8] = req_bytes;
     let req = CreatePartitionsRequest::decode(&mut cur, version)?;
 
-    let controller = &broker.controller;
     let node_id = broker.config.node_id;
     let partitions_map = broker.partitions.clone();
     let producer_state = broker.producer_state.clone();
@@ -164,45 +162,24 @@ pub(crate) async fn handle(
     let log_config = broker.config.log_config.clone();
     let log_dir_status = broker.log_dir_status.clone();
 
-    let image = controller.current_image();
+    let image = broker.controller.current_image();
 
     // KIP-599: count partition mutations before running handler logic so that
     // even invalid/rejected requests consume quota (bad-faith clients can't
     // escape throttling by sending malformed RPCs).
-    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-    let mutation_count: u64 = req
-        .topics
-        .iter()
-        .map(|t| {
-            let current: i32 =
-                i32::try_from(image.partitions_of(&t.name).count()).unwrap_or(i32::MAX);
-            (t.count - current).max(0) as u64
-        })
-        .sum();
+    let mutation_count = partition_mutation_count(&req, &image);
 
     // ── ACL preamble ────────────────────────────────────────
     // Batch-authorize every topic name for `Alter`. Topics that come
     // back `Deny` short-circuit the partition-change loop and emit
     // TOPIC_AUTHORIZATION_FAILED on that topic row.
-    let topic_names: Vec<&str> = req.topics.iter().map(|t| t.name.as_str()).collect();
-    let acl_results = authorize_topics(
+    let denied_topics = denied_topics(
         broker.config.authorizer.as_ref(),
-        &*image,
+        &image,
         ctx.principal,
         ctx.peer,
-        AclOperation::Alter,
-        topic_names.iter().copied(),
+        &req,
     );
-    let denied_topics: std::collections::HashSet<String> = acl_results
-        .iter()
-        .filter_map(|(name, r)| {
-            if *r == AuthorizationResult::Deny {
-                Some((*name).to_string())
-            } else {
-                None
-            }
-        })
-        .collect();
 
     let mut results: Vec<CreatePartitionsTopicResult> = Vec::with_capacity(req.topics.len());
 
@@ -237,12 +214,7 @@ pub(crate) async fn handle(
             continue;
         }
 
-        let mut sorted_brokers: Vec<crabka_raft::NodeId> =
-            image.brokers().map(|b| b.node_id).collect();
-        if sorted_brokers.is_empty() {
-            sorted_brokers.push(node_id);
-        }
-        sorted_brokers.sort_unstable();
+        let sorted_brokers = sorted_brokers(&image, node_id);
         let rf = topic_rec.replication_factor;
         let new_count = t.count;
         let new_partition_indices: Vec<i32> = (existing..new_count).collect();
@@ -275,54 +247,24 @@ pub(crate) async fn handle(
         // grown count from the partitions map as these apply. (Re-submitting a
         // `V1Topic` would round-trip back to the pre-grow count and be rejected
         // by the strict-expansion `validate` on the apply path.)
-        let mut records: Vec<MetadataRecord> = Vec::with_capacity(new_partition_count);
-        for (i, p) in new_partition_indices.iter().enumerate() {
-            let replicas = new_assignments[i].clone();
-            records.push(MetadataRecord::V1Partition(PartitionRecord {
-                topic: t.name.clone(),
-                partition: *p,
-                leader: replicas[0],
-                replicas: replicas.clone(),
-                isr: replicas,
-                leader_epoch: crabka_metadata::LeaderEpoch(0),
-                adding_replicas: vec![],
-                removing_replicas: vec![],
-                directories: vec![],
-                partition_epoch: 0,
-            }));
-        }
+        let records = partition_records(&t.name, &new_partition_indices, &new_assignments);
 
-        match controller.submit_change(records).await {
+        match broker.controller.submit_change(records).await {
             Ok(()) => {
-                // Materialize new partitions on local disk where self in replicas.
-                for (i, p) in new_partition_indices.iter().enumerate() {
-                    let replicas = &new_assignments[i];
-                    if should_materialize_locally(replicas, node_id) {
-                        if let Err(e) = materialize_partition(
-                            &partitions_map,
-                            &t.name,
-                            *p,
-                            &log_dirs,
-                            &log_config,
-                            &log_dir_status,
-                            &producer_state,
-                        ) {
-                            tracing::error!(
-                                topic = %t.name, partition = *p, error = %e,
-                                "CreatePartitions: materialize after quorum commit failed"
-                            );
-                        } else if let Some(part) =
-                            partitions_map.get(&t.name, crabka_ids::PartitionIndex(*p))
-                        {
-                            let leader = replicas[0];
-                            part.install_leader_change(leader.0, 0).await;
-                            if is_local_leader(leader, node_id) {
-                                // At creation the ISR equals the full replica set.
-                                part.install_isr(replicas, replicas, leader).await;
-                            }
-                        }
-                    }
-                }
+                materialize_new_partitions(
+                    MaterializeContext {
+                        partitions: &partitions_map,
+                        log_dirs: &log_dirs,
+                        log_config: &log_config,
+                        log_dir_status: &log_dir_status,
+                        producer_state: &producer_state,
+                        node_id,
+                    },
+                    &t.name,
+                    &new_partition_indices,
+                    &new_assignments,
+                )
+                .await;
             }
             Err(RaftError::NotLeader { .. } | RaftError::LeaderUnknown) => {
                 out.error_code = codes::NOT_CONTROLLER;
@@ -339,11 +281,140 @@ pub(crate) async fn handle(
 
     // KIP-599: apply controller_mutation_rate throttle after response assembly,
     // before encoding. Sets throttle_time_ms and sleeps so the client waits.
+    finish_response(broker, &image, ctx, mutation_count, results, version).await
+}
+
+fn sorted_brokers(image: &crabka_metadata::MetadataImage, node_id: NodeId) -> Vec<NodeId> {
+    let mut brokers: Vec<_> = image.brokers().map(|broker| broker.node_id).collect();
+    if brokers.is_empty() {
+        brokers.push(node_id);
+    }
+    brokers.sort_unstable();
+    brokers
+}
+
+fn partition_records(
+    topic: &str,
+    indices: &[i32],
+    assignments: &[Vec<NodeId>],
+) -> Vec<MetadataRecord> {
+    indices
+        .iter()
+        .zip(assignments)
+        .map(|(index, replicas)| {
+            MetadataRecord::V1Partition(PartitionRecord {
+                topic: topic.to_string(),
+                partition: *index,
+                leader: replicas[0],
+                replicas: replicas.clone(),
+                isr: replicas.clone(),
+                leader_epoch: crabka_metadata::LeaderEpoch(0),
+                adding_replicas: vec![],
+                removing_replicas: vec![],
+                directories: vec![],
+                partition_epoch: 0,
+            })
+        })
+        .collect()
+}
+
+#[derive(Clone, Copy)]
+struct MaterializeContext<'a> {
+    partitions: &'a std::sync::Arc<crate::partition_registry::PartitionRegistry>,
+    log_dirs: &'a [std::path::PathBuf],
+    log_config: &'a crabka_log::LogConfig,
+    log_dir_status: &'a crate::log_dir_status::LogDirRegistry,
+    producer_state: &'a std::sync::Arc<crate::producer_state::ProducerState>,
+    node_id: NodeId,
+}
+
+async fn materialize_new_partitions(
+    context: MaterializeContext<'_>,
+    topic: &str,
+    indices: &[i32],
+    assignments: &[Vec<NodeId>],
+) {
+    for (index, replicas) in indices.iter().zip(assignments) {
+        if !should_materialize_locally(replicas, context.node_id) {
+            continue;
+        }
+        if let Err(error) = materialize_partition(
+            context.partitions,
+            topic,
+            *index,
+            context.log_dirs,
+            context.log_config,
+            context.log_dir_status,
+            context.producer_state,
+        ) {
+            tracing::error!(topic, partition = *index, error = %error,
+                "CreatePartitions: materialize after quorum commit failed");
+            continue;
+        }
+        let Some(partition) = context
+            .partitions
+            .get(topic, crabka_ids::PartitionIndex(*index))
+        else {
+            continue;
+        };
+        let leader = replicas[0];
+        partition.install_leader_change(leader.0, 0).await;
+        if is_local_leader(leader, context.node_id) {
+            partition.install_isr(replicas, replicas, leader).await;
+        }
+    }
+}
+
+fn partition_mutation_count(
+    request: &CreatePartitionsRequest,
+    image: &crabka_metadata::MetadataImage,
+) -> u64 {
+    request
+        .topics
+        .iter()
+        .map(|topic| {
+            let current =
+                i32::try_from(image.partitions_of(&topic.name).count()).unwrap_or(i32::MAX);
+            u64::try_from((i64::from(topic.count) - i64::from(current)).max(0))
+                .expect("mutation count is non-negative")
+        })
+        .sum()
+}
+
+fn denied_topics(
+    authorizer: &dyn crate::authorizer::Authorizer,
+    image: &crabka_metadata::MetadataImage,
+    principal: &crabka_security::Principal,
+    peer: &std::net::SocketAddr,
+    request: &CreatePartitionsRequest,
+) -> std::collections::HashSet<String> {
+    authorize_topics(
+        authorizer,
+        image,
+        principal,
+        peer,
+        AclOperation::Alter,
+        request.topics.iter().map(|topic| topic.name.as_str()),
+    )
+    .into_iter()
+    .filter(|(_, result)| *result == AuthorizationResult::Deny)
+    .map(|(name, _)| name.to_string())
+    .collect()
+}
+
+async fn finish_response(
+    broker: &Broker,
+    image: &crabka_metadata::MetadataImage,
+    context: &crate::handlers::RequestContext<'_>,
+    mutation_count: u64,
+    results: Vec<CreatePartitionsTopicResult>,
+    version: i16,
+) -> Result<Bytes, BrokerError> {
     let delay = crate::quota::consume_controller_mutation_quota(
-        &image,
+        image,
         &broker.quota_buckets,
-        ctx.principal.name.as_str(),
-        ctx.client_id,
+        context.principal.name.as_str(),
+        context.client_id,
         mutation_count,
     );
     let resp = create_partitions_response(
@@ -360,7 +431,7 @@ pub(crate) async fn handle(
 mod tests {
     use std::{net::SocketAddr, sync::Arc};
 
-    use assert2::check;
+    use assert2::{assert, check};
     use crabka_metadata::TopicRecord;
     use crabka_protocol::owned::create_partitions_request::{
         CreatePartitionsAssignment, CreatePartitionsTopic,
@@ -491,11 +562,11 @@ mod tests {
         ];
         let out = resolve_new_partition_assignments(None, &brokers, 0, 3, 2)
             .expect("round-robin should succeed");
-        assert2::assert!(out.len() == 3);
+        assert!(out.len() == 3);
         for r in &out {
-            assert2::assert!(r.len() == 2);
+            assert!(r.len() == 2, "each replica list must be rf=2");
             for b in r {
-                assert2::assert!(brokers.contains(b));
+                assert!(brokers.contains(b));
             }
         }
     }
@@ -513,7 +584,7 @@ mod tests {
         let new_tail = resolve_new_partition_assignments(None, &brokers, 2, 2, 2)
             .expect("round-robin tail should succeed");
         let full = crate::handlers::create_topics::round_robin_replicas(&brokers, 4, 2);
-        assert2::assert!(new_tail == full[2..]);
+        assert!(new_tail == full[2..]);
     }
 
     #[test]
@@ -521,7 +592,7 @@ mod tests {
         let brokers: Vec<NodeId> = vec![crabka_audit::NodeId(0), crabka_audit::NodeId(1)];
         let err = resolve_new_partition_assignments(None, &brokers, 0, 1, 3)
             .expect_err("rf=3 against 2 brokers must fail");
-        assert2::assert!(err.0 == codes::INVALID_REPLICATION_FACTOR);
+        assert!(err.0 == codes::INVALID_REPLICATION_FACTOR);
     }
 
     #[test]
@@ -535,7 +606,7 @@ mod tests {
         let provided = vec![assn(&[3, 1]), assn(&[2, 0]), assn(&[1, 3])];
         let out = resolve_new_partition_assignments(Some(&provided), &brokers, 0, 3, 2)
             .expect("explicit assignments should pass validation");
-        assert2::assert!(
+        assert!(
             out == vec![
                 vec![NodeId(3), NodeId(1)],
                 vec![NodeId(2), NodeId(0)],
@@ -545,90 +616,86 @@ mod tests {
     }
 
     #[test]
-    fn invalid_explicit_assignments_are_rejected() {
-        let cases = [
-            (
-                "assignment count mismatch",
-                &[0, 1, 2][..],
-                vec![assn(&[0, 1]), assn(&[1, 2])],
-                3,
-                2,
-                "assignments.len()=2 does not match new partition count=3",
-                true,
-            ),
-            (
-                "replication factor mismatch",
-                &[0, 1, 2],
-                vec![assn(&[0, 1, 2])],
-                1,
-                2,
-                "does not match replication_factor=2",
-                false,
-            ),
-            (
-                "duplicate broker",
-                &[0, 1, 2],
-                vec![assn(&[1, 1])],
-                1,
-                2,
-                "duplicate broker id 1",
-                false,
-            ),
-            (
-                "unknown broker",
-                &[0, 1, 2],
-                vec![assn(&[0, 9])],
-                1,
-                2,
-                "unknown broker id 9",
-                false,
-            ),
-            (
-                "negative broker",
-                &[0, 1, 2],
-                vec![assn(&[0, -1])],
-                1,
-                2,
-                "negative broker id -1",
-                false,
-            ),
-            (
-                "empty assignments",
-                &[0, 1],
-                vec![],
-                2,
-                1,
-                "assignments.len()=0",
-                false,
-            ),
+    fn explicit_length_mismatch_returns_invalid_replica_assignment() {
+        let brokers: Vec<NodeId> = vec![
+            crabka_audit::NodeId(0),
+            crabka_audit::NodeId(1),
+            crabka_audit::NodeId(2),
         ];
+        let provided = vec![assn(&[0, 1]), assn(&[1, 2])];
+        let err = resolve_new_partition_assignments(Some(&provided), &brokers, 0, 3, 2)
+            .expect_err("2 assignments for 3 new partitions must fail");
+        let expected = (
+            codes::INVALID_REPLICA_ASSIGNMENT,
+            "assignments.len()=2 does not match new partition count=3".to_string(),
+        );
+        assert!(err == expected);
+    }
 
-        for (
-            _case,
-            broker_ids,
-            provided,
-            new_partition_count,
-            replication_factor,
-            expected_message,
-            exact_message,
-        ) in cases
-        {
-            let brokers: Vec<NodeId> = broker_ids.iter().copied().map(NodeId).collect();
-            let err = resolve_new_partition_assignments(
-                Some(&provided),
-                &brokers,
-                0,
-                new_partition_count,
-                replication_factor,
-            )
-            .unwrap_err();
-            let message_matches = if exact_message {
-                err.1 == expected_message
-            } else {
-                err.1.contains(expected_message)
-            };
-            assert2::assert!((err.0, message_matches) == (codes::INVALID_REPLICA_ASSIGNMENT, true));
-        }
+    #[test]
+    fn explicit_wrong_rf_returns_invalid_replica_assignment() {
+        let brokers: Vec<NodeId> = vec![
+            crabka_audit::NodeId(0),
+            crabka_audit::NodeId(1),
+            crabka_audit::NodeId(2),
+        ];
+        let provided = vec![assn(&[0, 1, 2])]; // 3 replicas, but rf=2
+        let err = resolve_new_partition_assignments(Some(&provided), &brokers, 0, 1, 2)
+            .expect_err("rf mismatch must fail");
+        assert!(err.0 == codes::INVALID_REPLICA_ASSIGNMENT);
+        assert!(err.1.contains("does not match replication_factor=2"));
+    }
+
+    #[test]
+    fn explicit_duplicate_broker_in_assignment_returns_invalid_replica_assignment() {
+        let brokers: Vec<NodeId> = vec![
+            crabka_audit::NodeId(0),
+            crabka_audit::NodeId(1),
+            crabka_audit::NodeId(2),
+        ];
+        let provided = vec![assn(&[1, 1])]; // duplicate
+        let err = resolve_new_partition_assignments(Some(&provided), &brokers, 0, 1, 2)
+            .expect_err("duplicate broker must fail");
+        assert!(err.0 == codes::INVALID_REPLICA_ASSIGNMENT);
+        assert!(err.1.contains("duplicate broker id 1"));
+    }
+
+    #[test]
+    fn explicit_unknown_broker_returns_invalid_replica_assignment() {
+        let brokers: Vec<NodeId> = vec![
+            crabka_audit::NodeId(0),
+            crabka_audit::NodeId(1),
+            crabka_audit::NodeId(2),
+        ];
+        let provided = vec![assn(&[0, 9])]; // 9 unknown
+        let err = resolve_new_partition_assignments(Some(&provided), &brokers, 0, 1, 2)
+            .expect_err("unknown broker must fail");
+        assert!(err.0 == codes::INVALID_REPLICA_ASSIGNMENT);
+        assert!(err.1.contains("unknown broker id 9"));
+    }
+
+    #[test]
+    fn explicit_negative_broker_id_returns_invalid_replica_assignment() {
+        let brokers: Vec<NodeId> = vec![
+            crabka_audit::NodeId(0),
+            crabka_audit::NodeId(1),
+            crabka_audit::NodeId(2),
+        ];
+        let provided = vec![assn(&[0, -1])];
+        let err = resolve_new_partition_assignments(Some(&provided), &brokers, 0, 1, 2)
+            .expect_err("negative broker id must fail");
+        assert!(err.0 == codes::INVALID_REPLICA_ASSIGNMENT);
+        assert!(err.1.contains("negative broker id -1"));
+    }
+
+    #[test]
+    fn empty_assignments_some_with_new_partitions_fails() {
+        let brokers: Vec<NodeId> = vec![crabka_audit::NodeId(0), crabka_audit::NodeId(1)];
+        let provided: Vec<CreatePartitionsAssignment> = vec![];
+        let err = resolve_new_partition_assignments(Some(&provided), &brokers, 0, 2, 1)
+            .expect_err("Some(empty) for >0 new partitions must fail");
+        assert!(err.0 == codes::INVALID_REPLICA_ASSIGNMENT);
+        assert!(err.1.contains("assignments.len()=0"));
     }
 
     #[test]
@@ -658,7 +725,7 @@ mod tests {
             }],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected);
     }
 
     #[test]
@@ -710,7 +777,7 @@ mod tests {
             ],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -749,8 +816,8 @@ mod tests {
             ],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
         };
-        assert2::assert!(resp == expected);
-        assert2::assert!(
+        assert!(resp == expected);
+        assert!(
             broker_handle
                 .controller_image_for_test()
                 .partitions_of("stable")
@@ -782,8 +849,8 @@ mod tests {
             }],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
         };
-        assert2::assert!(resp == expected);
-        assert2::assert!(
+        assert!(resp == expected);
+        assert!(
             broker_handle
                 .controller_image_for_test()
                 .partitions_of("dry-run")
@@ -818,8 +885,8 @@ mod tests {
             }],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
         };
-        assert2::assert!(resp == expected);
-        assert2::assert!(
+        assert!(resp == expected);
+        assert!(
             broker_handle
                 .controller_image_for_test()
                 .partitions_of("grow")
@@ -854,7 +921,7 @@ mod tests {
             }],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected);
         check!(
             elapsed >= std::time::Duration::from_millis(450),
             "handler must wait for the advertised throttle, elapsed={elapsed:?}"

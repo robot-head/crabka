@@ -109,6 +109,7 @@ pub(crate) async fn rebalance_tick(
 mod tests {
     use std::sync::Mutex;
 
+    use assert2::assert;
     use crabka_metadata::{PartitionRecord, TopicRecord};
     use uuid::Uuid;
 
@@ -226,7 +227,7 @@ mod tests {
             imbalance_threshold_pct: 10,
         };
         rebalance_tick(&mock, &liveness, &cfg).await;
-        assert2::assert!(mock.submitted.lock().unwrap().is_empty());
+        assert!(mock.submitted.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -239,7 +240,7 @@ mod tests {
             imbalance_threshold_pct: 10,
         };
         rebalance_tick(&mock, &liveness, &cfg).await;
-        assert2::assert!(mock.submitted.lock().unwrap().len() == 10);
+        assert!(mock.submitted.lock().unwrap().len() == 10);
     }
 
     #[tokio::test]
@@ -256,7 +257,10 @@ mod tests {
             imbalance_threshold_pct: 0,
         };
         rebalance_tick(&mock, &liveness, &cfg).await;
-        assert2::assert!(mock.submit_calls.load(std::sync::atomic::Ordering::SeqCst) == 0);
+        assert!(
+            mock.submit_calls.load(std::sync::atomic::Ordering::SeqCst) == 0,
+            "must not submit when there is nothing to rebalance"
+        );
     }
 
     #[tokio::test]
@@ -270,13 +274,11 @@ mod tests {
         };
         rebalance_tick(&mock, &liveness, &cfg).await;
         let submitted = mock.submitted.lock().unwrap();
-        assert2::assert!(submitted.len() == 20);
+        assert!(submitted.len() == 20);
         // Every submitted record must promote preferred (replicas[0] = 1).
         for record in submitted.iter() {
             match record {
-                MetadataRecord::V1Partition(p) => {
-                    assert2::assert!(p.leader == crabka_audit::NodeId(1));
-                }
+                MetadataRecord::V1Partition(p) => assert!(p.leader == crabka_audit::NodeId(1)),
                 _ => panic!("unexpected record type"),
             }
         }
@@ -312,6 +314,6 @@ mod tests {
 
         shutdown.cancel();
         task.await.unwrap();
-        assert2::assert!(!controller.submitted.lock().unwrap().is_empty());
+        assert!(!controller.submitted.lock().unwrap().is_empty());
     }
 }

@@ -67,6 +67,8 @@ pub struct AutoTriggerCtx<'a> {
     fields(anomaly_id = %anomaly.id, kind = anomaly.kind.as_str()),
     err,
 )]
+/// # Errors
+/// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub async fn maybe_trigger(
     anomaly: &Anomaly,
     ctx: &AutoTriggerCtx<'_>,

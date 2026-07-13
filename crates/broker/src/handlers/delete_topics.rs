@@ -85,7 +85,6 @@ fn should_wait_for_quota_delay(delay: Duration) -> bool {
     delay > Duration::ZERO
 }
 
-#[allow(clippy::too_many_lines)]
 #[tracing::instrument(
     name = "handle_delete_topics",
     level = "info",
@@ -116,27 +115,7 @@ pub(crate) async fn handle(
     // UNKNOWN_TOPIC_ID (KIP-516) rather than UNKNOWN_TOPIC_OR_PARTITION.
     let image = controller.current_image();
     // (resolved_name, requested_by_id, requested_topic_id)
-    let mut name_list: Vec<(Option<String>, bool, WireUuid)> = Vec::new();
-    if req.topic_names.is_empty() {
-        for state in &req.topics {
-            let id = state.topic_id;
-            let requested_by_id = requested_by_topic_id(state.name.as_ref(), id);
-            if requested_by_id {
-                // id-only path: look up by topic_id in the image index.
-                let uuid = uuid::Uuid::from_bytes(id.0);
-                let found = image.topic_by_id(&uuid).map(|t| t.name.clone());
-                name_list.push((found, true, id));
-            } else if let Some(ref n) = state.name {
-                name_list.push((Some(n.clone()), false, id));
-            } else {
-                name_list.push((None, false, id));
-            }
-        }
-    } else {
-        for n in &req.topic_names {
-            name_list.push((Some(n.clone()), false, WireUuid::ZERO));
-        }
-    }
+    let name_list = resolve_topic_names(&req, &image);
 
     // KIP-599: count partition mutations before running the delete logic.
     // Nonexistent topics (name_opt = None) contribute 0 partitions.
@@ -153,28 +132,13 @@ pub(crate) async fn handle(
     // Batch-authorize every topic name for `Delete`. Topics that come
     // back `Deny` short-circuit the delete loop and emit
     // TOPIC_AUTHORIZATION_FAILED on that topic row.
-    let known_names: Vec<&str> = name_list
-        .iter()
-        .filter_map(|(opt, _, _)| opt.as_deref())
-        .collect();
-    let acl_results = authorize_topics(
+    let denied_topics = denied_topic_names(
         broker.config.authorizer.as_ref(),
-        &*image,
+        &image,
         ctx.principal,
         ctx.peer,
-        AclOperation::Delete,
-        known_names.iter().copied(),
+        &name_list,
     );
-    let denied_topics: std::collections::HashSet<String> = acl_results
-        .iter()
-        .filter_map(|(name, r)| {
-            if *r == AuthorizationResult::Deny {
-                Some((*name).to_string())
-            } else {
-                None
-            }
-        })
-        .collect();
 
     let mut results: Vec<DeletableTopicResult> = Vec::with_capacity(name_list.len());
 
@@ -206,34 +170,7 @@ pub(crate) async fn handle(
         // and we lose the `remote.storage.enable` flag plus the topic_id;
         // the snapshot is the sole record that drives the remote-tier
         // partition-delete cascade.
-        let tiered_to_cascade: Vec<crabka_remote_storage::TopicIdPartition> =
-            if broker.remote_reader.is_some() {
-                let topic_id = image.topic(&name).map(|t| t.topic_id);
-                topic_id
-                    .map(|tid| {
-                        partitions
-                            .partitions_of(&name)
-                            .into_iter()
-                            .filter(|&idx| {
-                                partitions.get(&name, idx).is_some_and(|p| {
-                                    p.log.lock().is_ok_and(|log| {
-                                        log.config_snapshot().remote_storage_enable
-                                    })
-                                })
-                            })
-                            .map(|idx| {
-                                crabka_remote_storage::TopicIdPartition::new(
-                                    tid,
-                                    name.clone(),
-                                    idx.get(),
-                                )
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            } else {
-                Vec::new()
-            };
+        let tiered_to_cascade = tiered_partitions(broker, &partitions, &image, &name);
 
         let res = controller
             .submit_change(vec![MetadataRecord::V1DeleteTopic(DeleteTopicRecord {
@@ -306,11 +243,96 @@ pub(crate) async fn handle(
     crate::handlers::encode_response(&resp, version)
 }
 
+type TopicNameRequest = (Option<String>, bool, WireUuid);
+
+fn tiered_partitions(
+    broker: &Broker,
+    partitions: &crate::partition_registry::PartitionRegistry,
+    image: &crabka_metadata::MetadataImage,
+    topic_name: &str,
+) -> Vec<crabka_remote_storage::TopicIdPartition> {
+    if broker.remote_reader.is_none() {
+        return Vec::new();
+    }
+    let Some(topic_id) = image.topic(topic_name).map(|topic| topic.topic_id) else {
+        return Vec::new();
+    };
+    partitions
+        .partitions_of(topic_name)
+        .into_iter()
+        .filter(|&index| {
+            partitions.get(topic_name, index).is_some_and(|partition| {
+                partition
+                    .log
+                    .lock()
+                    .is_ok_and(|log| log.config_snapshot().remote_storage_enable)
+            })
+        })
+        .map(|index| {
+            crabka_remote_storage::TopicIdPartition::new(
+                topic_id,
+                topic_name.to_string(),
+                index.get(),
+            )
+        })
+        .collect()
+}
+
+fn resolve_topic_names(
+    request: &DeleteTopicsRequest,
+    image: &crabka_metadata::MetadataImage,
+) -> Vec<TopicNameRequest> {
+    if !request.topic_names.is_empty() {
+        return request
+            .topic_names
+            .iter()
+            .map(|name| (Some(name.clone()), false, WireUuid::ZERO))
+            .collect();
+    }
+    request
+        .topics
+        .iter()
+        .map(|state| {
+            let requested_by_id = requested_by_topic_id(state.name.as_ref(), state.topic_id);
+            let name = if requested_by_id {
+                image
+                    .topic_by_id(&uuid::Uuid::from_bytes(state.topic_id.0))
+                    .map(|topic| topic.name.clone())
+            } else {
+                state.name.clone()
+            };
+            (name, requested_by_id, state.topic_id)
+        })
+        .collect()
+}
+
+fn denied_topic_names(
+    authorizer: &dyn crate::authorizer::Authorizer,
+    image: &crabka_metadata::MetadataImage,
+    principal: &crabka_security::Principal,
+    peer: &std::net::SocketAddr,
+    requests: &[TopicNameRequest],
+) -> std::collections::HashSet<String> {
+    let known_names = requests.iter().filter_map(|(name, _, _)| name.as_deref());
+    authorize_topics(
+        authorizer,
+        image,
+        principal,
+        peer,
+        AclOperation::Delete,
+        known_names,
+    )
+    .into_iter()
+    .filter(|(_, result)| *result == AuthorizationResult::Deny)
+    .map(|(name, _)| name.to_string())
+    .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::{net::SocketAddr, sync::Arc};
 
-    use assert2::check;
+    use assert2::{assert, check};
     use crabka_protocol::owned::delete_topics_request::{DeleteTopicState, DeleteTopicsRequest};
     use crabka_security::Principal;
 
@@ -388,7 +410,7 @@ mod tests {
             error_message: None,
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
         };
-        assert2::assert!(unknown_id == expected_unknown);
+        assert!(unknown_id == expected_unknown);
 
         let denied = delete_topic_result(
             Some("secret".into()),
@@ -402,7 +424,7 @@ mod tests {
             error_message: None,
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
         };
-        assert2::assert!(denied == expected_denied);
+        assert!(denied == expected_denied);
 
         let resp = delete_topics_response(vec![denied], 123);
         let expected_resp = DeleteTopicsResponse {
@@ -410,7 +432,7 @@ mod tests {
             responses: vec![expected_denied],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
         };
-        assert2::assert!(resp == expected_resp);
+        assert!(resp == expected_resp);
     }
 
     #[test]
@@ -431,7 +453,7 @@ mod tests {
             resource_type: "Topic".into(),
             name: "ok".into(),
         }];
-        assert2::assert!(resources == expected);
+        assert!(resources == expected);
     }
 
     #[test]
@@ -442,7 +464,10 @@ mod tests {
         let ctx = test_context(&p, &peer);
 
         audit_deleted_topics(log.as_ref(), &ctx, Vec::new());
-        assert2::assert!(rx.try_recv().is_err());
+        assert!(
+            rx.try_recv().is_err(),
+            "empty audit resource list is a no-op"
+        );
 
         audit_deleted_topics(
             log.as_ref(),
@@ -476,8 +501,8 @@ mod tests {
 
     #[test]
     fn should_wait_for_quota_delay_only_waits_for_positive_delay() {
-        assert2::assert!(!should_wait_for_quota_delay(Duration::ZERO));
-        assert2::assert!(should_wait_for_quota_delay(Duration::from_millis(1)));
+        assert!(!should_wait_for_quota_delay(Duration::ZERO));
+        assert!(should_wait_for_quota_delay(Duration::from_millis(1)));
     }
 
     #[tokio::test]
@@ -501,7 +526,7 @@ mod tests {
             }],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -537,7 +562,7 @@ mod tests {
             ],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 }

@@ -189,7 +189,6 @@ struct Args {
 }
 
 #[tokio::main]
-#[allow(clippy::too_many_lines)]
 async fn main() -> anyhow::Result<()> {
     // Install the ring crypto provider before any TLS work (server or client).
     rustls::crypto::ring::default_provider()

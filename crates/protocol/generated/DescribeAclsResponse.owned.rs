@@ -14,7 +14,8 @@ pub const MIN_VERSION: i16 = 1;
 pub const MAX_VERSION: i16 = 3;
 pub const FLEXIBLE_MIN: i16 = 2;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -42,9 +43,9 @@ impl Encode for DescribeAclsResponse {
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message.as_deref());
+                let () = put_compact_nullable_string(buf, self.error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.error_message.as_deref());
+                let () = put_nullable_string(buf, self.error_message.as_deref());
             }
         }
         if version >= 0 {
@@ -169,7 +170,7 @@ impl Default for DescribeAclsResource {
             resource_name: String::new(),
             pattern_type: 3i8,
             acls: Vec::new(),
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
@@ -181,9 +182,9 @@ impl Encode for DescribeAclsResource {
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.resource_name);
+                let () = put_compact_string(buf, &self.resource_name);
             } else {
-                put_string(buf, &self.resource_name);
+                let () = put_string(buf, &self.resource_name);
             }
         }
         if version >= 1 {
@@ -300,16 +301,16 @@ impl Encode for AclDescription {
         let flex = version >= 2;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.principal);
+                let () = put_compact_string(buf, &self.principal);
             } else {
-                put_string(buf, &self.principal);
+                let () = put_string(buf, &self.principal);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.host);
+                let () = put_compact_string(buf, &self.host);
             } else {
-                put_string(buf, &self.host);
+                let () = put_string(buf, &self.host);
             }
         }
         if version >= 0 {
@@ -408,7 +409,7 @@ impl AclDescription {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(version: i16) -> ::serde_json::Value {
+pub fn default_json(_version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("throttleTimeMs".to_string(), ::serde_json::json!(0));
     obj.insert("errorCode".to_string(), ::serde_json::json!(0));

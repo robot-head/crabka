@@ -11,6 +11,7 @@
 
 use std::sync::Arc;
 
+use assert2::assert;
 use crabka_operator::{
     controller::kafka::reconcile,
     crd::{Authorization, Kafka, KafkaSpec, OpaAuthorization, SimpleAuthorization},
@@ -115,7 +116,7 @@ async fn kafka_with_opa_authorization_renders_correct_broker_toml() {
         "[authorization.opa]",
         "url = \"http://opa:8181/v1/data/k/a\"",
     ] {
-        assert2::assert!(toml_str.contains(needle));
+        assert!(toml_str.contains(needle), "{needle} missing;\n{toml_str}");
     }
 
     // Round-trip parse through the broker's own FileConfig — sanity check
@@ -129,8 +130,8 @@ async fn kafka_with_opa_authorization_renders_correct_broker_toml() {
     let opa = a
         .opa
         .expect("FileConfig.authorization.opa must be Some for type = \"opa\"");
-    assert2::assert!(opa.url.as_str() == "http://opa:8181/v1/data/k/a");
-    assert2::assert!(a.super_users == vec!["ANONYMOUS".to_string()]);
+    assert!(opa.url == "http://opa:8181/v1/data/k/a");
+    assert!(a.super_users == vec!["ANONYMOUS".to_string()]);
 }
 
 // ── test 2: type: simple round-trips super_users ─────────────────────────────
@@ -165,7 +166,10 @@ async fn kafka_with_simple_authorization_super_users_round_trip() {
         ("super_users = [\"User:admin\"]", true),
         ("[authorization.opa]", false),
     ] {
-        assert2::assert!(toml_str.contains(needle) == want);
+        assert!(
+            toml_str.contains(needle) == want,
+            "{needle}: expected present={want} for type = \"simple\";\n{toml_str}"
+        );
     }
 
     // Round-trip parse for structural validity.
@@ -174,6 +178,9 @@ async fn kafka_with_simple_authorization_super_users_round_trip() {
     let a = parsed
         .authorization
         .expect("FileConfig.authorization must be Some when [authorization] is rendered");
-    assert2::assert!(a.opa == None);
-    assert2::assert!(a.super_users == vec!["User:admin".to_string()]);
+    assert!(
+        a.opa.is_none(),
+        "FileConfig.authorization.opa must be None for type = \"simple\""
+    );
+    assert!(a.super_users == vec!["User:admin".to_string()]);
 }

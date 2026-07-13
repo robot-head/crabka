@@ -14,7 +14,8 @@ pub const MIN_VERSION: i16 = 2;
 pub const MAX_VERSION: i16 = 7;
 pub const FLEXIBLE_MIN: i16 = 5;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,7 +31,7 @@ impl Default for CreateTopicsRequest {
             topics: Vec::new(),
             timeout_ms: 60_000i32,
             validate_only: false,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
@@ -150,9 +151,9 @@ impl Encode for CreatableTopic {
         let flex = version >= 5;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.name);
+                let () = put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name);
+                let () = put_string(buf, &self.name);
             }
         }
         if version >= 0 {
@@ -389,16 +390,16 @@ impl Encode for CreatableTopicConfig {
         let flex = version >= 5;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.name);
+                let () = put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name);
+                let () = put_string(buf, &self.name);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.value.as_deref());
+                let () = put_compact_nullable_string(buf, self.value.as_deref());
             } else {
-                put_nullable_string(buf, self.value.as_deref());
+                let () = put_nullable_string(buf, self.value.as_deref());
             }
         }
         if flex {
@@ -476,7 +477,7 @@ impl CreatableTopicConfig {
 pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("topics".to_string(), ::serde_json::Value::Array(vec![]));
-    obj.insert("timeoutMs".to_string(), ::serde_json::json!(60000));
+    obj.insert("timeoutMs".to_string(), ::serde_json::json!(60_000));
     if version >= 1 {
         obj.insert("validateOnly".to_string(), ::serde_json::Value::Bool(false));
     }

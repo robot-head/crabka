@@ -53,7 +53,7 @@ pub trait StateStore: Any + Send {
     /// next write (forwarded with the deduped `Change` on flush). Default no-op.
     fn set_record_context(&mut self, _ctx: crate::processor::record::RecordContext) {}
     /// Erased record-cache hook: wrap this store's backend in the supplied
-    /// [`NamedCache`] (registered in the task's `ThreadCache`) and return `true` if
+    /// internal `NamedCache` (registered in the task's `ThreadCache`) and return `true` if
     /// this store kind is cache-aware. Lets `instantiate` enable caching on a
     /// materialized KV store without knowing its `K`/`V`. Default `false` (not
     /// cacheable) — window/session stores keep the default until their caching

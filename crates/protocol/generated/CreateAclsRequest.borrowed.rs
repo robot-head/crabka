@@ -12,7 +12,8 @@ pub const MIN_VERSION: i16 = 1;
 pub const MAX_VERSION: i16 = 3;
 pub const FLEXIBLE_MIN: i16 = 2;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -21,6 +22,10 @@ pub struct CreateAclsRequest<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl CreateAclsRequest<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::create_acls_request::CreateAclsRequest {
         crate::owned::create_acls_request::CreateAclsRequest {
             creations: (self.creations).iter().map(AclCreation::to_owned).collect(),
@@ -130,11 +135,15 @@ impl Default for AclCreation<'_> {
             host: "",
             operation: 0i8,
             permission_type: 0i8,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl AclCreation<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::create_acls_request::AclCreation {
         crate::owned::create_acls_request::AclCreation {
             resource_type: (self.resource_type),
@@ -156,9 +165,9 @@ impl Encode for AclCreation<'_> {
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.resource_name);
+                let () = put_compact_string(buf, self.resource_name);
             } else {
-                put_string(buf, self.resource_name);
+                let () = put_string(buf, self.resource_name);
             }
         }
         if version >= 1 {
@@ -166,16 +175,16 @@ impl Encode for AclCreation<'_> {
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.principal);
+                let () = put_compact_string(buf, self.principal);
             } else {
-                put_string(buf, self.principal);
+                let () = put_string(buf, self.principal);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.host);
+                let () = put_compact_string(buf, self.host);
             } else {
-                put_string(buf, self.host);
+                let () = put_string(buf, self.host);
             }
         }
         if version >= 0 {

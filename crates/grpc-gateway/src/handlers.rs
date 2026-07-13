@@ -169,6 +169,8 @@ pub(crate) fn to_gateway_record(r: crate::pb::Record) -> crate::types::GatewayRe
     skip_all,
     fields(records = req.0.records.len()),
 )]
+/// # Errors
+/// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
 pub async fn send(
     Extension(state): Extension<Arc<AppState>>,
     principal: Option<Extension<Principal>>,

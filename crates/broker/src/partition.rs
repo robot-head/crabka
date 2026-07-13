@@ -177,10 +177,9 @@ pub struct HwTimeout;
 // `partition_id` mirrors Kafka's wire naming and is the conventional term
 // used throughout the broker; renaming to `id` would shadow `Partition`'s
 // own identity at every call site.
-#[allow(clippy::struct_field_names)]
 pub struct Partition {
     pub topic: String,
-    pub partition_id: PartitionIndex,
+    pub index: PartitionIndex,
     /// Parent `log.dir` currently owning the partition (the parent of
     /// `log.lock().dir()` — i.e. the configured directory, not the
     /// `<topic>-<partition>` subdirectory). Updated by
@@ -202,8 +201,7 @@ pub struct Partition {
     pub current_leader_epoch: Arc<AtomicI32>,
     /// Held so the writer task is reaped when every `Partition` handle is
     /// dropped. Not accessed after construction.
-    #[allow(clippy::pub_underscore_fields)]
-    pub _writer_handle: Arc<JoinHandle<()>>,
+    pub writer_handle: Arc<JoinHandle<()>>,
 }
 
 impl Partition {
@@ -512,7 +510,7 @@ impl Partition {
             // used to trace failover leadership churn / flip-flop.
             tracing::info!(
                 topic = %self.topic,
-                partition = self.partition_id.get(),
+                partition = self.index.get(),
                 prev_leader,
                 new_leader,
                 prev_epoch,
@@ -616,7 +614,7 @@ impl std::fmt::Debug for Partition {
         // tracing output.
         f.debug_struct("Partition")
             .field("topic", &self.topic)
-            .field("partition_id", &self.partition_id)
+            .field("partition_id", &self.index)
             .finish_non_exhaustive()
     }
 }
@@ -625,7 +623,7 @@ impl std::fmt::Debug for Partition {
 mod tests {
     use std::sync::atomic::{AtomicI32, AtomicU64};
 
-    use assert2::check;
+    use assert2::{assert, check};
     use crabka_log::LogConfig;
     use tempfile::tempdir;
 
@@ -638,7 +636,7 @@ mod tests {
         let writer = tokio::spawn(async {});
         let p = Partition {
             topic: "t".into(),
-            partition_id: PartitionIndex(0),
+            index: PartitionIndex(0),
             log_dir: Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             log: Arc::new(Mutex::new(log)),
             writer_tx: tx,
@@ -649,7 +647,7 @@ mod tests {
             hw_advance_notify,
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
-            _writer_handle: Arc::new(writer),
+            writer_handle: Arc::new(writer),
         };
         (p, dir)
     }
@@ -667,20 +665,22 @@ mod tests {
         ));
         let hw_advance_notify = Arc::new(Notify::new());
         let writer = tokio::spawn(crate::partition_writer::run(
-            "t".to_string(),
-            PartitionIndex(0),
-            log.clone(),
-            log_dir.clone(),
+            ("t".to_string(), PartitionIndex(0)),
+            (log.clone(), log_dir.clone()),
             rx,
-            append_notify.clone(),
-            replica_state.clone(),
-            hw_advance_notify.clone(),
-            crate::log_dir_status::LogDirRegistry::default(),
-            Arc::new(crate::producer_state::ProducerState::new()),
+            (
+                append_notify.clone(),
+                replica_state.clone(),
+                hw_advance_notify.clone(),
+            ),
+            (
+                crate::log_dir_status::LogDirRegistry::default(),
+                Arc::new(crate::producer_state::ProducerState::new()),
+            ),
         ));
         let p = Partition {
             topic: "t".into(),
-            partition_id: PartitionIndex(0),
+            index: PartitionIndex(0),
             log_dir,
             log,
             writer_tx: tx,
@@ -689,7 +689,7 @@ mod tests {
             hw_advance_notify,
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
-            _writer_handle: Arc::new(writer),
+            writer_handle: Arc::new(writer),
         };
         (p, dir)
     }
@@ -742,7 +742,7 @@ mod tests {
         let writer = tokio::spawn(async {});
         let p = Partition {
             topic: "t".into(),
-            partition_id: PartitionIndex(0),
+            index: PartitionIndex(0),
             log_dir: Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             log: Arc::new(Mutex::new(log)),
             writer_tx: tx,
@@ -753,7 +753,7 @@ mod tests {
             hw_advance_notify: Arc::new(Notify::new()),
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
-            _writer_handle: Arc::new(writer),
+            writer_handle: Arc::new(writer),
         };
         let s = format!("{p:?}");
         // topic/partition_id appear; the mutex/log internals must NOT appear
@@ -765,7 +765,7 @@ mod tests {
             ("segments", false),
         ];
         for (needle, expected) in cases {
-            assert2::assert!(s.contains(needle) == expected);
+            assert!(s.contains(needle) == expected, "needle {needle:?} in {s:?}");
         }
     }
 
@@ -784,7 +784,7 @@ mod tests {
         }
         let p = Partition {
             topic: "t".into(),
-            partition_id: PartitionIndex(0),
+            index: PartitionIndex(0),
             log_dir: Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             log: Arc::new(Mutex::new(log)),
             writer_tx: tx,
@@ -793,9 +793,9 @@ mod tests {
             hw_advance_notify: Arc::new(Notify::new()),
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
-            _writer_handle: Arc::new(writer),
+            writer_handle: Arc::new(writer),
         };
-        assert2::assert!(p.high_watermark().await == 42);
+        assert!(p.high_watermark().await == 42);
     }
 
     #[tokio::test]
@@ -806,7 +806,7 @@ mod tests {
         let writer = tokio::spawn(async {});
         let p = Partition {
             topic: "t".into(),
-            partition_id: PartitionIndex(0),
+            index: PartitionIndex(0),
             log_dir: Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             log: Arc::new(Mutex::new(log)),
             writer_tx: tx,
@@ -817,7 +817,7 @@ mod tests {
             hw_advance_notify: Arc::new(Notify::new()),
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
-            _writer_handle: Arc::new(writer),
+            writer_handle: Arc::new(writer),
         };
         p.install_isr(
             &[
@@ -852,11 +852,14 @@ mod tests {
         let hw_advance_notify = Arc::new(Notify::new());
         let (p, _td) = test_partition(hw_advance_notify.clone());
         append_records(&p, 3);
-        assert2::assert!(p.high_watermark().await == 0);
+        assert!(p.high_watermark().await == 0);
 
         let waiter = hw_advance_notify.notified();
         tokio::pin!(waiter);
-        assert2::assert!(futures_util::poll!(&mut waiter).is_pending());
+        assert!(
+            futures_util::poll!(&mut waiter).is_pending(),
+            "waiter registers on first poll"
+        );
 
         p.install_isr(
             &[crabka_audit::NodeId(1)],
@@ -865,8 +868,11 @@ mod tests {
         )
         .await;
 
-        assert2::assert!(p.high_watermark().await == 3);
-        assert2::assert!(futures_util::poll!(&mut waiter).is_ready());
+        assert!(p.high_watermark().await == 3);
+        assert!(
+            futures_util::poll!(&mut waiter).is_ready(),
+            "notify should fire when ISR install advances HW"
+        );
     }
 
     #[tokio::test]
@@ -880,11 +886,14 @@ mod tests {
             crabka_audit::NodeId(1),
         )
         .await;
-        assert2::assert!(p.high_watermark().await == 2);
+        assert!(p.high_watermark().await == 2);
 
         let waiter = hw_advance_notify.notified();
         tokio::pin!(waiter);
-        assert2::assert!(futures_util::poll!(&mut waiter).is_pending());
+        assert!(
+            futures_util::poll!(&mut waiter).is_pending(),
+            "waiter registers on first poll"
+        );
 
         p.install_isr(
             &[crabka_audit::NodeId(1)],
@@ -893,8 +902,11 @@ mod tests {
         )
         .await;
 
-        assert2::assert!(p.high_watermark().await == 2);
-        assert2::assert!(futures_util::poll!(&mut waiter).is_pending());
+        assert!(p.high_watermark().await == 2);
+        assert!(
+            futures_util::poll!(&mut waiter).is_pending(),
+            "unchanged HW must not wake waiters"
+        );
     }
 
     #[tokio::test]
@@ -921,15 +933,20 @@ mod tests {
 
             p.install_leader_change(leader, epoch).await;
 
-            assert2::assert!(
-                (
-                    p.current_leader.load(Ordering::Acquire),
-                    p.current_leader_epoch.load(Ordering::Acquire),
-                ) == (leader, epoch)
+            assert!(
+                p.current_leader.load(Ordering::Acquire) == leader,
+                "case ({leader}, {epoch})"
+            );
+            assert!(
+                p.current_leader_epoch.load(Ordering::Acquire) == epoch,
+                "case ({leader}, {epoch})"
             );
             let st = p.replica_state.lock().await;
-            assert2::assert!(st.per_follower.is_empty());
-            assert2::assert!(st.current_leader_epoch == crabka_ids::LeaderEpoch(epoch));
+            assert!(st.per_follower.is_empty(), "case ({leader}, {epoch})");
+            assert!(
+                st.current_leader_epoch == crabka_ids::LeaderEpoch(epoch),
+                "case ({leader}, {epoch})"
+            );
         }
     }
 
@@ -939,7 +956,7 @@ mod tests {
 
         p.test_set_leader_epoch(6);
 
-        assert2::assert!(p.current_leader_epoch.load(Ordering::Acquire) == 6);
+        assert!(p.current_leader_epoch.load(Ordering::Acquire) == 6);
     }
 
     #[tokio::test]
@@ -950,7 +967,7 @@ mod tests {
             .await
             .expect("set log start");
 
-        assert2::assert!(p.log_start_offset() == 5);
+        assert!(p.log_start_offset() == 5);
     }
 
     #[tokio::test]
@@ -968,7 +985,7 @@ mod tests {
         }
         let p = Partition {
             topic: "t".into(),
-            partition_id: PartitionIndex(0),
+            index: PartitionIndex(0),
             log_dir: Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             log: Arc::new(Mutex::new(log)),
             writer_tx: tx,
@@ -977,7 +994,7 @@ mod tests {
             hw_advance_notify: Arc::new(Notify::new()),
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
-            _writer_handle: Arc::new(writer),
+            writer_handle: Arc::new(writer),
         };
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         p.await_hw_at_least(Offset(50), deadline)
@@ -993,7 +1010,7 @@ mod tests {
         let writer = tokio::spawn(async {});
         let p = Partition {
             topic: "t".into(),
-            partition_id: PartitionIndex(0),
+            index: PartitionIndex(0),
             log_dir: Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             log: Arc::new(Mutex::new(log)),
             writer_tx: tx,
@@ -1004,11 +1021,11 @@ mod tests {
             hw_advance_notify: Arc::new(Notify::new()),
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
-            _writer_handle: Arc::new(writer),
+            writer_handle: Arc::new(writer),
         };
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(50);
         let result = p.await_hw_at_least(Offset(100), deadline).await;
-        assert2::assert!(matches!(result, Err(crate::partition::HwTimeout)));
+        assert!(matches!(result, Err(crate::partition::HwTimeout)));
     }
 
     #[tokio::test]
@@ -1022,7 +1039,7 @@ mod tests {
         let hw_advance_notify = Arc::new(Notify::new());
         let p = Partition {
             topic: "t".into(),
-            partition_id: PartitionIndex(0),
+            index: PartitionIndex(0),
             log_dir: Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             log: Arc::new(Mutex::new(log)),
             writer_tx: tx,
@@ -1033,7 +1050,7 @@ mod tests {
             hw_advance_notify: hw_advance_notify.clone(),
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
-            _writer_handle: Arc::new(writer),
+            writer_handle: Arc::new(writer),
         };
 
         // Append a 3-record batch so log_end_offset() == 3.
@@ -1063,7 +1080,7 @@ mod tests {
             .expect("log mutex")
             .append(&mut batch)
             .expect("append");
-        assert2::assert!(p.log_end_offset() == 3);
+        assert!(p.log_end_offset() == 3);
 
         // reported_hw below log_end: stored verbatim, notify fires.
         // A `Notified` future does not register with the `Notify` until it is
@@ -1071,34 +1088,46 @@ mod tests {
         // waiters — so poll once (Pending) to register BEFORE advancing HW.
         let waiter = hw_advance_notify.notified();
         tokio::pin!(waiter);
-        assert2::assert!(futures_util::poll!(&mut waiter).is_pending());
+        assert!(
+            futures_util::poll!(&mut waiter).is_pending(),
+            "waiter registers on first poll"
+        );
         p.set_follower_hw(Offset(2)).await;
-        assert2::assert!(p.high_watermark().await == 2);
-        assert2::assert!(futures_util::poll!(&mut waiter).is_ready());
+        assert!(p.high_watermark().await == 2);
+        assert!(
+            futures_util::poll!(&mut waiter).is_ready(),
+            "notify should fire when HW advances"
+        );
 
         // reported_hw above log_end: clamped to log_end (3).
         p.set_follower_hw(Offset(100)).await;
-        assert2::assert!(p.high_watermark().await == 3);
+        assert!(p.high_watermark().await == 3);
 
         // reported_hw below current HW: no regression.
         p.set_follower_hw(Offset(1)).await;
-        assert2::assert!(p.high_watermark().await == 3);
+        assert!(p.high_watermark().await == 3);
     }
 
     #[tokio::test]
     async fn set_follower_hw_same_high_watermark_does_not_notify() {
         let hw_advance_notify = Arc::new(Notify::new());
         let (p, _td) = test_partition(hw_advance_notify.clone());
-        assert2::assert!(p.high_watermark().await == 0);
+        assert!(p.high_watermark().await == 0);
 
         let waiter = hw_advance_notify.notified();
         tokio::pin!(waiter);
-        assert2::assert!(futures_util::poll!(&mut waiter).is_pending());
+        assert!(
+            futures_util::poll!(&mut waiter).is_pending(),
+            "waiter registers on first poll"
+        );
 
         p.set_follower_hw(Offset(0)).await;
 
-        assert2::assert!(p.high_watermark().await == 0);
-        assert2::assert!(futures_util::poll!(&mut waiter).is_pending());
+        assert!(p.high_watermark().await == 0);
+        assert!(
+            futures_util::poll!(&mut waiter).is_pending(),
+            "unchanged HW must not wake waiters"
+        );
     }
 
     #[tokio::test]
@@ -1113,7 +1142,7 @@ mod tests {
         let hw_advance_notify = Arc::new(Notify::new());
         let p = Partition {
             topic: "t".into(),
-            partition_id: PartitionIndex(0),
+            index: PartitionIndex(0),
             log_dir: Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             log: Arc::new(Mutex::new(log)),
             writer_tx: tx,
@@ -1122,7 +1151,7 @@ mod tests {
             hw_advance_notify: hw_advance_notify.clone(),
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
-            _writer_handle: Arc::new(writer),
+            writer_handle: Arc::new(writer),
         };
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;

@@ -13,7 +13,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 1;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -141,7 +142,7 @@ impl Default for ConfigResource {
         Self {
             resource_name: String::new(),
             resource_type: 16i8,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
@@ -150,9 +151,9 @@ impl Encode for ConfigResource {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.resource_name);
+                let () = put_compact_string(buf, &self.resource_name);
             } else {
-                put_string(buf, &self.resource_name);
+                let () = put_string(buf, &self.resource_name);
             }
         }
         if version >= 1 {
@@ -222,7 +223,7 @@ impl ConfigResource {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(version: i16) -> ::serde_json::Value {
+pub fn default_json(_version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("throttleTimeMs".to_string(), ::serde_json::json!(0));
     obj.insert("errorCode".to_string(), ::serde_json::json!(0));

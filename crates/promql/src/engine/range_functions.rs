@@ -1,5 +1,6 @@
 use crabka_blockstore::Labels;
 use crabka_metrics::{BucketSpan, NativeHistogram, ResetHint};
+use num_traits::ToPrimitive;
 
 use super::{
     RangeEval, add_compatible_native_histogram, labels::labels_without_metric_name,
@@ -275,7 +276,6 @@ fn range_function_sample_from_series(
     Some(SampleValue::Float(value))
 }
 
-#[allow(clippy::cast_precision_loss)]
 fn anchored_float_range_value(
     timestamps: &[i64],
     values: &[f64],
@@ -347,7 +347,7 @@ fn anchored_float_range_value(
         RangeFn::Increase | RangeFn::Rate => {
             let result = counter_delta(&selected_values)?;
             if kind == RangeFn::Rate {
-                let range_seconds = range_ms as f64 / 1000.0;
+                let range_seconds = range_ms.to_f64()? / 1000.0;
                 if range_seconds <= 0.0 {
                     return None;
                 }
@@ -373,7 +373,6 @@ fn counter_delta(values: &[f64]) -> Option<f64> {
     Some(result)
 }
 
-#[allow(clippy::cast_precision_loss)]
 fn smoothed_float_range_value(
     timestamps: &[i64],
     values: &[f64],
@@ -401,7 +400,7 @@ fn smoothed_float_range_value(
         result = 0.0;
     }
     if kind == RangeFn::Rate {
-        let range_seconds = range_ms as f64 / 1000.0;
+        let range_seconds = range_ms.to_f64()? / 1000.0;
         if range_seconds <= 0.0 {
             return None;
         }
@@ -425,7 +424,6 @@ fn counter_corrected_values(values: &[f64]) -> Option<Vec<f64>> {
     Some(out)
 }
 
-#[allow(clippy::cast_precision_loss)]
 fn boundary_value(timestamps: &[i64], values: &[f64], target_ms: i64) -> Option<f64> {
     if timestamps.len() != values.len() || timestamps.is_empty() {
         return None;
@@ -456,7 +454,7 @@ fn boundary_value(timestamps: &[i64], values: &[f64], target_ms: i64) -> Option<
     }
     let last_index = timestamps.len() - 1;
     let interval = timestamps[last_index].saturating_sub(timestamps[last_index - 1]);
-    if target_ms.saturating_sub(timestamps[last_index]) as f64 > interval as f64 * 1.1 {
+    if target_ms.saturating_sub(timestamps[last_index]).to_f64()? > interval.to_f64()? * 1.1 {
         return values.last().copied();
     }
     interpolate_boundary(
@@ -485,7 +483,6 @@ pub(super) fn instant_smoothed_boundary_value(
     boundary_value(timestamps, values, target_ms)
 }
 
-#[allow(clippy::cast_precision_loss)]
 fn interpolate_boundary(
     left_ts: i64,
     left_value: f64,
@@ -493,11 +490,11 @@ fn interpolate_boundary(
     right_value: f64,
     target_ms: i64,
 ) -> Option<f64> {
-    let interval = (right_ts - left_ts) as f64;
+    let interval = (right_ts - left_ts).to_f64()?;
     if interval <= 0.0 {
         return None;
     }
-    let ratio = (target_ms - left_ts) as f64 / interval;
+    let ratio = (target_ms - left_ts).to_f64()? / interval;
     Some(left_value + (right_value - left_value) * ratio)
 }
 
@@ -727,7 +724,6 @@ fn extrapolated_histogram_component(
     )
 }
 
-#[allow(clippy::cast_precision_loss)]
 fn extrapolate_histogram_delta(
     timestamps: &[i64],
     mut result: f64,
@@ -739,15 +735,15 @@ fn extrapolate_histogram_delta(
     let n = timestamps.len();
     let first_ts = timestamps[0];
     let last_ts = timestamps[n - 1];
-    let sampled_interval = (last_ts - first_ts) as f64 / 1000.0;
+    let sampled_interval = (last_ts - first_ts).to_f64()? / 1000.0;
     if sampled_interval <= 0.0 {
         return None;
     }
 
-    let average_duration_between_samples = sampled_interval / (n - 1) as f64;
+    let average_duration_between_samples = sampled_interval / (n - 1).to_f64()?;
     let extrapolation_threshold = average_duration_between_samples * 1.1;
-    let mut duration_to_start = (first_ts - range_start_ms) as f64 / 1000.0;
-    let mut duration_to_end = (range_end_ms - last_ts) as f64 / 1000.0;
+    let mut duration_to_start = (first_ts - range_start_ms).to_f64()? / 1000.0;
+    let mut duration_to_end = (range_end_ms - last_ts).to_f64()? / 1000.0;
 
     if duration_to_start >= extrapolation_threshold {
         duration_to_start = average_duration_between_samples / 2.0;
@@ -759,7 +755,7 @@ fn extrapolate_histogram_delta(
     let extrapolated_interval = sampled_interval + duration_to_start + duration_to_end;
     result *= extrapolated_interval / sampled_interval;
     if kind == RangeFn::Rate {
-        result /= range_ms as f64 / 1000.0;
+        result /= range_ms.to_f64()? / 1000.0;
     }
     Some(result)
 }
@@ -1109,7 +1105,6 @@ fn double_exponential_smoothing_sample_from_series(
 
 // Prometheus computes extrapolation in f64 seconds; timestamp/range deltas
 // intentionally enter that float domain here.
-#[allow(clippy::cast_precision_loss)]
 fn extrapolated_rate(
     timestamps: &[i64],
     values: &[f64],
@@ -1136,15 +1131,15 @@ fn extrapolated_rate(
 
     let first_ts = timestamps[0];
     let last_ts = timestamps[n - 1];
-    let sampled_interval = (last_ts - first_ts) as f64 / 1000.0;
+    let sampled_interval = (last_ts - first_ts).to_f64()? / 1000.0;
     if sampled_interval <= 0.0 {
         return None;
     }
 
-    let average_duration_between_samples = sampled_interval / (n - 1) as f64;
+    let average_duration_between_samples = sampled_interval / (n - 1).to_f64()?;
     let extrapolation_threshold = average_duration_between_samples * 1.1;
-    let mut duration_to_start = (first_ts - range_start_ms) as f64 / 1000.0;
-    let mut duration_to_end = (range_end_ms - last_ts) as f64 / 1000.0;
+    let mut duration_to_start = (first_ts - range_start_ms).to_f64()? / 1000.0;
+    let mut duration_to_end = (range_end_ms - last_ts).to_f64()? / 1000.0;
 
     if duration_to_start >= extrapolation_threshold {
         duration_to_start = average_duration_between_samples / 2.0;
@@ -1163,7 +1158,7 @@ fn extrapolated_rate(
     let extrapolate_to_interval = sampled_interval + duration_to_start + duration_to_end;
     result *= extrapolate_to_interval / sampled_interval;
     if kind == RangeFn::Rate {
-        let range_seconds = range_ms as f64 / 1000.0;
+        let range_seconds = range_ms.to_f64()? / 1000.0;
         if range_seconds <= 0.0 {
             return None;
         }
@@ -1212,7 +1207,6 @@ pub(super) fn align_subquery_start(start_ms: i64, step_ms: i64) -> i64 {
 }
 
 // Prometheus predicts gauges from a simple linear regression in f64 seconds.
-#[allow(clippy::cast_precision_loss)]
 fn predict_linear(samples: &[(i64, f64)], range_end_ms: i64, duration_seconds: f64) -> Option<f64> {
     let (slope, intercept) = regression_slope_and_intercept(samples, range_end_ms)?;
     Some(intercept + (slope * duration_seconds))
@@ -1256,12 +1250,10 @@ fn double_exponential_smoothing(
     Some(smoothed)
 }
 
-#[allow(clippy::cast_precision_loss)]
 fn regression_slope(samples: &[(i64, f64)], range_end_ms: i64) -> Option<f64> {
     regression_slope_and_intercept(samples, range_end_ms).map(|(slope, _)| slope)
 }
 
-#[allow(clippy::cast_precision_loss)]
 fn regression_slope_and_intercept(samples: &[(i64, f64)], range_end_ms: i64) -> Option<(f64, f64)> {
     if samples.len() < 2 {
         return None;
@@ -1271,7 +1263,7 @@ fn regression_slope_and_intercept(samples: &[(i64, f64)], range_end_ms: i64) -> 
     let mut sum_y = 0.0;
     let mut count = 0.0;
     for (timestamp, value) in samples {
-        sum_x += (*timestamp - range_end_ms) as f64 / 1000.0;
+        sum_x += (*timestamp - range_end_ms).to_f64()? / 1000.0;
         sum_y += value;
         count += 1.0;
     }
@@ -1281,7 +1273,7 @@ fn regression_slope_and_intercept(samples: &[(i64, f64)], range_end_ms: i64) -> 
     let mut covariance = 0.0;
     let mut variance = 0.0;
     for (timestamp, value) in samples {
-        let x = (*timestamp - range_end_ms) as f64 / 1000.0;
+        let x = (*timestamp - range_end_ms).to_f64()? / 1000.0;
         let x_delta = x - mean_x;
         covariance += x_delta * (value - mean_y);
         variance += x_delta * x_delta;
@@ -1297,7 +1289,6 @@ fn regression_slope_and_intercept(samples: &[(i64, f64)], range_end_ms: i64) -> 
 
 // Prometheus computes instant rate deltas in f64 seconds; timestamp deltas
 // intentionally enter that float domain here.
-#[allow(clippy::cast_precision_loss)]
 fn instant_delta(timestamps: &[i64], values: &[f64], kind: IrateFn) -> Option<f64> {
     let n = timestamps.len();
     if n < 2 || values.len() != n {
@@ -1311,7 +1302,7 @@ fn instant_delta(timestamps: &[i64], values: &[f64], kind: IrateFn) -> Option<f6
     }
 
     if matches!(kind, IrateFn::Irate) {
-        let interval = (timestamps[n - 1] - timestamps[n - 2]) as f64 / 1000.0;
+        let interval = (timestamps[n - 1] - timestamps[n - 2]).to_f64()? / 1000.0;
         if interval <= 0.0 {
             return None;
         }

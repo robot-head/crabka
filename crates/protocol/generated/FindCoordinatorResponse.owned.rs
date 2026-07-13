@@ -14,7 +14,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 6;
 pub const FLEXIBLE_MIN: i16 = 3;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -45,9 +46,9 @@ impl Encode for FindCoordinatorResponse {
         }
         if (1..=3).contains(&version) {
             if flex {
-                put_compact_nullable_string(buf, self.error_message.as_deref());
+                let () = put_compact_nullable_string(buf, self.error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.error_message.as_deref());
+                let () = put_nullable_string(buf, self.error_message.as_deref());
             }
         }
         if (0..=3).contains(&version) {
@@ -55,9 +56,9 @@ impl Encode for FindCoordinatorResponse {
         }
         if (0..=3).contains(&version) {
             if flex {
-                put_compact_string(buf, &self.host);
+                let () = put_compact_string(buf, &self.host);
             } else {
-                put_string(buf, &self.host);
+                let () = put_string(buf, &self.host);
             }
         }
         if (0..=3).contains(&version) {
@@ -220,9 +221,9 @@ impl Encode for Coordinator {
         let flex = version >= 3;
         if version >= 4 {
             if flex {
-                put_compact_string(buf, &self.key);
+                let () = put_compact_string(buf, &self.key);
             } else {
-                put_string(buf, &self.key);
+                let () = put_string(buf, &self.key);
             }
         }
         if version >= 4 {
@@ -230,9 +231,9 @@ impl Encode for Coordinator {
         }
         if version >= 4 {
             if flex {
-                put_compact_string(buf, &self.host);
+                let () = put_compact_string(buf, &self.host);
             } else {
-                put_string(buf, &self.host);
+                let () = put_string(buf, &self.host);
             }
         }
         if version >= 4 {
@@ -243,9 +244,9 @@ impl Encode for Coordinator {
         }
         if version >= 4 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message.as_deref());
+                let () = put_compact_nullable_string(buf, self.error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.error_message.as_deref());
+                let () = put_nullable_string(buf, self.error_message.as_deref());
             }
         }
         if flex {

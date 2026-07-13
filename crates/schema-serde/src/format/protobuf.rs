@@ -124,8 +124,7 @@ fn message_index(descriptor: &prost_reflect::MessageDescriptor) -> Vec<i32> {
     let target = descriptor.full_name();
     for (i, m) in file.messages().enumerate() {
         if m.full_name() == target {
-            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-            return vec![i as i32];
+            return vec![i32::try_from(i).expect("Protobuf message index must fit in i32")];
         }
     }
     vec![0]

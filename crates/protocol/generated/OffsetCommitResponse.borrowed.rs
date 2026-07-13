@@ -12,7 +12,8 @@ pub const MIN_VERSION: i16 = 2;
 pub const MAX_VERSION: i16 = 10;
 pub const FLEXIBLE_MIN: i16 = 8;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -22,6 +23,10 @@ pub struct OffsetCommitResponse<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl OffsetCommitResponse<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::offset_commit_response::OffsetCommitResponse {
         crate::owned::offset_commit_response::OffsetCommitResponse {
             throttle_time_ms: (self.throttle_time_ms),
@@ -131,6 +136,10 @@ pub struct OffsetCommitResponseTopic<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl OffsetCommitResponseTopic<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::offset_commit_response::OffsetCommitResponseTopic {
         crate::owned::offset_commit_response::OffsetCommitResponseTopic {
             name: (self.name).to_string(),
@@ -148,9 +157,9 @@ impl Encode for OffsetCommitResponseTopic<'_> {
         let flex = version >= 8;
         if (0..=9).contains(&version) {
             if flex {
-                put_compact_string(buf, self.name);
+                let () = put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name);
+                let () = put_string(buf, self.name);
             }
         }
         if version >= 10 {
@@ -255,6 +264,10 @@ pub struct OffsetCommitResponsePartition {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl OffsetCommitResponsePartition {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::offset_commit_response::OffsetCommitResponsePartition {
         crate::owned::offset_commit_response::OffsetCommitResponsePartition {
             partition_index: (self.partition_index),

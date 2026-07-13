@@ -16,7 +16,8 @@ pub const MIN_VERSION: i16 = 1;
 pub const MAX_VERSION: i16 = 10;
 pub const FLEXIBLE_MIN: i16 = 6;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -28,6 +29,10 @@ pub struct OffsetFetchResponse<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl OffsetFetchResponse<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::offset_fetch_response::OffsetFetchResponse {
         crate::owned::offset_fetch_response::OffsetFetchResponse {
             throttle_time_ms: (self.throttle_time_ms),
@@ -182,6 +187,10 @@ pub struct OffsetFetchResponseTopic<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl OffsetFetchResponseTopic<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::offset_fetch_response::OffsetFetchResponseTopic {
         crate::owned::offset_fetch_response::OffsetFetchResponseTopic {
             name: (self.name).to_string(),
@@ -198,9 +207,9 @@ impl Encode for OffsetFetchResponseTopic<'_> {
         let flex = version >= 6;
         if (0..=7).contains(&version) {
             if flex {
-                put_compact_string(buf, self.name);
+                let () = put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name);
+                let () = put_string(buf, self.name);
             }
         }
         if (0..=7).contains(&version) {
@@ -303,11 +312,15 @@ impl Default for OffsetFetchResponsePartition<'_> {
             committed_leader_epoch: -1i32,
             metadata: None,
             error_code: 0i16,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl OffsetFetchResponsePartition<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::offset_fetch_response::OffsetFetchResponsePartition {
         crate::owned::offset_fetch_response::OffsetFetchResponsePartition {
             partition_index: (self.partition_index),
@@ -333,9 +346,9 @@ impl Encode for OffsetFetchResponsePartition<'_> {
         }
         if (0..=7).contains(&version) {
             if flex {
-                put_compact_nullable_string(buf, self.metadata);
+                let () = put_compact_nullable_string(buf, self.metadata);
             } else {
-                put_nullable_string(buf, self.metadata);
+                let () = put_nullable_string(buf, self.metadata);
             }
         }
         if (0..=7).contains(&version) {
@@ -436,6 +449,10 @@ pub struct OffsetFetchResponseGroup<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl OffsetFetchResponseGroup<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::offset_fetch_response::OffsetFetchResponseGroup {
         crate::owned::offset_fetch_response::OffsetFetchResponseGroup {
             group_id: (self.group_id).to_string(),
@@ -453,9 +470,9 @@ impl Encode for OffsetFetchResponseGroup<'_> {
         let flex = version >= 6;
         if version >= 8 {
             if flex {
-                put_compact_string(buf, self.group_id);
+                let () = put_compact_string(buf, self.group_id);
             } else {
-                put_string(buf, self.group_id);
+                let () = put_string(buf, self.group_id);
             }
         }
         if version >= 8 {
@@ -558,6 +575,10 @@ pub struct OffsetFetchResponseTopics<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl OffsetFetchResponseTopics<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::offset_fetch_response::OffsetFetchResponseTopics {
         crate::owned::offset_fetch_response::OffsetFetchResponseTopics {
             name: (self.name).to_string(),
@@ -575,9 +596,9 @@ impl Encode for OffsetFetchResponseTopics<'_> {
         let flex = version >= 6;
         if (8..=9).contains(&version) {
             if flex {
-                put_compact_string(buf, self.name);
+                let () = put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name);
+                let () = put_string(buf, self.name);
             }
         }
         if version >= 10 {
@@ -692,11 +713,15 @@ impl Default for OffsetFetchResponsePartitions<'_> {
             committed_leader_epoch: -1i32,
             metadata: None,
             error_code: 0i16,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl OffsetFetchResponsePartitions<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::offset_fetch_response::OffsetFetchResponsePartitions {
         crate::owned::offset_fetch_response::OffsetFetchResponsePartitions {
             partition_index: (self.partition_index),
@@ -722,9 +747,9 @@ impl Encode for OffsetFetchResponsePartitions<'_> {
         }
         if version >= 8 {
             if flex {
-                put_compact_nullable_string(buf, self.metadata);
+                let () = put_compact_nullable_string(buf, self.metadata);
             } else {
-                put_nullable_string(buf, self.metadata);
+                let () = put_nullable_string(buf, self.metadata);
             }
         }
         if version >= 8 {

@@ -16,7 +16,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 9;
 pub const FLEXIBLE_MIN: i16 = 9;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -26,6 +27,10 @@ pub struct ProduceResponse<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl ProduceResponse<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::kafka_3_6_2::owned::produce_response::ProduceResponse {
         crate::kafka_3_6_2::owned::produce_response::ProduceResponse {
             responses: (self.responses)
@@ -137,6 +142,10 @@ pub struct TopicProduceResponse<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl TopicProduceResponse<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::kafka_3_6_2::owned::produce_response::TopicProduceResponse {
         crate::kafka_3_6_2::owned::produce_response::TopicProduceResponse {
             name: (self.name).to_string(),
@@ -153,9 +162,9 @@ impl Encode for TopicProduceResponse<'_> {
         let flex = version >= 9;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name);
+                let () = put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name);
+                let () = put_string(buf, self.name);
             }
         }
         if version >= 0 {
@@ -268,11 +277,15 @@ impl Default for PartitionProduceResponse<'_> {
             log_start_offset: -1i64,
             record_errors: Vec::new(),
             error_message: None,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl PartitionProduceResponse<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::kafka_3_6_2::owned::produce_response::PartitionProduceResponse {
@@ -319,9 +332,9 @@ impl Encode for PartitionProduceResponse<'_> {
         }
         if version >= 8 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message);
+                let () = put_compact_nullable_string(buf, self.error_message);
             } else {
-                put_nullable_string(buf, self.error_message);
+                let () = put_nullable_string(buf, self.error_message);
             }
         }
         if flex {
@@ -453,6 +466,10 @@ pub struct BatchIndexAndErrorMessage<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl BatchIndexAndErrorMessage<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::kafka_3_6_2::owned::produce_response::BatchIndexAndErrorMessage {
@@ -472,9 +489,9 @@ impl Encode for BatchIndexAndErrorMessage<'_> {
         }
         if version >= 8 {
             if flex {
-                put_compact_nullable_string(buf, self.batch_index_error_message);
+                let () = put_compact_nullable_string(buf, self.batch_index_error_message);
             } else {
-                put_nullable_string(buf, self.batch_index_error_message);
+                let () = put_nullable_string(buf, self.batch_index_error_message);
             }
         }
         if flex {

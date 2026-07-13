@@ -9,7 +9,7 @@ pub struct LogEnd {
     pub last_offset: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Event {
     /// The election timer fired.
     ElectionTimeout,

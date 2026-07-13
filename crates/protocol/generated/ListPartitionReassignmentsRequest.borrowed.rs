@@ -12,7 +12,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 0;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,11 +27,15 @@ impl Default for ListPartitionReassignmentsRequest<'_> {
         Self {
             timeout_ms: 60_000i32,
             topics: None,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl ListPartitionReassignmentsRequest<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::list_partition_reassignments_request::ListPartitionReassignmentsRequest {
@@ -156,6 +161,10 @@ pub struct ListPartitionReassignmentsTopics<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl ListPartitionReassignmentsTopics<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::list_partition_reassignments_request::ListPartitionReassignmentsTopics {
@@ -171,9 +180,9 @@ impl Encode for ListPartitionReassignmentsTopics<'_> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name);
+                let () = put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name);
+                let () = put_string(buf, self.name);
             }
         }
         if version >= 0 {

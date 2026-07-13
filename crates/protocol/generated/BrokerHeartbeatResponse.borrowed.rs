@@ -8,7 +8,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,11 +29,15 @@ impl Default for BrokerHeartbeatResponse {
             is_caught_up: false,
             is_fenced: true,
             should_shut_down: false,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl BrokerHeartbeatResponse {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::broker_heartbeat_response::BrokerHeartbeatResponse {
         crate::owned::broker_heartbeat_response::BrokerHeartbeatResponse {
             throttle_time_ms: (self.throttle_time_ms),

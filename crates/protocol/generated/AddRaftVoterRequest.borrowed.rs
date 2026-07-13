@@ -16,7 +16,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 1;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,14 +36,18 @@ impl Default for AddRaftVoterRequest<'_> {
             cluster_id: None,
             timeout_ms: 0i32,
             voter_id: 0i32,
-            voter_directory_id: Default::default(),
+            voter_directory_id: crate::primitives::uuid::Uuid::default(),
             listeners: Vec::new(),
             ack_when_committed: true,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl AddRaftVoterRequest<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::add_raft_voter_request::AddRaftVoterRequest {
         crate::owned::add_raft_voter_request::AddRaftVoterRequest {
             cluster_id: (self.cluster_id).map(std::string::ToString::to_string),
@@ -66,9 +71,9 @@ impl Encode for AddRaftVoterRequest<'_> {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.cluster_id);
+                let () = put_compact_nullable_string(buf, self.cluster_id);
             } else {
-                put_nullable_string(buf, self.cluster_id);
+                let () = put_nullable_string(buf, self.cluster_id);
             }
         }
         if version >= 0 {
@@ -216,6 +221,10 @@ pub struct Listener<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl Listener<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::add_raft_voter_request::Listener {
         crate::owned::add_raft_voter_request::Listener {
             name: (self.name).to_string(),
@@ -230,16 +239,16 @@ impl Encode for Listener<'_> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name);
+                let () = put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name);
+                let () = put_string(buf, self.name);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.host);
+                let () = put_compact_string(buf, self.host);
             } else {
-                put_string(buf, self.host);
+                let () = put_string(buf, self.host);
             }
         }
         if version >= 0 {

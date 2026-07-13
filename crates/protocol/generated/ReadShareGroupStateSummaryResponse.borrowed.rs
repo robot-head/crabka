@@ -15,7 +15,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 1;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -24,6 +25,10 @@ pub struct ReadShareGroupStateSummaryResponse<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl ReadShareGroupStateSummaryResponse<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::read_share_group_state_summary_response::ReadShareGroupStateSummaryResponse
@@ -125,6 +130,10 @@ pub struct ReadStateSummaryResult<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl ReadStateSummaryResult<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::read_share_group_state_summary_response::ReadStateSummaryResult {
@@ -240,11 +249,15 @@ impl Default for PartitionResult<'_> {
             leader_epoch: 0i32,
             start_offset: 0i64,
             delivery_complete_count: -1i32,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl PartitionResult<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::read_share_group_state_summary_response::PartitionResult {
@@ -271,9 +284,9 @@ impl Encode for PartitionResult<'_> {
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message);
+                let () = put_compact_nullable_string(buf, self.error_message);
             } else {
-                put_nullable_string(buf, self.error_message);
+                let () = put_nullable_string(buf, self.error_message);
             }
         }
         if version >= 0 {

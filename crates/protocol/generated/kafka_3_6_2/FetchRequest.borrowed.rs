@@ -15,7 +15,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 15;
 pub const FLEXIBLE_MIN: i16 = 12;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,12 +49,16 @@ impl Default for FetchRequest<'_> {
             forgotten_topics_data: Vec::new(),
             rack_id: "",
             cluster_id: None,
-            replica_state: Default::default(),
-            unknown_tagged_fields: Default::default(),
+            replica_state: <ReplicaState>::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
-impl FetchRequest<'_> {
+impl<'a> FetchRequest<'a> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::kafka_3_6_2::owned::fetch_request::FetchRequest {
         crate::kafka_3_6_2::owned::fetch_request::FetchRequest {
             replica_id: (self.replica_id),
@@ -74,37 +79,47 @@ impl FetchRequest<'_> {
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
-}
-impl Encode for FetchRequest<'_> {
-    fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
-        if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion {
-                api_key: API_KEY,
-                version,
-            });
-        }
-        let flex = is_flexible(version);
+    fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if (0..=14).contains(&version) {
             put_i32(buf, self.replica_id);
         }
+    }
+    fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
             put_i32(buf, self.max_wait_ms);
         }
+    }
+    fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
             put_i32(buf, self.min_bytes);
         }
+    }
+    fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 3 {
             put_i32(buf, self.max_bytes);
         }
+    }
+    fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 4 {
             put_i8(buf, self.isolation_level);
         }
+    }
+    fn encode_field_5<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 7 {
             put_i32(buf, self.session_id);
         }
+    }
+    fn encode_field_6<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 7 {
             put_i32(buf, self.session_epoch);
         }
+    }
+    fn encode_field_7<B: BufMut>(
+        &self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
             {
                 crate::primitives::array::put_array_len(buf, (self.topics).len(), flex);
@@ -113,6 +128,14 @@ impl Encode for FetchRequest<'_> {
                 }
             }
         }
+        Ok(())
+    }
+    fn encode_field_8<B: BufMut>(
+        &self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 7 {
             {
                 crate::primitives::array::put_array_len(
@@ -125,16 +148,21 @@ impl Encode for FetchRequest<'_> {
                 }
             }
         }
+        Ok(())
+    }
+    fn encode_field_9<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if version >= 11 {
             if flex {
-                put_compact_string(buf, self.rack_id);
+                let () = put_compact_string(buf, self.rack_id);
             } else {
-                put_string(buf, self.rack_id);
+                let () = put_string(buf, self.rack_id);
             }
         }
+    }
+    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if flex {
             let mut tagged = WriteTaggedFields::new();
-            if !(self.cluster_id.is_none()) {
+            if self.cluster_id.is_some() {
                 let payload = encode_to_bytes(
                     if flex {
                         compact_nullable_string_len(self.cluster_id.as_deref())
@@ -143,9 +171,9 @@ impl Encode for FetchRequest<'_> {
                     },
                     |b| {
                         if flex {
-                            put_compact_nullable_string(b, self.cluster_id.as_deref());
+                            let () = put_compact_nullable_string(b, self.cluster_id.as_deref());
                         } else {
-                            put_nullable_string(b, self.cluster_id.as_deref());
+                            let () = put_nullable_string(b, self.cluster_id.as_deref());
                         }
                         Ok(())
                     },
@@ -161,6 +189,195 @@ impl Encode for FetchRequest<'_> {
             }
             tagged.write(buf, &self.unknown_tagged_fields);
         }
+    }
+    fn decode_field_0(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if (0..=14).contains(&version) {
+            out.replica_id = get_i32(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_1(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.max_wait_ms = get_i32(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_2(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.min_bytes = get_i32(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_3(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 3 {
+            out.max_bytes = get_i32(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_4(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 4 {
+            out.isolation_level = get_i8(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_5(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 7 {
+            out.session_id = get_i32(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_6(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 7 {
+            out.session_epoch = get_i32(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_7(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.topics = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(FetchTopic::decode_borrow(buf, version)?);
+                }
+                v
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_8(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 7 {
+            out.forgotten_topics_data = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(ForgottenTopic::decode_borrow(buf, version)?);
+                }
+                v
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_9(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 11 {
+            out.rack_id = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        Ok(())
+    }
+    fn decode_tagged_fields(
+        out: &mut Self,
+        buf: &mut &'a [u8],
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if flex {
+            let mut tag_cluster_id = None;
+            let mut tag_replica_state = None;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |tag, payload| match tag {
+                0 => {
+                    tag_cluster_id = Some({
+                        let b: &mut &[u8] = payload;
+                        if flex {
+                            crate::primitives::string_bytes::get_compact_nullable_string_owned(b)?
+                        } else {
+                            crate::primitives::string_bytes::get_nullable_string_owned(b)?
+                        }
+                    });
+                    Ok(true)
+                }
+                1 => {
+                    tag_replica_state = Some({
+                        let b: &mut &[u8] = payload;
+                        ReplicaState::decode_borrow(b, version)?
+                    });
+                    Ok(true)
+                }
+                _ => Ok(false),
+            })?;
+            if let Some(v) = tag_cluster_id {
+                out.cluster_id = v;
+            }
+            if let Some(v) = tag_replica_state {
+                out.replica_state = v;
+            }
+        }
+        Ok(())
+    }
+}
+impl Encode for FetchRequest<'_> {
+    fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
+        if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
+        }
+        let flex = is_flexible(version);
+        self.encode_field_0(buf, version, flex);
+        self.encode_field_1(buf, version, flex);
+        self.encode_field_2(buf, version, flex);
+        self.encode_field_3(buf, version, flex);
+        self.encode_field_4(buf, version, flex);
+        self.encode_field_5(buf, version, flex);
+        self.encode_field_6(buf, version, flex);
+        self.encode_field_7(buf, version, flex)?;
+        self.encode_field_8(buf, version, flex)?;
+        self.encode_field_9(buf, version, flex);
+        self.encode_tagged_fields(buf, version, flex);
         Ok(())
     }
     fn encoded_len(&self, version: i16) -> usize {
@@ -217,7 +434,7 @@ impl Encode for FetchRequest<'_> {
         }
         if flex {
             let mut known_pairs: Vec<(u32, usize)> = Vec::new();
-            if !(self.cluster_id.is_none()) {
+            if self.cluster_id.is_some() {
                 known_pairs.push((
                     0,
                     if flex {
@@ -245,85 +462,17 @@ impl<'de> DecodeBorrow<'de> for FetchRequest<'de> {
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if (0..=14).contains(&version) {
-            out.replica_id = get_i32(buf)?;
-        }
-        if version >= 0 {
-            out.max_wait_ms = get_i32(buf)?;
-        }
-        if version >= 0 {
-            out.min_bytes = get_i32(buf)?;
-        }
-        if version >= 3 {
-            out.max_bytes = get_i32(buf)?;
-        }
-        if version >= 4 {
-            out.isolation_level = get_i8(buf)?;
-        }
-        if version >= 7 {
-            out.session_id = get_i32(buf)?;
-        }
-        if version >= 7 {
-            out.session_epoch = get_i32(buf)?;
-        }
-        if version >= 0 {
-            out.topics = {
-                let n = crate::primitives::array::get_array_len(buf, flex)?;
-                let mut v = Vec::with_capacity(n);
-                for _ in 0..n {
-                    v.push(FetchTopic::decode_borrow(buf, version)?);
-                }
-                v
-            };
-        }
-        if version >= 7 {
-            out.forgotten_topics_data = {
-                let n = crate::primitives::array::get_array_len(buf, flex)?;
-                let mut v = Vec::with_capacity(n);
-                for _ in 0..n {
-                    v.push(ForgottenTopic::decode_borrow(buf, version)?);
-                }
-                v
-            };
-        }
-        if version >= 11 {
-            out.rack_id = if flex {
-                get_compact_string_borrowed(buf)?
-            } else {
-                get_string_borrowed(buf)?
-            };
-        }
-        if flex {
-            let mut tag_cluster_id = None;
-            let mut tag_replica_state = None;
-            out.unknown_tagged_fields = read_tagged_fields(buf, |tag, payload| match tag {
-                0 => {
-                    tag_cluster_id = Some({
-                        let b: &mut &[u8] = payload;
-                        if flex {
-                            crate::primitives::string_bytes::get_compact_nullable_string_owned(b)?
-                        } else {
-                            crate::primitives::string_bytes::get_nullable_string_owned(b)?
-                        }
-                    });
-                    Ok(true)
-                }
-                1 => {
-                    tag_replica_state = Some({
-                        let b: &mut &[u8] = payload;
-                        ReplicaState::decode_borrow(b, version)?
-                    });
-                    Ok(true)
-                }
-                _ => Ok(false),
-            })?;
-            if let Some(v) = tag_cluster_id {
-                out.cluster_id = v;
-            }
-            if let Some(v) = tag_replica_state {
-                out.replica_state = v;
-            }
-        }
+        Self::decode_field_0(&mut out, buf, version, flex)?;
+        Self::decode_field_1(&mut out, buf, version, flex)?;
+        Self::decode_field_2(&mut out, buf, version, flex)?;
+        Self::decode_field_3(&mut out, buf, version, flex)?;
+        Self::decode_field_4(&mut out, buf, version, flex)?;
+        Self::decode_field_5(&mut out, buf, version, flex)?;
+        Self::decode_field_6(&mut out, buf, version, flex)?;
+        Self::decode_field_7(&mut out, buf, version, flex)?;
+        Self::decode_field_8(&mut out, buf, version, flex)?;
+        Self::decode_field_9(&mut out, buf, version, flex)?;
+        Self::decode_tagged_fields(&mut out, buf, version, flex)?;
         Ok(out)
     }
 }
@@ -382,11 +531,15 @@ impl Default for ReplicaState {
         Self {
             replica_id: -1i32,
             replica_epoch: -1i64,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl ReplicaState {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::kafka_3_6_2::owned::fetch_request::ReplicaState {
         crate::kafka_3_6_2::owned::fetch_request::ReplicaState {
             replica_id: (self.replica_id),
@@ -464,6 +617,10 @@ pub struct FetchTopic<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl FetchTopic<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::kafka_3_6_2::owned::fetch_request::FetchTopic {
         crate::kafka_3_6_2::owned::fetch_request::FetchTopic {
             topic: (self.topic).to_string(),
@@ -481,9 +638,9 @@ impl Encode for FetchTopic<'_> {
         let flex = version >= 12;
         if (0..=12).contains(&version) {
             if flex {
-                put_compact_string(buf, self.topic);
+                let () = put_compact_string(buf, self.topic);
             } else {
-                put_string(buf, self.topic);
+                let () = put_string(buf, self.topic);
             }
         }
         if version >= 13 {
@@ -600,11 +757,15 @@ impl Default for FetchPartition {
             last_fetched_epoch: -1i32,
             log_start_offset: -1i64,
             partition_max_bytes: 0i32,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl FetchPartition {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::kafka_3_6_2::owned::fetch_request::FetchPartition {
         crate::kafka_3_6_2::owned::fetch_request::FetchPartition {
             partition: (self.partition),
@@ -734,6 +895,10 @@ pub struct ForgottenTopic<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl ForgottenTopic<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::kafka_3_6_2::owned::fetch_request::ForgottenTopic {
         crate::kafka_3_6_2::owned::fetch_request::ForgottenTopic {
             topic: (self.topic).to_string(),
@@ -748,9 +913,9 @@ impl Encode for ForgottenTopic<'_> {
         let flex = version >= 12;
         if (7..=12).contains(&version) {
             if flex {
-                put_compact_string(buf, self.topic);
+                let () = put_compact_string(buf, self.topic);
             } else {
-                put_string(buf, self.topic);
+                let () = put_string(buf, self.topic);
             }
         }
         if version >= 13 {

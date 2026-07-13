@@ -14,7 +14,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 1;
 pub const FLEXIBLE_MIN: i16 = 1;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -25,6 +26,10 @@ pub struct BeginQuorumEpochResponse<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl BeginQuorumEpochResponse<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::begin_quorum_epoch_response::BeginQuorumEpochResponse {
         crate::owned::begin_quorum_epoch_response::BeginQuorumEpochResponse {
             error_code: (self.error_code),
@@ -156,12 +161,7 @@ impl<'de> DecodeBorrow<'de> for BeginQuorumEpochResponse<'de> {
                             let n = crate::primitives::array::get_array_len(b, flex)?;
                             let mut v = Vec::with_capacity(n);
                             for _ in 0..n {
-                                v.push(
-                                            crate::owned::begin_quorum_epoch_response::NodeEndpoint::decode(
-                                                b,
-                                                version,
-                                            )?,
-                                        );
+                                v.push(crate::owned::begin_quorum_epoch_response::NodeEndpoint::decode(b, version)?);
                             }
                             v
                         }
@@ -202,6 +202,10 @@ pub struct TopicData<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl TopicData<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::begin_quorum_epoch_response::TopicData {
         crate::owned::begin_quorum_epoch_response::TopicData {
             topic_name: (self.topic_name).to_string(),
@@ -218,9 +222,9 @@ impl Encode for TopicData<'_> {
         let flex = version >= 1;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.topic_name);
+                let () = put_compact_string(buf, self.topic_name);
             } else {
-                put_string(buf, self.topic_name);
+                let () = put_string(buf, self.topic_name);
             }
         }
         if version >= 0 {
@@ -315,6 +319,10 @@ pub struct PartitionData {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl PartitionData {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::begin_quorum_epoch_response::PartitionData {
         crate::owned::begin_quorum_epoch_response::PartitionData {
             partition_index: (self.partition_index),
@@ -418,6 +426,10 @@ pub struct NodeEndpoint<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl NodeEndpoint<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::begin_quorum_epoch_response::NodeEndpoint {
         crate::owned::begin_quorum_epoch_response::NodeEndpoint {
             node_id: (self.node_id),
@@ -435,9 +447,9 @@ impl Encode for NodeEndpoint<'_> {
         }
         if version >= 1 {
             if flex {
-                put_compact_string(buf, self.host);
+                let () = put_compact_string(buf, self.host);
             } else {
-                put_string(buf, self.host);
+                let () = put_string(buf, self.host);
             }
         }
         if version >= 1 {

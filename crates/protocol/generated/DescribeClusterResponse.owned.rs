@@ -16,7 +16,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,8 +43,189 @@ impl Default for DescribeClusterResponse {
             controller_id: -1i32,
             brokers: Vec::new(),
             cluster_authorized_operations: -2_147_483_648i32,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
+    }
+}
+impl DescribeClusterResponse {
+    fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
+        if version >= 0 {
+            put_i32(buf, self.throttle_time_ms);
+        }
+    }
+    fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
+        if version >= 0 {
+            put_i16(buf, self.error_code);
+        }
+    }
+    fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
+        if version >= 0 {
+            if flex {
+                let () = put_compact_nullable_string(buf, self.error_message.as_deref());
+            } else {
+                let () = put_nullable_string(buf, self.error_message.as_deref());
+            }
+        }
+    }
+    fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
+        if version >= 1 {
+            put_i8(buf, self.endpoint_type);
+        }
+    }
+    fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
+        if version >= 0 {
+            if flex {
+                let () = put_compact_string(buf, &self.cluster_id);
+            } else {
+                let () = put_string(buf, &self.cluster_id);
+            }
+        }
+    }
+    fn encode_field_5<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
+        if version >= 0 {
+            put_i32(buf, self.controller_id);
+        }
+    }
+    fn encode_field_6<B: BufMut>(
+        &self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.brokers).len(), flex);
+                for it in &self.brokers {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
+        Ok(())
+    }
+    fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
+        if version >= 0 {
+            put_i32(buf, self.cluster_authorized_operations);
+        }
+    }
+    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {
+        if flex {
+            let tagged = WriteTaggedFields::new();
+            tagged.write(buf, &self.unknown_tagged_fields);
+        }
+    }
+    fn decode_field_0<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.throttle_time_ms = get_i32(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_1<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.error_code = get_i16(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_2<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.error_message = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_3<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 1 {
+            out.endpoint_type = get_i8(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_4<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.cluster_id = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_5<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.controller_id = get_i32(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_6<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.brokers = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(DescribeClusterBroker::decode(buf, version)?);
+                }
+                v
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_7<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.cluster_authorized_operations = get_i32(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_tagged_fields<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        _version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
+        if flex {
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
+        }
+        Ok(())
     }
 }
 impl Encode for DescribeClusterResponse {
@@ -55,47 +237,15 @@ impl Encode for DescribeClusterResponse {
             });
         }
         let flex = is_flexible(version);
-        if version >= 0 {
-            put_i32(buf, self.throttle_time_ms);
-        }
-        if version >= 0 {
-            put_i16(buf, self.error_code);
-        }
-        if version >= 0 {
-            if flex {
-                put_compact_nullable_string(buf, self.error_message.as_deref());
-            } else {
-                put_nullable_string(buf, self.error_message.as_deref());
-            }
-        }
-        if version >= 1 {
-            put_i8(buf, self.endpoint_type);
-        }
-        if version >= 0 {
-            if flex {
-                put_compact_string(buf, &self.cluster_id);
-            } else {
-                put_string(buf, &self.cluster_id);
-            }
-        }
-        if version >= 0 {
-            put_i32(buf, self.controller_id);
-        }
-        if version >= 0 {
-            {
-                crate::primitives::array::put_array_len(buf, (self.brokers).len(), flex);
-                for it in &self.brokers {
-                    it.encode(buf, version)?;
-                }
-            }
-        }
-        if version >= 0 {
-            put_i32(buf, self.cluster_authorized_operations);
-        }
-        if flex {
-            let tagged = WriteTaggedFields::new();
-            tagged.write(buf, &self.unknown_tagged_fields);
-        }
+        self.encode_field_0(buf, version, flex);
+        self.encode_field_1(buf, version, flex);
+        self.encode_field_2(buf, version, flex);
+        self.encode_field_3(buf, version, flex);
+        self.encode_field_4(buf, version, flex);
+        self.encode_field_5(buf, version, flex);
+        self.encode_field_6(buf, version, flex)?;
+        self.encode_field_7(buf, version, flex);
+        self.encode_tagged_fields(buf, version, flex);
         Ok(())
     }
     fn encoded_len(&self, version: i16) -> usize {
@@ -158,48 +308,15 @@ impl Decode<'_> for DescribeClusterResponse {
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 {
-            out.throttle_time_ms = get_i32(buf)?;
-        }
-        if version >= 0 {
-            out.error_code = get_i16(buf)?;
-        }
-        if version >= 0 {
-            out.error_message = if flex {
-                get_compact_nullable_string_owned(buf)?
-            } else {
-                get_nullable_string_owned(buf)?
-            };
-        }
-        if version >= 1 {
-            out.endpoint_type = get_i8(buf)?;
-        }
-        if version >= 0 {
-            out.cluster_id = if flex {
-                get_compact_string_owned(buf)?
-            } else {
-                get_string_owned(buf)?
-            };
-        }
-        if version >= 0 {
-            out.controller_id = get_i32(buf)?;
-        }
-        if version >= 0 {
-            out.brokers = {
-                let n = crate::primitives::array::get_array_len(buf, flex)?;
-                let mut v = Vec::with_capacity(n);
-                for _ in 0..n {
-                    v.push(DescribeClusterBroker::decode(buf, version)?);
-                }
-                v
-            };
-        }
-        if version >= 0 {
-            out.cluster_authorized_operations = get_i32(buf)?;
-        }
-        if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
-        }
+        Self::decode_field_0(&mut out, buf, version, flex)?;
+        Self::decode_field_1(&mut out, buf, version, flex)?;
+        Self::decode_field_2(&mut out, buf, version, flex)?;
+        Self::decode_field_3(&mut out, buf, version, flex)?;
+        Self::decode_field_4(&mut out, buf, version, flex)?;
+        Self::decode_field_5(&mut out, buf, version, flex)?;
+        Self::decode_field_6(&mut out, buf, version, flex)?;
+        Self::decode_field_7(&mut out, buf, version, flex)?;
+        Self::decode_tagged_fields(&mut out, buf, version, flex)?;
         Ok(out)
     }
 }
@@ -252,9 +369,9 @@ impl Encode for DescribeClusterBroker {
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.host);
+                let () = put_compact_string(buf, &self.host);
             } else {
-                put_string(buf, &self.host);
+                let () = put_string(buf, &self.host);
             }
         }
         if version >= 0 {
@@ -262,9 +379,9 @@ impl Encode for DescribeClusterBroker {
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.rack.as_deref());
+                let () = put_compact_nullable_string(buf, self.rack.as_deref());
             } else {
-                put_nullable_string(buf, self.rack.as_deref());
+                let () = put_nullable_string(buf, self.rack.as_deref());
             }
         }
         if version >= 2 {
@@ -385,7 +502,7 @@ pub fn default_json(version: i16) -> ::serde_json::Value {
     obj.insert("brokers".to_string(), ::serde_json::Value::Array(vec![]));
     obj.insert(
         "clusterAuthorizedOperations".to_string(),
-        ::serde_json::json!(-2147483648),
+        ::serde_json::json!(-2_147_483_648),
     );
     ::serde_json::Value::Object(obj)
 }

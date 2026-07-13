@@ -1,13 +1,9 @@
 //! OTLP metrics translation into the shared ingest decode target.
 
-#![allow(
-    clippy::cast_precision_loss,
-    reason = "OTLP metric points expose integer counts that the internal metric sample model stores as f64."
-)]
-
 use std::collections::BTreeMap;
 
 use crabka_blockstore::Labels;
+use num_traits::ToPrimitive;
 use opentelemetry_proto::tonic::{
     common::v1::{AnyValue, InstrumentationScope, KeyValue, any_value},
     metrics::v1::{
@@ -256,6 +252,8 @@ impl OtlpError {
 }
 
 /// Decode a protobuf-encoded `MetricsData` body.
+/// # Errors
+/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub fn decode_otlp_bytes(
     body: &[u8],
     strategy: TranslationStrategy,
@@ -264,6 +262,8 @@ pub fn decode_otlp_bytes(
 }
 
 /// Decode a protobuf-encoded `MetricsData` body with delta-state handling.
+/// # Errors
+/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub fn decode_otlp_stateful_bytes(
     body: &[u8],
     strategy: TranslationStrategy,
@@ -273,6 +273,8 @@ pub fn decode_otlp_stateful_bytes(
 }
 
 /// Translate OTLP metrics into the common ingest representation.
+/// # Errors
+/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub fn decode_otlp(
     data: &MetricsData,
     strategy: TranslationStrategy,
@@ -282,6 +284,8 @@ pub fn decode_otlp(
 }
 
 /// Translate OTLP metrics with delta-temporality accumulation across calls.
+/// # Errors
+/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub fn decode_otlp_stateful(
     data: &MetricsData,
     strategy: TranslationStrategy,
@@ -522,6 +526,8 @@ fn prometheus_base_unit_suffix(unit: &str) -> Option<&'static str> {
 }
 
 /// Convert one OTLP exponential histogram point to a native histogram sample.
+/// # Errors
+/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub fn exponential_histogram_to_native(
     point: &ExponentialHistogramDataPoint,
 ) -> Result<NativeHistogram, OtlpError> {
@@ -550,8 +556,8 @@ pub fn exponential_histogram_to_native(
         is_float: false,
         reset_hint: ResetHint::Unknown,
         zero_threshold: point.zero_threshold,
-        zero_count: point.zero_count as f64,
-        count: point.count as f64,
+        zero_count: point.zero_count.to_f64().unwrap_or(f64::MAX),
+        count: point.count.to_f64().unwrap_or(f64::MAX),
         sum: point.sum.unwrap_or(0.0),
         positive_spans,
         positive_counts,
@@ -863,7 +869,7 @@ fn classic_histogram_series(
             ),
             samples: vec![DecodedSample::with_start_timestamp(
                 timestamp,
-                cumulative as f64,
+                cumulative.to_f64().unwrap_or(f64::MAX),
                 (point.start_time_unix_nano != 0)
                     .then_some(nanos_to_millis(point.start_time_unix_nano)),
             )],
@@ -882,7 +888,7 @@ fn classic_histogram_series(
         ),
         samples: vec![DecodedSample::with_start_timestamp(
             timestamp,
-            point.count as f64,
+            point.count.to_f64().unwrap_or(f64::MAX),
             (point.start_time_unix_nano != 0)
                 .then_some(nanos_to_millis(point.start_time_unix_nano)),
         )],
@@ -1008,7 +1014,7 @@ fn summary_point_series(
         ),
         samples: vec![DecodedSample::with_start_timestamp(
             timestamp,
-            point.count as f64,
+            point.count.to_f64().unwrap_or(f64::MAX),
             (point.start_time_unix_nano != 0)
                 .then_some(nanos_to_millis(point.start_time_unix_nano)),
         )],
@@ -1092,7 +1098,7 @@ fn attribute_value(value: Option<&AnyValue>) -> Option<String> {
 fn number_value(point: &NumberDataPoint) -> Option<f64> {
     match point.value {
         Some(number_data_point::Value::AsDouble(value)) => Some(value),
-        Some(number_data_point::Value::AsInt(value)) => Some(value as f64),
+        Some(number_data_point::Value::AsInt(value)) => value.to_f64(),
         None => None,
     }
 }
@@ -1142,7 +1148,7 @@ fn exemplar_belongs_to_bucket(value: f64, point: &HistogramDataPoint, bucket_idx
 fn exemplar(exemplar: &OtlpExemplar) -> Option<DecodedExemplar> {
     let value = match exemplar.value {
         Some(otlp_exemplar::Value::AsDouble(value)) => value,
-        Some(otlp_exemplar::Value::AsInt(value)) => value as f64,
+        Some(otlp_exemplar::Value::AsInt(value)) => value.to_f64().unwrap_or(f64::MAX),
         None => return None,
     };
     let mut labels = Labels::new();
@@ -1244,7 +1250,7 @@ fn spans_from_buckets(buckets: BTreeMap<i32, u64>) -> (Vec<BucketSpan>, Vec<f64>
             current_span_start = Some(offset);
         }
         previous_offset = Some(offset);
-        counts.push(count as f64);
+        counts.push(count.to_f64().unwrap_or(f64::MAX));
     }
 
     if let (Some(start), Some(previous)) = (current_span_start, previous_offset) {
@@ -1259,7 +1265,7 @@ fn spans_from_buckets(buckets: BTreeMap<i32, u64>) -> (Vec<BucketSpan>, Vec<f64>
 
 #[cfg(test)]
 mod tests {
-    use assert2::check;
+    use assert2::{assert, check};
     use crabka_blockstore::Labels;
     use opentelemetry_proto::tonic::{
         common::v1::{AnyValue, InstrumentationScope, KeyValue, any_value},
@@ -1368,27 +1374,27 @@ mod tests {
 
         let series = decode_otlp(&data, TranslationStrategy::default()).unwrap();
 
-        assert2::assert!(
-            series
-                == vec![DecodedSeries {
-                    labels: labels(&[
-                        ("__name__", "system_cpu_utilization"),
-                        ("host_name", "api-1")
-                    ]),
-                    samples: vec![DecodedSample {
-                        timestamp_ms: 1,
-                        value: 0.42,
-                        start_timestamp_ms: None,
-                    }],
-                    histograms: Vec::new(),
-                    exemplars: Vec::new(),
-                    metadata: Some(DecodedMetadata {
-                        metric_family_name: "system_cpu_utilization".into(),
-                        metric_type: "gauge".into(),
-                        help: String::new(),
-                        unit: String::new(),
-                    }),
-                }]
+        assert_eq!(
+            series,
+            vec![DecodedSeries {
+                labels: labels(&[
+                    ("__name__", "system_cpu_utilization"),
+                    ("host_name", "api-1")
+                ]),
+                samples: vec![DecodedSample {
+                    timestamp_ms: 1,
+                    value: 0.42,
+                    start_timestamp_ms: None,
+                }],
+                histograms: Vec::new(),
+                exemplars: Vec::new(),
+                metadata: Some(DecodedMetadata {
+                    metric_family_name: "system_cpu_utilization".into(),
+                    metric_type: "gauge".into(),
+                    help: String::new(),
+                    unit: String::new(),
+                }),
+            }]
         );
     }
 
@@ -1404,8 +1410,8 @@ mod tests {
 
         let err = decode_otlp(&data, TranslationStrategy::default()).unwrap_err();
 
-        assert2::assert!(matches!(err, super::OtlpError::Invalid(_, _)));
-        assert2::assert!(format!("{err}").contains("too far in the future"));
+        assert!(matches!(err, super::OtlpError::Invalid(_, _)));
+        assert!(format!("{err}").contains("too far in the future"));
     }
 
     #[test]
@@ -1423,14 +1429,14 @@ mod tests {
         let series = decode_otlp(&data, TranslationStrategy::default()).unwrap();
 
         let metadata = series[0].metadata.as_ref().expect("metric metadata");
-        assert2::assert!(
-            *metadata
-                == DecodedMetadata {
-                    metric_family_name: "system_cpu_utilization".into(),
-                    metric_type: "gauge".into(),
-                    help: "CPU utilization ratio.".into(),
-                    unit: "1".into(),
-                }
+        assert_eq!(
+            *metadata,
+            DecodedMetadata {
+                metric_family_name: "system_cpu_utilization".into(),
+                metric_type: "gauge".into(),
+                help: "CPU utilization ratio.".into(),
+                unit: "1".into(),
+            }
         );
     }
 
@@ -1457,8 +1463,8 @@ mod tests {
 
         let series = decode_otlp(&data, TranslationStrategy::default()).unwrap();
 
-        assert2::assert!(series.len() == 1);
-        assert2::assert!(series[0].exemplars.is_empty());
+        assert!(series.len() == 1);
+        assert!(series[0].exemplars.is_empty());
     }
 
     #[test]
@@ -1475,8 +1481,8 @@ mod tests {
 
         let series = decode_otlp(&data, TranslationStrategy::default()).unwrap();
 
-        assert2::assert!(series[0].labels.get("__name__") == Some("http_server_requests_total"));
-        assert2::assert!(series[0].samples.as_slice() == &[DecodedSample::new(2, 7.0)][..]);
+        assert!(series[0].labels.get("__name__") == Some("http_server_requests_total"));
+        assert!(series[0].samples == vec![(2, 7.0)]);
     }
 
     #[test]
@@ -1493,7 +1499,7 @@ mod tests {
 
         let series = decode_otlp(&data, TranslationStrategy::default()).unwrap();
 
-        assert2::assert!(series[0].labels.get("__name__") == Some("http_server_requests_total"));
+        assert!(series[0].labels.get("__name__") == Some("http_server_requests_total"));
     }
 
     #[test]
@@ -1511,16 +1517,10 @@ mod tests {
 
         let series = decode_otlp(&data, TranslationStrategy::default()).unwrap();
 
-        assert2::assert!(
-            series[0].labels.get("__name__") == Some("k8s_pod_cpu_time_seconds_total")
-        );
-        assert2::assert!(
-            series[0]
-                .metadata
-                .as_ref()
-                .map(|metadata| metadata.metric_family_name.as_str())
-                == Some("k8s_pod_cpu_time_seconds_total")
-        );
+        assert!(series[0].labels.get("__name__") == Some("k8s_pod_cpu_time_seconds_total"));
+        assert!(series[0].metadata.as_ref().is_some_and(
+            |metadata| metadata.metric_family_name == "k8s_pod_cpu_time_seconds_total"
+        ));
     }
 
     #[test]
@@ -1536,7 +1536,7 @@ mod tests {
 
         let series = decode_otlp(&data, TranslationStrategy::default()).unwrap();
 
-        assert2::assert!(series[0].labels.get("__name__") == Some("network_io_bytes_per_second"));
+        assert!(series[0].labels.get("__name__") == Some("network_io_bytes_per_second"));
     }
 
     #[test]
@@ -1552,9 +1552,7 @@ mod tests {
 
         let series = decode_otlp(&data, TranslationStrategy::default()).unwrap();
 
-        assert2::assert!(
-            series[0].labels.get("__name__") == Some("vehicle_speed_meters_per_second")
-        );
+        assert!(series[0].labels.get("__name__") == Some("vehicle_speed_meters_per_second"));
     }
 
     #[test]
@@ -1570,7 +1568,7 @@ mod tests {
 
         let series = decode_otlp(&data, TranslationStrategy::default()).unwrap();
 
-        assert2::assert!(series[0].labels.get("__name__") == Some("network_io_bytes_per_second"));
+        assert!(series[0].labels.get("__name__") == Some("network_io_bytes_per_second"));
     }
 
     #[test]
@@ -1605,7 +1603,7 @@ mod tests {
 
             let series = decode_otlp(&data, TranslationStrategy::default()).unwrap();
 
-            assert2::assert!(series[0].labels.get("__name__") == Some(expected_name));
+            assert!(series[0].labels.get("__name__") == Some(expected_name));
         }
     }
 
@@ -1637,8 +1635,8 @@ mod tests {
             decode_otlp_stateful(&second, TranslationStrategy::default(), &mut accumulator)
                 .unwrap();
 
-        assert2::assert!(first_series[0].samples == vec![(2, 7.0)]);
-        assert2::assert!(second_series[0].samples == vec![(3, 12.0)]);
+        assert!(first_series[0].samples == vec![(2, 7.0)]);
+        assert!(second_series[0].samples == vec![(3, 12.0)]);
     }
 
     #[test]
@@ -1678,32 +1676,32 @@ mod tests {
             help: String::new(),
             unit: String::new(),
         });
-        assert2::assert!(
-            series
-                == vec![
-                    DecodedSeries {
-                        labels: expected_labels.clone(),
-                        samples: vec![DecodedSample {
-                            timestamp_ms: 2,
-                            value: 7.0,
-                            start_timestamp_ms: Some(1),
-                        }],
-                        histograms: Vec::new(),
-                        exemplars: Vec::new(),
-                        metadata: expected_metadata.clone(),
-                    },
-                    DecodedSeries {
-                        labels: expected_labels,
-                        samples: vec![DecodedSample {
-                            timestamp_ms: 3,
-                            value: 12.0,
-                            start_timestamp_ms: Some(1),
-                        }],
-                        histograms: Vec::new(),
-                        exemplars: Vec::new(),
-                        metadata: expected_metadata,
-                    },
-                ]
+        assert_eq!(
+            series,
+            vec![
+                DecodedSeries {
+                    labels: expected_labels.clone(),
+                    samples: vec![DecodedSample {
+                        timestamp_ms: 2,
+                        value: 7.0,
+                        start_timestamp_ms: Some(1),
+                    }],
+                    histograms: Vec::new(),
+                    exemplars: Vec::new(),
+                    metadata: expected_metadata.clone(),
+                },
+                DecodedSeries {
+                    labels: expected_labels,
+                    samples: vec![DecodedSample {
+                        timestamp_ms: 3,
+                        value: 12.0,
+                        start_timestamp_ms: Some(1),
+                    }],
+                    histograms: Vec::new(),
+                    exemplars: Vec::new(),
+                    metadata: expected_metadata,
+                },
+            ]
         );
     }
 
@@ -1741,27 +1739,22 @@ mod tests {
                     && series.labels.get("le") == Some("1")
             })
             .expect("matching bucket series");
+        assert!(matching_bucket.exemplars.len() == 1);
         let exemplar = &matching_bucket.exemplars[0];
-        check!(
-            (
-                matching_bucket.exemplars.len(),
-                exemplar.timestamp_ms,
-                (exemplar.value - 0.9).abs() < f64::EPSILON,
-                exemplar.labels.get("trace_id"),
-                exemplar.labels.get("span_id"),
-                exemplar.labels.get("http_route"),
-            ) == (1, 1, true, Some("01234567"), Some("abcd"), Some("/v1"),)
-        );
+        check!(exemplar.timestamp_ms == 1);
+        check!((exemplar.value - 0.9).abs() < f64::EPSILON);
+        check!(exemplar.labels.get("trace_id") == Some("01234567"));
+        check!(exemplar.labels.get("span_id") == Some("abcd"));
+        check!(exemplar.labels.get("http_route") == Some("/v1"));
 
         for series in &series {
             if series.labels.get("le") != Some("1") {
-                assert2::assert!(series.exemplars.is_empty());
+                assert!(series.exemplars.is_empty());
             }
         }
     }
 
     #[test]
-    #[allow(clippy::too_many_lines)]
     fn delta_histogram_accumulates_to_cumulative_classic_series() {
         let first = metrics_data(Metric {
             name: "rpc.server.duration".into(),
@@ -1863,8 +1856,11 @@ mod tests {
                 11.0,
             ),
         ];
-        for (_case, series, name, le, expected) in cases {
-            assert2::assert!(sample_value(series, name, le) == Some(expected));
+        for (case, series, name, le, expected) in cases {
+            assert!(
+                sample_value(series, name, le) == Some(expected),
+                "case: {case} name={name} le={le:?}"
+            );
         }
     }
 
@@ -1894,15 +1890,15 @@ mod tests {
             .iter()
             .find(|series| series.labels.get("__name__") == Some("target_info"))
             .expect("target_info series");
-        assert2::assert!(
-            &target.labels
-                == &labels(&[
+        assert!(
+            target.labels
+                == labels(&[
                     ("__name__", "target_info"),
                     ("service_name", "checkout"),
-                    ("telemetry_sdk_language", "rust"),
+                    ("telemetry_sdk_language", "rust")
                 ])
         );
-        assert2::assert!(&target.samples == &vec![DecodedSample::new(1, 1.0)]);
+        assert!(target.samples == vec![(1, 1.0)]);
     }
 
     #[test]
@@ -1940,26 +1936,26 @@ mod tests {
             .iter()
             .find(|series| series.labels.get("__name__") == Some("http_server_active_requests"))
             .expect("metric series");
-        assert2::assert!(
-            metric.labels
-                == labels(&[
-                    ("__name__", "http_server_active_requests"),
-                    ("otel_scope_library_language", "rust"),
-                    ("otel_scope_name", "io.opentelemetry.http"),
-                    (
-                        "otel_scope_schema_url",
-                        "https://opentelemetry.io/schemas/1.24.0"
-                    ),
-                    ("otel_scope_version", "1.2.3"),
-                    ("service_name", "checkout"),
-                ])
+        assert_eq!(
+            metric.labels,
+            labels(&[
+                ("__name__", "http_server_active_requests"),
+                ("otel_scope_library_language", "rust"),
+                ("otel_scope_name", "io.opentelemetry.http"),
+                (
+                    "otel_scope_schema_url",
+                    "https://opentelemetry.io/schemas/1.24.0"
+                ),
+                ("otel_scope_version", "1.2.3"),
+                ("service_name", "checkout"),
+            ])
         );
 
         let target = series
             .iter()
             .find(|series| series.labels.get("__name__") == Some("target_info"))
             .expect("target_info series");
-        assert2::assert!(target.labels.get("otel_scope_name").is_none());
+        assert!(target.labels.get("otel_scope_name").is_none());
     }
 
     #[test]
@@ -1996,68 +1992,62 @@ mod tests {
             help: String::new(),
             unit: String::new(),
         });
-        assert2::assert!(
-            series
-                == vec![
-                    DecodedSeries {
-                        labels: labels(&[
-                            ("__name__", "rpc_server_duration"),
-                            ("quantile", "0.5"),
-                            ("route", "/v1")
-                        ]),
-                        samples: vec![DecodedSample {
-                            timestamp_ms: 4,
-                            value: 2.0,
-                            start_timestamp_ms: None,
-                        }],
-                        histograms: Vec::new(),
-                        exemplars: Vec::new(),
-                        metadata: expected_metadata.clone(),
-                    },
-                    DecodedSeries {
-                        labels: labels(&[
-                            ("__name__", "rpc_server_duration"),
-                            ("quantile", "0.9"),
-                            ("route", "/v1")
-                        ]),
-                        samples: vec![DecodedSample {
-                            timestamp_ms: 4,
-                            value: 4.0,
-                            start_timestamp_ms: None,
-                        }],
-                        histograms: Vec::new(),
-                        exemplars: Vec::new(),
-                        metadata: expected_metadata.clone(),
-                    },
-                    DecodedSeries {
-                        labels: labels(&[
-                            ("__name__", "rpc_server_duration_count"),
-                            ("route", "/v1")
-                        ]),
-                        samples: vec![DecodedSample {
-                            timestamp_ms: 4,
-                            value: 9.0,
-                            start_timestamp_ms: None,
-                        }],
-                        histograms: Vec::new(),
-                        exemplars: Vec::new(),
-                        metadata: expected_metadata.clone(),
-                    },
-                    DecodedSeries {
-                        labels: labels(&[
-                            ("__name__", "rpc_server_duration_sum"),
-                            ("route", "/v1")
-                        ]),
-                        samples: vec![DecodedSample {
-                            timestamp_ms: 4,
-                            value: 12.5,
-                            start_timestamp_ms: None,
-                        }],
-                        histograms: Vec::new(),
-                        exemplars: Vec::new(),
-                        metadata: expected_metadata,
-                    },
-                ]
+        assert_eq!(
+            series,
+            vec![
+                DecodedSeries {
+                    labels: labels(&[
+                        ("__name__", "rpc_server_duration"),
+                        ("quantile", "0.5"),
+                        ("route", "/v1")
+                    ]),
+                    samples: vec![DecodedSample {
+                        timestamp_ms: 4,
+                        value: 2.0,
+                        start_timestamp_ms: None,
+                    }],
+                    histograms: Vec::new(),
+                    exemplars: Vec::new(),
+                    metadata: expected_metadata.clone(),
+                },
+                DecodedSeries {
+                    labels: labels(&[
+                        ("__name__", "rpc_server_duration"),
+                        ("quantile", "0.9"),
+                        ("route", "/v1")
+                    ]),
+                    samples: vec![DecodedSample {
+                        timestamp_ms: 4,
+                        value: 4.0,
+                        start_timestamp_ms: None,
+                    }],
+                    histograms: Vec::new(),
+                    exemplars: Vec::new(),
+                    metadata: expected_metadata.clone(),
+                },
+                DecodedSeries {
+                    labels: labels(&[("__name__", "rpc_server_duration_count"), ("route", "/v1")]),
+                    samples: vec![DecodedSample {
+                        timestamp_ms: 4,
+                        value: 9.0,
+                        start_timestamp_ms: None,
+                    }],
+                    histograms: Vec::new(),
+                    exemplars: Vec::new(),
+                    metadata: expected_metadata.clone(),
+                },
+                DecodedSeries {
+                    labels: labels(&[("__name__", "rpc_server_duration_sum"), ("route", "/v1")]),
+                    samples: vec![DecodedSample {
+                        timestamp_ms: 4,
+                        value: 12.5,
+                        start_timestamp_ms: None,
+                    }],
+                    histograms: Vec::new(),
+                    exemplars: Vec::new(),
+                    metadata: expected_metadata,
+                },
+            ]
         );
     }
 
@@ -2090,31 +2080,20 @@ mod tests {
 
         let series = decode_otlp(&data, TranslationStrategy::default()).unwrap();
 
+        check!(series.len() == 1);
+        check!(series[0].labels.get("__name__") == Some("rpc_server_duration"));
+        check!(series[0].histograms.len() == 1);
         let (timestamp_ms, hist) = &series[0].histograms[0];
-        check!(
-            (
-                series.len(),
-                series[0].labels.get("__name__"),
-                series[0].histograms.len(),
-                (
-                    *timestamp_ms,
-                    hist.schema,
-                    (hist.count - 6.0).abs() < f64::EPSILON,
-                    (hist.sum - 12.0).abs() < f64::EPSILON,
-                    (hist.zero_count - 1.0).abs() < f64::EPSILON,
-                    hist.positive_spans[0].offset,
-                    hist.positive_counts.as_slice() == [2.0, 3.0],
-                    hist.negative_spans[0].offset,
-                    hist.negative_counts.as_slice() == [1.0],
-                    hist.start_timestamp_ms,
-                ),
-            ) == (
-                1,
-                Some("rpc_server_duration"),
-                1,
-                (3, 3, true, true, true, 0, true, 5, true, Some(1)),
-            )
-        );
+        check!(*timestamp_ms == 3);
+        check!(hist.schema == 3);
+        check!((hist.count - 6.0).abs() < f64::EPSILON);
+        check!((hist.sum - 12.0).abs() < f64::EPSILON);
+        check!((hist.zero_count - 1.0).abs() < f64::EPSILON);
+        check!(hist.positive_spans[0].offset == 0);
+        check!(hist.positive_counts == vec![2.0, 3.0]);
+        check!(hist.negative_spans[0].offset == 5);
+        check!(hist.negative_counts == vec![1.0]);
+        check!(hist.start_timestamp_ms == Some(1));
     }
 
     #[test]
@@ -2147,26 +2126,14 @@ mod tests {
 
         let series = decode_otlp(&data, TranslationStrategy::default()).unwrap();
 
+        assert!(series.len() == 1);
+        assert!(series[0].exemplars.len() == 1);
         let exemplar = &series[0].exemplars[0];
-        check!(
-            (
-                series.len(),
-                series[0].exemplars.len(),
-                exemplar.timestamp_ms,
-                (exemplar.value - 2.5).abs() < f64::EPSILON,
-                exemplar.labels.get("trace_id"),
-                exemplar.labels.get("span_id"),
-                exemplar.labels.get("span_kind"),
-            ) == (
-                1,
-                1,
-                2,
-                true,
-                Some("01234567"),
-                Some("abcd"),
-                Some("server"),
-            )
-        );
+        check!(exemplar.timestamp_ms == 2);
+        check!((exemplar.value - 2.5).abs() < f64::EPSILON);
+        check!(exemplar.labels.get("trace_id") == Some("01234567"));
+        check!(exemplar.labels.get("span_id") == Some("abcd"));
+        check!(exemplar.labels.get("span_kind") == Some("server"));
     }
 
     #[test]
@@ -2220,27 +2187,17 @@ mod tests {
                 .unwrap();
 
         let first_hist = &first_series[0].histograms[0].1;
+        check!((first_hist.count - 4.0).abs() < f64::EPSILON);
+        check!((first_hist.sum - 6.0).abs() < f64::EPSILON);
+        check!((first_hist.zero_count - 1.0).abs() < f64::EPSILON);
+        check!(first_hist.positive_counts == vec![2.0, 1.0]);
+
         let second_hist = &second_series[0].histograms[0].1;
-        check!(
-            (
-                (
-                    (first_hist.count - 4.0).abs() < f64::EPSILON,
-                    (first_hist.sum - 6.0).abs() < f64::EPSILON,
-                    (first_hist.zero_count - 1.0).abs() < f64::EPSILON,
-                    first_hist.positive_counts.as_slice(),
-                ),
-                (
-                    (second_hist.count - 7.0).abs() < f64::EPSILON,
-                    (second_hist.sum - 11.0).abs() < f64::EPSILON,
-                    (second_hist.zero_count - 3.0).abs() < f64::EPSILON,
-                    second_hist.positive_counts.as_slice(),
-                    second_hist.start_timestamp_ms,
-                ),
-            ) == (
-                (true, true, true, &[2.0, 1.0][..]),
-                (true, true, true, &[3.0, 3.0][..], Some(1)),
-            )
-        );
+        check!((second_hist.count - 7.0).abs() < f64::EPSILON);
+        check!((second_hist.sum - 11.0).abs() < f64::EPSILON);
+        check!((second_hist.zero_count - 3.0).abs() < f64::EPSILON);
+        check!(second_hist.positive_counts == vec![3.0, 3.0]);
+        check!(second_hist.start_timestamp_ms == Some(1));
     }
 
     #[test]
@@ -2293,14 +2250,14 @@ mod tests {
         let second_hist = &second_series[0].histograms[0].1;
         check!((second_hist.count - 5.0).abs() < f64::EPSILON);
         check!((second_hist.sum - 8.0).abs() < f64::EPSILON);
-        assert2::assert!(
-            &second_hist.positive_spans
-                == &vec![BucketSpan {
+        check!(
+            second_hist.positive_spans
+                == vec![BucketSpan {
                     offset: 1,
                     length: 2
                 }]
         );
-        assert2::assert!(&second_hist.positive_counts == &vec![2.0, 3.0]);
+        check!(second_hist.positive_counts == vec![2.0, 3.0]);
     }
 
     #[test]
@@ -2329,8 +2286,8 @@ mod tests {
         let series = decode_otlp(&data, TranslationStrategy::default()).unwrap();
         let hist = &series[0].histograms[0].1;
 
-        assert2::assert!(hist.positive_spans[0].offset == 1);
-        assert2::assert!(hist.negative_spans[0].offset == 4);
+        assert!(hist.positive_spans[0].offset == 1);
+        assert!(hist.negative_spans[0].offset == 4);
     }
 
     #[test]
@@ -2354,8 +2311,8 @@ mod tests {
 
         let err = decode_otlp(&data, TranslationStrategy::default()).unwrap_err();
 
-        assert2::assert!(matches!(err, super::OtlpError::Invalid(_, _)));
-        assert2::assert!(format!("{err}").contains("scale -5"));
+        assert!(matches!(err, super::OtlpError::Invalid(_, _)));
+        assert!(format!("{err}").contains("scale -5"));
     }
 
     #[test]
@@ -2379,8 +2336,8 @@ mod tests {
 
         let err = decode_otlp(&data, TranslationStrategy::default()).unwrap_err();
 
-        assert2::assert!(matches!(err, super::OtlpError::Invalid(_, _)));
-        assert2::assert!(format!("{err}").contains("scale 40"));
+        assert!(matches!(err, super::OtlpError::Invalid(_, _)));
+        assert!(format!("{err}").contains("scale 40"));
     }
 
     #[test]
@@ -2404,7 +2361,7 @@ mod tests {
 
         let err = decode_otlp(&data, TranslationStrategy::default()).unwrap_err();
 
-        assert2::assert!(matches!(err, super::OtlpError::Invalid(_, _)));
-        assert2::assert!(format!("{err}").contains("lossy downscale"));
+        assert!(matches!(err, super::OtlpError::Invalid(_, _)));
+        assert!(format!("{err}").contains("lossy downscale"));
     }
 }

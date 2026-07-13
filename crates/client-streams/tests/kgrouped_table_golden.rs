@@ -76,7 +76,10 @@ fn kgrouped_table_topology_matches_jvm() {
         &std::fs::read_to_string("tests/testdata/golden/dsl/kgrouped_table.topology.json").unwrap(),
     )
     .unwrap();
-    assert2::assert!(actual == expected);
+    assert_eq!(
+        actual, expected,
+        "wire topology != JVM kgrouped_table fixture"
+    );
 }
 
 /// Build the auto-named topology: `table("in","src-store") -> groupBy -> count()`
@@ -124,7 +127,10 @@ fn kgrouped_table_autonamed_topology_matches_jvm() {
         .unwrap(),
     )
     .unwrap();
-    assert2::assert!(actual == expected);
+    assert_eq!(
+        actual, expected,
+        "auto-named wire topology != JVM kgrouped_table_autonamed fixture"
+    );
 }
 
 #[derive(serde::Deserialize, PartialEq, Debug)]
@@ -159,16 +165,16 @@ fn kgrouped_table_behavior_matches_jvm() {
     )
     .unwrap();
     // The golden keys count/reduce/aggregate map to sink topics count-out/reduce-out/agg-out.
-    for (_name, golden_key, out) in [
-        ("count output", "count", "count-out"),
-        ("reduce output", "reduce", "reduce-out"),
-        ("aggregate output", "aggregate", "agg-out"),
+    for (golden_key, out) in [
+        ("count", "count-out"),
+        ("reduce", "reduce-out"),
+        ("aggregate", "agg-out"),
     ] {
         let mut got: Vec<Row> = Vec::new();
         while let Some((Some(k), v)) = d.read_output(out, Produced::with(StringSerde, I64Serde)) {
             got.push(Row { key: k, value: v });
         }
         let want: Vec<Row> = serde_json::from_value(golden[golden_key].clone()).unwrap();
-        assert2::assert!(got == want);
+        assert_eq!(got, want, "{golden_key} output != JVM behavioral golden");
     }
 }

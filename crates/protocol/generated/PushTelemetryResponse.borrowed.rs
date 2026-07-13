@@ -8,7 +8,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 0;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -18,6 +19,10 @@ pub struct PushTelemetryResponse {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl PushTelemetryResponse {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::push_telemetry_response::PushTelemetryResponse {
         crate::owned::push_telemetry_response::PushTelemetryResponse {
             throttle_time_ms: (self.throttle_time_ms),

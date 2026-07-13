@@ -16,7 +16,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 3;
 pub const FLEXIBLE_MIN: i16 = 2;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -26,6 +27,10 @@ pub struct CreatePartitionsResponse<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl CreatePartitionsResponse<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::create_partitions_response::CreatePartitionsResponse {
         crate::owned::create_partitions_response::CreatePartitionsResponse {
             throttle_time_ms: (self.throttle_time_ms),
@@ -138,6 +143,10 @@ pub struct CreatePartitionsTopicResult<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl CreatePartitionsTopicResult<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::create_partitions_response::CreatePartitionsTopicResult {
@@ -154,9 +163,9 @@ impl Encode for CreatePartitionsTopicResult<'_> {
         let flex = version >= 2;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name);
+                let () = put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name);
+                let () = put_string(buf, self.name);
             }
         }
         if version >= 0 {
@@ -164,9 +173,9 @@ impl Encode for CreatePartitionsTopicResult<'_> {
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message);
+                let () = put_compact_nullable_string(buf, self.error_message);
             } else {
-                put_nullable_string(buf, self.error_message);
+                let () = put_nullable_string(buf, self.error_message);
             }
         }
         if flex {

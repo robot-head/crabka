@@ -85,7 +85,7 @@ impl FetchWriteOp {
 
 impl FetchResponse {
     /// Serialize this response as an ordered [`FetchWriteOp`] plan whose
-    /// concatenated bytes are **byte-identical** to [`FetchResponse::encode`]
+    /// concatenated bytes are **byte-identical** to [`crate::Encode::encode`]
     /// at the same `version`.
     ///
     /// Only valid for the canonical (v4+) Fetch codec — the legacy
@@ -95,6 +95,9 @@ impl FetchResponse {
     /// The records length prefix is written into the inline segment that
     /// precedes each `Records` op, so resolving `Records` to its bytes and
     /// concatenating reproduces the exact wire frame.
+    ///
+    /// # Errors
+    /// Returns an error if the response cannot be encoded for `version`.
     pub fn write_plan(&self, version: i16) -> Result<Vec<FetchWriteOp>, ProtocolError> {
         debug_assert!(
             version >= 4,
@@ -347,7 +350,7 @@ mod tests {
     /// The load-bearing golden test: for a hand-built multi-topic,
     /// multi-partition, multi-batch response, the write-plan's concatenated
     /// bytes must equal the generated `encode` output, at every version.
-    fn assert_plan_matches_encode(case_name: &str, resp: &FetchResponse, version: i16) {
+    fn assert_plan_matches_encode(_case_name: &str, resp: &FetchResponse, version: i16) {
         let mut canonical = BytesMut::new();
         resp.encode(&mut canonical, version).unwrap();
         let plan = resp.write_plan(version).unwrap();

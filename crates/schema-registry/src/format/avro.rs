@@ -8,6 +8,8 @@ use crate::error::SrError;
 
 pub struct AvroSchema(apache_avro::Schema);
 
+/// # Errors
+/// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
 pub fn parse(schema: &str, refs: &[super::ResolvedReference]) -> Result<AvroSchema, SrError> {
     if refs.is_empty() {
         return apache_avro::Schema::parse_str(schema)
@@ -36,6 +38,8 @@ impl ParsedSchema for AvroSchema {
 /// Directional Avro check: can a reader using `reader` read data written with
 /// `writer`? `Ok(())` if compatible, else `Err(messages)`.
 #[tracing::instrument(level = "debug", name = "avro.check", skip_all, fields(reader_refs = reader_refs.len(), writer_refs = writer_refs.len()))]
+/// # Errors
+/// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
 pub fn check(
     reader: &str,
     writer: &str,

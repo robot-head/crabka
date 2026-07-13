@@ -3,7 +3,7 @@
 //!
 //! The diagrams here are not hand-drawn: [`failure_scenarios_md`] runs
 //! [`crabka_raft::scenarios::scenarios`] in process and turns each recorded
-//! [`ScenarioTrace`](crabka_raft::scenarios::ScenarioTrace) into a Zola
+//! [`ScenarioTrace`] into a Zola
 //! `{% mermaid() %}` paired shortcode, so what the reader sees is exactly what
 //! the real KIP-595/996 algorithm did.
 

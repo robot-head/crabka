@@ -14,15 +14,14 @@ pub struct AddPartitionsToTxnTopicResult<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl AddPartitionsToTxnTopicResult<'_> {
-    pub fn to_owned(
-        &self,
-    ) -> crate::owned::common::add_partitions_to_txn_response::add_partitions_to_txn_topic_result::AddPartitionsToTxnTopicResult{
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
+    pub fn to_owned(&self) -> crate::owned::common::add_partitions_to_txn_response::add_partitions_to_txn_topic_result::AddPartitionsToTxnTopicResult{
         crate::owned::common::add_partitions_to_txn_response::add_partitions_to_txn_topic_result::AddPartitionsToTxnTopicResult {
             name: (self.name).to_string(),
-            results_by_partition: (self.results_by_partition)
-                .iter()
-                .map(super::add_partitions_to_txn_partition_result::AddPartitionsToTxnPartitionResult::to_owned)
-                .collect(),
+            results_by_partition: (self.results_by_partition).iter().map(super::add_partitions_to_txn_partition_result::AddPartitionsToTxnPartitionResult::to_owned).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
@@ -32,9 +31,9 @@ impl Encode for AddPartitionsToTxnTopicResult<'_> {
         let flex = version >= 3;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name);
+                let () = put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name);
+                let () = put_string(buf, self.name);
             }
         }
         if version >= 0 {
@@ -101,12 +100,7 @@ impl<'de> DecodeBorrow<'de> for AddPartitionsToTxnTopicResult<'de> {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v.push(
-                        super::add_partitions_to_txn_partition_result::AddPartitionsToTxnPartitionResult::decode_borrow(
-                            buf,
-                            version,
-                        )?,
-                    );
+                    v.push(super::add_partitions_to_txn_partition_result::AddPartitionsToTxnPartitionResult::decode_borrow(buf, version)?);
                 }
                 v
             };
@@ -126,9 +120,7 @@ impl AddPartitionsToTxnTopicResult<'_> {
             m.name = "x";
         }
         if version >= 0 {
-            m.results_by_partition = vec![
-                super::add_partitions_to_txn_partition_result::AddPartitionsToTxnPartitionResult::populated(version)
-            ];
+            m.results_by_partition = vec![super::add_partitions_to_txn_partition_result::AddPartitionsToTxnPartitionResult::populated(version)];
         }
         m
     }

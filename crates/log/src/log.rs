@@ -28,9 +28,6 @@ use crate::{
 /// concurrent readers (`&self` for `read`/`log_start_offset`/etc.).
 /// Construct one with [`Log::open`].
 #[derive(Debug)]
-// `log_start_override` mirrors Kafka's `log_start_offset` terminology;
-// renaming to drop the `log_` prefix would obscure the field's role.
-#[allow(clippy::struct_field_names)]
 pub struct Log {
     dir: PathBuf,
     config: std::sync::Arc<std::sync::RwLock<LogConfig>>,
@@ -44,7 +41,7 @@ pub struct Log {
     /// `local_log_start_offset` co-advances with this pointer, so
     /// [`Log::local_log_start_offset`] delegates here — there is a single
     /// source of truth.
-    log_start_override: Option<Offset>,
+    start_offset_override: Option<Offset>,
 
     /// Last-Stable-Offset: the offset before the first record of any
     /// in-flight transaction. Defaults to `log_end_offset()` when no
@@ -106,7 +103,7 @@ impl RawRead {
 crate::sendfile_cfg! {
     /// Descriptor form of [`Log::read_raw`] for the zero-copy (`sendfile`) fetch
     /// path (Increments D + E): the records run is described by one
-    /// [`FileRegion`] per contributing segment — so a multi-segment fetch is
+    /// [`crabka_protocol::records::FileRegion`] per contributing segment — so a multi-segment fetch is
     /// `sendfile`d as several regions with **no** coalescing copy (unlike
     /// `read_raw`, which concatenates cross-segment chunks into a fresh
     /// `BytesMut`). Compiled on the SENDFILE alias (Linux + Apple +
@@ -212,6 +209,8 @@ impl Log {
     // sibling `seal_at(next_base - 1)` recovery arithmetic is separately pinned
     // by `reopen_seals_recovered_segments_at_next_base_minus_one`.
     #[cfg_attr(test, mutants::skip)]
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
     pub fn open(dir: impl AsRef<Path>, config: LogConfig) -> Result<Self, LogError> {
         let dir = dir.as_ref().to_path_buf();
         fs::create_dir_all(&dir)?;
@@ -277,7 +276,7 @@ impl Log {
             config,
             segments,
             active: Some(active),
-            log_start_override: None,
+            start_offset_override: None,
             lso,
             pending: HashMap::new(),
             active_txn_index,
@@ -304,7 +303,7 @@ impl Log {
         } else {
             Offset(0)
         };
-        if let Some(o) = self.log_start_override {
+        if let Some(o) = self.start_offset_override {
             return derived.max(o);
         }
         derived
@@ -327,13 +326,15 @@ impl Log {
                 "set_log_start_offset: new_start must be >= 0".into(),
             ));
         }
-        self.log_start_override = Some(new_start);
+        self.start_offset_override = Some(new_start);
         Ok(())
     }
 
     /// Deprecated alias kept for existing test/feature-helpers callers.
     #[deprecated(note = "use set_log_start_offset")]
     #[cfg(any(test, feature = "test-helpers"))]
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
     pub fn test_set_log_start_offset(&mut self, new_start: Offset) -> Result<(), LogError> {
         self.set_log_start_offset(new_start)
     }
@@ -345,6 +346,8 @@ impl Log {
     /// `log_start` — `truncate_to` can't help here because we need to
     /// move `log_start` *forward* past where there is no local data.
     #[instrument(level = "info", skip_all, fields(new_base = new_base.0), err)]
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
     pub fn reset_to(&mut self, new_base: Offset) -> Result<(), LogError> {
         if new_base < 0 {
             return Err(LogError::OffsetMismatch {
@@ -372,7 +375,7 @@ impl Log {
         }
 
         // Clear the start override so the derived value takes over.
-        self.log_start_override = None;
+        self.start_offset_override = None;
 
         let new_active = Segment::create(&self.dir, new_base)?;
         self.active_txn_index = TxnIndex::open(new_active.txn_index_path())?;
@@ -434,6 +437,8 @@ impl Log {
     ///
     /// Callable through `&self` (the `Arc<RwLock<…>>` wrapping lets us
     /// mutate the inner value without an exclusive borrow on the `Log`).
+    /// # Panics
+    /// Panics if synchronized log state is poisoned or a segment previously validated as nonempty is unexpectedly missing its required batch or index entry.
     pub fn set_config(&self, new: LogConfig) {
         *self.config.write().unwrap() = new;
     }
@@ -441,6 +446,8 @@ impl Log {
     /// Snapshot the current config. Allocates a clone; cheap because
     /// `LogConfig` is small and `Clone`.
     #[must_use]
+    /// # Panics
+    /// Panics if synchronized log state is poisoned or a segment previously validated as nonempty is unexpectedly missing its required batch or index entry.
     pub fn config_snapshot(&self) -> LogConfig {
         self.config.read().unwrap().clone()
     }
@@ -476,6 +483,8 @@ impl Log {
         fields(assigned_base = tracing::field::Empty, leader_epoch = batch.partition_leader_epoch),
         err,
     )]
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
     pub fn append(&mut self, batch: &mut RecordBatch) -> Result<Offset, LogError> {
         // `partition_leader_epoch` is the raw KIP-320 wire `int32`; wrap it into
         // the domain newtype at this boundary.
@@ -519,6 +528,8 @@ impl Log {
         ),
         err,
     )]
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
     pub fn append_verbatim(&mut self, batch: &VerbatimBatch) -> Result<Offset, LogError> {
         let leader_epoch = batch.leader_epoch;
         let assigned_base = self.log_end_offset();
@@ -618,6 +629,8 @@ impl Log {
         fields(leader_epoch = batch.partition_leader_epoch),
         err,
     )]
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
     pub fn append_at(&mut self, batch: &mut RecordBatch, offset: Offset) -> Result<(), LogError> {
         let expected = self.log_end_offset();
         if offset != expected {
@@ -753,6 +766,10 @@ impl Log {
     // offsets, so a too-low cursor yields the same batches and `start_offset`
     // (taken from `batches.first()`). No distinguishing input exists.
     #[cfg_attr(test, mutants::skip)]
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
+    /// # Panics
+    /// Panics if synchronized log state is poisoned or a segment previously validated as nonempty is unexpectedly missing its required batch or index entry.
     pub fn read(&self, offset: Offset, max_bytes: usize) -> Result<ReadOutput, LogError> {
         let log_start = self.log_start_offset();
         let log_end = self.log_end_offset();
@@ -815,6 +832,10 @@ impl Log {
         fields(total = tracing::field::Empty),
         err,
     )]
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
+    /// # Panics
+    /// Panics if synchronized log state is poisoned or a segment previously validated as nonempty is unexpectedly missing its required batch or index entry.
     pub fn read_raw(
         &self,
         fetch_offset: Offset,
@@ -896,7 +917,7 @@ impl Log {
     crate::sendfile_cfg! {
     /// Descriptor variant of [`Log::read_raw`] for the zero-copy (`sendfile`)
     /// fetch path: walks sealed segments then the active segment exactly as
-    /// `read_raw` does, but collects one [`FileRegion`] per contributing segment
+    /// `read_raw` does, but collects one [`crabka_protocol::records::FileRegion`] per contributing segment
     /// (via [`Segment::read_raw_desc`]) instead of owned `Bytes`. Crucially,
     /// multi-segment fetches are **not** coalesced — each region is `sendfile`d
     /// separately, dropping the cross-segment copy.
@@ -909,6 +930,8 @@ impl Log {
         fields(regions = tracing::field::Empty, total = tracing::field::Empty),
         err,
     )]
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
     pub fn read_raw_desc(
         &self,
         fetch_offset: Offset,
@@ -984,6 +1007,10 @@ impl Log {
     /// Truncate the log so no records at offset `>= offset` remain. Used
     /// by replication / leader election.
     #[instrument(level = "info", skip(self), err)]
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
+    /// # Panics
+    /// Panics if synchronized log state is poisoned or a segment previously validated as nonempty is unexpectedly missing its required batch or index entry.
     pub fn truncate_to(&mut self, offset: Offset) -> Result<(), LogError> {
         let log_start = self.log_start_offset();
         let log_end = self.log_end_offset();
@@ -1143,6 +1170,10 @@ impl Log {
         fields(evicted = tracing::field::Empty),
         err,
     )]
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
+    /// # Panics
+    /// Panics if synchronized log state is poisoned or a segment previously validated as nonempty is unexpectedly missing its required batch or index entry.
     pub fn tick(&mut self, now: SystemTime) -> Result<(), LogError> {
         // Tiered topics' segment lifecycle is owned by the RemoteLogManager.
         if self.config.read().unwrap().remote_storage_enable {
@@ -1306,7 +1337,7 @@ impl Log {
 
         // Advance the (single) log-start pointer. `local_log_start_offset`
         // delegates here, so the local floor moves in lockstep.
-        self.log_start_override = Some(target);
+        self.start_offset_override = Some(target);
 
         Ok(removed)
     }
@@ -1378,6 +1409,10 @@ impl Log {
         fields(sealed_segments = self.segments.len()),
         err,
     )]
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
+    /// # Panics
+    /// Panics if synchronized log state is poisoned or a segment previously validated as nonempty is unexpectedly missing its required batch or index entry.
     pub fn compact(&mut self, ctx: &CompactionContext) -> Result<(), LogError> {
         if self.segments.is_empty() {
             return Ok(());
@@ -1388,9 +1423,10 @@ impl Log {
             if cfg_guard.cleanup_policy != crate::CleanupPolicy::Compact {
                 return Ok(());
             }
-            let retention_ms =
-                i64::try_from(cfg_guard.delete_retention_ms.as_millis()).unwrap_or(i64::MAX);
-            (cfg_guard.index_interval_bytes, retention_ms)
+            (
+                cfg_guard.index_interval_bytes,
+                i64::try_from(cfg_guard.delete_retention_ms.as_millis()).unwrap_or(i64::MAX),
+            )
         };
 
         let now_ms = retention::now_ms(ctx.now);
@@ -1411,8 +1447,10 @@ impl Log {
                 &sealed_refs,
                 &offset_map,
                 &txn_meta,
-                now_ms,
-                delete_retention_ms,
+                crate::compact::RewriteRetention {
+                    now_ms,
+                    delete_retention_ms,
+                },
                 &ctx.active_producers,
                 index_interval,
             )?
@@ -2816,13 +2854,12 @@ mod tests {
 
     /// Build a log rolled into several sealed segments under `dir`. Mirror
     /// of the `remote_log_manager` test helper, kept local to this module.
-    #[allow(clippy::needless_pass_by_value)]
-    fn rolled_log(dir: &std::path::Path, extra: LogConfig) -> Log {
+    fn rolled_log(dir: &std::path::Path, extra: &LogConfig) -> Log {
         let mut log = Log::open(
             dir,
             LogConfig {
                 segment_bytes: 200,
-                ..extra
+                ..extra.clone()
             },
         )
         .unwrap();
@@ -2847,7 +2884,7 @@ mod tests {
     #[test]
     fn delete_local_segments_through_drops_sealed_below_target() {
         let dir = tempdir().unwrap();
-        let mut log = rolled_log(dir.path(), LogConfig::default());
+        let mut log = rolled_log(dir.path(), &LogConfig::default());
         let exports = log.tierable_segments();
         assert2::assert!(exports.len() >= 3);
 
@@ -2889,7 +2926,7 @@ mod tests {
     #[test]
     fn delete_local_segments_through_keeps_active_segment() {
         let dir = tempdir().unwrap();
-        let mut log = rolled_log(dir.path(), LogConfig::default());
+        let mut log = rolled_log(dir.path(), &LogConfig::default());
         let leo_before = log.log_end_offset();
         let active_log = dir.path().join(format!(
             "{:020}.log",
@@ -2914,7 +2951,7 @@ mod tests {
     #[test]
     fn delete_local_segments_through_advances_local_start_pointer() {
         let dir = tempdir().unwrap();
-        let mut log = rolled_log(dir.path(), LogConfig::default());
+        let mut log = rolled_log(dir.path(), &LogConfig::default());
         let exports = log.tierable_segments();
         let target = exports[1].last_offset + 1;
         log.delete_local_segments_through(target).unwrap();
@@ -2925,7 +2962,7 @@ mod tests {
     #[test]
     fn delete_local_segments_through_is_noop_at_or_below_current_start() {
         let dir = tempdir().unwrap();
-        let mut log = rolled_log(dir.path(), LogConfig::default());
+        let mut log = rolled_log(dir.path(), &LogConfig::default());
         let start_before = log.log_start_offset();
         let sealed_before = log.tierable_segments().len();
 
@@ -2956,7 +2993,7 @@ mod tests {
         let dir_tiered = tempdir().unwrap();
         let mut tiered = rolled_log(
             dir_tiered.path(),
-            LogConfig {
+            &LogConfig {
                 remote_storage_enable: true,
                 retention_ms: Some(Duration::from_millis(1)),
                 ..LogConfig::default()
@@ -2971,7 +3008,7 @@ mod tests {
         let dir_plain = tempdir().unwrap();
         let mut plain = rolled_log(
             dir_plain.path(),
-            LogConfig {
+            &LogConfig {
                 remote_storage_enable: false,
                 retention_ms: Some(Duration::from_millis(1)),
                 ..LogConfig::default()

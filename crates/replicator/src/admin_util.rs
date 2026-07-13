@@ -21,6 +21,8 @@ const TOPIC_ALREADY_EXISTS: i16 = 36;
     fields(topic = %topic, partitions, bootstrap = %bootstrap),
     err,
 )]
+/// # Errors
+/// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
 pub async fn ensure_topic(
     bootstrap: &str,
     topic: &str,
@@ -65,6 +67,8 @@ pub async fn ensure_topic(
     fields(topic = %topic, bootstrap = %bootstrap),
     err,
 )]
+/// # Errors
+/// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
 pub async fn ensure_compacted_topic(
     bootstrap: &str,
     topic: &str,
@@ -140,18 +144,21 @@ async fn build_drain_consumer(
 ///
 /// Uses N=3 consecutive empty polls (500 ms each) as the drain sentinel.
 /// Poll errors for a not-yet-existing topic are silently treated as empty.
+pub type RawRecord = (Option<Bytes>, Option<Bytes>);
+
 #[tracing::instrument(
     level = "debug",
     skip_all,
     fields(topic = %topic, drained = tracing::field::Empty),
     err,
 )]
-#[allow(clippy::type_complexity)]
+/// # Errors
+/// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
 pub async fn read_all(
     bootstrap: &str,
     topic: &str,
     security: Option<ClientSecurity>,
-) -> Result<Vec<(Option<Bytes>, Option<Bytes>)>, String> {
+) -> Result<Vec<RawRecord>, String> {
     const MAX_EMPTY: usize = 3;
 
     let group_id = format!("crabka-replicator-reader-{topic}");
@@ -204,6 +211,8 @@ pub async fn read_all(
 /// Return the value bytes of the last record whose key equals `key`.
 ///
 /// If `key` is empty, returns the last record overall regardless of key.
+/// # Errors
+/// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
 pub async fn read_last_value_for_key(
     bootstrap: &str,
     topic: &str,

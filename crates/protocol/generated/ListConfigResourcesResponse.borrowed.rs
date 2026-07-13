@@ -12,7 +12,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 1;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -23,6 +24,10 @@ pub struct ListConfigResourcesResponse<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl ListConfigResourcesResponse<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::list_config_resources_response::ListConfigResourcesResponse {
@@ -155,11 +160,15 @@ impl Default for ConfigResource<'_> {
         Self {
             resource_name: "",
             resource_type: 16i8,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl ConfigResource<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::list_config_resources_response::ConfigResource {
         crate::owned::list_config_resources_response::ConfigResource {
             resource_name: (self.resource_name).to_string(),
@@ -173,9 +182,9 @@ impl Encode for ConfigResource<'_> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.resource_name);
+                let () = put_compact_string(buf, self.resource_name);
             } else {
-                put_string(buf, self.resource_name);
+                let () = put_string(buf, self.resource_name);
             }
         }
         if version >= 1 {

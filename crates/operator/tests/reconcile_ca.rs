@@ -9,7 +9,7 @@
 //!   6. `byo_mode_without_pre_existing_secrets_errors_gracefully`
 //!   7. `reconciler_does_not_renew_valid_leaf_certs`
 
-use assert2::check;
+use assert2::{assert, check};
 #[path = "shared/mod.rs"]
 mod shared;
 
@@ -149,7 +149,6 @@ fn fake_secret_body_cluster_id(name: &str, namespace: &str) -> serde_json::Value
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn default_flow_creates_cluster_ca_clients_ca_and_broker_keystore() {
     let ns = "ns1";
     let name = "c1";
@@ -257,7 +256,13 @@ async fn default_flow_creates_cluster_ca_clients_ca_and_broker_keystore() {
                     || u.contains("-kafka-brokers"))
         })
         .collect();
-    assert2::assert!(ca_patches.len() == 5);
+    assert!(
+        ca_patches.len() == 5,
+        "expected 5 CA-related PATCH calls (2 cluster-ca, 2 clients-ca, 1 keystore), \
+         got {}: {:?}",
+        ca_patches.len(),
+        ca_patches
+    );
 
     // cluster-ca key + cert, clients-ca key + cert, and broker keystore
     // PATCHes must all be present.
@@ -268,10 +273,11 @@ async fn default_flow_creates_cluster_ca_clients_ca_and_broker_keystore() {
         &clients_ca_cert,
         &keystore_name,
     ] {
-        assert2::assert!(
+        assert!(
             methods_uris
                 .iter()
-                .any(|(m, u)| *m == Method::PATCH && u.contains(target.as_str()))
+                .any(|(m, u)| *m == Method::PATCH && u.contains(target.as_str())),
+            "PATCH for {target} must be present",
         );
     }
 
@@ -294,14 +300,14 @@ async fn default_flow_creates_cluster_ca_clients_ca_and_broker_keystore() {
         .iter()
         .find(|c| c["type"] == "ClusterCaReady")
         .unwrap_or_else(|| panic!("ClusterCaReady condition missing, body = {body}"));
+    assert!(cluster_ca_cond["status"] == "True", "body = {body}");
+    assert!(cluster_ca_cond["reason"] == "CaReady", "body = {body}");
     let clients_ca_cond = conds
         .iter()
         .find(|c| c["type"] == "ClientsCaReady")
         .unwrap_or_else(|| panic!("ClientsCaReady condition missing, body = {body}"));
-    assert2::assert!(cluster_ca_cond["status"].as_str() == Some("True"));
-    assert2::assert!(cluster_ca_cond["reason"].as_str() == Some("CaReady"));
-    assert2::assert!(clients_ca_cond["status"].as_str() == Some("True"));
-    assert2::assert!(clients_ca_cond["reason"].as_str() == Some("CaReady"));
+    check!(clients_ca_cond["status"] == "True", "body = {body}");
+    check!(clients_ca_cond["reason"] == "CaReady", "body = {body}");
 
     check!(
         state.remaining_rules() == 0,
@@ -317,7 +323,6 @@ async fn default_flow_creates_cluster_ca_clients_ca_and_broker_keystore() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn byo_mode_adopts_pre_existing_secrets_does_not_overwrite() {
     let ns = "ns5";
     let name = "c5";
@@ -439,14 +444,21 @@ async fn byo_mode_adopts_pre_existing_secrets_does_not_overwrite() {
             .iter()
             .filter(|(m, u)| *m == Method::PATCH && u.contains(suffix))
             .collect();
-        assert2::assert!(ca_patches.is_empty());
+        assert!(
+            ca_patches.is_empty(),
+            "BYO mode: operator must not PATCH CA Secret {suffix}, \
+             got {}: {:?}",
+            ca_patches.len(),
+            ca_patches,
+        );
     }
 
     // The operator MUST have patched the broker keystore.
-    assert2::assert!(
+    assert!(
         methods_uris
             .iter()
-            .any(|(m, u)| *m == Method::PATCH && u.contains(&keystore_name))
+            .any(|(m, u)| *m == Method::PATCH && u.contains(&keystore_name)),
+        "BYO mode: broker keystore PATCH must still happen",
     );
 
     // Status conditions: ClusterCaReady=True + ClientsCaReady=True (BYO Secrets were present + parseable).
@@ -468,14 +480,23 @@ async fn byo_mode_adopts_pre_existing_secrets_does_not_overwrite() {
         .iter()
         .find(|c| c["type"] == "ClusterCaReady")
         .unwrap_or_else(|| panic!("ClusterCaReady condition missing, body = {body}"));
+    assert!(
+        cluster_ca_cond["status"] == "True",
+        "BYO present: ClusterCaReady must be True, body = {body}"
+    );
     let clients_ca_cond = conds
         .iter()
         .find(|c| c["type"] == "ClientsCaReady")
         .unwrap_or_else(|| panic!("ClientsCaReady condition missing, body = {body}"));
-    assert2::assert!(cluster_ca_cond["status"].as_str() == Some("True"));
-    assert2::assert!(clients_ca_cond["status"].as_str() == Some("True"));
+    assert!(
+        clients_ca_cond["status"] == "True",
+        "BYO present: ClientsCaReady must be True, body = {body}"
+    );
 
-    assert2::assert!(state.remaining_rules() == 0);
+    assert!(
+        state.remaining_rules() == 0,
+        "all preloaded rules must have been consumed"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -547,7 +568,10 @@ async fn byo_mode_without_pre_existing_secrets_errors_gracefully() {
     // Reconcile must NOT return an Err — BYO-missing is a graceful condition,
     // not a hard failure. The reconciler requeues after patching the status.
     let result = reconcile(Arc::new(kafka), ctx).await;
-    assert2::assert!(result.is_ok());
+    assert!(
+        result.is_ok(),
+        "BYO-missing must return Ok(requeue), got: {result:?}",
+    );
 
     let observed = state.take_observed();
     let methods_uris: Vec<(Method, String)> = observed
@@ -562,10 +586,11 @@ async fn byo_mode_without_pre_existing_secrets_errors_gracefully() {
         &format!("{name}-clients-ca"),
         &format!("{name}-clients-ca-cert"),
     ] {
-        assert2::assert!(
+        assert!(
             !methods_uris
                 .iter()
-                .any(|(m, u)| *m == Method::PATCH && u.contains(ca_suffix))
+                .any(|(m, u)| *m == Method::PATCH && u.contains(ca_suffix)),
+            "BYO-missing: operator must not PATCH CA Secret {ca_suffix}",
         );
     }
 
@@ -589,8 +614,14 @@ async fn byo_mode_without_pre_existing_secrets_errors_gracefully() {
         .iter()
         .find(|c| c["type"] == "ClusterCaReady")
         .unwrap_or_else(|| panic!("ClusterCaReady condition missing, body = {body}"));
-    assert2::assert!(cluster_ca_cond["status"].as_str() == Some("False"));
-    assert2::assert!(cluster_ca_cond["reason"].as_str() == Some("ByoCaMissing"));
+    check!(
+        cluster_ca_cond["status"] == "False",
+        "ByoCaMissing: ClusterCaReady must be False, body = {body}"
+    );
+    check!(
+        cluster_ca_cond["reason"] == "ByoCaMissing",
+        "ByoCaMissing: reason must be ByoCaMissing, body = {body}"
+    );
 
     check!(
         state.remaining_rules() == 0,
@@ -612,7 +643,6 @@ async fn byo_mode_without_pre_existing_secrets_errors_gracefully() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn reconciler_does_not_renew_valid_leaf_certs() {
     let ns = "ns7";
     let name = "c7";
@@ -820,7 +850,10 @@ async fn reconciler_does_not_renew_valid_leaf_certs() {
     let patched_bytes = base64::engine::general_purpose::STANDARD
         .decode(patched_crt)
         .expect("0.crt is base64");
-    assert2::assert!(patched_bytes == original_bytes);
+    assert!(
+        patched_bytes == original_bytes,
+        "reconciler must not replace an existing leaf cert; cert bytes must be identical"
+    );
 
     // Confirm no CA PATCHes happened (CAs were reused from existing Secrets).
     let ca_patches: Vec<_> = methods_uris
@@ -829,9 +862,15 @@ async fn reconciler_does_not_renew_valid_leaf_certs() {
             *m == Method::PATCH && (u.contains("-cluster-ca") || u.contains("-clients-ca"))
         })
         .collect();
-    assert2::assert!(ca_patches.is_empty());
+    assert!(
+        ca_patches.is_empty(),
+        "reconciler must not PATCH CA Secrets when they already exist: {ca_patches:?}",
+    );
 
-    assert2::assert!(state.remaining_rules() == 0);
+    assert!(
+        state.remaining_rules() == 0,
+        "all preloaded rules must have been consumed"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -914,7 +953,6 @@ fn keystore_patch_data<B: AsRef<[u8]>>(
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn broker_leaf_certs_chain_to_cluster_ca() {
     let ns = "ns2";
     let name = "c2";
@@ -1037,7 +1075,12 @@ async fn broker_leaf_certs_chain_to_cluster_ca() {
         .expect("cluster CA PEM decodes to X509Certificate");
 
     // (2) Issuer of leaf == subject of cluster CA.
-    assert2::assert!(leaf.issuer() == ca.subject());
+    assert!(
+        leaf.issuer() == ca.subject(),
+        "leaf issuer DN must match cluster CA subject DN; leaf issuer = {}, ca subject = {}",
+        leaf.issuer(),
+        ca.subject()
+    );
 
     // (3) Signature chain-to-root.
     leaf.verify_signature(Some(ca.public_key()))
@@ -1069,11 +1112,21 @@ async fn broker_leaf_certs_chain_to_cluster_ca() {
     let headless_fqdn = format!("{name}-broker-headless.{ns}.svc.cluster.local");
     // Pod FQDN, pod short-name, headless FQDN.
     for want in [&pod_fqdn, &pod_name, &headless_fqdn] {
-        assert2::assert!(dns_names.contains(want));
+        assert!(
+            dns_names.contains(want),
+            "SANs must include {want}; got DNS={dns_names:?}",
+        );
     }
-    assert2::assert!(has_ip_localhost);
+    assert!(
+        has_ip_localhost,
+        "SANs must include 127.0.0.1; got GNs={:?}",
+        san_ext.general_names,
+    );
 
-    assert2::assert!(state.remaining_rules() == 0);
+    assert!(
+        state.remaining_rules() == 0,
+        "all preloaded rules must have been consumed"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1087,7 +1140,6 @@ async fn broker_leaf_certs_chain_to_cluster_ca() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn scale_up_adds_entries_does_not_reissue_existing() {
     let ns = "ns3";
     let name = "c3";
@@ -1254,12 +1306,19 @@ async fn scale_up_adds_entries_does_not_reissue_existing() {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(crt_b64)
             .expect("base64");
-        assert2::assert!(bytes == original_certs[&id]);
+        assert!(
+            bytes == original_certs[&id],
+            "broker {id} cert must be byte-identical (reuse path), not reissued"
+        );
     }
 
     // New broker 3: cert + key + digest present.
     for k in ["3.crt", "3.key", "3.sans-digest"] {
-        assert2::assert!(data.get(k).and_then(|v| v.as_str()).is_some());
+        assert!(
+            data.get(k).and_then(|v| v.as_str()).is_some(),
+            "scale-up: keystore PATCH must add data['{k}'], got keys = {:?}",
+            data.keys().collect::<Vec<_>>(),
+        );
     }
     // New broker 3's cert must also chain to the cluster CA (sanity).
     let new_crt_b64 = data["3.crt"].as_str().unwrap();
@@ -1275,7 +1334,10 @@ async fn scale_up_adds_entries_does_not_reissue_existing() {
     leaf.verify_signature(Some(ca.public_key()))
         .expect("new leaf must chain to cluster CA");
 
-    assert2::assert!(state.remaining_rules() == 0);
+    assert!(
+        state.remaining_rules() == 0,
+        "all preloaded rules must have been consumed"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1288,7 +1350,6 @@ async fn scale_up_adds_entries_does_not_reissue_existing() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn scale_down_prunes_entries() {
     let ns = "ns4";
     let name = "c4";
@@ -1446,13 +1507,23 @@ async fn scale_down_prunes_entries() {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(crt_b64)
             .expect("base64");
-        assert2::assert!(bytes == original_certs[&id]);
+        assert!(
+            bytes == original_certs[&id],
+            "broker {id} cert must be byte-identical after scale-down (reuse path)"
+        );
     }
 
     // Removed broker 3: all three entries pruned.
     for k in ["3.crt", "3.key", "3.sans-digest"] {
-        assert2::assert!(!data.contains_key(k));
+        assert!(
+            !data.contains_key(k),
+            "scale-down: keystore PATCH must drop data['{k}'], got keys = {:?}",
+            data.keys().collect::<Vec<_>>(),
+        );
     }
 
-    assert2::assert!(state.remaining_rules() == 0);
+    assert!(
+        state.remaining_rules() == 0,
+        "all preloaded rules must have been consumed"
+    );
 }

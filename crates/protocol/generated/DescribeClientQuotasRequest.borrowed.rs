@@ -16,7 +16,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 1;
 pub const FLEXIBLE_MIN: i16 = 1;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -26,6 +27,10 @@ pub struct DescribeClientQuotasRequest<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl DescribeClientQuotasRequest<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::describe_client_quotas_request::DescribeClientQuotasRequest {
@@ -140,6 +145,10 @@ pub struct ComponentData<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl ComponentData<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_client_quotas_request::ComponentData {
         crate::owned::describe_client_quotas_request::ComponentData {
             entity_type: (self.entity_type).to_string(),
@@ -154,9 +163,9 @@ impl Encode for ComponentData<'_> {
         let flex = version >= 1;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.entity_type);
+                let () = put_compact_string(buf, self.entity_type);
             } else {
-                put_string(buf, self.entity_type);
+                let () = put_string(buf, self.entity_type);
             }
         }
         if version >= 0 {
@@ -164,9 +173,9 @@ impl Encode for ComponentData<'_> {
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.match_);
+                let () = put_compact_nullable_string(buf, self.match_);
             } else {
-                put_nullable_string(buf, self.match_);
+                let () = put_nullable_string(buf, self.match_);
             }
         }
         if flex {

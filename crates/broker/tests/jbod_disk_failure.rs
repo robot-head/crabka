@@ -1,6 +1,5 @@
 // rustc 1.95 clippy ICEs on annotate-snippets in pedantic lints on these
 // raw-wire test files; match the opt-out used by jbod.rs / compaction.rs.
-#![allow(clippy::pedantic)]
 
 //! KIP-112 runtime log-dir failure path.
 //!
@@ -15,6 +14,7 @@
 
 use std::{io, net::SocketAddr};
 
+use assert2::{assert, check};
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_protocol::{
@@ -105,7 +105,7 @@ async fn create_topic(addr: SocketAddr, topic: &str, partitions: i32) {
     let resp_bytes = round_trip(&mut stream, 19, VERSION, &body).await.unwrap();
     let mut cur: &[u8] = &resp_bytes;
     let resp = CreateTopicsResponse::decode(&mut cur, VERSION).unwrap();
-    assert2::assert!(resp.topics[0].error_code == 0);
+    assert!(resp.topics[0].error_code == 0, "CreateTopics must succeed");
 }
 
 async fn wait_all_partitions(handle: &BrokerHandle, topic: &str, n: i32) {
@@ -121,7 +121,7 @@ fn partitions_in_dir(dir: &std::path::Path, topic: &str) -> Vec<i32> {
     std::fs::read_dir(dir)
         .unwrap()
         .filter_map(Result::ok)
-        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
         .filter_map(|e| {
             let name = e.file_name();
             let s = name.to_str()?;
@@ -181,8 +181,17 @@ async fn produce_to_partition_on_offline_dir_returns_storage_error() {
     // Confirm spread: both dirs must hold at least one partition of the topic.
     let in_extra = partitions_in_dir(extra.path(), TOPIC);
     let in_primary = partitions_in_dir(primary.path(), TOPIC);
-    assert2::assert!(!in_extra.is_empty());
-    assert2::assert!(!in_primary.is_empty());
+    assert!(
+        !in_extra.is_empty(),
+        "test premise: at least one partition must land on the extra dir \
+         (primary={} extra={})",
+        in_primary.len(),
+        in_extra.len()
+    );
+    assert!(
+        !in_primary.is_empty(),
+        "test premise: at least one partition must land on the primary dir"
+    );
 
     // Pick the smallest partition index on each dir for determinism.
     let mut extra_parts = in_extra.clone();
@@ -195,15 +204,25 @@ async fn produce_to_partition_on_offline_dir_returns_storage_error() {
 
     // Flip ONLY the extra dir offline. The primary dir stays online, so the
     // broker does NOT trigger the all-dirs-offline self-shutdown path.
-    assert2::assert!(handle.test_mark_log_dir_offline(extra.path()));
+    assert!(
+        handle.test_mark_log_dir_offline(extra.path()),
+        "mark_offline must return true (dir was registered and online)"
+    );
 
     // Case 1: Produce to the offline-dir partition must return KAFKA_STORAGE_ERROR (56).
     let code = produce_and_get_error(addr, TOPIC, offline_partition).await;
-    assert2::assert!(code == 56);
+    assert!(
+        code == 56,
+        "partition {offline_partition} on offline extra dir must return \
+         KAFKA_STORAGE_ERROR (56); got {code}"
+    );
 
     // Case 2 (sanity): Produce to the still-online primary-dir partition must succeed.
     let code = produce_and_get_error(addr, TOPIC, online_partition).await;
-    assert2::assert!(code == 0);
+    assert!(
+        code == 0,
+        "partition {online_partition} on online primary dir must succeed (0); got {code}"
+    );
 
     handle.shutdown().await;
 }
@@ -226,7 +245,10 @@ async fn all_log_dirs_offline_triggers_self_shutdown() {
     let mut shutdown_rx = handle.should_shutdown_rx();
 
     // Flip the only log dir offline. This is the all-dirs condition.
-    assert2::assert!(handle.test_mark_log_dir_offline(primary.path()));
+    assert!(
+        handle.test_mark_log_dir_offline(primary.path()),
+        "mark_offline must return true (dir was registered and online)"
+    );
 
     // Wait up to 15 s for the heartbeat client to detect the all-dirs
     // condition and latch should_shutdown to true.
@@ -241,8 +263,14 @@ async fn all_log_dirs_offline_triggers_self_shutdown() {
         }
     })
     .await;
-    assert2::assert!(woke.is_ok());
-    assert2::assert!(*shutdown_rx.borrow());
+    assert!(
+        woke.is_ok(),
+        "broker did not signal self-shutdown when all log dirs went offline"
+    );
+    assert!(
+        *shutdown_rx.borrow(),
+        "should_shutdown must be true after all dirs offline"
+    );
 
     // Shutdown should complete without hanging: the supervisor was already
     // cancelled by the self-shutdown path, and cancelling an already-
@@ -250,7 +278,7 @@ async fn all_log_dirs_offline_triggers_self_shutdown() {
     handle.shutdown().await;
 }
 
-/// KIP-112 / KIP-858: `AssignReplicasToDirs` (api_key=73) is accepted by the
+/// KIP-112 / KIP-858: `AssignReplicasToDirs` (`api_key=73`) is accepted by the
 /// controller-leader broker, records the assignment, and echoes the request
 /// back with `error_code=0` on every partition.
 ///
@@ -259,6 +287,8 @@ async fn all_log_dirs_offline_triggers_self_shutdown() {
 /// encode.
 #[tokio::test]
 async fn assign_replicas_to_dirs_reports_and_echoes() {
+    const VERSION: i16 = 0; // AssignReplicasToDirs only has version 0
+
     const TOPIC: &str = "kip112-assign";
     const N: i32 = 2;
     // Use a single-dir broker so the broker IS the controller leader.
@@ -282,7 +312,6 @@ async fn assign_replicas_to_dirs_reports_and_echoes() {
     // Choose an arbitrary dir UUID to assign partition 0 on broker 1.
     let dir_uuid = uuid::Uuid::from_u128(0xCAFE_BABE);
 
-    const VERSION: i16 = 0; // AssignReplicasToDirs only has version 0
     let req = AssignReplicasToDirsRequest {
         broker_id: 1, // for_tests default broker_id
         broker_epoch: -1,
@@ -310,18 +339,24 @@ async fn assign_replicas_to_dirs_reports_and_echoes() {
     let mut cur: &[u8] = &resp_bytes;
     let resp = AssignReplicasToDirsResponse::decode(&mut cur, VERSION).unwrap();
 
-    assert2::assert!(
-        (
-            resp.error_code,
-            resp.directories.is_empty(),
-            resp.directories[0].topics[0].partitions[0].error_code,
-        ) == (0, false, 0)
+    check!(
+        resp.error_code == 0,
+        "AssignReplicasToDirs top-level error_code must be NONE (0), got {}",
+        resp.error_code
+    );
+    assert!(
+        !resp.directories.is_empty(),
+        "response must echo at least one directory"
+    );
+    check!(
+        resp.directories[0].topics[0].partitions[0].error_code == 0,
+        "per-partition error_code must be NONE (0)"
     );
 
     handle.shutdown().await;
 }
 
-/// KIP-112: a `BrokerHeartbeat` (api_key=63) with `offline_log_dirs` set is
+/// KIP-112: a `BrokerHeartbeat` (`api_key=63`) with `offline_log_dirs` set is
 /// accepted by the controller. For a single-broker cluster with no ISR peers
 /// the failover scan finds no alive ISR alternative → plan.changes is empty →
 /// `submit_change` is skipped → response `error_code=0`.
@@ -366,7 +401,11 @@ async fn heartbeat_with_offline_log_dirs_is_accepted() {
     let mut cur: &[u8] = &resp_bytes;
     let resp = BrokerHeartbeatResponse::decode(&mut cur, HB_MAX_VERSION).unwrap();
 
-    assert2::assert!(resp.error_code == 0);
+    assert!(
+        resp.error_code == 0,
+        "BrokerHeartbeat with offline_log_dirs must be accepted (error_code=0), got {}",
+        resp.error_code
+    );
 
     handle.shutdown().await;
 }

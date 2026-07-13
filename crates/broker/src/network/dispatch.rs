@@ -15,13 +15,13 @@
 use std::net::SocketAddr;
 
 use bytes::{BufMut, Bytes, BytesMut};
-use crabka_protocol::api_key::ApiKey;
+use crabka_protocol::{Decode as _, api_key::ApiKey};
 use futures_util::{SinkExt, StreamExt};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::TcpStream,
 };
-use tokio_util::codec::Framed;
+use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tracing::Instrument as _;
 
 use crate::{
@@ -248,12 +248,261 @@ async fn serve_connection_plaintext(
     serve_connection_stream(broker, stream, spec, peer, None).await;
 }
 
+fn initial_connection_auth(
+    is_sasl_listener: bool,
+    mtls_principal: Option<crabka_security::Principal>,
+) -> crate::network::auth::ConnectionAuth {
+    if is_sasl_listener {
+        return crate::network::auth::ConnectionAuth::Anonymous;
+    }
+    let principal = mtls_principal.unwrap_or_else(|| crabka_security::Principal {
+        name: "ANONYMOUS".to_string(),
+        auth_method: crabka_security::AuthMethod::Anonymous,
+        groups: vec![],
+    });
+    crate::network::auth::ConnectionAuth::Authenticated {
+        principal,
+        mechanism: crabka_security::SaslMechanism::Plain,
+        expires_at_ms: None,
+        authenticated_via_token: false,
+    }
+}
+
+fn auth_deadline(auth: &crate::network::auth::ConnectionAuth) -> Option<tokio::time::Instant> {
+    match auth {
+        crate::network::auth::ConnectionAuth::Authenticated {
+            expires_at_ms: Some(expires_at_ms),
+            ..
+        } => Some(instant_at_epoch_ms(*expires_at_ms)),
+        crate::network::auth::ConnectionAuth::Reauthenticating { previous, .. } => {
+            previous.expires_at_ms.map(instant_at_epoch_ms)
+        }
+        _ => None,
+    }
+}
+
+async fn next_connection_frame<S>(
+    framed: &mut Framed<S, LengthDelimitedCodec>,
+    auth: &crate::network::auth::ConnectionAuth,
+) -> Option<Bytes>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let frame_result = tokio::select! {
+        biased;
+        next = framed.next() => next,
+        () = sleep_until_some(auth_deadline(auth)) => {
+            tracing::info!(
+                principal = ?auth_principal_name(auth),
+                "SASL session expired, closing connection (KIP-368)"
+            );
+            return None;
+        }
+    };
+    match frame_result {
+        Some(Ok(bytes)) => Some(bytes.freeze()),
+        Some(Err(error)) => {
+            tracing::warn!(%error, "frame decode error, closing");
+            None
+        }
+        None => None,
+    }
+}
+
+fn capture_client_software(
+    parsed: &crate::network::request::ParsedRequest<'_>,
+    name: &mut String,
+    version: &mut String,
+) {
+    if parsed.api_key != API_VERSIONS_KEY || parsed.api_version < 3 {
+        return;
+    }
+    let mut body = parsed.body;
+    if let Ok(request) = crabka_protocol::owned::api_versions_request::ApiVersionsRequest::decode(
+        &mut body,
+        parsed.api_version,
+    ) && crate::handlers::api_versions::is_valid_client_info(&request.client_software_name)
+        && crate::handlers::api_versions::is_valid_client_info(&request.client_software_version)
+    {
+        name.clone_from(&request.client_software_name);
+        version.clone_from(&request.client_software_version);
+    }
+}
+
+fn parse_connection_request<'a>(
+    broker: &Broker,
+    frame: &'a Bytes,
+    peer: &SocketAddr,
+) -> Option<(crate::network::request::ParsedRequest<'a>, tracing::Span)> {
+    let peeked_api_key = match crate::network::request::peek_api_key(frame) {
+        Ok(api_key) => api_key,
+        Err(error) => {
+            tracing::warn!(%error, "frame too small to peek api_key, closing");
+            return None;
+        }
+    };
+    let parsed = match crate::network::request::parse_request(frame, |api_key, version| {
+        broker.handlers().body_flexible(api_key, version)
+    }) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            tracing::warn!(%error, "request parse error, closing");
+            return None;
+        }
+    };
+    debug_assert_eq!(parsed.api_key, peeked_api_key);
+    let span = if tracing::enabled!(
+        target: crate::telemetry::REQUEST_TARGET,
+        tracing::Level::DEBUG
+    ) {
+        crate::telemetry::request_span(
+            parsed.api_key,
+            parsed.api_version,
+            parsed.correlation_id,
+            parsed.client_id,
+            peer,
+        )
+    } else {
+        tracing::Span::none()
+    };
+    Some((parsed, span))
+}
+
+fn begin_request(
+    broker: &Broker,
+    parsed: &crate::network::request::ParsedRequest<'_>,
+) -> (std::time::Instant, InFlightGuard) {
+    let started = std::time::Instant::now();
+    broker.metrics.record_api_request(parsed.api_key);
+    tracing::info!(
+        api_key = parsed.api_key,
+        api_version = parsed.api_version,
+        correlation_id = parsed.correlation_id,
+        body_flexible = parsed.body_flexible,
+        body_len = parsed.body.len(),
+        "dispatching request"
+    );
+    (started, InFlightGuard::new(&broker.metrics, parsed.api_key))
+}
+
+async fn send_unsupported_response<S>(
+    framed: &mut Framed<S, LengthDelimitedCodec>,
+    broker: &Broker,
+    parsed: &crate::network::request::ParsedRequest<'_>,
+    auth: &crate::network::auth::ConnectionAuth,
+    started: std::time::Instant,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    broker
+        .metrics
+        .record_unsupported_api_request(parsed.api_key);
+    let mut body = BytesMut::with_capacity(2);
+    body.put_i16(codes::UNSUPPORTED_VERSION);
+    let response = encode_response(
+        parsed.api_key,
+        parsed.correlation_id,
+        parsed.body_flexible,
+        &body.freeze(),
+    );
+    let response = maybe_apply_request_quota(broker, response, parsed, auth, started).await;
+    if let Err(error) = framed.send(response).await {
+        tracing::warn!(%error, "framed.send error, closing");
+        return false;
+    }
+    true
+}
+
+async fn dispatch_fetch<S>(
+    framed: &mut Framed<S, LengthDelimitedCodec>,
+    broker: &Broker,
+    parsed: &crate::network::request::ParsedRequest<'_>,
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+    request_span: tracing::Span,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin + crate::network::fetch_writer::SendfileSink,
+{
+    let sendfile_capable =
+        crate::network::fetch_writer::SendfileSink::is_sendfile_capable(framed.get_ref());
+    match handle_fetch_frame_from_parsed(broker, parsed, auth, peer, sendfile_capable)
+        .instrument(request_span)
+        .await
+    {
+        Ok(operations) => {
+            if let Err(error) = SinkExt::<Bytes>::flush(framed).await {
+                tracing::warn!(%error, "framed.flush error before fetch plan, closing");
+                return false;
+            }
+            if let Err(error) =
+                crate::network::fetch_writer::write_fetch_plan(framed.get_mut(), operations).await
+            {
+                tracing::warn!(%error, "fetch plan write error, closing");
+                return false;
+            }
+            true
+        }
+        Err(error) => {
+            broker.metrics.record_request_error(parsed.api_key);
+            tracing::warn!(%error, "Fetch dispatch error, closing connection");
+            false
+        }
+    }
+}
+
+async fn send_registry_response<S>(
+    framed: &mut Framed<S, LengthDelimitedCodec>,
+    entry: crate::handlers::DispatchEntry,
+    context: DispatchContext<'_, '_>,
+    request_span: tracing::Span,
+    started: std::time::Instant,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut response = match dispatch_registry_response(entry, context)
+        .instrument(request_span)
+        .await
+    {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => {
+            tracing::warn!("registry entry has no ordinary dispatcher, closing connection");
+            return false;
+        }
+        Err(error) => {
+            context
+                .broker
+                .metrics
+                .record_request_error(context.parsed.api_key);
+            tracing::warn!(%error, "registry dispatch error, closing connection");
+            return false;
+        }
+    };
+    if entry.quota_policy() == crate::handlers::RequestQuotaPolicy::ApplyFallbackAccounting {
+        response = maybe_apply_request_quota(
+            context.broker,
+            response,
+            context.parsed,
+            context.auth,
+            started,
+        )
+        .await;
+    }
+    if let Err(error) = framed.send(response).await {
+        tracing::warn!(%error, "framed.send error, closing");
+        return false;
+    }
+    true
+}
+
 /// Generic per-connection request loop. `S` is the post-handshake byte
 /// stream — `TcpStream` for plaintext listeners, `tokio_rustls::server::TlsStream<TcpStream>`
 /// for TLS listeners. `spec` carries the listener's protocol so the loop
 /// can initialise `ConnectionAuth` correctly and gate pre-auth requests on
 /// SASL listeners.
-#[allow(clippy::too_many_lines)] // each api_key intercept arm adds ~15 lines.
+// each api_key intercept arm adds ~15 lines.
 async fn serve_connection_stream<S>(
     broker: std::sync::Arc<Broker>,
     stream: S,
@@ -270,136 +519,24 @@ async fn serve_connection_stream<S>(
         &broker.config.enabled_sasl_mechanisms,
     )
     .to_owned();
-    // Per-connection auth state. Mutated by the SASL handlers;
-    // used to gate non-allowlisted api_keys before auth completes.
-    // When an mTLS client cert was presented (verified by the TLS
-    // layer against `client_ca_path`), the dispatch layer starts the
-    // connection as Authenticated with the cert's Subject DN as the
-    // principal name. SASL listeners ignore mTLS principals — Kafka's
-    // SASL_SSL semantics require SASL to be the auth, even if a cert was
-    // negotiated for transport.
-    #[allow(unused_mut)] // SaslAuthenticate handlers mutate `auth`.
-    let mut auth = if is_sasl_listener {
-        crate::network::auth::ConnectionAuth::Anonymous
-    } else if let Some(principal) = mtls_principal {
-        // Non-SASL connections carry an inert mechanism +
-        // no-expiry; the in-band re-auth path is unreachable on these
-        // listeners (handshake is only sent on SASL listeners).
-        crate::network::auth::ConnectionAuth::Authenticated {
-            principal,
-            mechanism: crabka_security::SaslMechanism::Plain,
-            expires_at_ms: None,
-            // mTLS clients never auth via a delegation token.
-            authenticated_via_token: false,
-        }
-    } else {
-        // PLAINTEXT / SSL-without-cert: implicit anonymous, treated as
-        // authenticated for gating purposes so the pre-auth allowlist
-        // is a no-op.
-        crate::network::auth::ConnectionAuth::Authenticated {
-            principal: crabka_security::Principal {
-                name: "ANONYMOUS".to_string(),
-                auth_method: crabka_security::AuthMethod::Anonymous,
-                groups: vec![],
-            },
-            mechanism: crabka_security::SaslMechanism::Plain,
-            expires_at_ms: None,
-            // Anonymous never auths via a delegation token.
-            authenticated_via_token: false,
-        }
-    };
+    let mut auth = initial_connection_auth(is_sasl_listener, mtls_principal);
     // Track live connections for the duration of this serve loop. The
     // gauge is decremented when `_conn` drops on any loop exit (EOF,
     // decode/send error, or SASL-session expiry).
     let _conn = ActiveConnectionGuard::new(&broker.metrics);
     tracing::info!(listener = %spec.name, sasl = is_sasl_listener, "connection opened");
 
-    // KIP-714: per-connection client software name + version, populated from
-    // the first `ApiVersions v3+` request (KIP-511). Default to empty strings
+    // KIP-714 client software identity, populated by the first ApiVersions v3+ request.
     // so `GetTelemetrySubscriptions` can be served even on connections that
     // never sent `ApiVersions` (e.g. early-version clients).
-    let mut client_software_name = String::new();
-    let mut client_software_version = String::new();
+    let mut client_software = (String::new(), String::new());
 
     loop {
-        // Compute the re-auth deadline for OAUTHBEARER connections. PLAIN /
-        // SCRAM / mTLS / anonymous return `None` and the timer arm is
-        // effectively disabled via `std::future::pending()` inside
-        // `sleep_until_some`. During `Reauthenticating`, the deadline stays
-        // pinned to the `previous` session's `expires_at_ms` so a slow
-        // in-band re-auth attempt cannot extend the session by sitting in
-        // the in-progress state past the original expiry (KIP-368).
-        let deadline: Option<tokio::time::Instant> = match &auth {
-            crate::network::auth::ConnectionAuth::Authenticated {
-                expires_at_ms: Some(exp_ms),
-                ..
-            } => Some(instant_at_epoch_ms(*exp_ms)),
-            crate::network::auth::ConnectionAuth::Reauthenticating { previous, .. } => {
-                previous.expires_at_ms.map(instant_at_epoch_ms)
-            }
-            _ => None,
+        let Some(frame) = next_connection_frame(&mut framed, &auth).await else {
+            break;
         };
-
-        // `biased;` ensures that if both `framed.next()` and the deadline
-        // are ready in the same poll, the read arm wins — letting the last
-        // in-flight request before expiry complete normally (KIP-368).
-        let frame_result = tokio::select! {
-            biased;
-            next = framed.next() => next,
-            () = sleep_until_some(deadline) => {
-                tracing::info!(
-                    principal = ?auth_principal_name(&auth),
-                    "SASL session expired, closing connection (KIP-368)"
-                );
-                break;
-            }
-        };
-
-        let frame = match frame_result {
-            // Freeze the codec's `BytesMut` to a refcounted `Bytes` once per
-            // frame (zero-copy). The produce hot path slices each partition's
-            // verbatim records bytes as a cheap refcount view of this `Bytes`
-            // (see `handle_produce_frame`); all other readers deref it as
-            // `&[u8]` exactly as before.
-            Some(Ok(b)) => b.freeze(),
-            Some(Err(e)) => {
-                tracing::warn!(error = %e, "frame decode error, closing");
-                break;
-            }
-            None => break, // EOF
-        };
-        let peeked_api_key = match crate::network::request::peek_api_key(&frame) {
-            Ok(api_key) => api_key,
-            Err(e) => {
-                tracing::warn!(error = %e, "frame too small to peek api_key, closing");
-                break;
-            }
-        };
-        let parsed = match crate::network::request::parse_request(&frame, |api_key, version| {
-            broker.handlers().body_flexible(api_key, version)
-        }) {
-            Ok(parsed) => parsed,
-            Err(e) => {
-                tracing::warn!(error = %e, "request parse error, closing");
-                break;
-            }
-        };
-        debug_assert_eq!(parsed.api_key, peeked_api_key);
-
-        // Per-request server span. The `enabled!` guard keeps this a single
-        // disabled-level check on a broker without OTLP. Each handler `.await`
-        // is `.instrument`ed with this span so handler events nest under it.
-        let req_span = if tracing::enabled!(target: crate::telemetry::REQUEST_TARGET, tracing::Level::DEBUG)
-        {
-            crate::telemetry::request_span(
-                parsed.api_key,
-                parsed.api_version,
-                parsed.correlation_id,
-                parsed.client_id,
-                &peer,
-            )
-        } else {
-            tracing::Span::none()
+        let Some((parsed, req_span)) = parse_connection_request(&broker, &frame, &peer) else {
+            break;
         };
         // Per-state request gate: on SASL listeners, gate every api_key
         // through `auth.allows_request(api_key)`. This covers:
@@ -459,37 +596,9 @@ async fn serve_connection_stream<S>(
             continue;
         }
 
-        // KIP-511: capture client software name + version from ApiVersions v3+
-        // frames so they're available for telemetry subscription matching. This
-        // runs before ordinary registry dispatch so telemetry handlers on later
-        // requests see the captured KIP-714 software labels.
-        if parsed.api_key == API_VERSIONS_KEY && parsed.api_version >= 3 {
-            use crabka_protocol::Decode;
-            let mut cur: &[u8] = parsed.body;
-            if let Ok(req) =
-                crabka_protocol::owned::api_versions_request::ApiVersionsRequest::decode(
-                    &mut cur,
-                    parsed.api_version,
-                )
-                && crate::handlers::api_versions::is_valid_client_info(&req.client_software_name)
-                && crate::handlers::api_versions::is_valid_client_info(&req.client_software_version)
-            {
-                client_software_name.clone_from(&req.client_software_name);
-                client_software_version.clone_from(&req.client_software_version);
-            }
-        }
+        capture_client_software(&parsed, &mut client_software.0, &mut client_software.1);
 
-        let started = std::time::Instant::now();
-        broker.metrics.record_api_request(parsed.api_key);
-        let _in_flight = InFlightGuard::new(&broker.metrics, parsed.api_key);
-        tracing::info!(
-            api_key = parsed.api_key,
-            api_version = parsed.api_version,
-            correlation_id = parsed.correlation_id,
-            body_flexible = parsed.body_flexible,
-            body_len = parsed.body.len(),
-            "dispatching request"
-        );
+        let (started, _in_flight) = begin_request(&broker, &parsed);
 
         let Some(entry) = broker.handlers().get(parsed.api_key) else {
             tracing::warn!(
@@ -497,91 +606,39 @@ async fn serve_connection_stream<S>(
                 api_version = parsed.api_version,
                 "unsupported api, returning error"
             );
-            broker
-                .metrics
-                .record_unsupported_api_request(parsed.api_key);
-            let mut buf = BytesMut::with_capacity(2);
-            buf.put_i16(codes::UNSUPPORTED_VERSION);
-            let response_bytes = encode_response(
-                parsed.api_key,
-                parsed.correlation_id,
-                parsed.body_flexible,
-                &buf.freeze(),
-            );
-            let response_bytes =
-                maybe_apply_request_quota(&broker, response_bytes, &parsed, &auth, started).await;
-            if let Err(e) = framed.send(response_bytes).await {
-                tracing::warn!(error = %e, "framed.send error, closing");
+            if !send_unsupported_response(&mut framed, &broker, &parsed, &auth, started).await {
                 break;
             }
             continue;
         };
 
         if matches!(entry.kind(), crate::handlers::DispatchKind::Fetch) {
-            let sendfile_capable =
-                crate::network::fetch_writer::SendfileSink::is_sendfile_capable(framed.get_ref());
-            match handle_fetch_frame_from_parsed(&broker, &parsed, &auth, &peer, sendfile_capable)
-                .instrument(req_span.clone())
-                .await
+            if !dispatch_fetch(
+                &mut framed,
+                &broker,
+                &parsed,
+                &auth,
+                &peer,
+                req_span.clone(),
+            )
+            .await
             {
-                Ok(ops) => {
-                    if let Err(e) = SinkExt::<Bytes>::flush(&mut framed).await {
-                        tracing::warn!(error = %e, "framed.flush error before fetch plan, closing");
-                        break;
-                    }
-                    if let Err(e) =
-                        crate::network::fetch_writer::write_fetch_plan(framed.get_mut(), ops).await
-                    {
-                        tracing::warn!(error = %e, "fetch plan write error, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    broker.metrics.record_request_error(parsed.api_key);
-                    tracing::warn!(error = %e, "Fetch dispatch error, closing connection");
-                    break;
-                }
+                break;
             }
+            continue;
         }
 
-        let mut response_bytes = match dispatch_registry_response(
-            &broker,
-            entry,
-            &parsed,
-            &frame,
-            &auth,
-            &peer,
-            &spec.name,
-            &client_software_name,
-            &client_software_version,
-        )
-        .instrument(req_span.clone())
-        .await
-        {
-            Ok(Some(bytes)) => bytes,
-            Ok(None) => {
-                tracing::warn!(
-                    api_key = parsed.api_key,
-                    api_version = parsed.api_version,
-                    "registry entry has no ordinary dispatcher, closing connection"
-                );
-                break;
-            }
-            Err(e) => {
-                broker.metrics.record_request_error(parsed.api_key);
-                tracing::warn!(error = %e, "registry dispatch error, closing connection");
-                break;
-            }
+        let context = DispatchContext {
+            broker: &broker,
+            parsed: &parsed,
+            frame: &frame,
+            auth: &auth,
+            peer: &peer,
+            listener_name: &spec.name,
+            client_software_name: &client_software.0,
+            client_software_version: &client_software.1,
         };
-
-        if entry.quota_policy() == crate::handlers::RequestQuotaPolicy::ApplyFallbackAccounting {
-            response_bytes =
-                maybe_apply_request_quota(&broker, response_bytes, &parsed, &auth, started).await;
-        }
-
-        if let Err(e) = framed.send(response_bytes).await {
-            tracing::warn!(error = %e, "framed.send error, closing");
+        if !send_registry_response(&mut framed, entry, context, req_span, started).await {
             break;
         }
     }
@@ -616,7 +673,6 @@ async fn try_handle_sasl_frame(
     Some(handle_sasl_frame(broker, parsed, auth, sasl_mechanisms).await)
 }
 
-#[allow(clippy::too_many_lines)]
 async fn handle_sasl_frame(
     broker: &Broker,
     parsed: &crate::network::request::ParsedRequest<'_>,
@@ -626,17 +682,7 @@ async fn handle_sasl_frame(
     use crabka_protocol::{Decode, Encode};
 
     let (resp_body, close_after) = match parsed.api_key {
-        SASL_HANDSHAKE_KEY => {
-            let mut cur: &[u8] = parsed.body;
-            let req = crabka_protocol::owned::sasl_handshake_request::SaslHandshakeRequest::decode(
-                &mut cur,
-                parsed.api_version,
-            )?;
-            let resp = crate::network::auth::handle_handshake(&req, auth, sasl_mechanisms);
-            let mut buf = BytesMut::with_capacity(resp.encoded_len(parsed.api_version));
-            resp.encode(&mut buf, parsed.api_version)?;
-            (buf.freeze(), false)
-        }
+        SASL_HANDSHAKE_KEY => (handle_sasl_handshake(parsed, auth, sasl_mechanisms)?, false),
         SASL_AUTHENTICATE_KEY => {
             let mut cur: &[u8] = parsed.body;
             let req =
@@ -737,6 +783,24 @@ async fn handle_sasl_frame(
         response_bytes,
         close_after,
     })
+}
+
+fn handle_sasl_handshake(
+    parsed: &crate::network::request::ParsedRequest<'_>,
+    auth: &mut crate::network::auth::ConnectionAuth,
+    sasl_mechanisms: &[crabka_security::SaslMechanism],
+) -> Result<Bytes, BrokerError> {
+    use crabka_protocol::{Decode, Encode};
+
+    let mut body = parsed.body;
+    let request = crabka_protocol::owned::sasl_handshake_request::SaslHandshakeRequest::decode(
+        &mut body,
+        parsed.api_version,
+    )?;
+    let response = crate::network::auth::handle_handshake(&request, auth, sasl_mechanisms);
+    let mut encoded = BytesMut::with_capacity(response.encoded_len(parsed.api_version));
+    response.encode(&mut encoded, parsed.api_version)?;
+    Ok(encoded.freeze())
 }
 
 /// Decode + dispatch a `Fetch` (`api_key` 1) frame. Pulls the
@@ -842,47 +906,35 @@ async fn handle_fetch_frame_from_parsed(
     )
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[derive(Clone, Copy)]
+struct DispatchContext<'a, 'request> {
+    broker: &'a Broker,
+    parsed: &'a crate::network::request::ParsedRequest<'request>,
+    frame: &'a Bytes,
+    auth: &'a crate::network::auth::ConnectionAuth,
+    peer: &'a SocketAddr,
+    listener_name: &'a str,
+    client_software_name: &'a str,
+    client_software_version: &'a str,
+}
+
 async fn dispatch_registered_bytes(
-    broker: &Broker,
     entry: crate::handlers::DispatchEntry,
-    parsed: &crate::network::request::ParsedRequest<'_>,
-    frame: &Bytes,
-    auth: &crate::network::auth::ConnectionAuth,
-    peer: &SocketAddr,
-    listener_name: &str,
-    client_software_name: &str,
-    client_software_version: &str,
+    context: DispatchContext<'_, '_>,
 ) -> Option<Result<Bytes, BrokerError>> {
+    let DispatchContext {
+        broker,
+        parsed,
+        frame,
+        auth,
+        peer,
+        listener_name,
+        client_software_name,
+        client_software_version,
+    } = context;
     match entry.kind() {
-        crate::handlers::DispatchKind::Context(handler) => {
-            let ctx = crate::handlers::RequestContext::new(
-                principal_or_anonymous(auth),
-                peer,
-                parsed.client_id.unwrap_or(""),
-                false,
-                listener_name,
-            );
-            Some(
-                handler(
-                    broker,
-                    parsed.api_version,
-                    parsed.correlation_id,
-                    parsed.body,
-                    &ctx,
-                )
-                .await
-                .map(|body| {
-                    encode_response(
-                        parsed.api_key,
-                        parsed.correlation_id,
-                        parsed.body_flexible,
-                        &body,
-                    )
-                }),
-            )
-        }
-        crate::handlers::DispatchKind::DecodedContext(handler)
+        crate::handlers::DispatchKind::Context(handler)
+        | crate::handlers::DispatchKind::DecodedContext(handler)
         | crate::handlers::DispatchKind::EncodedContext(handler) => {
             let ctx = crate::handlers::RequestContext::new(
                 principal_or_anonymous(auth),
@@ -891,7 +943,8 @@ async fn dispatch_registered_bytes(
                 false,
                 listener_name,
             );
-            Some(
+            Some(encode_dispatch_result(
+                parsed,
                 handler(
                     broker,
                     parsed.api_version,
@@ -899,18 +952,11 @@ async fn dispatch_registered_bytes(
                     parsed.body,
                     &ctx,
                 )
-                .await
-                .map(|body| {
-                    encode_response(
-                        parsed.api_key,
-                        parsed.correlation_id,
-                        parsed.body_flexible,
-                        &body,
-                    )
-                }),
-            )
+                .await,
+            ))
         }
-        crate::handlers::DispatchKind::Auth(handler) => Some(
+        crate::handlers::DispatchKind::Auth(handler) => Some(encode_dispatch_result(
+            parsed,
             handler(
                 broker,
                 parsed.api_version,
@@ -919,16 +965,8 @@ async fn dispatch_registered_bytes(
                 auth,
                 peer,
             )
-            .await
-            .map(|body| {
-                encode_response(
-                    parsed.api_key,
-                    parsed.correlation_id,
-                    parsed.body_flexible,
-                    &body,
-                )
-            }),
-        ),
+            .await,
+        )),
         crate::handlers::DispatchKind::Produce(handler) => {
             let ctx = crate::handlers::RequestContext::new(
                 principal_or_anonymous(auth),
@@ -939,7 +977,8 @@ async fn dispatch_registered_bytes(
             );
             let body_offset = frame.len() - parsed.body.len();
             let body_bytes = frame.slice(body_offset..);
-            Some(
+            Some(encode_dispatch_result(
+                parsed,
                 handler(
                     broker,
                     parsed.api_version,
@@ -948,16 +987,8 @@ async fn dispatch_registered_bytes(
                     body_bytes,
                     &ctx,
                 )
-                .await
-                .map(|body| {
-                    encode_response(
-                        parsed.api_key,
-                        parsed.correlation_id,
-                        parsed.body_flexible,
-                        &body,
-                    )
-                }),
-            )
+                .await,
+            ))
         }
         crate::handlers::DispatchKind::Telemetry(handler) => {
             let ctx = crate::handlers::TelemetryContext::new(
@@ -966,7 +997,8 @@ async fn dispatch_registered_bytes(
                 client_software_name,
                 client_software_version,
             );
-            Some(
+            Some(encode_dispatch_result(
+                parsed,
                 handler(
                     broker,
                     parsed.api_version,
@@ -974,16 +1006,8 @@ async fn dispatch_registered_bytes(
                     parsed.body,
                     &ctx,
                 )
-                .await
-                .map(|body| {
-                    encode_response(
-                        parsed.api_key,
-                        parsed.correlation_id,
-                        parsed.body_flexible,
-                        &body,
-                    )
-                }),
-            )
+                .await,
+            ))
         }
         crate::handlers::DispatchKind::Plain(_)
         | crate::handlers::DispatchKind::Fetch
@@ -991,31 +1015,26 @@ async fn dispatch_registered_bytes(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn dispatch_registry_response(
-    broker: &Broker,
-    entry: crate::handlers::DispatchEntry,
+fn encode_dispatch_result(
     parsed: &crate::network::request::ParsedRequest<'_>,
-    frame: &Bytes,
-    auth: &crate::network::auth::ConnectionAuth,
-    peer: &SocketAddr,
-    listener_name: &str,
-    client_software_name: &str,
-    client_software_version: &str,
+    result: Result<Bytes, BrokerError>,
+) -> Result<Bytes, BrokerError> {
+    result.map(|body| {
+        encode_response(
+            parsed.api_key,
+            parsed.correlation_id,
+            parsed.body_flexible,
+            &body,
+        )
+    })
+}
+
+async fn dispatch_registry_response(
+    entry: crate::handlers::DispatchEntry,
+    context: DispatchContext<'_, '_>,
 ) -> Result<Option<Bytes>, BrokerError> {
-    match dispatch_registered_bytes(
-        broker,
-        entry,
-        parsed,
-        frame,
-        auth,
-        peer,
-        listener_name,
-        client_software_name,
-        client_software_version,
-    )
-    .await
-    {
+    let DispatchContext { broker, parsed, .. } = context;
+    match dispatch_registered_bytes(entry, context).await {
         Some(result) => result.map(Some),
         None => match entry.kind() {
             crate::handlers::DispatchKind::Plain(handler) => {
@@ -1221,7 +1240,7 @@ fn patch_leading_throttle(
 mod tests {
     use std::time::Duration;
 
-    use assert2::check;
+    use assert2::{assert, check};
 
     use super::*;
 
@@ -1282,8 +1301,8 @@ mod tests {
             ("reauthenticating uses previous", &reauth, Some("bob")),
             ("anonymous", &anonymous, None),
         ];
-        for (_case, auth, want) in cases {
-            assert2::assert!(auth_principal_name(auth) == want);
+        for (case, auth, want) in cases {
+            assert!(auth_principal_name(auth) == want, "{case}");
         }
     }
 
@@ -1296,7 +1315,7 @@ mod tests {
         // `None` never resolves; the 10ms timeout is the only timer, so virtual
         // time jumps to it and the timeout elapses -> Err.
         let result = tokio::time::timeout(Duration::from_millis(10), sleep_until_some(None)).await;
-        assert2::assert!(result.is_err());
+        assert!(result.is_err());
     }
 
     #[tokio::test(start_paused = true)]
@@ -1308,7 +1327,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), sleep_until_some(Some(deadline)))
             .await
             .expect("deadline should resolve");
-        assert2::assert!(tokio::time::Instant::now() >= deadline);
+        assert!(tokio::time::Instant::now() >= deadline);
     }
 
     #[test]
@@ -1320,10 +1339,16 @@ mod tests {
         let before = tokio::time::Instant::now();
         let future = instant_at_epoch_ms(now_ms + 250);
         let delay = future.duration_since(before);
-        assert2::assert!(delay >= Duration::from_millis(100) && delay <= Duration::from_secs(2));
+        assert!(
+            delay >= Duration::from_millis(100) && delay <= Duration::from_secs(2),
+            "future epoch should become a near future tokio deadline, got {delay:?}"
+        );
 
         let past = instant_at_epoch_ms(now_ms - 250);
-        assert2::assert!(past <= tokio::time::Instant::now() + Duration::from_millis(50));
+        assert!(
+            past <= tokio::time::Instant::now() + Duration::from_millis(50),
+            "past epoch should fire immediately"
+        );
     }
 
     #[test]
@@ -1333,7 +1358,7 @@ mod tests {
         let body = [0u8, 0u8]; // error_code=0
         let out = encode_response(API_VERSIONS_KEY, 7, true, &body);
         // 4 byte corr_id + body, no tagged byte.
-        assert2::assert!(out.len() == 4 + body.len());
+        assert!(out.len() == 4 + body.len());
     }
 
     #[test]
@@ -1354,7 +1379,10 @@ mod tests {
             (18, 3, false), // ApiVersions
         ];
         for (api_key, version, want) in cases {
-            assert2::assert!(throttle_is_leading_field(api_key, version) == want);
+            assert!(
+                throttle_is_leading_field(api_key, version) == want,
+                "api_key {api_key} version {version}"
+            );
         }
     }
 
@@ -1369,16 +1397,16 @@ mod tests {
         body.put_i32(0); // ThrottleTimeMs = 0
         let resp = encode_response(68, 7, true, &body);
         let patched = patch_leading_throttle(resp, 68, true, 250);
-        assert2::assert!(read(&patched, 5) == 250);
-        assert2::assert!(read(&patched, 0) == 7); // corr_id preserved
+        assert!(read(&patched, 5) == 250);
+        assert!(read(&patched, 0) == 7); // corr_id preserved
 
         // Non-flexible response header (Metadata v3): header = 4 bytes.
         let mut body = BytesMut::new();
         body.put_i32(10); // existing throttle 10 < 250
         let resp = encode_response(3, 9, false, &body);
         let patched = patch_leading_throttle(resp, 3, false, 250);
-        assert2::assert!(read(&patched, 4) == 250);
-        assert2::assert!(read(&patched, 0) == 9);
+        assert!(read(&patched, 4) == 250);
+        assert!(read(&patched, 0) == 9);
     }
 
     #[test]
@@ -1389,7 +1417,7 @@ mod tests {
         let resp = encode_response(3, 1, false, &body);
         let patched = patch_leading_throttle(resp, 3, false, 100);
         let v = i32::from_be_bytes([patched[4], patched[5], patched[6], patched[7]]);
-        assert2::assert!(v == 500);
+        assert!(v == 500);
     }
 
     #[test]
@@ -1399,21 +1427,21 @@ mod tests {
         buf.put_i16(18);
         buf.put_i16(3);
         buf.put_i32(1);
-        assert2::assert!(crate::network::request::peek_api_key(&buf).unwrap() == 18);
+        assert!(crate::network::request::peek_api_key(&buf).unwrap() == 18);
     }
 
     #[test]
     fn peek_api_key_rejects_short_frame() {
         let buf = [0u8; 1];
-        assert2::assert!(crate::network::request::peek_api_key(&buf).is_err());
+        assert!(crate::network::request::peek_api_key(&buf).is_err());
     }
 
     #[test]
     fn encode_response_other_flexible_inserts_tagged_byte() {
         let body = [0u8, 0u8];
         let out = encode_response(3, 7, true, &body);
-        assert2::assert!(out.len() == 5 + body.len());
-        assert2::assert!(out[4] == 0); // tagged byte
+        assert!(out.len() == 5 + body.len());
+        assert!(out[4] == 0); // tagged byte
     }
 
     /// KIP-853 RPCs (80/81/82) route through the registry path and are
@@ -1428,8 +1456,11 @@ mod tests {
             buf.put_i16(api_key);
             buf.put_i16(0); // version 0
             buf.put_i32(1); // corr_id
-            assert2::assert!(crate::network::request::peek_api_key(&buf).unwrap() == api_key);
-            assert2::assert!(registry.body_flexible(api_key, 0));
+            assert!(crate::network::request::peek_api_key(&buf).unwrap() == api_key);
+            assert!(
+                registry.body_flexible(api_key, 0),
+                "api_key {api_key} is flexible from v0"
+            );
         }
     }
 

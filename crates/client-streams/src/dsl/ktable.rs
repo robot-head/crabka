@@ -53,6 +53,66 @@ use crate::{
 /// is itself `Send` (the captured serdes are `Send + Sync`: the `Serde` supertrait).
 pub(crate) type SuppressStoreFactory = Arc<dyn Fn(&mut LowerState, &str, &str, bool) + Send + Sync>;
 
+struct ForeignKeyJoinGraph {
+    registration_base: String,
+    send_name: String,
+    registration_sink: String,
+    registration_source: String,
+    subscription_store: String,
+    receive_name: String,
+    subscription_join_name: String,
+    foreign_join_name: String,
+    response_base: String,
+    response_sink: String,
+    response_source: String,
+    resolver_name: String,
+    output_name: String,
+    output_id: NodeId,
+}
+
+fn allocate_foreign_key_join_graph(
+    builder: &mut InternalStreamsBuilder,
+    parents: (NodeId, NodeId),
+) -> ForeignKeyJoinGraph {
+    let registration_base = builder.new_processor_name(names::FK_SUBSCRIPTION_REGISTRATION);
+    let send_name = builder.new_processor_name(names::FK_SUBSCRIPTION_REGISTRATION);
+    let registration_sink = builder.new_processor_name(names::KTABLE_SINK);
+    let registration_source = builder.new_processor_name(names::KTABLE_SOURCE);
+    let subscription_store = builder.new_processor_name(names::FK_SUBSCRIPTION_STATE_STORE);
+    let receive_name = builder.new_processor_name(names::FK_SUBSCRIPTION_PROCESSOR);
+    let subscription_join_name = builder.new_processor_name(names::FK_SUBSCRIPTION_PROCESSOR);
+    let foreign_join_name = builder.new_processor_name(names::FK_SUBSCRIPTION_PROCESSOR);
+    let response_base = builder.new_processor_name(names::FK_SUBSCRIPTION_RESPONSE);
+    let response_sink = builder.new_processor_name(names::KTABLE_SINK);
+    let response_source = builder.new_processor_name(names::KTABLE_SOURCE);
+    let resolver_name = builder.new_processor_name(names::FK_RESPONSE_RESOLVER);
+    let output_name = builder.new_processor_name(names::FK_OUTPUT);
+    let result_store = builder.new_processor_name(names::FK_OUTPUT_STATE_STORE);
+    let output_id = builder.graph.add(
+        output_name.clone(),
+        GraphNodeKind::TableProcessor {
+            store_name: Some(result_store.clone()),
+        },
+        vec![parents.0, parents.1],
+    );
+    ForeignKeyJoinGraph {
+        registration_base,
+        send_name,
+        registration_sink,
+        registration_source,
+        subscription_store,
+        receive_name,
+        subscription_join_name,
+        foreign_join_name,
+        response_base,
+        response_sink,
+        response_source,
+        resolver_name,
+        output_name,
+        output_id,
+    }
+}
+
 /// Build a non-windowed [`SuppressStoreFactory`] from a table's key/value serdes
 /// (plain aggregations + `builder.table`). Registers a `SuppressBytesStore<K, V>`
 /// with the JVM 1-day default changelog retention. (Windowed/session aggregations
@@ -605,6 +665,8 @@ where
     ///
     /// Both tables must be materialized — the join reads each side's store. The
     /// two source topics are declared as a copartition group (KIP-1071).
+    /// # Panics
+    /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub fn join<VB, VR, F, VBS>(
         &self,
         other: &KTable<K, VB, KS, VBS>,
@@ -631,6 +693,8 @@ where
     /// `leftJoin` (left KTable-KTable join): emits a row whenever the **left**
     /// (this) side is present; the right side is optional (the joiner receives
     /// `None` for it on a miss).
+    /// # Panics
+    /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub fn left_join<VB, VR, F, VBS>(
         &self,
         other: &KTable<K, VB, KS, VBS>,
@@ -680,7 +744,6 @@ where
     /// into the same subtopology as that store's owning table source). When both
     /// tables are single-source-topic tables, their source topics are declared as
     /// a copartition group.
-    #[allow(clippy::too_many_lines)]
     fn join_impl<VB, VR, JF, VBS>(
         &self,
         other: &KTable<K, VB, KS, VBS>,
@@ -878,6 +941,8 @@ where
     /// KIP-213 graph (subscription registration + response repartition topics, a
     /// subscription state store, and the five FK-join processors). See the module
     /// `dsl::processors::fk` for the per-processor semantics.
+    /// # Panics
+    /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub fn join_on_foreign_key<KO, VB, VR, FKE, J, KOS, KosOther, VbsOther>(
         &self,
         other: &KTable<KO, VB, KosOther, VbsOther>,
@@ -941,8 +1006,30 @@ where
     /// topic 4 … result store 17) are minted **eagerly** here so a downstream op
     /// (`toStream`=18, sink=19) lands at the JVM index; the thunk then registers
     /// the Topology sources/processors/sinks/stores/repartition-topics/copartition.
-    #[allow(clippy::too_many_lines)] // the 14-node KIP-213 graph is one cohesive lowering
-    #[allow(clippy::similar_names)] // va_serde/vb_serde are the FK-join domain names (left/right value)
+    // the 14-node KIP-213 graph is one cohesive lowering
+    fn foreign_key_join_sources<KO, VB, KosOther, VbsOther>(
+        &self,
+        other: &KTable<KO, VB, KosOther, VbsOther>,
+    ) -> (String, String, String, String) {
+        let left_store = self
+            .store_name()
+            .expect("FK join: left table must be a materialized source table")
+            .to_string();
+        let right_store = other
+            .store_name()
+            .expect("FK join: right table must be a materialized source table")
+            .to_string();
+        let left_topic = self
+            .source_topic()
+            .expect("FK join: left table must be sourced from a single topic")
+            .to_string();
+        let right_topic = other
+            .source_topic()
+            .expect("FK join: right table must be sourced from a single topic")
+            .to_string();
+        (left_store, right_store, left_topic, right_topic)
+    }
+
     fn fk_join_impl<KO, VB, VR, FKE, JF, KOS, KosOther, VbsOther>(
         &self,
         other: &KTable<KO, VB, KosOther, VbsOther>,
@@ -965,64 +1052,27 @@ where
         KosOther: Clone,
         VbsOther: Serde<VB> + Clone + 'static,
     {
-        let sa = self
-            .store_name()
-            .expect("FK join: left table must be a materialized source table")
-            .to_string();
-        let sb = other
-            .store_name()
-            .expect("FK join: right table must be a materialized source table")
-            .to_string();
-        let a_src = self
-            .source_topic()
-            .expect("FK join: left table must be sourced from a single topic")
-            .to_string();
-        let b_src = other
-            .source_topic()
-            .expect("FK join: right table must be sourced from a single topic")
-            .to_string();
+        let (sa, sb, a_src, b_src) = self.foreign_key_join_sources(other);
         // Capture the left key/value + right value serdes (boxed clones for the
         // per-processor closures).
         let k_serde = self.key_serde();
-        let va_serde = self.value_serde();
-        let vb_serde = other.value_serde();
+        let left_value_serde = self.value_serde();
+        let right_value_serde = other.value_serde();
         let self_node = self.node_id();
         let other_node = other.node_id();
 
         let mut g = self.builder.borrow_mut();
-        // ── Mint the JVM counter indices 4..=17 in order. ──────────────────────
-        let registration_base = g.new_processor_name(names::FK_SUBSCRIPTION_REGISTRATION); // 4
-        let send_name = g.new_processor_name(names::FK_SUBSCRIPTION_REGISTRATION); // 5
-        let reg_sink_name = g.new_processor_name(names::KTABLE_SINK); // 6
-        let reg_source_name = g.new_processor_name(names::KTABLE_SOURCE); // 7
-        let subscription_store = g.new_processor_name(names::FK_SUBSCRIPTION_STATE_STORE); // 8
-        let receive_name = g.new_processor_name(names::FK_SUBSCRIPTION_PROCESSOR); // 9
-        let subscription_join_name = g.new_processor_name(names::FK_SUBSCRIPTION_PROCESSOR); // 10
-        let foreign_join_name = g.new_processor_name(names::FK_SUBSCRIPTION_PROCESSOR); // 11
-        let response_base = g.new_processor_name(names::FK_SUBSCRIPTION_RESPONSE); // 12
-        let resp_sink_name = g.new_processor_name(names::KTABLE_SINK); // 13
-        let resp_source_name = g.new_processor_name(names::KTABLE_SOURCE); // 14
-        let resolver_name = g.new_processor_name(names::FK_RESPONSE_RESOLVER); // 15
-        let output_name = g.new_processor_name(names::FK_OUTPUT); // 16
-        let result_store = g.new_processor_name(names::FK_OUTPUT_STATE_STORE); // 17
-
-        let output_id = g.graph.add(
-            output_name.clone(),
-            GraphNodeKind::TableProcessor {
-                store_name: Some(result_store.clone()),
-            },
-            vec![self_node, other_node],
-        );
-
-        let fk_extractor = fk_extractor;
-        let jf = jf;
-        let fk_serde = fk_serde;
-        let _self_builder = Rc::clone(&self.builder);
+        let graph = allocate_foreign_key_join_graph(&mut g, (self_node, other_node));
+        let output_id = graph.output_id;
 
         let thunk = move |state: &mut LowerState| {
             let app = state.app_id.clone();
-            let registration_topic = format!("{app}-{registration_base}{}", names::FK_TOPIC_SUFFIX);
-            let response_topic = format!("{app}-{response_base}{}", names::FK_TOPIC_SUFFIX);
+            let registration_topic = format!(
+                "{app}-{}{}",
+                graph.registration_base,
+                names::FK_TOPIC_SUFFIX
+            );
+            let response_topic = format!("{app}-{}{}", graph.response_base, names::FK_TOPIC_SUFFIX);
 
             let a_parent =
                 NodeHandle::<K, Change<V>>::from_name(state.handle_name[&self_node].clone());
@@ -1033,15 +1083,15 @@ where
             let send_h = state
                 .topology
                 .add_processor::<K, Change<V>, KO, SubscriptionWrapper, _, _, _>(
-                    send_name.clone(),
+                    graph.send_name.clone(),
                     {
                         let fke = fk_extractor.clone();
-                        let va = va_serde.clone();
+                        let left_serde = left_value_serde.clone();
                         let ko = fk_serde.clone();
                         let ks = k_serde.clone();
                         move || SubscriptionSendProcessor {
                             fk_extractor: fke.clone(),
-                            va_serde: Box::new(SerdeArc(va.clone())),
+                            va_serde: Box::new(SerdeArc(left_serde.clone())),
                             ko_serde: Box::new(ko.clone()),
                             k_serde: Box::new(SerdeArc(ks.clone())),
                             is_left,
@@ -1053,7 +1103,7 @@ where
             state
                 .topology
                 .add_sink_explicit::<KO, SubscriptionWrapper, KOS, SubscriptionWrapperSerde, _, _>(
-                    reg_sink_name.clone(),
+                    graph.registration_sink.clone(),
                     registration_topic.clone(),
                     [&send_h],
                     crate::processor::serde::Produced::with(
@@ -1067,7 +1117,7 @@ where
             let reg_src_h = state
                 .topology
                 .add_source_explicit::<KO, SubscriptionWrapper, KOS, SubscriptionWrapperSerde>(
-                    reg_source_name.clone(),
+                    graph.registration_source.clone(),
                     [registration_topic.clone()],
                     crate::processor::serde::Consumed::with(
                         fk_serde.clone(),
@@ -1079,9 +1129,9 @@ where
             let receive_h = state
                 .topology
                 .add_processor::<KO, SubscriptionWrapper, KO, SubscriptionWrapper, _, _, _>(
-                    receive_name.clone(),
+                    graph.receive_name.clone(),
                     {
-                        let store = subscription_store.clone();
+                        let store = graph.subscription_store.clone();
                         let ko = fk_serde.clone();
                         move || SubscriptionReceiveProcessor {
                             store_name: store.clone(),
@@ -1094,15 +1144,15 @@ where
             let sub_join_h = state
                 .topology
                 .add_processor::<KO, SubscriptionWrapper, K, SubscriptionResponseWrapper, _, _, _>(
-                    subscription_join_name.clone(),
+                    graph.subscription_join_name.clone(),
                     {
                         let b = sb.clone();
                         let ks = k_serde.clone();
-                        let vbs = vb_serde.clone();
+                        let right_serde = right_value_serde.clone();
                         move || SubscriptionJoinProcessor::<KO, K, VB> {
                             b_store: b.clone(),
                             k_serde: Box::new(SerdeArc(ks.clone())),
-                            vb_serde: Box::new(SerdeArc(vbs.clone())),
+                            vb_serde: Box::new(SerdeArc(right_serde.clone())),
                             _pd: PhantomData,
                         }
                     },
@@ -1113,17 +1163,17 @@ where
             let foreign_join_h = state
                 .topology
                 .add_processor::<KO, Change<VB>, K, SubscriptionResponseWrapper, _, _, _>(
-                    foreign_join_name.clone(),
+                    graph.foreign_join_name.clone(),
                     {
-                        let store = subscription_store.clone();
+                        let store = graph.subscription_store.clone();
                         let ko = fk_serde.clone();
                         let ks = k_serde.clone();
-                        let vbs = vb_serde.clone();
+                        let right_serde = right_value_serde.clone();
                         move || ForeignTableJoinProcessor::<KO, K, VB> {
                             store_name: store.clone(),
                             ko_serde: Box::new(ko.clone()),
                             k_serde: Box::new(SerdeArc(ks.clone())),
-                            vb_serde: Box::new(SerdeArc(vbs.clone())),
+                            vb_serde: Box::new(SerdeArc(right_serde.clone())),
                             _pd: PhantomData,
                         }
                     },
@@ -1134,7 +1184,7 @@ where
             // (prefix-scanner). This unites the registration-source chain with sb's
             // subtopology (subtopology 1).
             state.topology.add_fk_subscription_store(
-                subscription_store.clone(),
+                graph.subscription_store.clone(),
                 [
                     receive_h.name().to_string(),
                     foreign_join_h.name().to_string(),
@@ -1149,7 +1199,7 @@ where
             state
                 .topology
                 .add_sink_explicit::<K, SubscriptionResponseWrapper, _, SubscriptionResponseWrapperSerde, _, _>(
-                    resp_sink_name.clone(),
+                    graph.response_sink.clone(),
                     response_topic.clone(),
                     [&sub_join_h, &foreign_join_h],
                     crate::processor::serde::Produced::with(
@@ -1163,7 +1213,7 @@ where
             let resp_src_h = state
                 .topology
                 .add_source_explicit::<K, SubscriptionResponseWrapper, _, SubscriptionResponseWrapperSerde>(
-                    resp_source_name.clone(),
+                    graph.response_source.clone(),
                     [response_topic.clone()],
                     crate::processor::serde::Consumed::with(
                         SerdeArc(k_serde.clone()),
@@ -1173,16 +1223,16 @@ where
             let resolver_h = state
                 .topology
                 .add_processor::<K, SubscriptionResponseWrapper, K, Change<VR>, _, _, _>(
-                    resolver_name.clone(),
+                    graph.resolver_name.clone(),
                     {
                         let a = sa.clone();
-                        let vas = va_serde.clone();
-                        let vbs = vb_serde.clone();
+                        let left_serde = left_value_serde.clone();
+                        let right_serde = right_value_serde.clone();
                         let joiner = jf.clone();
                         move || SubscriptionResolverProcessor::<K, V, VB, VR, JF> {
                             a_store: a.clone(),
-                            va_serde: Box::new(SerdeArc(vas.clone())),
-                            vb_serde: Box::new(SerdeArc(vbs.clone())),
+                            va_serde: Box::new(SerdeArc(left_serde.clone())),
+                            vb_serde: Box::new(SerdeArc(right_serde.clone())),
                             joiner: joiner.clone(),
                             is_left,
                             _pd: PhantomData,
@@ -1198,7 +1248,7 @@ where
             let output_h = state
                 .topology
                 .add_processor::<K, Change<VR>, K, Change<VR>, _, _, _>(
-                    output_name.clone(),
+                    graph.output_name.clone(),
                     || FkJoinOutputProcessor::<K, VR> { _pd: PhantomData },
                     [&resolver_h],
                 );
@@ -1248,6 +1298,8 @@ where
     /// the table-producing operation; calling `suppress` on a table that changed
     /// its value type (`map_values`) panics because no serde factory is available.
     #[must_use]
+    /// # Panics
+    /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub fn suppress(&self, suppressed: crate::dsl::suppress::Suppressed<K>) -> KTable<K, V, KS, VS>
     where
         KS: Clone,
@@ -1350,14 +1402,14 @@ mod tests {
             crate::processor::serde::Consumed::with(StringSerde, I64Serde),
             Materialized::with(StringSerde, I64Serde).as_versioned("vt", 600_000),
         );
-        assert2::assert!(t.versioned_retention_ms == Some(600_000));
+        assert_eq!(t.versioned_retention_ms, Some(600_000));
 
         let plain = b.table_explicit::<StringSerde, I64Serde>(
             "in2",
             crate::processor::serde::Consumed::with(StringSerde, I64Serde),
             Materialized::with(StringSerde, I64Serde).as_store("pt"),
         );
-        assert2::assert!(plain.versioned_retention_ms == None);
+        assert_eq!(plain.versioned_retention_ms, None);
     }
 }
 
@@ -1411,7 +1463,7 @@ mod fk_exec_tests {
                 .iter()
                 .map(|(k, v)| (Some((*k).to_string()), v.map(str::to_string)))
                 .collect();
-            assert2::assert!(step_out == want_owned);
+            assert_eq!(step_out, want_owned, "step {topic}:{key}={val}@{ts}");
         }
     }
 

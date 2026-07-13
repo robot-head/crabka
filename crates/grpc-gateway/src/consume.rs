@@ -33,6 +33,8 @@ pub struct ConsumeSession {
 }
 
 impl ConsumeSession {
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn new(
         bootstrap: &str,
         group_id: &str,
@@ -58,6 +60,10 @@ impl ConsumeSession {
     }
 
     /// Poll a batch; record values are decoded through the codec.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
+    /// # Panics
+    /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub async fn poll(
         &mut self,
         timeout: Duration,
@@ -92,6 +98,10 @@ impl ConsumeSession {
     }
 
     /// Commit current positions (at-least-once: call after delivery is acked).
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
+    /// # Panics
+    /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub async fn commit(&self) -> Result<(), GatewayError> {
         self.consumer
             .as_ref()

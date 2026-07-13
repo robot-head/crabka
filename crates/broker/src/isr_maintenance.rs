@@ -37,9 +37,6 @@ pub(crate) struct Config {
     pub metrics: crate::metrics::BrokerMetrics,
 }
 
-// cargo-mutants: background maintenance loop over live partition/controller state;
-// unit tests cover the pure ISR decision helpers.
-#[cfg_attr(test, mutants::skip)]
 pub(crate) async fn run(cfg: Config) {
     let mut tick = tokio::time::interval(ISR_SCAN_INTERVAL);
     // Reused across ticks to avoid re-allocating the snapshot Vec each second.
@@ -87,13 +84,13 @@ pub(crate) async fn run(cfg: Config) {
                 &cfg.controller,
                 cfg.broker_id,
                 &part.topic,
-                part.partition_id.get(),
+                part.index.get(),
                 proposal.new_isr,
                 proposal.leader_epoch.0,
             )
             .await
             {
-                warn!(topic = %part.topic, partition = part.partition_id.get(), error = %e,
+                warn!(topic = %part.topic, partition = part.index.get(), error = %e,
                     "AlterPartition propose failed");
             }
         }
@@ -462,30 +459,21 @@ mod tests {
         }
 
         fn quorum_state(&self) -> crabka_raft::QuorumState {
-            crabka_raft::QuorumState {
-                current_term: 0,
-                last_applied_index: 0,
-                current_leader: *self.leader_tx.borrow(),
-                voters: Vec::new(),
-                voter_nodes: std::collections::BTreeMap::new(),
-                per_voter_matched_index: std::collections::BTreeMap::new(),
-            }
+            unimplemented!("unused in isr_maintenance tests")
         }
 
         async fn submit_change(
             &self,
             _records: Vec<MetadataRecord>,
         ) -> Result<(), crabka_raft::RaftError> {
-            panic!("TestMetadataSource::submit_change must not be called by ISR maintenance tests")
+            unimplemented!("unused in isr_maintenance tests")
         }
 
         async fn change_membership(
             &self,
             _new_voters: std::collections::BTreeSet<NodeId>,
         ) -> Result<(), crabka_raft::RaftError> {
-            panic!(
-                "TestMetadataSource::change_membership must not be called by ISR maintenance tests"
-            )
+            unimplemented!("unused in isr_maintenance tests")
         }
 
         async fn add_learner(
@@ -493,11 +481,11 @@ mod tests {
             _node_id: NodeId,
             _node: crabka_raft::Node,
         ) -> Result<(), crabka_raft::RaftError> {
-            panic!("TestMetadataSource::add_learner must not be called by ISR maintenance tests")
+            unimplemented!("unused in isr_maintenance tests")
         }
 
         fn controller_bound_addr(&self) -> std::net::SocketAddr {
-            std::net::SocketAddr::from(([0, 0, 0, 0], 0))
+            unimplemented!("unused in isr_maintenance tests")
         }
 
         fn read_snapshot_range(
@@ -505,34 +493,32 @@ mod tests {
             _position: i64,
             _max_bytes: i32,
         ) -> crabka_raft::SnapshotRange {
-            crabka_raft::SnapshotRange::NoSnapshot
+            unimplemented!("unused in isr_maintenance tests")
         }
 
         async fn trigger_snapshot(&self) -> Result<(), crabka_raft::RaftError> {
-            panic!(
-                "TestMetadataSource::trigger_snapshot must not be called by ISR maintenance tests"
-            )
+            unimplemented!("unused in isr_maintenance tests")
         }
 
         async fn add_voter(
             &self,
             _req: crabka_raft::AddVoter,
         ) -> Result<crabka_raft::ReconfigOutcome, crabka_raft::RaftError> {
-            panic!("TestMetadataSource::add_voter must not be called by ISR maintenance tests")
+            unimplemented!("unused in isr_maintenance tests")
         }
 
         async fn remove_voter(
             &self,
             _req: crabka_raft::RemoveVoter,
         ) -> Result<crabka_raft::ReconfigOutcome, crabka_raft::RaftError> {
-            panic!("TestMetadataSource::remove_voter must not be called by ISR maintenance tests")
+            unimplemented!("unused in isr_maintenance tests")
         }
 
         async fn update_voter(
             &self,
             _req: crabka_raft::UpdateVoter,
         ) -> Result<crabka_raft::ReconfigOutcome, crabka_raft::RaftError> {
-            panic!("TestMetadataSource::update_voter must not be called by ISR maintenance tests")
+            unimplemented!("unused in isr_maintenance tests")
         }
 
         async fn cancel(&self) {}
@@ -564,7 +550,7 @@ mod tests {
             new_isr: vec![NodeId(1), NodeId(2)],
             leader_epoch: LeaderEpoch(7),
         };
-        assert2::assert!(proposal == expected);
+        assert_eq!(proposal, expected);
     }
 
     #[tokio::test]
@@ -593,7 +579,7 @@ mod tests {
             new_isr: vec![NodeId(1), NodeId(2), NodeId(3)],
             leader_epoch: LeaderEpoch(8),
         };
-        assert2::assert!(proposal == expected);
+        assert_eq!(proposal, expected);
     }
 
     #[tokio::test]
@@ -613,7 +599,7 @@ mod tests {
         )
         .await;
 
-        assert2::assert!(
+        assert!(
             compute_proposal(&part, Duration::from_secs(5))
                 .await
                 .is_none()
@@ -662,8 +648,8 @@ mod tests {
 
         shutdown.cancel();
         task.await.unwrap();
-        assert2::assert!(metrics.isr_shrinks_total.get() == 1);
-        assert2::assert!(metrics.isr_expands_total.get() == 0);
+        assert_eq!(metrics.isr_shrinks_total.get(), 1);
+        assert_eq!(metrics.isr_expands_total.get(), 0);
     }
 
     #[test]
@@ -710,7 +696,7 @@ mod tests {
             }],
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert2::assert!(req == expected);
+        assert_eq!(req, expected);
     }
 
     #[test]
@@ -725,7 +711,7 @@ mod tests {
 
         let req = build_alter_partition_request(&image, 5, "orders", 0, &[NodeId(5)], 3);
 
-        assert2::assert!(req.broker_epoch == 5);
+        assert_eq!(req.broker_epoch, 5);
     }
 
     #[tokio::test]
@@ -738,7 +724,7 @@ mod tests {
             .await
             .expect_err("missing controller leader should reject the send");
 
-        assert2::assert!(err == "no controller leader");
+        assert_eq!(err, "no controller leader");
     }
 
     #[tokio::test]
@@ -751,7 +737,7 @@ mod tests {
             .await
             .expect_err("closed local port should fail as transport");
 
-        assert2::assert!(matches!(err, AlterPartitionSendError::Transport(_)));
+        assert!(matches!(err, AlterPartitionSendError::Transport(_)));
     }
 
     #[test]
@@ -763,13 +749,13 @@ mod tests {
 
         let targets = alter_partition_targets(&image, Some(NodeId(2)));
 
-        assert2::assert!(
-            targets
-                == vec![
-                    (NodeId(2), "b2:9092".to_string()),
-                    (NodeId(0), "b0:9092".to_string()),
-                    (NodeId(1), "b1:9092".to_string()),
-                ]
+        assert_eq!(
+            targets,
+            vec![
+                (NodeId(2), "b2:9092".to_string()),
+                (NodeId(0), "b0:9092".to_string()),
+                (NodeId(1), "b1:9092".to_string()),
+            ]
         );
     }
 
@@ -781,12 +767,12 @@ mod tests {
 
         let targets = alter_partition_targets(&image, Some(NodeId(9)));
 
-        assert2::assert!(
-            targets
-                == vec![
-                    (NodeId(0), "b0:9092".to_string()),
-                    (NodeId(1), "b1:9092".to_string())
-                ]
+        assert_eq!(
+            targets,
+            vec![
+                (NodeId(0), "b0:9092".to_string()),
+                (NodeId(1), "b1:9092".to_string())
+            ]
         );
     }
 
@@ -799,7 +785,11 @@ mod tests {
             (crate::codes::UNKNOWN_SERVER_ERROR, 0, false),
         ];
         for (global_err, part_err, want) in cases {
-            assert2::assert!(is_not_controller_response(global_err, part_err) == want);
+            assert_eq!(
+                is_not_controller_response(global_err, part_err),
+                want,
+                "global_err={global_err} part_err={part_err}"
+            );
         }
     }
 
@@ -843,7 +833,11 @@ mod tests {
             ),
         ];
         for (global_err, part_err, want) in cases {
-            assert2::assert!(classify_alter_partition_response(global_err, part_err) == want);
+            assert_eq!(
+                classify_alter_partition_response(global_err, part_err),
+                want,
+                "global_err={global_err} part_err={part_err}"
+            );
         }
     }
 }

@@ -32,7 +32,6 @@ fn docker_rm_f() {
         .output();
 }
 
-#[allow(clippy::too_many_lines)]
 fn docker_run_broker() {
     docker_rm_f();
     let advertised =
@@ -179,7 +178,6 @@ fn write_entry(
 
 #[test]
 #[ignore = "requires docker + mirror.gcr.io/apache/kafka:4.3.0"]
-#[allow(clippy::too_many_lines)]
 fn capture_and_generate_corpus() {
     if !docker_available() {
         eprintln!("docker unavailable; skipping");

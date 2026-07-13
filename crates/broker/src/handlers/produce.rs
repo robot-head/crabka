@@ -71,7 +71,6 @@ fn topic_min_insync_replicas(image: &crabka_metadata::MetadataImage, topic: &str
         .unwrap_or(DEFAULT_MIN_INSYNC_REPLICAS)
 }
 
-#[allow(clippy::too_many_lines)]
 #[tracing::instrument(
     name = "handle_produce",
     level = "info",
@@ -113,17 +112,7 @@ pub(crate) async fn handle(
     // Legacy v0-2 requests carry a v0/v1 `MessageSet` that is always
     // up-converted (never passthrough-eligible), so they take the full owned
     // decode and feed every partition the owned path directly.
-    let req: ProduceFramed = if (0..3).contains(&version) {
-        let mut cur: &[u8] = req_bytes;
-        let owned: ProduceRequest =
-            crabka_protocol::kafka_3_6_2::owned::produce_request::ProduceRequest::decode(
-                &mut cur, version,
-            )?
-            .into();
-        ProduceFramed::from_owned(owned)
-    } else {
-        ProduceFramed::from_framing(produce_framing(body_bytes, version)?)
-    };
+    let req = decode_produce_request(req_bytes, body_bytes, version)?;
     let timeout = Duration::from_millis(u64::try_from(req.timeout_ms.max(0)).unwrap_or(0));
 
     // ── ACL preamble ────────────────────────────────────────
@@ -141,56 +130,9 @@ pub(crate) async fn handle(
     // re-done inline below — but ACLs are keyed by topic
     // *name*, so we resolve the names here too for the authorize call.
     let image = controller.current_image();
-    let txn_id_denied = match req.transactional_id.as_deref() {
-        Some(tid) if !tid.is_empty() => {
-            let acl_req = AuthorizationRequest {
-                principal: ctx.principal,
-                host: ctx.peer,
-                resource_type: ResourceType::TransactionalId,
-                resource_name: tid,
-                operation: AclOperation::Write,
-            };
-            broker.config.authorizer.authorize(&*image, &acl_req) == AuthorizationResult::Deny
-        }
-        _ => false,
-    };
-    let topic_names_for_acl: Vec<String> = req
-        .topic_data
-        .iter()
-        .map(|t| {
-            if !t.name.is_empty() {
-                t.name.clone()
-            } else if t.topic_id != WireUuid::ZERO {
-                image
-                    .topic_name_by_id(&uuid::Uuid::from_bytes(t.topic_id.0))
-                    .map(str::to_string)
-                    .unwrap_or_default()
-            } else {
-                String::new()
-            }
-        })
-        .collect();
-    let acl_results = authorize_topics(
-        broker.config.authorizer.as_ref(),
-        &*image,
-        ctx.principal,
-        ctx.peer,
-        AclOperation::Write,
-        topic_names_for_acl.iter().map(String::as_str),
-    );
-    // Snapshot which topics are denied (by name) so the per-topic loop
-    // can check without holding a borrow on `acl_results` (the loop
-    // moves out of `req.topic_data`).
-    let denied_topics: std::collections::HashSet<String> = acl_results
-        .iter()
-        .filter_map(|(name, r)| {
-            if *r == AuthorizationResult::Deny {
-                Some((*name).to_string())
-            } else {
-                None
-            }
-        })
-        .collect();
+    let authorization = authorize_produce(broker, &image, ctx, &req);
+    let txn_id_denied = authorization.transactional_id_denied;
+    let denied_topics = authorization.denied_topics;
 
     let mut topic_results: Vec<TopicProduceResponse> = Vec::with_capacity(req.topic_data.len());
 
@@ -274,20 +216,24 @@ pub(crate) async fn handle(
             let monitor = tokio_metrics::TaskMonitor::new();
             let out = monitor
                 .instrument(process_partition(
-                    part_data,
-                    topic_compression,
-                    &topic_name,
-                    topic_denied,
-                    txn_id_denied,
-                    req.acks,
-                    timeout,
-                    &partitions,
-                    &txn_coordinator,
-                    &producer_state,
-                    &log_dir_status,
-                    &image,
-                    broker.config.node_id,
-                    &broker.metrics,
+                    PartitionInput {
+                        part_data,
+                        topic_compression,
+                        topic_name: topic_name.clone(),
+                        topic_denied,
+                        txn_id_denied,
+                        acks: req.acks,
+                        timeout,
+                    },
+                    PartitionServices {
+                        partitions: &partitions,
+                        txn_coordinator: &txn_coordinator,
+                        producer_state: &producer_state,
+                        log_dir_status: &log_dir_status,
+                        image: &image,
+                        this_node_id: broker.config.node_id,
+                        metrics: &broker.metrics,
+                    },
                 ))
                 .await?;
             let micros = u64::try_from(monitor.cumulative().total_poll_duration.as_micros())
@@ -321,34 +267,135 @@ pub(crate) async fn handle(
     // their max, surface it in throttle_time_ms, and mute the channel once
     // before responding (KIP-219). The dispatch loop skips request_percentage
     // for Produce so it is charged exactly once, here.
-    let data_delay = produce_bytes_by_qos_tier
+    finish_produce_response(
+        broker,
+        &image,
+        ctx,
+        handler_start,
+        &produce_bytes_by_qos_tier,
+        topic_results,
+        version,
+    )
+    .await
+}
+
+fn decode_produce_request(
+    request_bytes: &[u8],
+    body_bytes: Bytes,
+    version: i16,
+) -> Result<ProduceFramed, BrokerError> {
+    if !(0..3).contains(&version) {
+        return Ok(ProduceFramed::from_framing(produce_framing(
+            body_bytes, version,
+        )?));
+    }
+    let mut cursor = request_bytes;
+    let owned: ProduceRequest =
+        crabka_protocol::kafka_3_6_2::owned::produce_request::ProduceRequest::decode(
+            &mut cursor,
+            version,
+        )?
+        .into();
+    Ok(ProduceFramed::from_owned(owned))
+}
+
+struct ProduceAuthorization {
+    transactional_id_denied: bool,
+    denied_topics: std::collections::HashSet<String>,
+}
+
+fn authorize_produce(
+    broker: &Broker,
+    image: &crabka_metadata::MetadataImage,
+    context: &crate::handlers::RequestContext<'_>,
+    request: &ProduceFramed,
+) -> ProduceAuthorization {
+    let transactional_id_denied = request.transactional_id.as_deref().is_some_and(|id| {
+        !id.is_empty()
+            && broker.config.authorizer.authorize(
+                image,
+                &AuthorizationRequest {
+                    principal: context.principal,
+                    host: context.peer,
+                    resource_type: ResourceType::TransactionalId,
+                    resource_name: id,
+                    operation: AclOperation::Write,
+                },
+            ) == AuthorizationResult::Deny
+    });
+    let topic_names: Vec<String> = request
+        .topic_data
         .iter()
-        .map(|(qos_tier, bytes)| {
+        .map(|topic| {
+            if !topic.name.is_empty() {
+                topic.name.clone()
+            } else if topic.topic_id != WireUuid::ZERO {
+                image
+                    .topic_name_by_id(&uuid::Uuid::from_bytes(topic.topic_id.0))
+                    .unwrap_or_default()
+                    .to_string()
+            } else {
+                String::new()
+            }
+        })
+        .collect();
+    let denied_topics = authorize_topics(
+        broker.config.authorizer.as_ref(),
+        image,
+        context.principal,
+        context.peer,
+        AclOperation::Write,
+        topic_names.iter().map(String::as_str),
+    )
+    .into_iter()
+    .filter(|(_, result)| *result == AuthorizationResult::Deny)
+    .map(|(name, _)| name.to_string())
+    .collect();
+    ProduceAuthorization {
+        transactional_id_denied,
+        denied_topics,
+    }
+}
+
+async fn finish_produce_response(
+    broker: &Broker,
+    image: &crabka_metadata::MetadataImage,
+    context: &crate::handlers::RequestContext<'_>,
+    handler_start: std::time::Instant,
+    bytes_by_qos: &std::collections::BTreeMap<String, u64>,
+    topic_results: Vec<TopicProduceResponse>,
+    version: i16,
+) -> Result<Bytes, BrokerError> {
+    let data_delay = bytes_by_qos
+        .iter()
+        .map(|(tier, bytes)| {
             crate::quota::consume_producer_quota(
-                &image,
+                image,
                 &broker.quota_buckets,
-                &ctx.principal.name,
-                ctx.client_id,
-                qos_tier,
+                &context.principal.name,
+                context.client_id,
+                tier,
                 *bytes,
             )
         })
         .max()
         .unwrap_or(Duration::ZERO);
-    #[allow(clippy::cast_possible_truncation)]
-    let elapsed_micros = handler_start
-        .elapsed()
-        .as_micros()
-        .min(u128::from(u64::MAX)) as u64;
+    let elapsed_micros = u64::try_from(
+        handler_start
+            .elapsed()
+            .as_micros()
+            .min(u128::from(u64::MAX)),
+    )
+    .expect("elapsed microseconds clamped to u64");
     let request_delay = crate::quota::consume_request_quota(
-        &image,
+        image,
         &broker.quota_buckets,
-        &ctx.principal.name,
-        ctx.client_id,
+        &context.principal.name,
+        context.client_id,
         elapsed_micros,
     );
     let delay = data_delay.max(request_delay);
-    let resp = ProduceResponse {
+    let response = ProduceResponse {
         responses: topic_results,
         throttle_time_ms: i32::try_from(delay.as_millis()).unwrap_or(i32::MAX),
         ..Default::default()
@@ -356,18 +403,17 @@ pub(crate) async fn handle(
     if delay > Duration::ZERO {
         tokio::time::sleep(delay).await;
     }
-    let buf = if (0..3).contains(&version) {
-        let legacy_resp: crabka_protocol::kafka_3_6_2::owned::produce_response::ProduceResponse =
-            resp.into();
-        let mut b = BytesMut::with_capacity(legacy_resp.encoded_len(version));
-        legacy_resp.encode(&mut b, version)?;
-        b
+    let mut encoded = BytesMut::new();
+    if (0..3).contains(&version) {
+        let legacy: crabka_protocol::kafka_3_6_2::owned::produce_response::ProduceResponse =
+            response.into();
+        encoded.reserve(legacy.encoded_len(version));
+        legacy.encode(&mut encoded, version)?;
     } else {
-        let mut b = BytesMut::with_capacity(resp.encoded_len(version));
-        resp.encode(&mut b, version)?;
-        b
-    };
-    Ok(buf.freeze())
+        encoded.reserve(response.encoded_len(version));
+        response.encode(&mut encoded, version)?;
+    }
+    Ok(encoded.freeze())
 }
 
 /// Per-partition produce handling, extracted so the call site can wrap it
@@ -376,23 +422,50 @@ pub(crate) async fn handle(
 /// queue, the HW gate under `acks=-1`, or the txn coordinator does not
 /// count toward CPU usage. Returns the per-partition response on every
 /// path; only `txn_coordinator.put` errors propagate via `?`.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-async fn process_partition(
+struct PartitionInput {
     part_data: FramedPartition,
     topic_compression: Option<crabka_compression::CompressionType>,
-    topic_name: &str,
+    topic_name: String,
     topic_denied: bool,
     txn_id_denied: bool,
     acks: i16,
     timeout: Duration,
-    partitions: &Arc<PartitionRegistry>,
-    txn_coordinator: &Arc<crate::txn::coordinator::TxnCoordinator>,
-    producer_state: &Arc<crate::producer_state::ProducerState>,
-    log_dir_status: &crate::log_dir_status::LogDirRegistry,
-    image: &Arc<crabka_metadata::MetadataImage>,
+}
+
+#[derive(Clone, Copy)]
+struct PartitionServices<'a> {
+    partitions: &'a Arc<PartitionRegistry>,
+    txn_coordinator: &'a Arc<crate::txn::coordinator::TxnCoordinator>,
+    producer_state: &'a Arc<crate::producer_state::ProducerState>,
+    log_dir_status: &'a crate::log_dir_status::LogDirRegistry,
+    image: &'a Arc<crabka_metadata::MetadataImage>,
     this_node_id: crabka_metadata::NodeId,
-    metrics: &crate::metrics::BrokerMetrics,
+    metrics: &'a crate::metrics::BrokerMetrics,
+}
+
+async fn process_partition(
+    input: PartitionInput,
+    services: PartitionServices<'_>,
 ) -> Result<PartitionProduceResponse, BrokerError> {
+    let PartitionInput {
+        part_data,
+        topic_compression,
+        topic_name,
+        topic_denied,
+        txn_id_denied,
+        acks,
+        timeout,
+    } = input;
+    let topic_name = topic_name.as_str();
+    let PartitionServices {
+        partitions,
+        txn_coordinator,
+        producer_state,
+        log_dir_status,
+        image,
+        this_node_id,
+        metrics,
+    } = services;
     let idx = part_data.index;
     let mut out = PartitionProduceResponse {
         index: idx,
@@ -452,80 +525,24 @@ async fn process_partition(
     // (3); presence-but-not-leader maps to NOT_LEADER_OR_FOLLOWER (6) with
     // a `current_leader` hint (encodes at Produce v10+, KIP-951) so the
     // client re-routes without a full Metadata round-trip.
-    if topic_name.is_empty() {
-        out.error_code = codes::UNKNOWN_TOPIC_OR_PARTITION;
-        return Ok(out);
-    }
-    let (leader, leader_epoch) = match image.partition(topic_name, idx) {
-        // Topic exists but this partition index doesn't, or the topic is
-        // unknown cluster-wide.
-        None => {
-            out.error_code = codes::UNKNOWN_TOPIC_OR_PARTITION;
+    let (part, leader_epoch) = match validate_partition_gate(
+        topic_name,
+        idx,
+        acks,
+        partitions,
+        log_dir_status,
+        image,
+        this_node_id,
+    ) {
+        Ok(ready) => ready,
+        Err(error) => {
+            out.error_code = error.code;
+            if let Some(leader) = error.current_leader {
+                out.current_leader = leader;
+            }
             return Ok(out);
         }
-        Some(pr) => (pr.leader, pr.leader_epoch),
     };
-    if leader != this_node_id {
-        out.error_code = codes::NOT_LEADER_OR_FOLLOWER;
-        out.current_leader = LeaderIdAndEpoch {
-            leader_id: i32::try_from(leader.0).unwrap_or(NO_LEADER_ID),
-            leader_epoch: leader_epoch.0,
-            ..Default::default()
-        };
-        return Ok(out);
-    }
-
-    // We are the image-designated leader. The local replica must exist;
-    // if the local writer-actor hasn't been spun up yet (supervisor
-    // reconcile lagging the image on a just-elected leader), treat it as a
-    // transient not-leader — the client retries and the append lands once
-    // the writer is ready, rather than failing the produce outright.
-    let Some(part) = partitions.get(topic_name, crabka_ids::PartitionIndex(idx)) else {
-        out.error_code = codes::NOT_LEADER_OR_FOLLOWER;
-        out.current_leader = LeaderIdAndEpoch {
-            leader_id: i32::try_from(leader.0).unwrap_or(NO_LEADER_ID),
-            leader_epoch: leader_epoch.0,
-            ..Default::default()
-        };
-        return Ok(out);
-    };
-
-    // KIP-113 offline-dir handling: if the partition's owning log dir
-    // has been flipped offline (either by the startup probe or by a
-    // runtime fsync failure on any partition in this dir), refuse the
-    // append immediately with KAFKA_STORAGE_ERROR. The partition's
-    // writer task would otherwise queue the work, fail at fsync, and
-    // bounce the same error back via the ack — same outcome, more
-    // latency and a wasted disk attempt.
-    if log_dir_status.is_offline(&part.log_dir.load()) {
-        out.error_code = codes::KAFKA_STORAGE_ERROR;
-        return Ok(out);
-    }
-
-    // `min.insync.replicas` pre-flight check (KIP-91 / KAFKA-3197).
-    // Only `acks=-1` (`all`) cares: with `acks=0`/`1` the leader never
-    // waits for followers, so the threshold is meaningless. When the
-    // image's ISR is already smaller than the configured threshold,
-    // there's no chance the post-append HW gate will satisfy "all
-    // in-sync replicas ack" — fail fast with NOT_ENOUGH_REPLICAS (19)
-    // before queueing work on the writer. Default `1` matches Apache
-    // Kafka and preserves the legacy "any-ISR-counts" behavior.
-    if acks == ACKS_ALL
-        && let Some(pr) = image.partition(topic_name, idx)
-    {
-        let min_isr = topic_min_insync_replicas(image, topic_name);
-        if i32::try_from(pr.isr.len()).unwrap_or(i32::MAX) < min_isr {
-            out.error_code = codes::NOT_ENOUGH_REPLICAS;
-            return Ok(out);
-        }
-    }
-
-    // The current leader epoch — this becomes the `partition_leader_epoch`
-    // carried on the wire (stamped onto the owned batch / verbatim bytes at
-    // append) and used by KIP-101 fence validation on the follower's Fetch.
-    let leader_epoch = part
-        .current_leader_epoch
-        .load(std::sync::atomic::Ordering::Acquire);
 
     // ── transactional produce verify (KIP-1319 v2) ──────────
     // This check is more authoritative than idempotent dedup,
@@ -534,206 +551,262 @@ async fn process_partition(
     // All header fields below come from `prepared` — sourced from the v2
     // batch HEADER on the verbatim path (no record decode), or from the
     // decoded owned `RecordBatch` header on the fallback path.
-    let is_transactional = prepared.attributes.is_transactional();
+    if let Some(code) =
+        validate_transactional_produce(&prepared, txn_coordinator, image, topic_name, idx).await?
     {
-        let pid_txn = prepared.producer_id;
-        let epoch_txn = prepared.producer_epoch;
-        if is_transactional && pid_txn >= 0 {
-            // Wrap the decode-side `i64` into `ProducerId` for the coordinator lookup.
-            let Some(tid) = txn_coordinator.tid_for_pid(crabka_log::ProducerId(pid_txn)) else {
-                // Unknown producer_id — reject.
-                out.error_code = codes::INVALID_PRODUCER_ID_MAPPING;
-                return Ok(out);
-            };
-            // Holding the tid's entry locally is the authoritative signal
-            // that we coordinate it. Gating on `is_coordinator_for` instead
-            // is racy on a freshly-booted broker: `leader_partitions` is
-            // recomputed on every metadata change and is transiently empty
-            // while raft leadership settles, so a transactional Produce could
-            // arrive while the check returns false and silently skip the
-            // inline AddPartitionsToTxn — leaving the txn `Empty` so the
-            // following EndTxn fails with INVALID_TXN_STATE.
-            if let Some(entry_mutex) = txn_coordinator.get(&tid) {
-                let mut entry = entry_mutex.lock().await;
-                if entry.producer_epoch != epoch_txn {
-                    out.error_code = codes::INVALID_PRODUCER_EPOCH;
-                    return Ok(out);
-                }
-                let tp = crate::txn::state::TopicPartition {
-                    topic: topic_name.to_string(),
-                    partition: crabka_ids::PartitionIndex(idx),
-                };
-                // Consider the partition "needs registering" if it
-                // isn't in the current partition set OR if the
-                // current state is CompleteCommit/CompleteAbort
-                // (indicating a new transaction after a completed
-                // one — the partition set is stale).
-                let needs_register = !entry.partitions.contains(&tp)
-                    || matches!(
-                        entry.state,
-                        crate::txn::state::TxnState::CompleteCommit
-                            | crate::txn::state::TxnState::CompleteAbort
-                    );
-                if needs_register {
-                    // v2 auto-AddPartitionsToTxn: register the
-                    // partition inline if the state allows it.
-                    if !entry
-                        .state
-                        .can_transition_to(crate::txn::state::TxnState::Ongoing)
-                    {
-                        out.error_code = codes::INVALID_TXN_STATE;
-                        return Ok(out);
-                    }
-                    // If starting a new txn after a completed one,
-                    // clear the stale partition set.
-                    if matches!(
-                        entry.state,
-                        crate::txn::state::TxnState::CompleteCommit
-                            | crate::txn::state::TxnState::CompleteAbort
-                    ) {
-                        entry.partitions.clear();
-                    }
-                    entry.state = crate::txn::state::TxnState::Ongoing;
-                    entry.partitions.insert(tp);
-                    entry.last_update_ms = crate::txn::util::now_millis();
-                    let snap = entry.clone();
-                    // Lock must be dropped before the async put.
-                    drop(entry);
-                    let txnv = crate::txn::version::resolve_txn_version(image);
-                    txn_coordinator.put(snap, txnv).await?;
-                }
-                // else: partition already registered in an active txn — fall through.
-            }
-            // else: we don't hold this tid's state — not our coordinator.
-            // Trust the producer to have called AddPartitionsToTxn through the
-            // correct coordinator. Inter-broker v2 auto-add is not yet
-            // supported.
-        }
-    }
-
-    // ── idempotent-producer dedup gate ───────────────────────
-    let pid = prepared.producer_id;
-    let epoch = prepared.producer_epoch;
-    let base_seq = prepared.base_sequence;
-    let last_offset_delta = prepared.last_offset_delta;
-    let max_timestamp = prepared.max_timestamp;
-
-    let dedup_outcome = if pid >= 0 {
-        Some(
-            producer_state
-                .check(
-                    topic_name,
-                    crabka_ids::PartitionIndex(idx),
-                    pid,
-                    epoch,
-                    base_seq,
-                    last_offset_delta,
-                )
-                .await,
-        )
-    } else {
-        None
-    };
-
-    match dedup_outcome {
-        Some(crate::producer_state::Decision::Duplicate { base_offset }) => {
-            // The original Produce's append went through but its
-            // HW gate may have timed out — that's why the idempotent
-            // producer is retrying with the same `base_sequence`.
-            // For `acks=-1`, we MUST still wait for HW to reach
-            // the duplicate's last offset before claiming success.
-            // Returning NONE unconditionally would silently bypass
-            // the full-ISR durability guarantee that acks=all
-            // promises: the original append is on the leader, but
-            // followers may not have it yet, and a leader crash
-            // before they catch up would lose data the producer
-            // believed acknowledged.
-            if acks == ACKS_ALL {
-                let target = base_offset + i64::from(last_offset_delta) + 1;
-                let deadline = std::time::Instant::now() + timeout;
-                // `base_offset` here is the dedup tracker's raw wire `i64`; wrap
-                // the HW target into `Offset` for the log-layer gate.
-                match part.await_hw_at_least(Offset(target), deadline).await {
-                    Ok(()) => {
-                        out.error_code = codes::NONE;
-                        out.base_offset = base_offset;
-                    }
-                    Err(_timeout) => {
-                        out.error_code = codes::NOT_ENOUGH_REPLICAS_AFTER_APPEND;
-                        out.base_offset = base_offset;
-                    }
-                }
-            } else {
-                out.error_code = codes::NONE;
-                out.base_offset = base_offset;
-            }
-            return Ok(out);
-        }
-        Some(crate::producer_state::Decision::OutOfOrder) => {
-            out.error_code = codes::OUT_OF_ORDER_SEQUENCE_NUMBER;
-            return Ok(out);
-        }
-        Some(crate::producer_state::Decision::Fenced) => {
-            out.error_code = codes::INVALID_PRODUCER_EPOCH;
-            return Ok(out);
-        }
-        Some(crate::producer_state::Decision::Append) | None => {
-            // fall through to writer dispatch
-        }
-    }
-
-    // ── verbatim passthrough vs owned fallback ───────────────
-    // Both paths stamp the same `leader_epoch` computed above: the writer
-    // patches it into the verbatim bytes in-place at append; the owned batch
-    // carries it as a struct field.
-    let data = build_produce_data(prepared, leader_epoch);
-
-    let (ack_tx, ack_rx) = oneshot::channel();
-    let job = WriterMessage::Produce(ProduceJob { data, ack: ack_tx });
-
-    if part.writer_tx.send(job).await.is_err() {
-        out.error_code = codes::NOT_LEADER_OR_FOLLOWER;
+        out.error_code = code;
         return Ok(out);
     }
 
-    match tokio::time::timeout(timeout, ack_rx).await {
+    // ── idempotent-producer dedup gate ───────────────────────
+    if let Some(response) = handle_duplicate(
+        &prepared,
+        producer_state,
+        &part,
+        topic_name,
+        idx,
+        acks,
+        timeout,
+    )
+    .await
+    {
+        return Ok(response);
+    }
+
+    dispatch_prepared(
+        prepared,
+        AppendContext {
+            partition: &part,
+            producer_state,
+            topic_name,
+            partition_index: idx,
+            acks,
+            timeout,
+            leader_epoch,
+        },
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
+struct AppendContext<'a> {
+    partition: &'a Arc<crate::partition::Partition>,
+    producer_state: &'a Arc<crate::producer_state::ProducerState>,
+    topic_name: &'a str,
+    partition_index: i32,
+    acks: i16,
+    timeout: Duration,
+    leader_epoch: i32,
+}
+
+async fn dispatch_prepared(
+    prepared: PreparedBatch,
+    context: AppendContext<'_>,
+) -> Result<PartitionProduceResponse, BrokerError> {
+    let mut response = PartitionProduceResponse {
+        index: context.partition_index,
+        ..Default::default()
+    };
+    let commit = CommitKey {
+        topic: context.topic_name,
+        partition: context.partition_index,
+        pid: prepared.producer_id,
+        epoch: prepared.producer_epoch,
+        base_seq: prepared.base_sequence,
+        last_offset_delta: prepared.last_offset_delta,
+        max_timestamp: prepared.max_timestamp,
+    };
+    let data = build_produce_data(prepared, context.leader_epoch);
+    let (ack_tx, ack_rx) = oneshot::channel();
+    let job = WriterMessage::Produce(ProduceJob { data, ack: ack_tx });
+    if context.partition.writer_tx.send(job).await.is_err() {
+        response.error_code = codes::NOT_LEADER_OR_FOLLOWER;
+        return Ok(response);
+    }
+    match tokio::time::timeout(context.timeout, ack_rx).await {
         Ok(Ok(Ok(base_offset))) => {
-            // Single finalization site for a successful append: applies
-            // the `acks=-1` high-watermark gate and records the
-            // idempotent-producer commit exactly once.
             finalize_ack(
-                &mut out,
-                &part,
-                acks,
-                timeout,
+                &mut response,
+                context.partition,
+                context.acks,
+                context.timeout,
                 base_offset,
-                producer_state,
-                &CommitKey {
-                    topic: topic_name,
-                    partition: idx,
-                    pid,
-                    epoch,
-                    base_seq,
-                    last_offset_delta,
-                    max_timestamp,
-                },
+                context.producer_state,
+                &commit,
             )
             .await;
         }
-        Ok(Ok(Err(e))) => {
-            out.error_code = codes::from_broker_error(&e);
-        }
-        Ok(Err(_)) => {
-            // Writer dropped the oneshot without sending — shouldn't
-            // happen unless the writer task panicked between recv
-            // and ack. Map to NOT_LEADER_OR_FOLLOWER.
-            out.error_code = codes::NOT_LEADER_OR_FOLLOWER;
-        }
-        Err(_) => {
-            out.error_code = codes::REQUEST_TIMED_OUT;
-        }
+        Ok(Ok(Err(error))) => response.error_code = codes::from_broker_error(&error),
+        Ok(Err(_)) => response.error_code = codes::NOT_LEADER_OR_FOLLOWER,
+        Err(_) => response.error_code = codes::REQUEST_TIMED_OUT,
     }
-    Ok(out)
+    Ok(response)
+}
+
+async fn handle_duplicate(
+    batch: &PreparedBatch,
+    producer_state: &crate::producer_state::ProducerState,
+    partition: &crate::partition::Partition,
+    topic_name: &str,
+    partition_index: i32,
+    acks: i16,
+    timeout: Duration,
+) -> Option<PartitionProduceResponse> {
+    if batch.producer_id < 0 {
+        return None;
+    }
+    let decision = producer_state
+        .check(
+            topic_name,
+            crabka_ids::PartitionIndex(partition_index),
+            batch.producer_id,
+            batch.producer_epoch,
+            batch.base_sequence,
+            batch.last_offset_delta,
+        )
+        .await;
+    let (error_code, base_offset) = match decision {
+        crate::producer_state::Decision::Duplicate { base_offset } => {
+            let error_code = if acks == ACKS_ALL {
+                let target = base_offset + i64::from(batch.last_offset_delta) + 1;
+                let deadline = std::time::Instant::now() + timeout;
+                if partition
+                    .await_hw_at_least(Offset(target), deadline)
+                    .await
+                    .is_ok()
+                {
+                    codes::NONE
+                } else {
+                    codes::NOT_ENOUGH_REPLICAS_AFTER_APPEND
+                }
+            } else {
+                codes::NONE
+            };
+            (error_code, base_offset)
+        }
+        crate::producer_state::Decision::OutOfOrder => (codes::OUT_OF_ORDER_SEQUENCE_NUMBER, -1),
+        crate::producer_state::Decision::Fenced => (codes::INVALID_PRODUCER_EPOCH, -1),
+        crate::producer_state::Decision::Append => return None,
+    };
+    Some(PartitionProduceResponse {
+        index: partition_index,
+        error_code,
+        base_offset,
+        ..Default::default()
+    })
+}
+
+struct PartitionGateError {
+    code: i16,
+    current_leader: Option<LeaderIdAndEpoch>,
+}
+
+fn validate_partition_gate(
+    topic_name: &str,
+    partition_index: i32,
+    acks: i16,
+    partitions: &PartitionRegistry,
+    log_dir_status: &crate::log_dir_status::LogDirRegistry,
+    image: &crabka_metadata::MetadataImage,
+    this_node_id: crabka_metadata::NodeId,
+) -> Result<(Arc<crate::partition::Partition>, i32), PartitionGateError> {
+    let Some(record) = image
+        .partition(topic_name, partition_index)
+        .filter(|_| !topic_name.is_empty())
+    else {
+        return Err(PartitionGateError {
+            code: codes::UNKNOWN_TOPIC_OR_PARTITION,
+            current_leader: None,
+        });
+    };
+    let leader = LeaderIdAndEpoch {
+        leader_id: i32::try_from(record.leader.0).unwrap_or(NO_LEADER_ID),
+        leader_epoch: record.leader_epoch.0,
+        ..Default::default()
+    };
+    if record.leader != this_node_id {
+        return Err(PartitionGateError {
+            code: codes::NOT_LEADER_OR_FOLLOWER,
+            current_leader: Some(leader),
+        });
+    }
+    let Some(partition) = partitions.get(topic_name, crabka_ids::PartitionIndex(partition_index))
+    else {
+        return Err(PartitionGateError {
+            code: codes::NOT_LEADER_OR_FOLLOWER,
+            current_leader: Some(leader),
+        });
+    };
+    if log_dir_status.is_offline(&partition.log_dir.load()) {
+        return Err(PartitionGateError {
+            code: codes::KAFKA_STORAGE_ERROR,
+            current_leader: None,
+        });
+    }
+    if acks == ACKS_ALL
+        && i32::try_from(record.isr.len()).unwrap_or(i32::MAX)
+            < topic_min_insync_replicas(image, topic_name)
+    {
+        return Err(PartitionGateError {
+            code: codes::NOT_ENOUGH_REPLICAS,
+            current_leader: None,
+        });
+    }
+    let leader_epoch = partition
+        .current_leader_epoch
+        .load(std::sync::atomic::Ordering::Acquire);
+    Ok((partition, leader_epoch))
+}
+
+async fn validate_transactional_produce(
+    batch: &PreparedBatch,
+    coordinator: &crate::txn::coordinator::TxnCoordinator,
+    image: &crabka_metadata::MetadataImage,
+    topic_name: &str,
+    partition: i32,
+) -> Result<Option<i16>, BrokerError> {
+    if !batch.attributes.is_transactional() || batch.producer_id < 0 {
+        return Ok(None);
+    }
+    let Some(transactional_id) = coordinator.tid_for_pid(crabka_log::ProducerId(batch.producer_id))
+    else {
+        return Ok(Some(codes::INVALID_PRODUCER_ID_MAPPING));
+    };
+    let Some(entry_mutex) = coordinator.get(&transactional_id) else {
+        return Ok(None);
+    };
+    let mut entry = entry_mutex.lock().await;
+    if entry.producer_epoch != batch.producer_epoch {
+        return Ok(Some(codes::INVALID_PRODUCER_EPOCH));
+    }
+    let topic_partition = crate::txn::state::TopicPartition {
+        topic: topic_name.to_string(),
+        partition: crabka_ids::PartitionIndex(partition),
+    };
+    let completed = matches!(
+        entry.state,
+        crate::txn::state::TxnState::CompleteCommit | crate::txn::state::TxnState::CompleteAbort
+    );
+    if entry.partitions.contains(&topic_partition) && !completed {
+        return Ok(None);
+    }
+    if !entry
+        .state
+        .can_transition_to(crate::txn::state::TxnState::Ongoing)
+    {
+        return Ok(Some(codes::INVALID_TXN_STATE));
+    }
+    if completed {
+        entry.partitions.clear();
+    }
+    entry.state = crate::txn::state::TxnState::Ongoing;
+    entry.partitions.insert(topic_partition);
+    entry.last_update_ms = crate::txn::util::now_millis();
+    let snapshot = entry.clone();
+    drop(entry);
+    let version = crate::txn::version::resolve_txn_version(image);
+    coordinator.put(snapshot, version).await?;
+    Ok(None)
 }
 
 /// Borrowed bundle of the idempotent-producer dedup identity plus the
@@ -819,13 +892,10 @@ async fn finalize_ack(
             .commit(
                 key.topic,
                 crabka_ids::PartitionIndex(key.partition),
-                key.pid,
-                key.epoch,
-                key.base_seq,
-                key.last_offset_delta,
+                (key.pid, key.epoch),
+                (key.base_seq, key.last_offset_delta),
                 // Unwrap the assigned `Offset` into the dedup tracker's `i64`.
-                base_offset.0,
-                key.max_timestamp,
+                (base_offset.0, key.max_timestamp),
             )
             .await;
     }
@@ -1256,7 +1326,7 @@ fn build_produce_data(prepared: PreparedBatch, leader_epoch: i32) -> ProduceData
 mod tests {
     use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
-    use assert2::check;
+    use assert2::{assert, check};
     use bytes::{Bytes, BytesMut};
     use crabka_compression::CompressionType;
     use crabka_metadata::{
@@ -1266,8 +1336,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        FramedPartition, FramedTopic, MIN_INSYNC_REPLICAS, PartitionPayload,
-        build_topic_error_response, decode_owned_batch, process_partition,
+        FramedPartition, FramedTopic, MIN_INSYNC_REPLICAS, PartitionInput, PartitionPayload,
+        PartitionServices, build_topic_error_response, decode_owned_batch, process_partition,
         produce_bytes_by_qos_tier, resolve_topic_compression, topic_min_insync_replicas,
     };
 
@@ -1336,20 +1406,23 @@ mod tests {
     #[test]
     fn topic_min_isr_defaults_to_one_when_unset() {
         let img = image_with_topic("t", &[1, 2, 3]);
-        assert2::assert!(topic_min_insync_replicas(&img, "t") == 1);
+        assert!(topic_min_insync_replicas(&img, "t") == 1);
     }
 
     #[test]
     fn topic_min_isr_reads_override_when_set() {
         let mut img = image_with_topic("t", &[1, 2, 3]);
         set_min_isr(&mut img, "t", 3);
-        assert2::assert!(topic_min_insync_replicas(&img, "t") == 3);
+        assert!(topic_min_insync_replicas(&img, "t") == 3);
     }
 
     #[test]
     fn topic_min_isr_default_one_on_unknown_topic() {
         let img = MetadataImage::new(Uuid::nil());
-        assert2::assert!(topic_min_insync_replicas(&img, "ghost") == 1);
+        assert!(
+            topic_min_insync_replicas(&img, "ghost") == 1,
+            "missing topic_config must default to 1, not crash"
+        );
     }
 
     #[test]
@@ -1361,7 +1434,10 @@ mod tests {
             topic: "t".into(),
             overrides: o,
         }));
-        assert2::assert!(topic_min_insync_replicas(&img, "t") == 1);
+        assert!(
+            topic_min_insync_replicas(&img, "t") == 1,
+            "unparseable value must fall back to permissive default 1"
+        );
     }
 
     #[test]
@@ -1375,7 +1451,7 @@ mod tests {
             topic: "t".into(),
             overrides: o,
         }));
-        assert2::assert!(topic_min_insync_replicas(&img, "t") == 1);
+        assert!(topic_min_insync_replicas(&img, "t") == 1);
     }
 
     #[test]
@@ -1401,7 +1477,7 @@ mod tests {
             ("gold".to_string(), 30),
             (crate::config_keys::DEFAULT_QOS_TIER.to_string(), 7),
         ]);
-        assert2::assert!(grouped == expected);
+        assert!(grouped == expected);
     }
 
     #[test]
@@ -1448,7 +1524,7 @@ mod tests {
             partition_responses: vec![error_partition(0), error_partition(4)],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected);
     }
 
     #[test]
@@ -1470,7 +1546,10 @@ mod tests {
                 topic: "t".into(),
                 overrides,
             }));
-            assert2::assert!(resolve_topic_compression(&img, "t") == want);
+            assert!(
+                resolve_topic_compression(&img, "t") == want,
+                "compression.type {config_value:?}"
+            );
         }
     }
 
@@ -1495,13 +1574,20 @@ mod tests {
             ..Default::default()
         };
         let decoded = decode_owned_batch(
-            RecordsPayload::V2(vec![batch.clone()]),
+            RecordsPayload::V2(vec![batch]),
             "orders",
             &crate::metrics::BrokerMetrics::new(),
         )
         .expect("decode owned batch");
 
-        assert2::assert!(decoded == batch);
+        check!(decoded.last_offset_delta == 1);
+        check!(decoded.max_timestamp == 9876);
+        check!(decoded.producer_id == 22);
+        check!(decoded.producer_epoch == 3);
+        check!(decoded.base_sequence == 11);
+        assert!(decoded.records.len() == 2);
+        check!(decoded.records[0].value.as_deref() == Some(&b"a"[..]));
+        check!(decoded.records[1].value.as_deref() == Some(&b"b"[..]));
     }
 
     #[test]
@@ -1512,7 +1598,7 @@ mod tests {
             &crate::metrics::BrokerMetrics::new(),
         )
         .unwrap_err();
-        assert2::assert!(err == crate::codes::INVALID_REQUEST);
+        assert!(err == crate::codes::INVALID_REQUEST);
     }
 
     #[tokio::test]
@@ -1552,23 +1638,27 @@ mod tests {
         });
 
         let resp = process_partition(
-            FramedPartition {
-                index: 0,
-                payload: PartitionPayload::Slice(payload),
+            PartitionInput {
+                part_data: FramedPartition {
+                    index: 0,
+                    payload: PartitionPayload::Slice(payload),
+                },
+                topic_compression: None,
+                topic_name: "orders".into(),
+                topic_denied: false,
+                txn_id_denied: false,
+                acks: 1,
+                timeout: Duration::from_millis(1),
             },
-            None,
-            "orders",
-            false,
-            false,
-            1,
-            Duration::from_millis(1),
-            &partitions,
-            &txn_coordinator,
-            &producer_state,
-            &log_dir_status,
-            &image,
-            crabka_audit::NodeId(1),
-            &metrics,
+            PartitionServices {
+                partitions: &partitions,
+                txn_coordinator: &txn_coordinator,
+                producer_state: &producer_state,
+                log_dir_status: &log_dir_status,
+                image: &image,
+                this_node_id: crabka_audit::NodeId(1),
+                metrics: &metrics,
+            },
         )
         .await
         .expect("process partition");
@@ -1588,7 +1678,7 @@ mod tests {
             },
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected);
     }
 
     #[tokio::test]
@@ -1634,24 +1724,28 @@ mod tests {
         });
 
         let resp = process_partition(
-            FramedPartition {
-                index: 0,
-                payload: PartitionPayload::Slice(payload),
+            PartitionInput {
+                part_data: FramedPartition {
+                    index: 0,
+                    payload: PartitionPayload::Slice(payload),
+                },
+                topic_compression: None,
+                topic_name: "orders".into(),
+                topic_denied: false,
+                txn_id_denied: false,
+                acks: 1,
+                timeout: Duration::from_millis(1),
             },
-            None,
-            "orders",
-            false,
-            false,
-            1,
-            Duration::from_millis(1),
-            &partitions,
-            &txn_coordinator,
-            &producer_state,
-            &log_dir_status,
-            &image,
-            // We are the leader (node 2), but hold no local replica.
-            crabka_audit::NodeId(2),
-            &metrics,
+            PartitionServices {
+                partitions: &partitions,
+                txn_coordinator: &txn_coordinator,
+                producer_state: &producer_state,
+                log_dir_status: &log_dir_status,
+                image: &image,
+                // We are the leader (node 2), but hold no local replica.
+                this_node_id: crabka_audit::NodeId(2),
+                metrics: &metrics,
+            },
         )
         .await
         .expect("process partition");
@@ -1671,7 +1765,7 @@ mod tests {
             },
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected);
     }
 
     /// Idempotent-retry (`Decision::Duplicate`) under `acks=all` re-waits for
@@ -1728,16 +1822,22 @@ mod tests {
                 .append(&mut batch)
                 .expect("seed source records");
         }
-        assert2::assert!(part.log_end_offset() == crabka_log::Offset(3));
+        assert!(part.log_end_offset() == crabka_log::Offset(3));
         part.set_follower_hw(crabka_log::Offset(2)).await;
-        assert2::assert!(part.high_watermark().await == crabka_log::Offset(2));
+        assert!(part.high_watermark().await == crabka_log::Offset(2));
         partitions.insert("orders".to_string(), crabka_ids::PartitionIndex(0), part);
 
         // Pre-seed the dedup tracker so the incoming batch is a Duplicate whose
         // recorded base_offset is 0 and span is 0..=2.
         let pid: i64 = 7777;
         producer_state
-            .commit("orders", crabka_ids::PartitionIndex(0), pid, 0, 0, 2, 0, 0)
+            .commit(
+                "orders",
+                crabka_ids::PartitionIndex(0),
+                (pid, 0),
+                (0, 2),
+                (0, 0),
+            )
             .await;
 
         // Incoming (retried) batch: same pid/epoch/base_sequence/span.
@@ -1757,23 +1857,27 @@ mod tests {
         });
 
         let resp: PartitionProduceResponse = process_partition(
-            FramedPartition {
-                index: 0,
-                payload: PartitionPayload::Slice(payload),
+            PartitionInput {
+                part_data: FramedPartition {
+                    index: 0,
+                    payload: PartitionPayload::Slice(payload),
+                },
+                topic_compression: None,
+                topic_name: "orders".into(),
+                topic_denied: false,
+                txn_id_denied: false,
+                acks: -1,
+                timeout: Duration::from_millis(50),
             },
-            None,
-            "orders",
-            false,
-            false,
-            -1, // acks = all
-            Duration::from_millis(50),
-            &partitions,
-            &txn_coordinator,
-            &producer_state,
-            &log_dir_status,
-            &image,
-            crabka_audit::NodeId(1),
-            &metrics,
+            PartitionServices {
+                partitions: &partitions,
+                txn_coordinator: &txn_coordinator,
+                producer_state: &producer_state,
+                log_dir_status: &log_dir_status,
+                image: &image,
+                this_node_id: crabka_audit::NodeId(1),
+                metrics: &metrics,
+            },
         )
         .await
         .expect("process partition");
@@ -1807,13 +1911,19 @@ mod tests {
         // Tuple match → 4096 bytes overage at 1024 B/s → throttle > 0.
         let delay_match =
             crate::quota::consume_producer_quota(&img, &buckets, "alice", "app-x", "default", 4096);
-        assert2::assert!(delay_match > std::time::Duration::ZERO);
+        assert!(
+            delay_match > std::time::Duration::ZERO,
+            "tuple quota match should throttle on overage; got {delay_match:?}"
+        );
         // No tuple match for client_id="other"; no (user=alice)-only quota exists.
         let buckets2 = crate::quota::QuotaBuckets::new();
         let delay_other = crate::quota::consume_producer_quota(
             &img, &buckets2, "alice", "other", "default", 4096,
         );
-        assert2::assert!(delay_other == std::time::Duration::ZERO);
+        assert!(
+            delay_other == std::time::Duration::ZERO,
+            "non-matching client_id should not throttle; got {delay_other:?}"
+        );
     }
 
     // ── verbatim passthrough predicate (prepare_batch + build_produce_data) ──
@@ -1823,7 +1933,7 @@ mod tests {
     // verbatim-vs-owned; `build_produce_data` maps the result to the writer's
     // `ProduceData`, stamping the leader epoch.
     mod verbatim {
-        use assert2::check;
+        use assert2::{assert, check};
         use bytes::{Bytes, BytesMut};
         use crabka_compression::CompressionType;
         use crabka_protocol::records::{Attributes, Record, RecordBatch, TimestampType};
@@ -1885,8 +1995,8 @@ mod tests {
                     "non-v2 zeroed slice",
                 ),
             ];
-            for (payload, want, _label) in cases {
-                assert2::assert!(payload.message_count() == want);
+            for (payload, want, label) in cases {
+                assert!(payload.message_count() == want, "case: {label}");
             }
         }
 
@@ -1910,23 +2020,10 @@ mod tests {
             let data = dispatch_slice(wire.clone(), None, 7);
             match data {
                 ProduceData::Verbatim(v) => {
-                    assert2::assert!(
-                        (
-                            v.bytes,
-                            v.last_offset_delta,
-                            v.max_timestamp,
-                            v.leader_epoch,
-                            v.producer_id,
-                            v.is_transactional,
-                        ) == (
-                            wire,
-                            0,
-                            42,
-                            crabka_log::LeaderEpoch(7),
-                            crabka_log::ProducerId(-1),
-                            false,
-                        )
-                    );
+                    check!(&v.bytes[..] == &wire[..]);
+                    check!(v.leader_epoch == 7);
+                    check!(v.max_timestamp == 42);
+                    check!(v.last_offset_delta == 0);
                 }
                 ProduceData::Owned(_) => panic!("expected Verbatim"),
             }
@@ -1939,7 +2036,7 @@ mod tests {
             b.attributes = b.attributes.with_compression(CompressionType::Lz4);
             let wire = encode(&b);
             let data = dispatch_slice(wire, Some(CompressionType::Lz4), 1);
-            assert2::assert!(matches!(data, ProduceData::Verbatim(_)));
+            assert!(matches!(data, ProduceData::Verbatim(_)));
         }
 
         #[test]
@@ -1947,7 +2044,7 @@ mod tests {
             // A wire-null records field is rejected as INVALID_REQUEST.
             let m = crate::metrics::BrokerMetrics::new();
             let err = prepare_batch(PartitionPayload::Null, None, "t", &m).unwrap_err();
-            assert2::assert!(err == crate::codes::INVALID_REQUEST);
+            assert!(err == crate::codes::INVALID_REQUEST);
         }
 
         #[test]
@@ -1956,7 +2053,7 @@ mod tests {
             let b = plain_batch();
             let wire = encode(&b);
             let data = dispatch_slice(wire, Some(CompressionType::Zstd), 0);
-            assert2::assert!(matches!(data, ProduceData::Owned(_)));
+            assert!(matches!(data, ProduceData::Owned(_)));
         }
 
         #[test]
@@ -1967,7 +2064,7 @@ mod tests {
                 .with_timestamp_type(TimestampType::LogAppendTime);
             let wire = encode(&b);
             let data = dispatch_slice(wire, None, 0);
-            assert2::assert!(matches!(data, ProduceData::Owned(_)));
+            assert!(matches!(data, ProduceData::Owned(_)));
         }
 
         #[test]
@@ -1976,7 +2073,7 @@ mod tests {
             b.attributes = Attributes::default().with_control(true);
             let wire = encode(&b);
             let data = dispatch_slice(wire, None, 0);
-            assert2::assert!(matches!(data, ProduceData::Owned(_)));
+            assert!(matches!(data, ProduceData::Owned(_)));
         }
 
         #[test]
@@ -1991,7 +2088,7 @@ mod tests {
             let m = crate::metrics::BrokerMetrics::new();
             let err = prepare_batch(PartitionPayload::Slice(Bytes::from(wire)), None, "t", &m)
                 .unwrap_err();
-            assert2::assert!(err == crate::codes::INVALID_RECORD);
+            assert!(err == crate::codes::INVALID_RECORD);
         }
 
         #[test]
@@ -2002,7 +2099,7 @@ mod tests {
             b.encode(&mut two).unwrap();
             b.encode(&mut two).unwrap();
             let data = dispatch_slice(two.freeze(), None, 0);
-            assert2::assert!(matches!(data, ProduceData::Owned(_)));
+            assert!(matches!(data, ProduceData::Owned(_)));
         }
 
         #[test]
@@ -2015,8 +2112,8 @@ mod tests {
             let data = dispatch_slice(wire, None, 0);
             match data {
                 ProduceData::Verbatim(v) => {
-                    assert2::assert!(v.is_transactional);
-                    assert2::assert!(v.producer_id == crabka_log::ProducerId(100));
+                    assert!(v.is_transactional);
+                    assert!(v.producer_id == crabka_log::ProducerId(100));
                 }
                 ProduceData::Owned(_) => panic!("transactional data batch should pass through"),
             }
@@ -2047,7 +2144,12 @@ mod tests {
             let wire = encode(&b);
             // The compressed wire bytes must be far smaller than the raw payload,
             // so an accidental decompress would be obvious.
-            assert2::assert!(wire.len() < big.len() / 4);
+            assert!(
+                wire.len() < big.len() / 4,
+                "lz4 wire ({} B) should be much smaller than raw ({} B)",
+                wire.len(),
+                big.len()
+            );
 
             let data = dispatch_slice(wire.clone(), None, 3);
             match data {
@@ -2055,25 +2157,12 @@ mod tests {
                     // Stored bytes are the COMPRESSED wire bytes — verbatim, not
                     // re-encoded from decompressed records ("must stay compressed").
                     // Header fields came from the v2 header, no record decode.
+                    check!(&v.bytes[..] == &wire[..]);
                     check!(v.bytes.len() == wire.len());
                     check!(v.bytes.len() < big.len());
-                    assert2::assert!(
-                        (
-                            v.bytes,
-                            v.last_offset_delta,
-                            v.max_timestamp,
-                            v.leader_epoch,
-                            v.producer_id,
-                            v.is_transactional,
-                        ) == (
-                            wire,
-                            0,
-                            7_777,
-                            crabka_log::LeaderEpoch(3),
-                            crabka_log::ProducerId(-1),
-                            false,
-                        )
-                    );
+                    check!(v.max_timestamp == 7_777);
+                    check!(v.last_offset_delta == 0);
+                    check!(v.leader_epoch == 3);
                 }
                 ProduceData::Owned(_) => {
                     panic!("lz4 producer batch must pass through verbatim (no decompress)")
@@ -2101,35 +2190,21 @@ mod tests {
             let m = crate::metrics::BrokerMetrics::new();
             let prepared =
                 prepare_batch(PartitionPayload::Slice(wire.clone()), None, "t", &m).unwrap();
-            assert2::assert!(matches!(prepared.source, PreparedSource::Verbatim(_)));
-            assert2::assert!(
-                (
-                    prepared.attributes,
-                    prepared.last_offset_delta,
-                    prepared.max_timestamp,
-                    prepared.producer_id,
-                    prepared.producer_epoch,
-                    prepared.base_sequence,
-                ) == (b.attributes, 2, 555, 4242, 9, 17)
-            );
+            assert!(matches!(prepared.source, PreparedSource::Verbatim(_)));
+            check!(prepared.producer_id == 4242);
+            check!(prepared.producer_epoch == 9);
+            check!(prepared.base_sequence == 17);
+            check!(prepared.last_offset_delta == 2);
+            check!(prepared.max_timestamp == 555);
 
             // Cross-check: an owned decode of the same compressed bytes yields
             // the same header identity (proving the header read is correct).
             let mut cur: &[u8] = &wire;
             let owned = RecordBatch::decode(&mut cur).unwrap();
-            assert2::assert!(
-                (
-                    owned.producer_id,
-                    owned.producer_epoch,
-                    owned.base_sequence,
-                    owned.last_offset_delta,
-                ) == (
-                    prepared.producer_id,
-                    prepared.producer_epoch,
-                    prepared.base_sequence,
-                    prepared.last_offset_delta,
-                )
-            );
+            check!(owned.producer_id == prepared.producer_id);
+            check!(owned.producer_epoch == prepared.producer_epoch);
+            check!(owned.base_sequence == prepared.base_sequence);
+            check!(owned.last_offset_delta == prepared.last_offset_delta);
         }
     }
 }

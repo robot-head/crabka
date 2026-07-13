@@ -115,6 +115,8 @@ impl std::fmt::Debug for ControllerConfig {
 }
 
 impl ControllerConfig {
+    /// # Panics
+    /// Panics only if the static loopback test address is invalid.
     #[must_use]
     pub fn for_tests(node_id: NodeId, log_dir: PathBuf) -> Self {
         let listen: SocketAddr = "127.0.0.1:0".parse().expect("static");

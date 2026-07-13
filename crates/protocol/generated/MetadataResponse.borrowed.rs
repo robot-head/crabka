@@ -16,7 +16,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 13;
 pub const FLEXIBLE_MIN: i16 = 9;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,11 +41,15 @@ impl Default for MetadataResponse<'_> {
             topics: Vec::new(),
             cluster_authorized_operations: -2_147_483_648i32,
             error_code: 0i16,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl MetadataResponse<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::metadata_response::MetadataResponse {
         crate::owned::metadata_response::MetadataResponse {
             throttle_time_ms: (self.throttle_time_ms),
@@ -86,9 +91,9 @@ impl Encode for MetadataResponse<'_> {
         }
         if version >= 2 {
             if flex {
-                put_compact_nullable_string(buf, self.cluster_id);
+                let () = put_compact_nullable_string(buf, self.cluster_id);
             } else {
-                put_nullable_string(buf, self.cluster_id);
+                let () = put_nullable_string(buf, self.cluster_id);
             }
         }
         if version >= 1 {
@@ -255,6 +260,10 @@ pub struct MetadataResponseBroker<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl MetadataResponseBroker<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::metadata_response::MetadataResponseBroker {
         crate::owned::metadata_response::MetadataResponseBroker {
             node_id: (self.node_id),
@@ -273,9 +282,9 @@ impl Encode for MetadataResponseBroker<'_> {
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.host);
+                let () = put_compact_string(buf, self.host);
             } else {
-                put_string(buf, self.host);
+                let () = put_string(buf, self.host);
             }
         }
         if version >= 0 {
@@ -283,9 +292,9 @@ impl Encode for MetadataResponseBroker<'_> {
         }
         if version >= 1 {
             if flex {
-                put_compact_nullable_string(buf, self.rack);
+                let () = put_compact_nullable_string(buf, self.rack);
             } else {
-                put_nullable_string(buf, self.rack);
+                let () = put_nullable_string(buf, self.rack);
             }
         }
         if flex {
@@ -389,15 +398,19 @@ impl Default for MetadataResponseTopic<'_> {
         Self {
             error_code: 0i16,
             name: None,
-            topic_id: Default::default(),
+            topic_id: crate::primitives::uuid::Uuid::default(),
             is_internal: false,
             partitions: Vec::new(),
             topic_authorized_operations: -2_147_483_648i32,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl MetadataResponseTopic<'_> {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::metadata_response::MetadataResponseTopic {
         crate::owned::metadata_response::MetadataResponseTopic {
             error_code: (self.error_code),
@@ -422,15 +435,15 @@ impl Encode for MetadataResponseTopic<'_> {
         if version >= 0 {
             if version >= 12 {
                 if flex {
-                    put_compact_nullable_string(buf, self.name);
+                    let () = put_compact_nullable_string(buf, self.name);
                 } else {
-                    put_nullable_string(buf, self.name);
+                    let () = put_nullable_string(buf, self.name);
                 }
             } else {
                 if flex {
-                    put_compact_string(buf, (self.name).unwrap_or(""));
+                    let () = put_compact_string(buf, (self.name).unwrap_or(""));
                 } else {
-                    put_string(buf, (self.name).unwrap_or(""));
+                    let () = put_string(buf, (self.name).unwrap_or(""));
                 }
             }
         }
@@ -599,11 +612,15 @@ impl Default for MetadataResponsePartition {
             replica_nodes: Vec::new(),
             isr_nodes: Vec::new(),
             offline_replicas: Vec::new(),
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl MetadataResponsePartition {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::metadata_response::MetadataResponsePartition {
         crate::owned::metadata_response::MetadataResponsePartition {
             error_code: (self.error_code),

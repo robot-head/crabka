@@ -1,12 +1,8 @@
-#![allow(clippy::pedantic)]
-#![allow(clippy::unnecessary_unwrap)]
-#![allow(clippy::type_complexity)]
-
 //! Broker-side integration tests for KIP-612 IP quotas.
 //!
 //! Tests:
 //! 1. `ip_quota_alter_then_describe_round_trip` — SASL/PLAIN; alter
-//!    (ip=127.0.0.1) connection_creation_rate=2.0; describe; assert.
+//!    (ip=127.0.0.1) `connection_creation_rate=2.0`; describe; assert.
 //! 2. `connection_creation_rate_throttles_accept` — PLAINTEXT; rate=1;
 //!    open 5 connections sequentially; assert wall ≥3s.
 //! 3. `unthrottled_ip_unaffected` — PLAINTEXT; no quota; open 5 connections;
@@ -14,6 +10,7 @@
 
 use std::{io, net::SocketAddr};
 
+use assert2::assert;
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::{Broker, BrokerHandle, config::ListenerSpec};
 use crabka_protocol::{
@@ -32,6 +29,10 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
 };
+
+type QuotaEntity = Vec<(String, Option<String>)>;
+type QuotaOperations = Vec<(String, f64, bool)>;
+type QuotaEntries = Vec<(QuotaEntity, QuotaOperations)>;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Wire helpers — single length-prefixed request/response exchange.
@@ -197,12 +198,12 @@ async fn start_single_broker_plaintext() -> (BrokerHandle, TempDir, SocketAddr) 
 // Wire drivers for AlterClientQuotas and DescribeClientQuotas
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Drive `AlterClientQuotas` (api_key=49) over a SASL/PLAIN connection.
+/// Drive `AlterClientQuotas` (`api_key=49`) over a SASL/PLAIN connection.
 async fn drive_alter_client_quotas_sasl(
     addr: SocketAddr,
     user: &str,
     pass: &str,
-    entries: Vec<(Vec<(String, Option<String>)>, Vec<(String, f64, bool)>)>,
+    entries: QuotaEntries,
     validate_only: bool,
 ) -> Vec<(Vec<(String, Option<String>)>, i16)> {
     use crabka_protocol::owned::{
@@ -238,19 +239,19 @@ async fn drive_alter_client_quotas_sasl(
         ..Default::default()
     };
 
-    const VERSION: i16 = 1; // flexible
+    let version: i16 = 1; // flexible
 
     let mut stream = sasl_plain_authenticate(addr, user, pass.as_bytes())
         .await
         .expect("SASL authenticate for AlterClientQuotas");
     let mut body = BytesMut::new();
-    req.encode(&mut body, VERSION)
+    req.encode(&mut body, version)
         .expect("encode AlterClientQuotas");
-    let resp_bytes = round_trip(&mut stream, 49, VERSION, 1, true, &body)
+    let resp_bytes = round_trip(&mut stream, 49, version, 1, true, &body)
         .await
         .expect("AlterClientQuotas round-trip");
     let mut cur: &[u8] = &resp_bytes;
-    let resp = AlterClientQuotasResponse::decode(&mut cur, VERSION)
+    let resp = AlterClientQuotasResponse::decode(&mut cur, version)
         .expect("decode AlterClientQuotasResponse");
 
     resp.entries
@@ -266,10 +267,10 @@ async fn drive_alter_client_quotas_sasl(
         .collect()
 }
 
-/// Drive `DescribeClientQuotas` (api_key=48) over a SASL/PLAIN connection.
+/// Drive `DescribeClientQuotas` (`api_key=48`) over a SASL/PLAIN connection.
 ///
 /// `components` is a list of `(entity_type, match_type, match_value)`:
-/// - match_type: 0=EXACT, 1=DEFAULT, 2=ANY
+/// - `match_type`: 0=EXACT, 1=DEFAULT, 2=ANY
 async fn drive_describe_client_quotas_sasl(
     addr: SocketAddr,
     user: &str,
@@ -296,22 +297,22 @@ async fn drive_describe_client_quotas_sasl(
         ..Default::default()
     };
 
-    const VERSION: i16 = 1; // flexible
+    let version: i16 = 1; // flexible
 
     let mut stream = sasl_plain_authenticate(addr, user, pass.as_bytes())
         .await
         .expect("SASL authenticate for DescribeClientQuotas");
     let mut body = BytesMut::new();
-    req.encode(&mut body, VERSION)
+    req.encode(&mut body, version)
         .expect("encode DescribeClientQuotas");
-    let resp_bytes = round_trip(&mut stream, 48, VERSION, 1, true, &body)
+    let resp_bytes = round_trip(&mut stream, 48, version, 1, true, &body)
         .await
         .expect("DescribeClientQuotas round-trip");
     let mut cur: &[u8] = &resp_bytes;
-    let resp = DescribeClientQuotasResponse::decode(&mut cur, VERSION)
+    let resp = DescribeClientQuotasResponse::decode(&mut cur, version)
         .expect("decode DescribeClientQuotasResponse");
 
-    assert2::assert!(resp.error_code == 0);
+    assert!(resp.error_code == 0, "DescribeClientQuotas top-level error");
 
     resp.entries
         .unwrap_or_default()
@@ -332,8 +333,8 @@ async fn drive_describe_client_quotas_sasl(
 // Integration tests
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Test 1: AlterClientQuotas sets (ip=127.0.0.1) connection_creation_rate=2.0;
-/// the value appears in the metadata image and in DescribeClientQuotas.
+/// Test 1: `AlterClientQuotas` sets (ip=127.0.0.1) `connection_creation_rate=2.0`;
+/// the value appears in the metadata image and in `DescribeClientQuotas`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ip_quota_alter_then_describe_round_trip() {
     let (handle, _dir, addr) =
@@ -350,7 +351,7 @@ async fn ip_quota_alter_then_describe_round_trip() {
         false,
     )
     .await;
-    assert2::assert!(alter_resp[0].1 == 0);
+    assert!(alter_resp[0].1 == 0, "alter should succeed");
 
     // Wait until the quota is visible in the image.
     handle
@@ -371,19 +372,18 @@ async fn ip_quota_alter_then_describe_round_trip() {
         false,
     )
     .await;
-    assert2::assert!(
-        (
-            desc.len(),
-            desc[0]
-                .1
-                .iter()
-                .find(|(k, _)| k == "connection_creation_rate")
-                .map(|(_, v)| *v),
-        ) == (1, Some(2.0))
+    assert!(desc.len() == 1);
+    assert!(
+        desc[0]
+            .1
+            .iter()
+            .find(|(k, _)| k == "connection_creation_rate")
+            .map(|(_, v)| *v)
+            == Some(2.0)
     );
 }
 
-/// Test 2: Set rate=1 connection/sec for loopback IP via submit_metadata_record_for_test
+/// Test 2: Set rate=1 connection/sec for loopback IP via `submit_metadata_record_for_test`
 /// (PLAINTEXT cluster — no SASL admin path). Open 5 connections sequentially;
 /// assert wall time >= 3 seconds (proves the throttle fires).
 ///
@@ -392,7 +392,7 @@ async fn ip_quota_alter_then_describe_round_trip() {
 ///   conn 2..5: bucket empty → sleep 1s → free each
 /// Total ~4s. Tolerance >=3s.
 ///
-/// Each connection sends ApiVersions and waits for the response. This
+/// Each connection sends `ApiVersions` and waits for the response. This
 /// ensures the accept loop has finished the throttle sleep for that
 /// connection before we open the next one (the OS backlog alone would
 /// complete the TCP handshake immediately and not measure throttle time).
@@ -431,8 +431,6 @@ async fn connection_creation_rate_throttles_accept() {
     // (Without this, the OS TCP backlog completes the SYN-ACK handshake for
     // all connections immediately and TcpStream::connect returns without
     // waiting for the accept-side throttle sleep.)
-    use crabka_protocol::{Encode, owned::api_versions_request::ApiVersionsRequest};
-
     let started = std::time::Instant::now();
     let mut streams = Vec::with_capacity(5);
     for _ in 0..5 {
@@ -457,10 +455,13 @@ async fn connection_creation_rate_throttles_accept() {
     // conn5=free(refilled). Total: 2 sleeps ≈ 2s.
     // Tolerance: >=1.5s proves the throttle fired. This is stable even with
     // slight timing variations in the test runner.
-    assert2::assert!(elapsed >= std::time::Duration::from_millis(1500));
+    assert!(
+        elapsed >= std::time::Duration::from_millis(1500),
+        "expected >=1.5s of throttle, got {elapsed:?}"
+    );
 }
 
-/// Test 3: No connection_creation_rate quota configured. Open 5 connections;
+/// Test 3: No `connection_creation_rate` quota configured. Open 5 connections;
 /// assert wall time < 500ms (unthrottled baseline).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unthrottled_ip_unaffected() {
@@ -476,7 +477,10 @@ async fn unthrottled_ip_unaffected() {
     let elapsed = started.elapsed();
     drop(streams);
 
-    assert2::assert!(elapsed < std::time::Duration::from_millis(500));
+    assert!(
+        elapsed < std::time::Duration::from_millis(500),
+        "expected fast unthrottled connect, got {elapsed:?}"
+    );
 }
 
 /// Start a single-broker PLAINTEXT cluster with explicit connection caps
@@ -522,7 +526,10 @@ async fn max_connections_per_ip_refuses_excess_and_frees_on_close() {
     // request round-trip fails (peer closed the connection).
     let mut c2 = TcpStream::connect(addr).await.expect("tcp connect c2");
     let c2_result = round_trip(&mut c2, 18, 0, 1, false, &av_body).await;
-    assert2::assert!(c2_result.is_err());
+    assert!(
+        c2_result.is_err(),
+        "c2 must be refused while c1 holds the only per-IP slot, got {c2_result:?}"
+    );
 
     // Closing c1 frees the slot. The decrement happens when the c1 handler task
     // observes the close, so retry briefly until a fresh connection succeeds.
@@ -533,7 +540,10 @@ async fn max_connections_per_ip_refuses_excess_and_frees_on_close() {
         if round_trip(&mut c3, 18, 0, 1, false, &av_body).await.is_ok() {
             break;
         }
-        assert2::assert!(std::time::Instant::now() < deadline);
+        assert!(
+            std::time::Instant::now() < deadline,
+            "per-IP slot was not freed after c1 closed"
+        );
         // intentional: the per-IP ConnectionGuard decrement is coordinator-local
         // (not in the metadata image and has no metric); each iteration re-drives
         // the real connect+round-trip under test, so keep the bounded retry poll.

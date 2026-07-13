@@ -45,6 +45,8 @@ impl TopicAdminClient for AdminClient {
 /// Idempotent: if the topic already exists with any config, this is a
 /// no-op (the existing topic's configs are NOT updated; that's a
 /// separate operator reconciliation path).
+/// # Errors
+/// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub async fn ensure_topic<A: TopicAdminClient + ?Sized>(
     admin: &mut A,
     name: &str,

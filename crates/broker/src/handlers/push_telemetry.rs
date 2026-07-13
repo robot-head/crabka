@@ -29,7 +29,6 @@ const DECOMPRESSED_OUTPUT_FLOOR: usize = 16 * 1024 * 1024;
 /// Hard ceiling on decompressed client-metrics output.
 const DECOMPRESSED_OUTPUT_CEILING: usize = 1024 * 1024 * 1024;
 
-#[allow(clippy::unused_async)] // signature symmetry with other inline-intercept handlers
 #[tracing::instrument(
     name = "handle_push_telemetry",
     level = "info",
@@ -37,7 +36,7 @@ const DECOMPRESSED_OUTPUT_CEILING: usize = 1024 * 1024 * 1024;
     fields(api = "PushTelemetry", version, req_bytes = req_bytes.len()),
     err,
 )]
-pub(crate) async fn handle(
+pub(crate) fn handle(
     broker: &Broker,
     version: i16,
     _correlation_id: i32,
@@ -115,12 +114,10 @@ fn flatten_for_prometheus(
     let num = |v: &Value| -> f64 {
         match v {
             Value::AsDouble(d) => *d,
-            Value::AsInt(i) => {
-                #[allow(clippy::cast_precision_loss)]
-                // i64→f64 for telemetry display; sub-ms precision loss is acceptable
-                let f = *i as f64;
-                f
-            }
+            Value::AsInt(i) => i
+                .to_string()
+                .parse()
+                .expect("every i64 has a finite f64 representation"),
         }
     };
     for rm in &md.resource_metrics {
@@ -153,13 +150,15 @@ fn flatten_for_prometheus(
                     }
                     Some(Data::Histogram(h)) => {
                         for dp in &h.data_points {
-                            #[allow(clippy::cast_precision_loss)]
-                            // u64→f64 for telemetry display; large counts lose sub-ms precision
                             out.push(DataPoint {
                                 metric: format!("{}_count", m.name),
                                 client_instance_id: instance.to_string(),
                                 client_id: client_id.to_string(),
-                                value: dp.count as f64,
+                                value: dp
+                                    .count
+                                    .to_string()
+                                    .parse()
+                                    .expect("every u64 has a finite f64 representation"),
                             });
                             if let Some(sum) = dp.sum {
                                 out.push(DataPoint {
@@ -181,7 +180,7 @@ fn flatten_for_prometheus(
 
 #[cfg(test)]
 mod tests {
-    use assert2::check;
+    use assert2::{assert, check};
     use bytes::Bytes;
     use crabka_compression::CompressionType;
     use crabka_protocol::{owned::push_telemetry_response, primitives::uuid::Uuid as ProtoUuid};
@@ -248,16 +247,11 @@ mod tests {
             &encode_request(&req),
             &ctx,
         )
-        .await
         .expect("handle");
         let resp = decode_response(&resp);
 
-        let expected = PushTelemetryResponse {
-            throttle_time_ms: 0,
-            error_code: codes::INVALID_REQUEST,
-            ..Default::default()
-        };
-        assert2::assert!(resp == expected);
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.error_code == codes::INVALID_REQUEST);
         broker_handle.shutdown().await;
     }
 
@@ -302,16 +296,11 @@ mod tests {
             &encode_request(&req),
             &ctx,
         )
-        .await
         .expect("handle");
         let resp = decode_response(&resp);
 
-        let expected = PushTelemetryResponse {
-            throttle_time_ms: 0,
-            error_code: codes::NONE,
-            ..Default::default()
-        };
-        assert2::assert!(resp == expected);
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.error_code == codes::NONE);
         broker_handle.shutdown().await;
     }
 
@@ -349,21 +338,24 @@ mod tests {
 
         let points = flatten_for_prometheus(&md, "instance-1", "client-a");
 
-        assert2::assert!(points.len() == 4);
+        assert!(points.len() == 4, "{points:?}");
         check!(
             points[0].client_instance_id.as_str() == "instance-1",
             "{points:?}"
         );
         check!(points[0].client_id.as_str() == "client-a", "{points:?}");
         let cases = [
-            ("gauge point", 0usize, "cpu.utilization", 0.75f64),
-            ("sum point", 1, "requests.total", 42.0),
-            ("histogram count point", 2, "latency.ms_count", 3.0),
-            ("histogram sum point", 3, "latency.ms_sum", 9.5),
+            (0usize, "cpu.utilization", 0.75f64),
+            (1, "requests.total", 42.0),
+            (2, "latency.ms_count", 3.0),
+            (3, "latency.ms_sum", 9.5),
         ];
-        for (_case, idx, metric, value) in cases {
-            assert2::assert!(points[idx].metric == metric);
-            assert2::assert!((points[idx].value - value).abs() < f64::EPSILON);
+        for (idx, metric, value) in cases {
+            assert!(points[idx].metric == metric, "point {idx}: {points:?}");
+            assert!(
+                (points[idx].value - value).abs() < f64::EPSILON,
+                "point {idx}: {points:?}"
+            );
         }
     }
 }

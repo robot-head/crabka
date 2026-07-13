@@ -16,12 +16,9 @@
 //!  11. GET deployments/<gw>                   — read back ready-replica count
 //!  12. PATCH kafkagrpcgateways/<gw>/status    — write final status
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
-};
+use std::{collections::BTreeMap, sync::Arc};
 
-use assert2::check;
+use assert2::{assert, check};
 use crabka_operator::{
     controller::grpc_gateway::reconcile,
     crd::grpc_gateway::{KafkaGrpcGateway, KafkaGrpcGatewaySpec},
@@ -84,7 +81,37 @@ fn gw_cr(name: &str) -> KafkaGrpcGateway {
 ///   mounted paths.
 /// - `KafkaUser` PATCH body has `authentication.type = "tls"`.
 /// - Final status carries `Ready=True reason=Available`.
-#[allow(clippy::too_many_lines)]
+fn assert_ready_status(observed: &[http::Request<hyper::body::Bytes>]) {
+    // --- Assert final status carries Ready=True / Available ---
+    let status_patch = observed
+        .iter()
+        .rev()
+        .find(|r| {
+            r.method() == Method::PATCH
+                && r.uri()
+                    .to_string()
+                    .contains(&format!("/kafkagrpcgateways/{GW}/status"))
+        })
+        .expect("gateway status PATCH must have been captured");
+    let status_body: serde_json::Value =
+        serde_json::from_slice(status_patch.body()).expect("status PATCH body is JSON");
+    let conds = status_body["status"]["conditions"]
+        .as_array()
+        .expect("status must have conditions array");
+    let ready = conds
+        .iter()
+        .find(|c| c["type"] == "Ready")
+        .unwrap_or_else(|| panic!("Ready condition missing; body = {status_body}"));
+    check!(
+        ready["status"] == "True",
+        "Ready condition must be True when 1/1 replicas ready; body = {status_body}"
+    );
+    check!(
+        ready["reason"] == "Available",
+        "Ready reason must be Available; body = {status_body}"
+    );
+}
+
 #[tokio::test]
 async fn happy_path_all_objects_created_ready() {
     // Generate a real cluster CA so ensure_serving_cert can sign with it.
@@ -187,8 +214,9 @@ async fn happy_path_all_objects_created_ready() {
     let action = reconcile(Arc::new(gw), ctx).await.expect("reconcile ok");
 
     // Action must be a 30-second requeue.
-    assert2::assert!(
-        action == kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(30))
+    assert!(
+        action == kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(30)),
+        "expected requeue(30s), got {action:?}"
     );
 
     let observed = state.take_observed();
@@ -211,7 +239,10 @@ async fn happy_path_all_objects_created_ready() {
         .unwrap_or_else(|| {
             panic!("KafkaUser PATCH missing spec.authentication.type; body = {user_body}")
         });
-    assert2::assert!(auth_type == "tls");
+    assert!(
+        auth_type == "tls",
+        "KafkaUser must have authentication.type=tls; got {auth_type}"
+    );
 
     // --- Assert Deployment PATCH body has exactly 5 volume mounts ---
     let dep_patch = observed
@@ -227,20 +258,28 @@ async fn happy_path_all_objects_created_ready() {
         .pointer("/spec/template/spec/containers/0/volumeMounts")
         .and_then(|v| v.as_array())
         .unwrap_or_else(|| panic!("Deployment PATCH missing volumeMounts; body = {dep_body}"));
-    let mount_names: BTreeSet<&str> = mounts
+    let mount_names: Vec<&str> = mounts
         .iter()
         .filter_map(|m| m.get("name").and_then(|v| v.as_str()))
         .collect();
-    assert2::assert!(
+    assert!(
+        mounts.len() == 5,
+        "Deployment must have exactly 5 volumeMounts, got {}: {:?}",
+        mounts.len(),
         mount_names
-            == BTreeSet::from([
-                "broker-client",
-                "clients-ca",
-                "cluster-ca",
-                "config",
-                "serving"
-            ])
     );
+    for want in [
+        "serving",
+        "broker-client",
+        "cluster-ca",
+        "clients-ca",
+        "config",
+    ] {
+        assert!(
+            mount_names.contains(&want),
+            "Deployment volumeMounts must include '{want}'; got {mount_names:?}"
+        );
+    }
 
     // --- Assert Deployment PATCH body has broker-TLS CLI args ---
     let args = dep_body
@@ -281,31 +320,13 @@ async fn happy_path_all_objects_created_ready() {
             true,
         ),
     ] {
-        assert2::assert!(args_joined.contains(needle) == want);
+        assert!(
+            args_joined.contains(needle) == want,
+            "Deployment arg fragment {needle:?}: expected present={want}; args = {args_joined}"
+        );
     }
 
-    // --- Assert final status carries Ready=True / Available ---
-    let status_patch = observed
-        .iter()
-        .rev()
-        .find(|r| {
-            r.method() == Method::PATCH
-                && r.uri()
-                    .to_string()
-                    .contains(&format!("/kafkagrpcgateways/{GW}/status"))
-        })
-        .expect("gateway status PATCH must have been captured");
-    let status_body: serde_json::Value =
-        serde_json::from_slice(status_patch.body()).expect("status PATCH body is JSON");
-    let conds = status_body["status"]["conditions"]
-        .as_array()
-        .expect("status must have conditions array");
-    let ready = conds
-        .iter()
-        .find(|c| c["type"] == "Ready")
-        .unwrap_or_else(|| panic!("Ready condition missing; body = {status_body}"));
-    assert2::assert!(ready["status"].as_str() == Some("True"));
-    assert2::assert!(ready["reason"].as_str() == Some("Available"));
+    assert_ready_status(&observed);
 
     // All 12 rules must have been consumed.
     check!(
@@ -327,7 +348,6 @@ async fn happy_path_all_objects_created_ready() {
 /// The reconcile still walks the child-KafkaUser + serving-cert + config-Secret
 /// steps (those don't depend on the broker endpoint), then bails at step (6)
 /// when `resolve_broker_endpoint` returns `None`.
-#[allow(clippy::too_many_lines)]
 #[tokio::test]
 async fn no_tls_listener_blocks_with_degraded_and_no_deployment() {
     let cluster_ca =
@@ -442,8 +462,9 @@ async fn no_tls_listener_blocks_with_degraded_and_no_deployment() {
     let gw = gw_cr(GW);
     let action = reconcile(Arc::new(gw), ctx).await.expect("reconcile ok");
 
-    assert2::assert!(
-        action == kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(30))
+    assert!(
+        action == kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(30)),
+        "expected requeue(30s) from no-TLS-listener gate, got {action:?}"
     );
 
     let observed = state.take_observed();
@@ -467,8 +488,14 @@ async fn no_tls_listener_blocks_with_degraded_and_no_deployment() {
         .iter()
         .find(|c| c["type"] == "Ready")
         .unwrap_or_else(|| panic!("Ready condition missing; body = {body}"));
-    assert2::assert!(ready["status"].as_str() == Some("False"));
-    assert2::assert!(ready["reason"].as_str() == Some("NoTlsListener"));
+    assert!(
+        ready["status"] == "False",
+        "Ready must be False without a TLS listener; body = {body}"
+    );
+    assert!(
+        ready["reason"] == "NoTlsListener",
+        "reason must be NoTlsListener; body = {body}"
+    );
 
     // No Deployment or Service PATCH must have happened.
     let unexpected: Vec<_> = observed
@@ -480,9 +507,16 @@ async fn no_tls_listener_blocks_with_degraded_and_no_deployment() {
         })
         .map(|r| r.uri().to_string())
         .collect();
-    assert2::assert!(unexpected.is_empty());
+    assert!(
+        unexpected.is_empty(),
+        "no-TLS-listener gate must prevent Deployment/Service render; unexpected PATCHes: {unexpected:?}"
+    );
 
-    assert2::assert!(state.remaining_rules() == 0);
+    assert!(
+        state.remaining_rules() == 0,
+        "all FIFO rules must be consumed, {} remaining",
+        state.remaining_rules()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -528,8 +562,9 @@ async fn version_gate_blocks_when_kafka_not_validated() {
     let action = reconcile(Arc::new(gw), ctx).await.expect("reconcile ok");
 
     // Returns a 30-second requeue (waiting for version validation).
-    assert2::assert!(
-        action == kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(30))
+    assert!(
+        action == kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(30)),
+        "expected requeue(30s) from version gate, got {action:?}"
     );
 
     let observed = state.take_observed();
@@ -553,8 +588,14 @@ async fn version_gate_blocks_when_kafka_not_validated() {
         .iter()
         .find(|c| c["type"] == "Ready")
         .unwrap_or_else(|| panic!("Ready condition missing; body = {body}"));
-    assert2::assert!(ready["status"].as_str() == Some("False"));
-    assert2::assert!(ready["reason"].as_str() == Some("WaitingForVersionValidation"));
+    assert!(
+        ready["status"] == "False",
+        "Ready must be False when version-gated; body = {body}"
+    );
+    assert!(
+        ready["reason"] == "WaitingForVersionValidation",
+        "reason must be WaitingForVersionValidation; body = {body}"
+    );
 
     // NO Deployment, Service, or KafkaUser PATCHes must have happened.
     let unexpected: Vec<_> = observed
@@ -567,8 +608,15 @@ async fn version_gate_blocks_when_kafka_not_validated() {
         })
         .map(|r| r.uri().to_string())
         .collect();
-    assert2::assert!(unexpected.is_empty());
+    assert!(
+        unexpected.is_empty(),
+        "version gate must prevent child object creation; unexpected PATCHes: {unexpected:?}"
+    );
 
     // Both rules consumed (GET + PATCH status).
-    assert2::assert!(state.remaining_rules() == 0);
+    assert!(
+        state.remaining_rules() == 0,
+        "all FIFO rules must be consumed, {} remaining",
+        state.remaining_rules()
+    );
 }

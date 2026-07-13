@@ -31,7 +31,6 @@ async fn boot() -> (BrokerHandle, String, TempDir) {
     (broker, bootstrap, dir)
 }
 
-#[allow(clippy::too_many_lines)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ownership_split_non_owner_is_unavailable() {
     let (broker, bootstrap, _dir) = boot().await;

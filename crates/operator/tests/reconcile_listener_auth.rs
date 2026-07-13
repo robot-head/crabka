@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use assert2::check;
+use assert2::{assert, check};
 use crabka_operator::{
     controller::kafka::reconcile,
     crd::{Kafka, KafkaSpec, Listener, ListenerAuthentication, ListenerType},
@@ -66,49 +66,75 @@ fn internal_listener(
     }
 }
 
-#[tokio::test]
-async fn internal_listener_auth_render_cases() {
-    for (case, namespace, cluster, listener, expected_fragments) in [
-        (
-            "SCRAM-SHA-512 with TLS",
-            "ns1",
-            "c1",
-            internal_listener(
-                "data",
-                9094,
-                true,
-                Some(ListenerAuthentication::ScramSha512),
-            ),
-            vec![
-                "protocol = \"SaslSsl\"",
-                "tls_config = {",
-                "sasl_config = { enabled_mechanisms = [\"SCRAM-SHA-512\"] }",
-            ],
-        ),
-        (
-            "mTLS client authentication",
-            "ns2",
-            "c2",
-            internal_listener("mtls", 9095, true, Some(ListenerAuthentication::Tls)),
-            vec![
-                "protocol = \"Ssl\"",
-                "client_ca_path = \"/etc/crabka/clients-ca/ca.crt\"",
-                "client_auth = \"Required\"",
-            ],
-        ),
-    ] {
-        let items = vec![fake_pool_list_item("brokers", namespace, cluster, 1, 1)];
-        let (ctx, state) = build_ctx(namespace, happy_path_rules(cluster, namespace, &items));
-        let kafka = kafka_cr_with_listeners(cluster, namespace, vec![listener]);
-        reconcile(Arc::new(kafka), ctx)
-            .await
-            .unwrap_or_else(|error| panic!("{case}: reconcile failed: {error}"));
+// ── test 1 ────────────────────────────────────────────────────────────────────
 
-        let observed = state.take_observed();
-        let toml = extract_broker0_toml(&observed, cluster);
-        for fragment in expected_fragments {
-            assert2::assert!(toml.contains(fragment));
-        }
+/// SCRAM-SHA-512 internal listener with TLS renders `protocol = "SaslSsl"`
+/// and the correct `sasl_config` inline table.
+#[tokio::test]
+async fn scram_sha_512_internal_listener_renders_sasl_ssl() {
+    let items = vec![fake_pool_list_item("brokers", "ns1", "c1", 1, 1)];
+    let (ctx, state) = build_ctx("ns1", happy_path_rules("c1", "ns1", &items));
+
+    let kafka = kafka_cr_with_listeners(
+        "c1",
+        "ns1",
+        vec![internal_listener(
+            "data",
+            9094,
+            true,
+            Some(ListenerAuthentication::ScramSha512),
+        )],
+    );
+    reconcile(Arc::new(kafka), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let toml = extract_broker0_toml(&observed, "c1");
+
+    for needle in [
+        "protocol = \"SaslSsl\"",
+        "tls_config = {",
+        "sasl_config = { enabled_mechanisms = [\"SCRAM-SHA-512\"] }",
+    ] {
+        assert!(
+            toml.contains(needle),
+            "expected {needle:?} for SCRAM-SHA-512 with TLS;\n{toml}"
+        );
+    }
+}
+
+// ── test 2 ────────────────────────────────────────────────────────────────────
+
+/// mTLS internal listener renders `protocol = "Ssl"`, `client_ca_path`, and
+/// `client_auth = "Required"`.
+#[tokio::test]
+async fn mtls_internal_listener_renders_client_auth_required() {
+    let items = vec![fake_pool_list_item("brokers", "ns2", "c2", 1, 1)];
+    let (ctx, state) = build_ctx("ns2", happy_path_rules("c2", "ns2", &items));
+
+    let kafka = kafka_cr_with_listeners(
+        "c2",
+        "ns2",
+        vec![internal_listener(
+            "mtls",
+            9095,
+            true,
+            Some(ListenerAuthentication::Tls),
+        )],
+    );
+    reconcile(Arc::new(kafka), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let toml = extract_broker0_toml(&observed, "c2");
+
+    for needle in [
+        "protocol = \"Ssl\"",
+        "client_ca_path = \"/etc/crabka/clients-ca/ca.crt\"",
+        "client_auth = \"Required\"",
+    ] {
+        assert!(
+            toml.contains(needle),
+            "mTLS listener must render {needle:?};\n{toml}"
+        );
     }
 }
 
@@ -136,8 +162,14 @@ async fn scram_sha_256_renders_sasl_ssl_with_256_mechanism() {
     let observed = state.take_observed();
     let toml = extract_broker0_toml(&observed, "c3");
 
-    assert2::assert!(toml.contains("protocol = \"SaslSsl\""));
-    assert2::assert!(toml.contains("sasl_config = { enabled_mechanisms = [\"SCRAM-SHA-256\"] }"));
+    assert!(
+        toml.contains("protocol = \"SaslSsl\""),
+        "expected SaslSsl for SCRAM-SHA-256 with TLS;\n{toml}"
+    );
+    assert!(
+        toml.contains("sasl_config = { enabled_mechanisms = [\"SCRAM-SHA-256\"] }"),
+        "expected SCRAM-SHA-256 mechanism;\n{toml}"
+    );
 }
 
 // ── test 4 ────────────────────────────────────────────────────────────────────
@@ -198,9 +230,13 @@ async fn listener_mtls_requires_tls_validation_error_surfaces_status() {
     let observed = state.take_observed();
 
     // ConfigMap PATCH must be absent.
-    assert2::assert!(!observed.iter().any(|r| {
-        r.method() == Method::PATCH && r.uri().to_string().contains("/configmaps/c5-broker-config")
-    }));
+    assert!(
+        !observed.iter().any(|r| {
+            r.method() == Method::PATCH
+                && r.uri().to_string().contains("/configmaps/c5-broker-config")
+        }),
+        "validation failure must not patch the broker-config ConfigMap"
+    );
 
     // Status must surface the validation error.
     let status_patch = observed
@@ -217,8 +253,11 @@ async fn listener_mtls_requires_tls_validation_error_surfaces_status() {
         .iter()
         .find(|c| c["type"] == "ListenersValid")
         .unwrap_or_else(|| panic!("ListenersValid present; body = {body}"));
-    assert2::assert!(valid["status"].as_str() == Some("False"));
-    assert2::assert!(valid["reason"].as_str() == Some("ListenerMtlsRequiresTransportTls"));
+    check!(valid["status"] == "False", "body = {body}");
+    check!(
+        valid["reason"] == "ListenerMtlsRequiresTransportTls",
+        "body = {body}"
+    );
 
     check!(state.remaining_rules() == 0);
 }
@@ -287,12 +326,21 @@ async fn auth_change_bumps_config_hash() {
         .unwrap_or_else(|| panic!("config-hash label missing; body = {body2}"))
         .to_string();
 
-    assert2::assert!(hash1 != hash2);
+    assert!(
+        hash1 != hash2,
+        "config-hash must differ between SCRAM-SHA-512 and mTLS configs"
+    );
 
     // Both hashes must be valid 16-char hex strings.
-    for (hash, _label) in [(&hash1, "scram"), (&hash2, "mtls")] {
-        assert2::assert!(hash.len() == 16);
-        assert2::assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+    for (hash, label) in [(&hash1, "scram"), (&hash2, "mtls")] {
+        assert!(
+            hash.len() == 16,
+            "{label} config-hash must be 16 hex chars, got {hash:?}"
+        );
+        assert!(
+            hash.chars().all(|c| c.is_ascii_hexdigit()),
+            "{label} config-hash must be hex, got {hash:?}"
+        );
     }
 }
 
@@ -303,31 +351,106 @@ async fn auth_change_bumps_config_hash() {
 /// `ExternalIP=203.0.113.10` must be included in the per-broker cert's SAN
 /// set, as evidenced by the `0.sans-digest` stored in the keystore Secret
 /// PATCH matching the digest computed from SANs that include that IP.
-#[tokio::test]
-#[allow(clippy::too_many_lines)]
-async fn nodeport_listener_external_san_added_to_per_broker_cert() {
+fn assert_nodeport_san_digest(
+    observed: &[http::Request<hyper::body::Bytes>],
+    keystore_name: &str,
+    name: &str,
+    ns: &str,
+    pool_name: &str,
+    ext_node_ip: &str,
+) {
     use base64::Engine as _;
     use crabka_security::ca::SubjectAltName;
+    // Find the keystore PATCH.
+    let ks_patch = observed
+        .iter()
+        .find(|r| {
+            r.method() == Method::PATCH
+                && r.uri()
+                    .to_string()
+                    .contains(&format!("/secrets/{keystore_name}"))
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "broker keystore PATCH not found; observed: {:?}",
+                observed
+                    .iter()
+                    .map(|r| format!("{} {}", r.method(), r.uri()))
+                    .collect::<Vec<_>>()
+            )
+        });
 
-    let ns = "ns7";
-    let name = "c7";
-    let pool_name = "brokers";
+    let ks_body: serde_json::Value =
+        serde_json::from_slice(ks_patch.body()).expect("keystore PATCH body is JSON");
 
-    let items = vec![fake_pool_list_item(pool_name, ns, name, 1, 1)];
-    let svc_name = format!("{name}-broker-headless");
-    let secret_name = format!("{name}-cluster-id");
-    let cluster_ca_key = format!("{name}-cluster-ca");
-    let cluster_ca_cert = format!("{name}-cluster-ca-cert");
-    let clients_ca_key = format!("{name}-clients-ca");
-    let clients_ca_cert = format!("{name}-clients-ca-cert");
-    let keystore_name = format!("{name}-kafka-brokers");
+    // The keystore body is a full Secret SSA body; the `data` field holds
+    // base64-encoded values.
+    let data = ks_body
+        .get("data")
+        .and_then(|d| d.as_object())
+        .unwrap_or_else(|| panic!("keystore PATCH has no data object; body = {ks_body}"));
 
-    // The external listener name — used for per-broker + bootstrap Service names.
-    let ext_listener_name = "external";
-    let bootstrap_svc = format!("{name}-{ext_listener_name}-bootstrap");
-    let broker_svc = format!("{name}-{ext_listener_name}-0");
-    let ext_node_ip = "203.0.113.10";
+    let digest_b64 = data
+        .get("0.sans-digest")
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| {
+            panic!(
+                "0.sans-digest key missing from keystore PATCH; keys = {:?}",
+                data.keys().collect::<Vec<_>>()
+            )
+        });
 
+    // Decode and reconstruct the expected digest.
+    let digest_bytes = base64::engine::general_purpose::STANDARD
+        .decode(digest_b64)
+        .expect("0.sans-digest is valid base64");
+    let stored_digest = std::str::from_utf8(&digest_bytes).expect("digest is utf-8");
+
+    // Base SANs the operator builds for broker 0:
+    //   pod_fqdn, pod_name, headless svc FQDN, 127.0.0.1
+    // Extra SANs from the NodePort external IP:
+    //   203.0.113.10
+    let cluster_name = name;
+    let cluster_ns = ns;
+    let pool_n = pool_name;
+    let pod_name = format!("{cluster_name}-{pool_n}-0");
+    let headless_svc = format!("{cluster_name}-broker-headless");
+    let pod_fqdn = format!("{pod_name}.{headless_svc}.{cluster_ns}.svc.cluster.local");
+
+    let base_sans = vec![
+        SubjectAltName::Dns(pod_fqdn),
+        SubjectAltName::Dns(pod_name),
+        SubjectAltName::Dns(format!(
+            "{cluster_name}-broker-headless.{cluster_ns}.svc.cluster.local"
+        )),
+        SubjectAltName::Ip(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+    ];
+    let extra_sans = vec![SubjectAltName::Ip(ext_node_ip.parse().expect("valid IP"))];
+
+    let expected_digest =
+        crabka_operator::controller::cluster_ca::compute_san_digest(&base_sans, &extra_sans);
+
+    // Verifies the digest in the Secret matches the expected SAN set (including the node's
+    // ExternalIP). This proves the SAN computation reached the keystore-write path, but does
+    // not parse the cert PEM itself — issue_broker_cert is independently tested in
+    // security/src/ca.rs and operator/src/controller/cluster_ca.rs::san_tests.
+    assert!(
+        stored_digest == expected_digest,
+        "keystore 0.sans-digest must include the NodePort external IP {ext_node_ip}"
+    );
+}
+
+fn nodeport_state_responses(
+    namespace: &str,
+    bootstrap_service: &str,
+    broker_service: &str,
+    ext_node_ip: &str,
+) -> (
+    serde_json::Value,
+    serde_json::Value,
+    serde_json::Value,
+    serde_json::Value,
+) {
     // Node list response: one node with ExternalIP.
     let node_list_response = serde_json::json!({
         "kind": "NodeList",
@@ -354,16 +477,48 @@ async fn nodeport_listener_external_san_added_to_per_broker_cert() {
     let fake_bootstrap_svc = serde_json::json!({
         "apiVersion": "v1",
         "kind": "Service",
-        "metadata": { "name": bootstrap_svc, "namespace": ns, "uid": "bs-uid" },
+        "metadata": { "name": bootstrap_service, "namespace": namespace, "uid": "bs-uid" },
         "spec": { "type": "NodePort", "ports": [{ "port": 9094, "nodePort": 30094 }] }
     });
 
     let fake_broker_svc = serde_json::json!({
         "apiVersion": "v1",
         "kind": "Service",
-        "metadata": { "name": broker_svc, "namespace": ns, "uid": "bsvc-uid" },
+        "metadata": { "name": broker_service, "namespace": namespace, "uid": "bsvc-uid" },
         "spec": { "type": "NodePort", "ports": [{ "port": 9094, "nodePort": 30095 }] }
     });
+
+    (
+        node_list_response,
+        pod_list_response,
+        fake_bootstrap_svc,
+        fake_broker_svc,
+    )
+}
+
+#[tokio::test]
+async fn nodeport_listener_external_san_added_to_per_broker_cert() {
+    let ns = "ns7";
+    let name = "c7";
+    let pool_name = "brokers";
+
+    let items = vec![fake_pool_list_item(pool_name, ns, name, 1, 1)];
+    let svc_name = format!("{name}-broker-headless");
+    let secret_name = format!("{name}-cluster-id");
+    let cluster_ca_key = format!("{name}-cluster-ca");
+    let cluster_ca_cert = format!("{name}-cluster-ca-cert");
+    let clients_ca_key = format!("{name}-clients-ca");
+    let clients_ca_cert = format!("{name}-clients-ca-cert");
+    let keystore_name = format!("{name}-kafka-brokers");
+
+    // The external listener name — used for per-broker + bootstrap Service names.
+    let ext_listener_name = "external";
+    let bootstrap_svc = format!("{name}-{ext_listener_name}-bootstrap");
+    let broker_svc = format!("{name}-{ext_listener_name}-0");
+    let ext_node_ip = "203.0.113.10";
+
+    let (node_list_response, pod_list_response, fake_bootstrap_svc, fake_broker_svc) =
+        nodeport_state_responses(ns, &bootstrap_svc, &broker_svc, ext_node_ip);
 
     let mut rules = vec![
         // Headless service.
@@ -561,78 +716,5 @@ async fn nodeport_listener_external_san_added_to_per_broker_cert() {
 
     let observed = state.take_observed();
 
-    // Find the keystore PATCH.
-    let ks_patch = observed
-        .iter()
-        .find(|r| {
-            r.method() == Method::PATCH
-                && r.uri()
-                    .to_string()
-                    .contains(&format!("/secrets/{keystore_name}"))
-        })
-        .unwrap_or_else(|| {
-            panic!(
-                "broker keystore PATCH not found; observed: {:?}",
-                observed
-                    .iter()
-                    .map(|r| format!("{} {}", r.method(), r.uri()))
-                    .collect::<Vec<_>>()
-            )
-        });
-
-    let ks_body: serde_json::Value =
-        serde_json::from_slice(ks_patch.body()).expect("keystore PATCH body is JSON");
-
-    // The keystore body is a full Secret SSA body; the `data` field holds
-    // base64-encoded values.
-    let data = ks_body
-        .get("data")
-        .and_then(|d| d.as_object())
-        .unwrap_or_else(|| panic!("keystore PATCH has no data object; body = {ks_body}"));
-
-    let digest_b64 = data
-        .get("0.sans-digest")
-        .and_then(|v| v.as_str())
-        .unwrap_or_else(|| {
-            panic!(
-                "0.sans-digest key missing from keystore PATCH; keys = {:?}",
-                data.keys().collect::<Vec<_>>()
-            )
-        });
-
-    // Decode and reconstruct the expected digest.
-    let digest_bytes = base64::engine::general_purpose::STANDARD
-        .decode(digest_b64)
-        .expect("0.sans-digest is valid base64");
-    let stored_digest = std::str::from_utf8(&digest_bytes).expect("digest is utf-8");
-
-    // Base SANs the operator builds for broker 0:
-    //   pod_fqdn, pod_name, headless svc FQDN, 127.0.0.1
-    // Extra SANs from the NodePort external IP:
-    //   203.0.113.10
-    let cluster_name = name;
-    let cluster_ns = ns;
-    let pool_n = pool_name;
-    let pod_name = format!("{cluster_name}-{pool_n}-0");
-    let headless_svc = format!("{cluster_name}-broker-headless");
-    let pod_fqdn = format!("{pod_name}.{headless_svc}.{cluster_ns}.svc.cluster.local");
-
-    let base_sans = vec![
-        SubjectAltName::Dns(pod_fqdn),
-        SubjectAltName::Dns(pod_name),
-        SubjectAltName::Dns(format!(
-            "{cluster_name}-broker-headless.{cluster_ns}.svc.cluster.local"
-        )),
-        SubjectAltName::Ip(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
-    ];
-    let extra_sans = vec![SubjectAltName::Ip(ext_node_ip.parse().expect("valid IP"))];
-
-    let expected_digest =
-        crabka_operator::controller::cluster_ca::compute_san_digest(&base_sans, &extra_sans);
-
-    // Verifies the digest in the Secret matches the expected SAN set (including the node's
-    // ExternalIP). This proves the SAN computation reached the keystore-write path, but does
-    // not parse the cert PEM itself — issue_broker_cert is independently tested in
-    // security/src/ca.rs and operator/src/controller/cluster_ca.rs::san_tests.
-    assert2::assert!(stored_digest == expected_digest);
+    assert_nodeport_san_digest(&observed, &keystore_name, name, ns, pool_name, ext_node_ip);
 }
