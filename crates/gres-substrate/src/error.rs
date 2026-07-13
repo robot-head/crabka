@@ -62,6 +62,19 @@ pub enum SubstrateError {
         /// Manifest part name whose bytes failed checksum validation.
         part: String,
     },
+    /// The requested committed fold predates all retained reconstructible history.
+    #[error(
+        "pruned history: WAL starts at {log_start}, with no checkpoint covering sample {sample_offset}"
+    )]
+    PrunedHistory {
+        /// Earliest retained WAL offset.
+        log_start: i64,
+        /// Stable committed offset sampled by the reader.
+        sample_offset: i64,
+    },
+    /// A bounded fold snapshot exceeded its configured resource limit.
+    #[error("committed fold limit exceeded: {0}")]
+    FoldLimit(String),
 }
 
 impl From<SubstrateError> for crabka_pgexec::ExecError {
@@ -81,6 +94,9 @@ impl From<SubstrateError> for crabka_pgexec::ExecError {
             | SubstrateError::UnmappedPhysicalTable(_)
             | SubstrateError::TornTruncation { .. }
             | SubstrateError::ChecksumMismatch { .. } => Self::Unavailable,
+            SubstrateError::PrunedHistory { .. } | SubstrateError::FoldLimit(_) => {
+                Self::Unavailable
+            }
         }
     }
 }
