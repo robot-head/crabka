@@ -63,14 +63,19 @@ impl HashShardSpec {
         bucket_count: u32,
         co_location_group: Option<String>,
     ) -> Result<Self, MapValidationError> {
-        if hash_columns.is_empty() {
+        if hash_columns.is_empty() || hash_columns.iter().any(String::is_empty) {
             return Err(MapValidationError::InvalidHashShardSpec {
-                reason: "hash sharding requires at least one column".into(),
+                reason: "hash sharding requires non-empty column names".into(),
             });
         }
         if bucket_count == 0 || !bucket_count.is_power_of_two() {
             return Err(MapValidationError::InvalidHashShardSpec {
                 reason: "hash bucket count must be a power of two".into(),
+            });
+        }
+        if co_location_group.as_deref().is_some_and(str::is_empty) {
+            return Err(MapValidationError::InvalidHashShardSpec {
+                reason: "co-location group name must not be empty".into(),
             });
         }
         Ok(Self {
@@ -83,8 +88,8 @@ impl HashShardSpec {
 
     #[must_use]
     pub fn bucket_for_value(&self, value: impl AsRef<[u8]>) -> u32 {
-        let mask = u64::from(self.bucket_count - 1);
-        u32::try_from(fnv1a64(value.as_ref()) & mask).expect("bucket mask fits u32")
+        crabka_pgkv::key::hash_bucket(value.as_ref(), self.bucket_count)
+            .expect("validated hash spec has a power-of-two bucket count")
     }
 }
 
@@ -936,6 +941,41 @@ mod tests {
                 .unwrap()
                 .range_id
         );
+    }
+
+    #[test]
+    fn hash_spec_rejects_empty_column_and_group_names() {
+        for result in [
+            HashShardSpec::new(TableId::new(10), vec![String::new()], 4, None),
+            HashShardSpec::new(
+                TableId::new(10),
+                vec!["id".into()],
+                4,
+                Some(String::new()),
+            ),
+        ] {
+            assert!(matches!(
+                result,
+                Err(MapValidationError::InvalidHashShardSpec { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn hash_bucket_corpus_matches_physical_key_encoding() {
+        let spec = HashShardSpec::new(TableId::new(10), vec!["id".into()], 16, None).unwrap();
+        let corpus = [
+            (b"".as_slice(), 5),
+            (b"a".as_slice(), 12),
+            (b"alpha".as_slice(), 11),
+            (b"alice".as_slice(), 7),
+            (&[0_u8, 255, 1], 3),
+        ];
+
+        for (value, expected) in corpus {
+            assert_eq!(spec.bucket_for_value(value), expected);
+            assert_eq!(crabka_pgkv::key::hash_bucket(value, 16), Some(expected));
+        }
     }
 
     #[test]
