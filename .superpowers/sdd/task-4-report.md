@@ -83,5 +83,9 @@ Status: DONE_WITH_CONCERNS
 
 ### Concerns
 
-- `cargo test -p crabka-gres-ranges --all-targets -q` and a direct rerun of `real_range_partition_aborts_transfer_and_heal_restores_2pc` fail during compute readiness with `range transfer is unavailable for r0: current range-zero receipt engine is unavailable`. The failure is in pre-existing/concurrent dirty files (`crates/gres-ranges/src/control.rs` and process/split surfaces), outside this GROUP BY slice; focused remote, transport, library, and compile gates pass.
-- `.superpowers/sdd/progress.md`, `crates/gres-ranges/src/control.rs`, and other concurrent dirty `gres` process/split files were not staged, reverted, or included in either GROUP BY commit.
+- `cargo test -p crabka-gres-ranges --all-targets -q` and a direct rerun of `real_range_partition_aborts_transfer_and_heal_restores_2pc` fail during compute readiness with `range transfer is unavailable for r0: current range-zero receipt engine is unavailable`. The failure is attributed to the pre-existing dirty `crates/gres-ranges/src/control.rs`, outside this GROUP BY slice; focused remote, transport, library, and compile gates pass.
+- `.superpowers/sdd/progress.md` and `crates/gres-ranges/src/control.rs` were not staged, reverted, or included in either GROUP BY commit.
+
+### Cleanup correction
+
+`cargo fmt --all` created formatter-only spill in `crates/gres-ranges/tests/harness/process.rs`, `crates/gres/src/lib.rs`, `crates/gres/src/split_activation.rs`, and `crates/gres/tests/topology_process_split_crash.rs`. Those four unstaged diffs were removed before handoff. They were not genuine concurrent changes and are not part of the all-target failure attribution; that concern remains attributed only to the pre-existing dirty `crates/gres-ranges/src/control.rs`.
