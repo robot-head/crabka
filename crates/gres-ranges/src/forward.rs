@@ -23,10 +23,11 @@ use crate::{
     RangeId,
     registry::{RangeRegistry, RegistryError},
     transport::{
-        ExplicitGateReq, ExplicitGateResp, FramedTcpClient, RangeRequest, RangeResponse,
-        RangeService, ResolveTxnResp, ScanCursorReq, ScanCursorResp, ScanRangeReq, ScanRangeResp,
-        ScanRangeRow, TransportError, WireColumnPredicate, WireDatum, WireErrorKind,
-        WireExecuteOutcome, WireGlobalStatus, WirePartialAggregateFunction,
+        ExplicitGateReq, ExplicitGateResp, FramedTcpClient, JoinRangeReq, JoinRangeResp,
+        JoinRangeRow, RangeRequest, RangeResponse, RangeService, ResolveTxnResp, ScanCursorReq,
+        ScanCursorResp, ScanRangeReq, ScanRangeResp, ScanRangeRow, TransportError,
+        WireColumnPredicate, WireDatum, WireErrorKind, WireExecuteOutcome, WireGlobalStatus,
+        WireJoinKind, WireJoinStrategy, WireJoinTableInterval, WirePartialAggregateFunction,
         WirePartialAggregateSpec, WirePredicateOp, WirePredicatePushdown, WireProjectionPushdown,
         WireQueryResult, WireRowInterval, WireSessionOperation, WireSessionResult, WireSnapshot,
         WireSqlResultChunk, WireTopKColumn, WireTopKSpec, write_frame,
@@ -533,16 +534,19 @@ impl RangeService for HostedRangeService {
                     }
                 }
             }
-            RangeRequest::JoinRange(request) => match request.validate() {
-                Ok(()) => RangeResponse::Error {
-                    error: WireErrorKind::Failed,
-                    message: "owner join execution is not implemented".into(),
-                },
-                Err(error) => RangeResponse::Error {
-                    error: WireErrorKind::Failed,
-                    message: error.to_string(),
-                },
-            },
+            RangeRequest::JoinRange(request) => {
+                let engine = match self.hosted_engine(request.range_id) {
+                    Ok(engine) => engine,
+                    Err(response) => return response,
+                };
+                match handle_join_range(engine, request) {
+                    Ok(response) => RangeResponse::JoinRange(response),
+                    Err(error) => RangeResponse::Error {
+                        error: WireErrorKind::Failed,
+                        message: error.into_pg().message,
+                    },
+                }
+            }
             RangeRequest::ScanCursor(request) => {
                 let engine = match self.hosted_engine(request.scan.range_id) {
                     Ok(engine) => engine,
@@ -2619,6 +2623,223 @@ impl RegistryRangeScanner {
             }
         }
     }
+
+    async fn join_async(
+        &self,
+        mut request: crabka_pgexec::JoinRangeRequest,
+    ) -> Result<crabka_pgexec::JoinRangeResult, crabka_pgexec::ExecError> {
+        request
+            .validate()
+            .map_err(|error| crabka_pgexec::ExecError::Unsupported(error.to_string()))?;
+        let catalog = self.local_engines.values().next().ok_or_else(|| {
+            crabka_pgexec::ExecError::Unsupported(
+                "distributed join requires a local catalog engine".into(),
+            )
+        })?;
+        let left_table =
+            crabka_pgcatalog::get_table(catalog.catalog_kv(), &request.left.table_name)?;
+        let right_table =
+            crabka_pgcatalog::get_table(catalog.catalog_kv(), &request.right.table_name)?;
+        if request.strategy == crabka_pgexec::JoinExecutionStrategy::CoPartitioned
+            && !crabka_pgexec::plan_dist::tables_are_co_partitioned(&left_table, &right_table)
+        {
+            request.strategy = crabka_pgexec::JoinExecutionStrategy::Gather;
+        }
+        if request.strategy == crabka_pgexec::JoinExecutionStrategy::Gather {
+            let left = self
+                .materialize_join_side(&request, &left_table, true)
+                .await?;
+            let right = self
+                .materialize_join_side(&request, &right_table, false)
+                .await?;
+            return crabka_pgexec::scanner::execute_materialized_join(&request, &left, &right);
+        }
+        if matches!(
+            request.strategy,
+            crabka_pgexec::JoinExecutionStrategy::BroadcastLeft
+        ) {
+            request.broadcast_rows = Some(
+                self.materialize_join_side(&request, &left_table, true)
+                    .await?,
+            );
+        } else if matches!(
+            request.strategy,
+            crabka_pgexec::JoinExecutionStrategy::BroadcastRight
+        ) {
+            request.broadcast_rows = Some(
+                self.materialize_join_side(&request, &right_table, false)
+                    .await?,
+            );
+        }
+        request
+            .validate()
+            .map_err(|error| crabka_pgexec::ExecError::Unsupported(error.to_string()))?;
+        let mut rows = Vec::new();
+        for range_id in self.registry.range_ids().await {
+            let response = if let Some(engine) = self.local_engines.get(&range_id) {
+                handle_join_range(engine, encode_join_request(range_id, &request)?)?
+            } else {
+                self.join_remote_range(range_id, encode_join_request(range_id, &request)?)
+                    .await?
+            };
+            rows.extend(
+                response
+                    .rows
+                    .into_iter()
+                    .map(|row| crabka_pgexec::JoinRow { tuple: row.tuple }),
+            );
+            if rows.len() > crabka_pgexec::scanner::MAX_JOIN_RESULT_ROWS {
+                return Err(crabka_pgexec::ExecError::Unsupported(
+                    "join result row count exceeds limit".into(),
+                ));
+            }
+        }
+        rows.sort_by(|left, right| left.tuple.cmp(&right.tuple));
+        let result = crabka_pgexec::JoinRangeResult { rows };
+        result
+            .validate()
+            .map_err(|error| crabka_pgexec::ExecError::Unsupported(error.to_string()))?;
+        Ok(result)
+    }
+
+    async fn materialize_join_side(
+        &self,
+        request: &crabka_pgexec::JoinRangeRequest,
+        table: &crabka_pgcatalog::Table,
+        left: bool,
+    ) -> Result<Vec<crabka_pgexec::JoinRow>, crabka_pgexec::ExecError> {
+        let side = if left { &request.left } else { &request.right };
+        let predicate = if left {
+            &request.left_filter
+        } else {
+            &request.right_filter
+        };
+        let mut rows = Vec::new();
+        for range_id in self.registry.range_ids().await {
+            let scanned = if let Some(engine) = self.local_engines.get(&range_id) {
+                let local =
+                    engine.scan_local_visible_with_timestamp_owner(
+                        table,
+                        &join_snapshot_to_mvcc(&request.global_snapshot),
+                        &join_snapshot_to_mvcc(&request.local_snapshot),
+                        request.own_xid,
+                        Some(crabka_pgexec::ReadTimestamp::new(request.read_ts).map_err(
+                            |error| crabka_pgexec::ExecError::Unsupported(error.to_string()),
+                        )?),
+                        request
+                            .own_start_ts
+                            .map(crabka_pgexec::TimestampTransactionId::new)
+                            .transpose()
+                            .map_err(|error| {
+                                crabka_pgexec::ExecError::Unsupported(error.to_string())
+                            })?,
+                        side.interval,
+                    )?;
+                crabka_pgexec::scanner::apply_scan_pushdown(
+                    local,
+                    predicate,
+                    &crabka_pgexec::ProjectionPushdown::All,
+                )?
+            } else {
+                let endpoint = self
+                    .registry
+                    .resolve(range_id)
+                    .await
+                    .map_err(|error| scanner_error(error.into()))?;
+                let rpc = ScanRangeReq {
+                    range_id,
+                    table_name: table.name.clone(),
+                    interval: WireRowInterval {
+                        start: side.interval.start,
+                        end: side.interval.end,
+                    },
+                    local_snapshot: WireSnapshot {
+                        xmin: request.local_snapshot.xmin,
+                        xmax: request.local_snapshot.xmax,
+                        xip: request.local_snapshot.xip.clone(),
+                    },
+                    global_snapshot: WireSnapshot {
+                        xmin: request.global_snapshot.xmin,
+                        xmax: request.global_snapshot.xmax,
+                        xip: request.global_snapshot.xip.clone(),
+                    },
+                    own_xid: request.own_xid,
+                    read_ts: Some(request.read_ts),
+                    own_start_ts: request.own_start_ts,
+                    predicate: encode_predicate(predicate)?,
+                    projection: WireProjectionPushdown::All,
+                    partial_aggregate: None,
+                    top_k: None,
+                };
+                match self
+                    .client
+                    .call(&endpoint.endpoint, &RangeRequest::ScanRange(rpc))
+                    .await
+                {
+                    Ok(RangeResponse::ScanRange(response)) => decode_scan_rows(response)?,
+                    Ok(RangeResponse::ScanRangeError { code, message }) => {
+                        return Err(crabka_pgexec::ExecError::Remote(PgError::error(
+                            &code, message,
+                        )));
+                    }
+                    Ok(RangeResponse::Error { error, message }) => {
+                        return Err(scanner_error(ForwardError::Remote {
+                            kind: error,
+                            message,
+                        }));
+                    }
+                    Ok(_) => return Err(scanner_error(ForwardError::UnexpectedResponse)),
+                    Err(error) => return Err(scanner_error(ForwardError::Transport(error))),
+                }
+            };
+            rows.extend(scanned.into_iter().map(|row| crabka_pgexec::JoinRow {
+                tuple: crabka_pgmvcc::version::encode_tuple(row.xmin, 0, &row.row),
+            }));
+            let is_broadcast_side = matches!(
+                (request.strategy, left),
+                (crabka_pgexec::JoinExecutionStrategy::BroadcastLeft, true)
+                    | (crabka_pgexec::JoinExecutionStrategy::BroadcastRight, false)
+            );
+            if is_broadcast_side && rows.len() > crabka_pgexec::scanner::MAX_JOIN_BROADCAST_ROWS {
+                return Err(crabka_pgexec::ExecError::Unsupported(
+                    crabka_pgexec::JoinValidationError::TooManyBroadcastRows {
+                        actual: rows.len(),
+                        limit: crabka_pgexec::scanner::MAX_JOIN_BROADCAST_ROWS,
+                    }
+                    .to_string(),
+                ));
+            }
+        }
+        rows.sort_by(|left, right| left.tuple.cmp(&right.tuple));
+        Ok(rows)
+    }
+
+    async fn join_remote_range(
+        &self,
+        range_id: RangeId,
+        request: JoinRangeReq,
+    ) -> Result<JoinRangeResp, crabka_pgexec::ExecError> {
+        let endpoint = self
+            .registry
+            .resolve(range_id)
+            .await
+            .map_err(|error| scanner_error(error.into()))?;
+        match self
+            .client
+            .call(&endpoint.endpoint, &RangeRequest::JoinRange(request))
+            .await
+        {
+            Ok(RangeResponse::JoinRange(response)) => Ok(response),
+            Ok(RangeResponse::Error { error, message }) => {
+                Err(scanner_error(ForwardError::Remote {
+                    kind: error,
+                    message,
+                }))
+            }
+            Ok(_) => Err(scanner_error(ForwardError::UnexpectedResponse)),
+            Err(error) => Err(scanner_error(ForwardError::Transport(error))),
+        }
+    }
 }
 
 impl crabka_pgexec::RangeScanner for RegistryRangeScanner {
@@ -2635,6 +2856,25 @@ impl crabka_pgexec::RangeScanner for RegistryRangeScanner {
                         .build()
                         .expect("range scanner runtime builds")
                         .block_on(scanner.scan_async(request))
+                })
+                .join()
+                .expect("range scanner thread does not panic")
+        })
+    }
+
+    fn join(
+        &self,
+        request: crabka_pgexec::JoinRangeRequest,
+    ) -> Result<crabka_pgexec::JoinRangeResult, crabka_pgexec::ExecError> {
+        let scanner = self.clone();
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("range scanner runtime builds")
+                        .block_on(scanner.join_async(request))
                 })
                 .join()
                 .expect("range scanner thread does not panic")
@@ -2850,9 +3090,10 @@ impl RangeScanService {
 #[async_trait]
 impl RangeService for RangeScanService {
     async fn handle(&self, request: RangeRequest) -> RangeResponse {
-        let (range_id, scan_request, cursor_request) = match request {
-            RangeRequest::ScanRange(request) => (request.range_id, Some(request), None),
-            RangeRequest::ScanCursor(request) => (request.scan.range_id, None, Some(request)),
+        let (range_id, scan_request, cursor_request, join_request) = match request {
+            RangeRequest::ScanRange(request) => (request.range_id, Some(request), None, None),
+            RangeRequest::ScanCursor(request) => (request.scan.range_id, None, Some(request), None),
+            RangeRequest::JoinRange(request) => (request.range_id, None, None, Some(request)),
             _ => {
                 return RangeResponse::Error {
                     error: WireErrorKind::Failed,
@@ -2866,10 +3107,16 @@ impl RangeService for RangeScanService {
                 message: format!("range r{range_id} is not hosted here"),
             };
         };
-        let response = match cursor_request {
-            Some(request) => handle_scan_cursor(engine, request).map(RangeResponse::ScanCursor),
-            None => handle_scan_range(engine, scan_request.expect("scan request present"))
+        let response = match (cursor_request, join_request) {
+            (Some(request), None) => {
+                handle_scan_cursor(engine, request).map(RangeResponse::ScanCursor)
+            }
+            (None, Some(request)) => {
+                handle_join_range(engine, request).map(RangeResponse::JoinRange)
+            }
+            (None, None) => handle_scan_range(engine, scan_request.expect("scan request present"))
                 .map(RangeResponse::ScanRange),
+            (Some(_), Some(_)) => unreachable!("one request variant"),
         };
         match response {
             Ok(response) => response,
@@ -2882,6 +3129,81 @@ impl RangeService for RangeScanService {
             }
         }
     }
+}
+
+fn handle_join_range(
+    engine: &crabka_pgexec::SqlEngine,
+    request: JoinRangeReq,
+) -> Result<JoinRangeResp, crabka_pgexec::ExecError> {
+    request
+        .validate()
+        .map_err(|error| crabka_pgexec::ExecError::Unsupported(error.to_string()))?;
+    let pg_request = request.to_pgexec();
+    let left_table = crabka_pgcatalog::get_table(engine.catalog_kv(), &request.left.table_name)?;
+    let right_table = crabka_pgcatalog::get_table(engine.catalog_kv(), &request.right.table_name)?;
+    if u64::from(left_table.id) != request.left.table_id
+        || u64::from(right_table.id) != request.right.table_id
+    {
+        return Err(crabka_pgexec::ExecError::Unsupported(
+            "join table id does not match catalog identity".into(),
+        ));
+    }
+    if matches!(request.strategy, WireJoinStrategy::CoPartitioned)
+        && !crabka_pgexec::plan_dist::tables_are_co_partitioned(&left_table, &right_table)
+    {
+        return Err(crabka_pgexec::ExecError::Unsupported(
+            "co-partitioned join requires identical proven hash co-location".into(),
+        ));
+    }
+    let scan = |table: &crabka_pgcatalog::Table, interval: &WireRowInterval| {
+        engine
+            .scan_local_visible_with_timestamp_owner(
+                table,
+                &request.global_snapshot.clone().into(),
+                &request.local_snapshot.clone().into(),
+                request.own_xid,
+                Some(
+                    crabka_pgexec::ReadTimestamp::new(request.read_ts).map_err(|error| {
+                        crabka_pgexec::ExecError::Unsupported(error.to_string())
+                    })?,
+                ),
+                request
+                    .own_start_ts
+                    .map(crabka_pgexec::TimestampTransactionId::new)
+                    .transpose()
+                    .map_err(|error| crabka_pgexec::ExecError::Unsupported(error.to_string()))?,
+                crabka_pgexec::RowInterval {
+                    start: interval.start,
+                    end: interval.end,
+                },
+            )
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|row| crabka_pgexec::JoinRow {
+                        tuple: crabka_pgmvcc::version::encode_tuple(row.xmin, 0, &row.row),
+                    })
+                    .collect::<Vec<_>>()
+            })
+    };
+    let broadcast = pg_request.broadcast_rows.clone().unwrap_or_default();
+    let (left, right) = match request.strategy {
+        WireJoinStrategy::BroadcastLeft => {
+            (broadcast, scan(&right_table, &request.right.interval)?)
+        }
+        WireJoinStrategy::BroadcastRight => (scan(&left_table, &request.left.interval)?, broadcast),
+        WireJoinStrategy::CoPartitioned | WireJoinStrategy::Gather => (
+            scan(&left_table, &request.left.interval)?,
+            scan(&right_table, &request.right.interval)?,
+        ),
+    };
+    let result = crabka_pgexec::scanner::execute_materialized_join(&pg_request, &left, &right)?;
+    Ok(JoinRangeResp {
+        rows: result
+            .rows
+            .into_iter()
+            .map(|row| JoinRangeRow { tuple: row.tuple })
+            .collect(),
+    })
 }
 
 fn handle_scan_range(
@@ -3245,6 +3567,71 @@ fn decode_scan_rows(
             })
         })
         .collect()
+}
+
+fn join_snapshot_to_mvcc(
+    snapshot: &crabka_pgexec::JoinSnapshot,
+) -> crabka_pgmvcc::visibility::Snapshot {
+    crabka_pgmvcc::visibility::Snapshot {
+        xmin: snapshot.xmin,
+        xmax: snapshot.xmax,
+        xip: snapshot.xip.clone(),
+    }
+}
+
+fn encode_join_request(
+    range_id: RangeId,
+    request: &crabka_pgexec::JoinRangeRequest,
+) -> Result<JoinRangeReq, crabka_pgexec::ExecError> {
+    let snapshot = |value: &crabka_pgexec::JoinSnapshot| WireSnapshot {
+        xmin: value.xmin,
+        xmax: value.xmax,
+        xip: value.xip.clone(),
+    };
+    let table = |value: &crabka_pgexec::JoinTableInterval| WireJoinTableInterval {
+        table_id: value.table_id,
+        table_name: value.table_name.clone(),
+        interval: WireRowInterval {
+            start: value.interval.start,
+            end: value.interval.end,
+        },
+    };
+    Ok(JoinRangeReq {
+        range_id,
+        local_snapshot: snapshot(&request.local_snapshot),
+        global_snapshot: snapshot(&request.global_snapshot),
+        read_ts: request.read_ts,
+        own_xid: request.own_xid,
+        own_start_ts: request.own_start_ts,
+        kind: match request.kind {
+            crabka_pgexec::JoinKind::Inner => WireJoinKind::Inner,
+            crabka_pgexec::JoinKind::Left => WireJoinKind::Left,
+            crabka_pgexec::JoinKind::Right => WireJoinKind::Right,
+            crabka_pgexec::JoinKind::Full => WireJoinKind::Full,
+        },
+        left_keys: request.left_keys.clone(),
+        right_keys: request.right_keys.clone(),
+        strategy: match request.strategy {
+            crabka_pgexec::JoinExecutionStrategy::BroadcastLeft => WireJoinStrategy::BroadcastLeft,
+            crabka_pgexec::JoinExecutionStrategy::BroadcastRight => {
+                WireJoinStrategy::BroadcastRight
+            }
+            crabka_pgexec::JoinExecutionStrategy::CoPartitioned => WireJoinStrategy::CoPartitioned,
+            crabka_pgexec::JoinExecutionStrategy::Gather => WireJoinStrategy::Gather,
+        },
+        left: table(&request.left),
+        right: table(&request.right),
+        broadcast_rows: request.broadcast_rows.as_ref().map(|rows| {
+            rows.iter()
+                .map(|row| JoinRangeRow {
+                    tuple: row.tuple.clone(),
+                })
+                .collect()
+        }),
+        left_filter: encode_predicate(&request.left_filter)?,
+        right_filter: encode_predicate(&request.right_filter)?,
+        projection: request.projection.clone(),
+    })
 }
 
 fn scanner_error(error: ForwardError) -> crabka_pgexec::ExecError {
@@ -4377,6 +4764,83 @@ mod tests {
         let (_xmin, _xmax, row) = crabka_pgmvcc::version::decode_tuple(&response.rows[0].tuple)
             .expect("decode projected tuple");
         assert_eq!(row, vec![Datum::Text("keep".to_string())]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scan_range_service_executes_broadcast_join_on_owner() {
+        let owner = crabka_pgexec::SqlEngine::new();
+        let mut session = owner.connect();
+        session
+            .simple_query("CREATE TABLE jl (id int4, v text) SHARDED")
+            .await
+            .unwrap();
+        session
+            .simple_query("CREATE TABLE jr (id int4, v text) SHARDED")
+            .await
+            .unwrap();
+        session
+            .simple_query("INSERT INTO jl VALUES (1, 'a'), (2, 'b')")
+            .await
+            .unwrap();
+        let left = crabka_pgcatalog::get_table(owner.catalog_kv(), "jl").unwrap();
+        let right = crabka_pgcatalog::get_table(owner.catalog_kv(), "jr").unwrap();
+        let service =
+            RangeScanService::new(BTreeMap::from([(RangeId::new(1), owner.clone_handle())]));
+        let snapshot = WireSnapshot {
+            xmin: 1,
+            xmax: 100,
+            xip: vec![],
+        };
+        let response = service
+            .handle(RangeRequest::JoinRange(JoinRangeReq {
+                range_id: RangeId::new(1),
+                local_snapshot: snapshot.clone(),
+                global_snapshot: snapshot,
+                read_ts: 100,
+                own_xid: None,
+                own_start_ts: None,
+                kind: WireJoinKind::Inner,
+                left_keys: vec![0],
+                right_keys: vec![0],
+                strategy: WireJoinStrategy::BroadcastRight,
+                left: WireJoinTableInterval {
+                    table_id: u64::from(left.id),
+                    table_name: left.name,
+                    interval: WireRowInterval {
+                        start: None,
+                        end: None,
+                    },
+                },
+                right: WireJoinTableInterval {
+                    table_id: u64::from(right.id),
+                    table_name: right.name,
+                    interval: WireRowInterval {
+                        start: None,
+                        end: None,
+                    },
+                },
+                broadcast_rows: Some(vec![JoinRangeRow {
+                    tuple: crabka_pgmvcc::version::encode_tuple(
+                        1,
+                        0,
+                        &[Datum::Int4(2), Datum::Text("z".into())],
+                    ),
+                }]),
+                left_filter: WirePredicatePushdown::FullScan,
+                right_filter: WirePredicatePushdown::FullScan,
+                projection: vec![1, 3],
+            }))
+            .await;
+        let RangeResponse::JoinRange(response) = response else {
+            panic!("expected join response: {response:?}")
+        };
+        assert_eq!(response.rows.len(), 1);
+        assert_eq!(
+            crabka_pgmvcc::version::decode_tuple(&response.rows[0].tuple)
+                .unwrap()
+                .2,
+            vec![Datum::Text("b".into()), Datum::Text("z".into())]
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

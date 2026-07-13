@@ -752,7 +752,7 @@ impl JoinRangeReq {
         self.to_pgexec().validate()
     }
 
-    fn to_pgexec(&self) -> crabka_pgexec::JoinRangeRequest {
+    pub(crate) fn to_pgexec(&self) -> crabka_pgexec::JoinRangeRequest {
         use crabka_pgexec::{JoinExecutionStrategy as S, JoinKind as K};
         crabka_pgexec::JoinRangeRequest {
             local_snapshot: join_snapshot(&self.local_snapshot),

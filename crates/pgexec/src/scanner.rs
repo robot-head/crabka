@@ -481,6 +481,111 @@ impl JoinRangeResult {
     }
 }
 
+/// Execute an equi-join over bounded, encoded visible rows.
+///
+/// Both inputs contain complete table tuples. Side predicates are evaluated
+/// before joining, projection indexes address the concatenated `[left, right]`
+/// row, and SQL NULL keys never compare equal.
+pub fn execute_materialized_join(
+    request: &JoinRangeRequest,
+    left: &[JoinRow],
+    right: &[JoinRow],
+) -> Result<JoinRangeResult, ExecError> {
+    request
+        .validate()
+        .map_err(|error| ExecError::Unsupported(error.to_string()))?;
+    if request.kind != JoinKind::Inner {
+        return Err(ExecError::Unsupported(
+            "distributed owner execution currently supports inner joins only".into(),
+        ));
+    }
+    let left = decode_join_input(left, &request.left_filter)?;
+    let right = decode_join_input(right, &request.right_filter)?;
+    let mut rows = Vec::new();
+    for left_row in &left {
+        for right_row in &right {
+            if !join_keys_equal(left_row, right_row, &request.left_keys, &request.right_keys)? {
+                continue;
+            }
+            if rows.len() == MAX_JOIN_RESULT_ROWS {
+                return Err(ExecError::Unsupported(
+                    JoinValidationError::TooManyResultRows {
+                        actual: MAX_JOIN_RESULT_ROWS + 1,
+                        limit: MAX_JOIN_RESULT_ROWS,
+                    }
+                    .to_string(),
+                ));
+            }
+            let joined = left_row
+                .iter()
+                .chain(right_row)
+                .cloned()
+                .collect::<Vec<_>>();
+            let projected = if request.projection.is_empty() {
+                joined
+            } else {
+                request
+                    .projection
+                    .iter()
+                    .map(|&column| {
+                        joined.get(column).cloned().ok_or_else(|| {
+                            ExecError::Unsupported(format!(
+                                "join projection column {column} is outside the joined row"
+                            ))
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            rows.push(JoinRow {
+                tuple: crabka_pgmvcc::version::encode_tuple(0, 0, &projected),
+            });
+        }
+    }
+    rows.sort_by(|left, right| left.tuple.cmp(&right.tuple));
+    let result = JoinRangeResult { rows };
+    result
+        .validate()
+        .map_err(|error| ExecError::Unsupported(error.to_string()))?;
+    Ok(result)
+}
+
+fn decode_join_input(
+    rows: &[JoinRow],
+    predicate: &PredicatePushdown,
+) -> Result<Vec<Vec<crabka_pgtypes::Datum>>, ExecError> {
+    rows.iter()
+        .map(|row| crabka_pgmvcc::version::decode_tuple(&row.tuple).map(|(_, _, row)| row))
+        .filter_map(|row| match row {
+            Ok(row) if row_satisfies_predicate(&row, predicate) => Some(Ok(row)),
+            Ok(_) => None,
+            Err(error) => Some(Err(error.into())),
+        })
+        .collect()
+}
+
+fn join_keys_equal(
+    left: &[crabka_pgtypes::Datum],
+    right: &[crabka_pgtypes::Datum],
+    left_keys: &[usize],
+    right_keys: &[usize],
+) -> Result<bool, ExecError> {
+    for (&left_key, &right_key) in left_keys.iter().zip(right_keys) {
+        let left = left.get(left_key).ok_or_else(|| {
+            ExecError::Unsupported(format!("left join key {left_key} is outside the row"))
+        })?;
+        let right = right.get(right_key).ok_or_else(|| {
+            ExecError::Unsupported(format!("right join key {right_key} is outside the row"))
+        })?;
+        if matches!(left, crabka_pgtypes::Datum::Null)
+            || matches!(right, crabka_pgtypes::Datum::Null)
+            || left != right
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 fn validate_join_rows(rows: &[JoinRow]) -> Result<(), JoinValidationError> {
     for row in rows {
         bound(row.tuple.len(), MAX_JOIN_ROW_BYTES, |actual, limit| {
@@ -527,6 +632,132 @@ pub trait RangeScanner: Send + Sync + 'static {
 #[cfg(test)]
 mod join_protocol_tests {
     use super::*;
+
+    fn encoded(row: &[crabka_pgtypes::Datum]) -> JoinRow {
+        JoinRow {
+            tuple: crabka_pgmvcc::version::encode_tuple(1, 0, row),
+        }
+    }
+
+    fn decoded(rows: JoinRangeResult) -> Vec<Vec<crabka_pgtypes::Datum>> {
+        rows.rows
+            .into_iter()
+            .map(|row| crabka_pgmvcc::version::decode_tuple(&row.tuple).unwrap().2)
+            .collect()
+    }
+
+    #[test]
+    fn materialized_inner_join_has_sql_null_filter_projection_and_order_semantics() {
+        use crabka_pgtypes::Datum::{Int4, Null};
+        let mut request = JoinRangeRequest::test_fixture();
+        request.strategy = JoinExecutionStrategy::Gather;
+        request.broadcast_rows = None;
+        request.left_filter = PredicatePushdown::Conjunctive(vec![ColumnPredicate {
+            column: 1,
+            op: PredicateOp::Gt,
+            value: Int4(10),
+        }]);
+        request.projection = vec![3, 1, 0];
+        let left = vec![
+            encoded(&[Int4(2), Int4(30)]),
+            encoded(&[Null, Int4(99)]),
+            encoded(&[Int4(1), Int4(5)]),
+            encoded(&[Int4(1), Int4(20)]),
+        ];
+        let right = vec![
+            encoded(&[Int4(1), Int4(101)]),
+            encoded(&[Null, Int4(999)]),
+            encoded(&[Int4(2), Int4(202)]),
+            encoded(&[Int4(1), Int4(100)]),
+        ];
+
+        let actual = execute_materialized_join(&request, &left, &right).unwrap();
+
+        assert_eq!(
+            decoded(actual),
+            vec![
+                vec![Int4(100), Int4(20), Int4(1)],
+                vec![Int4(101), Int4(20), Int4(1)],
+                vec![Int4(202), Int4(30), Int4(2)],
+            ]
+        );
+    }
+
+    #[test]
+    fn materialized_join_rejects_result_over_bound() {
+        let mut request = JoinRangeRequest::test_fixture();
+        request.strategy = JoinExecutionStrategy::Gather;
+        request.broadcast_rows = None;
+        let left = vec![encoded(&[crabka_pgtypes::Datum::Int4(1)]); 257];
+        let right = vec![encoded(&[crabka_pgtypes::Datum::Int4(1)]); 256];
+
+        let error = execute_materialized_join(&request, &left, &right).unwrap_err();
+
+        assert!(
+            matches!(error, ExecError::Unsupported(message) if message.contains("join result row count"))
+        );
+    }
+
+    #[test]
+    fn randomized_materialized_strategies_equal_gathered_reference() {
+        use crabka_pgtypes::Datum::{Int4, Null};
+        let mut state = 0x9e37_79b9_u64;
+        for _seed in 0..64 {
+            let mut next = || {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state
+            };
+            let left = (0..24)
+                .map(|_| {
+                    let value = next();
+                    encoded(&[
+                        if value % 7 == 0 {
+                            Null
+                        } else {
+                            Int4((value % 9) as i32)
+                        },
+                        Int4((value >> 8) as i32),
+                    ])
+                })
+                .collect::<Vec<_>>();
+            let right = (0..19)
+                .map(|_| {
+                    let value = next();
+                    encoded(&[
+                        if value % 5 == 0 {
+                            Null
+                        } else {
+                            Int4((value % 9) as i32)
+                        },
+                        Int4((value >> 8) as i32),
+                    ])
+                })
+                .collect::<Vec<_>>();
+            let mut request = JoinRangeRequest::test_fixture();
+            request.projection = vec![0, 1, 3];
+            request.strategy = JoinExecutionStrategy::Gather;
+            request.broadcast_rows = None;
+            let expected = execute_materialized_join(&request, &left, &right).unwrap();
+            for strategy in [
+                JoinExecutionStrategy::BroadcastLeft,
+                JoinExecutionStrategy::BroadcastRight,
+                JoinExecutionStrategy::CoPartitioned,
+            ] {
+                request.strategy = strategy;
+                request.broadcast_rows = matches!(
+                    strategy,
+                    JoinExecutionStrategy::BroadcastLeft | JoinExecutionStrategy::BroadcastRight
+                )
+                .then(Vec::new);
+                assert_eq!(
+                    execute_materialized_join(&request, &left, &right).unwrap(),
+                    expected
+                );
+            }
+        }
+    }
 
     #[test]
     fn join_request_rejects_unbounded_broadcast_rows() {
