@@ -1009,6 +1009,46 @@ pub fn apply_top_k_pushdown(rows: &mut Vec<ScannedRow>, spec: &TopKSpec) -> Resu
     Ok(())
 }
 
+/// Merge already ordered range-local top-K streams without materializing or
+/// globally sorting their union. Only `limit` output rows are retained.
+pub fn merge_top_k_streams(
+    streams: Vec<Vec<ScannedRow>>,
+    spec: &TopKSpec,
+) -> Result<Vec<ScannedRow>, ExecError> {
+    if spec.order_by.is_empty() {
+        return Err(ExecError::Unsupported(
+            "top-k pushdown requires at least one ORDER BY column".into(),
+        ));
+    }
+    for stream in &streams {
+        for key in &spec.order_by {
+            ensure_top_k_column_is_supported(stream, key.column)?;
+        }
+        if !stream
+            .windows(2)
+            .all(|rows| compare_top_k_rows(&rows[0], &rows[1], &spec.order_by).is_le())
+        {
+            return Err(ExecError::Unsupported(
+                "range-local top-k stream is not ordered".into(),
+            ));
+        }
+    }
+    let limit = usize::try_from(spec.limit).unwrap_or(usize::MAX);
+    let mut positions = vec![0_usize; streams.len()];
+    let mut output = Vec::with_capacity(limit.min(streams.iter().map(Vec::len).sum()));
+    while output.len() < limit {
+        let next = streams
+            .iter()
+            .enumerate()
+            .filter_map(|(stream, rows)| rows.get(positions[stream]).map(|row| (stream, row)))
+            .min_by(|(_, left), (_, right)| compare_top_k_rows(left, right, &spec.order_by));
+        let Some((stream, _)) = next else { break };
+        output.push(streams[stream][positions[stream]].clone());
+        positions[stream] += 1;
+    }
+    Ok(output)
+}
+
 fn ensure_top_k_column_is_supported(rows: &[ScannedRow], column: usize) -> Result<(), ExecError> {
     let mut expected_type = None;
     for row in rows {
