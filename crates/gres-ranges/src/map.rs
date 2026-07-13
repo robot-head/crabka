@@ -797,6 +797,35 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+
+    #[derive(Clone, Debug)]
+    struct GroupPlacementModel {
+        owners: [[u8; 4]; 2],
+        split_generations: [[u8; 4]; 2],
+    }
+
+    impl GroupPlacementModel {
+        fn coordinated_move(&mut self, bucket: usize, owner: u8) {
+            for table in &mut self.owners {
+                table[bucket] = owner;
+            }
+        }
+
+        fn coordinated_split(&mut self, bucket: usize) {
+            for table in &mut self.split_generations {
+                table[bucket] = table[bucket].wrapping_add(1);
+            }
+        }
+
+        fn broken_move(&mut self, bucket: usize, owner: u8) {
+            self.owners[0][bucket] = owner;
+        }
+
+        fn is_co_located(&self) -> bool {
+            self.owners[0] == self.owners[1]
+                && self.split_generations[0] == self.split_generations[1]
+        }
+    }
     use crate::TenantName;
 
     fn tenant() -> TenantName {
@@ -1012,6 +1041,36 @@ mod tests {
             err,
             MapValidationError::InvalidCoLocationGroup { .. }
         ));
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn coordinated_group_moves_preserve_every_bucket_after_every_operation(
+            operations in proptest::collection::vec((proptest::bool::ANY, 0_usize..4, 0_u8..4), 0..64)
+        ) {
+            let mut model = GroupPlacementModel {
+                owners: [[0; 4]; 2],
+                split_generations: [[0; 4]; 2],
+            };
+            for (is_split, bucket, owner) in operations {
+                if is_split {
+                    model.coordinated_split(bucket);
+                } else {
+                    model.coordinated_move(bucket, owner);
+                }
+                proptest::prop_assert!(model.is_co_located());
+            }
+        }
+    }
+
+    #[test]
+    fn broken_uncoordinated_group_move_has_teeth() {
+        let mut model = GroupPlacementModel {
+            owners: [[0; 4]; 2],
+            split_generations: [[0; 4]; 2],
+        };
+        model.broken_move(2, 1);
+        assert!(!model.is_co_located());
     }
 
     #[test]
