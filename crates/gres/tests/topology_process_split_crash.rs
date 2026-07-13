@@ -986,6 +986,10 @@ fn predicate_state(
     }
 }
 
+const fn should_yield_parked_observation(already_yielded: bool, sidecar_parked: bool) -> bool {
+    !already_yielded && sidecar_parked
+}
+
 #[test]
 fn split_kill_points_are_exhaustive_unique_and_sharded() {
     let names = SplitKillPoint::ALL.map(SplitKillPoint::name);
@@ -1100,6 +1104,21 @@ fn every_split_predicate_field_fails_closed_on_a_near_miss() {
                 point.name()
             );
         }
+    }
+}
+
+#[test]
+fn parked_retirement_is_observed_once_before_retire_rpc() {
+    for (already_yielded, sidecar_parked, expected) in [
+        (false, false, false),
+        (false, true, true),
+        (true, false, false),
+        (true, true, false),
+    ] {
+        assert_eq!(
+            should_yield_parked_observation(already_yielded, sidecar_parked),
+            expected,
+        );
     }
 }
 
@@ -2713,6 +2732,7 @@ async fn run_real_split_crash_case(point: SplitKillPoint) {
     let mut restart_ms = 0;
     let mut publication_ms = 0;
     let mut marker_session_released = false;
+    let mut parked_observation_yielded = false;
     let mut last_reported_phase = None;
     let mut pre_kill_predicate = None;
     let mut journal_receipt_expectations = BTreeMap::new();
@@ -2889,6 +2909,18 @@ async fn run_real_split_crash_case(point: SplitKillPoint) {
                 let _ =
                     reconcile_one_retiring_range_wal(&control, &mut retirement, &tenant_name).await;
                 let current = load_operation(&system, &operation_id).await;
+                let current_tenant = load_tenant(&system).await;
+                let sidecar_parked = current_tenant.range_retirements.iter().any(|retirement| {
+                    retirement.operation_id == operation_id
+                        && retirement.phase == RangeRetirementPhase::Parked
+                });
+                if should_yield_parked_observation(
+                    parked_observation_yielded,
+                    sidecar_parked,
+                ) {
+                    parked_observation_yielded = true;
+                    continue;
+                }
                 reconcile_rpc_with_diagnostics(&system, point, &control, &mutation, &current).await;
             }
             SplitOperationPhase::Completed => {
