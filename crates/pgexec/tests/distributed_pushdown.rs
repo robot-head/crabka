@@ -134,6 +134,27 @@ fn sequence_and_checkpoint_stats_use_live_bytes_then_checkpoint_fallback() {
     let checkpoint = CheckpointMetadata::new([(7, 44)]);
     assert_eq!(checkpoint.estimated_bytes(7), Some(44));
 }
+
+#[tokio::test]
+async fn production_engine_stats_follow_durable_table_sequence() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    session
+        .simple_query("CREATE TABLE runtime_stats (id int4)")
+        .await
+        .unwrap();
+    let table = crabka_pgcatalog::get_table(engine.catalog_kv(), "runtime_stats").unwrap();
+    let before = engine.join_stats().estimated_bytes(u64::from(table.id));
+    session
+        .simple_query("INSERT INTO runtime_stats VALUES (1), (2), (3)")
+        .await
+        .unwrap();
+    let after = engine.join_stats().estimated_bytes(u64::from(table.id));
+    assert!(
+        after > before,
+        "runtime sequence adapter must observe committed inserts"
+    );
+}
 use crabka_pgparser::ast::{BinaryOp, Expr, SelectItem};
 use crabka_pgtypes::{ColumnType, Datum};
 use crabka_pgwire::engine::{Engine, QueryResult, Session};
