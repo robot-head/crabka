@@ -80,6 +80,23 @@ pub enum JoinStrategy {
     Gather,
 }
 
+/// Return whether catalog metadata proves that two tables use the same physical
+/// hash partitioning. A missing co-location group is deliberately not proof.
+#[must_use]
+pub fn tables_are_co_partitioned(left: &Table, right: &Table) -> bool {
+    use crabka_pgcatalog::ShardingStrategy;
+
+    let (Some(ShardingStrategy::Hash(left_hash)), Some(ShardingStrategy::Hash(right_hash))) =
+        (&left.sharding, &right.sharding)
+    else {
+        return false;
+    };
+    left_hash.buckets == right_hash.buckets
+        && left_hash.columns == right_hash.columns
+        && left_hash.co_location_group.is_some()
+        && left_hash.co_location_group == right_hash.co_location_group
+}
+
 #[must_use]
 pub fn plan_join(stats: &dyn Stats, config: PlannerConfig, inputs: JoinInputs) -> JoinStrategy {
     let estimates = [
@@ -104,6 +121,31 @@ pub fn plan_join(stats: &dyn Stats, config: PlannerConfig, inputs: JoinInputs) -
         JoinStrategy::CoPartitioned
     } else {
         JoinStrategy::Gather
+    }
+}
+
+/// Select a join strategy and validate any co-partitioned answer against the
+/// physical catalog metadata used by execution. Statistics may suggest
+/// co-partitioning, but they cannot substitute for an identical hash layout.
+#[must_use]
+pub fn plan_join_for_tables(
+    stats: &dyn Stats,
+    config: PlannerConfig,
+    left: &Table,
+    right: &Table,
+) -> JoinStrategy {
+    let selected = plan_join(
+        stats,
+        config,
+        JoinInputs {
+            left_table_id: u64::from(left.id),
+            right_table_id: u64::from(right.id),
+        },
+    );
+    if selected == JoinStrategy::CoPartitioned && !tables_are_co_partitioned(left, right) {
+        JoinStrategy::Gather
+    } else {
+        selected
     }
 }
 

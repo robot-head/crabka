@@ -7,13 +7,67 @@ use crabka_pgexec::{
     ScannedRow, SqlEngine, TopKColumn, TopKSpec,
     plan_dist::{
         CheckpointMetadata, JoinInputs, JoinStrategy, PlannerConfig, SequenceCounters, Stats,
-        plan_join, plan_scan, strict_predicate_for_filter,
+        plan_join, plan_join_for_tables, plan_scan, strict_predicate_for_filter,
     },
     scanner::{
         LocalRangeScanner, apply_executable_scan_pushdown, apply_scan_pushdown,
         finalize_partial_aggregate_rows, merge_top_k_streams,
     },
 };
+
+#[test]
+fn co_partitioning_requires_identical_hash_metadata() {
+    use crabka_pgcatalog::{HashSharding, ShardingStrategy};
+
+    let hash = |columns: &[&str], buckets, group: Option<&str>| {
+        Some(ShardingStrategy::Hash(HashSharding {
+            columns: columns.iter().map(|column| (*column).to_string()).collect(),
+            buckets,
+            co_location_group: group.map(str::to_string),
+        }))
+    };
+    let mut left = table();
+    left.sharding = hash(&["id"], 16, Some("orders"));
+    let mut right = left.clone();
+    right.id = 43;
+
+    assert!(crabka_pgexec::plan_dist::tables_are_co_partitioned(
+        &left, &right
+    ));
+    right.sharding = hash(&["id"], 32, Some("orders"));
+    assert!(!crabka_pgexec::plan_dist::tables_are_co_partitioned(
+        &left, &right
+    ));
+    right.sharding = hash(&["id"], 16, None);
+    assert!(!crabka_pgexec::plan_dist::tables_are_co_partitioned(
+        &left, &right
+    ));
+}
+
+#[test]
+fn selected_copartitioned_join_falls_back_when_catalog_proof_is_missing() {
+    let stats = FakeStats {
+        left: 100,
+        right: 100,
+        co_partitioned: true,
+    };
+    let left = table();
+    let mut right = table();
+    right.id = 43;
+    right.name = "other".to_string();
+
+    assert_eq!(
+        plan_join_for_tables(
+            &stats,
+            PlannerConfig {
+                broadcast_threshold_bytes: 64,
+            },
+            &left,
+            &right,
+        ),
+        JoinStrategy::Gather
+    );
+}
 
 #[derive(Debug)]
 struct FakeStats {
