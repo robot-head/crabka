@@ -233,3 +233,21 @@ Status: COMPLETE.
 - This report is committed separately.
 
 The pre-existing dirty `.superpowers/sdd/progress.md` and `crates/gres-ranges/src/control.rs` remain unstaged and were neither reverted nor included.
+
+## Checkpoint runtime wiring completion
+
+Status: COMPLETE.
+
+- RED: `cargo test -p crabka-gres-substrate verified_checkpoint_publication_changes_next_join_plan --lib --no-run` failed with unresolved `CombinedStats` and no `CheckpointService::planner_stats` method.
+- GREEN: `cargo test -p crabka-gres-substrate verified_checkpoint_publication_changes_next_join_plan --lib -- --nocapture` passed. The integration constructs a production `SqlEngine` over real durable sequence keys, observes `BroadcastLeft` at a pinned 64-byte threshold, completes an authoritative in-process checkpoint, and observes the next plan choose `Gather` from the newly verified checkpoint size. It also constructs a restarted checkpoint service, loads the existing manifest through `latest_checkpoint_metadata`, publishes that verified metadata, and observes the restored estimate.
+- `CheckpointPlannerStats` is one shared `RwLock<Option<CheckpointMetadata>>` read adapter, not a second metadata model. `CheckpointService` publishes the exact `CheckpointMetadata` returned by `latest_checkpoint_metadata` only after manifest/part validation and successful prune handling. Publication clones metadata while no async operation is pending; planner reads take a synchronous read lock and never cross an await.
+- Production in-memory, live single-range, live multi-range, and staged-successor construction pass the same shared adapter into `CombinedStats` alongside `DurableSequenceStats`. Existing engines and their sessions share that `Arc`, so every successful checkpoint completion updates subsequent plans without rebuilding sessions. Startup calls the same verified metadata loader before exposing the engine, covering restart. Fake `Stats` injection remains unchanged.
+- `CheckpointStats` remains only the resettable checkpoint scheduling counter source, honoring its explicit prohibition against use as live range statistics.
+- GREEN: `cargo test -p crabka-pgexec --test distributed_pushdown -- --nocapture` passed 44/44.
+- GREEN: `cargo check -p crabka-pgexec --all-targets`, `cargo check -p crabka-gres-ranges --all-targets`, `cargo check -p crabka-gres-substrate --all-targets`, and `cargo check -p crabka-gres --all-targets` passed (only existing process-harness dead-code warnings).
+- GREEN: `./scripts/gres-sharded-conformance.sh` passed all four legs and refreshed `target/gres-sharded-conformance-artifacts/sharded-conformance.json`.
+- GREEN: changed-file rustfmt/check mode and `git diff --check` passed with only stable-rustfmt warnings for repository nightly options.
+- Feature commit: `67d5f761 fix(gres): publish checkpoint stats to join planning`.
+- This report is committed separately.
+
+The preserved dirty `.superpowers/sdd/progress.md` and `crates/gres-ranges/src/control.rs` were not staged, reverted, or included.
