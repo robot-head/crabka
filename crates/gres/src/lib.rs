@@ -2390,9 +2390,11 @@ async fn open_multirange_runtime(
         crabka_gres_ranges::MultiRangeTenantConfig::from_boundaries(tenant, boundaries)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
     if let Some(record) = tenant_record {
-        tenant_config = tenant_config
-            .with_map_epoch(crabka_gres_ranges::MapEpoch::new(record.record_version))
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+        tenant_config.range_map = range_map_from_tenant_layout(
+            tenant_config.tenant.clone(),
+            crabka_gres_ranges::MapEpoch::new(record.record_version),
+            &record.ranges,
+        )?;
     }
     if let Ok(fault) = std::env::var("CRABKA_GRES_TEST_COMMIT_FAULT") {
         let fault = parse_test_commit_fault(&fault)?;
@@ -2626,6 +2628,38 @@ async fn open_multirange_runtime(
         "activation recovery startup handoff"
     );
     open_live_multirange_tenant(tenant_config, engines, config, timestamp_primary_aliases).await
+}
+
+fn range_map_from_tenant_layout(
+    tenant: crabka_gres_ranges::TenantName,
+    epoch: crabka_gres_ranges::MapEpoch,
+    layout: &[crabka_gres_control::RangeLayoutEntry],
+) -> std::io::Result<crabka_gres_ranges::RangeMap> {
+    let mut start = crabka_gres_ranges::RangeKey::table_start(crabka_gres_ranges::TableId::new(0));
+    let mut ranges = Vec::with_capacity(layout.len());
+    for entry in layout {
+        let end = entry.end_key.map(|boundary| match boundary.bucket {
+            Some(bucket) => crabka_gres_ranges::RangeKey::hash(
+                crabka_gres_ranges::TableId::new(boundary.table_id),
+                bucket,
+                boundary.rowid,
+            ),
+            None => crabka_gres_ranges::RangeKey::new(
+                crabka_gres_ranges::TableId::new(boundary.table_id),
+                boundary.rowid,
+            ),
+        });
+        ranges.push(crabka_gres_ranges::RangeSpec::for_interval(
+            crabka_gres_ranges::RangeId::new(entry.range_id),
+            start,
+            end,
+        ));
+        if let Some(end) = end {
+            start = end;
+        }
+    }
+    crabka_gres_ranges::RangeMap::new(tenant, epoch, ranges)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
 }
 
 fn bind_recovered_hosted_ranges(
@@ -2932,12 +2966,6 @@ impl crabka_gres_ranges::RangeService for DynamicLiveRangeService {
         &self,
         request: crabka_gres_ranges::RangeRequest,
     ) -> crabka_gres_ranges::RangeResponse {
-        if self.publishing.load(std::sync::atomic::Ordering::Acquire) {
-            return crabka_gres_ranges::RangeResponse::Error {
-                error: crabka_gres_ranges::WireErrorKind::StaleEndpoint,
-                message: "range topology publication is in progress; retry".into(),
-            };
-        }
         if let crabka_gres_ranges::RangeRequest::Control(control_request) = request {
             if let Some(control) = self.load_range_control() {
                 return crabka_gres_ranges::RangeResponse::Control(
@@ -2949,6 +2977,17 @@ impl crabka_gres_ranges::RangeService for DynamicLiveRangeService {
                 .handle(crabka_gres_ranges::RangeRequest::Control(control_request))
                 .await;
         }
+        let activation_recovery = matches!(
+            &request,
+            crabka_gres_ranges::RangeRequest::TimestampRecover(_)
+                | crabka_gres_ranges::RangeRequest::TimestampPrimaryRecover(_)
+        );
+        if self.publishing.load(std::sync::atomic::Ordering::Acquire) && !activation_recovery {
+            return crabka_gres_ranges::RangeResponse::Error {
+                error: crabka_gres_ranges::WireErrorKind::StaleEndpoint,
+                message: "range topology publication is in progress; retry".into(),
+            };
+        }
         self.load().handle(request).await
     }
 
@@ -2957,12 +2996,6 @@ impl crabka_gres_ranges::RangeService for DynamicLiveRangeService {
         request: crabka_gres_ranges::RangeRequest,
         writer: &mut (dyn tokio::io::AsyncWrite + Unpin + Send),
     ) -> Result<Option<crabka_gres_ranges::RangeResponse>, crabka_gres_ranges::TransportError> {
-        if self.publishing.load(std::sync::atomic::Ordering::Acquire) {
-            return Ok(Some(crabka_gres_ranges::RangeResponse::Error {
-                error: crabka_gres_ranges::WireErrorKind::StaleEndpoint,
-                message: "range topology publication is in progress; retry".into(),
-            }));
-        }
         if let crabka_gres_ranges::RangeRequest::Control(control_request) = request {
             if let Some(control) = self.load_range_control() {
                 return Ok(Some(crabka_gres_ranges::RangeResponse::Control(
@@ -2976,6 +3009,17 @@ impl crabka_gres_ranges::RangeService for DynamicLiveRangeService {
                     writer,
                 )
                 .await;
+        }
+        let activation_recovery = matches!(
+            &request,
+            crabka_gres_ranges::RangeRequest::TimestampRecover(_)
+                | crabka_gres_ranges::RangeRequest::TimestampPrimaryRecover(_)
+        );
+        if self.publishing.load(std::sync::atomic::Ordering::Acquire) && !activation_recovery {
+            return Ok(Some(crabka_gres_ranges::RangeResponse::Error {
+                error: crabka_gres_ranges::WireErrorKind::StaleEndpoint,
+                message: "range topology publication is in progress; retry".into(),
+            }));
         }
         self.load().handle_connection(request, writer).await
     }
@@ -3130,6 +3174,31 @@ async fn open_live_multirange_tenant(
         tso_rpc,
         timestamp_primary_aliases.clone(),
     ));
+    if transfer.current_range_zero_engine().is_err() {
+        let mut hosted_service =
+            crabka_gres_ranges::HostedRangeService::new(gateway.hosted_range_engines())
+                .with_timestamp_primary_aliases(timestamp_primary_aliases.clone())
+                .with_durable_inspector(transfer.clone());
+        if let Some((registry, client)) = gateway.timestamp_primary_remote() {
+            hosted_service = hosted_service.with_timestamp_primary_remote(registry, client);
+        }
+        if let Some(tso_rpc) = transfer
+            .tso_rpc
+            .read()
+            .map_err(|_| std::io::Error::other("live TSO lock poisoned"))?
+            .clone()
+        {
+            hosted_service = hosted_service.with_tso(tso_rpc);
+        }
+        dynamic_service.replace(hosted_service);
+        return Ok(GresRuntime {
+            engine: RuntimeEngine::Multi(Box::new(gateway)),
+            checkpoint_runtime: None,
+            range_service: Some(dynamic_service),
+            range_transfer: Some(transfer.clone()),
+            staged_transfer: Some(transfer),
+        });
+    }
     let mut generations = transfer
         .ranges
         .read()
@@ -3155,6 +3224,16 @@ async fn open_live_multirange_tenant(
         crabka_gres_ranges::control::RangeControlReceiptStore::list(receipt_store.as_ref())
             .await
             .map_err(|error| std::io::Error::other(format!("list control receipts: {error}")))?;
+    let activation_store = crabka_gres_ranges::control::RangeZeroTopologyActivationStore::new(
+        config.tenant.clone(),
+        transfer
+            .current_range_zero_engine()
+            .map_err(|error| std::io::Error::other(error.to_string()))?,
+    );
+    let activation_receipts =
+        crabka_gres_ranges::control::TopologyActivationReceiptStore::list(&activation_store)
+            .await
+            .map_err(|error| std::io::Error::other(format!("list topology receipts: {error}")))?;
     generations.extend(
         recovery_receipts
             .iter()
@@ -3171,31 +3250,45 @@ async fn open_live_multirange_tenant(
         &transfer,
         gateway.clone(),
     ));
+    let intent_authority = Arc::new(LiveSplitIntentAuthority {
+        bootstrap: config.bootstrap.clone(),
+        tenant: crabka_gres_control::TenantName::try_from(config.tenant.as_str())
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?,
+    });
     let mut control = crabka_gres_ranges::control::GenerationFencedRangeControl::new(
         config.tenant.clone(),
         first_range,
         first_generation,
         executor,
-        Arc::new(LiveSplitIntentAuthority {
-            bootstrap: config.bootstrap.clone(),
-            tenant: crabka_gres_control::TenantName::try_from(config.tenant.as_str())
-                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?,
-        }),
+        intent_authority.clone(),
     )
     .with_receipt_store(receipt_store.clone());
     for (range_id, generation) in generations.into_iter().skip(1) {
         control = control.with_range(range_id, generation);
     }
     let control = Arc::new(control);
-    let activated_operations = recovery_receipts
-        .iter()
-        .filter_map(|receipt| match &receipt.request.operation {
-            crabka_gres_ranges::transport::RangeControlOperation::SuccessorFencePrologue {
-                ..
-            } if receipt.result.is_some() => Some(receipt.request.operation_id.clone()),
-            _ => None,
+    let mut activated_operations = activation_receipts
+        .into_iter()
+        .filter(|receipt| {
+            matches!(
+                receipt.phase,
+                crabka_gres_ranges::control::TopologyActivationPhase::MustActivate
+                    | crabka_gres_ranges::control::TopologyActivationPhase::WriterActivated
+                    | crabka_gres_ranges::control::TopologyActivationPhase::CheckpointDurable
+                    | crabka_gres_ranges::control::TopologyActivationPhase::TopologyCommitted
+            )
         })
+        .map(|receipt| receipt.operation_id)
         .collect::<std::collections::BTreeSet<_>>();
+    for receipt in &recovery_receipts {
+        if matches!(
+            receipt.request.operation,
+            crabka_gres_ranges::transport::RangeControlOperation::SuccessorFencePrologue { .. }
+        ) && receipt.result.is_some()
+        {
+            activated_operations.insert(receipt.request.operation_id.clone());
+        }
+    }
     for operation_id in &activated_operations {
         transfer.note_activation_irreversible(operation_id);
     }
@@ -4529,7 +4622,8 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
                     self.config.kafka_security.clone(),
                 )
                 .with_wal_generation(request.wal_generation)
-                .with_optional_advertised_endpoint(self.config.advertised_endpoint.clone());
+                .with_optional_advertised_endpoint(self.config.advertised_endpoint.clone())
+                .with_checkpoints(Arc::clone(&source_checkpoint.store));
                 crabka_gres_substrate::ensure_live_wal_topic(&target_recovery)
                     .await
                     .map_err(|error| crabka_gres_ranges::RangeTransferError::Runtime {
@@ -4667,7 +4761,8 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
                     activation_committer: committer,
                     snapshot_source,
                     checkpoint: Some(checkpoint),
-                    recovery_config: target_recovery,
+                    recovery_config: target_recovery
+                        .with_replay_seed(0, restore_plan.replay.next_journal_seq),
                     generation,
                     pause: Arc::new(std::sync::Mutex::new(RangePauseState::Idle)),
                     tso_horizon,
@@ -6715,6 +6810,44 @@ mod tests {
     }
 
     #[test]
+    fn registry_layout_preserves_hash_bucket_boundary_in_initial_serving_map() {
+        let tenant = crabka_gres_ranges::TenantName::parse("hash-layout").expect("tenant");
+        let layout = vec![
+            crabka_gres_control::RangeLayoutEntry {
+                range_id: 0,
+                end_key: Some(crabka_gres_control::RangeBoundary::hash(50, 4, 0)),
+                endpoint: "127.0.0.1:1".into(),
+                wal_generation: 0,
+                lifecycle: Default::default(),
+                retirement: None,
+            },
+            crabka_gres_control::RangeLayoutEntry {
+                range_id: 1,
+                end_key: None,
+                endpoint: "127.0.0.1:2".into(),
+                wal_generation: 0,
+                lifecycle: Default::default(),
+                retirement: None,
+            },
+        ];
+
+        let map =
+            range_map_from_tenant_layout(tenant, crabka_gres_ranges::MapEpoch::new(7), &layout)
+                .expect("registry map");
+
+        assert_eq!(map.epoch().as_u64(), 7);
+        assert_eq!(
+            map.ranges()[0].end,
+            Some(crabka_gres_ranges::RangeKey::hash(
+                crabka_gres_ranges::TableId::new(50),
+                4,
+                0,
+            ))
+        );
+        assert_eq!(map.ranges()[1].start, map.ranges()[0].end.unwrap());
+    }
+
+    #[test]
     fn live_single_range_wal_selection_matches_recovery_writer_and_checkpoint_topics() {
         let config = SubstrateRuntimeConfig {
             bootstrap: "broker-a:9092,broker-b:9092".to_string(),
@@ -6907,6 +7040,21 @@ mod tests {
                 ..
             }
         ));
+        let recovery = crabka_gres_ranges::RangeRequest::TimestampPrimaryRecover(
+            crabka_gres_ranges::transport::TimestampPrimaryRecoverReq {
+                primary_range: crabka_gres_ranges::RangeId::COORDINATOR,
+                identity: crabka_gres_ranges::transport::WireTimestampIdentity {
+                    start_ts: 1,
+                    global_xid: 1,
+                    primary_range: 0,
+                },
+            },
+        );
+        assert!(!matches!(
+            crabka_gres_ranges::RangeService::handle(&dynamic, recovery).await,
+            crabka_gres_ranges::RangeResponse::Error { message, .. }
+                if message == "range topology publication is in progress; retry"
+        ));
         dynamic.finish_publication();
         let after = crabka_gres_ranges::RangeService::handle(&dynamic, request).await;
         assert!(!matches!(
@@ -6966,6 +7114,14 @@ mod tests {
             )
         ));
 
+        dynamic.begin_publication();
+        assert!(matches!(
+            crabka_gres_ranges::RangeService::handle(&dynamic, request.clone()).await,
+            crabka_gres_ranges::RangeResponse::Control(
+                crabka_gres_ranges::transport::RangeControlResp::Status { serving: true, .. }
+            )
+        ));
+
         dynamic.replace(crabka_gres_ranges::HostedRangeService::new(BTreeMap::from(
             [(crabka_gres_ranges::RangeId::COORDINATOR, SqlEngine::new())],
         )));
@@ -6976,6 +7132,7 @@ mod tests {
                 crabka_gres_ranges::transport::RangeControlResp::Status { serving: true, .. }
             )
         ));
+        dynamic.finish_publication();
     }
 
     #[test]

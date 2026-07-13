@@ -214,6 +214,8 @@ pub struct InspectDurableRecordsResp {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireRangeKey {
     pub table_id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bucket: Option<u32>,
     pub rowid: u64,
 }
 
@@ -2104,6 +2106,7 @@ mod tests {
                     transaction_id: 5,
                     key: WireRangeKey {
                         table_id: 7,
+                        bucket: None,
                         rowid: 12,
                     },
                 }],

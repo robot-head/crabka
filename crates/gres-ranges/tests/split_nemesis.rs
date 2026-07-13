@@ -474,5 +474,6 @@ fn marker(transaction_id: u64, table_id: u64) -> InDoubtMarker {
     InDoubtMarker {
         transaction_id,
         key: RangeKey::table_start(TableId::new(table_id)),
+        hash_bucket: None,
     }
 }

@@ -445,7 +445,7 @@ mod tests {
         }
     }
 
-    fn not_leader_none(result: &Result<SubmitChangeResult, RaftError>) {
+    fn not_leader_none<T>(result: &Result<T, RaftError>) {
         assert!(matches!(
             result,
             Err(RaftError::NotLeader {

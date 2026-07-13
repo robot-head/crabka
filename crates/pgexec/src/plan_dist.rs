@@ -1,10 +1,10 @@
 //! Deterministic distributed-planning pre-pass for range scans.
 
+use std::{collections::BTreeMap, sync::Arc};
+
 use crabka_pgcatalog::Table;
 use crabka_pgparser::ast::{BinaryOp, Expr, FuncArgs, SelectItem};
 use crabka_pgtypes::{ColumnType, Datum};
-use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use crate::{
     ExecError,

@@ -95,6 +95,8 @@ mod tests {
             end_key: Some(RangeBoundary::table_start(100)),
             endpoint: endpoint.to_string(),
             wal_generation,
+            lifecycle: Default::default(),
+            retirement: None,
         }])
         .expect("range layout")
     }

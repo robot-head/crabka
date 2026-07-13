@@ -42,7 +42,9 @@ impl RangeMutationClient for MtlsRangeMutationClient {
             .map_err(|error| SplitReconcileError::Transport(error.to_string()))?
         {
             RangeResponse::Control(response) => Ok(response),
-            _ => Err(SplitReconcileError::UnexpectedResponse),
+            response => Err(SplitReconcileError::UnexpectedResponse(format!(
+                "transport returned {response:?}"
+            ))),
         }
     }
 }
@@ -59,8 +61,8 @@ pub enum SplitReconcileError {
     Rejected { code: String, message: String },
     #[error("range control returned ambiguous result: {0}")]
     Ambiguous(String),
-    #[error("range control returned an unexpected response")]
-    UnexpectedResponse,
+    #[error("range control returned an unexpected response: {0}")]
+    UnexpectedResponse(String),
 }
 
 /// Advance at most one durable range-RPC phase. Ambiguous responses leave the journal
@@ -237,7 +239,11 @@ pub async fn verify_target_topology_ready(
             RangeControlResp::Ambiguous { message } => {
                 return Err(SplitReconcileError::Ambiguous(message));
             }
-            _ => return Err(SplitReconcileError::UnexpectedResponse),
+            response => {
+                return Err(SplitReconcileError::UnexpectedResponse(format!(
+                    "target status returned {response:?}"
+                )));
+            }
         }
     }
     Ok(())
@@ -364,7 +370,9 @@ fn apply_response(
                 || covered_offset < 0
                 || manifest_key.is_empty()
             {
-                return Err(SplitReconcileError::UnexpectedResponse);
+                return Err(SplitReconcileError::UnexpectedResponse(format!(
+                    "invalid checkpoint receipt generation={generation} covered_offset={covered_offset} manifest_key={manifest_key:?}"
+                )));
             }
             evidence.manifest_key = Some(manifest_key);
             evidence.covered_offset = Some(covered_offset);
@@ -372,7 +380,10 @@ fn apply_response(
         }
         (SplitOperationPhase::Checkpointed, RangeControlResp::Paused { barrier_offset }) => {
             if barrier_offset < evidence.covered_offset.unwrap_or(i64::MAX) {
-                return Err(SplitReconcileError::UnexpectedResponse);
+                return Err(SplitReconcileError::UnexpectedResponse(format!(
+                    "pause barrier {barrier_offset} precedes checkpoint {:?}",
+                    evidence.covered_offset
+                )));
             }
             evidence.barrier_offset = Some(barrier_offset);
             SplitOperationPhase::Paused
@@ -403,7 +414,12 @@ fn apply_response(
         (_, RangeControlResp::Ambiguous { message }) => {
             return Err(SplitReconcileError::Ambiguous(message));
         }
-        _ => return Err(SplitReconcileError::UnexpectedResponse),
+        (_, response) => {
+            return Err(SplitReconcileError::UnexpectedResponse(format!(
+                "phase {:?} returned {response:?}",
+                record.phase
+            )));
+        }
     };
     record
         .advance_with_evidence(phase, record.attempts, None, evidence)
@@ -444,13 +460,14 @@ mod tests {
         atomic::{AtomicBool, Ordering},
     };
 
-    use super::*;
     use crabka_gres_control::{
         RangeBoundary, RangeLayoutEntry, RangeLayoutSplit, RangeLifecycle, SplitOperationPlan,
         TenantName,
     };
     use crabka_gres_ranges::{RangeControlResp, RangeId};
     use tokio::sync::Mutex;
+
+    use super::*;
 
     #[test]
     fn active_operation_filter_is_ordered_and_excludes_terminal_records() {

@@ -1004,8 +1004,10 @@ async fn control_binding(bootstrap: &str, tenant: &str, operation_id: &str) -> (
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn live_authority_allows_exact_target_status_at_activated_before_layout_cutover() {
-    use crabka_gres_ranges::control::IntentAuthorizationContext;
-    use crabka_gres_ranges::transport::{RangeControlOperation, RangeControlReq};
+    use crabka_gres_ranges::{
+        control::IntentAuthorizationContext,
+        transport::{RangeControlOperation, RangeControlReq},
+    };
     let broker_dir = tempfile::tempdir().unwrap();
     let broker = Broker::start(BrokerConfig::for_tests(broker_dir.path().to_path_buf()))
         .await
@@ -1166,6 +1168,8 @@ async fn drive_live_control_split(
         manifest_key: String,
         covered_offset: i64,
         barrier_offset: i64,
+        stage_binding: (u64, String),
+        post_stage_binding: Option<(u64, String)>,
     }
     let state = if state_path.exists() {
         let value: serde_json::Value =
@@ -1176,6 +1180,10 @@ async fn drive_live_control_split(
             manifest_key: value["manifest_key"].as_str().expect("manifest key").into(),
             covered_offset: value["covered_offset"].as_i64().expect("covered offset"),
             barrier_offset: value["barrier_offset"].as_i64().expect("barrier offset"),
+            stage_binding: serde_json::from_value(value["stage_binding"].clone())
+                .expect("decode stage binding"),
+            post_stage_binding: serde_json::from_value(value["post_stage_binding"].clone())
+                .expect("decode post-stage binding"),
         }
     } else {
         let current_map = runtime.published_range_map().expect("source range map");
@@ -1291,11 +1299,14 @@ async fn drive_live_control_split(
             }),
         )
         .await;
+        let stage_binding = control_binding(bootstrap, tenant, operation_id).await;
         let state = DriverState {
             split,
             manifest_key,
             covered_offset,
             barrier_offset,
+            stage_binding,
+            post_stage_binding: None,
         };
         std::fs::write(
             state_path,
@@ -1304,6 +1315,8 @@ async fn drive_live_control_split(
                 "manifest_key": state.manifest_key,
                 "covered_offset": state.covered_offset,
                 "barrier_offset": state.barrier_offset,
+                "stage_binding": state.stage_binding,
+                "post_stage_binding": state.post_stage_binding,
             }))
             .expect("encode driver state"),
         )
@@ -1314,11 +1327,14 @@ async fn drive_live_control_split(
         split,
         manifest_key,
         covered_offset,
-        barrier_offset: _,
+        barrier_offset,
+        stage_binding,
+        mut post_stage_binding,
     } = state;
     if runtime.published_range_map().as_ref() == Some(&split.target_map) {
-        let (journal_revision, journal_digest) =
-            control_binding(bootstrap, tenant, operation_id).await;
+        let (journal_revision, journal_digest) = post_stage_binding
+            .clone()
+            .unwrap_or(control_binding(bootstrap, tenant, operation_id).await);
         let prologue = control_request(
             runtime,
             tenant,
@@ -1391,7 +1407,7 @@ async fn drive_live_control_split(
     )
     .await;
     assert!(matches!(pause, RangeControlResp::Paused { .. }));
-    let (journal_revision, journal_digest) = control_binding(bootstrap, tenant, operation_id).await;
+    let (journal_revision, journal_digest) = stage_binding.clone();
     let stage = control_request(
         runtime,
         tenant,
@@ -1415,7 +1431,26 @@ async fn drive_live_control_split(
         None,
     )
     .await;
-    let (journal_revision, journal_digest) = control_binding(bootstrap, tenant, operation_id).await;
+    let (journal_revision, journal_digest) = match post_stage_binding.take() {
+        Some(binding) => binding,
+        None => {
+            let binding = control_binding(bootstrap, tenant, operation_id).await;
+            std::fs::write(
+                state_path,
+                serde_json::to_vec(&serde_json::json!({
+                    "split": split,
+                    "manifest_key": manifest_key,
+                    "covered_offset": covered_offset,
+                    "barrier_offset": barrier_offset,
+                    "stage_binding": stage_binding,
+                    "post_stage_binding": binding,
+                }))
+                .expect("encode post-stage driver state"),
+            )
+            .expect("persist post-stage control binding");
+            binding
+        }
+    };
     let markers = control_request(
         runtime,
         tenant,
@@ -1423,7 +1458,7 @@ async fn drive_live_control_split(
         &split,
         Operation::InheritMarkers {
             journal_revision,
-            journal_digest,
+            journal_digest: journal_digest.clone(),
         },
     )
     .await;
@@ -1431,7 +1466,6 @@ async fn drive_live_control_split(
         matches!(markers, RangeControlResp::Markers { .. }),
         "markers: {markers:?}"
     );
-    let (journal_revision, journal_digest) = control_binding(bootstrap, tenant, operation_id).await;
     let prologue = control_request(
         runtime,
         tenant,
@@ -2626,7 +2660,7 @@ async fn hosted_range_compute_forwards_dml_and_grants_timestamps_over_real_tcp()
             .expect("range RPC response");
         assert!(matches!(
             response,
-            crabka_gres_ranges::RangeResponse::Sql { .. }
+            crabka_gres_ranges::RangeResponse::SqlResults { .. }
         ));
     }
 

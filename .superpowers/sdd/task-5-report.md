@@ -1,6 +1,49 @@
 # G9 Task 5 report
 
-Status: BLOCKED
+Status: DONE
+
+## Final completion after clean rebase (2026-07-13)
+
+The prior blockers are resolved on the rebased branch. Production SQL now preserves hash bucket
+identity through writes, timestamp metadata, transport, recovery, filtered restore, marker
+inheritance, registry activation, and cursor termination. The external process harness runs a real
+populated hash split at bucket 8 and emits strict schema-v3 evidence for every crash point.
+
+The final debugging pass also repaired merge-era and restart regressions exposed only by the broad
+serial suite:
+
+- stale predecessor timestamp descriptors are rehomed through the active map while active
+  participant identities remain authoritative;
+- hash scan terminals use logical rowids instead of the sparse bucket-prefixed physical integer;
+- rN-only computes start without advertising structural control that cannot durably receipt via a
+  local r0 engine;
+- already-materialized successor folds carry a replay seed into canonical writer activation;
+- irreversible prologue recovery is proved from durable topology-activation receipts before older
+  control steps are skipped;
+- the raw-KV test runtime supplies an explicit snapshot-derived identity table mapping;
+- nullable hash shard keys receive a deterministic bucket;
+- distributed explicit transactions continue to acquire the single r0-hosted lease; and
+- exact authenticated control-step bindings are persisted by the crash driver for replay.
+
+Fresh final verification:
+
+- authoritative hash crash matrix: 19/19 cases passed (11 source restore, 2 publication,
+  6 retirement/resume);
+- `validate-gres-split-crash-evidence.py --self-test`: passed;
+- schema-v3 full-matrix validation under `target/g9-hash-split-crash`: passed;
+- `crabka-pgexec`: 350 library tests and all integration targets passed serially;
+- `crabka-gres-substrate`: 131 library tests and all integration targets passed serially;
+- `crabka-gres`: 87 library tests, 21 runtime tests, 12 topology nemesis tests, and 27 topology
+  crash-contract tests passed serially;
+- `crabka-gres-ranges`: 179 library tests and all integration targets passed, with the one
+  initially stale explicit-gate fixture corrected and its real multiprocess lease/expiry test
+  rerun green;
+- `cargo check --workspace --all-targets`: passed (warnings only);
+- `git diff --check`: passed.
+
+No commit, staging operation, or push was performed. The protected
+`crates/gres-ranges/src/control.rs` remains byte-identical at SHA-256
+`2c0431bcf5edc5f54e5b8d9e1abd0be031ecf1d834e98169600ea1547395ce05`.
 
 ## Resume after timestamp wire prerequisite (`809e29a8`)
 
@@ -136,3 +179,76 @@ Therefore a production bucket midpoint correctly has no real bucket-prefixed SQL
 The strict midpoint test could not reach execution on HEAD `42ee28d4`: compiling `crabka-gres-ranges` fails with eight `E0063` errors because the new mandatory `bucket` field on `TimestampTxnOperation`/`TimestampWrite` was not propagated through forwarding and tenant construction (`forward.rs:305,662,776,861,1808,3547`; `tenant.rs:4239,4315`). The transport schema also still omits bucket from both `WireTimestampWrite` and `WireTimestampOperation` (`transport.rs:534-539,588-593`), so merely adding `bucket: None` to compile would silently erase hash identity across remote prewrite/recovery—the exact restart/intent invariant this task must prove.
 
 Accordingly the claimed physical prerequisite is not a compiling cross-crate vertical slice, and no honest external process gate can be built or run on this HEAD. Completion first requires versioning and propagating bucket identity through wire prewrite/resolve/recover operations and every conversion, with bucket-zero roundtrip tests, then rerunning the midpoint RED. The experimental runtime edit was removed and `control.rs` remains the sole unstaged delta. Status is `BLOCKED` on the incomplete prerequisite.
+
+## Recovery-availability diagnostic after rebase (2026-07-13)
+
+Status: BLOCKED; no commit created.
+
+### Root cause and evidence
+
+The focused hash `InitiatedBeforeRunningCas` run reached journal `Completed` but measured a
+33,849 ms acknowledgement gap against the unchanged 25,000 ms bound. The gap ran from
+05:50:12.442780 to 05:50:46.293157; activation completed at approximately 05:50:43.832.
+Changing SQL INSERT/recovery timeouts did not change this interval.
+
+Read-only tracing found that activation synchronously calls
+`recover_durable_timestamp_transactions`. It scans every historical primary descriptor and
+replays every participant. Committed participant identity sidecars under `meta/ts_intent/` were
+never deleted, so each hash workload commit remained permanently discoverable as outstanding
+recovery work. This explains why the descriptor-heavy hash workload accumulates activation work.
+
+The correction is deliberately narrow:
+
+- every terminal participant resolution deletes its identity sidecar in the same committer batch
+  as the row state, recovered global-index operations, and scan-terminal operations;
+- pending descriptors remain recovery work;
+- terminal hosted participants are replayed only while a matching durable identity sidecar exists;
+- remote participants remain conservative and are always replayed because local discovery cannot
+  prove their settlement.
+
+Absence of the identity is therefore a safe completion proof: physical row resolution,
+global-index settlement, scan-terminal advancement, and identity deletion share one atomic commit.
+An immediate idempotent replay remains accepted through `write_is_resolved_to`.
+
+### RED/GREEN
+
+RED command:
+
+`cargo test -p crabka-pgexec --test transactions committed_descriptor_recovery_resolves_put_delete_and_global_index_intents -- --exact --nocapture`
+
+Result before the fix: 1 failed, 37 filtered; the new assertion failed because
+`durable_timestamp_intent_identities()` was non-empty after committed recovery.
+
+GREEN result after the fix: 1 passed, 0 failed, 37 filtered, finished in 0.02 s. The test also
+performs a second idempotent recovery after the sidecar is absent and rechecks row/delete/global
+index visibility.
+
+A complementary `crabka-gres-ranges` unit test pins the selection rule for settled terminal,
+outstanding terminal, and pending descriptors. Its crate build is blocked before reaching the test
+by unrelated current-HEAD compiler errors:
+
+- `crates/metadata/src/image.rs:1161`: mismatched closing delimiter;
+- `crates/client-core/src/fetch.rs`: missing `IsolatedFetch` and stale call shape;
+- `crates/log/src/log.rs:323`: `Log` has no `log_start_override` field.
+
+Because those errors also prevent rebuilding the focused process test, the warm live hash case and
+schema-v3 evidence validator were not run. The 25 s availability bound and 240 s wrapper deadline
+were not changed.
+
+### Intentional files
+
+- `crates/pgexec/src/timestamp_txn.rs`
+- `crates/pgexec/tests/transactions.rs`
+- `crates/gres-ranges/src/tenant.rs`
+
+The three files were rustfmt-formatted directly and `git diff --check` is clean. The protected
+`crates/gres-ranges/src/control.rs` remains SHA-256
+`2c0431bcf5edc5f54e5b8d9e1abd0be031ecf1d834e98169600ea1547395ce05` with numstat 14/7.
+`Cargo.lock` regeneration from the rebase's manifest/lock mismatch was restored and is not part of
+this change.
+
+### Concern
+
+The local atomicity and idempotence regression is green, but the recovery-selection test and the
+required live availability/evidence gates cannot be claimed until the unrelated rebase compiler
+breakage is repaired. Per instruction, no commit was made.

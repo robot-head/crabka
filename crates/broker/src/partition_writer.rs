@@ -704,13 +704,13 @@ mod tests {
 
     macro_rules! run_writer {
         ($topic:expr, $partition:expr, $log:expr, $log_dir:expr, $rx:expr,
-         $append:expr, $replica:expr, $hw:expr, $status:expr, $producer:expr $(,)?) => {
+         $append:expr, $replica:expr, $hw:expr, $status:expr, $producer:expr, $wal:expr $(,)?) => {
             run(
                 ($topic, $partition),
                 ($log, $log_dir),
                 $rx,
                 ($append, $replica, $hw),
-                ($status, $producer),
+                ($status, $producer, $wal),
             )
         };
     }

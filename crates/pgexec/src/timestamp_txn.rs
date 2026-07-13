@@ -1618,7 +1618,7 @@ fn resolve_ops_idempotent(
                 decision,
                 write,
             )?);
-            if decision == TimestampTxnDecision::Aborted {
+            if decision != TimestampTxnDecision::Pending {
                 ops.push(crabka_pgkv::WriteOp::Delete {
                     key: timestamp_intent_identity_key(write, identity.start_ts),
                 });
@@ -1665,6 +1665,45 @@ fn write_is_resolved_to(
         }
     };
     Ok(version.start_ts == start_ts.get() && version.state == expected_state)
+}
+
+pub(crate) fn timestamp_operations_are_resolved(
+    kv: &dyn crabka_pgkv::Kv,
+    range_id: u32,
+    identity: TimestampTxnIdentity,
+    decision: PrimaryTxnDecision,
+    operations: &[TimestampTxnOperation],
+) -> Result<bool, TimestampTxnError> {
+    let decision = match decision {
+        PrimaryTxnDecision::Pending => return Ok(false),
+        PrimaryTxnDecision::Aborted => TimestampTxnDecision::Aborted,
+        PrimaryTxnDecision::Committed(commit_ts) => TimestampTxnDecision::Committed(commit_ts),
+    };
+    let mut found = false;
+    for operation in operations
+        .iter()
+        .filter(|operation| operation.range_id == range_id)
+    {
+        found = true;
+        let write = TimestampWrite {
+            table_id: operation.table_id,
+            bucket: operation.bucket,
+            rowid: operation.rowid,
+            row: Vec::new(),
+            delete: operation.delete,
+            global_index_intents: Vec::new(),
+        };
+        let row_decision = match decision {
+            TimestampTxnDecision::Committed(commit_ts) if operation.delete => {
+                TimestampTxnDecision::Deleted(commit_ts)
+            }
+            other => other,
+        };
+        if !write_is_resolved_to(kv, identity.start_ts, row_decision, &write)? {
+            return Ok(false);
+        }
+    }
+    Ok(found)
 }
 
 fn resolve_ops_idempotent_for_write(
@@ -1937,17 +1976,41 @@ pub(crate) fn local_intent_matches_descriptor(
     };
     if start_ts != descriptor.start_ts.get()
         || global_xid != descriptor.global_xid
-        || !descriptor.prepared.contains(&range_id)
-        || !descriptor.operations.iter().any(|operation| {
+        || !local_operation_matches_descriptor(descriptor, range_id, table_id, bucket, rowid)
+    {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+pub(crate) fn local_operation_matches_descriptor(
+    descriptor: &TimestampTxnDescriptor,
+    range_id: u32,
+    table_id: u32,
+    bucket: Option<u32>,
+    rowid: u64,
+) -> bool {
+    descriptor.prepared.contains(&range_id)
+        && descriptor.operations.iter().any(|operation| {
             operation.range_id == range_id
                 && operation.table_id == table_id
                 && operation.bucket == bucket
                 && operation.rowid == rowid
         })
-    {
-        return Ok(false);
-    }
-    Ok(true)
+}
+
+pub(crate) fn local_terminal_operation_matches_descriptor(
+    descriptor: &TimestampTxnDescriptor,
+    table_id: u32,
+    bucket: Option<u32>,
+    rowid: u64,
+) -> bool {
+    descriptor.operations.iter().any(|operation| {
+        descriptor.prepared.contains(&operation.range_id)
+            && operation.table_id == table_id
+            && operation.bucket == bucket
+            && operation.rowid == rowid
+    })
 }
 
 /// Build prewrite intent operations, failing before any write if the row has a
@@ -2470,7 +2533,7 @@ fn ensure_prewrite_can_win(
     Ok(())
 }
 
-fn map_ts_error(error: TimestampTxnError) -> ExecError {
+pub(crate) fn map_ts_error(error: TimestampTxnError) -> ExecError {
     match error {
         TimestampTxnError::WriteConflict { .. } => ExecError::SerializationFailure,
         other => ExecError::Unsupported(other.to_string()),

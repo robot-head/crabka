@@ -1966,11 +1966,7 @@ fn hash_bucket_for_row(table: &Table, row: &[Datum]) -> Result<Option<u32>, Exec
         Datum::Int8(value) => value.to_be_bytes().to_vec(),
         Datum::Text(value) => value.as_bytes().to_vec(),
         Datum::Bytea(value) => value.clone(),
-        Datum::Null => {
-            return Err(ExecError::Unsupported(
-                "hash shard key must not be NULL".into(),
-            ));
-        }
+        Datum::Null => Vec::new(),
         _ => {
             return Err(ExecError::Unsupported(
                 "hash shard key type is not supported".into(),
@@ -2435,6 +2431,11 @@ pub(crate) fn scan_ts_live_interval(
                 )?,
                 None => false,
             };
+            let descriptor_operation = descriptor.as_ref().is_some_and(|descriptor| {
+                crate::timestamp_txn::local_terminal_operation_matches_descriptor(
+                    descriptor, table.id, bucket, rowid,
+                )
+            });
             let primary_decision = descriptor.as_ref().map(|descriptor| descriptor.decision);
             let candidate = match (version.state, primary_decision, verified_distributed_intent) {
                 (
@@ -2453,16 +2454,16 @@ pub(crate) fn scan_ts_live_interval(
                 (
                     crabka_pgmvcc::version::TsVersionState::Committed { commit_ts },
                     Some(PrimaryTxnDecision::Committed(primary_commit_ts)),
-                    true,
+                    _,
                 ) if commit_ts == primary_commit_ts.get() && commit_ts <= read_ts.get() => {
-                    Some((commit_ts, Some(version.row)))
+                    descriptor_operation.then_some((commit_ts, Some(version.row)))
                 }
                 (
                     crabka_pgmvcc::version::TsVersionState::Deleted { commit_ts },
                     Some(PrimaryTxnDecision::Committed(primary_commit_ts)),
-                    true,
+                    _,
                 ) if commit_ts == primary_commit_ts.get() && commit_ts <= read_ts.get() => {
-                    Some((commit_ts, None))
+                    descriptor_operation.then_some((commit_ts, None))
                 }
                 // Legacy/single-range timestamp versions have no descriptor.
                 (crabka_pgmvcc::version::TsVersionState::Committed { commit_ts }, None, _)

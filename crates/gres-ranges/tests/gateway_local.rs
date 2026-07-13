@@ -1271,14 +1271,22 @@ async fn remote_extended_statement_participates_in_cross_range_commit() {
             .kv_handle(),
     );
     let remote_address = spawn_tls(
-        Arc::new(HostedRangeService::new(BTreeMap::from([(
-            RangeId::new(1),
-            remote.clone_handle(),
-        )]))),
+        Arc::new(HostedRangeService::new(BTreeMap::from([
+            (
+                RangeId::COORDINATOR,
+                gateway
+                    .hosted_range_engines()
+                    .get(&RangeId::COORDINATOR)
+                    .expect("gateway range 0")
+                    .clone_handle(),
+            ),
+            (RangeId::new(1), remote.clone_handle()),
+        ]))),
         fixture.server,
     )
     .await;
     let mut live_record = record.clone();
+    live_record.ranges[0].endpoint = remote_address.to_string();
     live_record.ranges[1].endpoint = remote_address.to_string();
     registry
         .refresh_from_tenant_record(&live_record)

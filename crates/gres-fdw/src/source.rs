@@ -8,7 +8,9 @@
 //!   bounds)` → [`FetchPlan`]; it is unit-tested independently of any broker.
 
 use crabka_client_admin::AdminClient;
-use crabka_client_core::{Connection, FetchedHeader, fetch_partition_with_isolation};
+use crabka_client_core::{
+    Connection, FetchedHeader, IsolatedFetch, fetch_partition_with_isolation,
+};
 use crabka_pgexec::foreign::ScanBounds;
 use crabka_protocol::{
     owned::list_offsets_request::{ListOffsetsPartition, ListOffsetsRequest, ListOffsetsTopic},
@@ -327,13 +329,15 @@ pub async fn scan_topic(
 
             let fetched = fetch_partition_with_isolation(
                 &conn,
-                topic,
-                topic_uuid,
-                partition,
-                next_offset,
-                MAX_WAIT_MS,
-                PARTITION_MAX_BYTES,
-                READ_COMMITTED,
+                IsolatedFetch {
+                    topic,
+                    topic_id: topic_uuid,
+                    partition,
+                    fetch_offset: next_offset,
+                    max_wait_ms: MAX_WAIT_MS,
+                    partition_max_bytes: PARTITION_MAX_BYTES,
+                    isolation_level: READ_COMMITTED,
+                },
             )
             .await
             .map_err(|e| {

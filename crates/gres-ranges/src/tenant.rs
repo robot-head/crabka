@@ -423,11 +423,15 @@ pub fn in_doubt_markers_for_engine(
             let Some(table_id) = routing_by_physical.get(&operation.table_id).copied() else {
                 continue;
             };
-            let key = RangeKey::new(table_id, operation.rowid);
+            let key = match operation.bucket {
+                Some(bucket) => RangeKey::hash(table_id, bucket, operation.rowid),
+                None => RangeKey::new(table_id, operation.rowid),
+            };
             if key >= interval_start && interval_end.is_none_or(|end| key < end) {
                 markers.push(crate::InDoubtMarker {
                     transaction_id: descriptor.start_ts.get(),
                     key,
+                    hash_bucket: operation.bucket,
                 });
             }
         }
@@ -553,6 +557,7 @@ impl MultiRangeTenant {
         if config.recover_timestamps_on_start {
             recover_durable_timestamp_transactions(
                 &engines,
+                &config.range_map,
                 config
                     .range_registry
                     .clone()
@@ -905,6 +910,7 @@ impl MultiRangeTenant {
                 )));
             recover_durable_timestamp_transactions(
                 &engines,
+                &state.target_map,
                 self.inner.timestamp_primary_remote.clone(),
             )
             .map_err(|error| {
@@ -1195,8 +1201,77 @@ impl MultiRangeTenant {
 /// Settle every primary descriptor recovered from hosted ranges before serving.
 /// A pending descriptor is abort-won under its primary-range descriptor lock; a durable
 /// commit is physically replayed with the operations stored in that descriptor.
+fn hosted_participant_requires_recovery(
+    descriptor: &crabka_pgexec::TimestampTxnDescriptor,
+    identity: crabka_pgexec::TimestampTxnIdentity,
+    participant: RangeId,
+    outstanding: &BTreeSet<crabka_pgexec::DurableTimestampIntentIdentity>,
+) -> Result<bool, ExecError> {
+    if descriptor.decision == crabka_pgexec::PrimaryTxnDecision::Pending
+        || outstanding.contains(&crabka_pgexec::DurableTimestampIntentIdentity {
+            identity,
+            participant_range: participant.as_u32(),
+        })
+    {
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+fn route_timestamp_descriptor_to_active_map(
+    mut descriptor: crabka_pgexec::TimestampTxnDescriptor,
+    range_map: &RangeMap,
+) -> Result<crabka_pgexec::TimestampTxnDescriptor, crate::MapValidationError> {
+    let active_ranges = range_map
+        .ranges()
+        .iter()
+        .map(|range| range.range_id.as_u32())
+        .collect::<BTreeSet<_>>();
+    let original_prepared = descriptor.prepared.iter().copied().collect::<BTreeSet<_>>();
+    let mut participants = descriptor
+        .participants
+        .iter()
+        .copied()
+        .filter(|range| active_ranges.contains(range))
+        .collect::<BTreeSet<_>>();
+    let mut prepared = descriptor
+        .prepared
+        .iter()
+        .copied()
+        .filter(|range| active_ranges.contains(range))
+        .collect::<BTreeSet<_>>();
+    for operation in &mut descriptor.operations {
+        let source_range = operation.range_id;
+        if !active_ranges.contains(&source_range) {
+            let route = operation.bucket.map_or_else(
+                || {
+                    range_map
+                        .range_for_key(TableId::new(u64::from(operation.table_id)), operation.rowid)
+                },
+                |bucket| {
+                    range_map.range_for_hash_bucket(
+                        TableId::new(u64::from(operation.table_id)),
+                        bucket,
+                        operation.rowid,
+                    )
+                },
+            )?;
+            operation.range_id = route.range_id.as_u32();
+        }
+        participants.insert(operation.range_id);
+        if original_prepared.contains(&source_range) {
+            prepared.insert(operation.range_id);
+        }
+    }
+    descriptor.participants = participants.into_iter().collect();
+    descriptor.prepared = prepared.into_iter().collect();
+    descriptor.operations.sort_unstable();
+    Ok(descriptor)
+}
+
 fn recover_durable_timestamp_transactions(
     engines: &BTreeMap<RangeId, SqlEngine>,
+    range_map: &RangeMap,
     remote: Option<(RangeRegistry, FramedTcpClient)>,
 ) -> Result<(), TenantError> {
     let mut descriptors = Vec::new();
@@ -1205,8 +1280,18 @@ fn recover_durable_timestamp_transactions(
             .timestamp_transaction_descriptors()
             .map_err(|error| TenantError::TimestampRecovery(format!("{error:?}")))?
         {
+            let descriptor = route_timestamp_descriptor_to_active_map(descriptor, range_map)
+                .map_err(|error| TenantError::TimestampRecovery(error.to_string()))?;
             descriptors.push((*primary_range, descriptor));
         }
+    }
+    let mut outstanding = BTreeSet::new();
+    for engine in engines.values() {
+        outstanding.extend(
+            engine
+                .durable_timestamp_intent_identities()
+                .map_err(|error| TenantError::TimestampRecovery(format!("{error:?}")))?,
+        );
     }
     std::thread::scope(|scope| {
         scope
@@ -1217,19 +1302,17 @@ fn recover_durable_timestamp_transactions(
                     .map_err(|error| TenantError::TimestampRecovery(error.to_string()))?
                     .block_on(async {
                         for (primary_range, descriptor) in descriptors {
-                            let primary = engines.get(&primary_range).expect("hosted primary");
-                            let decision = primary
-                                .recover_timestamp_transaction(descriptor.start_ts)
-                                .await
-                                .map_err(|error| {
-                                    TenantError::TimestampRecovery(format!("{error:?}"))
-                                })?;
-                            for range_id in descriptor.participants {
+                            let identity = crabka_pgexec::TimestampTxnIdentity {
+                                start_ts: descriptor.start_ts,
+                                global_xid: descriptor.global_xid,
+                                primary_range: primary_range.as_u32(),
+                            };
+                            let mut needs_recovery = false;
+                            for &range_id in &descriptor.participants {
                                 let range_id = RangeId::new(range_id);
-                                let identity = crabka_pgexec::TimestampTxnIdentity {
-                                    start_ts: descriptor.start_ts,
-                                    global_xid: descriptor.global_xid,
-                                    primary_range: primary_range.as_u32(),
+                                let Some(participant) = engines.get(&range_id) else {
+                                    needs_recovery = true;
+                                    break;
                                 };
                                 let operations = descriptor
                                     .operations
@@ -1237,6 +1320,70 @@ fn recover_durable_timestamp_transactions(
                                     .copied()
                                     .filter(|operation| operation.range_id == range_id.as_u32())
                                     .collect::<Vec<_>>();
+                                if hosted_participant_requires_recovery(
+                                    &descriptor,
+                                    identity,
+                                    range_id,
+                                    &outstanding,
+                                )
+                                .map_err(|error| {
+                                    TenantError::TimestampRecovery(format!("{error:?}"))
+                                })? || !participant
+                                    .timestamp_transaction_operations_are_resolved(
+                                        range_id.as_u32(),
+                                        identity,
+                                        descriptor.decision,
+                                        &operations,
+                                    )
+                                    .map_err(|error| {
+                                        TenantError::TimestampRecovery(format!("{error:?}"))
+                                    })?
+                                {
+                                    needs_recovery = true;
+                                    break;
+                                }
+                            }
+                            if !needs_recovery {
+                                continue;
+                            }
+                            let primary = engines.get(&primary_range).expect("hosted primary");
+                            let decision = primary
+                                .recover_timestamp_transaction(descriptor.start_ts)
+                                .await
+                                .map_err(|error| {
+                                    TenantError::TimestampRecovery(format!("{error:?}"))
+                                })?;
+                            for &range_id in &descriptor.participants {
+                                let range_id = RangeId::new(range_id);
+                                let operations = descriptor
+                                    .operations
+                                    .iter()
+                                    .copied()
+                                    .filter(|operation| operation.range_id == range_id.as_u32())
+                                    .collect::<Vec<_>>();
+                                if let Some(participant) = engines.get(&range_id)
+                                    && !hosted_participant_requires_recovery(
+                                        &descriptor,
+                                        identity,
+                                        range_id,
+                                        &outstanding,
+                                    )
+                                    .map_err(|error| {
+                                        TenantError::TimestampRecovery(format!("{error:?}"))
+                                    })?
+                                    && participant
+                                        .timestamp_transaction_operations_are_resolved(
+                                            range_id.as_u32(),
+                                            identity,
+                                            descriptor.decision,
+                                            &operations,
+                                        )
+                                        .map_err(|error| {
+                                            TenantError::TimestampRecovery(format!("{error:?}"))
+                                        })?
+                                {
+                                    continue;
+                                }
                                 let resolve_result = if let Some(participant) =
                                     engines.get(&range_id)
                                 {
@@ -5971,6 +6118,136 @@ mod tests {
     use super::*;
 
     #[test]
+    fn timestamp_recovery_rehomes_predecessor_operations_by_active_hash_ownership() {
+        let split_at = RangeKey::hash(TableId::new(52), 2, 0);
+        let right_at = RangeKey::hash(TableId::new(52), 8, 0);
+        let range_map = RangeMap::new(
+            tenant(),
+            MapEpoch::new(9),
+            vec![
+                RangeSpec::for_interval(RangeId::new(0), RangeKey::MIN, Some(split_at)),
+                RangeSpec::for_interval(RangeId::new(2), split_at, Some(right_at)),
+                RangeSpec::for_interval(RangeId::new(3), right_at, None),
+            ],
+        )
+        .expect("post-split map");
+        let start_ts = crabka_pgexec::TimestampTransactionId::new(10).expect("start timestamp");
+        let mut descriptor = crabka_pgexec::TimestampTxnDescriptor::begun(start_ts, 7, vec![0, 1]);
+        descriptor.prepared = vec![0, 1];
+        descriptor.operations = vec![
+            crabka_pgexec::TimestampTxnOperation {
+                range_id: 0,
+                table_id: 52,
+                bucket: Some(1),
+                rowid: 1,
+                delete: false,
+            },
+            crabka_pgexec::TimestampTxnOperation {
+                range_id: 1,
+                table_id: 52,
+                bucket: Some(2),
+                rowid: 2,
+                delete: false,
+            },
+            crabka_pgexec::TimestampTxnOperation {
+                range_id: 1,
+                table_id: 52,
+                bucket: Some(8),
+                rowid: 3,
+                delete: true,
+            },
+        ];
+
+        let routed = route_timestamp_descriptor_to_active_map(descriptor, &range_map)
+            .expect("route recovered descriptor");
+
+        assert_eq!(routed.participants, vec![0, 2, 3]);
+        assert_eq!(routed.prepared, vec![0, 2, 3]);
+        assert_eq!(
+            routed
+                .operations
+                .iter()
+                .map(|operation| operation.range_id)
+                .collect::<Vec<_>>(),
+            vec![0, 2, 3]
+        );
+    }
+
+    #[test]
+    fn timestamp_recovery_preserves_an_active_participant_despite_physical_table_identity() {
+        let range_map = MultiRangeTenantConfig::from_boundaries(tenant(), "0:0,0:50")
+            .expect("active map")
+            .range_map;
+        let start_ts = crabka_pgexec::TimestampTransactionId::new(10).expect("start timestamp");
+        let mut descriptor = crabka_pgexec::TimestampTxnDescriptor::begun(start_ts, 7, vec![0]);
+        descriptor.prepared = vec![0];
+        descriptor.operations = vec![crabka_pgexec::TimestampTxnOperation {
+            range_id: 0,
+            table_id: 1,
+            bucket: None,
+            rowid: 60,
+            delete: false,
+        }];
+
+        let routed = route_timestamp_descriptor_to_active_map(descriptor, &range_map)
+            .expect("preserve active participant");
+
+        assert_eq!(routed.participants, vec![0]);
+        assert_eq!(routed.prepared, vec![0]);
+        assert_eq!(routed.operations[0].range_id, 0);
+    }
+
+    #[test]
+    fn settled_terminal_descriptor_is_not_replayed_on_a_hosted_participant() {
+        let start_ts = crabka_pgexec::TimestampTransactionId::new(10).expect("start timestamp");
+        let commit_ts =
+            crabka_pgexec::CommitTimestamp::after_start(start_ts, 20).expect("commit timestamp");
+        let mut descriptor = crabka_pgexec::TimestampTxnDescriptor::begun(start_ts, 7, vec![1]);
+        descriptor
+            .decide(crabka_pgexec::PrimaryTxnDecision::Committed(commit_ts))
+            .expect("terminal descriptor");
+        let identity = crabka_pgexec::TimestampTxnIdentity {
+            start_ts,
+            global_xid: 7,
+            primary_range: 0,
+        };
+        let outstanding = BTreeSet::from([crabka_pgexec::DurableTimestampIntentIdentity {
+            identity,
+            participant_range: 1,
+        }]);
+
+        assert!(
+            !hosted_participant_requires_recovery(
+                &descriptor,
+                identity,
+                RangeId::new(1),
+                &BTreeSet::new(),
+            )
+            .unwrap()
+        );
+        assert!(
+            hosted_participant_requires_recovery(
+                &descriptor,
+                identity,
+                RangeId::new(1),
+                &outstanding,
+            )
+            .unwrap()
+        );
+
+        let pending = crabka_pgexec::TimestampTxnDescriptor::begun(start_ts, 7, vec![1]);
+        assert!(
+            hosted_participant_requires_recovery(
+                &pending,
+                identity,
+                RangeId::new(1),
+                &BTreeSet::new(),
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
     fn timestamp_primary_is_the_first_write_range_not_range_zero() {
         let writes = BTreeMap::from([
             (
@@ -6335,6 +6612,7 @@ mod tests {
             vec![crate::InDoubtMarker {
                 transaction_id: 700,
                 key: RangeKey::new(TableId::new(52), 1),
+                hash_bucket: None,
             }]
         );
     }
@@ -6736,15 +7014,20 @@ mod tests {
         let mut engines = BTreeMap::new();
         engines.insert(RangeId::COORDINATOR, coordinator);
         engines.insert(RangeId::new(1), participant);
+        let recovery_map = MultiRangeTenantConfig::from_boundaries(tenant(), "0,10")
+            .expect("recovery map")
+            .range_map;
 
-        recover_durable_timestamp_transactions(&engines, None).expect("first recovery");
+        recover_durable_timestamp_transactions(&engines, &recovery_map, None)
+            .expect("first recovery");
         assert!(
             participant_kv
                 .scan_prefix(b"\0\0\0\0index/ts_intent/")
                 .expect("scan global-index intents after first recovery")
                 .is_empty()
         );
-        recover_durable_timestamp_transactions(&engines, None).expect("repeat recovery");
+        recover_durable_timestamp_transactions(&engines, &recovery_map, None)
+            .expect("repeat recovery");
 
         let tuple_key =
             crabka_pgmvcc::version::version_key_ts(write.table_id, write.rowid, start_ts.get());
@@ -6823,7 +7106,10 @@ mod tests {
         let mut engines = BTreeMap::new();
         engines.insert(RangeId::new(1), primary);
         engines.insert(RangeId::new(2), secondary);
-        recover_durable_timestamp_transactions(&engines, None)
+        let recovery_map = MultiRangeTenantConfig::from_boundaries(tenant(), "0,10,10:12")
+            .expect("recovery map")
+            .range_map;
+        recover_durable_timestamp_transactions(&engines, &recovery_map, None)
             .expect("recovery aborts prewrite-before-ack orphan");
 
         let tuple_key = crabka_pgmvcc::version::version_key_ts(
@@ -6937,9 +7223,13 @@ mod tests {
         .expect("layout");
         let registry = RangeRegistry::from_tenant_record(&record).expect("registry");
         let engines = BTreeMap::from([(RangeId::new(2), secondary)]);
+        let recovery_map = MultiRangeTenantConfig::from_boundaries(tenant(), "0,10,10:2")
+            .expect("recovery map")
+            .range_map;
 
         recover_durable_timestamp_transactions(
             &engines,
+            &recovery_map,
             Some((registry, FramedTcpClient::default())),
         )
         .expect("rN-only recovery settles through authenticated primary RPC");

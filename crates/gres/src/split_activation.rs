@@ -2,19 +2,43 @@
 
 use std::{collections::BTreeMap, sync::Arc};
 
-use super::{
-    LiveMultiRangeTransfer, LiveMultirangeEngines, LiveRangeEngine, LiveRangeResources,
-    PrepareTopologyFault, SubstrateRuntimeConfig, TopologyActivationFault, committed_tail_sha256,
-    open_live_range_substrate_engine, open_substrate_range_cache, range_pause_lock_error,
-};
 use crabka_gres_ranges::{
-    RangeId, RangeMap, TableId,
+    RangeId, RangeKey, RangeMap, TableId,
     control::{
         RangeZeroTopologyActivationStore, TopologyActivationPhase, TopologyActivationReceipt,
         TopologyActivationReceiptStore,
     },
 };
 use crabka_pgexec::SqlEngine;
+
+fn registry_boundary(key: RangeKey) -> crabka_gres_control::RangeBoundary {
+    if key.bucket == 0 {
+        crabka_gres_control::RangeBoundary::new(key.table_id.as_u64(), key.rowid)
+    } else {
+        crabka_gres_control::RangeBoundary::hash(key.table_id.as_u64(), key.bucket, key.rowid)
+    }
+}
+
+fn registry_boundary_matches(
+    boundary: Option<crabka_gres_control::RangeBoundary>,
+    key: Option<RangeKey>,
+) -> bool {
+    match (boundary, key) {
+        (None, None) => true,
+        (Some(boundary), Some(key)) => {
+            boundary.table_id == key.table_id.as_u64()
+                && boundary.bucket.unwrap_or(0) == key.bucket
+                && boundary.rowid == key.rowid
+        }
+        _ => false,
+    }
+}
+
+use super::{
+    LiveMultiRangeTransfer, LiveMultirangeEngines, LiveRangeEngine, LiveRangeResources,
+    PrepareTopologyFault, SubstrateRuntimeConfig, TopologyActivationFault, committed_tail_sha256,
+    open_live_range_substrate_engine, open_substrate_range_cache, range_pause_lock_error,
+};
 
 static RECOVERY_CACHE_NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -93,13 +117,7 @@ impl ActivationDiscovery {
                 && map.ranges().iter().all(|spec| {
                     current.ranges.iter().any(|entry| {
                         entry.range_id == spec.range_id.as_u32()
-                            && entry.end_key
-                                == spec.end.map(|end| {
-                                    crabka_gres_control::RangeBoundary::new(
-                                        end.table_id.as_u64(),
-                                        end.rowid,
-                                    )
-                                })
+                            && registry_boundary_matches(entry.end_key, spec.end)
                     })
                 })
         };
@@ -160,9 +178,7 @@ impl ActivationDiscovery {
                         ))
                     })?
             };
-            entry.end_key = spec.end.map(|end| {
-                crabka_gres_control::RangeBoundary::new(end.table_id.as_u64(), end.rowid)
-            });
+            entry.end_key = spec.end.map(registry_boundary);
             target_layout.push(entry);
         }
         let mut target = current.clone();
@@ -340,6 +356,13 @@ impl LiveMultiRangeTransfer {
                 .collect(),
         )
         .with_timestamp_primary_aliases(self.timestamp_primary_aliases.clone());
+        let current_service = self.range_service.load();
+        if let Some(inspector) = current_service.durable_inspector_dispatcher() {
+            service = service.with_durable_inspector(inspector);
+        }
+        if let Some((registry, client)) = current_service.timestamp_primary_remote_dispatcher() {
+            service = service.with_timestamp_primary_remote(registry, client);
+        }
         if let Some(tso) = tso_rpc.clone() {
             service = service.with_tso(tso);
         }
@@ -2086,21 +2109,39 @@ fn routing_table_id(table: &str) -> TableId {
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::{
-        ActivationDiscovery, canonicalize_receipt_history, next_replacement_generation,
-        routing_table_id, should_defer_timestamp_recovery, validate_receipt_extension, validate_receipt_history,
-        validate_receipt_wal_identity,
-    };
     use crabka_gres_ranges::{
         MapEpoch, MoveRangeCommand, RangeId, RangeKey, RangeMap, RangeSpec, SplitCommand,
         SplitState, SuccessorDescriptor, TableId, TenantName,
         control::{ActivationTargetProgress, TopologyActivationPhase, TopologyActivationReceipt},
     };
 
+    use super::{
+        ActivationDiscovery, canonicalize_receipt_history, next_replacement_generation,
+        registry_boundary, registry_boundary_matches, routing_table_id,
+        should_defer_timestamp_recovery, validate_receipt_extension, validate_receipt_history,
+        validate_receipt_wal_identity,
+    };
+
     #[test]
     fn routing_id_matches_split_catalog_contract() {
         assert_eq!(routing_table_id("accounts42"), TableId::new(42));
         assert_eq!(routing_table_id("accounts"), TableId::ZERO);
+    }
+
+    #[test]
+    fn activation_registry_boundary_preserves_hash_bucket() {
+        assert_eq!(
+            registry_boundary(RangeKey::hash(TableId::new(50), 8, 0)),
+            crabka_gres_control::RangeBoundary::hash(50, 8, 0)
+        );
+        assert_eq!(
+            registry_boundary(RangeKey::new(TableId::new(51), 16)),
+            crabka_gres_control::RangeBoundary::new(51, 16)
+        );
+        assert!(registry_boundary_matches(
+            Some(crabka_gres_control::RangeBoundary::hash(50, 0, 0)),
+            Some(RangeKey::hash(TableId::new(50), 0, 0))
+        ));
     }
 
     #[test]

@@ -245,7 +245,7 @@ async fn sharded_timestamp_elle_history_survives_writer_kills_and_tso_fences() {
     let store = Arc::new(MemKv::default());
     let horizon = MemoryTsoHorizon::new(store, 4);
     let old_oracle =
-        TsoOracle::recover(horizon.clone(), horizon.clone(), 4, nonzero(8), 0).expect("old oracle");
+        TsoOracle::recover(horizon.clone(), horizon.clone(), 4, nonzero(1), 0).expect("old oracle");
     let old_lease = old_oracle.grant(nonzero(2)).await.expect("old lease");
     horizon.set_live_epoch(5).await;
     assert!(matches!(
