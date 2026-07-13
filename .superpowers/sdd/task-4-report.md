@@ -49,3 +49,39 @@ Pre-existing dirt in `.superpowers/sdd/progress.md` and `crates/gres-ranges/src/
 - Authoritative planner-enabled sharding gate: `./scripts/gres-sharded-conformance.sh` passed and wrote `target/gres-sharded-conformance-artifacts/sharded-conformance.json`. Its four legs passed: sharded visibility, multirange global visibility, pgexec global decisions, and pgexec sharded seams.
 
 Remaining required implementation gaps after continuation: GROUP BY owner partials/gateway merge and actual executor dispatch of the three join strategies. The join planner selection seam alone is insufficient to claim Task 4 complete.
+
+## GROUP BY completion
+
+Status: DONE_WITH_CONCERNS
+
+### RED/GREEN evidence
+
+- RED: `cargo test -p crabka-pgexec --test distributed_pushdown grouped_partial_count_merges_range_groups_in_deterministic_key_order --no-run` failed with `E0599`: no method named `grouped_by` on `PartialAggregateSpec` (exit 101).
+- RED: `cargo test -p crabka-pgexec --test distributed_pushdown sql_grouped_aggregates_request_partial_pushdown_and_match_full_scan -- --nocapture` ran the new SQL equivalence test and failed because no recorded scan contained `group_by == vec![2]` (exit 101).
+- GREEN: `cargo test -p crabka-pgexec --test distributed_pushdown grouped_ -- --nocapture` passed 3/3, including 64 generated datasets x COUNT/SUM/MIN/MAX/AVG-parts whole-value equivalence checks.
+- GREEN: `cargo test -p crabka-pgexec --test distributed_pushdown -- --nocapture` passed 38/38.
+- GREEN: `cargo test -p crabka-gres-ranges registry_range_scanner_merges_remote_grouped_avg_parts --lib -- --nocapture` passed 1/1.
+- GREEN: `cargo test -p crabka-gres-ranges loopback_transport_round_trips_scan_range_payload --lib -- --nocapture` passed 1/1.
+- GREEN: `cargo test -p crabka-pgexec --all-targets` passed all pgexec unit and integration targets (342 library tests plus every integration binary, including 38/38 distributed pushdown tests).
+- GREEN: `cargo test -p crabka-gres-ranges --all-targets -q` passed the 160 library tests and the next 21-test target, then failed in the unrelated process test described under concerns.
+- GREEN: `cargo check -p crabka-gres-ranges --all-targets` exited 0.
+- GREEN: `cargo fmt --all` and `git diff --check` exited 0; stable rustfmt emitted only the repository's existing nightly-option warnings.
+
+### Files and commits
+
+- Production/tests: `crates/pgexec/src/scanner.rs`, `crates/pgexec/src/plan_dist.rs`, `crates/pgexec/src/exec.rs`, `crates/pgexec/tests/distributed_pushdown.rs`, `crates/gres-ranges/src/transport.rs`, `crates/gres-ranges/src/forward.rs`.
+- Production/test commit: `239a6449 feat(gres): push grouped partial aggregates`.
+- This report is committed separately.
+
+### Semantics
+
+- `PartialAggregateSpec` and `WirePartialAggregateSpec` carry typed zero-based group-column indexes; the wire field uses `serde(default)` for backward-compatible scalar requests.
+- Each owner filters before grouping and returns rows shaped as `[group keys..., aggregate state...]`. COUNT/SUM/MIN/MAX use one state datum; AVG uses exact numeric sum plus checked int8 count.
+- The gateway coalesces equal keys across ranges, treats NULL keys as one group, validates partial row shapes, preserves scalar aggregate NULL/type behavior, and finalizes AVG only after global sum/count merge.
+- Empty grouped input returns zero rows. Deterministic ordering is ascending by group keys with NULL last. SQL pushdown is intentionally limited to group columns followed by one supported non-DISTINCT aggregate, with optional matching ascending `ORDER BY`; other grouped shapes retain the existing local path.
+- Randomized coverage compares partitioned pushdown to a single-range whole-value result for 64 datasets, four owner partitions, NULL keys/values, and all five aggregate functions.
+
+### Concerns
+
+- `cargo test -p crabka-gres-ranges --all-targets -q` and a direct rerun of `real_range_partition_aborts_transfer_and_heal_restores_2pc` fail during compute readiness with `range transfer is unavailable for r0: current range-zero receipt engine is unavailable`. The failure is in pre-existing/concurrent dirty files (`crates/gres-ranges/src/control.rs` and process/split surfaces), outside this GROUP BY slice; focused remote, transport, library, and compile gates pass.
+- `.superpowers/sdd/progress.md`, `crates/gres-ranges/src/control.rs`, and other concurrent dirty `gres` process/split files were not staged, reverted, or included in either GROUP BY commit.
