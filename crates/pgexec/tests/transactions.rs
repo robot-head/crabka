@@ -443,6 +443,22 @@ async fn committed_descriptor_recovery_resolves_put_delete_and_global_index_inte
         )
         .await
         .expect("recovery resolution");
+    assert!(
+        participant
+            .durable_timestamp_intent_identities()
+            .expect("settled intent identities")
+            .is_empty(),
+        "a terminal participant must not remain discoverable as recovery work"
+    );
+    participant
+        .timestamp_txn_participant(1)
+        .resolve_operations_with_primary(
+            identity,
+            TimestampTxnDecision::Committed(commit_ts),
+            &operations,
+        )
+        .await
+        .expect("idempotent recovery replay without identity sidecars");
     assert_eq!(
         crabka_pgexec::timestamp_txn::read_visible_ts_row(
             participant_kv.as_ref(),

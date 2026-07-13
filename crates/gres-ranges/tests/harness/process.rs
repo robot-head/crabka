@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use std::os::unix::process::CommandExt as _;
 use std::{
     collections::BTreeMap,
     fs::File,
@@ -6,8 +8,6 @@ use std::{
     process::Stdio,
     time::Duration,
 };
-#[cfg(unix)]
-use std::os::unix::process::CommandExt as _;
 
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
@@ -361,7 +361,10 @@ impl ProcessHarness {
             while process_group_exists(pid) && tokio::time::Instant::now() < deadline {
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }
-            assert!(!process_group_exists(pid), "compute process group r{range} reaped");
+            assert!(
+                !process_group_exists(pid),
+                "compute process group r{range} reaped"
+            );
         }
         let _ = tokio::time::timeout(Duration::from_secs(5), &mut node.log_task)
             .await
@@ -703,9 +706,7 @@ fn spawn_node(
         .kill_on_drop(true);
     #[cfg(unix)]
     command.as_std_mut().process_group(0);
-    let child = command
-        .spawn()
-        .expect("spawn gres child");
+    let child = command.spawn().expect("spawn gres child");
     let mut child = child;
     let stdout = child.stdout.take().expect("child stdout pipe");
     let (ready_tx, ready) = oneshot::channel();

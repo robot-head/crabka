@@ -277,8 +277,9 @@ pub async fn committed_fold_snapshot_live_at(
     }
     let wal = live_committed_reader(config, sample).await?;
     let fixed = FixedEndSampler(sample);
+    let checkpoint_namespace = config.checkpoint_namespace();
     committed_fold_snapshot(&FoldSnapshotRequest {
-        tenant: config.tenant.as_str(),
+        tenant: &checkpoint_namespace,
         generation: config.wal_generation,
         checkpoints: config
             .checkpoints

@@ -111,20 +111,26 @@ def rows(value: Any, located: bool, label: str) -> list[tuple[Any, ...]]:
     if result != sorted(result) or len(result) != len(set(result)): fail(f"{label}: rows must be sorted and unique")
     return result
 
-def marker_rows(value: Any, label: str) -> list[tuple[int, int, int]]:
+def marker_rows(value: Any, label: str) -> list[tuple[int, int, int | None, int]]:
     if not isinstance(value, list): fail(f"{label}: markers must be list")
     result = []
     for item in value:
-        item = exact_object(item, {"transaction_id", "table_id", "rowid"}, label)
+        if not isinstance(item, dict) or set(item) not in ({"transaction_id", "table_id", "rowid"}, {"transaction_id", "table_id", "bucket", "rowid"}): fail(f"{label}: unexpected marker fields")
         if any(type(item[key]) is not int or item[key] < 0 for key in item): fail(f"{label}: malformed marker")
-        result.append((item["transaction_id"], item["table_id"], item["rowid"]))
+        result.append((item["transaction_id"], item["table_id"], item.get("bucket"), item["rowid"]))
     if result != sorted(result) or len(result) != len(set(result)): fail(f"{label}: markers must be sorted and unique")
     return result
 
-def marker_digest(markers: list[tuple[int, int, int]]) -> str:
+def marker_digest(markers: list[tuple[int, ...]]) -> str:
     hasher = hashlib.sha256()
     for marker in markers:
-        for number in marker: hasher.update(struct.pack(">Q", number))
+        if len(marker) == 3:
+            transaction_id, table_id, rowid = marker; bucket = None
+        else:
+            transaction_id, table_id, bucket, rowid = marker
+        hasher.update(struct.pack(">Q", transaction_id)); hasher.update(struct.pack(">Q", table_id))
+        if bucket is not None: hasher.update(b"\1"); hasher.update(struct.pack(">I", bucket))
+        hasher.update(struct.pack(">Q", rowid))
     return hasher.hexdigest()
 
 def expected_predicate(case: str) -> dict[str, Any]:
@@ -157,7 +163,15 @@ def expected_predicate(case: str) -> dict[str, Any]:
     phase,receipt,sidecar,topic,deletes=target[case]
     return {"phase":phase,"receipt":receipt,"evidence":15,"layout":"target","sidecar":sidecar,"predecessor_topic_present":topic,"delete_count":deletes,"successors_serving":True}
 
-def validate_record_v2(r: dict[str, Any], family: str, case: str, source: str) -> None:
+def hash_owner(table_id: int, logical_id: int) -> int | None:
+    if table_id == 51:
+        return 3
+    if table_id != 50:
+        return None
+    bucket = hash_bucket(struct.pack(">i", logical_id), 16)
+    return 0 if bucket < 4 else 2 if bucket < 8 else 3
+
+def validate_record_v2(r: dict[str, Any], family: str, case: str, source: str, hash_mode: bool = False) -> None:
     if set(r) != KEYS: fail(f"{source}: schema keys differ: missing={sorted(KEYS-set(r))} extra={sorted(set(r)-KEYS)}")
     for key in INTS:
         if type(r[key]) is not int: fail(f"{source}: {key} must be integer")
@@ -189,7 +203,7 @@ def validate_record_v2(r: dict[str, Any], family: str, case: str, source: str) -
     ack_rows=sorted((event["table_id"],event["rowid"],event["seq"],event["checksum"]) for event in acknowledgements.values())
     if len(ack_rows)!=r["acknowledged_rows"] or recovered!=r["recovered_acknowledgements"] or computed_gap!=r["max_ack_gap_ms"]: fail(f"{source}: payload-derived summary mismatch")
     if not any(event["timestamp_ms"]<r["kill_ms"] for event in acknowledgements.values()) or not any(event["timestamp_ms"]>r["restart_ms"] for event in acknowledgements.values()): fail(f"{source}: pre-kill/post-restart ACK proof missing")
-    computed_r2=any(event["provenance"]=="workload" and event["timestamp_ms"]>r["publication_ms"] and event["table_id"]==50 and event["rowid"]>=16 for event in acknowledgements.values())
+    computed_r2=any(event["provenance"]=="workload" and event["timestamp_ms"]>r["publication_ms"] and event["table_id"]==50 and ((hash_mode and hash_owner(50,event["rowid"])==2) or (not hash_mode and event["rowid"]>=16)) for event in acknowledgements.values())
     computed_r3=any(event["provenance"]=="workload" and event["timestamp_ms"]>r["publication_ms"] and event["table_id"]==51 and event["rowid"]>=16 for event in acknowledgements.values())
     if computed_r2!=r["post_publication_r2_ack"] or computed_r3!=r["post_publication_r3_ack"] or not computed_r2 or not computed_r3: fail(f"{source}: post-publication stream proof mismatch")
 
@@ -208,7 +222,7 @@ def validate_record_v2(r: dict[str, Any], family: str, case: str, source: str) -
     if oracle != projected or oracle != sql or len(projected)!=len(set(projected)): fail(f"{source}: oracle/direct/SQL row equality failed")
     if len(oracle) != r["acknowledged_rows"] or not oracle: fail(f"{source}: acknowledged row count mismatch")
     for range_id, table, rowid, _seq, _checksum in direct:
-        owner = 0 if table == 50 and rowid < 10 else 2 if (table == 50 or table == 51 and rowid < 16) else 3 if table == 51 else None
+        owner = hash_owner(table,rowid) if hash_mode else 0 if table == 50 and rowid < 10 else 2 if (table == 50 or table == 51 and rowid < 16) else 3 if table == 51 else None
         if owner is None or range_id != owner: fail(f"{source}: physical row ownership mismatch")
 
     source_markers = marker_rows(r["source_markers"], "source markers")
@@ -265,7 +279,7 @@ def validate_record_v2(r: dict[str, Any], family: str, case: str, source: str) -
             if any(proof["response"].get("result") not in allowed for proof in group): fail(f"{source}: replay response kind differs")
         elif any(proof["response"].get("result")!=expected_kind for proof in group): fail(f"{source}: replay response kind differs")
     if not isinstance(marker_response, dict) or marker_response.get("digest") != r["marker_response_digest"]: fail(f"{source}: marker response identity missing")
-    wire = lambda items: [(item["transaction_id"], item["key"]["table_id"], item["key"]["rowid"]) for item in items]
+    wire = lambda items: [(item["transaction_id"], item["key"]["table_id"], item["key"].get("bucket"), item["key"]["rowid"]) for item in items]
     if wire(marker_response.get("markers", [])) != source_markers or wire(marker_response.get("left_markers", [])) != left or wire(marker_response.get("right_markers", [])) != right: fail(f"{source}: marker response partitions differ")
 
     predecessor = f"__gres_wal.{r['tenant_id']}.r1"
@@ -280,10 +294,11 @@ def validate_record_v2(r: dict[str, Any], family: str, case: str, source: str) -
     if r["operation_revision"] <= 0 or r["operation_attempts"] < 1 or r["tenant_record_version"] != r["source_record_version"] + 2 or r["retirement_source_generation"] != 0 or r["retirement_successor_generations"] != [[0, 0], [2, 1], [3, 1]]: fail(f"{source}: journal/tenant/retirement versions invalid")
     if r["completed_phase"]!="completed" or r["pre_kill_predicate"]!=expected_predicate(case): fail(f"{source}: completed/pre-kill state mismatch")
     if not (r["marker_response_digest"]==r["operation_marker_digest"]==r["retirement_marker_digest"]==terminal["marker_digest"]): fail(f"{source}: marker digest chain differs")
-    expected_layout=[{"range_id":0,"end_table_id":50,"end_rowid":10,"endpoint":r["coordinator_endpoint"],"wal_generation":0},{"range_id":2,"end_table_id":51,"end_rowid":16,"endpoint":r["left_endpoint"],"wal_generation":1},{"range_id":3,"end_table_id":None,"end_rowid":None,"endpoint":r["right_endpoint"],"wal_generation":1}]
+    expected_layout=([{"range_id":0,"end_table_id":50,"end_bucket":4,"end_rowid":0,"endpoint":r["coordinator_endpoint"],"wal_generation":0},{"range_id":2,"end_table_id":50,"end_bucket":8,"end_rowid":0,"endpoint":r["left_endpoint"],"wal_generation":1},{"range_id":3,"end_table_id":None,"end_rowid":None,"endpoint":r["right_endpoint"],"wal_generation":1}] if hash_mode else [{"range_id":0,"end_table_id":50,"end_rowid":10,"endpoint":r["coordinator_endpoint"],"wal_generation":0},{"range_id":2,"end_table_id":51,"end_rowid":16,"endpoint":r["left_endpoint"],"wal_generation":1},{"range_id":3,"end_table_id":None,"end_rowid":None,"endpoint":r["right_endpoint"],"wal_generation":1}])
     layout=[]
     for entry in r["terminal_layout"]:
-        entry=exact_object(entry,{"range_id","end_table_id","end_rowid","endpoint","wal_generation"},"terminal layout"); layout.append(entry)
+        keys=set(expected_layout[len(layout)])
+        entry=exact_object(entry,keys,"terminal layout"); layout.append(entry)
     if layout!=expected_layout: fail(f"{source}: terminal r0/r2/r3 layout differs")
 
     bound = BOUNDS[family]
@@ -293,12 +308,21 @@ def validate_record_v2(r: dict[str, Any], family: str, case: str, source: str) -
     expected_topics = sorted({f"__gres_wal.{r['tenant_id']}.r0", f"__gres_wal.{r['tenant_id']}.r2.g0000000001", f"__gres_wal.{r['tenant_id']}.r3.g0000000001", r["sentinel_topic"]})
     if not r["sentinel_topic"].startswith("g8-sentinel-") or r["topology_topics"] != expected_topics: fail(f"{source}: exact topology topics differ")
 
+def expected_hash_marker(case: str) -> tuple[int,int,int,int]:
+    late={"initiated_before_running_cas","checkpoint_receipt_before_journal_cas","checkpointed_after_journal_cas"}
+    return (1025,52,2,1026) if case in late else (1,52,2,2)
+
 def validate_hash_evidence(value: Any, record: dict[str, Any], source: str) -> None:
     evidence=exact_object(value,HASH_EVIDENCE_KEYS,"hash evidence")
+    if marker_rows(record["source_markers"], "hash source markers") != [expected_hash_marker(record["case"])]: fail(f"{source}: hash marker physical identity differs")
     algorithm=exact_object(evidence["algorithm"],{"name","offset_basis","prime","bucket_count"},"hash algorithm")
     if algorithm!={"name":"fnv1a64-int4-be","offset_basis":FNV_OFFSET,"prime":FNV_PRIME,"bucket_count":16}: fail(f"{source}: hash algorithm differs")
     boundary=exact_object(evidence["boundary"],{"table_id","bucket","rowid","request_bucket","receipt_bucket"},"hash boundary")
     if boundary!={"table_id":50,"bucket":8,"rowid":0,"request_bucket":8,"receipt_bucket":8}: fail(f"{source}: hash boundary differs")
+    layout=record["terminal_layout"]
+    if not isinstance(layout,list) or [entry.get("range_id") for entry in layout]!=[0,2,3]: fail(f"{source}: hash terminal range identities differ")
+    boundary_entries=[entry for entry in layout if entry.get("end_table_id")==50 and entry.get("end_bucket")==8 and entry.get("end_rowid")==0]
+    if len(boundary_entries)!=1 or [entry.get("wal_generation") for entry in layout]!=[0,1,1]: fail(f"{source}: hash terminal boundary/generations differ")
     corpus=[]
     for item in evidence["corpus"]:
         item=exact_object(item,{"logical_id","bytes_hex","bucket"},"hash corpus")
@@ -320,11 +344,16 @@ def validate_hash_evidence(value: Any, record: dict[str, Any], source: str) -> N
             decoded.append((snapshot["stage"],snapshot["range_id"],item["corpus"],summary))
     after=[summary for stage,_range,_corpus,summary in decoded if stage=="after" and summary["state"]=="committed"]
     if len({(row["table_id"],row["rowid"],row["version"]) for row in after})!=len(after): fail(f"{source}: raw hash rows are not unique")
+    latest={}
+    for stage,_range,corpus,row in decoded:
+        if stage!="after" or row["state"]!="committed": continue
+        key=(row["table_id"],row["rowid"])
+        if key not in latest or latest[key][1]["version"]<row["version"]: latest[key]=(corpus,row)
     folds=exact_object(evidence["folds"],{"left_corpus","right_corpus","raw_after_sha256","sql_sha256","ack_sha256"},"hash folds")
-    corpus_after=[summary for stage,_range,is_corpus,summary in decoded if stage=="after" and is_corpus and summary["table_id"]==50 and summary["state"]=="committed"]
+    corpus_after=[summary for corpus,summary in latest.values() if corpus and summary["table_id"]==50]
     left=sum(row["bucket"]<8 for row in corpus_after); right=sum(row["bucket"]>=8 for row in corpus_after)
     if (left,right)!=(8,8) or (folds["left_corpus"],folds["right_corpus"])!=(8,8): fail(f"{source}: bucket-8 corpus fold differs")
-    raw_projection=sorted((row["table_id"],row["logical_id"],row["rowid"],row["seq"],row["checksum"]) for row in after if row["seq"] is not None)
+    raw_projection=sorted((row["table_id"],row["logical_id"],row["rowid"],row["seq"],row["checksum"]) for _corpus,row in latest.values() if row["seq"] is not None)
     sql=[]
     for item in evidence["sql_rows"]:
         item=exact_object(item,{"table_id","logical_id","rowid","seq","checksum"},"hash SQL row")
@@ -342,6 +371,7 @@ def validate_hash_evidence(value: Any, record: dict[str, Any], source: str) -> N
         summary=decode_txd2(item["raw_key_hex"],item["raw_value_hex"],"hash transaction")
         normalized={**summary,"operations":[list(operation) for operation in summary["operations"]]}
         if item["summary"]!=normalized: fail(f"{source}: raw transaction summary differs")
+        if summary["participants"]!=[0,1] or summary["prepared"]!=[0,1] or {operation[2] for operation in summary["operations"]}!={0,8} or len(summary["operations"])!=2: fail(f"{source}: hash transaction participant/bucket partition differs")
         decisions.append(summary["decision"])
     if sorted(decisions)!=["aborted","committed"] or "pending" in decisions: fail(f"{source}: terminal transaction decisions differ")
 
@@ -351,7 +381,7 @@ def validate_record(r: dict[str, Any], family: str, case: str, source: str) -> N
         validate_record_v2(r,family,case,source); return
     if r.get("schema_version")!=3 or set(r)!=KEYS|{"hash_evidence"}: fail(f"{source}: schema-v3 keys differ")
     base=copy.deepcopy(r); evidence=base.pop("hash_evidence"); base["schema_version"]=2
-    validate_record_v2(base,family,case,source)
+    validate_record_v2(base,family,case,source,hash_mode=True)
     validate_hash_evidence(evidence,r,source)
 
 def require_family(family: str) -> None:
@@ -425,6 +455,25 @@ def encode_txd2(start_ts:int,decision:str)->tuple[str,str,dict[str,Any]]:
 
 def synthetic_v3(family:str,case:str,index:int)->dict[str,Any]:
     result=synthetic(family,case,index); result["schema_version"]=3
+    transaction_id,table_id,bucket,rowid=expected_hash_marker(case)
+    marker={"transaction_id":transaction_id,"table_id":table_id,"bucket":bucket,"rowid":rowid}
+    wire={"transaction_id":transaction_id,"key":{"table_id":table_id,"bucket":bucket,"rowid":rowid}}
+    marker_hash=marker_digest([(transaction_id,table_id,bucket,rowid)])
+    result["source_markers"]=[marker]; result["left_markers"]=[]; result["right_markers"]=[marker]
+    result["marker_response_digest"]=marker_hash; result["operation_marker_digest"]=marker_hash; result["retirement_marker_digest"]=marker_hash
+    result["terminal_operation_evidence"]["marker_digest"]=marker_hash
+    marker_proof=next(item for item in result["authenticated_receipts"] if item["operation"]=="markers")
+    marker_proof["response"]={"result":"markers","markers":[wire],"left_markers":[],"right_markers":[wire],"digest":marker_hash}
+    marker_proof["response_sha256"]=digest(compact(marker_proof["response"]))
+    result["terminal_layout"]=[
+        {"range_id":0,"end_table_id":50,"end_bucket":4,"end_rowid":0,"endpoint":result["coordinator_endpoint"],"wal_generation":0},
+        {"range_id":2,"end_table_id":50,"end_bucket":8,"end_rowid":0,"endpoint":result["left_endpoint"],"wal_generation":1},
+        {"range_id":3,"end_table_id":None,"end_rowid":None,"endpoint":result["right_endpoint"],"wal_generation":1},
+    ]
+    scans={(range_id,table_id):[] for range_id in [0,2,3] for table_id in [50,51]}
+    for row in result["reopened_oracle_rows"]:
+        scans[(hash_owner(row["table_id"],row["rowid"]),row["table_id"])].append(copy.deepcopy(row))
+    result["direct_physical_rows"]=[{"range_id":range_id,"table_id":table_id,"rows":scans[(range_id,table_id)]} for range_id,table_id in [(0,50),(0,51),(2,50),(2,51),(3,50),(3,51)]]
     records=[]
     for logical_id in range(16):
         key,value,summary=encode_hash_row(50,logical_id,1000+logical_id,2000+logical_id,3000+logical_id,4000+logical_id)

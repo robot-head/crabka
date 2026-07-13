@@ -152,6 +152,18 @@ impl HostedRangeService {
         self.range_control.clone()
     }
 
+    /// Borrow the stable durable inspector while replacing the hosted-engine snapshot.
+    #[must_use]
+    pub fn durable_inspector_dispatcher(&self) -> Option<Arc<dyn DurableRecordInspector>> {
+        self.durable_inspector.clone()
+    }
+
+    /// Borrow remote timestamp-primary routing while replacing the hosted-engine snapshot.
+    #[must_use]
+    pub fn timestamp_primary_remote_dispatcher(&self) -> Option<(RangeRegistry, FramedTcpClient)> {
+        self.timestamp_primary_remote.clone()
+    }
+
     #[must_use]
     pub fn with_timestamp_primary_remote(
         mut self,
@@ -5834,11 +5846,9 @@ mod tests {
                 write.rowid,
                 start_ts.get(),
             ),
-            None => crabka_pgmvcc::version::version_key_ts(
-                write.table_id,
-                write.rowid,
-                start_ts.get(),
-            ),
+            None => {
+                crabka_pgmvcc::version::version_key_ts(write.table_id, write.rowid, start_ts.get())
+            }
         };
         let bytes = engine
             .kv_handle()

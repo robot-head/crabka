@@ -378,7 +378,8 @@ impl SplitHooks for RawKvSplitRuntime {
             .await
             .map_err(split_hook_error)?;
         let filter = CheckpointFilter::new(state.successor_after.start, state.successor_after.end)
-            .map_err(split_hook_error)?;
+            .map_err(split_hook_error)?
+            .with_physical_to_logical(raw_identity_table_mapping(predecessor.kv()?.as_ref())?);
         let tail =
             RestoreTail {
                 current_generation: predecessor.snapshot.snapshot().wal_generation,
@@ -533,6 +534,23 @@ fn parse_row_range_key(key_bytes: &[u8]) -> Result<RangeKey, SplitError> {
         SplitError::Hook("raw-KV split runtime rejects unsupported non-row key".into())
     })?;
     Ok(RangeKey::new(TableId::new(u64::from(table_id)), rowid))
+}
+
+fn raw_identity_table_mapping(
+    kv: &dyn SnapshotKv,
+) -> Result<BTreeMap<TableId, TableId>, SplitError> {
+    let mut snapshot = kv.snapshot().map_err(split_hook_error)?;
+    let mut mapping = BTreeMap::new();
+    while let Some((key_bytes, _)) = snapshot.next().map_err(split_hook_error)? {
+        let table_id = key::table_bucket_rowid_of(&key_bytes)
+            .map(|(table_id, _, _)| table_id)
+            .or_else(|| key::table_rowid_of(&key_bytes).map(|(table_id, _)| table_id));
+        if let Some(table_id) = table_id {
+            let table_id = TableId::new(u64::from(table_id));
+            mapping.insert(table_id, table_id);
+        }
+    }
+    Ok(mapping)
 }
 
 struct RawPrologue {

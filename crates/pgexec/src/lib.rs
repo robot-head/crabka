@@ -85,10 +85,10 @@ pub use scanner::{
 };
 pub use session::SqlSession;
 pub use timestamp_txn::{
-    CommitTimestamp, PrimaryTxnDecision, ReadTimestamp, TimestampOracle, TimestampOracleError,
-    TimestampTransactionId, TimestampTxnDecision, TimestampTxnDescriptor, TimestampTxnIdentity,
-    TimestampTxnOperation, TimestampTxnParticipant, TimestampWrite,
-    decode_timestamp_txn_descriptor_value, timestamp_txn_descriptor_op,
+    CommitTimestamp, DurableTimestampIntentIdentity, PrimaryTxnDecision, ReadTimestamp,
+    TimestampOracle, TimestampOracleError, TimestampTransactionId, TimestampTxnDecision,
+    TimestampTxnDescriptor, TimestampTxnIdentity, TimestampTxnOperation, TimestampTxnParticipant,
+    TimestampWrite, decode_timestamp_txn_descriptor_value, timestamp_txn_descriptor_op,
 };
 
 use crate::{lockmgr::RowLockManager, procarray::ProcArray, seq::SequenceManager};
@@ -575,7 +575,14 @@ impl SqlEngine {
                 .into_iter()
                 .try_fold(None, |maximum, (key, _)| {
                     let prefix = crabka_pgmvcc::version::row_prefix_of(&key)?;
-                    let rowid = crabka_pgkv::key::rowid_of(table.id, prefix)?;
+                    let rowid = if matches!(
+                        table.sharding,
+                        Some(crabka_pgcatalog::ShardingStrategy::Hash(_))
+                    ) {
+                        crabka_pgkv::key::bucket_rowid_of(table.id, prefix)?.1
+                    } else {
+                        crabka_pgkv::key::rowid_of(table.id, prefix)?
+                    };
                     Ok::<_, ExecError>(Some(
                         maximum.map_or(rowid, |current: u64| current.max(rowid)),
                     ))
@@ -645,12 +652,12 @@ impl SqlEngine {
             (Some(crabka_pgcatalog::ShardingStrategy::Hash(_)), None) => Err(
                 ExecError::Unsupported("hash timestamp operation is missing its bucket".into()),
             ),
-            (Some(crabka_pgcatalog::ShardingStrategy::Hash(spec)), Some(bucket)) => Err(
-                ExecError::Unsupported(format!(
+            (Some(crabka_pgcatalog::ShardingStrategy::Hash(spec)), Some(bucket)) => {
+                Err(ExecError::Unsupported(format!(
                     "hash timestamp bucket {bucket} is outside 0..{}",
                     spec.buckets
-                )),
-            ),
+                )))
+            }
             (_, Some(_)) => Err(ExecError::Unsupported(
                 "non-hash timestamp operation carries a bucket".into(),
             )),
@@ -1088,6 +1095,23 @@ impl SqlEngine {
         &self,
     ) -> Result<Vec<crate::timestamp_txn::DurableTimestampIntentIdentity>, ExecError> {
         crate::timestamp_txn::timestamp_intent_identities(self.kv.as_ref()).map_err(Into::into)
+    }
+
+    pub fn timestamp_transaction_operations_are_resolved(
+        &self,
+        range_id: u32,
+        identity: TimestampTxnIdentity,
+        decision: PrimaryTxnDecision,
+        operations: &[TimestampTxnOperation],
+    ) -> Result<bool, ExecError> {
+        timestamp_txn::timestamp_operations_are_resolved(
+            self.kv.as_ref(),
+            range_id,
+            identity,
+            decision,
+            operations,
+        )
+        .map_err(timestamp_txn::map_ts_error)
     }
 
     /// Idempotently abort every timestamp intent owned by this range for `start_ts`.
@@ -1537,7 +1561,10 @@ fn exclusive_cursor_terminal(sequence: u64, physical_max: Option<u64>) -> Result
 
 #[cfg(test)]
 mod cursor_terminal_tests {
-    use super::exclusive_cursor_terminal;
+    use crabka_pgkv::WriteOp;
+    use crabka_pgwire::engine::{Engine, Session};
+
+    use super::{SqlEngine, exclusive_cursor_terminal};
 
     #[test]
     fn combines_structural_and_physical_cursor_horizons() {
@@ -1547,6 +1574,26 @@ mod cursor_terminal_tests {
         assert_eq!(exclusive_cursor_terminal(3, Some(7)).unwrap(), 8);
         assert_eq!(exclusive_cursor_terminal(0, None).unwrap(), 0);
         assert!(exclusive_cursor_terminal(0, Some(u64::MAX)).is_err());
+    }
+
+    #[tokio::test]
+    async fn hash_cursor_terminal_uses_logical_rowid_not_sparse_bucket_prefix() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query("CREATE TABLE h (id int4) SHARDED BY HASH (id) BUCKETS 16")
+            .await
+            .expect("create hash table");
+        let table = engine.catalog_table("h").expect("hash table");
+        engine
+            .kv_handle()
+            .write_batch(&[WriteOp::Put {
+                key: crabka_pgmvcc::version::hash_version_key_ts(table.id, 15, 7, 1),
+                value: vec![0],
+            }])
+            .expect("seed high-bucket physical key");
+
+        assert_eq!(engine.scan_local_terminal(&table).unwrap(), 8);
     }
 }
 
@@ -1795,11 +1842,7 @@ mod tests {
                 .validate_timestamp_bucket(ordinary.id, Some(0))
                 .is_err()
         );
-        assert!(
-            engine
-                .validate_timestamp_bucket(ordinary.id, None)
-                .is_ok()
-        );
+        assert!(engine.validate_timestamp_bucket(ordinary.id, None).is_ok());
     }
 
     #[tokio::test]

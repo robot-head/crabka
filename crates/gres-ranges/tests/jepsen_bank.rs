@@ -140,7 +140,7 @@ async fn sharded_timestamp_bank_ledger_survives_writer_kills_and_tso_fences() {
     let store = Arc::new(MemKv::default());
     let horizon = MemoryTsoHorizon::new(store, 1);
     let old_oracle =
-        TsoOracle::recover(horizon.clone(), horizon.clone(), 1, nonzero(4), 0).expect("old oracle");
+        TsoOracle::recover(horizon.clone(), horizon.clone(), 1, nonzero(1), 0).expect("old oracle");
     let before_fence = old_oracle
         .grant(nonzero(1))
         .await

@@ -47,6 +47,9 @@ pub struct InDoubtMarker {
     pub transaction_id: u64,
     /// Key that determines interval ownership.
     pub key: RangeKey,
+    /// Physical hash bucket when the marker belongs to a hash-sharded table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hash_bucket: Option<u32>,
 }
 
 /// Fully specified placement for one replacement range.
@@ -1333,6 +1336,7 @@ mod tests {
         let hooks = TestHooks::new(vec![InDoubtMarker {
             transaction_id: 99,
             key: RangeKey::new(TableId::new(15), 1),
+            hash_bucket: None,
         }]);
 
         let err = run_conversion("convert-1", conversion_command(), &store, &hooks)
@@ -1533,10 +1537,12 @@ mod tests {
             InDoubtMarker {
                 transaction_id: 1,
                 key: RangeKey::new(TableId::new(15), 0),
+                hash_bucket: None,
             },
             InDoubtMarker {
                 transaction_id: 2,
                 key: RangeKey::new(TableId::new(25), 0),
+                hash_bucket: None,
             },
         ]
     }

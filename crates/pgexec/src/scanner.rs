@@ -1911,14 +1911,15 @@ mod cursor_contract_tests {
         atomic::{AtomicUsize, Ordering},
     };
 
-    use super::{
-        MaterializedRangeCursor, PredicatePushdown, ProjectionPushdown, RangeCursor, RangeScanner,
-        RowInterval, ScanRequest, TimestampedRangeScanner,
-    };
     use crabka_pgcatalog::{Column, Table};
     use crabka_pgkv::MemKv;
     use crabka_pgmvcc::Snapshot;
     use crabka_pgtypes::{ColumnType, Datum};
+
+    use super::{
+        MaterializedRangeCursor, PredicatePushdown, ProjectionPushdown, RangeCursor, RangeScanner,
+        RowInterval, ScanRequest, TimestampedRangeScanner,
+    };
 
     fn row(rowid: u64) -> super::ScannedRow {
         super::ScannedRow {

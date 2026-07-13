@@ -636,6 +636,7 @@ fn wire_marker(
         transaction_id: marker.transaction_id,
         key: crabka_gres_ranges::transport::WireRangeKey {
             table_id: marker.key.table_id.as_u64(),
+            bucket: marker.hash_bucket,
             rowid: marker.key.rowid,
         },
     }
@@ -692,6 +693,10 @@ fn marker_digest(markers: &[crabka_gres_ranges::transport::WireInDoubtMarker]) -
     for marker in markers {
         digest.update(marker.transaction_id.to_be_bytes());
         digest.update(marker.key.table_id.to_be_bytes());
+        if let Some(bucket) = marker.key.bucket {
+            digest.update([1]);
+            digest.update(bucket.to_be_bytes());
+        }
         digest.update(marker.key.rowid.to_be_bytes());
     }
     use std::fmt::Write as _;
@@ -969,6 +974,7 @@ mod tests {
         InDoubtMarker {
             transaction_id,
             key: RangeKey::new(TableId::new(7), rowid),
+            hash_bucket: None,
         }
     }
 
