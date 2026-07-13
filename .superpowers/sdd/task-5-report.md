@@ -2,6 +2,49 @@
 
 Status: BLOCKED
 
+## Resume after timestamp wire prerequisite (`809e29a8`)
+
+Strict RED converted the production live transfer regression from the prior degenerate whole-table
+move into a real midpoint split at `(logical table 10, bucket 8, rowid 0)`. SQL inserts the pinned
+`int4` corpus `0..15`; its big-endian FNV-1a hashes form a bijection over buckets `0..15`. The first
+production restore failed with `checkpoint invalid: malformed timestamp intent metadata key`.
+A focused substrate test reproduced the same failure for a bucket-zero intent sidecar and a
+bucket-15 prewrite reservation.
+
+Root cause: `CheckpointFilter::timestamp_metadata_key` accepted only the legacy bucketless sidecar
+tails and always reconstructed an ordinary `(table,rowid)` `RangeKey`. Its TXD2 descriptor paths
+also ignored `TimestampTxnOperation.bucket`. Commit `524dae75` adds strict legacy-or-hash sidecar
+decoding (including a validated tag and bucket zero), uses the bucket in descriptor selection and
+rewriting, and updates stale substrate test literals that did not compile with the mandatory field.
+
+GREEN live evidence after the fix:
+
+- predecessor primary-version fold equals the disjoint successor union;
+- left and right contain exactly eight `HashPrimaryVersion` keys each;
+- their physical bucket sets are exactly `0..7` and `8..15`, with no ordinary primary key and no
+  cross-bucket leakage;
+- a fresh post-publication SQL session returns exactly `0..15`.
+
+Fresh command results on `524dae75`:
+
+- `cargo test -p crabka-gres-substrate --lib --no-fail-fast`: 124 passed;
+- focused production midpoint runtime: 1 passed;
+- parser/catalog/pgkv/pgmvcc library suites: 309 passed;
+- `cargo test -p crabka-gres-control --lib --no-fail-fast`: 65 passed;
+- split model: 5 passed; split nemesis: 4 passed;
+- topology process split crash binary: 23 passed, preserving all 19 kill-point contract tests;
+- changed-file rustfmt and `git diff --check`: clean;
+- the pre-existing `crates/gres-ranges/src/control.rs` working-tree bytes remained exactly unchanged
+  (verified against the pre-work SHA-256).
+
+Status remains `BLOCKED`, not `DONE`: the authoritative externally enabled G8 process harness is
+still hard-coded to two ordinary `SHARDED` tables and a rowid boundary. This slice did not
+parameterize its live workload, remote committed/aborted timestamp prewrites, CLI invocation,
+physical-fold oracle, or schema-v2 evidence validator for a hash table and bucket-8 boundary, and
+therefore did not run the requested source-restore/publication/retirement live hash kill points.
+The in-process midpoint is real production data movement, but it is not a substitute for that
+multiprocess crash gate.
+
 ## Landed-seam audit
 
 Base `aa18718bb7f8493a3070edb882254e609c6e7f44` already contained the broad Task 5 vertical slice in the earlier bulk commit `d9489c823`: parser AST and `SHARDED BY HASH`; catalog `HashSharding`; bucket-leading `pgkv`/`pgmvcc` keys; `RangeKey { table_id, bucket, rowid }`; equality/scatter routing; layout co-location validation; registry `HashPlacement`; and the G9 Task 4 co-partitioned join execution arm. Those seams were re-read and tested rather than treated as completion.
