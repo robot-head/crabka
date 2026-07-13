@@ -4844,6 +4844,60 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn registry_range_scanner_executes_sql_join_end_to_end() {
+        let mut gateway = crabka_pgexec::SqlEngine::new();
+        let mut setup = gateway.connect();
+        setup
+            .simple_query("CREATE TABLE jl (id int4, v text) SHARDED")
+            .await
+            .expect("create left");
+        setup
+            .simple_query("CREATE TABLE jr (id int4, v text) SHARDED")
+            .await
+            .expect("create right");
+        setup
+            .simple_query("INSERT INTO jl VALUES (1, 'a'), (2, 'b')")
+            .await
+            .expect("insert left");
+        setup
+            .simple_query("INSERT INTO jr VALUES (2, 'z'), (3, 'q')")
+            .await
+            .expect("insert right");
+        let left = crabka_pgcatalog::get_table(gateway.catalog_kv(), "jl").expect("left table");
+        let right = crabka_pgcatalog::get_table(gateway.catalog_kv(), "jr").expect("right table");
+        let registry =
+            RangeRegistry::from_tenant_record(&record("127.0.0.1:1".into())).expect("registry");
+        let scanner = RegistryRangeScanner::new(
+            registry,
+            FramedTcpClient::default(),
+            BTreeMap::from([(RangeId::new(1), gateway.clone_handle())]),
+        );
+        gateway.set_range_scanner(Arc::new(scanner));
+        gateway.set_join_stats(Arc::new(crabka_pgexec::plan_dist::SequenceCounters::new([
+            (u64::from(left.id), 1),
+            (u64::from(right.id), 100),
+        ])));
+        gateway.set_join_strategy_config(crabka_pgexec::plan_dist::PlannerConfig {
+            broadcast_threshold_bytes: 16,
+        });
+
+        let result = gateway
+            .connect()
+            .simple_query("SELECT jl.v, jr.v FROM jl JOIN jr ON jl.id = jr.id ORDER BY jl.v, jr.v")
+            .await
+            .expect("distributed SQL join");
+        let crabka_pgwire::engine::QueryResult::Rows { rows, .. } = &result[0] else {
+            panic!("expected rows")
+        };
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0].as_ref().expect("left value").text.as_ref(), b"b");
+        assert_eq!(
+            rows[0][1].as_ref().expect("right value").text.as_ref(),
+            b"z"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn scan_cursor_uses_owner_token_without_skips_or_duplicates() {
         let owner = crabka_pgexec::SqlEngine::new();
         let mut owner_session = owner.connect();

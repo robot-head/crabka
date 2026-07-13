@@ -283,6 +283,8 @@ pub struct SqlEngine {
     /// single-range scan path; multi-range assemblies inject a scatter-gather
     /// implementation for sharded/global-visibility reads.
     pub(crate) range_scanner: Arc<dyn scanner::RangeScanner>,
+    pub(crate) join_stats: Arc<dyn plan_dist::Stats>,
+    pub(crate) join_strategy_config: plan_dist::PlannerConfig,
     /// Timestamp oracle backing the sharded timestamp transaction path.
     pub(crate) timestamp_oracle: Arc<dyn timestamp_txn::TimestampOracle>,
 }
@@ -330,6 +332,8 @@ impl SqlEngine {
             clock: Arc::new(crate::clock::SystemClock),
             foreign_scanner: None,
             range_scanner: Arc::new(scanner::LocalRangeScanner),
+            join_stats: Arc::new(plan_dist::SequenceCounters::default()),
+            join_strategy_config: plan_dist::PlannerConfig::default(),
             timestamp_oracle: Arc::new(timestamp_txn::LocalTimestampOracle::default()),
         })
     }
@@ -389,6 +393,8 @@ impl SqlEngine {
             clock: Arc::new(crate::clock::SystemClock),
             foreign_scanner: None,
             range_scanner: Arc::new(scanner::LocalRangeScanner),
+            join_stats: Arc::new(plan_dist::SequenceCounters::default()),
+            join_strategy_config: plan_dist::PlannerConfig::default(),
             timestamp_oracle: Arc::new(timestamp_txn::LocalTimestampOracle::default()),
         })
     }
@@ -424,6 +430,8 @@ impl SqlEngine {
             clock: Arc::clone(&self.clock),
             foreign_scanner: self.foreign_scanner.as_ref().map(Arc::clone),
             range_scanner: Arc::clone(&self.range_scanner),
+            join_stats: Arc::clone(&self.join_stats),
+            join_strategy_config: self.join_strategy_config,
             timestamp_oracle: Arc::clone(&self.timestamp_oracle),
         }
     }
@@ -469,6 +477,16 @@ impl SqlEngine {
     /// Register the table scanner seam used for ordinary table scans.
     pub fn set_range_scanner(&mut self, scanner: Arc<dyn scanner::RangeScanner>) {
         self.range_scanner = scanner;
+    }
+
+    /// Inject statistics used by distributed SQL join planning.
+    pub fn set_join_stats(&mut self, stats: Arc<dyn plan_dist::Stats>) {
+        self.join_stats = stats;
+    }
+
+    /// Configure distributed SQL join strategy thresholds.
+    pub fn set_join_strategy_config(&mut self, config: plan_dist::PlannerConfig) {
+        self.join_strategy_config = config;
     }
 
     /// Return the range scanner shared by subsequently initialized local engines.
@@ -1620,6 +1638,8 @@ impl Engine for SqlEngine {
             Arc::clone(&self.clock),
             self.foreign_scanner.as_ref().map(Arc::clone),
             Arc::clone(&self.range_scanner),
+            Arc::clone(&self.join_stats),
+            self.join_strategy_config,
             Arc::clone(&self.timestamp_oracle),
         )
     }

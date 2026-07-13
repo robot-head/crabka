@@ -18,7 +18,11 @@ use crate::{
     error::ExecError,
     foreign::{ForeignScanner, ScanBounds},
     join::{Relation, join_relations},
-    scanner::{PredicatePushdown, RangeScanner, RowInterval, ScanRequest, ScannedRow},
+    scanner::{
+        JoinExecutionStrategy, JoinKind as ScannerJoinKind, JoinRangeRequest, JoinRow,
+        JoinSnapshot, JoinTableInterval, PredicatePushdown, RangeScanner, RowInterval, ScanRequest,
+        ScannedRow,
+    },
     scope::{ColumnBinding, Scope},
     timestamp_txn::{PrimaryTxnDecision, ReadTimestamp, TimestampTransactionId, TimestampWrite},
 };
@@ -2861,6 +2865,20 @@ fn build_table_expr(
             kind,
             constraint,
         } => {
+            if let Some(relation) = try_distributed_inner_equi_join(
+                catalog_kv,
+                gsnap,
+                snapshot,
+                own,
+                left,
+                right,
+                *kind,
+                constraint,
+                ctes,
+                range_scanner,
+            )? {
+                return Ok(relation);
+            }
             // A join is never a single foreign table: each side scans in full and
             // the join predicate / residual WHERE filters locally.
             let l = build_table_expr(
@@ -2916,6 +2934,205 @@ fn build_table_expr(
             crate::values::requalify_derived(inner, alias, columns)
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_distributed_inner_equi_join(
+    catalog_kv: &dyn Kv,
+    gsnap: &crabka_pgmvcc::visibility::Snapshot,
+    snapshot: &crabka_pgmvcc::visibility::Snapshot,
+    own: Option<u64>,
+    left_expr: &crabka_pgparser::ast::TableExpr,
+    right_expr: &crabka_pgparser::ast::TableExpr,
+    kind: crabka_pgparser::ast::JoinKind,
+    constraint: &crabka_pgparser::ast::JoinConstraint,
+    ctes: &crate::cte::CteContext,
+    range_scanner: &dyn RangeScanner,
+) -> Result<Option<Relation>, ExecError> {
+    use crabka_pgparser::ast::{BinaryOp, Expr, JoinConstraint, JoinKind, TableExpr};
+
+    if kind != JoinKind::Inner {
+        return Ok(None);
+    }
+    let (
+        TableExpr::Table {
+            name: left_name,
+            alias: left_alias,
+        },
+        TableExpr::Table {
+            name: right_name,
+            alias: right_alias,
+        },
+    ) = (left_expr, right_expr)
+    else {
+        return Ok(None);
+    };
+    if ctes.lookup(left_name).is_some() || ctes.lookup(right_name).is_some() {
+        return Ok(None);
+    }
+    let JoinConstraint::On(Expr::Binary {
+        op: BinaryOp::Eq,
+        left: key_left,
+        right: key_right,
+    }) = constraint
+    else {
+        return Ok(None);
+    };
+    let table = |name: &str| match crabka_pgcatalog::get_table(catalog_kv, name) {
+        Ok(table) => Ok(Some(table)),
+        Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => Ok(None),
+        Err(error) => Err(ExecError::from(error)),
+    };
+    let Some(left_table) = table(left_name)? else {
+        return Ok(None);
+    };
+    let Some(right_table) = table(right_name)? else {
+        return Ok(None);
+    };
+    if !left_table.sharded
+        || !right_table.sharded
+        || left_table.foreign.is_some()
+        || right_table.foreign.is_some()
+    {
+        return Ok(None);
+    }
+    let left_qualifier = left_alias.as_deref().unwrap_or(&left_table.name);
+    let right_qualifier = right_alias.as_deref().unwrap_or(&right_table.name);
+    fn qualified_key(expr: &Expr) -> Option<(&str, &str)> {
+        let Expr::Column {
+            table: Some(table),
+            name,
+        } = expr
+        else {
+            return None;
+        };
+        Some((table.as_str(), name.as_str()))
+    }
+    let (Some((first_table, first_column)), Some((second_table, second_column))) =
+        (qualified_key(key_left), qualified_key(key_right))
+    else {
+        return Ok(None);
+    };
+    let (left_column, right_column) =
+        if first_table == left_qualifier && second_table == right_qualifier {
+            (first_column, second_column)
+        } else if first_table == right_qualifier && second_table == left_qualifier {
+            (second_column, first_column)
+        } else {
+            return Ok(None);
+        };
+    let Some(left_key) = left_table
+        .columns
+        .iter()
+        .position(|column| column.name == left_column)
+    else {
+        return Ok(None);
+    };
+    let Some(right_key) = right_table
+        .columns
+        .iter()
+        .position(|column| column.name == right_column)
+    else {
+        return Ok(None);
+    };
+    let planned = range_scanner.join_strategy(&left_table, &right_table);
+    let strategy = match planned {
+        crate::plan_dist::JoinStrategy::Broadcast { small_table_id }
+            if small_table_id == u64::from(left_table.id) =>
+        {
+            JoinExecutionStrategy::BroadcastLeft
+        }
+        crate::plan_dist::JoinStrategy::Broadcast { small_table_id }
+            if small_table_id == u64::from(right_table.id) =>
+        {
+            JoinExecutionStrategy::BroadcastRight
+        }
+        crate::plan_dist::JoinStrategy::Broadcast { .. } => JoinExecutionStrategy::Gather,
+        crate::plan_dist::JoinStrategy::CoPartitioned
+            if hash_sharding_matches_join_keys(
+                &left_table,
+                &right_table,
+                left_column,
+                right_column,
+            ) =>
+        {
+            JoinExecutionStrategy::CoPartitioned
+        }
+        crate::plan_dist::JoinStrategy::CoPartitioned => JoinExecutionStrategy::Gather,
+        crate::plan_dist::JoinStrategy::Gather => JoinExecutionStrategy::Gather,
+    };
+    let join_snapshot = |source: &crabka_pgmvcc::visibility::Snapshot| JoinSnapshot {
+        xmin: source.xmin,
+        xmax: source.xmax,
+        xip: source.xip.clone(),
+    };
+    let request = JoinRangeRequest {
+        local_snapshot: join_snapshot(snapshot),
+        global_snapshot: join_snapshot(gsnap),
+        read_ts: 1,
+        own_xid: own,
+        own_start_ts: None,
+        kind: ScannerJoinKind::Inner,
+        left_keys: vec![left_key],
+        right_keys: vec![right_key],
+        strategy,
+        left: JoinTableInterval {
+            table_id: u64::from(left_table.id),
+            table_name: left_table.name.clone(),
+            interval: RowInterval::ALL,
+        },
+        right: JoinTableInterval {
+            table_id: u64::from(right_table.id),
+            table_name: right_table.name.clone(),
+            interval: RowInterval::ALL,
+        },
+        broadcast_rows: matches!(
+            strategy,
+            JoinExecutionStrategy::BroadcastLeft | JoinExecutionStrategy::BroadcastRight
+        )
+        .then(Vec::new),
+        left_filter: PredicatePushdown::FullScan,
+        right_filter: PredicatePushdown::FullScan,
+        projection: Vec::new(),
+    };
+    let result = match range_scanner.join(request) {
+        Ok(result) => result,
+        Err(ExecError::Unsupported(_)) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    result
+        .validate()
+        .map_err(|error| ExecError::Unsupported(error.to_string()))?;
+    let rows = result
+        .rows
+        .into_iter()
+        .map(|JoinRow { tuple }| {
+            crabka_pgmvcc::version::decode_tuple(&tuple)
+                .map(|(_, _, row)| row)
+                .map_err(ExecError::from)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut scope = Scope::single(&left_table, left_qualifier);
+    scope
+        .columns
+        .extend(Scope::single(&right_table, right_qualifier).columns);
+    Ok(Some(Relation { scope, rows }))
+}
+
+fn hash_sharding_matches_join_keys(
+    left: &Table,
+    right: &Table,
+    left_column: &str,
+    right_column: &str,
+) -> bool {
+    use crabka_pgcatalog::ShardingStrategy;
+
+    let (Some(ShardingStrategy::Hash(left_hash)), Some(ShardingStrategy::Hash(right_hash))) =
+        (&left.sharding, &right.sharding)
+    else {
+        return false;
+    };
+    left_hash.columns.as_slice() == [left_column] && right_hash.columns.as_slice() == [right_column]
 }
 
 #[allow(clippy::too_many_arguments)]
