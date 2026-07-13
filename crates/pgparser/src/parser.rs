@@ -1751,9 +1751,12 @@ impl Parser {
         let sharding = if saw_sharded && self.eat_keyword(Keyword::By) {
             self.expect_ident_eq("hash")?;
             self.expect(&Token::LParen)?;
-            let mut hash_columns = vec![self.expect_ident()?];
-            while self.eat_comma() {
-                hash_columns.push(self.expect_ident()?);
+            let hash_columns = vec![self.expect_ident()?];
+            if self.eat_comma() {
+                return Err(ParseError::new(
+                    "hash sharding requires exactly one column",
+                    self.peek_pos(),
+                ));
             }
             self.expect(&Token::RParen)?;
             self.expect_ident_eq("buckets")?;
@@ -3848,6 +3851,14 @@ mod tests {
             .expect_err("non-power-of-two buckets");
         assert_eq!(err.sqlstate(), "42601");
         assert!(err.message.contains("power of two"));
+    }
+
+    #[test]
+    fn rejects_multiple_hash_sharding_columns() {
+        let err = parse("CREATE TABLE t (a int4, b int4) SHARDED BY HASH (a, b) BUCKETS 16")
+            .expect_err("the G9 hash grammar has exactly one column");
+        assert_eq!(err.sqlstate(), "42601");
+        assert!(err.message.contains("exactly one column"));
     }
 
     #[test]
