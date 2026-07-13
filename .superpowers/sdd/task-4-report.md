@@ -89,3 +89,38 @@ Status: DONE_WITH_CONCERNS
 ### Cleanup correction
 
 `cargo fmt --all` created formatter-only spill in `crates/gres-ranges/tests/harness/process.rs`, `crates/gres/src/lib.rs`, `crates/gres/src/split_activation.rs`, and `crates/gres/tests/topology_process_split_crash.rs`. Those four unstaged diffs were removed before handoff. They were not genuine concurrent changes and are not part of the all-target failure attribution; that concern remains attributed only to the pre-existing dirty `crates/gres-ranges/src/control.rs`.
+
+## Join protocol slice
+
+Status: PROTOCOL_COMPLETE; OWNER_EXECUTION_AND_SQL_DISPATCH_PENDING.
+
+This slice adds the typed, owned `JoinRangeRequest`/`JoinRangeResult` boundary and an object-safe `RangeScanner::join` seam. The default validates then returns an explicit unsupported error; it never manufactures production rows. `gres-ranges` carries matching `JoinRange` request/response variants, validates requests at the hosted-service boundary, and likewise returns an explicit unsupported response because owner execution is deliberately outside this slice. SQL planning/executor dispatch remains pending.
+
+### RED/GREEN evidence
+
+- RED: `cargo test -p crabka-pgexec join_protocol_tests --lib` failed with missing join types, bounds, validation errors, and `RangeScanner::join` (`E0407`, `E0425`, `E0422`, `E0433`, exit 101).
+- GREEN: the same focused pgexec command passed 2/2, including the whole-request fake seam and broadcast-count rejection.
+- GREEN: `cargo test -p crabka-gres-ranges join_range --lib` passed 2/2 request/result serde roundtrip and near-limit/rejection tests.
+- GREEN: `cargo test -p crabka-gres-ranges bounded_framing_rejects_oversized_join_request --lib` passed 1/1.
+- GREEN: `cargo check -p crabka-pgexec --all-targets` and `cargo check -p crabka-gres-ranges --all-targets` exited 0.
+- GREEN: changed-file `rustfmt --edition 2024 --check` and `git diff --check` exited 0; stable rustfmt emitted only repository nightly-option warnings. Whole-worktree `cargo fmt --all -- --check` remains blocked by the preserved pre-existing dirty `crates/gres-ranges/src/control.rs`.
+
+### Files and commit
+
+- `crates/pgexec/src/scanner.rs`, `crates/pgexec/src/lib.rs`
+- `crates/gres-ranges/src/transport.rs`, `crates/gres-ranges/src/forward.rs`, `crates/gres-ranges/src/coordinator.rs`, `crates/gres-ranges/src/lib.rs`
+- Implementation/test commit: `bddba50d feat(gres): add typed distributed join protocol`.
+- This report is committed separately.
+
+### Contract and bounds
+
+- The request binds local/global snapshots, a mandatory nonzero read timestamp, optional own xid/start timestamp, join kind, paired key indexes, selected strategy, both table ids/names/rowid intervals, per-side predicate metadata, output projection, and optional broadcast rows.
+- Rows use deterministic tuple bytes ordered by the request projection. Both broadcast and result rows are independently validated.
+- Limits: 16 join keys, 256 projection columns, 256 predicates per side, 65,536 xids per snapshot, 8,192 broadcast rows, 256 KiB per encoded row, 65,536 result rows, plus the existing 1 MiB transport frame ceiling.
+- Validation also rejects empty/mismatched join keys, invalid table identities/intervals, malformed snapshots, missing read timestamps, and broadcast payloads inconsistent with the chosen strategy.
+
+### Concerns and pending work
+
+- Owner-side join execution and SQL executor dispatch are explicitly still pending; callers receive unsupported/failure rather than fake results.
+- The 1 MiB frame limit is intentionally stricter than the aggregate broadcast-row and result-row caps, so realistic RPCs hit bounded framing before theoretical aggregate maxima. Future execution should page/stream results rather than relaxing framing.
+- Pre-existing dirty `.superpowers/sdd/progress.md` and `crates/gres-ranges/src/control.rs` were preserved and excluded from both commits.
