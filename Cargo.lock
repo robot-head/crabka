@@ -2911,6 +2911,7 @@ dependencies = [
  "crabka-client-producer",
  "crabka-gres-ranges",
  "crabka-object-store",
+ "crabka-pgcatalog",
  "crabka-pgexec",
  "crabka-pgkv",
  "crabka-pgmvcc",

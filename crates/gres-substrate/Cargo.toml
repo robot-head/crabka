@@ -49,6 +49,7 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-
 tracing = { workspace = true }
 
 [dev-dependencies]
+crabka-pgcatalog = { version = "0.3.9", path = "../pgcatalog" }
 assert2 = { workspace = true }
 proptest = { workspace = true }
 crabka-broker = { version = "0.3.9", path = "../broker", features = ["test-helpers"] }
