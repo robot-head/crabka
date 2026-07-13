@@ -1537,7 +1537,7 @@ async fn real_child_hash_durable_inspection_covers_pinned_bucket_corpus() {
         return;
     }
     let tenant = format!("tg9hi-{}", std::process::id());
-    let system = ProcessHarness::start_all_on_zero(&tenant).await;
+    let mut system = ProcessHarness::start_all_on_zero(&tenant).await;
     let sql = system.sql(0).await;
     let mut ddl = String::new();
     for table in 1..50 {
@@ -1553,14 +1553,20 @@ async fn real_child_hash_durable_inspection_covers_pinned_bucket_corpus() {
     sql.simple_query("INSERT INTO hash_probe50 VALUES (23), (31)")
         .await
         .expect("commit cross-boundary hash transaction");
+    sql.simple_query("BEGIN; INSERT INTO hash_probe50 VALUES (7), (15); ROLLBACK;")
+        .await
+        .expect("roll back cross-boundary hash transaction");
     drop(sql);
+    system.restart_with_hosted_ranges(0, "0,1").await;
 
     let start_key = crabka_pgkv::key::table_prefix(50);
     let mut end_key = start_key.clone();
     *end_key.last_mut().expect("table prefix") += 1;
     let mut buckets = BTreeSet::new();
     let mut decoded_rows = Vec::new();
+    let mut aborted_rows = BTreeSet::new();
     let mut cross_boundary_descriptor = None;
+    let mut rolled_back_descriptor = None;
     for range_id in [0, 1] {
         let response = system
             .inspect_durable_records(crabka_gres_ranges::InspectDurableRecordsReq {
@@ -1586,6 +1592,20 @@ async fn real_child_hash_durable_inspection_covers_pinned_bucket_corpus() {
                     table_id, bucket, ..
                 } => {
                     assert_eq!(table_id, 50);
+                    let tuple = crabka_pgmvcc::version::decode_ts_tuple(&record.value)
+                        .expect("decode authoritative hash timestamp row");
+                    if matches!(tuple.state, crabka_pgmvcc::version::TsVersionState::Aborted) {
+                        let Some(crabka_pgtypes::Datum::Int4(logical_id)) = tuple.row.first()
+                        else {
+                            panic!("aborted hash tuple lacks logical int4 id")
+                        };
+                        assert!(aborted_rows.insert((*logical_id, bucket)));
+                        continue;
+                    }
+                    assert!(matches!(
+                        tuple.state,
+                        crabka_pgmvcc::version::TsVersionState::Committed { .. }
+                    ));
                     let row = decode_hash_physical_record(range_id, record)
                         .expect("decode authoritative hash row");
                     if (0..16).contains(&row.logical_id) {
@@ -1609,7 +1629,17 @@ async fn real_child_hash_durable_inspection_covers_pinned_bucket_corpus() {
                             )
                             .expect("decode TXD2 descriptor");
                         if descriptor.operations.len() == 2 {
-                            assert!(cross_boundary_descriptor.replace(descriptor).is_none());
+                            match descriptor.decision {
+                                crabka_pgexec::PrimaryTxnDecision::Committed(_) => {
+                                    assert!(cross_boundary_descriptor.replace(descriptor).is_none())
+                                }
+                                crabka_pgexec::PrimaryTxnDecision::Aborted => {
+                                    assert!(rolled_back_descriptor.replace(descriptor).is_none())
+                                }
+                                crabka_pgexec::PrimaryTxnDecision::Pending => {
+                                    panic!("terminal inspection retained a pending descriptor")
+                                }
+                            }
                         }
                     }
                 }
@@ -1620,6 +1650,7 @@ async fn real_child_hash_durable_inspection_covers_pinned_bucket_corpus() {
         }
     }
     assert_eq!(buckets, (0..16).collect());
+    assert_eq!(aborted_rows, BTreeSet::from([(7, 0), (15, 8)]));
     let descriptor = cross_boundary_descriptor.expect("two-operation hash TXD2 descriptor");
     assert_eq!(descriptor.participants, vec![0, 1]);
     assert_eq!(
@@ -1633,6 +1664,20 @@ async fn real_child_hash_durable_inspection_covers_pinned_bucket_corpus() {
     assert!(matches!(
         descriptor.decision,
         crabka_pgexec::PrimaryTxnDecision::Committed(_)
+    ));
+    let rolled_back = rolled_back_descriptor.expect("two-operation aborted hash TXD2 descriptor");
+    assert_eq!(rolled_back.participants, vec![0, 1]);
+    assert_eq!(
+        rolled_back
+            .operations
+            .iter()
+            .map(|operation| operation.bucket.expect("hash descriptor bucket"))
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([0, 8])
+    );
+    assert!(matches!(
+        rolled_back.decision,
+        crabka_pgexec::PrimaryTxnDecision::Aborted
     ));
     decoded_rows.retain(|row| (0..16).contains(&row.logical_id));
     decoded_rows.sort();
