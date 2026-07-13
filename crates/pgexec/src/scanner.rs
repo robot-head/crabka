@@ -277,10 +277,242 @@ impl RangeCursor for MaterializedRangeCursor {
     }
 }
 
+pub const MAX_JOIN_KEY_COLUMNS: usize = 16;
+pub const MAX_JOIN_PROJECTION_COLUMNS: usize = 256;
+pub const MAX_JOIN_PREDICATES: usize = 256;
+pub const MAX_JOIN_SNAPSHOT_XIDS: usize = 65_536;
+pub const MAX_JOIN_BROADCAST_ROWS: usize = 8_192;
+pub const MAX_JOIN_ROW_BYTES: usize = 256 * 1024;
+pub const MAX_JOIN_RESULT_ROWS: usize = 65_536;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinKind {
+    Inner,
+    Left,
+    Right,
+    Full,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinExecutionStrategy {
+    BroadcastLeft,
+    BroadcastRight,
+    CoPartitioned,
+    Gather,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JoinSnapshot {
+    pub xmin: u64,
+    pub xmax: u64,
+    pub xip: Vec<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JoinTableInterval {
+    pub table_id: u64,
+    pub table_name: String,
+    pub interval: RowInterval,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct JoinRow {
+    /// Deterministic tuple encoding; values are ordered by the request projection.
+    pub tuple: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JoinRangeRequest {
+    pub local_snapshot: JoinSnapshot,
+    pub global_snapshot: JoinSnapshot,
+    pub read_ts: u64,
+    pub own_xid: Option<u64>,
+    pub own_start_ts: Option<u64>,
+    pub kind: JoinKind,
+    pub left_keys: Vec<usize>,
+    pub right_keys: Vec<usize>,
+    pub strategy: JoinExecutionStrategy,
+    pub left: JoinTableInterval,
+    pub right: JoinTableInterval,
+    pub broadcast_rows: Option<Vec<JoinRow>>,
+    pub left_filter: PredicatePushdown,
+    pub right_filter: PredicatePushdown,
+    pub projection: Vec<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JoinRangeResult {
+    pub rows: Vec<JoinRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum JoinValidationError {
+    #[error("join read timestamp must be nonzero")]
+    MissingReadTimestamp,
+    #[error("join key lists must be nonempty and have equal length")]
+    InvalidJoinKeys,
+    #[error("join key count {actual} exceeds limit {limit}")]
+    TooManyJoinKeys { actual: usize, limit: usize },
+    #[error("join projection count {actual} exceeds limit {limit}")]
+    TooManyProjectionColumns { actual: usize, limit: usize },
+    #[error("join predicate count {actual} exceeds limit {limit}")]
+    TooManyPredicates { actual: usize, limit: usize },
+    #[error("join snapshot xid count {actual} exceeds limit {limit}")]
+    TooManySnapshotXids { actual: usize, limit: usize },
+    #[error("broadcast row count {actual} exceeds limit {limit}")]
+    TooManyBroadcastRows { actual: usize, limit: usize },
+    #[error("join row byte count {actual} exceeds limit {limit}")]
+    JoinRowTooLarge { actual: usize, limit: usize },
+    #[error("join result row count {actual} exceeds limit {limit}")]
+    TooManyResultRows { actual: usize, limit: usize },
+    #[error("broadcast rows do not match the selected strategy")]
+    InvalidBroadcastRows,
+    #[error("join table identity is invalid")]
+    InvalidTableIdentity,
+    #[error("join interval is invalid")]
+    InvalidInterval,
+}
+
+impl JoinRangeRequest {
+    pub fn validate(&self) -> Result<(), JoinValidationError> {
+        if self.read_ts == 0 {
+            return Err(JoinValidationError::MissingReadTimestamp);
+        }
+        if self.left_keys.is_empty() || self.left_keys.len() != self.right_keys.len() {
+            return Err(JoinValidationError::InvalidJoinKeys);
+        }
+        bound(
+            self.left_keys.len(),
+            MAX_JOIN_KEY_COLUMNS,
+            |actual, limit| JoinValidationError::TooManyJoinKeys { actual, limit },
+        )?;
+        bound(
+            self.projection.len(),
+            MAX_JOIN_PROJECTION_COLUMNS,
+            |actual, limit| JoinValidationError::TooManyProjectionColumns { actual, limit },
+        )?;
+        for snapshot in [&self.local_snapshot, &self.global_snapshot] {
+            bound(
+                snapshot.xip.len(),
+                MAX_JOIN_SNAPSHOT_XIDS,
+                |actual, limit| JoinValidationError::TooManySnapshotXids { actual, limit },
+            )?;
+            if snapshot.xmin > snapshot.xmax
+                || !snapshot.xip.windows(2).all(|pair| pair[0] < pair[1])
+            {
+                return Err(JoinValidationError::InvalidTableIdentity);
+            }
+        }
+        for predicate in [&self.left_filter, &self.right_filter] {
+            let count = match predicate {
+                PredicatePushdown::FullScan => 0,
+                PredicatePushdown::Conjunctive(items) => items.len(),
+            };
+            bound(count, MAX_JOIN_PREDICATES, |actual, limit| {
+                JoinValidationError::TooManyPredicates { actual, limit }
+            })?;
+        }
+        for table in [&self.left, &self.right] {
+            if table.table_id == 0 || table.table_name.is_empty() {
+                return Err(JoinValidationError::InvalidTableIdentity);
+            }
+            if matches!((table.interval.start, table.interval.end), (Some(start), Some(end)) if start >= end)
+            {
+                return Err(JoinValidationError::InvalidInterval);
+            }
+        }
+        let expects_broadcast = matches!(
+            self.strategy,
+            JoinExecutionStrategy::BroadcastLeft | JoinExecutionStrategy::BroadcastRight
+        );
+        if expects_broadcast != self.broadcast_rows.is_some() {
+            return Err(JoinValidationError::InvalidBroadcastRows);
+        }
+        if let Some(rows) = &self.broadcast_rows {
+            bound(rows.len(), MAX_JOIN_BROADCAST_ROWS, |actual, limit| {
+                JoinValidationError::TooManyBroadcastRows { actual, limit }
+            })?;
+            validate_join_rows(rows)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn test_fixture() -> Self {
+        let snapshot = JoinSnapshot {
+            xmin: 1,
+            xmax: 3,
+            xip: vec![2],
+        };
+        Self {
+            local_snapshot: snapshot.clone(),
+            global_snapshot: snapshot,
+            read_ts: 7,
+            own_xid: None,
+            own_start_ts: None,
+            kind: JoinKind::Inner,
+            left_keys: vec![0],
+            right_keys: vec![0],
+            strategy: JoinExecutionStrategy::BroadcastRight,
+            left: JoinTableInterval {
+                table_id: 1,
+                table_name: "left".into(),
+                interval: RowInterval::ALL,
+            },
+            right: JoinTableInterval {
+                table_id: 2,
+                table_name: "right".into(),
+                interval: RowInterval::ALL,
+            },
+            broadcast_rows: Some(vec![]),
+            left_filter: PredicatePushdown::FullScan,
+            right_filter: PredicatePushdown::FullScan,
+            projection: vec![0],
+        }
+    }
+}
+
+impl JoinRangeResult {
+    pub fn validate(&self) -> Result<(), JoinValidationError> {
+        bound(self.rows.len(), MAX_JOIN_RESULT_ROWS, |actual, limit| {
+            JoinValidationError::TooManyResultRows { actual, limit }
+        })?;
+        validate_join_rows(&self.rows)
+    }
+}
+
+fn validate_join_rows(rows: &[JoinRow]) -> Result<(), JoinValidationError> {
+    for row in rows {
+        bound(row.tuple.len(), MAX_JOIN_ROW_BYTES, |actual, limit| {
+            JoinValidationError::JoinRowTooLarge { actual, limit }
+        })?;
+    }
+    Ok(())
+}
+
+fn bound<E>(actual: usize, limit: usize, error: impl FnOnce(usize, usize) -> E) -> Result<(), E> {
+    if actual > limit {
+        Err(error(actual, limit))
+    } else {
+        Ok(())
+    }
+}
+
 /// Seam for local or scatter-gather table scans.
 pub trait RangeScanner: Send + Sync + 'static {
     /// Return visible rows in deterministic `(rowid, xmin)` table order.
     fn scan(&self, request: ScanRequest<'_>) -> Result<Vec<ScannedRow>, ExecError>;
+
+    /// Execute a validated distributed join fragment. Implementations which do
+    /// not support owner-side joins fail explicitly and never synthesize rows.
+    fn join(&self, request: JoinRangeRequest) -> Result<JoinRangeResult, ExecError> {
+        request
+            .validate()
+            .map_err(|error| ExecError::Unsupported(error.to_string()))?;
+        Err(ExecError::Unsupported(
+            "distributed join execution is not implemented by this range scanner".into(),
+        ))
+    }
 
     /// Open a pull-based cursor. The default is a compatibility adapter which
     /// materializes through [`RangeScanner::scan`].
@@ -289,6 +521,49 @@ pub trait RangeScanner: Send + Sync + 'static {
         request: ScanRequest<'a>,
     ) -> Result<Box<dyn RangeCursor + 'a>, ExecError> {
         Ok(Box::new(MaterializedRangeCursor::new(self.scan(request)?)))
+    }
+}
+
+#[cfg(test)]
+mod join_protocol_tests {
+    use super::*;
+
+    #[test]
+    fn join_request_rejects_unbounded_broadcast_rows() {
+        let mut request = JoinRangeRequest::test_fixture();
+        request.broadcast_rows = Some(vec![JoinRow::default(); MAX_JOIN_BROADCAST_ROWS + 1]);
+
+        assert_eq!(
+            request.validate(),
+            Err(JoinValidationError::TooManyBroadcastRows {
+                actual: MAX_JOIN_BROADCAST_ROWS + 1,
+                limit: MAX_JOIN_BROADCAST_ROWS,
+            })
+        );
+    }
+
+    #[test]
+    fn scanner_fake_receives_the_whole_join_request() {
+        #[derive(Default)]
+        struct Fake(std::sync::Mutex<Option<JoinRangeRequest>>);
+        impl RangeScanner for Fake {
+            fn scan(&self, _request: ScanRequest<'_>) -> Result<Vec<ScannedRow>, ExecError> {
+                unreachable!()
+            }
+            fn join(&self, request: JoinRangeRequest) -> Result<JoinRangeResult, ExecError> {
+                request
+                    .validate()
+                    .map_err(|error| ExecError::Unsupported(error.to_string()))?;
+                *self.0.lock().expect("fake mutex") = Some(request);
+                Ok(JoinRangeResult { rows: vec![] })
+            }
+        }
+        let fake = Fake::default();
+        let request = JoinRangeRequest::test_fixture();
+
+        fake.join(request.clone()).expect("fake join");
+
+        assert_eq!(*fake.0.lock().expect("fake mutex"), Some(request));
     }
 }
 

@@ -533,6 +533,16 @@ impl RangeService for HostedRangeService {
                     }
                 }
             }
+            RangeRequest::JoinRange(request) => match request.validate() {
+                Ok(()) => RangeResponse::Error {
+                    error: WireErrorKind::Failed,
+                    message: "owner join execution is not implemented".into(),
+                },
+                Err(error) => RangeResponse::Error {
+                    error: WireErrorKind::Failed,
+                    message: error.to_string(),
+                },
+            },
             RangeRequest::ScanCursor(request) => {
                 let engine = match self.hosted_engine(request.scan.range_id) {
                     Ok(engine) => engine,
@@ -3434,6 +3444,7 @@ mod tests {
             match request {
                 RangeRequest::Sql { sql, .. } => RangeResponse::Sql { result: sql },
                 RangeRequest::ScanRange(_)
+                | RangeRequest::JoinRange(_)
                 | RangeRequest::ScanCursor(_)
                 | RangeRequest::SessionOpen { .. }
                 | RangeRequest::Session { .. }

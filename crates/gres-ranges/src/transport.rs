@@ -61,6 +61,8 @@ pub enum RangeRequest {
     },
     /// Ask an owning range to scan a table rowid interval under caller snapshots.
     ScanRange(ScanRangeReq),
+    /// Execute one typed join fragment on an owning range.
+    JoinRange(JoinRangeReq),
     /// Pull one bounded page from an owner-issued range cursor token.
     ScanCursor(ScanCursorReq),
     /// Run one transaction-coordinator RPC.
@@ -114,6 +116,8 @@ pub enum RangeResponse {
     GlobalRecovered,
     /// Visible rows returned by a range scan.
     ScanRange(ScanRangeResp),
+    /// Deterministically encoded rows returned by a join fragment.
+    JoinRange(JoinRangeResp),
     /// One bounded owner-cursor page.
     ScanCursor(ScanCursorResp),
     /// Range-scan execution failed with the owner's `PostgreSQL` error code.
@@ -681,6 +685,160 @@ pub struct ScanRangeRow {
 #[serde(deny_unknown_fields)]
 pub struct ScanRangeResp {
     pub rows: Vec<ScanRangeRow>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WireJoinKind {
+    Inner,
+    Left,
+    Right,
+    Full,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WireJoinStrategy {
+    BroadcastLeft,
+    BroadcastRight,
+    CoPartitioned,
+    Gather,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WireJoinTableInterval {
+    pub table_id: u64,
+    pub table_name: String,
+    pub interval: WireRowInterval,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct JoinRangeRow {
+    pub tuple: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JoinRangeReq {
+    pub range_id: RangeId,
+    pub local_snapshot: WireSnapshot,
+    pub global_snapshot: WireSnapshot,
+    pub read_ts: u64,
+    pub own_xid: Option<u64>,
+    pub own_start_ts: Option<u64>,
+    pub kind: WireJoinKind,
+    pub left_keys: Vec<usize>,
+    pub right_keys: Vec<usize>,
+    pub strategy: WireJoinStrategy,
+    pub left: WireJoinTableInterval,
+    pub right: WireJoinTableInterval,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broadcast_rows: Option<Vec<JoinRangeRow>>,
+    pub left_filter: WirePredicatePushdown,
+    pub right_filter: WirePredicatePushdown,
+    pub projection: Vec<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JoinRangeResp {
+    pub rows: Vec<JoinRangeRow>,
+}
+
+impl JoinRangeReq {
+    pub fn validate(&self) -> Result<(), crabka_pgexec::JoinValidationError> {
+        self.to_pgexec().validate()
+    }
+
+    fn to_pgexec(&self) -> crabka_pgexec::JoinRangeRequest {
+        use crabka_pgexec::{JoinExecutionStrategy as S, JoinKind as K};
+        crabka_pgexec::JoinRangeRequest {
+            local_snapshot: join_snapshot(&self.local_snapshot),
+            global_snapshot: join_snapshot(&self.global_snapshot),
+            read_ts: self.read_ts,
+            own_xid: self.own_xid,
+            own_start_ts: self.own_start_ts,
+            kind: match self.kind {
+                WireJoinKind::Inner => K::Inner,
+                WireJoinKind::Left => K::Left,
+                WireJoinKind::Right => K::Right,
+                WireJoinKind::Full => K::Full,
+            },
+            left_keys: self.left_keys.clone(),
+            right_keys: self.right_keys.clone(),
+            strategy: match self.strategy {
+                WireJoinStrategy::BroadcastLeft => S::BroadcastLeft,
+                WireJoinStrategy::BroadcastRight => S::BroadcastRight,
+                WireJoinStrategy::CoPartitioned => S::CoPartitioned,
+                WireJoinStrategy::Gather => S::Gather,
+            },
+            left: join_table(&self.left),
+            right: join_table(&self.right),
+            broadcast_rows: self.broadcast_rows.as_ref().map(|rows| {
+                rows.iter()
+                    .map(|row| crabka_pgexec::JoinRow {
+                        tuple: row.tuple.clone(),
+                    })
+                    .collect()
+            }),
+            left_filter: decode_predicate_for_join(&self.left_filter),
+            right_filter: decode_predicate_for_join(&self.right_filter),
+            projection: self.projection.clone(),
+        }
+    }
+}
+
+fn join_snapshot(snapshot: &WireSnapshot) -> crabka_pgexec::JoinSnapshot {
+    crabka_pgexec::JoinSnapshot {
+        xmin: snapshot.xmin,
+        xmax: snapshot.xmax,
+        xip: snapshot.xip.clone(),
+    }
+}
+
+fn join_table(table: &WireJoinTableInterval) -> crabka_pgexec::JoinTableInterval {
+    crabka_pgexec::JoinTableInterval {
+        table_id: table.table_id,
+        table_name: table.table_name.clone(),
+        interval: crabka_pgexec::RowInterval {
+            start: table.interval.start,
+            end: table.interval.end,
+        },
+    }
+}
+
+fn decode_predicate_for_join(
+    predicate: &WirePredicatePushdown,
+) -> crabka_pgexec::PredicatePushdown {
+    match predicate {
+        WirePredicatePushdown::FullScan => crabka_pgexec::PredicatePushdown::FullScan,
+        WirePredicatePushdown::Conjunctive { predicates } => {
+            crabka_pgexec::PredicatePushdown::Conjunctive(
+                predicates
+                    .iter()
+                    .map(|item| crabka_pgexec::ColumnPredicate {
+                        column: item.column,
+                        op: match item.op {
+                            WirePredicateOp::Eq => crabka_pgexec::PredicateOp::Eq,
+                            WirePredicateOp::Lt => crabka_pgexec::PredicateOp::Lt,
+                            WirePredicateOp::Le => crabka_pgexec::PredicateOp::Le,
+                            WirePredicateOp::Gt => crabka_pgexec::PredicateOp::Gt,
+                            WirePredicateOp::Ge => crabka_pgexec::PredicateOp::Ge,
+                        },
+                        value: match &item.value {
+                            WireDatum::Null => crabka_pgtypes::Datum::Null,
+                            WireDatum::Bool(value) => crabka_pgtypes::Datum::Bool(*value),
+                            WireDatum::Int4(value) => crabka_pgtypes::Datum::Int4(*value),
+                            WireDatum::Int8(value) => crabka_pgtypes::Datum::Int8(*value),
+                            WireDatum::Text(value) => crabka_pgtypes::Datum::Text(value.clone()),
+                        },
+                    })
+                    .collect(),
+            )
+        }
+    }
 }
 
 /// One pull against an owner-controlled cursor. `token` is opaque to gateways.
@@ -1599,6 +1757,94 @@ mod tests {
 
     use super::*;
 
+    fn join_request_fixture() -> JoinRangeReq {
+        let snapshot = WireSnapshot {
+            xmin: 1,
+            xmax: 3,
+            xip: vec![2],
+        };
+        JoinRangeReq {
+            range_id: RangeId::new(1),
+            local_snapshot: snapshot.clone(),
+            global_snapshot: snapshot,
+            read_ts: 9,
+            own_xid: None,
+            own_start_ts: None,
+            kind: WireJoinKind::Inner,
+            left_keys: vec![0],
+            right_keys: vec![0],
+            strategy: WireJoinStrategy::BroadcastRight,
+            left: WireJoinTableInterval {
+                table_id: 1,
+                table_name: "l".into(),
+                interval: WireRowInterval {
+                    start: None,
+                    end: None,
+                },
+            },
+            right: WireJoinTableInterval {
+                table_id: 2,
+                table_name: "r".into(),
+                interval: WireRowInterval {
+                    start: None,
+                    end: None,
+                },
+            },
+            broadcast_rows: Some(vec![]),
+            left_filter: WirePredicatePushdown::FullScan,
+            right_filter: WirePredicatePushdown::FullScan,
+            projection: vec![0, 1],
+        }
+    }
+
+    #[test]
+    fn join_range_wire_round_trip_preserves_whole_request_and_result() {
+        let request = RangeRequest::JoinRange(join_request_fixture());
+        let encoded = serde_json::to_vec(&request).expect("encode join request");
+        assert_eq!(
+            serde_json::from_slice::<RangeRequest>(&encoded).expect("decode join request"),
+            request
+        );
+
+        let response = RangeResponse::JoinRange(JoinRangeResp {
+            rows: vec![JoinRangeRow {
+                tuple: vec![3, 1, 4],
+            }],
+        });
+        let encoded = serde_json::to_vec(&response).expect("encode join response");
+        assert_eq!(
+            serde_json::from_slice::<RangeResponse>(&encoded).expect("decode join response"),
+            response
+        );
+    }
+
+    #[test]
+    fn join_range_accepts_near_limit_row_and_rejects_over_limit_row() {
+        let mut request = join_request_fixture();
+        request.broadcast_rows = Some(vec![JoinRangeRow {
+            tuple: vec![0; crabka_pgexec::scanner::MAX_JOIN_ROW_BYTES],
+        }]);
+        request.validate().expect("near-limit row");
+        request.broadcast_rows.as_mut().expect("broadcast")[0]
+            .tuple
+            .push(0);
+        assert!(matches!(
+            request.validate(),
+            Err(crabka_pgexec::JoinValidationError::JoinRowTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn bounded_framing_rejects_oversized_join_request() {
+        let mut request = join_request_fixture();
+        request.broadcast_rows = Some(vec![JoinRangeRow {
+            tuple: vec![0; MAX_FRAME_BYTES],
+        }]);
+        let error = serialize_json_bounded(&RangeRequest::JoinRange(request), MAX_FRAME_BYTES)
+            .expect_err("frame must be bounded");
+        assert!(matches!(error, TransportError::FrameTooLarge { .. }));
+    }
+
     #[test]
     fn range_peer_principal_cannot_execute_destructive_control() {
         let peers = BTreeSet::from(["range-peer".to_string()]);
@@ -1760,6 +2006,10 @@ mod tests {
                         tuple: vec![1, 2, 3],
                     }],
                 }),
+                RangeRequest::JoinRange(_) => RangeResponse::Error {
+                    error: WireErrorKind::Failed,
+                    message: "join execution is not installed".into(),
+                },
                 RangeRequest::ScanCursor(request) => RangeResponse::ScanCursor(ScanCursorResp {
                     rows: Vec::new(),
                     token: request.token,

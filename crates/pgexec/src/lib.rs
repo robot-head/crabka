@@ -77,10 +77,11 @@ pub use error::ExecError;
 pub use gtm::GlobalXidLease;
 pub use read_gate::{Linearizer, LocalLinearizer};
 pub use scanner::{
-    ColumnPredicate, LocalRangeScanner, MaterializedRangeCursor, PartialAggregateFunction,
-    PartialAggregateSpec, PredicateOp, PredicatePushdown, ProjectionPushdown, RangeCursor,
-    RangeScanner, RowInterval, ScanPage, ScanRequest, ScannedRow, TimestampedRangeScanner,
-    TopKColumn, TopKSpec,
+    ColumnPredicate, JoinExecutionStrategy, JoinKind, JoinRangeRequest, JoinRangeResult, JoinRow,
+    JoinSnapshot, JoinTableInterval, JoinValidationError, LocalRangeScanner,
+    MaterializedRangeCursor, PartialAggregateFunction, PartialAggregateSpec, PredicateOp,
+    PredicatePushdown, ProjectionPushdown, RangeCursor, RangeScanner, RowInterval, ScanPage,
+    ScanRequest, ScannedRow, TimestampedRangeScanner, TopKColumn, TopKSpec,
 };
 pub use session::SqlSession;
 pub use timestamp_txn::{

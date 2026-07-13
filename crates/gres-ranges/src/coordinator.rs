@@ -343,6 +343,7 @@ impl TxnRpc {
             | RangeResponse::ExplicitGate(_)
             | RangeResponse::GlobalRecovered
             | RangeResponse::ScanRange(_)
+            | RangeResponse::JoinRange(_)
             | RangeResponse::ScanCursor(_)
             | RangeResponse::ScanRangeError { .. }
             | RangeResponse::Tso(_)
