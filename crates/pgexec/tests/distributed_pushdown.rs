@@ -5,12 +5,54 @@ use crabka_pgexec::{
     ColumnPredicate, PartialAggregateFunction, PartialAggregateSpec, PredicateOp,
     PredicatePushdown, ProjectionPushdown, RangeCursor, RangeScanner, ScanPage, ScanRequest,
     ScannedRow, SqlEngine, TopKColumn, TopKSpec,
-    plan_dist::{plan_scan, strict_predicate_for_filter},
+    plan_dist::{
+        CheckpointMetadata, JoinInputs, JoinStrategy, PlannerConfig, SequenceCounters, Stats,
+        plan_join, plan_scan, strict_predicate_for_filter,
+    },
     scanner::{
         LocalRangeScanner, apply_executable_scan_pushdown, apply_scan_pushdown,
         finalize_partial_aggregate_rows,
     },
 };
+
+#[derive(Debug)]
+struct FakeStats {
+    left: u64,
+    right: u64,
+    co_partitioned: bool,
+}
+
+impl Stats for FakeStats {
+    fn estimated_bytes(&self, table_id: u64) -> Option<u64> {
+        Some(if table_id == 1 { self.left } else { self.right })
+    }
+
+    fn are_co_partitioned(&self, _left_table_id: u64, _right_table_id: u64) -> bool {
+        self.co_partitioned
+    }
+}
+
+#[test]
+fn join_strategy_golden_prefers_broadcast_then_copartitioned_then_gather() {
+    let config = PlannerConfig { broadcast_threshold_bytes: 64 };
+    let inputs = JoinInputs { left_table_id: 1, right_table_id: 2 };
+    let cases = [
+        (FakeStats { left: 65, right: 12, co_partitioned: true }, JoinStrategy::Broadcast { small_table_id: 2 }),
+        (FakeStats { left: 100, right: 100, co_partitioned: true }, JoinStrategy::CoPartitioned),
+        (FakeStats { left: 100, right: 100, co_partitioned: false }, JoinStrategy::Gather),
+    ];
+    for (stats, expected) in cases {
+        assert_eq!(plan_join(&stats, config, inputs), expected);
+    }
+}
+
+#[test]
+fn sequence_and_checkpoint_stats_use_live_bytes_then_checkpoint_fallback() {
+    let live = SequenceCounters::new([(7, 91)]);
+    assert_eq!(live.estimated_bytes(7), Some(91));
+    let checkpoint = CheckpointMetadata::new([(7, 44)]);
+    assert_eq!(checkpoint.estimated_bytes(7), Some(44));
+}
 use crabka_pgparser::ast::{BinaryOp, Expr, SelectItem};
 use crabka_pgtypes::{ColumnType, Datum};
 use crabka_pgwire::engine::{Engine, QueryResult, Session};
