@@ -103,6 +103,8 @@ This slice adds the typed, owned `JoinRangeRequest`/`JoinRangeResult` boundary a
 - GREEN: `cargo test -p crabka-gres-ranges join_range --lib` passed 2/2 request/result serde roundtrip and near-limit/rejection tests.
 - GREEN: `cargo test -p crabka-gres-ranges bounded_framing_rejects_oversized_join_request --lib` passed 1/1.
 - GREEN: `cargo check -p crabka-pgexec --all-targets` and `cargo check -p crabka-gres-ranges --all-targets` exited 0.
+- GREEN: `cargo test -p crabka-pgexec --all-targets -q` passed every target (347 library tests plus all integration targets).
+- PARTIAL: `cargo test -p crabka-gres-ranges --all-targets -q` passed 164 library tests and the next 21-test target, then the previously documented `real_range_partition_aborts_transfer_and_heal_restores_2pc` process test failed during readiness because the preserved dirty `control.rs` reports the range-zero receipt engine unavailable.
 - GREEN: changed-file `rustfmt --edition 2024 --check` and `git diff --check` exited 0; stable rustfmt emitted only repository nightly-option warnings. Whole-worktree `cargo fmt --all -- --check` remains blocked by the preserved pre-existing dirty `crates/gres-ranges/src/control.rs`.
 
 ### Files and commit
@@ -124,3 +126,33 @@ This slice adds the typed, owned `JoinRangeRequest`/`JoinRangeResult` boundary a
 - Owner-side join execution and SQL executor dispatch are explicitly still pending; callers receive unsupported/failure rather than fake results.
 - The 1 MiB frame limit is intentionally stricter than the aggregate broadcast-row and result-row caps, so realistic RPCs hit bounded framing before theoretical aggregate maxima. Future execution should page/stream results rather than relaxing framing.
 - Pre-existing dirty `.superpowers/sdd/progress.md` and `crates/gres-ranges/src/control.rs` were preserved and excluded from both commits.
+
+## Join owner execution slice
+
+Status: OWNER_AND_GATEWAY_EXECUTION_COMPLETE; SQL_DISPATCH_PENDING.
+
+### RED/GREEN evidence
+
+- RED: `cargo test -p crabka-pgexec join_protocol_tests::materialized --lib` failed with `E0425` because `execute_materialized_join` did not exist.
+- RED: `cargo test -p crabka-gres-ranges scan_range_service_executes_broadcast_join_on_owner --lib` reached the real service and failed with `Error { message: "expected scan_range rpc" }`.
+- GREEN: `cargo test -p crabka-pgexec join_protocol_tests --lib` passed 5/5, including 64 generated whole-value comparisons of broadcast-left, broadcast-right, and co-partitioned materialized execution against one gathered reference.
+- GREEN: `cargo test -p crabka-gres-ranges join_range --lib` passed 2/2 typed wire/bound tests.
+- GREEN: `cargo test -p crabka-gres-ranges scan_range_service_executes_broadcast_join_on_owner --lib` passed the exact `RangeService::handle(JoinRange)` owner integration test.
+- GREEN: `cargo check -p crabka-pgexec --all-targets` and `cargo check -p crabka-gres-ranges --all-targets` exited 0.
+- GREEN: changed-file `rustfmt --edition 2024` and `git diff --check` exited 0; stable rustfmt emitted only the repository's existing nightly-option warnings.
+
+### Commit and semantics
+
+- `f0c79557 feat(gres): execute distributed joins at range owners`.
+- The shared production join primitive decodes bounded tuple payloads, filters each side before joining, implements inner equi-join semantics with NULL keys never matching, projects from `[left..., right...]`, rejects invalid key/projection indexes, sorts encoded results deterministically, and enforces per-fragment and merged result bounds.
+- Broadcast execution obtains the small side through the existing scan seam, enforces the broadcast-row cap while materializing, and sends that bounded payload to every large-side owner. Owners scan only their requested large-side interval at the request's snapshots/read timestamp.
+- Co-partitioned execution sends matching intervals to each owner only after identical catalog hash layout and co-location are proven. Owners independently reject unproven requests; the gateway deterministically falls back to gather when proof is absent.
+- Gather obtains both sides through `ScanRange`/local-owner scan paths and executes the same shared join primitive at the gateway. Strategy outputs are merged and sorted identically.
+- `HostedRangeService`, `RangeScanService`, and `RegistryRangeScanner` now expose production `JoinRange` execution. SQL planner/executor selection and dispatch are explicitly still pending for the next slice.
+
+### Concerns
+
+- This slice intentionally executes only `JoinKind::Inner`; left/right/full variants are rejected explicitly rather than partially emulated.
+- The 1 MiB bounded frame remains stricter than aggregate row-count limits, so large broadcast/result payloads still require future paging/streaming work.
+- The preserved dirty `.superpowers/sdd/progress.md` and `crates/gres-ranges/src/control.rs` were not staged, reverted, or included in the feature commit.
+- The full gres-ranges all-target test retains the same unrelated process-test failure already documented by the GROUP BY slice; focused join tests, all library tests, and all-target compilation are green.
