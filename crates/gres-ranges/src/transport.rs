@@ -83,6 +83,8 @@ pub enum RangeRequest {
     TimestampPrimaryRecover(TimestampPrimaryRecoverReq),
     /// Read a validated primary descriptor without choosing a decision.
     TimestampPrimaryInspect(TimestampPrimaryRecoverReq),
+    /// Inspect a bounded page of authoritative committed durable records.
+    InspectDurableRecords(InspectDurableRecordsReq),
     /// Run one generation-fenced split control operation over authenticated transport.
     Control(RangeControlReq),
 }
@@ -140,6 +142,8 @@ pub enum RangeResponse {
         decision: WirePrimaryTxnDecision,
         operations: Vec<WireTimestampOperation>,
     },
+    /// One bounded authoritative durable-record page.
+    InspectDurableRecords(InspectDurableRecordsResp),
     /// Explicit result of a split control operation.
     Control(RangeControlResp),
     /// Range compute rejected the request.
@@ -147,6 +151,63 @@ pub enum RangeResponse {
         error: WireErrorKind,
         message: String,
     },
+}
+
+/// Maximum records returned by one durable inspection page.
+pub const MAX_DURABLE_INSPECT_RECORDS: u32 = 4_096;
+/// Maximum raw key plus value bytes returned by one durable inspection page.
+pub const MAX_DURABLE_INSPECT_BYTES: u32 = 128 * 1024;
+
+/// Authenticated, generation-fenced durable-record inspection request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InspectDurableRecordsReq {
+    pub tenant: String,
+    pub range_id: RangeId,
+    pub generation: u64,
+    pub table_id: u32,
+    /// Inclusive physical key bound within the requested table namespace.
+    pub start_key: Vec<u8>,
+    /// Exclusive physical key bound within the requested table namespace.
+    pub end_key: Vec<u8>,
+    pub max_records: u32,
+    pub max_bytes: u32,
+    /// Optional previously sampled committed offset for stable reassembly.
+    pub snapshot_offset: Option<i64>,
+    /// Opaque continuation token issued for exactly this request shape.
+    pub cursor: Option<String>,
+}
+
+/// Exact durable record bytes and their last modifying WAL revision when known.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DurableRecord {
+    pub key: Vec<u8>,
+    pub value: Vec<u8>,
+    pub source_offset: Option<i64>,
+    pub source_revision: Option<u64>,
+}
+
+/// Durable source identity shared by every record in an inspection page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DurableInspectProvenance {
+    pub sample_offset: i64,
+    pub wal_generation: u64,
+    pub replay_start_offset: i64,
+    pub replayed_records: u64,
+    pub checkpoint_pairs: u64,
+    pub checkpoint_manifest_key: Option<String>,
+    pub checkpoint_covered_offset: Option<i64>,
+    pub checkpoint_journal_seq: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InspectDurableRecordsResp {
+    pub records: Vec<DurableRecord>,
+    pub next_cursor: Option<String>,
+    pub provenance: DurableInspectProvenance,
 }
 
 /// Serializable `(table_id, rowid)` boundary used by split control.
@@ -1865,16 +1926,14 @@ mod tests {
 
     #[test]
     fn legacy_timestamp_wire_decodes_as_explicitly_bucketless() {
-        let write: WireTimestampWrite = serde_json::from_str(
-            r#"{"table_id":7,"rowid":11,"row":[],"delete":false}"#,
-        )
-        .expect("decode legacy timestamp write");
+        let write: WireTimestampWrite =
+            serde_json::from_str(r#"{"table_id":7,"rowid":11,"row":[],"delete":false}"#)
+                .expect("decode legacy timestamp write");
         assert_eq!(write.bucket, None);
 
-        let operation: WireTimestampOperation = serde_json::from_str(
-            r#"{"range_id":3,"table_id":7,"rowid":11,"delete":false}"#,
-        )
-        .expect("decode legacy timestamp operation");
+        let operation: WireTimestampOperation =
+            serde_json::from_str(r#"{"range_id":3,"table_id":7,"rowid":11,"delete":false}"#)
+                .expect("decode legacy timestamp operation");
         assert_eq!(operation.bucket, None);
     }
 
@@ -2144,6 +2203,22 @@ mod tests {
                         decision: WirePrimaryTxnDecision::Pending,
                         operations: Vec::new(),
                     }
+                }
+                RangeRequest::InspectDurableRecords(request) => {
+                    RangeResponse::InspectDurableRecords(InspectDurableRecordsResp {
+                        records: Vec::new(),
+                        next_cursor: request.cursor,
+                        provenance: DurableInspectProvenance {
+                            sample_offset: 4,
+                            wal_generation: request.generation,
+                            replay_start_offset: 0,
+                            replayed_records: 1,
+                            checkpoint_pairs: 0,
+                            checkpoint_manifest_key: None,
+                            checkpoint_covered_offset: None,
+                            checkpoint_journal_seq: None,
+                        },
+                    })
                 }
                 RangeRequest::Control(_) => RangeResponse::Error {
                     error: WireErrorKind::Failed,
@@ -2541,5 +2616,75 @@ mod tests {
             .expect_err("silent peer must timeout");
 
         assert!(matches!(error, TransportError::Timeout(_)));
+    }
+
+    #[tokio::test]
+    async fn durable_inspection_round_trips_without_exceeding_frame_bound() {
+        let request = InspectDurableRecordsReq {
+            tenant: "tenant-a".into(),
+            range_id: RangeId::new(2),
+            generation: 7,
+            table_id: 50,
+            start_key: crabka_pgkv::key::table_prefix(50),
+            end_key: {
+                let mut end = crabka_pgkv::key::table_prefix(50);
+                end.push(0xff);
+                end
+            },
+            max_records: MAX_DURABLE_INSPECT_RECORDS,
+            max_bytes: MAX_DURABLE_INSPECT_BYTES,
+            snapshot_offset: None,
+            cursor: Some("cursor".into()),
+        };
+        let encoded = serialize_json_bounded(
+            &RangeRequest::InspectDurableRecords(request.clone()),
+            MAX_FRAME_BYTES,
+        )
+        .expect("bounded request");
+        assert_eq!(
+            serde_json::from_slice::<RangeRequest>(&encoded).expect("request decode"),
+            RangeRequest::InspectDurableRecords(request.clone())
+        );
+        let addr = spawn_loopback(Arc::new(EchoService::default()))
+            .await
+            .unwrap();
+        let response = FramedTcpClient::default()
+            .call(
+                &addr.to_string(),
+                &RangeRequest::InspectDurableRecords(request),
+            )
+            .await
+            .expect("inspection response");
+        assert!(matches!(response, RangeResponse::InspectDurableRecords(_)));
+    }
+
+    #[test]
+    fn durable_inspection_uses_range_acl_not_destructive_peer_acl() {
+        let request = RangeRequest::InspectDurableRecords(InspectDurableRecordsReq {
+            tenant: "tenant-a".into(),
+            range_id: RangeId::new(2),
+            generation: 1,
+            table_id: 9,
+            start_key: vec![1],
+            end_key: vec![2],
+            max_records: 1,
+            max_bytes: 1,
+            snapshot_offset: None,
+            cursor: None,
+        });
+        let range = BTreeSet::from(["range-peer".to_string()]);
+        let operator = BTreeSet::from(["operator".to_string()]);
+        assert!(principal_authorized_for_request(
+            "range-peer",
+            &request,
+            &range,
+            &operator
+        ));
+        assert!(!principal_authorized_for_request(
+            "operator", &request, &range, &operator
+        ));
+        assert!(!principal_authorized_for_request(
+            "stranger", &request, &range, &operator
+        ));
     }
 }

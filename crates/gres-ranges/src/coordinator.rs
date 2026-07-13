@@ -351,6 +351,7 @@ impl TxnRpc {
             | RangeResponse::TimestampParticipantDone
             | RangeResponse::TimestampPrimaryDecision { .. }
             | RangeResponse::TimestampPrimaryOutcome { .. }
+            | RangeResponse::InspectDurableRecords(_)
             | RangeResponse::Control(_) => Err(TxnRpcError::UnexpectedResponse),
         }
     }

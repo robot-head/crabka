@@ -47,7 +47,8 @@ pub use self::{
     frame::WalFrame,
     readonly_fold::{
         CommittedFoldSnapshot, FoldCheckpointIdentity, FoldLimits, FoldProjection, FoldProvenance,
-        FoldSnapshotRequest, GenerationWitness, committed_fold_snapshot,
+        FoldRecordSource, FoldSnapshotRequest, GenerationWitness, committed_fold_snapshot,
+        committed_fold_snapshot_live, committed_fold_snapshot_live_at,
     },
     recovery::{
         CommittedWalReader, InMemoryWalLog, LiveRecovered, LiveRecoveryConfig, RecoveryBarrier,

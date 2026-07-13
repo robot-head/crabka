@@ -250,6 +250,25 @@ impl ProcessHarness {
         .expect("operator mTLS client")
     }
 
+    pub async fn inspect_durable_records(
+        &self,
+        request: crabka_gres_ranges::InspectDurableRecordsReq,
+    ) -> crabka_gres_ranges::InspectDurableRecordsResp {
+        let range_id = request.range_id;
+        let response = self
+            .operator_control_client()
+            .call(
+                &self.range_endpoint(range_id.as_u32()),
+                &crabka_gres_ranges::RangeRequest::InspectDurableRecords(request),
+            )
+            .await
+            .expect("authenticated durable-record inspection");
+        let crabka_gres_ranges::RangeResponse::InspectDurableRecords(response) = response else {
+            panic!("unexpected durable-record inspection response: {response:?}");
+        };
+        response
+    }
+
     pub fn log(&self, range: u32) -> String {
         let path = &self.node(range).log_path;
         std::fs::read_to_string(path)
