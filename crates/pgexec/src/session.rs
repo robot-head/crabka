@@ -2269,13 +2269,19 @@ impl SqlSession {
             TxnState::Idle => {
                 let _writer_fence_guard = Arc::clone(&self.writer_fence).writer().await;
                 let _table_write_guard = Arc::clone(&self.table_write_gate).read_owned().await;
-                if crate::exec::table_uses_global_visibility(&crabka_pgcatalog::get_table(
-                    self.catalog_kv.as_ref(),
-                    &copy.table,
-                )?) {
-                    return Err(ExecError::Unsupported(
-                        "COPY into sharded tables is not supported".into(),
-                    ));
+                let copy_table =
+                    crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), &copy.table)?;
+                if crate::exec::table_uses_global_visibility(&copy_table) {
+                    let ctx = self.eval_ctx();
+                    let plan = crate::exec::execute_timestamp_copy_write(
+                        self.catalog_kv.as_ref(),
+                        self.kv.as_ref(),
+                        self.seq.as_ref(),
+                        copy,
+                        &rows,
+                        &ctx,
+                    )?;
+                    return self.commit_timestamp_write_plan(plan).await;
                 }
                 let _unique_guard = match unique_index_lock_mode(
                     crate::exec::copy_requires_unique_local_serialization(
@@ -2336,7 +2342,6 @@ impl SqlSession {
         &mut self,
         stmt: &Statement,
     ) -> Result<QueryResult, ExecError> {
-        let start_ts = self.allocate_timestamp_transaction_id().await?;
         let ctx = self.eval_ctx();
         let plan = crate::exec::execute_timestamp_write(
             self.catalog_kv.as_ref(),
@@ -2345,10 +2350,17 @@ impl SqlSession {
             stmt,
             &ctx,
         )?;
+        self.commit_timestamp_write_plan(plan).await
+    }
+
+    async fn commit_timestamp_write_plan(
+        &self,
+        plan: crate::exec::TimestampWritePlan,
+    ) -> Result<QueryResult, ExecError> {
         if plan.writes.is_empty() {
             return Ok(plan.result);
         }
-
+        let start_ts = self.allocate_timestamp_transaction_id().await?;
         let participant = crate::timestamp_txn::TimestampTxnParticipant::new(
             Arc::clone(&self.kv),
             Arc::clone(&self.catalog_kv),
@@ -5207,6 +5219,66 @@ mod tests {
             panic!("expected rows");
         };
         assert!(rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn copy_from_stdin_hash_table_uses_timestamp_bucket_keys_atomically() {
+        let kv = Arc::new(crabka_pgkv::MemKv::new());
+        let mut engine =
+            SqlEngine::with_kv(Arc::clone(&kv) as Arc<dyn crabka_pgkv::Kv>).expect("engine");
+        engine.init_gtm_coordinator().expect("gtm");
+        let mut session = engine.connect();
+        session
+            .simple_query(
+                "CREATE TABLE hc (id int4 NOT NULL, value text) SHARDED BY HASH (id) BUCKETS 16",
+            )
+            .await
+            .expect("create");
+
+        session
+            .copy_in(
+                "COPY hc (id, value) FROM STDIN",
+                vec![bytes::Bytes::from(
+                    (0..16)
+                        .map(|id| format!("{id}\tv{id}\n"))
+                        .collect::<String>(),
+                )],
+            )
+            .await
+            .expect("copy hash rows");
+
+        let table = crabka_pgcatalog::get_table(kv.as_ref(), "hc").expect("table");
+        let physical = kv
+            .scan_prefix(&crabka_pgkv::key::table_prefix(table.id))
+            .expect("physical rows");
+        assert_eq!(physical.len(), 16);
+        assert!(physical.iter().all(|(key, _)| matches!(
+            crabka_pgkv::key::classify_key(key),
+            crabka_pgkv::key::KeyClass::HashPrimaryVersion { .. }
+        )));
+        let results = session
+            .simple_query("SELECT id FROM hc ORDER BY id")
+            .await
+            .expect("read copied rows");
+        let QueryResult::Rows { rows, .. } = &results[0] else {
+            panic!("expected rows");
+        };
+        assert_eq!(rows.len(), 16);
+
+        let error = session
+            .copy_in(
+                "COPY hc (id, value) FROM STDIN",
+                vec![bytes::Bytes::from_static(b"100\tok\n\\N\tbad\n")],
+            )
+            .await
+            .expect_err("malformed batch aborts");
+        assert_eq!(error.code, "23502");
+        assert_eq!(
+            kv.scan_prefix(&crabka_pgkv::key::table_prefix(table.id))
+                .expect("physical rows after abort")
+                .len(),
+            16
+        );
     }
 
     #[tokio::test]
