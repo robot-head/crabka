@@ -16,6 +16,7 @@ pub mod checkpoint;
 pub mod error;
 pub mod follower;
 pub mod frame;
+pub mod readonly_fold;
 pub mod recovery;
 pub mod replay;
 pub mod split_runtime;
@@ -44,6 +45,10 @@ pub use self::{
         ReadOnlyRange0Follower,
     },
     frame::WalFrame,
+    readonly_fold::{
+        CommittedFoldSnapshot, FoldCheckpointIdentity, FoldLimits, FoldProjection, FoldProvenance,
+        FoldSnapshotRequest, GenerationWitness, committed_fold_snapshot,
+    },
     recovery::{
         CommittedWalReader, InMemoryWalLog, LiveRecovered, LiveRecoveryConfig, RecoveryBarrier,
         RecoveryFencer, bootstrap_live_range0_follower, bounded_committed_tail,
