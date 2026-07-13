@@ -3,7 +3,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 readonly family=source_restore
-readonly evidence_dir="$PWD/target/g8-split-crash/$family"
+readonly evidence_dir="${CRABKA_G8_SPLIT_EVIDENCE_ROOT:-$PWD/target/g8-split-crash}/$family"
 readonly validator="$PWD/scripts/tests/validate-gres-split-crash-evidence.py"
 readonly cases=(
   initiated_before_running_cas checkpoint_receipt_before_journal_cas
@@ -19,7 +19,7 @@ rm -rf "$evidence_dir"
 mkdir -p "$evidence_dir"
 for case_name in "${cases[@]}"; do
   evidence="$evidence_dir/$case_name.json"
-  CRABKA_G8_SPLIT_CRASH=1 CRABKA_G8_SPLIT_KILL_POINT="$case_name" \
+  CRABKA_G8_SPLIT_CRASH=1 CRABKA_G8_SPLIT_WORKLOAD="${CRABKA_G8_SPLIT_WORKLOAD:-ordinary}" CRABKA_G8_SPLIT_KILL_POINT="$case_name" \
     CRABKA_G8_SPLIT_CRASH_EVIDENCE="$evidence" \
     timeout 240s cargo test --locked -p crabka-gres --test topology_process_split_crash \
       -- --exact real_process_split_crash_anywhere --nocapture
