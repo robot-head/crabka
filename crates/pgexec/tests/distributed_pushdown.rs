@@ -11,7 +11,7 @@ use crabka_pgexec::{
     },
     scanner::{
         LocalRangeScanner, apply_executable_scan_pushdown, apply_scan_pushdown,
-        finalize_partial_aggregate_rows,
+        finalize_partial_aggregate_rows, merge_top_k_streams,
     },
 };
 
@@ -388,6 +388,30 @@ fn top_k_pushdown_merges_uneven_range_local_results_lexicographically() {
             .collect::<Vec<_>>(),
         vec![(3, 2), (8, 1), (1, 1)]
     );
+}
+
+#[test]
+fn k_way_top_k_merge_matches_global_order_and_bounds_output_for_random_streams() {
+    let spec = TopKSpec { order_by: vec![TopKColumn { column: 0, asc: true }], limit: 7 };
+    for seed in 0_u64..64 {
+        let mut streams = vec![Vec::new(), Vec::new(), Vec::new()];
+        for index in 0_u64..31 {
+            let value = ((seed.wrapping_mul(17) + index.wrapping_mul(23)) % 41) as i32;
+            streams[index as usize % 3].push(ScannedRow {
+                rowid: seed * 100 + index,
+                xmin: 1,
+                row: vec![Datum::Int4(value)],
+            });
+        }
+        for stream in &mut streams {
+            crabka_pgexec::scanner::apply_top_k_pushdown(stream, &spec).unwrap();
+        }
+        let mut expected = streams.iter().flatten().cloned().collect::<Vec<_>>();
+        crabka_pgexec::scanner::apply_top_k_pushdown(&mut expected, &spec).unwrap();
+        let actual = merge_top_k_streams(streams, &spec).unwrap();
+        assert_eq!(actual, expected);
+        assert!(actual.len() <= 7);
+    }
 }
 
 #[test]

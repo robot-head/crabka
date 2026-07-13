@@ -2433,7 +2433,7 @@ impl RegistryRangeScanner {
                 "sharded scatter scans require a finite statement read timestamp".into(),
             ));
         }
-        let mut rows = Vec::new();
+        let mut streams = Vec::new();
         for range_id in self.registry.range_ids().await {
             if let Some(engine) = self.local_engines.get(&range_id) {
                 let local_rows = engine.scan_local_visible_with_timestamp_owner(
@@ -2445,7 +2445,7 @@ impl RegistryRangeScanner {
                     request.own_start_ts,
                     request.interval,
                 )?;
-                rows.extend(crabka_pgexec::scanner::apply_executable_scan_pushdown(
+                streams.push(crabka_pgexec::scanner::apply_executable_scan_pushdown(
                     local_rows,
                     &request.predicate,
                     &request.projection,
@@ -2454,12 +2454,13 @@ impl RegistryRangeScanner {
                 )?);
                 continue;
             }
-            rows.extend(self.scan_remote_range(range_id, &request).await?);
+            streams.push(self.scan_remote_range(range_id, &request).await?);
         }
+        let mut rows = streams.iter().flatten().cloned().collect();
         if let Some(spec) = request.partial_aggregate.as_ref() {
             rows = merge_partial_aggregate_rows(rows, spec)?;
         } else if let Some(spec) = request.top_k.as_ref() {
-            crabka_pgexec::scanner::apply_top_k_pushdown(&mut rows, spec)?;
+            rows = crabka_pgexec::scanner::merge_top_k_streams(streams, spec)?;
         } else {
             rows.sort_by_key(|row| (row.rowid, row.xmin));
         }
