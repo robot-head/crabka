@@ -1,6 +1,6 @@
 # G9 Task 5 report
 
-Status: DONE_WITH_CONCERNS
+Status: BLOCKED
 
 ## Landed-seam audit
 
@@ -60,4 +60,14 @@ Pinned 16-bucket corpus (bytes -> bucket): empty -> 5; `a` -> 12; `alpha` -> 11;
 - No new balancer-free operation-sequence property test was added. The landed map constructor validates corresponding group buckets after each reconstructed layout and therefore rejects a violating transition, but the repository still lacks the requested dedicated generated sequence model that performs coordinated group split/move operations.
 - The existing G8 split/nemesis tests use ordinary `SHARDED` tables; they were run unchanged, but no practical multiprocess crash gate was run with a `SHARDED BY HASH` workload in this task.
 - The parser supports multiple hash columns and the optional existing `COLOCATED WITH group` suffix in addition to the brief's singular spelling. The exact singular spelling is accepted and invalid bucket counts are rejected, but a standalone SQL deparser does not exist in `pgparser`, so no parser-level deparse API was added.
-- Because these gaps are explicit Task 5 gates, the honest status is `DONE_WITH_CONCERNS`, not an unqualified `DONE`.
+- Because these gaps are explicit Task 5 gates, they preclude an unqualified completion status.
+
+## Continuation audit and blocker
+
+The binding design is singular: `docs/superpowers/specs/2026-07-09-crabka-gres-g9-distributed-maturity-design.md:73` specifies `SHARDED BY HASH (col) BUCKETS n`, and its test gate at line 109 requires hash-spec tables through the whole G8 crash/nemesis suite.
+
+That gate cannot honestly be parameterized onto the current deployed split bridge. The bridge rejects every sharded or hash-sharded table in `crates/gres-ranges/src/tenant.rs:1048-1050` and again at `1170-1172`. The latter physical path also rejects any non-empty predecessor table at `1177-1182`; its checkpoint is explicitly named `local-empty-table-no-data-migration` at line 2100. Consequently there is no real hash-table filtered checkpoint/restore/catch-up/cutover implementation for a process crash/nemesis test to exercise. A test-only parameter would either fail at validation or mock the missing physical path, contrary to the requirement.
+
+Completing the requested gate therefore requires first implementing the missing G8 deployed data-migration bridge for populated sharded tables (filtered checkpoint/restore, tail catch-up, cutover, restart recovery), then enabling hash bucket boundaries and coordinated co-location moves. This is architectural prerequisite work, not a Task 5 test parameterization seam. The repository's own audit records the same blocker in `.superpowers/sdd/audit-g7-g9.md:311-315` and recommends completing the physical operator path before the G9 gates.
+
+Because the parent explicitly disallowed a concerns status and requires a practical non-mock process crash shard, the final status is `BLOCKED` on this absent physical G8 prerequisite. The earlier fast-model and in-process results remain valid but do not satisfy the missing system gate.
