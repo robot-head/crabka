@@ -36,3 +36,16 @@ Verification for commit `59092d16`:
 - Changed-file `git diff --check`: passed.
 
 COPY remains separate: both session COPY entry points currently reject sharded tables before the xid-only COPY executor.
+
+## COPY timestamp slice
+
+Autocommit `COPY FROM STDIN` now plans supported sharded tables as one `TimestampWritePlan` and commits the whole batch through the existing timestamp participant prewrite/commit/abort protocol. It reuses the established COPY text decoder, target resolution, defaults, NULL handling, and type coercion. Hash rows derive their bucket from the catalog hash column. Unsupported local indexes and unique global indexes fail closed; explicit sharded transactions retain their existing rejection. Unsharded COPY still executes the unchanged xid path.
+
+The production protocol test copies the pinned integers 0 through 15, proves 16 physical `HashPrimaryVersion` keys and 16 SQL-visible rows, then submits a batch containing one valid row followed by a NULL hash key and proves the entire failing batch adds no physical version.
+
+Verification for commit `2a93a781`:
+
+- `cargo test -p crabka-pgexec copy_from_stdin --lib --no-fail-fast`: 4 passed.
+- `cargo test -p crabka-pgexec --test transactions --no-fail-fast`: 38 passed.
+- `cargo check -p crabka-pgexec --all-targets`: passed.
+- Changed-file `git diff --check`: passed.
