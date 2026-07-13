@@ -1531,6 +1531,69 @@ fn split_workload_mode_is_explicit_and_fail_closed() {
     assert!(SplitWorkload::parse(Some("HASH")).is_err());
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn real_child_hash_durable_inspection_covers_pinned_bucket_corpus() {
+    if std::env::var_os("CRABKA_G9_HASH_INSPECT").is_none() {
+        return;
+    }
+    let tenant = format!("tg9hi-{}", std::process::id());
+    let system = ProcessHarness::start_all_on_zero(&tenant).await;
+    let sql = system.sql(0).await;
+    let mut ddl = String::new();
+    for table in 1..50 {
+        ddl.push_str(&format!("CREATE TABLE filler_{table} (id int4);"));
+    }
+    ddl.push_str("CREATE TABLE hash_probe50 (id int4 NOT NULL) SHARDED BY HASH (id) BUCKETS 16;");
+    sql.simple_query(&ddl).await.expect("create hash probe");
+    for id in 0..16 {
+        sql.simple_query(&format!("INSERT INTO hash_probe50 VALUES ({id})"))
+            .await
+            .expect("insert pinned hash probe");
+    }
+    drop(sql);
+
+    let start_key = crabka_pgkv::key::table_prefix(50);
+    let mut end_key = start_key.clone();
+    *end_key.last_mut().expect("table prefix") += 1;
+    let mut buckets = BTreeSet::new();
+    for range_id in [0, 1] {
+        let response = system
+            .inspect_durable_records(crabka_gres_ranges::InspectDurableRecordsReq {
+                tenant: tenant.clone(),
+                range_id: RangeId::new(range_id),
+                generation: 0,
+                table_id: 50,
+                start_key: start_key.clone(),
+                end_key: end_key.clone(),
+                max_records: crabka_gres_ranges::MAX_DURABLE_INSPECT_RECORDS,
+                max_bytes: crabka_gres_ranges::MAX_DURABLE_INSPECT_BYTES,
+                snapshot_offset: None,
+                cursor: None,
+            })
+            .await;
+        assert!(response.next_cursor.is_none());
+        assert!(response.provenance.sample_offset >= 0);
+        for record in &response.records {
+            assert!(record.source_offset.is_some());
+            assert!(record.source_revision.is_some());
+            match crabka_pgkv::key::classify_key(&record.key) {
+                crabka_pgkv::key::KeyClass::HashPrimaryVersion {
+                    table_id, bucket, ..
+                } => {
+                    assert_eq!(table_id, 50);
+                    assert!(buckets.insert(bucket), "bucket duplicated across ranges");
+                }
+                crabka_pgkv::key::KeyClass::System => {}
+                class => {
+                    panic!("hash durable inspection returned legacy/unexpected class {class:?}")
+                }
+            }
+        }
+    }
+    assert_eq!(buckets, (0..16).collect());
+    system.shutdown().await;
+}
+
 fn cli_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
