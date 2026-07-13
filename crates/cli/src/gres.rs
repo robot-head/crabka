@@ -168,6 +168,9 @@ struct SplitRangeArgs {
     table: u64,
     /// Row identifier at the split point.
     rowid: u64,
+    /// Hash bucket at the split point; required exactly for hash-sharded tables.
+    #[arg(long)]
+    bucket: Option<u32>,
     /// Durable idempotency key for this split.
     #[arg(long)]
     operation_id: String,
@@ -470,7 +473,8 @@ async fn split_range(args: SplitRangeArgs) -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("tenant {tenant_name} not found"))?;
-    let source = source_range_for_key(&record, RangeBoundary::new(args.table, args.rowid))?;
+    let boundary = split_boundary(&record, args.table, args.bucket, args.rowid)?;
+    let source = source_range_for_key(&record, boundary)?;
     let first_free = next_range_id(&record);
     let left_range_id = args
         .left_range_id
@@ -502,11 +506,7 @@ async fn split_range(args: SplitRangeArgs) -> Result<(), String> {
     let split = RangeLayoutSplit {
         source_range_id: source.range_id,
         predecessor_generation: source.wal_generation,
-        left: successor(
-            left_range_id,
-            Some(RangeBoundary::new(args.table, args.rowid)),
-            left_endpoint,
-        ),
+        left: successor(left_range_id, Some(boundary), left_endpoint),
         right: successor(successor_range_id, source.end_key, successor_endpoint),
     };
     let target = record
@@ -529,15 +529,37 @@ async fn split_range(args: SplitRangeArgs) -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
     println!(
-        "initiated split {} for tenant {tenant_name} range {} at table {} rowid {} into ranges {} and {}",
+        "initiated split {} for tenant {tenant_name} range {} at table {} bucket {:?} rowid {} into ranges {} and {}",
         args.operation_id,
         source.range_id,
         args.table,
+        args.bucket,
         args.rowid,
         left_range_id,
         successor_range_id
     );
     Ok(())
+}
+
+fn split_boundary(
+    record: &TenantRecord,
+    table_id: u64,
+    bucket: Option<u32>,
+    rowid: u64,
+) -> Result<RangeBoundary, String> {
+    let placement = record
+        .hash_placements
+        .iter()
+        .find(|placement| placement.table_id == table_id);
+    match (placement, bucket) {
+        (Some(placement), Some(bucket)) if bucket < placement.bucket_count => {
+            Ok(RangeBoundary::hash(table_id, bucket, rowid))
+        }
+        (Some(_), Some(_)) => Err("--bucket must be less than the table hash bucket count".into()),
+        (Some(_), None) => Err("--bucket is required for a hash-sharded table split".into()),
+        (None, Some(_)) => Err("--bucket is only valid for a hash-sharded table split".into()),
+        (None, None) => Ok(RangeBoundary::new(table_id, rowid)),
+    }
 }
 
 async fn move_range(args: MoveRangeArgs) -> Result<(), String> {
@@ -1224,6 +1246,23 @@ mod tests {
 
         assert!(left.range_id == 0);
         assert!(right.range_id == 1);
+    }
+
+    #[test]
+    fn split_boundary_requires_exact_hash_bucket_contract() {
+        let mut record = test_record("tenant-a", TenantState::Active);
+        record.hash_placements = vec![crabka_gres_control::HashPlacement {
+            table_id: 7,
+            hash_columns: vec!["id".into()],
+            bucket_count: 8,
+            co_location_group: None,
+        }];
+
+        assert!(split_boundary(&record, 7, Some(3), 9) == Ok(RangeBoundary::hash(7, 3, 9)));
+        assert!(split_boundary(&record, 7, None, 9).is_err());
+        assert!(split_boundary(&record, 7, Some(8), 9).is_err());
+        assert!(split_boundary(&record, 9, Some(0), 9).is_err());
+        assert!(split_boundary(&record, 9, None, 9) == Ok(RangeBoundary::new(9, 9)));
     }
 
     #[test]

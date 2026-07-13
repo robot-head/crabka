@@ -59,7 +59,7 @@ pub struct GresTenantSpec {
 pub struct GresTenantRangeSpec {
     /// Range identifier used by compute placement and WAL topics.
     pub range_id: u32,
-    /// Exclusive `(table_id, rowid)` upper bound. Unset marks the final range.
+    /// Exclusive `(table_id, bucket?, rowid)` upper bound. Unset marks the final range.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_key: Option<GresTenantRangeKey>,
 }
@@ -72,6 +72,9 @@ pub struct GresTenantRangeSpec {
 pub struct GresTenantRangeKey {
     /// Table identifier at the boundary.
     pub table_id: u64,
+    /// Hash bucket at the boundary; absent for non-hash tables.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bucket: Option<u32>,
     /// Row identifier at the boundary.
     pub rowid: u64,
 }
