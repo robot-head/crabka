@@ -2,9 +2,10 @@ use std::sync::{Arc, Mutex};
 
 use crabka_pgcatalog::{Column, Table};
 use crabka_pgexec::{
-    ColumnPredicate, PartialAggregateFunction, PartialAggregateSpec, PredicateOp,
-    PredicatePushdown, ProjectionPushdown, RangeCursor, RangeScanner, ScanPage, ScanRequest,
-    ScannedRow, SqlEngine, TopKColumn, TopKSpec,
+    ColumnPredicate, JoinExecutionStrategy, JoinRangeRequest, JoinRangeResult,
+    PartialAggregateFunction, PartialAggregateSpec, PredicateOp, PredicatePushdown,
+    ProjectionPushdown, RangeCursor, RangeScanner, ScanPage, ScanRequest, ScannedRow, SqlEngine,
+    TopKColumn, TopKSpec,
     plan_dist::{
         CheckpointMetadata, JoinInputs, JoinStrategy, PlannerConfig, SequenceCounters, Stats,
         plan_join, plan_join_for_tables, plan_scan, strict_predicate_for_filter,
@@ -957,11 +958,16 @@ struct RecordedScan {
 #[derive(Debug, Default)]
 struct RecordingScanner {
     scans: Mutex<Vec<RecordedScan>>,
+    joins: Mutex<Vec<JoinRangeRequest>>,
 }
 
 impl RecordingScanner {
     fn scans(&self) -> Vec<RecordedScan> {
         self.scans.lock().expect("scan log").clone()
+    }
+
+    fn joins(&self) -> Vec<JoinRangeRequest> {
+        self.joins.lock().expect("join log").clone()
     }
 }
 
@@ -975,6 +981,188 @@ impl RangeScanner for RecordingScanner {
             top_k: request.top_k.clone(),
         });
         LocalRangeScanner.scan(request)
+    }
+
+    fn join(&self, request: JoinRangeRequest) -> Result<JoinRangeResult, crabka_pgexec::ExecError> {
+        self.joins.lock().expect("join log").push(request);
+        Err(crabka_pgexec::ExecError::Unsupported(
+            "recording scanner requests deterministic local fallback".into(),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn sql_inner_equi_join_dispatches_selected_broadcast_request() {
+    let scanner = Arc::new(RecordingScanner::default());
+    let mut engine = SqlEngine::new();
+    engine.set_range_scanner(scanner.clone());
+    engine.set_join_stats(Arc::new(SequenceCounters::new([(1, 1)])));
+    engine.set_join_strategy_config(PlannerConfig {
+        broadcast_threshold_bytes: u64::MAX,
+    });
+    let mut session = engine.connect();
+    session
+        .simple_query(
+            "CREATE TABLE left_t (id int4, value text) SHARDED; \
+             CREATE TABLE right_t (id int4, value text) SHARDED; \
+             INSERT INTO left_t VALUES (1, 'l'); \
+             INSERT INTO right_t VALUES (1, 'r'); \
+             SELECT left_t.value, right_t.value FROM left_t JOIN right_t ON left_t.id = right_t.id",
+        )
+        .await
+        .expect("join falls back locally after dispatch");
+
+    let joins = scanner.joins();
+    assert_eq!(joins.len(), 1);
+    assert!(matches!(
+        joins[0].strategy,
+        JoinExecutionStrategy::BroadcastLeft | JoinExecutionStrategy::BroadcastRight
+    ));
+    assert_ne!(joins[0].read_ts, 0);
+}
+
+#[tokio::test]
+async fn sql_copartitioned_join_requires_the_join_key_to_match_hash_metadata() {
+    let scanner = Arc::new(RecordingScanner::default());
+    let mut engine = SqlEngine::new();
+    engine.set_range_scanner(scanner.clone());
+    engine.set_join_stats(Arc::new(FakeStats {
+        left: 100,
+        right: 100,
+        co_partitioned: true,
+    }));
+    engine.set_join_strategy_config(PlannerConfig {
+        broadcast_threshold_bytes: 0,
+    });
+    engine
+        .connect()
+        .simple_query(
+            "CREATE TABLE left_t (id int4, value text) SHARDED BY HASH (id) BUCKETS 4 COLOCATED WITH pair; \
+             CREATE TABLE right_t (id int4, value text) SHARDED BY HASH (id) BUCKETS 4 COLOCATED WITH pair; \
+             SELECT * FROM left_t JOIN right_t ON left_t.value = right_t.value",
+        )
+        .await
+        .expect("unsupported scanner falls back locally");
+
+    assert_eq!(scanner.joins()[0].strategy, JoinExecutionStrategy::Gather);
+}
+
+#[derive(Debug)]
+struct MaterializedJoinScanner {
+    left: Vec<crabka_pgexec::JoinRow>,
+    right: Vec<crabka_pgexec::JoinRow>,
+    joins: Mutex<Vec<JoinRangeRequest>>,
+}
+
+impl RangeScanner for MaterializedJoinScanner {
+    fn scan(&self, request: ScanRequest<'_>) -> Result<Vec<ScannedRow>, crabka_pgexec::ExecError> {
+        LocalRangeScanner.scan(request)
+    }
+
+    fn join(&self, request: JoinRangeRequest) -> Result<JoinRangeResult, crabka_pgexec::ExecError> {
+        self.joins.lock().expect("join log").push(request.clone());
+        crabka_pgexec::scanner::execute_materialized_join(&request, &self.left, &self.right)
+    }
+}
+
+fn encoded_join_rows(rows: &[Vec<Datum>]) -> Vec<crabka_pgexec::JoinRow> {
+    rows.iter()
+        .map(|row| crabka_pgexec::JoinRow {
+            tuple: crabka_pgmvcc::version::encode_tuple(0, 0, row),
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn sql_join_strategies_dispatch_and_match_local_whole_rows() {
+    let generated = |side: &str, salt: u64| {
+        (0..64)
+            .map(|seed| {
+                let random = (seed * 1_103_515_245 + salt) % 17;
+                let key = if random % 7 == 0 {
+                    Datum::Null
+                } else {
+                    Datum::Int4(i32::try_from(random % 9).expect("small key"))
+                };
+                vec![key, Datum::Text(format!("{side}-{seed:02}"))]
+            })
+            .collect::<Vec<_>>()
+    };
+    let left = generated("l", 12_345);
+    let right = generated("r", 54_321);
+    let values_sql = |rows: &[Vec<Datum>]| {
+        rows.iter()
+            .map(|row| match row.as_slice() {
+                [Datum::Int4(key), Datum::Text(value)] => format!("({key}, '{value}')"),
+                [Datum::Null, Datum::Text(value)] => format!("(NULL, '{value}')"),
+                _ => unreachable!("generated row shape"),
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let cases = [
+        (
+            FakeStats {
+                left: 1,
+                right: 100,
+                co_partitioned: false,
+            },
+            u64::MAX,
+            JoinExecutionStrategy::BroadcastLeft,
+        ),
+        (
+            FakeStats {
+                left: 100,
+                right: 100,
+                co_partitioned: true,
+            },
+            0,
+            JoinExecutionStrategy::CoPartitioned,
+        ),
+        (
+            FakeStats {
+                left: 100,
+                right: 100,
+                co_partitioned: false,
+            },
+            0,
+            JoinExecutionStrategy::Gather,
+        ),
+    ];
+    for (stats, threshold, expected_strategy) in cases {
+        let scanner = Arc::new(MaterializedJoinScanner {
+            left: encoded_join_rows(&left),
+            right: encoded_join_rows(&right),
+            joins: Mutex::new(Vec::new()),
+        });
+        let mut pushed = SqlEngine::new();
+        pushed.set_range_scanner(scanner.clone());
+        pushed.set_join_stats(Arc::new(stats));
+        pushed.set_join_strategy_config(PlannerConfig {
+            broadcast_threshold_bytes: threshold,
+        });
+        let local = SqlEngine::new();
+        let ddl = format!(
+            "CREATE TABLE left_t (id int4, value text) SHARDED BY HASH (id) BUCKETS 4 COLOCATED WITH pair; \
+             CREATE TABLE right_t (id int4, value text) SHARDED BY HASH (id) BUCKETS 4 COLOCATED WITH pair; \
+             INSERT INTO left_t VALUES {}; INSERT INTO right_t VALUES {}",
+            values_sql(&left),
+            values_sql(&right)
+        );
+        for engine in [&pushed, &local] {
+            engine
+                .connect()
+                .simple_query(&ddl)
+                .await
+                .expect("seed tables");
+        }
+        let sql = "SELECT l.id, l.value, r.value FROM left_t l JOIN right_t r ON l.id = r.id ORDER BY l.id, l.value, r.value";
+        let pushed_rows = query_cells(pushed.clone_handle(), sql).await;
+        let local_rows = query_cells(local, sql).await;
+        assert_eq!(pushed_rows, local_rows);
+        let joins = scanner.joins.lock().expect("join log");
+        assert_eq!(joins.len(), 1);
+        assert_eq!(joins[0].strategy, expected_strategy);
     }
 }
 

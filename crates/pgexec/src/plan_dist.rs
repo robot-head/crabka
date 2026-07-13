@@ -14,7 +14,7 @@ use crate::{
 };
 
 /// Statistics seam consumed by distributed join planning.
-pub trait Stats {
+pub trait Stats: Send + Sync + 'static {
     fn estimated_bytes(&self, table_id: u64) -> Option<u64>;
 
     fn are_co_partitioned(&self, _left_table_id: u64, _right_table_id: u64) -> bool {

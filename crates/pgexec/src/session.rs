@@ -855,6 +855,8 @@ pub struct SqlSession {
     /// G-8 table scan seam. Defaults to local MVCC scanning; multi-range tenants
     /// can inject a scatter-gather scanner.
     range_scanner: Arc<dyn crate::scanner::RangeScanner>,
+    join_stats: Arc<dyn crate::plan_dist::Stats>,
+    join_strategy_config: crate::plan_dist::PlannerConfig,
     /// Timestamp oracle for sharded timestamp transactions.
     timestamp_oracle: Arc<dyn crate::timestamp_txn::TimestampOracle>,
     timestamp_own_start_ts: Option<crate::timestamp_txn::TimestampTransactionId>,
@@ -916,6 +918,8 @@ impl SqlSession {
         clock: Arc<dyn crate::clock::Clock>,
         foreign_scanner: Option<Arc<dyn crate::foreign::ForeignScanner>>,
         range_scanner: Arc<dyn crate::scanner::RangeScanner>,
+        join_stats: Arc<dyn crate::plan_dist::Stats>,
+        join_strategy_config: crate::plan_dist::PlannerConfig,
         timestamp_oracle: Arc<dyn crate::timestamp_txn::TimestampOracle>,
     ) -> Self {
         Self {
@@ -939,6 +943,8 @@ impl SqlSession {
             guc: GucState::default(),
             foreign_scanner,
             range_scanner,
+            join_stats,
+            join_strategy_config,
             timestamp_oracle,
             timestamp_own_start_ts: None,
             sequence_currvals: Arc::new(Mutex::new(HashMap::new())),
@@ -1640,6 +1646,8 @@ impl SqlSession {
         } else {
             crate::scanner::TimestampedRangeScanner::new(Arc::clone(&self.range_scanner), read_ts)
         };
+        let statement_scanner = statement_scanner
+            .with_join_planner(Arc::clone(&self.join_stats), self.join_strategy_config);
         let ctx = self.eval_ctx();
         // SP40: the session does not track an authenticated SQL user, so foreign-table
         // user-mapping lookups resolve against the conventional `"public"` mapping.

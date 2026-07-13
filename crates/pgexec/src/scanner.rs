@@ -619,6 +619,14 @@ pub trait RangeScanner: Send + Sync + 'static {
         ))
     }
 
+    fn join_strategy(
+        &self,
+        _left: &crabka_pgcatalog::Table,
+        _right: &crabka_pgcatalog::Table,
+    ) -> crate::plan_dist::JoinStrategy {
+        crate::plan_dist::JoinStrategy::Gather
+    }
+
     /// Open a pull-based cursor. The default is a compatibility adapter which
     /// materializes through [`RangeScanner::scan`].
     fn scan_cursor<'a>(
@@ -871,6 +879,10 @@ pub struct TimestampedRangeScanner {
     inner: std::sync::Arc<dyn RangeScanner>,
     read_ts: crate::timestamp_txn::ReadTimestamp,
     own_start_ts: Option<crate::timestamp_txn::TimestampTransactionId>,
+    join_planner: Option<(
+        std::sync::Arc<dyn crate::plan_dist::Stats>,
+        crate::plan_dist::PlannerConfig,
+    )>,
 }
 
 impl TimestampedRangeScanner {
@@ -884,6 +896,7 @@ impl TimestampedRangeScanner {
             inner,
             read_ts,
             own_start_ts: None,
+            join_planner: None,
         }
     }
 
@@ -898,7 +911,18 @@ impl TimestampedRangeScanner {
             inner,
             read_ts,
             own_start_ts: Some(own_start_ts),
+            join_planner: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_join_planner(
+        mut self,
+        stats: std::sync::Arc<dyn crate::plan_dist::Stats>,
+        config: crate::plan_dist::PlannerConfig,
+    ) -> Self {
+        self.join_planner = Some((stats, config));
+        self
     }
 }
 
@@ -920,6 +944,23 @@ impl RangeScanner for TimestampedRangeScanner {
             request.own_start_ts = self.own_start_ts;
         }
         self.inner.scan_cursor(request)
+    }
+
+    fn join(&self, mut request: JoinRangeRequest) -> Result<JoinRangeResult, ExecError> {
+        request.read_ts = self.read_ts.get();
+        request.own_start_ts = self.own_start_ts.map(|timestamp| timestamp.get());
+        self.inner.join(request)
+    }
+
+    fn join_strategy(
+        &self,
+        left: &crabka_pgcatalog::Table,
+        right: &crabka_pgcatalog::Table,
+    ) -> crate::plan_dist::JoinStrategy {
+        let Some((stats, config)) = &self.join_planner else {
+            return crate::plan_dist::JoinStrategy::Gather;
+        };
+        crate::plan_dist::plan_join_for_tables(stats.as_ref(), *config, left, right)
     }
 }
 
