@@ -199,3 +199,37 @@ Status: COMPLETE_WITH_DOCUMENTED_FALLBACKS.
 - SQL distributed dispatch intentionally recognizes only the narrow directly-provable equi-join shape described above; all other correct SQL shapes retain the local executor rather than risking semantic drift.
 - Join RPC framing remains capped at 1 MiB. Large broadcast inputs/results fail through the existing bounded framing/row validation path; paging/streaming remains future work.
 - The previously documented dirty `control.rs` process-test concern is unchanged. The affected library and all-target compile gates, production registry SQL integration, and authoritative sharding conformance gate are green.
+
+## Independent review remediation
+
+Status: COMPLETE.
+
+### Exact co-partition keys
+
+- RED: `cargo test -p crabka-gres-ranges scan_range_service_rejects_copartitioned_join_on_non_hash_keys --lib -- --nocapture` reached the hosted owner and failed because identical hash layout was accepted for join key indexes `[1]`/`[1]` while both tables shard on column `[0]`.
+- GREEN: the same command passes. `co_partitioned_join_keys_match` resolves the catalog hash-column names to ordered indexes and requires exact equality on both sides. The gateway changes an unproved direct/future `CoPartitioned` request to `Gather`; the owner independently returns `0A000`. Existing exact-key SQL selection and production registry integration remain green.
+
+### Runtime statistics sources
+
+- RED: `cargo test -p crabka-pgexec --test distributed_pushdown production_engine_stats_follow_durable_table_sequence --no-run` failed because `SqlEngine` exposed no production stats handle and still constructed an empty map fixture.
+- GREEN: the executable test passes before/after real committed inserts. `DurableSequenceStats` reads the authoritative applied `crabka_pgkv::key::seq_key(TableId)` through the engine KV on every estimate; `SqlEngine::with_kv` and `SqlEngine::replicated` install it by default and sessions retain the shared `Stats` handle.
+- The landed durable checkpoint source is `crabka_gres_substrate::checkpoint::runtime::CheckpointMetadata`, produced only after manifest/part presence and checksum validation. It now implements the fakeable `Stats` interface read-only, using verified range/tenant `total_bytes` as a conservative per-table upper bound. `CheckpointStats` was deliberately not used: its own contract says its resettable scheduling counters must never be exported as live range statistics. `cargo test -p crabka-gres-substrate verified_checkpoint_metadata_is_a_read_only_stats_source --lib -- --nocapture` passes against the real metadata type.
+
+### Broadcast transport capacity
+
+- RED: `cargo test -p crabka-gres-ranges join_request_transport_capacity_has_exact_materialized_boundary --lib --no-run` failed because `JoinRangeReq` had no transport-capacity decision.
+- GREEN: the test binary-searches the exact serialized boundary: the largest full `RangeRequest::JoinRange` JSON (enum/request overhead plus materialized tuple bytes) at or below `MAX_FRAME_BYTES = 1,048,576` is accepted and one additional tuple byte is rejected.
+- After the gateway materializes the chosen broadcast side, it encodes the request for every target range before sending any join RPC. If any fully encoded request exceeds 1 MiB (regardless of the 64 MiB planning hint), it clears broadcast rows, changes the strategy to `Gather`, materializes both sides under the unchanged snapshots/read timestamp, and executes the shared join primitive locally. No partial broadcast can occur before this decision.
+
+### Verification and commits
+
+- `cargo test -p crabka-pgexec --test distributed_pushdown -- --nocapture`: 44/44 passed.
+- `cargo test -p crabka-gres-ranges --lib -q`: 167/167 passed.
+- `cargo check -p crabka-pgexec --all-targets` and `cargo check -p crabka-gres-ranges --all-targets`: passed.
+- `cargo test -p crabka-gres-ranges registry_range_scanner_executes_sql_join_end_to_end --lib -- --nocapture`: passed through production SQL planning and registry owner/gateway execution.
+- `./scripts/gres-sharded-conformance.sh`: all four legs passed; artifact refreshed at `target/gres-sharded-conformance-artifacts/sharded-conformance.json`.
+- Changed-file `rustfmt --edition 2024`, changed-file check mode, and `git diff --check`: passed with only the repository's stable-rustfmt nightly-option warnings.
+- Implementation commit: `11491421 fix(gres): harden distributed join planning`.
+- This report is committed separately.
+
+The pre-existing dirty `.superpowers/sdd/progress.md` and `crates/gres-ranges/src/control.rs` remain unstaged and were neither reverted nor included.
