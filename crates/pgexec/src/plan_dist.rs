@@ -3,6 +3,7 @@
 use crabka_pgcatalog::Table;
 use crabka_pgparser::ast::{BinaryOp, Expr, FuncArgs, SelectItem};
 use crabka_pgtypes::{ColumnType, Datum};
+use std::collections::BTreeMap;
 
 use crate::{
     ExecError,
@@ -11,6 +12,92 @@ use crate::{
         TopKSpec,
     },
 };
+
+/// Statistics seam consumed by distributed join planning.
+pub trait Stats {
+    fn estimated_bytes(&self, table_id: u64) -> Option<u64>;
+
+    fn are_co_partitioned(&self, _left_table_id: u64, _right_table_id: u64) -> bool {
+        false
+    }
+}
+
+/// Live per-table byte estimates derived from monotonic sequence counters.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SequenceCounters(BTreeMap<u64, u64>);
+
+impl SequenceCounters {
+    pub fn new(values: impl IntoIterator<Item = (u64, u64)>) -> Self {
+        Self(values.into_iter().collect())
+    }
+}
+
+impl Stats for SequenceCounters {
+    fn estimated_bytes(&self, table_id: u64) -> Option<u64> {
+        self.0.get(&table_id).copied()
+    }
+}
+
+/// Durable per-table byte estimates read from checkpoint metadata.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CheckpointMetadata(BTreeMap<u64, u64>);
+
+impl CheckpointMetadata {
+    pub fn new(values: impl IntoIterator<Item = (u64, u64)>) -> Self {
+        Self(values.into_iter().collect())
+    }
+}
+
+impl Stats for CheckpointMetadata {
+    fn estimated_bytes(&self, table_id: u64) -> Option<u64> {
+        self.0.get(&table_id).copied()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlannerConfig {
+    pub broadcast_threshold_bytes: u64,
+}
+
+impl Default for PlannerConfig {
+    fn default() -> Self {
+        Self { broadcast_threshold_bytes: 64 * 1024 * 1024 }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JoinInputs {
+    pub left_table_id: u64,
+    pub right_table_id: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinStrategy {
+    Broadcast { small_table_id: u64 },
+    CoPartitioned,
+    Gather,
+}
+
+#[must_use]
+pub fn plan_join(stats: &dyn Stats, config: PlannerConfig, inputs: JoinInputs) -> JoinStrategy {
+    let estimates = [
+        (inputs.left_table_id, stats.estimated_bytes(inputs.left_table_id)),
+        (inputs.right_table_id, stats.estimated_bytes(inputs.right_table_id)),
+    ];
+    if let Some((small_table_id, _)) = estimates
+        .into_iter()
+        .filter_map(|(table_id, bytes)| bytes.map(|bytes| (table_id, bytes)))
+        .filter(|(_, bytes)| *bytes <= config.broadcast_threshold_bytes)
+        .min_by_key(|&(table_id, bytes)| (bytes, table_id))
+    {
+        return JoinStrategy::Broadcast { small_table_id };
+    }
+    if stats.are_co_partitioned(inputs.left_table_id, inputs.right_table_id) {
+        JoinStrategy::CoPartitioned
+    } else {
+        JoinStrategy::Gather
+    }
+}
 
 /// Pushdown plan for one base-table scan.
 #[derive(Debug, Clone, PartialEq, Eq)]
