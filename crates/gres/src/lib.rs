@@ -1078,6 +1078,17 @@ impl Session for RuntimeSession {
         }
     }
 
+    async fn copy_in_portal(
+        &mut self,
+        portal: &str,
+        data: Vec<bytes::Bytes>,
+    ) -> Result<QueryResult, crabka_pgwire::error::PgError> {
+        match self {
+            Self::Single(session) => session.copy_in_portal(portal, data).await,
+            Self::Multi(session) => session.copy_in_portal(portal, data).await,
+        }
+    }
+
     fn mark_statement_failed(&mut self) {
         match self {
             Self::Single(session) => session.mark_statement_failed(),

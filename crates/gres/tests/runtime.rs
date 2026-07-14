@@ -2650,7 +2650,9 @@ async fn read_backend_message(
 }
 
 /// Drain backend messages until `ReadyForQuery`, returning the types seen.
-async fn read_until_ready(stream: &mut tokio::net::TcpStream) -> std::io::Result<Vec<(u8, Vec<u8>)>> {
+async fn read_until_ready(
+    stream: &mut tokio::net::TcpStream,
+) -> std::io::Result<Vec<(u8, Vec<u8>)>> {
     let mut seen = Vec::new();
     loop {
         let (kind, body) = read_backend_message(stream).await?;
@@ -2662,10 +2664,7 @@ async fn read_until_ready(stream: &mut tokio::net::TcpStream) -> std::io::Result
     }
 }
 
-async fn send_simple_query(
-    stream: &mut tokio::net::TcpStream,
-    sql: &str,
-) -> std::io::Result<()> {
+async fn send_simple_query(stream: &mut tokio::net::TcpStream, sql: &str) -> std::io::Result<()> {
     use tokio::io::AsyncWriteExt as _;
     let mut msg = vec![b'Q'];
     let payload_len = i32::try_from(4 + sql.len() + 1).expect("query length fits i32");
@@ -2702,7 +2701,11 @@ async fn runtime_serves_copy_from_stdin_over_pgwire() {
         .expect("raw connect");
     let params = b"user\0postgres\0database\0postgres\0\0";
     let mut startup = Vec::new();
-    startup.extend_from_slice(&i32::try_from(8 + params.len()).expect("startup length").to_be_bytes());
+    startup.extend_from_slice(
+        &i32::try_from(8 + params.len())
+            .expect("startup length")
+            .to_be_bytes(),
+    );
     startup.extend_from_slice(&196_608_i32.to_be_bytes());
     startup.extend_from_slice(params);
     stream.write_all(&startup).await.expect("startup");
@@ -2711,17 +2714,32 @@ async fn runtime_serves_copy_from_stdin_over_pgwire() {
     send_simple_query(&mut stream, "COPY copied FROM STDIN")
         .await
         .expect("send copy");
-    let (kind, _) = read_backend_message(&mut stream).await.expect("copy-in response");
-    assert!(kind == b'G', "expected CopyInResponse, got {}", char::from(kind));
+    let (kind, _) = read_backend_message(&mut stream)
+        .await
+        .expect("copy-in response");
+    assert!(
+        kind == b'G',
+        "expected CopyInResponse, got {}",
+        char::from(kind)
+    );
 
     for chunk in [&b"1\tfirst\n"[..], &b"2\tsecond\n3\t\\N\n"[..]] {
         let mut msg = vec![b'd'];
-        msg.extend_from_slice(&i32::try_from(4 + chunk.len()).expect("chunk length").to_be_bytes());
+        msg.extend_from_slice(
+            &i32::try_from(4 + chunk.len())
+                .expect("chunk length")
+                .to_be_bytes(),
+        );
         msg.extend_from_slice(chunk);
         stream.write_all(&msg).await.expect("copy data");
     }
-    stream.write_all(&[b'c', 0, 0, 0, 4]).await.expect("copy done");
-    let seen = read_until_ready(&mut stream).await.expect("copy completion");
+    stream
+        .write_all(&[b'c', 0, 0, 0, 4])
+        .await
+        .expect("copy done");
+    let seen = read_until_ready(&mut stream)
+        .await
+        .expect("copy completion");
     let complete = seen
         .iter()
         .find(|(kind, _)| *kind == b'C')
@@ -2747,6 +2765,92 @@ async fn runtime_serves_copy_from_stdin_over_pgwire() {
                 (Some("3"), None),
             ]
     );
+
+    server.abort();
+    let _ = server.await;
+}
+
+/// COPY FROM STDIN via the extended protocol: tokio-postgres prepares the
+/// COPY statement and pipelines Bind/Execute/Sync, so the server must answer
+/// Execute with `CopyInResponse`, ignore the pipelined Sync during copy-in,
+/// and complete on `CopyDone` + Sync.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn runtime_serves_copy_from_stdin_over_extended_protocol() {
+    use assert2::assert;
+    use futures_util::SinkExt as _;
+
+    let _permit = broker_test_permit().await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("local addr").port();
+    let server = tokio::spawn(crabka_gres::serve_listener(
+        listener,
+        test_args(format!("127.0.0.1:{port}"), None),
+    ));
+
+    let client = connect(port).await;
+    client
+        .simple_query("CREATE TABLE copied_ext (id int4 PRIMARY KEY, note text)")
+        .await
+        .expect("create");
+
+    let sink = client
+        .copy_in::<_, bytes::Bytes>("COPY copied_ext FROM STDIN")
+        .await
+        .expect("begin extended copy");
+    let mut sink = Box::pin(sink);
+    sink.send(bytes::Bytes::from_static(b"1\tfirst\n"))
+        .await
+        .expect("send first chunk");
+    sink.send(bytes::Bytes::from_static(b"2\tsecond\n3\t\\N\n"))
+        .await
+        .expect("send second chunk");
+    let copied = sink.as_mut().finish().await.expect("finish copy");
+    assert!(copied == 3);
+
+    let rows = client
+        .simple_query("SELECT id, note FROM copied_ext ORDER BY id")
+        .await
+        .expect("select");
+    let values: Vec<(Option<&str>, Option<&str>)> = rows
+        .iter()
+        .filter_map(|message| match message {
+            tokio_postgres::SimpleQueryMessage::Row(row) => Some((row.get(0), row.get(1))),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        values
+            == vec![
+                (Some("1"), Some("first")),
+                (Some("2"), Some("second")),
+                (Some("3"), None),
+            ]
+    );
+
+    // Error path: malformed copy data fails at CopyDone and the session must
+    // recover (extended-protocol discard-until-Sync) for later statements.
+    let sink = client
+        .copy_in::<_, bytes::Bytes>("COPY copied_ext FROM STDIN")
+        .await
+        .expect("begin failing copy");
+    let mut sink = Box::pin(sink);
+    sink.send(bytes::Bytes::from_static(
+        b"not-an-int\ttoo\tmany\tcolumns\n",
+    ))
+    .await
+    .expect("send bad chunk");
+    let failure = sink.as_mut().finish().await;
+    assert!(failure.is_err());
+
+    let rows = client
+        .simple_query("SELECT count(*) FROM copied_ext")
+        .await
+        .expect("post-failure select");
+    let count = rows.iter().find_map(|message| match message {
+        tokio_postgres::SimpleQueryMessage::Row(row) => row.get(0),
+        _ => None,
+    });
+    assert!(count == Some("3"));
 
     server.abort();
     let _ = server.await;

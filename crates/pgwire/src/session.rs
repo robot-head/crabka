@@ -76,8 +76,19 @@ struct ExtendedState {
 
 #[derive(Debug)]
 struct CopyInState {
-    sql: String,
+    target: CopyInTarget,
     chunks: Vec<Bytes>,
+}
+
+/// How a COPY FROM STDIN was started, which decides how it completes and
+/// whether the wire layer owes a `ReadyForQuery` after `CommandComplete`
+/// (simple protocol) or must wait for the client's Sync (extended protocol).
+#[derive(Debug)]
+enum CopyInTarget {
+    /// Simple-protocol Query: complete via [`Session::copy_in`] with the SQL text.
+    Statement { sql: String },
+    /// Extended-protocol Execute: complete via [`Session::copy_in_portal`].
+    Portal { name: String },
 }
 
 fn resolve_param_formats(requested: &[i16], nparams: usize) -> Result<Vec<i16>, PgError> {
@@ -279,13 +290,15 @@ async fn handle_describe<Sess: Session>(
     Ok(())
 }
 
+/// Returns `Some(CopyInState)` when the portal is a COPY FROM STDIN: the
+/// `CopyInResponse` has been written and the caller must enter copy-in mode.
 async fn handle_execute<Sess: Session>(
     session: &mut Sess,
     portal_name: &str,
     max_rows: i32,
     token: CancellationToken,
     out: &mut BytesMut,
-) -> Result<(), PgError> {
+) -> Result<Option<CopyInState>, PgError> {
     if max_rows < 0 {
         return Err(PgError::protocol(format!(
             "execute message has negative max rows: {max_rows}"
@@ -303,7 +316,17 @@ async fn handle_execute<Sess: Session>(
         )),
         r = session.execute(portal_name, max_rows.cast_unsigned()) => r?,
     };
-    encode_execute_outcome(out, outcome)
+    if let ExecuteOutcome::CopyIn { response } = outcome {
+        write_copy_in_response(out, &response);
+        return Ok(Some(CopyInState {
+            target: CopyInTarget::Portal {
+                name: portal_name.to_string(),
+            },
+            chunks: Vec::new(),
+        }));
+    }
+    encode_execute_outcome(out, outcome)?;
+    Ok(None)
 }
 
 fn encode_execute_outcome(out: &mut BytesMut, outcome: ExecuteOutcome) -> Result<(), PgError> {
@@ -535,7 +558,9 @@ where
                     continue;
                 }
                 FrontendMessage::CopyDone => {
-                    let state = copy_in.take().expect("copy state present");
+                    let CopyInState { target, chunks } =
+                        copy_in.take().expect("copy state present");
+                    let extended = matches!(target, CopyInTarget::Portal { .. });
                     activity.touch();
                     let token = cancel.begin_query();
                     let outcome = tokio::select! {
@@ -544,41 +569,68 @@ where
                             sqlstate::QUERY_CANCELED,
                             "canceling statement due to user request",
                         )),
-                        r = session.copy_in(&state.sql, state.chunks) => r,
+                        r = async {
+                            match &target {
+                                CopyInTarget::Statement { sql } => {
+                                    session.copy_in(sql, chunks).await
+                                }
+                                CopyInTarget::Portal { name } => {
+                                    session.copy_in_portal(name, chunks).await
+                                }
+                            }
+                        } => r,
                     };
                     match outcome {
                         Ok(QueryResult::Command { tag }) => {
                             backend::command_complete(&mut out, &tag);
                         }
-                        Ok(_) => backend::error_response(
-                            &mut out,
-                            &PgError::error(sqlstate::PROTOCOL_VIOLATION, "COPY returned rows"),
-                        ),
-                        Err(e) => backend::error_response(&mut out, &e),
+                        Ok(_) => {
+                            let e =
+                                PgError::error(sqlstate::PROTOCOL_VIOLATION, "COPY returned rows");
+                            if extended {
+                                fail_extended(&mut ext, &mut out, &e);
+                            } else {
+                                backend::error_response(&mut out, &e);
+                            }
+                        }
+                        Err(e) => {
+                            if extended {
+                                fail_extended(&mut ext, &mut out, &e);
+                            } else {
+                                backend::error_response(&mut out, &e);
+                            }
+                        }
                     }
-                    backend::ready_for_query(&mut out, session.tx_status());
+                    // Extended protocol: the client's Sync (sent after
+                    // CopyDone) produces ReadyForQuery; simple protocol owes
+                    // it now.
+                    if !extended {
+                        backend::ready_for_query(&mut out, session.tx_status());
+                    }
                     stream.write_all(&out).await?;
                     out.clear();
                     continue;
                 }
                 FrontendMessage::CopyFail(message) => {
-                    copy_in = None;
+                    let state = copy_in.take().expect("copy state present");
+                    let extended = matches!(state.target, CopyInTarget::Portal { .. });
                     session.mark_statement_failed();
                     let e =
                         PgError::error(sqlstate::QUERY_CANCELED, format!("COPY failed: {message}"));
-                    backend::error_response(&mut out, &e);
-                    backend::ready_for_query(&mut out, session.tx_status());
+                    if extended {
+                        fail_extended(&mut ext, &mut out, &e);
+                    } else {
+                        backend::error_response(&mut out, &e);
+                        backend::ready_for_query(&mut out, session.tx_status());
+                    }
                     stream.write_all(&out).await?;
                     out.clear();
                     continue;
                 }
-                FrontendMessage::Sync => {
-                    copy_in = None;
-                    backend::ready_for_query(&mut out, session.tx_status());
-                    stream.write_all(&out).await?;
-                    out.clear();
-                    continue;
-                }
+                // PostgreSQL ignores Flush and Sync during copy-in mode
+                // (drivers pipeline Bind/Execute/Sync before streaming data);
+                // the Sync that matters arrives after CopyDone/CopyFail.
+                FrontendMessage::Sync | FrontendMessage::Flush => continue,
                 FrontendMessage::Terminate => return Ok(()),
                 _ => {
                     let e = PgError::protocol("unexpected frontend message during COPY");
@@ -608,7 +660,7 @@ where
                         stream.write_all(&out).await?;
                         out.clear();
                         copy_in = Some(CopyInState {
-                            sql,
+                            target: CopyInTarget::Statement { sql },
                             chunks: Vec::new(),
                         });
                         continue;
@@ -714,13 +766,15 @@ where
                 activity.touch();
                 // Cancel window: between extended messages no engine future runs; the pending flag in CancelRegistry makes a cancel received there fire on the next engine call.
                 let token = cancel.begin_query();
-                if let Err(e) =
-                    handle_execute(&mut session, &portal, max_rows, token, &mut out).await
-                {
-                    if e.code == sqlstate::QUERY_CANCELED {
-                        session.mark_statement_failed();
+                match handle_execute(&mut session, &portal, max_rows, token, &mut out).await {
+                    Ok(Some(copy_start)) => copy_in = Some(copy_start),
+                    Ok(None) => {}
+                    Err(e) => {
+                        if e.code == sqlstate::QUERY_CANCELED {
+                            session.mark_statement_failed();
+                        }
+                        fail_extended(&mut ext, &mut out, &e);
                     }
-                    fail_extended(&mut ext, &mut out, &e);
                 }
                 stream.write_all(&out).await?;
                 out.clear();

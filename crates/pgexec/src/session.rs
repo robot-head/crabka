@@ -2767,6 +2767,19 @@ fn is_copy_sentinel(stmt: &Statement) -> bool {
     matches!(stmt, Statement::Set { name, .. } if name == crabka_pgparser::ast::COPY_FROM_STDIN_SENTINEL)
 }
 
+/// Decode the COPY statement carried by a parsed COPY FROM STDIN sentinel;
+/// `None` for any other statement.
+fn copy_sentinel_stmt(stmt: &Statement) -> Result<Option<CopyStmt>, PgError> {
+    match stmt {
+        Statement::Set { name, value, .. }
+            if name == crabka_pgparser::ast::COPY_FROM_STDIN_SENTINEL =>
+        {
+            decode_copy_stmt(value).map(Some)
+        }
+        _ => Ok(None),
+    }
+}
+
 fn decode_copy_stmt(value: &crabka_pgparser::ast::SetValue) -> Result<CopyStmt, PgError> {
     let crabka_pgparser::ast::SetValue::Value(encoded) = value else {
         return Err(PgError::error(
@@ -3782,6 +3795,39 @@ fn resolve_result_formats(requested: &[i16], count: usize) -> Result<Vec<i16>, P
 }
 
 impl SqlSession {
+    /// Validate a decoded COPY FROM STDIN statement and build the
+    /// `CopyInResponse` the wire layer answers with before entering copy-in
+    /// mode. Shared by the simple-protocol (`begin_copy_in`) and
+    /// extended-protocol (`execute` on a COPY portal) start paths.
+    fn copy_in_start(&mut self, copy: &CopyStmt) -> Result<CopyInResponse, PgError> {
+        if matches!(self.state, TxnState::Failed(_)) {
+            return Err(ExecError::InFailedTransaction.into_pg());
+        }
+        self.reject_prepared_participant()
+            .map_err(ExecError::into_pg)?;
+        if matches!(copy.format, CopyFormat::Csv) {
+            return Err(ExecError::Unsupported("COPY CSV is not supported".into()).into_pg());
+        }
+        let table = crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), &copy.table)
+            .map_err(ExecError::from)
+            .map_err(ExecError::into_pg)?;
+        let target_count = match &copy.columns {
+            Some(columns) => columns.len(),
+            None => table.columns.len(),
+        };
+        if let Some(columns) = &copy.columns {
+            for column in columns {
+                if table.column_index(column).is_none() {
+                    return Err(ExecError::UndefinedColumn(column.clone()).into_pg());
+                }
+            }
+        }
+        Ok(CopyInResponse {
+            overall_format: 0,
+            column_formats: vec![0; target_count],
+        })
+    }
+
     #[cfg(test)]
     async fn test_extended_query(
         &mut self,
@@ -4309,6 +4355,15 @@ impl Session for SqlSession {
         );
         if needs_run {
             let statement = self.portals.get(portal).and_then(|p| p.statement.clone());
+            if let Some(stmt) = &statement
+                && let Some(copy) = copy_sentinel_stmt(stmt)?
+            {
+                // Extended-protocol COPY FROM STDIN: answer with a
+                // CopyInResponse; the buffered rows arrive via
+                // `copy_in_portal` after CopyDone.
+                let response = self.copy_in_start(&copy)?;
+                return Ok(ExecuteOutcome::CopyIn { response });
+            }
             let execution = match statement {
                 None => SqlPortalExecution::Empty,
                 Some(stmt) => match self.run_one(&stmt).await.map_err(ExecError::into_pg)? {
@@ -4394,32 +4449,7 @@ impl Session for SqlSession {
         let Some(copy) = parse_single_copy_statement(sql)? else {
             return Ok(None);
         };
-        if matches!(self.state, TxnState::Failed(_)) {
-            return Err(ExecError::InFailedTransaction.into_pg());
-        }
-        self.reject_prepared_participant()
-            .map_err(ExecError::into_pg)?;
-        if matches!(copy.format, CopyFormat::Csv) {
-            return Err(ExecError::Unsupported("COPY CSV is not supported".into()).into_pg());
-        }
-        let table = crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), &copy.table)
-            .map_err(ExecError::from)
-            .map_err(ExecError::into_pg)?;
-        let target_count = match &copy.columns {
-            Some(columns) => columns.len(),
-            None => table.columns.len(),
-        };
-        if let Some(columns) = &copy.columns {
-            for column in columns {
-                if table.column_index(column).is_none() {
-                    return Err(ExecError::UndefinedColumn(column.clone()).into_pg());
-                }
-            }
-        }
-        Ok(Some(CopyInResponse {
-            overall_format: 0,
-            column_formats: vec![0; target_count],
-        }))
+        self.copy_in_start(&copy).map(Some)
     }
 
     async fn copy_in(
@@ -4440,6 +4470,50 @@ impl Session for SqlSession {
             self.mark_transaction_failed();
         }
         result.map_err(ExecError::into_pg)
+    }
+
+    async fn copy_in_portal(
+        &mut self,
+        portal: &str,
+        data: Vec<bytes::Bytes>,
+    ) -> Result<QueryResult, PgError> {
+        let statement = self
+            .portals
+            .get(portal)
+            .ok_or_else(|| {
+                PgError::error(
+                    sqlstate::INVALID_CURSOR_NAME,
+                    format!("portal \"{portal}\" does not exist"),
+                )
+            })?
+            .statement
+            .clone();
+        let copy = statement
+            .as_ref()
+            .map(copy_sentinel_stmt)
+            .transpose()?
+            .flatten()
+            .ok_or_else(|| {
+                PgError::error(
+                    sqlstate::PROTOCOL_VIOLATION,
+                    "COPY data received for a non-COPY portal",
+                )
+            })?;
+        self.reject_prepared_participant()
+            .map_err(ExecError::into_pg)?;
+        let result = self.run_copy_in(&copy, data).await;
+        if result.is_err() {
+            self.mark_transaction_failed();
+        }
+        let result = result.map_err(ExecError::into_pg)?;
+        // Mark the portal completed so a re-Execute reports the command tag
+        // instead of restarting the copy.
+        if let QueryResult::Command { tag } = &result
+            && let Some(p) = self.portals.get_mut(portal)
+        {
+            p.execution = SqlPortalExecution::Command { tag: tag.clone() };
+        }
+        Ok(result)
     }
 
     fn mark_statement_failed(&mut self) {
