@@ -158,6 +158,14 @@ for step_name, artifact in (
     assert "--extended-baseline crates/gres-conformance/corpus-extended/baseline.json" in leg
     assert f"--extended-out {artifact}.json" in leg
     assert f"--extended-summary {artifact}.md" in leg
+substrate_leg = " ".join(
+    normalized_commands(workflow_step("Conformance against the substrate-backed engine")).split()
+)
+for fragment in (
+    "./target/debug/crabka gres create-tenant --bootstrap 127.0.0.1:9092 --name conformance --user crab --password-stdin",
+    "./target/debug/crabka-gres --listen 127.0.0.1:54334 --substrate-bootstrap 127.0.0.1:9092 --tenant conformance --auth trust",
+):
+    assert fragment in substrate_leg, f"substrate conformance leg missing {fragment}"
 summary = workflow_step("Publish extended parity summaries")
 assert "cat extended-parity-standalone.md extended-parity-substrate.md" in summary
 upload = workflow_step("Upload parity report")

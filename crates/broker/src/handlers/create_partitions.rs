@@ -266,6 +266,7 @@ pub(crate) async fn handle(
                         topic_id: topic_rec.topic_id,
                         hot_tail: &hot_tail,
                         wal_shards: &wal_shards,
+                        controller: &broker.controller,
                     },
                     &t.name,
                     &new_partition_indices,
@@ -337,6 +338,7 @@ struct MaterializeContext<'a> {
     topic_id: uuid::Uuid,
     hot_tail: &'a std::sync::Arc<crate::diskless::hot_tail::HotTailCache>,
     wal_shards: &'a std::sync::Arc<crate::wal::quorum::registry::WalShardRegistry>,
+    controller: &'a std::sync::Arc<dyn crate::metadata_source::MetadataSource>,
 }
 
 async fn materialize_new_partitions(
@@ -362,6 +364,11 @@ async fn materialize_new_partitions(
                 diskless: context.diskless,
                 hot_tail: Some(context.hot_tail.clone()),
                 wal_shards: Some(context.wal_shards.clone()),
+                sequencer: context.diskless.then(|| {
+                    std::sync::Arc::new(crate::wal::ControllerSequencer::new(
+                        context.controller.clone(),
+                    )) as std::sync::Arc<dyn crate::wal::OffsetSequencer>
+                }),
             })
         {
             tracing::error!(topic, partition = *index, error = %error,

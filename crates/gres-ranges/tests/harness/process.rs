@@ -873,6 +873,12 @@ mod process_group_tests {
             .await
             .expect("fixture group exit timeout")
             .expect("wait fixture group");
-        assert!(!process_group_exists(process_group));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while process_group_exists(process_group) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("fixture process group reap timeout");
     }
 }

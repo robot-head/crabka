@@ -11,12 +11,14 @@ acknowledgement continuity ceilings below.
 Running must redo checkpoint, pause, and stage after restart. Three consecutive runs completed in
 32.70s, 32.73s, and 34.11s with gaps of 7,122ms, 7,432ms, and 8,222ms. Cold restart was stable at
 1,725-1,728ms; restart-ready to stage-complete took 6,430-6,885ms, identifying protocol replay as
-the source of the wider gap. Identity-hardened validation later observed 10,152ms, so CI now uses the common 12,000ms process-kill ceiling.
+the source of the wider gap. Identity-hardened and hosted-runner validation later observed gaps up
+to 12,194ms, so CI uses a 15,000ms early-recovery ceiling with scheduling margin.
 
 Checkpointed restarts after the manifest is durable but must still repeat pause, stage, markers,
 and prologue. Three consecutive runs completed in 33.83s, 34.22s, and 32.85s with gaps of 8,117ms,
 7,628ms, and 7,112ms. Cold restart was stable at 1,905-1,907ms; restart-ready to stage-complete
-took 4,315-4,806ms. CI now uses the common 12,000ms process-kill ceiling after identity hardening.
+took 4,315-4,806ms. Hosted-runner validation later observed gaps up to 11,701ms, so this early
+recovery case shares the 15,000ms ceiling.
 
 PausedBeforeStage must repeat StageFilteredRestore after restart before it can publish the
 successor serving snapshot. Three consecutive topology-before-table lock-order runs completed in

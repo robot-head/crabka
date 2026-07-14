@@ -30,6 +30,7 @@ use crate::{
     context::{Context, PgdogExpectedRoute, PgdogReloadRequest},
     controller::{
         common::{self, FIELD_MANAGER, ReconcileError, apply_object, condition, owner_ref},
+        gres_tenant::COMPUTE_PORT,
         topic::internal_listener_bootstrap,
     },
     crd::{Gres, GresTenant, Kafka},
@@ -538,7 +539,7 @@ fn tenant_endpoint_at(tenant: &GresTenant, now_unix_millis: u64) -> Option<Tenan
             name,
             tenant.namespace().unwrap_or_else(|| "default".into())
         ),
-        backend_port: 5432,
+        backend_port: u16::try_from(COMPUTE_PORT).expect("compute listener port fits in u16"),
         state,
         pooler_mode: None,
     })
@@ -740,7 +741,7 @@ fn render_activator_deployment(
                         "args": [
                             "--listen", format!("0.0.0.0:{ACTIVATOR_PORT}"),
                             "--bootstrap", bootstrap,
-                            "--backend-endpoint-template", format!("{{tenant}}-gres.{namespace}.svc:5432", namespace = obj.namespace().unwrap_or_else(|| "default".into()))
+                            "--backend-endpoint-template", format!("{{tenant}}-gres.{namespace}.svc:{COMPUTE_PORT}", namespace = obj.namespace().unwrap_or_else(|| "default".into()))
                         ],
                         "ports": [{ "name": "postgres", "containerPort": ACTIVATOR_PORT, "protocol": "TCP" }],
                         "readinessProbe": { "tcpSocket": { "port": ACTIVATOR_PORT }, "periodSeconds": 5 }
@@ -1023,7 +1024,6 @@ mod tests {
         let suspended = tenant_endpoint_at(&tenant_with_phase("suspended", None), 1_000).unwrap();
         let resumed =
             tenant_endpoint_at(&tenant_with_phase("active", Some(31_000)), 1_000).unwrap();
-        assert!(resumed.state == TenantState::ResumeRequested);
 
         let activator = Some((
             "fleet-gres-activator.ns.svc.cluster.local".to_string(),
@@ -1043,14 +1043,33 @@ mod tests {
         })
         .unwrap();
         let users = "[[users]]\nname = \"alice\"\npassword = \"secret\"\n";
-        assert!(config_hash(&suspended_toml, users) == config_hash(&resumed_toml, users));
+        assert_eq!(
+            config_hash(&suspended_toml, users),
+            config_hash(&resumed_toml, users)
+        );
     }
 
     #[test]
-    fn expired_active_grace_flips_pgdog_route_to_direct_compute() {
-        let endpoint =
-            tenant_endpoint_at(&tenant_with_phase("active", Some(1_000)), 1_000).unwrap();
-        assert!(endpoint.state == TenantState::Active);
+    fn tenant_endpoint_states_use_the_range_zero_sql_listener() {
+        let cases = [
+            ("suspended", None, TenantState::Suspended),
+            ("resume_requested", None, TenantState::ResumeRequested),
+            ("active", Some(31_000), TenantState::ResumeRequested),
+            ("active", Some(1_000), TenantState::Active),
+        ];
+
+        for (phase, grace_until, state) in cases {
+            assert_eq!(
+                tenant_endpoint_at(&tenant_with_phase(phase, grace_until), 1_000),
+                Some(TenantEndpoint {
+                    name: "tenant-a".into(),
+                    backend_host: "tenant-a-gres.ns.svc.cluster.local".into(),
+                    backend_port: 5432,
+                    state,
+                    pooler_mode: None,
+                })
+            );
+        }
     }
 
     #[test]
@@ -1094,7 +1113,7 @@ mod tests {
     }
 
     #[test]
-    fn activator_workload_is_wired_to_registry_and_compute_service() {
+    fn activator_workload_is_wired_to_registry_and_range_zero_sql_listener() {
         let deployment = render_activator_deployment(
             &gres(),
             "registry.demo.svc:9092",
@@ -1112,14 +1131,16 @@ mod tests {
             .clone()
             .expect("activator args");
 
-        assert!(
-            args.windows(2)
-                .any(|pair| pair == ["--bootstrap", "registry.demo.svc:9092"])
-        );
-        assert!(
-            args.windows(2).any(|pair| {
-                pair == ["--backend-endpoint-template", "{tenant}-gres.ns.svc:5432"]
-            })
+        assert_eq!(
+            args,
+            [
+                "--listen",
+                "0.0.0.0:6543",
+                "--bootstrap",
+                "registry.demo.svc:9092",
+                "--backend-endpoint-template",
+                "{tenant}-gres.ns.svc:5432",
+            ]
         );
     }
 

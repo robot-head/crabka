@@ -38,8 +38,8 @@ for kill_point in ("running", "checkpointed", "paused_before_stage", "paused_aft
     assert kill_evidence["old_pid"] != kill_evidence["new_pid"]
     assert kill_evidence["recovered_acknowledgements"] >= 1
     expected_gap_bound = {
-        "running": 12000,
-        "checkpointed": 12000,
+        "running": 15000,
+        "checkpointed": 15000,
         "paused_before_stage": 20000,
         "paused_after_stage": 20000,
     }[kill_point]

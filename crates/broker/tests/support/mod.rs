@@ -140,30 +140,32 @@ pub async fn audit_record_seqs(client: &crabka_client_core::Client) -> Vec<u64> 
 /// Start a broker configured with an audit signing key and a given checkpoint cadence.
 ///
 /// Uses `every_secs = 3600` so only the count-based trigger fires in tests.
-pub async fn start_with_audit_key(
+pub fn start_with_audit_key(
     key_path: &std::path::Path,
     key_id: &str,
     every_n: u64,
-) -> InProcess {
+) -> impl std::future::Future<Output = InProcess> {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let mut config = BrokerConfig::for_tests(tempdir.path().to_path_buf());
     config.audit_signing_key_path = Some(key_path.to_path_buf());
     config.audit_signing_key_id = Some(key_id.to_string());
     config.audit_checkpoint_every_n = every_n;
     config.audit_checkpoint_every_secs = 3600; // only count trigger fires
-    let broker = Broker::start(config).await.expect("broker start");
-    let bootstrap = broker.listen_addr().to_string();
-    let client = Client::builder()
-        .bootstrap(&bootstrap)
-        .client_id("crabka-broker-test-audit-key")
-        .build()
-        .await
-        .expect("client build");
-    InProcess {
-        broker,
-        client,
-        _tempdir: tempdir,
-    }
+    Box::pin(async move {
+        let broker = Broker::start(config).await.expect("broker start");
+        let bootstrap = broker.listen_addr().to_string();
+        let client = Client::builder()
+            .bootstrap(&bootstrap)
+            .client_id("crabka-broker-test-audit-key")
+            .build()
+            .await
+            .expect("client build");
+        InProcess {
+            broker,
+            client,
+            _tempdir: tempdir,
+        }
+    })
 }
 
 /// Start a broker whose authorizer is `SimpleAclAuthorizer` with no ACLs and no

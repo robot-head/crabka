@@ -1525,11 +1525,14 @@ pub async fn serve_listener_with_tenant_config_loader(
     };
 
     let mut tenant_record = load_substrate_tenant_record(&args, tenant_config_loader).await?;
+    let tenant_security_enabled = tenant_record
+        .as_ref()
+        .is_some_and(|record| tenant_kafka_security_from_env(record.name.as_str()).is_some());
     let mut lifecycle_registry = None;
-    if let (Some(record), Some(bootstrap)) =
-        (tenant_record.as_ref(), args.substrate_bootstrap.as_deref())
-        && !matches!(bootstrap, "memory://" | "in-memory://")
-    {
+    if let (Some(record), Some(bootstrap)) = (
+        tenant_record.as_ref(),
+        lifecycle_registry_bootstrap(args.substrate_bootstrap.as_deref(), tenant_security_enabled),
+    ) {
         let mut registry = crabka_gres_control::Registry::connect(bootstrap)
             .await
             .map_err(|error| std::io::Error::other(format!("tenant registry connect: {error}")))?;
@@ -1613,6 +1616,18 @@ pub async fn serve_listener_with_tenant_config_loader(
         let _ = server.await;
     }
     serve_result
+}
+
+fn lifecycle_registry_bootstrap(
+    bootstrap: Option<&str>,
+    tenant_security_enabled: bool,
+) -> Option<&str> {
+    // Tenant-scoped Kafka principals are deliberately denied access to the
+    // global registry. Their lifecycle remains owned by the control plane.
+    if tenant_security_enabled {
+        return None;
+    }
+    bootstrap.filter(|address| !matches!(*address, "memory://" | "in-memory://"))
 }
 
 async fn start_range_service(
@@ -5883,6 +5898,58 @@ mod tests {
         assert_eq!(security.protocol, ListenerProtocol::SaslPlaintext);
         assert!(matches!(security.sasl, Some(SaslCredentials::Scram { .. })));
         assert_eq!(security.sasl_host.as_deref(), Some("broker.internal"));
+    }
+
+    #[test]
+    fn lifecycle_registry_respects_bootstrap_and_tenant_security() {
+        struct Case {
+            name: &'static str,
+            bootstrap: Option<&'static str>,
+            tenant_security_enabled: bool,
+            expected: Option<&'static str>,
+        }
+
+        let cases = [
+            Case {
+                name: "no substrate bootstrap",
+                bootstrap: None,
+                tenant_security_enabled: false,
+                expected: None,
+            },
+            Case {
+                name: "memory substrate",
+                bootstrap: Some("memory://"),
+                tenant_security_enabled: false,
+                expected: None,
+            },
+            Case {
+                name: "in-memory substrate",
+                bootstrap: Some("in-memory://"),
+                tenant_security_enabled: false,
+                expected: None,
+            },
+            Case {
+                name: "unsecured live substrate",
+                bootstrap: Some("broker:9092"),
+                tenant_security_enabled: false,
+                expected: Some("broker:9092"),
+            },
+            Case {
+                name: "tenant-secured live substrate",
+                bootstrap: Some("broker:9093"),
+                tenant_security_enabled: true,
+                expected: None,
+            },
+        ];
+
+        for case in cases {
+            assert_eq!(
+                lifecycle_registry_bootstrap(case.bootstrap, case.tenant_security_enabled,),
+                case.expected,
+                "{}",
+                case.name,
+            );
+        }
     }
 
     #[test]

@@ -55,6 +55,7 @@ async fn wait_for_transaction_coordinator(bootstrap: &str, transactional_id: &st
     producer.close().await.expect("close readiness producer");
 }
 
+#[cfg(unix)]
 fn raise_fd_limit_for_cluster() {
     let limits = rustix::process::getrlimit(rustix::process::Resource::Nofile);
     rustix::process::setrlimit(
@@ -66,6 +67,9 @@ fn raise_fd_limit_for_cluster() {
     )
     .expect("raise soft file descriptor limit for three in-process brokers");
 }
+
+#[cfg(not(unix))]
+fn raise_fd_limit_for_cluster() {}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fencing_falls_back_to_end_txn_when_coordinator_differs_from_partition_leader() {

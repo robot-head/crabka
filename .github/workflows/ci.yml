@@ -296,7 +296,7 @@ jobs:
   rust:
     needs: changes
     if: ${{ needs.changes.outputs.rust == 'true' }}
-    timeout-minutes: 45
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -410,33 +410,26 @@ jobs:
           distribution: temurin
           java-version: 17
       - run: (cd tools/oracle && ./gradlew installDist --no-daemon)
-      # `--exclude crabka-client-core` skips the testcontainers-based integration
-      # tests (which need Docker). client-core's unit tests run under the
-      # `rust` matrix job; its docker-gated tests run under
-      # `client-core-integration`. We only want JVM oracle tests here.
-      # `--exclude crabka-log` skips its testcontainers-based integration
-      # test (Docker-only); it runs under the `log-integration` job below.
-      # `--exclude crabka-broker` skips the testcontainers-based JVM
-      # acceptance tests (Docker-only); they run under the
-      # `broker-jvm-acceptance` job below.
-      # `--exclude crabka-grpc-gateway` skips its Docker-gated `jvm_differential`
-      # test: with `--include-ignored` it would run here, but it advertises
-      # `host.docker.internal` (only set up in `broker-jvm-acceptance`), so it
-      # fails to connect. The gateway's coverage comes from the
-      # `grpc-gateway-integration` job's non-ignored tests.
-      # `--exclude crabka-admin-ui` skips its ignored browser e2e tests; they
-      # require CRABKA_ADMIN_UI_E2E_URL to point at a running admin UI.
+      # Select the JVM-oracle targets explicitly. A workspace-wide
+      # `--include-ignored` sweep also runs thousands of ordinary tests and
+      # Docker- or PostgreSQL-gated suites that belong to dedicated jobs.
       - name: JVM differential coverage
         run: |
           mkdir -p coverage
           cargo llvm-cov clean --workspace
-          cargo llvm-cov nextest --workspace --profile ci \
-            --exclude crabka-client-core \
-            --exclude crabka-log \
-            --exclude crabka-broker \
-            --exclude crabka-grpc-gateway \
-            --exclude crabka-admin-ui \
-            --filterset 'not binary(capture_corpus)' \
+          cargo llvm-cov nextest --locked \
+            -p crabka-compression \
+            -p crabka-protocol \
+            --profile ci \
+            --test differential \
+            --test differential_all \
+            --test differential_api_versions \
+            --test differential_describe_groups \
+            --test differential_metadata \
+            --test differential_offset_commit \
+            --test differential_produce \
+            --test differential_records \
+            --test oracle_smoke \
             --lcov --output-path coverage/jvm-differential.lcov \
             -- --include-ignored
       - uses: codecov/codecov-action@v7
@@ -1025,6 +1018,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: gres-conformance
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Configure end-to-end coverage instrumentation
+        run: |
+          cargo llvm-cov show-env --sh > "$RUNNER_TEMP/cargo-llvm-cov-env.sh"
+          echo "BASH_ENV=$RUNNER_TEMP/cargo-llvm-cov-env.sh" >> "$GITHUB_ENV"
+          source "$RUNNER_TEMP/cargo-llvm-cov-env.sh"
+          cargo llvm-cov clean --workspace
       - name: F-0 runtime wiring contract
         run: python3 scripts/tests/gres_f0_runtime_gates.py
       - name: Driver capture safety contract
@@ -1052,6 +1052,13 @@ jobs:
       - name: Front-door PgDog e2e gate
         run: CRABKA_GRES_SKIP_BUILD=1 CRABKA_GRES_E2E_KEEP_ARTIFACTS=1 ./scripts/gres-e2e.sh
       - name: Cold-start SLO gate
+        # This harness builds release images and asserts lifecycle ordering.
+        # Coverage instrumentation slows the in-cluster compute enough to
+        # perturb the held-session/PgDog rollout race it is measuring. Keep
+        # this timing gate on normal release binaries; the surrounding smoke,
+        # front-door, and parity executions remain instrumented.
+        env:
+          BASH_ENV: ""
         run: |
           curl -fsSLo /tmp/kind https://kind.sigs.k8s.io/dl/v0.30.0/kind-linux-amd64
           chmod +x /tmp/kind
@@ -1113,10 +1120,16 @@ jobs:
           done
           python3 -c 'import socket; socket.create_connection(("127.0.0.1", 9092), timeout=0.2).close()'
 
+          printf '%s\n' crab | ./target/debug/crabka gres create-tenant \
+            --bootstrap 127.0.0.1:9092 \
+            --name conformance \
+            --user crab \
+            --password-stdin
           ./target/debug/crabka-gres \
             --listen 127.0.0.1:54334 \
             --substrate-bootstrap 127.0.0.1:9092 \
-            --tenant conformance &
+            --tenant conformance \
+            --auth trust &
           GRES_PID=$!
           for _ in $(seq 80); do
             if psql "host=127.0.0.1 port=54334 user=crab dbname=crab sslmode=prefer" -tAc 'SELECT 1' >/dev/null 2>&1; then
@@ -1147,6 +1160,19 @@ jobs:
       - name: Publish extended parity summaries
         if: ${{ !cancelled() }}
         run: cat extended-parity-standalone.md extended-parity-substrate.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Generate Gres end-to-end coverage
+        if: ${{ !cancelled() }}
+        run: |
+          mkdir -p coverage
+          cargo llvm-cov report --lcov --output-path coverage/gres-conformance.lcov
+      - uses: codecov/codecov-action@v7
+        if: ${{ !cancelled() }}
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage/gres-conformance.lcov
+          disable_search: true
+          flags: gres-conformance
+          fail_ci_if_error: false
       - name: Upload parity report
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
@@ -1182,8 +1208,9 @@ jobs:
           path: target/gres-coldstart-artifacts
           if-no-files-found: warn
 
-  # Gres engine integration coverage: pgwire, executor, FDW, and the service
-  # binary have most behavior behind tests/ targets rather than unit tests.
+  # Gres integration coverage: the engine, range/control plane, lifecycle
+  # services, and CLI have most behavior behind tests/ targets rather than
+  # unit tests.
   gres-integration:
     needs: changes
     if: ${{ needs.changes.outputs.gres == 'true' }}
@@ -1201,7 +1228,21 @@ jobs:
       - uses: taiki-e/install-action@cargo-llvm-cov
       - name: Gres engine integration coverage
         run: |
-          cargo llvm-cov nextest -p crabka-pgwire -p crabka-pgexec -p crabka-gres-fdw -p crabka-gres-substrate -p crabka-gres \
+          # Range process tests launch the service as a subprocess; nextest
+          # builds test targets but not cross-package binaries.
+          cargo build --locked -p crabka-gres --bin crabka-gres
+          cargo llvm-cov nextest \
+            -p crabka-pgwire \
+            -p crabka-pgexec \
+            -p crabka-gres-fdw \
+            -p crabka-gres-substrate \
+            -p crabka-gres \
+            -p crabka-gres-ranges \
+            -p crabka-gres-control \
+            -p crabka-gres-conformance \
+            -p crabka-cli \
+            -p crabka-gres-activator \
+            -p crabka-gres-balancer \
             --features crabka-gres-substrate/checkpoint-test-hooks \
             --profile ci --tests --lcov --output-path lcov.info
       - uses: codecov/codecov-action@v7
@@ -1220,6 +1261,107 @@ jobs:
           files: target/nextest/ci/junit.xml
           disable_search: true
           flags: gres-integration
+          fail_ci_if_error: false
+
+  # Non-ignored integration targets across the remainder of the workspace.
+  # The JVM differential lane used to sweep these accidentally via
+  # `--include-ignored`; keep broad coverage here without coupling ordinary
+  # Rust tests to the Java oracle. Packages with external-service or especially
+  # heavy suites are excluded because their dedicated coverage jobs above own
+  # those targets.
+  workspace-integration-coverage:
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/free-disk-space
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: workspace-integration-${{ matrix.shard }}
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@nextest
+      - name: Build subprocess dependencies
+        run: cargo build --locked -p crabka-cli --bin crabka -p crabka-gres --bin crabka-gres
+      - name: Workspace integration coverage (shard ${{ matrix.shard }}/2)
+        run: |
+          mkdir -p coverage
+          cargo llvm-cov nextest --locked --workspace --profile ci --tests \
+            --exclude crabka-client-core \
+            --exclude crabka-log \
+            --exclude crabka-broker \
+            --exclude crabka-grpc-gateway \
+            --exclude crabka-admin-ui \
+            -E 'kind(test)' \
+            --partition hash:${{ matrix.shard }}/2 \
+            --lcov --output-path coverage/workspace-integration-${{ matrix.shard }}.lcov
+      - uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage/workspace-integration-${{ matrix.shard }}.lcov
+          disable_search: true
+          flags: workspace-integration
+          fail_ci_if_error: false
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          report_type: test_results
+          files: target/nextest/ci/junit.xml
+          disable_search: true
+          flags: workspace-integration
+          fail_ci_if_error: false
+
+  # Admin UI's Dioxus dependency graph pushes the already-large workspace
+  # LLVM build past the hosted runner's disk limit. Keep its non-ignored
+  # integration suite on a dedicated runner; the Playwright E2E remains
+  # ignored unless explicitly requested with its feature and environment.
+  admin-ui-integration:
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/free-disk-space
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: admin-ui-integration
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@nextest
+      - name: Admin UI integration coverage
+        run: |
+          mkdir -p coverage
+          cargo llvm-cov nextest --locked -p crabka-admin-ui --profile ci --tests \
+            --lcov --output-path coverage/admin-ui-integration.lcov
+      - uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage/admin-ui-integration.lcov
+          disable_search: true
+          flags: admin-ui-integration
+          fail_ci_if_error: false
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          report_type: test_results
+          files: target/nextest/ci/junit.xml
+          disable_search: true
+          flags: admin-ui-integration
           fail_ci_if_error: false
 
   # JVM kafka-console-{producer,consumer,topics} driving a Rust crabka-broker.
@@ -1382,6 +1524,8 @@ jobs:
             --test reconcile_ca \
             --test reconcile_ca_rotation \
             --test reconcile_gateway \
+            --test reconcile_gres \
+            --test reconcile_gres_tenant \
             --test reconcile_inter_broker_mtls \
             --test reconcile_kafka \
             --test reconcile_kafka_authorization \
@@ -1586,6 +1730,8 @@ jobs:
       - traces-conformance
       - gres-conformance
       - gres-integration
+      - workspace-integration-coverage
+      - admin-ui-integration
       - broker-jvm-acceptance
       - broker-integration
       - operator-integration

@@ -84,7 +84,9 @@ const PRODUCE_VERSION: i16 = 11;
 /// — the second authorization check in `produce_allowed_by_opa_succeeds`
 /// always re-fetches from the mock, so the assertion isn't sensitive to
 /// in-process cache hits from earlier requests within the same test process.
-async fn start_broker_with_opa_authorizer(opa_url: String) -> (BrokerHandle, TempDir, SocketAddr) {
+fn start_broker_with_opa_authorizer(
+    opa_url: String,
+) -> impl std::future::Future<Output = (BrokerHandle, TempDir, SocketAddr)> {
     let log_dir = tempfile::tempdir().unwrap();
     let mut cfg = BrokerConfig::for_tests(log_dir.path().to_path_buf());
     cfg.listeners = vec![ListenerSpec {
@@ -133,9 +135,11 @@ async fn start_broker_with_opa_authorizer(opa_url: String) -> (BrokerHandle, Tem
     .expect("OpaAuthorizer::new must succeed inside a tokio runtime");
     cfg.authorizer = std::sync::Arc::new(opa);
 
-    let handle = Broker::start(cfg).await.expect("broker must start");
-    let addr = handle.listen_addr();
-    (handle, log_dir, addr)
+    Box::pin(async move {
+        let handle = Broker::start(cfg).await.expect("broker must start");
+        let addr = handle.listen_addr();
+        (handle, log_dir, addr)
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

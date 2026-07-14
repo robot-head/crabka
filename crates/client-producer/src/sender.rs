@@ -306,6 +306,7 @@ async fn drain_once(cfg: &mut SenderConfig, state: &mut PipelineState) {
     //    and returns batches whose routing budget elapsed, which we fail here
     //    (their in-flight slot was counted at first drain, so `finish_in_flight`
     //    once).
+    fail_recovered_retry_slots(cfg, &mut state.retry);
     let (mut to_send, expired) = collect_retries(&mut state.retry, now);
     for pb in expired {
         fail_batch(
@@ -1002,6 +1003,24 @@ fn fail_recovered_batches(cfg: &SenderConfig, batches: &mut Vec<PreparedBatch>) 
         }
     }
     batches.extend(retained);
+}
+
+fn fail_recovered_retry_slots(
+    cfg: &SenderConfig,
+    retry: &mut HashMap<(String, i32), PreparedBatch>,
+) {
+    let recovered_keys = retry
+        .iter()
+        .filter(|(_, batch)| batch_crosses_recovery_barrier(cfg, batch.transaction_generation))
+        .map(|(key, _)| key.clone())
+        .collect::<Vec<_>>();
+    for key in recovered_keys {
+        let batch = retry
+            .remove(&key)
+            .expect("recovered retry key remains present");
+        fail_batch(batch.records, ProducerError::RecoveryRequired);
+        finish_in_flight(cfg);
+    }
 }
 
 /// Decrement `in_flight` for a completed batch, waking any `flush` waiter when
@@ -2691,8 +2710,9 @@ mod harness {
         tokio::time::timeout(Duration::from_secs(3), initial_send)
             .await
             .expect("transactional batch should reach the controlled transport failure");
-        assert!(
-            transport.send_count() == 1,
+        assert_eq!(
+            transport.send_count(),
+            1,
             "initial send must fail exactly once"
         );
 
@@ -2711,8 +2731,9 @@ mod harness {
             acknowledgement,
             Err(ProducerError::RecoveryRequired)
         ));
-        assert!(
-            transport.send_count() == 1,
+        assert_eq!(
+            transport.send_count(),
+            1,
             "a retry-slot batch from the old generation must not resend"
         );
 

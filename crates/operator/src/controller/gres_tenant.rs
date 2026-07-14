@@ -59,7 +59,7 @@ use crate::{
 const FINALIZER: &str = "crabka.io/gres-tenant-finalizer";
 const APP_NAME: &str = "crabka-gres";
 const DEFAULT_IMAGE: &str = concat!("ghcr.io/robot-head/crabka-gres:", env!("CARGO_PKG_VERSION"));
-const COMPUTE_PORT: i32 = 5432;
+pub(super) const COMPUTE_PORT: i32 = 5432;
 const RANGE_PORT: i32 = 7432;
 const RANGE_TLS_DIR: &str = "/etc/crabka/range-tls";
 const RANGE_TLS_IDENTITY_ANNOTATION: &str = "crabka.io/range-tls-identity";
@@ -1840,9 +1840,16 @@ fn render_service(obj: &GresTenant) -> Result<Service, ReconcileError> {
 
 fn render_range_service(obj: &GresTenant, range_id: u32) -> Result<Service, ReconcileError> {
     let name = obj.name_any();
+    let mut ports = Vec::with_capacity(if range_id == 0 { 2 } else { 1 });
+    if range_id == 0 {
+        ports.push(json!({ "name": "postgres", "port": COMPUTE_PORT, "targetPort": COMPUTE_PORT, "protocol": "TCP" }));
+    }
+    ports.push(
+        json!({ "name": "range", "port": RANGE_PORT, "targetPort": RANGE_PORT, "protocol": "TCP" }),
+    );
     Ok(serde_json::from_value(json!({
         "metadata": { "name": range_service_name(&name, range_id), "namespace": obj.namespace(), "labels": meta_labels(obj), "ownerReferences": [owner_ref::<GresTenant>(obj)?] },
-        "spec": { "type": "ClusterIP", "selector": range_labels(obj, range_id), "ports": [{ "name": "range", "port": RANGE_PORT, "targetPort": RANGE_PORT, "protocol": "TCP" }] }
+        "spec": { "type": "ClusterIP", "selector": range_labels(obj, range_id), "ports": ports }
     }))?)
 }
 
@@ -2486,25 +2493,50 @@ mod tests {
     }
 
     #[test]
-    fn range_service_has_stable_registry_name_and_selects_only_its_range() {
+    fn range_services_expose_their_stable_listener_sets() {
         let mut obj = tenant();
         obj.metadata.namespace = Some("ns".into());
         obj.metadata.uid = Some("uid".into());
 
-        let service = render_range_service(&obj, 1).expect("render r1 service");
+        let cases = [
+            (
+                0,
+                "tenant-a-gres",
+                vec![
+                    json!({ "name": "postgres", "port": COMPUTE_PORT, "targetPort": COMPUTE_PORT, "protocol": "TCP" }),
+                    json!({ "name": "range", "port": RANGE_PORT, "targetPort": RANGE_PORT, "protocol": "TCP" }),
+                ],
+            ),
+            (
+                1,
+                "tenant-a-gres-r1",
+                vec![
+                    json!({ "name": "range", "port": RANGE_PORT, "targetPort": RANGE_PORT, "protocol": "TCP" }),
+                ],
+            ),
+        ];
 
-        assert_eq!(service.metadata.name.as_deref(), Some("tenant-a-gres-r1"));
-        let spec = service.spec.expect("service spec");
-        assert_eq!(
-            spec.selector
-                .expect("selector")
-                .get("crabka.io/gres-range")
-                .map(String::as_str),
-            Some("r1")
-        );
-        let port = &spec.ports.expect("ports")[0];
-        assert_eq!(port.name.as_deref(), Some("range"));
-        assert_eq!(port.port, RANGE_PORT);
+        for (range_id, name, ports) in cases {
+            let expected = serde_json::from_value(json!({
+                "metadata": {
+                    "name": name,
+                    "namespace": "ns",
+                    "labels": meta_labels(&obj),
+                    "ownerReferences": [owner_ref::<GresTenant>(&obj).expect("owner reference")],
+                },
+                "spec": {
+                    "type": "ClusterIP",
+                    "selector": range_labels(&obj, range_id),
+                    "ports": ports,
+                },
+            }))
+            .expect("expected range Service");
+
+            assert_eq!(
+                render_range_service(&obj, range_id).expect("render range Service"),
+                expected
+            );
+        }
     }
 
     #[test]

@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Write as _,

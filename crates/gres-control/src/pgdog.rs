@@ -274,7 +274,7 @@ impl<'a> RenderGeneral<'a> {
             tls_certificate: general.tls_cert_path.as_deref(),
             tls_private_key: general.tls_key_path.as_deref(),
             tls_client_ca_certificate: general.tls_client_ca_path.as_deref(),
-            tls_client_required: general.tls_client_ca_path.is_some(),
+            tls_client_required: general.tls_cert_path.is_some(),
         }
     }
 }
@@ -468,6 +468,66 @@ mod tests {
             error
                 .to_string()
                 .contains("TLS certificate and private key")
+        );
+    }
+
+    #[test]
+    fn requires_tls_clients_whenever_frontend_tls_is_configured() {
+        struct Case {
+            name: &'static str,
+            certificate: Option<&'static str>,
+            private_key: Option<&'static str>,
+            client_ca: Option<&'static str>,
+        }
+
+        let cases = [
+            Case {
+                name: "plaintext frontend",
+                certificate: None,
+                private_key: None,
+                client_ca: None,
+            },
+            Case {
+                name: "server-authenticated TLS",
+                certificate: Some("/tls/server.crt"),
+                private_key: Some("/tls/server.key"),
+                client_ca: None,
+            },
+            Case {
+                name: "mutual TLS",
+                certificate: Some("/tls/server.crt"),
+                private_key: Some("/tls/server.key"),
+                client_ca: Some("/tls/client-ca.crt"),
+            },
+        ];
+        let tenants = vec![active_tenant("blue", "blue-0.gres.svc", 5432)];
+
+        let actual = cases
+            .into_iter()
+            .map(|case| {
+                let input = PgdogRenderInput {
+                    tenants: &tenants,
+                    activator: None,
+                    general: PgdogGeneral {
+                        tls_cert_path: case.certificate.map(str::to_owned),
+                        tls_key_path: case.private_key.map(str::to_owned),
+                        tls_client_ca_path: case.client_ca.map(str::to_owned),
+                        ..PgdogGeneral::default()
+                    },
+                };
+                let rendered = render_pgdog_toml(&input).expect("valid frontend TLS");
+                let required = rendered.contains("tls_client_required = true");
+                (case.name, required)
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            actual,
+            vec![
+                ("plaintext frontend", false),
+                ("server-authenticated TLS", true),
+                ("mutual TLS", true),
+            ]
         );
     }
 

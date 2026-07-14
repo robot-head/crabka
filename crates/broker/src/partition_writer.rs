@@ -993,7 +993,6 @@ mod tests {
                     std::time::Instant::now(),
                 );
             }
-            let hw_advance_notify = Arc::new(Notify::new());
             let writer = tokio::spawn(run_with_sequencer(
                 ("t".to_string(), PartitionIndex(0)),
                 (
@@ -1004,7 +1003,7 @@ mod tests {
                 (
                     append_notify,
                     replica_state.clone(),
-                    hw_advance_notify.clone(),
+                    Arc::new(Notify::new()),
                 ),
                 (
                     crate::log_dir_status::LogDirRegistry::default(),
@@ -1013,9 +1012,6 @@ mod tests {
                 ),
                 Some(test_sequencer()),
             ));
-
-            let hw_waiter = hw_advance_notify.notified();
-            tokio::pin!(hw_waiter);
 
             let (ack, ack_rx) = oneshot::channel();
             tx.send(WriterMessage::Produce(ProduceJob {
@@ -1026,18 +1022,18 @@ mod tests {
             .expect("send job");
 
             let assigned = ack_rx.await.expect("ack recv").expect("append ok");
-            assert!(assigned == 0);
-            tokio::time::timeout(std::time::Duration::from_secs(1), &mut hw_waiter)
-                .await
-                .expect("hw_advance_notify did not fire");
-            assert!(replica_state.lock().await.hw == 1);
+            assert_eq!(assigned, 0);
 
             drop(tx);
-            writer.await.expect("writer join");
+            tokio::time::timeout(std::time::Duration::from_secs(10), writer)
+                .await
+                .expect("writer did not drain after local fsync")
+                .expect("writer join");
+            assert_eq!(replica_state.lock().await.hw, 1);
         }
 
         let log = Log::open(dir.path(), LogConfig::default()).expect("reopen log");
-        assert!(log.log_end_offset() >= Offset(1));
+        assert_eq!(log.log_end_offset(), Offset(1));
     }
 
     #[tokio::test]

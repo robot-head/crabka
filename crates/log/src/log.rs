@@ -111,15 +111,22 @@ impl RawRead {
 
 #[cfg(test)]
 mod sync_observer {
-    use std::{cell::RefCell, path::PathBuf};
+    use std::cell::RefCell;
+    #[cfg(unix)]
+    use std::path::PathBuf;
 
     use crabka_ids::Offset;
 
+    #[cfg(unix)]
     thread_local! {
         static DIR_SYNCS: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
+    }
+
+    thread_local! {
         static SEGMENT_FLUSHES: RefCell<Vec<Offset>> = const { RefCell::new(Vec::new()) };
     }
 
+    #[cfg(unix)]
     pub(super) fn take_dir_syncs() -> Vec<PathBuf> {
         DIR_SYNCS.take()
     }
@@ -128,6 +135,7 @@ mod sync_observer {
         SEGMENT_FLUSHES.take()
     }
 
+    #[cfg(unix)]
     pub(super) fn record_dir_sync(dir: PathBuf) {
         DIR_SYNCS.with_borrow_mut(|synced| synced.push(dir));
     }
@@ -651,12 +659,19 @@ impl Log {
         }
         self.active_segment_flush()?;
         if self.dir_sync_needed {
+            // Rust's standard directory-open path is supported on Unix, where
+            // syncing the parent makes newly-created segment names durable. On
+            // Windows the platform provides no equivalent through `std`; the
+            // segment, offset-index, and time-index handles above have still
+            // been flushed with `sync_data`.
+            #[cfg(unix)]
             Self::sync_log_dir(&self.dir)?;
             self.dir_sync_needed = false;
         }
         Ok(())
     }
 
+    #[cfg(unix)]
     fn sync_log_dir(dir: &Path) -> Result<(), LogError> {
         let log_dir = fs::File::open(dir)?;
         log_dir.sync_all()?;
@@ -2111,50 +2126,48 @@ mod tests {
         assert2::assert!(log.log_end_offset() == Offset(3));
     }
 
+    #[cfg(unix)]
     #[test]
-    fn sync_fsyncs_parent_dir_for_initial_segment_creation() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
-        sync_observer::take_dir_syncs();
+    fn sync_fsyncs_parent_dir_after_segment_lifecycle_events() {
+        enum Case {
+            InitialCreation,
+            ReopenBeforePriorSync,
+            Rollover,
+        }
 
-        log.sync().unwrap();
+        for case in [
+            Case::InitialCreation,
+            Case::ReopenBeforePriorSync,
+            Case::Rollover,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut log = match case {
+                Case::InitialCreation => Log::open(dir.path(), LogConfig::default()).unwrap(),
+                Case::ReopenBeforePriorSync => {
+                    drop(Log::open(dir.path(), LogConfig::default()).unwrap());
+                    Log::open(dir.path(), LogConfig::default()).unwrap()
+                }
+                Case::Rollover => {
+                    let mut log = Log::open(
+                        dir.path(),
+                        LogConfig {
+                            segment_bytes: 1,
+                            ..LogConfig::default()
+                        },
+                    )
+                    .unwrap();
+                    log.append(&mut sample_batch(1)).unwrap();
+                    log.sync().unwrap();
+                    log.append(&mut sample_batch(1)).unwrap();
+                    log
+                }
+            };
+            sync_observer::take_dir_syncs();
 
-        assert2::assert!(sync_observer::take_dir_syncs() == vec![dir.path().to_path_buf()]);
-    }
+            log.sync().unwrap();
 
-    #[test]
-    fn sync_fsyncs_parent_dir_after_reopen_before_prior_sync() {
-        let dir = tempfile::tempdir().unwrap();
-        let log = Log::open(dir.path(), LogConfig::default()).unwrap();
-        drop(log);
-
-        let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
-        sync_observer::take_dir_syncs();
-
-        log.sync().unwrap();
-
-        assert2::assert!(sync_observer::take_dir_syncs() == vec![dir.path().to_path_buf()]);
-    }
-
-    #[test]
-    fn sync_fsyncs_parent_dir_after_segment_rollover() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut log = Log::open(
-            dir.path(),
-            LogConfig {
-                segment_bytes: 1,
-                ..LogConfig::default()
-            },
-        )
-        .unwrap();
-        log.append(&mut sample_batch(1)).unwrap();
-        log.sync().unwrap();
-        sync_observer::take_dir_syncs();
-
-        log.append(&mut sample_batch(1)).unwrap();
-        log.sync().unwrap();
-
-        assert2::assert!(sync_observer::take_dir_syncs() == vec![dir.path().to_path_buf()]);
+            assert2::assert!(sync_observer::take_dir_syncs() == vec![dir.path().to_path_buf()]);
+        }
     }
 
     #[test]

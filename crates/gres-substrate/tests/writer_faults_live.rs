@@ -72,6 +72,17 @@ fn request(seq: u64, key: &[u8], value: &[u8]) -> GroupCommitRequest {
 }
 
 async fn boot() -> (BrokerHandle, String, TempDir) {
+    raise_fd_limit_for_broker();
+    let dir = TempDir::new().expect("broker tempdir");
+    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+        .await
+        .expect("broker start");
+    let bootstrap = broker.listen_addr().to_string();
+    (broker, bootstrap, dir)
+}
+
+#[cfg(unix)]
+fn raise_fd_limit_for_broker() {
     let limits = rustix::process::getrlimit(rustix::process::Resource::Nofile);
     if limits.current.unwrap_or(0) < 8192 {
         rustix::process::setrlimit(
@@ -83,13 +94,10 @@ async fn boot() -> (BrokerHandle, String, TempDir) {
         )
         .expect("raise soft file descriptor limit for live broker tests");
     }
-    let dir = TempDir::new().expect("broker tempdir");
-    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
-        .await
-        .expect("broker start");
-    let bootstrap = broker.listen_addr().to_string();
-    (broker, bootstrap, dir)
 }
+
+#[cfg(not(unix))]
+fn raise_fd_limit_for_broker() {}
 
 async fn raw_batch_identities(bootstrap: &str, topic: &str) -> Vec<(i64, i64, i16, bool)> {
     let mut admin = AdminClient::connect(&[bootstrap.to_owned()])

@@ -75,14 +75,17 @@ async fn round_trip(
     Ok(cur.to_vec())
 }
 
-async fn start_two_dir_broker() -> (BrokerHandle, TempDir, TempDir, SocketAddr) {
+fn start_two_dir_broker()
+-> impl std::future::Future<Output = (BrokerHandle, TempDir, TempDir, SocketAddr)> {
     let primary = tempfile::tempdir().unwrap();
     let extra = tempfile::tempdir().unwrap();
     let mut cfg = BrokerConfig::for_tests(primary.path().to_path_buf());
     cfg.extra_log_dirs = vec![extra.path().to_path_buf()];
-    let handle = Broker::start(cfg).await.expect("broker start");
-    let addr = handle.listen_addr();
-    (handle, primary, extra, addr)
+    Box::pin(async move {
+        let handle = Broker::start(cfg).await.expect("broker start");
+        let addr = handle.listen_addr();
+        (handle, primary, extra, addr)
+    })
 }
 
 async fn create_topic(addr: SocketAddr, topic: &str, partitions: i32) {

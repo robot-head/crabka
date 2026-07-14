@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 #[path = "../../gres-ranges/tests/harness/process.rs"]
 mod process;
 
@@ -2392,9 +2394,8 @@ async fn real_process_move_source_phase_sigkill_with_exact_ack_ledger() {
         SourceKillPoint::PausedBeforeStage
         | SourceKillPoint::PausedAfterStage
         | SourceKillPoint::Restored => 20_000,
-        SourceKillPoint::Running
-        | SourceKillPoint::Checkpointed
-        | SourceKillPoint::ActivatedBeforeCutover
+        SourceKillPoint::Running | SourceKillPoint::Checkpointed => 15_000,
+        SourceKillPoint::ActivatedBeforeCutover
         | SourceKillPoint::ActivatedAfterTenantCas
         | SourceKillPoint::LayoutPublished
         | SourceKillPoint::RetiringBeforeDelete

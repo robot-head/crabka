@@ -89,7 +89,7 @@ impl Harness {
 /// metadata-driving client unfettered access while still letting us seed
 /// ACLs and observe their effect on the authorized-operations bitfield
 /// for a separately-evaluated principal name.
-async fn boot_with_super_user(super_user: &str) -> Harness {
+fn boot_with_super_user(super_user: &str) -> impl std::future::Future<Output = Harness> {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let mut cfg = BrokerConfig::for_tests(tempdir.path().to_path_buf());
     cfg.super_users = {
@@ -98,18 +98,20 @@ async fn boot_with_super_user(super_user: &str) -> Harness {
         s
     };
     cfg.authorizer = Arc::new(SimpleAclAuthorizer::new(cfg.super_users.clone()));
-    let handle = Broker::start(cfg).await.expect("broker start");
-    let client = Client::builder()
-        .bootstrap(handle.listen_addr().to_string())
-        .client_id("crabka-kip-430-test")
-        .build()
-        .await
-        .expect("client build");
-    Harness {
-        handle,
-        client,
-        _tempdir: tempdir,
-    }
+    Box::pin(async move {
+        let handle = Broker::start(cfg).await.expect("broker start");
+        let client = Client::builder()
+            .bootstrap(handle.listen_addr().to_string())
+            .client_id("crabka-kip-430-test")
+            .build()
+            .await
+            .expect("client build");
+        Harness {
+            handle,
+            client,
+            _tempdir: tempdir,
+        }
+    })
 }
 
 async fn create_topic(client: &Client, name: &str, partitions: i32) {

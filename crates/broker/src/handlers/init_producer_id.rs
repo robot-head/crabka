@@ -184,6 +184,7 @@ pub(crate) async fn handle(
                     diskless: false,
                     hot_tail: None,
                     wal_shards: None,
+                    sequencer: None,
                 })
                 .map_err(BrokerError::Txn)?;
                 handle_transactional(&coord, tid, &req, txnv, req.enable2_pc).await?

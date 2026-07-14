@@ -247,7 +247,7 @@ deadline_wait 60 "tenant compute Deployment creation" "kubectl get deploy tenant
 deadline_wait 60 "PgDog Deployment creation" "kubectl get deploy fleet-pgdog >/dev/null 2>&1"
 deadline_wait 60 "activator Deployment creation" "kubectl get deploy fleet-gres-activator >/dev/null 2>&1"
 timeout 240s kubectl rollout status deploy/tenant-a-gres --timeout=230s
-kubectl port-forward svc/tenant-a-gres 17432:5432 >"$ARTIFACT_DIR/compute-port-forward.log" 2>&1 &
+kubectl port-forward deploy/tenant-a-gres 17432:5432 >"$ARTIFACT_DIR/compute-port-forward.log" 2>&1 &
 COMPUTE_FORWARD_PID=$!
 deadline_wait 30 "compute port-forward" "timeout 1 bash -c '</dev/tcp/127.0.0.1/17432' 2>/dev/null"
 (
@@ -343,7 +343,7 @@ for iteration in $(seq 1 "$ITERATIONS"); do
     printf '%s\t%s\n' "$iteration" "$latency_ms" >>"$ARTIFACT_DIR/iteration-timings.tsv"
     wait_lifecycle active
     timeout 180s kubectl rollout status deploy/tenant-a-gres --timeout=170s
-    kubectl port-forward svc/tenant-a-gres 17432:5432 >"$ARTIFACT_DIR/compute-port-forward.log" 2>&1 &
+    kubectl port-forward deploy/tenant-a-gres 17432:5432 >"$ARTIFACT_DIR/compute-port-forward.log" 2>&1 &
     COMPUTE_FORWARD_PID=$!
     deadline_wait 30 "post-wake compute port-forward" \
         "timeout 1 bash -c '</dev/tcp/127.0.0.1/17432' 2>/dev/null"
@@ -391,7 +391,11 @@ for iteration in $(seq 1 "$ITERATIONS"); do
         -tAc "SELECT 1" >/dev/null 2>&1; then
         fail "post-grace direct PgDog route accepted the wrong tenant credential"
     fi
-    kubectl logs deploy/fleet-pgdog --since=2m | grep -q 'auth: passthrough' || \
+    post_grace_pgdog_log="$ARTIFACT_DIR/post-grace-pgdog-${iteration}.log"
+    kubectl logs -l app.kubernetes.io/name=crabka-pgdog,app.kubernetes.io/instance=fleet \
+        --all-containers=true --prefix --ignore-errors=true --since=2m \
+        >"$post_grace_pgdog_log" 2>&1
+    grep -Fq 'auth: passthrough' "$post_grace_pgdog_log" || \
         fail "post-grace direct PgDog query was not passthrough authenticated"
     kill "$KEEPER_PID" 2>/dev/null || true
     wait "$KEEPER_PID" 2>/dev/null || true

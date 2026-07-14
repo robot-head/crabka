@@ -97,14 +97,16 @@ pub(crate) fn decode_response<T: Decode<'static>>(bytes: &Bytes, version: i16) -
 /// per-file `start_broker` performed (installing an authorizer, toggling
 /// `audit_enabled`, enabling share/streams groups, …). The returned
 /// [`tempfile::TempDir`] must outlive the broker.
-pub(crate) async fn start_broker_with(
+pub(crate) fn start_broker_with(
     configure: impl FnOnce(&mut BrokerConfig),
-) -> (BrokerHandle, tempfile::TempDir) {
+) -> impl std::future::Future<Output = (BrokerHandle, tempfile::TempDir)> {
     let dir = tempfile::TempDir::new().expect("tempdir");
     let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
     configure(&mut cfg);
-    let handle = Broker::start(cfg).await.expect("start broker");
-    (handle, dir)
+    Box::pin(async move {
+        let handle = Broker::start(cfg).await.expect("start broker");
+        (handle, dir)
+    })
 }
 
 /// Start an in-process broker with only its authorizer swapped in.

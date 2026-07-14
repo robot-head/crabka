@@ -6,16 +6,26 @@ cd "$(dirname "$0")/../.."
 gate=scripts/gres-kind-lifecycle.sh
 test -x "$gate"
 
-grep -Fq 'kind create cluster' "$gate"
-grep -Fq 'crabka.io_greses.yaml' "$gate"
-grep -Fq 'crabka.io_grestenants.yaml' "$gate"
-grep -Fq 'kubectl rollout status' "$gate"
-grep -Fq 'sslmode=verify-full' "$gate"
-grep -Fq 'ResumeRequested' "$gate"
-grep -Fq 'wal_generation' "$gate"
-grep -Fq 'CRABKA_GRES_COLDSTART_ITERATIONS:-10' "$gate"
-grep -Fq 'ghcr.io/pgdogdev/pgdog:0.1.47' "$gate"
-grep -Fq 'timeout ' "$gate"
+required_patterns=(
+    'kind create cluster'
+    'crabka.io_greses.yaml'
+    'crabka.io_grestenants.yaml'
+    'kubectl rollout status'
+    'sslmode=verify-full'
+    'ResumeRequested'
+    'wal_generation'
+    'CRABKA_GRES_COLDSTART_ITERATIONS:-10'
+    'ghcr.io/pgdogdev/pgdog:0.1.47'
+    'kubectl logs -l app.kubernetes.io/name=crabka-pgdog,app.kubernetes.io/instance=fleet'
+    'post-grace-pgdog-${iteration}.log'
+    'timeout '
+)
+for pattern in "${required_patterns[@]}"; do
+    grep -Fq "$pattern" "$gate"
+done
+
+test "$(grep -Fc 'kubectl port-forward deploy/tenant-a-gres 17432:5432' "$gate")" -eq 2
+! grep -Fq 'kubectl port-forward svc/tenant-a-gres 17432:5432' "$gate"
 
 grep -Fq -- '-p crabka-gres -p crabka-gres-activator' packaging/melange/crabka.yaml
 test -f packaging/apko/crabka-gres.yaml

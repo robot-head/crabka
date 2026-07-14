@@ -61,7 +61,9 @@ async fn create_topic(bootstrap: &str, name: &str) {
 /// Boot a single-broker cluster whose only listener is `SASL_PLAINTEXT`
 /// with `PLAIN` enabled and the given users provisioned. Returns the same
 /// `(handle, bootstrap, dir)` triple as [`boot_single`].
-async fn boot_single_sasl(users: &[(&str, &str)]) -> (BrokerHandle, String, TempDir) {
+fn boot_single_sasl(
+    users: &[(&str, &str)],
+) -> impl std::future::Future<Output = (BrokerHandle, String, TempDir)> {
     let dir = TempDir::new().unwrap();
     let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
     cfg.listeners = vec![ListenerSpec {
@@ -78,9 +80,11 @@ async fn boot_single_sasl(users: &[(&str, &str)]) -> (BrokerHandle, String, Temp
         cfg.plain_credentials
             .insert((*name).to_string(), (*pass).to_string());
     }
-    let broker = Broker::start(cfg).await.unwrap();
-    let bootstrap = broker.listen_addr().to_string();
-    (broker, bootstrap, dir)
+    Box::pin(async move {
+        let broker = Broker::start(cfg).await.unwrap();
+        let bootstrap = broker.listen_addr().to_string();
+        (broker, bootstrap, dir)
+    })
 }
 
 /// Client-side `SASL_PLAINTEXT` + `PLAIN` security for `(user, pass)`.
