@@ -15,10 +15,10 @@ use crabka_gres_balancer::{
     UnsupportedExecutor, execute_plan,
 };
 use crabka_gres_control::{
-    PgdogGeneral, PgdogRenderInput, PgdogUser, RangeBoundary, RangeLayoutEntry, RangeLayoutSplit,
-    RangeLifecycle, Registry, SplitOperationPlan, SplitOperationRecord, SqlUser, TenantEndpoint,
-    TenantId, TenantName, TenantRecord, TenantState, render_pgdog_toml, render_users_toml,
-    tenant_config_topic,
+    HashPlacement, PgdogGeneral, PgdogRenderInput, PgdogUser, RangeBoundary, RangeLayoutEntry,
+    RangeLayoutSplit, RangeLifecycle, Registry, SplitOperationPlan, SplitOperationRecord, SqlUser,
+    TenantEndpoint, TenantId, TenantName, TenantRecord, TenantState, render_pgdog_toml,
+    render_users_toml, tenant_config_topic,
 };
 use crabka_security::{ListenerProtocol, SaslMechanism, scram::PgScramVerifier};
 use serde::Serialize;
@@ -113,9 +113,12 @@ struct CreateTenantArgs {
     /// Idle seconds before automatic suspension. Zero means never.
     #[arg(long)]
     idle_seconds: Option<u64>,
-    /// Comma-separated table-start range boundaries, for example 0,100,200.
+    /// Comma-separated table, table:rowid, or table:bucket:rowid boundaries.
     #[arg(long)]
     ranges: Option<String>,
+    /// Hash placement as `TABLE:COLUMN[,COLUMN...]:BUCKETS[:COLOCATION_GROUP]`.
+    #[arg(long = "hash-placement", value_parser = parse_hash_placement)]
+    hash_placements: Vec<HashPlacement>,
 }
 
 #[derive(Args, Debug)]
@@ -867,6 +870,7 @@ fn build_create_tenant_record(
     record.checkpoint_bytes = args.checkpoint_bytes;
     record.idle_seconds = args.idle_seconds;
     record.ranges = ranges;
+    record.hash_placements.clone_from(&args.hash_placements);
     record.ensure_valid().map_err(|e| e.to_string())?;
     Ok(record)
 }
@@ -882,16 +886,7 @@ fn parse_range_layout(
         .split(',')
         .map(str::trim)
         .filter(|token| !token.is_empty())
-        .map(|token| {
-            let (table, rowid) = token.split_once(':').map_or((token, "0"), |parts| parts);
-            let table = table
-                .parse::<u64>()
-                .map_err(|error| format!("invalid --ranges boundary {token:?}: {error}"))?;
-            let rowid = rowid
-                .parse::<u64>()
-                .map_err(|error| format!("invalid --ranges boundary {token:?}: {error}"))?;
-            Ok::<RangeBoundary, String>(RangeBoundary::new(table, rowid))
-        })
+        .map(parse_range_boundary)
         .collect::<Result<Vec<_>, _>>()?;
     if boundaries.is_empty() {
         return Err("--ranges must contain at least one boundary".to_string());
@@ -899,7 +894,7 @@ fn parse_range_layout(
     if boundaries[0] != RangeBoundary::table_start(0)
         || boundaries
             .windows(2)
-            .any(|pair| (pair[0].table_id, pair[0].rowid) >= (pair[1].table_id, pair[1].rowid))
+            .any(|pair| range_boundary_key(pair[0]) >= range_boundary_key(pair[1]))
     {
         return Err("--ranges boundaries must be strictly increasing and start at 0".to_string());
     }
@@ -918,6 +913,69 @@ fn parse_range_layout(
             })
         })
         .collect()
+}
+
+fn parse_range_boundary(token: &str) -> Result<RangeBoundary, String> {
+    let invalid =
+        |error: &dyn std::fmt::Display| format!("invalid --ranges boundary {token:?}: {error}");
+    let parts = token.split(':').collect::<Vec<_>>();
+    match parts.as_slice() {
+        [table] => table
+            .parse::<u64>()
+            .map(RangeBoundary::table_start)
+            .map_err(|error| invalid(&error)),
+        [table, rowid] => Ok(RangeBoundary::new(
+            table.parse::<u64>().map_err(|error| invalid(&error))?,
+            rowid.parse::<u64>().map_err(|error| invalid(&error))?,
+        )),
+        [table, bucket, rowid] => Ok(RangeBoundary::hash(
+            table.parse::<u64>().map_err(|error| invalid(&error))?,
+            bucket.parse::<u32>().map_err(|error| invalid(&error))?,
+            rowid.parse::<u64>().map_err(|error| invalid(&error))?,
+        )),
+        _ => Err(format!(
+            "invalid --ranges boundary {token:?}: expected table, table:rowid, or table:bucket:rowid"
+        )),
+    }
+}
+
+fn range_boundary_key(boundary: RangeBoundary) -> (u64, u32, u64) {
+    (
+        boundary.table_id,
+        boundary.bucket.unwrap_or(0),
+        boundary.rowid,
+    )
+}
+
+fn parse_hash_placement(value: &str) -> Result<HashPlacement, String> {
+    let parts = value.split(':').collect::<Vec<_>>();
+    let [table_id, hash_columns, bucket_count, co_location_group @ ..] = parts.as_slice() else {
+        return Err(
+            "hash placement must be TABLE:COLUMN[,COLUMN...]:BUCKETS[:COLOCATION_GROUP]"
+                .to_string(),
+        );
+    };
+    if co_location_group.len() > 1 {
+        return Err(
+            "hash placement must be TABLE:COLUMN[,COLUMN...]:BUCKETS[:COLOCATION_GROUP]"
+                .to_string(),
+        );
+    }
+    let hash_columns = hash_columns
+        .split(',')
+        .map(str::trim)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    Ok(HashPlacement {
+        table_id: table_id
+            .parse::<u64>()
+            .map_err(|error| format!("invalid hash-placement table ID: {error}"))?,
+        hash_columns,
+        bucket_count: bucket_count
+            .parse::<u32>()
+            .map_err(|error| format!("invalid hash-placement bucket count: {error}"))?,
+        co_location_group: co_location_group.first().map(|group| (*group).to_string()),
+    })
 }
 
 fn range_endpoint(tenant: &TenantName, range_id: u32) -> String {
@@ -1189,6 +1247,7 @@ mod tests {
             checkpoint_bytes: Some(20),
             idle_seconds: Some(30),
             ranges: Some("0,100,200".to_string()),
+            hash_placements: Vec::new(),
         };
 
         let password = fixture_password("hunter", "2");
@@ -1204,6 +1263,59 @@ mod tests {
         check!(record.ranges[2].endpoint == "tenant-a-gres-r2.gres.svc:5432");
         assert!(PgScramVerifier::parse(&record.scram_verifier).is_ok());
         assert!(!record.scram_verifier.contains(&password));
+    }
+
+    #[test]
+    fn create_tenant_range_layout_parses_supported_boundary_shapes() {
+        let tenant = TenantName::try_from("tenant-a").expect("tenant name");
+        let cases = [
+            ("0", vec![None]),
+            ("0,7:50", vec![Some(RangeBoundary::new(7, 50)), None]),
+            ("0,7:3:50", vec![Some(RangeBoundary::hash(7, 3, 50)), None]),
+            (
+                "0,7,8:3:50",
+                vec![
+                    Some(RangeBoundary::table_start(7)),
+                    Some(RangeBoundary::hash(8, 3, 50)),
+                    None,
+                ],
+            ),
+        ];
+
+        for (ranges, expected_end_keys) in cases {
+            let layout = parse_range_layout(&tenant, Some(ranges)).expect("valid range layout");
+            let actual_end_keys = layout.iter().map(|entry| entry.end_key).collect::<Vec<_>>();
+
+            assert_eq!(actual_end_keys, expected_end_keys, "ranges={ranges}");
+        }
+    }
+
+    #[test]
+    fn create_tenant_hash_placement_parser_is_table_driven() {
+        let cases = [
+            (
+                "1:id:4",
+                HashPlacement {
+                    table_id: 1,
+                    hash_columns: vec!["id".to_string()],
+                    bucket_count: 4,
+                    co_location_group: None,
+                },
+            ),
+            (
+                "7:tenant_id,order_id:16:orders",
+                HashPlacement {
+                    table_id: 7,
+                    hash_columns: vec!["tenant_id".to_string(), "order_id".to_string()],
+                    bucket_count: 16,
+                    co_location_group: Some("orders".to_string()),
+                },
+            ),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(parse_hash_placement(input), Ok(expected), "input={input}");
+        }
     }
 
     #[test]

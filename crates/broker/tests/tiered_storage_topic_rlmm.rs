@@ -54,6 +54,12 @@ fn run_broker_test(test: impl Future<Output = ()>) {
         .build()
         .expect("broker test runtime");
     runtime.block_on(test);
+    // Broker shutdown closes the listeners and async tasks, but some blocking
+    // helpers can outlive the test body. A plain Runtime drop waits for those
+    // helpers forever and prevents the serialized test cases from advancing.
+    // Keep the lock held through a bounded shutdown so teardown cannot overlap
+    // the next broker instance while still guaranteeing forward progress.
+    runtime.shutdown_timeout(Duration::from_secs(5));
 }
 
 /// Boot a single broker with the `Local` tiered-storage backend and the

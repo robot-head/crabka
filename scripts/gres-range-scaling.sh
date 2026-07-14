@@ -49,7 +49,7 @@ readonly CLUSTER_ID="00000000-0000-0000-0000-000000000001"
 readonly SQL_USER="scaleuser"
 readonly SQL_PASSWORD="scale-secret"
 readonly MODE_REQUEST="${CRABKA_GRES_RANGE_SCALING_MODE:-auto}"
-readonly SHARDED_TABLE_NAME="s0"
+readonly SHARDED_TABLE_NAME="s1"
 
 BROKER_PID=""
 GRES_PID=""
@@ -193,10 +193,39 @@ sharded_range_boundaries() {
     local boundaries=("0")
     local index
     for index in $(seq 1 $((range_count - 1))); do
-        boundaries+=("0:$((index * 1000000))")
+        boundaries+=("1:${index}:0")
     done
     local joined="${boundaries[*]}"
     printf '%s\n' "${joined// /,}"
+}
+
+int4_hash_bucket() {
+    local value="$1"
+    local bucket_count="$2"
+    local mask=$((bucket_count - 1))
+    local hash=$((1 & mask))
+    local shift
+    local byte
+
+    # Only the low log2(bucket_count) bits are needed. The FNV-1a offset
+    # basis ends in 1, and reducing after each byte preserves those bits.
+    for shift in 24 16 8 0; do
+        byte=$(((value >> shift) & 255))
+        hash=$((((hash ^ byte) * 1099511628211) & mask))
+    done
+    printf '%s\n' "$hash"
+}
+
+sharded_id_for_range() {
+    local seed="$1"
+    local bucket_count="$2"
+    local target_bucket="$3"
+    local candidate=$((seed * bucket_count))
+
+    while [ "$(int4_hash_bucket "$candidate" "$bucket_count")" -ne "$target_bucket" ]; do
+        candidate=$((candidate + 1))
+    done
+    printf '%s\n' "$candidate"
 }
 
 range_table_id() {
@@ -252,7 +281,13 @@ stop_gres() {
 create_tenant_config() {
     local tenant="$1"
     local boundaries="$2"
+    local hash_buckets="${3:-}"
     local password_file="${ARTIFACT_DIR}/${tenant}.password"
+    local placement_args=()
+
+    if [ -n "$hash_buckets" ]; then
+        placement_args=(--hash-placement "1:id:${hash_buckets}")
+    fi
 
     printf '%s\n' "$SQL_PASSWORD" >"$password_file"
     ./target/debug/crabka gres create-tenant \
@@ -261,6 +296,7 @@ create_tenant_config() {
         --user "$SQL_USER" \
         --password-file "$password_file" \
         --ranges "$boundaries" \
+        "${placement_args[@]}" \
         >"${ARTIFACT_DIR}/create-${tenant}.log" 2>&1
 }
 
@@ -301,6 +337,8 @@ run_psql_worker() {
     local worker_id="$5"
     local out_file="$6"
     local id_base="$7"
+    local bucket_count="${8:-}"
+    local target_bucket="${9:-}"
     local iteration
     local sql_file="${out_file}.sql"
     local raw_file="${out_file}.psql"
@@ -308,12 +346,19 @@ run_psql_worker() {
     : >"$sql_file"
     printf '\\timing on\n' >>"$sql_file"
     for iteration in $(seq 1 "$warmup_txns"); do
-        printf 'INSERT INTO %s VALUES (%s);\n' "$table_name" "$((id_base + 500000 + iteration))" >>"$sql_file"
+        local warmup_id=$((id_base + 500000 + iteration))
+        if [ -n "$bucket_count" ]; then
+            warmup_id="$(sharded_id_for_range "$warmup_id" "$bucket_count" "$target_bucket")"
+        fi
+        printf 'INSERT INTO %s VALUES (%s);\n' "$table_name" "$warmup_id" >>"$sql_file"
     done
     printf '\\echo MEASURE_BEGIN\n' >>"$sql_file"
     for iteration in $(seq 1 "$txns"); do
         local id
         id=$((id_base + iteration))
+        if [ -n "$bucket_count" ]; then
+            id="$(sharded_id_for_range "$id" "$bucket_count" "$target_bucket")"
+        fi
         printf 'INSERT INTO %s VALUES (%s);\n' "$table_name" "$id" >>"$sql_file"
     done
     PGAPPNAME= psql "$conninfo" -v ON_ERROR_STOP=1 -qAt -f "$sql_file" >"$raw_file" 2>"${out_file}.err"
@@ -463,7 +508,7 @@ prepare_sharded_table() {
     local range_count="$1"
     local conninfo="$2"
 
-    PGAPPNAME= psql "$conninfo" -v ON_ERROR_STOP=1 -c "CREATE TABLE ${SHARDED_TABLE_NAME} (id int4) SHARDED;" \
+    PGAPPNAME= psql "$conninfo" -v ON_ERROR_STOP=1 -c "CREATE TABLE ${SHARDED_TABLE_NAME} (id int4) SHARDED BY HASH (id) BUCKETS ${range_count};" \
         >"${ARTIFACT_DIR}/prepare-sharded-${range_count}.log" 2>&1
 }
 
@@ -486,7 +531,7 @@ run_live_sharded_workload() {
 
     boundaries="$(sharded_range_boundaries "$range_count")"
     mkdir -p "$run_dir"
-    create_tenant_config "$tenant" "$boundaries"
+    create_tenant_config "$tenant" "$boundaries" "$range_count"
     start_gres "$tenant" "$boundaries"
     prepare_sharded_table "$range_count" "$conninfo"
 
@@ -494,7 +539,7 @@ run_live_sharded_workload() {
     for range_index in $(seq 0 $((range_count - 1))); do
         for session_index in $(seq 1 "$sessions_per_range"); do
             worker_id=$((worker_id + 1))
-            run_psql_worker "$conninfo" "$SHARDED_TABLE_NAME" "$txns_per_session" "$warmup_txns" "$worker_id" "${run_dir}/latencies-${worker_id}.txt" "$((range_index * 1000000 + session_index * 10000))" &
+            run_psql_worker "$conninfo" "$SHARDED_TABLE_NAME" "$txns_per_session" "$warmup_txns" "$worker_id" "${run_dir}/latencies-${worker_id}.txt" "$((range_index * 1000000 + session_index * 10000))" "$range_count" "$range_index" &
             pids+=("$!")
         done
     done
@@ -514,6 +559,7 @@ run_live_sharded_workload() {
 import json
 import math
 import pathlib
+import re
 import statistics
 import sys
 

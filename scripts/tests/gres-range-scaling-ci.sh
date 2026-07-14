@@ -51,7 +51,11 @@ def validate(source, benchmark=script):
         'aggregate["trials"] = samples', 'statistics.median',
         'decision_ceiling_passed = all(point["within_expected_envelope"] for point in decision_points)',
         'expected_min_tps <= measured_tps <= expected_max_tps',
-        'sharded_range_boundaries()', 'boundaries+=("0:$((index * 1000000))")',
+        'sharded_range_boundaries()', 'boundaries+=("1:${index}:0")',
+        'readonly SHARDED_TABLE_NAME="s1"',
+        'SHARDED BY HASH (id) BUCKETS ${range_count}',
+        '--hash-placement "1:id:${hash_buckets}"',
+        'sharded_id_for_range()', '"$range_count" "$range_index"',
         'primary_range_distribution', 'runtime timestamp_primary_committed observations cover all expected ranges',
         'timestamp_primary_committed', 'observed_primary_transactions',
         'ansi_escape.sub("", raw_line)',
@@ -59,6 +63,11 @@ def validate(source, benchmark=script):
     ]
     for needle in required_script:
         assert needle in benchmark, f'missing benchmark/gate contract: {needle}'
+    sharded_result = 'result-sharded-${range_count}-trial-${trial}.json'
+    sharded_start = benchmark.index(sharded_result)
+    sharded_end = benchmark.index('\nPY\n', sharded_start)
+    sharded_parser = benchmark[sharded_start:sharded_end]
+    assert '\nimport re\n' in sharded_parser, 'sharded result parser must import re'
 
 validate(workflow)
 
@@ -76,40 +85,26 @@ for index, mutated in enumerate(mutations):
     else:
         raise AssertionError(f'negative workflow mutation {index} unexpectedly passed')
 
-upper_mutation = script.replace('expected_min_tps <= measured_tps <= expected_max_tps', 'expected_min_tps <= measured_tps')
-try:
-    validate(workflow, upper_mutation)
-except AssertionError:
-    pass
-else:
-    raise AssertionError('upper envelope mutation unexpectedly passed')
-
-boundary_mutation = script.replace('boundaries+=("0:$((index * 1000000))")', 'boundaries+=("$((index * 1000000))")')
-try:
-    validate(workflow, boundary_mutation)
-except AssertionError:
-    pass
-else:
-    raise AssertionError('table-id sharded-boundary mutation unexpectedly passed')
-
-fabricated_distribution = script.replace(
-    'timestamp_primary_committed',
-    'sessions_per_range * txns_per_session',
-)
-try:
-    validate(workflow, fabricated_distribution)
-except AssertionError:
-    pass
-else:
-    raise AssertionError('fabricated primary distribution unexpectedly passed')
-
-ansi_mutation = script.replace('ansi_escape.sub("", raw_line)', 'raw_line')
-try:
-    validate(workflow, ansi_mutation)
-except AssertionError:
-    pass
-else:
-    raise AssertionError('ANSI-sensitive primary distribution parser unexpectedly passed')
+sharded_start = script.index('result-sharded-${range_count}-trial-${trial}.json')
+missing_re = script[:sharded_start] + script[sharded_start:].replace('import re\n', '', 1)
+benchmark_mutations = [
+    ('upper envelope', script.replace('expected_min_tps <= measured_tps <= expected_max_tps', 'expected_min_tps <= measured_tps')),
+    ('hash bucket boundary', script.replace('boundaries+=("1:${index}:0")', 'boundaries+=("1:$((index * 1000000))")')),
+    ('logical table ID', script.replace('readonly SHARDED_TABLE_NAME="s1"', 'readonly SHARDED_TABLE_NAME="s0"')),
+    ('hash-sharded DDL', script.replace('SHARDED BY HASH (id) BUCKETS ${range_count}', 'SHARDED')),
+    ('registry hash placement', script.replace('--hash-placement "1:id:${hash_buckets}"', '')),
+    ('bucket-targeted worker', script.replace('"$range_count" "$range_index"', '"$range_count"')),
+    ('fabricated primary distribution', script.replace('timestamp_primary_committed', 'sessions_per_range * txns_per_session')),
+    ('ANSI-sensitive primary parser', script.replace('ansi_escape.sub("", raw_line)', 'raw_line')),
+    ('missing re import', missing_re),
+]
+for label, mutated in benchmark_mutations:
+    try:
+        validate(workflow, mutated)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError(f'{label} mutation unexpectedly passed')
 PY
 
 skewed_artifact="$(mktemp)"
