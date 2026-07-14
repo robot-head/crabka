@@ -4257,7 +4257,7 @@ async fn prepare_split_workload(
         .env("PGHOST", "127.0.0.1")
         .env("PGPORT", system.stable_sql_port().to_string())
         .env("PGUSER", "alice")
-        .env("PGPASSWORD", "process-secret")
+        .env("PGPASSWORD", process::fixture_password())
         .env("PGDATABASE", system.tenant())
         .kill_on_drop(true);
     command.as_std_mut().process_group(0);

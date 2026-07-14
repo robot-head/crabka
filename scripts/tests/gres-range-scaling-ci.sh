@@ -63,6 +63,12 @@ def validate(source, benchmark=script):
     ]
     for needle in required_script:
         assert needle in benchmark, f'missing benchmark/gate contract: {needle}'
+    fast_marker = 'elif [ "${MODE_REQUEST}" = "fast" ] || [ "${CRABKA_GRES_RANGE_SCALING_FAST:-0}" = "1" ]; then'
+    fast_start = benchmark.index(fast_marker)
+    fast_end = benchmark.index('\nelse\n', fast_start)
+    fast_block = benchmark[fast_start:fast_end]
+    assert 'SESSIONS_PER_RANGE="${CRABKA_GRES_RANGE_SCALING_SESSIONS_PER_RANGE:-1}"' in fast_block, \
+        'fast mode must use one persistent session per range so the live curve measures range scaling'
     sharded_result = 'result-sharded-${range_count}-trial-${trial}.json'
     sharded_start = benchmark.index(sharded_result)
     sharded_end = benchmark.index('\nPY\n', sharded_start)
@@ -87,6 +93,16 @@ for index, mutated in enumerate(mutations):
 
 sharded_start = script.index('result-sharded-${range_count}-trial-${trial}.json')
 missing_re = script[:sharded_start] + script[sharded_start:].replace('import re\n', '', 1)
+fast_marker = 'elif [ "${MODE_REQUEST}" = "fast" ] || [ "${CRABKA_GRES_RANGE_SCALING_FAST:-0}" = "1" ]; then'
+fast_start = script.index(fast_marker)
+fast_end = script.index('\nelse\n', fast_start)
+fast_block = script[fast_start:fast_end]
+two_fast_sessions = (
+    script[:fast_start]
+    + fast_block.replace('SESSIONS_PER_RANGE="${CRABKA_GRES_RANGE_SCALING_SESSIONS_PER_RANGE:-1}"',
+                         'SESSIONS_PER_RANGE="${CRABKA_GRES_RANGE_SCALING_SESSIONS_PER_RANGE:-2}"')
+    + script[fast_end:]
+)
 benchmark_mutations = [
     ('upper envelope', script.replace('expected_min_tps <= measured_tps <= expected_max_tps', 'expected_min_tps <= measured_tps')),
     ('hash bucket boundary', script.replace('boundaries+=("1:${index}:0")', 'boundaries+=("1:$((index * 1000000))")')),
@@ -97,6 +113,7 @@ benchmark_mutations = [
     ('fabricated primary distribution', script.replace('timestamp_primary_committed', 'sessions_per_range * txns_per_session')),
     ('ANSI-sensitive primary parser', script.replace('ansi_escape.sub("", raw_line)', 'raw_line')),
     ('missing re import', missing_re),
+    ('two fast sessions per range', two_fast_sessions),
 ]
 for label, mutated in benchmark_mutations:
     try:

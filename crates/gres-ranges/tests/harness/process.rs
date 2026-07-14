@@ -23,7 +23,7 @@ use tokio::{
     task::{JoinHandle, JoinSet},
 };
 
-fn fixture_password() -> String {
+pub(super) fn fixture_password() -> String {
     std::process::id().to_string()
 }
 
