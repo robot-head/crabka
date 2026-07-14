@@ -15,8 +15,8 @@ use crabka_pgexec::SqlEngine;
 use crabka_pgkv::{FjallKv, Kv, KvScan, MemKv, RestoreKv, SnapshotKv};
 use crabka_pgwire::{
     engine::{
-        BoundParam, CloseTarget, Engine, ExecuteOutcome, PortalDescription, PreparedDescription,
-        QueryResult, Session, TxStatus,
+        BoundParam, CloseTarget, CopyInResponse, Engine, ExecuteOutcome, PortalDescription,
+        PreparedDescription, QueryResult, Session, TxStatus,
     },
     session::{AuthMode, SessionConfig},
 };
@@ -1054,6 +1054,34 @@ impl Session for RuntimeSession {
         match self {
             Self::Single(session) => session.sync().await,
             Self::Multi(session) => session.sync().await,
+        }
+    }
+
+    async fn begin_copy_in(
+        &mut self,
+        sql: &str,
+    ) -> Result<Option<CopyInResponse>, crabka_pgwire::error::PgError> {
+        match self {
+            Self::Single(session) => session.begin_copy_in(sql).await,
+            Self::Multi(session) => session.begin_copy_in(sql).await,
+        }
+    }
+
+    async fn copy_in(
+        &mut self,
+        sql: &str,
+        data: Vec<bytes::Bytes>,
+    ) -> Result<QueryResult, crabka_pgwire::error::PgError> {
+        match self {
+            Self::Single(session) => session.copy_in(sql, data).await,
+            Self::Multi(session) => session.copy_in(sql, data).await,
+        }
+    }
+
+    fn mark_statement_failed(&mut self) {
+        match self {
+            Self::Single(session) => session.mark_statement_failed(),
+            Self::Multi(session) => session.mark_statement_failed(),
         }
     }
 

@@ -2636,6 +2636,122 @@ async fn runtime_serves_sql_over_pgwire() {
     let _ = server.await;
 }
 
+/// Read one pgwire backend message (type byte + length-prefixed payload).
+async fn read_backend_message(
+    stream: &mut tokio::net::TcpStream,
+) -> std::io::Result<(u8, Vec<u8>)> {
+    use tokio::io::AsyncReadExt as _;
+    let kind = stream.read_u8().await?;
+    let len = stream.read_i32().await?;
+    let body_len = usize::try_from(len - 4).expect("message length fits usize");
+    let mut body = vec![0_u8; body_len];
+    stream.read_exact(&mut body).await?;
+    Ok((kind, body))
+}
+
+/// Drain backend messages until `ReadyForQuery`, returning the types seen.
+async fn read_until_ready(stream: &mut tokio::net::TcpStream) -> std::io::Result<Vec<(u8, Vec<u8>)>> {
+    let mut seen = Vec::new();
+    loop {
+        let (kind, body) = read_backend_message(stream).await?;
+        let done = kind == b'Z';
+        seen.push((kind, body));
+        if done {
+            return Ok(seen);
+        }
+    }
+}
+
+async fn send_simple_query(
+    stream: &mut tokio::net::TcpStream,
+    sql: &str,
+) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt as _;
+    let mut msg = vec![b'Q'];
+    let payload_len = i32::try_from(4 + sql.len() + 1).expect("query length fits i32");
+    msg.extend_from_slice(&payload_len.to_be_bytes());
+    msg.extend_from_slice(sql.as_bytes());
+    msg.push(0);
+    stream.write_all(&msg).await
+}
+
+/// COPY FROM STDIN through the binary's front door uses the simple-query
+/// protocol (the path psql's `\copy` takes), so this drives raw pgwire frames:
+/// Query -> `CopyInResponse` -> `CopyData`/`CopyDone` -> `CommandComplete`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn runtime_serves_copy_from_stdin_over_pgwire() {
+    use assert2::assert;
+    use tokio::io::AsyncWriteExt as _;
+
+    let _permit = broker_test_permit().await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("local addr").port();
+    let server = tokio::spawn(crabka_gres::serve_listener(
+        listener,
+        test_args(format!("127.0.0.1:{port}"), None),
+    ));
+
+    let client = connect(port).await;
+    client
+        .simple_query("CREATE TABLE copied (id int4 PRIMARY KEY, note text)")
+        .await
+        .expect("create");
+
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("raw connect");
+    let params = b"user\0postgres\0database\0postgres\0\0";
+    let mut startup = Vec::new();
+    startup.extend_from_slice(&i32::try_from(8 + params.len()).expect("startup length").to_be_bytes());
+    startup.extend_from_slice(&196_608_i32.to_be_bytes());
+    startup.extend_from_slice(params);
+    stream.write_all(&startup).await.expect("startup");
+    read_until_ready(&mut stream).await.expect("auth handshake");
+
+    send_simple_query(&mut stream, "COPY copied FROM STDIN")
+        .await
+        .expect("send copy");
+    let (kind, _) = read_backend_message(&mut stream).await.expect("copy-in response");
+    assert!(kind == b'G', "expected CopyInResponse, got {}", char::from(kind));
+
+    for chunk in [&b"1\tfirst\n"[..], &b"2\tsecond\n3\t\\N\n"[..]] {
+        let mut msg = vec![b'd'];
+        msg.extend_from_slice(&i32::try_from(4 + chunk.len()).expect("chunk length").to_be_bytes());
+        msg.extend_from_slice(chunk);
+        stream.write_all(&msg).await.expect("copy data");
+    }
+    stream.write_all(&[b'c', 0, 0, 0, 4]).await.expect("copy done");
+    let seen = read_until_ready(&mut stream).await.expect("copy completion");
+    let complete = seen
+        .iter()
+        .find(|(kind, _)| *kind == b'C')
+        .expect("CommandComplete after CopyDone");
+    assert!(complete.1.starts_with(b"COPY 3\0"));
+
+    let rows = client
+        .simple_query("SELECT id, note FROM copied ORDER BY id")
+        .await
+        .expect("select");
+    let values: Vec<(Option<&str>, Option<&str>)> = rows
+        .iter()
+        .filter_map(|message| match message {
+            tokio_postgres::SimpleQueryMessage::Row(row) => Some((row.get(0), row.get(1))),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        values
+            == vec![
+                (Some("1"), Some("first")),
+                (Some("2"), Some("second")),
+                (Some("3"), None),
+            ]
+    );
+
+    server.abort();
+    let _ = server.await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn runtime_reopens_durable_local_storage() {
     let _permit = broker_test_permit().await;
