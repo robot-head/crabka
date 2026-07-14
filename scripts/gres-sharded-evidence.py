@@ -11,12 +11,14 @@ from pathlib import Path
 COMMIT = re.compile(
     r"timestamp_primary_committed primary_range=(\d+).*table_ids=\{([^}]*)\}"
 )
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def summarize_lines(lines: list[str], expected_ranges: set[int] = {0, 1}) -> dict:
     counts: Counter[tuple[int, int]] = Counter()
     ranges_by_table: dict[int, set[int]] = defaultdict(set)
     for line in lines:
+        line = ANSI_ESCAPE.sub("", line)
         match = COMMIT.search(line)
         if not match:
             continue

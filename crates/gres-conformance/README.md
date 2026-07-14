@@ -20,6 +20,11 @@ postgres:18 oracle); update it only deliberately — e.g. a corpus change, an
 engine improvement, or a documented postgres:18 minor-version drift — never to
 absorb a regression.
 
+The live two-range `SHARDED` gate uses `sharded-baseline.json`. Sharded tables
+have a deliberately narrower mutation and query surface than ordinary tables,
+so their parity floor is ratcheted independently against the same corpus and
+PostgreSQL 18 oracle.
+
 ## Baseline ratchet
 
 Corpus growth and `baseline.json` changes must land together in the same

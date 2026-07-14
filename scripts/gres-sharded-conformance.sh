@@ -128,10 +128,10 @@ EOF
     printf '%s\n' 'corpus-secret' >"${ARTIFACT_DIR}/tenant.password"
     ./target/debug/crabka gres create-tenant --bootstrap "127.0.0.1:${BROKER_PORT}" \
         --name sharded-corpus --user corpus --password-file "${ARTIFACT_DIR}/tenant.password" \
-        --ranges 0,0:2 >"${ARTIFACT_DIR}/create-tenant.log" 2>&1
+        --ranges 0,0:250 >"${ARTIFACT_DIR}/create-tenant.log" 2>&1
     ./target/debug/crabka-gres --listen "127.0.0.1:${GRES_PORT}" \
         --substrate-bootstrap "127.0.0.1:${BROKER_PORT}" --tenant sharded-corpus \
-        --ranges 0,0:2 --auth trust >"${ARTIFACT_DIR}/gres.log" 2>&1 &
+        --ranges 0,0:250 --auth trust >"${ARTIFACT_DIR}/gres.log" 2>&1 &
     GRES_PID=$!
     for _ in $(seq 1 120); do
         if psql "host=127.0.0.1 port=${GRES_PORT} user=corpus dbname=crab sslmode=prefer" -tAc 'SELECT 1' >/dev/null 2>&1; then break; fi
@@ -145,18 +145,24 @@ EOF
     psql "$ORACLE_ADMIN_URL" -v ON_ERROR_STOP=1 -c 'CREATE DATABASE gres_sharded_oracle' \
         >>"${ARTIFACT_DIR}/oracle-setup.log" 2>&1
     local oracle_url="${ORACLE_ADMIN_URL/dbname=postgres/dbname=gres_sharded_oracle}"
-    ./target/debug/crabka-gres-conformance \
+    if ! ./target/debug/crabka-gres-conformance \
         --oracle-url "$oracle_url" \
         --subject-url "host=127.0.0.1 port=${GRES_PORT} user=corpus dbname=crab" \
         --subject-sharded-ddl \
         --corpus crates/gres-conformance/corpus \
-        --baseline crates/gres-conformance/baseline.json \
+        --baseline crates/gres-conformance/sharded-baseline.json \
         --out "${ARTIFACT_DIR}/parity-sharded.json" \
         --summary "${ARTIFACT_DIR}/parity-sharded.md" \
         >"${ARTIFACT_DIR}/conformance.log" 2>&1
+    then
+        return 1
+    fi
 
-    python3 scripts/gres-sharded-evidence.py "${ARTIFACT_DIR}/gres.log" \
+    if ! python3 scripts/gres-sharded-evidence.py "${ARTIFACT_DIR}/gres.log" \
         "${ARTIFACT_DIR}/corpus-through-sharding.json"
+    then
+        return 1
+    fi
     python3 - "$ARTIFACT_DIR" <<'PY'
 import json, pathlib, sys
 artifact = pathlib.Path(sys.argv[1])
@@ -166,7 +172,7 @@ payload.update({
     "mode": "live",
     "range_count": 2,
     "subject_ddl": "sharded",
-    "baseline": "crates/gres-conformance/baseline.json",
+    "baseline": "crates/gres-conformance/sharded-baseline.json",
     "passed": True,
 })
 path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")

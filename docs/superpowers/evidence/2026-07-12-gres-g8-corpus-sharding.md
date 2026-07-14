@@ -4,9 +4,11 @@ Date: 2026-07-12
 
 ## Scope
 
-- The existing primary PostgreSQL oracle corpus and `baseline.json` are unchanged.
+- The existing primary PostgreSQL oracle corpus and ordinary-table `baseline.json`
+  are unchanged; `sharded-baseline.json` independently ratchets this surface.
 - Only subject `CREATE TABLE` setup statements are parser-validated and rewritten with `SHARDED`.
-- A live standalone substrate uses one tenant with two ranges (`0,0:2`).
+- A live standalone substrate uses one tenant with two row-boundary ranges
+  (`0,0:250`), placing early and late corpus writes on both physical owners.
 - Extended-case setup transformation is unit-tested but is not part of the live primary-corpus gate.
 
 ## Verification
@@ -24,11 +26,12 @@ CRABKA_GRES_SHARDED_CONFORMANCE_MODE=live \
   scripts/gres-sharded-conformance.sh
 ```
 
-The live corpus report recorded 688 cases, with 616 matches and the remaining
-72 outcomes accepted by the existing baseline. The runtime ownership artifact
+The PostgreSQL 18 live corpus report recorded 688 cases, with 662 matches
+and the remaining 26 outcomes accepted by the dedicated sharded baseline. The
+runtime ownership artifact
 records committed timestamp-primary operations by physical user table ID and
 primary range. The observed corpus included user-table commits on both range 0
-and range 1 (22 distinct physical user table IDs in total). No individual table
+and range 1 (24 distinct physical user table IDs in total). No individual table
 was observed with both primaries, and the report does not claim that every table
 spans both ranges. Catalog-only (`table_id = 0`) evidence is excluded and cannot
 satisfy either expected range.
