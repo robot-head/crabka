@@ -1,6 +1,13 @@
 //! Timestamp-transaction primitives for the G-9 sharded-table path.
 
-use std::{num::NonZeroU64, sync::Mutex};
+use std::{
+    collections::HashMap,
+    num::NonZeroU64,
+    sync::{
+        Arc, Mutex, OnceLock, Weak,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use thiserror::Error;
 
@@ -1046,6 +1053,10 @@ pub fn timestamp_txn_descriptors(
 
 /// Return the largest timestamp represented by durable timestamp tuple versions
 /// and range-0 transaction descriptors on this store.
+///
+/// This is a full store scan. Per-statement paths use the cached
+/// [`TimestampHorizonSource`] instead and fall back to this scan only to seed
+/// the cache (engine open/recovery) or when the store is applied externally.
 /// # Errors
 ///
 /// Returns an error when the requested operation cannot be completed.
@@ -1086,6 +1097,240 @@ pub fn durable_timestamp_horizon_with_catalog(
     catalog_kv: &dyn crabka_pgkv::Kv,
 ) -> Result<u64, crabka_pgkv::KvError> {
     Ok(durable_timestamp_horizon(local_kv)?.max(durable_timestamp_horizon(catalog_kv)?))
+}
+
+/// Cached [`durable_timestamp_horizon`] for one KV store, shared process-wide
+/// by every engine handle over the same store `Arc`.
+///
+/// `max` only grows, and every value folded into it was durably written to (or
+/// scanned from) the store, so it is always a valid read-timestamp floor.
+/// `epoch`/`seeded_epoch` implement invalidation: bumping `epoch` forces the
+/// next [`Self::current`] to fold in a fresh full scan, used when the store may
+/// have received timestamp writes this process did not commit itself (for
+/// example on a replication leadership change).
+#[derive(Debug)]
+pub(crate) struct StoreHorizonCache {
+    epoch: AtomicU64,
+    seeded_epoch: AtomicU64,
+    max: AtomicU64,
+}
+
+impl StoreHorizonCache {
+    fn new() -> Self {
+        Self {
+            epoch: AtomicU64::new(0),
+            seeded_epoch: AtomicU64::new(u64::MAX),
+            max: AtomicU64::new(0),
+        }
+    }
+
+    /// Fold a timestamp that is durable on this store into the cached horizon.
+    fn observe(&self, timestamp: u64) {
+        self.max.fetch_max(timestamp, Ordering::AcqRel);
+    }
+
+    /// Force the next [`Self::current`] to rescan the store.
+    fn invalidate(&self) {
+        self.epoch.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Return the cached horizon, seeding it from one full store scan when the
+    /// cache is cold or was invalidated.
+    fn current(&self, kv: &dyn crabka_pgkv::Kv) -> Result<u64, crabka_pgkv::KvError> {
+        let epoch = self.epoch.load(Ordering::Acquire);
+        if self.seeded_epoch.load(Ordering::Acquire) != epoch {
+            let scanned = durable_timestamp_horizon(kv)?;
+            self.max.fetch_max(scanned, Ordering::AcqRel);
+            // Publish the seed for the epoch observed BEFORE the scan: if a
+            // concurrent invalidation raced the scan, the next lookup rescans.
+            self.seeded_epoch.store(epoch, Ordering::Release);
+        }
+        Ok(self.max.load(Ordering::Acquire))
+    }
+}
+
+/// Return the process-wide horizon cache for `kv`'s store identity. Handles
+/// over the same store share one cache, so a bump made through any engine in
+/// this process (for example range 0's descriptor decisions on the store a
+/// data-range engine uses as its catalog) is visible to every reader.
+///
+/// Every strong holder of the returned cache also holds the store `Arc`, so a
+/// live registry entry can never alias a new store reusing the allocation.
+fn store_horizon_cache(kv: &Arc<dyn crabka_pgkv::Kv>) -> Arc<StoreHorizonCache> {
+    static CACHES: OnceLock<Mutex<HashMap<usize, Weak<StoreHorizonCache>>>> = OnceLock::new();
+
+    let identity = Arc::as_ptr(kv).cast::<()>() as usize;
+    let mut caches = CACHES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .expect("horizon cache registry lock");
+    caches.retain(|_, cache| cache.strong_count() != 0);
+    if let Some(cache) = caches.get(&identity).and_then(Weak::upgrade) {
+        return cache;
+    }
+    let cache = Arc::new(StoreHorizonCache::new());
+    caches.insert(identity, Arc::downgrade(&cache));
+    cache
+}
+
+/// Amortized-O(1) provider of the durable timestamp horizon over one engine's
+/// local and catalog stores.
+///
+/// The first lookup per store seeds the shared [`StoreHorizonCache`] with one
+/// full [`durable_timestamp_horizon`] scan; afterwards the horizon is a pair of
+/// atomic loads. Every durable batch an engine commits flows through
+/// [`HorizonObservingCommitter`], which folds newly written timestamp state
+/// into the store's cache, so the cache never falls below the store's true
+/// horizon for writes made in this process. A catalog replica applied by
+/// another process (`rescan_catalog`) keeps the full-scan behavior for the
+/// catalog side because its timestamp descriptors are decided elsewhere and
+/// arrive through the replication apply path, not through a local committer.
+#[derive(Clone)]
+pub(crate) struct TimestampHorizonSource {
+    kv: Arc<dyn crabka_pgkv::Kv>,
+    catalog_kv: Arc<dyn crabka_pgkv::Kv>,
+    kv_cache: Arc<StoreHorizonCache>,
+    catalog_cache: Arc<StoreHorizonCache>,
+    rescan_catalog: bool,
+}
+
+impl TimestampHorizonSource {
+    /// Build a horizon source over an engine's local and catalog stores.
+    /// `catalog_applied_externally` marks a catalog replica whose contents are
+    /// applied by another process, forcing a per-lookup rescan of that store.
+    pub(crate) fn new(
+        kv: Arc<dyn crabka_pgkv::Kv>,
+        catalog_kv: Arc<dyn crabka_pgkv::Kv>,
+        catalog_applied_externally: bool,
+    ) -> Self {
+        let kv_cache = store_horizon_cache(&kv);
+        let catalog_cache = store_horizon_cache(&catalog_kv);
+        Self {
+            kv,
+            catalog_kv,
+            kv_cache,
+            catalog_cache,
+            rescan_catalog: catalog_applied_externally,
+        }
+    }
+
+    /// The read/transaction-timestamp floor: the greatest durable timestamp on
+    /// either store.
+    pub(crate) fn current(&self) -> Result<u64, crabka_pgkv::KvError> {
+        let local = self.kv_cache.current(self.kv.as_ref())?;
+        if Arc::ptr_eq(&self.kv_cache, &self.catalog_cache) {
+            return Ok(local);
+        }
+        let catalog = if self.rescan_catalog {
+            durable_timestamp_horizon(self.catalog_kv.as_ref())?
+        } else {
+            self.catalog_cache.current(self.catalog_kv.as_ref())?
+        };
+        Ok(local.max(catalog))
+    }
+
+    /// Fold a timestamp that became durable outside this process's committers
+    /// into both stores' cached horizons.
+    pub(crate) fn observe(&self, timestamp: u64) {
+        self.kv_cache.observe(timestamp);
+        self.catalog_cache.observe(timestamp);
+    }
+
+    /// Force the next lookup to rescan both stores.
+    pub(crate) fn invalidate(&self) {
+        self.kv_cache.invalidate();
+        self.catalog_cache.invalidate();
+    }
+}
+
+/// [`Committer`] decorator that folds committed timestamp state into the
+/// store's horizon cache, keeping [`TimestampHorizonSource::current`] exact for
+/// every durable write made through pgexec without rescanning the store.
+pub(crate) struct HorizonObservingCommitter {
+    inner: Arc<dyn Committer>,
+    /// Pins the store so the registry entry cannot alias a new store reusing
+    /// the same allocation.
+    _kv: Arc<dyn crabka_pgkv::Kv>,
+    cache: Arc<StoreHorizonCache>,
+}
+
+impl HorizonObservingCommitter {
+    /// Wrap `inner`, observing every batch it commits into `kv`'s store.
+    pub(crate) fn wrap(
+        inner: Arc<dyn Committer>,
+        kv: &Arc<dyn crabka_pgkv::Kv>,
+    ) -> Arc<dyn Committer> {
+        Arc::new(Self {
+            inner,
+            _kv: Arc::clone(kv),
+            cache: store_horizon_cache(kv),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl Committer for HorizonObservingCommitter {
+    async fn commit(&self, ops: Vec<crabka_pgkv::WriteOp>) -> Result<(), ExecError> {
+        let observed = max_timestamp_in_ops(&ops);
+        self.inner.commit(ops).await?;
+        if let Some(timestamp) = observed {
+            self.cache.observe(timestamp);
+        }
+        Ok(())
+    }
+}
+
+/// The greatest timestamp `ops` makes durable, mirroring what a fresh
+/// [`durable_timestamp_horizon`] scan would newly discover: start and commit
+/// timestamps of timestamp tuple versions, plus start timestamps and committed
+/// commit timestamps of range-0 transaction descriptors.
+fn max_timestamp_in_ops(ops: &[crabka_pgkv::WriteOp]) -> Option<u64> {
+    const DESCRIPTOR_PREFIX: &[u8] = b"\0\0\0\0meta/ts_txn/";
+
+    fn fold(horizon: &mut Option<u64>, timestamp: u64) {
+        *horizon = Some(horizon.map_or(timestamp, |current| current.max(timestamp)));
+    }
+
+    let tuple_start = crabka_pgkv::key::table_prefix(crabka_pgkv::key::SYSTEM_TABLE_ID + 1);
+    let tuple_end = [0xFF_u8; 5];
+    let mut horizon = None;
+    for op in ops {
+        let (key, value) = match op {
+            crabka_pgkv::WriteOp::Put { key, value }
+            | crabka_pgkv::WriteOp::ConditionalPut { key, value, .. } => (key, value),
+            crabka_pgkv::WriteOp::Delete { .. } => continue,
+        };
+        if let Some(raw) = key.strip_prefix(DESCRIPTOR_PREFIX) {
+            let Ok(raw) = <[u8; 8]>::try_from(raw) else {
+                continue;
+            };
+            let raw_start_ts = u64::from_be_bytes(raw);
+            fold(&mut horizon, raw_start_ts);
+            if let Ok(start_ts) = TimestampTransactionId::new(raw_start_ts)
+                && let Ok(descriptor) = decode_timestamp_txn_descriptor_value(start_ts, value)
+                && let PrimaryTxnDecision::Committed(commit_ts) = descriptor.decision
+            {
+                fold(&mut horizon, commit_ts.get());
+            }
+            continue;
+        }
+        if key.as_slice() < tuple_start.as_slice() || key.as_slice() >= tuple_end.as_slice() {
+            continue;
+        }
+        let Ok(version) = crabka_pgmvcc::version::decode_ts_tuple(value) else {
+            continue;
+        };
+        fold(&mut horizon, version.start_ts);
+        match version.state {
+            crabka_pgmvcc::version::TsVersionState::Committed { commit_ts }
+            | crabka_pgmvcc::version::TsVersionState::Deleted { commit_ts } => {
+                fold(&mut horizon, commit_ts);
+            }
+            crabka_pgmvcc::version::TsVersionState::Intent
+            | crabka_pgmvcc::version::TsVersionState::Aborted => {}
+        }
+    }
+    horizon
 }
 
 /// Build idempotent physical-abort operations for every timestamp intent on this
@@ -2780,6 +3025,60 @@ mod tests {
             delete: false,
             global_index_intents: Vec::new(),
         }
+    }
+
+    #[test]
+    fn committed_batch_timestamps_mirror_the_horizon_scan() {
+        use assert2::assert;
+
+        let row = vec![crabka_pgtypes::Datum::Int4(1)];
+        let intent_only = vec![crabka_pgkv::WriteOp::Put {
+            key: crabka_pgmvcc::version::version_key_ts(7, 1, 10),
+            value: crabka_pgmvcc::version::encode_ts_tuple(
+                10,
+                crabka_pgmvcc::version::TsVersionState::Intent,
+                &row,
+            ),
+        }];
+        assert!(max_timestamp_in_ops(&intent_only) == Some(10));
+
+        let committed_tuple = vec![crabka_pgkv::WriteOp::Put {
+            key: crabka_pgmvcc::version::version_key_ts(7, 1, 10),
+            value: crabka_pgmvcc::version::encode_ts_tuple(
+                10,
+                crabka_pgmvcc::version::TsVersionState::Committed { commit_ts: 15 },
+                &row,
+            ),
+        }];
+        assert!(max_timestamp_in_ops(&committed_tuple) == Some(15));
+
+        let mut descriptor = TimestampTxnDescriptor::begun(
+            TimestampTransactionId::new(20).expect("start timestamp"),
+            9,
+            vec![3],
+        );
+        assert!(max_timestamp_in_ops(&[timestamp_txn_descriptor_op(&descriptor)]) == Some(20));
+        descriptor
+            .decide(PrimaryTxnDecision::Committed(
+                CommitTimestamp::new(25).expect("commit timestamp"),
+            ))
+            .expect("decide");
+        assert!(max_timestamp_in_ops(&[timestamp_txn_descriptor_op(&descriptor)]) == Some(25));
+
+        let ignored = vec![
+            crabka_pgkv::WriteOp::Delete {
+                key: crabka_pgmvcc::version::version_key_ts(7, 1, 99),
+            },
+            crabka_pgkv::WriteOp::Put {
+                key: crabka_pgkv::key::row_key(7, 1),
+                value: crabka_pgmvcc::version::encode_tuple(4, 0, &row),
+            },
+            crabka_pgkv::WriteOp::Put {
+                key: b"\0\0\0\0meta/ts_prewrite/anything".to_vec(),
+                value: 42_u64.to_be_bytes().to_vec(),
+            },
+        ];
+        assert!(max_timestamp_in_ops(&ignored) == None);
     }
 
     #[tokio::test]

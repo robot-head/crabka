@@ -2636,6 +2636,51 @@ async fn runtime_serves_sql_over_pgwire() {
     let _ = server.await;
 }
 
+/// The binary's `run_serve` path uses the real `LiveTenantConfigLoader`
+/// rather than the injected test stubs, so `memory://` must not be resolved
+/// as a broker address list during tenant-config loading.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn runtime_live_loader_serves_sql_over_memory_substrate() {
+    use assert2::assert;
+
+    let _permit = broker_test_permit().await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("local addr").port();
+    let cache_dir = tempfile::tempdir().expect("cache dir");
+    let mut args = substrate_test_args(format!("127.0.0.1:{port}"));
+    args.cache_dir = Some(cache_dir.path().to_path_buf());
+    let server = tokio::spawn(async move {
+        crabka_gres::serve_listener_with_tenant_config_loader(
+            listener,
+            args,
+            &crabka_gres::LiveTenantConfigLoader,
+        )
+        .await
+    });
+
+    let client = connect(port).await;
+    client
+        .simple_query("CREATE TABLE binary_smoke (id int4)")
+        .await
+        .expect("create");
+    client
+        .simple_query("INSERT INTO binary_smoke VALUES (42)")
+        .await
+        .expect("insert");
+    let rows = client
+        .simple_query("SELECT id FROM binary_smoke")
+        .await
+        .expect("select");
+    let first_value = rows.iter().find_map(|message| match message {
+        tokio_postgres::SimpleQueryMessage::Row(row) => row.get(0),
+        _ => None,
+    });
+    assert!(first_value == Some("42"));
+
+    server.abort();
+    let _ = server.await;
+}
+
 /// Read one pgwire backend message (type byte + length-prefixed payload).
 async fn read_backend_message(
     stream: &mut tokio::net::TcpStream,

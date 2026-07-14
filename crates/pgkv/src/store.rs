@@ -76,6 +76,17 @@ pub trait Kv: Send + Sync {
     /// Returns [`KvError`] when validation fails or the backing store cannot
     /// persist the complete batch.
     fn write_batch(&self, ops: &[WriteOp]) -> Result<(), KvError>;
+    /// Give the store a chance to retire shadowed data (LSM memtable rotation
+    /// so flush + compaction can drop deleted entries and tombstones). Called
+    /// after garbage-collection sweeps; a no-op for stores without background
+    /// structure.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KvError`] when the backing store cannot start maintenance.
+    fn maintain(&self) -> Result<(), KvError> {
+        Ok(())
+    }
 }
 
 /// A consistent point-in-time, key-ordered stream of committed key-value pairs.

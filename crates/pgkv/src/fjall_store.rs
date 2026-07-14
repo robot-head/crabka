@@ -160,6 +160,15 @@ impl Kv for KeyspaceKv {
         transaction.commit().map_err(io)?;
         self.sync()
     }
+
+    fn maintain(&self) -> Result<(), KvError> {
+        // Rotate the active memtable so flush + compaction retire shadowed
+        // entries and GC tombstones. Byte-size rotation alone lets small-value
+        // churn (MVCC version keys and their delete tombstones on one row
+        // prefix) linger in the memtable for minutes, and every prefix scan
+        // walks all of it.
+        self.ks.inner().rotate_memtable_and_wait().map_err(io)
+    }
 }
 
 impl SnapshotKv for KeyspaceKv {
@@ -212,6 +221,18 @@ pub struct FjallKv {
     inner: KeyspaceKv,
 }
 
+/// Memtable cap for crabka keyspaces. Fjall's 64 MiB default means MVCC
+/// churn (distinct version keys plus GC tombstones on the same row prefix)
+/// accumulates in the active memtable for a very long time, and every prefix
+/// scan walks all of it — measured as a hot-row throughput collapse. A small
+/// cap rotates the memtable early so flush + compaction retire shadowed
+/// entries and tombstones.
+const MAX_MEMTABLE_SIZE_BYTES: u64 = 8 * 1024 * 1024;
+
+fn crabka_keyspace_options() -> KeyspaceCreateOptions {
+    KeyspaceCreateOptions::default().max_memtable_size(MAX_MEMTABLE_SIZE_BYTES)
+}
+
 impl FjallKv {
     /// Opens (or creates) a `FjallKv` at the given path.
     ///
@@ -223,9 +244,7 @@ impl FjallKv {
     /// Returns [`KvError::Io`] when the database or keyspace cannot be opened.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, KvError> {
         let db = Arc::new(SingleWriterTxDatabase::builder(path).open().map_err(io)?);
-        let ks = db
-            .keyspace("data", KeyspaceCreateOptions::default)
-            .map_err(io)?;
+        let ks = db.keyspace("data", crabka_keyspace_options).map_err(io)?;
         Ok(Self {
             inner: KeyspaceKv::new(db, ks),
         })
@@ -242,9 +261,7 @@ impl FjallKv {
     /// Returns [`KvError::Io`] when the database or keyspace cannot be opened.
     pub fn open_cache(path: impl AsRef<Path>) -> Result<Self, KvError> {
         let db = Arc::new(SingleWriterTxDatabase::builder(path).open().map_err(io)?);
-        let ks = db
-            .keyspace("data", KeyspaceCreateOptions::default)
-            .map_err(io)?;
+        let ks = db.keyspace("data", crabka_keyspace_options).map_err(io)?;
         Ok(Self {
             inner: KeyspaceKv::new_cache(db, ks),
         })
@@ -274,6 +291,10 @@ impl Kv for FjallKv {
 
     fn write_batch(&self, ops: &[WriteOp]) -> Result<(), KvError> {
         self.inner.write_batch(ops)
+    }
+
+    fn maintain(&self) -> Result<(), KvError> {
+        self.inner.maintain()
     }
 }
 

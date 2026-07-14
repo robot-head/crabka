@@ -6,6 +6,7 @@
 #![doc(html_root_url = "https://docs.rs/crabka-pgmvcc/0.3.9")]
 
 pub mod clog;
+pub mod gc;
 pub mod version;
 pub mod visibility;
 pub mod xid;

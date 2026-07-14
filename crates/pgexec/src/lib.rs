@@ -287,6 +287,27 @@ pub struct SqlEngine {
     pub(crate) join_strategy_config: plan_dist::PlannerConfig,
     /// Timestamp oracle backing the sharded timestamp transaction path.
     pub(crate) timestamp_oracle: Arc<dyn timestamp_txn::TimestampOracle>,
+    /// Cached durable-timestamp horizon over `kv`/`catalog_kv`. Seeded lazily
+    /// with one full scan, then kept exact by the horizon-observing committer,
+    /// so per-statement read floors are O(1) instead of a store scan.
+    pub(crate) timestamp_horizon: timestamp_txn::TimestampHorizonSource,
+    /// Snapshot pins and the cached decided floor backing the garbage horizon.
+    /// Sessions pin their snapshots here so neither write-path pruning, `vacuum`,
+    /// nor checkpoint compaction can reclaim a version a live snapshot still sees.
+    pub(crate) gc_horizon: Arc<crabka_pgmvcc::gc::GcHorizon>,
+}
+
+/// Counts returned by [`SqlEngine::vacuum`].
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct VacuumStats {
+    /// Dead tuple versions physically deleted.
+    pub versions_pruned: u64,
+    /// Orphaned local secondary-index entries physically deleted.
+    pub index_entries_pruned: u64,
+    /// Surviving tuple versions whose creator was rewritten to `FROZEN_XID`.
+    pub versions_frozen: u64,
+    /// Clog entries below the horizon physically deleted.
+    pub clog_entries_pruned: u64,
 }
 
 /// Timestamp ownership carried by a local MVCC scan.
@@ -327,10 +348,14 @@ impl SqlEngine {
     pub fn with_kv(kv: Arc<dyn Kv>) -> Result<Self, ExecError> {
         let coordination = coordination_for(&kv);
         let procarray = Arc::new(ProcArray::open(Arc::clone(&kv), PersistMode::Durable)?);
-        let committer: Arc<dyn crate::commit::Committer> =
+        let committer = timestamp_txn::HorizonObservingCommitter::wrap(
             Arc::new(crate::commit::LocalCommitter {
                 kv: Arc::clone(&kv),
-            });
+            }),
+            &kv,
+        );
+        let timestamp_horizon =
+            timestamp_txn::TimestampHorizonSource::new(Arc::clone(&kv), Arc::clone(&kv), false);
         Ok(Self {
             coordination: Arc::clone(&coordination),
             catalog_kv: Arc::clone(&kv),
@@ -353,19 +378,26 @@ impl SqlEngine {
             join_stats: Arc::new(plan_dist::DurableSequenceStats::new(Arc::clone(&kv))),
             join_strategy_config: plan_dist::PlannerConfig::default(),
             timestamp_oracle: Arc::new(timestamp_txn::LocalTimestampOracle::default()),
+            timestamp_horizon,
+            gc_horizon: Arc::new(crabka_pgmvcc::gc::GcHorizon::new()),
         })
     }
 
     /// Oldest xid that a checkpoint may vacuum without changing visibility.
     ///
-    /// The active-snapshot xmin is capped by the first non-terminal clog entry
-    /// at or above the durable recovery scan watermark, so prepared/in-progress
-    /// state can never be pruned or frozen past.
+    /// The active-snapshot xmin is capped by the lowest registered snapshot pin
+    /// and by the first non-terminal clog entry at or above the durable recovery
+    /// scan watermark, so neither a live reader's snapshot nor prepared/
+    /// in-progress state can ever be pruned or frozen past.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
     pub fn checkpoint_garbage_horizon(&self) -> Result<u64, ExecError> {
-        checkpoint_garbage_horizon(self.procarray.as_ref(), self.kv.as_ref())
+        checkpoint_garbage_horizon(
+            self.procarray.as_ref(),
+            self.kv.as_ref(),
+            self.gc_horizon.as_ref(),
+        )
     }
 
     /// A shareable horizon callback for checkpoint runtimes that outlive engine setup.
@@ -374,7 +406,213 @@ impl SqlEngine {
     ) -> Arc<dyn Fn() -> Result<u64, ExecError> + Send + Sync> {
         let procarray = Arc::clone(&self.procarray);
         let kv = Arc::clone(&self.kv);
-        Arc::new(move || checkpoint_garbage_horizon(procarray.as_ref(), kv.as_ref()))
+        let gc_horizon = Arc::clone(&self.gc_horizon);
+        Arc::new(move || {
+            checkpoint_garbage_horizon(procarray.as_ref(), kv.as_ref(), gc_horizon.as_ref())
+        })
+    }
+
+    /// Whether this engine may physically reclaim dead MVCC versions locally
+    /// (write-path chain pruning and [`SqlEngine::vacuum`]).
+    ///
+    /// True only for the plain single-range local engine (`new`/`open`/
+    /// `with_kv`): Durable persist mode, no GTM, no range-0 barrier, and a
+    /// single store for data + catalog. Replicated engines apply WAL batches
+    /// deterministically — a local delete outside the WAL would diverge
+    /// replicas and checkpoints — and multi-range engines can carry global
+    /// xids whose lifecycle the local horizon cannot judge.
+    #[must_use]
+    pub fn supports_local_vacuum(&self) -> bool {
+        self.persist_mode == PersistMode::Durable
+            && self.gtm.is_none()
+            && self.range0_barrier.is_none()
+            && Arc::ptr_eq(&self.kv, &self.catalog_kv)
+    }
+
+    /// Engine-level garbage sweep: physically delete every dead MVCC version
+    /// (and its orphaned local secondary-index entries) in every ordinary
+    /// table, freeze the surviving sub-horizon tuples, truncate the clog
+    /// below the horizon, and advance the durable clog scan floor to it.
+    ///
+    /// A version is dead iff its creator aborted (or crashed below the
+    /// horizon), or it was deleted/superseded by a transaction that committed
+    /// below the garbage horizon ([`crabka_pgmvcc::gc::version_is_dead`]);
+    /// the horizon is capped by running writers, registered snapshot pins,
+    /// and the first non-terminal clog entry, so nothing any live or future
+    /// snapshot can see is touched. Freezing rewrites a surviving committed
+    /// sub-horizon creator to `FROZEN_XID` (always visible without a clog
+    /// lookup), which is what makes deleting the sub-horizon clog entries
+    /// safe — without truncation the clog grows one entry per write
+    /// transaction forever.
+    ///
+    /// A no-op (returning zeroed [`VacuumStats`]) on engines where
+    /// [`SqlEngine::supports_local_vacuum`] is false.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when catalog or store access fails or a delete batch
+    /// cannot be committed.
+    pub async fn vacuum(&self) -> Result<VacuumStats, ExecError> {
+        if !self.supports_local_vacuum() {
+            return Ok(VacuumStats::default());
+        }
+        let horizon = self.checkpoint_garbage_horizon()?;
+        let tables = crabka_pgcatalog::list_tables(self.catalog_kv.as_ref())?;
+        // A unique lock-owner id for the sweep. `begin_write` registers it as
+        // running (harmless: it is the newest xid, so it lowers no horizon) and
+        // it writes no tuples and no clog entry, so after `finish` it is
+        // indistinguishable from a crashed no-op transaction.
+        let vacuum_xid = self.procarray.begin_write()?;
+        let result = self.vacuum_tables(&tables, horizon, vacuum_xid).await;
+        // Belt-and-braces: per-row sweeps release as they go; make sure nothing
+        // stays held (or registered) on an error path.
+        self.lockmgr.release_all(vacuum_xid);
+        self.procarray.finish(vacuum_xid);
+        let (mut stats, fully_swept) = result?;
+        // Truncate the clog below the horizon — but only after EVERY ordinary
+        // table was fully swept at this horizon: sweeping pruned every dead
+        // sub-horizon version and froze every surviving one, so no visibility
+        // check can consult a deleted entry (an absent sub-horizon entry
+        // already reads as decided-by-crash). A row skipped by a transient
+        // lock verdict defers truncation to the next sweep.
+        if fully_swept {
+            stats.clog_entries_pruned = self.truncate_clog_below(horizon).await?;
+            // Advance the durable clog scan floor. Safe by the horizon
+            // contract: every xid below `horizon` is decided (or a crashed
+            // leftover that can never commit), and the horizon never passes a
+            // non-terminal (InProgress/Prepared) entry — so the recovery
+            // watermark invariant ("never advance past a non-terminal
+            // marker") holds. On this single-range local engine no Prepared
+            // marker can exist at all.
+            self.advance_clog_scan_lo(horizon).await?;
+        }
+        Ok(stats)
+    }
+
+    /// Delete every clog entry strictly below `horizon`, in bounded batches.
+    /// Callers must have frozen/pruned every version referencing those xids.
+    async fn truncate_clog_below(&self, horizon: u64) -> Result<u64, ExecError> {
+        let mut deleted: u64 = 0;
+        let mut batch: Vec<crabka_pgkv::WriteOp> = Vec::new();
+        for (key, _) in self.kv.scan_range(
+            &crabka_pgkv::key::clog_key(0),
+            &crabka_pgkv::key::clog_key(horizon),
+        )? {
+            batch.push(crabka_pgkv::WriteOp::Delete { key });
+            if batch.len() == 4096 {
+                deleted += batch.len() as u64;
+                self.committer.commit(std::mem::take(&mut batch)).await?;
+            }
+        }
+        if !batch.is_empty() {
+            deleted += batch.len() as u64;
+            self.committer.commit(batch).await?;
+        }
+        Ok(deleted)
+    }
+
+    /// Sweep every ordinary table's version chains at `horizon` (see `vacuum`).
+    /// Returns the sweep counts and whether EVERY candidate row was swept
+    /// (false when a transient lock verdict skipped one — the caller must not
+    /// truncate the clog in that case).
+    async fn vacuum_tables(
+        &self,
+        tables: &[crabka_pgcatalog::Table],
+        horizon: u64,
+        vacuum_xid: u64,
+    ) -> Result<(VacuumStats, bool), ExecError> {
+        let mut stats = VacuumStats::default();
+        let mut fully_swept = true;
+        for table in tables {
+            // Timestamp/sharded tables use ts tuples with their own
+            // resolution rules; only ordinary xid-MVCC tables are swept.
+            if table.sharded || table.sharding.is_some() {
+                continue;
+            }
+            // Hold the shared physical gate so a concurrent conversion (which
+            // rewrites the whole table under the exclusive half) serializes
+            // with the sweep, exactly like an ordinary writer.
+            let _gate = Arc::clone(&self.table_write_gate).read_owned().await;
+            let local_indexes: Vec<crabka_pgcatalog::Index> =
+                crabka_pgcatalog::list_table_indexes(self.catalog_kv.as_ref(), &table.name)?
+                    .into_iter()
+                    .filter(|index| index.placement == crabka_pgcatalog::IndexPlacement::Local)
+                    .collect();
+            // Lock-free candidate pre-scan: deadness and freezability at a
+            // fixed horizon are stable (terminal clog states are immutable),
+            // so this can only under-report relative to the locked re-read
+            // below — and versions written after it carry xids at or above
+            // the horizon, which need neither pruning nor freezing.
+            let clog_status = |xid| crabka_pgmvcc::clog::get(self.kv.as_ref(), xid);
+            let mut candidates = std::collections::BTreeSet::new();
+            for (key, value) in self
+                .kv
+                .scan_prefix(&crabka_pgkv::key::table_prefix(table.id))?
+            {
+                let (xmin, xmax, _row) = crabka_pgmvcc::version::decode_tuple(&value)?;
+                let dead = crabka_pgmvcc::gc::version_is_dead(xmin, xmax, horizon, &clog_status)?;
+                let freezable = !dead
+                    && xmin != crabka_pgmvcc::xid::FROZEN_XID
+                    && xmin < horizon
+                    && matches!(
+                        clog_status(xmin)?,
+                        crabka_pgmvcc::clog::XidStatus::Committed
+                    );
+                if dead || freezable {
+                    let prefix = crabka_pgmvcc::version::row_prefix_of(&key)?;
+                    candidates.insert(crabka_pgkv::key::rowid_of(table.id, prefix)?);
+                }
+            }
+            for rowid in candidates {
+                // Take the writer's exclusive row lock: dead version KEYS never
+                // collide with a writer's puts, but the index-entry survivor
+                // computation must not race a concurrent writer re-adding the
+                // same indexed values, and a freeze rewrite must not race a
+                // writer stamping xmax on the same key. Holding at most this
+                // one lock, the sweep cannot close a wait-for cycle of its
+                // own; a transient deadlock verdict (a just-woken waiter's
+                // stale edge) simply skips the row until the next sweep.
+                if self
+                    .lockmgr
+                    .acquire(
+                        table.id,
+                        rowid,
+                        crate::lockmgr::LockMode::Exclusive,
+                        vacuum_xid,
+                    )
+                    .await
+                    .is_err()
+                {
+                    fully_swept = false;
+                    continue;
+                }
+                let pruned = crate::exec::prune_rowid_chain_ops(
+                    self.kv.as_ref(),
+                    table,
+                    &local_indexes,
+                    &crate::exec::ChainPruneRequest {
+                        rowid,
+                        horizon,
+                        keep_xids: &[],
+                        new_row: None,
+                        freeze_below: Some(horizon),
+                    },
+                );
+                let commit = match pruned {
+                    Ok(prune) if prune.ops.is_empty() => Ok(()),
+                    Ok(prune) => {
+                        stats.versions_pruned += prune.versions;
+                        stats.index_entries_pruned += prune.index_entries;
+                        stats.versions_frozen += prune.frozen;
+                        self.committer.commit(prune.ops).await
+                    }
+                    Err(error) => Err(error),
+                };
+                self.lockmgr.release_all(vacuum_xid);
+                commit?;
+            }
+        }
+        Ok((stats, fully_swept))
     }
 
     /// Build an engine whose reads come from `sm_kv` (the applied state machine)
@@ -398,6 +636,12 @@ impl SqlEngine {
             Arc::clone(&sm_kv),
             PersistMode::Replicated,
         )?);
+        let committer = timestamp_txn::HorizonObservingCommitter::wrap(committer, &sm_kv);
+        let timestamp_horizon = timestamp_txn::TimestampHorizonSource::new(
+            Arc::clone(&sm_kv),
+            Arc::clone(&catalog_kv),
+            false,
+        );
         Ok(Self {
             coordination: Arc::clone(&coordination),
             catalog_kv,
@@ -420,17 +664,33 @@ impl SqlEngine {
             join_stats: Arc::new(plan_dist::DurableSequenceStats::new(Arc::clone(&sm_kv))),
             join_strategy_config: plan_dist::PlannerConfig::default(),
             timestamp_oracle: Arc::new(timestamp_txn::LocalTimestampOracle::default()),
+            timestamp_horizon,
+            gc_horizon: Arc::new(crabka_pgmvcc::gc::GcHorizon::new()),
         })
     }
 
     /// Reseed counters from the applied store (call when this node becomes leader).
+    ///
+    /// Also invalidates the cached durable-timestamp horizon, so the next
+    /// statement rescans the applied store for timestamp state that was
+    /// replicated to this node while another leader was committing.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
     pub fn reseed_counters(&self) -> Result<(), ExecError> {
         self.procarray.reseed_from_applied()?;
         self.seq.reseed_from_applied();
+        self.timestamp_horizon.invalidate();
         Ok(())
+    }
+
+    /// Record that timestamp state at or below `timestamp` is durable on this
+    /// engine's stores even though the write did not flow through this
+    /// engine's committer (for example, an external replication apply path).
+    /// Read, transaction, and commit timestamps allocated afterwards stay
+    /// strictly above it.
+    pub fn observe_durable_timestamp(&self, timestamp: u64) {
+        self.timestamp_horizon.observe(timestamp);
     }
 
     /// A second handle to the SAME engine (all fields are `Arc`/`Copy`): every
@@ -460,6 +720,8 @@ impl SqlEngine {
             join_stats: Arc::clone(&self.join_stats),
             join_strategy_config: self.join_strategy_config,
             timestamp_oracle: Arc::clone(&self.timestamp_oracle),
+            timestamp_horizon: self.timestamp_horizon.clone(),
+            gc_horizon: Arc::clone(&self.gc_horizon),
         }
     }
 
@@ -832,10 +1094,7 @@ impl SqlEngine {
         &self,
     ) -> Result<TimestampTransactionId, ExecError> {
         self.timestamp_oracle
-            .allocate_transaction_id_after(timestamp_txn::durable_timestamp_horizon_with_catalog(
-                self.kv.as_ref(),
-                self.catalog_kv.as_ref(),
-            )?)
+            .allocate_transaction_id_after(self.timestamp_horizon.current()?)
             .await
             .map_err(|error| ExecError::Unsupported(error.to_string()))
     }
@@ -846,10 +1105,7 @@ impl SqlEngine {
     /// Returns an error when the requested operation cannot be completed.
     pub async fn allocate_timestamp_read_timestamp(&self) -> Result<ReadTimestamp, ExecError> {
         self.timestamp_oracle
-            .allocate_read_timestamp_after(timestamp_txn::durable_timestamp_horizon_with_catalog(
-                self.kv.as_ref(),
-                self.catalog_kv.as_ref(),
-            )?)
+            .allocate_read_timestamp_after(self.timestamp_horizon.current()?)
             .await
             .map_err(|error| ExecError::Unsupported(error.to_string()))
     }
@@ -863,13 +1119,7 @@ impl SqlEngine {
         start_ts: TimestampTransactionId,
     ) -> Result<CommitTimestamp, ExecError> {
         self.timestamp_oracle
-            .allocate_commit_after_durable(
-                start_ts,
-                timestamp_txn::durable_timestamp_horizon_with_catalog(
-                    self.kv.as_ref(),
-                    self.catalog_kv.as_ref(),
-                )?,
-            )
+            .allocate_commit_after_durable(start_ts, self.timestamp_horizon.current()?)
             .await
             .map_err(|error| ExecError::Unsupported(error.to_string()))
     }
@@ -1350,6 +1600,18 @@ impl SqlEngine {
     /// Point this engine's catalog/global-decision view at range 0's store.
     pub fn set_catalog_kv(&mut self, catalog_kv: Arc<dyn Kv>) {
         self.catalog_kv = catalog_kv;
+        self.rebuild_timestamp_horizon();
+    }
+
+    /// Rebuild the cached horizon source after the store wiring changed. A
+    /// range-0 barrier marks the catalog as a replica applied by another
+    /// process, whose timestamp descriptors must be rescanned per lookup.
+    fn rebuild_timestamp_horizon(&mut self) {
+        self.timestamp_horizon = timestamp_txn::TimestampHorizonSource::new(
+            Arc::clone(&self.kv),
+            Arc::clone(&self.catalog_kv),
+            self.range0_barrier.is_some(),
+        );
     }
 
     /// Open a GTM over this engine's `kv` (range 0's store) and make this engine
@@ -1378,6 +1640,7 @@ impl SqlEngine {
     /// caught-up range-0 replica. Range 0's own engine needs no barrier.
     pub fn set_range0_barrier(&mut self, b: Arc<dyn crate::read_gate::Linearizer>) {
         self.range0_barrier = Some(b);
+        self.rebuild_timestamp_horizon();
     }
 
     /// Whether this engine carries the shared GTM (so `begin_global_durable` and
@@ -1787,10 +2050,30 @@ mod cursor_terminal_tests {
     }
 }
 
-fn checkpoint_garbage_horizon(procarray: &ProcArray, kv: &dyn Kv) -> Result<u64, ExecError> {
+pub(crate) fn checkpoint_garbage_horizon(
+    procarray: &ProcArray,
+    kv: &dyn Kv,
+    gc_horizon: &crabka_pgmvcc::gc::GcHorizon,
+) -> Result<u64, ExecError> {
     use crabka_pgmvcc::{clog::XidStatus, xid::FIRST_NORMAL_XID};
 
+    // The horizon cap: no higher than the oldest running writer xid AND the
+    // lowest registered snapshot pin. Writers register in the ProcArray;
+    // read-only snapshots (REPEATABLE READ transactions, per-statement
+    // snapshots) register pins in the GcHorizon — without the pin cap a
+    // version whose committed deleter was still running when such a snapshot
+    // was taken could be pruned out from under it.
     let active_xmin = procarray.snapshot().xmin;
+    let cap = gc_horizon
+        .min_pinned()
+        .map_or(active_xmin, |pinned| pinned.min(active_xmin));
+    // Scan the clog from the durable recovery watermark, tightened by the
+    // in-process decided floor (everything below a previously returned horizon
+    // is already decided — decidedness is immutable), so the walk is amortized
+    // O(1) per xid instead of O(all xids) per call. Absent clog entries below
+    // `cap` never appear in the scan: an absent xid below the active xmin is
+    // not running, so it is a crash leftover that can never commit
+    // (aborted-equivalent) — exactly the existing recovery semantics.
     let scan_lo = match kv.get(&crabka_pgkv::key::clog_scan_lo_key())? {
         Some(bytes) if bytes.len() == 8 => {
             u64::from_be_bytes(bytes[..8].try_into().expect("checked length"))
@@ -1798,10 +2081,11 @@ fn checkpoint_garbage_horizon(procarray: &ProcArray, kv: &dyn Kv) -> Result<u64,
         _ => FIRST_NORMAL_XID,
     }
     .max(FIRST_NORMAL_XID)
-    .min(active_xmin);
+    .max(gc_horizon.decided_floor())
+    .min(cap);
     for (key, value) in kv.scan_range(
         &crabka_pgkv::key::clog_key(scan_lo),
-        &crabka_pgkv::key::clog_key(active_xmin),
+        &crabka_pgkv::key::clog_key(cap),
     )? {
         let Some(xid) = crabka_pgkv::key::clog_xid_of(&key) else {
             continue;
@@ -1810,10 +2094,13 @@ fn checkpoint_garbage_horizon(procarray: &ProcArray, kv: &dyn Kv) -> Result<u64,
             crabka_pgmvcc::clog::decode(&value)?,
             XidStatus::InProgress | XidStatus::Prepared(_)
         ) {
-            return Ok(xid.min(active_xmin));
+            let horizon = xid.min(cap);
+            gc_horizon.advance_decided_floor(horizon);
+            return Ok(horizon);
         }
     }
-    Ok(active_xmin)
+    gc_horizon.advance_decided_floor(cap);
+    Ok(cap)
 }
 
 /// A sentinel global snapshot for single-range (non-GTM) engines. Any global xid
@@ -1921,6 +2208,8 @@ impl Engine for SqlEngine {
             join_stats: Arc::clone(&self.join_stats),
             join_strategy_config: self.join_strategy_config,
             timestamp_oracle: Arc::clone(&self.timestamp_oracle),
+            timestamp_horizon: self.timestamp_horizon.clone(),
+            gc_horizon: Arc::clone(&self.gc_horizon),
         })
     }
 }

@@ -39,6 +39,12 @@ pub(crate) struct TxnCtx {
     /// The visibility snapshot: re-taken per statement under READ COMMITTED,
     /// fixed at BEGIN under REPEATABLE READ.
     pub(crate) snapshot: Snapshot,
+    /// Holds the garbage horizon at or below this transaction's BEGIN-time
+    /// snapshot xmin until COMMIT/ROLLBACK, so no version this transaction's
+    /// snapshot(s) can see is pruned while the block is open. READ COMMITTED
+    /// re-snapshots per statement, but the BEGIN-time xmin is `<=` every later
+    /// snapshot's xmin, so one conservative pin covers the whole block.
+    pub(crate) _snapshot_pin: crabka_pgmvcc::gc::SnapshotPin,
     pub(crate) repeatable_read: bool,
     /// The GLOBAL snapshot the cross-range resolver (`exec::global_status`) gates
     /// `Prepared(-> g)` rows against. Captured at BEGIN for REPEATABLE READ (fixed
@@ -859,6 +865,15 @@ pub struct SqlSession {
     join_strategy_config: crate::plan_dist::PlannerConfig,
     /// Timestamp oracle for sharded timestamp transactions.
     timestamp_oracle: Arc<dyn crate::timestamp_txn::TimestampOracle>,
+    /// Cached durable-timestamp horizon (shared from the engine): the floor a
+    /// statement's read/transaction/commit timestamps must exceed, without
+    /// rescanning the store per statement.
+    timestamp_horizon: crate::timestamp_txn::TimestampHorizonSource,
+    /// Garbage-horizon pins + decided floor (shared from the engine). Every
+    /// statement/transaction pins its snapshot xmin here so version pruning
+    /// (write-path, `vacuum`, checkpoint compaction) never reclaims a version
+    /// a live snapshot still sees.
+    gc_horizon: Arc<crabka_pgmvcc::gc::GcHorizon>,
     timestamp_own_start_ts: Option<crate::timestamp_txn::TimestampTransactionId>,
     sequence_currvals: Arc<Mutex<HashMap<String, i64>>>,
     session_user: String,
@@ -890,6 +905,8 @@ pub(crate) struct SqlSessionConfig {
     pub join_stats: Arc<dyn crate::plan_dist::Stats>,
     pub join_strategy_config: crate::plan_dist::PlannerConfig,
     pub timestamp_oracle: Arc<dyn crate::timestamp_txn::TimestampOracle>,
+    pub timestamp_horizon: crate::timestamp_txn::TimestampHorizonSource,
+    pub gc_horizon: Arc<crabka_pgmvcc::gc::GcHorizon>,
 }
 
 #[derive(Clone)]
@@ -942,6 +959,8 @@ impl SqlSession {
             join_stats,
             join_strategy_config,
             timestamp_oracle,
+            timestamp_horizon,
+            gc_horizon,
         } = config;
         Self {
             kv,
@@ -967,6 +986,8 @@ impl SqlSession {
             join_stats,
             join_strategy_config,
             timestamp_oracle,
+            timestamp_horizon,
+            gc_horizon,
             timestamp_own_start_ts: None,
             sequence_currvals: Arc::new(Mutex::new(HashMap::new())),
             session_user: "public".into(),
@@ -1019,6 +1040,7 @@ impl SqlSession {
         xid: u64,
         repeatable_read: bool,
         eval_ctx: &'a crate::clock::EvalCtx,
+        prune_horizon: Option<u64>,
     ) -> crate::exec::WriteContext<'a> {
         crate::exec::WriteContext {
             catalog_kv: self.catalog_kv.as_ref(),
@@ -1032,7 +1054,34 @@ impl SqlSession {
             xid,
             repeatable_read,
             eval_ctx,
+            prune_horizon,
         }
+    }
+
+    /// The garbage horizon UPDATE/DELETE may prune dead row versions at, or
+    /// `None` when this session's engine must not prune locally.
+    ///
+    /// Pruning is a physical local delete outside any replicated batch
+    /// ordering, so it is only sound on the plain single-range LOCAL engine:
+    /// Durable persist mode (a replicated engine's deterministic WAL apply and
+    /// checkpoints would diverge), no GTM and no range-0 barrier (multi-range
+    /// rows can carry global xids whose lifecycle the local horizon cannot
+    /// judge), and a single store for data + catalog. Mirrors
+    /// `SqlEngine::supports_local_vacuum`.
+    fn local_prune_horizon(&self) -> Result<Option<u64>, ExecError> {
+        if self.persist_mode != crate::PersistMode::Durable
+            || self.gtm.is_some()
+            || self.range0_barrier.is_some()
+            || !Arc::ptr_eq(&self.kv, &self.catalog_kv)
+        {
+            return Ok(None);
+        }
+        crate::checkpoint_garbage_horizon(
+            self.procarray.as_ref(),
+            self.kv.as_ref(),
+            self.gc_horizon.as_ref(),
+        )
+        .map(Some)
     }
 
     /// Set the timestamp transaction whose pending intents are owned by this SQL session.
@@ -1207,12 +1256,7 @@ impl SqlSession {
             let global_snapshot = self.global_read_snapshot(None)?;
             let timestamp_read = self
                 .timestamp_oracle
-                .allocate_read_timestamp_after(
-                    crate::timestamp_txn::durable_timestamp_horizon_with_catalog(
-                        self.kv.as_ref(),
-                        self.catalog_kv.as_ref(),
-                    )?,
-                )
+                .allocate_read_timestamp_after(self.timestamp_horizon.current()?)
                 .await
                 .map_err(|error| ExecError::Unsupported(error.to_string()))?;
             if let TxnState::InTransaction(ctx) = &mut self.state {
@@ -1326,6 +1370,15 @@ impl SqlSession {
     }
 
     async fn run_one(&mut self, stmt: &Statement) -> Result<QueryResult, ExecError> {
+        // Pin the garbage horizon for this autocommit statement's duration.
+        // The pin (the ProcArray xmin now) is <= the xmin of any snapshot the
+        // statement takes below, so a concurrent pruner/vacuum can never
+        // reclaim a version this statement's snapshot(s) can still see —
+        // including between the multiple eager KV scans of a join, subquery,
+        // or index probe. Inside a block the TxnCtx pin (taken at BEGIN)
+        // already covers every statement snapshot.
+        let _statement_pin = matches!(self.state, TxnState::Idle)
+            .then(|| self.gc_horizon.pin(self.procarray.snapshot().xmin));
         self.reject_prepared_participant()?;
         if matches!(self.state, TxnState::Failed(_))
             && !matches!(stmt, Statement::Commit | Statement::Rollback)
@@ -1456,20 +1509,21 @@ impl SqlSession {
         } else {
             None
         };
+        // Pin the garbage horizon at this snapshot's xmin for the block's
+        // lifetime: an open REPEATABLE READ transaction must keep every version
+        // its fixed snapshot can see; a READ COMMITTED block's later statement
+        // snapshots all have xmin >= this pin, so it covers them conservatively.
+        let snapshot_pin = self.gc_horizon.pin(snapshot.xmin);
         self.state = TxnState::InTransaction(TxnCtx {
             xid: None,
             snapshot,
+            _snapshot_pin: snapshot_pin,
             repeatable_read: rr,
             global_snapshot,
             timestamp_read: if rr {
                 Some(
                     self.timestamp_oracle
-                        .allocate_read_timestamp_after(
-                            crate::timestamp_txn::durable_timestamp_horizon_with_catalog(
-                                self.kv.as_ref(),
-                                self.catalog_kv.as_ref(),
-                            )?,
-                        )
+                        .allocate_read_timestamp_after(self.timestamp_horizon.current()?)
                         .await
                         .map_err(|error| ExecError::Unsupported(error.to_string()))?,
                 )
@@ -1672,12 +1726,7 @@ impl SqlSession {
             }
             TxnState::InTransaction(_) | TxnState::Idle => self
                 .timestamp_oracle
-                .allocate_read_timestamp_after(
-                    crate::timestamp_txn::durable_timestamp_horizon_with_catalog(
-                        self.kv.as_ref(),
-                        self.catalog_kv.as_ref(),
-                    )?,
-                )
+                .allocate_read_timestamp_after(self.timestamp_horizon.current()?)
                 .await
                 .map_err(|error| ExecError::Unsupported(error.to_string()))?,
             TxnState::Prepared(_) | TxnState::Failed(_) => {
@@ -2099,7 +2148,18 @@ impl SqlSession {
                 // txn commits later, so no clog op. In Replicated mode we fold the
                 // next_xid op into this batch (the state machine max-merges it;
                 // re-folding on a later write in the same txn is harmless).
-                let write_ctx = self.write_context(&gsnap, &snapshot, xid, repeatable_read, &ctx);
+                // Cache the garbage horizon once per statement: UPDATE/DELETE
+                // prune the chains of the rows they write against it (local
+                // engines only; None disables pruning elsewhere).
+                let prune_horizon = self.local_prune_horizon()?;
+                let write_ctx = self.write_context(
+                    &gsnap,
+                    &snapshot,
+                    xid,
+                    repeatable_read,
+                    &ctx,
+                    prune_horizon,
+                );
                 let (result, mut ops) = crate::exec::execute_write(&write_ctx, stmt).await?;
                 // Record the (table_id, rowid)s this write touched (from the version
                 // Puts it built) so the abort-atomicity fence (`effective_global_xid`)
@@ -2188,7 +2248,11 @@ impl SqlSession {
                 let snapshot = self.procarray.snapshot();
                 let gsnap = self.global_read_snapshot(None)?;
                 let ctx = self.eval_ctx();
-                let write_ctx = self.write_context(&gsnap, &snapshot, xid, false, &ctx);
+                // Cache the garbage horizon once per statement (see the
+                // in-transaction branch above).
+                let prune_horizon = self.local_prune_horizon()?;
+                let write_ctx =
+                    self.write_context(&gsnap, &snapshot, xid, false, &ctx, prune_horizon);
                 let outcome = crate::exec::execute_write(&write_ctx, stmt).await;
                 let (result, mut ops) = match outcome {
                     Ok(v) => v,
@@ -2247,6 +2311,9 @@ impl SqlSession {
         copy: &CopyStmt,
         chunks: Vec<bytes::Bytes>,
     ) -> Result<QueryResult, ExecError> {
+        // Statement-duration garbage-horizon pin — see `run_one`.
+        let _statement_pin = matches!(self.state, TxnState::Idle)
+            .then(|| self.gc_horizon.pin(self.procarray.snapshot().xmin));
         if matches!(copy.format, CopyFormat::Csv) {
             return Err(ExecError::Unsupported("COPY CSV is not supported".into()));
         }
@@ -2281,7 +2348,8 @@ impl SqlSession {
                 let ctx = self.eval_ctx();
                 let gsnap = self.global_read_snapshot(None)?;
                 let snapshot = self.procarray.snapshot();
-                let write_ctx = self.write_context(&gsnap, &snapshot, xid, false, &ctx);
+                // COPY is insert-only: no chains are re-read, nothing to prune.
+                let write_ctx = self.write_context(&gsnap, &snapshot, xid, false, &ctx, None);
                 let (result, mut ops) = crate::exec::execute_copy_write(&write_ctx, copy, &rows)?;
                 if self.persist_mode == crate::PersistMode::Replicated {
                     ops.push(self.procarray.next_xid_op());
@@ -2324,7 +2392,8 @@ impl SqlSession {
                 let ctx = self.eval_ctx();
                 let gsnap = self.global_read_snapshot(None)?;
                 let snapshot = self.procarray.snapshot();
-                let write_ctx = self.write_context(&gsnap, &snapshot, xid, false, &ctx);
+                // COPY is insert-only: no chains are re-read, nothing to prune.
+                let write_ctx = self.write_context(&gsnap, &snapshot, xid, false, &ctx, None);
                 let outcome = crate::exec::execute_copy_write(&write_ctx, copy, &rows);
                 let (result, mut ops) = match outcome {
                     Ok(value) => value,
@@ -2400,12 +2469,7 @@ impl SqlSession {
         &self,
     ) -> Result<crate::timestamp_txn::TimestampTransactionId, ExecError> {
         self.timestamp_oracle
-            .allocate_transaction_id_after(
-                crate::timestamp_txn::durable_timestamp_horizon_with_catalog(
-                    self.kv.as_ref(),
-                    self.catalog_kv.as_ref(),
-                )?,
-            )
+            .allocate_transaction_id_after(self.timestamp_horizon.current()?)
             .await
             .map_err(|error| ExecError::Unsupported(error.to_string()))
     }
@@ -2415,13 +2479,7 @@ impl SqlSession {
         start_ts: crate::timestamp_txn::TimestampTransactionId,
     ) -> Result<crate::timestamp_txn::CommitTimestamp, ExecError> {
         self.timestamp_oracle
-            .allocate_commit_after_durable(
-                start_ts,
-                crate::timestamp_txn::durable_timestamp_horizon_with_catalog(
-                    self.kv.as_ref(),
-                    self.catalog_kv.as_ref(),
-                )?,
-            )
+            .allocate_commit_after_durable(start_ts, self.timestamp_horizon.current()?)
             .await
             .map_err(|error| ExecError::Unsupported(error.to_string()))
     }
@@ -3925,12 +3983,7 @@ impl SqlSession {
                     }
                     TxnState::InTransaction(_) | TxnState::Idle => self
                         .timestamp_oracle
-                        .allocate_read_timestamp_after(
-                            crate::timestamp_txn::durable_timestamp_horizon_with_catalog(
-                                self.kv.as_ref(),
-                                self.catalog_kv.as_ref(),
-                            )?,
-                        )
+                        .allocate_read_timestamp_after(self.timestamp_horizon.current()?)
                         .await
                         .map_err(|error| ExecError::Unsupported(error.to_string()))?,
                     TxnState::Prepared(_) | TxnState::Failed(_) => {

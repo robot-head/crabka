@@ -72,6 +72,12 @@ pub(crate) struct WriteContext<'a> {
     pub xid: u64,
     pub repeatable_read: bool,
     pub eval_ctx: &'a crate::clock::EvalCtx,
+    /// `Some(garbage horizon)` iff this statement may opportunistically prune
+    /// dead versions of the rows it writes (single-range LOCAL engines only —
+    /// the session computes it once per statement; `None` disables pruning,
+    /// as on replicated engines where a local delete outside the WAL would
+    /// diverge replicas and checkpoints).
+    pub prune_horizon: Option<u64>,
 }
 
 #[derive(Clone, Copy)]
@@ -1036,11 +1042,8 @@ pub(crate) async fn execute_write(
 ) -> Result<(QueryResult, Vec<crabka_pgkv::WriteOp>), ExecError> {
     let catalog_kv = write_ctx.catalog_kv;
     let kv = write_ctx.kv;
-    let global = write_ctx.global;
-    let gsnap = write_ctx.global_snapshot;
     let lockmgr = write_ctx.lockmgr;
     let seq = write_ctx.seq;
-    let snapshot = write_ctx.snapshot;
     let xid = write_ctx.xid;
     let ctx = write_ctx.eval_ctx;
     let mut ops: Vec<crabka_pgkv::WriteOp> = Vec::new();
@@ -1129,8 +1132,7 @@ pub(crate) async fn execute_write(
                 .collect::<Result<_, _>>()?;
             let mut n: u64 = 0;
             let mut returned_rows = returning.as_ref().map(|_| Vec::new()).unwrap_or_default();
-            for (rowid, _xmin, scanned_row) in
-                scan_live(kv, global, gsnap, snapshot, Some(xid), &t)?
+            for (rowid, _xmin, scanned_row) in write_candidate_rows(write_ctx, &t, filter.as_ref())?
             {
                 // 1. Filter on the snapshot-visible row FIRST — do not lock rows
                 //    that don't match the WHERE clause (avoids over-locking and
@@ -1148,7 +1150,8 @@ pub(crate) async fn execute_write(
                 }
                 // 3. EvalPlanQual: re-read this row under the lock and decide what to
                 //    operate on (40001 under RR if changed since our snapshot).
-                let Some((cur_xmin, cur_row)) = eval_plan_qual(&write_ctx.mutation(), &t, rowid)?
+                let Some((cur_key_xid, cur_xmin, cur_row)) =
+                    eval_plan_qual(&write_ctx.mutation(), &t, rowid)?
                 else {
                     continue; // deleted by a concurrent committed txn — skip
                 };
@@ -1189,9 +1192,12 @@ pub(crate) async fn execute_write(
                         ),
                     });
                 } else {
-                    // Supersede a committed version: stamp its xmax, write a new tuple.
+                    // Supersede a committed version: stamp its xmax, write a new
+                    // tuple. The stamp targets the version's PHYSICAL key
+                    // (`cur_key_xid`) — for a frozen tuple the header xmin
+                    // (`FROZEN_XID`) no longer names its key.
                     ops.push(crabka_pgkv::WriteOp::Put {
-                        key: crabka_pgmvcc::version::version_key_xid(t.id, rowid, cur_xmin),
+                        key: crabka_pgmvcc::version::version_key_xid(t.id, rowid, cur_key_xid),
                         value: crabka_pgmvcc::version::encode_tuple(cur_xmin, xid, &cur_row),
                     });
                     ops.push(crabka_pgkv::WriteOp::Put {
@@ -1204,6 +1210,28 @@ pub(crate) async fn execute_write(
                     });
                 }
                 ops.extend(local_index_entry_ops(&t, &local_indexes, rowid, &next)?);
+                // Opportunistic per-rowid chain pruning (local engines only):
+                // we hold this row's exclusive lock and just re-read its chain,
+                // so reclaim its dead versions in the same commit batch. The
+                // versions this statement writes (`cur_xmin`, `xid`) are never
+                // pruned, and `next`'s indexed values count as survivors.
+                if let Some(horizon) = write_ctx.prune_horizon {
+                    ops.extend(
+                        prune_rowid_chain_ops(
+                            kv,
+                            &t,
+                            &local_indexes,
+                            &ChainPruneRequest {
+                                rowid,
+                                horizon,
+                                keep_xids: &[cur_key_xid, xid],
+                                new_row: Some(&next),
+                                freeze_below: None,
+                            },
+                        )?
+                        .ops,
+                    );
+                }
                 n += 1;
             }
             let tag = format!("UPDATE {n}");
@@ -1216,12 +1244,11 @@ pub(crate) async fn execute_write(
             returning,
         } => {
             let t = crabka_pgcatalog::get_table(catalog_kv, table)?;
-            let _local_indexes = writable_local_indexes(catalog_kv, &t)?;
+            let local_indexes = writable_local_indexes(catalog_kv, &t)?;
             let scope = Scope::single(&t, &t.name);
             let mut n: u64 = 0;
             let mut returned_rows = returning.as_ref().map(|_| Vec::new()).unwrap_or_default();
-            for (rowid, _xmin, scanned_row) in
-                scan_live(kv, global, gsnap, snapshot, Some(xid), &t)?
+            for (rowid, _xmin, scanned_row) in write_candidate_rows(write_ctx, &t, filter.as_ref())?
             {
                 // 1. Filter on the snapshot-visible row FIRST — do not lock rows
                 //    that don't match the WHERE clause.
@@ -1237,7 +1264,8 @@ pub(crate) async fn execute_write(
                     Err(()) => return Err(ExecError::Deadlock),
                 }
                 // 3. EvalPlanQual: re-read this row under the lock.
-                let Some((cur_xmin, cur_row)) = eval_plan_qual(&write_ctx.mutation(), &t, rowid)?
+                let Some((cur_key_xid, cur_xmin, cur_row)) =
+                    eval_plan_qual(&write_ctx.mutation(), &t, rowid)?
                 else {
                     continue; // already deleted by a concurrent committed txn
                 };
@@ -1257,11 +1285,34 @@ pub(crate) async fn execute_write(
                         value: crabka_pgmvcc::version::encode_tuple(xid, xid, &cur_row),
                     });
                 } else {
-                    // Set xmax = my xid on the matched version (keep its row bytes).
+                    // Set xmax = my xid on the matched version (keep its row
+                    // bytes), targeting its PHYSICAL key — see the UPDATE arm.
                     ops.push(crabka_pgkv::WriteOp::Put {
-                        key: crabka_pgmvcc::version::version_key_xid(t.id, rowid, cur_xmin),
+                        key: crabka_pgmvcc::version::version_key_xid(t.id, rowid, cur_key_xid),
                         value: crabka_pgmvcc::version::encode_tuple(cur_xmin, xid, &cur_row),
                     });
+                }
+                // Opportunistic per-rowid chain pruning (local engines only) —
+                // see the UPDATE arm. The tombstoned current version survives
+                // (its xmax is our in-progress xid), so its index entries stay;
+                // an engine-level `vacuum` reclaims the chain once the delete
+                // commits below a future horizon.
+                if let Some(horizon) = write_ctx.prune_horizon {
+                    ops.extend(
+                        prune_rowid_chain_ops(
+                            kv,
+                            &t,
+                            &local_indexes,
+                            &ChainPruneRequest {
+                                rowid,
+                                horizon,
+                                keep_xids: &[cur_key_xid, xid],
+                                new_row: None,
+                                freeze_below: None,
+                            },
+                        )?
+                        .ops,
+                    );
                 }
                 n += 1;
             }
@@ -1610,21 +1661,23 @@ fn enforce_unique_local_index(
     if !pending_unique_keys.insert(pending_key) {
         return Err(ExecError::UniqueViolation(index.name.clone()));
     }
+    // Probe the index for exactly this key instead of scanning the whole table.
+    // The probe keeps the scan path's visibility (all-committed local + global
+    // snapshots plus our own xid), and `lookup_local_index_equal` resolves each
+    // candidate rowid through MVCC and re-checks its visible row's values, so
+    // dead entries left by old versions or aborted writers never count. A
+    // visible holder other than the row being written is a violation.
     let current_visibility = all_committed_snapshot();
-    for (other_rowid, _xmin, other_row) in scan_live(
-        mvcc.kv,
-        mvcc.global,
-        &current_visibility,
-        &current_visibility,
-        mvcc.own,
-        table,
-    )? {
-        if other_rowid == rowid {
-            continue;
-        }
-        if indexed_values(table, index, &other_row)? == values {
-            return Err(ExecError::UniqueViolation(index.name.clone()));
-        }
+    let probe = MvccReadContext {
+        kv: mvcc.kv,
+        global: mvcc.global,
+        global_snapshot: &current_visibility,
+        snapshot: &current_visibility,
+        own: mvcc.own,
+    };
+    let holders = lookup_local_index_equal(&probe, table, index, &values)?;
+    if holders.iter().any(|holder| holder.rowid != rowid) {
+        return Err(ExecError::UniqueViolation(index.name.clone()));
     }
     Ok(())
 }
@@ -1676,6 +1729,176 @@ fn indexed_values(
         .collect()
 }
 
+/// Result of pruning one rowid's version chain.
+pub(crate) struct ChainPrune {
+    /// `WriteOp`s reclaiming the chain: `Delete`s for dead version keys and
+    /// their orphaned local secondary-index entries, plus (for `vacuum`)
+    /// `Put`s freezing surviving sub-horizon tuple headers. Empty when
+    /// nothing on the chain needs work.
+    pub ops: Vec<crabka_pgkv::WriteOp>,
+    /// Number of tuple versions deleted by `ops`.
+    pub versions: u64,
+    /// Number of secondary-index entries deleted by `ops`.
+    pub index_entries: u64,
+    /// Number of surviving tuple versions frozen by `ops`.
+    pub frozen: u64,
+}
+
+/// Delete ops reclaiming `rowid`'s dead versions (and the local secondary-index
+/// entries no surviving version still needs), judged at `horizon`.
+///
+/// A version is dead per [`crabka_pgmvcc::gc::version_is_dead`]: its creator
+/// aborted, or a transaction that committed below `horizon` deleted/superseded
+/// it. `horizon` must come from `checkpoint_garbage_horizon`, which caps it at
+/// the oldest running writer xid, the lowest registered snapshot pin, and the
+/// first non-terminal clog entry.
+///
+/// Snapshot safety: every snapshot consumer registers a `GcHorizon` pin at its
+/// snapshot `xmin` for as long as the snapshot is in use (REPEATABLE READ
+/// transactions pin at BEGIN until COMMIT/ROLLBACK; autocommit and READ
+/// COMMITTED statements pin for the statement's duration), so a version some
+/// live snapshot still sees — one whose committed deleter is in that
+/// snapshot's `xip` or above its `xmax` — keeps `horizon` at or below the
+/// deleter's xid and is never selected here. Un-pinned readers do not exist:
+/// every statement path pins before taking its snapshot, and the pin value
+/// (the ProcArray xmin at pin time) is monotonically `<=` any snapshot xmin
+/// taken afterwards. `MemKv`/`FjallKv` scans additionally materialize their
+/// results eagerly (`KvScan` is a `Vec`), so even a scan that raced an earlier
+/// horizon computation observes an atomic before-or-after state of each prune
+/// batch, never a partially deleted chain.
+///
+/// Lock interaction: callers must hold `rowid`'s exclusive row lock (UPDATE/
+/// DELETE already do; `vacuum` takes it per row). Dead version KEYS can never
+/// collide with a concurrent writer's puts — a writer only writes the newest
+/// committed version's key (stamping `xmax`) and its own new key, and neither
+/// is ever dead — but the survivor computation for shared index entries must
+/// not race a writer re-adding the same indexed values for this rowid.
+///
+/// Only meaningful on single-range LOCAL engines: local xids only, no
+/// `Prepared` clog states, so plain local clog reads decide status. Callers
+/// gate on the engine mode (`WriteContext::prune_horizon` /
+/// `SqlEngine::supports_local_vacuum`).
+///
+/// One rowid-chain prune request (see [`prune_rowid_chain_ops`]).
+pub(crate) struct ChainPruneRequest<'a> {
+    /// The row whose version chain is pruned.
+    pub rowid: u64,
+    /// The garbage horizon (from `checkpoint_garbage_horizon`).
+    pub horizon: u64,
+    /// Version-key xids this batch itself (re)writes — never deleted or
+    /// frozen, whatever their current on-disk state.
+    pub keep_xids: &'a [u64],
+    /// The row this batch is writing, when any; its indexed values count as
+    /// survivors so a shared index entry is never deleted out from under the
+    /// incoming version.
+    pub new_row: Option<&'a [Datum]>,
+    /// When given (`vacuum` only), additionally rewrite every surviving
+    /// version whose creator committed below this floor to `FROZEN_XID`
+    /// (visible to every snapshot without a clog lookup) — the precondition
+    /// for truncating the clog below the horizon. Freezing is invisible to
+    /// every snapshot: a registered snapshot's `xmin` is at or above the
+    /// horizon, so a committed sub-horizon creator was already
+    /// settled-and-committed for it.
+    pub freeze_below: Option<u64>,
+}
+
+pub(crate) fn prune_rowid_chain_ops(
+    kv: &dyn Kv,
+    table: &Table,
+    local_indexes: &[crabka_pgcatalog::Index],
+    request: &ChainPruneRequest<'_>,
+) -> Result<ChainPrune, ExecError> {
+    let &ChainPruneRequest {
+        rowid,
+        horizon,
+        keep_xids,
+        new_row,
+        freeze_below,
+    } = request;
+    let status = |xid| crabka_pgmvcc::clog::get(kv, xid);
+    let mut dead: Vec<(Vec<u8>, Vec<Datum>)> = Vec::new();
+    let mut surviving: Vec<Vec<Datum>> = Vec::new();
+    let mut freeze: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    for (key, value) in kv.scan_prefix(&crabka_pgkv::key::row_key(table.id, rowid))? {
+        let (xmin, xmax, row) = crabka_pgmvcc::version::decode_tuple(&value)?;
+        let key_xid = crabka_pgmvcc::version::xid_of_key(&key)?;
+        if !keep_xids.contains(&key_xid)
+            && crabka_pgmvcc::gc::version_is_dead(xmin, xmax, horizon, &status)?
+        {
+            dead.push((key, row));
+            continue;
+        }
+        if let Some(floor) = freeze_below
+            && !keep_xids.contains(&key_xid)
+            && xmin != crabka_pgmvcc::xid::FROZEN_XID
+            && xmin < floor
+            && matches!(status(xmin)?, crabka_pgmvcc::clog::XidStatus::Committed)
+        {
+            freeze.push((key, value.clone()));
+        }
+        surviving.push(row);
+    }
+    if dead.is_empty() && freeze.is_empty() {
+        return Ok(ChainPrune {
+            ops: Vec::new(),
+            versions: 0,
+            index_entries: 0,
+            frozen: 0,
+        });
+    }
+    let mut ops: Vec<crabka_pgkv::WriteOp> = Vec::new();
+    let frozen = freeze.len() as u64;
+    for (key, value) in freeze {
+        ops.push(crabka_pgkv::WriteOp::Put {
+            key,
+            value: crabka_pgmvcc::version::freeze_tuple_xmin(&value)?,
+        });
+    }
+    let mut index_entries: u64 = 0;
+    // An index entry key `(values, rowid)` is SHARED by every version of this
+    // row carrying `values`: delete it only when no surviving version — nor
+    // the row this batch is writing — still carries those values. Chains are
+    // short (pruning keeps them O(1)), so linear survivor probes suffice.
+    let mut removed: Vec<(crabka_pgcatalog::IndexId, Vec<Datum>)> = Vec::new();
+    for index in local_indexes {
+        let mut survivors: Vec<Vec<Datum>> = Vec::with_capacity(surviving.len() + 1);
+        for row in &surviving {
+            survivors.push(indexed_values(table, index, row)?);
+        }
+        if let Some(row) = new_row {
+            survivors.push(indexed_values(table, index, row)?);
+        }
+        for (_, row) in &dead {
+            let values = indexed_values(table, index, row)?;
+            if survivors.contains(&values)
+                || removed
+                    .iter()
+                    .any(|(id, prior)| *id == index.id && *prior == values)
+            {
+                continue;
+            }
+            ops.push(crabka_pgkv::WriteOp::Delete {
+                key: crabka_pgkv::key::secondary_index_entry_key(
+                    table.id, index.id, &values, rowid,
+                ),
+            });
+            removed.push((index.id, values));
+            index_entries += 1;
+        }
+    }
+    let versions = dead.len() as u64;
+    ops.extend(
+        dead.into_iter()
+            .map(|(key, _)| crabka_pgkv::WriteOp::Delete { key }),
+    );
+    Ok(ChainPrune {
+        ops,
+        versions,
+        index_entries,
+        frozen,
+    })
+}
+
 fn lookup_local_index_equal(
     mvcc: &MvccReadContext<'_>,
     table: &Table,
@@ -1719,6 +1942,52 @@ fn lookup_local_index_equal(
         }
     }
     Ok(rows)
+}
+
+/// Choose the index probe for an UPDATE/DELETE filter: a top-level
+/// `column = literal` conjunct matching a single-column local index. Returns
+/// `None` — full scan — for sharded tables, for filters outside the pushdown
+/// subset (reusing the SELECT path's extraction, so only exact-type literals on
+/// supported column types qualify), and when no index matches.
+fn choose_write_index_probe(
+    catalog_kv: &dyn Kv,
+    table: &Table,
+    filter: Option<&Expr>,
+) -> Result<Option<(crabka_pgcatalog::Index, Datum)>, ExecError> {
+    if table.sharded {
+        return Ok(None);
+    }
+    let predicate = crate::plan_dist::predicate_for_filter(table, filter);
+    choose_local_index_equality(catalog_kv, table, &predicate)
+}
+
+/// Candidate `(rowid, xmin, row)` source for UPDATE/DELETE: probe a matching
+/// local index instead of scanning the whole table when the filter pins an
+/// indexed column to a literal, else fall back to `scan_live`. Both paths read
+/// under the statement's snapshot/gsnap/own visibility and return rows sorted
+/// by rowid; the caller still applies the FULL residual filter and the
+/// under-lock EvalPlanQual re-check to every candidate, so the affected rows,
+/// RETURNING output, and lock order are identical to the full scan.
+fn write_candidate_rows(
+    write_ctx: &WriteContext<'_>,
+    table: &Table,
+    filter: Option<&Expr>,
+) -> Result<Vec<(u64, u64, Vec<Datum>)>, ExecError> {
+    if let Some((index, value)) = choose_write_index_probe(write_ctx.catalog_kv, table, filter)? {
+        let rows = lookup_local_index_equal(&write_ctx.mvcc_read(), table, &index, &[value])?;
+        return Ok(rows
+            .into_iter()
+            .map(|row| (row.rowid, row.xmin, row.row))
+            .collect());
+    }
+    scan_live(
+        write_ctx.kv,
+        write_ctx.global,
+        write_ctx.global_snapshot,
+        write_ctx.snapshot,
+        Some(write_ctx.xid),
+        table,
+    )
 }
 
 /// Build timestamp-transaction writes for sharded-table autocommit DML.
@@ -2145,6 +2414,21 @@ fn find_visible_one(
     Ok(visible)
 }
 
+/// One decoded version of a row chain, keyed by the xid suffix of its
+/// PHYSICAL version key. The key xid normally equals the header `xmin`, but a
+/// frozen tuple keeps its original key while its header reads `FROZEN_XID` —
+/// writers must stamp `xmax` on the physical key, never one reconstructed
+/// from the header.
+struct ChainVersion {
+    key_xid: u64,
+    xmin: u64,
+    xmax: u64,
+    row: Vec<crabka_pgtypes::Datum>,
+}
+
+/// The version of `rowid` a write should operate on, as
+/// `(key_xid, xmin, row)`.
+///
 /// After locking the row, re-read its current versions. Returns the version to
 /// operate on, or None to skip. Under REPEATABLE READ, a row changed by a txn
 /// that committed after our snapshot is a serialization failure (40001). Under
@@ -2153,7 +2437,7 @@ fn eval_plan_qual(
     mutation: &MutationContext<'_>,
     table: &crabka_pgcatalog::Table,
     rowid: u64,
-) -> Result<Option<(u64, Vec<crabka_pgtypes::Datum>)>, ExecError> {
+) -> Result<Option<(u64, u64, Vec<crabka_pgtypes::Datum>)>, ExecError> {
     let kv = mutation.kv;
     let global = mutation.global;
     let procarray = mutation.procarray;
@@ -2163,11 +2447,15 @@ fn eval_plan_qual(
     // Re-scan just this rowid's versions from disk.
     let prefix = crabka_pgkv::key::row_key(table.id, rowid);
     let scanned = kv.scan_prefix(&prefix)?;
-    let mut versions: Vec<(u64, u64, Vec<crabka_pgtypes::Datum>)> =
-        Vec::with_capacity(scanned.len());
-    for (_k, v) in &scanned {
+    let mut versions: Vec<ChainVersion> = Vec::with_capacity(scanned.len());
+    for (k, v) in &scanned {
         let (xmn, xmx, row) = crabka_pgmvcc::version::decode_tuple(v)?;
-        versions.push((xmn, xmx, row));
+        versions.push(ChainVersion {
+            key_xid: crabka_pgmvcc::version::xid_of_key(k)?,
+            xmin: xmn,
+            xmax: xmx,
+            row,
+        });
     }
     // Resolve this row's `Prepared(Li -> g)` markers against a SETTLED global view
     // — range 0's global clog read directly — NOT the statement's pre-lock global
@@ -2196,11 +2484,14 @@ fn eval_plan_qual(
     // The resolver derefs a Prepared(xmx -> g) deleter to range 0's global
     // decision so a cross-range supersede is detected exactly when it commits.
     let resolve = global_status(kv, global, &settled_global);
-    let changed_since_snapshot = versions.iter().any(|&(_xmn, xmx, _)| {
-        xmx != crabka_pgmvcc::xid::INVALID_XID
-            && xmx != xid
-            && matches!(resolve(xmx), Ok(crabka_pgmvcc::clog::XidStatus::Committed))
-            && !snapshot_can_see(snapshot, xmx)
+    let changed_since_snapshot = versions.iter().any(|version| {
+        version.xmax != crabka_pgmvcc::xid::INVALID_XID
+            && version.xmax != xid
+            && matches!(
+                resolve(version.xmax),
+                Ok(crabka_pgmvcc::clog::XidStatus::Committed)
+            )
+            && !snapshot_can_see(snapshot, version.xmax)
     });
     if changed_since_snapshot {
         if repeatable_read {
@@ -2208,10 +2499,50 @@ fn eval_plan_qual(
         }
         // READ COMMITTED: re-find the latest live version under a FRESH snapshot.
         let fresh = procarray.snapshot();
-        return find_visible_one(kv, global, &settled_global, &fresh, Some(xid), &versions);
+        return find_visible_one_keyed(kv, global, &settled_global, &fresh, Some(xid), &versions);
     }
     // No concurrent committed change: find the version visible to our snapshot.
-    find_visible_one(kv, global, &settled_global, snapshot, Some(xid), &versions)
+    find_visible_one_keyed(kv, global, &settled_global, snapshot, Some(xid), &versions)
+}
+
+/// [`find_visible_one`] over [`ChainVersion`]s, additionally returning the
+/// visible version's PHYSICAL key xid so callers stamp the key that actually
+/// exists (a frozen tuple's header `xmin` no longer names its key).
+fn find_visible_one_keyed(
+    kv: &dyn Kv,
+    global: &dyn Kv,
+    gsnap: &crabka_pgmvcc::visibility::Snapshot,
+    snap: &crabka_pgmvcc::visibility::Snapshot,
+    own: Option<u64>,
+    versions: &[ChainVersion],
+) -> Result<Option<(u64, u64, Vec<crabka_pgtypes::Datum>)>, ExecError> {
+    let mut visible: Option<(u64, u64, Vec<crabka_pgtypes::Datum>)> = None;
+    let mut live_count: usize = 0;
+    for version in versions {
+        if crabka_pgmvcc::visibility::satisfies_mvcc(
+            version.xmin,
+            version.xmax,
+            snap,
+            own,
+            global_status(kv, global, gsnap),
+        )? {
+            live_count += 1;
+            // Keep the greatest live version — by header xmin, then by key xid
+            // (frozen tuples all read xmin == FROZEN_XID; their key xids still
+            // order them). See find_visible_one for the invariant discussion.
+            if visible.as_ref().is_none_or(|(cur_key, cur_xmin, _)| {
+                (version.xmin, version.key_xid) > (*cur_xmin, *cur_key)
+            }) {
+                visible = Some((version.key_xid, version.xmin, version.row.clone()));
+            }
+        }
+    }
+    debug_assert!(
+        live_count <= 1,
+        "find_visible_one_keyed: {live_count} live versions for one rowid under one snapshot \
+         — MVCC at-most-one-live invariant violated"
+    );
+    Ok(visible)
 }
 
 /// Coerce an evaluated value into a target column type (assignment context). `ctx`
@@ -4413,7 +4744,7 @@ pub(crate) async fn execute_read_locking(
 
         // 3. EvalPlanQual: re-read the row under the lock (40001 under RR if
         //    changed since our snapshot; RC re-finds the latest live version).
-        let Some((_cur_xmin, cur_row)) = eval_plan_qual(
+        let Some((_cur_key_xid, _cur_xmin, cur_row)) = eval_plan_qual(
             &MutationContext {
                 kv,
                 global,
@@ -6527,7 +6858,7 @@ mod tests {
         .expect("eval_plan_qual must not error");
 
         // The fix: must see v2 (xmin=la, value=70), NOT v1 (value=100).
-        let (ret_xmin, ret_row) = result.expect("must find a version (not None)");
+        let (_ret_key_xid, ret_xmin, ret_row) = result.expect("must find a version (not None)");
         assert_eq!(
             ret_xmin, la,
             "eval_plan_qual must return the cross-range committed version (xmin=la={la}), \
@@ -6951,5 +7282,301 @@ mod tests {
             mapping.options.iter().any(|(k, _)| k == "username"),
             "options preserved"
         );
+    }
+
+    fn command_tag(r: &QueryResult) -> &str {
+        match r {
+            QueryResult::Command { tag } | QueryResult::Rows { tag, .. } => tag,
+            QueryResult::Empty => panic!("expected a tagged result, got Empty"),
+        }
+    }
+
+    /// Parse `sql` (a DELETE statement) and return its WHERE clause, exercising
+    /// the same filter shapes the write path receives.
+    fn delete_filter(sql: &str) -> Option<crabka_pgparser::ast::Expr> {
+        let stmt = crabka_pgparser::parser::parse(sql)
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("one statement");
+        match stmt {
+            Statement::Delete { filter, .. } => filter,
+            other => panic!("expected DELETE, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn choose_write_index_probe_matches_single_column_equality_conjuncts() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        run(&engine, "CREATE TABLE t (id int4 PRIMARY KEY, flag text)").await;
+        let table = crabka_pgcatalog::get_table(engine.catalog_kv.as_ref(), "t").expect("table");
+
+        let cases: &[(&str, Option<crabka_pgtypes::Datum>)] = &[
+            (
+                "DELETE FROM t WHERE id = 5",
+                Some(crabka_pgtypes::Datum::Int4(5)),
+            ),
+            (
+                "DELETE FROM t WHERE id = 5 AND flag = 'x'",
+                Some(crabka_pgtypes::Datum::Int4(5)),
+            ),
+            (
+                "DELETE FROM t WHERE flag = 'x' AND id = 5",
+                Some(crabka_pgtypes::Datum::Int4(5)),
+            ),
+            (
+                "DELETE FROM t WHERE 5 = id",
+                Some(crabka_pgtypes::Datum::Int4(5)),
+            ),
+            // Non-indexed column, disjunction, computed column, wrong-type
+            // literal, range comparison, and no filter all fall back.
+            ("DELETE FROM t WHERE flag = 'x'", None),
+            ("DELETE FROM t WHERE id = 5 OR flag = 'x'", None),
+            ("DELETE FROM t WHERE id + 1 = 5", None),
+            ("DELETE FROM t WHERE id = 5.5", None),
+            ("DELETE FROM t WHERE id < 5", None),
+            ("DELETE FROM t", None),
+        ];
+        for (sql, expected) in cases {
+            let filter = delete_filter(sql);
+            let probe = super::choose_write_index_probe(
+                engine.catalog_kv.as_ref(),
+                &table,
+                filter.as_ref(),
+            )
+            .expect("choose probe");
+            match (probe, expected) {
+                (Some((index, value)), Some(want)) => {
+                    assert!(index.columns == ["id"], "{sql}");
+                    assert!(value == *want, "{sql}");
+                }
+                (None, None) => {}
+                (got, want) => panic!("{sql}: got {got:?}, want {want:?}"),
+            }
+        }
+
+        // Sharded tables never probe, even with a matching filter shape.
+        let mut sharded = table.clone();
+        sharded.sharded = true;
+        let filter = delete_filter("DELETE FROM t WHERE id = 5");
+        let probe =
+            super::choose_write_index_probe(engine.catalog_kv.as_ref(), &sharded, filter.as_ref())
+                .expect("choose probe");
+        assert!(probe.is_none());
+    }
+
+    #[tokio::test]
+    async fn insert_unique_probe_rejects_duplicates_within_and_across_statements() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        run_s(&mut s, "CREATE TABLE t (id int4 PRIMARY KEY, v text)").await;
+        run_s(&mut s, "INSERT INTO t VALUES (1, 'a')").await;
+
+        // Across committed rows.
+        let err = s
+            .simple_query("INSERT INTO t VALUES (1, 'b')")
+            .await
+            .expect_err("duplicate committed key");
+        assert!(err.code == "23505");
+
+        // Within one statement (rows not yet in the kv: pending-key dedup).
+        let err = s
+            .simple_query("INSERT INTO t VALUES (2, 'a'), (2, 'b')")
+            .await
+            .expect_err("duplicate within statement");
+        assert!(err.code == "23505");
+
+        // Across statements inside one transaction: the probe sees our own
+        // uncommitted row via read-your-writes.
+        run_s(&mut s, "BEGIN").await;
+        run_s(&mut s, "INSERT INTO t VALUES (3, 'x')").await;
+        let err = s
+            .simple_query("INSERT INTO t VALUES (3, 'y')")
+            .await
+            .expect_err("duplicate of own uncommitted row");
+        assert!(err.code == "23505");
+        run_s(&mut s, "ROLLBACK").await;
+
+        // The rolled-back insert left only dead index entries: the key is free.
+        run_s(&mut s, "INSERT INTO t VALUES (3, 'z')").await;
+
+        // UPDATE moving a row onto a held key is a violation too.
+        let err = s
+            .simple_query("UPDATE t SET id = 1 WHERE id = 3")
+            .await
+            .expect_err("update onto held key");
+        assert!(err.code == "23505");
+    }
+
+    #[tokio::test]
+    async fn insert_unique_probe_ignores_dead_versions_of_the_key() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        run_s(&mut s, "CREATE TABLE t (id int4 PRIMARY KEY, v text)").await;
+        run_s(&mut s, "INSERT INTO t VALUES (1, 'a')").await;
+
+        // Move the key away: the index keeps a dead entry for id=1 pointing at
+        // the superseded version, which must not count as a holder.
+        run_s(&mut s, "UPDATE t SET id = 2 WHERE id = 1").await;
+        run_s(&mut s, "INSERT INTO t VALUES (1, 'b')").await;
+
+        // Delete-then-reinsert: the deleted version's entry is dead too.
+        run_s(&mut s, "DELETE FROM t WHERE id = 2").await;
+        run_s(&mut s, "INSERT INTO t VALUES (2, 'c')").await;
+
+        let r = &run_s(&mut s, "SELECT id, v FROM t ORDER BY id").await[0];
+        let rows = rows_of(r);
+        assert!(rows.len() == 2);
+        assert!(text(&rows[0][0]) == Some("1".into()));
+        assert!(text(&rows[0][1]) == Some("b".into()));
+        assert!(text(&rows[1][0]) == Some("2".into()));
+        assert!(text(&rows[1][1]) == Some("c".into()));
+    }
+
+    #[tokio::test]
+    async fn point_update_via_index_probe_applies_residual_filter_and_returning() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        run_s(
+            &mut s,
+            "CREATE TABLE t (id int4 PRIMARY KEY, flag text, v text)",
+        )
+        .await;
+        run_s(
+            &mut s,
+            "INSERT INTO t VALUES (1,'x','a'), (2,'x','b'), (3,'y','c')",
+        )
+        .await;
+
+        // Indexed equality + residual conjunct: only id=2 matches both.
+        let r = &run_s(&mut s, "UPDATE t SET v = 'z' WHERE id = 2 AND flag = 'x'").await[0];
+        assert!(command_tag(r) == "UPDATE 1");
+
+        // Residual conjunct rejects the probed row: no row is touched.
+        let r = &run_s(&mut s, "UPDATE t SET v = 'w' WHERE id = 3 AND flag = 'x'").await[0];
+        assert!(command_tag(r) == "UPDATE 0");
+
+        // RETURNING reflects the updated row exactly.
+        let r = &run_s(
+            &mut s,
+            "UPDATE t SET v = 'r' WHERE id = 1 AND flag = 'x' RETURNING id, v",
+        )
+        .await[0];
+        assert!(command_tag(r) == "UPDATE 1");
+        let returned = rows_of(r);
+        assert!(returned.len() == 1);
+        assert!(text(&returned[0][0]) == Some("1".into()));
+        assert!(text(&returned[0][1]) == Some("r".into()));
+
+        let r = &run_s(&mut s, "SELECT id, flag, v FROM t ORDER BY id").await[0];
+        let rows = rows_of(r);
+        let contents: Vec<Vec<Option<String>>> = rows
+            .iter()
+            .map(|row| row.iter().map(text).collect())
+            .collect();
+        assert!(
+            contents
+                == vec![
+                    vec![Some("1".into()), Some("x".into()), Some("r".into())],
+                    vec![Some("2".into()), Some("x".into()), Some("z".into())],
+                    vec![Some("3".into()), Some("y".into()), Some("c".into())],
+                ]
+        );
+    }
+
+    #[tokio::test]
+    async fn point_delete_via_index_probe_applies_residual_filter_and_returning() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        run_s(
+            &mut s,
+            "CREATE TABLE t (id int4 PRIMARY KEY, flag text, v text)",
+        )
+        .await;
+        run_s(
+            &mut s,
+            "INSERT INTO t VALUES (1,'x','a'), (2,'x','b'), (3,'y','c')",
+        )
+        .await;
+
+        // Residual conjunct rejects the probed row: nothing is deleted.
+        let r = &run_s(&mut s, "DELETE FROM t WHERE id = 3 AND flag = 'x'").await[0];
+        assert!(command_tag(r) == "DELETE 0");
+
+        let r = &run_s(
+            &mut s,
+            "DELETE FROM t WHERE id = 1 AND flag = 'x' RETURNING id, v",
+        )
+        .await[0];
+        assert!(command_tag(r) == "DELETE 1");
+        let returned = rows_of(r);
+        assert!(returned.len() == 1);
+        assert!(text(&returned[0][0]) == Some("1".into()));
+        assert!(text(&returned[0][1]) == Some("a".into()));
+
+        let r = &run_s(&mut s, "SELECT id FROM t ORDER BY id").await[0];
+        let rows = rows_of(r);
+        assert!(rows.len() == 2);
+        assert!(text(&rows[0][0]) == Some("2".into()));
+        assert!(text(&rows[1][0]) == Some("3".into()));
+    }
+
+    #[tokio::test]
+    async fn update_and_delete_fall_back_to_full_scan_for_non_indexed_predicates() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        run_s(
+            &mut s,
+            "CREATE TABLE t (id int4 PRIMARY KEY, flag text, v text)",
+        )
+        .await;
+        run_s(
+            &mut s,
+            "INSERT INTO t VALUES (1,'x','a'), (2,'x','b'), (3,'y','c')",
+        )
+        .await;
+
+        // Non-indexed equality: full scan, same result as the probe would give.
+        let r = &run_s(&mut s, "UPDATE t SET v = 'q' WHERE flag = 'x'").await[0];
+        assert!(command_tag(r) == "UPDATE 2");
+
+        // Disjunction on the indexed column: not a conjunctive equality, so the
+        // fallback full scan must handle it.
+        let r = &run_s(&mut s, "UPDATE t SET v = 'd' WHERE id = 1 OR id = 3").await[0];
+        assert!(command_tag(r) == "UPDATE 2");
+
+        let r = &run_s(&mut s, "SELECT id, v FROM t ORDER BY id").await[0];
+        let rows = rows_of(r);
+        let contents: Vec<Vec<Option<String>>> = rows
+            .iter()
+            .map(|row| row.iter().map(text).collect())
+            .collect();
+        assert!(
+            contents
+                == vec![
+                    vec![Some("1".into()), Some("d".into())],
+                    vec![Some("2".into()), Some("q".into())],
+                    vec![Some("3".into()), Some("d".into())],
+                ]
+        );
+
+        // Range predicate on the indexed column: also a fallback.
+        let r = &run_s(&mut s, "DELETE FROM t WHERE id > 1").await[0];
+        assert!(command_tag(r) == "DELETE 2");
+        let r = &run_s(&mut s, "SELECT id FROM t").await[0];
+        assert!(rows_of(r).len() == 1);
+        assert!(text(&rows_of(r)[0][0]) == Some("1".into()));
     }
 }

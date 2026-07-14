@@ -38,6 +38,11 @@ const CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS: i32 = 30_000;
 const TENANT_CONFIG_FETCH_MAX_WAIT_MS: i32 = 500;
 const TENANT_CONFIG_FETCH_PARTITION_MAX_BYTES: i32 = 1 << 20;
 const IDLE_MONITOR_POLL_INTERVAL: Duration = Duration::from_secs(1);
+/// How often the LOCAL (mem / --data-dir) serving engine sweeps dead MVCC
+/// versions. Write paths prune the rows they touch opportunistically; this
+/// periodic `SqlEngine::vacuum` catches cold garbage (aborted inserts,
+/// deleted-then-never-touched rows).
+const LOCAL_VACUUM_INTERVAL: Duration = Duration::from_secs(30);
 
 trait SubstrateKv: SnapshotKv + RestoreKv {}
 
@@ -348,8 +353,14 @@ impl SubstrateRuntimeConfig {
     }
 
     fn is_in_memory_bootstrap(&self) -> bool {
-        matches!(self.bootstrap.as_str(), "memory://" | "in-memory://")
+        is_in_memory_bootstrap(&self.bootstrap)
     }
+}
+
+/// Whether `bootstrap` names the in-process substrate seam instead of a
+/// dialable broker address list.
+fn is_in_memory_bootstrap(bootstrap: &str) -> bool {
+    matches!(bootstrap, "memory://" | "in-memory://")
 }
 
 impl RangeRpcRuntimeConfig {
@@ -1601,6 +1612,24 @@ pub async fn serve_listener_with_tenant_config_loader(
     let (engine, checkpoint_runtime, _range_transfer_keepalive) = runtime.into_parts();
     let activity = Arc::new(crabka_pgwire::server::ActivityTracker::new());
     let shutdown = CancellationToken::new();
+    // Periodic dead-version sweep for the single-range LOCAL engine (mem or
+    // --data-dir). Substrate/replicated engines refuse local pruning
+    // (`supports_local_vacuum` is false there) and rely on checkpoint-time GC.
+    // The loop runs on a child token whose drop guard lives on THIS future's
+    // stack: whether serving returns or is aborted, the sweep task stops and
+    // releases its engine handle (and with it a --data-dir store lock).
+    let _vacuum_guard = if let RuntimeEngine::Single(sql_engine) = &engine
+        && sql_engine.supports_local_vacuum()
+    {
+        let vacuum_token = shutdown.child_token();
+        tokio::spawn(run_local_vacuum_loop(
+            sql_engine.clone_handle(),
+            vacuum_token.clone(),
+        ));
+        Some(vacuum_token.drop_guard())
+    } else {
+        None
+    };
     let serve = crabka_pgwire::server::serve_tls_with_activity_until(
         listener,
         Arc::new(engine),
@@ -1657,6 +1686,34 @@ pub async fn serve_listener_with_tenant_config_loader(
     serve_result
 }
 
+/// Periodically reclaim dead MVCC versions on the LOCAL serving engine until
+/// `shutdown` fires. The write paths already prune the rows they touch; this
+/// sweep catches cold garbage a write never revisits.
+async fn run_local_vacuum_loop(engine: SqlEngine, shutdown: CancellationToken) {
+    loop {
+        tokio::select! {
+            () = shutdown.cancelled() => return,
+            () = tokio::time::sleep(LOCAL_VACUUM_INTERVAL) => {}
+        }
+        match engine.vacuum().await {
+            Ok(stats) => {
+                // Rotate the LSM memtable so the sweep's tombstones (and the
+                // shadowed versions they retire) leave the scan path instead
+                // of accumulating until a byte-size rotation.
+                if let Err(error) = engine.kv_handle().maintain() {
+                    tracing::warn!(?error, "post-vacuum store maintenance failed");
+                }
+                tracing::debug!(
+                    versions_pruned = stats.versions_pruned,
+                    index_entries_pruned = stats.index_entries_pruned,
+                    "local vacuum sweep"
+                );
+            }
+            Err(error) => tracing::warn!(?error, "local vacuum sweep failed"),
+        }
+    }
+}
+
 fn lifecycle_registry_bootstrap(
     bootstrap: Option<&str>,
     tenant_security_enabled: bool,
@@ -1666,7 +1723,7 @@ fn lifecycle_registry_bootstrap(
     if tenant_security_enabled {
         return None;
     }
-    bootstrap.filter(|address| !matches!(*address, "memory://" | "in-memory://"))
+    bootstrap.filter(|address| !is_in_memory_bootstrap(address))
 }
 
 async fn start_range_service(
@@ -1817,6 +1874,10 @@ pub trait TenantConfigLoader: Sync {
 }
 
 /// Kafka-backed tenant-config loader used by the binary.
+///
+/// In-memory bootstraps (`memory://` / `in-memory://`) have no broker to
+/// dial, so the loader reports no tenant record instead of resolving the
+/// bootstrap as a socket address.
 pub struct LiveTenantConfigLoader;
 
 #[async_trait::async_trait]
@@ -2072,6 +2133,11 @@ async fn load_substrate_tenant_record(
         .load_tenant_config(bootstrap, &tenant, security)
         .await?;
     let Some(record) = record else {
+        // In-memory bootstraps carry no tenant record; the runtime serves
+        // with CLI defaults, and `--auth`/`--user-cred` control SQL auth.
+        if is_in_memory_bootstrap(bootstrap) {
+            return Ok(None);
+        }
         return invalid_input(format!(
             "missing tenant config in {}; create it with `crabka gres create-tenant --name {tenant}`",
             tenant_config_topic(&tenant)
@@ -2125,6 +2191,11 @@ async fn load_live_tenant_config(
     tenant: &TenantName,
     security: Option<ClientSecurity>,
 ) -> std::io::Result<Option<TenantRecord>> {
+    // The in-process substrate seam has no broker to dial and no config
+    // topic to read; startup falls back to CLI-provided defaults.
+    if is_in_memory_bootstrap(bootstrap) {
+        return Ok(None);
+    }
     let topic = tenant_config_topic(tenant);
     let Some(addr) = resolve_bootstrap_addr(bootstrap) else {
         return invalid_input("substrate bootstrap address list is empty");
@@ -2517,7 +2588,7 @@ fn multirange_tenant_config(
     if let Some(record) = tenant_record {
         let mut registry = crabka_gres_ranges::RangeRegistry::from_tenant_record(record)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
-        if !matches!(config.bootstrap.as_str(), "memory://" | "in-memory://") {
+        if !config.is_in_memory_bootstrap() {
             registry = registry.with_authoritative_source(Arc::new(LiveRangeRegistrySource {
                 bootstrap: config.bootstrap.clone(),
                 tenant: crabka_gres_control::TenantName::try_from(config.tenant.as_str()).map_err(
@@ -6423,6 +6494,7 @@ mod tests {
     #[tokio::test]
     async fn missing_substrate_tenant_config_names_create_tenant_command() {
         let mut args = substrate_args();
+        args.substrate_bootstrap = Some("127.0.0.1:9092".to_string());
         args.auth = None;
 
         let error = load_substrate_tenant_record(&args, &EmptyTenantConfigLoader)
@@ -6452,19 +6524,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn memory_substrate_ranges_reach_tenant_config_loader() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
-        let mut args = substrate_args();
-        args.ranges = Some("0,100,200".to_string());
+    async fn memory_substrate_missing_tenant_config_is_tolerated() {
+        use assert2::assert;
+
+        let args = substrate_args();
         let loader = RecordingTenantConfigLoader::default();
 
-        let error = serve_listener_with_tenant_config_loader(listener, args, &loader)
+        let record = load_substrate_tenant_record(&args, &loader)
             .await
-            .expect_err("missing tenant config after loader is called");
+            .expect("in-memory bootstrap tolerates a missing tenant record");
 
-        assert_eq!(loader.calls.load(Ordering::SeqCst), 1);
-        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-        assert!(error.to_string().contains("missing tenant config"));
+        assert!(loader.calls.load(Ordering::SeqCst) == 1);
+        assert!(record.is_none());
+    }
+
+    #[tokio::test]
+    async fn live_tenant_config_loader_short_circuits_in_memory_bootstraps() {
+        use assert2::assert;
+
+        let tenant = TenantName::try_from("tenant-a").expect("tenant name");
+        for bootstrap in ["memory://", "in-memory://"] {
+            let record = LiveTenantConfigLoader
+                .load_tenant_config(bootstrap, &tenant, None)
+                .await
+                .expect("in-memory bootstrap must not dial a broker");
+            assert!(
+                record.is_none(),
+                "bootstrap {bootstrap} must yield no tenant record"
+            );
+        }
     }
 
     #[test]

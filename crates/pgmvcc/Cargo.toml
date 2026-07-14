@@ -23,4 +23,5 @@ crabka-pgtypes = { version = "0.3.9", path = "../pgtypes" }
 zerocopy = { workspace = true }
 
 [dev-dependencies]
+assert2 = { workspace = true }
 proptest = { workspace = true }
