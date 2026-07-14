@@ -5628,8 +5628,8 @@ mod tests {
 
     use super::*;
 
-    fn fixture_password(prefix: &str, suffix: &str) -> String {
-        prefix.to_owned() + suffix
+    fn fixture_password() -> String {
+        std::process::id().to_string()
     }
 
     #[test]
@@ -6134,12 +6134,8 @@ mod tests {
     }
 
     fn tenant_record() -> TenantRecord {
-        let verifier = PgScramVerifier::generate_with_salt(
-            &fixture_password("hunter", "2"),
-            4096,
-            vec![1; 16],
-        )
-        .expect("verifier");
+        let verifier = PgScramVerifier::generate_with_salt(&fixture_password(), 4096, vec![1; 16])
+            .expect("verifier");
         TenantRecord::new(
             1,
             crabka_gres_control::TenantId::try_from("tenant-a").expect("tenant id"),

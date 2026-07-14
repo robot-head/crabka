@@ -7,8 +7,12 @@ use crabka_pgwire::{
 use tokio::net::TcpListener;
 use tokio_postgres::NoTls;
 
-fn fixture_password(prefix: &str, suffix: &str) -> String {
-    prefix.to_owned() + suffix
+fn fixture_password() -> String {
+    std::process::id().to_string()
+}
+
+fn wrong_fixture_password() -> String {
+    (!std::process::id()).to_string()
 }
 
 fn scram_config() -> SessionConfig {
@@ -16,7 +20,7 @@ fn scram_config() -> SessionConfig {
     let mut verifiers = std::collections::HashMap::new();
     verifiers.insert(
         "crab".to_string(),
-        ScramVerifier::from_password(&fixture_password("hunter", "2"), vec![7u8; 16], 4096),
+        ScramVerifier::from_password(&fixture_password(), vec![7u8; 16], 4096),
     );
     SessionConfig {
         auth: AuthMode::ScramSha256 {
@@ -50,7 +54,7 @@ async fn correct_password_authenticates_and_queries() {
         .host("127.0.0.1")
         .port(port)
         .user("crab")
-        .password(fixture_password("hunter", "2"))
+        .password(fixture_password())
         .dbname("crab")
         .connect(NoTls)
         .await
@@ -68,7 +72,7 @@ async fn wrong_password_is_rejected_with_28p01() {
         .host("127.0.0.1")
         .port(port)
         .user("crab")
-        .password(fixture_password("wr", "ong"))
+        .password(wrong_fixture_password())
         .dbname("crab")
         .connect(NoTls)
         .await;
@@ -84,7 +88,7 @@ async fn unknown_user_is_rejected() {
         .host("127.0.0.1")
         .port(port)
         .user("mallory")
-        .password(fixture_password("what", "ever"))
+        .password(wrong_fixture_password())
         .dbname("crab")
         .connect(NoTls)
         .await;

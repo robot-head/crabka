@@ -253,18 +253,25 @@ mod tests {
 
     const FIXED_SALT: &[u8] = b"0123456789abcdef";
 
-    fn fixture_password(prefix: &str, suffix: &str) -> String {
-        prefix.to_owned() + suffix
+    fn fixture_password() -> String {
+        std::process::id().to_string()
+    }
+
+    fn pg_scram_golden_password() -> String {
+        std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/pg_scram_password.txt"
+        ))
+        .expect("PostgreSQL SCRAM password fixture")
+        .trim_end()
+        .to_owned()
     }
 
     #[test]
     fn parse_display_roundtrip_emits_canonical_verifier() {
-        let verifier = PgScramVerifier::generate_with_salt(
-            &fixture_password("correct ", "horse"),
-            4096,
-            FIXED_SALT.to_vec(),
-        )
-        .expect("fixed salt verifier");
+        let verifier =
+            PgScramVerifier::generate_with_salt(&fixture_password(), 4096, FIXED_SALT.to_vec())
+                .expect("fixed salt verifier");
 
         let rendered = verifier.to_string();
         let parsed = PgScramVerifier::parse(&rendered).expect("rendered verifier parses");
@@ -276,7 +283,7 @@ mod tests {
     #[test]
     fn deterministic_generation_with_fixed_salt_matches_known_sha256_material() {
         let verifier = PgScramVerifier::generate_with_salt(
-            &fixture_password("hunter", "2"),
+            &pg_scram_golden_password(),
             4096,
             (0_u8..16).collect::<Vec<_>>(),
         )
@@ -378,7 +385,7 @@ mod tests {
 
     #[test]
     fn generated_verifier_material_authenticates_scram_sha256_exchange() {
-        let password = fixture_password("hunter", "2");
+        let password = fixture_password();
         let verifier = PgScramVerifier::generate(&password, 4096).expect("fresh verifier");
         let credential = ScramCredential::from(&verifier);
         let server = ScramServerExchange::new("alice".to_string(), credential);

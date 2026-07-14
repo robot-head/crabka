@@ -1023,8 +1023,8 @@ mod tests {
 
     use super::*;
 
-    fn fixture_password(prefix: &str, suffix: &str) -> String {
-        prefix.to_owned() + suffix
+    fn fixture_password() -> String {
+        std::process::id().to_string()
     }
 
     #[derive(Parser)]
@@ -1050,7 +1050,7 @@ mod tests {
             crabka_gres_control::TenantState::Active,
             crabka_gres_control::SqlUser::try_from("alice").unwrap(),
             crabka_security::scram::PgScramVerifier::generate_with_salt(
-                &fixture_password("sec", "ret"),
+                &fixture_password(),
                 4096,
                 vec![1; 16],
             )

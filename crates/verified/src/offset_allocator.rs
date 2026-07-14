@@ -5,7 +5,7 @@ use creusot_std::prelude::*;
 
 /// Reserve `count` offsets from `next`, returning `(base, next_after)`.
 #[must_use]
-#[cfg_attr(creusot, requires(count >= 0))]
+#[cfg_attr(creusot, requires(count@ >= 0))]
 #[cfg_attr(creusot, requires(next@ + count@ <= i64::MAX@))]
 #[cfg_attr(creusot, ensures(result.0@ == next@))]
 #[cfg_attr(creusot, ensures(result.1@ == next@ + count@))]

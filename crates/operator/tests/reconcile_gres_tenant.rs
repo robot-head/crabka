@@ -27,8 +27,8 @@ use shared::{
     fixture_ctx, json_response, mock_client,
 };
 
-fn fixture_password(prefix: &str, suffix: &str) -> String {
-    prefix.to_owned() + suffix
+fn fixture_password() -> String {
+    std::process::id().to_string()
 }
 
 struct FakeGresControl {
@@ -272,7 +272,7 @@ fn tenant_record(state: TenantState, generation: u64) -> TenantRecord {
         tenant_name,
         state,
         SqlUser::try_from("alice").unwrap(),
-        PgScramVerifier::generate(&fixture_password("hunter", "2"), 8192)
+        PgScramVerifier::generate(&fixture_password(), 8192)
             .expect("fixture SCRAM verifier")
             .to_string(),
         1,
@@ -305,10 +305,7 @@ fn multi_range_reconcile_rules() -> Vec<MockRule> {
         MockRule {
             method: Method::GET,
             path_substr: "/secrets/pw".into(),
-            response: json_response(
-                200,
-                &secret_body("pw", "ns", &fixture_password("hunter", "2")),
-            ),
+            response: json_response(200, &secret_body("pw", "ns", &fixture_password())),
         },
     ];
     rules.push(MockRule {
@@ -650,10 +647,7 @@ fn tenant_reconcile_rules() -> Vec<MockRule> {
         MockRule {
             method: Method::GET,
             path_substr: "/secrets/pw".into(),
-            response: json_response(
-                200,
-                &secret_body("pw", "ns", &fixture_password("hunter", "2")),
-            ),
+            response: json_response(200, &secret_body("pw", "ns", &fixture_password())),
         },
         MockRule {
             method: Method::PATCH,

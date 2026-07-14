@@ -26,8 +26,12 @@ async fn broker_test_permit() -> tokio::sync::OwnedSemaphorePermit {
     .expect("broker test gate should remain open")
 }
 
-fn fixture_password(prefix: &str, suffix: &str) -> String {
-    prefix.to_owned() + suffix
+fn fixture_password() -> String {
+    std::process::id().to_string()
+}
+
+fn wrong_fixture_password() -> String {
+    (!std::process::id()).to_string()
 }
 
 struct RangeMtlsFixture {
@@ -123,7 +127,7 @@ impl crabka_gres::TenantConfigLoader for FakeTenantConfigLoader {
 
 fn tenant_record() -> crabka_gres_control::TenantRecord {
     let verifier = crabka_security::scram::PgScramVerifier::generate_with_salt(
-        &fixture_password("g5-secret-", "password"),
+        &fixture_password(),
         8192,
         vec![3; 16],
     )
@@ -875,7 +879,7 @@ async fn seed_control_operation(
     split: &crabka_gres_ranges::SplitState,
 ) {
     let verifier = crabka_security::scram::PgScramVerifier::generate_with_salt(
-        &fixture_password("control-", "secret"),
+        &fixture_password(),
         8192,
         vec![7; 16],
     )
@@ -2541,14 +2545,13 @@ async fn runtime_uses_tenant_scram_by_default_and_rejects_wrong_password() {
         crabka_gres::serve_listener_with_tenant_config_loader(listener, args, &loader).await
     });
 
-    let client =
-        connect_with_password(port, "alice", &fixture_password("g5-secret-", "password")).await;
+    let client = connect_with_password(port, "alice", &fixture_password()).await;
     client.simple_query("SELECT 1").await.expect("select");
     let wrong_password = tokio_postgres::Config::new()
         .host("127.0.0.1")
         .port(port)
         .user("alice")
-        .password(fixture_password("wr", "ong"))
+        .password(wrong_fixture_password())
         .connect(tokio_postgres::NoTls)
         .await;
     assert!(wrong_password.is_err());
@@ -2580,7 +2583,7 @@ async fn runtime_tenant_scram_accepts_libpq_psql() {
 
     let output = tokio::task::spawn_blocking(move || {
         std::process::Command::new("psql")
-            .env("PGPASSWORD", fixture_password("g5-secret-", "password"))
+            .env("PGPASSWORD", fixture_password())
             .arg(format!(
                 "host=127.0.0.1 port={port} user=alice dbname=crab sslmode=disable"
             ))

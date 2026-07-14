@@ -2208,8 +2208,8 @@ mod tests {
     use super::*;
     use crate::crd::{GresTenantSpec, SecretKeyRef};
 
-    fn fixture_password(prefix: &str, suffix: &str) -> String {
-        prefix.to_owned() + suffix
+    fn fixture_password() -> String {
+        std::process::id().to_string()
     }
 
     #[derive(clap::Parser)]
@@ -2315,7 +2315,7 @@ mod tests {
     #[test]
     fn tenant_record_hashes_password_without_plaintext() {
         let obj = tenant();
-        let password = fixture_password("hunter", "2");
+        let password = fixture_password();
         let defaults = EffectiveDefaults {
             wal_replication: 1,
             checkpoint_frames: None,

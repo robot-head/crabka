@@ -1,0 +1,9 @@
+{
+  "profile": [],
+  "proofs": {
+    "Coma": {
+      "vc_reserve_offsets": { "prover": "alt-ergo", "time": 0.009 },
+      "vc_saturating_add": { "prover": "alt-ergo", "time": 0.006 }
+    }
+  }
+}

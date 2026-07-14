@@ -24,7 +24,7 @@ use tokio::{
 };
 
 fn fixture_password() -> String {
-    "process-".to_owned() + "secret"
+    std::process::id().to_string()
 }
 
 pub struct ProcessHarness {

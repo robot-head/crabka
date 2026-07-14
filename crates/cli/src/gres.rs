@@ -1141,8 +1141,8 @@ mod tests {
 
     use super::*;
 
-    fn fixture_password(prefix: &str, suffix: &str) -> String {
-        prefix.to_owned() + suffix
+    fn fixture_password() -> String {
+        std::process::id().to_string()
     }
 
     const BALANCE_SNAPSHOT_ENABLED: &str = r#"{
@@ -1250,7 +1250,7 @@ mod tests {
             hash_placements: Vec::new(),
         };
 
-        let password = fixture_password("hunter", "2");
+        let password = fixture_password();
         let record = build_create_tenant_record(&args, &password, 7).expect("valid record");
 
         check!(record.record_version == 7);
