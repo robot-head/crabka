@@ -498,7 +498,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.96.0"
+          toolchain: "1.97.0"
       - uses: Swatinem/rust-cache@v2
         with:
           key: gres-range-scaling
@@ -560,7 +560,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.96.0"
+          toolchain: "1.97.0"
       - uses: Swatinem/rust-cache@v2
         with:
           key: gres-topology-process-nemesis
@@ -598,7 +598,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.96.0"
+          toolchain: "1.97.0"
       - uses: Swatinem/rust-cache@v2
         with:
           key: gres-sharded-conformance
@@ -1014,7 +1014,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.96.0"
+          toolchain: "1.97.0"
       - uses: Swatinem/rust-cache@v2
         with:
           key: gres-conformance
@@ -1220,7 +1220,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.96.0"
+          toolchain: "1.97.0"
       - uses: Swatinem/rust-cache@v2
         with:
           key: gres-integration
