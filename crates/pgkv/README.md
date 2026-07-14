@@ -1,8 +1,6 @@
 # crabka-pgkv
 
 [![crates.io](https://img.shields.io/crates/v/crabka-pgkv.svg)](https://crates.io/crates/crabka-pgkv)
-[![docs.rs](https://docs.rs/crabka-pgkv/badge.svg)](https://docs.rs/crabka-pgkv)
-
 Ordered key-value storage seam for the Crabka Gres engine with order-preserving key encoding and versioned row encoding.
 
 Part of [Crabka](https://github.com/robot-head/crabka)'s Chapter Gres — a pure-Rust

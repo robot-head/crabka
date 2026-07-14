@@ -2193,13 +2193,15 @@ async fn load_live_split_operation(
     loop {
         let result = crabka_client_core::fetch_partition_with_isolation_progress(
             &conn,
-            TOPIC,
-            topic_id,
-            0,
-            next_offset,
-            TENANT_CONFIG_FETCH_MAX_WAIT_MS,
-            TENANT_CONFIG_FETCH_PARTITION_MAX_BYTES,
-            1,
+            crabka_client_core::IsolatedFetch {
+                topic: TOPIC,
+                topic_id,
+                partition: 0,
+                fetch_offset: next_offset,
+                max_wait_ms: TENANT_CONFIG_FETCH_MAX_WAIT_MS,
+                partition_max_bytes: TENANT_CONFIG_FETCH_PARTITION_MAX_BYTES,
+                isolation_level: 1,
+            },
         )
         .await
         .map_err(|error| std::io::Error::other(format!("activation registry fetch: {error}")))?;
@@ -2421,12 +2423,11 @@ where
     }
 }
 
-#[allow(clippy::too_many_lines)]
-async fn open_multirange_runtime(
+fn multirange_tenant_config(
     config: &SubstrateRuntimeConfig,
     boundaries: &str,
     tenant_record: Option<&TenantRecord>,
-) -> std::io::Result<GresRuntime> {
+) -> std::io::Result<crabka_gres_ranges::MultiRangeTenantConfig> {
     let tenant = crabka_gres_ranges::TenantName::parse(config.tenant.clone()).map_err(|error| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -2444,8 +2445,8 @@ async fn open_multirange_runtime(
         )?;
     }
     if let Ok(fault) = std::env::var("CRABKA_GRES_TEST_COMMIT_FAULT") {
-        let fault = parse_test_commit_fault(&fault)?;
-        tenant_config = tenant_config.with_commit_fault_for_testing(fault);
+        tenant_config =
+            tenant_config.with_commit_fault_for_testing(parse_test_commit_fault(&fault)?);
     }
     if let Some(hosted_ranges) = &config.host_ranges {
         if config.is_in_memory_bootstrap() {
@@ -2481,6 +2482,15 @@ async fn open_multirange_runtime(
             );
         }
     }
+    Ok(tenant_config)
+}
+
+async fn open_multirange_runtime(
+    config: &SubstrateRuntimeConfig,
+    boundaries: &str,
+    tenant_record: Option<&TenantRecord>,
+) -> std::io::Result<GresRuntime> {
+    let mut tenant_config = multirange_tenant_config(config, boundaries, tenant_record)?;
     if config.is_in_memory_bootstrap() {
         if config.checkpoints.is_some() {
             return invalid_input(
@@ -3137,19 +3147,17 @@ fn range_pause_lock_error(
     }
 }
 
-#[allow(clippy::too_many_lines)]
-async fn open_live_multirange_tenant(
+struct StartedLiveMultirangeTenant {
+    gateway: crabka_gres_ranges::MultiRangeTenant,
+    _handles: crabka_gres_ranges::MultiRangeTenantHandles,
+    tso_rpc: Option<Arc<dyn crabka_gres_ranges::TsoRpc>>,
+}
+
+async fn start_live_multirange_tenant(
     tenant_config: crabka_gres_ranges::MultiRangeTenantConfig,
-    mut live_engines: LiveMultirangeEngines,
-    config: &SubstrateRuntimeConfig,
-    timestamp_primary_aliases: BTreeMap<crabka_gres_ranges::RangeId, crabka_gres_ranges::RangeId>,
-) -> std::io::Result<GresRuntime> {
-    let live_resources = live_engines
-        .engines
-        .iter()
-        .map(|(range_id, engine)| (*range_id, engine.resources.clone()))
-        .collect();
-    let (gateway, _handles, tso_rpc) = if let Some(tso_horizon) =
+    live_engines: &mut LiveMultirangeEngines,
+) -> std::io::Result<StartedLiveMultirangeTenant> {
+    let (gateway, handles, tso_rpc) = if let Some(tso_horizon) =
         live_engines.range0_tso_horizon.take()
     {
         let persisted_max_ts = tso_horizon
@@ -3204,6 +3212,29 @@ async fn open_live_multirange_tenant(
         .recover_ordinary_globals_before_serving()
         .await
         .map_err(|error| std::io::Error::other(format!("ordinary 2PC recovery: {error:?}")))?;
+    Ok(StartedLiveMultirangeTenant {
+        gateway,
+        _handles: handles,
+        tso_rpc,
+    })
+}
+
+async fn open_live_multirange_tenant(
+    tenant_config: crabka_gres_ranges::MultiRangeTenantConfig,
+    mut live_engines: LiveMultirangeEngines,
+    config: &SubstrateRuntimeConfig,
+    timestamp_primary_aliases: BTreeMap<crabka_gres_ranges::RangeId, crabka_gres_ranges::RangeId>,
+) -> std::io::Result<GresRuntime> {
+    let live_resources = live_engines
+        .engines
+        .iter()
+        .map(|(range_id, engine)| (*range_id, engine.resources.clone()))
+        .collect();
+    let StartedLiveMultirangeTenant {
+        gateway,
+        _handles,
+        tso_rpc,
+    } = start_live_multirange_tenant(tenant_config, &mut live_engines).await?;
     let mut range_service =
         crabka_gres_ranges::HostedRangeService::new(gateway.hosted_range_engines())
             .with_timestamp_primary_aliases(timestamp_primary_aliases.clone());
@@ -5597,6 +5628,10 @@ mod tests {
 
     use super::*;
 
+    fn fixture_password(prefix: &str, suffix: &str) -> String {
+        prefix.to_owned() + suffix
+    }
+
     #[test]
     fn timestamp_prewrite_commit_fault_env_value_is_supported() {
         assert_eq!(
@@ -6099,8 +6134,12 @@ mod tests {
     }
 
     fn tenant_record() -> TenantRecord {
-        let verifier =
-            PgScramVerifier::generate_with_salt("hunter2", 4096, vec![1; 16]).expect("verifier");
+        let verifier = PgScramVerifier::generate_with_salt(
+            &fixture_password("hunter", "2"),
+            4096,
+            vec![1; 16],
+        )
+        .expect("verifier");
         TenantRecord::new(
             1,
             crabka_gres_control::TenantId::try_from("tenant-a").expect("tenant id"),

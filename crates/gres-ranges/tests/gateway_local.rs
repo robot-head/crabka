@@ -385,8 +385,7 @@ impl InProcessTransfer {
         }
     }
 
-    #[allow(clippy::unused_async)]
-    async fn stage_range(
+    fn stage_range(
         &self,
         request: TableTransferRequest,
     ) -> Result<StagedRangeSuccessor, RangeTransferError> {
@@ -544,8 +543,8 @@ impl RangeTransferCapability for InProcessTransfer {
         let left = requests.next().expect("left request");
         let right = requests.next().expect("right request");
         Ok(StagedRangeSuccessors {
-            left: self.stage_range(left).await?,
-            right: Some(self.stage_range(right).await?),
+            left: self.stage_range(left)?,
+            right: Some(self.stage_range(right)?),
         })
     }
 
@@ -959,8 +958,72 @@ async fn gateway_forwards_remote_autocommit_over_tcp() {
     assert_eq!(rows[0][0].as_ref().expect("cell").text, "7");
 }
 
+async fn assert_recovered_timestamp_commit(
+    restarted: &MultiRangeTenant,
+    remote: &mut SqlEngine,
+    descriptor: &crabka_pgexec::TimestampTxnDescriptor,
+) {
+    let restarted_hosted = restarted.hosted_range_engines();
+    remote.set_timestamp_oracle(
+        restarted_hosted
+            .get(&RangeId::COORDINATOR)
+            .expect("restarted r0")
+            .timestamp_oracle_handle(),
+    );
+    let commit_ts = match descriptor.decision {
+        crabka_pgexec::PrimaryTxnDecision::Committed(ts) => ts,
+        other => panic!("expected committed descriptor, got {other:?}"),
+    };
+    for operation in &descriptor.operations {
+        let kv = if operation.range_id == 2 {
+            remote.kv_handle()
+        } else {
+            restarted_hosted
+                .get(&RangeId::new(operation.range_id))
+                .expect("reopened owner")
+                .kv_handle()
+        };
+        let key = crabka_pgmvcc::version::version_key_ts(
+            operation.table_id,
+            operation.rowid,
+            descriptor.start_ts.get(),
+        );
+        let bytes = kv
+            .get(&key)
+            .expect("read version")
+            .expect("recovered version exists");
+        let version = crabka_pgmvcc::version::decode_ts_tuple(&bytes).expect("decode version");
+        assert_eq!(
+            version.state,
+            crabka_pgmvcc::version::TsVersionState::Committed {
+                commit_ts: commit_ts.get()
+            }
+        );
+    }
+    let read_ts = restarted_hosted
+        .get(&RangeId::new(1))
+        .expect("r1")
+        .allocate_timestamp_read_timestamp()
+        .await
+        .expect("read timestamp");
+    assert!(
+        read_ts.get() >= commit_ts.get(),
+        "read_ts={} commit_ts={}",
+        read_ts.get(),
+        commit_ts.get()
+    );
+    let mut recovered_session = restarted.connect();
+    let rows = recovered_session
+        .simple_query("SELECT id FROM t50 ORDER BY id")
+        .await
+        .expect("recovered rows");
+    assert!(
+        matches!(&rows[..], [QueryResult::Rows { rows, .. }] if rows.len() == 2),
+        "{rows:?}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[allow(clippy::too_many_lines)]
 async fn ambiguous_remote_timestamp_commit_recovers_once_after_gateway_restart() {
     let local_dir = tempfile::tempdir().expect("local durable ranges");
     let remote_dir = tempfile::tempdir().expect("remote durable range");
@@ -987,7 +1050,7 @@ async fn ambiguous_remote_timestamp_commit_recovers_once_after_gateway_restart()
         },
         RangeLayoutEntry {
             range_id: 1,
-            end_key: Some(crabka_gres_control::RangeBoundary::new(50, 10)),
+            end_key: Some(crabka_gres_control::RangeBoundary::new(50, 3)),
             endpoint: "local-r1".into(),
             wal_generation: 1,
             lifecycle: RangeLifecycle::default(),
@@ -1006,7 +1069,7 @@ async fn ambiguous_remote_timestamp_commit_recovers_once_after_gateway_restart()
     let registry = RangeRegistry::from_tenant_record(&record).expect("registry");
     let config = MultiRangeTenantConfig::from_boundaries(
         TenantName::parse("tenant_remote_scatter").expect("tenant"),
-        "0,50:0,50:10",
+        "0,50:0,50:3",
     )
     .expect("config")
     .with_data_dir(local_dir.path().to_path_buf())
@@ -1150,64 +1213,7 @@ async fn ambiguous_remote_timestamp_commit_recovers_once_after_gateway_restart()
         1,
         "exactly one recovery RPC"
     );
-    let restarted_hosted = restarted.hosted_range_engines();
-    remote.set_timestamp_oracle(
-        restarted_hosted
-            .get(&RangeId::COORDINATOR)
-            .expect("restarted r0")
-            .timestamp_oracle_handle(),
-    );
-    let commit_ts = match descriptor.decision {
-        crabka_pgexec::PrimaryTxnDecision::Committed(ts) => ts,
-        other => panic!("expected committed descriptor, got {other:?}"),
-    };
-    for operation in &descriptor.operations {
-        let kv = if operation.range_id == 2 {
-            remote.kv_handle()
-        } else {
-            restarted_hosted
-                .get(&RangeId::new(operation.range_id))
-                .expect("reopened owner")
-                .kv_handle()
-        };
-        let key = crabka_pgmvcc::version::version_key_ts(
-            operation.table_id,
-            operation.rowid,
-            descriptor.start_ts.get(),
-        );
-        let bytes = kv
-            .get(&key)
-            .expect("read version")
-            .expect("recovered version exists");
-        let version = crabka_pgmvcc::version::decode_ts_tuple(&bytes).expect("decode version");
-        assert_eq!(
-            version.state,
-            crabka_pgmvcc::version::TsVersionState::Committed {
-                commit_ts: commit_ts.get()
-            }
-        );
-    }
-    let read_ts = restarted_hosted
-        .get(&RangeId::new(1))
-        .expect("r1")
-        .allocate_timestamp_read_timestamp()
-        .await
-        .expect("read timestamp");
-    assert!(
-        read_ts.get() >= commit_ts.get(),
-        "read_ts={} commit_ts={}",
-        read_ts.get(),
-        commit_ts.get()
-    );
-    let mut recovered_session = restarted.connect();
-    let rows = recovered_session
-        .simple_query("SELECT id FROM t50 ORDER BY id")
-        .await
-        .expect("recovered rows");
-    assert!(
-        matches!(&rows[..], [QueryResult::Rows { rows, .. }] if rows.len() == 2),
-        "{rows:?}"
-    );
+    assert_recovered_timestamp_commit(&restarted, &mut remote, &descriptor).await;
 }
 
 #[tokio::test]

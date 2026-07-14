@@ -27,6 +27,7 @@ use std::{
 
 use assert2::assert;
 use bytes::Bytes;
+use crabka_broker::BrokerHandle;
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
 use crabka_client_core::Client;
 use crabka_client_producer::{Acks, Producer, ProducerRecord};
@@ -45,6 +46,17 @@ use tokio::sync::Mutex;
 fn cluster_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
+}
+
+async fn wait_for_local_replica(broker: &BrokerHandle, topic: &str, partition: i32) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while broker.local_log_end_offset(topic, partition).is_none() {
+        assert!(
+            Instant::now() <= deadline,
+            "broker never materialized a local replica for {topic}/{partition}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 /// A native `Producer` against a 3-broker rf=1 cluster must store every
@@ -111,6 +123,23 @@ async fn producer_routes_to_non_bootstrap_leaders() {
             (0..n_partitions).all(|p| img.partition(topic, p).is_some_and(|part| part.leader != 0))
         })
         .await;
+
+    // A leader appearing in the controller image precedes the supervisor
+    // materializing that broker's local writer actor. Producing in that gap can
+    // transiently return UNKNOWN_TOPIC_ID (100), so wait for each rf=1 owner to
+    // be ready before exercising the producer's routing behavior.
+    for partition in 0..n_partitions {
+        let leader = cluster[0]
+            .0
+            .partition_leader_for_test(topic, partition)
+            .expect("partition has a leader");
+        let leader_handle = &cluster
+            .iter()
+            .find(|(handle, _, _)| handle.node_id() == leader)
+            .expect("leader node is in the cluster")
+            .0;
+        wait_for_local_replica(leader_handle, topic, partition).await;
+    }
 
     // Discriminating guard: at least one partition must be led by a
     // non-bootstrap broker, otherwise the test exercises no cross-broker

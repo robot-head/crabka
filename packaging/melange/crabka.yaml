@@ -17,6 +17,8 @@ environment:
       - build-base
       - busybox
       - git
+      - openssl-dev
+      - pkgconf
       - rustup
 
 # A single cargo build compiles the shared dependency graph (protocol, log,

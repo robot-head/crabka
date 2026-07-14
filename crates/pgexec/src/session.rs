@@ -868,6 +868,30 @@ pub struct SqlSession {
     portals: HashMap<String, SqlPortal>,
 }
 
+pub(crate) struct SqlSessionConfig {
+    pub kv: Arc<dyn Kv>,
+    pub catalog_kv: Arc<dyn Kv>,
+    pub procarray: Arc<ProcArray>,
+    pub seq: Arc<SequenceManager>,
+    pub lockmgr: Arc<RowLockManager>,
+    pub catalog_lock: Arc<tokio::sync::Mutex<()>>,
+    pub table_write_gate: Arc<tokio::sync::RwLock<()>>,
+    pub writer_fence: Arc<crate::WriterFence>,
+    pub coordination: Arc<crate::EngineCoordination>,
+    pub unique_index_lock: Arc<tokio::sync::RwLock<()>>,
+    pub committer: Arc<dyn crate::commit::Committer>,
+    pub linearizer: Arc<dyn crate::read_gate::Linearizer>,
+    pub persist_mode: crate::PersistMode,
+    pub gtm: Option<Arc<crate::gtm::Gtm>>,
+    pub range0_barrier: Option<Arc<dyn crate::read_gate::Linearizer>>,
+    pub clock: Arc<dyn crate::clock::Clock>,
+    pub foreign_scanner: Option<Arc<dyn crate::foreign::ForeignScanner>>,
+    pub range_scanner: Arc<dyn crate::scanner::RangeScanner>,
+    pub join_stats: Arc<dyn crate::plan_dist::Stats>,
+    pub join_strategy_config: crate::plan_dist::PlannerConfig,
+    pub timestamp_oracle: Arc<dyn crate::timestamp_txn::TimestampOracle>,
+}
+
 #[derive(Clone)]
 struct SqlPrepared {
     statement: Option<Statement>,
@@ -895,33 +919,30 @@ enum SqlPortalExecution {
 }
 
 impl SqlSession {
-    // Threads the engine's shared handles (kv, procarray, seq, lockmgr, catalog
-    // lock, committer, linearizer) plus persist mode into a per-connection
-    // session; the count is inherent to the seam, not a smell.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
-        kv: Arc<dyn Kv>,
-        catalog_kv: Arc<dyn Kv>,
-        procarray: Arc<ProcArray>,
-        seq: Arc<SequenceManager>,
-        lockmgr: Arc<RowLockManager>,
-        catalog_lock: Arc<tokio::sync::Mutex<()>>,
-        table_write_gate: Arc<tokio::sync::RwLock<()>>,
-        writer_fence: Arc<crate::WriterFence>,
-        coordination: Arc<crate::EngineCoordination>,
-        unique_index_lock: Arc<tokio::sync::RwLock<()>>,
-        committer: Arc<dyn crate::commit::Committer>,
-        linearizer: Arc<dyn crate::read_gate::Linearizer>,
-        persist_mode: crate::PersistMode,
-        gtm: Option<Arc<crate::gtm::Gtm>>,
-        range0_barrier: Option<Arc<dyn crate::read_gate::Linearizer>>,
-        clock: Arc<dyn crate::clock::Clock>,
-        foreign_scanner: Option<Arc<dyn crate::foreign::ForeignScanner>>,
-        range_scanner: Arc<dyn crate::scanner::RangeScanner>,
-        join_stats: Arc<dyn crate::plan_dist::Stats>,
-        join_strategy_config: crate::plan_dist::PlannerConfig,
-        timestamp_oracle: Arc<dyn crate::timestamp_txn::TimestampOracle>,
-    ) -> Self {
+    pub(crate) fn new(config: SqlSessionConfig) -> Self {
+        let SqlSessionConfig {
+            kv,
+            catalog_kv,
+            procarray,
+            seq,
+            lockmgr,
+            catalog_lock,
+            table_write_gate,
+            writer_fence,
+            coordination,
+            unique_index_lock,
+            committer,
+            linearizer,
+            persist_mode,
+            gtm,
+            range0_barrier,
+            clock,
+            foreign_scanner,
+            range_scanner,
+            join_stats,
+            join_strategy_config,
+            timestamp_oracle,
+        } = config;
         Self {
             kv,
             catalog_kv,
@@ -988,6 +1009,29 @@ impl SqlSession {
                 manager: Arc::clone(&self.seq),
                 currvals: Arc::clone(&self.sequence_currvals),
             })),
+        }
+    }
+
+    fn write_context<'a>(
+        &'a self,
+        global_snapshot: &'a Snapshot,
+        snapshot: &'a Snapshot,
+        xid: u64,
+        repeatable_read: bool,
+        eval_ctx: &'a crate::clock::EvalCtx,
+    ) -> crate::exec::WriteContext<'a> {
+        crate::exec::WriteContext {
+            catalog_kv: self.catalog_kv.as_ref(),
+            kv: self.kv.as_ref(),
+            global: self.catalog_kv.as_ref(),
+            global_snapshot,
+            procarray: self.procarray.as_ref(),
+            lockmgr: self.lockmgr.as_ref(),
+            seq: self.seq.as_ref(),
+            snapshot,
+            xid,
+            repeatable_read,
+            eval_ctx,
         }
     }
 
@@ -1658,20 +1702,22 @@ impl SqlSession {
             scanner: self.foreign_scanner.as_ref(),
             current_user: &self.current_role,
         };
+        let ctes = crate::cte::CteContext::empty();
+        let read_ctx = crate::subquery::SubCtx {
+            catalog_kv: &*self.catalog_kv,
+            kv: &*self.kv,
+            global: &*self.catalog_kv,
+            gsnap: &gsnap,
+            snapshot: &snapshot,
+            own,
+            ctes: &ctes,
+            eval_ctx: &ctx,
+            fctx,
+            range_scanner: &statement_scanner,
+        };
         let (result, mutations) =
             with_guc_runtime(self.guc.effective_map(), self.guc.settings(), || {
-                crate::exec::execute_read(
-                    &*self.catalog_kv,
-                    &*self.kv,
-                    &*self.catalog_kv,
-                    &gsnap,
-                    &snapshot,
-                    own,
-                    stmt,
-                    &ctx,
-                    fctx,
-                    &statement_scanner,
-                )
+                crate::exec::execute_read(&read_ctx, stmt)
             });
         if result.is_ok() {
             self.apply_guc_mutations(mutations)?;
@@ -1752,24 +1798,29 @@ impl SqlSession {
                     ),
                     _ => unreachable!(),
                 };
-                let kv = Arc::clone(&self.kv);
                 let ctx = self.eval_ctx();
+                let ctes = crate::cte::CteContext::empty();
+                let read_ctx = crate::subquery::SubCtx {
+                    catalog_kv: &*self.catalog_kv,
+                    kv: self.kv.as_ref(),
+                    global: &*self.catalog_kv,
+                    gsnap: &gsnap,
+                    snapshot: &snapshot,
+                    own: Some(xid),
+                    ctes: &ctes,
+                    eval_ctx: &ctx,
+                    fctx: crate::exec::ForeignCtx::none(),
+                    range_scanner: self.range_scanner.as_ref(),
+                };
                 // Errors propagate to run_one which transitions to Failed,
                 // keeping the xid + locks until COMMIT/ROLLBACK.
                 crate::exec::execute_read_locking(
-                    &*self.catalog_kv,
-                    &*kv,
-                    &*self.catalog_kv,
-                    &gsnap,
+                    &read_ctx,
                     &self.procarray,
                     &self.lockmgr,
-                    &snapshot,
-                    xid,
                     repeatable_read,
                     mode,
                     s,
-                    &ctx,
-                    self.range_scanner.as_ref(),
                 )
                 .await
             }
@@ -1790,22 +1841,27 @@ impl SqlSession {
                 };
                 let snapshot = self.procarray.snapshot();
                 let gsnap = self.global_read_snapshot(None)?;
-                let kv = Arc::clone(&self.kv);
                 let ctx = self.eval_ctx();
+                let ctes = crate::cte::CteContext::empty();
+                let read_ctx = crate::subquery::SubCtx {
+                    catalog_kv: &*self.catalog_kv,
+                    kv: self.kv.as_ref(),
+                    global: &*self.catalog_kv,
+                    gsnap: &gsnap,
+                    snapshot: &snapshot,
+                    own: Some(xid),
+                    ctes: &ctes,
+                    eval_ctx: &ctx,
+                    fctx: crate::exec::ForeignCtx::none(),
+                    range_scanner: self.range_scanner.as_ref(),
+                };
                 let result = crate::exec::execute_read_locking(
-                    &*self.catalog_kv,
-                    &*kv,
-                    &*self.catalog_kv,
-                    &gsnap,
+                    &read_ctx,
                     &self.procarray,
                     &self.lockmgr,
-                    &snapshot,
-                    xid,
                     false, // autocommit is always READ COMMITTED
                     mode,
                     s,
-                    &ctx,
-                    self.range_scanner.as_ref(),
                 )
                 .await;
                 // Release regardless of success or error.
@@ -2035,7 +2091,6 @@ impl SqlSession {
                     ),
                     _ => unreachable!(),
                 };
-                let kv = Arc::clone(&self.kv);
                 let ctx = self.eval_ctx();
                 // An error here propagates to run_one, which transitions the
                 // block to Failed (keeping the xid + row locks until
@@ -2044,21 +2099,8 @@ impl SqlSession {
                 // txn commits later, so no clog op. In Replicated mode we fold the
                 // next_xid op into this batch (the state machine max-merges it;
                 // re-folding on a later write in the same txn is harmless).
-                let (result, mut ops) = crate::exec::execute_write(
-                    &*self.catalog_kv,
-                    &*kv,
-                    &*self.catalog_kv,
-                    &gsnap,
-                    &self.procarray,
-                    &self.lockmgr,
-                    &self.seq,
-                    &snapshot,
-                    xid,
-                    repeatable_read,
-                    stmt,
-                    &ctx,
-                )
-                .await?;
+                let write_ctx = self.write_context(&gsnap, &snapshot, xid, repeatable_read, &ctx);
+                let (result, mut ops) = crate::exec::execute_write(&write_ctx, stmt).await?;
                 // Record the (table_id, rowid)s this write touched (from the version
                 // Puts it built) so the abort-atomicity fence (`effective_global_xid`)
                 // can scan them for an inherited in-doubt `Prepared(-> g_old)` marker.
@@ -2145,23 +2187,9 @@ impl SqlSession {
                 };
                 let snapshot = self.procarray.snapshot();
                 let gsnap = self.global_read_snapshot(None)?;
-                let kv = Arc::clone(&self.kv);
                 let ctx = self.eval_ctx();
-                let outcome = crate::exec::execute_write(
-                    &*self.catalog_kv,
-                    &*kv,
-                    &*self.catalog_kv,
-                    &gsnap,
-                    &self.procarray,
-                    &self.lockmgr,
-                    &self.seq,
-                    &snapshot,
-                    xid,
-                    false,
-                    stmt,
-                    &ctx,
-                )
-                .await;
+                let write_ctx = self.write_context(&gsnap, &snapshot, xid, false, &ctx);
+                let outcome = crate::exec::execute_write(&write_ctx, stmt).await;
                 let (result, mut ops) = match outcome {
                     Ok(v) => v,
                     Err(e) => {
@@ -2251,18 +2279,10 @@ impl SqlSession {
                     _ => unreachable!(),
                 };
                 let ctx = self.eval_ctx();
-                let (result, mut ops) = crate::exec::execute_copy_write(
-                    self.catalog_kv.as_ref(),
-                    self.kv.as_ref(),
-                    self.catalog_kv.as_ref(),
-                    &self.global_read_snapshot(None)?,
-                    &self.procarray.snapshot(),
-                    self.seq.as_ref(),
-                    xid,
-                    copy,
-                    &rows,
-                    &ctx,
-                )?;
+                let gsnap = self.global_read_snapshot(None)?;
+                let snapshot = self.procarray.snapshot();
+                let write_ctx = self.write_context(&gsnap, &snapshot, xid, false, &ctx);
+                let (result, mut ops) = crate::exec::execute_copy_write(&write_ctx, copy, &rows)?;
                 if self.persist_mode == crate::PersistMode::Replicated {
                     ops.push(self.procarray.next_xid_op());
                 }
@@ -2302,18 +2322,10 @@ impl SqlSession {
                 };
                 let xid = self.procarray.begin_write()?;
                 let ctx = self.eval_ctx();
-                let outcome = crate::exec::execute_copy_write(
-                    self.catalog_kv.as_ref(),
-                    self.kv.as_ref(),
-                    self.catalog_kv.as_ref(),
-                    &self.global_read_snapshot(None)?,
-                    &self.procarray.snapshot(),
-                    self.seq.as_ref(),
-                    xid,
-                    copy,
-                    &rows,
-                    &ctx,
-                );
+                let gsnap = self.global_read_snapshot(None)?;
+                let snapshot = self.procarray.snapshot();
+                let write_ctx = self.write_context(&gsnap, &snapshot, xid, false, &ctx);
+                let outcome = crate::exec::execute_copy_write(&write_ctx, copy, &rows);
                 let (result, mut ops) = match outcome {
                     Ok(value) => value,
                     Err(error) => {

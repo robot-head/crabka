@@ -289,6 +289,15 @@ pub struct SqlEngine {
     pub(crate) timestamp_oracle: Arc<dyn timestamp_txn::TimestampOracle>,
 }
 
+/// Timestamp ownership carried by a local MVCC scan.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TimestampScanOwner {
+    /// Statement read timestamp used for sharded scans.
+    pub read_ts: Option<timestamp_txn::ReadTimestamp>,
+    /// Pending timestamp transaction whose intents are visible to this scan.
+    pub own_start_ts: Option<timestamp_txn::TimestampTransactionId>,
+}
+
 impl Default for SqlEngine {
     fn default() -> Self {
         Self::new()
@@ -545,8 +554,10 @@ impl SqlEngine {
             global_snapshot,
             snapshot,
             own_xid,
-            read_ts,
-            None,
+            TimestampScanOwner {
+                read_ts,
+                own_start_ts: None,
+            },
             interval,
         )
     }
@@ -557,17 +568,19 @@ impl SqlEngine {
     ///
     /// Returns an execution error when timestamp metadata is missing or the
     /// underlying visibility scan fails.
-    #[allow(clippy::too_many_arguments)]
     pub fn scan_local_visible_with_timestamp_owner(
         &self,
         table: &crabka_pgcatalog::Table,
         global_snapshot: &crabka_pgmvcc::visibility::Snapshot,
         snapshot: &crabka_pgmvcc::visibility::Snapshot,
         own_xid: Option<u64>,
-        read_ts: Option<timestamp_txn::ReadTimestamp>,
-        own_start_ts: Option<timestamp_txn::TimestampTransactionId>,
+        timestamp_owner: TimestampScanOwner,
         interval: scanner::RowInterval,
     ) -> Result<Vec<scanner::ScannedRow>, ExecError> {
+        let TimestampScanOwner {
+            read_ts,
+            own_start_ts,
+        } = timestamp_owner;
         if table.sharded {
             let read_ts = read_ts.ok_or_else(|| {
                 ExecError::Unsupported(
@@ -1886,29 +1899,29 @@ impl Engine for SqlEngine {
     type Session = SqlSession;
 
     fn connect(&self) -> SqlSession {
-        SqlSession::new(
-            Arc::clone(&self.kv),
-            Arc::clone(&self.catalog_kv),
-            Arc::clone(&self.procarray),
-            Arc::clone(&self.seq),
-            Arc::clone(&self.lockmgr),
-            Arc::clone(&self.catalog_lock),
-            Arc::clone(&self.table_write_gate),
-            Arc::clone(&self.writer_fence),
-            Arc::clone(&self.coordination),
-            Arc::clone(&self.unique_index_lock),
-            Arc::clone(&self.committer),
-            Arc::clone(&self.linearizer),
-            self.persist_mode,
-            self.gtm.as_ref().map(Arc::clone),
-            self.range0_barrier.as_ref().map(Arc::clone),
-            Arc::clone(&self.clock),
-            self.foreign_scanner.as_ref().map(Arc::clone),
-            Arc::clone(&self.range_scanner),
-            Arc::clone(&self.join_stats),
-            self.join_strategy_config,
-            Arc::clone(&self.timestamp_oracle),
-        )
+        SqlSession::new(session::SqlSessionConfig {
+            kv: Arc::clone(&self.kv),
+            catalog_kv: Arc::clone(&self.catalog_kv),
+            procarray: Arc::clone(&self.procarray),
+            seq: Arc::clone(&self.seq),
+            lockmgr: Arc::clone(&self.lockmgr),
+            catalog_lock: Arc::clone(&self.catalog_lock),
+            table_write_gate: Arc::clone(&self.table_write_gate),
+            writer_fence: Arc::clone(&self.writer_fence),
+            coordination: Arc::clone(&self.coordination),
+            unique_index_lock: Arc::clone(&self.unique_index_lock),
+            committer: Arc::clone(&self.committer),
+            linearizer: Arc::clone(&self.linearizer),
+            persist_mode: self.persist_mode,
+            gtm: self.gtm.as_ref().map(Arc::clone),
+            range0_barrier: self.range0_barrier.as_ref().map(Arc::clone),
+            clock: Arc::clone(&self.clock),
+            foreign_scanner: self.foreign_scanner.as_ref().map(Arc::clone),
+            range_scanner: Arc::clone(&self.range_scanner),
+            join_stats: Arc::clone(&self.join_stats),
+            join_strategy_config: self.join_strategy_config,
+            timestamp_oracle: Arc::clone(&self.timestamp_oracle),
+        })
     }
 }
 

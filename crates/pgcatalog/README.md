@@ -1,8 +1,6 @@
 # crabka-pgcatalog
 
 [![crates.io](https://img.shields.io/crates/v/crabka-pgcatalog.svg)](https://crates.io/crates/crabka-pgcatalog)
-[![docs.rs](https://docs.rs/crabka-pgcatalog/badge.svg)](https://docs.rs/crabka-pgcatalog)
-
 System catalog for the Crabka Gres engine: tables, columns, and FDW metadata as
 a stateless view over the KV storage seam.
 

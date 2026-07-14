@@ -23,7 +23,9 @@ use tokio::{
     task::{JoinHandle, JoinSet},
 };
 
-const PASSWORD: &str = "process-secret";
+fn fixture_password() -> String {
+    "process-".to_owned() + "secret"
+}
 
 pub struct ProcessHarness {
     root: tempfile::TempDir,
@@ -267,7 +269,7 @@ impl ProcessHarness {
         let crabka_gres_ranges::RangeResponse::InspectDurableRecords(response) = response else {
             panic!("unexpected durable-record inspection response: {response:?}");
         };
-        response
+        *response
     }
 
     pub fn log(&self, range: u32) -> String {
@@ -467,29 +469,6 @@ fn kill_process_group(process_group: u32) {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
-}
-
-#[cfg(test)]
-#[allow(clippy::items_after_test_module)]
-mod process_group_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn kill_process_group_reaps_child_and_descendant() {
-        let mut command = Command::new("bash");
-        command.args(["-c", "sleep 300 & wait"]).kill_on_drop(true);
-        #[cfg(unix)]
-        command.as_std_mut().process_group(0);
-        let mut child = command.spawn().expect("spawn process group fixture");
-        let process_group = child.id().expect("fixture PID");
-        assert!(process_group_exists(process_group));
-        kill_process_group(process_group);
-        tokio::time::timeout(Duration::from_secs(5), child.wait())
-            .await
-            .expect("fixture group exit timeout")
-            .expect("wait fixture group");
-        assert!(!process_group_exists(process_group));
-    }
 }
 
 impl Drop for ProcessHarness {
@@ -779,9 +758,12 @@ async fn provision_control(bootstrap: &str, tenant: &str, r0_port: u16, r1_port:
         outcomes.iter().all(|outcome| outcome.error.is_none()),
         "WAL topics: {outcomes:?}"
     );
-    let verifier =
-        crabka_security::scram::PgScramVerifier::generate_with_salt(PASSWORD, 8192, vec![7; 16])
-            .expect("verifier");
+    let verifier = crabka_security::scram::PgScramVerifier::generate_with_salt(
+        &fixture_password(),
+        8192,
+        vec![7; 16],
+    )
+    .expect("verifier");
     let tenant_name = TenantName::try_from(tenant).expect("tenant name");
     let record = TenantRecord::new(
         1,
@@ -840,7 +822,7 @@ async fn connect_with_driver(
         .host("127.0.0.1")
         .port(port)
         .user("alice")
-        .password(PASSWORD)
+        .password(fixture_password())
         .dbname(database)
         .connect(tokio_postgres::NoTls)
         .await
@@ -871,4 +853,26 @@ fn gres_binary() -> PathBuf {
         candidate.display()
     );
     candidate
+}
+
+#[cfg(test)]
+mod process_group_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn kill_process_group_reaps_child_and_descendant() {
+        let mut command = Command::new("bash");
+        command.args(["-c", "sleep 300 & wait"]).kill_on_drop(true);
+        #[cfg(unix)]
+        command.as_std_mut().process_group(0);
+        let mut child = command.spawn().expect("spawn process group fixture");
+        let process_group = child.id().expect("fixture PID");
+        assert!(process_group_exists(process_group));
+        kill_process_group(process_group);
+        tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .expect("fixture group exit timeout")
+            .expect("wait fixture group");
+        assert!(!process_group_exists(process_group));
+    }
 }

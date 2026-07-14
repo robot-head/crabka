@@ -590,8 +590,8 @@ impl MultiRangeTenant {
                 &config.range_map,
                 config
                     .range_registry
-                    .clone()
-                    .zip(config.range_client.clone()),
+                    .as_ref()
+                    .zip(config.range_client.as_ref()),
             )?;
         }
         let scanner_engines = engines
@@ -947,7 +947,10 @@ impl MultiRangeTenant {
             recover_durable_timestamp_transactions(
                 &engines,
                 &state.target_map,
-                self.inner.timestamp_primary_remote.clone(),
+                self.inner
+                    .timestamp_primary_remote
+                    .as_ref()
+                    .map(|(registry, client)| (registry, client)),
             )
             .map_err(|error| {
                 LocalSqlSplitError::Orchestration(SplitError::Hook(format!(
@@ -1310,11 +1313,10 @@ fn route_timestamp_descriptor_to_active_map(
     Ok(descriptor)
 }
 
-#[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
 fn recover_durable_timestamp_transactions(
     engines: &BTreeMap<RangeId, SqlEngine>,
     range_map: &RangeMap,
-    remote: Option<(RangeRegistry, FramedTcpClient)>,
+    remote: Option<(&RangeRegistry, &FramedTcpClient)>,
 ) -> Result<(), TenantError> {
     let mut descriptors = Vec::new();
     for (primary_range, engine) in engines {
@@ -1449,7 +1451,7 @@ fn recover_durable_timestamp_transactions(
                                     }
                                 } else {
                                     recover_remote_timestamp_participant(
-                                        remote.as_ref(),
+                                        remote,
                                         range_id,
                                         identity,
                                         decision,
@@ -1462,89 +1464,7 @@ fn recover_durable_timestamp_transactions(
                                 })?;
                             }
                         }
-                        let mut orphan_participants = BTreeMap::<
-                            crabka_pgexec::TimestampTxnIdentity,
-                            Vec<RangeId>,
-                        >::new();
-                        for engine in engines.values() {
-                            for durable in engine.durable_timestamp_intent_identities().map_err(|error| {
-                                TenantError::TimestampRecovery(format!("{error:?}"))
-                            })? {
-                                orphan_participants.entry(durable.identity).or_default()
-                                    .push(RangeId::new(durable.participant_range));
-                            }
-                        }
-                        for (identity, mut participants) in orphan_participants {
-                            participants.sort_unstable();
-                            participants.dedup();
-                            let primary_range = RangeId::new(identity.primary_range);
-                            let remote_primary_decision;
-                            let (primary, primary_decision) = if let Some(primary) = engines.get(&primary_range) {
-                                let decision = primary.primary_timestamp_decision(identity.start_ts)
-                                    .map_err(|error| TenantError::TimestampRecovery(format!("{error:?}")))?;
-                                (Some(primary), decision)
-                            } else {
-                                remote_primary_decision = recover_remote_timestamp_primary(remote.as_ref(), identity).await
-                                    .map_err(|error| TenantError::TimestampRecovery(format!("{error:?}")))?;
-                                (None, remote_primary_decision)
-                            };
-                            if primary_decision != crabka_pgexec::PrimaryTxnDecision::Pending {
-                                if primary.is_none() {
-                                    for range_id in participants {
-                                        let participant = engines.get(&range_id).ok_or_else(|| TenantError::TimestampRecovery(
-                                            format!("terminal participant r{range_id} is not hosted")
-                                        ))?;
-                                        if primary_decision == crabka_pgexec::PrimaryTxnDecision::Aborted {
-                                            participant.abort_timestamp_transaction_intents(identity.start_ts).await
-                                                .map_err(|error| TenantError::TimestampRecovery(format!("{error:?}")))?;
-                                        } else {
-                                            return Err(TenantError::TimestampRecovery(
-                                                "committed orphan lacks acknowledged primary operations".into(),
-                                            ));
-                                        }
-                                    }
-                                    continue;
-                                }
-                                let primary = primary.expect("checked hosted primary");
-                                let descriptor = primary.timestamp_transaction_descriptors()
-                                    .map_err(|error| TenantError::TimestampRecovery(format!("{error:?}")))?
-                                    .into_iter().find(|descriptor| descriptor.start_ts == identity.start_ts)
-                                    .ok_or_else(|| TenantError::TimestampRecovery("terminal primary descriptor disappeared".into()))?;
-                                for range_id in participants {
-                                    let participant = engines.get(&range_id).ok_or_else(|| TenantError::TimestampRecovery(
-                                        format!("terminal participant r{range_id} is not hosted")
-                                    ))?;
-                                    if primary_decision == crabka_pgexec::PrimaryTxnDecision::Aborted {
-                                        participant.abort_timestamp_transaction_intents(identity.start_ts).await
-                                            .map_err(|error| TenantError::TimestampRecovery(format!("{error:?}")))?;
-                                        continue;
-                                    }
-                                    let operations = descriptor.operations.iter().copied()
-                                        .filter(|operation| operation.range_id == range_id.as_u32())
-                                        .collect::<Vec<_>>();
-                                    participant.resolve_timestamp_transaction_operations(
-                                        range_id.as_u32(), identity, primary_decision, &operations,
-                                    ).await.map_err(|error| TenantError::TimestampRecovery(format!("{error:?}")))?;
-                                }
-                                continue;
-                            }
-                            let primary = primary.expect("pending decision requires hosted primary");
-                            let descriptor = crabka_pgexec::TimestampTxnDescriptor::begun(
-                                identity.start_ts, identity.global_xid,
-                                participants.iter().map(|range| range.as_u32()).collect(),
-                            );
-                            primary.begin_timestamp_transaction(&descriptor).await
-                                .map_err(|error| TenantError::TimestampRecovery(format!("{error:?}")))?;
-                            primary.decide_timestamp_transaction(
-                                identity.start_ts, crabka_pgexec::PrimaryTxnDecision::Aborted,
-                            ).await.map_err(|error| TenantError::TimestampRecovery(format!("{error:?}")))?;
-                            for range_id in participants {
-                                engines.get(&range_id).ok_or_else(|| TenantError::TimestampRecovery(
-                                    format!("orphan participant r{range_id} is not hosted")
-                                ))?.abort_timestamp_transaction_intents(identity.start_ts).await
-                                    .map_err(|error| TenantError::TimestampRecovery(format!("{error:?}")))?;
-                            }
-                        }
+                        recover_orphan_timestamp_participants(engines, remote).await?;
                         Ok(())
                     })
             })
@@ -1553,8 +1473,137 @@ fn recover_durable_timestamp_transactions(
     })
 }
 
+async fn recover_orphan_timestamp_participants(
+    engines: &BTreeMap<RangeId, SqlEngine>,
+    remote: Option<(&RangeRegistry, &FramedTcpClient)>,
+) -> Result<(), TenantError> {
+    let recovery_error =
+        |error: crabka_pgexec::ExecError| TenantError::TimestampRecovery(format!("{error:?}"));
+    let mut orphan_participants =
+        BTreeMap::<crabka_pgexec::TimestampTxnIdentity, Vec<RangeId>>::new();
+    for engine in engines.values() {
+        for durable in engine
+            .durable_timestamp_intent_identities()
+            .map_err(recovery_error)?
+        {
+            orphan_participants
+                .entry(durable.identity)
+                .or_default()
+                .push(RangeId::new(durable.participant_range));
+        }
+    }
+    for (identity, mut participants) in orphan_participants {
+        participants.sort_unstable();
+        participants.dedup();
+        let primary_range = RangeId::new(identity.primary_range);
+        let remote_primary_decision;
+        let (primary, primary_decision) = if let Some(primary) = engines.get(&primary_range) {
+            let decision = primary
+                .primary_timestamp_decision(identity.start_ts)
+                .map_err(recovery_error)?;
+            (Some(primary), decision)
+        } else {
+            remote_primary_decision = recover_remote_timestamp_primary(remote, identity)
+                .await
+                .map_err(recovery_error)?;
+            (None, remote_primary_decision)
+        };
+        if primary_decision != crabka_pgexec::PrimaryTxnDecision::Pending {
+            if primary.is_none() {
+                for range_id in participants {
+                    let participant = engines.get(&range_id).ok_or_else(|| {
+                        TenantError::TimestampRecovery(format!(
+                            "terminal participant r{range_id} is not hosted"
+                        ))
+                    })?;
+                    if primary_decision == crabka_pgexec::PrimaryTxnDecision::Aborted {
+                        participant
+                            .abort_timestamp_transaction_intents(identity.start_ts)
+                            .await
+                            .map_err(recovery_error)?;
+                    } else {
+                        return Err(TenantError::TimestampRecovery(
+                            "committed orphan lacks acknowledged primary operations".into(),
+                        ));
+                    }
+                }
+                continue;
+            }
+            let primary = primary.expect("checked hosted primary");
+            let descriptor = primary
+                .timestamp_transaction_descriptors()
+                .map_err(recovery_error)?
+                .into_iter()
+                .find(|descriptor| descriptor.start_ts == identity.start_ts)
+                .ok_or_else(|| {
+                    TenantError::TimestampRecovery("terminal primary descriptor disappeared".into())
+                })?;
+            for range_id in participants {
+                let participant = engines.get(&range_id).ok_or_else(|| {
+                    TenantError::TimestampRecovery(format!(
+                        "terminal participant r{range_id} is not hosted"
+                    ))
+                })?;
+                if primary_decision == crabka_pgexec::PrimaryTxnDecision::Aborted {
+                    participant
+                        .abort_timestamp_transaction_intents(identity.start_ts)
+                        .await
+                        .map_err(recovery_error)?;
+                    continue;
+                }
+                let operations = descriptor
+                    .operations
+                    .iter()
+                    .copied()
+                    .filter(|operation| operation.range_id == range_id.as_u32())
+                    .collect::<Vec<_>>();
+                participant
+                    .resolve_timestamp_transaction_operations(
+                        range_id.as_u32(),
+                        identity,
+                        primary_decision,
+                        &operations,
+                    )
+                    .await
+                    .map_err(recovery_error)?;
+            }
+            continue;
+        }
+        let primary = primary.expect("pending decision requires hosted primary");
+        let descriptor = crabka_pgexec::TimestampTxnDescriptor::begun(
+            identity.start_ts,
+            identity.global_xid,
+            participants.iter().map(|range| range.as_u32()).collect(),
+        );
+        primary
+            .begin_timestamp_transaction(&descriptor)
+            .await
+            .map_err(recovery_error)?;
+        primary
+            .decide_timestamp_transaction(
+                identity.start_ts,
+                crabka_pgexec::PrimaryTxnDecision::Aborted,
+            )
+            .await
+            .map_err(recovery_error)?;
+        for range_id in participants {
+            engines
+                .get(&range_id)
+                .ok_or_else(|| {
+                    TenantError::TimestampRecovery(format!(
+                        "orphan participant r{range_id} is not hosted"
+                    ))
+                })?
+                .abort_timestamp_transaction_intents(identity.start_ts)
+                .await
+                .map_err(recovery_error)?;
+        }
+    }
+    Ok(())
+}
+
 async fn recover_remote_timestamp_primary(
-    remote: Option<&(RangeRegistry, FramedTcpClient)>,
+    remote: Option<(&RangeRegistry, &FramedTcpClient)>,
     identity: crabka_pgexec::TimestampTxnIdentity,
 ) -> Result<crabka_pgexec::PrimaryTxnDecision, ExecError> {
     let (registry, client) = remote.ok_or_else(|| {
@@ -1607,7 +1656,7 @@ async fn recover_remote_timestamp_primary(
 }
 
 async fn recover_remote_timestamp_participant(
-    remote: Option<&(RangeRegistry, FramedTcpClient)>,
+    remote: Option<(&RangeRegistry, &FramedTcpClient)>,
     range_id: RangeId,
     identity: crabka_pgexec::TimestampTxnIdentity,
     decision: crabka_pgexec::PrimaryTxnDecision,
@@ -1984,8 +2033,10 @@ impl crabka_pgexec::RangeScanner for InProcessRangeScanner {
                 request.global_snapshot,
                 request.snapshot,
                 request.own_xid,
-                request.read_ts,
-                request.own_start_ts,
+                crabka_pgexec::TimestampScanOwner {
+                    read_ts: request.read_ts,
+                    own_start_ts: request.own_start_ts,
+                },
                 local_scan_interval(request.interval, segment.interval),
             )?;
             rows.extend(crabka_pgexec::scanner::apply_executable_scan_pushdown(
@@ -2470,7 +2521,7 @@ enum ExplicitTransactionGuard {
     Local {
         _guard: tokio::sync::OwnedMutexGuard<()>,
     },
-    Distributed(RemoteExplicitGateLease),
+    Distributed(Box<RemoteExplicitGateLease>),
 }
 
 #[derive(Debug, Clone)]
@@ -3350,7 +3401,7 @@ impl GatewaySession {
                 .await
                 .map_err(ForwardError::into_pg)?
             {
-                Some(lease) => Some(ExplicitTransactionGuard::Distributed(lease)),
+                Some(lease) => Some(ExplicitTransactionGuard::Distributed(Box::new(lease))),
                 None => Some(ExplicitTransactionGuard::Local {
                     _guard: self
                         .inner
@@ -4035,35 +4086,22 @@ impl GatewaySession {
             .table_for_timestamp_writes(&plan.writes)
             .map_err(ExecError::into_pg)?;
         let write_lease = {
-            let hidden_rowid_count = usize::from(table.sharding.is_some()) * plan.writes.len();
             let lease = coordinator
-                .allocate_timestamp_write_lease(hidden_rowid_count)
+                .allocate_timestamp_write_lease(plan.writes.len())
                 .await
                 .map_err(ExecError::into_pg)?;
-            if table.sharding.is_some() {
-                plan = coordinator
-                    .plan_timestamp_write_sql_with_rowids(statement, &lease.hidden_rowids)
-                    .map_err(ExecError::into_pg)?;
-            } else {
-                plan.commit_ops.clear();
-            }
+            plan = coordinator
+                .plan_timestamp_write_sql_with_rowids(statement, &lease.hidden_rowids)
+                .map_err(ExecError::into_pg)?;
             lease
         };
         let write_routes = timestamp_insert_write_routes(
             &self.current_serving()?.range_map,
             &table,
             statement,
-            plan.writes.len(),
+            &plan.writes,
         )?;
-        for ((mut write, range_id), rowid) in plan
-            .writes
-            .into_iter()
-            .zip(write_routes)
-            .zip(timestamp_insert_physical_rowids(statement, &table)?)
-        {
-            if let Some(rowid) = rowid {
-                write.rowid = rowid;
-            }
+        for (write, range_id) in plan.writes.into_iter().zip(write_routes) {
             writes_by_range.entry(range_id).or_default().push(write);
         }
         if writes_by_range
@@ -4877,14 +4915,13 @@ async fn cleanup_dropped_timestamp_session(
     Ok(())
 }
 
-/// Map each INSERT tuple to its physical owner from the same literal shard keys
-/// used by gateway routing. Timestamp writes receive sequence rowids, so routing
-/// them by those generated ids would silently disagree with the SQL shard key.
+/// Map each INSERT tuple to its physical owner. Hash-sharded tables use their
+/// declared literal shard keys; row-sharded tables use their leased hidden IDs.
 fn timestamp_insert_write_routes(
     range_map: &RangeMap,
     table: &crabka_pgcatalog::Table,
     statement: &str,
-    write_count: usize,
+    writes: &[crabka_pgexec::TimestampWrite],
 ) -> Result<Vec<RangeId>, PgError> {
     let lower = statement.trim_start().to_ascii_lowercase();
     let table_id = routing_table_id(&table.name);
@@ -4906,42 +4943,23 @@ fn timestamp_insert_write_routes(
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| map_error_to_pg(&error))?
     } else {
-        inserted_rowid_keys(&lower)?
-            .into_iter()
-            .map(|rowid| {
+        writes
+            .iter()
+            .map(|write| {
                 range_map
-                    .range_for_key(table_id, rowid)
+                    .range_for_key(table_id, write.rowid)
                     .map(|route| route.range_id)
             })
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| map_error_to_pg(&error))?
     };
-    if routes.len() != write_count {
+    if routes.len() != writes.len() {
         return Err(PgError::error(
             sqlstate::FEATURE_NOT_SUPPORTED,
             "timestamp scatter tuple routing did not match planned writes",
         ));
     }
     Ok(routes)
-}
-
-/// Row-range scans are partitioned by the durable row id. For literal `id`
-/// INSERTs, preserve that key in the scatter writes; hash ownership remains
-/// independent of sequence rowids and therefore leaves them unchanged.
-fn timestamp_insert_physical_rowids(
-    statement: &str,
-    table: &crabka_pgcatalog::Table,
-) -> Result<Vec<Option<u64>>, PgError> {
-    if table.sharding.is_some() {
-        let count = values_tuples(&statement.trim_start().to_ascii_lowercase()).count();
-        return Ok(vec![None; count]);
-    }
-    Ok(
-        inserted_rowid_keys(&statement.trim_start().to_ascii_lowercase())?
-            .into_iter()
-            .map(Some)
-            .collect(),
-    )
 }
 
 fn ensure_timestamp_scatter_is_supported(statement: &str) -> Result<(), PgError> {
@@ -5335,6 +5353,16 @@ fn route_sql_statement(
 
     if let Some(route) = route_hash_sharded_statement(range_map, catalog, sql, kind, table_ref)? {
         return Ok(route);
+    }
+
+    if kind == StatementKind::Dml && sql.starts_with("insert") {
+        return Ok(RouteTarget::scatter(
+            range_map
+                .ranges()
+                .iter()
+                .map(|range| range.range_id)
+                .collect(),
+        ));
     }
 
     let rowids = statement_rowid_keys(sql, kind)?;
@@ -6162,6 +6190,22 @@ mod tests {
     use crabka_pgkv::{Kv, MemKv};
 
     use super::*;
+
+    fn text_rows(results: &[QueryResult]) -> Vec<Vec<Option<String>>> {
+        let [QueryResult::Rows { rows, .. }] = results else {
+            panic!("expected one row result: {results:?}")
+        };
+        rows.iter()
+            .map(|row| {
+                row.iter()
+                    .map(|cell| {
+                        cell.as_ref()
+                            .map(|cell| String::from_utf8(cell.text.to_vec()).expect("UTF-8 cell"))
+                    })
+                    .collect()
+            })
+            .collect()
+    }
 
     #[test]
     fn timestamp_recovery_rehomes_predecessor_operations_by_active_hash_ownership() {
@@ -7267,7 +7311,7 @@ mod tests {
         recover_durable_timestamp_transactions(
             &engines,
             &recovery_map,
-            Some((registry, FramedTcpClient::default())),
+            Some((&registry, &FramedTcpClient::default())),
         )
         .expect("rN-only recovery settles through authenticated primary RPC");
 
@@ -7318,8 +7362,6 @@ mod tests {
             table.id,
         );
 
-        assert!(range0_versions.len() == 2);
-        assert!(range1_versions.len() == 1);
         let mut all_versions = range0_versions
             .into_iter()
             .chain(range1_versions)
@@ -7329,10 +7371,89 @@ mod tests {
         assert!(
             all_versions
                 == vec![
-                    TimestampVersion::new(1, 2),
-                    TimestampVersion::new(3, 4),
-                    TimestampVersion::new(5, 6)
+                    TimestampVersion::new(1, 3),
+                    TimestampVersion::new(4, 6),
+                    TimestampVersion::new(7, 9)
                 ]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn row_sharded_multi_row_insert_preserves_hidden_row_identity() {
+        let config = MultiRangeTenantConfig::from_boundaries(tenant(), "0,0:2").expect("range map");
+        let (gateway, _) = MultiRangeTenant::start(config).expect("tenant starts");
+        let mut session = gateway.connect();
+        session
+            .simple_query("CREATE TABLE agg_sales (region text, amount int4) SHARDED")
+            .await
+            .expect("create sharded table");
+
+        for statement in [
+            "INSERT INTO agg_sales VALUES \
+             ('west', 10), ('west', 20), ('east', 5), ('east', 5), ('north', 100)",
+            "INSERT INTO agg_sales VALUES ('west', 10), ('south', 7)",
+        ] {
+            session
+                .simple_query(statement)
+                .await
+                .expect("insert with repeated logical values");
+        }
+
+        let results = session
+            .simple_query("SELECT region, amount FROM agg_sales ORDER BY region, amount")
+            .await
+            .expect("scatter scan");
+        assert_eq!(
+            text_rows(&results),
+            vec![
+                vec![Some("east".into()), Some("5".into())],
+                vec![Some("east".into()), Some("5".into())],
+                vec![Some("north".into()), Some("100".into())],
+                vec![Some("south".into()), Some("7".into())],
+                vec![Some("west".into()), Some("10".into())],
+                vec![Some("west".into()), Some("10".into())],
+                vec![Some("west".into()), Some("20".into())],
+            ]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn row_sharded_insert_coerces_untyped_datetime_literals() {
+        let config = MultiRangeTenantConfig::from_boundaries(tenant(), "0,0:2").expect("range map");
+        let (gateway, _) = MultiRangeTenant::start(config).expect("tenant starts");
+        let mut session = gateway.connect();
+        session
+            .simple_query(
+                "CREATE TABLE dt_demo (\
+                     id int4, d date, tm time, ts timestamp, tz timestamptz, iv interval\
+                 ) SHARDED",
+            )
+            .await
+            .expect("create datetime table");
+        session
+            .simple_query(
+                "INSERT INTO dt_demo VALUES (\
+                     2, '2024-06-01', '08:00:00', '2024-06-01 08:00:00', \
+                     '2024-06-01 12:00:00+00', '2 hours'\
+                 )",
+            )
+            .await
+            .expect("insert untyped datetime literals");
+
+        let results = session
+            .simple_query("SELECT id, d, tm, ts, tz, iv FROM dt_demo")
+            .await
+            .expect("scatter scan");
+        assert_eq!(
+            text_rows(&results),
+            [vec![
+                Some("2".into()),
+                Some("2024-06-01".into()),
+                Some("08:00:00".into()),
+                Some("2024-06-01 08:00:00".into()),
+                Some("2024-06-01 12:00:00+00".into()),
+                Some("02:00:00".into()),
+            ]]
         );
     }
 

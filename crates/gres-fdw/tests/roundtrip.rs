@@ -171,7 +171,6 @@ fn protobuf_order_frame(schema_id: u32) -> Bytes {
 /// fetch via `block_in_place`, and the broker/registry tasks must run
 /// concurrently with the test body.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::too_many_lines)]
 async fn kafka_fdw_roundtrip_avro_and_raw_fallback() {
     let stack = KafkaStack::start().await;
 

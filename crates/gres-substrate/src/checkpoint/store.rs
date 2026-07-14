@@ -112,7 +112,7 @@ impl CheckpointStore for ObjectOpsCheckpointStore {
     async fn list(&self, prefix: &str) -> Result<Vec<CheckpointObject>, SubstrateError> {
         let mut listed = self
             .ops
-            .list(Some(&Path::from(prefix)))
+            .list(Some(Path::from(prefix)))
             .await
             .map_err(|error| map_object_error(&error))?
             .into_iter()

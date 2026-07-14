@@ -110,81 +110,145 @@ pub async fn reconcile(obj: Arc<GresTenant>, ctx: Arc<Context>) -> Result<Action
     .await
 }
 
-#[allow(clippy::too_many_lines)]
-async fn reconcile_inner(
-    obj: Arc<GresTenant>,
-    ctx: Arc<Context>,
-) -> Result<Action, ReconcileError> {
-    let ns = obj.namespace().unwrap_or_else(|| "default".into());
-    let name = obj.name_any();
-    let tenant_api: Api<GresTenant> = Api::namespaced(ctx.client.clone(), &ns);
+struct ReadyTenant {
+    namespace: String,
+    name: String,
+    tenant_api: Api<GresTenant>,
+    tenant_name: TenantName,
+    cluster: String,
+    bootstrap: String,
+    defaults: EffectiveDefaults,
+    kafka_sasl: bool,
+}
 
+enum TenantPreparation {
+    Ready(Box<ReadyTenant>),
+    Requeue(Action),
+}
+
+async fn prepare_tenant(
+    obj: &GresTenant,
+    ctx: &Context,
+) -> Result<TenantPreparation, ReconcileError> {
+    let namespace = obj.namespace().unwrap_or_else(|| "default".into());
+    let name = obj.name_any();
+    let tenant_api: Api<GresTenant> = Api::namespaced(ctx.client.clone(), &namespace);
     let tenant_name = match TenantName::try_from(name.as_str()) {
         Ok(name) => name,
-        Err(err) => {
+        Err(error) => {
             patch_status(
                 &tenant_api,
                 &name,
-                &obj,
-                "False",
-                "InvalidName",
-                &err.to_string(),
-                None,
-                preserved_lifecycle_state(&obj),
-                false,
+                obj,
+                &TenantStatusUpdate {
+                    status: "False",
+                    reason: "InvalidName",
+                    message: &error.to_string(),
+                    registry_version: None,
+                    lifecycle_phase: preserved_lifecycle_state(obj),
+                    advance_generation: false,
+                },
             )
             .await?;
-            return Ok(Action::requeue(Duration::from_mins(5)));
+            return Ok(TenantPreparation::Requeue(Action::requeue(
+                Duration::from_mins(5),
+            )));
         }
     };
-
-    let gres_api: Api<Gres> = Api::namespaced(ctx.client.clone(), &ns);
+    let gres_api: Api<Gres> = Api::namespaced(ctx.client.clone(), &namespace);
     let Some(gres) = gres_api.get_opt(&obj.spec.gres).await? else {
         patch_status(
             &tenant_api,
             &name,
-            &obj,
-            "False",
-            "GresNotFound",
-            "referenced Gres does not exist",
-            None,
-            preserved_lifecycle_state(&obj),
-            false,
+            obj,
+            &TenantStatusUpdate {
+                status: "False",
+                reason: "GresNotFound",
+                message: "referenced Gres does not exist",
+                registry_version: None,
+                lifecycle_phase: preserved_lifecycle_state(obj),
+                advance_generation: false,
+            },
         )
         .await?;
-        return Ok(Action::requeue(Duration::from_secs(30)));
+        return Ok(TenantPreparation::Requeue(Action::requeue(
+            Duration::from_secs(30),
+        )));
     };
-    let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &ns);
     let cluster = gres.spec.kafka_cluster.clone();
-    let kafka = kafka_api.get_opt(&cluster).await?;
-    let Some(bootstrap) = kafka.as_ref().and_then(internal_listener_bootstrap) else {
-        patch_status(
-            &tenant_api,
-            &name,
-            &obj,
-            "False",
-            "ClusterNotReady",
-            "referenced Kafka is not Ready or has no internal listener",
-            None,
-            preserved_lifecycle_state(&obj),
-            false,
-        )
-        .await?;
-        return Ok(Action::requeue(Duration::from_secs(30)));
+    let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &namespace);
+    let Some(kafka) = kafka_api.get_opt(&cluster).await? else {
+        patch_cluster_not_ready(&tenant_api, &name, obj).await?;
+        return Ok(TenantPreparation::Requeue(Action::requeue(
+            Duration::from_secs(30),
+        )));
     };
-
+    let Some(bootstrap) = internal_listener_bootstrap(&kafka) else {
+        patch_cluster_not_ready(&tenant_api, &name, obj).await?;
+        return Ok(TenantPreparation::Requeue(Action::requeue(
+            Duration::from_secs(30),
+        )));
+    };
     if obj.meta().deletion_timestamp.is_some() {
-        cleanup_tenant(&ctx, &cluster, &bootstrap, &tenant_name, &name).await;
+        cleanup_tenant(ctx, &cluster, &bootstrap, &tenant_name, &name).await;
         remove_finalizer(&tenant_api, &name).await?;
-        return Ok(Action::await_change());
+        return Ok(TenantPreparation::Requeue(Action::await_change()));
     }
-
-    if !has_finalizer(&obj) {
+    if !has_finalizer(obj) {
         add_finalizer(&tenant_api, &name).await?;
-        return Ok(Action::requeue(Duration::ZERO));
+        return Ok(TenantPreparation::Requeue(Action::requeue(Duration::ZERO)));
     }
+    Ok(TenantPreparation::Ready(Box::new(ReadyTenant {
+        namespace,
+        name,
+        tenant_api,
+        tenant_name,
+        cluster,
+        bootstrap,
+        defaults: effective_defaults(gres.spec.defaults.as_ref(), obj.spec.overrides.as_ref()),
+        kafka_sasl: kafka_internal_listener_requires_sasl(&kafka),
+    })))
+}
 
-    let defaults = effective_defaults(gres.spec.defaults.as_ref(), obj.spec.overrides.as_ref());
+async fn patch_cluster_not_ready(
+    tenant_api: &Api<GresTenant>,
+    name: &str,
+    obj: &GresTenant,
+) -> Result<(), ReconcileError> {
+    patch_status(
+        tenant_api,
+        name,
+        obj,
+        &TenantStatusUpdate {
+            status: "False",
+            reason: "ClusterNotReady",
+            message: "referenced Kafka is not Ready or has no internal listener",
+            registry_version: None,
+            lifecycle_phase: preserved_lifecycle_state(obj),
+            advance_generation: false,
+        },
+    )
+    .await
+}
+
+async fn reconcile_inner(
+    obj: Arc<GresTenant>,
+    ctx: Arc<Context>,
+) -> Result<Action, ReconcileError> {
+    let ready = match prepare_tenant(&obj, &ctx).await? {
+        TenantPreparation::Ready(ready) => ready,
+        TenantPreparation::Requeue(action) => return Ok(action),
+    };
+    let ReadyTenant {
+        namespace: ns,
+        name,
+        tenant_api,
+        tenant_name,
+        cluster,
+        bootstrap,
+        defaults,
+        kafka_sasl,
+    } = *ready;
     let wal_topic = wal_topic(&tenant_name);
     let spec_ranges = effective_ranges(&obj.spec.ranges)?;
     let cfg_topic = tenant_config_topic(&tenant_name);
@@ -212,9 +276,6 @@ async fn reconcile_inner(
         .as_ref()
         .map_or_else(|| requested_state(&obj), |record| record.state);
     let registry_version = current_record.as_ref().map(|record| record.record_version);
-    let kafka_sasl = kafka
-        .as_ref()
-        .is_some_and(kafka_internal_listener_requires_sasl);
     let range_control_enabled = tenant_ranges.len() > 1 || active_split.is_some();
     let range_tls_hash = if range_control_enabled {
         Some(reconcile_range_tls_secret(&ctx, &ns, &obj).await?)
@@ -224,94 +285,22 @@ async fn reconcile_inner(
     let reconcile_result: Result<Action, ReconcileError> = async {
         let admin_handle = ctx.admin_client_for(&cluster, &bootstrap).await?;
         let mut admin = admin_handle.lock().await;
-        let mut topic_specs = vec![
-            CreateTopicSpec {
-                name: cfg_topic.clone(),
-                partitions: 1,
-                replicas: defaults.wal_replication,
-                configs: BTreeMap::from([("cleanup.policy".to_string(), "compact".to_string())]),
+        let password = provision_tenant_resources(
+            &mut admin,
+            &TenantResourceConfig {
+                ctx: &ctx,
+                namespace: &ns,
+                obj: &obj,
+                name: &name,
+                tenant_name: &tenant_name,
+                tenant_ranges: &tenant_ranges,
+                config_topic: &cfg_topic,
+                defaults,
+                current_record: current_record.as_ref(),
+                lifecycle_state,
             },
-            CreateTopicSpec {
-                name: TENANT_REGISTRY_TOPIC.to_string(),
-                partitions: 1,
-                replicas: defaults.wal_replication,
-                configs: BTreeMap::from([("cleanup.policy".to_string(), "compact".to_string())]),
-            },
-        ];
-        if matches!(
-            lifecycle_state,
-            TenantState::Active | TenantState::ResumeRequested
-        ) {
-            let wal_generation = current_record
-                .as_ref()
-                .map_or(0, |record| record.wal_generation);
-            topic_specs.extend(tenant_ranges.iter().map(|range| CreateTopicSpec {
-                name: wal_topic_for_generation(&tenant_name, range.range_id, wal_generation),
-                partitions: 1,
-                replicas: defaults.wal_replication,
-                configs: BTreeMap::new(),
-            }));
-        }
-        let missing = missing_topics(&mut admin, &topic_specs).await?;
-        if !missing.is_empty() {
-            admin.create_topics(&missing, 30_000).await?;
-        }
-
-        let password = read_password_secret(&ctx, &ns, &obj.spec.password_secret_ref).await?;
-        let kafka_username = tenant_kafka_username(&tenant_name);
-        admin
-            .alter_user_scram_credentials_sha512(
-                &[ScramUpsertion {
-                    username: kafka_username.clone(),
-                    password: password.clone(),
-                    iterations: DEFAULT_SCRAM_ITERATIONS,
-                }],
-                &[],
-            )
-            .await?;
-
-        let principal = format!("User:{kafka_username}");
-        let desired_acls: std::collections::BTreeSet<_> =
-            tenant_acls(&principal, &tenant_name).into_iter().collect();
-        let current_acls: std::collections::BTreeSet<_> = admin
-            .describe_acls(&AclEntryFilter {
-                principal: Some(principal.clone()),
-                ..Default::default()
-            })
-            .await?
-            .into_iter()
-            .collect();
-        let (additions, deletions) = diff_acls(&current_acls, &desired_acls);
-        if !additions.is_empty() {
-            admin.create_acls(&additions).await?;
-        }
-        if !deletions.is_empty() {
-            let filters: Vec<_> = deletions.iter().map(entry_to_exact_filter).collect();
-            admin.delete_acls(&filters).await?;
-        }
-
-        // Publish stable Service DNS before writing those names into the range
-        // registry. Deployments may still be progressing, but clients never
-        // observe a registry endpoint whose Kubernetes object is absent.
-        let svc_api: Api<Service> = Api::namespaced(ctx.client.clone(), &ns);
-        cleanup_obsolete_range_resources(&ctx, &ns, &obj, current_record.as_ref(), &tenant_ranges)
-            .await?;
-        if tenant_ranges.len() > 1 {
-            apply_object(
-                &svc_api,
-                &front_door_service_name(&name),
-                &render_service(&obj)?,
-            )
-            .await?;
-        }
-        for range in &tenant_ranges {
-            apply_object(
-                &svc_api,
-                &range_service_name(&name, range.range_id),
-                &render_range_service(&obj, range.range_id)?,
-            )
-            .await?;
-        }
+        )
+        .await?;
         let record_version = match current_record.as_ref() {
             None => 1,
             Some(record) => record.record_version.checked_add(1).ok_or_else(|| {
@@ -363,14 +352,16 @@ async fn reconcile_inner(
                 &ctx,
                 &ns,
                 &obj,
-                &tenant_ranges,
-                &bootstrap,
-                &wal_topic,
-                &cfg_topic,
-                record.state,
-                kafka_sasl,
-                range_control_enabled,
-                range_tls_hash.as_deref(),
+                &ComputeDeploymentConfig {
+                    ranges: &tenant_ranges,
+                    bootstrap: &bootstrap,
+                    wal_topic: &wal_topic,
+                    config_topic: &cfg_topic,
+                    lifecycle_state: record.state,
+                    kafka_sasl,
+                    range_control_enabled,
+                    range_tls_hash: range_tls_hash.as_deref(),
+                },
             )
             .await?;
             return Ok(Action::requeue(LIFECYCLE_REQUEUE));
@@ -406,67 +397,24 @@ async fn reconcile_inner(
             record = current.clone();
         }
 
-        let policy_api: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), &ns);
-        let deployments_ready = reconcile_compute_deployments(
-            &ctx,
-            &ns,
-            &obj,
-            &tenant_ranges,
-            &bootstrap,
-            &wal_topic,
-            &cfg_topic,
-            record.state,
+        reconcile_compute_and_status(&ComputeStatusConfig {
+            ctx: &ctx,
+            namespace: &ns,
+            obj: &obj,
+            name: &name,
+            tenant_api: &tenant_api,
+            control: &control,
+            active_split: active_split.as_ref(),
+            tenant_ranges: &tenant_ranges,
+            bootstrap: &bootstrap,
+            wal_topic: &wal_topic,
+            config_topic: &cfg_topic,
+            record: &record,
             kafka_sasl,
             range_control_enabled,
-            range_tls_hash.as_deref(),
-        )
-        .await?;
-        if deployments_ready && let Some(operation) = active_split.as_ref() {
-            let mutation_client = operator_control_mutation_client(&ctx, &ns, &obj).await?;
-            if operation.phase == crabka_gres_control::SplitOperationPhase::Activated {
-                verify_target_topology_ready(&mutation_client, operation)
-                    .await
-                    .map_err(|error| ReconcileError::Malformed(error.to_string()))?;
-                reconcile_activated_cutover(&control, operation)
-                    .await
-                    .map_err(|error| ReconcileError::Malformed(error.to_string()))?;
-            } else {
-                reconcile_one_rpc_phase(&control, &mutation_client, operation)
-                    .await
-                    .map_err(|error| ReconcileError::Malformed(error.to_string()))?;
-            }
-            return Ok(Action::requeue(LIFECYCLE_REQUEUE));
-        }
-        apply_object(
-            &policy_api,
-            &network_policy_name(&name),
-            &render_range_compute_network_policy(&obj)?,
-        )
-        .await?;
-
-        let (status, reason, message, endpoint_ready) = if deployments_ready {
-            ("True", "Ready", "tenant in sync", true)
-        } else {
-            (
-                "False",
-                "ComputeProgressing",
-                "waiting for all range compute Deployments to become available",
-                false,
-            )
-        };
-        patch_status(
-            &tenant_api,
-            &name,
-            &obj,
-            status,
-            reason,
-            message,
-            Some(record.record_version),
-            record.state,
-            endpoint_ready,
-        )
-        .await?;
-        Ok(Action::requeue(LIFECYCLE_REQUEUE))
+            range_tls_hash: range_tls_hash.as_deref(),
+        })
+        .await
     }
     .await;
 
@@ -477,12 +425,14 @@ async fn reconcile_inner(
                 &tenant_api,
                 &name,
                 &obj,
-                "False",
-                "ReconcileFailed",
-                &error.to_string(),
-                registry_version,
-                lifecycle_state,
-                false,
+                &TenantStatusUpdate {
+                    status: "False",
+                    reason: "ReconcileFailed",
+                    message: &error.to_string(),
+                    registry_version,
+                    lifecycle_phase: lifecycle_state,
+                    advance_generation: false,
+                },
             )
             .await?;
             Err(error)
@@ -495,6 +445,215 @@ enum ParkingProgress {
     NotNeeded,
     DeletionPending,
     Complete,
+}
+
+struct TenantResourceConfig<'a> {
+    ctx: &'a Context,
+    namespace: &'a str,
+    obj: &'a GresTenant,
+    name: &'a str,
+    tenant_name: &'a TenantName,
+    tenant_ranges: &'a [GresTenantRangeSpec],
+    config_topic: &'a str,
+    defaults: EffectiveDefaults,
+    current_record: Option<&'a TenantRecord>,
+    lifecycle_state: TenantState,
+}
+
+async fn provision_tenant_resources(
+    admin: &mut tokio::sync::MutexGuard<'_, dyn crabka_client_admin::AdminClientLike + Send>,
+    config: &TenantResourceConfig<'_>,
+) -> Result<String, ReconcileError> {
+    let compact = BTreeMap::from([("cleanup.policy".to_string(), "compact".to_string())]);
+    let mut topic_specs = vec![
+        CreateTopicSpec {
+            name: config.config_topic.to_owned(),
+            partitions: 1,
+            replicas: config.defaults.wal_replication,
+            configs: compact.clone(),
+        },
+        CreateTopicSpec {
+            name: TENANT_REGISTRY_TOPIC.to_string(),
+            partitions: 1,
+            replicas: config.defaults.wal_replication,
+            configs: compact,
+        },
+    ];
+    if matches!(
+        config.lifecycle_state,
+        TenantState::Active | TenantState::ResumeRequested
+    ) {
+        let wal_generation = config
+            .current_record
+            .map_or(0, |record| record.wal_generation);
+        topic_specs.extend(config.tenant_ranges.iter().map(|range| CreateTopicSpec {
+            name: wal_topic_for_generation(config.tenant_name, range.range_id, wal_generation),
+            partitions: 1,
+            replicas: config.defaults.wal_replication,
+            configs: BTreeMap::new(),
+        }));
+    }
+    let missing = missing_topics(admin, &topic_specs).await?;
+    if !missing.is_empty() {
+        admin.create_topics(&missing, 30_000).await?;
+    }
+
+    let password = read_password_secret(
+        config.ctx,
+        config.namespace,
+        &config.obj.spec.password_secret_ref,
+    )
+    .await?;
+    let kafka_username = tenant_kafka_username(config.tenant_name);
+    admin
+        .alter_user_scram_credentials_sha512(
+            &[ScramUpsertion {
+                username: kafka_username.clone(),
+                password: password.clone(),
+                iterations: DEFAULT_SCRAM_ITERATIONS,
+            }],
+            &[],
+        )
+        .await?;
+
+    let principal = format!("User:{kafka_username}");
+    let desired_acls = tenant_acls(&principal, config.tenant_name)
+        .into_iter()
+        .collect();
+    let current_acls = admin
+        .describe_acls(&AclEntryFilter {
+            principal: Some(principal),
+            ..Default::default()
+        })
+        .await?
+        .into_iter()
+        .collect();
+    let (additions, deletions) = diff_acls(&current_acls, &desired_acls);
+    if !additions.is_empty() {
+        admin.create_acls(&additions).await?;
+    }
+    if !deletions.is_empty() {
+        let filters: Vec<_> = deletions.iter().map(entry_to_exact_filter).collect();
+        admin.delete_acls(&filters).await?;
+    }
+
+    // Publish stable Service DNS before writing those names into the range registry.
+    let svc_api: Api<Service> = Api::namespaced(config.ctx.client.clone(), config.namespace);
+    cleanup_obsolete_range_resources(
+        config.ctx,
+        config.namespace,
+        config.obj,
+        config.current_record,
+        config.tenant_ranges,
+    )
+    .await?;
+    if config.tenant_ranges.len() > 1 {
+        apply_object(
+            &svc_api,
+            &front_door_service_name(config.name),
+            &render_service(config.obj)?,
+        )
+        .await?;
+    }
+    for range in config.tenant_ranges {
+        apply_object(
+            &svc_api,
+            &range_service_name(config.name, range.range_id),
+            &render_range_service(config.obj, range.range_id)?,
+        )
+        .await?;
+    }
+    Ok(password)
+}
+
+struct ComputeStatusConfig<'a> {
+    ctx: &'a Context,
+    namespace: &'a str,
+    obj: &'a GresTenant,
+    name: &'a str,
+    tenant_api: &'a Api<GresTenant>,
+    control: &'a crate::context::GresControlHandle,
+    active_split: Option<&'a crabka_gres_control::SplitOperationRecord>,
+    tenant_ranges: &'a [GresTenantRangeSpec],
+    bootstrap: &'a str,
+    wal_topic: &'a str,
+    config_topic: &'a str,
+    record: &'a TenantRecord,
+    kafka_sasl: bool,
+    range_control_enabled: bool,
+    range_tls_hash: Option<&'a str>,
+}
+
+async fn reconcile_compute_and_status(
+    config: &ComputeStatusConfig<'_>,
+) -> Result<Action, ReconcileError> {
+    let deployments_ready = reconcile_compute_deployments(
+        config.ctx,
+        config.namespace,
+        config.obj,
+        &ComputeDeploymentConfig {
+            ranges: config.tenant_ranges,
+            bootstrap: config.bootstrap,
+            wal_topic: config.wal_topic,
+            config_topic: config.config_topic,
+            lifecycle_state: config.record.state,
+            kafka_sasl: config.kafka_sasl,
+            range_control_enabled: config.range_control_enabled,
+            range_tls_hash: config.range_tls_hash,
+        },
+    )
+    .await?;
+    if deployments_ready && let Some(operation) = config.active_split {
+        let mutation_client =
+            operator_control_mutation_client(config.ctx, config.namespace, config.obj).await?;
+        if operation.phase == crabka_gres_control::SplitOperationPhase::Activated {
+            verify_target_topology_ready(&mutation_client, operation)
+                .await
+                .map_err(|error| ReconcileError::Malformed(error.to_string()))?;
+            reconcile_activated_cutover(config.control, operation)
+                .await
+                .map_err(|error| ReconcileError::Malformed(error.to_string()))?;
+        } else {
+            reconcile_one_rpc_phase(config.control, &mutation_client, operation)
+                .await
+                .map_err(|error| ReconcileError::Malformed(error.to_string()))?;
+        }
+        return Ok(Action::requeue(LIFECYCLE_REQUEUE));
+    }
+
+    let policy_api: Api<NetworkPolicy> =
+        Api::namespaced(config.ctx.client.clone(), config.namespace);
+    apply_object(
+        &policy_api,
+        &network_policy_name(config.name),
+        &render_range_compute_network_policy(config.obj)?,
+    )
+    .await?;
+    let (status, reason, message, endpoint_ready) = if deployments_ready {
+        ("True", "Ready", "tenant in sync", true)
+    } else {
+        (
+            "False",
+            "ComputeProgressing",
+            "waiting for all range compute Deployments to become available",
+            false,
+        )
+    };
+    patch_status(
+        config.tenant_api,
+        config.name,
+        config.obj,
+        &TenantStatusUpdate {
+            status,
+            reason,
+            message,
+            registry_version: Some(config.record.record_version),
+            lifecycle_phase: config.record.state,
+            advance_generation: endpoint_ready,
+        },
+    )
+    .await?;
+    Ok(Action::requeue(LIFECYCLE_REQUEUE))
 }
 
 async fn reconcile_range_tls_secret(
@@ -541,19 +700,22 @@ async fn operator_control_mutation_client(
     Ok(MtlsRangeMutationClient::new(client))
 }
 
-#[allow(clippy::too_many_arguments)]
+struct ComputeDeploymentConfig<'a> {
+    ranges: &'a [GresTenantRangeSpec],
+    bootstrap: &'a str,
+    wal_topic: &'a str,
+    config_topic: &'a str,
+    lifecycle_state: TenantState,
+    kafka_sasl: bool,
+    range_control_enabled: bool,
+    range_tls_hash: Option<&'a str>,
+}
+
 async fn reconcile_compute_deployments(
     ctx: &Context,
     namespace: &str,
     obj: &GresTenant,
-    ranges: &[GresTenantRangeSpec],
-    bootstrap: &str,
-    wal_topic: &str,
-    config_topic: &str,
-    lifecycle_state: TenantState,
-    kafka_sasl: bool,
-    range_control_enabled: bool,
-    range_tls_hash: Option<&str>,
+    config: &ComputeDeploymentConfig<'_>,
 ) -> Result<bool, ReconcileError> {
     let dep_api: Api<Deployment> = Api::namespaced(ctx.client.clone(), namespace);
     let image = ctx
@@ -563,20 +725,22 @@ async fn reconcile_compute_deployments(
         .unwrap_or_else(|| DEFAULT_IMAGE.to_string());
     let tenant_name = obj.name_any();
     let mut all_ready = true;
-    for range in ranges {
+    for range in config.ranges {
         let deployment = render_deployment(
             obj,
             range,
-            ranges,
-            &image,
-            bootstrap,
-            wal_topic,
-            config_topic,
-            compute_replicas(lifecycle_state),
-            &ctx.config,
-            kafka_sasl,
-            range_control_enabled,
-            range_tls_hash,
+            &DeploymentRenderConfig {
+                all_ranges: config.ranges,
+                image: &image,
+                bootstrap: config.bootstrap,
+                wal_topic: config.wal_topic,
+                config_topic: config.config_topic,
+                replicas: compute_replicas(config.lifecycle_state),
+                operator_config: &ctx.config,
+                kafka_sasl: config.kafka_sasl,
+                range_control_enabled: config.range_control_enabled,
+                range_tls_hash: config.range_tls_hash,
+            },
         )?;
         apply_object(
             &dep_api,
@@ -1682,34 +1846,37 @@ fn render_range_service(obj: &GresTenant, range_id: u32) -> Result<Service, Reco
     }))?)
 }
 
-#[allow(clippy::too_many_arguments)]
+struct DeploymentRenderConfig<'a> {
+    all_ranges: &'a [GresTenantRangeSpec],
+    image: &'a str,
+    bootstrap: &'a str,
+    wal_topic: &'a str,
+    config_topic: &'a str,
+    replicas: i32,
+    operator_config: &'a crate::config::OperatorConfig,
+    kafka_sasl: bool,
+    range_control_enabled: bool,
+    range_tls_hash: Option<&'a str>,
+}
+
 fn render_deployment(
     obj: &GresTenant,
     range: &GresTenantRangeSpec,
-    all_ranges: &[GresTenantRangeSpec],
-    image: &str,
-    bootstrap: &str,
-    wal_topic: &str,
-    cfg_topic: &str,
-    replicas: i32,
-    operator_config: &crate::config::OperatorConfig,
-    kafka_sasl: bool,
-    range_control_enabled: bool,
-    range_tls_hash: Option<&str>,
+    config: &DeploymentRenderConfig<'_>,
 ) -> Result<Deployment, ReconcileError> {
     let name = obj.name_any();
     let selector = range_labels(obj, range.range_id);
     let host_ranges = host_ranges_arg(range.range_id);
-    let ranges = ranges_arg(all_ranges);
+    let ranges = ranges_arg(config.all_ranges);
     let mut args = vec![
         "--listen".to_owned(),
         format!("0.0.0.0:{COMPUTE_PORT}"),
         "--substrate-bootstrap".to_owned(),
-        bootstrap.to_owned(),
+        config.bootstrap.to_owned(),
         "--tenant".to_owned(),
         name.clone(),
     ];
-    if range_control_enabled {
+    if config.range_control_enabled {
         args.extend([
             "--ranges".to_owned(),
             ranges.clone(),
@@ -1731,28 +1898,28 @@ fn render_deployment(
             format!("CN={name}-operator"),
         ]);
     }
-    args.extend(checkpoint_runtime_args(operator_config)?);
+    args.extend(checkpoint_runtime_args(config.operator_config)?);
     let mut env = vec![
-        json!({ "name": "KAFKA_BOOTSTRAP_SERVERS", "value": bootstrap }),
+        json!({ "name": "KAFKA_BOOTSTRAP_SERVERS", "value": config.bootstrap }),
         json!({ "name": "GRES_TENANT", "value": name }),
-        json!({ "name": "GRES_WAL_TOPIC", "value": wal_topic }),
-        json!({ "name": "GRES_CONFIG_TOPIC", "value": cfg_topic }),
+        json!({ "name": "GRES_WAL_TOPIC", "value": config.wal_topic }),
+        json!({ "name": "GRES_CONFIG_TOPIC", "value": config.config_topic }),
         json!({ "name": "GRES_RANGES", "value": ranges }),
         json!({ "name": "GRES_HOST_RANGES", "value": host_ranges }),
     ];
-    if kafka_sasl {
+    if config.kafka_sasl {
         env.push(json!({ "name": "GRES_KAFKA_USERNAME", "value": format!("gres-{name}") }));
         env.push(json!({ "name": "GRES_KAFKA_PASSWORD", "valueFrom": { "secretKeyRef": { "name": obj.spec.password_secret_ref.name, "key": obj.spec.password_secret_ref.key } } }));
     }
-    if let Some(access_key) = &operator_config.gres_checkpoint_access_key_id {
+    if let Some(access_key) = &config.operator_config.gres_checkpoint_access_key_id {
         env.push(json!({ "name": "AWS_ACCESS_KEY_ID", "value": access_key }));
     }
-    if let Some(secret_key) = &operator_config.gres_checkpoint_secret_access_key {
+    if let Some(secret_key) = &config.operator_config.gres_checkpoint_secret_access_key {
         env.push(json!({ "name": "AWS_SECRET_ACCESS_KEY", "value": secret_key }));
     }
     let mut ports =
         vec![json!({ "name": "postgres", "containerPort": COMPUTE_PORT, "protocol": "TCP" })];
-    let (range_tls_mounts, range_tls_volumes) = if range_control_enabled {
+    let (range_tls_mounts, range_tls_volumes) = if config.range_control_enabled {
         ports.push(json!({ "name": "range", "containerPort": RANGE_PORT, "protocol": "TCP" }));
         (
             vec![json!({ "name": "range-tls", "mountPath": RANGE_TLS_DIR, "readOnly": true })],
@@ -1768,12 +1935,13 @@ fn render_deployment(
     } else {
         (Vec::new(), Vec::new())
     };
-    let pod_annotations = range_tls_hash
+    let pod_annotations = config
+        .range_tls_hash
         .map(|hash| BTreeMap::from([(RANGE_TLS_HASH_ANNOTATION.to_owned(), hash.to_owned())]));
     Ok(serde_json::from_value(json!({
         "metadata": { "name": deployment_name(&name, range.range_id), "namespace": obj.namespace(), "labels": meta_labels(obj), "ownerReferences": [owner_ref::<GresTenant>(obj)?] },
         "spec": {
-            "replicas": replicas,
+            "replicas": config.replicas,
             "selector": { "matchLabels": selector },
             "template": {
                 "metadata": { "labels": selector, "annotations": pod_annotations },
@@ -1781,7 +1949,7 @@ fn render_deployment(
                     "securityContext": { "runAsNonRoot": true, "runAsUser": 65532, "fsGroup": 65532 },
                     "containers": [{
                         "name": "gres",
-                        "image": image,
+                        "image": config.image,
                         "args": args,
                         "env": env,
                         "ports": ports,
@@ -1948,20 +2116,23 @@ async fn remove_finalizer(api: &Api<GresTenant>, name: &str) -> Result<(), Recon
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+struct TenantStatusUpdate<'a> {
+    status: &'a str,
+    reason: &'a str,
+    message: &'a str,
+    registry_version: Option<u64>,
+    lifecycle_phase: TenantState,
+    advance_generation: bool,
+}
+
 async fn patch_status(
     api: &Api<GresTenant>,
     name: &str,
     obj: &GresTenant,
-    status: &str,
-    reason: &str,
-    message: &str,
-    registry_version: Option<u64>,
-    lifecycle_phase: TenantState,
-    advance_generation: bool,
+    update: &TenantStatusUpdate<'_>,
 ) -> Result<(), ReconcileError> {
     const PGDOG_ACTIVE_GRACE_MS: u64 = 4_000;
-    let observed_generation = if advance_generation {
+    let observed_generation = if update.advance_generation {
         obj.meta().generation
     } else {
         obj.status.as_ref().and_then(|s| s.observed_generation)
@@ -1975,7 +2146,7 @@ async fn patch_status(
         .status
         .as_ref()
         .and_then(|status| status.pgdog_credential_grace_until_unix_ms);
-    let pgdog_grace = if lifecycle_phase == TenantState::Active {
+    let pgdog_grace = if update.lifecycle_phase == TenantState::Active {
         if previous_phase == Some("active") {
             existing_grace
         } else {
@@ -1994,12 +2165,12 @@ async fn patch_status(
     };
     let body = json!({
         "status": {
-            "conditions": [condition("Ready", status, reason, message)],
+            "conditions": [condition("Ready", update.status, update.reason, update.message)],
             "observedGeneration": observed_generation,
-            "ready": status == "True",
+            "ready": update.status == "True",
             "walTopic": tenant.as_ref().map(wal_topic),
-            "registryVersion": registry_version.or_else(|| obj.status.as_ref().and_then(|s| s.registry_version)),
-            "lifecyclePhase": lifecycle_phase.to_string(),
+            "registryVersion": update.registry_version.or_else(|| obj.status.as_ref().and_then(|s| s.registry_version)),
+            "lifecyclePhase": update.lifecycle_phase.to_string(),
             "pgdogCredentialGraceUntilUnixMs": pgdog_grace,
         }
     });
@@ -2037,6 +2208,10 @@ mod tests {
     use super::*;
     use crate::crd::{GresTenantSpec, SecretKeyRef};
 
+    fn fixture_password(prefix: &str, suffix: &str) -> String {
+        prefix.to_owned() + suffix
+    }
+
     #[derive(clap::Parser)]
     struct ConfigArgs {
         #[command(flatten)]
@@ -2059,6 +2234,35 @@ mod tests {
                 overrides: None,
             },
         )
+    }
+
+    fn render_test_deployment(
+        obj: &GresTenant,
+        range: &GresTenantRangeSpec,
+        all_ranges: &[GresTenantRangeSpec],
+        kafka_sasl: bool,
+        range_control_enabled: bool,
+        range_tls_hash: Option<&str>,
+    ) -> Deployment {
+        let operator_config = ConfigArgs::parse_from(["operator"]).config;
+        let wal_topic = format!("__gres_wal.tenant-a.r{}", range.range_id);
+        render_deployment(
+            obj,
+            range,
+            &DeploymentRenderConfig {
+                all_ranges,
+                image: "image",
+                bootstrap: "k:9092",
+                wal_topic: &wal_topic,
+                config_topic: "__gres_cfg.tenant-a",
+                replicas: 1,
+                operator_config: &operator_config,
+                kafka_sasl,
+                range_control_enabled,
+                range_tls_hash,
+            },
+        )
+        .expect("render deployment")
     }
 
     #[test]
@@ -2111,6 +2315,7 @@ mod tests {
     #[test]
     fn tenant_record_hashes_password_without_plaintext() {
         let obj = tenant();
+        let password = fixture_password("hunter", "2");
         let defaults = EffectiveDefaults {
             wal_replication: 1,
             checkpoint_frames: None,
@@ -2121,7 +2326,7 @@ mod tests {
         let record = build_tenant_record(
             &obj,
             &TenantName::try_from("tenant-a").unwrap(),
-            "hunter2",
+            &password,
             1,
             &defaults,
             None,
@@ -2132,43 +2337,32 @@ mod tests {
         )
         .unwrap();
         assert!(record.scram_verifier.starts_with("SCRAM-SHA-256$"));
-        assert!(!record.scram_verifier.contains("hunter2"));
+        assert!(!record.scram_verifier.contains(&password));
     }
 
     #[test]
-    fn plaintext_kafka_deployment_omits_sasl_credentials() {
+    fn kafka_deployment_credentials_follow_sasl_mode() {
         let mut obj = tenant();
         obj.metadata.namespace = Some("ns".into());
         obj.metadata.uid = Some("uid".into());
-        let deployment = render_deployment(
-            &obj,
-            &GresTenantRangeSpec {
-                range_id: 0,
-                end_key: None,
-            },
-            &[GresTenantRangeSpec {
-                range_id: 0,
-                end_key: None,
-            }],
-            "image",
-            "k:9092",
-            "__gres_wal.tenant-a.r0",
-            "__gres_cfg.tenant-a",
-            1,
-            &ConfigArgs::parse_from(["operator"]).config,
-            false,
-            false,
-            None,
-        )
-        .unwrap();
-        let json = serde_json::to_string(&deployment).unwrap();
-        assert!(!json.contains("secretKeyRef"));
-        assert!(!json.contains("GRES_KAFKA_PASSWORD"));
-        let args = deployment.spec.unwrap().template.spec.unwrap().containers[0]
-            .args
-            .clone()
-            .unwrap();
-        assert!(!args.iter().any(|arg| arg == "--ranges"));
+        let ranges = [GresTenantRangeSpec {
+            range_id: 0,
+            end_key: None,
+        }];
+
+        for kafka_sasl in [false, true] {
+            let deployment =
+                render_test_deployment(&obj, &ranges[0], &ranges, kafka_sasl, false, None);
+            let json = serde_json::to_string(&deployment).unwrap();
+            assert_eq!(json.contains("secretKeyRef"), kafka_sasl);
+            assert_eq!(json.contains("GRES_KAFKA_PASSWORD"), kafka_sasl);
+            assert!(!json.contains("hunter2"));
+            let args = deployment.spec.unwrap().template.spec.unwrap().containers[0]
+                .args
+                .clone()
+                .unwrap();
+            assert!(!args.iter().any(|arg| arg == "--ranges"));
+        }
     }
 
     #[test]
@@ -2180,21 +2374,14 @@ mod tests {
             range_id: 0,
             end_key: None,
         }];
-        let deployment = render_deployment(
+        let deployment = render_test_deployment(
             &obj,
             &ranges[0],
             &ranges,
-            "image",
-            "k:9092",
-            "__gres_wal.tenant-a.r0",
-            "__gres_cfg.tenant-a",
-            1,
-            &ConfigArgs::parse_from(["operator"]).config,
             false,
             true,
             Some("range-tls-hash"),
-        )
-        .unwrap();
+        );
         let container = &deployment
             .spec
             .as_ref()
@@ -2222,36 +2409,6 @@ mod tests {
     }
 
     #[test]
-    fn sasl_kafka_deployment_references_password_secret_without_plaintext() {
-        let mut obj = tenant();
-        obj.metadata.namespace = Some("ns".into());
-        obj.metadata.uid = Some("uid".into());
-        let ranges = [GresTenantRangeSpec {
-            range_id: 0,
-            end_key: None,
-        }];
-        let deployment = render_deployment(
-            &obj,
-            &ranges[0],
-            &ranges,
-            "image",
-            "k:9092",
-            "__gres_wal.tenant-a.r0",
-            "__gres_cfg.tenant-a",
-            1,
-            &ConfigArgs::parse_from(["operator"]).config,
-            true,
-            false,
-            None,
-        )
-        .unwrap();
-        let json = serde_json::to_string(&deployment).unwrap();
-        assert!(json.contains("GRES_KAFKA_PASSWORD"));
-        assert!(json.contains("secretKeyRef"));
-        assert!(!json.contains("hunter2"));
-    }
-
-    #[test]
     fn each_multi_range_deployment_hosts_only_its_own_range() {
         let mut obj = tenant();
         obj.metadata.namespace = Some("ns".into());
@@ -2270,21 +2427,14 @@ mod tests {
                 end_key: None,
             },
         ];
-        let deployment = render_deployment(
+        let deployment = render_test_deployment(
             &obj,
             &ranges[1],
             &ranges,
-            "image",
-            "k:9092",
-            "__gres_wal.tenant-a.r1",
-            "__gres_cfg.tenant-a",
-            1,
-            &ConfigArgs::parse_from(["operator"]).config,
             false,
             true,
             Some("range-tls-hash"),
-        )
-        .expect("render r1 deployment");
+        );
         let args = deployment
             .spec
             .expect("spec")

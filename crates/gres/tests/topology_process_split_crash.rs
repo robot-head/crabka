@@ -613,7 +613,7 @@ impl SplitWorkload {
             point,
             family: point.family(),
             pause_bound_ms: point.pause_bound_ms(),
-            operation_bound_ms: point.operation_bound_ms(),
+            operation_bound_ms: SplitKillPoint::operation_bound_ms(),
             restart_hosted_ranges: point.restart_hosted_ranges(),
             split_args,
             schema_version,
@@ -761,8 +761,7 @@ impl SplitKillPoint {
         }
     }
 
-    #[allow(clippy::unused_self)]
-    const fn operation_bound_ms(self) -> u128 {
+    const fn operation_bound_ms() -> u128 {
         240_000
     }
 
@@ -1120,7 +1119,7 @@ fn split_kill_points_define_restart_and_deadline_contracts() {
     for point in SplitKillPoint::ALL {
         assert_eq!(SplitKillPoint::parse(point.name()), Ok(point));
         assert!(point.pause_bound_ms() > 0);
-        assert!(point.operation_bound_ms() > point.pause_bound_ms());
+        assert!(SplitKillPoint::operation_bound_ms() > point.pause_bound_ms());
         assert!(!point.restart_hosted_ranges().is_empty());
     }
     assert!(SplitKillPoint::parse("retiring_after_journal_cas").is_err());
@@ -1202,10 +1201,15 @@ fn payload_ledger_parses_attempt_ack_and_recovered_ack() {
 "#,
     )
     .expect("strict payload ledger");
-    assert_eq!(parsed.attempts.len(), 2);
-    assert_eq!(parsed.acknowledged.len(), 2);
-    assert_eq!(parsed.recovered, 1);
-    assert_eq!(parsed.max_ack_gap_ms, 8);
+    assert_eq!(
+        (
+            parsed.attempts.len(),
+            parsed.acknowledged.len(),
+            parsed.recovered,
+            parsed.max_ack_gap_ms,
+        ),
+        (2, 2, 1, 8)
+    );
     assert!(!payload_ledger_has_ack_after(&parsed, 20));
     assert!(payload_ledger_has_ack_after(&parsed, 19));
 }
@@ -1235,12 +1239,16 @@ fn payload_ledger_rejects_incomplete_or_inconsistent_events() {
 
 #[test]
 fn payload_ledger_projects_each_table_to_its_sealed_successor() {
-    assert_eq!(successor_partition(50, 9), Ok(0));
-    assert_eq!(successor_partition(50, 10), Ok(2));
-    assert_eq!(successor_partition(50, 20), Ok(2));
-    assert_eq!(successor_partition(51, 16), Ok(3));
-    assert_eq!(successor_partition(51, 32), Ok(3));
-    assert_eq!(successor_partition(51, 15), Ok(2));
+    for (table_id, rowid, expected_range) in [
+        (50, 9, 0),
+        (50, 10, 2),
+        (50, 20, 2),
+        (51, 15, 2),
+        (51, 16, 3),
+        (51, 32, 3),
+    ] {
+        assert_eq!(successor_partition(table_id, rowid), Ok(expected_range));
+    }
     assert!(successor_partition(52, 1).is_err());
 }
 
@@ -1249,13 +1257,13 @@ fn payload_ledger_rejects_duplicate_ack_checksum_and_time_regression() {
     let duplicate = r#"{"kind":"attempt","provenance":"workload","table_id":50,"rowid":null,"seq":1,"checksum":"a","timestamp_ms":10}
 {"kind":"ack","provenance":"workload","table_id":50,"rowid":7,"seq":1,"checksum":"a","timestamp_ms":12}
 {"kind":"ack","provenance":"workload","table_id":50,"rowid":7,"seq":1,"checksum":"a","timestamp_ms":13}"#;
-    assert!(parse_payload_ledger(duplicate).is_err());
     let checksum = r#"{"kind":"attempt","provenance":"workload","table_id":50,"rowid":null,"seq":1,"checksum":"a","timestamp_ms":10}
 {"kind":"ack","provenance":"workload","table_id":50,"rowid":7,"seq":1,"checksum":"b","timestamp_ms":12}"#;
-    assert!(parse_payload_ledger(checksum).is_err());
     let regression = r#"{"kind":"attempt","provenance":"workload","table_id":50,"rowid":null,"seq":1,"checksum":"a","timestamp_ms":12}
 {"kind":"ack","provenance":"workload","table_id":50,"rowid":7,"seq":1,"checksum":"a","timestamp_ms":10}"#;
-    assert!(parse_payload_ledger(regression).is_err());
+    for invalid_ledger in [duplicate, checksum, regression] {
+        assert!(parse_payload_ledger(invalid_ledger).is_err());
+    }
 }
 
 #[test]
@@ -1277,19 +1285,23 @@ fn payload_ledger_is_parsed_only_after_fsync_and_close() {
 #[test]
 fn continuous_payload_workload_records_two_tables_and_fsyncs_every_event() {
     let script = split_payload_workload_script();
-    assert!(script.contains("table_id=50"));
-    assert!(script.contains("table_id=51"));
-    assert!(script.contains("kind=attempt"));
-    assert!(script.contains("kind=recovered_ack"));
+    for required_fragment in [
+        "table_id=50",
+        "table_id=51",
+        "kind=attempt",
+        "kind=recovered_ack",
+        "rowid=$((16 + table_seq))",
+        "live_ledger50",
+        "live_ledger51",
+        "WHERE id = $rowid",
+        "CRABKA_G8_RECOVERY_TIMEOUT",
+        "CRABKA_G8_RAW_RECOVERY",
+        "CRABKA_G8_WORKLOAD_SLEEP",
+        "CRABKA_G8_INSERT_TIMEOUT",
+    ] {
+        assert!(script.contains(required_fragment));
+    }
     assert!(script.matches("sync -d").count() >= 2);
-    assert!(script.contains("rowid=$((16 + table_seq))"));
-    assert!(script.contains("live_ledger50"));
-    assert!(script.contains("live_ledger51"));
-    assert!(script.contains("WHERE id = $rowid"));
-    assert!(script.contains("CRABKA_G8_RECOVERY_TIMEOUT"));
-    assert!(script.contains("CRABKA_G8_RAW_RECOVERY"));
-    assert!(script.contains("CRABKA_G8_WORKLOAD_SLEEP"));
-    assert!(script.contains("CRABKA_G8_INSERT_TIMEOUT"));
     let raw_wait = script
         .find("while [[ ! -e \"$CRABKA_G8_RAW_RECOVERY\"")
         .expect("seq=2 waits for exact raw authorization");
@@ -1356,10 +1368,18 @@ async fn control_observation_records_exact_forwarded_request_and_response() {
         .await
         .expect("fixture response");
     let recorded = observations.lock().await;
-    assert_eq!(recorded.len(), 1);
-    assert_eq!(recorded[0].endpoint, "127.0.0.1:9092");
-    assert_eq!(recorded[0].request, request);
-    assert_eq!(recorded[0].response, response);
+    let [observation] = recorded.as_slice() else {
+        panic!("expected exactly one control observation")
+    };
+    assert_eq!(
+        observation,
+        &ControlObservation {
+            endpoint: "127.0.0.1:9092".into(),
+            request,
+            response,
+            timestamp_ms: observation.timestamp_ms,
+        }
+    );
 }
 
 #[test]
@@ -1476,18 +1496,13 @@ fn every_receipt_fault_targets_one_exact_rpc_response() {
 
 #[test]
 fn crash_family_availability_bounds_are_strict_and_distinct() {
-    assert_eq!(
-        SplitKillPoint::MarkerClaimReceiptBeforeJournalCas.pause_bound_ms(),
-        25_000
-    );
-    assert_eq!(
-        SplitKillPoint::TenantCasBeforeJournalCas.pause_bound_ms(),
-        15_000
-    );
-    assert_eq!(
-        SplitKillPoint::RetiringBeforeDelete.pause_bound_ms(),
-        15_000
-    );
+    for (point, expected_bound_ms) in [
+        (SplitKillPoint::MarkerClaimReceiptBeforeJournalCas, 25_000),
+        (SplitKillPoint::TenantCasBeforeJournalCas, 15_000),
+        (SplitKillPoint::RetiringBeforeDelete, 15_000),
+    ] {
+        assert_eq!(point.pause_bound_ms(), expected_bound_ms);
+    }
 }
 
 #[test]
@@ -1508,90 +1523,144 @@ fn publication_and_early_retirement_predicates_retain_prologue_receipt() {
 
 #[test]
 fn marker_session_lifecycle_preserves_pending_state_until_prologue_or_crash() {
-    assert_eq!(
-        marker_session_action(true, false, false, SplitOperationPhase::Paused),
-        MarkerSessionAction::Keep,
-        "Markers response alone must leave the Pending session live"
-    );
-    assert_eq!(
-        marker_session_action(true, true, false, SplitOperationPhase::Paused),
-        MarkerSessionAction::DropAfterCrash,
-        "a pre-Prologue crash closes the dead connection without issuing SQL"
-    );
-    assert_eq!(
-        marker_session_action(true, false, true, SplitOperationPhase::Restored),
-        MarkerSessionAction::RollbackAfterPrologue,
-        "authenticated Prologue permits an explicit rollback"
-    );
+    for (crashed, prologue, phase, expected) in [
+        (
+            false,
+            false,
+            SplitOperationPhase::Paused,
+            MarkerSessionAction::Keep,
+        ),
+        (
+            true,
+            false,
+            SplitOperationPhase::Paused,
+            MarkerSessionAction::DropAfterCrash,
+        ),
+        (
+            false,
+            true,
+            SplitOperationPhase::Restored,
+            MarkerSessionAction::RollbackAfterPrologue,
+        ),
+    ] {
+        assert_eq!(
+            marker_session_action(true, crashed, prologue, phase),
+            expected
+        );
+    }
 }
 
 #[test]
 fn marker_rollback_accepts_only_the_post_publication_stale_session_rejection() {
-    assert!(is_expected_marker_rollback_rejection(
-        "0A000",
-        "range map changed; reconnect before issuing another statement"
-    ));
-    assert!(!is_expected_marker_rollback_rejection(
-        "XX000",
-        "range map changed; reconnect before issuing another statement"
-    ));
-    assert!(!is_expected_marker_rollback_rejection(
-        "0A000",
-        "unrelated feature rejection"
-    ));
+    for (sqlstate, message, expected) in [
+        (
+            "0A000",
+            "range map changed; reconnect before issuing another statement",
+            true,
+        ),
+        (
+            "XX000",
+            "range map changed; reconnect before issuing another statement",
+            false,
+        ),
+        ("0A000", "unrelated feature rejection", false),
+    ] {
+        assert_eq!(
+            is_expected_marker_rollback_rejection(sqlstate, message),
+            expected
+        );
+    }
 }
 
 #[test]
 fn ordinary_and_hash_workloads_share_kill_mapping_but_not_physical_contract() {
     for point in SplitKillPoint::ALL {
-        let ordinary = SplitWorkload::Ordinary.contract(point);
-        let hash = SplitWorkload::Hash.contract(point);
-        assert_eq!(ordinary.point, hash.point);
-        assert_eq!(ordinary.family, hash.family);
-        assert_eq!(ordinary.pause_bound_ms, hash.pause_bound_ms);
-        assert_eq!(ordinary.operation_bound_ms, hash.operation_bound_ms);
-        assert_eq!(ordinary.restart_hosted_ranges, hash.restart_hosted_ranges);
-        assert_eq!(ordinary.split_args, ["51", "16"]);
-        assert_eq!(hash.split_args, ["50", "0", "--bucket", "8"]);
-        assert_ne!(ordinary.schema_version, hash.schema_version);
-        assert_eq!(ordinary.physical_key_class, "primary_version");
-        assert_eq!(hash.physical_key_class, "hash_primary_version");
+        for (workload, split_args, schema_version, physical_key_class) in [
+            (
+                SplitWorkload::Ordinary,
+                vec!["51", "16"],
+                2,
+                "primary_version",
+            ),
+            (
+                SplitWorkload::Hash,
+                vec!["50", "0", "--bucket", "8"],
+                3,
+                "hash_primary_version",
+            ),
+        ] {
+            assert_eq!(
+                workload.contract(point),
+                SplitWorkloadContract {
+                    point,
+                    family: point.family(),
+                    pause_bound_ms: point.pause_bound_ms(),
+                    operation_bound_ms: SplitKillPoint::operation_bound_ms(),
+                    restart_hosted_ranges: point.restart_hosted_ranges(),
+                    split_args,
+                    schema_version,
+                    physical_key_class,
+                }
+            );
+        }
     }
 }
 
 #[test]
 fn split_workload_mode_is_explicit_and_fail_closed() {
-    assert_eq!(SplitWorkload::parse(None), Ok(SplitWorkload::Ordinary));
-    assert_eq!(
-        SplitWorkload::parse(Some("ordinary")),
-        Ok(SplitWorkload::Ordinary)
-    );
-    assert_eq!(SplitWorkload::parse(Some("hash")), Ok(SplitWorkload::Hash));
-    assert!(SplitWorkload::parse(Some("")).is_err());
-    assert!(SplitWorkload::parse(Some("HASH")).is_err());
-    assert_eq!(SplitWorkload::Ordinary.inter_insert_delay(), "0.02");
-    assert_eq!(SplitWorkload::Hash.inter_insert_delay(), "0.10");
-    assert_eq!(SplitWorkload::Ordinary.insert_timeout(), "1s");
-    assert_eq!(SplitWorkload::Hash.insert_timeout(), "10s");
+    for (value, expected) in [
+        (None, Ok(SplitWorkload::Ordinary)),
+        (Some("ordinary"), Ok(SplitWorkload::Ordinary)),
+        (Some("hash"), Ok(SplitWorkload::Hash)),
+    ] {
+        assert_eq!(SplitWorkload::parse(value), expected);
+    }
+    for invalid in ["", "HASH"] {
+        assert!(SplitWorkload::parse(Some(invalid)).is_err());
+    }
+    for (workload, expected_delay, expected_timeout) in [
+        (SplitWorkload::Ordinary, "0.02", "1s"),
+        (SplitWorkload::Hash, "0.10", "10s"),
+    ] {
+        assert_eq!(
+            (workload.inter_insert_delay(), workload.insert_timeout()),
+            (expected_delay, expected_timeout)
+        );
+    }
 }
 
 #[test]
 fn hash_schema_v3_pins_algorithm_corpus_and_boundary() {
     let evidence = HashAlgorithmEvidence::pinned();
-    assert_eq!(evidence.name, "fnv1a64-int4-be");
-    assert_eq!(evidence.offset_basis, 0xcbf2_9ce4_8422_2325);
-    assert_eq!(evidence.prime, 0x0100_0000_01b3);
-    assert_eq!(evidence.bucket_count, 16);
-    assert_eq!(evidence.corpus.len(), 16);
+    let corpus = [5, 2, 15, 12, 9, 6, 3, 0, 13, 10, 7, 4, 1, 14, 11, 8]
+        .into_iter()
+        .enumerate()
+        .map(|(logical_id, bucket)| HashCorpusEvidence {
+            logical_id: i32::try_from(logical_id).unwrap(),
+            bytes_hex: format!("{logical_id:08x}"),
+            bucket,
+        })
+        .collect();
     assert_eq!(
-        evidence
-            .corpus
-            .iter()
-            .map(|item| item.bucket)
-            .collect::<BTreeSet<_>>(),
-        (0..16).collect()
+        evidence,
+        HashAlgorithmEvidence {
+            name: "fnv1a64-int4-be",
+            offset_basis: 0xcbf2_9ce4_8422_2325,
+            prime: 0x0100_0000_01b3,
+            bucket_count: 16,
+            corpus,
+        }
     );
-    assert_eq!(HashBoundaryEvidence::pinned().receipt_bucket, 8);
+    assert_eq!(
+        HashBoundaryEvidence::pinned(),
+        HashBoundaryEvidence {
+            table_id: 50,
+            bucket: 8,
+            rowid: 0,
+            request_bucket: 8,
+            receipt_bucket: 8,
+        }
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2062,14 +2131,14 @@ struct HashPhysicalPayloadRow {
     source_revision: u64,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 struct HashCorpusEvidence {
     logical_id: i32,
     bytes_hex: String,
     bucket: u32,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 struct HashAlgorithmEvidence {
     name: &'static str,
     offset_basis: u64,
@@ -2099,7 +2168,7 @@ impl HashAlgorithmEvidence {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 struct HashBoundaryEvidence {
     table_id: u32,
     bucket: u32,
@@ -2642,8 +2711,38 @@ async fn direct_hash_payload_rows(
         .collect()
 }
 
+#[derive(Debug, PartialEq, Eq, Serialize)]
+struct PublicationAckEvidence {
+    post_publication_r2_ack: bool,
+    post_publication_r3_ack: bool,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+struct TopicPresenceEvidence {
+    predecessor_topic_absent: bool,
+    sentinel_topic_present: bool,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+struct VerificationProcessStatus {
+    new_source_pid_alive_at_verification: bool,
+    old_source_pid_alive: bool,
+    workload_process_group_alive: bool,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+struct ShutdownProcessStatus {
+    new_source_pid_alive: bool,
+    old_source_process_group_alive: bool,
+    new_source_process_group_alive: bool,
+}
+
 #[derive(Debug, Serialize)]
-#[allow(clippy::struct_excessive_bools)]
+struct WorkloadProcessStatus {
+    workload_process_reaped: bool,
+}
+
+#[derive(Debug, Serialize)]
 struct SplitCrashEvidence {
     schema_version: u32,
     evidence_id: String,
@@ -2666,11 +2765,11 @@ struct SplitCrashEvidence {
     kill_ms: u128,
     restart_ms: u128,
     publication_ms: u128,
-    post_publication_r2_ack: bool,
-    post_publication_r3_ack: bool,
-    predecessor_topic_absent: bool,
+    #[serde(flatten)]
+    publication_ack: PublicationAckEvidence,
+    #[serde(flatten)]
+    topic_presence: TopicPresenceEvidence,
     sentinel_topic: String,
-    sentinel_topic_present: bool,
     left_endpoint: String,
     right_endpoint: String,
     coordinator_endpoint: String,
@@ -2700,19 +2799,18 @@ struct SplitCrashEvidence {
     old_source_process_group: u32,
     new_source_process_group: u32,
     workload_process_group: u32,
-    new_source_pid_alive_at_verification: bool,
-    old_source_pid_alive: bool,
-    new_source_pid_alive: bool,
-    old_source_process_group_alive: bool,
-    new_source_process_group_alive: bool,
-    workload_process_group_alive: bool,
+    #[serde(flatten)]
+    verification_process_status: VerificationProcessStatus,
+    #[serde(flatten)]
+    shutdown_process_status: ShutdownProcessStatus,
     operation_revision: u64,
     operation_attempts: u32,
     tenant_record_version: u64,
     source_record_version: u64,
     retirement_source_generation: u64,
     retirement_successor_generations: Vec<(u32, u64)>,
-    workload_process_reaped: bool,
+    #[serde(flatten)]
+    workload_process_status: WorkloadProcessStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     hash_evidence: Option<HashEvidence>,
 }
@@ -2726,15 +2824,44 @@ struct TerminalOperationEvidence {
     marker_digest: String,
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-async fn verify_completed_split_case(
-    system: &ProcessHarness,
+fn terminal_operation_evidence(
+    operation: &crabka_gres_control::SplitOperationRecord,
+) -> TerminalOperationEvidence {
+    TerminalOperationEvidence {
+        manifest_key: operation
+            .evidence
+            .manifest_key
+            .clone()
+            .expect("terminal manifest key"),
+        covered_offset: operation
+            .evidence
+            .covered_offset
+            .expect("terminal covered offset"),
+        barrier_offset: operation
+            .evidence
+            .barrier_offset
+            .expect("terminal barrier offset"),
+        tail_sha256: operation
+            .evidence
+            .tail_sha256
+            .clone()
+            .expect("terminal tail digest"),
+        marker_digest: operation
+            .evidence
+            .marker_digest
+            .clone()
+            .expect("terminal marker digest"),
+    }
+}
+
+struct VerifyCompletedSplitCase<'a> {
+    system: &'a ProcessHarness,
     workload_mode: SplitWorkload,
     point: SplitKillPoint,
-    operation_id: &str,
-    ledger_path: &Path,
-    observations: &[ControlObservation],
-    delete_ledger: &DeleteLedger,
+    operation_id: &'a str,
+    ledger_path: &'a Path,
+    observations: &'a [ControlObservation],
+    delete_ledger: &'a DeleteLedger,
     old_pid: u32,
     new_pid: u32,
     old_source_process_group: u32,
@@ -2745,12 +2872,32 @@ async fn verify_completed_split_case(
     elapsed_ms: u128,
     workload_process_reaped: bool,
     workload_process_group: u32,
-    sentinel_topic: &str,
+    sentinel_topic: &'a str,
     pre_kill_predicate: SplitPredicateState,
     journal_receipt_expectations: Vec<JournalReceiptExpectation>,
     hash_before_snapshots: Vec<HashSnapshotEvidence>,
     hash_before_transactions: Vec<HashTransactionEvidence>,
-) -> SplitCrashEvidence {
+}
+
+struct VerifiedTerminalPayload {
+    payload_events: Vec<PayloadEvent>,
+    ledger: PayloadLedger,
+    expected: BTreeSet<PhysicalPayloadRow>,
+    direct_physical_rows: Vec<DirectScanEvidence>,
+    sql_rows: BTreeSet<PhysicalPayloadRow>,
+    hash_sql_logical: Vec<(u64, i32, i32, String)>,
+    publication_ack: PublicationAckEvidence,
+}
+
+async fn verify_terminal_payload(
+    system: &ProcessHarness,
+    workload_mode: SplitWorkload,
+    point: SplitKillPoint,
+    ledger_path: &Path,
+    kill_ms: u128,
+    restart_ms: u128,
+    publication_ms: u128,
+) -> VerifiedTerminalPayload {
     let payload_events = std::fs::read_to_string(ledger_path)
         .expect("read reopened payload ledger")
         .lines()
@@ -2779,19 +2926,27 @@ async fn verify_completed_split_case(
             .values()
             .any(|event| event.timestamp_ms > restart_ms)
     );
-    let post_publication_r2_ack = ledger.acknowledged.values().any(|event| {
-        event.provenance == PayloadProvenance::Workload
-            && event.timestamp_ms > publication_ms
-            && event.table_id == 50
-            && event.rowid.is_some_and(|rowid| rowid >= 16)
-    });
-    let post_publication_r3_ack = ledger.acknowledged.values().any(|event| {
-        event.provenance == PayloadProvenance::Workload
-            && event.timestamp_ms > publication_ms
-            && event.table_id == 51
-            && event.rowid.is_some_and(|rowid| rowid >= 16)
-    });
-    assert!(post_publication_r2_ack && post_publication_r3_ack);
+    let publication_ack = PublicationAckEvidence {
+        post_publication_r2_ack: ledger.acknowledged.values().any(|event| {
+            event.provenance == PayloadProvenance::Workload
+                && event.timestamp_ms > publication_ms
+                && event.table_id == 50
+                && event.rowid.is_some_and(|rowid| rowid >= 16)
+        }),
+        post_publication_r3_ack: ledger.acknowledged.values().any(|event| {
+            event.provenance == PayloadProvenance::Workload
+                && event.timestamp_ms > publication_ms
+                && event.table_id == 51
+                && event.rowid.is_some_and(|rowid| rowid >= 16)
+        }),
+    };
+    assert_eq!(
+        publication_ack,
+        PublicationAckEvidence {
+            post_publication_r2_ack: true,
+            post_publication_r3_ack: true,
+        }
+    );
 
     let expected = ledger
         .acknowledged
@@ -2825,18 +2980,7 @@ async fn verify_completed_split_case(
         .iter()
         .flat_map(|scan| scan.rows.iter().cloned())
         .collect::<BTreeSet<_>>();
-    let direct_missing = expected
-        .difference(&direct_union)
-        .cloned()
-        .collect::<Vec<_>>();
-    let direct_extra = direct_union
-        .difference(&expected)
-        .cloned()
-        .collect::<Vec<_>>();
-    assert!(
-        direct_missing.is_empty() && direct_extra.is_empty(),
-        "direct terminal hash union mismatch: missing={direct_missing:?} extra={direct_extra:?}"
-    );
+    assert_eq!(direct_union, expected, "direct terminal hash union");
 
     let sql = system.sql(0).await;
     let mut sql_rows = BTreeSet::new();
@@ -2864,13 +3008,30 @@ async fn verify_completed_split_case(
             });
         }
     }
-    let sql_missing = expected.difference(&sql_rows).cloned().collect::<Vec<_>>();
-    let sql_extra = sql_rows.difference(&expected).cloned().collect::<Vec<_>>();
-    assert!(
-        sql_missing.is_empty() && sql_extra.is_empty(),
-        "terminal SQL union mismatch: missing={sql_missing:?} extra={sql_extra:?}"
-    );
+    assert_eq!(sql_rows, expected, "terminal SQL union");
+    VerifiedTerminalPayload {
+        payload_events,
+        ledger,
+        expected,
+        direct_physical_rows,
+        sql_rows,
+        hash_sql_logical,
+        publication_ack,
+    }
+}
 
+struct VerifiedMarkers {
+    markers: Vec<crabka_gres_ranges::transport::WireInDoubtMarker>,
+    left: Vec<crabka_gres_ranges::transport::WireInDoubtMarker>,
+    right: Vec<crabka_gres_ranges::transport::WireInDoubtMarker>,
+    marker_digest: String,
+}
+
+fn verify_marker_receipts(
+    observations: &[ControlObservation],
+    workload_mode: SplitWorkload,
+    point: SplitKillPoint,
+) -> VerifiedMarkers {
     let marker_receipts = observations
         .iter()
         .filter_map(|observation| {
@@ -2935,42 +3096,209 @@ async fn verify_completed_split_case(
             .all(|item| right.iter().all(|other| item != other))
     );
     assert!(left.iter().chain(right).eq(markers.iter()));
+    VerifiedMarkers {
+        markers: markers.clone(),
+        left: left.clone(),
+        right: right.clone(),
+        marker_digest: marker_digest.clone(),
+    }
+}
 
+struct HashEvidenceInput<'a> {
+    workload_mode: SplitWorkload,
+    hash_after_snapshots: Vec<HashSnapshotEvidence>,
+    hash_sql_logical: Vec<(u64, i32, i32, String)>,
+    ledger: &'a PayloadLedger,
+    hash_before_snapshots: Vec<HashSnapshotEvidence>,
+    hash_before_transactions: Vec<HashTransactionEvidence>,
+    hash_after_transactions: Vec<HashTransactionEvidence>,
+    tenant: &'a TenantRecord,
+}
+
+fn build_hash_evidence(input: HashEvidenceInput<'_>) -> Option<HashEvidence> {
+    if input.workload_mode != SplitWorkload::Hash {
+        return None;
+    }
+    let mut latest =
+        BTreeMap::<(u32, i32, Option<i32>, Option<String>), HashRawSummaryEvidence>::new();
+    for snapshot in &input.hash_after_snapshots {
+        for record in &snapshot.records {
+            if record.summary.state != "committed" {
+                continue;
+            }
+            let key = (
+                record.summary.table_id,
+                record.summary.logical_id,
+                record.summary.seq,
+                record.summary.checksum.clone(),
+            );
+            if latest
+                .get(&key)
+                .is_none_or(|previous| previous.version < record.summary.version)
+            {
+                latest.insert(key, record.summary.clone());
+            }
+        }
+    }
+    let mut hash_sql_rows = input
+        .hash_sql_logical
+        .into_iter()
+        .map(|(table_id, logical_id, seq, checksum)| {
+            let physical = latest
+                .get(&(
+                    u32::try_from(table_id).expect("hash SQL table id"),
+                    logical_id,
+                    Some(seq),
+                    Some(checksum.clone()),
+                ))
+                .expect("SQL-visible hash row has raw physical record");
+            HashSqlRowEvidence {
+                table_id,
+                logical_id,
+                rowid: physical.rowid,
+                seq,
+                checksum,
+            }
+        })
+        .collect::<Vec<_>>();
+    hash_sql_rows.sort_by(|left, right| {
+        (
+            left.table_id,
+            left.logical_id,
+            left.rowid,
+            left.seq,
+            &left.checksum,
+        )
+            .cmp(&(
+                right.table_id,
+                right.logical_id,
+                right.rowid,
+                right.seq,
+                &right.checksum,
+            ))
+    });
+    let raw_projection = hash_sql_rows
+        .iter()
+        .map(|row| {
+            (
+                row.table_id,
+                row.logical_id,
+                row.rowid,
+                row.seq,
+                row.checksum.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut ack_projection = input
+        .ledger
+        .acknowledged
+        .values()
+        .map(|event| {
+            (
+                event.table_id,
+                i32::try_from(event.rowid.expect("hash ACK logical id"))
+                    .expect("hash logical id fits i32"),
+                i32::try_from(event.seq).expect("hash seq fits i32"),
+                event.checksum.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    ack_projection.sort();
+    let mut transactions = BTreeMap::new();
+    for transaction in input
+        .hash_before_transactions
+        .into_iter()
+        .chain(input.hash_after_transactions)
+    {
+        transactions.insert(transaction.raw_key_hex.clone(), transaction);
+    }
+    let algorithm = HashAlgorithmEvidence::pinned();
+    let left_corpus = latest
+        .values()
+        .filter(|row| is_hash_corpus_row(row) && row.bucket < 8)
+        .count();
+    let right_corpus = latest
+        .values()
+        .filter(|row| is_hash_corpus_row(row) && row.bucket >= 8)
+        .count();
+    assert!(
+        input.tenant.ranges.iter().any(|range| {
+            range.end_key.is_some_and(|boundary| {
+                boundary.table_id == 50 && boundary.bucket == Some(8) && boundary.rowid == 0
+            })
+        }),
+        "terminal registry receipt lost the hash bucket-8 boundary"
+    );
+    let mut snapshots = input.hash_before_snapshots;
+    snapshots.extend(input.hash_after_snapshots);
+    Some(HashEvidence {
+        corpus: algorithm.corpus.clone(),
+        algorithm,
+        boundary: HashBoundaryEvidence::pinned(),
+        snapshots,
+        sql_rows: hash_sql_rows,
+        transactions: transactions.into_values().collect(),
+        folds: HashFoldEvidence {
+            left_corpus,
+            right_corpus,
+            raw_after_sha256: sha256_bytes(
+                &serde_json::to_vec(&raw_projection).expect("raw hash fold"),
+            ),
+            sql_sha256: sha256_bytes(&serde_json::to_vec(&raw_projection).expect("SQL hash fold")),
+            ack_sha256: sha256_bytes(&serde_json::to_vec(&ack_projection).expect("ACK hash fold")),
+        },
+    })
+}
+
+struct VerifiedTerminalTopology {
+    operation: crabka_gres_control::SplitOperationRecord,
+    tenant: TenantRecord,
+    hash_after_snapshots: Vec<HashSnapshotEvidence>,
+    hash_after_transactions: Vec<HashTransactionEvidence>,
+    left_endpoint: String,
+    right_endpoint: String,
+    coordinator_endpoint: String,
+    left_wal_generation: u64,
+    right_wal_generation: u64,
+    terminal_layout: Vec<TerminalRangeEvidence>,
+    retirement_marker_digest: String,
+    retirement_source_generation: u64,
+    retirement_successor_generations: Vec<(u32, u64)>,
+}
+
+async fn verify_terminal_topology(
+    system: &ProcessHarness,
+    operation_id: &str,
+    marker_digest: &str,
+    workload_mode: SplitWorkload,
+) -> VerifiedTerminalTopology {
     let operation = load_operation(system, operation_id).await;
     assert_eq!(operation.phase, SplitOperationPhase::Completed);
     assert_eq!(
         operation.evidence.marker_digest.as_deref(),
-        Some(marker_digest.as_str())
+        Some(marker_digest)
     );
     let tenant = load_tenant(system).await;
-    let (mut hash_after_snapshots, hash_after_transactions) =
-        if workload_mode == SplitWorkload::Hash {
-            let active_ranges = tenant
-                .ranges
-                .iter()
-                .map(|range| (range.range_id, range.wal_generation))
-                .collect::<Vec<_>>();
-            collect_hash_snapshots(system, "after", &active_ranges).await
-        } else {
-            (Vec::new(), Vec::new())
-        };
+    let (hash_after_snapshots, hash_after_transactions) = if workload_mode == SplitWorkload::Hash {
+        let active_ranges = tenant
+            .ranges
+            .iter()
+            .map(|range| (range.range_id, range.wal_generation))
+            .collect::<Vec<_>>();
+        collect_hash_snapshots(system, "after", &active_ranges).await
+    } else {
+        (Vec::new(), Vec::new())
+    };
     let plan = operation.plan.as_ref().expect("sealed completed plan");
     assert_eq!(tenant.ranges, plan.target_layout);
-    let r2 = tenant
-        .ranges
-        .iter()
-        .find(|range| range.range_id == 2)
-        .expect("r2");
-    let r3 = tenant
-        .ranges
-        .iter()
-        .find(|range| range.range_id == 3)
-        .expect("r3");
-    let r0 = tenant
-        .ranges
-        .iter()
-        .find(|range| range.range_id == 0)
-        .expect("r0");
+    let range = |range_id| {
+        tenant
+            .ranges
+            .iter()
+            .find(|range| range.range_id == range_id)
+            .unwrap_or_else(|| panic!("r{range_id}"))
+    };
+    let (r0, r2, r3) = (range(0), range(2), range(3));
     assert_ne!(r2.endpoint, r3.endpoint);
     assert_eq!((r2.wal_generation, r3.wal_generation), (1, 1));
     let retirement = tenant
@@ -2979,23 +3307,64 @@ async fn verify_completed_split_case(
         .find(|retirement| retirement.operation_id == operation_id)
         .expect("retirement sidecar");
     assert_eq!(retirement.phase, RangeRetirementPhase::Parked);
-    assert_eq!(retirement.checkpoint.marker_digest, *marker_digest);
-    let terminal_layout = tenant
-        .ranges
-        .iter()
-        .map(|range| TerminalRangeEvidence {
-            range_id: range.range_id,
-            end_table_id: range.end_key.map(|end| end.table_id),
-            end_bucket: range.end_key.and_then(|end| end.bucket),
-            end_rowid: range.end_key.map(|end| end.rowid),
-            endpoint: range.endpoint.clone(),
-            wal_generation: range.wal_generation,
-        })
-        .collect::<Vec<_>>();
+    assert_eq!(retirement.checkpoint.marker_digest, marker_digest);
+    VerifiedTerminalTopology {
+        terminal_layout: tenant
+            .ranges
+            .iter()
+            .map(|range| TerminalRangeEvidence {
+                range_id: range.range_id,
+                end_table_id: range.end_key.map(|end| end.table_id),
+                end_bucket: range.end_key.and_then(|end| end.bucket),
+                end_rowid: range.end_key.map(|end| end.rowid),
+                endpoint: range.endpoint.clone(),
+                wal_generation: range.wal_generation,
+            })
+            .collect(),
+        left_endpoint: r2.endpoint.clone(),
+        right_endpoint: r3.endpoint.clone(),
+        coordinator_endpoint: r0.endpoint.clone(),
+        left_wal_generation: r2.wal_generation,
+        right_wal_generation: r3.wal_generation,
+        retirement_marker_digest: retirement.checkpoint.marker_digest.clone(),
+        retirement_source_generation: retirement.source_generation,
+        retirement_successor_generations: retirement.successor_ranges.clone(),
+        operation,
+        tenant,
+        hash_after_snapshots,
+        hash_after_transactions,
+    }
+}
 
-    let mut admin = crabka_client_admin::AdminClient::connect(&[system.bootstrap().to_owned()])
-        .await
-        .expect("terminal topic admin");
+struct TerminalEnvironmentInput<'a> {
+    system: &'a ProcessHarness,
+    point: SplitKillPoint,
+    operation_id: &'a str,
+    sentinel_topic: &'a str,
+    delete_ledger: &'a DeleteLedger,
+    old_pid: u32,
+    new_pid: u32,
+    old_source_process_group: u32,
+    new_source_process_group: u32,
+    workload_process_group: u32,
+    workload_process_reaped: bool,
+    elapsed_ms: u128,
+}
+
+struct VerifiedTerminalEnvironment {
+    topic_presence: TopicPresenceEvidence,
+    topology_topics: Vec<String>,
+    evidence_id: String,
+    verification_process_status: VerificationProcessStatus,
+}
+
+async fn verify_terminal_environment(
+    input: &TerminalEnvironmentInput<'_>,
+) -> VerifiedTerminalEnvironment {
+    let mut admin =
+        crabka_client_admin::AdminClient::connect(&[input.system.bootstrap().to_owned()])
+            .await
+            .expect("terminal topic admin");
     let topics = admin
         .metadata(&[])
         .await
@@ -3005,27 +3374,155 @@ async fn verify_completed_split_case(
         .filter(|topic| topic.error.is_none())
         .map(|topic| topic.name)
         .collect::<BTreeSet<_>>();
-    let predecessor_topic = format!("__gres_wal.{}.r1", system.tenant());
-    let predecessor_topic_absent = !topics.contains(&predecessor_topic);
-    let sentinel_topic_present = topics.contains(sentinel_topic);
-    assert!(predecessor_topic_absent);
-    assert!(sentinel_topic_present);
-    assert!(topics.contains(&format!("__gres_wal.{}.r0", system.tenant())));
-    assert!(topics.contains(&format!("__gres_wal.{}.r2.g0000000001", system.tenant())));
-    assert!(topics.contains(&format!("__gres_wal.{}.r3.g0000000001", system.tenant())));
-    assert_eq!(delete_ledger.exact_calls, 1);
-    assert!(!delete_ledger.unrelated_attempted);
-    assert_ne!(old_pid, new_pid);
-    assert!(workload_process_reaped);
-    assert!(elapsed_ms < point.operation_bound_ms());
-    let topology_topics = topics
-        .iter()
-        .filter(|topic| {
-            topic.starts_with(&format!("__gres_wal.{}.", system.tenant()))
-                || *topic == sentinel_topic
-        })
-        .cloned()
-        .collect();
+    let topic_presence = TopicPresenceEvidence {
+        predecessor_topic_absent: !topics
+            .contains(&format!("__gres_wal.{}.r1", input.system.tenant())),
+        sentinel_topic_present: topics.contains(input.sentinel_topic),
+    };
+    assert_eq!(
+        topic_presence,
+        TopicPresenceEvidence {
+            predecessor_topic_absent: true,
+            sentinel_topic_present: true,
+        }
+    );
+    for topic in [
+        format!("__gres_wal.{}.r0", input.system.tenant()),
+        format!("__gres_wal.{}.r2.g0000000001", input.system.tenant()),
+        format!("__gres_wal.{}.r3.g0000000001", input.system.tenant()),
+    ] {
+        assert!(topics.contains(&topic), "missing terminal topic {topic}");
+    }
+    assert_eq!(input.delete_ledger.exact_calls, 1);
+    assert!(!input.delete_ledger.unrelated_attempted);
+    assert_ne!(input.old_pid, input.new_pid);
+    assert!(input.workload_process_reaped);
+    assert!(input.elapsed_ms < SplitKillPoint::operation_bound_ms());
+    let verification_process_status = VerificationProcessStatus {
+        old_source_pid_alive: process_exists(input.old_pid),
+        new_source_pid_alive_at_verification: process_exists(input.new_pid),
+        workload_process_group_alive: process_group_exists(input.workload_process_group),
+    };
+    assert_eq!(
+        verification_process_status,
+        VerificationProcessStatus {
+            new_source_pid_alive_at_verification: true,
+            old_source_pid_alive: false,
+            workload_process_group_alive: false,
+        }
+    );
+    assert!(!process_group_exists(input.old_source_process_group));
+    assert!(process_group_exists(input.new_source_process_group));
+    VerifiedTerminalEnvironment {
+        topology_topics: topics
+            .into_iter()
+            .filter(|topic| {
+                topic.starts_with(&format!("__gres_wal.{}.", input.system.tenant()))
+                    || topic == input.sentinel_topic
+            })
+            .collect(),
+        evidence_id: sha256_bytes(
+            format!(
+                "{}\0{}\0{}\0{}",
+                family_name(input.point.family()),
+                input.point.name(),
+                input.system.tenant(),
+                input.operation_id
+            )
+            .as_bytes(),
+        ),
+        topic_presence,
+        verification_process_status,
+    }
+}
+
+async fn verify_completed_split_case(input: VerifyCompletedSplitCase<'_>) -> SplitCrashEvidence {
+    let VerifyCompletedSplitCase {
+        system,
+        workload_mode,
+        point,
+        operation_id,
+        ledger_path,
+        observations,
+        delete_ledger,
+        old_pid,
+        new_pid,
+        old_source_process_group,
+        new_source_process_group,
+        kill_ms,
+        restart_ms,
+        publication_ms,
+        elapsed_ms,
+        workload_process_reaped,
+        workload_process_group,
+        sentinel_topic,
+        pre_kill_predicate,
+        journal_receipt_expectations,
+        hash_before_snapshots,
+        hash_before_transactions,
+    } = input;
+    let VerifiedTerminalPayload {
+        payload_events,
+        ledger,
+        expected,
+        direct_physical_rows,
+        sql_rows,
+        hash_sql_logical,
+        publication_ack,
+    } = verify_terminal_payload(
+        system,
+        workload_mode,
+        point,
+        ledger_path,
+        kill_ms,
+        restart_ms,
+        publication_ms,
+    )
+    .await;
+    let VerifiedMarkers {
+        markers,
+        left,
+        right,
+        marker_digest,
+    } = verify_marker_receipts(observations, workload_mode, point);
+
+    let VerifiedTerminalTopology {
+        operation,
+        tenant,
+        hash_after_snapshots,
+        hash_after_transactions,
+        left_endpoint,
+        right_endpoint,
+        coordinator_endpoint,
+        left_wal_generation,
+        right_wal_generation,
+        terminal_layout,
+        retirement_marker_digest,
+        retirement_source_generation,
+        retirement_successor_generations,
+    } = verify_terminal_topology(system, operation_id, &marker_digest, workload_mode).await;
+    let plan = operation.plan.as_ref().expect("sealed completed plan");
+
+    let VerifiedTerminalEnvironment {
+        topic_presence,
+        topology_topics,
+        evidence_id,
+        verification_process_status,
+    } = verify_terminal_environment(&TerminalEnvironmentInput {
+        system,
+        point,
+        operation_id,
+        sentinel_topic,
+        delete_ledger,
+        old_pid,
+        new_pid,
+        old_source_process_group,
+        new_source_process_group,
+        workload_process_group,
+        workload_process_reaped,
+        elapsed_ms,
+    })
+    .await;
     let marker_identity =
         |marker: &crabka_gres_ranges::transport::WireInDoubtMarker| MarkerIdentityEvidence {
             transaction_id: marker.transaction_id,
@@ -3037,159 +3534,16 @@ async fn verify_completed_split_case(
     let left_markers = left.iter().map(marker_identity).collect::<Vec<_>>();
     let right_markers = right.iter().map(marker_identity).collect::<Vec<_>>();
     let authenticated_receipts = receipt_replay_evidence(observations);
-    let evidence_id = sha256_bytes(
-        format!(
-            "{}\0{}\0{}\0{}",
-            family_name(point.family()),
-            point.name(),
-            system.tenant(),
-            operation_id
-        )
-        .as_bytes(),
-    );
-    let old_source_pid_alive = process_exists(old_pid);
-    let new_source_pid_alive_at_verification = process_exists(new_pid);
-    let workload_process_group_alive = process_group_exists(workload_process_group);
-    assert!(!old_source_pid_alive);
-    assert!(new_source_pid_alive_at_verification);
-    assert!(!process_group_exists(old_source_process_group));
-    assert!(process_group_exists(new_source_process_group));
-    assert!(!workload_process_group_alive);
-
-    let hash_evidence = if workload_mode == SplitWorkload::Hash {
-        let mut latest =
-            BTreeMap::<(u32, i32, Option<i32>, Option<String>), HashRawSummaryEvidence>::new();
-        for snapshot in &hash_after_snapshots {
-            for record in &snapshot.records {
-                if record.summary.state != "committed" {
-                    continue;
-                }
-                let key = (
-                    record.summary.table_id,
-                    record.summary.logical_id,
-                    record.summary.seq,
-                    record.summary.checksum.clone(),
-                );
-                if latest
-                    .get(&key)
-                    .is_none_or(|previous| previous.version < record.summary.version)
-                {
-                    latest.insert(key, record.summary.clone());
-                }
-            }
-        }
-        let mut hash_sql_rows = hash_sql_logical
-            .into_iter()
-            .map(|(table_id, logical_id, seq, checksum)| {
-                let physical = latest
-                    .get(&(
-                        u32::try_from(table_id).expect("hash SQL table id"),
-                        logical_id,
-                        Some(seq),
-                        Some(checksum.clone()),
-                    ))
-                    .expect("SQL-visible hash row has raw physical record");
-                HashSqlRowEvidence {
-                    table_id,
-                    logical_id,
-                    rowid: physical.rowid,
-                    seq,
-                    checksum,
-                }
-            })
-            .collect::<Vec<_>>();
-        hash_sql_rows.sort_by(|left, right| {
-            (
-                left.table_id,
-                left.logical_id,
-                left.rowid,
-                left.seq,
-                &left.checksum,
-            )
-                .cmp(&(
-                    right.table_id,
-                    right.logical_id,
-                    right.rowid,
-                    right.seq,
-                    &right.checksum,
-                ))
-        });
-        let raw_projection = hash_sql_rows
-            .iter()
-            .map(|row| {
-                (
-                    row.table_id,
-                    row.logical_id,
-                    row.rowid,
-                    row.seq,
-                    row.checksum.clone(),
-                )
-            })
-            .collect::<Vec<_>>();
-        let mut ack_projection = ledger
-            .acknowledged
-            .values()
-            .map(|event| {
-                (
-                    event.table_id,
-                    i32::try_from(event.rowid.expect("hash ACK logical id"))
-                        .expect("hash logical id fits i32"),
-                    i32::try_from(event.seq).expect("hash seq fits i32"),
-                    event.checksum.clone(),
-                )
-            })
-            .collect::<Vec<_>>();
-        ack_projection.sort();
-        let mut transactions = BTreeMap::new();
-        for transaction in hash_before_transactions
-            .into_iter()
-            .chain(hash_after_transactions)
-        {
-            transactions.insert(transaction.raw_key_hex.clone(), transaction);
-        }
-        let algorithm = HashAlgorithmEvidence::pinned();
-        let left_corpus = latest
-            .values()
-            .filter(|row| is_hash_corpus_row(row) && row.bucket < 8)
-            .count();
-        let right_corpus = latest
-            .values()
-            .filter(|row| is_hash_corpus_row(row) && row.bucket >= 8)
-            .count();
-        assert!(
-            tenant.ranges.iter().any(|range| {
-                range.end_key.is_some_and(|boundary| {
-                    boundary.table_id == 50 && boundary.bucket == Some(8) && boundary.rowid == 0
-                })
-            }),
-            "terminal registry receipt lost the hash bucket-8 boundary"
-        );
-        let mut snapshots = hash_before_snapshots;
-        snapshots.append(&mut hash_after_snapshots);
-        Some(HashEvidence {
-            corpus: algorithm.corpus.clone(),
-            algorithm,
-            boundary: HashBoundaryEvidence::pinned(),
-            snapshots,
-            sql_rows: hash_sql_rows,
-            transactions: transactions.into_values().collect(),
-            folds: HashFoldEvidence {
-                left_corpus,
-                right_corpus,
-                raw_after_sha256: sha256_bytes(
-                    &serde_json::to_vec(&raw_projection).expect("raw hash fold"),
-                ),
-                sql_sha256: sha256_bytes(
-                    &serde_json::to_vec(&raw_projection).expect("SQL hash fold"),
-                ),
-                ack_sha256: sha256_bytes(
-                    &serde_json::to_vec(&ack_projection).expect("ACK hash fold"),
-                ),
-            },
-        })
-    } else {
-        None
-    };
+    let hash_evidence = build_hash_evidence(HashEvidenceInput {
+        workload_mode,
+        hash_after_snapshots,
+        hash_sql_logical,
+        ledger: &ledger,
+        hash_before_snapshots,
+        hash_before_transactions,
+        hash_after_transactions,
+        tenant: &tenant,
+    });
 
     SplitCrashEvidence {
         schema_version: workload_mode.contract(point).schema_version,
@@ -3203,7 +3557,7 @@ async fn verify_completed_split_case(
         max_ack_gap_ms: ledger.max_ack_gap_ms,
         max_ack_gap_bound_ms: point.pause_bound_ms(),
         operation_elapsed_ms: elapsed_ms,
-        operation_bound_ms: point.operation_bound_ms(),
+        operation_bound_ms: SplitKillPoint::operation_bound_ms(),
         marker_count: markers.len(),
         left_marker_count: left.len(),
         right_marker_count: right.len(),
@@ -3213,16 +3567,14 @@ async fn verify_completed_split_case(
         kill_ms,
         restart_ms,
         publication_ms,
-        post_publication_r2_ack,
-        post_publication_r3_ack,
-        predecessor_topic_absent,
+        publication_ack,
+        topic_presence,
         sentinel_topic: sentinel_topic.to_owned(),
-        sentinel_topic_present,
-        left_endpoint: r2.endpoint.clone(),
-        right_endpoint: r3.endpoint.clone(),
-        coordinator_endpoint: r0.endpoint.clone(),
-        left_wal_generation: r2.wal_generation,
-        right_wal_generation: r3.wal_generation,
+        left_endpoint,
+        right_endpoint,
+        coordinator_endpoint,
+        left_wal_generation,
+        right_wal_generation,
         topology_topics,
         payload_events,
         reopened_oracle_rows: expected.iter().cloned().collect(),
@@ -3232,31 +3584,7 @@ async fn verify_completed_split_case(
         left_markers,
         right_markers,
         marker_response_digest: marker_digest.clone(),
-        terminal_operation_evidence: TerminalOperationEvidence {
-            manifest_key: operation
-                .evidence
-                .manifest_key
-                .clone()
-                .expect("terminal manifest key"),
-            covered_offset: operation
-                .evidence
-                .covered_offset
-                .expect("terminal covered offset"),
-            barrier_offset: operation
-                .evidence
-                .barrier_offset
-                .expect("terminal barrier offset"),
-            tail_sha256: operation
-                .evidence
-                .tail_sha256
-                .clone()
-                .expect("terminal tail digest"),
-            marker_digest: operation
-                .evidence
-                .marker_digest
-                .clone()
-                .expect("terminal marker digest"),
-        },
+        terminal_operation_evidence: terminal_operation_evidence(&operation),
         completed_phase: "completed".into(),
         terminal_layout,
         pre_kill_predicate,
@@ -3265,7 +3593,7 @@ async fn verify_completed_split_case(
             .marker_digest
             .clone()
             .expect("operation marker digest"),
-        retirement_marker_digest: retirement.checkpoint.marker_digest.clone(),
+        retirement_marker_digest,
         authenticated_receipts,
         journal_receipt_expectations,
         delete_attempts: delete_ledger.attempts.clone(),
@@ -3275,19 +3603,21 @@ async fn verify_completed_split_case(
         old_source_process_group,
         new_source_process_group,
         workload_process_group,
-        new_source_pid_alive_at_verification,
-        old_source_pid_alive,
-        new_source_pid_alive: true,
-        old_source_process_group_alive: process_group_exists(old_source_process_group),
-        new_source_process_group_alive: process_group_exists(new_source_process_group),
-        workload_process_group_alive,
+        verification_process_status,
+        shutdown_process_status: ShutdownProcessStatus {
+            new_source_pid_alive: true,
+            old_source_process_group_alive: process_group_exists(old_source_process_group),
+            new_source_process_group_alive: process_group_exists(new_source_process_group),
+        },
         operation_revision: operation.revision,
         operation_attempts: operation.attempts,
         tenant_record_version: tenant.record_version,
         source_record_version: plan.source_record_version,
-        retirement_source_generation: retirement.source_generation,
-        retirement_successor_generations: retirement.successor_ranges.clone(),
-        workload_process_reaped,
+        retirement_source_generation,
+        retirement_successor_generations,
+        workload_process_status: WorkloadProcessStatus {
+            workload_process_reaped,
+        },
         hash_evidence,
     }
 }
@@ -3691,10 +4021,17 @@ async fn reconcile_rpc_with_diagnostics(
     }
 }
 
-#[allow(clippy::too_many_lines)]
-async fn run_real_split_crash_case(point: SplitKillPoint, workload_mode: SplitWorkload) {
-    use std::os::unix::process::CommandExt as _;
+struct PreparedSplitSystem {
+    system: ProcessHarness,
+    marker_session: Option<MarkerSession>,
+    operation_id: String,
+    sentinel_topic: String,
+}
 
+async fn prepare_split_system(
+    point: SplitKillPoint,
+    workload_mode: SplitWorkload,
+) -> PreparedSplitSystem {
     assert!(
         cli_binary().is_file(),
         "build crabka CLI before live matrix"
@@ -3719,7 +4056,6 @@ async fn run_real_split_crash_case(point: SplitKillPoint, workload_mode: SplitWo
     } else {
         ProcessHarness::start_all_on_zero(&tenant).await
     };
-    let mut marker_session = None;
     let sentinel_topic = format!("g8-sentinel-{identity}");
     let mut sentinel_admin =
         crabka_client_admin::AdminClient::connect(&[system.bootstrap().to_owned()])
@@ -3773,55 +4109,75 @@ async fn run_real_split_crash_case(point: SplitKillPoint, workload_mode: SplitWo
         register_hash_split_layout(&system).await;
         system.restart_with_hosted_ranges(0, "r0,r1").await;
     }
-    if point.inject_marker_before_cli() {
-        marker_session = Some(
-            inject_pending_split_marker(&system)
-                .await
-                .expect("inject pre-CLI Pending marker"),
-        );
+    let marker_session = if point.inject_marker_before_cli() {
+        let marker = inject_pending_split_marker(&system)
+            .await
+            .expect("inject pre-CLI Pending marker");
         system.clear_commit_fault();
-    }
+        Some(marker)
+    } else {
+        None
+    };
     let seed_start = i32::from(workload_mode != SplitWorkload::Hash);
     for rowid in seed_start..16_i32 {
         for table in [50, 51] {
-            let sql = system.sql(0).await;
-            sql.simple_query(&format!(
-                "INSERT INTO live_ledger{table} VALUES ({rowid}, {}, 'seed-{table}-{rowid}')",
-                1_000_000 + rowid
-            ))
-            .await
-            .expect("seed static physical rowid");
+            system
+                .sql(0)
+                .await
+                .simple_query(&format!(
+                    "INSERT INTO live_ledger{table} VALUES ({rowid}, {}, 'seed-{table}-{rowid}')",
+                    1_000_000 + rowid
+                ))
+                .await
+                .expect("seed static physical rowid");
         }
     }
     if workload_mode == SplitWorkload::Hash {
         let sql = system.sql(0).await;
         sql.simple_query(
-            "BEGIN; \
-             INSERT INTO live_ledger50 VALUES (23, 1000023, 'seed-50-23'); \
-             INSERT INTO live_ledger50 VALUES (31, 1000031, 'seed-50-31'); \
-             COMMIT;",
+            "BEGIN; INSERT INTO live_ledger50 VALUES (23, 1000023, 'seed-50-23'); \
+             INSERT INTO live_ledger50 VALUES (31, 1000031, 'seed-50-31'); COMMIT;",
         )
         .await
         .expect("commit pinned cross-bucket hash transaction");
         sql.simple_query(
-            "BEGIN; \
-             INSERT INTO live_ledger50 VALUES (7, -7, 'aborted-50-7'); \
-             INSERT INTO live_ledger50 VALUES (15, -15, 'aborted-50-15'); \
-             ROLLBACK;",
+            "BEGIN; INSERT INTO live_ledger50 VALUES (7, -7, 'aborted-50-7'); \
+             INSERT INTO live_ledger50 VALUES (15, -15, 'aborted-50-15'); ROLLBACK;",
         )
         .await
         .expect("abort pinned cross-bucket hash transaction");
     }
+    PreparedSplitSystem {
+        system,
+        marker_session,
+        operation_id,
+        sentinel_topic,
+    }
+}
+
+struct PreparedSplitWorkload {
+    _root: tempfile::TempDir,
+    ledger_path: tempfile::TempPath,
+    errors_path: PathBuf,
+    workload: WorkloadChild,
+    process_group: u32,
+}
+
+async fn prepare_split_workload(
+    system: &ProcessHarness,
+    workload_mode: SplitWorkload,
+) -> PreparedSplitWorkload {
+    use std::os::unix::process::CommandExt as _;
 
     let root = tempfile::tempdir().expect("Split crash workload root");
     let mut ledger_file = tempfile::NamedTempFile::new_in(root.path()).expect("payload ledger");
-    for rowid in u64::try_from(seed_start).expect("nonnegative seed start")..16_u64 {
+    let seed_start = u64::from(workload_mode != SplitWorkload::Hash);
+    for rowid in seed_start..16_u64 {
         for table_id in [50, 51] {
             let seq = 1_000_000 + rowid;
             let checksum = format!("seed-{table_id}-{rowid}");
-            append_payload_event(
-                &mut ledger_file,
-                &PayloadEvent {
+            for event in [
+                PayloadEvent {
                     kind: PayloadKind::Attempt,
                     provenance: PayloadProvenance::Seed,
                     table_id,
@@ -3830,10 +4186,7 @@ async fn run_real_split_crash_case(point: SplitKillPoint, workload_mode: SplitWo
                     checksum: checksum.clone(),
                     timestamp_ms: timestamp_ms(),
                 },
-            );
-            append_payload_event(
-                &mut ledger_file,
-                &PayloadEvent {
+                PayloadEvent {
                     kind: PayloadKind::Ack,
                     provenance: PayloadProvenance::Seed,
                     table_id,
@@ -3842,16 +4195,17 @@ async fn run_real_split_crash_case(point: SplitKillPoint, workload_mode: SplitWo
                     checksum,
                     timestamp_ms: timestamp_ms(),
                 },
-            );
+            ] {
+                append_payload_event(&mut ledger_file, &event);
+            }
         }
     }
     if workload_mode == SplitWorkload::Hash {
         for rowid in [23_u64, 31] {
             let seq = 1_000_000 + rowid;
             let checksum = format!("seed-50-{rowid}");
-            append_payload_event(
-                &mut ledger_file,
-                &PayloadEvent {
+            for event in [
+                PayloadEvent {
                     kind: PayloadKind::Attempt,
                     provenance: PayloadProvenance::Seed,
                     table_id: 50,
@@ -3860,10 +4214,7 @@ async fn run_real_split_crash_case(point: SplitKillPoint, workload_mode: SplitWo
                     checksum: checksum.clone(),
                     timestamp_ms: timestamp_ms(),
                 },
-            );
-            append_payload_event(
-                &mut ledger_file,
-                &PayloadEvent {
+                PayloadEvent {
                     kind: PayloadKind::Ack,
                     provenance: PayloadProvenance::Seed,
                     table_id: 50,
@@ -3872,7 +4223,9 @@ async fn run_real_split_crash_case(point: SplitKillPoint, workload_mode: SplitWo
                     checksum,
                     timestamp_ms: timestamp_ms(),
                 },
-            );
+            ] {
+                append_payload_event(&mut ledger_file, &event);
+            }
         }
     }
     let ledger_path = ledger_file.into_temp_path();
@@ -3910,15 +4263,16 @@ async fn run_real_split_crash_case(point: SplitKillPoint, workload_mode: SplitWo
     command.as_std_mut().process_group(0);
     let child = command.spawn().expect("spawn Split workload");
     let process_group = child.id().expect("Split workload PID");
-    let mut workload = WorkloadChild::new(child, process_group, stop_path);
+    let workload = WorkloadChild::new(child, process_group, stop_path);
     if workload_mode == SplitWorkload::Hash {
-        authorize_hash_response_recovery(&system, &ledger_path, &raw_recovery).await;
+        authorize_hash_response_recovery(system, &ledger_path, &raw_recovery).await;
     }
     wait_for_payload_acks(&ledger_path, &errors_path, 8).await;
     if workload_mode == SplitWorkload::Ordinary {
-        assert_static_ids_match_physical_rows(&system, 50).await;
-        assert_static_ids_match_physical_rows(&system, 51).await;
-        assert_pre_split_seed_rows_on_predecessor(&system).await;
+        for table_id in [50, 51] {
+            assert_static_ids_match_physical_rows(system, table_id).await;
+        }
+        assert_pre_split_seed_rows_on_predecessor(system).await;
     } else {
         let acknowledged = parse_closed_payload_ledger(&ledger_path)
             .expect("pre-split hash payload ledger")
@@ -3934,18 +4288,11 @@ async fn run_real_split_crash_case(point: SplitKillPoint, workload_mode: SplitWo
         let mut visible = BTreeSet::new();
         for range_id in [0, 1] {
             for table_id in [50, 51] {
-                visible.extend(direct_hash_payload_rows(&system, range_id, table_id).await);
+                visible.extend(direct_hash_payload_rows(system, range_id, table_id).await);
             }
         }
-        let missing = acknowledged
-            .difference(&visible)
-            .cloned()
-            .collect::<Vec<_>>();
-        assert!(
-            missing.is_empty(),
-            "pre-split acknowledged hash rows are not directly visible: {missing:?}"
-        );
-        let (snapshots, _) = collect_hash_snapshots(&system, "before", &[(0, 0), (1, 0)]).await;
+        assert!(acknowledged.is_subset(&visible));
+        let (snapshots, _) = collect_hash_snapshots(system, "before", &[(0, 0), (1, 0)]).await;
         for table_id in [50, 51] {
             assert_eq!(
                 snapshots
@@ -3960,27 +4307,176 @@ async fn run_real_split_crash_case(point: SplitKillPoint, workload_mode: SplitWo
             );
         }
     }
-    initiate_split(&system, &operation_id, workload_mode).await;
+    PreparedSplitWorkload {
+        _root: root,
+        ledger_path,
+        errors_path,
+        workload,
+        process_group,
+    }
+}
 
+struct RestartSplitSource<'a> {
+    system: &'a mut ProcessHarness,
+    point: SplitKillPoint,
+    workload_mode: SplitWorkload,
+    operation: &'a SplitOperationRecord,
+    tenant: &'a TenantRecord,
+    authenticated_prologue: bool,
+    successors_serving: bool,
+    ledger_path: &'a Path,
+    errors_path: &'a Path,
+    process_group: u32,
+    timestamp_fault: &'a str,
+    marker_session: &'a mut Option<MarkerSession>,
+    marker_session_released: &'a mut bool,
+    control: &'a mut GresControlHandle,
+    mutation: &'a mut RecordingRangeMutationClient<MtlsRangeMutationClient>,
+    retirement: &'a mut CountingRetirementAdmin,
+    faults: &'a Arc<OneShotControlFaults>,
+    observations: &'a Arc<Mutex<Vec<ControlObservation>>>,
+}
+
+struct RestartSplitOutcome {
+    old_pid: u32,
+    new_pid: u32,
+    old_source_process_group: u32,
+    new_source_process_group: u32,
+    kill_ms: u128,
+    restart_ms: u128,
+    hash_before_snapshots: Vec<HashSnapshotEvidence>,
+    hash_before_transactions: Vec<HashTransactionEvidence>,
+}
+
+async fn restart_split_source(input: RestartSplitSource<'_>) -> RestartSplitOutcome {
+    wait_for_payload_acks(input.ledger_path, input.errors_path, 9).await;
+    let (hash_before_snapshots, hash_before_transactions) =
+        if input.workload_mode == SplitWorkload::Hash {
+            let active_layout = if input.authenticated_prologue || input.successors_serving {
+                &input
+                    .operation
+                    .plan
+                    .as_ref()
+                    .expect("sealed split operation plan")
+                    .target_layout
+            } else {
+                &input.tenant.ranges
+            };
+            let active_ranges = active_layout
+                .iter()
+                .map(|range| (range.range_id, range.wal_generation))
+                .collect::<Vec<_>>();
+            collect_hash_snapshots(input.system, "before", &active_ranges).await
+        } else {
+            (Vec::new(), Vec::new())
+        };
+    let old_pid = input.system.pid(0);
+    let old_source_process_group = input.system.process_group(0);
+    let kill_ms = timestamp_ms();
+    if !input.point.inject_marker_before_cli() {
+        signal_process_group(input.process_group, "-STOP");
+        input
+            .system
+            .set_commit_fault_for_next_child(input.timestamp_fault);
+    }
+    input.system.kill(0).await;
+    if marker_session_action(
+        input.marker_session.is_some(),
+        true,
+        false,
+        input.operation.phase,
+    ) == MarkerSessionAction::DropAfterCrash
+    {
+        close_marker_session(
+            input
+                .marker_session
+                .take()
+                .expect("crashed marker session remains owned by harness"),
+            false,
+        )
+        .await;
+        *input.marker_session_released = true;
+    }
+    input
+        .system
+        .restart_with_hosted_ranges(0, input.point.restart_hosted_ranges())
+        .await;
+    let new_pid = input.system.pid(0);
+    let new_source_process_group = input.system.process_group(0);
+    let restart_ms = timestamp_ms();
+    assert_ne!(old_pid, new_pid);
+    if !input.point.inject_marker_before_cli() {
+        let marker_result = inject_pending_split_marker(input.system).await;
+        input.system.clear_commit_fault();
+        if marker_result.is_err() {
+            signal_process_group(input.process_group, "-CONT");
+        }
+        *input.marker_session = Some(marker_result.expect("inject post-restart Pending marker"));
+        signal_process_group(input.process_group, "-CONT");
+    }
+    let mut fresh = Registry::connect(input.system.bootstrap())
+        .await
+        .expect("registry restart");
+    fresh.ensure_topic(1).await.expect("registry topic restart");
+    *input.control = Arc::new(BrokerControl {
+        registry: Mutex::new(fresh),
+        faults: Arc::clone(input.faults),
+    });
+    *input.mutation = RecordingRangeMutationClient::new(
+        MtlsRangeMutationClient::new(input.system.operator_control_client()),
+        Arc::clone(input.observations),
+    )
+    .with_journal_cas_after(receipt_fault_receipt(input.point), Arc::clone(input.faults));
+    input.retirement.inner =
+        crabka_client_admin::AdminClient::connect(&[input.system.bootstrap().to_owned()])
+            .await
+            .expect("retirement admin restart");
+    RestartSplitOutcome {
+        old_pid,
+        new_pid,
+        old_source_process_group,
+        new_source_process_group,
+        kill_ms,
+        restart_ms,
+        hash_before_snapshots,
+        hash_before_transactions,
+    }
+}
+
+struct PreparedSplitControl {
+    tenant_name: TenantName,
+    faults: Arc<OneShotControlFaults>,
+    control: GresControlHandle,
+    observations: Arc<Mutex<Vec<ControlObservation>>>,
+    mutation: RecordingRangeMutationClient<MtlsRangeMutationClient>,
+    predecessor_topic: String,
+    delete_ledger: Arc<std::sync::Mutex<DeleteLedger>>,
+    retirement: CountingRetirementAdmin,
+}
+
+async fn prepare_split_control(
+    system: &ProcessHarness,
+    point: SplitKillPoint,
+) -> PreparedSplitControl {
     let tenant_name = TenantName::try_from(system.tenant()).expect("tenant name");
     let mut registry = Registry::connect(system.bootstrap())
         .await
         .expect("registry");
     registry.ensure_topic(1).await.expect("registry topic");
     let faults = Arc::new(OneShotControlFaults::default());
-    let mut control: GresControlHandle = Arc::new(BrokerControl {
+    let control: GresControlHandle = Arc::new(BrokerControl {
         registry: Mutex::new(registry),
         faults: Arc::clone(&faults),
     });
     let observations = Arc::new(Mutex::new(Vec::new()));
-    let mut mutation = RecordingRangeMutationClient::new(
+    let mutation = RecordingRangeMutationClient::new(
         MtlsRangeMutationClient::new(system.operator_control_client()),
         Arc::clone(&observations),
     )
     .with_journal_cas_after(receipt_fault_receipt(point), Arc::clone(&faults));
     let predecessor_topic = format!("__gres_wal.{}.r1", system.tenant());
     let delete_ledger = Arc::new(std::sync::Mutex::new(DeleteLedger::default()));
-    let mut retirement = CountingRetirementAdmin {
+    let retirement = CountingRetirementAdmin {
         inner: crabka_client_admin::AdminClient::connect(&[system.bootstrap().to_owned()])
             .await
             .expect("retirement admin"),
@@ -3988,26 +4484,70 @@ async fn run_real_split_crash_case(point: SplitKillPoint, workload_mode: SplitWo
         ledger: Arc::clone(&delete_ledger),
         fail_after_delete: false,
     };
+    PreparedSplitControl {
+        tenant_name,
+        faults,
+        control,
+        observations,
+        mutation,
+        predecessor_topic,
+        delete_ledger,
+        retirement,
+    }
+}
+
+struct SplitDriveInput<'a> {
+    system: &'a mut ProcessHarness,
+    point: SplitKillPoint,
+    workload_mode: SplitWorkload,
+    operation_id: &'a str,
+    ledger_path: &'a Path,
+    errors_path: &'a Path,
+    process_group: u32,
+    timestamp_fault: &'a str,
+    marker_session: Option<MarkerSession>,
+}
+
+struct SplitDriveOutcome {
+    observations: Vec<ControlObservation>,
+    delete_snapshot: DeleteLedger,
+    old_pid: u32,
+    new_pid: u32,
+    old_source_process_group: u32,
+    new_source_process_group: u32,
+    kill_ms: u128,
+    restart_ms: u128,
+    publication_ms: u128,
+    elapsed_ms: u128,
+    pre_kill_predicate: SplitPredicateState,
+    journal_receipt_expectations: Vec<JournalReceiptExpectation>,
+    hash_before_snapshots: Vec<HashSnapshotEvidence>,
+    hash_before_transactions: Vec<HashTransactionEvidence>,
+}
+
+async fn drive_split_operation(mut input: SplitDriveInput<'_>) -> SplitDriveOutcome {
+    let PreparedSplitControl {
+        tenant_name,
+        faults,
+        mut control,
+        observations,
+        mut mutation,
+        predecessor_topic,
+        delete_ledger,
+        mut retirement,
+    } = prepare_split_control(input.system, input.point).await;
     let started = Instant::now();
     let mut killed = false;
-    let mut old_pid = 0;
-    let mut new_pid = 0;
-    let mut old_source_process_group = 0;
-    let mut new_source_process_group = 0;
-    let mut kill_ms = 0;
-    let mut restart_ms = 0;
+    let mut restart = None;
     let mut publication_ms = 0;
     let mut marker_session_released = false;
     let mut parked_observation_yielded = false;
     let mut last_reported_phase = None;
     let mut pre_kill_predicate = None;
     let mut journal_receipt_expectations = BTreeMap::new();
-    let mut hash_before_snapshots = Vec::new();
-    let mut hash_before_transactions = Vec::new();
-
     loop {
-        assert!(started.elapsed().as_millis() < point.operation_bound_ms());
-        let operation = load_operation(&system, &operation_id).await;
+        assert!(started.elapsed().as_millis() < SplitKillPoint::operation_bound_ms());
+        let operation = load_operation(input.system, input.operation_id).await;
         if let Some(expectation) = journal_receipt_expectation(&operation)
             && let Some(previous) = journal_receipt_expectations
                 .insert(expectation.operation.clone(), expectation.clone())
@@ -4026,14 +4566,8 @@ async fn run_real_split_crash_case(point: SplitKillPoint, workload_mode: SplitWo
             );
             last_reported_phase = Some(operation.phase);
         }
-        let tenant = load_tenant(&system).await;
+        let tenant = load_tenant(input.system).await;
         let obs = observations.lock().await.clone();
-        if marker_session.is_some() && !marker_session_released {
-            assert!(
-                marker_session.is_some(),
-                "Pending marker session remains live"
-            );
-        }
         let authenticated_prologue = obs.iter().any(|item| {
             matches!(
                 item.request.operation,
@@ -4044,48 +4578,26 @@ async fn run_real_split_crash_case(point: SplitKillPoint, workload_mode: SplitWo
             )
         });
         if marker_session_action(
-            marker_session.is_some(),
+            input.marker_session.is_some(),
             false,
             authenticated_prologue,
             operation.phase,
         ) == MarkerSessionAction::RollbackAfterPrologue
             && !marker_session_released
         {
-            let marker_client = marker_session
-                .take()
-                .expect("Pending marker session remains live through prologue");
-            close_marker_session(marker_client, true).await;
+            close_marker_session(
+                input
+                    .marker_session
+                    .take()
+                    .expect("Pending marker session remains live through prologue"),
+                true,
+            )
+            .await;
             marker_session_released = true;
-            eprintln!(
-                "G8_MILESTONE timestamp_ms={} marker_session_rollback",
-                timestamp_ms()
-            );
         }
         let topic_present = predecessor_topic_present(&mut retirement, &predecessor_topic).await;
         let deletes = delete_ledger.lock().expect("delete ledger").exact_calls;
-        let successors_serving = if matches!(
-            operation.phase,
-            SplitOperationPhase::Restored
-                | SplitOperationPhase::Activated
-                | SplitOperationPhase::LayoutPublished
-                | SplitOperationPhase::Retiring
-                | SplitOperationPhase::Resuming
-                | SplitOperationPhase::Completed
-        ) && observed_receipt(&obs) == Receipt::Prologue
-            || matches!(
-                operation.phase,
-                SplitOperationPhase::Activated
-                    | SplitOperationPhase::LayoutPublished
-                    | SplitOperationPhase::Retiring
-                    | SplitOperationPhase::Resuming
-                    | SplitOperationPhase::Completed
-            ) {
-            verify_target_topology_ready(&mutation, &operation)
-                .await
-                .is_ok()
-        } else {
-            false
-        };
+        let successors_serving = successors_are_serving(&mutation, &operation, &obs).await;
         let state = predicate_state(
             &operation,
             &tenant,
@@ -4096,148 +4608,160 @@ async fn run_real_split_crash_case(point: SplitKillPoint, workload_mode: SplitWo
         );
         if publication_ms == 0 && state.layout == Layout::Target {
             publication_ms = timestamp_ms();
-            let before = payload_ack_count(&ledger_path);
-            wait_for_payload_acks(&ledger_path, &errors_path, before + 4).await;
+            let before = payload_ack_count(input.ledger_path);
+            wait_for_payload_acks(input.ledger_path, input.errors_path, before + 4).await;
         }
-        if !killed && point.is_ready(&state) {
-            pre_kill_predicate = Some(state.clone());
-            wait_for_payload_acks(&ledger_path, &errors_path, 9).await;
-            if workload_mode == SplitWorkload::Hash {
-                let active_layout = if authenticated_prologue || successors_serving {
-                    &operation
-                        .plan
-                        .as_ref()
-                        .expect("sealed split operation plan")
-                        .target_layout
-                } else {
-                    &tenant.ranges
-                };
-                let active_ranges = active_layout
-                    .iter()
-                    .map(|range| (range.range_id, range.wal_generation))
-                    .collect::<Vec<_>>();
-                (hash_before_snapshots, hash_before_transactions) =
-                    collect_hash_snapshots(&system, "before", &active_ranges).await;
-            }
-            old_pid = system.pid(0);
-            old_source_process_group = system.process_group(0);
-            kill_ms = timestamp_ms();
-            if !point.inject_marker_before_cli() {
-                signal_process_group(process_group, "-STOP");
-                system.set_commit_fault_for_next_child(timestamp_fault);
-            }
-            system.kill(0).await;
-            if marker_session_action(marker_session.is_some(), true, false, operation.phase)
-                == MarkerSessionAction::DropAfterCrash
-            {
-                close_marker_session(
-                    marker_session
-                        .take()
-                        .expect("crashed marker session remains owned by harness"),
-                    false,
-                )
-                .await;
-                marker_session_released = true;
-            }
-            system
-                .restart_with_hosted_ranges(0, point.restart_hosted_ranges())
-                .await;
-            new_pid = system.pid(0);
-            new_source_process_group = system.process_group(0);
-            restart_ms = timestamp_ms();
-            assert_ne!(old_pid, new_pid);
-            if !point.inject_marker_before_cli() {
-                let marker_result = inject_pending_split_marker(&system).await;
-                system.clear_commit_fault();
-                if marker_result.is_err() {
-                    signal_process_group(process_group, "-CONT");
-                }
-                marker_session = Some(marker_result.expect("inject post-restart Pending marker"));
-                signal_process_group(process_group, "-CONT");
-            }
-            let mut fresh = Registry::connect(system.bootstrap())
-                .await
-                .expect("registry restart");
-            fresh.ensure_topic(1).await.expect("registry topic restart");
-            control = Arc::new(BrokerControl {
-                registry: Mutex::new(fresh),
-                faults: Arc::clone(&faults),
-            });
-            mutation = RecordingRangeMutationClient::new(
-                MtlsRangeMutationClient::new(system.operator_control_client()),
-                Arc::clone(&observations),
-            )
-            .with_journal_cas_after(receipt_fault_receipt(point), Arc::clone(&faults));
-            retirement.inner =
-                crabka_client_admin::AdminClient::connect(&[system.bootstrap().to_owned()])
-                    .await
-                    .expect("retirement admin restart");
+        if !killed && input.point.is_ready(&state) {
+            pre_kill_predicate = Some(state);
+            restart = Some(
+                restart_split_source(RestartSplitSource {
+                    system: input.system,
+                    point: input.point,
+                    workload_mode: input.workload_mode,
+                    operation: &operation,
+                    tenant: &tenant,
+                    authenticated_prologue,
+                    successors_serving,
+                    ledger_path: input.ledger_path,
+                    errors_path: input.errors_path,
+                    process_group: input.process_group,
+                    timestamp_fault: input.timestamp_fault,
+                    marker_session: &mut input.marker_session,
+                    marker_session_released: &mut marker_session_released,
+                    control: &mut control,
+                    mutation: &mut mutation,
+                    retirement: &mut retirement,
+                    faults: &faults,
+                    observations: &observations,
+                })
+                .await,
+            );
             killed = true;
             continue;
         }
-
         match operation.phase {
             SplitOperationPhase::Activated => {
                 verify_target_topology_ready(&mutation, &operation)
                     .await
                     .expect("successor readiness");
-                if !killed && point == SplitKillPoint::TenantCasBeforeJournalCas {
+                if !killed && input.point == SplitKillPoint::TenantCasBeforeJournalCas {
                     faults.arm_tenant_cas_ack();
                 }
                 let _ = reconcile_activated_cutover(&control, &operation).await;
             }
             SplitOperationPhase::Retiring => {
-                if !killed && point == SplitKillPoint::DeleteSuccessBeforeSidecarCas {
+                if !killed && input.point == SplitKillPoint::DeleteSuccessBeforeSidecarCas {
                     retirement.fail_after_delete = true;
                 }
                 let _ =
                     reconcile_one_retiring_range_wal(&control, &mut retirement, &tenant_name).await;
-                let current = load_operation(&system, &operation_id).await;
-                let current_tenant = load_tenant(&system).await;
+                let current = load_operation(input.system, input.operation_id).await;
+                let current_tenant = load_tenant(input.system).await;
                 let sidecar_parked = current_tenant.range_retirements.iter().any(|retirement| {
-                    retirement.operation_id == operation_id
+                    retirement.operation_id == input.operation_id
                         && retirement.phase == RangeRetirementPhase::Parked
                 });
                 if should_yield_parked_observation(parked_observation_yielded, sidecar_parked) {
                     parked_observation_yielded = true;
                     continue;
                 }
-                reconcile_rpc_with_diagnostics(&system, point, &control, &mutation, &current).await;
+                reconcile_rpc_with_diagnostics(
+                    input.system,
+                    input.point,
+                    &control,
+                    &mutation,
+                    &current,
+                )
+                .await;
             }
             SplitOperationPhase::Completed => {
-                assert!(killed, "selected Split boundary was never reached");
+                let restart = restart
+                    .as_ref()
+                    .expect("selected Split boundary was reached");
                 if !payload_ledger_has_ack_after(
-                    &parse_closed_payload_ledger(&ledger_path)
+                    &parse_closed_payload_ledger(input.ledger_path)
                         .expect("open terminal workload ledger"),
-                    restart_ms,
+                    restart.restart_ms,
                 ) {
-                    let before = payload_ack_count(&ledger_path);
-                    wait_for_payload_acks(&ledger_path, &errors_path, before + 1).await;
+                    let before = payload_ack_count(input.ledger_path);
+                    wait_for_payload_acks(input.ledger_path, input.errors_path, before + 1).await;
                 }
                 break;
             }
             _ => {
-                reconcile_rpc_with_diagnostics(&system, point, &control, &mutation, &operation)
-                    .await;
+                reconcile_rpc_with_diagnostics(
+                    input.system,
+                    input.point,
+                    &control,
+                    &mutation,
+                    &operation,
+                )
+                .await;
             }
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    workload.shutdown().await;
-    let workload_process_reaped = !process_group_exists(process_group);
-    let delete_snapshot = delete_ledger.lock().expect("delete ledger").clone();
-    let preserved_logs = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/g8-split-child-logs")
-        .join(point.name());
-    system.preserve_logs(&preserved_logs).await;
-    let mut evidence = verify_completed_split_case(
-        &system,
-        workload_mode,
-        point,
-        &operation_id,
-        &ledger_path,
-        &observations.lock().await,
-        &delete_snapshot,
+    let restart = restart.expect("restart observation");
+    SplitDriveOutcome {
+        observations: observations.lock().await.clone(),
+        delete_snapshot: delete_ledger.lock().expect("delete ledger").clone(),
+        old_pid: restart.old_pid,
+        new_pid: restart.new_pid,
+        old_source_process_group: restart.old_source_process_group,
+        new_source_process_group: restart.new_source_process_group,
+        kill_ms: restart.kill_ms,
+        restart_ms: restart.restart_ms,
+        publication_ms,
+        elapsed_ms: started.elapsed().as_millis(),
+        pre_kill_predicate: pre_kill_predicate.expect("selected pre-kill predicate"),
+        journal_receipt_expectations: journal_receipt_expectations.into_values().collect(),
+        hash_before_snapshots: restart.hash_before_snapshots,
+        hash_before_transactions: restart.hash_before_transactions,
+    }
+}
+
+async fn successors_are_serving(
+    mutation: &RecordingRangeMutationClient<MtlsRangeMutationClient>,
+    operation: &SplitOperationRecord,
+    observations: &[ControlObservation],
+) -> bool {
+    let successor_phase = matches!(
+        operation.phase,
+        SplitOperationPhase::Activated
+            | SplitOperationPhase::LayoutPublished
+            | SplitOperationPhase::Retiring
+            | SplitOperationPhase::Resuming
+            | SplitOperationPhase::Completed
+    );
+    let prologue_phase = operation.phase == SplitOperationPhase::Restored
+        && observed_receipt(observations) == Receipt::Prologue;
+    (successor_phase || prologue_phase)
+        && verify_target_topology_ready(mutation, operation)
+            .await
+            .is_ok()
+}
+
+async fn run_real_split_crash_case(point: SplitKillPoint, workload_mode: SplitWorkload) {
+    let timestamp_fault = "after_timestamp_prewrite_before_decision";
+    let PreparedSplitSystem {
+        mut system,
+        marker_session,
+        operation_id,
+        sentinel_topic,
+    } = prepare_split_system(point, workload_mode).await;
+
+    let PreparedSplitWorkload {
+        _root,
+        ledger_path,
+        errors_path,
+        mut workload,
+        process_group,
+    } = prepare_split_workload(&system, workload_mode).await;
+    initiate_split(&system, &operation_id, workload_mode).await;
+
+    let SplitDriveOutcome {
+        observations,
+        delete_snapshot,
         old_pid,
         new_pid,
         old_source_process_group,
@@ -4245,27 +4769,83 @@ async fn run_real_split_crash_case(point: SplitKillPoint, workload_mode: SplitWo
         kill_ms,
         restart_ms,
         publication_ms,
-        started.elapsed().as_millis(),
-        workload_process_reaped,
-        process_group,
-        &sentinel_topic,
-        pre_kill_predicate.expect("selected pre-kill predicate"),
-        journal_receipt_expectations.into_values().collect(),
+        elapsed_ms,
+        pre_kill_predicate,
+        journal_receipt_expectations,
         hash_before_snapshots,
         hash_before_transactions,
-    )
+    } = drive_split_operation(SplitDriveInput {
+        system: &mut system,
+        point,
+        workload_mode,
+        operation_id: &operation_id,
+        ledger_path: &ledger_path,
+        errors_path: &errors_path,
+        process_group,
+        timestamp_fault,
+        marker_session,
+    })
+    .await;
+
+    workload.shutdown().await;
+    let workload_process_reaped = !process_group_exists(process_group);
+    let preserved_logs = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/g8-split-child-logs")
+        .join(point.name());
+    system.preserve_logs(&preserved_logs).await;
+    let mut evidence = verify_completed_split_case(VerifyCompletedSplitCase {
+        system: &system,
+        workload_mode,
+        point,
+        operation_id: &operation_id,
+        ledger_path: &ledger_path,
+        observations: &observations,
+        delete_ledger: &delete_snapshot,
+        old_pid,
+        new_pid,
+        old_source_process_group,
+        new_source_process_group,
+        kill_ms,
+        restart_ms,
+        publication_ms,
+        elapsed_ms,
+        workload_process_reaped,
+        workload_process_group: process_group,
+        sentinel_topic: &sentinel_topic,
+        pre_kill_predicate,
+        journal_receipt_expectations,
+        hash_before_snapshots,
+        hash_before_transactions,
+    })
     .await;
     system.shutdown().await;
-    evidence.old_source_pid_alive = process_exists(old_pid);
-    evidence.new_source_pid_alive = process_exists(new_pid);
-    evidence.old_source_process_group_alive = process_group_exists(old_source_process_group);
-    evidence.new_source_process_group_alive = process_group_exists(new_source_process_group);
-    evidence.workload_process_group_alive = process_group_exists(process_group);
-    assert!(!evidence.old_source_pid_alive);
-    assert!(!evidence.new_source_pid_alive);
-    assert!(!evidence.old_source_process_group_alive);
-    assert!(!evidence.new_source_process_group_alive);
-    assert!(!evidence.workload_process_group_alive);
+    evidence.verification_process_status.old_source_pid_alive = process_exists(old_pid);
+    evidence.shutdown_process_status.new_source_pid_alive = process_exists(new_pid);
+    evidence
+        .shutdown_process_status
+        .old_source_process_group_alive = process_group_exists(old_source_process_group);
+    evidence
+        .shutdown_process_status
+        .new_source_process_group_alive = process_group_exists(new_source_process_group);
+    evidence
+        .verification_process_status
+        .workload_process_group_alive = process_group_exists(process_group);
+    assert_eq!(
+        evidence.verification_process_status,
+        VerificationProcessStatus {
+            new_source_pid_alive_at_verification: true,
+            old_source_pid_alive: false,
+            workload_process_group_alive: false,
+        }
+    );
+    assert_eq!(
+        evidence.shutdown_process_status,
+        ShutdownProcessStatus {
+            new_source_pid_alive: false,
+            old_source_process_group_alive: false,
+            new_source_process_group_alive: false,
+        }
+    );
     if let Some(path) = std::env::var_os("CRABKA_G8_SPLIT_CRASH_EVIDENCE") {
         let path = PathBuf::from(path);
         if let Some(parent) = path.parent() {

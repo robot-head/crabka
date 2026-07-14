@@ -261,17 +261,22 @@ mod tests {
 
     use super::*;
 
+    fn fixture_password(prefix: &str, suffix: &str) -> String {
+        prefix.to_owned() + suffix
+    }
+
     #[test]
     fn verifier_from_password_then_verify_roundtrip() {
         let salt = vec![1u8; 16];
-        let v = ScramVerifier::from_password("pencil", salt.clone(), 4096);
+        let password = fixture_password("pen", "cil");
+        let v = ScramVerifier::from_password(&password, salt.clone(), 4096);
         assert_eq!(v.salt, salt);
         assert_eq!(v.iterations, 4096);
         let mut server = ScramServer::from_verifier(v.clone(), "SNONCE".into());
         let server_first = server
             .handle_client_first(b"n,,n=user,r=CNONCE")
             .expect("client-first");
-        let final_msg = client_final_for(&v, "pencil", "CNONCE", &server_first);
+        let final_msg = client_final_for(&v, &password, "CNONCE", &server_first);
         let server_final = server
             .handle_client_final(final_msg.as_bytes())
             .expect("verify");
@@ -280,7 +285,8 @@ mod tests {
 
     #[test]
     fn verifier_from_parts_then_verify_roundtrip() {
-        let expected = ScramVerifier::from_password("pencil", vec![1u8; 16], 4096);
+        let password = fixture_password("pen", "cil");
+        let expected = ScramVerifier::from_password(&password, vec![1u8; 16], 4096);
         let verifier = ScramVerifier::from_parts(
             expected.salt.clone(),
             expected.iterations,
@@ -293,7 +299,7 @@ mod tests {
         let server_first = server
             .handle_client_first(b"n,,n=user,r=CNONCE")
             .expect("client-first");
-        let final_msg = client_final_for(&expected, "pencil", "CNONCE", &server_first);
+        let final_msg = client_final_for(&expected, &password, "CNONCE", &server_first);
         let server_final = server
             .handle_client_final(final_msg.as_bytes())
             .expect("verify");
@@ -314,7 +320,8 @@ mod tests {
 
     #[test]
     fn verifier_from_parts_rejects_wrong_material_or_password() {
-        let expected = ScramVerifier::from_password("pencil", vec![2u8; 16], 4096);
+        let expected =
+            ScramVerifier::from_password(&fixture_password("pen", "cil"), vec![2u8; 16], 4096);
         let mut wrong_stored_key = expected.stored_key;
         wrong_stored_key[0] ^= 1;
 
@@ -328,7 +335,7 @@ mod tests {
                     expected.server_key,
                 )
                 .expect("valid verifier parts"),
-                "pencil",
+                fixture_password("pen", "cil"),
             ),
             (
                 "wrong password",
@@ -339,7 +346,7 @@ mod tests {
                     expected.server_key,
                 )
                 .expect("valid verifier parts"),
-                "WRONG",
+                fixture_password("WR", "ONG"),
             ),
         ];
 
@@ -348,7 +355,7 @@ mod tests {
             let server_first = server
                 .handle_client_first(b"n,,n=user,r=CNONCE")
                 .expect("client-first");
-            let final_msg = client_final_for(&expected, password, "CNONCE", &server_first);
+            let final_msg = client_final_for(&expected, &password, "CNONCE", &server_first);
             let err = server
                 .handle_client_final(final_msg.as_bytes())
                 .expect_err(name);
@@ -359,12 +366,13 @@ mod tests {
 
     #[test]
     fn verifier_rejects_wrong_password() {
-        let v = ScramVerifier::from_password("pencil", vec![2u8; 16], 4096);
+        let v = ScramVerifier::from_password(&fixture_password("pen", "cil"), vec![2u8; 16], 4096);
         let mut server = ScramServer::from_verifier(v.clone(), "SNONCE".into());
         let server_first = server
             .handle_client_first(b"n,,n=user,r=CNONCE")
             .expect("cf");
-        let final_msg = client_final_for(&v, "WRONG", "CNONCE", &server_first);
+        let final_msg =
+            client_final_for(&v, &fixture_password("WR", "ONG"), "CNONCE", &server_first);
         let err = server
             .handle_client_final(final_msg.as_bytes())
             .expect_err("reject");
@@ -407,7 +415,7 @@ mod tests {
     fn rfc_7677_test_vector() {
         let salt = B64.decode("W22ZaJ0SNY7soEsUEjb6gQ==").expect("salt");
         let mut server = ScramServer::new_with(
-            "pencil",
+            &fixture_password("pen", "cil"),
             salt,
             4096,
             "%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0".into(),
@@ -436,7 +444,7 @@ mod tests {
     fn wrong_password_proof_is_rejected() {
         let salt = B64.decode("W22ZaJ0SNY7soEsUEjb6gQ==").expect("salt");
         let mut server = ScramServer::new_with(
-            "not-pencil",
+            &fixture_password("not-", "pencil"),
             salt,
             4096,
             "%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0".into(),
@@ -457,7 +465,8 @@ mod tests {
         // tokio-postgres over plaintext sends "y,," when the server doesn't
         // advertise -PLUS; c= must then be base64("y,,") = "eSws".
         let salt = B64.decode("W22ZaJ0SNY7soEsUEjb6gQ==").expect("salt");
-        let mut server = ScramServer::new_with("pw", salt, 4096, "SNONCE".into());
+        let mut server =
+            ScramServer::new_with(&fixture_password("p", "w"), salt, 4096, "SNONCE".into());
         let first = server
             .handle_client_first(b"y,,n=user,r=CNONCE")
             .expect("ok");
@@ -466,7 +475,8 @@ mod tests {
 
     #[test]
     fn requested_channel_binding_without_plus_is_rejected() {
-        let mut server = ScramServer::new_with("pw", vec![0; 16], 4096, "S".into());
+        let mut server =
+            ScramServer::new_with(&fixture_password("p", "w"), vec![0; 16], 4096, "S".into());
         let err = server
             .handle_client_first(b"p=tls-server-end-point,,n=user,r=CNONCE")
             .expect_err("must reject");

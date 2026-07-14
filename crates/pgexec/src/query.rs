@@ -1,80 +1,19 @@
 use crabka_pgkv::Kv;
-use crabka_pgmvcc::visibility::Snapshot;
 use crabka_pgparser::ast::{QueryBody, QueryExpr, SetExpr};
 use crabka_pgwire::engine::FieldDescription;
 
-use crate::{
-    clock::EvalCtx, error::ExecError, join::Relation, scanner::RangeScanner, scope::Scope,
-};
+use crate::{clock::EvalCtx, error::ExecError, join::Relation, scope::Scope, subquery::SubCtx};
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn query_to_relation(
-    catalog_kv: &dyn Kv,
-    kv: &dyn Kv,
-    global: &dyn Kv,
-    gsnap: &Snapshot,
-    snapshot: &Snapshot,
-    own: Option<u64>,
-    q: &QueryExpr,
-    ctx: &EvalCtx,
-    fctx: crate::exec::ForeignCtx,
-    range_scanner: &dyn RangeScanner,
-) -> Result<Relation, ExecError> {
-    let ctes = crate::cte::CteContext::empty();
-    query_to_relation_with_ctes(
-        catalog_kv,
-        kv,
-        global,
-        gsnap,
-        snapshot,
-        own,
-        q,
-        &ctes,
-        ctx,
-        fctx,
-        range_scanner,
-    )
+pub(crate) fn query_to_relation(ctx: &SubCtx<'_>, q: &QueryExpr) -> Result<Relation, ExecError> {
+    query_to_relation_with_ctes(ctx, q)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn query_to_relation_with_ctes(
-    catalog_kv: &dyn Kv,
-    kv: &dyn Kv,
-    global: &dyn Kv,
-    gsnap: &Snapshot,
-    snapshot: &Snapshot,
-    own: Option<u64>,
+    ctx: &SubCtx<'_>,
     q: &QueryExpr,
-    ctes: &crate::cte::CteContext,
-    ctx: &EvalCtx,
-    fctx: crate::exec::ForeignCtx,
-    range_scanner: &dyn RangeScanner,
 ) -> Result<Relation, ExecError> {
-    let query_ctes = crate::cte::evaluate_with_clause(
-        catalog_kv,
-        kv,
-        global,
-        gsnap,
-        snapshot,
-        own,
-        q.with.as_ref(),
-        ctes,
-        ctx,
-        fctx,
-        range_scanner,
-    )?;
-    let sub_ctx = crate::subquery::SubCtx {
-        catalog_kv,
-        kv,
-        global,
-        gsnap,
-        snapshot,
-        own,
-        ctes: &query_ctes,
-        eval_ctx: ctx,
-        fctx,
-        range_scanner,
-    };
+    let query_ctes = crate::cte::evaluate_with_clause(ctx, q.with.as_ref())?;
+    let query_ctx = ctx.with_ctes(&query_ctes);
     match &q.body {
         SetExpr::Query(QueryBody::Select(s)) => {
             if q.locking.is_some() {
@@ -87,36 +26,12 @@ pub(crate) fn query_to_relation_with_ctes(
             s.limit = q.limit;
             s.offset = q.offset;
             s.locking = q.locking;
-            crate::exec::select_to_relation_with_ctes(
-                catalog_kv,
-                kv,
-                global,
-                gsnap,
-                snapshot,
-                own,
-                &s,
-                &query_ctes,
-                ctx,
-                fctx,
-                range_scanner,
-            )
+            crate::exec::select_to_relation_with_ctes(&query_ctx, &s)
         }
         SetExpr::Query(QueryBody::Values(v)) => {
-            let mut rel = crate::values::values_to_relation_with_ctes(
-                catalog_kv,
-                kv,
-                global,
-                gsnap,
-                snapshot,
-                own,
-                v,
-                &query_ctes,
-                ctx,
-                fctx,
-                range_scanner,
-            )?;
-            let order_by = crate::subquery::resolve_order_items(&sub_ctx, &q.order_by)?;
-            crate::values::apply_query_order(&mut rel, &order_by, q.offset, q.limit, ctx)?;
+            let mut rel = crate::values::values_to_relation_with_ctes(&query_ctx, v)?;
+            let order_by = crate::subquery::resolve_order_items(&query_ctx, &q.order_by)?;
+            crate::values::apply_query_order(&mut rel, &order_by, q.offset, q.limit, ctx.eval_ctx)?;
             Ok(rel)
         }
         SetExpr::Query(QueryBody::Nested(nested)) => {
@@ -125,41 +40,14 @@ pub(crate) fn query_to_relation_with_ctes(
                     "locking SELECT must use execute_read_locking".into(),
                 ));
             }
-            let mut rel = query_to_relation_with_ctes(
-                catalog_kv,
-                kv,
-                global,
-                gsnap,
-                snapshot,
-                own,
-                nested,
-                &query_ctes,
-                ctx,
-                fctx,
-                range_scanner,
-            )?;
-            let order_by = crate::subquery::resolve_order_items(&sub_ctx, &q.order_by)?;
-            crate::values::apply_query_order(&mut rel, &order_by, q.offset, q.limit, ctx)?;
+            let mut rel = query_to_relation_with_ctes(&query_ctx, nested)?;
+            let order_by = crate::subquery::resolve_order_items(&query_ctx, &q.order_by)?;
+            crate::values::apply_query_order(&mut rel, &order_by, q.offset, q.limit, ctx.eval_ctx)?;
             Ok(rel)
         }
         SetExpr::SetOp { .. } => {
-            let order_by = crate::subquery::resolve_order_items(&sub_ctx, &q.order_by)?;
-            crate::setops::set_expr_to_relation(
-                catalog_kv,
-                kv,
-                global,
-                gsnap,
-                snapshot,
-                own,
-                &q.body,
-                &order_by,
-                q.offset,
-                q.limit,
-                &query_ctes,
-                ctx,
-                fctx,
-                range_scanner,
-            )
+            let order_by = crate::subquery::resolve_order_items(&query_ctx, &q.order_by)?;
+            crate::setops::set_expr_to_relation(&query_ctx, &q.body, &order_by, q.offset, q.limit)
         }
     }
 }

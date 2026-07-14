@@ -9,7 +9,9 @@ use std::{
 
 use bytes::Bytes;
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
-use crabka_client_core::{Connection, ConnectionOptions, fetch_partition_with_isolation_progress};
+use crabka_client_core::{
+    Connection, ConnectionOptions, IsolatedFetch, fetch_partition_with_isolation_progress,
+};
 use crabka_client_producer::{Acks, Producer, ProducerError, ProducerRecord, Transaction};
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 use tokio::sync::{Mutex, watch};
@@ -1041,13 +1043,15 @@ impl Registry {
         loop {
             let result = fetch_partition_with_isolation_progress(
                 &conn,
-                TENANT_REGISTRY_TOPIC,
-                topic_id,
-                0,
-                next_offset,
-                FETCH_MAX_WAIT_MS,
-                FETCH_PARTITION_MAX_BYTES,
-                READ_COMMITTED,
+                IsolatedFetch {
+                    topic: TENANT_REGISTRY_TOPIC,
+                    topic_id,
+                    partition: 0,
+                    fetch_offset: next_offset,
+                    max_wait_ms: FETCH_MAX_WAIT_MS,
+                    partition_max_bytes: FETCH_PARTITION_MAX_BYTES,
+                    isolation_level: READ_COMMITTED,
+                },
             )
             .await?;
             let Some(progress) = result.next_offset else {
@@ -1408,13 +1412,15 @@ fn spawn_reader(
             loop {
                 match fetch_partition_with_isolation_progress(
                     &conn,
-                    TENANT_REGISTRY_TOPIC,
-                    topic_id,
-                    0,
-                    next_offset,
-                    FETCH_MAX_WAIT_MS,
-                    FETCH_PARTITION_MAX_BYTES,
-                    READ_COMMITTED,
+                    IsolatedFetch {
+                        topic: TENANT_REGISTRY_TOPIC,
+                        topic_id,
+                        partition: 0,
+                        fetch_offset: next_offset,
+                        max_wait_ms: FETCH_MAX_WAIT_MS,
+                        partition_max_bytes: FETCH_PARTITION_MAX_BYTES,
+                        isolation_level: READ_COMMITTED,
+                    },
                 )
                 .await
                 {

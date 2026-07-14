@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 
 use crabka_broker::{Broker, BrokerConfig};
@@ -14,6 +14,21 @@ use crabka_pgkv::Kv as _;
 use crabka_pgwire::engine::{Engine as _, Session as _};
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
 use tokio::net::TcpListener;
+
+async fn broker_test_permit() -> tokio::sync::OwnedSemaphorePermit {
+    const MAX_CONCURRENT_TEST_BROKERS: usize = 1;
+    static GATE: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    Arc::clone(
+        GATE.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_TEST_BROKERS))),
+    )
+    .acquire_owned()
+    .await
+    .expect("broker test gate should remain open")
+}
+
+fn fixture_password(prefix: &str, suffix: &str) -> String {
+    prefix.to_owned() + suffix
+}
 
 struct RangeMtlsFixture {
     _dir: tempfile::TempDir,
@@ -108,7 +123,7 @@ impl crabka_gres::TenantConfigLoader for FakeTenantConfigLoader {
 
 fn tenant_record() -> crabka_gres_control::TenantRecord {
     let verifier = crabka_security::scram::PgScramVerifier::generate_with_salt(
-        "g5-secret-password",
+        &fixture_password("g5-secret-", "password"),
         8192,
         vec![3; 16],
     )
@@ -299,6 +314,7 @@ async fn produce_raw_fixture(bootstrap: &str, topic: &str, payload: &'static [u8
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn live_multirange_substrate_default_fdw_server_reads_own_broker() {
+    let _permit = broker_test_permit().await;
     let broker_dir = tempfile::tempdir().expect("broker tempdir");
     let broker = Broker::start(BrokerConfig::for_tests(broker_dir.path().to_path_buf()))
         .await
@@ -352,6 +368,7 @@ async fn live_multirange_substrate_default_fdw_server_reads_own_broker() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn runtime_constructs_substrate_mode_over_in_process_wal() {
+    let _permit = broker_test_permit().await;
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let port = listener.local_addr().expect("local addr").port();
     let loader = FakeTenantConfigLoader {
@@ -391,6 +408,7 @@ async fn runtime_constructs_substrate_mode_over_in_process_wal() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn runtime_constructs_checkpoint_enabled_substrate_mode() {
+    let _permit = broker_test_permit().await;
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let port = listener.local_addr().expect("local addr").port();
     let loader = FakeTenantConfigLoader {
@@ -434,6 +452,7 @@ async fn runtime_constructs_checkpoint_enabled_substrate_mode() {
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn live_multirange_transfer_stages_populated_successor_without_publishing_it() {
+    let _permit = broker_test_permit().await;
     let broker_dir = tempfile::tempdir().expect("broker tempdir");
     let broker = Broker::start(BrokerConfig::for_tests(broker_dir.path().to_path_buf()))
         .await
@@ -856,7 +875,7 @@ async fn seed_control_operation(
     split: &crabka_gres_ranges::SplitState,
 ) {
     let verifier = crabka_security::scram::PgScramVerifier::generate_with_salt(
-        "control-secret",
+        &fixture_password("control-", "secret"),
         8192,
         vec![7; 16],
     )
@@ -1008,6 +1027,8 @@ async fn live_authority_allows_exact_target_status_at_activated_before_layout_cu
         control::IntentAuthorizationContext,
         transport::{RangeControlOperation, RangeControlReq},
     };
+
+    let _permit = broker_test_permit().await;
     let broker_dir = tempfile::tempdir().unwrap();
     let broker = Broker::start(BrokerConfig::for_tests(broker_dir.path().to_path_buf()))
         .await
@@ -1154,7 +1175,183 @@ async fn live_authority_allows_exact_target_status_at_activated_before_layout_cu
     );
 }
 
-#[allow(clippy::too_many_lines)]
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ControlSplitDriverState {
+    split: crabka_gres_ranges::SplitState,
+    manifest_key: String,
+    covered_offset: i64,
+    barrier_offset: i64,
+    stage_binding: (u64, String),
+    post_stage_binding: Option<(u64, String)>,
+}
+
+fn persist_control_split_driver_state(
+    state_path: &std::path::Path,
+    state: &ControlSplitDriverState,
+) {
+    std::fs::write(
+        state_path,
+        serde_json::to_vec(state).expect("encode operator driver state"),
+    )
+    .expect("persist operator driver state");
+}
+
+fn persist_post_stage_binding(
+    state_path: &std::path::Path,
+    split: &crabka_gres_ranges::SplitState,
+    manifest_key: &str,
+    covered_offset: i64,
+    barrier_offset: i64,
+    stage_binding: &(u64, String),
+    binding: &(u64, String),
+) {
+    persist_control_split_driver_state(
+        state_path,
+        &ControlSplitDriverState {
+            split: split.clone(),
+            manifest_key: manifest_key.to_owned(),
+            covered_offset,
+            barrier_offset,
+            stage_binding: stage_binding.clone(),
+            post_stage_binding: Some(binding.clone()),
+        },
+    );
+}
+
+async fn load_or_prepare_control_split(
+    runtime: &crabka_gres::GresRuntime,
+    bootstrap: &str,
+    tenant: &str,
+    operation_id: &str,
+    state_path: &std::path::Path,
+    initial_mutation: Option<crabka_gres_ranges::SplitState>,
+) -> ControlSplitDriverState {
+    use crabka_gres_ranges::transport::{RangeControlOperation as Operation, RangeControlResp};
+    if state_path.exists() {
+        return serde_json::from_slice(&std::fs::read(state_path).expect("read driver state"))
+            .expect("decode driver state");
+    }
+    let current_map = runtime.published_range_map().expect("source range map");
+    let predecessor = current_map
+        .ranges()
+        .iter()
+        .find(|range| range.range_id == RangeId::COORDINATOR)
+        .cloned()
+        .expect("source predecessor");
+    let split_at = RangeKey::table_start(TableId::new(1));
+    let split = initial_mutation.unwrap_or_else(|| {
+        crabka_gres_ranges::SplitState::for_split(
+            operation_id,
+            SplitCommand {
+                current_map,
+                predecessor: RangeId::COORDINATOR,
+                predecessor_generation: 0,
+                left: SuccessorDescriptor {
+                    range_id: RangeId::COORDINATOR,
+                    endpoint: "127.0.0.1:7443".into(),
+                    wal_generation: 1,
+                    interval: RangeSpec::for_interval(
+                        RangeId::COORDINATOR,
+                        predecessor.start,
+                        Some(split_at),
+                    ),
+                },
+                right: SuccessorDescriptor {
+                    range_id: RangeId::new(2),
+                    endpoint: "127.0.0.1:7443".into(),
+                    wal_generation: 1,
+                    interval: RangeSpec::for_interval(RangeId::new(2), split_at, predecessor.end),
+                },
+            },
+        )
+        .expect("valid control split")
+    });
+    let transfer = runtime
+        .range_transfer_capability()
+        .expect("live control transfer capability");
+    transfer
+        .record_topology_activation_intent(&split)
+        .await
+        .expect("journal topology intent before checkpoint");
+    seed_control_operation(bootstrap, tenant, &split).await;
+    let checkpoint = control_request(
+        runtime,
+        tenant,
+        operation_id,
+        &split,
+        Operation::ForceCheckpoint,
+    )
+    .await;
+    let RangeControlResp::Checkpoint {
+        covered_offset,
+        manifest_key,
+        ..
+    } = checkpoint
+    else {
+        panic!("checkpoint failed: {checkpoint:?}");
+    };
+    advance_control_operation(
+        bootstrap,
+        tenant,
+        operation_id,
+        crabka_gres_control::SplitOperationPhase::Checkpointed,
+        Some(crabka_gres_control::SplitOperationEvidence {
+            manifest_key: Some(manifest_key.clone()),
+            covered_offset: Some(covered_offset),
+            ..Default::default()
+        }),
+    )
+    .await;
+    transfer
+        .record_topology_activation_checkpoint(
+            operation_id,
+            &crabka_gres_ranges::CheckpointManifest {
+                range_id: split.predecessor,
+                covered_offset,
+                manifest_key: manifest_key.clone(),
+            },
+        )
+        .await
+        .expect("journal topology checkpoint before pause");
+    let pause = control_request(
+        runtime,
+        tenant,
+        operation_id,
+        &split,
+        Operation::PauseAtCoveredOffset {
+            manifest_key: manifest_key.clone(),
+            covered_offset,
+        },
+    )
+    .await;
+    let RangeControlResp::Paused { barrier_offset } = pause else {
+        panic!("pause failed: {pause:?}");
+    };
+    advance_control_operation(
+        bootstrap,
+        tenant,
+        operation_id,
+        crabka_gres_control::SplitOperationPhase::Paused,
+        Some(crabka_gres_control::SplitOperationEvidence {
+            manifest_key: Some(manifest_key.clone()),
+            covered_offset: Some(covered_offset),
+            barrier_offset: Some(barrier_offset),
+            ..Default::default()
+        }),
+    )
+    .await;
+    let state = ControlSplitDriverState {
+        stage_binding: control_binding(bootstrap, tenant, operation_id).await,
+        split,
+        manifest_key,
+        covered_offset,
+        barrier_offset,
+        post_stage_binding: None,
+    };
+    persist_control_split_driver_state(state_path, &state);
+    state
+}
+
 async fn drive_live_control_split(
     runtime: &crabka_gres::GresRuntime,
     bootstrap: &str,
@@ -1164,174 +1361,22 @@ async fn drive_live_control_split(
     initial_mutation: Option<crabka_gres_ranges::SplitState>,
 ) {
     use crabka_gres_ranges::transport::{RangeControlOperation as Operation, RangeControlResp};
-    struct DriverState {
-        split: crabka_gres_ranges::SplitState,
-        manifest_key: String,
-        covered_offset: i64,
-        barrier_offset: i64,
-        stage_binding: (u64, String),
-        post_stage_binding: Option<(u64, String)>,
-    }
-    let state = if state_path.exists() {
-        let value: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(state_path).expect("read driver state"))
-                .expect("decode driver state");
-        DriverState {
-            split: serde_json::from_value(value["split"].clone()).expect("decode stored split"),
-            manifest_key: value["manifest_key"].as_str().expect("manifest key").into(),
-            covered_offset: value["covered_offset"].as_i64().expect("covered offset"),
-            barrier_offset: value["barrier_offset"].as_i64().expect("barrier offset"),
-            stage_binding: serde_json::from_value(value["stage_binding"].clone())
-                .expect("decode stage binding"),
-            post_stage_binding: serde_json::from_value(value["post_stage_binding"].clone())
-                .expect("decode post-stage binding"),
-        }
-    } else {
-        let current_map = runtime.published_range_map().expect("source range map");
-        let predecessor = current_map
-            .ranges()
-            .iter()
-            .find(|range| range.range_id == RangeId::COORDINATOR)
-            .cloned()
-            .expect("source predecessor");
-        let split_at = RangeKey::table_start(TableId::new(1));
-        let split = initial_mutation.unwrap_or_else(|| {
-            crabka_gres_ranges::SplitState::for_split(
-                operation_id,
-                SplitCommand {
-                    current_map,
-                    predecessor: RangeId::COORDINATOR,
-                    predecessor_generation: 0,
-                    left: SuccessorDescriptor {
-                        range_id: RangeId::COORDINATOR,
-                        endpoint: "127.0.0.1:7443".into(),
-                        wal_generation: 1,
-                        interval: RangeSpec::for_interval(
-                            RangeId::COORDINATOR,
-                            predecessor.start,
-                            Some(split_at),
-                        ),
-                    },
-                    right: SuccessorDescriptor {
-                        range_id: RangeId::new(2),
-                        endpoint: "127.0.0.1:7443".into(),
-                        wal_generation: 1,
-                        interval: RangeSpec::for_interval(
-                            RangeId::new(2),
-                            split_at,
-                            predecessor.end,
-                        ),
-                    },
-                },
-            )
-            .expect("valid control split")
-        });
-        let transfer = runtime
-            .range_transfer_capability()
-            .expect("live control transfer capability");
-        transfer
-            .record_topology_activation_intent(&split)
-            .await
-            .expect("journal topology intent before checkpoint");
-        seed_control_operation(bootstrap, tenant, &split).await;
-        let checkpoint = control_request(
-            runtime,
-            tenant,
-            operation_id,
-            &split,
-            Operation::ForceCheckpoint,
-        )
-        .await;
-        let RangeControlResp::Checkpoint {
-            covered_offset,
-            manifest_key,
-            ..
-        } = checkpoint
-        else {
-            panic!("checkpoint failed: {checkpoint:?}");
-        };
-        advance_control_operation(
-            bootstrap,
-            tenant,
-            operation_id,
-            crabka_gres_control::SplitOperationPhase::Checkpointed,
-            Some(crabka_gres_control::SplitOperationEvidence {
-                manifest_key: Some(manifest_key.clone()),
-                covered_offset: Some(covered_offset),
-                ..Default::default()
-            }),
-        )
-        .await;
-        transfer
-            .record_topology_activation_checkpoint(
-                operation_id,
-                &crabka_gres_ranges::CheckpointManifest {
-                    range_id: split.predecessor,
-                    covered_offset,
-                    manifest_key: manifest_key.clone(),
-                },
-            )
-            .await
-            .expect("journal topology checkpoint before pause");
-        let pause = control_request(
-            runtime,
-            tenant,
-            operation_id,
-            &split,
-            Operation::PauseAtCoveredOffset {
-                manifest_key: manifest_key.clone(),
-                covered_offset,
-            },
-        )
-        .await;
-        let RangeControlResp::Paused { barrier_offset } = pause else {
-            panic!("pause failed: {pause:?}");
-        };
-        advance_control_operation(
-            bootstrap,
-            tenant,
-            operation_id,
-            crabka_gres_control::SplitOperationPhase::Paused,
-            Some(crabka_gres_control::SplitOperationEvidence {
-                manifest_key: Some(manifest_key.clone()),
-                covered_offset: Some(covered_offset),
-                barrier_offset: Some(barrier_offset),
-                ..Default::default()
-            }),
-        )
-        .await;
-        let stage_binding = control_binding(bootstrap, tenant, operation_id).await;
-        let state = DriverState {
-            split,
-            manifest_key,
-            covered_offset,
-            barrier_offset,
-            stage_binding,
-            post_stage_binding: None,
-        };
-        std::fs::write(
-            state_path,
-            serde_json::to_vec(&serde_json::json!({
-                "split": state.split,
-                "manifest_key": state.manifest_key,
-                "covered_offset": state.covered_offset,
-                "barrier_offset": state.barrier_offset,
-                "stage_binding": state.stage_binding,
-                "post_stage_binding": state.post_stage_binding,
-            }))
-            .expect("encode driver state"),
-        )
-        .expect("persist operator driver state before staging");
-        state
-    };
-    let DriverState {
+    let ControlSplitDriverState {
         split,
         manifest_key,
         covered_offset,
         barrier_offset,
         stage_binding,
         mut post_stage_binding,
-    } = state;
+    } = load_or_prepare_control_split(
+        runtime,
+        bootstrap,
+        tenant,
+        operation_id,
+        state_path,
+        initial_mutation,
+    )
+    .await;
     if runtime.published_range_map().as_ref() == Some(&split.target_map) {
         let (journal_revision, journal_digest) = post_stage_binding
             .clone()
@@ -1436,19 +1481,15 @@ async fn drive_live_control_split(
         binding
     } else {
         let binding = control_binding(bootstrap, tenant, operation_id).await;
-        std::fs::write(
+        persist_post_stage_binding(
             state_path,
-            serde_json::to_vec(&serde_json::json!({
-                "split": split,
-                "manifest_key": manifest_key,
-                "covered_offset": covered_offset,
-                "barrier_offset": barrier_offset,
-                "stage_binding": stage_binding,
-                "post_stage_binding": binding,
-            }))
-            .expect("encode post-stage driver state"),
-        )
-        .expect("persist post-stage control binding");
+            &split,
+            &manifest_key,
+            covered_offset,
+            barrier_offset,
+            &stage_binding,
+            &binding,
+        );
         binding
     };
     let markers = control_request(
@@ -1519,6 +1560,7 @@ async fn drive_live_control_split(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn live_control_move_stages_claims_and_publishes_one_distinct_endpoint_successor() {
+    let _permit = broker_test_permit().await;
     let broker_dir = tempfile::tempdir().expect("broker tempdir");
     let broker = Broker::start(BrokerConfig::for_tests(broker_dir.path().to_path_buf()))
         .await
@@ -1591,6 +1633,7 @@ async fn live_control_move_stages_claims_and_publishes_one_distinct_endpoint_suc
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn control_executor_crash_child() {
+    let _permit = broker_test_permit().await;
     if std::env::var_os("CRABKA_GRES_CONTROL_CRASH_CHILD").is_none() {
         return;
     }
@@ -1626,6 +1669,8 @@ async fn control_executor_crash_child() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn control_executor_hard_crash_matrix_reconciles_and_replays() {
     const MAX_CONTROL_RECOVERY_PAUSE: std::time::Duration = std::time::Duration::from_secs(30);
+
+    let _permit = broker_test_permit().await;
     let broker_dir = tempfile::tempdir().expect("broker tempdir");
     let broker = Broker::start(BrokerConfig::for_tests(broker_dir.path().to_path_buf()))
         .await
@@ -1738,6 +1783,7 @@ fn activation_fault_from_env(value: &str) -> crabka_gres::TopologyActivationFaul
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn activation_crash_child() {
+    let _permit = broker_test_permit().await;
     let Ok(fault_name) = std::env::var("CRABKA_GRES_ACTIVATION_CRASH_CHILD") else {
         return;
     };
@@ -1804,6 +1850,7 @@ async fn activation_crash_child() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn activation_generation_chain_child() {
+    let _permit = broker_test_permit().await;
     if std::env::var_os("CRABKA_GRES_ACTIVATION_CHAIN_CHILD").is_none() {
         return;
     }
@@ -1914,6 +1961,7 @@ async fn activation_generation_chain_child() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn activation_discovery_follows_g0_g1_g2_with_distinct_operation_ids() {
+    let _permit = broker_test_permit().await;
     let broker_dir = tempfile::tempdir().expect("broker tempdir");
     let broker = Broker::start(BrokerConfig::for_tests(broker_dir.path().to_path_buf()))
         .await
@@ -1978,6 +2026,7 @@ async fn activation_discovery_follows_g0_g1_g2_with_distinct_operation_ids() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn activation_crash_matrix_reopens_before_readiness() {
+    let _permit = broker_test_permit().await;
     let broker_dir = tempfile::tempdir().expect("broker tempdir");
     let broker = Broker::start(BrokerConfig::for_tests(broker_dir.path().to_path_buf()))
         .await
@@ -2209,6 +2258,7 @@ fn primary_versions(pairs: &crabka_pgkv::KvScan, table_id: u32) -> BTreeMap<Vec<
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn live_populated_hash_split_partitions_physical_rows_and_sequence() {
+    let _permit = broker_test_permit().await;
     let broker_dir = tempfile::tempdir().expect("broker tempdir");
     let broker = Broker::start(BrokerConfig::for_tests(broker_dir.path().to_path_buf()))
         .await
@@ -2368,6 +2418,7 @@ async fn live_populated_hash_split_partitions_physical_rows_and_sequence() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn live_multirange_transfer_rejects_concurrent_pause_without_waiting() {
+    let _permit = broker_test_permit().await;
     let broker_dir = tempfile::tempdir().expect("broker tempdir");
     let broker = Broker::start(BrokerConfig::for_tests(broker_dir.path().to_path_buf()))
         .await
@@ -2441,6 +2492,7 @@ async fn live_multirange_transfer_rejects_concurrent_pause_without_waiting() {
 
 #[tokio::test]
 async fn non_live_runtimes_do_not_expose_range_transfer_capability() {
+    let _permit = broker_test_permit().await;
     let single = crabka_gres::open_substrate_runtime(&crabka_gres::SubstrateRuntimeConfig {
         bootstrap: "memory://".to_string(),
         tenant: "runtime-transfer".to_string(),
@@ -2477,6 +2529,7 @@ async fn non_live_runtimes_do_not_expose_range_transfer_capability() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn runtime_uses_tenant_scram_by_default_and_rejects_wrong_password() {
+    let _permit = broker_test_permit().await;
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let port = listener.local_addr().expect("local addr").port();
     let loader = FakeTenantConfigLoader {
@@ -2488,13 +2541,14 @@ async fn runtime_uses_tenant_scram_by_default_and_rejects_wrong_password() {
         crabka_gres::serve_listener_with_tenant_config_loader(listener, args, &loader).await
     });
 
-    let client = connect_with_password(port, "alice", "g5-secret-password").await;
+    let client =
+        connect_with_password(port, "alice", &fixture_password("g5-secret-", "password")).await;
     client.simple_query("SELECT 1").await.expect("select");
     let wrong_password = tokio_postgres::Config::new()
         .host("127.0.0.1")
         .port(port)
         .user("alice")
-        .password("wrong")
+        .password(fixture_password("wr", "ong"))
         .connect(tokio_postgres::NoTls)
         .await;
     assert!(wrong_password.is_err());
@@ -2505,6 +2559,7 @@ async fn runtime_uses_tenant_scram_by_default_and_rejects_wrong_password() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn runtime_tenant_scram_accepts_libpq_psql() {
+    let _permit = broker_test_permit().await;
     if std::process::Command::new("psql")
         .arg("--version")
         .output()
@@ -2525,7 +2580,7 @@ async fn runtime_tenant_scram_accepts_libpq_psql() {
 
     let output = tokio::task::spawn_blocking(move || {
         std::process::Command::new("psql")
-            .env("PGPASSWORD", "g5-secret-password")
+            .env("PGPASSWORD", fixture_password("g5-secret-", "password"))
             .arg(format!(
                 "host=127.0.0.1 port={port} user=alice dbname=crab sslmode=disable"
             ))
@@ -2547,6 +2602,7 @@ async fn runtime_tenant_scram_accepts_libpq_psql() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn runtime_serves_sql_over_pgwire() {
+    let _permit = broker_test_permit().await;
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let port = listener.local_addr().expect("local addr").port();
     let server = tokio::spawn(crabka_gres::serve_listener(
@@ -2579,6 +2635,7 @@ async fn runtime_serves_sql_over_pgwire() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn runtime_reopens_durable_local_storage() {
+    let _permit = broker_test_permit().await;
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let data_dir = temp_dir.path().join("gres");
 
@@ -2625,6 +2682,7 @@ async fn runtime_reopens_durable_local_storage() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hosted_range_compute_forwards_dml_and_grants_timestamps_over_real_tcp() {
+    let _permit = broker_test_permit().await;
     let engine = crabka_pgexec::SqlEngine::new();
     let horizon = crabka_gres_ranges::MemoryTsoHorizon::new(engine.kv_handle(), 1);
     let persisted_max_ts = horizon.load_max_ts().expect("load TSO horizon");

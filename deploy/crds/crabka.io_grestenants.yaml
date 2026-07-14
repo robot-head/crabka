@@ -79,17 +79,20 @@ spec:
                 description: |-
                   Optional ordered range layout. Omitted means one open-ended range r0.
 
-                  The operator currently accepts only a single range. It reports a
-                  `Ready=False` `MultiRangeUnsupported` condition for a multi-range
-                  layout rather than rendering unsafe per-range computes that would each
-                  host range r0 and write its WAL.
+                  Each entry is placed on a distinct range compute.
                 items:
                   description: One row-key range in a tenant layout.
                   properties:
                     endKey:
-                      description: Exclusive `(table_id, rowid)` upper bound. Unset marks the final range.
+                      description: Exclusive `(table_id, bucket?, rowid)` upper bound. Unset marks the final range.
                       nullable: true
                       properties:
+                        bucket:
+                          description: Hash bucket at the boundary; absent for non-hash tables.
+                          format: uint32
+                          minimum: 0.0
+                          nullable: true
+                          type: integer
                         rowid:
                           description: Row identifier at the boundary.
                           format: uint64

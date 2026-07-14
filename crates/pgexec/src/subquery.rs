@@ -20,6 +20,7 @@ use crate::error::ExecError;
 /// The read-side handles a subquery needs to execute (mirrors `execute_read`'s
 /// parameters). Threaded through the resolution recursion so each nested subquery
 /// reads under the outer query's snapshot.
+#[derive(Clone, Copy)]
 pub(crate) struct SubCtx<'a> {
     pub catalog_kv: &'a dyn crabka_pgkv::Kv,
     pub kv: &'a dyn crabka_pgkv::Kv,
@@ -36,6 +37,26 @@ pub(crate) struct SubCtx<'a> {
     pub fctx: crate::exec::ForeignCtx<'a>,
     /// G-8: ordinary table scanner seam forwarded through nested subqueries.
     pub range_scanner: &'a dyn crate::scanner::RangeScanner,
+}
+
+impl<'a> SubCtx<'a> {
+    pub(crate) fn with_ctes<'b>(&'b self, ctes: &'b crate::cte::CteContext) -> SubCtx<'b>
+    where
+        'a: 'b,
+    {
+        SubCtx {
+            catalog_kv: self.catalog_kv,
+            kv: self.kv,
+            global: self.global,
+            gsnap: self.gsnap,
+            snapshot: self.snapshot,
+            own: self.own,
+            ctes,
+            eval_ctx: self.eval_ctx,
+            fctx: self.fctx,
+            range_scanner: self.range_scanner,
+        }
+    }
 }
 
 /// Rewrite every uncorrelated subquery in `s`'s expr-bearing clauses to a resolved
@@ -237,19 +258,7 @@ fn no_locking(q: &QueryExpr) -> Result<(), ExecError> {
 /// Run a subquery through the join read path to its materialized rows.
 fn run_relation(ctx: &SubCtx, q: &QueryExpr) -> Result<crate::join::Relation, ExecError> {
     no_locking(q)?;
-    crate::query::query_to_relation_with_ctes(
-        ctx.catalog_kv,
-        ctx.kv,
-        ctx.global,
-        ctx.gsnap,
-        ctx.snapshot,
-        ctx.own,
-        q,
-        ctx.ctes,
-        ctx.eval_ctx,
-        ctx.fctx,
-        ctx.range_scanner,
-    )
+    crate::query::query_to_relation_with_ctes(ctx, q)
 }
 
 /// Run a subquery to its raw rows (any shape) — used by `EXISTS`.

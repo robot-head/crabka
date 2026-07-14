@@ -1,5 +1,3 @@
-#![allow(clippy::missing_panics_doc, clippy::too_many_lines)]
-
 #[path = "../../gres-ranges/tests/harness/process.rs"]
 mod process;
 
@@ -64,17 +62,41 @@ enum SourceKillPoint {
 }
 
 #[derive(Debug, Clone, Copy)]
-#[allow(clippy::struct_excessive_bools)]
-struct RetirementPredicateState {
-    journal_phase: SplitOperationPhase,
-    target_layout: bool,
-    target_record_version: bool,
-    retirement_phase: Option<RangeRetirementPhase>,
-    predecessor_topic_present: bool,
-    retire_receipt_durable: bool,
+enum PredicateValue {
+    Met,
+    Unmet,
 }
 
-#[derive(Debug, Clone, Default)]
+impl PredicateValue {
+    const fn is_met(self) -> bool {
+        matches!(self, Self::Met)
+    }
+
+    const fn toggled(self) -> Self {
+        match self {
+            Self::Met => Self::Unmet,
+            Self::Unmet => Self::Met,
+        }
+    }
+}
+
+impl From<bool> for PredicateValue {
+    fn from(value: bool) -> Self {
+        if value { Self::Met } else { Self::Unmet }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RetirementPredicateState {
+    journal_phase: SplitOperationPhase,
+    target_layout: PredicateValue,
+    target_record_version: PredicateValue,
+    retirement_phase: Option<RangeRetirementPhase>,
+    predecessor_topic_present: PredicateValue,
+    retire_receipt_durable: PredicateValue,
+}
+
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
 struct RetirementDeleteLedger {
     exact_delete_calls: usize,
     requested_topics: Vec<String>,
@@ -257,33 +279,33 @@ impl SourceKillPoint {
     }
 
     fn retirement_is_ready(self, state: RetirementPredicateState) -> bool {
-        if !state.target_layout || !state.target_record_version {
+        if !state.target_layout.is_met() || !state.target_record_version.is_met() {
             return false;
         }
         match self {
             Self::RetiringBeforeDelete => {
                 state.journal_phase == SplitOperationPhase::Retiring
                     && state.retirement_phase == Some(RangeRetirementPhase::Parking)
-                    && state.predecessor_topic_present
-                    && !state.retire_receipt_durable
+                    && state.predecessor_topic_present.is_met()
+                    && !state.retire_receipt_durable.is_met()
             }
             Self::RetiringAfterDelete => {
                 state.journal_phase == SplitOperationPhase::Retiring
                     && state.retirement_phase == Some(RangeRetirementPhase::Parking)
-                    && !state.predecessor_topic_present
-                    && !state.retire_receipt_durable
+                    && !state.predecessor_topic_present.is_met()
+                    && !state.retire_receipt_durable.is_met()
             }
             Self::RetiringParked => {
                 state.journal_phase == SplitOperationPhase::Retiring
                     && state.retirement_phase == Some(RangeRetirementPhase::Parked)
-                    && !state.predecessor_topic_present
-                    && !state.retire_receipt_durable
+                    && !state.predecessor_topic_present.is_met()
+                    && !state.retire_receipt_durable.is_met()
             }
             Self::Resuming => {
                 state.journal_phase == SplitOperationPhase::Resuming
                     && state.retirement_phase == Some(RangeRetirementPhase::Parked)
-                    && !state.predecessor_topic_present
-                    && state.retire_receipt_durable
+                    && !state.predecessor_topic_present.is_met()
+                    && state.retire_receipt_durable.is_met()
             }
             _ => false,
         }
@@ -385,7 +407,17 @@ struct KillInjection<'a> {
     point: SourceKillPoint,
 }
 
-#[allow(clippy::struct_excessive_bools)]
+#[derive(Default)]
+struct CutoverObservation {
+    post_publication_ack_before_retirement: bool,
+    ambiguous_cutover_advanced_without_republish: bool,
+}
+
+struct RetireReceiptProbes {
+    before_kill: bool,
+    after_restart: bool,
+}
+
 struct KillObservation {
     old_pid: u32,
     new_pid: u32,
@@ -396,16 +428,14 @@ struct KillObservation {
     post_publication_ack_ms: Option<u128>,
     phase: SplitOperationPhase,
     evidence: crabka_gres_control::SplitOperationEvidence,
-    post_publication_ack_before_retirement: bool,
-    ambiguous_cutover_advanced_without_republish: bool,
+    cutover: CutoverObservation,
     tenant_layout: &'static str,
     retirement_phase: Option<RangeRetirementPhase>,
     tenant_record_version: u64,
     predecessor_topic_present: Option<bool>,
     delete_ledger: Arc<std::sync::Mutex<RetirementDeleteLedger>>,
     delete_calls_at_kill: usize,
-    retire_receipt_probed_before_kill: bool,
-    retire_receipt_probed_after_restart: bool,
+    retire_receipt_probes: RetireReceiptProbes,
 }
 
 async fn probe_durable_retire_receipt(
@@ -648,44 +678,44 @@ fn retirement_kill_predicates_require_exact_durable_state() {
             SourceKillPoint::RetiringBeforeDelete,
             RetirementPredicateState {
                 journal_phase: SplitOperationPhase::Retiring,
-                target_layout: true,
-                target_record_version: true,
+                target_layout: PredicateValue::Met,
+                target_record_version: PredicateValue::Met,
                 retirement_phase: Some(RangeRetirementPhase::Parking),
-                predecessor_topic_present: true,
-                retire_receipt_durable: false,
+                predecessor_topic_present: PredicateValue::Met,
+                retire_receipt_durable: PredicateValue::Unmet,
             },
         ),
         (
             SourceKillPoint::RetiringAfterDelete,
             RetirementPredicateState {
                 journal_phase: SplitOperationPhase::Retiring,
-                target_layout: true,
-                target_record_version: true,
+                target_layout: PredicateValue::Met,
+                target_record_version: PredicateValue::Met,
                 retirement_phase: Some(RangeRetirementPhase::Parking),
-                predecessor_topic_present: false,
-                retire_receipt_durable: false,
+                predecessor_topic_present: PredicateValue::Unmet,
+                retire_receipt_durable: PredicateValue::Unmet,
             },
         ),
         (
             SourceKillPoint::RetiringParked,
             RetirementPredicateState {
                 journal_phase: SplitOperationPhase::Retiring,
-                target_layout: true,
-                target_record_version: true,
+                target_layout: PredicateValue::Met,
+                target_record_version: PredicateValue::Met,
                 retirement_phase: Some(RangeRetirementPhase::Parked),
-                predecessor_topic_present: false,
-                retire_receipt_durable: false,
+                predecessor_topic_present: PredicateValue::Unmet,
+                retire_receipt_durable: PredicateValue::Unmet,
             },
         ),
         (
             SourceKillPoint::Resuming,
             RetirementPredicateState {
                 journal_phase: SplitOperationPhase::Resuming,
-                target_layout: true,
-                target_record_version: true,
+                target_layout: PredicateValue::Met,
+                target_record_version: PredicateValue::Met,
                 retirement_phase: Some(RangeRetirementPhase::Parked),
-                predecessor_topic_present: false,
-                retire_receipt_durable: true,
+                predecessor_topic_present: PredicateValue::Unmet,
+                retire_receipt_durable: PredicateValue::Met,
             },
         ),
     ];
@@ -694,11 +724,11 @@ fn retirement_kill_predicates_require_exact_durable_state() {
         assert!(point.retirement_is_ready(state));
         for near_miss in [
             RetirementPredicateState {
-                target_layout: false,
+                target_layout: PredicateValue::Unmet,
                 ..state
             },
             RetirementPredicateState {
-                target_record_version: false,
+                target_record_version: PredicateValue::Unmet,
                 ..state
             },
             RetirementPredicateState {
@@ -710,11 +740,11 @@ fn retirement_kill_predicates_require_exact_durable_state() {
                 ..state
             },
             RetirementPredicateState {
-                predecessor_topic_present: !state.predecessor_topic_present,
+                predecessor_topic_present: state.predecessor_topic_present.toggled(),
                 ..state
             },
             RetirementPredicateState {
-                retire_receipt_durable: !state.retire_receipt_durable,
+                retire_receipt_durable: state.retire_receipt_durable.toggled(),
                 ..state
             },
         ] {
@@ -729,10 +759,14 @@ fn counting_retirement_admin_rejects_unrelated_delete_requests() {
     ledger
         .record_delete_request("__gres_wal.tenant.r1", &["__gres_wal.tenant.r1"])
         .expect("exact predecessor delete");
-    assert_eq!(ledger.exact_delete_calls, 1);
     assert_eq!(
-        ledger.requested_topics,
-        vec!["__gres_wal.tenant.r1".to_owned()]
+        ledger,
+        RetirementDeleteLedger {
+            exact_delete_calls: 1,
+            requested_topics: vec!["__gres_wal.tenant.r1".to_owned()],
+            unrelated_delete_attempted: false,
+            injected_after_delete_errors: 0,
+        }
     );
 
     assert!(
@@ -740,25 +774,29 @@ fn counting_retirement_admin_rejects_unrelated_delete_requests() {
             .record_delete_request("__gres_wal.tenant.r1", &["sentinel"])
             .is_err()
     );
-    assert!(ledger.unrelated_delete_attempted);
-    assert_eq!(ledger.exact_delete_calls, 1);
+    assert_eq!(
+        ledger,
+        RetirementDeleteLedger {
+            exact_delete_calls: 1,
+            requested_topics: vec!["__gres_wal.tenant.r1".to_owned()],
+            unrelated_delete_attempted: true,
+            injected_after_delete_errors: 0,
+        }
+    );
 }
 
 #[test]
 fn retirement_restart_uses_authoritative_target_ranges() {
-    for point in [
-        SourceKillPoint::RetiringBeforeDelete,
-        SourceKillPoint::RetiringAfterDelete,
-        SourceKillPoint::RetiringParked,
-        SourceKillPoint::Resuming,
+    for (point, expected_ranges) in [
+        (SourceKillPoint::RetiringBeforeDelete, "r0,r2"),
+        (SourceKillPoint::RetiringAfterDelete, "r0,r2"),
+        (SourceKillPoint::RetiringParked, "r0,r2"),
+        (SourceKillPoint::Resuming, "r0,r2"),
+        (SourceKillPoint::ActivatedBeforeCutover, "r0,r2"),
+        (SourceKillPoint::Restored, "r0,r1"),
     ] {
-        assert_eq!(restart_hosted_ranges(point), "r0,r2");
+        assert_eq!(restart_hosted_ranges(point), expected_ranges);
     }
-    assert_eq!(
-        restart_hosted_ranges(SourceKillPoint::ActivatedBeforeCutover),
-        "r0,r2"
-    );
-    assert_eq!(restart_hosted_ranges(SourceKillPoint::Restored), "r0,r1");
 }
 
 #[tokio::test]
@@ -915,12 +953,115 @@ async fn initiate_split_with_cli(
     );
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 struct SplitLedgerRow {
     rowid: u64,
     seq: i32,
     route_key: i32,
     checksum: String,
+}
+
+struct SplitFoundationSetup {
+    operation_started: Instant,
+    operation_id: String,
+    system: ProcessHarness,
+    sentinel_topic: String,
+    acknowledged: Vec<SplitLedgerRow>,
+}
+
+async fn prepare_split_foundation() -> SplitFoundationSetup {
+    assert!(cli_binary().is_file(), "dedicated CI must build crabka CLI");
+    let operation_started = Instant::now();
+    let identity = format!("{:x}-p{:x}", timestamp_ms(), std::process::id());
+    let operation_id = format!("g8-split-{identity}");
+    let system = ProcessHarness::start_all_on_zero(&format!("tenant-g8-split-{identity}")).await;
+    let mut registry = Registry::connect(system.bootstrap())
+        .await
+        .expect("registry");
+    assert!(
+        registry
+            .load_split_operation(system.tenant(), &operation_id)
+            .await
+            .expect("unique split operation")
+            .is_none()
+    );
+    let sentinel_topic = format!("__gres_g8_split_sentinel.{}", system.tenant());
+    let mut sentinel_admin =
+        crabka_client_admin::AdminClient::connect(&[system.bootstrap().to_owned()])
+            .await
+            .expect("split sentinel admin");
+    let outcomes = sentinel_admin
+        .create_topics(
+            &[crabka_client_admin::CreateTopicSpec {
+                name: sentinel_topic.clone(),
+                partitions: 1,
+                replicas: 1,
+                configs: BTreeMap::default(),
+            }],
+            30_000,
+        )
+        .await
+        .expect("create split sentinel");
+    assert!(outcomes.iter().all(|outcome| outcome.error.is_none()));
+
+    let source = system.sql(0).await;
+    source
+        .simple_query(
+            "CREATE TABLE live_ledger51 (seq int4, route_key int4, checksum text NOT NULL) SHARDED",
+        )
+        .await
+        .expect("create split ledger");
+    let mut ack_file = tempfile::NamedTempFile::new().expect("external split ACK ledger");
+    for seq in 0..32_i32 {
+        let route_key = if seq % 2 == 0 { seq / 2 } else { 16 + seq / 2 };
+        let row = SplitLedgerRow {
+            rowid: u64::try_from(seq).unwrap() + 1,
+            seq,
+            route_key,
+            checksum: format!("split-{seq:04x}-{route_key:04x}"),
+        };
+        source
+            .execute(
+                "INSERT INTO live_ledger51 VALUES ($1, $2, $3)",
+                &[&row.seq, &row.route_key, &row.checksum],
+            )
+            .await
+            .expect("acknowledged split source write");
+        serde_json::to_writer(&mut ack_file, &row).expect("append split ACK");
+        ack_file.write_all(b"\n").expect("terminate split ACK");
+        ack_file.as_file().sync_data().expect("fsync split ACK");
+    }
+    ack_file.flush().expect("flush split ACK ledger");
+    ack_file
+        .as_file()
+        .sync_all()
+        .expect("sync split ACK ledger");
+    let acknowledged = std::fs::read_to_string(ack_file.path())
+        .expect("read back fsynced split ACK ledger")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("decode split ACK ledger row"))
+        .collect::<Vec<_>>();
+    assert_eq!(acknowledged.len(), 32);
+    assert!(
+        direct_successor_rows(&system, 0, 51, None, None)
+            .await
+            .is_empty()
+    );
+    assert_eq!(
+        direct_successor_rows(&system, 1, 51, None, None)
+            .await
+            .iter()
+            .map(|row| row.rowid)
+            .collect::<Vec<_>>(),
+        (1..33_u64).collect::<Vec<_>>()
+    );
+    SplitFoundationSetup {
+        operation_started,
+        operation_id,
+        system,
+        sentinel_topic,
+        acknowledged,
+    }
 }
 
 async fn direct_successor_rows(
@@ -1016,17 +1157,250 @@ async fn retirement_topic_present(admin: &mut dyn RangeRetirementAdmin, topic: &
         .is_some_and(|entry| entry.error.is_none())
 }
 
+struct OperationRestartInput<'a> {
+    system: &'a mut ProcessHarness,
+    operation_id: &'a str,
+    current: &'a SplitOperationRecord,
+    current_tenant: &'a TenantRecord,
+    injection: &'a KillInjection<'a>,
+    predecessor_topic_at_boundary: Option<bool>,
+    predecessor_topic: &'a str,
+    control: &'a mut GresControlHandle,
+    mutation_client: &'a mut RecordingRangeMutationClient,
+    retirement_admin: &'a mut CountingRetirementAdmin,
+    marker_observations: &'a Arc<Mutex<Vec<MarkerObservation>>>,
+    delete_ledger: &'a Arc<std::sync::Mutex<RetirementDeleteLedger>>,
+}
+
+async fn restart_operation_source(input: OperationRestartInput<'_>) -> KillObservation {
+    wait_for_ack_count(input.injection.ledger_path, 8).await;
+    let old_pid = input.system.pid(0);
+    let pre_kill_ms = timestamp_ms();
+    input.system.kill(0).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    input
+        .system
+        .restart_with_hosted_ranges(0, restart_hosted_ranges(input.injection.point))
+        .await;
+    let new_pid = input.system.pid(0);
+    assert_ne!(
+        old_pid, new_pid,
+        "SIGKILL restart must replace the real child"
+    );
+    let mut fresh_registry = Registry::connect(input.system.bootstrap())
+        .await
+        .expect("fresh post-kill registry");
+    fresh_registry
+        .ensure_topic(1)
+        .await
+        .expect("registry topic");
+    *input.control = Arc::new(BrokerControl {
+        registry: Mutex::new(fresh_registry),
+    });
+    *input.mutation_client = RecordingRangeMutationClient {
+        inner: MtlsRangeMutationClient::new(input.system.operator_control_client()),
+        marker_observations: Arc::clone(input.marker_observations),
+    };
+    let fresh_admin =
+        crabka_client_admin::AdminClient::connect(&[input.system.bootstrap().to_owned()])
+            .await
+            .expect("fresh retirement admin");
+    *input.retirement_admin = CountingRetirementAdmin::new(
+        fresh_admin,
+        input.predecessor_topic.to_owned(),
+        Arc::clone(input.delete_ledger),
+    );
+    let mut observation = KillObservation {
+        old_pid,
+        new_pid,
+        restart_ms: timestamp_ms(),
+        pre_kill_ms,
+        stage_complete_ms: None,
+        publication_ms: None,
+        post_publication_ack_ms: None,
+        phase: input.current.phase,
+        evidence: input.current.evidence.clone(),
+        cutover: CutoverObservation::default(),
+        tenant_layout: input
+            .current
+            .plan
+            .as_ref()
+            .map(|plan| {
+                if input.current_tenant.ranges == plan.target_layout {
+                    "target"
+                } else {
+                    "current"
+                }
+            })
+            .expect("sealed plan"),
+        retirement_phase: input
+            .current_tenant
+            .range_retirements
+            .iter()
+            .find(|retirement| retirement.operation_id == input.current.operation_id)
+            .map(|retirement| retirement.phase),
+        tenant_record_version: input.current_tenant.record_version,
+        predecessor_topic_present: input.predecessor_topic_at_boundary,
+        delete_ledger: Arc::clone(input.delete_ledger),
+        delete_calls_at_kill: input
+            .delete_ledger
+            .lock()
+            .expect("delete ledger at kill")
+            .exact_delete_calls,
+        retire_receipt_probes: RetireReceiptProbes {
+            before_kill: input.injection.point == SourceKillPoint::Resuming,
+            after_restart: false,
+        },
+    };
+    let restarted_tenant = load_tenant(input.system.bootstrap(), input.system.tenant()).await;
+    assert_eq!(
+        restarted_tenant.record_version,
+        input.current_tenant.record_version
+    );
+    assert_eq!(restarted_tenant.ranges, input.current_tenant.ranges);
+    assert_eq!(
+        restarted_tenant.range_retirements,
+        input.current_tenant.range_retirements
+    );
+    if input.injection.point == SourceKillPoint::Resuming {
+        let restarted_operation = load_operation(
+            input.system.bootstrap(),
+            input.system.tenant(),
+            input.operation_id,
+        )
+        .await;
+        assert_eq!(restarted_operation.phase, SplitOperationPhase::Resuming);
+        observation.retire_receipt_probes.after_restart = probe_durable_retire_receipt(
+            input.system,
+            input.mutation_client,
+            &restarted_operation,
+            "after restart",
+        )
+        .await;
+    }
+    observation
+}
+
+async fn reconcile_activated_operation(
+    system: &ProcessHarness,
+    operation_id: &str,
+    control: &GresControlHandle,
+    mutation_client: &RecordingRangeMutationClient,
+    current: &SplitOperationRecord,
+    restarted_pids: Option<&mut KillObservation>,
+) {
+    let readiness_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match verify_target_topology_ready(mutation_client, current).await {
+            Ok(()) => break,
+            Err(error) if Instant::now() < readiness_deadline => {
+                let debug_tenant = load_tenant(system.bootstrap(), system.tenant()).await;
+                let debug_operation =
+                    load_operation(system.bootstrap(), system.tenant(), operation_id).await;
+                let plan = debug_operation.plan.as_ref().expect("plan");
+                eprintln!(
+                    "target readiness retry: {error}; tenant_version={} phase={:?} source_version={} current_match={} target_match={}",
+                    debug_tenant.record_version,
+                    debug_operation.phase,
+                    plan.source_record_version,
+                    debug_tenant.ranges == plan.current_layout,
+                    debug_tenant.ranges == plan.target_layout,
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(error) => panic!("target readiness: {error}"),
+        }
+    }
+    let tenant_before_cutover = load_tenant(system.bootstrap(), system.tenant()).await;
+    let reconciled = reconcile_activated_cutover(control, current)
+        .await
+        .expect("atomic cutover");
+    if current
+        .plan
+        .as_ref()
+        .is_some_and(|plan| tenant_before_cutover.ranges == plan.target_layout)
+    {
+        let tenant_after_cutover = load_tenant(system.bootstrap(), system.tenant()).await;
+        assert_eq!(
+            tenant_after_cutover.record_version,
+            tenant_before_cutover.record_version
+        );
+        assert_eq!(tenant_after_cutover.ranges, tenant_before_cutover.ranges);
+        assert_eq!(
+            tenant_after_cutover.range_retirements,
+            tenant_before_cutover.range_retirements
+        );
+        assert_eq!(reconciled.phase, SplitOperationPhase::LayoutPublished);
+        if let Some(observation) = restarted_pids {
+            observation
+                .cutover
+                .ambiguous_cutover_advanced_without_republish = true;
+        }
+    }
+}
+
+type DriveOperationResult = (
+    SplitOperationRecord,
+    Option<KillObservation>,
+    Vec<MarkerObservation>,
+    RetirementDeleteLedger,
+);
+
+async fn finish_drive(
+    current: SplitOperationRecord,
+    restarted_pids: Option<KillObservation>,
+    marker_observations: &Mutex<Vec<MarkerObservation>>,
+    delete_ledger: &std::sync::Mutex<RetirementDeleteLedger>,
+) -> DriveOperationResult {
+    (
+        current,
+        restarted_pids,
+        marker_observations.lock().await.clone(),
+        delete_ledger.lock().expect("final delete ledger").clone(),
+    )
+}
+
+async fn delay_after_transient_reconcile(
+    system: &ProcessHarness,
+    started: Instant,
+    max_operation_duration: Duration,
+    error: &SplitReconcileError,
+) {
+    assert!(
+        started.elapsed() < max_operation_duration,
+        "operation deadline after transient reconcile error: {error}; source log: {}",
+        system.log(0)
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+}
+
+async fn reconcile_non_special_phase(
+    control: &GresControlHandle,
+    mutation_client: &RecordingRangeMutationClient,
+    current: &SplitOperationRecord,
+    system: &ProcessHarness,
+    started: Instant,
+    max_operation_duration: Duration,
+) {
+    match reconcile_one_rpc_phase(control, mutation_client, current).await {
+        Ok(_) => {}
+        Err(
+            error @ (SplitReconcileError::Transport(_)
+            | SplitReconcileError::Ambiguous(_)
+            | SplitReconcileError::Registry(_)),
+        ) => {
+            delay_after_transient_reconcile(system, started, max_operation_duration, &error).await;
+        }
+        Err(error) => panic!("non-retryable reconcile error: {error}"),
+    }
+}
+
 async fn drive_operation(
     system: &mut ProcessHarness,
     operation_id: &str,
     max_operation_duration: std::time::Duration,
     kill_injection: Option<KillInjection<'_>>,
-) -> (
-    SplitOperationRecord,
-    Option<KillObservation>,
-    Vec<MarkerObservation>,
-    RetirementDeleteLedger,
-) {
+) -> DriveOperationResult {
     let tenant = TenantName::try_from(system.tenant()).expect("tenant");
     let mut registry = Registry::connect(system.bootstrap())
         .await
@@ -1082,14 +1456,15 @@ async fn drive_operation(
                 .point
                 .retirement_is_ready(RetirementPredicateState {
                     journal_phase: current.phase,
-                    target_layout: current_tenant.ranges == plan.target_layout,
+                    target_layout: (current_tenant.ranges == plan.target_layout).into(),
                     target_record_version: plan
                         .source_record_version
                         .checked_add(1)
-                        .is_some_and(|minimum| current_tenant.record_version >= minimum),
+                        .is_some_and(|minimum| current_tenant.record_version >= minimum)
+                        .into(),
                     retirement_phase,
-                    predecessor_topic_present,
-                    retire_receipt_durable,
+                    predecessor_topic_present: predecessor_topic_present.into(),
+                    retire_receipt_durable: retire_receipt_durable.into(),
                 })
         } else {
             false
@@ -1099,113 +1474,23 @@ async fn drive_operation(
             .is_some_and(|injection| injection.point.is_ready(&current, &current_tenant));
         if restarted_pids.is_none() && (retirement_ready || source_or_cutover_ready) {
             let injection = kill_injection.as_ref().expect("checked");
-            wait_for_ack_count(injection.ledger_path, 8).await;
-            let old_pid = system.pid(0);
-            let pre_kill_ms = timestamp_ms();
-            system.kill(0).await;
-            tokio::time::sleep(Duration::from_millis(150)).await;
-            system
-                .restart_with_hosted_ranges(0, restart_hosted_ranges(injection.point))
-                .await;
-            let new_pid = system.pid(0);
-            assert_ne!(
-                old_pid, new_pid,
-                "SIGKILL restart must replace the real child"
-            );
-            let mut fresh_registry = Registry::connect(system.bootstrap())
-                .await
-                .expect("fresh post-kill registry");
-            fresh_registry
-                .ensure_topic(1)
-                .await
-                .expect("registry topic");
-            control = Arc::new(BrokerControl {
-                registry: Mutex::new(fresh_registry),
-            });
-            mutation_client = RecordingRangeMutationClient {
-                inner: MtlsRangeMutationClient::new(system.operator_control_client()),
-                marker_observations: Arc::clone(&marker_observations),
-            };
-            let fresh_admin =
-                crabka_client_admin::AdminClient::connect(&[system.bootstrap().to_owned()])
-                    .await
-                    .expect("fresh retirement admin");
-            retirement_admin = CountingRetirementAdmin::new(
-                fresh_admin,
-                predecessor_topic.clone(),
-                Arc::clone(&delete_ledger),
-            );
-            restarted_pids = Some(KillObservation {
-                old_pid,
-                new_pid,
-                restart_ms: timestamp_ms(),
-                pre_kill_ms,
-                stage_complete_ms: None,
-                publication_ms: None,
-                post_publication_ack_ms: None,
-                phase: current.phase,
-                evidence: current.evidence.clone(),
-                post_publication_ack_before_retirement: false,
-                ambiguous_cutover_advanced_without_republish: false,
-                tenant_layout: current
-                    .plan
-                    .as_ref()
-                    .map(|plan| {
-                        if current_tenant.ranges == plan.target_layout {
-                            "target"
-                        } else {
-                            "current"
-                        }
-                    })
-                    .expect("sealed plan"),
-                retirement_phase: current_tenant
-                    .range_retirements
-                    .iter()
-                    .find(|retirement| retirement.operation_id == current.operation_id)
-                    .map(|retirement| retirement.phase),
-                tenant_record_version: current_tenant.record_version,
-                predecessor_topic_present: predecessor_topic_at_boundary,
-                delete_ledger: Arc::clone(&delete_ledger),
-                delete_calls_at_kill: delete_ledger
-                    .lock()
-                    .expect("delete ledger at kill")
-                    .exact_delete_calls,
-                retire_receipt_probed_before_kill: injection.point == SourceKillPoint::Resuming,
-                retire_receipt_probed_after_restart: false,
-            });
-            let restarted_tenant = load_tenant(system.bootstrap(), system.tenant()).await;
-            assert_eq!(
-                restarted_tenant.record_version, current_tenant.record_version,
-                "restart cannot alter durable tenant version"
-            );
-            assert_eq!(
-                restarted_tenant.ranges, current_tenant.ranges,
-                "restart cannot alter durable tenant layout"
-            );
-            assert_eq!(
-                restarted_tenant.range_retirements, current_tenant.range_retirements,
-                "restart cannot alter durable retirement sidecar"
-            );
-            if injection.point == SourceKillPoint::Resuming {
-                let restarted_operation =
-                    load_operation(system.bootstrap(), system.tenant(), operation_id).await;
-                assert_eq!(
-                    restarted_operation.phase,
-                    SplitOperationPhase::Resuming,
-                    "post-restart receipt probe must run before Completed"
-                );
-                let probed = probe_durable_retire_receipt(
+            restarted_pids = Some(
+                restart_operation_source(OperationRestartInput {
                     system,
-                    &mutation_client,
-                    &restarted_operation,
-                    "after restart",
-                )
-                .await;
-                restarted_pids
-                    .as_mut()
-                    .expect("restart observation")
-                    .retire_receipt_probed_after_restart = probed;
-            }
+                    operation_id,
+                    current: &current,
+                    current_tenant: &current_tenant,
+                    injection,
+                    predecessor_topic_at_boundary,
+                    predecessor_topic: &predecessor_topic,
+                    control: &mut control,
+                    mutation_client: &mut mutation_client,
+                    retirement_admin: &mut retirement_admin,
+                    marker_observations: &marker_observations,
+                    delete_ledger: &delete_ledger,
+                })
+                .await,
+            );
         }
         if current.evidence.tail_sha256.is_some()
             && let Some(observation) = restarted_pids.as_mut()
@@ -1227,7 +1512,7 @@ async fn drive_operation(
                     .is_some_and(|minimum| current_tenant.record_version >= minimum)
         }) && let (Some(injection), Some(observation)) =
             (kill_injection.as_ref(), restarted_pids.as_mut())
-            && !observation.post_publication_ack_before_retirement
+            && !observation.cutover.post_publication_ack_before_retirement
         {
             observation.publication_ms = Some(timestamp_ms());
             let acknowledged = parse_ack_ledger(
@@ -1238,7 +1523,7 @@ async fn drive_operation(
             .acknowledgements
             .len();
             wait_for_ack_count(injection.ledger_path, acknowledged + 1).await;
-            observation.post_publication_ack_before_retirement = true;
+            observation.cutover.post_publication_ack_before_retirement = true;
             observation.post_publication_ack_ms = parse_ack_ledger(
                 &std::fs::read_to_string(injection.ledger_path)
                     .expect("post-publication acknowledgement ledger"),
@@ -1251,68 +1536,15 @@ async fn drive_operation(
         }
         match current.phase {
             SplitOperationPhase::Activated => {
-                let readiness_deadline = Instant::now() + std::time::Duration::from_secs(5);
-                loop {
-                    match verify_target_topology_ready(&mutation_client, &current).await {
-                        Ok(()) => break,
-                        Err(error) if Instant::now() < readiness_deadline => {
-                            let mut debug_registry = Registry::connect(system.bootstrap())
-                                .await
-                                .expect("debug registry");
-                            let debug_tenant = debug_registry
-                                .get(system.tenant())
-                                .await
-                                .expect("debug tenant")
-                                .expect("debug tenant present");
-                            let debug_operation = debug_registry
-                                .load_split_operation(system.tenant(), operation_id)
-                                .await
-                                .expect("debug operation")
-                                .expect("debug operation present");
-                            eprintln!(
-                                "target readiness retry: {error}; tenant_version={} phase={:?} source_version={} current_match={} target_match={}",
-                                debug_tenant.record_version,
-                                debug_operation.phase,
-                                debug_operation
-                                    .plan
-                                    .as_ref()
-                                    .expect("plan")
-                                    .source_record_version,
-                                debug_tenant.ranges
-                                    == debug_operation.plan.as_ref().expect("plan").current_layout,
-                                debug_tenant.ranges
-                                    == debug_operation.plan.as_ref().expect("plan").target_layout,
-                            );
-                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                        }
-                        Err(error) => panic!("target readiness: {error}"),
-                    }
-                }
-                let tenant_before_cutover = load_tenant(system.bootstrap(), system.tenant()).await;
-                let reconciled = reconcile_activated_cutover(&control, &current)
-                    .await
-                    .expect("atomic cutover");
-                if current
-                    .plan
-                    .as_ref()
-                    .is_some_and(|plan| tenant_before_cutover.ranges == plan.target_layout)
-                {
-                    let tenant_after_cutover =
-                        load_tenant(system.bootstrap(), system.tenant()).await;
-                    assert_eq!(
-                        tenant_after_cutover.record_version, tenant_before_cutover.record_version,
-                        "ambiguous cutover replay cannot republish tenant"
-                    );
-                    assert_eq!(tenant_after_cutover.ranges, tenant_before_cutover.ranges);
-                    assert_eq!(
-                        tenant_after_cutover.range_retirements,
-                        tenant_before_cutover.range_retirements
-                    );
-                    assert_eq!(reconciled.phase, SplitOperationPhase::LayoutPublished);
-                    if let Some(observation) = restarted_pids.as_mut() {
-                        observation.ambiguous_cutover_advanced_without_republish = true;
-                    }
-                }
+                reconcile_activated_operation(
+                    system,
+                    operation_id,
+                    &control,
+                    &mutation_client,
+                    &current,
+                    restarted_pids.as_mut(),
+                )
+                .await;
             }
             SplitOperationPhase::Retiring => {
                 if kill_injection.as_ref().is_some_and(|injection| {
@@ -1343,33 +1575,26 @@ async fn drive_operation(
                 assert_eq!(rpc_result.phase, SplitOperationPhase::Resuming);
             }
             SplitOperationPhase::Completed => {
-                assert!(
-                    started.elapsed() < max_operation_duration,
-                    "operation exceeded duration bound"
-                );
-                return (
+                assert!(started.elapsed() < max_operation_duration);
+                return finish_drive(
                     current,
                     restarted_pids,
-                    marker_observations.lock().await.clone(),
-                    delete_ledger.lock().expect("final delete ledger").clone(),
-                );
+                    &marker_observations,
+                    &delete_ledger,
+                )
+                .await;
             }
-            _ => match reconcile_one_rpc_phase(&control, &mutation_client, &current).await {
-                Ok(_) => {}
-                Err(
-                    error @ (SplitReconcileError::Transport(_)
-                    | SplitReconcileError::Ambiguous(_)
-                    | SplitReconcileError::Registry(_)),
-                ) => {
-                    assert!(
-                        started.elapsed() < max_operation_duration,
-                        "operation deadline after transient reconcile error: {error}; source log: {}",
-                        system.log(0)
-                    );
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-                Err(error) => panic!("non-retryable reconcile error: {error}"),
-            },
+            _ => {
+                reconcile_non_special_phase(
+                    &control,
+                    &mutation_client,
+                    &current,
+                    system,
+                    started,
+                    max_operation_duration,
+                )
+                .await;
+            }
         }
     }
 }
@@ -1438,117 +1663,180 @@ async fn real_process_move_cli_operator_and_wal_retirement() {
     system.shutdown().await;
 }
 
+struct SplitFoundationEvidence<'a> {
+    system: &'a ProcessHarness,
+    operation_id: &'a str,
+    sentinel_topic: &'a str,
+    completed: &'a SplitOperationRecord,
+    tenant: &'a TenantRecord,
+    r2_rows: &'a [SplitLedgerRow],
+    r3_rows: &'a [SplitLedgerRow],
+    acknowledged: &'a [SplitLedgerRow],
+    full_sequences: &'a [SplitLedgerRow],
+    marker_observation: &'a MarkerObservation,
+    journal_revision: u64,
+    journal_digest: &'a str,
+    partition_union: &'a [crabka_gres_ranges::WireInDoubtMarker],
+    delete_observation: &'a RetirementDeleteLedger,
+    operation_elapsed_ms: u128,
+}
+
+struct VerifiedSplitMarkers {
+    observation: MarkerObservation,
+    journal_revision: u64,
+    journal_digest: String,
+    partition_union: Vec<crabka_gres_ranges::WireInDoubtMarker>,
+}
+
+fn verify_split_markers(
+    completed: &SplitOperationRecord,
+    operation_id: &str,
+    marker_observations: &[MarkerObservation],
+) -> VerifiedSplitMarkers {
+    let [observation] = marker_observations else {
+        panic!("expected exactly one authenticated marker response")
+    };
+    assert_eq!(observation.request.range_id.as_u32(), 1);
+    assert_eq!(observation.request.operation_id, operation_id);
+    assert_eq!(observation.request.generation, 0);
+    let predecessor = completed
+        .plan
+        .as_ref()
+        .expect("sealed Split plan")
+        .current_layout
+        .iter()
+        .find(|range| range.range_id == 1)
+        .expect("predecessor r1");
+    assert_eq!(observation.endpoint, predecessor.endpoint);
+    let crabka_gres_ranges::RangeControlOperation::InheritMarkers {
+        journal_revision,
+        journal_digest,
+    } = &observation.request.operation
+    else {
+        panic!("recorded non-marker request");
+    };
+    assert!(*journal_revision > 0);
+    assert!(!journal_digest.is_empty());
+    assert_eq!(
+        observation.digest,
+        completed.evidence.marker_digest.as_deref().unwrap()
+    );
+    let mut partition_union = observation.left_markers.clone();
+    partition_union.extend(observation.right_markers.iter().copied());
+    assert_eq!(partition_union, observation.markers);
+    assert!(observation.left_markers.iter().all(|marker| {
+        marker.key.table_id < 51 || (marker.key.table_id == 51 && marker.key.rowid < 16)
+    }));
+    assert!(observation.right_markers.iter().all(|marker| {
+        marker.key.table_id > 51 || (marker.key.table_id == 51 && marker.key.rowid >= 16)
+    }));
+    assert!(
+        observation
+            .left_markers
+            .iter()
+            .all(|left| { observation.right_markers.iter().all(|right| left != right) })
+    );
+    VerifiedSplitMarkers {
+        observation: observation.clone(),
+        journal_revision: *journal_revision,
+        journal_digest: journal_digest.clone(),
+        partition_union,
+    }
+}
+
+async fn write_split_foundation_evidence(input: SplitFoundationEvidence<'_>) {
+    let mut admin =
+        crabka_client_admin::AdminClient::connect(&[input.system.bootstrap().to_owned()])
+            .await
+            .expect("split topic admin");
+    let topics = admin
+        .metadata(&[])
+        .await
+        .expect("split topic metadata")
+        .topics
+        .into_iter()
+        .filter(|topic| topic.error.is_none())
+        .map(|topic| topic.name)
+        .collect::<std::collections::BTreeSet<_>>();
+    let predecessor_topic = format!("__gres_wal.{}.r1", input.system.tenant());
+    assert!(!topics.contains(&predecessor_topic));
+    for topic in [
+        format!("__gres_wal.{}.r0", input.system.tenant()),
+        format!("__gres_wal.{}.r2.g0000000001", input.system.tenant()),
+        format!("__gres_wal.{}.r3.g0000000001", input.system.tenant()),
+        input.sentinel_topic.to_owned(),
+    ] {
+        assert!(topics.contains(&topic));
+    }
+    let Some(path) = std::env::var_os("CRABKA_G8_SPLIT_EVIDENCE") else {
+        return;
+    };
+    let path = PathBuf::from(path);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("create split evidence directory");
+    }
+    let plan = input.completed.plan.as_ref().expect("sealed plan");
+    let r2 = plan
+        .target_layout
+        .iter()
+        .find(|range| range.range_id == 2)
+        .expect("r2 target");
+    let r3 = plan
+        .target_layout
+        .iter()
+        .find(|range| range.range_id == 3)
+        .expect("r3 target");
+    let marker = input.marker_observation;
+    let evidence = serde_json::json!({
+        "schema_version": 1,
+        "operation": "split",
+        "tenant_id": input.system.tenant(),
+        "operation_id": input.operation_id,
+        "phase": "completed",
+        "routing_table_id": plan.routing_table_id,
+        "split_rowid": 16,
+        "target_range_ids": [0, 2, 3],
+        "r2": {"endpoint": r2.endpoint, "generation": r2.wal_generation, "serving": input.tenant.ranges.contains(r2), "row_count": input.r2_rows.len(), "cross_side_rows": input.r2_rows.iter().filter(|row| row.rowid >= 16).count()},
+        "r3": {"endpoint": r3.endpoint, "generation": r3.wal_generation, "serving": input.tenant.ranges.contains(r3), "row_count": input.r3_rows.len(), "cross_side_rows": input.r3_rows.iter().filter(|row| row.rowid < 16).count()},
+        "endpoints_distinct": r2.endpoint != r3.endpoint,
+        "acknowledged_rows": input.acknowledged.len(),
+        "full_scan_rows": input.full_sequences.len(),
+        "full_ack_equality": input.full_sequences == input.acknowledged,
+        "marker_partition": {
+            "authenticated_endpoint": marker.endpoint,
+            "request_range_id": marker.request.range_id.as_u32(),
+            "request_generation": marker.request.generation,
+            "request_journal_revision": input.journal_revision,
+            "request_journal_digest": input.journal_digest,
+            "predecessor_count": marker.markers.len(),
+            "r2_count": marker.left_markers.len(),
+            "r3_count": marker.right_markers.len(),
+            "disjoint": marker.left_markers.iter().all(|left| marker.right_markers.iter().all(|right| left != right)),
+            "exact_union": input.partition_union == marker.markers,
+            "digest": marker.digest,
+        },
+        "topics": topics,
+        "sentinel_topic": input.sentinel_topic,
+        "predecessor_topic_absent": !topics.contains(&predecessor_topic),
+        "predecessor_delete_count": input.delete_observation.exact_delete_calls,
+        "operation_elapsed_ms": input.operation_elapsed_ms,
+    });
+    std::fs::write(path, serde_json::to_vec_pretty(&evidence).unwrap())
+        .expect("write split evidence");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn real_process_split_two_successor_foundation() {
     if std::env::var_os("CRABKA_G8_SPLIT_FOUNDATION").is_none() {
         return;
     }
-    assert!(cli_binary().is_file(), "dedicated CI must build crabka CLI");
-    let operation_started = Instant::now();
-    let identity = format!("{:x}-p{:x}", timestamp_ms(), std::process::id());
-    let operation_id = format!("g8-split-{identity}");
-    let mut system =
-        ProcessHarness::start_all_on_zero(&format!("tenant-g8-split-{identity}")).await;
-    let mut registry = Registry::connect(system.bootstrap())
-        .await
-        .expect("registry");
-    assert!(
-        registry
-            .load_split_operation(system.tenant(), &operation_id)
-            .await
-            .expect("unique split operation")
-            .is_none()
-    );
-    drop(registry);
-
-    let sentinel_topic = format!("__gres_g8_split_sentinel.{}", system.tenant());
-    let mut sentinel_admin =
-        crabka_client_admin::AdminClient::connect(&[system.bootstrap().to_owned()])
-            .await
-            .expect("split sentinel admin");
-    let outcomes = sentinel_admin
-        .create_topics(
-            &[crabka_client_admin::CreateTopicSpec {
-                name: sentinel_topic.clone(),
-                partitions: 1,
-                replicas: 1,
-                configs: BTreeMap::default(),
-            }],
-            30_000,
-        )
-        .await
-        .expect("create split sentinel");
-    assert!(outcomes.iter().all(|outcome| outcome.error.is_none()));
-
-    let source = system.sql(0).await;
-    source
-        .simple_query(
-            "CREATE TABLE live_ledger51 (seq int4, route_key int4, checksum text NOT NULL) SHARDED",
-        )
-        .await
-        .expect("create split ledger");
-    let mut acknowledged = Vec::new();
-    let mut ack_file = tempfile::NamedTempFile::new().expect("external split ACK ledger");
-    for seq in 0..32_i32 {
-        let route_key = if seq % 2 == 0 { seq / 2 } else { 16 + seq / 2 };
-        let checksum = format!("split-{seq:04x}-{route_key:04x}");
-        source
-            .execute(
-                "INSERT INTO live_ledger51 VALUES ($1, $2, $3)",
-                &[&seq, &route_key, &checksum],
-            )
-            .await
-            .expect("acknowledged split source write");
-        acknowledged.push(SplitLedgerRow {
-            rowid: u64::try_from(seq).unwrap() + 1,
-            seq,
-            route_key,
-            checksum,
-        });
-        let ack = acknowledged.last().unwrap();
-        serde_json::to_writer(
-            &mut ack_file,
-            &serde_json::json!({
-                "rowid": ack.rowid,
-                "seq": ack.seq,
-                "route_key": ack.route_key,
-                "checksum": ack.checksum,
-            }),
-        )
-        .expect("append split ACK");
-        ack_file.write_all(b"\n").expect("terminate split ACK");
-        ack_file.as_file().sync_data().expect("fsync split ACK");
-    }
-    ack_file.flush().expect("flush split ACK ledger");
-    ack_file
-        .as_file()
-        .sync_all()
-        .expect("sync split ACK ledger");
-    let ack_path = ack_file.into_temp_path();
-    let acknowledged = std::fs::read_to_string(&ack_path)
-        .expect("read back fsynced split ACK ledger")
-        .lines()
-        .map(|line| {
-            let value: serde_json::Value =
-                serde_json::from_str(line).expect("decode split ACK ledger row");
-            SplitLedgerRow {
-                rowid: value["rowid"].as_u64().expect("ACK rowid"),
-                seq: i32::try_from(value["seq"].as_i64().expect("ACK seq")).expect("int4 seq"),
-                route_key: i32::try_from(value["route_key"].as_i64().expect("ACK route key"))
-                    .expect("int4 route key"),
-                checksum: value["checksum"].as_str().expect("ACK checksum").to_owned(),
-            }
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(acknowledged.len(), 32);
-    let pre_r0 = direct_successor_rows(&system, 0, 51, None, None).await;
-    let pre_r1 = direct_successor_rows(&system, 1, 51, None, None).await;
-    eprintln!("pre-split direct r0={pre_r0:?}, r1={pre_r1:?}");
-    assert!(pre_r0.is_empty());
-    assert_eq!(
-        pre_r1.iter().map(|row| row.rowid).collect::<Vec<_>>(),
-        (1..33_u64).collect::<Vec<_>>()
-    );
+    let SplitFoundationSetup {
+        operation_started,
+        operation_id,
+        mut system,
+        sentinel_topic,
+        acknowledged,
+    } = prepare_split_foundation().await;
     initiate_split_with_cli(&system, &operation_id, 51, 16).await;
     let (completed, _, marker_observations, delete_observation) = tokio::time::timeout(
         Duration::from_secs(90),
@@ -1557,57 +1845,21 @@ async fn real_process_split_two_successor_foundation() {
     .await
     .expect("whole Split operation deadline");
     assert_eq!(completed.phase, SplitOperationPhase::Completed);
-    assert_eq!(delete_observation.exact_delete_calls, 1);
-    assert!(!delete_observation.unrelated_delete_attempted);
     assert_eq!(
-        marker_observations.len(),
-        1,
-        "one authenticated predecessor marker-inheritance response"
+        delete_observation,
+        RetirementDeleteLedger {
+            exact_delete_calls: 1,
+            requested_topics: vec![format!("__gres_wal.{}.r1", system.tenant())],
+            unrelated_delete_attempted: false,
+            injected_after_delete_errors: 0,
+        }
     );
-    let marker_observation = &marker_observations[0];
-    assert_eq!(marker_observation.request.range_id.as_u32(), 1);
-    assert_eq!(marker_observation.request.operation_id, operation_id);
-    assert_eq!(marker_observation.request.generation, 0);
-    assert_eq!(
-        marker_observation.endpoint,
-        completed
-            .plan
-            .as_ref()
-            .expect("sealed Split plan")
-            .current_layout
-            .iter()
-            .find(|range| range.range_id == 1)
-            .expect("predecessor r1")
-            .endpoint
-    );
-    let crabka_gres_ranges::RangeControlOperation::InheritMarkers {
+    let VerifiedSplitMarkers {
+        observation: marker_observation,
         journal_revision,
         journal_digest,
-    } = &marker_observation.request.operation
-    else {
-        panic!("recorded non-marker request");
-    };
-    assert!(*journal_revision > 0);
-    assert!(!journal_digest.is_empty());
-    assert_eq!(
-        marker_observation.digest,
-        completed.evidence.marker_digest.as_deref().unwrap()
-    );
-    let mut partition_union = marker_observation.left_markers.clone();
-    partition_union.extend(marker_observation.right_markers.iter().copied());
-    assert_eq!(partition_union, marker_observation.markers);
-    assert!(marker_observation.left_markers.iter().all(|marker| {
-        marker.key.table_id < 51 || (marker.key.table_id == 51 && marker.key.rowid < 16)
-    }));
-    assert!(marker_observation.right_markers.iter().all(|marker| {
-        marker.key.table_id > 51 || (marker.key.table_id == 51 && marker.key.rowid >= 16)
-    }));
-    assert!(marker_observation.left_markers.iter().all(|left| {
-        marker_observation
-            .right_markers
-            .iter()
-            .all(|right| left != right)
-    }));
+        partition_union,
+    } = verify_split_markers(&completed, &operation_id, &marker_observations);
     let tenant = load_tenant(system.bootstrap(), system.tenant()).await;
     assert_eq!(
         tenant
@@ -1727,111 +1979,61 @@ async fn real_process_split_two_successor_foundation() {
         system.log(0)
     );
 
-    let mut admin = crabka_client_admin::AdminClient::connect(&[system.bootstrap().to_owned()])
-        .await
-        .expect("split topic admin");
-    let topics = admin
-        .metadata(&[])
-        .await
-        .expect("split topic metadata")
-        .topics
-        .into_iter()
-        .filter(|topic| topic.error.is_none())
-        .map(|topic| topic.name)
-        .collect::<std::collections::BTreeSet<_>>();
-    assert!(!topics.contains(&format!("__gres_wal.{}.r1", system.tenant())));
-    assert!(topics.contains(&format!("__gres_wal.{}.r0", system.tenant())));
-    assert!(topics.contains(&format!("__gres_wal.{}.r2.g0000000001", system.tenant())));
-    assert!(topics.contains(&format!("__gres_wal.{}.r3.g0000000001", system.tenant())));
-    assert!(topics.contains(&sentinel_topic));
-    if let Some(path) = std::env::var_os("CRABKA_G8_SPLIT_EVIDENCE") {
-        let path = PathBuf::from(path);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).expect("create split evidence directory");
-        }
-        let plan = completed.plan.as_ref().expect("sealed plan");
-        let r2 = plan
-            .target_layout
-            .iter()
-            .find(|range| range.range_id == 2)
-            .expect("r2 target");
-        let r3 = plan
-            .target_layout
-            .iter()
-            .find(|range| range.range_id == 3)
-            .expect("r3 target");
-        let evidence = serde_json::json!({
-            "schema_version": 1,
-            "operation": "split",
-            "tenant_id": system.tenant(),
-            "operation_id": operation_id,
-            "phase": "completed",
-            "routing_table_id": plan.routing_table_id,
-            "split_rowid": 16,
-            "target_range_ids": [0, 2, 3],
-            "r2": {"endpoint": r2.endpoint, "generation": r2.wal_generation, "serving": tenant.ranges.contains(r2), "row_count": r2_rows.len(), "cross_side_rows": r2_rows.iter().filter(|row| row.rowid >= 16).count()},
-            "r3": {"endpoint": r3.endpoint, "generation": r3.wal_generation, "serving": tenant.ranges.contains(r3), "row_count": r3_rows.len(), "cross_side_rows": r3_rows.iter().filter(|row| row.rowid < 16).count()},
-            "endpoints_distinct": r2.endpoint != r3.endpoint,
-            "acknowledged_rows": acknowledged.len(),
-            "full_scan_rows": full_sequences.len(),
-            "full_ack_equality": full_sequences == acknowledged,
-            "marker_partition": {
-                "authenticated_endpoint": marker_observation.endpoint,
-                "request_range_id": marker_observation.request.range_id.as_u32(),
-                "request_generation": marker_observation.request.generation,
-                "request_journal_revision": journal_revision,
-                "request_journal_digest": journal_digest,
-                "predecessor_count": marker_observation.markers.len(),
-                "r2_count": marker_observation.left_markers.len(),
-                "r3_count": marker_observation.right_markers.len(),
-                "disjoint": marker_observation.left_markers.iter().all(|left| marker_observation.right_markers.iter().all(|right| left != right)),
-                "exact_union": partition_union == marker_observation.markers,
-                "digest": marker_observation.digest,
-            },
-            "topics": topics,
-            "sentinel_topic": sentinel_topic,
-            "predecessor_topic_absent": !topics.contains(&format!("__gres_wal.{}.r1", system.tenant())),
-            "predecessor_delete_count": delete_observation.exact_delete_calls,
-            "operation_elapsed_ms": operation_started.elapsed().as_millis(),
-        });
-        std::fs::write(path, serde_json::to_vec_pretty(&evidence).unwrap())
-            .expect("write split evidence");
-    }
+    write_split_foundation_evidence(SplitFoundationEvidence {
+        system: &system,
+        operation_id: &operation_id,
+        sentinel_topic: &sentinel_topic,
+        completed: &completed,
+        tenant: &tenant,
+        r2_rows: &r2_rows,
+        r3_rows: &r3_rows,
+        acknowledged: &acknowledged,
+        full_sequences: &full_sequences,
+        marker_observation: &marker_observation,
+        journal_revision,
+        journal_digest: &journal_digest,
+        partition_union: &partition_union,
+        delete_observation: &delete_observation,
+        operation_elapsed_ms: operation_started.elapsed().as_millis(),
+    })
+    .await;
     system.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn real_process_move_source_phase_sigkill_with_exact_ack_ledger() {
-    if std::env::var_os("CRABKA_G8_PROCESS_NEMESIS").is_none() {
-        return;
-    }
-    let kill_point = SourceKillPoint::from_env();
+struct PreparedMoveNemesis {
+    system: ProcessHarness,
+    operation_id: String,
+    sentinel_topic: String,
+    _workload_root: tempfile::TempDir,
+    ledger_path: PathBuf,
+    workload_error_path: PathBuf,
+    workload: WorkloadChild,
+}
+
+async fn prepare_move_nemesis(kill_point: SourceKillPoint) -> PreparedMoveNemesis {
     let operation_id = format!(
         "g8-{}-{:x}-p{:x}",
         kill_point.name().replace('_', "-"),
         timestamp_ms(),
         std::process::id()
     );
-    let tenant_name = format!("tenant-{operation_id}");
-    let mut system = ProcessHarness::start_all_on_zero(&tenant_name).await;
-    let mut identity_registry = Registry::connect(system.bootstrap())
-        .await
-        .expect("identity registry");
+    let system = ProcessHarness::start_all_on_zero(&format!("tenant-{operation_id}")).await;
     assert!(
-        identity_registry
+        Registry::connect(system.bootstrap())
+            .await
+            .expect("identity registry")
             .load_split_operation(system.tenant(), &operation_id)
             .await
             .expect("check unique operation")
             .is_none(),
         "process nemesis operation identity must be globally fresh"
     );
-    drop(identity_registry);
     let sentinel_topic = format!("__gres_g8_retirement_sentinel.{}", system.tenant());
     let mut sentinel_admin =
         crabka_client_admin::AdminClient::connect(&[system.bootstrap().to_owned()])
             .await
             .expect("sentinel admin");
-    let sentinel_outcomes = sentinel_admin
+    let outcomes = sentinel_admin
         .create_topics(
             &[crabka_client_admin::CreateTopicSpec {
                 name: sentinel_topic.clone(),
@@ -1843,22 +2045,18 @@ async fn real_process_move_source_phase_sigkill_with_exact_ack_ledger() {
         )
         .await
         .expect("create sentinel topic");
-    assert!(
-        sentinel_outcomes
-            .iter()
-            .all(|outcome| outcome.error.is_none())
-    );
+    assert!(outcomes.iter().all(|outcome| outcome.error.is_none()));
     let mut ddl = String::new();
     for table in 1..50 {
         write!(&mut ddl, "CREATE TABLE filler_{table} (id int4);").expect("write DDL to string");
     }
     ddl.push_str("CREATE TABLE live_ledger (id int4, checksum text NOT NULL) SHARDED");
-    let ddl_client = system.sql(0).await;
-    ddl_client
+    system
+        .sql(0)
+        .await
         .simple_query(&ddl)
         .await
         .expect("create sharded workload ledger");
-    drop(ddl_client);
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let workload_root = tempfile::tempdir().expect("workload root");
@@ -1866,9 +2064,7 @@ async fn real_process_move_source_phase_sigkill_with_exact_ack_ledger() {
     let workload_error_path = workload_root.path().join("workload-errors.log");
     let response_loss_path = workload_root.path().join("response-loss-injected");
     let stop_path = workload_root.path().join("stop");
-    assert!(!ledger_path.exists(), "one fresh workload ledger per case");
-    let sql_port = system.stable_sql_port();
-    let workload_script = r#"
+    let script = r#"
 set -u
 seq=0
 while [[ ! -e "$CRABKA_G8_WORKLOAD_STOP" ]]; do
@@ -1877,18 +2073,9 @@ while [[ ! -e "$CRABKA_G8_WORKLOAD_STOP" ]]; do
   printf '{"kind":"attempt","seq":%s,"timestamp_ms":%s}\n' "$seq" "$now" >> "$CRABKA_G8_WORKLOAD_LEDGER"
   sync -d "$CRABKA_G8_WORKLOAD_LEDGER"
   if timeout 2s psql -X -q -v ON_ERROR_STOP=1 -c "INSERT INTO live_ledger (id, checksum) VALUES ($seq, '$checksum')" >/dev/null 2>>"$CRABKA_G8_WORKLOAD_ERRORS"; then
-    if [[ "$seq" -eq 2 && ! -e "$CRABKA_G8_RESPONSE_LOSS" ]]; then
-      touch "$CRABKA_G8_RESPONSE_LOSS"
-      response_known=false
-    else
-      response_known=true
-    fi
-  else
-    response_known=false
-  fi
-  if [[ "$response_known" == true ]]; then
-    kind=ack
-  else
+    if [[ "$seq" -eq 2 && ! -e "$CRABKA_G8_RESPONSE_LOSS" ]]; then touch "$CRABKA_G8_RESPONSE_LOSS"; response_known=false; else response_known=true; fi
+  else response_known=false; fi
+  if [[ "$response_known" == true ]]; then kind=ack; else
     actual=$(timeout 2s psql -X -A -t -q -v ON_ERROR_STOP=1 -c "SELECT checksum FROM live_ledger WHERE id = $seq" 2>>"$CRABKA_G8_WORKLOAD_ERRORS" || true)
     [[ "$actual" == "$checksum" ]] || continue
     kind=recovered_ack
@@ -1896,36 +2083,236 @@ while [[ ! -e "$CRABKA_G8_WORKLOAD_STOP" ]]; do
   now_raw=$(date +%s%N); now=$((now_raw / 1000000))
   printf '{"kind":"%s","seq":%s,"timestamp_ms":%s}\n' "$kind" "$seq" "$now" >> "$CRABKA_G8_WORKLOAD_LEDGER"
   sync -d "$CRABKA_G8_WORKLOAD_LEDGER"
-  seq=$((seq + 1))
-  sleep 0.02
+  seq=$((seq + 1)); sleep 0.02
 done
 "#;
-    let mut workload_command = tokio::process::Command::new("bash");
-    workload_command
-        .args(["-c", workload_script])
+    let mut command = tokio::process::Command::new("bash");
+    command
+        .args(["-c", script])
         .env("CRABKA_G8_WORKLOAD_LEDGER", &ledger_path)
         .env("CRABKA_G8_WORKLOAD_STOP", &stop_path)
         .env("CRABKA_G8_WORKLOAD_ERRORS", &workload_error_path)
         .env("CRABKA_G8_RESPONSE_LOSS", &response_loss_path)
         .env("PGHOST", "127.0.0.1")
-        .env("PGPORT", sql_port.to_string())
+        .env("PGPORT", system.stable_sql_port().to_string())
         .env("PGUSER", "alice")
         .env("PGPASSWORD", "process-secret")
         .env("PGDATABASE", system.tenant())
         .kill_on_drop(true);
-    workload_command.as_std_mut().process_group(0);
-    let child = workload_command.spawn().expect("spawn real workload child");
-    let workload_pid = child.id().expect("workload child pid");
+    command.as_std_mut().process_group(0);
+    let child = command.spawn().expect("spawn real workload child");
+    let process_group = child.id().expect("workload child pid");
+    assert!(process_group_exists(process_group));
+    PreparedMoveNemesis {
+        system,
+        operation_id,
+        sentinel_topic,
+        _workload_root: workload_root,
+        ledger_path,
+        workload_error_path,
+        workload: WorkloadChild {
+            child,
+            process_group,
+            stop_path,
+            stopped: false,
+        },
+    }
+}
+
+struct MoveTerminalTopology {
+    topic_names: std::collections::BTreeSet<String>,
+    delete_ledger: RetirementDeleteLedger,
+}
+
+async fn verify_move_terminal_topology(
+    system: &ProcessHarness,
+    operation_id: &str,
+    completed: &SplitOperationRecord,
+    restart: &KillObservation,
+    kill_point: SourceKillPoint,
+    sentinel_topic: &str,
+) -> MoveTerminalTopology {
+    let durable_tenant = load_tenant(system.bootstrap(), system.tenant()).await;
+    let moved_owner = durable_tenant
+        .ranges
+        .iter()
+        .find(|range| range.range_id == 2)
+        .expect("replacement owner r2");
+    assert_eq!(moved_owner.wal_generation, 1);
     assert!(
-        process_group_exists(workload_pid),
-        "workload process group started"
+        durable_tenant
+            .ranges
+            .iter()
+            .all(|range| range.range_id != 1)
     );
-    let mut workload = WorkloadChild {
-        child,
-        process_group: workload_pid,
-        stop_path: stop_path.clone(),
-        stopped: false,
+    let retirement = durable_tenant
+        .range_retirements
+        .iter()
+        .find(|retirement| retirement.operation_id == operation_id)
+        .expect("exact retirement sidecar");
+    assert_eq!(retirement.phase, RangeRetirementPhase::Parked);
+    assert_eq!(
+        completed.evidence.marker_digest.as_deref(),
+        Some(retirement.checkpoint.marker_digest.as_str())
+    );
+    let mut admin = crabka_client_admin::AdminClient::connect(&[system.bootstrap().to_owned()])
+        .await
+        .expect("admin");
+    let topic_names = admin
+        .metadata(&[])
+        .await
+        .expect("topic metadata")
+        .topics
+        .into_iter()
+        .filter(|topic| topic.error.is_none())
+        .map(|topic| topic.name)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(!topic_names.contains(&format!("__gres_wal.{}.r1", system.tenant())));
+    for topic in [
+        format!("__gres_wal.{}.r2.g0000000001", system.tenant()),
+        format!("__gres_wal.{}.r0", system.tenant()),
+        sentinel_topic.to_owned(),
+    ] {
+        assert!(topic_names.contains(&topic));
+    }
+    let delete_ledger = restart
+        .delete_ledger
+        .lock()
+        .expect("final retirement delete ledger")
+        .clone();
+    if matches!(
+        kill_point,
+        SourceKillPoint::RetiringBeforeDelete
+            | SourceKillPoint::RetiringAfterDelete
+            | SourceKillPoint::RetiringParked
+            | SourceKillPoint::Resuming
+    ) {
+        assert_eq!(
+            delete_ledger,
+            RetirementDeleteLedger {
+                exact_delete_calls: 1,
+                requested_topics: vec![format!("__gres_wal.{}.r1", system.tenant())],
+                unrelated_delete_attempted: false,
+                injected_after_delete_errors: usize::from(
+                    kill_point == SourceKillPoint::RetiringAfterDelete
+                ),
+            }
+        );
+        assert_eq!(
+            restart.predecessor_topic_present,
+            Some(kill_point == SourceKillPoint::RetiringBeforeDelete)
+        );
+        assert_eq!(
+            delete_ledger.exact_delete_calls - restart.delete_calls_at_kill,
+            usize::from(kill_point == SourceKillPoint::RetiringBeforeDelete)
+        );
+    }
+    MoveTerminalTopology {
+        topic_names,
+        delete_ledger,
+    }
+}
+
+struct MoveKillEvidence<'a> {
+    system: &'a ProcessHarness,
+    operation_id: &'a str,
+    kill_point: SourceKillPoint,
+    restart: &'a KillObservation,
+    ledger: &'a AckLedger,
+    acknowledgements_at_completion: usize,
+    max_observed_safe_ack_gap_ms: u128,
+    operation_elapsed_ms: u128,
+    delete_ledger: &'a RetirementDeleteLedger,
+    sentinel_topic: &'a str,
+    topic_names: &'a std::collections::BTreeSet<String>,
+    completed: &'a SplitOperationRecord,
+}
+
+fn write_move_kill_evidence(input: &MoveKillEvidence<'_>) {
+    let Some(path) = std::env::var_os("CRABKA_G8_KILL_EVIDENCE") else {
+        return;
     };
+    let restart = input.restart;
+    let ledger = input.ledger;
+    let delete_ledger = input.delete_ledger;
+    let evidence = serde_json::json!({
+        "operation": "move",
+        "tenant_id": input.system.tenant(),
+        "operation_id": input.operation_id,
+        "kill_point": input.kill_point.name(),
+        "completed": true,
+        "old_pid": restart.old_pid,
+        "new_pid": restart.new_pid,
+        "durable_phase": format!("{:?}", restart.phase),
+        "durable_evidence": {
+            "manifest_key": restart.evidence.manifest_key,
+            "covered_offset": restart.evidence.covered_offset,
+            "barrier_offset": restart.evidence.barrier_offset,
+            "tail_sha256": restart.evidence.tail_sha256,
+            "marker_digest": restart.evidence.marker_digest,
+        },
+        "acknowledged_rows": ledger.acknowledgements.len(),
+        "acknowledgements_at_completion": input.acknowledgements_at_completion,
+        "post_completed_ack": ledger.acknowledgements.len() > input.acknowledgements_at_completion,
+        "recovered_acknowledgements": ledger.recovered,
+        "max_ack_gap_ms": ledger.max_ack_gap_ms,
+        "max_ack_gap_bound_ms": input.max_observed_safe_ack_gap_ms,
+        "max_ack_gap_endpoints": ledger.max_ack_gap_endpoints.map(|(before_seq, before_ms, after_seq, after_ms)| serde_json::json!({
+            "before_seq": before_seq,
+            "before_ms": before_ms,
+            "after_seq": after_seq,
+            "after_ms": after_ms,
+        })),
+        "phase_timestamps_ms": {
+            "pre_kill": restart.pre_kill_ms,
+            "restart_ready": restart.restart_ms,
+            "stage_complete": restart.stage_complete_ms,
+            "publication": restart.publication_ms,
+            "post_publication_ack": restart.post_publication_ack_ms,
+        },
+        "operation_elapsed_ms": input.operation_elapsed_ms,
+        "predecessor_wal_retired": true,
+        "post_publication_ack_before_retirement": restart.cutover.post_publication_ack_before_retirement,
+        "ambiguous_cutover_advanced_without_republish": restart.cutover.ambiguous_cutover_advanced_without_republish,
+        "durable_tenant_layout": restart.tenant_layout,
+        "durable_retirement_phase": restart.retirement_phase.map(|phase| format!("{phase:?}")),
+        "durable_tenant_record_version": restart.tenant_record_version,
+        "predecessor_topic_present_at_kill": restart.predecessor_topic_present,
+        "exact_predecessor_delete_calls": delete_ledger.exact_delete_calls,
+        "delete_calls_at_kill": restart.delete_calls_at_kill,
+        "replay_delete_calls": delete_ledger.exact_delete_calls - restart.delete_calls_at_kill,
+        "delete_requested_topics": delete_ledger.requested_topics,
+        "unrelated_delete_attempted": delete_ledger.unrelated_delete_attempted,
+        "injected_after_delete_errors": delete_ledger.injected_after_delete_errors,
+        "retire_receipt_probed_before_kill": restart.retire_receipt_probes.before_kill,
+        "retire_receipt_probed_after_restart": restart.retire_receipt_probes.after_restart,
+        "sentinel_topic": input.sentinel_topic,
+        "sentinel_topic_preserved": input.topic_names.contains(input.sentinel_topic),
+        "replacement_owner": {"range_id": 2, "generation": 1},
+        "marker_digest": input.completed.evidence.marker_digest,
+    });
+    std::fs::write(
+        path,
+        serde_json::to_vec_pretty(&evidence).expect("serialize kill evidence"),
+    )
+    .expect("write kill evidence");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn real_process_move_source_phase_sigkill_with_exact_ack_ledger() {
+    if std::env::var_os("CRABKA_G8_PROCESS_NEMESIS").is_none() {
+        return;
+    }
+    let kill_point = SourceKillPoint::from_env();
+    let PreparedMoveNemesis {
+        mut system,
+        operation_id,
+        sentinel_topic,
+        _workload_root,
+        ledger_path,
+        workload_error_path,
+        mut workload,
+    } = prepare_move_nemesis(kill_point).await;
     let case = async {
         wait_for_ack_count(&ledger_path, 8).await;
         initiate_move_with_cli(&system, &operation_id).await;
@@ -1981,16 +2368,14 @@ done
         );
     };
     let restart = restart.expect("configured source-phase SIGKILL occurred");
-    let old_pid = restart.old_pid;
-    let new_pid = restart.new_pid;
     let restart_ms = restart.restart_ms;
     assert!(
-        restart.post_publication_ack_before_retirement,
+        restart.cutover.post_publication_ack_before_retirement,
         "a successor-bound write must commit after publication while retirement is pending"
     );
     if kill_point == SourceKillPoint::ActivatedAfterTenantCas {
         assert!(
-            restart.ambiguous_cutover_advanced_without_republish,
+            restart.cutover.ambiguous_cutover_advanced_without_republish,
             "tenant-CAS ambiguity must advance only the journal"
         );
     }
@@ -2065,156 +2450,33 @@ done
         "database rows must exactly equal durable ACK ledger"
     );
 
-    let durable_tenant = {
-        let mut registry = Registry::connect(system.bootstrap())
-            .await
-            .expect("registry");
-        registry
-            .get(system.tenant())
-            .await
-            .expect("tenant lookup")
-            .expect("tenant")
-    };
-    let moved_owner = durable_tenant
-        .ranges
-        .iter()
-        .find(|range| range.range_id == 2)
-        .expect("replacement owner r2");
-    assert_eq!(moved_owner.wal_generation, 1);
-    assert!(
-        durable_tenant
-            .ranges
-            .iter()
-            .all(|range| range.range_id != 1)
-    );
-    let retirement = durable_tenant
-        .range_retirements
-        .iter()
-        .find(|retirement| retirement.operation_id == operation_id)
-        .expect("exact retirement sidecar");
-    assert_eq!(
-        retirement.phase,
-        crabka_gres_control::RangeRetirementPhase::Parked
-    );
-    assert_eq!(
-        completed.evidence.marker_digest.as_deref(),
-        Some(retirement.checkpoint.marker_digest.as_str())
-    );
-
-    let mut admin = crabka_client_admin::AdminClient::connect(&[system.bootstrap().to_owned()])
-        .await
-        .expect("admin");
-    let topic_names = admin
-        .metadata(&[])
-        .await
-        .expect("topic metadata")
-        .topics
-        .into_iter()
-        .filter(|topic| topic.error.is_none())
-        .map(|topic| topic.name)
-        .collect::<std::collections::BTreeSet<_>>();
-    assert!(!topic_names.contains(&format!("__gres_wal.{}.r1", system.tenant())));
-    assert!(topic_names.contains(&format!("__gres_wal.{}.r2.g0000000001", system.tenant())));
-    assert!(topic_names.contains(&format!("__gres_wal.{}.r0", system.tenant())));
-    assert!(topic_names.contains(&sentinel_topic));
-
-    let retirement_kill = matches!(
+    let MoveTerminalTopology {
+        topic_names,
+        delete_ledger,
+    } = verify_move_terminal_topology(
+        &system,
+        &operation_id,
+        &completed,
+        &restart,
         kill_point,
-        SourceKillPoint::RetiringBeforeDelete
-            | SourceKillPoint::RetiringAfterDelete
-            | SourceKillPoint::RetiringParked
-            | SourceKillPoint::Resuming
-    );
-    let delete_ledger = restart
-        .delete_ledger
-        .lock()
-        .expect("final retirement delete ledger")
-        .clone();
-    if retirement_kill {
-        assert_eq!(delete_ledger.exact_delete_calls, 1);
-        assert!(!delete_ledger.unrelated_delete_attempted);
-        assert_eq!(
-            delete_ledger.requested_topics,
-            vec![format!("__gres_wal.{}.r1", system.tenant())]
-        );
-        assert_eq!(
-            delete_ledger.injected_after_delete_errors,
-            usize::from(kill_point == SourceKillPoint::RetiringAfterDelete)
-        );
-        assert_eq!(
-            restart.predecessor_topic_present,
-            Some(kill_point == SourceKillPoint::RetiringBeforeDelete)
-        );
-        assert_eq!(
-            delete_ledger.exact_delete_calls - restart.delete_calls_at_kill,
-            usize::from(kill_point == SourceKillPoint::RetiringBeforeDelete),
-            "only BeforeDelete may issue the exact delete during replay"
-        );
-    }
+        &sentinel_topic,
+    )
+    .await;
 
-    if let Some(path) = std::env::var_os("CRABKA_G8_KILL_EVIDENCE") {
-        std::fs::write(
-            path,
-            serde_json::to_vec_pretty(&serde_json::json!({
-                "operation": "move",
-                "tenant_id": system.tenant(),
-                "operation_id": operation_id,
-                "kill_point": kill_point.name(),
-                "completed": true,
-                "old_pid": old_pid,
-                "new_pid": new_pid,
-                "durable_phase": format!("{:?}", restart.phase),
-                "durable_evidence": {
-                    "manifest_key": restart.evidence.manifest_key,
-                    "covered_offset": restart.evidence.covered_offset,
-                    "barrier_offset": restart.evidence.barrier_offset,
-                    "tail_sha256": restart.evidence.tail_sha256,
-                    "marker_digest": restart.evidence.marker_digest,
-                },
-                "acknowledged_rows": ledger.acknowledgements.len(),
-                "acknowledgements_at_completion": acknowledgements_at_completion,
-                "post_completed_ack": ledger.acknowledgements.len() > acknowledgements_at_completion,
-                "recovered_acknowledgements": ledger.recovered,
-                "max_ack_gap_ms": ledger.max_ack_gap_ms,
-                "max_ack_gap_bound_ms": max_observed_safe_ack_gap_ms,
-                "max_ack_gap_endpoints": ledger.max_ack_gap_endpoints.map(|(before_seq, before_ms, after_seq, after_ms)| serde_json::json!({
-                    "before_seq": before_seq,
-                    "before_ms": before_ms,
-                    "after_seq": after_seq,
-                    "after_ms": after_ms,
-                })),
-                "phase_timestamps_ms": {
-                    "pre_kill": restart.pre_kill_ms,
-                    "restart_ready": restart.restart_ms,
-                    "stage_complete": restart.stage_complete_ms,
-                    "publication": restart.publication_ms,
-                    "post_publication_ack": restart.post_publication_ack_ms,
-                },
-                "operation_elapsed_ms": operation_elapsed_ms,
-            "predecessor_wal_retired": true,
-            "post_publication_ack_before_retirement": restart.post_publication_ack_before_retirement,
-            "ambiguous_cutover_advanced_without_republish": restart.ambiguous_cutover_advanced_without_republish,
-            "durable_tenant_layout": restart.tenant_layout,
-            "durable_retirement_phase": restart.retirement_phase.map(|phase| format!("{phase:?}")),
-            "durable_tenant_record_version": restart.tenant_record_version,
-            "predecessor_topic_present_at_kill": restart.predecessor_topic_present,
-            "exact_predecessor_delete_calls": delete_ledger.exact_delete_calls,
-            "delete_calls_at_kill": restart.delete_calls_at_kill,
-            "replay_delete_calls": delete_ledger.exact_delete_calls - restart.delete_calls_at_kill,
-            "delete_requested_topics": delete_ledger.requested_topics,
-            "unrelated_delete_attempted": delete_ledger.unrelated_delete_attempted,
-            "injected_after_delete_errors": delete_ledger.injected_after_delete_errors,
-            "retire_receipt_probed_before_kill": restart.retire_receipt_probed_before_kill,
-            "retire_receipt_probed_after_restart": restart.retire_receipt_probed_after_restart,
-            "sentinel_topic": sentinel_topic,
-            "sentinel_topic_preserved": topic_names.contains(&sentinel_topic),
-                "replacement_owner": {"range_id": 2, "generation": 1},
-                "marker_digest": completed.evidence.marker_digest,
-            }))
-            .expect("serialize kill evidence"),
-        )
-        .expect("write kill evidence");
-    }
+    write_move_kill_evidence(&MoveKillEvidence {
+        system: &system,
+        operation_id: &operation_id,
+        kill_point,
+        restart: &restart,
+        ledger: &ledger,
+        acknowledgements_at_completion,
+        max_observed_safe_ack_gap_ms,
+        operation_elapsed_ms,
+        delete_ledger: &delete_ledger,
+        sentinel_topic: &sentinel_topic,
+        topic_names: &topic_names,
+        completed: &completed,
+    });
     system.shutdown().await;
 }
 

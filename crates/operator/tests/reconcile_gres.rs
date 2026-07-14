@@ -1,8 +1,11 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    net::IpAddr,
+    sync::{Arc, Mutex},
+};
 
 use assert2::assert;
 use crabka_operator::{
-    context::{PgdogAdminError, PgdogAdminLike, PgdogReloadRequest},
+    context::{PgdogAdminError, PgdogAdminLike, PgdogExpectedRoute, PgdogReloadRequest},
     controller::gres::{reconcile, tenant_endpoint, tenant_to_gres_refs},
     crd::{
         Gres, GresBalancerGoal, GresBalancerGoals, GresBalancerOperationKind,
@@ -219,7 +222,6 @@ fn reconcile_rules(include_status: bool) -> Vec<MockRule> {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn renders_pgdog_config_secret_and_status_hash() {
     let admin = FakePgdogAdmin::new(vec![false, true]);
     let rules = reconcile_rules(true);
@@ -377,7 +379,13 @@ async fn multi_replica_reload_requests_maintenance_mode() {
         path_substr: "/secrets/pgdog-tls".into(),
         response: json_response(200, &serde_json::json!({
             "apiVersion":"v1", "kind":"Secret", "metadata":{"name":"pgdog-tls","namespace":"ns"},
-            "data":{"ca.crt":"dGVzdC1jYQ==","tls.crt":"dGVzdC1jZXJ0","tls.key":"dGVzdC1rZXk="}
+            "data":{
+                "ca.crt":"dGVzdC1jYQ==",
+                "tls.crt":"dGVzdC1jZXJ0",
+                "tls.key":"dGVzdC1rZXk=",
+                "client.crt":"dGVzdC1jbGllbnQtY2VydA==",
+                "client.key":"dGVzdC1jbGllbnQta2V5"
+            }
         })),
     });
     let state = MockState::new(rules);
@@ -393,25 +401,27 @@ async fn multi_replica_reload_requests_maintenance_mode() {
     reconcile(Arc::new(obj), ctx).await.unwrap();
 
     let requests = admin.requests();
-    assert!(requests[0].len() == 2);
-    assert!(requests[0].iter().all(|request| request.maintenance_mode));
-    assert!(
-        requests[0]
-            .iter()
-            .all(|request| request.host == "fleet-pgdog.ns.svc.cluster.local")
-    );
-    assert!(
-        requests[0]
-            .iter()
-            .all(|request| request.tls_ca_pem.as_deref() == Some(b"test-ca"))
-    );
-    assert!(
-        requests[0]
-            .iter()
-            .map(|request| request.connect_addr.unwrap().to_string())
-            .collect::<Vec<_>>()
-            == vec!["10.0.0.10", "10.0.0.11"]
-    );
+    let expected_requests = ["10.0.0.10", "10.0.0.11"]
+        .into_iter()
+        .map(|address| PgdogReloadRequest {
+            host: "fleet-pgdog.ns.svc.cluster.local".into(),
+            connect_addr: Some(address.parse::<IpAddr>().expect("fixture IP address")),
+            port: 6432,
+            password: "pw".into(),
+            expected_routes: vec![PgdogExpectedRoute {
+                database: "tenant-a".into(),
+                host: "tenant-a-gres.ns.svc.cluster.local".into(),
+                port: 5432,
+            }],
+            maintenance_mode: true,
+            tls_ca_pem: Some(b"test-ca".to_vec()),
+            tls_client_identity_pem: Some((
+                b"test-client-cert".to_vec(),
+                b"test-client-key".to_vec(),
+            )),
+        })
+        .collect::<Vec<_>>();
+    assert!(requests == vec![expected_requests]);
 }
 
 #[tokio::test]

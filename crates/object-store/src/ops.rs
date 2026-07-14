@@ -20,7 +20,6 @@ use crate::error::ObjectStoreError;
 /// [`ObjectOps::put_from_path`] over a filesystem path rather than a generic
 /// reader, so the trait mocks cleanly for mutation-testable IO decision logic.
 #[cfg_attr(test, mockall::automock)]
-#[allow(clippy::ref_option_ref)]
 #[async_trait::async_trait]
 pub trait ObjectOps: Send + Sync {
     /// Single-PUT an in-memory payload.
@@ -46,8 +45,7 @@ pub trait ObjectOps: Send + Sync {
     async fn head(&self, key: &Path) -> Result<ObjectMeta, ObjectStoreError>;
 
     /// List objects under an optional prefix.
-    async fn list<'a>(&self, prefix: Option<&'a Path>)
-    -> Result<Vec<ObjectMeta>, ObjectStoreError>;
+    async fn list(&self, prefix: Option<Path>) -> Result<Vec<ObjectMeta>, ObjectStoreError>;
 
     /// Delete an object.
     async fn delete(&self, key: &Path) -> Result<(), ObjectStoreError>;
@@ -129,12 +127,13 @@ impl ObjectOps for ObjectStoreClient {
         Ok(self.inner.head(key).await?)
     }
 
-    async fn list<'a>(
-        &self,
-        prefix: Option<&'a Path>,
-    ) -> Result<Vec<ObjectMeta>, ObjectStoreError> {
+    async fn list(&self, prefix: Option<Path>) -> Result<Vec<ObjectMeta>, ObjectStoreError> {
         use futures::stream::TryStreamExt as _;
-        Ok(self.inner.list(prefix).try_collect::<Vec<_>>().await?)
+        Ok(self
+            .inner
+            .list(prefix.as_ref())
+            .try_collect::<Vec<_>>()
+            .await?)
     }
 
     async fn delete(&self, key: &Path) -> Result<(), ObjectStoreError> {
@@ -193,7 +192,7 @@ mod tests {
             .await
             .unwrap();
         assert!(c.head(&key).await.unwrap().size == 4);
-        let listed = c.list(Some(&Path::from("p"))).await.unwrap();
+        let listed = c.list(Some(Path::from("p"))).await.unwrap();
         assert!(listed.iter().any(|m| m.location == key));
         c.delete(&key).await.unwrap();
         assert!(matches!(

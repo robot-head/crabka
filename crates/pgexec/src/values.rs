@@ -26,34 +26,12 @@ pub(crate) fn values_to_relation(
     values_to_relation_with_schema(v, ctx, schema)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn values_to_relation_with_ctes(
-    catalog_kv: &dyn crabka_pgkv::Kv,
-    kv: &dyn crabka_pgkv::Kv,
-    global: &dyn crabka_pgkv::Kv,
-    gsnap: &crabka_pgmvcc::visibility::Snapshot,
-    snapshot: &crabka_pgmvcc::visibility::Snapshot,
-    own: Option<u64>,
+    ctx: &crate::subquery::SubCtx<'_>,
     v: &ValuesStmt,
-    ctes: &crate::cte::CteContext,
-    ctx: &EvalCtx,
-    fctx: crate::exec::ForeignCtx,
-    range_scanner: &dyn crate::scanner::RangeScanner,
 ) -> Result<crate::join::Relation, ExecError> {
-    let sub_ctx = crate::subquery::SubCtx {
-        catalog_kv,
-        kv,
-        global,
-        gsnap,
-        snapshot,
-        own,
-        ctes,
-        eval_ctx: ctx,
-        fctx,
-        range_scanner,
-    };
-    let resolved = crate::subquery::resolve_in_values(&sub_ctx, v)?;
-    values_to_relation(&resolved, ctx)
+    let resolved = crate::subquery::resolve_in_values(ctx, v)?;
+    values_to_relation(&resolved, ctx.eval_ctx)
 }
 
 pub(crate) fn values_schema_relation_with_ctes(

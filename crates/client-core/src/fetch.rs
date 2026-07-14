@@ -195,30 +195,11 @@ pub async fn fetch_partition_with_isolation(
 ///
 /// Returns [`ClientError`] when the fetch request fails or the broker response
 /// is malformed.
-#[allow(clippy::too_many_arguments)]
 pub async fn fetch_partition_with_isolation_progress(
     conn: &Connection,
-    topic: &str,
-    topic_id: WireUuid,
-    partition: i32,
-    fetch_offset: i64,
-    max_wait_ms: i32,
-    partition_max_bytes: i32,
-    isolation_level: i8,
+    fetch: IsolatedFetch<'_>,
 ) -> Result<FetchPartitionResult, ClientError> {
-    fetch_partition_with_isolation_progress_on(
-        conn,
-        IsolatedFetch {
-            topic,
-            topic_id,
-            partition,
-            fetch_offset,
-            max_wait_ms,
-            partition_max_bytes,
-            isolation_level,
-        },
-    )
-    .await
+    fetch_partition_with_isolation_progress_on(conn, fetch).await
 }
 
 /// `FetchTransport`-generic body of [`fetch_partition_with_isolation`]. Holds the

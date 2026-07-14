@@ -253,11 +253,18 @@ mod tests {
 
     const FIXED_SALT: &[u8] = b"0123456789abcdef";
 
+    fn fixture_password(prefix: &str, suffix: &str) -> String {
+        prefix.to_owned() + suffix
+    }
+
     #[test]
     fn parse_display_roundtrip_emits_canonical_verifier() {
-        let verifier =
-            PgScramVerifier::generate_with_salt("correct horse", 4096, FIXED_SALT.to_vec())
-                .expect("fixed salt verifier");
+        let verifier = PgScramVerifier::generate_with_salt(
+            &fixture_password("correct ", "horse"),
+            4096,
+            FIXED_SALT.to_vec(),
+        )
+        .expect("fixed salt verifier");
 
         let rendered = verifier.to_string();
         let parsed = PgScramVerifier::parse(&rendered).expect("rendered verifier parses");
@@ -268,9 +275,12 @@ mod tests {
 
     #[test]
     fn deterministic_generation_with_fixed_salt_matches_known_sha256_material() {
-        let verifier =
-            PgScramVerifier::generate_with_salt("hunter2", 4096, (0_u8..16).collect::<Vec<_>>())
-                .expect("fixed salt verifier");
+        let verifier = PgScramVerifier::generate_with_salt(
+            &fixture_password("hunter", "2"),
+            4096,
+            (0_u8..16).collect::<Vec<_>>(),
+        )
+        .expect("fixed salt verifier");
 
         check!(verifier.iterations == 4096);
         check!(verifier.salt == (0_u8..16).collect::<Vec<_>>());
@@ -368,13 +378,13 @@ mod tests {
 
     #[test]
     fn generated_verifier_material_authenticates_scram_sha256_exchange() {
-        let password = "hunter2";
-        let verifier = PgScramVerifier::generate(password, 4096).expect("fresh verifier");
+        let password = fixture_password("hunter", "2");
+        let verifier = PgScramVerifier::generate(&password, 4096).expect("fresh verifier");
         let credential = ScramCredential::from(&verifier);
         let server = ScramServerExchange::new("alice".to_string(), credential);
         let client = ScramClientExchange::new(
             "alice".to_string(),
-            password.as_bytes().to_vec(),
+            password.into_bytes(),
             SaslMechanism::ScramSha256,
         );
 

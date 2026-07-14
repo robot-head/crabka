@@ -143,7 +143,7 @@ pub enum RangeResponse {
         operations: Vec<WireTimestampOperation>,
     },
     /// One bounded authoritative durable-record page.
-    InspectDurableRecords(InspectDurableRecordsResp),
+    InspectDurableRecords(Box<InspectDurableRecordsResp>),
     /// Explicit result of a split control operation.
     Control(RangeControlResp),
     /// Range compute rejected the request.
@@ -2241,7 +2241,7 @@ mod tests {
                     }
                 }
                 RangeRequest::InspectDurableRecords(request) => {
-                    RangeResponse::InspectDurableRecords(InspectDurableRecordsResp {
+                    RangeResponse::InspectDurableRecords(Box::new(InspectDurableRecordsResp {
                         records: Vec::new(),
                         next_cursor: request.cursor,
                         provenance: DurableInspectProvenance {
@@ -2254,7 +2254,7 @@ mod tests {
                             checkpoint_covered_offset: None,
                             checkpoint_journal_seq: None,
                         },
-                    })
+                    }))
                 }
             }
         }

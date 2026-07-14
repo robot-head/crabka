@@ -571,22 +571,22 @@ async fn recover_storage_and_groups(
                 )
                 .await?;
             }
-            let partition = try_spawn_partition_with_sequencer(
-                topic.clone(),
-                startup_image.topic(&topic).map(|topic| topic.topic_id),
-                PartitionIndex(partition_id),
-                owning_dir,
+            let partition = try_spawn_partition_with_sequencer(PartitionSpawnConfig {
+                topic: topic.clone(),
+                topic_id: startup_image.topic(&topic).map(|topic| topic.topic_id),
+                partition_id: PartitionIndex(partition_id),
+                log_dir: owning_dir,
                 log,
-                log_dir_status.clone(),
-                Arc::clone(&producer_state),
+                log_dir_status: log_dir_status.clone(),
+                producer_state: Arc::clone(&producer_state),
                 diskless,
-                Some(Arc::clone(&diskless_runtime.hot_tail)),
-                Some(Arc::clone(&diskless_runtime.wal_shards)),
-                diskless.then(|| {
+                hot_tail: Some(Arc::clone(&diskless_runtime.hot_tail)),
+                wal_shards: Some(Arc::clone(&diskless_runtime.wal_shards)),
+                sequencer: diskless.then(|| {
                     Arc::new(crate::wal::ControllerSequencer::new(Arc::clone(controller)))
                         as Arc<dyn crate::wal::OffsetSequencer>
                 }),
-            )?;
+            })?;
             partitions.insert(topic, PartitionIndex(partition_id), partition);
         }
     }
@@ -1666,7 +1666,12 @@ type BrokerCoordinatorSet = (
     Arc<crate::share_partition::manager::SharePartitionLeaderManager>,
 );
 
-#[allow(clippy::too_many_arguments)]
+struct BrokerStorageStartup {
+    log_dir_status: crate::log_dir_status::LogDirRegistry,
+    log_dir_ids: crate::log_dir_id::LogDirIds,
+    diskless: DisklessRuntime,
+}
+
 async fn finish_broker_startup(
     mut config: BrokerConfig,
     data_listener: Option<TcpListener>,
@@ -1681,11 +1686,7 @@ async fn finish_broker_startup(
         Arc<crate::network::client::InterBrokerClient>,
     ),
     runtime: BrokerRuntimeStartup,
-    storage: (
-        crate::log_dir_status::LogDirRegistry,
-        crate::log_dir_id::LogDirIds,
-    ),
-    diskless_runtime: DisklessRuntime,
+    storage: BrokerStorageStartup,
 ) -> Result<BrokerHandle, BrokerError> {
     let ListenerStartup {
         bound,
@@ -1723,10 +1724,10 @@ async fn finish_broker_startup(
         should_shutdown: runtime.should_shutdown,
         remote_reader: runtime.remote_reader,
         diskless_read: runtime.diskless_read,
-        hot_tail: diskless_runtime.hot_tail,
-        wal_shards: diskless_runtime.wal_shards,
-        log_dir_status: storage.0,
-        log_dir_ids: storage.1,
+        hot_tail: storage.diskless.hot_tail,
+        wal_shards: storage.diskless.wal_shards,
+        log_dir_status: storage.log_dir_status,
+        log_dir_ids: storage.log_dir_ids,
         client_metrics: runtime.client_metrics,
         #[cfg(any(test, feature = "test-helpers"))]
         offset_for_leader_epoch_requests: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -1753,7 +1754,14 @@ async fn finish_broker_startup(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
+#[derive(Clone, Copy)]
+struct ReplicatorStorage<'a> {
+    log_dir_status: &'a crate::log_dir_status::LogDirRegistry,
+    producer_state: &'a Arc<crate::producer_state::ProducerState>,
+    log_dir_ids: &'a crate::log_dir_id::LogDirIds,
+    diskless: &'a DisklessRuntime,
+}
+
 fn spawn_replicator_supervisor(
     config: &BrokerConfig,
     controller: &Arc<dyn crate::metadata_source::MetadataSource>,
@@ -1768,12 +1776,7 @@ fn spawn_replicator_supervisor(
         &Arc<crate::throttle::ThrottleState>,
         &crate::metrics::BrokerMetrics,
     ),
-    storage: (
-        &crate::log_dir_status::LogDirRegistry,
-        &Arc<crate::producer_state::ProducerState>,
-        &crate::log_dir_id::LogDirIds,
-    ),
-    diskless_runtime: &DisklessRuntime,
+    storage: ReplicatorStorage<'_>,
 ) -> JoinHandle<()> {
     let protocol = config
         .effective_listeners()
@@ -1788,7 +1791,7 @@ fn spawn_replicator_supervisor(
             broker_id: config.broker_id,
             controller: Arc::clone(controller),
             partitions: Arc::clone(partitions),
-            log_dirs: storage.0.online_subset(&config.all_log_dirs()),
+            log_dirs: storage.log_dir_status.online_subset(&config.all_log_dirs()),
             log_config: config.log_config.clone(),
             client_id: format!("crabka-broker-{}-replicator", config.broker_id),
             shutdown: runtime.0.clone(),
@@ -1798,12 +1801,12 @@ fn spawn_replicator_supervisor(
             inter_broker_listener_protocol: protocol,
             inter_broker_listener_name: config.inter_broker_listener_name.clone(),
             throttle_state: Arc::clone(runtime.1),
-            log_dir_status: storage.0.clone(),
-            producer_state: Arc::clone(storage.1),
+            log_dir_status: storage.log_dir_status.clone(),
+            producer_state: Arc::clone(storage.producer_state),
             metrics: runtime.2.clone(),
-            log_dir_ids: storage.2.clone(),
-            hot_tail: Arc::clone(&diskless_runtime.hot_tail),
-            wal_shards: Arc::clone(&diskless_runtime.wal_shards),
+            log_dir_ids: storage.log_dir_ids.clone(),
+            hot_tail: Arc::clone(&storage.diskless.hot_tail),
+            wal_shards: Arc::clone(&storage.diskless.wal_shards),
         },
     )
     .spawn()
@@ -1868,8 +1871,12 @@ async fn start_broker_runtime(
         coordinators,
         inter_broker_client,
         (&supervisor_shutdown, &throttle_state, &metrics),
-        (storage.2, storage.1, storage.3),
-        diskless_runtime,
+        ReplicatorStorage {
+            log_dir_status: storage.2,
+            producer_state: storage.1,
+            log_dir_ids: storage.3,
+            diskless: diskless_runtime,
+        },
     );
     let LivenessStartup {
         liveness,
@@ -3667,8 +3674,11 @@ impl Broker {
             ),
             (tls_dynamic, ktls_enabled, inter_broker_client),
             runtime,
-            (log_dir_status, log_dir_ids),
-            diskless_runtime,
+            BrokerStorageStartup {
+                log_dir_status,
+                log_dir_ids,
+                diskless: diskless_runtime,
+            },
         )
         .await
     }
@@ -3976,17 +3986,15 @@ pub(crate) fn diskless_topic_config(
         .is_some_and(|value| value == "true")
 }
 
-#[allow(clippy::too_many_arguments)]
 fn partition_wal(
-    topic: &str,
-    topic_id: Option<uuid::Uuid>,
-    partition_id: PartitionIndex,
+    identity: (&str, Option<uuid::Uuid>, PartitionIndex),
     log_dir: &std::path::Path,
     log: Arc<Mutex<crabka_log::Log>>,
     diskless: bool,
     hot_tail: Option<Arc<crate::diskless::hot_tail::HotTailCache>>,
     wal_shards: Option<Arc<crate::wal::quorum::registry::WalShardRegistry>>,
 ) -> Result<Option<crate::wal::SharedWal>, BrokerError> {
+    let (topic, topic_id, partition_id) = identity;
     if !diskless {
         return Ok(None);
     }
@@ -4028,37 +4036,44 @@ pub(crate) fn spawn_partition(
     producer_state: Arc<crate::producer_state::ProducerState>,
     diskless: bool,
 ) -> Arc<Partition> {
-    try_spawn_partition_with_sequencer(
+    try_spawn_partition_with_sequencer(PartitionSpawnConfig {
         topic,
-        None,
+        topic_id: None,
         partition_id,
         log_dir,
         log,
         log_dir_status,
         producer_state,
         diskless,
-        None,
-        None,
-        None,
-    )
+        hot_tail: None,
+        wal_shards: None,
+        sequencer: None,
+    })
     .expect("spawn partition")
 }
 
-#[allow(clippy::too_many_arguments, dead_code)]
-pub(crate) fn spawn_partition_with_sequencer(
-    topic: String,
-    topic_id: Option<uuid::Uuid>,
-    partition_id: PartitionIndex,
-    log_dir: std::path::PathBuf,
-    log: crabka_log::Log,
-    log_dir_status: crate::log_dir_status::LogDirRegistry,
-    producer_state: Arc<crate::producer_state::ProducerState>,
-    diskless: bool,
-    hot_tail: Option<Arc<crate::diskless::hot_tail::HotTailCache>>,
-    wal_shards: Option<Arc<crate::wal::quorum::registry::WalShardRegistry>>,
-    sequencer: Option<Arc<dyn crate::wal::OffsetSequencer>>,
-) -> Arc<Partition> {
-    try_spawn_partition_with_sequencer(
+pub(crate) struct PartitionSpawnConfig {
+    pub topic: String,
+    pub topic_id: Option<uuid::Uuid>,
+    pub partition_id: PartitionIndex,
+    pub log_dir: std::path::PathBuf,
+    pub log: crabka_log::Log,
+    pub log_dir_status: crate::log_dir_status::LogDirRegistry,
+    pub producer_state: Arc<crate::producer_state::ProducerState>,
+    pub diskless: bool,
+    pub hot_tail: Option<Arc<crate::diskless::hot_tail::HotTailCache>>,
+    pub wal_shards: Option<Arc<crate::wal::quorum::registry::WalShardRegistry>>,
+    pub sequencer: Option<Arc<dyn crate::wal::OffsetSequencer>>,
+}
+
+pub(crate) fn try_spawn_partition_with_sequencer(
+    config: PartitionSpawnConfig,
+) -> Result<Arc<Partition>, BrokerError> {
+    /// Depth of the per-partition writer mpsc queue: bounds how many
+    /// produce/replication appends may be in flight to one partition before
+    /// senders back-pressure.
+    const PARTITION_WRITER_QUEUE_DEPTH: usize = 64;
+    let PartitionSpawnConfig {
         topic,
         topic_id,
         partition_id,
@@ -4070,33 +4085,10 @@ pub(crate) fn spawn_partition_with_sequencer(
         hot_tail,
         wal_shards,
         sequencer,
-    )
-    .expect("spawn partition")
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn try_spawn_partition_with_sequencer(
-    topic: String,
-    topic_id: Option<uuid::Uuid>,
-    partition_id: PartitionIndex,
-    log_dir: std::path::PathBuf,
-    log: crabka_log::Log,
-    log_dir_status: crate::log_dir_status::LogDirRegistry,
-    producer_state: Arc<crate::producer_state::ProducerState>,
-    diskless: bool,
-    hot_tail: Option<Arc<crate::diskless::hot_tail::HotTailCache>>,
-    wal_shards: Option<Arc<crate::wal::quorum::registry::WalShardRegistry>>,
-    sequencer: Option<Arc<dyn crate::wal::OffsetSequencer>>,
-) -> Result<Arc<Partition>, BrokerError> {
-    /// Depth of the per-partition writer mpsc queue: bounds how many
-    /// produce/replication appends may be in flight to one partition before
-    /// senders back-pressure.
-    const PARTITION_WRITER_QUEUE_DEPTH: usize = 64;
+    } = config;
     let log = Arc::new(Mutex::new(log));
     let wal = partition_wal(
-        &topic,
-        topic_id,
-        partition_id,
+        (&topic, topic_id, partition_id),
         &log_dir,
         Arc::clone(&log),
         diskless,
@@ -4667,9 +4659,7 @@ mod tests {
 
         assert!(
             partition_wal(
-                "topic",
-                None,
-                PartitionIndex(0),
+                ("topic", None, PartitionIndex(0)),
                 dir.path(),
                 log.clone(),
                 false,
@@ -4681,9 +4671,7 @@ mod tests {
         );
         assert!(
             partition_wal(
-                "topic",
-                None,
-                PartitionIndex(0),
+                ("topic", None, PartitionIndex(0)),
                 dir.path(),
                 log,
                 true,

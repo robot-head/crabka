@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crabka_client_admin::AdminClient;
 use crabka_client_core::{
-    Connection, ConnectionOptions, fetch_partition_with_isolation_progress,
+    Connection, ConnectionOptions, IsolatedFetch, fetch_partition_with_isolation_progress,
     security::ClientSecurity,
 };
 use crabka_client_producer::{Acks, Producer};
@@ -313,13 +313,15 @@ pub async fn live_committed_end(config: &LiveRecoveryConfig) -> Result<i64, Subs
     while next < fetched.last_stable_offset {
         let page = fetch_partition_with_isolation_progress(
             &conn,
-            &reader.topic,
-            reader.topic_uuid,
-            PARTITION,
-            next,
-            FETCH_MAX_WAIT_MS,
-            FETCH_MAX_BYTES,
-            READ_COMMITTED,
+            IsolatedFetch {
+                topic: &reader.topic,
+                topic_id: reader.topic_uuid,
+                partition: PARTITION,
+                fetch_offset: next,
+                max_wait_ms: FETCH_MAX_WAIT_MS,
+                partition_max_bytes: FETCH_MAX_BYTES,
+                isolation_level: READ_COMMITTED,
+            },
         )
         .await
         .map_err(|error| SubstrateError::Unavailable(format!("committed-end fetch: {error}")))?;
@@ -707,13 +709,15 @@ impl KafkaCommittedWalReader {
     ) -> Result<FetchedWalPartition, SubstrateError> {
         let result = fetch_partition_with_isolation_progress(
             conn,
-            &self.topic,
-            self.topic_uuid,
-            PARTITION,
-            fetch_offset,
-            FETCH_MAX_WAIT_MS,
-            FETCH_MAX_BYTES,
-            READ_COMMITTED,
+            IsolatedFetch {
+                topic: &self.topic,
+                topic_id: self.topic_uuid,
+                partition: PARTITION,
+                fetch_offset,
+                max_wait_ms: FETCH_MAX_WAIT_MS,
+                partition_max_bytes: FETCH_MAX_BYTES,
+                isolation_level: READ_COMMITTED,
+            },
         )
         .await
         .map_err(|error| {

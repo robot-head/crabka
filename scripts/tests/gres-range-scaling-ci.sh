@@ -54,6 +54,7 @@ def validate(source, benchmark=script):
         'sharded_range_boundaries()', 'boundaries+=("0:$((index * 1000000))")',
         'primary_range_distribution', 'runtime timestamp_primary_committed observations cover all expected ranges',
         'timestamp_primary_committed', 'observed_primary_transactions',
+        'ansi_escape.sub("", raw_line)',
         'check-gres-primary-distribution.py',
     ]
     for needle in required_script:
@@ -101,6 +102,14 @@ except AssertionError:
     pass
 else:
     raise AssertionError('fabricated primary distribution unexpectedly passed')
+
+ansi_mutation = script.replace('ansi_escape.sub("", raw_line)', 'raw_line')
+try:
+    validate(workflow, ansi_mutation)
+except AssertionError:
+    pass
+else:
+    raise AssertionError('ANSI-sensitive primary distribution parser unexpectedly passed')
 PY
 
 skewed_artifact="$(mktemp)"

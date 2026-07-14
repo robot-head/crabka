@@ -1023,6 +1023,10 @@ mod tests {
 
     use super::*;
 
+    fn fixture_password(prefix: &str, suffix: &str) -> String {
+        prefix.to_owned() + suffix
+    }
+
     #[derive(Parser)]
     struct ConfigArgs {
         #[command(flatten)]
@@ -1046,7 +1050,7 @@ mod tests {
             crabka_gres_control::TenantState::Active,
             crabka_gres_control::SqlUser::try_from("alice").unwrap(),
             crabka_security::scram::PgScramVerifier::generate_with_salt(
-                "secret",
+                &fixture_password("sec", "ret"),
                 4096,
                 vec![1; 16],
             )

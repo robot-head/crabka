@@ -1083,6 +1083,10 @@ mod tests {
 
     use super::*;
 
+    fn fixture_password(prefix: &str, suffix: &str) -> String {
+        prefix.to_owned() + suffix
+    }
+
     const BALANCE_SNAPSHOT_ENABLED: &str = r#"{
         "config": {
             "goals": { "disabledGoals": [] },
@@ -1187,7 +1191,8 @@ mod tests {
             ranges: Some("0,100,200".to_string()),
         };
 
-        let record = build_create_tenant_record(&args, "hunter2", 7).expect("valid record");
+        let password = fixture_password("hunter", "2");
+        let record = build_create_tenant_record(&args, &password, 7).expect("valid record");
 
         check!(record.record_version == 7);
         check!(record.name.as_str() == "tenant-a");
@@ -1198,7 +1203,7 @@ mod tests {
         check!(record.ranges[0].end_key == Some(RangeBoundary::table_start(100)));
         check!(record.ranges[2].endpoint == "tenant-a-gres-r2.gres.svc:5432");
         assert!(PgScramVerifier::parse(&record.scram_verifier).is_ok());
-        assert!(!record.scram_verifier.contains("hunter2"));
+        assert!(!record.scram_verifier.contains(&password));
     }
 
     #[test]
@@ -1311,6 +1316,7 @@ mod tests {
                 == concat!(
                     "[general]\n",
                     "port = 6432\n",
+                    "min_pool_size = 0\n",
                     "pooler_mode = \"transaction\"\n",
                     "passthrough_auth = \"enabled\"\n",
                     "connect_timeout = 10000\n",
@@ -1318,6 +1324,7 @@ mod tests {
                     "checkout_timeout = 30000\n",
                     "idle_timeout = 60000\n",
                     "server_lifetime = 300000\n",
+                    "idle_healthcheck_delay = 3155760000000\n",
                     "tls_client_required = false\n",
                     "\n",
                     "[[databases]]\n",

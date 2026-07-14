@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use crabka_pgparser::ast::WithClause;
 
-use crate::{clock::EvalCtx, error::ExecError, join::Relation};
+use crate::{error::ExecError, join::Relation, subquery::SubCtx};
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CteContext {
@@ -54,45 +54,24 @@ pub(crate) fn apply_cte_column_aliases(
     crate::values::requalify_derived(rel, name, columns)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn evaluate_with_clause(
-    catalog_kv: &dyn crabka_pgkv::Kv,
-    kv: &dyn crabka_pgkv::Kv,
-    global: &dyn crabka_pgkv::Kv,
-    gsnap: &crabka_pgmvcc::visibility::Snapshot,
-    snapshot: &crabka_pgmvcc::visibility::Snapshot,
-    own: Option<u64>,
+    ctx: &SubCtx<'_>,
     with: Option<&WithClause>,
-    parent: &CteContext,
-    ctx: &EvalCtx,
-    fctx: crate::exec::ForeignCtx,
-    range_scanner: &dyn crate::scanner::RangeScanner,
 ) -> Result<CteContext, ExecError> {
     let Some(with) = with else {
-        return Ok(parent.child());
+        return Ok(ctx.ctes.child());
     };
     reject_recursive(with)?;
 
-    let mut out = parent.child();
+    let mut out = ctx.ctes.child();
     for cte in &with.ctes {
         if cte.query.locking.is_some() {
             return Err(ExecError::Unsupported(
                 "FOR UPDATE/SHARE is not supported in CTEs".into(),
             ));
         }
-        let rel = crate::query::query_to_relation_with_ctes(
-            catalog_kv,
-            kv,
-            global,
-            gsnap,
-            snapshot,
-            own,
-            &cte.query,
-            &out,
-            ctx,
-            fctx,
-            range_scanner,
-        )?;
+        let cte_ctx = ctx.with_ctes(&out);
+        let rel = crate::query::query_to_relation_with_ctes(&cte_ctx, &cte.query)?;
         let rel = apply_cte_column_aliases(rel, &cte.name, &cte.columns)?;
         out.insert(cte.name.clone(), rel);
     }

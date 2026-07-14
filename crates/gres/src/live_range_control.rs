@@ -200,7 +200,186 @@ impl LiveRangeControlExecutor {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
+    async fn stage_filtered_restore(
+        &self,
+        request: &RangeControlReq,
+        intent: &crabka_gres_ranges::control::AuthorizedSplitIntent,
+        transfer: &LiveMultiRangeTransfer,
+    ) -> Result<RangeControlResp, RangeControlResp> {
+        let split = intent.split();
+        let evidence = &intent.record().evidence;
+        let manifest_key = evidence.manifest_key.as_ref().ok_or_else(|| {
+            rejected(
+                "missing_evidence",
+                "checkpoint manifest is absent from journal",
+            )
+        })?;
+        let covered_offset = evidence
+            .covered_offset
+            .ok_or_else(|| rejected("missing_evidence", "covered offset is absent from journal"))?;
+        let barrier_offset = evidence
+            .barrier_offset
+            .ok_or_else(|| rejected("missing_evidence", "pause barrier is absent from journal"))?;
+        if let Some(tail_sha256) = self
+            .operations
+            .lock()
+            .await
+            .get(&request.operation_id)
+            .and_then(|runtime| runtime.tail_sha256.clone())
+        {
+            return Ok(RangeControlResp::Staged { tail_sha256 });
+        }
+        let checkpoint = CheckpointManifest {
+            range_id: split.predecessor,
+            covered_offset,
+            manifest_key: manifest_key.clone(),
+        };
+        let requested_barrier = RangeTransferBarrier {
+            range_id: split.predecessor,
+            offset: barrier_offset,
+        };
+        let barrier = self
+            .operations
+            .lock()
+            .await
+            .get(&request.operation_id)
+            .and_then(|runtime| runtime.barrier)
+            .unwrap_or(requested_barrier);
+        if barrier.range_id != requested_barrier.range_id
+            || barrier.offset < requested_barrier.offset
+        {
+            return Err(rejected(
+                "stale_pause",
+                "staged restore cannot use a stale or foreign pause barrier",
+            ));
+        }
+        let plan = self
+            .gateway
+            .validated_control_transfer_plan(split.clone())
+            .map_err(|error| rejected("invalid_split", error.to_string()))?;
+        let tail = transfer
+            .read_committed_tail(checkpoint.range_id, checkpoint.covered_offset, barrier)
+            .await
+            .map_err(|error| transfer_error(&error))?;
+        let tail_sha256 = committed_tail_sha256(&tail);
+        let staged = transfer
+            .stage_successors(&plan, &checkpoint, &tail, barrier)
+            .await
+            .map_err(|error| transfer_error(&error))?;
+        let mut operations = self.operations.lock().await;
+        let runtime = operations.entry(request.operation_id.clone()).or_default();
+        runtime.checkpoint = Some(checkpoint);
+        runtime.barrier = Some(barrier);
+        runtime.staged = Some(staged);
+        runtime.split = Some(split.clone());
+        runtime.tail_sha256 = Some(tail_sha256.clone());
+        Ok(RangeControlResp::Staged { tail_sha256 })
+    }
+
+    async fn inherit_markers(
+        &self,
+        request: &RangeControlReq,
+        intent: &crabka_gres_ranges::control::AuthorizedSplitIntent,
+        transfer: &LiveMultiRangeTransfer,
+    ) -> Result<RangeControlResp, RangeControlResp> {
+        let authorized_split = intent.split();
+        let start = authorized_split.predecessor_before.start;
+        let end = authorized_split.predecessor_before.end;
+        let source = self
+            .gateway
+            .control_in_doubt_markers(start, end)
+            .map_err(|error| rejected("marker_source_failed", error.to_string()))?;
+        let mut operations = self.operations.lock().await;
+        let runtime = operations
+            .get_mut(&request.operation_id)
+            .ok_or_else(|| rejected("missing_stage", "successors are not staged"))?;
+        let split = runtime
+            .split
+            .as_ref()
+            .ok_or_else(|| rejected("missing_stage", "split intent is not staged"))?;
+        if start != split.predecessor_before.start || end != split.predecessor_before.end {
+            return Err(rejected(
+                "invalid_interval",
+                "marker request must cover the exact predecessor interval",
+            ));
+        }
+        let (left, right) = if let Some(claimed) = runtime.claimed.as_ref() {
+            (
+                crabka_gres_ranges::tenant::in_doubt_markers_for_engine(
+                    &claimed.left.engine,
+                    split.predecessor_after.start,
+                    split.predecessor_after.end,
+                )
+                .map_err(|error| rejected("marker_verify_failed", error.to_string()))?,
+                claimed
+                    .right
+                    .as_ref()
+                    .map(|right| {
+                        crabka_gres_ranges::tenant::in_doubt_markers_for_engine(
+                            &right.engine,
+                            split.successor_after.start,
+                            split.successor_after.end,
+                        )
+                        .map_err(|error| rejected("marker_verify_failed", error.to_string()))
+                    })
+                    .transpose()?,
+            )
+        } else {
+            let staged = runtime
+                .staged
+                .as_ref()
+                .ok_or_else(|| rejected("missing_stage", "successor resources are not staged"))?;
+            (
+                transfer
+                    .staged_successor_markers(
+                        staged.left.range_id,
+                        split.predecessor_after.start,
+                        split.predecessor_after.end,
+                    )
+                    .map_err(|error| transfer_error(&error))?,
+                staged
+                    .right
+                    .as_ref()
+                    .map(|right| {
+                        transfer
+                            .staged_successor_markers(
+                                right.range_id,
+                                split.successor_after.start,
+                                split.successor_after.end,
+                            )
+                            .map_err(|error| transfer_error(&error))
+                    })
+                    .transpose()?,
+            )
+        };
+        verify_marker_partition(
+            &source,
+            &left,
+            right.as_deref(),
+            &split.predecessor_after,
+            &split.successor_after,
+        )?;
+        if runtime.claimed.is_none() {
+            let claimed = transfer
+                .claim_successors(
+                    runtime.staged.as_ref().expect("staged checked above"),
+                    runtime.barrier.ok_or_else(|| {
+                        rejected("missing_pause", "operation has no pause barrier")
+                    })?,
+                )
+                .await
+                .map_err(|error| transfer_error(&error))?;
+            runtime.claimed = Some(claimed);
+        }
+        let markers = source.iter().map(wire_marker).collect::<Vec<_>>();
+        Ok(RangeControlResp::Markers {
+            digest: marker_digest(&markers),
+            markers,
+            left_markers: Some(left.iter().map(wire_marker).collect()),
+            right_markers: Some(right.unwrap_or_default().iter().map(wire_marker).collect()),
+        })
+    }
+
     async fn apply(
         &self,
         request: &RangeControlReq,
@@ -212,15 +391,15 @@ impl LiveRangeControlExecutor {
                 transfer
                     .record_topology_activation_intent(intent.split())
                     .await
-                    .map_err(transfer_error)?;
+                    .map_err(|error| transfer_error(&error))?;
                 let checkpoint = transfer
                     .force_checkpoint(request.range_id)
                     .await
-                    .map_err(transfer_error)?;
+                    .map_err(|error| transfer_error(&error))?;
                 transfer
                     .record_topology_activation_checkpoint(&request.operation_id, &checkpoint)
                     .await
-                    .map_err(transfer_error)?;
+                    .map_err(|error| transfer_error(&error))?;
                 self.operations
                     .lock()
                     .await
@@ -260,7 +439,7 @@ impl LiveRangeControlExecutor {
                 let barrier = transfer
                     .pause_at_checkpoint(&checkpoint)
                     .await
-                    .map_err(transfer_error)?;
+                    .map_err(|error| transfer_error(&error))?;
                 let mut operations = self.operations.lock().await;
                 let runtime = operations.entry(request.operation_id.clone()).or_default();
                 runtime.checkpoint = Some(checkpoint);
@@ -274,74 +453,8 @@ impl LiveRangeControlExecutor {
                 Ok(self.status(&request.operation_id, request.range_id).await)
             }
             RangeControlOperation::StageFilteredRestore { .. } => {
-                let split = intent.split();
-                let evidence = &intent.record().evidence;
-                let manifest_key = evidence.manifest_key.as_ref().ok_or_else(|| {
-                    rejected(
-                        "missing_evidence",
-                        "checkpoint manifest is absent from journal",
-                    )
-                })?;
-                let covered_offset = evidence.covered_offset.ok_or_else(|| {
-                    rejected("missing_evidence", "covered offset is absent from journal")
-                })?;
-                let barrier_offset = evidence.barrier_offset.ok_or_else(|| {
-                    rejected("missing_evidence", "pause barrier is absent from journal")
-                })?;
-                if let Some(tail_sha256) = self
-                    .operations
-                    .lock()
+                self.stage_filtered_restore(request, intent, transfer.as_ref())
                     .await
-                    .get(&request.operation_id)
-                    .and_then(|runtime| runtime.tail_sha256.clone())
-                {
-                    return Ok(RangeControlResp::Staged { tail_sha256 });
-                }
-                let checkpoint = CheckpointManifest {
-                    range_id: split.predecessor,
-                    covered_offset,
-                    manifest_key: manifest_key.clone(),
-                };
-                let requested_barrier = RangeTransferBarrier {
-                    range_id: split.predecessor,
-                    offset: barrier_offset,
-                };
-                let barrier = self
-                    .operations
-                    .lock()
-                    .await
-                    .get(&request.operation_id)
-                    .and_then(|runtime| runtime.barrier)
-                    .unwrap_or(requested_barrier);
-                if barrier.range_id != requested_barrier.range_id
-                    || barrier.offset < requested_barrier.offset
-                {
-                    return Err(rejected(
-                        "stale_pause",
-                        "staged restore cannot use a stale or foreign pause barrier",
-                    ));
-                }
-                let plan = self
-                    .gateway
-                    .validated_control_transfer_plan(split.clone())
-                    .map_err(|error| rejected("invalid_split", error.to_string()))?;
-                let tail = transfer
-                    .read_committed_tail(checkpoint.range_id, checkpoint.covered_offset, barrier)
-                    .await
-                    .map_err(transfer_error)?;
-                let tail_sha256 = committed_tail_sha256(&tail);
-                let staged = transfer
-                    .stage_successors(&plan, &checkpoint, &tail, barrier)
-                    .await
-                    .map_err(transfer_error)?;
-                let mut operations = self.operations.lock().await;
-                let runtime = operations.entry(request.operation_id.clone()).or_default();
-                runtime.checkpoint = Some(checkpoint);
-                runtime.barrier = Some(barrier);
-                runtime.staged = Some(staged);
-                runtime.split = Some(split.clone());
-                runtime.tail_sha256 = Some(tail_sha256.clone());
-                Ok(RangeControlResp::Staged { tail_sha256 })
             }
             RangeControlOperation::SuccessorFencePrologue { .. } => {
                 let requested = intent.split();
@@ -391,105 +504,8 @@ impl LiveRangeControlExecutor {
                 Ok(RangeControlResp::Applied)
             }
             RangeControlOperation::InheritMarkers { .. } => {
-                let authorized_split = intent.split();
-                let start = authorized_split.predecessor_before.start;
-                let end = authorized_split.predecessor_before.end;
-                let source = self
-                    .gateway
-                    .control_in_doubt_markers(start, end)
-                    .map_err(|error| rejected("marker_source_failed", error.to_string()))?;
-                let mut operations = self.operations.lock().await;
-                let runtime = operations
-                    .get_mut(&request.operation_id)
-                    .ok_or_else(|| rejected("missing_stage", "successors are not staged"))?;
-                let split = runtime
-                    .split
-                    .as_ref()
-                    .ok_or_else(|| rejected("missing_stage", "split intent is not staged"))?;
-                if start != split.predecessor_before.start || end != split.predecessor_before.end {
-                    return Err(rejected(
-                        "invalid_interval",
-                        "marker request must cover the exact predecessor interval",
-                    ));
-                }
-                let (left, right) = if let Some(claimed) = runtime.claimed.as_ref() {
-                    (
-                        crabka_gres_ranges::tenant::in_doubt_markers_for_engine(
-                            &claimed.left.engine,
-                            split.predecessor_after.start,
-                            split.predecessor_after.end,
-                        )
-                        .map_err(|error| rejected("marker_verify_failed", error.to_string()))?,
-                        claimed
-                            .right
-                            .as_ref()
-                            .map(|right| {
-                                crabka_gres_ranges::tenant::in_doubt_markers_for_engine(
-                                    &right.engine,
-                                    split.successor_after.start,
-                                    split.successor_after.end,
-                                )
-                                .map_err(|error| {
-                                    rejected("marker_verify_failed", error.to_string())
-                                })
-                            })
-                            .transpose()?,
-                    )
-                } else {
-                    let staged = runtime.staged.as_ref().ok_or_else(|| {
-                        rejected("missing_stage", "successor resources are not staged")
-                    })?;
-                    (
-                        transfer
-                            .staged_successor_markers(
-                                staged.left.range_id,
-                                split.predecessor_after.start,
-                                split.predecessor_after.end,
-                            )
-                            .map_err(transfer_error)?,
-                        staged
-                            .right
-                            .as_ref()
-                            .map(|right| {
-                                transfer
-                                    .staged_successor_markers(
-                                        right.range_id,
-                                        split.successor_after.start,
-                                        split.successor_after.end,
-                                    )
-                                    .map_err(transfer_error)
-                            })
-                            .transpose()?,
-                    )
-                };
-                verify_marker_partition(
-                    &source,
-                    &left,
-                    right.as_deref(),
-                    &split.predecessor_after,
-                    &split.successor_after,
-                )?;
-                if runtime.claimed.is_none() {
-                    let claimed = transfer
-                        .claim_successors(
-                            runtime.staged.as_ref().expect("staged checked above"),
-                            runtime.barrier.ok_or_else(|| {
-                                rejected("missing_pause", "operation has no pause barrier")
-                            })?,
-                        )
-                        .await
-                        .map_err(transfer_error)?;
-                    runtime.claimed = Some(claimed);
-                }
-                let markers = source.iter().map(wire_marker).collect::<Vec<_>>();
-                Ok(RangeControlResp::Markers {
-                    digest: marker_digest(&markers),
-                    markers,
-                    left_markers: Some(left.iter().map(wire_marker).collect()),
-                    right_markers: Some(
-                        right.unwrap_or_default().iter().map(wire_marker).collect(),
-                    ),
-                })
+                self.inherit_markers(request, intent, transfer.as_ref())
+                    .await
             }
             RangeControlOperation::RetirePredecessor => {
                 transfer
@@ -500,7 +516,7 @@ impl LiveRangeControlExecutor {
                         &self.gateway.control_range_map(),
                     )
                     .await
-                    .map_err(transfer_error)?;
+                    .map_err(|error| transfer_error(&error))?;
                 if let Some(runtime) = self.operations.lock().await.get_mut(&request.operation_id) {
                     runtime.release_topology_fence();
                 }
@@ -520,7 +536,10 @@ impl LiveRangeControlExecutor {
                     .get(&request.operation_id)
                     .and_then(|runtime| runtime.barrier)
                     .ok_or_else(|| rejected("missing_pause", "operation has no pause barrier"))?;
-                transfer.resume(barrier).await.map_err(transfer_error)?;
+                transfer
+                    .resume(barrier)
+                    .await
+                    .map_err(|error| transfer_error(&error))?;
                 let mut operations = self.operations.lock().await;
                 let runtime = operations
                     .get_mut(&request.operation_id)
@@ -611,7 +630,7 @@ impl RangeControlExecutor for LiveRangeControlExecutor {
                 .await
             {
                 Ok(tail) => tail,
-                Err(error) => return transfer_error(error),
+                Err(error) => return transfer_error(&error),
             };
             if let Err(response) =
                 recovery_extension_is_structural(&request.tenant, *old_barrier, new_barrier, &tail)
@@ -626,8 +645,7 @@ impl RangeControlExecutor for LiveRangeControlExecutor {
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
-fn transfer_error(error: crabka_gres_ranges::RangeTransferError) -> RangeControlResp {
+fn transfer_error(error: &crabka_gres_ranges::RangeTransferError) -> RangeControlResp {
     rejected("transfer_failed", error.to_string())
 }
 

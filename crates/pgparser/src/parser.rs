@@ -40,6 +40,8 @@ type QueryTailAndLocking = (
     Option<crate::ast::RowLockStrength>,
 );
 
+type SetTail = (Vec<crate::ast::OrderItem>, Option<i64>, Option<i64>);
+
 pub(crate) struct Parser {
     toks: Vec<(Token, usize)>,
     source: String,
@@ -2354,10 +2356,7 @@ impl Parser {
     /// Parse an optional `ORDER BY …`, then `LIMIT`/`OFFSET` in either order.
     /// The tuple is the three result-level tail components (`order_by`, `limit`, `offset`);
     /// a named struct would not read more clearly than the positional triple.
-    #[allow(clippy::type_complexity)]
-    fn parse_set_tail(
-        &mut self,
-    ) -> Result<(Vec<crate::ast::OrderItem>, Option<i64>, Option<i64>), ParseError> {
+    fn parse_set_tail(&mut self) -> Result<SetTail, ParseError> {
         use crate::ast::OrderItem;
         let mut order_by = Vec::new();
         if self.eat_keyword(Keyword::Order) {

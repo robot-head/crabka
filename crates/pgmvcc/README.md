@@ -1,8 +1,6 @@
 # crabka-pgmvcc
 
 [![crates.io](https://img.shields.io/crates/v/crabka-pgmvcc.svg)](https://crates.io/crates/crabka-pgmvcc)
-[![docs.rs](https://docs.rs/crabka-pgmvcc/badge.svg)](https://docs.rs/crabka-pgmvcc)
-
 PostgreSQL-faithful MVCC for the Crabka Gres engine: xids, clog, snapshots, and `HeapTupleSatisfiesMVCC` visibility.
 
 Part of [Crabka](https://github.com/robot-head/crabka)'s Chapter Gres — a pure-Rust

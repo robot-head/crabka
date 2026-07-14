@@ -1,8 +1,6 @@
 # crabka-pgparser
 
 [![crates.io](https://img.shields.io/crates/v/crabka-pgparser.svg)](https://crates.io/crates/crabka-pgparser)
-[![docs.rs](https://docs.rs/crabka-pgparser/badge.svg)](https://docs.rs/crabka-pgparser)
-
 Hand-written PostgreSQL SQL lexer and parser producing the Crabka Gres AST.
 
 Part of [Crabka](https://github.com/robot-head/crabka)'s Chapter Gres — a pure-Rust

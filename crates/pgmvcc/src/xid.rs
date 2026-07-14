@@ -43,10 +43,7 @@ mod tests {
     #[test]
     fn global_base_is_top_bit_and_above_realistic_local_xids() {
         assert_eq!(GLOBAL_XID_BASE, 1u64 << 63);
-        #[allow(clippy::assertions_on_constants)]
-        {
-            assert!(1_000_000u64 < GLOBAL_XID_BASE);
-        }
+        const { assert!(1_000_000u64 < GLOBAL_XID_BASE) };
     }
 
     #[test]

@@ -349,19 +349,21 @@ async fn materialize_new_partitions(
         if !should_materialize_locally(replicas, context.node_id) {
             continue;
         }
-        if let Err(error) = materialize_partition(
-            context.partitions,
-            topic,
-            Some(context.topic_id),
-            *index,
-            context.log_dirs,
-            context.log_config,
-            context.log_dir_status,
-            context.producer_state,
-            context.diskless,
-            Some(context.hot_tail.clone()),
-            Some(context.wal_shards.clone()),
-        ) {
+        if let Err(error) =
+            materialize_partition(crate::replicator_supervisor::MaterializePartitionConfig {
+                partitions: context.partitions,
+                topic,
+                topic_id: Some(context.topic_id),
+                partition: *index,
+                log_dirs: context.log_dirs,
+                log_config: context.log_config,
+                log_dir_status: context.log_dir_status,
+                producer_state: context.producer_state,
+                diskless: context.diskless,
+                hot_tail: Some(context.hot_tail.clone()),
+                wal_shards: Some(context.wal_shards.clone()),
+            })
+        {
             tracing::error!(topic, partition = *index, error = %error,
                 "CreatePartitions: materialize after quorum commit failed");
             continue;

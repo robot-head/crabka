@@ -10,14 +10,12 @@
 use std::collections::{HashMap, HashSet};
 
 use crabka_pgkv::Kv;
-use crabka_pgmvcc::visibility::Snapshot;
 use crabka_pgparser::ast::{Expr, QueryBody, SetExpr, SetOp};
 use crabka_pgtypes::{ColumnType, Datum};
 
 use crate::{
     clock::EvalCtx,
     error::ExecError,
-    scanner::RangeScanner,
     scope::{ColumnBinding, Scope},
 };
 
@@ -183,40 +181,16 @@ pub(crate) fn describe_set_expr_with_ctes(
         .collect())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn set_expr_to_relation(
-    catalog_kv: &dyn Kv,
-    kv: &dyn Kv,
-    global: &dyn Kv,
-    gsnap: &Snapshot,
-    snapshot: &Snapshot,
-    own: Option<u64>,
+    ctx: &crate::subquery::SubCtx<'_>,
     body: &SetExpr,
     order_by: &[crabka_pgparser::ast::OrderItem],
     offset: Option<i64>,
     limit: Option<i64>,
-    ctes: &crate::cte::CteContext,
-    ctx: &EvalCtx,
-    fctx: crate::exec::ForeignCtx,
-    range_scanner: &dyn RangeScanner,
 ) -> Result<crate::join::Relation, ExecError> {
-    let cols = resolve_set_columns(catalog_kv, body, ctes, 0)?;
+    let cols = resolve_set_columns(ctx.catalog_kv, body, ctx.ctes, 0)?;
     let out_tys: Vec<ColumnType> = cols.iter().map(output_type).collect();
-    let mut rows = fold(
-        catalog_kv,
-        kv,
-        global,
-        gsnap,
-        snapshot,
-        own,
-        body,
-        &out_tys,
-        ctes,
-        ctx,
-        fctx,
-        range_scanner,
-        0,
-    )?;
+    let mut rows = fold(ctx, body, &out_tys, 0)?;
 
     let scope = Scope {
         columns: cols
@@ -234,7 +208,7 @@ pub(crate) fn set_expr_to_relation(
         for row in rows {
             let mut keys = Vec::with_capacity(order_by.len());
             for item in order_by {
-                keys.push(order_key(&item.expr, &scope, &row, ctx)?);
+                keys.push(order_key(&item.expr, &scope, &row, ctx.eval_ctx)?);
             }
             keyed.push((keys, row));
         }
@@ -271,20 +245,10 @@ fn order_key(expr: &Expr, scope: &Scope, row: &[Datum], ctx: &EvalCtx) -> Result
 /// per-column output types `out_tys` (resolved once by `resolve_set_columns`). Both
 /// sides of a `SetOp` node therefore carry identical types, so the multiset combine
 /// compares like-typed `Datum`s.
-#[allow(clippy::too_many_arguments)]
 fn fold(
-    catalog_kv: &dyn Kv,
-    kv: &dyn Kv,
-    global: &dyn Kv,
-    gsnap: &Snapshot,
-    snapshot: &Snapshot,
-    own: Option<u64>,
+    ctx: &crate::subquery::SubCtx<'_>,
     e: &SetExpr,
     out_tys: &[ColumnType],
-    ctes: &crate::cte::CteContext,
-    ctx: &EvalCtx,
-    fctx: crate::exec::ForeignCtx,
-    range_scanner: &dyn RangeScanner,
     depth: usize,
 ) -> Result<Vec<Vec<Datum>>, ExecError> {
     // Defense-in-depth (parser already caps the tree at MAX_DEPTH): 54001, not a crash.
@@ -293,52 +257,16 @@ fn fold(
     }
     match e {
         SetExpr::Query(QueryBody::Select(s)) => {
-            let rel = crate::exec::select_to_relation_with_ctes(
-                catalog_kv,
-                kv,
-                global,
-                gsnap,
-                snapshot,
-                own,
-                s,
-                ctes,
-                ctx,
-                fctx,
-                range_scanner,
-            )?;
-            coerce_rows(rel.rows, &rel.scope, out_tys, ctx)
+            let rel = crate::exec::select_to_relation_with_ctes(ctx, s)?;
+            coerce_rows(rel.rows, &rel.scope, out_tys, ctx.eval_ctx)
         }
         SetExpr::Query(QueryBody::Values(v)) => {
-            let rel = crate::values::values_to_relation_with_ctes(
-                catalog_kv,
-                kv,
-                global,
-                gsnap,
-                snapshot,
-                own,
-                v,
-                ctes,
-                ctx,
-                fctx,
-                range_scanner,
-            )?;
-            coerce_rows(rel.rows, &rel.scope, out_tys, ctx)
+            let rel = crate::values::values_to_relation_with_ctes(ctx, v)?;
+            coerce_rows(rel.rows, &rel.scope, out_tys, ctx.eval_ctx)
         }
         SetExpr::Query(QueryBody::Nested(nested)) => {
-            let rel = crate::query::query_to_relation_with_ctes(
-                catalog_kv,
-                kv,
-                global,
-                gsnap,
-                snapshot,
-                own,
-                nested,
-                ctes,
-                ctx,
-                fctx,
-                range_scanner,
-            )?;
-            coerce_rows(rel.rows, &rel.scope, out_tys, ctx)
+            let rel = crate::query::query_to_relation_with_ctes(ctx, nested)?;
+            coerce_rows(rel.rows, &rel.scope, out_tys, ctx.eval_ctx)
         }
         SetExpr::SetOp {
             op,
@@ -346,36 +274,8 @@ fn fold(
             left,
             right,
         } => {
-            let lrows = fold(
-                catalog_kv,
-                kv,
-                global,
-                gsnap,
-                snapshot,
-                own,
-                left,
-                out_tys,
-                ctes,
-                ctx,
-                fctx,
-                range_scanner,
-                depth + 1,
-            )?;
-            let rrows = fold(
-                catalog_kv,
-                kv,
-                global,
-                gsnap,
-                snapshot,
-                own,
-                right,
-                out_tys,
-                ctes,
-                ctx,
-                fctx,
-                range_scanner,
-                depth + 1,
-            )?;
+            let lrows = fold(ctx, left, out_tys, depth + 1)?;
+            let rrows = fold(ctx, right, out_tys, depth + 1)?;
             let combined_bytes = lrows.iter().chain(&rrows).fold(0usize, |bytes, row| {
                 bytes.saturating_add(crate::scanner::datum_row_bytes(row))
             });

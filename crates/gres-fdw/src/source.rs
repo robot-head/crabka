@@ -153,7 +153,6 @@ const PARTITION_MAX_BYTES: i32 = 10 * 1024 * 1024; // 10 MiB
 /// # Errors
 /// Returns [`KafkaFdwError`] on transport failures, unknown topics, or broker
 /// errors.
-#[allow(clippy::too_many_lines)]
 pub async fn scan_topic(
     profile: &ConnProfile,
     topic: &str,

@@ -1,8 +1,6 @@
 # crabka-pgtypes
 
 [![crates.io](https://img.shields.io/crates/v/crabka-pgtypes.svg)](https://crates.io/crates/crabka-pgtypes)
-[![docs.rs](https://docs.rs/crabka-pgtypes/badge.svg)](https://docs.rs/crabka-pgtypes)
-
 PostgreSQL value layer for the Crabka Gres engine: `Datum`, column types, text and binary wire encodings, casts, and operator semantics.
 
 Part of [Crabka](https://github.com/robot-head/crabka)'s Chapter Gres — a pure-Rust

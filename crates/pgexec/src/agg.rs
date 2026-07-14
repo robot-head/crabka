@@ -421,7 +421,6 @@ fn ungrouped_column(name: &str) -> ExecError {
 /// finalized per-group result; subexpressions matching a `GROUP BY` expression
 /// resolve to the group key; everything else recurses. (Validation already
 /// guarantees no ungrouped column reaches the `Column` arm.)
-#[allow(clippy::too_many_arguments)]
 fn eval_grouped(
     e: &Expr,
     scope: &Scope,
@@ -431,24 +430,46 @@ fn eval_grouped(
     results: &[Datum],
     ctx: &EvalCtx,
 ) -> Result<Datum, ExecError> {
-    eval_grouped_depth(e, scope, group_by, key, specs, results, ctx, 0)
+    eval_grouped_depth(
+        e,
+        &GroupedEvalContext {
+            scope,
+            group_by,
+            key,
+            specs,
+            results,
+            eval_ctx: ctx,
+        },
+        0,
+    )
+}
+
+struct GroupedEvalContext<'a> {
+    scope: &'a Scope,
+    group_by: &'a [Expr],
+    key: &'a [Datum],
+    specs: &'a [AggSpec],
+    results: &'a [Datum],
+    eval_ctx: &'a EvalCtx,
 }
 
 /// Depth-tracking core of [`eval_grouped`]. Mirrors `eval::eval_depth`: every
 /// recursive descent increments `depth`, and exceeding `MAX_GROUPED_DEPTH`
 /// returns `54001`. Defense-in-depth — the parser already caps AST depth, so a
 /// tree this deep can never reach here in practice.
-#[allow(clippy::too_many_arguments)]
 fn eval_grouped_depth(
     e: &Expr,
-    scope: &Scope,
-    group_by: &[Expr],
-    key: &[Datum],
-    specs: &[AggSpec],
-    results: &[Datum],
-    ctx: &EvalCtx,
+    grouped: &GroupedEvalContext<'_>,
     depth: usize,
 ) -> Result<Datum, ExecError> {
+    let GroupedEvalContext {
+        scope,
+        group_by,
+        key,
+        specs,
+        results,
+        eval_ctx: ctx,
+    } = grouped;
     if depth > MAX_GROUPED_DEPTH {
         return Err(ExecError::StackDepthExceeded);
     }
@@ -487,18 +508,18 @@ fn eval_grouped_depth(
         )),
         Expr::Column { name, .. } => Err(ungrouped_column(name)),
         Expr::Unary { op, expr } => {
-            let v = eval_grouped_depth(expr, scope, group_by, key, specs, results, ctx, d)?;
+            let v = eval_grouped_depth(expr, grouped, d)?;
             crate::eval::apply_unary(*op, &v, ctx)
         }
         Expr::Binary { op, left, right } => {
-            let l = eval_grouped_depth(left, scope, group_by, key, specs, results, ctx, d)?;
-            let r = eval_grouped_depth(right, scope, group_by, key, specs, results, ctx, d)?;
+            let l = eval_grouped_depth(left, grouped, d)?;
+            let r = eval_grouped_depth(right, grouped, d)?;
             crate::eval::apply_binary(*op, &l, &r, ctx)
         }
         // SP28: predicate + conditional expressions in a grouped context — same
         // combinators as scalar `eval`, recursing through `eval_grouped_depth`.
         Expr::IsNull { expr, negated } => {
-            let v = eval_grouped_depth(expr, scope, group_by, key, specs, results, ctx, d)?;
+            let v = eval_grouped_depth(expr, grouped, d)?;
             Ok(Datum::Bool(v.is_null() ^ *negated))
         }
         Expr::InList {
@@ -506,10 +527,8 @@ fn eval_grouped_depth(
             list,
             negated,
         } => {
-            let x = eval_grouped_depth(expr, scope, group_by, key, specs, results, ctx, d)?;
-            crate::eval::eval_in_list(&x, list, *negated, |e| {
-                eval_grouped_depth(e, scope, group_by, key, specs, results, ctx, d)
-            })
+            let x = eval_grouped_depth(expr, grouped, d)?;
+            crate::eval::eval_in_list(&x, list, *negated, |e| eval_grouped_depth(e, grouped, d))
         }
         Expr::Between {
             expr,
@@ -517,9 +536,9 @@ fn eval_grouped_depth(
             high,
             negated,
         } => {
-            let x = eval_grouped_depth(expr, scope, group_by, key, specs, results, ctx, d)?;
-            let lo = eval_grouped_depth(low, scope, group_by, key, specs, results, ctx, d)?;
-            let hi = eval_grouped_depth(high, scope, group_by, key, specs, results, ctx, d)?;
+            let x = eval_grouped_depth(expr, grouped, d)?;
+            let lo = eval_grouped_depth(low, grouped, d)?;
+            let hi = eval_grouped_depth(high, grouped, d)?;
             crate::eval::eval_between(&x, &lo, &hi, *negated, ctx)
         }
         Expr::Like {
@@ -528,8 +547,8 @@ fn eval_grouped_depth(
             negated,
             case_insensitive,
         } => {
-            let s = eval_grouped_depth(expr, scope, group_by, key, specs, results, ctx, d)?;
-            let p = eval_grouped_depth(pattern, scope, group_by, key, specs, results, ctx, d)?;
+            let s = eval_grouped_depth(expr, grouped, d)?;
+            let p = eval_grouped_depth(pattern, grouped, d)?;
             crate::eval::eval_like(&s, &p, *negated, *case_insensitive)
         }
         Expr::Case {
@@ -537,34 +556,28 @@ fn eval_grouped_depth(
             whens,
             else_result,
         } => crate::eval::eval_case(operand.as_deref(), whens, else_result.as_deref(), |e| {
-            eval_grouped_depth(e, scope, group_by, key, specs, results, ctx, d)
+            eval_grouped_depth(e, grouped, d)
         }),
         // SP29: a scalar function over grouped/aggregate arguments — evaluate it
         // with the grouped evaluator as its child-eval closure.
         Expr::Func(fc) if crate::func::is_scalar(&fc.name) => {
-            crate::func::eval_scalar(fc, ctx, |e| {
-                eval_grouped_depth(e, scope, group_by, key, specs, results, ctx, d)
-            })
+            crate::func::eval_scalar(fc, ctx, |e| eval_grouped_depth(e, grouped, d))
         }
         // SP37: a date/time function over grouped/aggregate arguments (e.g.
         // `date_trunc('day', max(ts))`) — same pattern, grouped child-eval closure.
         Expr::Func(fc) if crate::datetime_fn::is_datetime_func(&fc.name) => {
-            crate::datetime_fn::eval_datetime(fc, ctx, |e| {
-                eval_grouped_depth(e, scope, group_by, key, specs, results, ctx, d)
-            })
+            crate::datetime_fn::eval_datetime(fc, ctx, |e| eval_grouped_depth(e, grouped, d))
         }
         // SP38: a formatting function over grouped/aggregate arguments (e.g.
         // `to_char(max(ts), 'YYYY')`) — same pattern, grouped child-eval closure.
         Expr::Func(fc) if crate::format_fn::is_format_func(&fc.name) => {
-            crate::format_fn::eval_format(fc, ctx, |e| {
-                eval_grouped_depth(e, scope, group_by, key, specs, results, ctx, d)
-            })
+            crate::format_fn::eval_format(fc, ctx, |e| eval_grouped_depth(e, grouped, d))
         }
         Expr::Func(fc) => Err(undefined_function(&fc.name)),
         // SP31: cast in a grouped context — convert the grouped-evaluated operand
         // using the session zone from `ctx`.
         Expr::Cast { expr, ty } => {
-            let v = eval_grouped_depth(expr, scope, group_by, key, specs, results, ctx, d)?;
+            let v = eval_grouped_depth(expr, grouped, d)?;
             Ok(crabka_pgtypes::cast::cast(&v, *ty, &ctx.time_zone)?)
         }
         // SP34: a resolved subquery constant in a grouped context.

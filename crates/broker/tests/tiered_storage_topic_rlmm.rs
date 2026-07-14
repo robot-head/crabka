@@ -20,7 +20,11 @@
 use assert2::assert;
 mod support;
 
-use std::time::{Duration, Instant};
+use std::{
+    future::Future,
+    sync::{Mutex, OnceLock},
+    time::{Duration, Instant},
+};
 
 use crabka_broker::{
     Broker, BrokerConfig, BrokerHandle, KafkaRlmmConfig, RemoteStorageBackend, RlmmKind,
@@ -37,6 +41,20 @@ use crabka_protocol::{
 use tempfile::TempDir;
 
 const METADATA_TOPIC: &str = "__remote_log_metadata";
+
+fn run_broker_test(test: impl Future<Output = ()>) {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let _guard = LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("broker test lock should not be poisoned");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("broker test runtime");
+    runtime.block_on(test);
+}
 
 /// Boot a single broker with the `Local` tiered-storage backend and the
 /// topic-backed RLMM pointed at its own loopback listener. Returns the
@@ -135,17 +153,14 @@ async fn await_activation(broker: &BrokerHandle) {
         .await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn topic_backed_rlmm_loopback_scenarios() {
-    topic_rlmm_activates_against_loopback().await;
-    topic_rlmm_copy_then_fetch_round_trip().await;
-    copy_task_skips_tiering_while_rlmm_not_ready().await;
-    topic_rlmm_sasl_loopback_copy_then_fetch_round_trip().await;
-}
-
 /// The bootstrap completes against the loopback listener: the activation
 /// gauge flips and the `__remote_log_metadata` topic is provisioned.
-async fn topic_rlmm_activates_against_loopback() {
+#[test]
+fn topic_rlmm_activates_against_loopback() {
+    run_broker_test(topic_rlmm_activates_against_loopback_case());
+}
+
+async fn topic_rlmm_activates_against_loopback_case() {
     let (broker, _log_dir, _remote_dir) = start_broker_with_topic_rlmm().await;
 
     await_activation(&broker).await;
@@ -161,7 +176,12 @@ async fn topic_rlmm_activates_against_loopback() {
 /// tier one through the topic-backed RLMM (which publishes `CopySegment*`
 /// events to `__remote_log_metadata` over the loopback and consumes them
 /// back to update its cache), then read the records back at offset 0.
-async fn topic_rlmm_copy_then_fetch_round_trip() {
+#[test]
+fn topic_rlmm_copy_then_fetch_round_trip() {
+    run_broker_test(topic_rlmm_copy_then_fetch_round_trip_case());
+}
+
+async fn topic_rlmm_copy_then_fetch_round_trip_case() {
     const TOPIC: &str = "tiered-topic-rlmm-itest";
 
     let (broker, _log_dir, remote_dir) = start_broker_with_topic_rlmm().await;
@@ -453,7 +473,12 @@ async fn start_sasl_broker_with_topic_rlmm() -> (BrokerHandle, TempDir, TempDir)
 /// The topic config and produce volume mirror
 /// [`topic_rlmm_copy_then_fetch_round_trip`] exactly, so "0 tiered objects"
 /// is genuinely discriminating: the analogous loopback test tiers ≥ 1.
-async fn copy_task_skips_tiering_while_rlmm_not_ready() {
+#[test]
+fn copy_task_skips_tiering_while_rlmm_not_ready() {
+    run_broker_test(copy_task_skips_tiering_while_rlmm_not_ready_case());
+}
+
+async fn copy_task_skips_tiering_while_rlmm_not_ready_case() {
     const TOPIC: &str = "tiered-not-ready-itest";
 
     support::init_tracing();
@@ -579,7 +604,12 @@ async fn copy_task_skips_tiering_while_rlmm_not_ready() {
 /// topic, publish/consume `CopySegment` events, and serve the read-back —
 /// proving the secured metadata client works end-to-end. The test's own
 /// client authenticates with the same credentials.
-async fn topic_rlmm_sasl_loopback_copy_then_fetch_round_trip() {
+#[test]
+fn topic_rlmm_sasl_loopback_copy_then_fetch_round_trip() {
+    run_broker_test(topic_rlmm_sasl_loopback_copy_then_fetch_round_trip_case());
+}
+
+async fn topic_rlmm_sasl_loopback_copy_then_fetch_round_trip_case() {
     use crabka_client_core::security::{ClientSecurity, SaslCredentials};
     use crabka_security::ListenerProtocol;
 

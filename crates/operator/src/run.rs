@@ -26,7 +26,6 @@ use crate::{
 /// election surfaces an unrecoverable API error. Per-task failures inside
 /// the `tokio::select!` arms are logged but not propagated, since this is
 /// supervisor glue and the e2e test is the contract.
-#[allow(clippy::too_many_lines)]
 pub async fn run(config: OperatorConfig) -> anyhow::Result<()> {
     telemetry::init_tracing(&config.log_filter);
     let (registry, metrics) = telemetry::new_registry_with_metrics();

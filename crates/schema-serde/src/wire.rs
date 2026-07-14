@@ -122,8 +122,7 @@ fn read_varint(bytes: &[u8]) -> Result<(i64, &[u8]), SchemaSerdeError> {
             if encoded_varint_len(result) != index + 1 {
                 return Err(SchemaSerdeError::Wire("varint is overlong".into()));
             }
-            #[allow(clippy::cast_possible_wrap)]
-            let decoded = ((result >> 1) as i64) ^ -((result & 1) as i64);
+            let decoded = (result >> 1).cast_signed() ^ -(result & 1).cast_signed();
             return Ok((decoded, &bytes[index + 1..]));
         }
     }

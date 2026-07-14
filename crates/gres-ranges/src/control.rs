@@ -1082,9 +1082,19 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::items_after_statements)]
     async fn registry_authority_binds_exact_journal_and_sealed_topology() {
         use crabka_gres_control::SplitOperationPhase as Phase;
+
+        async fn allowed(
+            record: crabka_gres_control::SplitOperationRecord,
+            request: &RangeControlReq,
+        ) -> bool {
+            RegistrySplitIntentView::new([record])
+                .authorize_request(request, IntentAuthorizationContext::New)
+                .await
+                .unwrap_or(None)
+                .is_some()
+        }
 
         let mut record = authorized_test_fixture().record().clone();
         record.phase = Phase::Paused;
@@ -1100,16 +1110,6 @@ mod tests {
                 journal_digest: authorized.digest().into(),
             },
         };
-        async fn allowed(
-            record: crabka_gres_control::SplitOperationRecord,
-            request: &RangeControlReq,
-        ) -> bool {
-            RegistrySplitIntentView::new([record])
-                .authorize_request(request, IntentAuthorizationContext::New)
-                .await
-                .unwrap_or(None)
-                .is_some()
-        }
         assert!(allowed(record.clone(), &request).await);
 
         let mut request_mutations = Vec::new();

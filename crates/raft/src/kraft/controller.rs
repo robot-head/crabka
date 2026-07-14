@@ -789,7 +789,7 @@ impl Engine {
             }
             Command::Inbound(inbound) => self.on_inbound(inbound),
             Command::Timer(tick) => self.on_timer(tick),
-            Command::SubmitChange { records, reply } => self.on_submit_change(records, reply),
+            Command::SubmitChange { records, reply } => self.on_submit_change(&records, reply),
             Command::TriggerSnapshot { reply } => {
                 let _ = reply.send(self.do_trigger_snapshot());
             }
@@ -1241,9 +1241,7 @@ impl Engine {
     }
 
     /// Handle a `submit_change`: leader appends + parks a waiter; non-leader
-    /// rejects immediately with the leader hint. Takes `records` by value: it
-    /// owns the batch moved out of the [`Command`].
-    #[allow(clippy::needless_pass_by_value)]
+    /// rejects immediately with the leader hint.
     #[tracing::instrument(
         level = "debug",
         skip_all,
@@ -1256,7 +1254,7 @@ impl Engine {
     )]
     fn on_submit_change(
         &mut self,
-        records: Vec<crabka_metadata::MetadataRecord>,
+        records: &[crabka_metadata::MetadataRecord],
         reply: oneshot::Sender<Result<SubmitChangeResult, RaftError>>,
     ) {
         if !self.core.role().is_leader() {
@@ -1281,7 +1279,7 @@ impl Engine {
         let mut scratch = self.image.clone();
         let mut result = SubmitChangeResult::default();
         let mut value_blobs: Vec<bytes::Bytes> = Vec::new();
-        for r in &records {
+        for r in records {
             // Stamp the registration epoch = its committed offset.
             let stamped;
             let r: &MetadataRecord = match r {
@@ -3014,7 +3012,7 @@ mod tests {
         assert2::assert!(engine.image.topic("direct").is_none());
 
         let (reply, mut rx) = oneshot::channel();
-        engine.on_submit_change(topic_record("direct"), reply);
+        engine.on_submit_change(&topic_record("direct"), reply);
 
         assert!(matches!(rx.try_recv(), Ok(Ok(_))));
         check!(engine.image.topic("direct").is_some());
@@ -3029,7 +3027,7 @@ mod tests {
         let (mut engine, _dir) = build_engine_only(NodeId(1), &[NodeId(1)]);
         elect_single_voter_engine(&mut engine);
         let (reply, mut rx) = oneshot::channel();
-        engine.on_submit_change(topic_record("topic"), reply);
+        engine.on_submit_change(&topic_record("topic"), reply);
         assert!(matches!(rx.try_recv(), Ok(Ok(_))));
 
         let advance = |count| {
@@ -3043,10 +3041,10 @@ mod tests {
         };
 
         let (reply, mut rx) = oneshot::channel();
-        engine.on_submit_change(advance(3), reply);
+        engine.on_submit_change(&advance(3), reply);
         let first = rx.try_recv().expect("first reply").expect("first ok");
         let (reply, mut rx) = oneshot::channel();
-        engine.on_submit_change(advance(5), reply);
+        engine.on_submit_change(&advance(5), reply);
         let second = rx.try_recv().expect("second reply").expect("second ok");
 
         assert_eq!(first.offset_reservations[0].base_offset, 0);
@@ -3064,7 +3062,7 @@ mod tests {
         elect_single_voter_engine(&mut engine);
 
         let (reply, mut rx) = oneshot::channel();
-        engine.on_submit_change(topic_record("anchor"), reply);
+        engine.on_submit_change(&topic_record("anchor"), reply);
         assert2::assert!(matches!(rx.try_recv(), Ok(Ok(_))));
 
         let base = engine.log.log_end_offset();
@@ -3078,7 +3076,7 @@ mod tests {
             endpoints: vec![],
         });
         let (reply, mut rx) = oneshot::channel();
-        engine.on_submit_change(vec![reg], reply);
+        engine.on_submit_change(&[reg], reply);
 
         assert!(matches!(rx.try_recv(), Ok(Ok(_))));
         assert!(engine.image.broker_epoch(NodeId(7)) == Some(base.0));
@@ -3089,7 +3087,7 @@ mod tests {
         let (mut engine, _dir) = build_engine_only(NodeId(1), &[NodeId(1)]);
         elect_single_voter_engine(&mut engine);
         let (reply, mut rx) = oneshot::channel();
-        engine.on_submit_change(topic_record("replayed"), reply);
+        engine.on_submit_change(&topic_record("replayed"), reply);
         assert2::assert!(matches!(rx.try_recv(), Ok(Ok(_))));
 
         let mut recovered = MetadataImage::new(uuid::Uuid::nil());

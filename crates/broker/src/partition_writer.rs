@@ -202,7 +202,6 @@ pub(crate) async fn run_produce_append_batch_at(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn handle_produce(
     identity: (&str, PartitionIndex),
     first: ProduceJob,
@@ -214,9 +213,12 @@ async fn handle_produce(
         &Arc<tokio::sync::Mutex<ReplicaState>>,
         &Arc<Notify>,
     ),
-    wal: Option<&crate::wal::SharedWal>,
-    sequencer: Option<&Arc<dyn crate::wal::OffsetSequencer>>,
+    diskless: (
+        Option<&crate::wal::SharedWal>,
+        Option<&Arc<dyn crate::wal::OffsetSequencer>>,
+    ),
 ) {
+    let (wal, sequencer) = diskless;
     let (log, log_dir, log_dir_status) = storage;
     let (append_notify, replica_state, hw_advance_notify) = signals;
     let mut jobs = vec![first];
@@ -537,8 +539,7 @@ pub async fn run_with_sequencer(
                     &mut pending,
                     (&log, &log_dir, &log_dir_status),
                     (&append_notify, &replica_state, &hw_advance_notify),
-                    wal.as_ref(),
-                    sequencer.as_ref(),
+                    (wal.as_ref(), sequencer.as_ref()),
                 )
                 .await;
             }

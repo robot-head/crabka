@@ -272,7 +272,7 @@ async fn cross_range_statement_all_unsharded_tables_is_rejected() {
 }
 
 #[tokio::test]
-async fn sharded_statements_route_by_id_before_table_suffix_fallback() {
+async fn row_sharded_statements_keep_logical_id_independent_of_hidden_placement() {
     let (gateway, handles) = MultiRangeTenant::start(row_split_tenant_config()).expect("tenant");
     let mut session = gateway.connect();
 
@@ -312,7 +312,7 @@ async fn sharded_statements_route_by_id_before_table_suffix_fallback() {
         routed_ranges,
         vec![
             RangeId::COORDINATOR,
-            RangeId::new(1),
+            RangeId::COORDINATOR,
             RangeId::COORDINATOR,
             RangeId::new(1),
             RangeId::COORDINATOR,
@@ -321,7 +321,7 @@ async fn sharded_statements_route_by_id_before_table_suffix_fallback() {
 }
 
 #[tokio::test]
-async fn row_sharded_insert_with_explicit_columns_missing_id_fails_clear() {
+async fn row_sharded_insert_with_explicit_columns_can_omit_logical_id() {
     let (gateway, _handles) = MultiRangeTenant::start(row_split_tenant_config()).expect("tenant");
     let mut session = gateway.connect();
 
@@ -330,15 +330,14 @@ async fn row_sharded_insert_with_explicit_columns_missing_id_fails_clear() {
         .await
         .expect("create");
 
-    let error = session
+    session
         .simple_query("INSERT INTO t150 (value) VALUES (7)")
         .await
-        .expect_err("missing row shard key rejected");
+        .expect("hidden row identity does not require a logical id");
 
-    assert_eq!(error.code, "0A000");
     assert_eq!(
         select_values(&mut session, "SELECT value FROM t150 ORDER BY id").await,
-        Vec::<i32>::new()
+        vec![7]
     );
 }
 
@@ -757,7 +756,7 @@ async fn parameterized_row_insert_routes_at_bind() {
 }
 
 #[tokio::test]
-async fn non_literal_row_insert_is_rejected_before_execution() {
+async fn non_literal_logical_id_does_not_control_row_sharded_placement() {
     let (gateway, _handles) = MultiRangeTenant::start(row_split_tenant_config()).expect("tenant");
     let mut session = gateway.connect();
     session
@@ -765,15 +764,14 @@ async fn non_literal_row_insert_is_rejected_before_execution() {
         .await
         .expect("create");
 
-    let error = session
+    session
         .simple_query("INSERT INTO t150 VALUES (10 + 10, 7)")
         .await
-        .expect_err("non-literal row insert rejected");
+        .expect("logical id expression is independent of hidden row identity");
 
-    assert_eq!(error.code, "0A000");
     assert_eq!(
         select_values(&mut session, "SELECT value FROM t150 ORDER BY id").await,
-        Vec::<i32>::new()
+        vec![7]
     );
 }
 
@@ -889,7 +887,7 @@ async fn parameterized_hash_select_routes_at_bind() {
 }
 
 #[tokio::test]
-async fn deferred_bind_error_cleans_owner_statement_and_allows_reparse() {
+async fn deferred_bind_accepts_null_logical_id_and_allows_reparse() {
     let (gateway, _handles) = MultiRangeTenant::start(row_split_tenant_config()).expect("tenant");
     let mut session = gateway.connect();
     session
@@ -900,9 +898,9 @@ async fn deferred_bind_error_cleans_owner_statement_and_allows_reparse() {
         .parse("deferred", "INSERT INTO t150 VALUES ($1, 7)", &[])
         .await
         .expect("deferred parse");
-    let error = session
+    session
         .bind(
-            "bad",
+            "null-id",
             "deferred",
             &[BoundParam {
                 type_oid: None,
@@ -912,8 +910,7 @@ async fn deferred_bind_error_cleans_owner_statement_and_allows_reparse() {
             &[],
         )
         .await
-        .expect_err("null shard key rejected at bind");
-    assert_eq!(error.code, "0A000");
+        .expect("hidden row identity does not require a logical id");
     session
         .close(crabka_pgwire::engine::CloseTarget::Statement("deferred"))
         .await

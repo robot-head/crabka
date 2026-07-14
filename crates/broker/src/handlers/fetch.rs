@@ -734,13 +734,15 @@ async fn execute_pending_reads(
         let started = std::time::Instant::now();
         total_bytes += do_read(
             &partition,
-            Some(uuid::Uuid::from_bytes(read.topic_id.0)),
-            Some(broker.hot_tail.clone()),
-            Offset(read.fetch_offset),
-            read.max_bytes,
-            read.read_committed,
-            read.is_follower_fetch,
-            sendfile_capable,
+            ReadRequest {
+                topic_id: Some(uuid::Uuid::from_bytes(read.topic_id.0)),
+                hot_tail: Some(broker.hot_tail.clone()),
+                fetch_offset: Offset(read.fetch_offset),
+                max_bytes: read.max_bytes,
+                read_committed: read.read_committed,
+                is_follower_fetch: read.is_follower_fetch,
+                sendfile_capable,
+            },
             &mut read.out,
         )
         .await?;
@@ -1040,9 +1042,7 @@ enum ReadPlan {
     },
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn do_read(
-    part: &Partition,
+struct ReadRequest {
     topic_id: Option<uuid::Uuid>,
     hot_tail: Option<Arc<crate::diskless::hot_tail::HotTailCache>>,
     fetch_offset: Offset,
@@ -1050,8 +1050,22 @@ async fn do_read(
     read_committed: bool,
     is_follower_fetch: bool,
     sendfile_capable: bool,
+}
+
+async fn do_read(
+    part: &Partition,
+    request: ReadRequest,
     out: &mut PartitionData,
 ) -> Result<usize, BrokerError> {
+    let ReadRequest {
+        topic_id,
+        hot_tail,
+        fetch_offset,
+        max_bytes,
+        read_committed,
+        is_follower_fetch,
+        sendfile_capable,
+    } = request;
     let hw = part.high_watermark().await;
     let (log_start, w, plan) = plan_read(
         part,
@@ -1463,14 +1477,16 @@ async fn long_poll_then_reread(
         let read_start = std::time::Instant::now();
         do_read(
             &part,
-            Some(uuid::Uuid::from_bytes(p.topic_id.0)),
-            Some(broker.hot_tail.clone()),
-            // Wrap the decoded-request wire offset into `Offset` for the read.
-            Offset(p.fetch_offset),
-            p.max_bytes,
-            p.read_committed,
-            p.is_follower_fetch,
-            sendfile_capable,
+            ReadRequest {
+                topic_id: Some(uuid::Uuid::from_bytes(p.topic_id.0)),
+                hot_tail: Some(broker.hot_tail.clone()),
+                // Wrap the decoded-request wire offset into `Offset` for the read.
+                fetch_offset: Offset(p.fetch_offset),
+                max_bytes: p.max_bytes,
+                read_committed: p.read_committed,
+                is_follower_fetch: p.is_follower_fetch,
+                sendfile_capable,
+            },
             &mut p.out,
         )
         .await?;

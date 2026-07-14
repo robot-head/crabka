@@ -84,7 +84,6 @@ pub async fn reconcile(obj: Arc<Gres>, ctx: Arc<Context>) -> Result<Action, Reco
     common::record_reconcile(&ctx, "Gres", Box::pin(reconcile_inner(obj, ctx.clone()))).await
 }
 
-#[allow(clippy::too_many_lines)]
 async fn reconcile_inner(obj: Arc<Gres>, ctx: Arc<Context>) -> Result<Action, ReconcileError> {
     let ns = obj.namespace().unwrap_or_else(|| "default".into());
     let name = obj.name_any();

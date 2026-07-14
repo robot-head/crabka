@@ -20,8 +20,7 @@ use crate::{
     join::{Relation, join_relations},
     scanner::{
         JoinExecutionStrategy, JoinKind as ScannerJoinKind, JoinRangeRequest, JoinRow,
-        JoinSnapshot, JoinTableInterval, PredicatePushdown, RangeScanner, RowInterval, ScanRequest,
-        ScannedRow,
+        JoinSnapshot, JoinTableInterval, PredicatePushdown, RowInterval, ScanRequest, ScannedRow,
     },
     scope::{ColumnBinding, Scope},
     timestamp_txn::{PrimaryTxnDecision, ReadTimestamp, TimestampTransactionId, TimestampWrite},
@@ -57,6 +56,63 @@ impl ForeignCtx<'_> {
         Self {
             scanner: None,
             current_user: "public",
+        }
+    }
+}
+
+pub(crate) struct WriteContext<'a> {
+    pub catalog_kv: &'a dyn Kv,
+    pub kv: &'a dyn Kv,
+    pub global: &'a dyn Kv,
+    pub global_snapshot: &'a crabka_pgmvcc::visibility::Snapshot,
+    pub procarray: &'a crate::procarray::ProcArray,
+    pub lockmgr: &'a crate::lockmgr::RowLockManager,
+    pub seq: &'a crate::seq::SequenceManager,
+    pub snapshot: &'a crabka_pgmvcc::visibility::Snapshot,
+    pub xid: u64,
+    pub repeatable_read: bool,
+    pub eval_ctx: &'a crate::clock::EvalCtx,
+}
+
+#[derive(Clone, Copy)]
+struct MvccReadContext<'a> {
+    kv: &'a dyn Kv,
+    global: &'a dyn Kv,
+    global_snapshot: &'a crabka_pgmvcc::visibility::Snapshot,
+    snapshot: &'a crabka_pgmvcc::visibility::Snapshot,
+    own: Option<u64>,
+}
+
+impl WriteContext<'_> {
+    fn mvcc_read(&self) -> MvccReadContext<'_> {
+        MvccReadContext {
+            kv: self.kv,
+            global: self.global,
+            global_snapshot: self.global_snapshot,
+            snapshot: self.snapshot,
+            own: Some(self.xid),
+        }
+    }
+}
+
+struct MutationContext<'a> {
+    kv: &'a dyn Kv,
+    global: &'a dyn Kv,
+    procarray: &'a crate::procarray::ProcArray,
+    snapshot: &'a crabka_pgmvcc::visibility::Snapshot,
+    xid: u64,
+    repeatable_read: bool,
+}
+
+impl WriteContext<'_> {
+    fn mutation(&self) -> MutationContext<'_> {
+        MutationContext {
+            kv: self.kv,
+            global: self.global,
+            procarray: self.procarray,
+            snapshot: self.snapshot,
+            xid: self.xid,
+            repeatable_read: self.repeatable_read,
         }
     }
 }
@@ -834,6 +890,14 @@ fn build_insert_row(
     for (slot, expr) in target_idx.iter().zip(row_exprs.iter()) {
         let value = match expr {
             Expr::Default => default_value(&table.columns[*slot], ctx)?,
+            Expr::StringLiteral(value) => {
+                let target = table.columns[*slot].ty;
+                if target == crabka_pgtypes::ColumnType::Bytea {
+                    Datum::Bytea(crate::session::decode_bytea_text(value)?)
+                } else {
+                    crabka_pgtypes::cast::cast(&Datum::Text(value.clone()), target, &ctx.time_zone)?
+                }
+            }
             _ => {
                 let value = crate::eval::eval(expr, &Scope::empty(), &[], ctx)?;
                 coerce(value, table.columns[*slot].ty, ctx)?
@@ -966,21 +1030,19 @@ fn default_value(column: &Column, ctx: &crate::clock::EvalCtx) -> Result<Datum, 
 /// concurrent committed change is a 40001 under REPEATABLE READ, or a re-find
 /// under READ COMMITTED. Reads resolve via `satisfies_mvcc` with the txn's own
 /// xid (read-your-writes).
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_write(
-    catalog_kv: &dyn Kv,
-    kv: &dyn Kv,
-    global: &dyn Kv,
-    gsnap: &crabka_pgmvcc::visibility::Snapshot,
-    procarray: &crate::procarray::ProcArray,
-    lockmgr: &crate::lockmgr::RowLockManager,
-    seq: &crate::seq::SequenceManager,
-    snapshot: &crabka_pgmvcc::visibility::Snapshot,
-    xid: u64,
-    repeatable_read: bool,
+    write_ctx: &WriteContext<'_>,
     stmt: &Statement,
-    ctx: &crate::clock::EvalCtx,
 ) -> Result<(QueryResult, Vec<crabka_pgkv::WriteOp>), ExecError> {
+    let catalog_kv = write_ctx.catalog_kv;
+    let kv = write_ctx.kv;
+    let global = write_ctx.global;
+    let gsnap = write_ctx.global_snapshot;
+    let lockmgr = write_ctx.lockmgr;
+    let seq = write_ctx.seq;
+    let snapshot = write_ctx.snapshot;
+    let xid = write_ctx.xid;
+    let ctx = write_ctx.eval_ctx;
     let mut ops: Vec<crabka_pgkv::WriteOp> = Vec::new();
     match stmt {
         Statement::Insert {
@@ -1022,11 +1084,7 @@ pub(crate) async fn execute_write(
                 }
                 let full = build_insert_row(&t, &target_idx, row_exprs, ctx)?;
                 enforce_unique_local_indexes(
-                    kv,
-                    global,
-                    gsnap,
-                    snapshot,
-                    Some(xid),
+                    &write_ctx.mvcc_read(),
                     &t,
                     &local_indexes,
                     rowid,
@@ -1090,16 +1148,7 @@ pub(crate) async fn execute_write(
                 }
                 // 3. EvalPlanQual: re-read this row under the lock and decide what to
                 //    operate on (40001 under RR if changed since our snapshot).
-                let Some((cur_xmin, cur_row)) = eval_plan_qual(
-                    kv,
-                    global,
-                    procarray,
-                    snapshot,
-                    &t,
-                    rowid,
-                    xid,
-                    repeatable_read,
-                )?
+                let Some((cur_xmin, cur_row)) = eval_plan_qual(&write_ctx.mutation(), &t, rowid)?
                 else {
                     continue; // deleted by a concurrent committed txn — skip
                 };
@@ -1115,11 +1164,7 @@ pub(crate) async fn execute_write(
                 }
                 enforce_not_null(&t, &next)?;
                 enforce_unique_local_index_updates(
-                    kv,
-                    global,
-                    gsnap,
-                    snapshot,
-                    xid,
+                    &write_ctx.mvcc_read(),
                     &t,
                     &local_indexes,
                     rowid,
@@ -1192,16 +1237,7 @@ pub(crate) async fn execute_write(
                     Err(()) => return Err(ExecError::Deadlock),
                 }
                 // 3. EvalPlanQual: re-read this row under the lock.
-                let Some((cur_xmin, cur_row)) = eval_plan_qual(
-                    kv,
-                    global,
-                    procarray,
-                    snapshot,
-                    &t,
-                    rowid,
-                    xid,
-                    repeatable_read,
-                )?
+                let Some((cur_xmin, cur_row)) = eval_plan_qual(&write_ctx.mutation(), &t, rowid)?
                 else {
                     continue; // already deleted by a concurrent committed txn
                 };
@@ -1259,19 +1295,16 @@ fn returning_result(
     ))
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_copy_write(
-    catalog_kv: &dyn Kv,
-    kv: &dyn Kv,
-    global: &dyn Kv,
-    gsnap: &crabka_pgmvcc::visibility::Snapshot,
-    snapshot: &crabka_pgmvcc::visibility::Snapshot,
-    seq: &crate::seq::SequenceManager,
-    snapshot_xid: u64,
+    write_ctx: &WriteContext<'_>,
     copy: &crabka_pgparser::ast::CopyStmt,
     rows: &[Vec<Option<String>>],
-    ctx: &crate::clock::EvalCtx,
 ) -> Result<(QueryResult, Vec<crabka_pgkv::WriteOp>), ExecError> {
+    let catalog_kv = write_ctx.catalog_kv;
+    let kv = write_ctx.kv;
+    let seq = write_ctx.seq;
+    let snapshot_xid = write_ctx.xid;
+    let ctx = write_ctx.eval_ctx;
     let mut ops = Vec::new();
     let table = crabka_pgcatalog::get_table(catalog_kv, &copy.table)?;
     let local_indexes = writable_local_indexes(catalog_kv, &table)?;
@@ -1293,11 +1326,7 @@ pub(crate) fn execute_copy_write(
         }
         let full = build_copy_row(&table, &target_idx, row_values, ctx)?;
         enforce_unique_local_indexes(
-            kv,
-            global,
-            gsnap,
-            snapshot,
-            Some(snapshot_xid),
+            &write_ctx.mvcc_read(),
             &table,
             &local_indexes,
             rowid,
@@ -1531,13 +1560,8 @@ fn local_index_backfill_ops(
 
 type PendingUniqueKey = (crabka_pgcatalog::IndexId, Vec<Datum>);
 
-#[allow(clippy::too_many_arguments)]
 fn enforce_unique_local_index_updates(
-    kv: &dyn Kv,
-    global: &dyn Kv,
-    gsnap: &crabka_pgmvcc::visibility::Snapshot,
-    snapshot: &crabka_pgmvcc::visibility::Snapshot,
-    xid: u64,
+    mvcc: &MvccReadContext<'_>,
     table: &Table,
     indexes: &[crabka_pgcatalog::Index],
     rowid: u64,
@@ -1551,29 +1575,13 @@ fn enforce_unique_local_index_updates(
         if old_values == new_values {
             continue;
         }
-        enforce_unique_local_index(
-            kv,
-            global,
-            gsnap,
-            snapshot,
-            Some(xid),
-            table,
-            index,
-            rowid,
-            new_values,
-            pending_unique_keys,
-        )?;
+        enforce_unique_local_index(mvcc, table, index, rowid, new_values, pending_unique_keys)?;
     }
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn enforce_unique_local_indexes(
-    kv: &dyn Kv,
-    global: &dyn Kv,
-    gsnap: &crabka_pgmvcc::visibility::Snapshot,
-    snapshot: &crabka_pgmvcc::visibility::Snapshot,
-    own: Option<u64>,
+    mvcc: &MvccReadContext<'_>,
     table: &Table,
     indexes: &[crabka_pgcatalog::Index],
     rowid: u64,
@@ -1582,29 +1590,13 @@ fn enforce_unique_local_indexes(
 ) -> Result<(), ExecError> {
     for index in indexes.iter().filter(|index| index.unique) {
         let values = indexed_values(table, index, row)?;
-        enforce_unique_local_index(
-            kv,
-            global,
-            gsnap,
-            snapshot,
-            own,
-            table,
-            index,
-            rowid,
-            values,
-            pending_unique_keys,
-        )?;
+        enforce_unique_local_index(mvcc, table, index, rowid, values, pending_unique_keys)?;
     }
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn enforce_unique_local_index(
-    kv: &dyn Kv,
-    global: &dyn Kv,
-    _gsnap: &crabka_pgmvcc::visibility::Snapshot,
-    _snapshot: &crabka_pgmvcc::visibility::Snapshot,
-    own: Option<u64>,
+    mvcc: &MvccReadContext<'_>,
     table: &Table,
     index: &crabka_pgcatalog::Index,
     rowid: u64,
@@ -1620,11 +1612,11 @@ fn enforce_unique_local_index(
     }
     let current_visibility = all_committed_snapshot();
     for (other_rowid, _xmin, other_row) in scan_live(
-        kv,
-        global,
+        mvcc.kv,
+        mvcc.global,
         &current_visibility,
         &current_visibility,
-        own,
+        mvcc.own,
         table,
     )? {
         if other_rowid == rowid {
@@ -1684,19 +1676,14 @@ fn indexed_values(
         .collect()
 }
 
-#[allow(clippy::too_many_arguments)]
 fn lookup_local_index_equal(
-    kv: &dyn Kv,
-    global: &dyn Kv,
-    gsnap: &crabka_pgmvcc::visibility::Snapshot,
-    snapshot: &crabka_pgmvcc::visibility::Snapshot,
-    own: Option<u64>,
+    mvcc: &MvccReadContext<'_>,
     table: &Table,
     index: &crabka_pgcatalog::Index,
     values: &[Datum],
 ) -> Result<Vec<ScannedRow>, ExecError> {
     let prefix = crabka_pgkv::key::secondary_index_entry_prefix(table.id, index.id, values);
-    let entries = kv.scan_prefix(&prefix)?;
+    let entries = mvcc.kv.scan_prefix(&prefix)?;
     let mut rowids = BTreeSet::new();
     for (key, _) in entries {
         rowids.insert(crabka_pgkv::key::secondary_index_rowid_of(
@@ -1707,7 +1694,8 @@ fn lookup_local_index_equal(
     let mut rows = Vec::new();
     for rowid in rowids {
         let row_prefix = crabka_pgkv::key::row_key(table.id, rowid);
-        let versions = kv
+        let versions = mvcc
+            .kv
             .scan_prefix(&row_prefix)?
             .iter()
             .map(|(_, value)| {
@@ -1715,7 +1703,14 @@ fn lookup_local_index_equal(
                 Ok((xmin, xmax, row))
             })
             .collect::<Result<Vec<_>, crabka_pgkv::KvError>>()?;
-        let Some((xmin, row)) = find_visible_one(kv, global, gsnap, snapshot, own, &versions)?
+        let Some((xmin, row)) = find_visible_one(
+            mvcc.kv,
+            mvcc.global,
+            mvcc.global_snapshot,
+            mvcc.snapshot,
+            mvcc.own,
+            &versions,
+        )?
         else {
             continue;
         };
@@ -2154,17 +2149,17 @@ fn find_visible_one(
 /// operate on, or None to skip. Under REPEATABLE READ, a row changed by a txn
 /// that committed after our snapshot is a serialization failure (40001). Under
 /// READ COMMITTED, re-find the latest live version (a fresh snapshot).
-#[allow(clippy::too_many_arguments)]
 fn eval_plan_qual(
-    kv: &dyn Kv,
-    global: &dyn Kv,
-    procarray: &crate::procarray::ProcArray,
-    snapshot: &crabka_pgmvcc::visibility::Snapshot, // the txn snapshot (RR) used to detect "changed since"
+    mutation: &MutationContext<'_>,
     table: &crabka_pgcatalog::Table,
     rowid: u64,
-    xid: u64,
-    repeatable_read: bool,
 ) -> Result<Option<(u64, Vec<crabka_pgtypes::Datum>)>, ExecError> {
+    let kv = mutation.kv;
+    let global = mutation.global;
+    let procarray = mutation.procarray;
+    let snapshot = mutation.snapshot;
+    let xid = mutation.xid;
+    let repeatable_read = mutation.repeatable_read;
     // Re-scan just this rowid's versions from disk.
     let prefix = crabka_pgkv::key::row_key(table.id, rowid);
     let scanned = kv.scan_prefix(&prefix)?;
@@ -2805,62 +2800,25 @@ fn is_single_foreign_table(
 }
 
 /// Build the relation for one FROM list (comma items folded as cross joins).
-#[allow(clippy::too_many_arguments)]
 fn build_from(
-    catalog_kv: &dyn Kv,
-    kv: &dyn Kv,
-    global: &dyn Kv,
-    gsnap: &crabka_pgmvcc::visibility::Snapshot,
-    snapshot: &crabka_pgmvcc::visibility::Snapshot,
-    own: Option<u64>,
+    read_ctx: &crate::subquery::SubCtx<'_>,
     from: &[crabka_pgparser::ast::TableExpr],
-    ctes: &crate::cte::CteContext,
-    ctx: &crate::clock::EvalCtx,
-    fctx: ForeignCtx,
     // SP40 Task 14: pushed-down offset bounds for the single-foreign-table case.
     // `Some` only when `from` is exactly one entry (set by `select_to_relation`);
     // joins/comma-FROM never see it and keep the full-scan + local-filter path.
     bounds: Option<&ScanBounds>,
     scan_plan: Option<&crate::plan_dist::DistributedScanPlan>,
-    range_scanner: &dyn RangeScanner,
 ) -> Result<Relation, ExecError> {
+    let ctx = read_ctx.eval_ctx;
     let mut iter = from.iter();
     let first = iter
         .next()
         .ok_or_else(|| ExecError::Unsupported("build_from on empty FROM".into()))?;
-    let mut acc = build_table_expr(
-        catalog_kv,
-        kv,
-        global,
-        gsnap,
-        snapshot,
-        own,
-        first,
-        ctes,
-        ctx,
-        fctx,
-        bounds,
-        scan_plan,
-        range_scanner,
-    )?;
+    let mut acc = build_table_expr(read_ctx, first, bounds, scan_plan)?;
     for te in iter {
         // A comma-FROM (multiple tables) is a cross join — no single-table
         // pushdown applies, so subsequent items always scan in full.
-        let next = build_table_expr(
-            catalog_kv,
-            kv,
-            global,
-            gsnap,
-            snapshot,
-            own,
-            te,
-            ctes,
-            ctx,
-            fctx,
-            None,
-            None,
-            range_scanner,
-        )?;
+        let next = build_table_expr(read_ctx, te, None, None)?;
         acc = join_relations(
             acc,
             next,
@@ -2872,24 +2830,24 @@ fn build_from(
     Ok(acc)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn build_table_expr(
-    catalog_kv: &dyn Kv,
-    kv: &dyn Kv,
-    global: &dyn Kv,
-    gsnap: &crabka_pgmvcc::visibility::Snapshot,
-    snapshot: &crabka_pgmvcc::visibility::Snapshot,
-    own: Option<u64>,
+    read_ctx: &crate::subquery::SubCtx<'_>,
     te: &crabka_pgparser::ast::TableExpr,
-    ctes: &crate::cte::CteContext,
-    ctx: &crate::clock::EvalCtx,
-    fctx: ForeignCtx,
     // SP40 Task 14: pushed-down offset bounds, `Some` only for a single foreign
     // base table. Applied verbatim to the foreign scan; `None` ⇒ full scan.
     bounds: Option<&ScanBounds>,
     scan_plan: Option<&crate::plan_dist::DistributedScanPlan>,
-    range_scanner: &dyn RangeScanner,
 ) -> Result<Relation, ExecError> {
+    let catalog_kv = read_ctx.catalog_kv;
+    let kv = read_ctx.kv;
+    let global = read_ctx.global;
+    let gsnap = read_ctx.gsnap;
+    let snapshot = read_ctx.snapshot;
+    let own = read_ctx.own;
+    let ctes = read_ctx.ctes;
+    let ctx = read_ctx.eval_ctx;
+    let fctx = read_ctx.fctx;
+    let range_scanner = read_ctx.range_scanner;
     use crabka_pgparser::ast::TableExpr;
     match te {
         TableExpr::Table { name, alias } => {
@@ -2908,18 +2866,7 @@ fn build_table_expr(
                             "stored view definition is not a query".into(),
                         ));
                     };
-                    let relation = crate::query::query_to_relation(
-                        catalog_kv,
-                        kv,
-                        global,
-                        gsnap,
-                        snapshot,
-                        own,
-                        query,
-                        ctx,
-                        fctx,
-                        range_scanner,
-                    )?;
+                    let relation = crate::query::query_to_relation(read_ctx, query)?;
                     let qualifier = alias.as_deref().unwrap_or(&view.name);
                     return requalify_view_relation(relation, &view, qualifier);
                 }
@@ -2953,16 +2900,7 @@ fn build_table_expr(
             let scope = Scope::single(&t, qualifier);
             let default_scan_plan = crate::plan_dist::DistributedScanPlan::default();
             let distributed_plan = scan_plan.unwrap_or(&default_scan_plan);
-            if let Some(rows) = try_scan_with_local_index(
-                catalog_kv,
-                kv,
-                global,
-                gsnap,
-                snapshot,
-                own,
-                &t,
-                distributed_plan,
-            )? {
+            if let Some(rows) = try_scan_with_local_index(read_ctx, &t, distributed_plan)? {
                 let rows = rows.into_iter().map(|scanned| scanned.row).collect();
                 return Ok(Relation { scope, rows });
             }
@@ -3021,52 +2959,15 @@ fn build_table_expr(
             kind,
             constraint,
         } => {
-            if let Some(relation) = try_distributed_inner_equi_join(
-                catalog_kv,
-                gsnap,
-                snapshot,
-                own,
-                left,
-                right,
-                *kind,
-                constraint,
-                ctes,
-                range_scanner,
-            )? {
+            if let Some(relation) =
+                try_distributed_inner_equi_join(read_ctx, left, right, *kind, constraint)?
+            {
                 return Ok(relation);
             }
             // A join is never a single foreign table: each side scans in full and
             // the join predicate / residual WHERE filters locally.
-            let l = build_table_expr(
-                catalog_kv,
-                kv,
-                global,
-                gsnap,
-                snapshot,
-                own,
-                left,
-                ctes,
-                ctx,
-                fctx,
-                None,
-                None,
-                range_scanner,
-            )?;
-            let r = build_table_expr(
-                catalog_kv,
-                kv,
-                global,
-                gsnap,
-                snapshot,
-                own,
-                right,
-                ctes,
-                ctx,
-                fctx,
-                None,
-                None,
-                range_scanner,
-            )?;
+            let l = build_table_expr(read_ctx, left, None, None)?;
+            let r = build_table_expr(read_ctx, right, None, None)?;
             join_relations(l, r, *kind, constraint, ctx)
         }
         TableExpr::Derived {
@@ -3074,37 +2975,25 @@ fn build_table_expr(
             alias,
             columns,
         } => {
-            let inner = crate::query::query_to_relation_with_ctes(
-                catalog_kv,
-                kv,
-                global,
-                gsnap,
-                snapshot,
-                own,
-                subquery,
-                ctes,
-                ctx,
-                fctx,
-                range_scanner,
-            )?;
+            let inner = crate::query::query_to_relation_with_ctes(read_ctx, subquery)?;
             crate::values::requalify_derived(inner, alias, columns)
         }
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn try_distributed_inner_equi_join(
-    catalog_kv: &dyn Kv,
-    gsnap: &crabka_pgmvcc::visibility::Snapshot,
-    snapshot: &crabka_pgmvcc::visibility::Snapshot,
-    own: Option<u64>,
+    read_ctx: &crate::subquery::SubCtx<'_>,
     left_expr: &crabka_pgparser::ast::TableExpr,
     right_expr: &crabka_pgparser::ast::TableExpr,
     kind: crabka_pgparser::ast::JoinKind,
     constraint: &crabka_pgparser::ast::JoinConstraint,
-    ctes: &crate::cte::CteContext,
-    range_scanner: &dyn RangeScanner,
 ) -> Result<Option<Relation>, ExecError> {
+    let catalog_kv = read_ctx.catalog_kv;
+    let gsnap = read_ctx.gsnap;
+    let snapshot = read_ctx.snapshot;
+    let own = read_ctx.own;
+    let ctes = read_ctx.ctes;
+    let range_scanner = read_ctx.range_scanner;
     use crabka_pgparser::ast::{BinaryOp, Expr, JoinConstraint, JoinKind, TableExpr};
 
     if kind != JoinKind::Inner {
@@ -3292,25 +3181,31 @@ fn hash_sharding_matches_join_keys(
     left_hash.columns.as_slice() == [left_column] && right_hash.columns.as_slice() == [right_column]
 }
 
-#[allow(clippy::too_many_arguments)]
 fn try_scan_with_local_index(
-    catalog_kv: &dyn Kv,
-    kv: &dyn Kv,
-    global: &dyn Kv,
-    gsnap: &crabka_pgmvcc::visibility::Snapshot,
-    snapshot: &crabka_pgmvcc::visibility::Snapshot,
-    own: Option<u64>,
+    read_ctx: &crate::subquery::SubCtx<'_>,
     table: &Table,
     plan: &crate::plan_dist::DistributedScanPlan,
 ) -> Result<Option<Vec<ScannedRow>>, ExecError> {
     if table.sharded || plan.partial_aggregate.is_some() {
         return Ok(None);
     }
-    let Some((index, value)) = choose_local_index_equality(catalog_kv, table, &plan.predicate)?
+    let Some((index, value)) =
+        choose_local_index_equality(read_ctx.catalog_kv, table, &plan.predicate)?
     else {
         return Ok(None);
     };
-    let rows = lookup_local_index_equal(kv, global, gsnap, snapshot, own, table, &index, &[value])?;
+    let rows = lookup_local_index_equal(
+        &MvccReadContext {
+            kv: read_ctx.kv,
+            global: read_ctx.global,
+            global_snapshot: read_ctx.gsnap,
+            snapshot: read_ctx.snapshot,
+            own: read_ctx.own,
+        },
+        table,
+        &index,
+        &[value],
+    )?;
     crate::scanner::apply_executable_scan_pushdown(
         rows,
         &plan.predicate,
@@ -3360,22 +3255,16 @@ fn should_retry_without_scan_pushdown(
     message.contains("pushdown") || message.contains("full scans")
 }
 
-#[allow(clippy::too_many_arguments)]
 fn try_execute_partial_aggregate_pushdown(
-    catalog_kv: &dyn Kv,
-    kv: &dyn Kv,
-    global: &dyn Kv,
-    gsnap: &crabka_pgmvcc::visibility::Snapshot,
-    snapshot: &crabka_pgmvcc::visibility::Snapshot,
-    own: Option<u64>,
+    read_ctx: &crate::subquery::SubCtx<'_>,
     s: &SelectStmt,
-    ctes: &crate::cte::CteContext,
-    range_scanner: &dyn RangeScanner,
 ) -> Result<Option<Relation>, ExecError> {
     if !is_plain_partial_aggregate_select(s) {
         return Ok(None);
     }
-    let Some((table, qualifier)) = single_sharded_base_table(catalog_kv, s, ctes)? else {
+    let Some((table, qualifier)) =
+        single_sharded_base_table(read_ctx.catalog_kv, s, read_ctx.ctes)?
+    else {
         return Ok(None);
     };
     let spec = if s.group_by.is_empty() {
@@ -3392,12 +3281,12 @@ fn try_execute_partial_aggregate_pushdown(
     };
     let scope = Scope::single(&table, &qualifier);
     let (fields, _out_exprs, tys) = resolve_projection(&s.projection, &scope)?;
-    let rows = range_scanner.scan(ScanRequest {
-        local: kv,
-        global,
-        global_snapshot: gsnap,
-        snapshot,
-        own_xid: own,
+    let rows = read_ctx.range_scanner.scan(ScanRequest {
+        local: read_ctx.kv,
+        global: read_ctx.global,
+        global_snapshot: read_ctx.gsnap,
+        snapshot: read_ctx.snapshot,
+        own_xid: read_ctx.own,
         read_ts: None,
         own_start_ts: None,
         table: &table,
@@ -3573,37 +3462,19 @@ fn hash_sharding_from_ast(
 
 /// Run a SELECT to a `Relation` with an already-evaluated CTE scope. `WITH`
 /// belongs to `QueryExpr`; this function handles the SELECT body under that scope.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn select_to_relation_with_ctes(
-    catalog_kv: &dyn Kv,
-    kv: &dyn Kv,
-    global: &dyn Kv,
-    gsnap: &crabka_pgmvcc::visibility::Snapshot,
-    snapshot: &crabka_pgmvcc::visibility::Snapshot,
-    own: Option<u64>,
+    read_ctx: &crate::subquery::SubCtx<'_>,
     s: &SelectStmt,
-    ctes: &crate::cte::CteContext,
-    ctx: &crate::clock::EvalCtx,
-    fctx: ForeignCtx,
-    range_scanner: &dyn RangeScanner,
 ) -> Result<Relation, ExecError> {
+    let catalog_kv = read_ctx.catalog_kv;
+    let ctes = read_ctx.ctes;
+    let ctx = read_ctx.eval_ctx;
+    let fctx = read_ctx.fctx;
     reject_nested_relation_locking(s)?;
 
     // SP34: resolve this (sub)query's uncorrelated subquery expressions to constants
     // first, under the same snapshot handles. Nested subqueries recurse here.
-    let sub_ctx = crate::subquery::SubCtx {
-        catalog_kv,
-        kv,
-        global,
-        gsnap,
-        snapshot,
-        own,
-        ctes,
-        eval_ctx: ctx,
-        fctx,
-        range_scanner,
-    };
-    let resolved = crate::subquery::resolve_in_select(&sub_ctx, s)?;
+    let resolved = crate::subquery::resolve_in_select(read_ctx, s)?;
     let s = &resolved;
     let relation = if s.from.is_empty() {
         Relation {
@@ -3620,17 +3491,7 @@ pub(crate) fn select_to_relation_with_ctes(
         } else {
             None
         };
-        if let Some(relation) = try_execute_partial_aggregate_pushdown(
-            catalog_kv,
-            kv,
-            global,
-            gsnap,
-            snapshot,
-            own,
-            s,
-            ctes,
-            range_scanner,
-        )? {
+        if let Some(relation) = try_execute_partial_aggregate_pushdown(read_ctx, s)? {
             return Ok(relation);
         }
         let scan_plan = match s.from.as_slice() {
@@ -3650,21 +3511,7 @@ pub(crate) fn select_to_relation_with_ctes(
             }
             _ => None,
         };
-        build_from(
-            catalog_kv,
-            kv,
-            global,
-            gsnap,
-            snapshot,
-            own,
-            &s.from,
-            ctes,
-            ctx,
-            fctx,
-            pushed.as_ref(),
-            scan_plan.as_ref(),
-            range_scanner,
-        )?
+        build_from(read_ctx, &s.from, pushed.as_ref(), scan_plan.as_ref())?
     };
     let mut kept = Vec::new();
     for row in &relation.rows {
@@ -4461,75 +4308,43 @@ pub(crate) fn reject_nested_relation_locking(s: &SelectStmt) -> Result<(), ExecE
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_read(
-    catalog_kv: &dyn Kv,
-    kv: &dyn Kv,
-    global: &dyn Kv,
-    gsnap: &crabka_pgmvcc::visibility::Snapshot,
-    snapshot: &crabka_pgmvcc::visibility::Snapshot,
-    own: Option<u64>,
+    read_ctx: &crate::subquery::SubCtx<'_>,
     stmt: &Statement,
-    ctx: &crate::clock::EvalCtx,
-    fctx: ForeignCtx,
-    range_scanner: &dyn RangeScanner,
 ) -> Result<QueryResult, ExecError> {
     let Statement::Query(q) = stmt else {
         return Err(ExecError::Unsupported("not a query statement".into()));
     };
-    let rel = crate::query::query_to_relation(
-        catalog_kv,
-        kv,
-        global,
-        gsnap,
-        snapshot,
-        own,
-        q,
-        ctx,
-        fctx,
-        range_scanner,
-    )?;
-    Ok(crate::query::relation_to_rows_result(rel, ctx))
+    let rel = crate::query::query_to_relation(read_ctx, q)?;
+    Ok(crate::query::relation_to_rows_result(
+        rel,
+        read_ctx.eval_ctx,
+    ))
 }
 
 /// Locking SELECT (FOR UPDATE / FOR SHARE). Takes a row lock on each visible
 /// row before rechecking it via EvalPlanQual (same semantics as UPDATE/DELETE).
 /// The snapshot and xid must already be established by the caller.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_read_locking(
-    catalog_kv: &dyn Kv,
-    kv: &dyn Kv,
-    global: &dyn Kv,
-    gsnap: &crabka_pgmvcc::visibility::Snapshot,
+    read_ctx: &crate::subquery::SubCtx<'_>,
     procarray: &crate::procarray::ProcArray,
     lockmgr: &crate::lockmgr::RowLockManager,
-    snapshot: &crabka_pgmvcc::visibility::Snapshot,
-    xid: u64,
     repeatable_read: bool,
     mode: crate::lockmgr::LockMode,
     s: &SelectStmt,
-    ctx: &crate::clock::EvalCtx,
-    range_scanner: &dyn RangeScanner,
 ) -> Result<QueryResult, ExecError> {
+    let catalog_kv = read_ctx.catalog_kv;
+    let kv = read_ctx.kv;
+    let global = read_ctx.global;
+    let gsnap = read_ctx.gsnap;
+    let snapshot = read_ctx.snapshot;
+    let xid = read_ctx.own.ok_or_else(|| {
+        ExecError::Unsupported("locking SELECT requires a transaction xid".into())
+    })?;
+    let ctx = read_ctx.eval_ctx;
     // SP34: resolve uncorrelated subqueries (e.g. in the WHERE of a FOR UPDATE) to
     // constants first, under this statement's snapshot handles.
-    let empty_ctes = crate::cte::CteContext::empty();
-    let sub_ctx = crate::subquery::SubCtx {
-        catalog_kv,
-        kv,
-        global,
-        gsnap,
-        snapshot,
-        own: Some(xid),
-        ctes: &empty_ctes,
-        eval_ctx: ctx,
-        // A locking SELECT only operates over local tables; a subquery referencing a
-        // foreign table here would surface the no-scanner error, which is acceptable
-        // (FOR UPDATE over Kafka is not a phase-1 path).
-        fctx: ForeignCtx::none(),
-        range_scanner,
-    };
-    let resolved = crate::subquery::resolve_in_select(&sub_ctx, s)?;
+    let resolved = crate::subquery::resolve_in_select(read_ctx, s)?;
     let s = &resolved;
     // FOR UPDATE/SHARE is not allowed with aggregation (PostgreSQL 0A000).
     if crate::agg::is_aggregate_query(s) {
@@ -4568,7 +4383,7 @@ pub(crate) async fn execute_read_locking(
         rowid,
         row: scanned_row,
         ..
-    } in range_scanner.scan(ScanRequest {
+    } in read_ctx.range_scanner.scan(ScanRequest {
         local: kv,
         global,
         global_snapshot: gsnap,
@@ -4599,14 +4414,16 @@ pub(crate) async fn execute_read_locking(
         // 3. EvalPlanQual: re-read the row under the lock (40001 under RR if
         //    changed since our snapshot; RC re-finds the latest live version).
         let Some((_cur_xmin, cur_row)) = eval_plan_qual(
-            kv,
-            global,
-            procarray,
-            snapshot,
+            &MutationContext {
+                kv,
+                global,
+                procarray,
+                snapshot,
+                xid,
+                repeatable_read,
+            },
             &t,
             rowid,
-            xid,
-            repeatable_read,
         )?
         else {
             continue; // deleted by a concurrent committed txn — skip
@@ -4905,11 +4722,12 @@ pub(crate) fn apply_offset_limit<T>(rows: &mut Vec<T>, offset: Option<i64>, limi
 /// that produce each column, and each column's `ColumnType` (the third element
 /// lets `select_to_relation` build a derived table's output scope without
 /// re-inferring types).
-#[allow(clippy::type_complexity)]
+type ResolvedProjection = (Vec<FieldDescription>, Vec<Expr>, Vec<ColumnType>);
+
 pub(crate) fn resolve_projection(
     items: &[SelectItem],
     scope: &Scope,
-) -> Result<(Vec<FieldDescription>, Vec<Expr>, Vec<ColumnType>), ExecError> {
+) -> Result<ResolvedProjection, ExecError> {
     // SP33: expand each item in turn so `*` spans every FROM table and `a.*`
     // expands one qualifier. Each `*`-expanded column carries its qualifier so a
     // multi-table `*` re-resolves unambiguously via `scope.resolve`.
@@ -5307,11 +5125,13 @@ mod tests {
         let snapshot = engine.procarray.snapshot();
         let gsnap = settled_snapshot();
         super::lookup_local_index_equal(
-            engine.kv.as_ref(),
-            engine.kv.as_ref(),
-            &gsnap,
-            &snapshot,
-            None,
+            &super::MvccReadContext {
+                kv: engine.kv.as_ref(),
+                global: engine.kv.as_ref(),
+                global_snapshot: &gsnap,
+                snapshot: &snapshot,
+                own: None,
+            },
             table,
             index,
             &[crabka_pgtypes::Datum::Text(value.into())],
@@ -6693,14 +6513,16 @@ mod tests {
         //         → NOT running → asks status: InProgress → NOT committed → v2 invisible
         //   Returns v1 (value 100). Bug.
         let result = eval_plan_qual(
-            kv.as_ref(),
-            &global,
-            &procarray,
-            &writer_snapshot,
+            &super::MutationContext {
+                kv: kv.as_ref(),
+                global: &global,
+                procarray: &procarray,
+                snapshot: &writer_snapshot,
+                xid: writer,
+                repeatable_read: false,
+            },
             &table,
             rowid,
-            writer,
-            false, // READ COMMITTED
         )
         .expect("eval_plan_qual must not error");
 

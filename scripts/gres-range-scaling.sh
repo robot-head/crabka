@@ -419,6 +419,7 @@ run_live_workload() {
 import json
 import math
 import pathlib
+import re
 import statistics
 import sys
 
@@ -538,7 +539,9 @@ def percentile_nearest_rank(values, percentile):
 committed = len(latencies)
 elapsed_s = elapsed_ms / 1000
 primary_range_distribution = {}
-for line in gres_log.read_text().splitlines():
+ansi_escape = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+for raw_line in gres_log.read_text().splitlines():
+    line = ansi_escape.sub("", raw_line)
     if "timestamp_primary_committed" not in line:
         continue
     marker = "primary_range="

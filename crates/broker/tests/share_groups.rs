@@ -19,9 +19,17 @@ use crabka_protocol::owned::{
     share_group_heartbeat_request::ShareGroupHeartbeatRequest,
 };
 
+const SHARE_STATE_PARTITIONS: i32 = 1;
+
+fn broker_config(log_dir: std::path::PathBuf) -> BrokerConfig {
+    let mut config = BrokerConfig::for_tests(log_dir);
+    config.share_coordinator.state_topic_num_partitions = SHARE_STATE_PARTITIONS;
+    config
+}
+
 async fn boot() -> (crabka_broker::BrokerHandle, String, tempfile::TempDir) {
     let dir = tempfile::TempDir::new().unwrap();
-    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+    let broker = Broker::start(broker_config(dir.path().to_path_buf()))
         .await
         .unwrap();
     let bootstrap = broker.listen_addr().to_string();
@@ -206,9 +214,7 @@ async fn state_survives_restart() {
 
     let member_id;
     {
-        let broker = Broker::start(BrokerConfig::for_tests(log_dir.clone()))
-            .await
-            .unwrap();
+        let broker = Broker::start(broker_config(log_dir.clone())).await.unwrap();
         let bootstrap = broker.listen_addr().to_string();
         let client = connect(&bootstrap).await;
         create_topic(&client, "t4", 2).await;
@@ -226,7 +232,7 @@ async fn state_survives_restart() {
     }
 
     {
-        let mut cfg = BrokerConfig::for_tests(log_dir);
+        let mut cfg = broker_config(log_dir);
         cfg.bootstrap_mode = BootstrapMode::Rejoin;
         let broker = Broker::start(cfg).await.unwrap();
         let bootstrap = broker.listen_addr().to_string();
@@ -335,9 +341,7 @@ async fn lifecycle_metadata_survives_restart() {
 
     let tid;
     {
-        let broker = Broker::start(BrokerConfig::for_tests(log_dir.clone()))
-            .await
-            .unwrap();
+        let broker = Broker::start(broker_config(log_dir.clone())).await.unwrap();
         let bootstrap = broker.listen_addr().to_string();
         let client = connect(&bootstrap).await;
         create_topic(&client, "t6", 2).await;
@@ -391,7 +395,7 @@ async fn lifecycle_metadata_survives_restart() {
     }
 
     {
-        let mut cfg = BrokerConfig::for_tests(log_dir);
+        let mut cfg = broker_config(log_dir);
         cfg.bootstrap_mode = BootstrapMode::Rejoin;
         let broker = Broker::start(cfg).await.unwrap();
         let bootstrap = broker.listen_addr().to_string();

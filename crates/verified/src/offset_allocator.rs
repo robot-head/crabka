@@ -1,5 +1,8 @@
 //! Pure offset-reservation kernel for diskless WAL sequencers.
 
+#[cfg(creusot)]
+use creusot_std::prelude::*;
+
 /// Reserve `count` offsets from `next`, returning `(base, next_after)`.
 #[must_use]
 #[cfg_attr(creusot, requires(count >= 0))]
