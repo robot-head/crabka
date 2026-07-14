@@ -84,7 +84,7 @@ fn lock_log(log: &Mutex<Log>) -> std::sync::MutexGuard<'_, Log> {
 /// `fsync` is a credible "the disk just went sideways" signal, so we
 /// model it as a `LogError::Io` — which `flag_storage_failure` then
 /// recognizes and uses to mark the owning log dir offline.
-fn storage_failure_error(
+pub(crate) fn storage_failure_error(
     context: &str,
     detail: impl std::fmt::Display,
 ) -> crate::error::BrokerError {
@@ -129,13 +129,49 @@ fn append_produce_batch(
     (results, leo)
 }
 
+fn append_produce_batch_at(
+    log: &Mutex<Log>,
+    base: Offset,
+    datas: Vec<ProduceData>,
+) -> (Vec<Result<Offset, crate::error::BrokerError>>, Offset) {
+    let mut guard = lock_log(log);
+    let target = guard.config_snapshot().compression_type;
+    let mut next = base;
+    let mut results = Vec::with_capacity(datas.len());
+    for data in datas {
+        let count = i64::from(data.record_count());
+        let result = match data {
+            ProduceData::Verbatim(batch) => guard
+                .append_verbatim_at(&batch, next)
+                .map_err(crate::error::BrokerError::from),
+            ProduceData::Owned(mut batch) => {
+                if let Some(target) = target
+                    && batch.attributes.compression() != target
+                {
+                    batch.attributes = batch.attributes.with_compression(target);
+                }
+                guard
+                    .append_at(&mut batch, next)
+                    .map(|()| next)
+                    .map_err(crate::error::BrokerError::from)
+            }
+        };
+        if result.is_ok() {
+            next = Offset(next.0 + count);
+        }
+        results.push(result);
+    }
+    let leo = guard.log_end_offset();
+    (results, leo)
+}
+
 /// Run [`append_produce_batch`] away from normal async polling. On the broker's
 /// multi-thread runtime, `block_in_place` avoids the per-batch `spawn_blocking`
 /// scheduling hop while letting Tokio hand the worker's other tasks to a
 /// replacement thread; current-thread test runtimes keep the `spawn_blocking`
 /// fallback because `block_in_place` is illegal there. The writer loop is still
 /// the single serializer for this partition, so append ordering is unchanged.
-async fn run_produce_append_batch(
+pub(crate) async fn run_produce_append_batch(
     log: Arc<Mutex<Log>>,
     datas: Vec<ProduceData>,
 ) -> Result<(Vec<Result<Offset, crate::error::BrokerError>>, Offset), crate::error::BrokerError> {
@@ -150,7 +186,24 @@ async fn run_produce_append_batch(
     }
 }
 
+pub(crate) async fn run_produce_append_batch_at(
+    log: Arc<Mutex<Log>>,
+    base: Offset,
+    datas: Vec<ProduceData>,
+) -> Result<(Vec<Result<Offset, crate::error::BrokerError>>, Offset), crate::error::BrokerError> {
+    match Handle::current().runtime_flavor() {
+        RuntimeFlavor::MultiThread => catch_unwind(AssertUnwindSafe(|| {
+            tokio::task::block_in_place(move || append_produce_batch_at(&log, base, datas))
+        }))
+        .map_err(|_| storage_failure_error("append task panicked", "block_in_place panic")),
+        _ => tokio::task::spawn_blocking(move || append_produce_batch_at(&log, base, datas))
+            .await
+            .map_err(|join_err| storage_failure_error("append task panicked", &join_err)),
+    }
+}
+
 async fn handle_produce(
+    identity: (&str, PartitionIndex),
     first: ProduceJob,
     rx: &mut mpsc::Receiver<WriterMessage>,
     pending: &mut Option<WriterMessage>,
@@ -160,7 +213,12 @@ async fn handle_produce(
         &Arc<tokio::sync::Mutex<ReplicaState>>,
         &Arc<Notify>,
     ),
+    diskless: (
+        Option<&crate::wal::SharedWal>,
+        Option<&Arc<dyn crate::wal::OffsetSequencer>>,
+    ),
 ) {
+    let (wal, sequencer) = diskless;
     let (log, log_dir, log_dir_status) = storage;
     let (append_notify, replica_state, hw_advance_notify) = signals;
     let mut jobs = vec![first];
@@ -182,7 +240,33 @@ async fn handle_produce(
         datas.push(data);
     }
 
-    let (results, leo) = match run_produce_append_batch(Arc::clone(log), datas).await {
+    let append_result = if wal.is_some() {
+        let Some(sequencer) = sequencer else {
+            for ack in acks {
+                let _ = ack.send(Err(storage_failure_error(
+                    "diskless append missing offset sequencer",
+                    "no sequencer configured",
+                )));
+            }
+            return;
+        };
+        let count = datas.iter().map(ProduceData::record_count).sum();
+        match sequencer.assign(identity.0, identity.1, count).await {
+            Ok(base) => run_produce_append_batch_at(Arc::clone(log), base, datas).await,
+            Err(error) => {
+                for ack in acks {
+                    let _ = ack.send(Err(storage_failure_error(
+                        "offset assignment failed",
+                        &error,
+                    )));
+                }
+                return;
+            }
+        }
+    } else {
+        run_produce_append_batch(Arc::clone(log), datas).await
+    };
+    let (results, leo) = match append_result {
         Ok(value) => value,
         Err(err) => {
             flag_storage_failure(&err, log_dir, log_dir_status);
@@ -209,7 +293,19 @@ async fn handle_produce(
 
     if any_ok {
         append_notify.notify_waiters();
-        let advanced = {
+        let advanced = if let Some(wal) = wal {
+            match wal.sync_durable(leo).await {
+                Ok(durable) => {
+                    let mut state = replica_state.lock().await;
+                    let previous = state.hw;
+                    state.recompute_hw_for_wal_durable(durable) > previous
+                }
+                Err(error) => {
+                    flag_storage_failure(&error, log_dir, log_dir_status);
+                    false
+                }
+            }
+        } else {
             let mut state = replica_state.lock().await;
             let previous = state.hw;
             state.recompute_hw_for_leader_append(leo) > previous
@@ -382,7 +478,26 @@ async fn handle_trim(
 
 /// Loop on the receive side of the partition's `WriterMessage` channel.
 /// Exits when the channel closes (every sender dropped).
+#[allow(dead_code)]
 pub async fn run(
+    identity: (String, PartitionIndex),
+    storage: (Arc<Mutex<Log>>, Arc<ArcSwap<PathBuf>>),
+    rx: mpsc::Receiver<WriterMessage>,
+    signals: (
+        Arc<Notify>,
+        Arc<tokio::sync::Mutex<ReplicaState>>,
+        Arc<Notify>,
+    ),
+    services: (
+        LogDirRegistry,
+        Arc<ProducerState>,
+        Option<crate::wal::SharedWal>,
+    ),
+) {
+    run_with_sequencer(identity, storage, rx, signals, services, None).await;
+}
+
+pub async fn run_with_sequencer(
     identity: (String, PartitionIndex),
     storage: (Arc<Mutex<Log>>, Arc<ArcSwap<PathBuf>>),
     mut rx: mpsc::Receiver<WriterMessage>,
@@ -391,12 +506,17 @@ pub async fn run(
         Arc<tokio::sync::Mutex<ReplicaState>>,
         Arc<Notify>,
     ),
-    services: (LogDirRegistry, Arc<ProducerState>),
+    services: (
+        LogDirRegistry,
+        Arc<ProducerState>,
+        Option<crate::wal::SharedWal>,
+    ),
+    sequencer: Option<Arc<dyn crate::wal::OffsetSequencer>>,
 ) {
     let (topic, partition) = identity;
     let (log, log_dir) = storage;
     let (append_notify, replica_state, hw_advance_notify) = signals;
-    let (log_dir_status, producer_state) = services;
+    let (log_dir_status, producer_state, wal) = services;
     // `pending` holds a non-Produce message that was pulled off the channel
     // while group-draining Produce jobs (see the Produce arm). It is handled on
     // the next iteration so control messages are never reordered ahead of the
@@ -413,11 +533,13 @@ pub async fn run(
         match msg {
             WriterMessage::Produce(first) => {
                 handle_produce(
+                    (&topic, partition),
                     first,
                     &mut rx,
                     &mut pending,
                     (&log, &log_dir, &log_dir_status),
                     (&append_notify, &replica_state, &hw_advance_notify),
+                    (wal.as_ref(), sequencer.as_ref()),
                 )
                 .await;
             }
@@ -572,6 +694,8 @@ fn swap_future_log(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicI64, Ordering};
+
     use assert2::{assert, check};
     use crabka_compression::CompressionType;
     use crabka_log::LogConfig;
@@ -583,15 +707,38 @@ mod tests {
 
     macro_rules! run_writer {
         ($topic:expr, $partition:expr, $log:expr, $log_dir:expr, $rx:expr,
-         $append:expr, $replica:expr, $hw:expr, $status:expr, $producer:expr $(,)?) => {
+         $append:expr, $replica:expr, $hw:expr, $status:expr, $producer:expr, $wal:expr $(,)?) => {
             run(
                 ($topic, $partition),
                 ($log, $log_dir),
                 $rx,
                 ($append, $replica, $hw),
-                ($status, $producer),
+                ($status, $producer, $wal),
             )
         };
+    }
+
+    struct TestSequencer {
+        next: AtomicI64,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::wal::OffsetSequencer for TestSequencer {
+        async fn assign(
+            &self,
+            _topic: &str,
+            _partition: PartitionIndex,
+            count: u32,
+        ) -> Result<Offset, crate::error::BrokerError> {
+            let base = self.next.fetch_add(i64::from(count), Ordering::SeqCst);
+            Ok(Offset(base))
+        }
+    }
+
+    fn test_sequencer() -> Arc<dyn crate::wal::OffsetSequencer> {
+        Arc::new(TestSequencer {
+            next: AtomicI64::new(0),
+        })
     }
 
     fn sample_batch(n: i32) -> RecordBatch {
@@ -606,6 +753,53 @@ mod tests {
             });
         }
         b
+    }
+
+    struct GatedWal {
+        log: Arc<Mutex<Log>>,
+        sync_started: Mutex<Option<oneshot::Sender<()>>>,
+        release_sync: tokio::sync::Mutex<Option<oneshot::Receiver<()>>>,
+    }
+
+    impl GatedWal {
+        fn new(
+            log: Arc<Mutex<Log>>,
+            sync_started: oneshot::Sender<()>,
+            release_sync: oneshot::Receiver<()>,
+        ) -> Self {
+            Self {
+                log,
+                sync_started: Mutex::new(Some(sync_started)),
+                release_sync: tokio::sync::Mutex::new(Some(release_sync)),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::wal::WalStore for GatedWal {
+        async fn append(
+            &self,
+            datas: Vec<ProduceData>,
+        ) -> Result<
+            (Vec<Result<Offset, crate::error::BrokerError>>, Offset),
+            crate::error::BrokerError,
+        > {
+            run_produce_append_batch(self.log.clone(), datas).await
+        }
+
+        async fn sync_durable(&self, leo: Offset) -> Result<Offset, crate::error::BrokerError> {
+            if let Some(started) = self.sync_started.lock().unwrap().take() {
+                let _ = started.send(());
+            }
+            let release = self
+                .release_sync
+                .lock()
+                .await
+                .take()
+                .expect("sync release receiver present");
+            release.await.expect("sync release sent");
+            Ok(leo)
+        }
     }
 
     fn open_log_with_records(path: &std::path::Path, records: i32) -> Log {
@@ -669,6 +863,7 @@ mod tests {
             Arc::new(Notify::new()),
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(ProducerState::new()),
+            None,
         ));
 
         let (ack, ack_rx) = oneshot::channel();
@@ -694,6 +889,151 @@ mod tests {
 
         drop(tx);
         writer.await.expect("writer join");
+    }
+
+    #[tokio::test]
+    async fn diskless_writer_acks_all_gates_on_durable_hw() {
+        let dir = tempdir().expect("tempdir");
+        let log = Arc::new(Mutex::new(
+            Log::open(dir.path(), LogConfig::default()).expect("open log"),
+        ));
+        let (sync_started_tx, sync_started_rx) = oneshot::channel();
+        let (release_sync_tx, release_sync_rx) = oneshot::channel();
+        let wal: Option<crate::wal::SharedWal> = Some(Arc::new(GatedWal::new(
+            log.clone(),
+            sync_started_tx,
+            release_sync_rx,
+        )));
+        let (tx, rx) = mpsc::channel(1);
+        let append_notify = Arc::new(Notify::new());
+        let replica_state = Arc::new(tokio::sync::Mutex::new(ReplicaState::new()));
+        {
+            let mut st = replica_state.lock().await;
+            st.install_isr(
+                &[crabka_audit::NodeId(1)],
+                &[crabka_audit::NodeId(1)],
+                crabka_audit::NodeId(1),
+                std::time::Instant::now(),
+            );
+        }
+        let hw_advance_notify = Arc::new(Notify::new());
+        let writer = tokio::spawn(run_with_sequencer(
+            ("t".to_string(), PartitionIndex(0)),
+            (
+                log.clone(),
+                Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
+            ),
+            rx,
+            (
+                append_notify,
+                replica_state.clone(),
+                hw_advance_notify.clone(),
+            ),
+            (
+                crate::log_dir_status::LogDirRegistry::default(),
+                Arc::new(ProducerState::new()),
+                wal,
+            ),
+            Some(test_sequencer()),
+        ));
+
+        let hw_waiter = hw_advance_notify.notified();
+        tokio::pin!(hw_waiter);
+
+        let (ack, ack_rx) = oneshot::channel();
+        tx.send(WriterMessage::Produce(ProduceJob {
+            data: ProduceData::Owned(sample_batch(3)),
+            ack,
+        }))
+        .await
+        .expect("send job");
+
+        let assigned = ack_rx.await.expect("ack recv").expect("append ok");
+        assert!(assigned == 0);
+        tokio::time::timeout(std::time::Duration::from_secs(1), sync_started_rx)
+            .await
+            .expect("wal sync_durable did not start")
+            .expect("sync start signal sent");
+
+        assert!(replica_state.lock().await.hw == 0);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut hw_waiter)
+                .await
+                .is_err()
+        );
+
+        release_sync_tx.send(()).expect("release sync");
+        tokio::time::timeout(std::time::Duration::from_secs(1), &mut hw_waiter)
+            .await
+            .expect("hw_advance_notify did not fire");
+        assert!(replica_state.lock().await.hw == 3);
+
+        drop(tx);
+        writer.await.expect("writer join");
+    }
+
+    #[tokio::test]
+    async fn diskless_acked_record_survives_reopen() {
+        let dir = tempdir().expect("tempdir");
+        {
+            let log = Arc::new(Mutex::new(
+                Log::open(dir.path(), LogConfig::default()).expect("open log"),
+            ));
+            let wal: Option<crate::wal::SharedWal> =
+                Some(Arc::new(crate::wal::LocalFsyncWal::new(log.clone())));
+            let (tx, rx) = mpsc::channel(1);
+            let append_notify = Arc::new(Notify::new());
+            let replica_state = Arc::new(tokio::sync::Mutex::new(ReplicaState::new()));
+            {
+                let mut st = replica_state.lock().await;
+                st.install_isr(
+                    &[crabka_audit::NodeId(1)],
+                    &[crabka_audit::NodeId(1)],
+                    crabka_audit::NodeId(1),
+                    std::time::Instant::now(),
+                );
+            }
+            let writer = tokio::spawn(run_with_sequencer(
+                ("t".to_string(), PartitionIndex(0)),
+                (
+                    log.clone(),
+                    Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
+                ),
+                rx,
+                (
+                    append_notify,
+                    replica_state.clone(),
+                    Arc::new(Notify::new()),
+                ),
+                (
+                    crate::log_dir_status::LogDirRegistry::default(),
+                    Arc::new(ProducerState::new()),
+                    wal,
+                ),
+                Some(test_sequencer()),
+            ));
+
+            let (ack, ack_rx) = oneshot::channel();
+            tx.send(WriterMessage::Produce(ProduceJob {
+                data: ProduceData::Owned(sample_batch(1)),
+                ack,
+            }))
+            .await
+            .expect("send job");
+
+            let assigned = ack_rx.await.expect("ack recv").expect("append ok");
+            assert_eq!(assigned, 0);
+
+            drop(tx);
+            tokio::time::timeout(std::time::Duration::from_secs(10), writer)
+                .await
+                .expect("writer did not drain after local fsync")
+                .expect("writer join");
+            assert_eq!(replica_state.lock().await.hw, 1);
+        }
+
+        let log = Log::open(dir.path(), LogConfig::default()).expect("reopen log");
+        assert_eq!(log.log_end_offset(), Offset(1));
     }
 
     #[tokio::test]
@@ -730,6 +1070,7 @@ mod tests {
             Arc::new(Notify::new()),
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(ProducerState::new()),
+            None,
         ));
 
         let mut acks = acks.into_iter();
@@ -772,6 +1113,7 @@ mod tests {
             Arc::new(Notify::new()),
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(ProducerState::new()),
+            None,
         ));
 
         let (ack, ack_rx) = oneshot::channel();
@@ -813,6 +1155,7 @@ mod tests {
             Arc::new(Notify::new()),
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(ProducerState::new()),
+            None,
         ));
 
         // "Producer" batch with a bogus base_offset + epoch the log overwrites.
@@ -913,6 +1256,7 @@ mod tests {
             Arc::new(Notify::new()),
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(ProducerState::new()),
+            None,
         ));
 
         // Subscribe BEFORE sending so we don't miss the notification.
@@ -957,6 +1301,7 @@ mod tests {
             Arc::new(Notify::new()),
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(ProducerState::new()),
+            None,
         ));
 
         // First replicate batch must start at offset 0 to match the
@@ -995,6 +1340,7 @@ mod tests {
             Arc::new(Notify::new()),
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(ProducerState::new()),
+            None,
         ));
 
         // Wrong offset — log_end_offset is 0 but we claim 7.
@@ -1037,6 +1383,7 @@ mod tests {
             Arc::new(Notify::new()),
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(ProducerState::new()),
+            None,
         ));
 
         // Produce two batches so the log has some data.
@@ -1098,6 +1445,7 @@ mod tests {
             hw_advance_notify.clone(),
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(ProducerState::new()),
+            None,
         ));
 
         let waiter = hw_advance_notify.notified();
@@ -1153,6 +1501,7 @@ mod tests {
             hw_advance_notify.clone(),
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(ProducerState::new()),
+            None,
         ));
 
         let waiter = hw_advance_notify.notified();
@@ -1202,6 +1551,7 @@ mod tests {
             hw_advance_notify,
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(ProducerState::new()),
+            None,
         ));
 
         let new_cfg = LogConfig {
@@ -1256,6 +1606,7 @@ mod tests {
             hw_advance_notify,
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(ProducerState::new()),
+            None,
         ));
 
         let (ack, ack_rx) = tokio::sync::oneshot::channel();
@@ -1313,6 +1664,7 @@ mod tests {
             hw_advance_notify.clone(),
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(ProducerState::new()),
+            None,
         ));
 
         let (ack, ack_rx) = oneshot::channel();

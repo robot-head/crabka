@@ -984,10 +984,10 @@ fn now_unix_secs() -> i64 {
 
 /// Start a single `SASL_PLAINTEXT` broker that enables only OAUTHBEARER, with
 /// the supplied validator.
-async fn start_oauthbearer_broker(
+fn start_oauthbearer_broker(
     log_dir: &std::path::Path,
     validator: crabka_security::OAuthBearerValidator,
-) -> crabka_broker::BrokerHandle {
+) -> impl std::future::Future<Output = crabka_broker::BrokerHandle> {
     let mut cfg = BrokerConfig::for_tests(log_dir.to_path_buf());
     cfg.listeners = vec![ListenerSpec {
         name: "SASL_PLAINTEXT".to_string(),
@@ -1003,7 +1003,7 @@ async fn start_oauthbearer_broker(
     cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
     cfg.enabled_sasl_mechanisms = vec![SaslMechanism::OAuthBearer];
     cfg.oauthbearer_validator = validator;
-    Broker::start(cfg).await.expect("broker must start")
+    Box::pin(async move { Broker::start(cfg).await.expect("broker must start") })
 }
 
 /// Same as [`start_oauthbearer_broker`] but with a configurable
@@ -1011,11 +1011,11 @@ async fn start_oauthbearer_broker(
 /// `Some(seconds)` clamps `session_lifetime_ms` (and the dispatch-loop
 /// re-auth deadline) to `min(token_exp - now, seconds * 1000)`. Passing
 /// `None` reproduces the 49e default (session = token exp).
-async fn start_oauthbearer_broker_with_cap(
+fn start_oauthbearer_broker_with_cap(
     log_dir: &std::path::Path,
     validator: crabka_security::OAuthBearerValidator,
     max_session_lifetime_seconds: Option<u32>,
-) -> crabka_broker::BrokerHandle {
+) -> impl std::future::Future<Output = crabka_broker::BrokerHandle> {
     let mut cfg = BrokerConfig::for_tests(log_dir.to_path_buf());
     cfg.listeners = vec![ListenerSpec {
         name: "SASL_PLAINTEXT".to_string(),
@@ -1029,7 +1029,7 @@ async fn start_oauthbearer_broker_with_cap(
     cfg.enabled_sasl_mechanisms = vec![SaslMechanism::OAuthBearer];
     cfg.oauthbearer_validator = validator;
     cfg.oauthbearer_max_session_lifetime_seconds = max_session_lifetime_seconds;
-    Broker::start(cfg).await.expect("broker must start")
+    Box::pin(async move { Broker::start(cfg).await.expect("broker must start") })
 }
 
 /// `ApiVersions` (pre-auth) + `SaslHandshake`(OAUTHBEARER); asserts the broker

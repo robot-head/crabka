@@ -1,0 +1,246 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: grestenants.crabka.io
+spec:
+  group: crabka.io
+  names:
+    categories: []
+    kind: GresTenant
+    plural: grestenants
+    shortNames:
+    - gt
+    singular: grestenant
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns: []
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for GresTenantSpec via `CustomResource`
+        properties:
+          spec:
+            description: Gres tenant specification.
+            properties:
+              gres:
+                description: Name of the `Gres` fleet this tenant belongs to.
+                type: string
+              overrides:
+                description: Tenant-specific overrides for fleet defaults.
+                nullable: true
+                properties:
+                  checkpointBytes:
+                    description: Checkpoint after this many bytes when set.
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  checkpointFrames:
+                    description: Checkpoint after this many frames when set.
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  idleSeconds:
+                    description: Idle timeout in seconds; unset means never suspend by idleness.
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  suspendMaxCheckpointBytes:
+                    description: Keep the tenant warm when its latest checkpoint exceeds this size.
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  walReplication:
+                    description: Replication factor for tenant WAL topics.
+                    format: int32
+                    nullable: true
+                    type: integer
+                type: object
+              passwordSecretRef:
+                description: |-
+                  Secret key holding the plaintext tenant password. The reconciler hashes
+                  it to a verifier; the password is never copied to
+                  status.
+                properties:
+                  key:
+                    description: Secret data key.
+                    type: string
+                  name:
+                    description: Secret name.
+                    type: string
+                required:
+                - key
+                - name
+                type: object
+              ranges:
+                description: |-
+                  Optional ordered range layout. Omitted means one open-ended range r0.
+
+                  Each entry is placed on a distinct range compute.
+                items:
+                  description: One row-key range in a tenant layout.
+                  properties:
+                    endKey:
+                      description: Exclusive `(table_id, bucket?, rowid)` upper bound. Unset marks the final range.
+                      nullable: true
+                      properties:
+                        bucket:
+                          description: Hash bucket at the boundary; absent for non-hash tables.
+                          format: uint32
+                          minimum: 0.0
+                          nullable: true
+                          type: integer
+                        rowid:
+                          description: Row identifier at the boundary.
+                          format: uint64
+                          minimum: 0.0
+                          type: integer
+                        tableId:
+                          description: Table identifier at the boundary.
+                          format: uint64
+                          minimum: 0.0
+                          type: integer
+                      required:
+                      - rowid
+                      - tableId
+                      type: object
+                    rangeId:
+                      description: Range identifier used by compute placement and WAL topics.
+                      format: uint32
+                      minimum: 0.0
+                      type: integer
+                  required:
+                  - rangeId
+                  type: object
+                type: array
+              resources:
+                description: CPU / memory resource requests and limits for the tenant compute.
+                nullable: true
+                properties:
+                  claims:
+                    description: |-
+                      Claims lists the names of resources, defined in spec.resourceClaims, that are used by this container.
+
+                      This is an alpha field and requires enabling the DynamicResourceAllocation feature gate.
+
+                      This field is immutable. It can only be set for containers.
+                    items:
+                      description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                      properties:
+                        name:
+                          description: Name must match the name of one entry in pod.spec.resourceClaims of the Pod where this field is used. It makes that resource available inside a container.
+                          type: string
+                        request:
+                          description: Request is the name chosen for a request in the referenced claim. If empty, everything from the claim is made available, otherwise only the result of this request.
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    type: array
+                  limits:
+                    additionalProperties:
+                      description: "Quantity is a fixed-point representation of a number. It provides convenient marshaling/unmarshaling in JSON and YAML, in addition to String() and AsInt64() accessors.\n\nThe serialization format is:\n\n``` <quantity>        ::= <signedNumber><suffix>\n\n\t(Note that <suffix> may be empty, from the \"\" case in <decimalSI>.)\n\n<digit>           ::= 0 | 1 | ... | 9 <digits>          ::= <digit> | <digit><digits> <number>          ::= <digits> | <digits>.<digits> | <digits>. | .<digits> <sign>            ::= \"+\" | \"-\" <signedNumber>    ::= <number> | <sign><number> <suffix>          ::= <binarySI> | <decimalExponent> | <decimalSI> <binarySI>        ::= Ki | Mi | Gi | Ti | Pi | Ei\n\n\t(International System of units; See: http://physics.nist.gov/cuu/Units/binary.html)\n\n<decimalSI>       ::= m | \"\" | k | M | G | T | P | E\n\n\t(Note that 1024 = 1Ki but 1000 = 1k; I didn't choose the capitalization.)\n\n<decimalExponent> ::= \"e\" <signedNumber> | \"E\" <signedNumber> ```\n\nNo matter which of the three exponent forms is used, no quantity may represent a number greater than 2^63-1 in magnitude, nor may it have more than 3 decimal places. Numbers larger or more precise will be capped or rounded up. (E.g.: 0.1m will rounded up to 1m.) This may be extended in the future if we require larger or smaller quantities.\n\nWhen a Quantity is parsed from a string, it will remember the type of suffix it had, and will use the same type again when it is serialized.\n\nBefore serializing, Quantity will be put in \"canonical form\". This means that Exponent/suffix will be adjusted up or down (with a corresponding increase or decrease in Mantissa) such that:\n\n- No precision is lost - No fractional digits will be emitted - The exponent (or suffix) is as large as possible.\n\nThe sign will be omitted unless the number is negative.\n\nExamples:\n\n- 1.5 will be serialized as \"1500m\" - 1.5Gi will be serialized as \"1536Mi\"\n\nNote that the quantity will NEVER be internally represented by a floating point number. That is the whole point of this exercise.\n\nNon-canonical values will still parse as long as they are well formed, but will be re-emitted in their canonical form. (So always use canonical form, or don't diff.)\n\nThis format is intended to make it difficult to use these numbers without writing some sort of special handling code in the hopes that that will cause implementors to also use a fixed point implementation."
+                      x-kubernetes-int-or-string: true
+                    description: 'Limits describes the maximum amount of compute resources allowed. More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/'
+                    type: object
+                  requests:
+                    additionalProperties:
+                      description: "Quantity is a fixed-point representation of a number. It provides convenient marshaling/unmarshaling in JSON and YAML, in addition to String() and AsInt64() accessors.\n\nThe serialization format is:\n\n``` <quantity>        ::= <signedNumber><suffix>\n\n\t(Note that <suffix> may be empty, from the \"\" case in <decimalSI>.)\n\n<digit>           ::= 0 | 1 | ... | 9 <digits>          ::= <digit> | <digit><digits> <number>          ::= <digits> | <digits>.<digits> | <digits>. | .<digits> <sign>            ::= \"+\" | \"-\" <signedNumber>    ::= <number> | <sign><number> <suffix>          ::= <binarySI> | <decimalExponent> | <decimalSI> <binarySI>        ::= Ki | Mi | Gi | Ti | Pi | Ei\n\n\t(International System of units; See: http://physics.nist.gov/cuu/Units/binary.html)\n\n<decimalSI>       ::= m | \"\" | k | M | G | T | P | E\n\n\t(Note that 1024 = 1Ki but 1000 = 1k; I didn't choose the capitalization.)\n\n<decimalExponent> ::= \"e\" <signedNumber> | \"E\" <signedNumber> ```\n\nNo matter which of the three exponent forms is used, no quantity may represent a number greater than 2^63-1 in magnitude, nor may it have more than 3 decimal places. Numbers larger or more precise will be capped or rounded up. (E.g.: 0.1m will rounded up to 1m.) This may be extended in the future if we require larger or smaller quantities.\n\nWhen a Quantity is parsed from a string, it will remember the type of suffix it had, and will use the same type again when it is serialized.\n\nBefore serializing, Quantity will be put in \"canonical form\". This means that Exponent/suffix will be adjusted up or down (with a corresponding increase or decrease in Mantissa) such that:\n\n- No precision is lost - No fractional digits will be emitted - The exponent (or suffix) is as large as possible.\n\nThe sign will be omitted unless the number is negative.\n\nExamples:\n\n- 1.5 will be serialized as \"1500m\" - 1.5Gi will be serialized as \"1536Mi\"\n\nNote that the quantity will NEVER be internally represented by a floating point number. That is the whole point of this exercise.\n\nNon-canonical values will still parse as long as they are well formed, but will be re-emitted in their canonical form. (So always use canonical form, or don't diff.)\n\nThis format is intended to make it difficult to use these numbers without writing some sort of special handling code in the hopes that that will cause implementors to also use a fixed point implementation."
+                      x-kubernetes-int-or-string: true
+                    description: 'Requests describes the minimum amount of compute resources required. If Requests is omitted for a container, it defaults to Limits if that is explicitly specified, otherwise to an implementation-defined value. Requests cannot exceed Limits. More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/'
+                    type: object
+                type: object
+              suspended:
+                description: Suspends the tenant when true. Unset is treated as active.
+                nullable: true
+                type: boolean
+              user:
+                description: SQL user exposed through `PgDog` and enforced by the tenant compute.
+                type: string
+            required:
+            - gres
+            - passwordSecretRef
+            - user
+            type: object
+          status:
+            description: Observed tenant state.
+            nullable: true
+            properties:
+              conditions:
+                default: []
+                description: Kubernetes-style condition list.
+                items:
+                  properties:
+                    lastTransitionTime:
+                      description: RFC3339 timestamp.
+                      type: string
+                    message:
+                      description: Human-readable message.
+                      type: string
+                    reason:
+                      description: CamelCase machine reason.
+                      type: string
+                    status:
+                      description: '`True`, `False`, or `Unknown`.'
+                      type: string
+                    type:
+                      description: e.g. `Ready`.
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              lastCheckpointOffset:
+                description: Last checkpoint offset observed by the controller.
+                format: uint64
+                minimum: 0.0
+                nullable: true
+                type: integer
+              lifecyclePhase:
+                description: Lifecycle phase last observed by the operator.
+                nullable: true
+                type: string
+              observedGeneration:
+                description: '`metadata.generation` of the last successfully-reconciled spec.'
+                format: int64
+                nullable: true
+                type: integer
+              pgdogCredentialGraceUntilUnixMs:
+                description: |-
+                  Bounded compatibility window for `PgDog` 0.1.47 after a resumed compute
+                  becomes Active. The fleet reconciler removes the temporary backend
+                  credential after this Unix-millisecond deadline.
+                format: uint64
+                minimum: 0.0
+                nullable: true
+                type: integer
+              ready:
+                description: Whether the tenant is ready to accept connections.
+                nullable: true
+                type: boolean
+              registryVersion:
+                description: Registry record version last written for this tenant.
+                format: uint64
+                minimum: 0.0
+                nullable: true
+                type: integer
+              walTopic:
+                description: Tenant WAL topic name.
+                nullable: true
+                type: string
+            type: object
+        required:
+        - spec
+        title: GresTenant
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

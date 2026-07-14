@@ -1,0 +1,28 @@
+[package]
+name = "crabka-pgcatalog"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "System catalog for the Crabka Gres engine: tables, columns, and FDW metadata as a stateless view over the KV storage seam"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-pgcatalog"
+readme = "README.md"
+keywords = ["postgres", "catalog", "crabka", "gres"]
+categories = ["database-implementations"]
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+crabka-pgtypes = { version = "0.3.9", path = "../pgtypes" }
+crabka-pgkv = { version = "0.3.9", path = "../pgkv" }
+crabka-pgmvcc = { version = "0.3.9", path = "../pgmvcc" }
+zerocopy = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tempfile = { workspace = true }

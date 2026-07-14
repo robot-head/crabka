@@ -44,6 +44,23 @@ const UNKNOWN_TIMESTAMP: i64 = -1;
 /// Kafka's `ListOffsetsResponse.UNKNOWN_OFFSET`.
 const UNKNOWN_OFFSET: i64 = -1;
 
+async fn diskless_earliest_offset(
+    local_start: i64,
+    diskless_read: Option<&crate::diskless::read::DisklessReadHandle>,
+    topic_id: Option<uuid::Uuid>,
+    partition: i32,
+) -> i64 {
+    let Some((handle, topic_id)) = diskless_read.zip(topic_id) else {
+        return local_start;
+    };
+    handle
+        .index
+        .lock()
+        .await
+        .earliest_covered(topic_id, partition)
+        .map_or(local_start, |object_start| local_start.min(object_start))
+}
+
 #[tracing::instrument(
     name = "handle_list_offsets",
     level = "info",
@@ -145,7 +162,8 @@ async fn resolve_partition(
             log.config_snapshot().remote_storage_enable,
         )
     };
-    let topic_id = if remote_enabled && broker.remote_reader.is_some() {
+    let diskless = partition.diskless && broker.diskless_read.is_some();
+    let topic_id = if (remote_enabled && broker.remote_reader.is_some()) || diskless {
         broker
             .controller
             .current_image()
@@ -167,6 +185,13 @@ async fn resolve_partition(
                         error = %error, "list_offsets: remote earliest_offset failed"),
                 }
             }
+            earliest = diskless_earliest_offset(
+                earliest,
+                broker.diskless_read.as_deref(),
+                topic_id,
+                index,
+            )
+            .await;
             (earliest, UNKNOWN_TIMESTAMP)
         }
         LATEST_TIMESTAMP => (local_end, UNKNOWN_TIMESTAMP),
@@ -248,6 +273,31 @@ mod tests {
     );
 
     use crate::test_support::start_broker_with_authorizer_no_audit as start_broker;
+
+    #[tokio::test]
+    async fn diskless_earliest_uses_object_floor_but_leaves_local_floor_visible() {
+        let topic_id = uuid::Uuid::from_u128(42);
+        let mut cache = crate::diskless::wal_index::WalIndexCache::default();
+        cache.apply(&crate::diskless::wal_index::WalFlushRecord {
+            object_key: "o".into(),
+            format_version: 1,
+            entries: vec![crate::diskless::wal_index::WalIndexEntry {
+                topic_id,
+                partition: 0,
+                first_offset: 0,
+                last_offset: 8,
+                byte_start: 0,
+                byte_len: 1,
+            }],
+        });
+        let handle = crate::diskless::read::DisklessReadHandle::new(
+            Arc::new(tokio::sync::Mutex::new(cache)),
+            Arc::new(object_store::memory::InMemory::new()),
+        );
+
+        let earliest = diskless_earliest_offset(9, Some(&handle), Some(topic_id), 0).await;
+        assert!(earliest == 0);
+    }
 
     #[test]
     fn sentinel_constants_match_kafka_wire_values() {

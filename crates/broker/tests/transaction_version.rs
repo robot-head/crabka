@@ -37,9 +37,17 @@ use crabka_client_core::Client;
 use crabka_client_producer::{Producer, ProducerRecord};
 use crabka_protocol::owned::{
     add_partitions_to_txn_request::{AddPartitionsToTxnRequest, AddPartitionsToTxnTransaction},
-    common::add_partitions_to_txn_request::add_partitions_to_txn_topic::AddPartitionsToTxnTopic,
+    add_partitions_to_txn_response::{AddPartitionsToTxnResponse, AddPartitionsToTxnResult},
+    common::{
+        add_partitions_to_txn_request::add_partitions_to_txn_topic::AddPartitionsToTxnTopic,
+        add_partitions_to_txn_response::{
+            add_partitions_to_txn_partition_result::AddPartitionsToTxnPartitionResult,
+            add_partitions_to_txn_topic_result::AddPartitionsToTxnTopicResult,
+        },
+    },
     create_topics_request::{CreatableTopic, CreateTopicsRequest},
     end_txn_request::EndTxnRequest,
+    end_txn_response::EndTxnResponse,
     find_coordinator_request::FindCoordinatorRequest,
     init_producer_id_request::InitProducerIdRequest,
     update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest},
@@ -228,45 +236,46 @@ async fn full_cycle_commit_and_read(bootstrap: &str, topic: &str, tid: &str, gro
     consumer.close().await.unwrap();
 }
 
-// ── test 1: TV_1 full cycle (flexible v1 records) ──────────────────────────────
+// ── tests 1-2: versioned full-cycle matrix ─────────────────────────────────────
 
-/// Downgrade `transaction.version` to 1, then run a full transactional
-/// produce → commit → `read_committed` consume. The commit writes v1
-/// (flexible, `header 00 01`) `TransactionLogValue` records across the
-/// Ongoing → `PrepareCommit` → `CompleteCommit` transitions; seeing the committed
-/// records proves the v1 *encode* path runs at `TV_1` and the cycle works
-/// end-to-end (decode/recover byte-exactness is unit-tested in `txn::log_record`).
+/// Exercise the complete transactional cycle at both downgraded feature
+/// levels. `TV_1` writes flexible v1 log values and `TV_0` writes classic v0
+/// log values; in both cases a committed read proves the selected encode path
+/// works end-to-end.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn tv1_flexible_full_cycle_commits_and_reads() {
-    let (broker, bootstrap, _dir) = boot_single().await;
-    let admin = admin_client(&bootstrap).await;
-    create_topic(&admin, "tv1", 1).await;
+async fn versioned_full_cycles_commit_and_read() {
+    struct Case {
+        level: i16,
+        topic: &'static str,
+        tid: &'static str,
+        group: &'static str,
+    }
 
-    downgrade_transaction_version(&admin, 1).await;
+    let cases = [
+        Case {
+            level: 1,
+            topic: "tv1",
+            tid: "tv1-tid",
+            group: "tv1-g",
+        },
+        Case {
+            level: 0,
+            topic: "tv0",
+            tid: "tv0-tid",
+            group: "tv0-g",
+        },
+    ];
 
-    full_cycle_commit_and_read(&bootstrap, "tv1", "tv1-tid", "tv1-g").await;
+    for case in cases {
+        let (broker, bootstrap, _dir) = boot_single().await;
+        let admin = admin_client(&bootstrap).await;
+        create_topic(&admin, case.topic, 1).await;
+        downgrade_transaction_version(&admin, case.level).await;
 
-    broker.shutdown().await;
-}
+        full_cycle_commit_and_read(&bootstrap, case.topic, case.tid, case.group).await;
 
-// ── test 2: TV_0 full cycle (classic, non-flexible v0 records) ─────────────────
-
-/// Downgrade `transaction.version` to 0 (tombstone → Classic), then run a full
-/// transactional cycle. The commit writes v0 (non-flexible, `header 00 00`)
-/// `TransactionLogValue` records; reading the committed records back proves the
-/// v0 *encode* path runs at `TV_0` and the cycle works end-to-end (decode/recover
-/// byte-exactness is unit-tested in `txn::log_record`).
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn tv0_classic_full_cycle_commits_and_reads() {
-    let (broker, bootstrap, _dir) = boot_single().await;
-    let admin = admin_client(&bootstrap).await;
-    create_topic(&admin, "tv0", 1).await;
-
-    downgrade_transaction_version(&admin, 0).await;
-
-    full_cycle_commit_and_read(&bootstrap, "tv0", "tv0-tid", "tv0-g").await;
-
-    broker.shutdown().await;
+        broker.shutdown().await;
+    }
 }
 
 // ── test 3: verify-only AddPartitionsToTxn at TV_2 ─────────────────────────────
@@ -323,11 +332,25 @@ async fn tv2_verify_only_add_partitions_reports_per_partition_codes() {
         })
         .await
         .expect("AddPartitionsToTxn add");
-    assert!(add.error_code == 0, "AddPartitionsToTxn add: {add:?}");
-    let add_part = &add.results_by_transaction[0].topic_results[0].results_by_partition[0];
+    let expected_add = AddPartitionsToTxnResponse {
+        results_by_transaction: vec![AddPartitionsToTxnResult {
+            transactional_id: VERIFY_TID.into(),
+            topic_results: vec![AddPartitionsToTxnTopicResult {
+                name: "t".into(),
+                results_by_partition: vec![AddPartitionsToTxnPartitionResult {
+                    partition_index: 0,
+                    partition_error_code: NONE,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
     assert!(
-        add_part.partition_error_code == NONE,
-        "adding (t,0) should succeed: {add:?}"
+        add == expected_add,
+        "adding (t,0) returned an unexpected response: {add:?}"
     );
 
     // Verify-only query for BOTH (t,0) (added → NONE) and (t,1) (not added →
@@ -355,29 +378,32 @@ async fn tv2_verify_only_add_partitions_reports_per_partition_codes() {
         })
         .await
         .expect("AddPartitionsToTxn verify-only");
-    assert!(verify.error_code == 0, "verify-only top-level: {verify:?}");
-
-    let topic_result = &verify.results_by_transaction[0].topic_results[0];
-    assert!(topic_result.name == "t", "verify topic name: {verify:?}");
-
-    let code_for = |partition: i32| -> i16 {
-        topic_result
-            .results_by_partition
-            .iter()
-            .find(|p| p.partition_index == partition)
-            .unwrap_or_else(|| panic!("partition {partition} missing in verify result: {verify:?}"))
-            .partition_error_code
+    let expected_verify = AddPartitionsToTxnResponse {
+        results_by_transaction: vec![AddPartitionsToTxnResult {
+            transactional_id: VERIFY_TID.into(),
+            topic_results: vec![AddPartitionsToTxnTopicResult {
+                name: "t".into(),
+                results_by_partition: vec![
+                    AddPartitionsToTxnPartitionResult {
+                        partition_index: 0,
+                        partition_error_code: NONE,
+                        ..Default::default()
+                    },
+                    AddPartitionsToTxnPartitionResult {
+                        partition_index: 1,
+                        partition_error_code: TRANSACTION_ABORTABLE,
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
     };
-
-    let p0 = code_for(0);
-    let p1 = code_for(1);
     assert!(
-        p0 == NONE,
-        "verify-only (t,0) already in txn must be NONE(0), got {p0}: {verify:?}"
-    );
-    assert!(
-        p1 == TRANSACTION_ABORTABLE,
-        "verify-only (t,1) not in txn must be TRANSACTION_ABORTABLE(120), got {p1}: {verify:?}"
+        verify == expected_verify,
+        "verify-only response did not match the partition result table: {verify:?}"
     );
 
     broker.shutdown().await;
@@ -479,11 +505,25 @@ async fn add_partition_ongoing(
         })
         .await
         .expect("AddPartitionsToTxn add");
-    assert!(add.error_code == 0, "AddPartitionsToTxn add: {add:?}");
-    let add_part = &add.results_by_transaction[0].topic_results[0].results_by_partition[0];
+    let expected = AddPartitionsToTxnResponse {
+        results_by_transaction: vec![AddPartitionsToTxnResult {
+            transactional_id: tid.into(),
+            topic_results: vec![AddPartitionsToTxnTopicResult {
+                name: topic.into(),
+                results_by_partition: vec![AddPartitionsToTxnPartitionResult {
+                    partition_index: partition,
+                    partition_error_code: NONE,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
     assert!(
-        add_part.partition_error_code == NONE,
-        "adding ({topic},{partition}) should succeed: {add:?}"
+        add == expected,
+        "adding ({topic},{partition}) returned an unexpected response: {add:?}"
     );
 }
 
@@ -492,8 +532,8 @@ async fn add_partition_ongoing(
 /// only succeeds if the coordinator already holds an `Ongoing` entry whose
 /// `(producer_id, producer_epoch)` match — which, on a freshly-rebooted broker,
 /// can only have come from decoding the persisted `__transaction_state` record.
-/// Returns the `EndTxn` error code.
-async fn commit_via_end_txn(client: &Client, tid: &str, pid: i64, epoch: i16) -> i16 {
+/// Returns the complete `EndTxn` response.
+async fn commit_via_end_txn(client: &Client, tid: &str, pid: i64, epoch: i16) -> EndTxnResponse {
     // FindCoordinator both locates and triggers loading of the coordinator.
     let fc = client
         .send(FindCoordinatorRequest {
@@ -531,24 +571,24 @@ async fn commit_via_end_txn(client: &Client, tid: &str, pid: i64, epoch: i16) ->
             tokio::time::sleep(Duration::from_millis(100)).await;
             continue;
         }
-        return resp.error_code;
+        return resp;
     }
 }
 
-/// PRIMARY durability proof for the v1 (flexible, `TV_2` default) codec.
-///
-/// Boot a broker, start a transaction and add a partition so an `Ongoing`
-/// `TransactionLogValue` (v1) is persisted to `__transaction_state` — but do
-/// NOT commit. Shut the broker down, then re-boot on the SAME data dir
-/// (`BootstrapMode::Rejoin`), which drives `TxnCoordinator::recover` →
-/// `decode_key`/`decode_value` over the persisted record. Finally send
-/// `EndTxn(commit)` for the captured `(pid, epoch)`: it returns `NONE(0)` only
-/// if recovery decoded the `Ongoing` entry from disk with matching pid/epoch.
-/// This is the only path that exercises the startup decode/recover code that
-/// the live-broker tests above (which never restart) cannot reach.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn v1_ongoing_txn_survives_restart_via_decode_recover() {
-    const TID: &str = "recover-v1-tid";
+struct RecoveryCase {
+    name: &'static str,
+    topic: &'static str,
+    tid: &'static str,
+    downgrade_to: Option<i16>,
+    completion_epoch_delta: i16,
+}
+
+/// Persist an `Ongoing` transaction, restart on the same data directory, and
+/// compare the complete `EndTxn` response after recovery. Success proves the
+/// selected transaction-log codec was decoded with the original producer
+/// identity; the expected completion epoch additionally checks the feature
+/// level's KIP-890 behavior.
+async fn assert_ongoing_txn_survives_restart(case: &RecoveryCase) {
     let dir = TempDir::new().unwrap();
     let log_dir = dir.path().to_path_buf();
 
@@ -559,11 +599,13 @@ async fn v1_ongoing_txn_survives_restart_via_decode_recover() {
             .unwrap();
         let bootstrap = broker.listen_addr().to_string();
         let client = admin_client(&bootstrap).await;
-        // Default self-bootstrap is transaction.version=2 → v1 records.
-        create_topic(&client, "rec1", 1).await;
+        create_topic(&client, case.topic, 1).await;
+        if let Some(level) = case.downgrade_to {
+            downgrade_transaction_version(&client, level).await;
+        }
 
-        (pid, epoch) = init_producer_id(&client, TID).await;
-        add_partition_ongoing(&client, TID, pid, epoch, "rec1", 0).await;
+        (pid, epoch) = init_producer_id(&client, case.tid).await;
+        add_partition_ongoing(&client, case.tid, pid, epoch, case.topic, 0).await;
         // Deliberately do NOT commit: the entry stays Ongoing on disk.
 
         broker.shutdown().await;
@@ -575,59 +617,44 @@ async fn v1_ongoing_txn_survives_restart_via_decode_recover() {
         let bootstrap = broker.listen_addr().to_string();
         let client = admin_client(&bootstrap).await;
 
-        let code = commit_via_end_txn(&client, TID, pid, epoch).await;
+        let response = commit_via_end_txn(&client, case.tid, pid, epoch).await;
+        let expected = EndTxnResponse {
+            producer_id: pid,
+            producer_epoch: epoch + case.completion_epoch_delta,
+            ..Default::default()
+        };
         assert!(
-            code == NONE,
-            "EndTxn(commit) after restart must succeed (proves recover() decoded \
-             the Ongoing v1 entry with matching pid={pid}/epoch={epoch}); got error_code={code}"
+            response == expected,
+            "{} recovery returned an unexpected EndTxn response: {response:?}",
+            case.name
         );
 
         broker.shutdown().await;
     }
 }
 
-/// PRIMARY durability proof for the v0 (non-flexible, classic) codec.
-///
-/// Identical to the v1 test, except `transaction.version` is downgraded to 0
-/// BEFORE the transaction starts, so the persisted `TransactionLogValue` is the
-/// non-flexible v0 (`header 00 00`) format. The post-restart `EndTxn(commit)`
-/// succeeding proves the v0 record was decoded from disk by `recover()`.
+/// Primary durability matrix for the v1 (flexible, `TV_2` default) and v0
+/// (classic, `TV_0`) transaction-log codecs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn v0_ongoing_txn_survives_restart_via_decode_recover() {
-    const TID: &str = "recover-v0-tid";
-    let dir = TempDir::new().unwrap();
-    let log_dir = dir.path().to_path_buf();
+async fn versioned_ongoing_transactions_survive_restart_and_decode_recovery() {
+    let cases = [
+        RecoveryCase {
+            name: "v1/TV_2",
+            topic: "rec1",
+            tid: "recover-v1-tid",
+            downgrade_to: None,
+            completion_epoch_delta: 1,
+        },
+        RecoveryCase {
+            name: "v0/TV_0",
+            topic: "rec0",
+            tid: "recover-v0-tid",
+            downgrade_to: Some(0),
+            completion_epoch_delta: 0,
+        },
+    ];
 
-    let (pid, epoch);
-    {
-        let broker = Broker::start(BrokerConfig::for_tests(log_dir.clone()))
-            .await
-            .unwrap();
-        let bootstrap = broker.listen_addr().to_string();
-        let client = admin_client(&bootstrap).await;
-        create_topic(&client, "rec0", 1).await;
-
-        // Downgrade to TV_0 so the persisted record uses the v0 codec.
-        downgrade_transaction_version(&client, 0).await;
-
-        (pid, epoch) = init_producer_id(&client, TID).await;
-        add_partition_ongoing(&client, TID, pid, epoch, "rec0", 0).await;
-
-        broker.shutdown().await;
-    }
-
-    {
-        let broker = Broker::start(rejoin_config(log_dir)).await.unwrap();
-        let bootstrap = broker.listen_addr().to_string();
-        let client = admin_client(&bootstrap).await;
-
-        let code = commit_via_end_txn(&client, TID, pid, epoch).await;
-        assert!(
-            code == NONE,
-            "EndTxn(commit) after restart must succeed (proves recover() decoded \
-             the Ongoing v0 entry with matching pid={pid}/epoch={epoch}); got error_code={code}"
-        );
-
-        broker.shutdown().await;
+    for case in &cases {
+        assert_ongoing_txn_survives_restart(case).await;
     }
 }

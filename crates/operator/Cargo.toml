@@ -28,16 +28,23 @@ axum = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 clap = { workspace = true, features = ["env"] }
 crabka-client-admin = { version = "0.3.9", path = "../client-admin" }
+crabka-client-producer = { version = "0.3.9", path = "../client-producer" }
+crabka-gres-control = { version = "0.3.9", path = "../gres-control" }
+crabka-gres-ranges = { version = "0.3.9", path = "../gres-ranges" }
+crabka-gres-substrate = { version = "0.3.9", path = "../gres-substrate" }
 crabka-logfmt = { version = "0.3.8", path = "../logfmt" }
 crabka-metadata = { version = "0.3.8", path = "../metadata" }
+crabka-object-store = { version = "0.3.8", path = "../object-store" }
 crabka-security = { workspace = true }
 base64 = { workspace = true }
+bytes = { workspace = true }
 derive_more = { workspace = true }
 futures = { workspace = true }
 ring = { workspace = true }
 k8s-openapi = { workspace = true, features = ["schemars"] }
 kube = { workspace = true }
 prometheus-client = { workspace = true }
+object_store = { workspace = true }
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
 rustls = { workspace = true }
 schemars = { workspace = true }
@@ -45,11 +52,15 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 serde_yaml = "0.9"
 sha2 = { workspace = true }
+hex = { workspace = true }
 strum = { workspace = true }
 time = { version = "0.3", default-features = false, features = ["macros", "parsing", "formatting"] }
 toml = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
+tokio-postgres = { workspace = true }
+native-tls = { workspace = true }
+postgres-native-tls = { workspace = true }
 tower = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

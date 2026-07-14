@@ -9,7 +9,10 @@
 //! `tests/integration.rs`. The fuller suite (explicit release/reject,
 //! two-consumer sharing, close-leaves-group) is Task E3.
 
-use std::time::Duration;
+use std::{
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_consumer::{ShareAckMode, ShareAckType, ShareConsumer, ShareConsumerRecord};
@@ -27,7 +30,24 @@ use crabka_protocol::{
 use tempfile::TempDir;
 
 const SHARE_STATE_TOPIC: &str = "__share_group_state";
-const SHARE_STATE_PARTITIONS: i32 = 50;
+const SHARE_STATE_PARTITIONS: i32 = 1;
+const MAX_CONCURRENT_TEST_BROKERS: usize = 3;
+
+async fn broker_test_permit() -> tokio::sync::OwnedSemaphorePermit {
+    static GATE: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    Arc::clone(
+        GATE.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_TEST_BROKERS))),
+    )
+    .acquire_owned()
+    .await
+    .expect("broker test concurrency gate remains open")
+}
+
+fn broker_config(log_dir: std::path::PathBuf) -> BrokerConfig {
+    let mut config = BrokerConfig::for_tests(log_dir);
+    config.share_coordinator.state_topic_num_partitions = SHARE_STATE_PARTITIONS;
+    config
+}
 
 async fn create_topic(client: &Client, name: &str) {
     create_topic_with_partitions(client, name, 1).await;
@@ -52,8 +72,9 @@ async fn create_topic_with_partitions(client: &Client, name: &str, num_partition
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn share_consumer_joins_and_closes() {
+    let _permit = broker_test_permit().await;
     let dir = TempDir::new().unwrap();
-    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+    let broker = Broker::start(broker_config(dir.path().to_path_buf()))
         .await
         .unwrap();
     let bootstrap = broker.listen_addr().to_string();
@@ -299,8 +320,9 @@ fn val(r: &ShareConsumerRecord) -> String {
 /// auto-Accept advanced the SPSO past them.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn poll_acquires_and_implicit_accept_advances() {
+    let _permit = broker_test_permit().await;
     let dir = TempDir::new().unwrap();
-    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+    let broker = Broker::start(broker_config(dir.path().to_path_buf()))
         .await
         .unwrap();
     let bootstrap = broker.listen_addr().to_string();
@@ -388,8 +410,9 @@ async fn poll_until(
 /// poll again → the same records redelivered with `delivery_count == 2`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn explicit_release_redelivers() {
+    let _permit = broker_test_permit().await;
     let dir = TempDir::new().unwrap();
-    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+    let broker = Broker::start(broker_config(dir.path().to_path_buf()))
         .await
         .unwrap();
     let bootstrap = broker.listen_addr().to_string();
@@ -449,8 +472,9 @@ async fn explicit_release_redelivers() {
 /// freshly produced record returns only the new record.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn explicit_reject_not_redelivered() {
+    let _permit = broker_test_permit().await;
     let dir = TempDir::new().unwrap();
-    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+    let broker = Broker::start(broker_config(dir.path().to_path_buf()))
         .await
         .unwrap();
     let bootstrap = broker.listen_addr().to_string();
@@ -508,8 +532,9 @@ async fn explicit_reject_not_redelivered() {
 /// cover everything produced.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_consumers_share_topic() {
+    let _permit = broker_test_permit().await;
     let dir = TempDir::new().unwrap();
-    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+    let broker = Broker::start(broker_config(dir.path().to_path_buf()))
         .await
         .unwrap();
     let bootstrap = broker.listen_addr().to_string();
@@ -594,8 +619,9 @@ async fn two_consumers_share_topic() {
 /// `ShareGroupDescribe` shows the group with zero members.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn close_leaves_group() {
+    let _permit = broker_test_permit().await;
     let dir = TempDir::new().unwrap();
-    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+    let broker = Broker::start(broker_config(dir.path().to_path_buf()))
         .await
         .unwrap();
     let bootstrap = broker.listen_addr().to_string();
@@ -661,8 +687,9 @@ async fn close_leaves_group() {
 /// broker honored it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn explicit_renew_prevents_redelivery() {
+    let _permit = broker_test_permit().await;
     let dir = TempDir::new().unwrap();
-    let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+    let mut cfg = broker_config(dir.path().to_path_buf());
     // 1s lock; the sweeper ticks at lock/2. Generous so the renew timing window
     // tolerates scheduling jitter.
     cfg.share_group.record_lock_duration = Duration::from_secs(1);
@@ -756,10 +783,11 @@ async fn explicit_renew_prevents_redelivery() {
 /// it returns `ConsumerError::IllegalState` without any wire round-trip.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn renew_errors_in_implicit_mode() {
+    let _permit = broker_test_permit().await;
     use crabka_client_consumer::ConsumerError;
 
     let dir = TempDir::new().unwrap();
-    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+    let broker = Broker::start(broker_config(dir.path().to_path_buf()))
         .await
         .unwrap();
     let bootstrap = broker.listen_addr().to_string();

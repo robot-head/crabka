@@ -1,0 +1,4 @@
+[[users]]
+name = "alice"
+database = "blue"
+password = "SCRAM-SHA-256$4096:salt$stored:server"

@@ -1,0 +1,374 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: greses.crabka.io
+spec:
+  group: crabka.io
+  names:
+    categories: []
+    kind: Gres
+    plural: greses
+    shortNames:
+    - gg
+    singular: gres
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns: []
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for GresSpec via `CustomResource`
+        properties:
+          spec:
+            description: Gres fleet specification.
+            properties:
+              balancer:
+                description: |-
+                  Dry-run Gres balancer planning knobs. Live execution is intentionally
+                  not performed by the operator yet.
+                nullable: true
+                properties:
+                  enabled:
+                    default: true
+                    description: Enable dry-run planning status for this fleet.
+                    type: boolean
+                  goals:
+                    default:
+                      disabledGoals: []
+                    description: Per-goal enablement knobs.
+                    properties:
+                      disabledGoals:
+                        default: []
+                        description: Goals disabled for dry-run planning. Omit a goal to leave it enabled.
+                        items:
+                          description: Supported dry-run balancer goals.
+                          enum:
+                          - co_location_integrity
+                          - range_limit
+                          - range_size
+                          - load_skew
+                          - auto_shard_conversion
+                          type: string
+                        type: array
+                    type: object
+                  planSnapshot:
+                    description: |-
+                      Optional dry-run plan snapshot supplied to the operator for status
+                      reporting. The operator never executes these operations.
+                    nullable: true
+                    properties:
+                      operations:
+                        description: Operations emitted by the planner for the observed registry snapshot.
+                        items:
+                          description: Operation kinds emitted by the dry-run balancer planner.
+                          enum:
+                          - split
+                          - move
+                          - merge
+                          - convert_to_sharded
+                          type: string
+                        type: array
+                    required:
+                    - operations
+                    type: object
+                  registryLayout:
+                    default:
+                      transactionalRegistryProtocol: false
+                    description: |-
+                      Explicit capability declaration for Kafka's transactional registry
+                      protocol. This protocol does not make any physical Move, Split, or
+                      Merge operation executable; the operator reports plans only.
+                    properties:
+                      transactionalRegistryProtocol:
+                        default: false
+                        description: |-
+                          Kafka transactional registry protocol is configured and available for
+                          metadata transactions only. Physical range operations remain unavailable.
+                        type: boolean
+                    type: object
+                  thresholds:
+                    default:
+                      cooldownEpochs: 2
+                      loadSkewHysteresisPct: 25
+                      maxOperations: 32
+                      mergeFloorBytes: 67108864
+                      sizeCeilingBytes: 1073741824
+                      splitStrideRows: 1000000
+                    description: Threshold and cooldown knobs used by future live planner input.
+                    properties:
+                      cooldownEpochs:
+                        description: Epoch count that suppresses repeated operation kinds.
+                        format: uint64
+                        minimum: 0.0
+                        type: integer
+                      loadSkewHysteresisPct:
+                        description: Load skew percentage tolerated before move planning.
+                        format: uint32
+                        minimum: 0.0
+                        type: integer
+                      maxOperations:
+                        description: Maximum operations in one dry-run plan.
+                        format: uint
+                        minimum: 0.0
+                        type: integer
+                      maxRangesPerCompute:
+                        description: Optional maximum ranges per compute.
+                        format: uint
+                        minimum: 0.0
+                        nullable: true
+                        type: integer
+                      mergeFloorBytes:
+                        description: Merge adjacent ranges below this combined byte size.
+                        format: uint64
+                        minimum: 0.0
+                        type: integer
+                      sizeCeilingBytes:
+                        description: Split ranges larger than this many bytes.
+                        format: uint64
+                        minimum: 0.0
+                        type: integer
+                      splitStrideRows:
+                        description: Row stride used when a range has no upper bound.
+                        format: uint64
+                        minimum: 0.0
+                        type: integer
+                    required:
+                    - cooldownEpochs
+                    - loadSkewHysteresisPct
+                    - maxOperations
+                    - mergeFloorBytes
+                    - sizeCeilingBytes
+                    - splitStrideRows
+                    type: object
+                type: object
+              defaults:
+                description: |-
+                  Default tenant runtime settings inherited by `GresTenant`s unless
+                  they set `spec.overrides`.
+                nullable: true
+                properties:
+                  checkpointBytes:
+                    description: Checkpoint after this many bytes when set.
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  checkpointFrames:
+                    description: Checkpoint after this many frames when set.
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  idleSeconds:
+                    description: Idle timeout in seconds; unset means never suspend by idleness.
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  suspendMaxCheckpointBytes:
+                    description: Keep the tenant warm when its latest checkpoint exceeds this size.
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  walReplication:
+                    description: Replication factor for tenant WAL topics.
+                    format: int32
+                    nullable: true
+                    type: integer
+                type: object
+              kafkaCluster:
+                description: Kafka cluster name this Gres fleet targets.
+                type: string
+              pgdog:
+                description: '`PgDog` front-door deployment settings.'
+                properties:
+                  adminSecretRef:
+                    description: Secret key reference for `PgDog` admin credentials.
+                    properties:
+                      key:
+                        description: Secret data key.
+                        type: string
+                      name:
+                        description: Secret name.
+                        type: string
+                    required:
+                    - key
+                    - name
+                    type: object
+                  image:
+                    description: |-
+                      Container image override. When absent the operator uses
+                      `--default-pgdog-image`.
+                    nullable: true
+                    type: string
+                  listenPort:
+                    description: '`PgDog` client listen port.'
+                    format: int32
+                    maximum: 65535.0
+                    minimum: 1.0
+                    type: integer
+                  replicas:
+                    description: Number of `PgDog` replicas.
+                    format: int32
+                    maximum: 1000.0
+                    minimum: 0.0
+                    type: integer
+                  tlsSecretRef:
+                    description: Optional TLS Secret mounted by the future `PgDog` controller.
+                    nullable: true
+                    properties:
+                      name:
+                        description: Secret name.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                required:
+                - adminSecretRef
+                - listenPort
+                - replicas
+                type: object
+            required:
+            - kafkaCluster
+            - pgdog
+            type: object
+          status:
+            description: Observed Gres fleet state.
+            nullable: true
+            properties:
+              balancer:
+                description: |-
+                  Last balancer planning summary. The operator does not execute range
+                  changes from this status.
+                nullable: true
+                properties:
+                  disabledGoals:
+                    description: Goals disabled by spec or by the top-level balancer switch.
+                    items:
+                      type: string
+                    type: array
+                  dryRunOnly:
+                    description: True while the operator reports planner status without executing live changes.
+                    type: boolean
+                  enabled:
+                    description: Whether planner status is enabled by spec.
+                    type: boolean
+                  enabledGoals:
+                    description: Goals active for dry-run planning.
+                    items:
+                      type: string
+                    type: array
+                  executableOperationKinds:
+                    description: |-
+                      Distinct planned operation kinds executable by the operator. Empty
+                      until physical orchestration is implemented.
+                    items:
+                      type: string
+                    type: array
+                  executableOperations:
+                    description: |-
+                      Number of planned operations executable by the operator. Always zero:
+                      the transactional registry protocol cannot execute physical operations.
+                    format: uint
+                    minimum: 0.0
+                    type: integer
+                  message:
+                    description: Human-readable dry-run status reason.
+                    type: string
+                  mutationDisabledReason:
+                    description: Why mutations are disabled even when a dry-run plan is available.
+                    type: string
+                  plannedOperationKinds:
+                    description: Distinct operation kinds in the reported dry-run plan snapshot.
+                    items:
+                      type: string
+                    type: array
+                  plannedOperations:
+                    description: Number of operations in the reported dry-run plan snapshot.
+                    format: uint
+                    minimum: 0.0
+                    type: integer
+                  transactionalRegistryProtocolAvailable:
+                    description: |-
+                      Whether Kafka's transactional registry protocol was explicitly
+                      configured as available for metadata transactions. It does not enable
+                      physical range operations.
+                    type: boolean
+                  unsupportedOperationKinds:
+                    description: |-
+                      Distinct planned operation kinds the operator will not classify as
+                      executable. `convert_to_sharded` remains unsupported.
+                    items:
+                      type: string
+                    type: array
+                  unsupportedOperations:
+                    description: Number of planned operations the operator intentionally will not execute.
+                    format: uint
+                    minimum: 0.0
+                    type: integer
+                required:
+                - disabledGoals
+                - dryRunOnly
+                - enabled
+                - enabledGoals
+                - executableOperationKinds
+                - executableOperations
+                - message
+                - mutationDisabledReason
+                - plannedOperationKinds
+                - plannedOperations
+                - transactionalRegistryProtocolAvailable
+                - unsupportedOperationKinds
+                - unsupportedOperations
+                type: object
+              conditions:
+                default: []
+                description: Kubernetes-style condition list.
+                items:
+                  properties:
+                    lastTransitionTime:
+                      description: RFC3339 timestamp.
+                      type: string
+                    message:
+                      description: Human-readable message.
+                      type: string
+                    reason:
+                      description: CamelCase machine reason.
+                      type: string
+                    status:
+                      description: '`True`, `False`, or `Unknown`.'
+                      type: string
+                    type:
+                      description: e.g. `Ready`.
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              confirmedPgdogConfigHash:
+                description: Last `PgDog` config hash that was confirmed through the admin surface.
+                nullable: true
+                type: string
+              observedGeneration:
+                description: '`metadata.generation` of the last successfully-reconciled spec.'
+                format: int64
+                nullable: true
+                type: integer
+              serviceUrl:
+                description: In-cluster service URL for the `PgDog` front door.
+                nullable: true
+                type: string
+            type: object
+        required:
+        - spec
+        title: Gres
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

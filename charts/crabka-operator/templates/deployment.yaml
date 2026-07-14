@@ -35,6 +35,26 @@ spec:
             - run
             - --default-broker-image={{ .Values.brokerImage.repository }}:{{ .Values.brokerImage.tag | default .Chart.AppVersion }}
             - --default-gateway-image={{ .Values.gatewayImage.repository }}:{{ .Values.gatewayImage.tag | default .Chart.AppVersion }}
+            - --default-gres-image={{ .Values.gresImage.repository }}:{{ .Values.gresImage.tag | default .Chart.AppVersion }}
+            - --default-gres-activator-image={{ .Values.gresActivatorImage.repository }}:{{ .Values.gresActivatorImage.tag | default .Chart.AppVersion }}
+            - --default-pgdog-image={{ .Values.pgdogImage.repository }}:{{ .Values.pgdogImage.tag }}
+            {{- if .Values.gresCheckpoint.store }}
+            - --gres-checkpoint-store={{ .Values.gresCheckpoint.store }}
+            - --gres-checkpoint-bucket={{ .Values.gresCheckpoint.bucket }}
+            {{- if .Values.gresCheckpoint.region }}
+            - --gres-checkpoint-region={{ .Values.gresCheckpoint.region }}
+            {{- end }}
+            {{- if .Values.gresCheckpoint.endpoint }}
+            - --gres-checkpoint-endpoint={{ .Values.gresCheckpoint.endpoint }}
+            {{- end }}
+            {{- if .Values.gresCheckpoint.allowHttp }}
+            - --gres-checkpoint-allow-http
+            {{- end }}
+            {{- if .Values.gresCheckpoint.accessKeyId }}
+            - --gres-checkpoint-access-key-id={{ .Values.gresCheckpoint.accessKeyId }}
+            - --gres-checkpoint-secret-access-key={{ .Values.gresCheckpoint.secretAccessKey }}
+            {{- end }}
+            {{- end }}
             {{- if .Values.watchNamespaces }}
             - --watch-namespaces={{ join "," .Values.watchNamespaces }}
             {{- end }}

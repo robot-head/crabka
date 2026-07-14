@@ -11,7 +11,7 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Run the operator: watch CRDs and reconcile.
-    Run(RunArgs),
+    Run(Box<RunArgs>),
     /// Emit CRD YAML manifests to a directory.
     GenCrds { out_dir: std::path::PathBuf },
     /// Scan all (or one namespace's) Kafka CRs and reissue any

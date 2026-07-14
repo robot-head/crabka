@@ -1,0 +1,27 @@
+[general]
+port = 6432
+min_pool_size = 0
+pooler_mode = "transaction"
+passthrough_auth = "enabled"
+connect_timeout = 10000
+connect_attempts = 3
+checkout_timeout = 30000
+idle_timeout = 45000
+server_lifetime = 240000
+idle_healthcheck_delay = 3155760000000
+tls_certificate = "/etc/pgdog/tls/tls.crt"
+tls_private_key = "/etc/pgdog/tls/tls.key"
+tls_client_ca_certificate = "/etc/pgdog/tls/ca.crt"
+tls_client_required = true
+
+[[databases]]
+name = "blue"
+host = "blue-0.gres.svc"
+port = 5432
+pooler_mode = "transaction"
+
+[[databases]]
+name = "green"
+host = "green-0.gres.svc"
+port = 5432
+pooler_mode = "transaction"

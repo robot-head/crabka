@@ -26,13 +26,13 @@
 //! Keys mirror [`LocalTieredStorage`](crate::LocalTieredStorage)'s
 //! directory layout so the two backends are observationally equivalent.
 
-use std::{io::Read, path::Path, sync::Arc};
+use std::sync::Arc;
 
-use bytes::Bytes;
-use object_store::{
-    GetOptions, GetRange, ObjectStore, ObjectStoreExt, PutPayload, WriteMultipart,
-    path::Path as ObjectPath,
+use crabka_object_store::{
+    DEFAULT_MULTIPART_CHUNK_SIZE, DEFAULT_MULTIPART_THRESHOLD, ObjectOps, ObjectStoreClient,
+    ObjectStoreConfig, ObjectStoreError, S3Config, build_object_store,
 };
+use object_store::{GetRange, ObjectStore, path::Path as ObjectPath};
 use tracing::instrument;
 
 use crate::{
@@ -41,21 +41,6 @@ use crate::{
     storage_manager::{IndexType, LogSegmentData, RemoteStorageManager},
 };
 
-/// Default threshold above which `S3RemoteStorage::put_path` switches
-/// from a single PUT to a streaming multipart upload. 100 MiB. AWS's hard
-/// cap on single-PUT objects is 5 GiB; defaulting well below that keeps
-/// us comfortably inside the single-PUT regime for the common segment
-/// sizes (Kafka's default `segment.bytes` is 1 GiB) while ensuring
-/// segments at the upper end (or operator-bumped `segment.bytes`) never
-/// silently exceed the cap.
-pub const DEFAULT_MULTIPART_THRESHOLD: u64 = 100 * 1024 * 1024;
-
-/// Default per-part size for multipart uploads. 16 MiB. AWS requires every
-/// part except the last to be at least 5 MiB and caps the total parts at
-/// 10 000, so 16 MiB scales to a ~160 GiB segment before bumping into the
-/// part-count limit — far beyond any realistic Kafka segment.
-pub const DEFAULT_MULTIPART_CHUNK_SIZE: usize = 16 * 1024 * 1024;
-
 /// A [`RemoteStorageManager`] backed by any S3-compatible object store.
 ///
 /// Construct via [`S3RemoteStorage::with_store`] (any `ObjectStore` impl)
@@ -63,7 +48,7 @@ pub const DEFAULT_MULTIPART_CHUNK_SIZE: usize = 16 * 1024 * 1024;
 /// production path that builds an `AmazonS3` client from credentials,
 /// endpoint, and bucket.
 pub struct S3RemoteStorage {
-    store: Arc<dyn ObjectStore>,
+    ops: ObjectStoreClient,
     /// Optional key prefix (joined with `/` to every object key). Lets
     /// multiple Crabka clusters share a bucket safely.
     prefix: Option<String>,
@@ -81,85 +66,6 @@ impl std::fmt::Debug for S3RemoteStorage {
     }
 }
 
-/// Connection / bucket parameters for [`S3RemoteStorage::from_s3_config`].
-///
-/// Either `access_key_id` + `secret_access_key` or the standard AWS SDK
-/// credential chain (env vars, instance profile, …) supplies credentials.
-/// When both fields are `None`, `object_store` falls back to the
-/// environment-variable chain.
-#[derive(Clone)]
-pub struct S3Config {
-    /// S3 bucket name.
-    pub bucket: String,
-    /// Optional key prefix inside the bucket (no leading or trailing slash).
-    pub prefix: Option<String>,
-    /// AWS region. Required by AWS S3; ignored by `MinIO`/R2 when an
-    /// `endpoint` is provided but `object_store` still wants a value here
-    /// (use `"us-east-1"` as a placeholder).
-    pub region: String,
-    /// Optional custom endpoint URL (e.g. `http://minio:9000` for `MinIO`,
-    /// `https://<account>.r2.cloudflarestorage.com` for R2). When `None`,
-    /// `object_store` uses the AWS S3 endpoint for the configured region.
-    pub endpoint: Option<String>,
-    /// Optional explicit access key id. Falls back to the AWS credential
-    /// chain when `None`.
-    pub access_key_id: Option<String>,
-    /// Optional explicit secret access key. Falls back to the AWS
-    /// credential chain when `None`.
-    pub secret_access_key: Option<String>,
-    /// Allow plaintext HTTP (off-by-default; required by `MinIO` running
-    /// without TLS).
-    pub allow_http: bool,
-    /// Files at least this large are uploaded via S3 multipart instead of
-    /// a single PUT. Defaults to [`DEFAULT_MULTIPART_THRESHOLD`] (100 MiB).
-    /// Lower this in tests to exercise the multipart path against
-    /// segment-sized fixtures.
-    pub multipart_threshold: u64,
-    /// Per-part size used when multipart upload kicks in. Defaults to
-    /// [`DEFAULT_MULTIPART_CHUNK_SIZE`] (16 MiB). Must be ≥ 5 MiB (AWS
-    /// minimum) except for the last part; smaller values are accepted by
-    /// `MinIO` and convenient in tests.
-    pub multipart_chunk_size: usize,
-}
-
-impl std::fmt::Debug for S3Config {
-    /// Redacts the credential fields so a stray `{:?}` / tracing call never
-    /// leaks them. Mirrors the hand-written `Debug` on [`S3RemoteStorage`].
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let redact = |opt: &Option<String>| opt.as_ref().map(|_| "***");
-        f.debug_struct("S3Config")
-            .field("bucket", &self.bucket)
-            .field("prefix", &self.prefix)
-            .field("region", &self.region)
-            .field("endpoint", &self.endpoint)
-            .field("access_key_id", &redact(&self.access_key_id))
-            .field("secret_access_key", &redact(&self.secret_access_key))
-            .field("allow_http", &self.allow_http)
-            .field("multipart_threshold", &self.multipart_threshold)
-            .field("multipart_chunk_size", &self.multipart_chunk_size)
-            .finish()
-    }
-}
-
-impl Default for S3Config {
-    /// Produces a placeholder `S3Config` so callers can use `..Default::default()`
-    /// to fill in just the tuning knobs. The bucket / region / endpoint /
-    /// credential fields are stubs — every real caller overrides them.
-    fn default() -> Self {
-        Self {
-            bucket: String::new(),
-            prefix: None,
-            region: String::new(),
-            endpoint: None,
-            access_key_id: None,
-            secret_access_key: None,
-            allow_http: false,
-            multipart_threshold: DEFAULT_MULTIPART_THRESHOLD,
-            multipart_chunk_size: DEFAULT_MULTIPART_CHUNK_SIZE,
-        }
-    }
-}
-
 impl S3RemoteStorage {
     /// Wrap an arbitrary `ObjectStore` (e.g.
     /// `object_store::memory::InMemory` for tests). Use
@@ -170,7 +76,7 @@ impl S3RemoteStorage {
     #[must_use]
     pub fn with_store(store: Arc<dyn ObjectStore>, prefix: Option<String>) -> Self {
         Self {
-            store,
+            ops: ObjectStoreClient::new(store),
             prefix,
             multipart_threshold: DEFAULT_MULTIPART_THRESHOLD,
             multipart_chunk_size: DEFAULT_MULTIPART_CHUNK_SIZE,
@@ -195,25 +101,10 @@ impl S3RemoteStorage {
     /// region / endpoint combination is rejected by `object_store`'s
     /// builder.
     pub fn from_s3_config(cfg: &S3Config) -> Result<Self, RemoteStorageError> {
-        let mut builder = object_store::aws::AmazonS3Builder::new()
-            .with_bucket_name(&cfg.bucket)
-            .with_region(&cfg.region)
-            .with_allow_http(cfg.allow_http);
-        if let Some(endpoint) = &cfg.endpoint {
-            builder = builder.with_endpoint(endpoint);
-        }
-        if let (Some(k), Some(s)) = (&cfg.access_key_id, &cfg.secret_access_key) {
-            builder = builder.with_access_key_id(k).with_secret_access_key(s);
-        }
-        let store = builder
-            .build()
-            .map_err(|e| RemoteStorageError::InvalidArgument(format!("S3 builder: {e}")))?;
-        Ok(Self {
-            store: Arc::new(store),
-            prefix: cfg.prefix.clone(),
-            multipart_threshold: cfg.multipart_threshold,
-            multipart_chunk_size: cfg.multipart_chunk_size,
-        })
+        let store = build_object_store(&ObjectStoreConfig::S3(cfg.clone()))
+            .map_err(|e| RemoteStorageError::InvalidArgument(e.to_string()))?;
+        Ok(Self::with_store(store, cfg.prefix.clone())
+            .with_multipart_tuning(cfg.multipart_threshold, cfg.multipart_chunk_size))
     }
 
     fn segment_key(&self, metadata: &RemoteLogSegmentMetadata, suffix: &str) -> ObjectPath {
@@ -238,76 +129,20 @@ impl S3RemoteStorage {
         self.segment_key(metadata, index_filename(index_type))
     }
 
-    /// Run an async `ObjectStore` call to completion on the current Tokio
-    /// runtime. Sync trait callers reach this through `spawn_blocking`,
-    /// inside which `Handle::current()` is always available.
-    fn block<T, F>(fut: F) -> Result<T, RemoteStorageError>
+    /// Run an async [`ObjectOps`] call to completion on the current Tokio
+    /// runtime. Sync trait callers reach this through `spawn_blocking`, inside
+    /// which `Handle::current()` is always available. The `block_on` bridge
+    /// lives here, never in the substrate.
+    fn block_os<T, F>(fut: F) -> Result<T, ObjectStoreError>
     where
-        F: std::future::Future<Output = Result<T, object_store::Error>>,
+        F: std::future::Future<Output = Result<T, ObjectStoreError>>,
     {
         let handle = tokio::runtime::Handle::try_current().map_err(|_| {
-            RemoteStorageError::Backend(
+            ObjectStoreError::Backend(
                 "S3RemoteStorage requires an active Tokio runtime; call from spawn_blocking".into(),
             )
         })?;
-        let result = tokio::task::block_in_place(|| handle.block_on(fut));
-        result.map_err(map_object_store_error)
-    }
-
-    #[instrument(
-        skip_all,
-        fields(key = %key, len = tracing::field::Empty, multipart = tracing::field::Empty),
-        err
-    )]
-    fn put_path(&self, key: &ObjectPath, path: &Path) -> Result<(), RemoteStorageError> {
-        let len = std::fs::metadata(path)?.len();
-        let span = tracing::Span::current();
-        span.record("len", len);
-        span.record("multipart", len >= self.multipart_threshold);
-        if len < self.multipart_threshold {
-            // Single-PUT path: read the whole file into memory, one request.
-            let bytes = std::fs::read(path)?;
-            Self::block(self.store.put(key, PutPayload::from(bytes)))?;
-            return Ok(());
-        }
-        self.put_path_multipart(key, path)
-    }
-
-    /// Streaming multipart upload for files at or above
-    /// [`Self::multipart_threshold`]. Reads the file in `multipart_chunk_size`
-    /// blocks and pushes each into the [`WriteMultipart`] buffer; `finish`
-    /// flushes the tail and completes the upload (aborting on failure so
-    /// we don't leak in-progress parts in the bucket).
-    #[instrument(skip_all, fields(key = %key, chunk_size = self.multipart_chunk_size), err)]
-    fn put_path_multipart(&self, key: &ObjectPath, path: &Path) -> Result<(), RemoteStorageError> {
-        let file = std::fs::File::open(path)?;
-        let store = Arc::clone(&self.store);
-        let key = key.clone();
-        let chunk_size = self.multipart_chunk_size;
-        Self::block(async move {
-            let upload = store.put_multipart(&key).await?;
-            let mut writer = WriteMultipart::new_with_chunk_size(upload, chunk_size);
-            let mut file = file;
-            let mut buf = vec![0u8; chunk_size];
-            loop {
-                let n =
-                    Read::read(&mut file, &mut buf).map_err(|e| object_store::Error::Generic {
-                        store: "S3RemoteStorage",
-                        source: Box::new(e),
-                    })?;
-                if n == 0 {
-                    break;
-                }
-                writer.write(&buf[..n]);
-            }
-            writer.finish().await.map(|_| ())
-        })
-    }
-
-    #[instrument(skip_all, fields(key = %key, len = bytes.len()), err)]
-    fn put_bytes(&self, key: &ObjectPath, bytes: Bytes) -> Result<(), RemoteStorageError> {
-        Self::block(self.store.put(key, PutPayload::from_bytes(bytes)))?;
-        Ok(())
+        tokio::task::block_in_place(|| handle.block_on(fut))
     }
 }
 
@@ -318,20 +153,6 @@ fn index_filename(index_type: IndexType) -> &'static str {
         IndexType::ProducerSnapshot => "producer_snapshot",
         IndexType::LeaderEpoch => "leader_epoch",
         IndexType::Transaction => "txn_index",
-    }
-}
-
-fn map_object_store_error(e: object_store::Error) -> RemoteStorageError {
-    match e {
-        object_store::Error::NotFound { .. } => {
-            // Caller-visible "not found" is signalled via SegmentNotFound
-            // at the trait level, but here we don't know which segment is
-            // missing — surface as a backend error and let the caller
-            // upgrade to SegmentNotFound where it has the metadata in
-            // hand.
-            RemoteStorageError::Backend(format!("not found: {e}"))
-        }
-        other => RemoteStorageError::Backend(other.to_string()),
     }
 }
 
@@ -352,24 +173,45 @@ impl RemoteStorageManager for S3RemoteStorage {
         metadata: &RemoteLogSegmentMetadata,
         data: &LogSegmentData,
     ) -> Result<Option<CustomMetadata>, RemoteStorageError> {
-        self.put_path(&self.log_key(metadata), &data.log_segment)?;
-        self.put_path(
+        let threshold = self.multipart_threshold;
+        let chunk_size = self.multipart_chunk_size;
+        Self::block_os(self.ops.put_from_path(
+            &self.log_key(metadata),
+            &data.log_segment,
+            threshold,
+            chunk_size,
+        ))?;
+        Self::block_os(self.ops.put_from_path(
             &self.index_key(metadata, IndexType::Offset),
             &data.offset_index,
-        )?;
-        self.put_path(
+            threshold,
+            chunk_size,
+        ))?;
+        Self::block_os(self.ops.put_from_path(
             &self.index_key(metadata, IndexType::Timestamp),
             &data.time_index,
-        )?;
+            threshold,
+            chunk_size,
+        ))?;
         if let Some(snap) = &data.producer_snapshot_index {
-            self.put_path(&self.index_key(metadata, IndexType::ProducerSnapshot), snap)?;
+            Self::block_os(self.ops.put_from_path(
+                &self.index_key(metadata, IndexType::ProducerSnapshot),
+                snap,
+                threshold,
+                chunk_size,
+            ))?;
         }
-        self.put_bytes(
+        Self::block_os(self.ops.put(
             &self.index_key(metadata, IndexType::LeaderEpoch),
             data.leader_epoch_index.clone(),
-        )?;
+        ))?;
         if let Some(txn) = &data.transaction_index {
-            self.put_path(&self.index_key(metadata, IndexType::Transaction), txn)?;
+            Self::block_os(self.ops.put_from_path(
+                &self.index_key(metadata, IndexType::Transaction),
+                txn,
+                threshold,
+                chunk_size,
+            ))?;
         }
         // The opaque CustomMetadata channel is unused — every object's
         // key is derivable from the segment metadata, so we don't need to
@@ -396,32 +238,25 @@ impl RemoteStorageManager for S3RemoteStorage {
         end_position: Option<u32>,
     ) -> Result<Vec<u8>, RemoteStorageError> {
         let key = self.log_key(metadata);
-        let opts = GetOptions {
-            range: Some(match end_position {
-                Some(end) => {
-                    if end < start_position {
-                        return Err(RemoteStorageError::InvalidArgument(format!(
-                            "end_position {end} < start_position {start_position}"
-                        )));
-                    }
-                    // GetRange::Bounded is half-open [start, end); the trait
-                    // contract is inclusive end, so add 1 and saturate.
-                    GetRange::Bounded(u64::from(start_position)..u64::from(end).saturating_add(1))
+        let range = match end_position {
+            Some(end) => {
+                if end < start_position {
+                    return Err(RemoteStorageError::InvalidArgument(format!(
+                        "end_position {end} < start_position {start_position}"
+                    )));
                 }
-                None => GetRange::Offset(u64::from(start_position)),
-            }),
-            ..Default::default()
-        };
-        let result = Self::block(self.store.get_opts(&key, opts));
-        match result {
-            Ok(get) => {
-                let bytes = Self::block(get.bytes())?;
-                Ok(bytes.to_vec())
+                // GetRange::Bounded is half-open [start, end); the trait
+                // contract is inclusive end, so add 1 and saturate.
+                GetRange::Bounded(u64::from(start_position)..u64::from(end).saturating_add(1))
             }
-            Err(RemoteStorageError::Backend(ref msg)) if msg.starts_with("not found:") => Err(
-                RemoteStorageError::SegmentNotFound(metadata.remote_log_segment_id().clone()),
-            ),
-            Err(other) => Err(other),
+            None => GetRange::Offset(u64::from(start_position)),
+        };
+        match Self::block_os(self.ops.get_range(&key, range)) {
+            Ok(bytes) => Ok(bytes.to_vec()),
+            Err(ObjectStoreError::NotFound(_)) => Err(RemoteStorageError::SegmentNotFound(
+                metadata.remote_log_segment_id().clone(),
+            )),
+            Err(other) => Err(other.into()),
         }
     }
 
@@ -442,16 +277,12 @@ impl RemoteStorageManager for S3RemoteStorage {
         index_type: IndexType,
     ) -> Result<Vec<u8>, RemoteStorageError> {
         let key = self.index_key(metadata, index_type);
-        let result = Self::block(self.store.get(&key));
-        match result {
-            Ok(get) => {
-                let bytes = Self::block(get.bytes())?;
-                Ok(bytes.to_vec())
-            }
-            Err(RemoteStorageError::Backend(ref msg)) if msg.starts_with("not found:") => Err(
-                RemoteStorageError::SegmentNotFound(metadata.remote_log_segment_id().clone()),
-            ),
-            Err(other) => Err(other),
+        match Self::block_os(self.ops.get(&key)) {
+            Ok(bytes) => Ok(bytes.to_vec()),
+            Err(ObjectStoreError::NotFound(_)) => Err(RemoteStorageError::SegmentNotFound(
+                metadata.remote_log_segment_id().clone(),
+            )),
+            Err(other) => Err(other.into()),
         }
     }
 
@@ -476,11 +307,10 @@ impl RemoteStorageManager for S3RemoteStorage {
             self.index_key(metadata, IndexType::LeaderEpoch),
             self.index_key(metadata, IndexType::Transaction),
         ] {
-            match Self::block(self.store.delete(&key)) {
-                Ok(()) => {}
+            match Self::block_os(self.ops.delete(&key)) {
                 // Idempotent: deleting an absent object succeeds.
-                Err(RemoteStorageError::Backend(msg)) if msg.starts_with("not found:") => {}
-                Err(e) => return Err(e),
+                Ok(()) | Err(ObjectStoreError::NotFound(_)) => {}
+                Err(e) => return Err(e.into()),
             }
         }
         Ok(())
@@ -492,6 +322,7 @@ mod tests {
     use std::{collections::BTreeMap, io::Write, path::PathBuf};
 
     use assert2::{assert, check};
+    use bytes::Bytes;
     use crabka_ids::LeaderEpoch;
     use object_store::memory::InMemory;
     use tempfile::TempDir;
@@ -504,32 +335,6 @@ mod tests {
 
     fn rsm(prefix: Option<&str>) -> S3RemoteStorage {
         S3RemoteStorage::with_store(Arc::new(InMemory::new()), prefix.map(str::to_string))
-    }
-
-    #[test]
-    fn s3_config_debug_redacts_credentials() {
-        let cfg = S3Config {
-            bucket: "logs".to_string(),
-            region: "us-east-1".to_string(),
-            access_key_id: Some("AKIAEXAMPLEKEYID".to_string()),
-            secret_access_key: Some("super-secret-key-value".to_string()),
-            ..Default::default()
-        };
-        let dbg = format!("{cfg:?}");
-        check!(!dbg.contains("super-secret-key-value"));
-        check!(!dbg.contains("AKIAEXAMPLEKEYID"));
-        check!(dbg.contains("***"));
-        // Non-secret fields are still printed.
-        check!(dbg.contains("logs"));
-        check!(dbg.contains("us-east-1"));
-    }
-
-    #[test]
-    fn multipart_size_constants() {
-        // Pin the multipart threshold/part-size (mutants flip the `*` in the
-        // `N * 1024 * 1024` products to `+`/`/`).
-        assert!(DEFAULT_MULTIPART_THRESHOLD == 104_857_600); // 100 MiB
-        assert!(DEFAULT_MULTIPART_CHUNK_SIZE == 16_777_216); // 16 MiB
     }
 
     #[test]
@@ -751,8 +556,8 @@ mod tests {
         p
     }
 
-    /// Files at or above `multipart_threshold` flow through
-    /// `put_path_multipart`. We pick a chunk size that yields multiple
+    /// Files at or above `multipart_threshold` flow through the `ObjectOps`
+    /// multipart path. We pick a chunk size that yields multiple
     /// non-trailing parts so the inner loop's tail-flush + finish path is
     /// exercised. The `InMemory` backend implements `put_multipart` /
     /// `complete` end-to-end, so a successful round-trip proves the

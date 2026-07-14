@@ -805,7 +805,7 @@ mod tests {
         async fn submit_change(
             &self,
             _records: Vec<MetadataRecord>,
-        ) -> Result<(), crabka_raft::RaftError> {
+        ) -> Result<crabka_raft::SubmitChangeResult, crabka_raft::RaftError> {
             Err(crabka_raft::RaftError::Unsupported("fixed metadata source"))
         }
 
@@ -930,6 +930,7 @@ mod tests {
             log,
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(crate::producer_state::ProducerState::new()),
+            false,
         );
         partition.current_leader.store(1, Ordering::Relaxed);
         partition.current_leader_epoch.store(0, Ordering::Release);

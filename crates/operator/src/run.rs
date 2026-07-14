@@ -79,6 +79,14 @@ pub async fn run(config: OperatorConfig) -> anyhow::Result<()> {
         let ctx = ctx.clone();
         async move { controller::schema_registry::run(ctx).await }
     });
+    let gres_handle = tokio::spawn({
+        let ctx = ctx.clone();
+        async move { controller::gres::run(ctx).await }
+    });
+    let gres_tenant_handle = tokio::spawn({
+        let ctx = ctx.clone();
+        async move { controller::gres_tenant::run(ctx).await }
+    });
 
     tokio::select! {
         res = health_handle => match res {
@@ -120,6 +128,16 @@ pub async fn run(config: OperatorConfig) -> anyhow::Result<()> {
             Ok(Ok(())) => {}
             Ok(Err(e)) => tracing::error!(error = %e, "SchemaRegistry controller exited with error"),
             Err(e) => tracing::error!(error = %e, "SchemaRegistry controller task panicked"),
+        },
+        res = gres_handle => match res {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::error!(error = %e, "Gres controller exited with error"),
+            Err(e) => tracing::error!(error = %e, "Gres controller task panicked"),
+        },
+        res = gres_tenant_handle => match res {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::error!(error = %e, "GresTenant controller exited with error"),
+            Err(e) => tracing::error!(error = %e, "GresTenant controller task panicked"),
         },
         () = shutdown_signal() => tracing::info!("shutdown signal received"),
     }

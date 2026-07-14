@@ -72,3 +72,49 @@ pub enum RemoteStorageError {
         partition: i32,
     },
 }
+
+impl From<crabka_object_store::ObjectStoreError> for RemoteStorageError {
+    fn from(err: crabka_object_store::ObjectStoreError) -> Self {
+        use crabka_object_store::ObjectStoreError as E;
+
+        match err {
+            E::Io(e) => Self::Io(e),
+            E::InvalidConfig(m) => Self::InvalidArgument(m),
+            // Engine methods with segment context match NotFound before converting.
+            E::NotFound(p) => Self::Backend(format!("not found: {p}")),
+            E::TooLarge {
+                key,
+                size,
+                max_bytes,
+            } => Self::Backend(format!(
+                "object `{key}` is {size} bytes, exceeds cap of {max_bytes} bytes"
+            )),
+            E::Backend(m) => Self::Backend(m),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use assert2::assert;
+    use object_store::path::Path;
+
+    use super::*;
+
+    #[test]
+    fn object_store_too_large_converts_to_backend_message() {
+        let err = crabka_object_store::ObjectStoreError::TooLarge {
+            key: Path::from("index/snapshot.json"),
+            size: 1000,
+            max_bytes: 256,
+        };
+
+        let got = RemoteStorageError::from(err);
+
+        assert!(matches!(
+            got,
+            RemoteStorageError::Backend(ref msg)
+                if msg == "object `index/snapshot.json` is 1000 bytes, exceeds cap of 256 bytes"
+        ));
+    }
+}

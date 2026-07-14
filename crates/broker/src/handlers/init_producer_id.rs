@@ -172,15 +172,20 @@ pub(crate) async fn handle(
                 // so two concurrent InitProducerId calls for the same
                 // partition cannot both spawn independent writer tasks.
                 let txn_partition = crate::txn::coordinator::TxnCoordinator::partition_for(tid);
-                materialize_partition(
-                    &coord.partitions,
-                    crate::txn::bootstrap::TOPIC,
-                    txn_partition.get(),
-                    &log_dirs,
-                    &log_config,
-                    &log_dir_status,
-                    &broker.producer_state,
-                )
+                materialize_partition(crate::replicator_supervisor::MaterializePartitionConfig {
+                    partitions: &coord.partitions,
+                    topic: crate::txn::bootstrap::TOPIC,
+                    topic_id: None,
+                    partition: txn_partition.get(),
+                    log_dirs: &log_dirs,
+                    log_config: &log_config,
+                    log_dir_status: &log_dir_status,
+                    producer_state: &broker.producer_state,
+                    diskless: false,
+                    hot_tail: None,
+                    wal_shards: None,
+                    sequencer: None,
+                })
                 .map_err(BrokerError::Txn)?;
                 handle_transactional(&coord, tid, &req, txnv, req.enable2_pc).await?
             } else {
@@ -350,6 +355,7 @@ mod tests {
             log,
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(crate::producer_state::ProducerState::new()),
+            false,
         );
         assert!(part.log_end_offset() == 0);
         partitions.insert("orders".to_string(), PartitionIndex(0), Arc::clone(&part));

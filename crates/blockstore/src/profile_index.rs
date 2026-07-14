@@ -393,7 +393,7 @@ impl ProfileIndex {
     #[instrument(
         level = "debug",
         skip_all,
-        fields(path = %path, size = tracing::field::Empty),
+        fields(path = %path),
         err
     )]
     async fn load_path_with_cap(
@@ -401,15 +401,31 @@ impl ProfileIndex {
         path: &Path,
         max_bytes: usize,
     ) -> Result<Self> {
-        let meta = store.head(path).await?;
-        tracing::Span::current().record("size", meta.size);
-        if meta.size > max_bytes as u64 {
-            return Err(BlockStoreError::InvalidBlock(format!(
-                "profile index snapshot `{}` is {} bytes, exceeds cap of {max_bytes} bytes",
-                path, meta.size
-            )));
-        }
-        let bytes = store.get(path).await?.bytes().await?;
+        let bytes = match crabka_object_store::read_capped(store, path, max_bytes as u64).await {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return Err(match error {
+                    crabka_object_store::ObjectStoreError::TooLarge {
+                        size, max_bytes, ..
+                    } => BlockStoreError::InvalidBlock(format!(
+                        "profile index snapshot `{path}` is {size} bytes, exceeds cap of {max_bytes} bytes"
+                    )),
+                    crabka_object_store::ObjectStoreError::Backend(message)
+                    | crabka_object_store::ObjectStoreError::InvalidConfig(message) => {
+                        BlockStoreError::ObjectStore(message)
+                    }
+                    crabka_object_store::ObjectStoreError::Io(error) => {
+                        BlockStoreError::ObjectStore(error.to_string())
+                    }
+                    not_found @ crabka_object_store::ObjectStoreError::NotFound(_) => {
+                        match store.head(path).await {
+                            Ok(_) => BlockStoreError::ObjectStore(not_found.to_string()),
+                            Err(missing) => BlockStoreError::ObjectStore(missing.to_string()),
+                        }
+                    }
+                });
+            }
+        };
         Ok(serde_json::from_slice(&bytes)?)
     }
 }
@@ -894,7 +910,14 @@ mod tests {
         assert2::assert!(size > 1);
 
         let got = ProfileIndex::load_with_cap(&store, "index/profiles.json", 1).await;
-        assert2::assert!(got.is_err());
+        let Err(BlockStoreError::InvalidBlock(msg)) = got else {
+            panic!("expected InvalidBlock for oversized profile index snapshot");
+        };
+        assert2::assert!(
+            msg == format!(
+                "profile index snapshot `index/profiles.json` is {size} bytes, exceeds cap of 1 bytes"
+            )
+        );
 
         // A cap at/above the real size still loads.
         let loaded = ProfileIndex::load_with_cap(
@@ -907,5 +930,26 @@ mod tests {
         let mut profile_types = loaded.profile_types("t");
         profile_types.sort();
         assert2::assert!(profile_types == strings(&[HEAP_TYPE, CPU_TYPE]));
+    }
+
+    #[tokio::test]
+    async fn load_missing_snapshot_preserves_object_store_error_text() {
+        use object_store::memory::InMemory;
+
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("index/missing-profiles.json");
+        let expected = store.head(&path).await.unwrap_err().to_string();
+
+        let got = ProfileIndex::load_with_cap(
+            &store,
+            "index/missing-profiles.json",
+            MAX_PROFILE_INDEX_SNAPSHOT_BYTES,
+        )
+        .await;
+
+        let Err(BlockStoreError::ObjectStore(msg)) = got else {
+            panic!("expected ObjectStore error for missing profile index snapshot");
+        };
+        assert_eq!(msg, expected);
     }
 }

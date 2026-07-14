@@ -551,6 +551,10 @@ async fn process_partition(
     // All header fields below come from `prepared` — sourced from the v2
     // batch HEADER on the verbatim path (no record decode), or from the
     // decoded owned `RecordBatch` header on the fallback path.
+    if prepared.attributes.is_transactional() && part.diskless {
+        out.error_code = codes::INVALID_TXN_STATE;
+        return Ok(out);
+    }
     if let Some(code) =
         validate_transactional_produce(&prepared, txn_coordinator, image, topic_name, idx).await?
     {
@@ -724,12 +728,6 @@ fn validate_partition_gate(
         leader_epoch: record.leader_epoch.0,
         ..Default::default()
     };
-    if record.leader != this_node_id {
-        return Err(PartitionGateError {
-            code: codes::NOT_LEADER_OR_FOLLOWER,
-            current_leader: Some(leader),
-        });
-    }
     let Some(partition) = partitions.get(topic_name, crabka_ids::PartitionIndex(partition_index))
     else {
         return Err(PartitionGateError {
@@ -737,6 +735,12 @@ fn validate_partition_gate(
             current_leader: Some(leader),
         });
     };
+    if record.leader != this_node_id && !partition.diskless {
+        return Err(PartitionGateError {
+            code: codes::NOT_LEADER_OR_FOLLOWER,
+            current_leader: Some(leader),
+        });
+    }
     if log_dir_status.is_offline(&partition.log_dir.load()) {
         return Err(PartitionGateError {
             code: codes::KAFKA_STORAGE_ERROR,
@@ -768,11 +772,11 @@ async fn validate_transactional_produce(
     if !batch.attributes.is_transactional() || batch.producer_id < 0 {
         return Ok(None);
     }
-    let Some(transactional_id) = coordinator.tid_for_pid(crabka_log::ProducerId(batch.producer_id))
+    let transactional_id = coordinator.tid_for_pid(crabka_log::ProducerId(batch.producer_id));
+    let Some(entry_mutex) = transactional_id
+        .as_ref()
+        .and_then(|transactional_id| coordinator.get(transactional_id))
     else {
-        return Ok(Some(codes::INVALID_PRODUCER_ID_MAPPING));
-    };
-    let Some(entry_mutex) = coordinator.get(&transactional_id) else {
         return Ok(None);
     };
     let mut entry = entry_mutex.lock().await;
@@ -1802,6 +1806,7 @@ mod tests {
             log,
             log_dir_status.clone(),
             Arc::clone(&producer_state),
+            false,
         );
         // Push LEO to 3 so the HW can be clamped to 2 (one below the target).
         {

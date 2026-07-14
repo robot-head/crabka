@@ -161,6 +161,8 @@ pub(crate) async fn handle(
     let log_dirs = broker.config.all_log_dirs();
     let log_config = broker.config.log_config.clone();
     let log_dir_status = broker.log_dir_status.clone();
+    let hot_tail = broker.hot_tail.clone();
+    let wal_shards = broker.wal_shards.clone();
 
     let image = broker.controller.current_image();
 
@@ -204,6 +206,7 @@ pub(crate) async fn handle(
         };
 
         let existing = topic_rec.partitions;
+        let diskless = crate::broker::diskless_topic_config(image.topic_config(&t.name));
         if t.count <= existing {
             out.error_code = codes::INVALID_PARTITIONS;
             out.error_message = Some(format!(
@@ -250,7 +253,7 @@ pub(crate) async fn handle(
         let records = partition_records(&t.name, &new_partition_indices, &new_assignments);
 
         match broker.controller.submit_change(records).await {
-            Ok(()) => {
+            Ok(_) => {
                 materialize_new_partitions(
                     MaterializeContext {
                         partitions: &partitions_map,
@@ -259,6 +262,11 @@ pub(crate) async fn handle(
                         log_dir_status: &log_dir_status,
                         producer_state: &producer_state,
                         node_id,
+                        diskless,
+                        topic_id: topic_rec.topic_id,
+                        hot_tail: &hot_tail,
+                        wal_shards: &wal_shards,
+                        controller: &broker.controller,
                     },
                     &t.name,
                     &new_partition_indices,
@@ -326,6 +334,11 @@ struct MaterializeContext<'a> {
     log_dir_status: &'a crate::log_dir_status::LogDirRegistry,
     producer_state: &'a std::sync::Arc<crate::producer_state::ProducerState>,
     node_id: NodeId,
+    diskless: bool,
+    topic_id: uuid::Uuid,
+    hot_tail: &'a std::sync::Arc<crate::diskless::hot_tail::HotTailCache>,
+    wal_shards: &'a std::sync::Arc<crate::wal::quorum::registry::WalShardRegistry>,
+    controller: &'a std::sync::Arc<dyn crate::metadata_source::MetadataSource>,
 }
 
 async fn materialize_new_partitions(
@@ -338,15 +351,26 @@ async fn materialize_new_partitions(
         if !should_materialize_locally(replicas, context.node_id) {
             continue;
         }
-        if let Err(error) = materialize_partition(
-            context.partitions,
-            topic,
-            *index,
-            context.log_dirs,
-            context.log_config,
-            context.log_dir_status,
-            context.producer_state,
-        ) {
+        if let Err(error) =
+            materialize_partition(crate::replicator_supervisor::MaterializePartitionConfig {
+                partitions: context.partitions,
+                topic,
+                topic_id: Some(context.topic_id),
+                partition: *index,
+                log_dirs: context.log_dirs,
+                log_config: context.log_config,
+                log_dir_status: context.log_dir_status,
+                producer_state: context.producer_state,
+                diskless: context.diskless,
+                hot_tail: Some(context.hot_tail.clone()),
+                wal_shards: Some(context.wal_shards.clone()),
+                sequencer: context.diskless.then(|| {
+                    std::sync::Arc::new(crate::wal::ControllerSequencer::new(
+                        context.controller.clone(),
+                    )) as std::sync::Arc<dyn crate::wal::OffsetSequencer>
+                }),
+            })
+        {
             tracing::error!(topic, partition = *index, error = %error,
                 "CreatePartitions: materialize after quorum commit failed");
             continue;

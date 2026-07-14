@@ -3,13 +3,18 @@
 /// Failures from registry I/O, framing, and (de)serialization.
 #[derive(Debug, thiserror::Error)]
 pub enum SchemaSerdeError {
-    /// Registry HTTP/transport failure.
-    #[error("registry request failed: {0}")]
-    Registry(String),
+    /// Registry network or response-body transport failure.
+    #[error("registry transport failed: {0}")]
+    RegistryTransport(String),
 
     /// Registry returned a non-success status with a body.
     #[error("registry error {status}: {body}")]
     RegistryStatus { status: u16, body: String },
+
+    /// Registry returned a successful response whose body was not valid JSON
+    /// for the requested endpoint.
+    #[error("registry response decode failed: {0}")]
+    RegistryDecode(String),
 
     /// The Confluent wire frame was malformed (bad magic, truncated id).
     #[error("malformed wire frame: {0}")]
@@ -31,4 +36,21 @@ pub enum SchemaSerdeError {
     /// started. Retriable: re-deliver the record shortly.
     #[error("writer schema for id {0} pending fetch")]
     WriterSchemaPending(u32),
+
+    /// The registry could not resolve a writer schema and all of its references.
+    #[error("writer schema for id {id} unavailable: {reason}")]
+    WriterSchemaUnavailable { id: u32, reason: String },
+}
+
+impl SchemaSerdeError {
+    pub(crate) fn is_transient_registry_failure(&self) -> bool {
+        matches!(
+            self,
+            Self::RegistryTransport(_)
+                | Self::RegistryStatus {
+                    status: 429 | 500..=u16::MAX,
+                    ..
+                }
+        )
+    }
 }

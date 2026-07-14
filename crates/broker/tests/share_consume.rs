@@ -19,7 +19,10 @@
 //! - a record that exhausts `max_delivery_attempts` is archived (poison pill);
 //! - the share-session epoch state machine rejects stale / unknown epochs.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use assert2::{assert, check};
 use crabka_broker::{BootstrapMode, Broker, BrokerConfig};
@@ -120,7 +123,28 @@ fn wire(tid: uuid::Uuid) -> WireUuid {
 /// the SPSO advance would only live in memory — so a restart would lose it. This
 /// is the share-state analogue of waiting for the data partition.
 const SHARE_STATE_TOPIC: &str = "__share_group_state";
-const SHARE_STATE_PARTITIONS: i32 = 50;
+// These single-broker tests only need one state partition. Keeping the test
+// geometry small also prevents the parallel test runner from exhausting its
+// process-wide file-descriptor limit while eleven brokers run concurrently.
+const SHARE_STATE_PARTITIONS: i32 = 1;
+const MAX_CONCURRENT_TEST_BROKERS: usize = 3;
+
+async fn broker_test_permit() -> tokio::sync::OwnedSemaphorePermit {
+    static GATE: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+
+    Arc::clone(
+        GATE.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_TEST_BROKERS))),
+    )
+    .acquire_owned()
+    .await
+    .expect("broker test concurrency gate remains open")
+}
+
+fn broker_config(log_dir: std::path::PathBuf) -> BrokerConfig {
+    let mut config = BrokerConfig::for_tests(log_dir);
+    config.share_coordinator.state_topic_num_partitions = SHARE_STATE_PARTITIONS;
+    config
+}
 
 async fn bootstrap_share_state(broker: &crabka_broker::BrokerHandle, client: &Client, key: &str) {
     let resp = client
@@ -453,14 +477,13 @@ async fn fetch_until_acquired(
 /// advance was persisted by restarting the broker on the same data dir.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn consume_accept_restart() {
+    let _permit = broker_test_permit().await;
     let dir = tempfile::TempDir::new().unwrap();
     let log_dir = dir.path().to_path_buf();
 
     let tid;
     {
-        let broker = Broker::start(BrokerConfig::for_tests(log_dir.clone()))
-            .await
-            .unwrap();
+        let broker = Broker::start(broker_config(log_dir.clone())).await.unwrap();
         let client = connect(&broker.listen_addr().to_string()).await;
         create_topic(&broker, &client, "t", 1).await;
         tid = topic_id(&broker, "t");
@@ -512,7 +535,7 @@ async fn consume_accept_restart() {
     }
 
     {
-        let mut cfg = BrokerConfig::for_tests(log_dir);
+        let mut cfg = broker_config(log_dir);
         cfg.bootstrap_mode = BootstrapMode::Rejoin;
         let broker = Broker::start(cfg).await.unwrap();
         let client = connect(&broker.listen_addr().to_string()).await;
@@ -536,8 +559,9 @@ async fn consume_accept_restart() {
 /// Release re-delivers the same offsets with an incremented `delivery_count`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn release_redelivers() {
+    let _permit = broker_test_permit().await;
     let dir = tempfile::TempDir::new().unwrap();
-    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+    let broker = Broker::start(broker_config(dir.path().to_path_buf()))
         .await
         .unwrap();
     let client = connect(&broker.listen_addr().to_string()).await;
@@ -574,8 +598,9 @@ async fn release_redelivers() {
 /// advances past them (a freshly produced offset is the only thing acquired).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reject_archives() {
+    let _permit = broker_test_permit().await;
     let dir = tempfile::TempDir::new().unwrap();
-    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+    let broker = Broker::start(broker_config(dir.path().to_path_buf()))
         .await
         .unwrap();
     let client = connect(&broker.listen_addr().to_string()).await;
@@ -639,8 +664,9 @@ async fn reject_archives() {
 /// fall back to the request-level `max_bytes`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn acquire_past_leading_batch_returns_bytes() {
+    let _permit = broker_test_permit().await;
     let dir = tempfile::TempDir::new().unwrap();
-    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+    let broker = Broker::start(broker_config(dir.path().to_path_buf()))
         .await
         .unwrap();
     let client = connect(&broker.listen_addr().to_string()).await;
@@ -705,8 +731,9 @@ async fn acquire_past_leading_batch_returns_bytes() {
 /// background sweep, so the next fetch re-delivers at an incremented count.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lock_timeout_redelivers() {
+    let _permit = broker_test_permit().await;
     let dir = tempfile::TempDir::new().unwrap();
-    let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+    let mut cfg = broker_config(dir.path().to_path_buf());
     cfg.share_group.record_lock_duration = Duration::from_millis(200);
     let broker = Broker::start(cfg).await.unwrap();
     let client = connect(&broker.listen_addr().to_string()).await;
@@ -746,8 +773,9 @@ async fn lock_timeout_redelivers() {
 /// (poison pill): subsequent fetches acquire nothing and the SPSO advances.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn delivery_limit_archives() {
+    let _permit = broker_test_permit().await;
     let dir = tempfile::TempDir::new().unwrap();
-    let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+    let mut cfg = broker_config(dir.path().to_path_buf());
     cfg.share_group.record_lock_duration = Duration::from_millis(150);
     cfg.share_group.max_delivery_attempts = 2;
     let broker = Broker::start(cfg).await.unwrap();
@@ -798,8 +826,9 @@ async fn delivery_limit_archives() {
 /// The share-session epoch state machine rejects stale and unknown epochs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_epoch_validation() {
+    let _permit = broker_test_permit().await;
     let dir = tempfile::TempDir::new().unwrap();
-    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+    let broker = Broker::start(broker_config(dir.path().to_path_buf()))
         .await
         .unwrap();
     let client = connect(&broker.listen_addr().to_string()).await;
@@ -862,8 +891,9 @@ async fn session_epoch_validation() {
 /// renew kept the record Acquired, so the fetch acquires nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn renew_extends_lock_not_redelivered() {
+    let _permit = broker_test_permit().await;
     let dir = tempfile::TempDir::new().unwrap();
-    let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+    let mut cfg = broker_config(dir.path().to_path_buf());
     cfg.share_group.record_lock_duration = Duration::from_millis(500);
     let broker = Broker::start(cfg).await.unwrap();
     let client = connect(&broker.listen_addr().to_string()).await;
@@ -914,8 +944,9 @@ async fn renew_extends_lock_not_redelivered() {
 /// suppressed the redelivery (not slack in the timing).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn no_renew_redelivers_after_lock_expiry() {
+    let _permit = broker_test_permit().await;
     let dir = tempfile::TempDir::new().unwrap();
-    let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+    let mut cfg = broker_config(dir.path().to_path_buf());
     cfg.share_group.record_lock_duration = Duration::from_millis(500);
     let broker = Broker::start(cfg).await.unwrap();
     let client = connect(&broker.listen_addr().to_string()).await;
@@ -962,8 +993,9 @@ async fn read_committed_skips_open_txn_then_sees_committed() {
     use crabka_broker::coordinator::unified::share::config::ShareIsolationLevel;
     use crabka_client_producer::{Producer, ProducerRecord};
 
+    let _permit = broker_test_permit().await;
     let dir = tempfile::TempDir::new().unwrap();
-    let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+    let mut cfg = broker_config(dir.path().to_path_buf());
     cfg.share_group.isolation_level = ShareIsolationLevel::ReadCommitted;
     let broker = Broker::start(cfg).await.unwrap();
     let bootstrap = broker.listen_addr().to_string();
@@ -1117,8 +1149,9 @@ async fn produce_one(client: &Client, topic: &str, tid: uuid::Uuid, partition: i
 /// v0, v2) — never the gap offset 1's value v1.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fragmented_window_records_match_acquired_offsets() {
+    let _permit = broker_test_permit().await;
     let dir = tempfile::TempDir::new().unwrap();
-    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+    let broker = Broker::start(broker_config(dir.path().to_path_buf()))
         .await
         .unwrap();
     let client = connect(&broker.listen_addr().to_string()).await;

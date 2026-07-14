@@ -17,9 +17,9 @@ use std::{
 use crabka_client_admin::{
     AclEntry, AclEntryFilter, AdminClientLike, AdminError, AlterConfigsOutcome, CreateAclOutcome,
     CreatePartitionsOp, CreatePartitionsOutcome, CreateTopicOutcome, CreateTopicSpec,
-    DeleteAclFilterOutcome, DeleteTopicOutcome, IncrementalAlterOp, KafkaError, QuotaOp,
-    ScramDeletion, ScramUpsertion, ScramUserOutcome, TopicConfigOverrides, TopicMetadata,
-    TopicMetadataEntry, UserQuotaConfig,
+    DeleteAclFilterOutcome, DeleteRecordsOp, DeleteRecordsOutcome, DeleteTopicOutcome,
+    IncrementalAlterOp, KafkaError, QuotaOp, ScramDeletion, ScramUpsertion, ScramUserOutcome,
+    TopicConfigOverrides, TopicMetadata, TopicMetadataEntry, UserQuotaConfig,
 };
 use crabka_client_core::ClientError;
 use crabka_metadata::DelegationToken;
@@ -64,6 +64,7 @@ pub enum RecordedCall {
     Metadata(Vec<String>),
     CreateTopics(Vec<CreateTopicSpec>),
     DeleteTopics(Vec<String>),
+    DeleteRecords(Vec<DeleteRecordsOp>),
     CreatePartitions(Vec<CreatePartitionsOp>),
     DescribeConfigs(Vec<String>),
     IncrementalAlterConfigs(Vec<IncrementalAlterOp>),
@@ -139,6 +140,9 @@ pub struct FakeAdminClient {
     pub delegation_tokens: StdMutex<Vec<DelegationToken>>,
     /// Monotonic id counter for minted tokens.
     pub next_token_id: StdMutex<u64>,
+    /// Makes successful `DeleteTopics` acknowledgements leave topic metadata
+    /// visible, modelling Kafka's asynchronous topic deletion.
+    pub retain_topics_after_delete_ack: StdMutex<bool>,
 }
 
 impl FakeAdminClient {
@@ -148,6 +152,14 @@ impl FakeAdminClient {
 
     pub fn add_topic(&self, name: &str, state: TopicState) {
         self.topics.lock().unwrap().insert(name.into(), state);
+    }
+
+    pub fn retain_topics_after_delete_ack(&self) {
+        *self.retain_topics_after_delete_ack.lock().unwrap() = true;
+    }
+
+    pub fn remove_topic(&self, name: &str) {
+        self.topics.lock().unwrap().remove(name);
     }
 
     pub fn calls(&self) -> Vec<RecordedCall> {
@@ -389,10 +401,13 @@ impl AdminClientLike for FakeAdminClient {
             }
         }
         let mut store = self.topics.lock().unwrap();
+        let retain_topics_after_delete_ack = *self.retain_topics_after_delete_ack.lock().unwrap();
         let outcomes = names
             .iter()
             .map(|n| {
-                store.remove(*n);
+                if !retain_topics_after_delete_ack {
+                    store.remove(*n);
+                }
                 DeleteTopicOutcome {
                     name: (*n).to_string(),
                     error: None,
@@ -448,6 +463,26 @@ impl AdminClientLike for FakeAdminClient {
             })
             .collect();
         Ok(outcomes)
+    }
+
+    async fn delete_records(
+        &mut self,
+        ops: &[DeleteRecordsOp],
+        _timeout_ms: i32,
+    ) -> Result<Vec<DeleteRecordsOutcome>, AdminError> {
+        self.recorded_calls
+            .lock()
+            .unwrap()
+            .push(RecordedCall::DeleteRecords(ops.to_vec()));
+        Ok(ops
+            .iter()
+            .map(|op| DeleteRecordsOutcome {
+                topic: op.topic.clone(),
+                partition: op.partition,
+                error_code: 0,
+                low_watermark: op.offset,
+            })
+            .collect())
     }
 
     async fn describe_configs(

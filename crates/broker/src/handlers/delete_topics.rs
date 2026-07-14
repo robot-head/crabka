@@ -164,13 +164,22 @@ pub(crate) async fn handle(
             continue;
         }
 
+        // Snapshot every local partition before committing the metadata
+        // deletion. The metadata image watcher can remove registry entries as
+        // soon as the commit becomes visible; enumerating afterward races that
+        // watcher and can leave the on-disk log directory behind. A later
+        // create of the same topic name would then reopen the deleted topic's
+        // WAL, including stale transactional visibility state.
+        let local_partitions = partitions.partitions_of(&name);
+
         // Snapshot the (topic_id, partition_id) of every tiered
         // partition BEFORE the controller commits the delete and we tear
         // down in-memory state. After teardown the `Partition` is gone
         // and we lose the `remote.storage.enable` flag plus the topic_id;
         // the snapshot is the sole record that drives the remote-tier
         // partition-delete cascade.
-        let tiered_to_cascade = tiered_partitions(broker, &partitions, &image, &name);
+        let tiered_to_cascade =
+            tiered_partitions(broker, &partitions, &image, &name, &local_partitions);
 
         let res = controller
             .submit_change(vec![MetadataRecord::V1DeleteTopic(DeleteTopicRecord {
@@ -179,9 +188,9 @@ pub(crate) async fn handle(
             .await;
 
         let error_code = match res {
-            Ok(()) => {
+            Ok(_) => {
                 // Committed to quorum — tear down in-memory state and dirs.
-                for idx in partitions.partitions_of(&name) {
+                for idx in local_partitions {
                     partitions.remove(&name, idx);
                     // JBOD: the partition may live in any log dir; resolve
                     // its actual location (existing-location wins).
@@ -250,6 +259,7 @@ fn tiered_partitions(
     partitions: &crate::partition_registry::PartitionRegistry,
     image: &crabka_metadata::MetadataImage,
     topic_name: &str,
+    local_partitions: &[crabka_ids::PartitionIndex],
 ) -> Vec<crabka_remote_storage::TopicIdPartition> {
     if broker.remote_reader.is_none() {
         return Vec::new();
@@ -257,9 +267,9 @@ fn tiered_partitions(
     let Some(topic_id) = image.topic(topic_name).map(|topic| topic.topic_id) else {
         return Vec::new();
     };
-    partitions
-        .partitions_of(topic_name)
-        .into_iter()
+    local_partitions
+        .iter()
+        .copied()
         .filter(|&index| {
             partitions.get(topic_name, index).is_some_and(|partition| {
                 partition

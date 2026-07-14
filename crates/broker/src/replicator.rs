@@ -158,6 +158,7 @@ fn ensure_local_partition(cfg: &Config) -> Result<(), String> {
                 log,
                 cfg.log_dir_status.clone(),
                 cfg.producer_state.clone(),
+                false,
             ))
         })
 }
@@ -811,7 +812,10 @@ mod tests {
             }
         }
 
-        async fn submit_change(&self, _records: Vec<MetadataRecord>) -> Result<(), RaftError> {
+        async fn submit_change(
+            &self,
+            _records: Vec<MetadataRecord>,
+        ) -> Result<crabka_raft::SubmitChangeResult, RaftError> {
             panic!("unused in replicator tests")
         }
 

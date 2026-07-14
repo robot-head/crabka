@@ -50,6 +50,8 @@ pub enum TlsError {
     Io(#[from] std::io::Error),
     #[error("rustls: {0}")]
     Rustls(#[from] rustls::Error),
+    #[error("PEM: {0}")]
+    Pem(String),
     #[error("no private key in {0}")]
     NoPrivateKey(PathBuf),
     #[error("no certificates in {0}")]
@@ -66,6 +68,38 @@ pub enum TlsError {
 }
 
 impl TlsConfig {
+    /// Build an mTLS client directly from Kubernetes Secret PEM bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when certificates, private keys, or trust roots are
+    /// missing, malformed, or rejected by rustls.
+    pub fn build_client_config_from_pem(
+        cert_chain_pem: &[u8],
+        private_key_pem: &[u8],
+        trust_roots_pem: &[u8],
+    ) -> Result<Arc<rustls::ClientConfig>, TlsError> {
+        use rustls::pki_types::pem::PemObject;
+
+        let mut roots = rustls::RootCertStore::empty();
+        for cert in CertificateDer::pem_slice_iter(trust_roots_pem) {
+            roots.add(cert.map_err(|error| TlsError::Pem(error.to_string()))?)?;
+        }
+        let certs = CertificateDer::pem_slice_iter(cert_chain_pem)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| TlsError::Pem(error.to_string()))?;
+        if certs.is_empty() {
+            return Err(TlsError::NoCerts(PathBuf::from("<memory>")));
+        }
+        let key = PrivateKeyDer::from_pem_slice(private_key_pem)
+            .map_err(|error| TlsError::Pem(error.to_string()))?;
+        Ok(Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_client_auth_cert(certs, key)?,
+        ))
+    }
+
     // TLS server-config setup. skip_all keeps the loaded certs/key material out
     // of span fields; only the non-sensitive client-auth mode is recorded.
     // `err` surfaces cert/key loading + verifier-build failures (Debug).

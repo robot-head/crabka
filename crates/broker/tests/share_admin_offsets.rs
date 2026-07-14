@@ -18,7 +18,10 @@
 //! - Describe of an unknown topic returns `UNKNOWN_TOPIC_OR_PARTITION` per
 //!   partition.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use assert2::{assert, check};
 use crabka_broker::{BootstrapMode, Broker, BrokerConfig};
@@ -118,7 +121,25 @@ fn wire(tid: uuid::Uuid) -> WireUuid {
 }
 
 const SHARE_STATE_TOPIC: &str = "__share_group_state";
-const SHARE_STATE_PARTITIONS: i32 = 50;
+const SHARE_STATE_PARTITIONS: i32 = 1;
+const MAX_CONCURRENT_TEST_BROKERS: usize = 3;
+
+async fn broker_test_permit() -> tokio::sync::OwnedSemaphorePermit {
+    static GATE: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+
+    Arc::clone(
+        GATE.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_TEST_BROKERS))),
+    )
+    .acquire_owned()
+    .await
+    .expect("broker test concurrency gate remains open")
+}
+
+fn broker_config(log_dir: std::path::PathBuf) -> BrokerConfig {
+    let mut config = BrokerConfig::for_tests(log_dir);
+    config.share_coordinator.state_topic_num_partitions = SHARE_STATE_PARTITIONS;
+    config
+}
 
 async fn bootstrap_share_state(broker: &crabka_broker::BrokerHandle, client: &Client, key: &str) {
     let resp = client
@@ -427,8 +448,9 @@ async fn describe_offsets(
 /// SPSO advances to 3 and the (locally-led) partition reports lag 0.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn describe_reflects_spso_after_consume() {
+    let _permit = broker_test_permit().await;
     let dir = tempfile::TempDir::new().unwrap();
-    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+    let broker = Broker::start(broker_config(dir.path().to_path_buf()))
         .await
         .unwrap();
     let client = connect(&broker.listen_addr().to_string()).await;
@@ -525,8 +547,9 @@ async fn describe_until(
 /// real acquire path against the reset (and invalidated) leader cache.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn alter_resets_empty_group() {
+    let _permit = broker_test_permit().await;
     let dir = tempfile::TempDir::new().unwrap();
-    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+    let broker = Broker::start(broker_config(dir.path().to_path_buf()))
         .await
         .unwrap();
     let client = connect(&broker.listen_addr().to_string()).await;
@@ -593,8 +616,9 @@ async fn alter_resets_empty_group() {
 /// `NON_EMPTY_GROUP`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn alter_non_empty_group_fenced() {
+    let _permit = broker_test_permit().await;
     let dir = tempfile::TempDir::new().unwrap();
-    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+    let broker = Broker::start(broker_config(dir.path().to_path_buf()))
         .await
         .unwrap();
     let client = connect(&broker.listen_addr().to_string()).await;
@@ -634,8 +658,9 @@ async fn alter_non_empty_group_fenced() {
 /// subsequent Describe reads the partition as missing (`start_offset` -1).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn delete_removes_topic() {
+    let _permit = broker_test_permit().await;
     let dir = tempfile::TempDir::new().unwrap();
-    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+    let broker = Broker::start(broker_config(dir.path().to_path_buf()))
         .await
         .unwrap();
     let client = connect(&broker.listen_addr().to_string()).await;
@@ -696,8 +721,9 @@ async fn delete_removes_topic() {
 /// Describe of an unknown topic returns `UNKNOWN_TOPIC_OR_PARTITION` per partition.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn describe_unknown_topic() {
+    let _permit = broker_test_permit().await;
     let dir = tempfile::TempDir::new().unwrap();
-    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+    let broker = Broker::start(broker_config(dir.path().to_path_buf()))
         .await
         .unwrap();
     let client = connect(&broker.listen_addr().to_string()).await;
@@ -726,8 +752,9 @@ async fn describe_unknown_topic() {
 /// `DescribeShareGroupOffsets` marks each requested group `UNSUPPORTED_VERSION`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admin_offsets_rejected_when_share_disabled() {
+    let _permit = broker_test_permit().await;
     let dir = tempfile::TempDir::new().unwrap();
-    let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+    let mut cfg = broker_config(dir.path().to_path_buf());
     cfg.share_group.enable = false;
     let broker = Broker::start(cfg).await.unwrap();
     let client = connect(&broker.listen_addr().to_string()).await;
@@ -756,14 +783,13 @@ async fn admin_offsets_rejected_when_share_disabled() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn delivery_complete_count_restored_across_restart() {
     const N: i64 = 4;
+    let _permit = broker_test_permit().await;
     let dir = tempfile::TempDir::new().unwrap();
     let log_dir = dir.path().to_path_buf();
 
     let tid;
     {
-        let broker = Broker::start(BrokerConfig::for_tests(log_dir.clone()))
-            .await
-            .unwrap();
+        let broker = Broker::start(broker_config(log_dir.clone())).await.unwrap();
         let client = connect(&broker.listen_addr().to_string()).await;
         create_topic(&broker, &client, "t", 1).await;
         tid = topic_id(&broker, "t");
@@ -809,7 +835,7 @@ async fn delivery_complete_count_restored_across_restart() {
     }
 
     {
-        let mut cfg = BrokerConfig::for_tests(log_dir);
+        let mut cfg = broker_config(log_dir);
         cfg.bootstrap_mode = BootstrapMode::Rejoin;
         let broker = Broker::start(cfg).await.unwrap();
         let client = connect(&broker.listen_addr().to_string()).await;
@@ -845,14 +871,13 @@ async fn delivery_complete_count_restored_across_restart() {
 /// `partitions` list is empty — before AND after a restart.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn delete_rewrites_metadata_topic_absent_after_restart() {
+    let _permit = broker_test_permit().await;
     let dir = tempfile::TempDir::new().unwrap();
     let log_dir = dir.path().to_path_buf();
 
     let tid;
     {
-        let broker = Broker::start(BrokerConfig::for_tests(log_dir.clone()))
-            .await
-            .unwrap();
+        let broker = Broker::start(broker_config(log_dir.clone())).await.unwrap();
         let client = connect(&broker.listen_addr().to_string()).await;
         create_topic(&broker, &client, "t", 1).await;
         tid = topic_id(&broker, "t");
@@ -936,7 +961,7 @@ async fn delete_rewrites_metadata_topic_absent_after_restart() {
     }
 
     {
-        let mut cfg = BrokerConfig::for_tests(log_dir);
+        let mut cfg = broker_config(log_dir);
         cfg.bootstrap_mode = BootstrapMode::Rejoin;
         let broker = Broker::start(cfg).await.unwrap();
         let client = connect(&broker.listen_addr().to_string()).await;

@@ -33,6 +33,7 @@ pub struct Log {
     config: std::sync::Arc<std::sync::RwLock<LogConfig>>,
     segments: Vec<Segment>,
     active: Option<Segment>,
+    dir_sync_needed: bool,
     /// Override for `log_start_offset()`. When `Some(n)`, the effective
     /// `log_start` is `max(derived_from_segments, n)`. Used by
     /// `trim_to_offset` (and in tests) to advance the log start pointer
@@ -59,6 +60,11 @@ pub struct Log {
     /// Per-partition leader-epoch checkpoint. Shared across segments —
     /// epoch history accumulates over the log's lifetime.
     epoch_checkpoint: LeaderEpochCheckpoint,
+
+    /// External next-offset authority used by diskless recovery. When set by
+    /// the broker after reading the committed `KRaft` frontier, caller-supplied
+    /// append-at bases must equal `max(log_end_offset, reconciled_frontier)`.
+    reconciled_frontier: Offset,
 }
 
 /// Result of [`Log::read`]: the absolute offset of the first batch
@@ -88,6 +94,8 @@ pub struct RawRead {
     pub bytes: Bytes,
     /// Length of [`Self::bytes`] in bytes.
     pub total: usize,
+    /// Last offset included in [`Self::bytes`], or `None` when empty.
+    pub last_offset: Option<Offset>,
 }
 
 impl RawRead {
@@ -96,7 +104,44 @@ impl RawRead {
             start_offset: off,
             bytes: Bytes::new(),
             total: 0,
+            last_offset: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod sync_observer {
+    use std::cell::RefCell;
+    #[cfg(unix)]
+    use std::path::PathBuf;
+
+    use crabka_ids::Offset;
+
+    #[cfg(unix)]
+    thread_local! {
+        static DIR_SYNCS: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
+    }
+
+    thread_local! {
+        static SEGMENT_FLUSHES: RefCell<Vec<Offset>> = const { RefCell::new(Vec::new()) };
+    }
+
+    #[cfg(unix)]
+    pub(super) fn take_dir_syncs() -> Vec<PathBuf> {
+        DIR_SYNCS.take()
+    }
+
+    pub(super) fn take_segment_flushes() -> Vec<Offset> {
+        SEGMENT_FLUSHES.take()
+    }
+
+    #[cfg(unix)]
+    pub(super) fn record_dir_sync(dir: PathBuf) {
+        DIR_SYNCS.with_borrow_mut(|synced| synced.push(dir));
+    }
+
+    pub(super) fn record_segment_flush(base: Offset) {
+        SEGMENT_FLUSHES.with_borrow_mut(|flushed| flushed.push(base));
     }
 }
 
@@ -255,15 +300,21 @@ impl Log {
             }
         }
 
-        let active = match active {
-            Some(s) => s,
-            None => Segment::create(&dir, Offset(0))?,
+        let (active, dir_sync_needed) = match active {
+            // We cannot know whether the process that created this segment
+            // fsynced the parent directory before crashing. Conservatively
+            // require one directory fsync on the next explicit `sync()` so a
+            // diskless WAL ack never relies only on file data durability.
+            Some(s) => (s, true),
+            None => (Segment::create(&dir, Offset(0))?, true),
         };
 
         let active_txn_index = TxnIndex::open(active.txn_index_path())?;
-        let epoch_checkpoint = LeaderEpochCheckpoint::open(active.leader_epoch_checkpoint_path())?;
+        let mut epoch_checkpoint =
+            LeaderEpochCheckpoint::open(active.leader_epoch_checkpoint_path())?;
         // LSO starts at log_end_offset(); computed before moving `active`.
         let lso = active.last_offset() + 1;
+        epoch_checkpoint.truncate_from_end(lso)?;
 
         let config = std::sync::Arc::new(std::sync::RwLock::new(config));
 
@@ -276,11 +327,13 @@ impl Log {
             config,
             segments,
             active: Some(active),
+            dir_sync_needed,
             start_offset_override: None,
             lso,
             pending: HashMap::new(),
             active_txn_index,
             epoch_checkpoint,
+            reconciled_frontier: Offset(0),
         })
     }
 
@@ -382,6 +435,7 @@ impl Log {
         self.pending.clear(); // reset_to is a hard reset (after divergence)
         self.lso = new_active.last_offset() + 1; // = new_base (empty segment)
         self.active = Some(new_active);
+        self.dir_sync_needed = true;
         // The log now holds no records, so the leader-epoch cache must hold no
         // entries (Kafka's truncateFullyAndStartAt → leaderEpochCache.clearAndFlush).
         // Leaving stale entries makes a follower advertise a `last_fetched_epoch`
@@ -546,6 +600,100 @@ impl Log {
         Ok(assigned_base)
     }
 
+    /// Append a producer batch **verbatim** at a caller-supplied base offset.
+    ///
+    /// `base_offset` must equal the log's current [`Log::log_end_offset`];
+    /// otherwise this returns [`LogError::OffsetMismatch`] without appending.
+    /// On success, the stored batch is stamped with `base_offset` and the
+    /// batch's leader epoch without decoding or re-encoding CRC-covered bytes.
+    ///
+    /// # Errors
+    /// Returns [`LogError::OffsetMismatch`] when `base_offset` is not the log
+    /// end offset, or propagates segment/checkpoint I/O and validation errors.
+    #[instrument(
+        level = "debug",
+        skip_all,
+        fields(
+            supplied_base = base_offset.0,
+            leader_epoch = batch.leader_epoch.0,
+            bytes = batch.bytes.len(),
+        ),
+        err,
+    )]
+    pub fn append_verbatim_at(
+        &mut self,
+        batch: &VerbatimBatch,
+        base_offset: Offset,
+    ) -> Result<Offset, LogError> {
+        let expected = self.append_at_expected_offset();
+        if base_offset != expected {
+            return Err(LogError::OffsetMismatch {
+                expected,
+                actual: base_offset,
+            });
+        }
+
+        let leader_epoch = batch.leader_epoch;
+        self.append_verbatim_preserving_offset(batch, base_offset)?;
+        if leader_epoch.is_known()
+            && self
+                .epoch_checkpoint
+                .latest_epoch()
+                .is_none_or(|e| leader_epoch > e)
+        {
+            self.epoch_checkpoint.append(leader_epoch, base_offset)?;
+        }
+        Ok(base_offset)
+    }
+
+    /// Flush and `fsync` the active segment to stable storage, independent of
+    /// [`LogConfig::flush_on_append`]. Also fsyncs the log directory after a new
+    /// segment file has been created, so the segment remains reachable after a
+    /// crash on filesystems that require parent-directory fsync.
+    ///
+    /// # Errors
+    /// Returns a [`LogError`] if the underlying segment or directory flush fails.
+    pub fn sync(&mut self) -> Result<(), LogError> {
+        for segment in &mut self.segments {
+            Self::segment_flush(segment)?;
+        }
+        self.active_segment_flush()?;
+        if self.dir_sync_needed {
+            // Rust's standard directory-open path is supported on Unix, where
+            // syncing the parent makes newly-created segment names durable. On
+            // Windows the platform provides no equivalent through `std`; the
+            // segment, offset-index, and time-index handles above have still
+            // been flushed with `sync_data`.
+            #[cfg(unix)]
+            Self::sync_log_dir(&self.dir)?;
+            self.dir_sync_needed = false;
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn sync_log_dir(dir: &Path) -> Result<(), LogError> {
+        let log_dir = fs::File::open(dir)?;
+        log_dir.sync_all()?;
+        #[cfg(test)]
+        sync_observer::record_dir_sync(dir.to_path_buf());
+        Ok(())
+    }
+
+    fn active_segment_flush(&mut self) -> Result<(), LogError> {
+        let active = self
+            .active
+            .as_mut()
+            .expect("active segment must exist after Log::open");
+        Self::segment_flush(active)
+    }
+
+    fn segment_flush(segment: &mut Segment) -> Result<(), LogError> {
+        #[cfg(test)]
+        sync_observer::record_segment_flush(segment.base_offset());
+        segment.flush()
+    }
+
     /// Verbatim counterpart of [`Log::append_preserving_offset`]: roll if
     /// needed, append the verbatim bytes to the active segment, honor
     /// `flush_on_append`, and update LSO from the batch's
@@ -588,7 +736,7 @@ impl Log {
         )?;
 
         if flush_on_append {
-            active.flush()?;
+            self.active_segment_flush()?;
         }
 
         // --- LSO tracking (no control batches on this path) ---
@@ -612,6 +760,21 @@ impl Log {
         &self.epoch_checkpoint
     }
 
+    /// Reconcile append-at offset assignment to an external next-offset frontier.
+    ///
+    /// Diskless partitions use the `KRaft` metadata log as the offset authority.
+    /// After a crash, `KRaft` may have committed a next-offset that is ahead of the
+    /// recovered local WAL tail. In that case the gap is intentional: the caller
+    /// sets this frontier and the next append-at must use it instead of the local
+    /// LEO. Classic logs never call this method and keep the default frontier 0.
+    pub fn reconcile_next_offset(&mut self, frontier: Offset) {
+        self.reconciled_frontier = self.reconciled_frontier.max(frontier);
+    }
+
+    fn append_at_expected_offset(&self) -> Offset {
+        self.log_end_offset().max(self.reconciled_frontier)
+    }
+
     /// Append a `RecordBatch` whose `base_offset` is set by the caller.
     ///
     /// Unlike [`Log::append`], this does NOT overwrite `batch.base_offset`
@@ -632,7 +795,7 @@ impl Log {
     /// # Errors
     /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
     pub fn append_at(&mut self, batch: &mut RecordBatch, offset: Offset) -> Result<(), LogError> {
-        let expected = self.log_end_offset();
+        let expected = self.append_at_expected_offset();
         if offset != expected {
             return Err(LogError::OffsetMismatch {
                 expected,
@@ -687,7 +850,7 @@ impl Log {
         active.append(batch, index_interval_bytes)?;
 
         if flush_on_append {
-            active.flush()?;
+            self.active_segment_flush()?;
         }
 
         // --- LSO tracking + .txnindex writes ---
@@ -748,6 +911,7 @@ impl Log {
         let new_seg = Segment::create(&self.dir, new_base)?;
         self.active_txn_index = TxnIndex::open(new_seg.txn_index_path())?;
         self.active = Some(new_seg);
+        self.dir_sync_needed = true;
         Ok(())
     }
 
@@ -858,6 +1022,7 @@ impl Log {
         let mut current = fetch_offset;
         let mut remaining = max_bytes;
         let mut got_first = false;
+        let mut last_offset = None;
 
         for seg in &self.segments {
             if seg.last_offset() < current {
@@ -872,6 +1037,7 @@ impl Log {
                 }
                 remaining = remaining.saturating_sub(r.bytes.len());
                 current = r.last_offset + 1;
+                last_offset = Some(r.last_offset);
                 chunks.push(r.bytes);
                 if remaining == 0 || current >= limit_offset {
                     break;
@@ -890,6 +1056,7 @@ impl Log {
                     start_offset = r.start_offset;
                 }
                 chunks.push(r.bytes);
+                last_offset = Some(r.last_offset);
             }
         }
 
@@ -911,6 +1078,7 @@ impl Log {
             start_offset,
             bytes,
             total,
+            last_offset,
         })
     }
 
@@ -1062,6 +1230,7 @@ impl Log {
                 let new_seg = Segment::create(&self.dir, offset)?;
                 self.active_txn_index = TxnIndex::open(new_seg.txn_index_path())?;
                 self.active = Some(new_seg);
+                self.dir_sync_needed = true;
             }
         } else if let Some(active) = self.active.as_mut()
             && active.last_offset() >= offset
@@ -1746,6 +1915,122 @@ mod tests {
     }
 
     #[test]
+    fn append_verbatim_at_stamps_base_byte_exact() {
+        let (dir, mut log) = test_log();
+
+        let mut prefix = test_batch_at(0);
+        prefix.partition_leader_epoch = 2;
+        log.append(&mut prefix).unwrap();
+
+        let mut producer = test_batch_at(0);
+        producer.base_offset = 999;
+        producer.partition_leader_epoch = -1;
+        let (_wire, vb) = verbatim_from(&producer, LeaderEpoch(4));
+
+        let appended = log.append_verbatim_at(&vb, Offset(1)).unwrap();
+
+        assert_eq!(appended, Offset(1));
+        assert_eq!(log.log_end_offset(), Offset(2));
+        assert_eq!(
+            log.epoch_checkpoint().entries(),
+            &[
+                EpochEntry {
+                    epoch: LeaderEpoch(2),
+                    start_offset: Offset(0),
+                },
+                EpochEntry {
+                    epoch: LeaderEpoch(4),
+                    start_offset: Offset(1),
+                },
+            ]
+        );
+
+        let mut expected_wire = bytes::BytesMut::new();
+        prefix.encode(&mut expected_wire).unwrap();
+        let mut stamped = producer.clone();
+        stamped.base_offset = 1;
+        stamped.partition_leader_epoch = 4;
+        stamped.encode(&mut expected_wire).unwrap();
+
+        let r = log
+            .read_raw(Offset(0), log.log_end_offset(), 10 * 1024 * 1024)
+            .unwrap();
+        assert_eq!(
+            r.bytes[..],
+            expected_wire[..],
+            "verbatim append_at must be byte-exact after supplied base+epoch stamping"
+        );
+        drop(dir);
+    }
+
+    #[test]
+    fn append_verbatim_at_rejects_non_leo_base() {
+        let (dir, mut log) = test_log();
+
+        let producer = test_batch_at(0);
+        let (_wire, vb) = verbatim_from(&producer, LeaderEpoch(4));
+
+        let err = log.append_verbatim_at(&vb, Offset(1)).unwrap_err();
+
+        assert!(
+            matches!(
+                err,
+                LogError::OffsetMismatch {
+                    expected: Offset(0),
+                    actual: Offset(1)
+                }
+            ),
+            "non-LEO append_verbatim_at must report OffsetMismatch"
+        );
+        assert_eq!(log.log_end_offset(), Offset(0));
+        assert!(
+            log.read_raw(Offset(0), Offset(0), 1024)
+                .unwrap()
+                .bytes
+                .is_empty()
+        );
+        drop(dir);
+    }
+
+    #[test]
+    fn append_at_uses_reconciled_frontier_floor() {
+        let (dir, mut log) = test_log();
+        let mut prefix = test_batch_at(0);
+        log.append(&mut prefix).unwrap();
+
+        log.reconcile_next_offset(Offset(3));
+        let mut gap_batch = test_batch_at(0);
+        let mut rejected = gap_batch.clone();
+        let err = log.append_at(&mut rejected, Offset(1)).unwrap_err();
+        assert!(matches!(
+            err,
+            LogError::OffsetMismatch {
+                expected: Offset(3),
+                actual: Offset(1)
+            }
+        ));
+
+        log.append_at(&mut gap_batch, Offset(3)).unwrap();
+        assert_eq!(log.log_end_offset(), Offset(4));
+        drop(dir);
+    }
+
+    #[test]
+    fn append_verbatim_at_uses_reconciled_frontier_floor() {
+        let (dir, mut log) = test_log();
+
+        log.reconcile_next_offset(Offset(5));
+        let producer = test_batch_at(0);
+        let (_wire, vb) = verbatim_from(&producer, LeaderEpoch(4));
+
+        let appended = log.append_verbatim_at(&vb, Offset(5)).unwrap();
+
+        assert_eq!(appended, Offset(5));
+        assert_eq!(log.log_end_offset(), Offset(6));
+        drop(dir);
+    }
+
+    #[test]
     fn append_verbatim_matches_owned_append_bytes() {
         // The verbatim path and the owned path must write byte-identical
         // .log bytes for the same logical batch — proving passthrough does
@@ -1826,6 +2111,84 @@ mod tests {
         drop(log);
         let log_path = dir.path().join("00000000000000000000.log");
         assert2::assert!(log_path.exists());
+    }
+
+    #[test]
+    fn sync_persists_appended_records() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+            log.append(&mut sample_batch(3)).unwrap();
+            log.sync().unwrap(); // fsync without relying on flush_on_append
+        }
+        // Reopen from disk: the synced records are present.
+        let log = Log::open(dir.path(), LogConfig::default()).unwrap();
+        assert2::assert!(log.log_end_offset() == Offset(3));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sync_fsyncs_parent_dir_after_segment_lifecycle_events() {
+        enum Case {
+            InitialCreation,
+            ReopenBeforePriorSync,
+            Rollover,
+        }
+
+        for case in [
+            Case::InitialCreation,
+            Case::ReopenBeforePriorSync,
+            Case::Rollover,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut log = match case {
+                Case::InitialCreation => Log::open(dir.path(), LogConfig::default()).unwrap(),
+                Case::ReopenBeforePriorSync => {
+                    drop(Log::open(dir.path(), LogConfig::default()).unwrap());
+                    Log::open(dir.path(), LogConfig::default()).unwrap()
+                }
+                Case::Rollover => {
+                    let mut log = Log::open(
+                        dir.path(),
+                        LogConfig {
+                            segment_bytes: 1,
+                            ..LogConfig::default()
+                        },
+                    )
+                    .unwrap();
+                    log.append(&mut sample_batch(1)).unwrap();
+                    log.sync().unwrap();
+                    log.append(&mut sample_batch(1)).unwrap();
+                    log
+                }
+            };
+            sync_observer::take_dir_syncs();
+
+            log.sync().unwrap();
+
+            assert2::assert!(sync_observer::take_dir_syncs() == vec![dir.path().to_path_buf()]);
+        }
+    }
+
+    #[test]
+    fn sync_flushes_sealed_and_active_segments_after_rollover() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = Log::open(
+            dir.path(),
+            LogConfig {
+                segment_bytes: 1,
+                ..LogConfig::default()
+            },
+        )
+        .unwrap();
+        log.append(&mut sample_batch(1)).unwrap();
+        log.sync().unwrap();
+        sync_observer::take_segment_flushes();
+
+        log.append(&mut sample_batch(1)).unwrap();
+        log.sync().unwrap();
+
+        assert2::assert!(sync_observer::take_segment_flushes() == vec![Offset(0), Offset(1)]);
     }
 
     #[test]
@@ -2034,6 +2397,51 @@ mod tests {
         drop(f);
         let log = Log::open(dir.path(), LogConfig::default()).unwrap();
         assert2::assert!(log.log_end_offset() == 5);
+    }
+
+    #[test]
+    fn open_truncates_epoch_checkpoint_to_recovered_leo() {
+        let dir = tempdir().unwrap();
+        let log_path = dir.path().join("00000000000000000000.log");
+        let first_batch_len = {
+            let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+            let mut first = sample_batch_with_epoch(1, 1);
+            log.append(&mut first).unwrap();
+            let first_batch_len = log
+                .read_raw(Offset(0), Offset(1), usize::MAX)
+                .unwrap()
+                .total;
+            let mut torn = sample_batch_with_epoch(1, 7);
+            log.append(&mut torn).unwrap();
+            assert_eq!(log.epoch_checkpoint().latest_epoch(), Some(LeaderEpoch(7)));
+            first_batch_len
+        };
+
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&log_path)
+            .unwrap()
+            .set_len(u64::try_from(first_batch_len + 5).unwrap())
+            .unwrap();
+
+        let cfg = LogConfig {
+            validate_on_open: true,
+            ..LogConfig::default()
+        };
+        let reopened = Log::open(dir.path(), cfg).unwrap();
+
+        assert_eq!(reopened.log_end_offset(), Offset(1));
+        assert!(
+            reopened
+                .epoch_checkpoint()
+                .entries()
+                .iter()
+                .all(|entry| entry.start_offset < reopened.log_end_offset())
+        );
+        assert_eq!(
+            reopened.epoch_checkpoint().latest_epoch(),
+            Some(LeaderEpoch(1))
+        );
     }
 
     #[test]

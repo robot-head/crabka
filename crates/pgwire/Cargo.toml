@@ -1,0 +1,39 @@
+[package]
+name = "crabka-pgwire"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "PostgreSQL v3 wire-protocol server: simple and extended query protocols, SCRAM-SHA-256, TLS, and CancelRequest"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-pgwire"
+readme = "README.md"
+keywords = ["postgres", "wire-protocol", "scram", "crabka", "gres"]
+categories = ["database-implementations", "network-programming"]
+
+[lints]
+workspace = true
+
+[dependencies]
+bytes = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
+sha2 = { workspace = true }
+hmac = { workspace = true }
+pbkdf2 = { workspace = true }
+base64 = { workspace = true }
+rand = { workspace = true }
+subtle = { workspace = true }
+
+[dev-dependencies]
+tokio-postgres = { workspace = true }
+proptest = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+sqlx = { workspace = true }

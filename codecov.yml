@@ -1,15 +1,16 @@
 codecov:
   notify:
-    # Wait for all eleven coverage uploads (one per CI flag) before posting
+    # Wait for all eighteen coverage uploads before posting. Most flags upload
+    # once; workspace-integration uploads one report from each of two shards.
     # status checks or PR comments. Otherwise the first upload triggers a
     # report against the partial coverage, which shows a misleading drop
     # until the rest of the matrix lands. The flags below must match the
     # `flags:` values in .github/workflows/ci.yml.
-    after_n_builds: 11
+    after_n_builds: 18
     wait_for_ci: true
 
 comment:
-  after_n_builds: 11
+  after_n_builds: 18
   require_changes: false
 
 coverage:
@@ -75,9 +76,21 @@ flags:
     carryforward: true
   client-streams-integration:
     carryforward: true
+  schema-serde:
+    carryforward: true
   grpc-gateway-integration:
     carryforward: true
   schema-registry-integration:
     carryforward: true
   operator-integration:
+    carryforward: true
+  gres-integration:
+    carryforward: true
+  gres-conformance:
+    carryforward: true
+  workspace-integration:
+    carryforward: true
+  admin-ui-integration:
+    carryforward: true
+  traces-conformance:
     carryforward: true

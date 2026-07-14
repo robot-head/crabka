@@ -49,6 +49,19 @@ impl BlockStore {
         }
     }
 
+    /// Build a `BlockStore` whose object store is constructed from `cfg` via the
+    /// shared `crabka-object-store` substrate. `base` remains the caller's
+    /// `DataFusion` registration URL (a query-engine concern owned by the caller).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BlockStoreError::ObjectStore`] if the backend builder rejects `cfg`.
+    pub fn from_config(cfg: &crabka_object_store::ObjectStoreConfig, base: Url) -> Result<Self> {
+        let store = crabka_object_store::build_object_store(cfg)
+            .map_err(|e| BlockStoreError::ObjectStore(e.to_string()))?;
+        Ok(Self::new(store, base))
+    }
+
     #[must_use]
     pub fn writer(&self) -> BlockWriter {
         BlockWriter::new(self.store.clone())
@@ -240,7 +253,7 @@ mod tests {
         datatypes::{DataType, Field, Schema, SchemaRef},
         record_batch::RecordBatch,
     };
-    use object_store::{ObjectStore, memory::InMemory};
+    use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory};
 
     use super::*;
     use crate::{
@@ -284,6 +297,22 @@ mod tests {
         bs.index_mut().add_series("t", fp, &api);
         bs.index_mut().add_block(&meta);
         (bs, schema)
+    }
+
+    #[tokio::test]
+    async fn from_config_inmemory_builds_usable_store() {
+        use crabka_object_store::ObjectStoreConfig;
+
+        let base = url::Url::parse("memory:///").unwrap();
+        let bs = BlockStore::from_config(&ObjectStoreConfig::InMemory, base).unwrap();
+        let store = bs.object_store();
+        let path = object_store::path::Path::from("t/x");
+        store
+            .put(&path, object_store::PutPayload::from(b"hi".to_vec()))
+            .await
+            .unwrap();
+        let got = store.get(&path).await.unwrap().bytes().await.unwrap();
+        assert2::assert!(&got[..] == b"hi");
     }
 
     #[tokio::test]

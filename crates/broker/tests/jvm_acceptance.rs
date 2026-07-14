@@ -2222,9 +2222,9 @@ fn scram_jaas(user: &str, pass: &str) -> String {
 /// Spawn the broker with a single `SASL_PLAINTEXT` listener on
 /// `0.0.0.0:9092` (advertised as `host.docker.internal:9092`), pre-populated
 /// with the given PLAIN `users`. Mirrors [`start_host_broker`] otherwise.
-async fn start_sasl_plaintext_broker(
+fn start_sasl_plaintext_broker(
     users: &[(&str, &str)],
-) -> (crabka_broker::BrokerHandle, tempfile::TempDir) {
+) -> impl std::future::Future<Output = (crabka_broker::BrokerHandle, tempfile::TempDir)> {
     use crabka_broker::config::ListenerSpec;
     use crabka_security::{ListenerProtocol, SaslMechanism};
 
@@ -2270,14 +2270,16 @@ async fn start_sasl_plaintext_broker(
             .plain_credentials
             .insert((*u).to_string(), (*p).to_string());
     }
-    let handle = Broker::start(config).await.expect("start sasl broker");
-    eprintln!("CRABKA[test] sasl broker started listen={LISTEN} advertised={BOOTSTRAP}");
-    tracing::info!(
-        listen = %LISTEN,
-        advertised = %BOOTSTRAP,
-        "sasl broker started for jvm acceptance"
-    );
-    (handle, dir)
+    Box::pin(async move {
+        let handle = Broker::start(config).await.expect("start sasl broker");
+        eprintln!("CRABKA[test] sasl broker started listen={LISTEN} advertised={BOOTSTRAP}");
+        tracing::info!(
+            listen = %LISTEN,
+            advertised = %BOOTSTRAP,
+            "sasl broker started for jvm acceptance"
+        );
+        (handle, dir)
+    })
 }
 
 /// Spawn the broker with a single `SASL_PLAINTEXT` listener that enables
@@ -2290,10 +2292,10 @@ async fn start_sasl_plaintext_broker(
 ///
 /// Used by `jvm_sasl_scram_sha512_produce_consume` and
 /// `jvm_sasl_scram_sha256_produce_consume`.
-async fn start_dual_mech_broker(
+fn start_dual_mech_broker(
     admin: &str,
     admin_pass: &str,
-) -> (crabka_broker::BrokerHandle, tempfile::TempDir) {
+) -> impl std::future::Future<Output = (crabka_broker::BrokerHandle, tempfile::TempDir)> {
     use crabka_broker::config::ListenerSpec;
     use crabka_security::{ListenerProtocol, SaslMechanism};
 
@@ -2345,14 +2347,16 @@ async fn start_dual_mech_broker(
     config
         .plain_credentials
         .insert(admin.to_string(), admin_pass.to_string());
-    let handle = Broker::start(config).await.expect("start dual-mech broker");
-    eprintln!("CRABKA[test] dual-mech broker started listen={LISTEN} advertised={BOOTSTRAP}");
-    tracing::info!(
-        listen = %LISTEN,
-        advertised = %BOOTSTRAP,
-        "dual-mech broker started for jvm acceptance"
-    );
-    (handle, dir)
+    Box::pin(async move {
+        let handle = Broker::start(config).await.expect("start dual-mech broker");
+        eprintln!("CRABKA[test] dual-mech broker started listen={LISTEN} advertised={BOOTSTRAP}");
+        tracing::info!(
+            listen = %LISTEN,
+            advertised = %BOOTSTRAP,
+            "dual-mech broker started for jvm acceptance"
+        );
+        (handle, dir)
+    })
 }
 
 /// Write `props` to a `tempfile::NamedTempFile` and (on unix) chmod it to
@@ -3361,10 +3365,10 @@ fn docker_run_kafka_tool_with_image_and_mounts(
 /// This is the dual-mech broker from [`start_dual_mech_broker`] flipped
 /// from `SaslPlaintext` to `SaslSsl` with a `TlsConfig` attached — i.e.
 /// the production-shape listener configuration.
-async fn start_sasl_ssl_broker(
+fn start_sasl_ssl_broker(
     admin: &str,
     admin_pass: &str,
-) -> (crabka_broker::BrokerHandle, tempfile::TempDir) {
+) -> impl std::future::Future<Output = (crabka_broker::BrokerHandle, tempfile::TempDir)> {
     use crabka_broker::config::ListenerSpec;
     use crabka_security::{ListenerProtocol, SaslMechanism, TlsConfig};
 
@@ -3434,14 +3438,16 @@ async fn start_sasl_ssl_broker(
     config
         .plain_credentials
         .insert(admin.to_string(), admin_pass.to_string());
-    let handle = Broker::start(config).await.expect("start sasl_ssl broker");
-    eprintln!("CRABKA[test] sasl_ssl broker started listen={LISTEN} advertised={BOOTSTRAP}");
-    tracing::info!(
-        listen = %LISTEN,
-        advertised = %BOOTSTRAP,
-        "sasl_ssl broker started for jvm acceptance"
-    );
-    (handle, dir)
+    Box::pin(async move {
+        let handle = Broker::start(config).await.expect("start sasl_ssl broker");
+        eprintln!("CRABKA[test] sasl_ssl broker started listen={LISTEN} advertised={BOOTSTRAP}");
+        tracing::info!(
+            listen = %LISTEN,
+            advertised = %BOOTSTRAP,
+            "sasl_ssl broker started for jvm acceptance"
+        );
+        (handle, dir)
+    })
 }
 
 /// End-to-end `SASL_SSL` drive of the JVM tools — the production-shape auth
@@ -4274,10 +4280,10 @@ async fn jvm_inter_broker_sasl_ssl_raft_replication() {
 /// `DeleteAcls (31)` / `DescribeAcls (29)`, all of which require the
 /// `Cluster Alter` or `Cluster Describe` operation — the super-user bypass
 /// in `authorize()` short-circuits that check).
-async fn start_sasl_plaintext_broker_with_super_user(
+fn start_sasl_plaintext_broker_with_super_user(
     super_user: &str,
     users: &[(&str, &str)],
-) -> (crabka_broker::BrokerHandle, tempfile::TempDir) {
+) -> impl std::future::Future<Output = (crabka_broker::BrokerHandle, tempfile::TempDir)> {
     use crabka_broker::config::ListenerSpec;
     use crabka_security::{ListenerProtocol, SaslMechanism};
 
@@ -4289,6 +4295,7 @@ async fn start_sasl_plaintext_broker_with_super_user(
         .with_test_writer()
         .try_init();
     let dir = tempfile::tempdir().expect("tempdir");
+    let super_user = super_user.to_string();
     let listen_addr: std::net::SocketAddr = LISTEN.parse().expect("static addr");
     let controller_addr: std::net::SocketAddr = "0.0.0.0:9093".parse().expect("static addr");
     let mut config = BrokerConfig {
@@ -4316,7 +4323,7 @@ async fn start_sasl_plaintext_broker_with_super_user(
         }],
         inter_broker_listener_name: "SASL_PLAINTEXT".to_string(),
         enabled_sasl_mechanisms: vec![SaslMechanism::Plain],
-        super_users: std::collections::HashSet::from([super_user.to_string()]),
+        super_users: std::collections::HashSet::from([super_user.clone()]),
         ..BrokerConfig::default()
     };
     config.authorizer = std::sync::Arc::new(crabka_broker::authorizer::SimpleAclAuthorizer::new(
@@ -4327,13 +4334,15 @@ async fn start_sasl_plaintext_broker_with_super_user(
             .plain_credentials
             .insert((*u).to_string(), (*p).to_string());
     }
-    let handle = Broker::start(config)
-        .await
-        .expect("start sasl broker with super-user");
-    eprintln!(
-        "CRABKA[test] sasl super-user broker started listen={LISTEN} advertised={BOOTSTRAP} super_user={super_user}"
-    );
-    (handle, dir)
+    Box::pin(async move {
+        let handle = Broker::start(config)
+            .await
+            .expect("start sasl broker with super-user");
+        eprintln!(
+            "CRABKA[test] sasl super-user broker started listen={LISTEN} advertised={BOOTSTRAP} super_user={super_user}"
+        );
+        (handle, dir)
+    })
 }
 
 /// JVM acceptance — `kafka-acls.sh` end-to-end provision flow.
@@ -7703,14 +7712,16 @@ impl Drop for MinioContainer {
 ///
 /// Returns the broker handle, the temp dir (caller must keep it alive), and
 /// the `BrokerConfig` so the caller can re-use it for a restart.
-async fn start_host_broker_with_minio_tier(
+fn start_host_broker_with_minio_tier(
     s3: crabka_remote_storage::S3Config,
     rlmm: crabka_broker::RlmmKind,
-) -> (
-    crabka_broker::BrokerHandle,
-    tempfile::TempDir,
-    crabka_broker::BrokerConfig,
-) {
+) -> impl std::future::Future<
+    Output = (
+        crabka_broker::BrokerHandle,
+        tempfile::TempDir,
+        crabka_broker::BrokerConfig,
+    ),
+> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -7743,11 +7754,13 @@ async fn start_host_broker_with_minio_tier(
         remote_log_metadata: rlmm,
         ..BrokerConfig::default()
     };
-    let handle = Broker::start(config.clone()).await.expect("start broker");
-    eprintln!(
-        "CRABKA[test] broker started listen={LISTEN} advertised={BOOTSTRAP} (tiered S3 backend)"
-    );
-    (handle, dir, config)
+    Box::pin(async move {
+        let handle = Broker::start(config.clone()).await.expect("start broker");
+        eprintln!(
+            "CRABKA[test] broker started listen={LISTEN} advertised={BOOTSTRAP} (tiered S3 backend)"
+        );
+        (handle, dir, config)
+    })
 }
 
 // ---------------------------------------------------------------------------

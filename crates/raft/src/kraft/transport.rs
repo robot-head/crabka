@@ -87,7 +87,7 @@ pub enum Command {
     /// it is committed and applied (or with a rejection).
     SubmitChange {
         records: Vec<crabka_metadata::MetadataRecord>,
-        reply: oneshot::Sender<Result<(), RaftError>>,
+        reply: oneshot::Sender<Result<crate::SubmitChangeResult, RaftError>>,
     },
     /// Handle op: snapshot the current image to a checkpoint.
     TriggerSnapshot {

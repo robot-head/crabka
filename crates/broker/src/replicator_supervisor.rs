@@ -13,7 +13,11 @@
 //!    where this broker is in `replicas` but is NOT the leader, and
 //!    cancels tasks for partitions removed from the image.
 
-use std::{collections::HashSet, path::PathBuf, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use crabka_ids::PartitionIndex;
 use crabka_log::{Log, LogConfig};
@@ -25,8 +29,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::{
-    broker::spawn_partition, partition_registry::PartitionRegistry, replicator,
-    throttle::ThrottleState, txn::coordinator::TxnCoordinator,
+    partition_registry::PartitionRegistry, replicator, throttle::ThrottleState,
+    txn::coordinator::TxnCoordinator,
 };
 
 /// A `(topic, partition)` pair — the key the supervisor tracks follower
@@ -72,15 +76,36 @@ pub(crate) fn desired_local_set(node_id: NodeId, image: &MetadataImage) -> HashS
 ///
 /// Returns `Ok(())` if the partition is already present (no-op) or was
 /// successfully opened. Returns `Err(String)` on I/O failure.
-pub(crate) fn materialize_partition(
-    partitions: &PartitionRegistry,
-    topic: &str,
-    partition: i32,
-    log_dirs: &[PathBuf],
-    log_config: &LogConfig,
-    log_dir_status: &crate::log_dir_status::LogDirRegistry,
-    producer_state: &Arc<crate::producer_state::ProducerState>,
-) -> Result<(), String> {
+pub(crate) struct MaterializePartitionConfig<'a> {
+    pub partitions: &'a PartitionRegistry,
+    pub topic: &'a str,
+    pub topic_id: Option<uuid::Uuid>,
+    pub partition: i32,
+    pub log_dirs: &'a [PathBuf],
+    pub log_config: &'a LogConfig,
+    pub log_dir_status: &'a crate::log_dir_status::LogDirRegistry,
+    pub producer_state: &'a Arc<crate::producer_state::ProducerState>,
+    pub diskless: bool,
+    pub hot_tail: Option<Arc<crate::diskless::hot_tail::HotTailCache>>,
+    pub wal_shards: Option<Arc<crate::wal::quorum::registry::WalShardRegistry>>,
+    pub sequencer: Option<Arc<dyn crate::wal::OffsetSequencer>>,
+}
+
+pub(crate) fn materialize_partition(config: MaterializePartitionConfig<'_>) -> Result<(), String> {
+    let MaterializePartitionConfig {
+        partitions,
+        topic,
+        topic_id,
+        partition,
+        log_dirs,
+        log_config,
+        log_dir_status,
+        producer_state,
+        diskless,
+        hot_tail,
+        wal_shards,
+        sequencer,
+    } = config;
     // `materialize_if_vacant` runs `build` under the per-key write lock —
     // only one thread can be inside it for a given key at a time,
     // eliminating the TOCTOU race that existed with the old
@@ -90,19 +115,26 @@ pub(crate) fn materialize_partition(
     partitions.materialize_if_vacant(topic, PartitionIndex(partition), || {
         let dir = crate::log_dir::place_partition_dir(log_dirs, topic, partition);
         std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
-        let log = Log::open(&dir, log_config.clone()).map_err(|e| format!("Log::open: {e}"))?;
+        let open_config = crate::diskless::recovery::open_config(log_config, diskless);
+        let log = Log::open(&dir, open_config).map_err(|e| format!("Log::open: {e}"))?;
         let owning_dir = dir
             .parent()
             .expect("placed partition dir always has a parent log.dir")
             .to_path_buf();
-        Ok(spawn_partition(
-            topic.to_string(),
-            PartitionIndex(partition),
-            owning_dir,
+        crate::broker::try_spawn_partition_with_sequencer(crate::broker::PartitionSpawnConfig {
+            topic: topic.to_string(),
+            topic_id,
+            partition_id: PartitionIndex(partition),
+            log_dir: owning_dir,
             log,
-            log_dir_status.clone(),
-            producer_state.clone(),
-        ))
+            log_dir_status: log_dir_status.clone(),
+            producer_state: producer_state.clone(),
+            diskless,
+            hot_tail,
+            wal_shards,
+            sequencer,
+        })
+        .map_err(|e| format!("spawn partition: {e}"))
     })
 }
 
@@ -260,10 +292,19 @@ pub(crate) struct ReplicatorSupervisor {
     /// KIP-858: stable UUID per configured log.dir. Used by the reconcile
     /// loop to build `AssignReplicasToDirs` reports.
     log_dir_ids: crate::log_dir_id::LogDirIds,
+    /// Shared advisory cache for quorum-committed diskless WAL tails.
+    hot_tail: Arc<crate::diskless::hot_tail::HotTailCache>,
+    /// Registry exposed through the KIP-595 shard router for diskless WAL
+    /// fetches to newly materialized partitions.
+    wal_shards: Arc<crate::wal::quorum::registry::WalShardRegistry>,
     /// KIP-858: tracks the last-reported dir UUID per (topic, partition) so
     /// we only send `AssignReplicasToDirs` on first materialization or after
     /// a KIP-113 log-dir swap.
     reported_dirs: dashmap::DashMap<TopicPartition, uuid::Uuid>,
+    /// Topic identities observed by the preceding reconcile. Comparing UUIDs,
+    /// rather than names alone, also detects a delete followed by a same-name
+    /// recreation without treating startup-only on-disk logs as tombstoned.
+    known_topic_ids: Mutex<HashMap<String, uuid::Uuid>>,
     assign_dirs_reporter: Arc<dyn AssignDirsReporter>,
 }
 
@@ -286,6 +327,8 @@ pub(crate) struct ReplicatorSupervisorConfig {
     pub producer_state: Arc<crate::producer_state::ProducerState>,
     pub metrics: crate::metrics::BrokerMetrics,
     pub log_dir_ids: crate::log_dir_id::LogDirIds,
+    pub hot_tail: Arc<crate::diskless::hot_tail::HotTailCache>,
+    pub wal_shards: Arc<crate::wal::quorum::registry::WalShardRegistry>,
 }
 
 impl ReplicatorSupervisor {
@@ -309,7 +352,14 @@ impl ReplicatorSupervisor {
             producer_state,
             metrics,
             log_dir_ids,
+            hot_tail,
+            wal_shards,
         } = config;
+        let known_topic_ids = controller
+            .current_image()
+            .topics()
+            .map(|topic| (topic.name.clone(), topic.topic_id))
+            .collect();
         Self {
             node_id,
             broker_id,
@@ -331,13 +381,24 @@ impl ReplicatorSupervisor {
             producer_state,
             metrics,
             log_dir_ids,
+            hot_tail,
+            wal_shards,
             reported_dirs: dashmap::DashMap::new(),
+            known_topic_ids: Mutex::new(known_topic_ids),
             assign_dirs_reporter: Arc::new(NetworkAssignDirsReporter),
         }
     }
 
     pub(crate) async fn reconcile(&self, image: &MetadataImage) {
         let local_set = desired_local_set(self.node_id, image);
+
+        // A DeleteTopics handler tears down its local partition immediately
+        // after the metadata commit. A reconcile that already captured the
+        // preceding image can race that teardown and materialize the deleted
+        // partition again. Re-prune from the authoritative new image before
+        // materializing its desired set so that stale-image resurrection is
+        // idempotently repaired on the next watch delivery.
+        self.prune_deleted_topic_partitions(image);
 
         // 0. Materialize the on-disk partition for every assignment where
         //    self is in `replicas`, regardless of leader/follower role.
@@ -464,13 +525,57 @@ impl ReplicatorSupervisor {
         self.report_dir_assignments(&local_set, image).await;
     }
 
+    fn prune_deleted_topic_partitions(&self, image: &MetadataImage) {
+        let current_topic_ids = image
+            .topics()
+            .map(|topic| (topic.name.clone(), topic.topic_id))
+            .collect::<HashMap<_, _>>();
+        let obsolete_topics = {
+            let mut known_topic_ids = self
+                .known_topic_ids
+                .lock()
+                .expect("replicator supervisor topic identities poisoned");
+            let obsolete = known_topic_ids
+                .iter()
+                .filter(|(name, id)| current_topic_ids.get(*name) != Some(*id))
+                .map(|(name, _)| name.clone())
+                .collect::<HashSet<_>>();
+            *known_topic_ids = current_topic_ids;
+            obsolete
+        };
+        for partition in self.partitions.arcs() {
+            if !obsolete_topics.contains(&partition.topic) {
+                continue;
+            }
+            let topic = partition.topic.clone();
+            let index = partition.index;
+            let Some(removed) = self.partitions.remove(&topic, index) else {
+                continue;
+            };
+            self.reported_dirs.remove(&(topic.clone(), index.get()));
+            let owning_dir = removed.log_dir.load_full();
+            let partition_dir = crate::log_dir::partition_dir(&owning_dir, &topic, index.get());
+            if let Err(error) = std::fs::remove_dir_all(&partition_dir)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                warn!(
+                    topic = %topic,
+                    partition = index.get(),
+                    path = %partition_dir.display(),
+                    error = %error,
+                    "failed to prune deleted topic partition directory"
+                );
+            }
+        }
+    }
+
     async fn reconcile_local_partitions(
         &self,
         local_set: &HashSet<TopicPartition>,
         image: &MetadataImage,
     ) {
         for key in local_set {
-            if let Err(e) = self.materialize_local_partition(&key.0, key.1) {
+            if let Err(e) = self.materialize_local_partition(image, &key.0, key.1) {
                 warn!(
                     topic = %key.0, partition = key.1, error = %e,
                     "failed to materialize local partition"
@@ -499,6 +604,12 @@ impl ReplicatorSupervisor {
                 // up toward ISR re-admission.
                 part.install_isr(&part_record.isr, &part_record.replicas, part_record.leader)
                     .await;
+                if part.diskless
+                    && let Some(next_offset) = image.partition_next_offset(&key.0, key.1)
+                {
+                    part.install_diskless_durable_hw(crabka_ids::Offset(next_offset))
+                        .await;
+                }
             }
         }
     }
@@ -544,16 +655,31 @@ impl ReplicatorSupervisor {
     /// Open (or recover) the on-disk `Partition` for `(topic, partition)`
     /// and insert it into the broker's shared `partitions` map.
     /// Idempotent: a no-op if the partition is already present.
-    fn materialize_local_partition(&self, topic: &str, partition: i32) -> Result<(), String> {
-        materialize_partition(
-            &self.partitions,
+    fn materialize_local_partition(
+        &self,
+        image: &MetadataImage,
+        topic: &str,
+        partition: i32,
+    ) -> Result<(), String> {
+        let diskless = crate::broker::diskless_topic_config(image.topic_config(topic));
+        materialize_partition(MaterializePartitionConfig {
+            partitions: &self.partitions,
             topic,
+            topic_id: image.topic(topic).map(|topic| topic.topic_id),
             partition,
-            &self.log_dirs,
-            &self.log_config,
-            &self.log_dir_status,
-            &self.producer_state,
-        )
+            log_dirs: &self.log_dirs,
+            log_config: &self.log_config,
+            log_dir_status: &self.log_dir_status,
+            producer_state: &self.producer_state,
+            diskless,
+            hot_tail: Some(self.hot_tail.clone()),
+            wal_shards: Some(self.wal_shards.clone()),
+            sequencer: diskless.then(|| {
+                Arc::new(crate::wal::ControllerSequencer::new(
+                    self.controller.clone(),
+                )) as Arc<dyn crate::wal::OffsetSequencer>
+            }),
+        })
     }
 
     pub(crate) async fn run(self) {
@@ -713,7 +839,10 @@ mod tests {
             }
         }
 
-        async fn submit_change(&self, _records: Vec<MetadataRecord>) -> Result<(), RaftError> {
+        async fn submit_change(
+            &self,
+            _records: Vec<MetadataRecord>,
+        ) -> Result<crabka_raft::SubmitChangeResult, RaftError> {
             panic!("unused in replicator supervisor tests")
         }
 
@@ -803,6 +932,8 @@ mod tests {
             producer_state: Arc::new(crate::producer_state::ProducerState::new()),
             metrics: crate::metrics::BrokerMetrics::default(),
             log_dir_ids: crate::log_dir_id::LogDirIds::resolve(&[dir.path().to_path_buf()]),
+            hot_tail: Arc::new(crate::diskless::hot_tail::HotTailCache::default()),
+            wal_shards: Arc::new(crate::wal::quorum::registry::WalShardRegistry::new()),
         });
         supervisor.assign_dirs_reporter = reporter.clone();
         (supervisor, partitions, reporter, dir)
@@ -914,15 +1045,20 @@ mod tests {
 
         let dir = tempdir().expect("tempdir");
         let partitions = Arc::new(PartitionRegistry::new());
-        materialize_partition(
-            &partitions,
-            "t",
-            0,
-            &[dir.path().to_path_buf()],
-            &LogConfig::default(),
-            &crate::log_dir_status::LogDirRegistry::default(),
-            &Arc::new(crate::producer_state::ProducerState::new()),
-        )
+        materialize_partition(MaterializePartitionConfig {
+            partitions: &partitions,
+            topic: "t",
+            topic_id: None,
+            partition: 0,
+            log_dirs: &[dir.path().to_path_buf()],
+            log_config: &LogConfig::default(),
+            log_dir_status: &crate::log_dir_status::LogDirRegistry::default(),
+            producer_state: &Arc::new(crate::producer_state::ProducerState::new()),
+            diskless: false,
+            hot_tail: None,
+            wal_shards: None,
+            sequencer: None,
+        })
         .expect("materialize");
         let part = partitions.get("t", PartitionIndex(0)).expect("part");
         // Mirror what reconcile does for leader partitions.
@@ -942,6 +1078,43 @@ mod tests {
         .await;
         let st = part.replica_state.lock().await;
         assert!(st.isr.len() == 3);
+    }
+
+    #[tokio::test]
+    async fn materialize_diskless_partition_registers_wal_shard() {
+        use crabka_log::LogConfig;
+        use tempfile::tempdir;
+
+        let dir = tempdir().expect("tempdir");
+        let partitions = Arc::new(PartitionRegistry::new());
+        let topic_id = uuid::Uuid::from_u128(0xD15C);
+        let hot_tail = Arc::new(crate::diskless::hot_tail::HotTailCache::default());
+        let wal_shards = Arc::new(crate::wal::quorum::registry::WalShardRegistry::new());
+
+        materialize_partition(MaterializePartitionConfig {
+            partitions: &partitions,
+            topic: "diskless",
+            topic_id: Some(topic_id),
+            partition: 0,
+            log_dirs: &[dir.path().to_path_buf()],
+            log_config: &LogConfig::default(),
+            log_dir_status: &crate::log_dir_status::LogDirRegistry::default(),
+            producer_state: &Arc::new(crate::producer_state::ProducerState::new()),
+            diskless: true,
+            hot_tail: Some(hot_tail),
+            wal_shards: Some(wal_shards.clone()),
+            sequencer: None,
+        })
+        .expect("materialize");
+
+        assert!(
+            wal_shards
+                .get(crate::wal::quorum::registry::ShardId {
+                    topic_id,
+                    partition: PartitionIndex(0),
+                })
+                .is_some()
+        );
     }
 
     #[test]
@@ -1083,6 +1256,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reconcile_prunes_deleted_topic_partitions_but_keeps_live_topics() {
+        #[derive(Debug, PartialEq, Eq)]
+        struct PartitionState {
+            topic: &'static str,
+            registered: bool,
+            directory_exists: bool,
+            runtime_reused: Option<bool>,
+        }
+
+        let live_topic = topic_record("live", 1);
+        let live_partition = partition_record("live", 0, NodeId(2), vec![NodeId(2)], 0);
+        let active = image_with(&[
+            topic_record("deleted", 1),
+            partition_record("deleted", 0, NodeId(2), vec![NodeId(2)], 0),
+            live_topic.clone(),
+            live_partition.clone(),
+            topic_record("recreated", 1),
+            partition_record("recreated", 0, NodeId(2), vec![NodeId(2)], 0),
+        ]);
+        let after_delete = image_with(&[
+            live_topic,
+            live_partition,
+            topic_record("recreated", 1),
+            partition_record("recreated", 0, NodeId(2), vec![NodeId(2)], 0),
+        ]);
+        let (supervisor, partitions, _reporter, dir) = supervisor_fixture(active.clone());
+        supervisor
+            .materialize_local_partition(&active, "startup-only", 0)
+            .expect("startup-only partition");
+        supervisor.reconcile(&active).await;
+        let original = ["deleted", "live", "recreated", "startup-only"]
+            .into_iter()
+            .map(|topic| {
+                (
+                    topic,
+                    partitions
+                        .get(topic, PartitionIndex(0))
+                        .expect("original partition"),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+
+        supervisor.reconcile(&after_delete).await;
+
+        let actual = ["deleted", "live", "recreated", "startup-only"]
+            .into_iter()
+            .map(|topic| PartitionState {
+                topic,
+                registered: partitions.contains(topic, PartitionIndex(0)),
+                directory_exists: dir.path().join(format!("{topic}-0")).exists(),
+                runtime_reused: partitions
+                    .get(topic, PartitionIndex(0))
+                    .map(|current| Arc::ptr_eq(&original[topic], &current)),
+            })
+            .collect::<Vec<_>>();
+        let expected = vec![
+            PartitionState {
+                topic: "deleted",
+                registered: false,
+                directory_exists: false,
+                runtime_reused: None,
+            },
+            PartitionState {
+                topic: "live",
+                registered: true,
+                directory_exists: true,
+                runtime_reused: Some(true),
+            },
+            PartitionState {
+                topic: "recreated",
+                registered: true,
+                directory_exists: true,
+                runtime_reused: Some(false),
+            },
+            PartitionState {
+                topic: "startup-only",
+                registered: true,
+                directory_exists: true,
+                runtime_reused: Some(true),
+            },
+        ];
+        assert!(actual == expected);
+    }
+
+    #[tokio::test]
     async fn reconcile_cancels_tasks_for_removed_partitions() {
         let img = MetadataImage::new(Uuid::nil());
         let (supervisor, _partitions, _reporter, _dir) = supervisor_fixture(img.clone());
@@ -1134,7 +1392,9 @@ mod tests {
             partition_record("t", 0, NodeId(2), vec![NodeId(2)], 0),
         ]);
         let (supervisor, partitions, reporter, _dir) = supervisor_fixture(img.clone());
-        supervisor.materialize_local_partition("t", 0).unwrap();
+        supervisor
+            .materialize_local_partition(&img, "t", 0)
+            .unwrap();
         let mut local_set = HashSet::new();
         local_set.insert(("t".to_string(), 0));
 
@@ -1160,9 +1420,11 @@ mod tests {
     #[tokio::test]
     async fn materialize_local_partition_inserts_partition() {
         let img = MetadataImage::new(Uuid::nil());
-        let (supervisor, partitions, _reporter, _dir) = supervisor_fixture(img);
+        let (supervisor, partitions, _reporter, _dir) = supervisor_fixture(img.clone());
 
-        supervisor.materialize_local_partition("t", 0).unwrap();
+        supervisor
+            .materialize_local_partition(&img, "t", 0)
+            .unwrap();
 
         assert!(partitions.contains("t", PartitionIndex(0)));
     }
@@ -1222,15 +1484,20 @@ mod tests {
         // Materialize the partition on disk.
         let dir = tempdir().expect("tempdir");
         let partitions = Arc::new(PartitionRegistry::new());
-        materialize_partition(
-            &partitions,
-            "t",
-            0,
-            &[dir.path().to_path_buf()],
-            &LogConfig::default(),
-            &crate::log_dir_status::LogDirRegistry::default(),
-            &Arc::new(crate::producer_state::ProducerState::new()),
-        )
+        materialize_partition(MaterializePartitionConfig {
+            partitions: &partitions,
+            topic: "t",
+            topic_id: None,
+            partition: 0,
+            log_dirs: &[dir.path().to_path_buf()],
+            log_config: &LogConfig::default(),
+            log_dir_status: &crate::log_dir_status::LogDirRegistry::default(),
+            producer_state: &Arc::new(crate::producer_state::ProducerState::new()),
+            diskless: false,
+            hot_tail: None,
+            wal_shards: None,
+            sequencer: None,
+        })
         .expect("materialize");
 
         // Call push_topic_configs directly.
@@ -1285,15 +1552,20 @@ mod tests {
 
         let dir = tempdir().expect("tempdir");
         let partitions = Arc::new(PartitionRegistry::new());
-        materialize_partition(
-            &partitions,
-            "t",
-            0,
-            &[dir.path().to_path_buf()],
-            &LogConfig::default(),
-            &crate::log_dir_status::LogDirRegistry::default(),
-            &Arc::new(crate::producer_state::ProducerState::new()),
-        )
+        materialize_partition(MaterializePartitionConfig {
+            partitions: &partitions,
+            topic: "t",
+            topic_id: None,
+            partition: 0,
+            log_dirs: &[dir.path().to_path_buf()],
+            log_config: &LogConfig::default(),
+            log_dir_status: &crate::log_dir_status::LogDirRegistry::default(),
+            producer_state: &Arc::new(crate::producer_state::ProducerState::new()),
+            diskless: false,
+            hot_tail: None,
+            wal_shards: None,
+            sequencer: None,
+        })
         .expect("materialize");
 
         let mut desired = HashSet::new();
@@ -1349,15 +1621,20 @@ mod tests {
         // Materialize the partition under a temp dir.
         let dir = tempdir().expect("tempdir");
         let partitions = Arc::new(PartitionRegistry::new());
-        materialize_partition(
-            &partitions,
-            "t",
-            0,
-            &[dir.path().to_path_buf()],
-            &LogConfig::default(),
-            &crate::log_dir_status::LogDirRegistry::default(),
-            &Arc::new(crate::producer_state::ProducerState::new()),
-        )
+        materialize_partition(MaterializePartitionConfig {
+            partitions: &partitions,
+            topic: "t",
+            topic_id: None,
+            partition: 0,
+            log_dirs: &[dir.path().to_path_buf()],
+            log_config: &LogConfig::default(),
+            log_dir_status: &crate::log_dir_status::LogDirRegistry::default(),
+            producer_state: &Arc::new(crate::producer_state::ProducerState::new()),
+            diskless: false,
+            hot_tail: None,
+            wal_shards: None,
+            sequencer: None,
+        })
         .expect("materialize");
 
         // Resolve LogDirIds over the same temp dir.

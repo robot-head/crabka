@@ -23,6 +23,7 @@ assert2 = { workspace = true }
 arrow = { workspace = true }
 parquet = { workspace = true }
 datafusion = { workspace = true }
+crabka-object-store = { version = "0.3.8", path = "../object-store" }
 object_store = { workspace = true }
 url = { workspace = true }
 async-trait = { workspace = true }

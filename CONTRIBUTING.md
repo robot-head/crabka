@@ -38,6 +38,27 @@ cargo test --workspace
 cargo test --workspace -- --include-ignored
 ```
 
+## Gres conformance
+
+The Gres conformance baseline is a ratchet against PostgreSQL 18, not a place to
+hide regressions. When changing the SQL corpus or `baseline.json`, follow the
+baseline-ratchet rules in
+[`crates/gres-conformance/README.md`](crates/gres-conformance/README.md): corpus
+growth, baseline changes, and parity evidence belong in one reviewed change.
+
+SQL-surface changes must also update
+[`docs/PG_COMPAT_MATRIX.md`](docs/PG_COMPAT_MATRIX.md) in the same pull request.
+This includes parser acceptance changes, executor semantic changes, deliberate
+PostgreSQL-shaped refusals, aliases, and feature rows whose disposition changes.
+Reviewers should reject SQL-surface pull requests that leave the matrix stale or
+mark accepted statements as anything other than `Implemented` or `Mapped(...)`.
+Run the anti-rot gate locally before review:
+
+```bash
+tools/check-pg-compat-matrix.sh --self-test
+tools/check-pg-compat-matrix.sh
+```
+
 ## Mutation testing
 
 CI runs [cargo-mutants](https://mutants.rs) on each pull request, but only on the

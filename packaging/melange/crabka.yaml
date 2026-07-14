@@ -17,6 +17,8 @@ environment:
       - build-base
       - busybox
       - git
+      - openssl-dev
+      - pkgconf
       - rustup
 
 # A single cargo build compiles the shared dependency graph (protocol, log,
@@ -53,11 +55,13 @@ pipeline:
       cargo build --release \
         -p crabka-broker -p crabka-cli -p crabka-operator \
         -p crabka-schema-registry -p crabka-bench-driver \
+        -p crabka-gres -p crabka-gres-activator \
         --bin crabka-broker --bin crabka --bin crabka-operator \
-        --bin crabka-schema-registry --bin crabka-bench-driver --bin crabka-bench-report
+        --bin crabka-schema-registry --bin crabka-bench-driver --bin crabka-bench-report \
+        --bin crabka-gres --bin crabka-gres-activator
       mkdir -p dist
       for bin in crabka-broker crabka crabka-operator crabka-schema-registry \
-                 crabka-bench-driver crabka-bench-report; do
+                 crabka-bench-driver crabka-bench-report crabka-gres crabka-gres-activator; do
         install -m 0755 "$target/release/$bin" "dist/$bin"
       done
 
@@ -80,6 +84,18 @@ subpackages:
     pipeline:
       - runs: |
           install -D -m 0755 dist/crabka-schema-registry "${{targets.subpkgdir}}/usr/bin/crabka-schema-registry"
+
+  - name: crabka-gres
+    description: Gres PostgreSQL-compatible tenant compute
+    pipeline:
+      - runs: |
+          install -D -m 0755 dist/crabka-gres "${{targets.subpkgdir}}/usr/bin/crabka-gres"
+
+  - name: crabka-gres-activator
+    description: Gres scale-to-zero connection activator
+    pipeline:
+      - runs: |
+          install -D -m 0755 dist/crabka-gres-activator "${{targets.subpkgdir}}/usr/bin/crabka-gres-activator"
 
   - name: crabka-bench-driver
     description: Load driver + report aggregator for the Crabka vs Strimzi benchmark harness

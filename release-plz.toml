@@ -63,6 +63,41 @@ publish = true
 release = true
 
 [[package]]
+name = "crabka-pgcatalog"
+publish = true
+release = true
+
+[[package]]
+name = "crabka-pgexec"
+publish = true
+release = true
+
+[[package]]
+name = "crabka-pgkv"
+publish = true
+release = true
+
+[[package]]
+name = "crabka-pgmvcc"
+publish = true
+release = true
+
+[[package]]
+name = "crabka-pgparser"
+publish = true
+release = true
+
+[[package]]
+name = "crabka-pgtypes"
+publish = true
+release = true
+
+[[package]]
+name = "crabka-pgwire"
+publish = true
+release = true
+
+[[package]]
 name = "crabka-schema-serde"
 publish = true
 release = true
@@ -135,6 +170,46 @@ publish = false
 release = false
 
 [[package]]
+name = "crabka-gres"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-gres-activator"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-gres-balancer"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-gres-control"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-gres-conformance"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-gres-fdw"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-gres-ranges"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-gres-substrate"
+publish = false
+release = false
+
+[[package]]
 name = "crabka-ids"
 publish = false
 release = false
@@ -181,6 +256,11 @@ release = false
 
 [[package]]
 name = "crabka-metrics-service"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-object-store"
 publish = false
 release = false
 

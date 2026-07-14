@@ -40,6 +40,8 @@ pub struct SubjectVersionResponse {
     pub schema_type: Option<String>,
     #[serde(rename = "messageType", default)]
     pub message_type: Option<String>,
+    #[serde(default)]
+    pub references: Vec<SchemaReference>,
 }
 
 /// Response of `GET /schemas/ids/{id}`.
@@ -50,4 +52,6 @@ pub struct SchemaByIdResponse {
     pub schema_type: Option<String>,
     #[serde(rename = "messageType", default)]
     pub message_type: Option<String>,
+    #[serde(default)]
+    pub references: Vec<SchemaReference>,
 }

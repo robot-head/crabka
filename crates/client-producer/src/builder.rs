@@ -4,7 +4,7 @@ use std::{
     collections::HashMap,
     sync::{
         Arc,
-        atomic::{AtomicU8, AtomicUsize},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize},
     },
     time::Duration,
 };
@@ -214,6 +214,8 @@ impl Producer {
         let in_flight = Arc::new(AtomicUsize::new(0));
 
         let txn_state = Arc::new(Mutex::new(TxnState::Uninitialized));
+        let txn_recovery_required = Arc::new(AtomicBool::new(false));
+        let txn_recovery_generation = Arc::new(AtomicU64::new(0));
         let txn_pid_epoch = Arc::new(Mutex::new(initial_txn_pid_epoch()));
 
         let sender_handle = tokio::spawn(sender::run(sender::SenderConfig {
@@ -239,6 +241,8 @@ impl Producer {
             transactional_id: transactional_id.clone(),
             txn_state: Arc::clone(&txn_state),
             txn_pid_epoch: Arc::clone(&txn_pid_epoch),
+            txn_recovery_required: Arc::clone(&txn_recovery_required),
+            txn_recovery_generation: Arc::clone(&txn_recovery_generation),
         }));
 
         Ok(Producer {
@@ -271,6 +275,8 @@ impl Producer {
             transactional_id,
             transaction_timeout,
             txn_state,
+            txn_recovery_required,
+            txn_recovery_generation,
             txn_coord_client: Mutex::new(None),
             txn_pid_epoch,
         })

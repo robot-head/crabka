@@ -47,6 +47,11 @@ pub enum ProducerError {
 
     #[error("concurrent transactions on the same transactional_id")]
     ConcurrentTransactions,
+
+    #[error(
+        "transaction outcome is unknown; call init_transactions before sending or beginning another transaction"
+    )]
+    RecoveryRequired,
 }
 
 #[cfg(test)]

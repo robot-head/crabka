@@ -602,6 +602,7 @@ mod tests {
             log,
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(crate::producer_state::ProducerState::new()),
+            false,
         );
         reg.insert(bootstrap::TOPIC.to_string(), PartitionIndex(p), part);
     }

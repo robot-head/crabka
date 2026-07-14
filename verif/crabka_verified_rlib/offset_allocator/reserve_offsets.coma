@@ -1,0 +1,59 @@
+(* #"/work/crates/verified/src/offset_allocator.rs" 12 0 12 65 *)
+
+let%span snum = "/opt/creusot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/creusot-std-0.12.0/src/std/num.rs" 325 20 326 51
+let%span snum'0 = "/opt/creusot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/creusot-std-0.12.0/src/std/num.rs" 329 26 329 83
+let%span snum'1 = "/opt/creusot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/creusot-std-0.12.0/src/std/num.rs" 330 26 330 83
+let%span soffset_allocator = "/work/crates/verified/src/offset_allocator.rs" 13 11 13 37
+let%span soffset_allocator'0 = "/work/crates/verified/src/offset_allocator.rs" 8 29 8 40
+let%span soffset_allocator'1 = "/work/crates/verified/src/offset_allocator.rs" 9 29 9 56
+let%span soffset_allocator'2 = "/work/crates/verified/src/offset_allocator.rs" 10 28 10 46
+let%span soffset_allocator'3 = "/work/crates/verified/src/offset_allocator.rs" 11 28 11 55
+
+use creusot.int.Int64
+use creusot.prelude.Any
+use int.Int
+
+constant const_MIN: Int64.t = (-9223372036854775808: Int64.t)
+
+constant const_MAX: Int64.t = (9223372036854775807: Int64.t)
+
+let saturating_add (self_: Int64.t) (rhs: Int64.t) (return (x: Int64.t)) = any
+  [ return (result: Int64.t) ->
+  {[@stop_split] [@expl:saturating_add ensures] ([@stop_split] [@expl:saturating_add ensures #0] [%#snum] Int64.to_int self_
+            + Int64.to_int rhs
+          >= Int64.to_int const_MIN
+        /\ Int64.to_int self_ + Int64.to_int rhs <= Int64.to_int const_MAX
+      -> Int64.to_int result = Int64.to_int self_ + Int64.to_int rhs)
+    /\ ([@stop_split] [@expl:saturating_add ensures #1] [%#snum'0] Int64.to_int self_ + Int64.to_int rhs
+        < Int64.to_int const_MIN -> Int64.to_int result = Int64.to_int const_MIN)
+    /\ ([@stop_split] [@expl:saturating_add ensures #2] [%#snum'1] Int64.to_int self_ + Int64.to_int rhs
+      > Int64.to_int const_MAX -> Int64.to_int result = Int64.to_int const_MAX)}
+    (! return {result}) ]
+
+type tup2_i64_i64 = { f0: Int64.t; f1: Int64.t }
+
+meta "compute_max_steps" 1000000
+
+meta "select_lsinst" "all"
+
+let reserve_offsets [#"/work/crates/verified/src/offset_allocator.rs" 12 0 12 65] (next: Int64.t) (count: Int64.t)
+  (return (x: tup2_i64_i64)) =
+{[@stop_split] [@expl:reserve_offsets requires] ([@stop_split] [@expl:reserve_offsets requires #0] [%#soffset_allocator'0] Int64.to_int count
+    >= 0)
+  /\ ([@stop_split] [@expl:reserve_offsets requires #1] [%#soffset_allocator'1] Int64.to_int next + Int64.to_int count
+  <= Int64.to_int const_MAX)}
+  (! bb0
+  [ bb0 = s0
+    [ s0 = saturating_add [%#soffset_allocator] {next} {count} (fun (_x: Int64.t) -> [ &_14 <- _x ] s1)
+    | s1 = [ &_ret <- { f0 = next; f1 = _14 } ] s2
+    | s2 = return {_ret} ] ]
+  [ & _ret: tup2_i64_i64 = Any.any_l ()
+  | & next: Int64.t = next
+  | & count: Int64.t = count
+  | & _14: Int64.t = Any.any_l () ])
+  [ return (result: tup2_i64_i64) ->
+  {[@stop_split] [@expl:reserve_offsets ensures] ([@stop_split] [@expl:reserve_offsets ensures #0] [%#soffset_allocator'2] Int64.to_int result.f0
+      = Int64.to_int next)
+    /\ ([@stop_split] [@expl:reserve_offsets ensures #1] [%#soffset_allocator'3] Int64.to_int result.f1
+    = Int64.to_int next + Int64.to_int count)}
+    (! return {result}) ]

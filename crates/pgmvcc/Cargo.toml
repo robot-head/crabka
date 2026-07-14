@@ -1,0 +1,26 @@
+[package]
+name = "crabka-pgmvcc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "PostgreSQL-faithful MVCC for the Crabka Gres engine: xids, clog, snapshots, and HeapTupleSatisfiesMVCC visibility"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-pgmvcc"
+readme = "README.md"
+keywords = ["postgres", "mvcc", "transactions", "crabka", "gres"]
+categories = ["database-implementations"]
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+crabka-pgkv = { version = "0.3.9", path = "../pgkv" }
+crabka-pgtypes = { version = "0.3.9", path = "../pgtypes" }
+zerocopy = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

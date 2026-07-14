@@ -43,10 +43,13 @@ crabka-log = { version = "0.3.9", path = "../log" }
 crabka-ids = { version = "0.3.8", path = "../ids" }
 crabka-compression = { version = "0.3.9", path = "../compression", default-features = false }
 crabka-raft = { version = "0.3.8", path = "../raft" }
+crabka-kraft-core = { version = "0.3.8", path = "../kraft-core" }
+crabka-voters = { version = "0.3.8", path = "../voters" }
 crabka-metadata = { version = "0.3.8", path = "../metadata" }
 crabka-authz = { version = "0.3.8", path = "../authz" }
 crabka-remote-storage = { version = "0.3.8", path = "../remote-storage" }
 crabka-remote-storage-topic = { version = "0.3.8", path = "../remote-storage-topic" }
+crabka-object-store = { version = "0.3.8", path = "../object-store" }
 crabka-client-core = { version = "0.3.9", path = "../client-core" }
 crabka-throttle = { version = "0.3.8", path = "../throttle" }
 crabka-security.workspace = true
@@ -74,6 +77,7 @@ opentelemetry-proto = { workspace = true }
 clap = { workspace = true, features = ["env"] }
 uuid = { workspace = true }
 futures-util = { workspace = true }
+object_store = { workspace = true }
 prometheus-client.workspace = true
 axum.workspace = true
 # Fetch the OAUTHBEARER JWKS over HTTP(S). The `rustls` feature reuses the
@@ -141,6 +145,7 @@ proptest = { workspace = true }
 crabka-broker-test-helpers = { path = "test-helpers" }
 crabka-client-consumer = { version = "0.3", path = "../client-consumer" }
 crabka-client-producer = { version = "0.3", path = "../client-producer" }
+crabka-verified = { version = "0.3", path = "../verified" }
 # Host-side raw `Client::send(DescribeGroupsRequest)` against the
 # real-Kafka Docker capture (`describe_groups_jvm.rs`).
 crabka-client-core = { version = "0.3", path = "../client-core", features = ["mock"] }

@@ -6,6 +6,9 @@ use crabka_protocol::{
     owned::{
         create_partitions_request::{CreatePartitionsRequest, CreatePartitionsTopic},
         create_topics_request::{CreatableTopic, CreatableTopicConfig, CreateTopicsRequest},
+        delete_records_request::{
+            DeleteRecordsPartition, DeleteRecordsRequest, DeleteRecordsTopic,
+        },
         delete_topics_request::{DeleteTopicState, DeleteTopicsRequest},
         metadata_request::{MetadataRequest, MetadataRequestTopic},
     },
@@ -34,6 +37,21 @@ pub struct CreateTopicOutcome {
 pub struct DeleteTopicOutcome {
     pub name: String,
     pub error: Option<KafkaError>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteRecordsOp {
+    pub topic: String,
+    pub partition: i32,
+    pub offset: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteRecordsOutcome {
+    pub topic: String,
+    pub partition: i32,
+    pub error_code: i16,
+    pub low_watermark: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -171,6 +189,39 @@ impl AdminClient {
         Ok(second)
     }
 
+    /// Delete records below each requested partition offset.
+    ///
+    /// `offset == -1` follows Kafka `DeleteRecords` semantics: truncate to the
+    /// partition high watermark. The returned `low_watermark` is the broker's
+    /// resulting log-start offset for that partition.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AdminError`] when metadata lookup, leader routing, transport,
+    /// or protocol handling fails. Kafka partition-level failures remain in the
+    /// returned [`DeleteRecordsOutcome::error_code`].
+    pub async fn delete_records(
+        &mut self,
+        ops: &[DeleteRecordsOp],
+        timeout_ms: i32,
+    ) -> Result<Vec<DeleteRecordsOutcome>, AdminError> {
+        if ops.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut outcomes = Vec::new();
+        let groups = self
+            .delete_records_leader_groups(ops, &mut outcomes)
+            .await?;
+        for (endpoint, leader_ops) in groups {
+            self.reconnect(&endpoint).await?;
+            let req = build_delete_records(&leader_ops, timeout_ms);
+            let resp = self.conn.send(req).await?;
+            outcomes.extend(parse_delete_records(resp));
+        }
+        Ok(outcomes)
+    }
+
     /// Fetch Metadata, find the controller's `host:port`, and replace
     /// `self.conn` with a connection to it. Used by the per-method
     /// `NOT_CONTROLLER` retry paths above.
@@ -179,6 +230,74 @@ impl AdminClient {
         let controller_addr =
             controller_endpoint(&md_resp).ok_or(AdminError::NotControllerExhausted)?;
         self.reconnect(&controller_addr).await
+    }
+
+    async fn delete_records_leader_groups(
+        &mut self,
+        ops: &[DeleteRecordsOp],
+        outcomes: &mut Vec<DeleteRecordsOutcome>,
+    ) -> Result<BTreeMap<String, Vec<DeleteRecordsOp>>, AdminError> {
+        let mut topic_names = ops.iter().map(|op| op.topic.as_str()).collect::<Vec<_>>();
+        topic_names.sort_unstable();
+        topic_names.dedup();
+
+        let metadata = self.conn.send(build_metadata(&topic_names)).await?;
+        let broker_endpoints = metadata
+            .brokers
+            .iter()
+            .map(|broker| {
+                let endpoint = if broker.port > 0 {
+                    format!("{}:{}", broker.host, broker.port)
+                } else {
+                    self.bootstrap_addrs
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| format!("{}:{}", broker.host, broker.port))
+                };
+                (broker.node_id, endpoint)
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut groups = BTreeMap::<String, Vec<DeleteRecordsOp>>::new();
+
+        for op in ops {
+            let Some(topic) = metadata
+                .topics
+                .iter()
+                .find(|topic| topic.name.as_deref() == Some(op.topic.as_str()))
+            else {
+                outcomes.push(delete_records_error_outcome(op, 3));
+                continue;
+            };
+
+            if topic.error_code != 0 {
+                outcomes.push(delete_records_error_outcome(op, topic.error_code));
+                continue;
+            }
+
+            let Some(partition) = topic
+                .partitions
+                .iter()
+                .find(|partition| partition.partition_index == op.partition)
+            else {
+                outcomes.push(delete_records_error_outcome(op, 3));
+                continue;
+            };
+
+            if partition.error_code != 0 {
+                outcomes.push(delete_records_error_outcome(op, partition.error_code));
+                continue;
+            }
+
+            let Some(endpoint) = broker_endpoints.get(&partition.leader_id) else {
+                return Err(AdminError::Protocol(format!(
+                    "no broker endpoint for DeleteRecords leader {}",
+                    partition.leader_id
+                )));
+            };
+            groups.entry(endpoint.clone()).or_default().push(op.clone());
+        }
+
+        Ok(groups)
     }
 }
 
@@ -238,6 +357,33 @@ fn build_create_topics(specs: &[CreateTopicSpec], timeout_ms: i32) -> CreateTopi
     }
 }
 
+fn build_delete_records(ops: &[DeleteRecordsOp], timeout_ms: i32) -> DeleteRecordsRequest {
+    let mut topics = BTreeMap::<String, Vec<DeleteRecordsPartition>>::new();
+    for op in ops {
+        topics
+            .entry(op.topic.clone())
+            .or_default()
+            .push(DeleteRecordsPartition {
+                partition_index: op.partition,
+                offset: op.offset,
+                ..Default::default()
+            });
+    }
+
+    DeleteRecordsRequest {
+        topics: topics
+            .into_iter()
+            .map(|(name, partitions)| DeleteRecordsTopic {
+                name,
+                partitions,
+                ..Default::default()
+            })
+            .collect(),
+        timeout_ms,
+        ..Default::default()
+    }
+}
+
 fn parse_create_topics(
     resp: <CreateTopicsRequest as crabka_protocol::ProtocolRequest>::Response,
 ) -> Vec<CreateTopicOutcome> {
@@ -273,6 +419,35 @@ fn parse_create_partitions(
             error: kafka_error_if(t.error_code, t.error_message),
         })
         .collect()
+}
+
+fn parse_delete_records(
+    resp: <DeleteRecordsRequest as crabka_protocol::ProtocolRequest>::Response,
+) -> Vec<DeleteRecordsOutcome> {
+    resp.topics
+        .into_iter()
+        .flat_map(|topic| {
+            let topic_name = topic.name;
+            topic
+                .partitions
+                .into_iter()
+                .map(move |partition| DeleteRecordsOutcome {
+                    topic: topic_name.clone(),
+                    partition: partition.partition_index,
+                    error_code: partition.error_code,
+                    low_watermark: partition.low_watermark,
+                })
+        })
+        .collect()
+}
+
+fn delete_records_error_outcome(op: &DeleteRecordsOp, error_code: i16) -> DeleteRecordsOutcome {
+    DeleteRecordsOutcome {
+        topic: op.topic.clone(),
+        partition: op.partition,
+        error_code,
+        low_watermark: -1,
+    }
 }
 
 fn parse_metadata(
@@ -356,6 +531,113 @@ mod tests {
                 validate_only: false,
                 unknown_tagged_fields: UnknownTaggedFields(vec![]),
             }
+        );
+    }
+
+    #[test]
+    fn build_delete_records_groups_partitions_by_topic() {
+        let req = build_delete_records(
+            &[
+                DeleteRecordsOp {
+                    topic: "beta".to_string(),
+                    partition: 1,
+                    offset: -1,
+                },
+                DeleteRecordsOp {
+                    topic: "alpha".to_string(),
+                    partition: 0,
+                    offset: 50,
+                },
+                DeleteRecordsOp {
+                    topic: "alpha".to_string(),
+                    partition: 2,
+                    offset: 75,
+                },
+            ],
+            5_000,
+        );
+
+        assert_eq!(
+            req,
+            DeleteRecordsRequest {
+                topics: vec![
+                    DeleteRecordsTopic {
+                        name: "alpha".to_string(),
+                        partitions: vec![
+                            DeleteRecordsPartition {
+                                partition_index: 0,
+                                offset: 50,
+                                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                            },
+                            DeleteRecordsPartition {
+                                partition_index: 2,
+                                offset: 75,
+                                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                            },
+                        ],
+                        unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                    },
+                    DeleteRecordsTopic {
+                        name: "beta".to_string(),
+                        partitions: vec![DeleteRecordsPartition {
+                            partition_index: 1,
+                            offset: -1,
+                            unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                        }],
+                        unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                    },
+                ],
+                timeout_ms: 5_000,
+                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_delete_records_flattens_partition_errors() {
+        use crabka_protocol::owned::delete_records_response::{
+            DeleteRecordsPartitionResult, DeleteRecordsResponse, DeleteRecordsTopicResult,
+        };
+
+        let resp = DeleteRecordsResponse {
+            topics: vec![DeleteRecordsTopicResult {
+                name: "wal".to_string(),
+                partitions: vec![
+                    DeleteRecordsPartitionResult {
+                        partition_index: 0,
+                        low_watermark: 50,
+                        error_code: 0,
+                        ..Default::default()
+                    },
+                    DeleteRecordsPartitionResult {
+                        partition_index: 1,
+                        low_watermark: -1,
+                        error_code: 1,
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let outcomes = parse_delete_records(resp);
+        assert_eq!(
+            outcomes,
+            vec![
+                DeleteRecordsOutcome {
+                    topic: "wal".to_string(),
+                    partition: 0,
+                    error_code: 0,
+                    low_watermark: 50,
+                },
+                DeleteRecordsOutcome {
+                    topic: "wal".to_string(),
+                    partition: 1,
+                    error_code: 1,
+                    low_watermark: -1,
+                },
+            ]
         );
     }
 

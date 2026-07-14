@@ -235,10 +235,19 @@ mod tests {
     use assert2::{assert, check};
     use qubit_clock::{
         MockWaiterKind,
-        sleep::{MockSleeper, SystemSleeper},
+        sleep::{AsyncSleepFuture, MockSleeper, SystemSleeper},
     };
 
     use super::*;
+
+    #[derive(Debug)]
+    struct PendingSleeper;
+
+    impl AsyncSleeper for PendingSleeper {
+        fn sleep_for_async(&self, _duration: Duration) -> AsyncSleepFuture<'_> {
+            Box::pin(std::future::pending())
+        }
+    }
 
     /// Yield-poll until `cond` holds, with a bounded hang-guard so a genuine
     /// stall fails the test deterministically instead of spinning forever.
@@ -578,7 +587,7 @@ mod tests {
         let refresher = JwksRefresher {
             endpoint,
             handle: handle.clone(),
-            interval: Duration::from_hours(1), // disable periodic for these tests
+            interval: Duration::from_hours(1),
             shutdown: shutdown.clone(),
             tls_trust: None,
             signal_rx,
@@ -586,7 +595,9 @@ mod tests {
             last_successful_fetch_ms: last_successful.clone(),
             last_on_demand_refresh_ms: last_on_demand.clone(),
             ignore_key_use: false,
-            sleeper: Arc::new(SystemSleeper::new()),
+            // Signal tests isolate the on-demand arm; periodic refreshes have
+            // dedicated mock-timeline coverage above.
+            sleeper: Arc::new(PendingSleeper),
         };
         (
             refresher,
@@ -665,13 +676,13 @@ mod tests {
             tokio::task::yield_now().await;
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert!(
-            last_on_demand.load(Ordering::Relaxed) == first_ts,
-            "second signal within min_pause must not advance timestamp"
+        let actual = (
+            last_on_demand.load(Ordering::Relaxed),
+            count.load(Ordering::Relaxed),
         );
         assert!(
-            count.load(Ordering::Relaxed) == count_after_first,
-            "server must not see a second on-demand HTTP request"
+            actual == (first_ts, count_after_first),
+            "second signal within min_pause must change neither timestamp nor HTTP request count"
         );
 
         shutdown.cancel();

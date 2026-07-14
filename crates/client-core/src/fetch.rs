@@ -5,6 +5,8 @@
 //! (e.g. the tiered-storage metadata-log consumer) that drive their own
 //! per-partition fetch loops with externally-owned offsets.
 
+use std::collections::{HashSet, VecDeque};
+
 use bytes::Bytes;
 use crabka_protocol::{
     owned::{
@@ -12,6 +14,7 @@ use crabka_protocol::{
         fetch_response::FetchResponse,
     },
     primitives::uuid::Uuid as WireUuid,
+    records::RecordHeader,
 };
 
 use crate::{connection::Connection, error::ClientError};
@@ -52,6 +55,8 @@ pub struct FetchedRecord {
     pub value: Option<Bytes>,
     /// Record timestamp (epoch millis): batch `base_timestamp` + per-record delta.
     pub timestamp: i64,
+    /// Record headers in Kafka wire order, preserving duplicate keys and null values.
+    pub headers: Vec<FetchedHeader>,
 }
 
 /// Parameters for a single-partition fetch with an explicit isolation level.
@@ -65,6 +70,22 @@ pub struct IsolatedFetch<'a> {
     pub partition_max_bytes: i32,
     pub isolation_level: i8,
 }
+
+/// Records returned by a fetch together with the next safe partition offset.
+///
+/// `next_offset` advances over every decoded batch, including control batches
+/// and batches filtered because their transaction aborted. Callers which own a
+/// fetch cursor must use it rather than deriving progress from `records`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchPartitionResult {
+    /// Visible records in offset order.
+    pub records: Vec<FetchedRecord>,
+    /// One past the highest decoded batch offset, if the response had v2 batches.
+    pub next_offset: Option<i64>,
+}
+
+/// One Kafka record header decoded from a fetched record.
+pub type FetchedHeader = RecordHeader;
 
 /// Fetch up to `partition_max_bytes` from `(topic, partition)` starting
 /// at `fetch_offset`, decoding every v2 `RecordBatch` into
@@ -163,6 +184,24 @@ pub async fn fetch_partition_with_isolation(
     fetch_partition_with_isolation_on(conn, fetch).await
 }
 
+/// Fetch a partition with isolation and return both visible records and cursor
+/// progress across filtered transactional and control batches.
+///
+/// In `READ_COMMITTED` mode this applies the response's
+/// `aborted_transactions` metadata client-side because Crabka brokers return
+/// the underlying record batches verbatim.
+///
+/// # Errors
+///
+/// Returns [`ClientError`] when the fetch request fails or the broker response
+/// is malformed.
+pub async fn fetch_partition_with_isolation_progress(
+    conn: &Connection,
+    fetch: IsolatedFetch<'_>,
+) -> Result<FetchPartitionResult, ClientError> {
+    fetch_partition_with_isolation_progress_on(conn, fetch).await
+}
+
 /// `FetchTransport`-generic body of [`fetch_partition_with_isolation`]. Holds the
 /// build-request → send → decode-response logic so it is killable against a
 /// `mockall` `FetchTransport` without a live broker socket.
@@ -171,7 +210,26 @@ async fn fetch_partition_with_isolation_on<T: FetchTransport + ?Sized>(
     fetch: IsolatedFetch<'_>,
 ) -> Result<Vec<FetchedRecord>, ClientError> {
     let resp = conn.fetch(build_fetch_request(fetch)).await?;
-    decode_fetch_response(&resp, fetch.partition)
+    Ok(fetch_partition_with_isolation_progress_response(
+        &resp,
+        fetch.partition,
+        fetch.fetch_offset,
+        fetch.isolation_level,
+    )?
+    .records)
+}
+
+async fn fetch_partition_with_isolation_progress_on<T: FetchTransport + ?Sized>(
+    conn: &T,
+    fetch: IsolatedFetch<'_>,
+) -> Result<FetchPartitionResult, ClientError> {
+    let resp = conn.fetch(build_fetch_request(fetch)).await?;
+    fetch_partition_with_isolation_progress_response(
+        &resp,
+        fetch.partition,
+        fetch.fetch_offset,
+        fetch.isolation_level,
+    )
 }
 
 fn build_fetch_request(fetch: IsolatedFetch<'_>) -> FetchRequest {
@@ -195,20 +253,16 @@ fn build_fetch_request(fetch: IsolatedFetch<'_>) -> FetchRequest {
     }
 }
 
-/// Decode every v2 `RecordBatch` for `partition` in `resp` into
-/// offset-ordered [`FetchedRecord`]s. Control batches and legacy
-/// (non-v2) payloads are skipped. Socket-free so it is unit-testable
-/// against a hand-built response.
-///
-/// A non-zero partition-level `error_code` is surfaced as
-/// [`ClientError::Server`] rather than swallowed as an empty result,
-/// which would otherwise make a fetch loop re-request the same offset
-/// indefinitely.
-fn decode_fetch_response(
+/// Decode one partition response with client-side transaction filtering.
+fn fetch_partition_with_isolation_progress_response(
     resp: &crabka_protocol::owned::fetch_response::FetchResponse,
     partition: i32,
-) -> Result<Vec<FetchedRecord>, ClientError> {
+    fetch_floor: i64,
+    isolation_level: i8,
+) -> Result<FetchPartitionResult, ClientError> {
     let mut out = Vec::new();
+    let mut next_offset = None;
+    let read_committed = isolation_level == 1;
     for t in &resp.responses {
         for p in &t.partitions {
             if p.partition_index != partition {
@@ -223,38 +277,161 @@ fn decode_fetch_response(
             let Some(batches) = payload.as_v2() else {
                 continue;
             };
+            let mut aborted: Vec<(i64, i64)> = if read_committed {
+                p.aborted_transactions
+                    .as_deref()
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|transaction| (transaction.first_offset, transaction.producer_id))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            aborted.sort_unstable();
+            let mut aborted: VecDeque<_> = aborted.into();
+            let mut aborted_producers = HashSet::new();
             for batch in batches {
+                next_offset = Some(
+                    next_offset
+                        .unwrap_or(fetch_floor)
+                        .max(batch.base_offset + i64::from(batch.last_offset_delta) + 1),
+                );
+                while read_committed
+                    && aborted
+                        .front()
+                        .is_some_and(|(first_offset, _)| *first_offset <= batch.base_offset)
+                {
+                    let Some((_, producer_id)) = aborted.pop_front() else {
+                        break;
+                    };
+                    aborted_producers.insert(producer_id);
+                }
                 if batch.attributes.is_control_batch() {
+                    if read_committed {
+                        aborted_producers.remove(&batch.producer_id);
+                    }
+                    continue;
+                }
+                if read_committed
+                    && batch.attributes.is_transactional()
+                    && aborted_producers.contains(&batch.producer_id)
+                {
                     continue;
                 }
                 for r in &batch.records {
+                    let offset = batch.base_offset + i64::from(r.offset_delta);
+                    if offset < fetch_floor {
+                        continue;
+                    }
                     out.push(FetchedRecord {
-                        offset: batch.base_offset + i64::from(r.offset_delta),
+                        offset,
                         key: r.key.clone(),
                         value: r.value.clone(),
                         timestamp: batch.base_timestamp + r.timestamp_delta,
+                        headers: r.headers.clone(),
                     });
                 }
             }
         }
     }
     out.sort_by_key(|r| r.offset);
-    Ok(out)
+    Ok(FetchPartitionResult {
+        records: out,
+        next_offset,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use assert2::assert;
+    use bytes::BufMut as _;
     use crabka_protocol::{
         UnknownTaggedFields,
         owned::{
             fetch_request::ReplicaState,
-            fetch_response::{FetchResponse, FetchableTopicResponse, PartitionData},
+            fetch_response::{
+                AbortedTransaction, FetchResponse, FetchableTopicResponse, PartitionData,
+            },
         },
-        records::{Record, RecordBatch, RecordsPayload},
+        records::{Attributes, Record, RecordBatch, RecordsPayload},
     };
 
     use super::*;
+
+    fn put_signed_varint(buf: &mut Vec<u8>, value: i64) {
+        let mut encoded = ((value << 1) ^ (value >> 63)).cast_unsigned();
+        loop {
+            let byte = (encoded & 0x7f) as u8;
+            encoded >>= 7;
+            buf.push(if encoded == 0 { byte } else { byte | 0x80 });
+            if encoded == 0 {
+                break;
+            }
+        }
+    }
+
+    fn put_hand_encoded_record(buf: &mut Vec<u8>, body: &[u8]) {
+        put_signed_varint(buf, i64::try_from(body.len()).expect("record body fits"));
+        buf.extend_from_slice(body);
+    }
+
+    /// Build bytes directly from the Kafka record-batch v2 grammar. This
+    /// deliberately does not call either production encoder.
+    fn hand_encoded_v2_header_batch() -> RecordBatch {
+        let mut records = Vec::new();
+        let mut empty = Vec::new();
+        empty.push(0);
+        put_signed_varint(&mut empty, 0);
+        put_signed_varint(&mut empty, 0);
+        put_signed_varint(&mut empty, -1);
+        put_signed_varint(&mut empty, 5);
+        empty.extend_from_slice(b"empty");
+        put_signed_varint(&mut empty, 0);
+        put_hand_encoded_record(&mut records, &empty);
+
+        let long_key = "k".repeat(130);
+        let long_value = vec![0xa5; 130];
+        let mut headered = Vec::new();
+        headered.push(0);
+        put_signed_varint(&mut headered, 10);
+        put_signed_varint(&mut headered, 1);
+        put_signed_varint(&mut headered, -1);
+        put_signed_varint(&mut headered, 4);
+        headered.extend_from_slice(b"data");
+        put_signed_varint(&mut headered, 3);
+        put_signed_varint(&mut headered, 130);
+        headered.extend_from_slice(long_key.as_bytes());
+        put_signed_varint(&mut headered, 130);
+        headered.extend_from_slice(&long_value);
+        put_signed_varint(&mut headered, 3);
+        headered.extend_from_slice(b"dup");
+        put_signed_varint(&mut headered, -1);
+        put_signed_varint(&mut headered, 3);
+        headered.extend_from_slice(b"dup");
+        put_signed_varint(&mut headered, 0);
+        put_hand_encoded_record(&mut records, &headered);
+
+        let mut batch = bytes::BytesMut::new();
+        batch.put_i64(5);
+        batch.put_i32(0);
+        batch.put_i32(0);
+        batch.put_i8(2);
+        batch.put_u32(0);
+        batch.put_i16(0);
+        batch.put_i32(1);
+        batch.put_i64(1_000);
+        batch.put_i64(1_010);
+        batch.put_i64(-1);
+        batch.put_i16(-1);
+        batch.put_i32(-1);
+        batch.put_i32(2);
+        batch.extend_from_slice(&records);
+        let batch_len = i32::try_from(batch.len() - 12).expect("batch length fits");
+        batch[8..12].copy_from_slice(&batch_len.to_be_bytes());
+        let crc = crc32c::crc32c(&batch[21..]);
+        batch[17..21].copy_from_slice(&crc.to_be_bytes());
+        RecordBatch::decode(&mut &batch[..]).expect("hand-encoded v2 batch decodes")
+    }
 
     fn batch_with(base_offset: i64, values: &[&[u8]]) -> RecordBatch {
         let records = values
@@ -301,7 +478,9 @@ mod tests {
             }],
             ..Default::default()
         };
-        let got = decode_fetch_response(&resp, 0).unwrap();
+        let got = fetch_partition_with_isolation_progress_response(&resp, 0, 0, 0)
+            .unwrap()
+            .records;
         assert!(
             got == vec![
                 FetchedRecord {
@@ -309,12 +488,65 @@ mod tests {
                     key: None,
                     value: Some(Bytes::from_static(b"a")),
                     timestamp: 1_000,
+                    headers: Vec::new(),
                 },
                 FetchedRecord {
                     offset: 6,
                     key: None,
                     value: Some(Bytes::from_static(b"b")),
                     timestamp: 1_010,
+                    headers: Vec::new(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn decode_preserves_hand_encoded_v2_header_wire_order_and_varints() {
+        let response = FetchResponse {
+            responses: vec![FetchableTopicResponse {
+                topic: "headers".into(),
+                partitions: vec![PartitionData {
+                    partition_index: 0,
+                    records: Some(RecordsPayload::from(vec![hand_encoded_v2_header_batch()])),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let records = fetch_partition_with_isolation_progress_response(&response, 0, 0, 0)
+            .expect("fetch response")
+            .records;
+        assert_eq!(
+            records,
+            vec![
+                FetchedRecord {
+                    offset: 5,
+                    key: None,
+                    value: Some(Bytes::from_static(b"empty")),
+                    timestamp: 1_000,
+                    headers: Vec::new(),
+                },
+                FetchedRecord {
+                    offset: 6,
+                    key: None,
+                    value: Some(Bytes::from_static(b"data")),
+                    timestamp: 1_010,
+                    headers: vec![
+                        FetchedHeader {
+                            key: "k".repeat(130),
+                            value: Some(Bytes::from(vec![0xa5; 130])),
+                        },
+                        FetchedHeader {
+                            key: "dup".to_string(),
+                            value: None,
+                        },
+                        FetchedHeader {
+                            key: "dup".to_string(),
+                            value: Some(Bytes::new()),
+                        },
+                    ],
                 },
             ]
         );
@@ -390,8 +622,41 @@ mod tests {
             }],
             ..Default::default()
         };
-        let err = decode_fetch_response(&resp, 0).unwrap_err();
+        let err = fetch_partition_with_isolation_progress_response(&resp, 0, 0, 0).unwrap_err();
         assert!(matches!(err, ClientError::Server { error_code: 1 }));
+    }
+
+    #[test]
+    fn read_committed_filters_aborted_batches_and_advances_past_them() {
+        let mut aborted_batch = batch_with(5, &[b"discard"]);
+        aborted_batch.producer_id = 9;
+        aborted_batch.attributes = Attributes(Attributes::TRANSACTIONAL_BIT);
+        let visible_batch = batch_with(6, &[b"keep"]);
+        let response = FetchResponse {
+            responses: vec![FetchableTopicResponse {
+                topic: "t".into(),
+                partitions: vec![PartitionData {
+                    partition_index: 0,
+                    aborted_transactions: Some(vec![AbortedTransaction {
+                        producer_id: 9,
+                        first_offset: 5,
+                        ..Default::default()
+                    }]),
+                    records: Some(RecordsPayload::from(vec![aborted_batch, visible_batch])),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let result = fetch_partition_with_isolation_progress_response(&response, 0, 5, 1)
+            .expect("successful fetch response");
+
+        assert_eq!(result.records.len(), 1);
+        assert_eq!(result.records[0].offset, 6);
+        assert_eq!(result.records[0].value, Some(Bytes::from_static(b"keep")));
+        assert_eq!(result.next_offset, Some(7));
     }
 
     // ── socket-free end-to-end drive via MockFetchTransport ──────────────────
@@ -449,12 +714,14 @@ mod tests {
                     key: None,
                     value: Some(Bytes::from_static(b"a")),
                     timestamp: 1_000,
+                    headers: Vec::new(),
                 },
                 FetchedRecord {
                     offset: 6,
                     key: None,
                     value: Some(Bytes::from_static(b"b")),
                     timestamp: 1_010,
+                    headers: Vec::new(),
                 },
             ]
         );

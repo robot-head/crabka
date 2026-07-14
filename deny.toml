@@ -33,17 +33,6 @@ ignore = [
     # dependency used by the new internal profiles crates; no fixed release is
     # available through that DataFusion revision.
     "RUSTSEC-2024-0436",
-    # russh CryptoVec allocation DoS advisories. russh is a DEV/TEST-ONLY
-    # transitive dependency: it enters the graph solely via
-    # `testcontainers -> testcontainers-modules` under `[dev-dependencies]`
-    # (`cargo tree -i russh -e normal` is empty), is never a direct dependency,
-    # and appears nowhere in Crabka source. It is not compiled into any
-    # production binary (broker/observability/etc.). The vulnerabilities are
-    # reachable only by a malicious SSH *peer*; testcontainers uses russh as an
-    # SSH client to a developer-controlled Docker host, not an untrusted network
-    # surface. No fixed release is available through testcontainers 0.27.3.
-    "RUSTSEC-2026-0153",
-    "RUSTSEC-2026-0154",
 ]
 
 [licenses]
@@ -74,6 +63,9 @@ exceptions = [
     # permissive, non-copyleft license). Pulled in transitively via polars
     # (the `polars` columnar-streams feature).
     { allow = ["BSL-1.0"], crate = "xxhash-rust" },
+    # varint-rs uses the OSI-approved zero-clause BSD license. It enters
+    # transitively through fjall/lsm-tree, so keep the allowance crate-scoped.
+    { allow = ["0BSD"], crate = "varint-rs" },
     # Creusot's specification attributes/proc macros are LGPL-2.1-or-later.
     # They enter the graph only through the newly added verified kernels
     # (`crabka-verified`) and throttle arithmetic contracts; ordinary cargo

@@ -1,0 +1,1051 @@
+use crabka_gres_ranges::{
+    HashShardSpec, MultiRangeTenant, MultiRangeTenantConfig, RangeId, StatementKind, TableId,
+    TenantName,
+};
+
+#[tokio::test]
+async fn idle_sharded_autocommit_uses_owning_range_as_timestamp_primary() {
+    let config = MultiRangeTenantConfig::from_boundaries(
+        TenantName::parse("tenant_idle_ts_primary").expect("tenant"),
+        "0,50:0,50:10",
+    )
+    .expect("config");
+    let (gateway, _handles) = MultiRangeTenant::start(config).expect("tenant");
+    let mut session = gateway.connect();
+    session
+        .simple_query("CREATE TABLE t50 (id int4) SHARDED")
+        .await
+        .expect("create");
+    session
+        .simple_query("INSERT INTO t50 VALUES (1)")
+        .await
+        .expect("insert");
+
+    let engines = gateway.hosted_range_engines();
+    assert!(
+        engines[&RangeId::COORDINATOR]
+            .timestamp_transaction_descriptors()
+            .expect("r0 descriptors")
+            .is_empty()
+    );
+    let primaries = engines[&RangeId::new(1)]
+        .timestamp_transaction_descriptors()
+        .expect("r1 descriptors");
+    assert_eq!(primaries.len(), 1);
+    assert!(matches!(
+        primaries[0].decision,
+        crabka_pgexec::PrimaryTxnDecision::Committed(_)
+    ));
+}
+use crabka_pgwire::engine::{
+    BoundParam, CloseTarget, Engine, ExecuteOutcome, QueryResult, Session,
+};
+
+#[tokio::test]
+async fn gateway_owns_multiple_portals_cursor_close_and_sync_lifetimes() {
+    let (gateway, _handles) = MultiRangeTenant::start(tenant_config()).expect("tenant");
+    let mut session = gateway.connect();
+    session
+        .simple_query("CREATE TABLE t150 (id int4); INSERT INTO t150 VALUES (1), (2), (3)")
+        .await
+        .expect("seed");
+
+    session
+        .parse("statement", "SELECT id FROM t150 ORDER BY id", &[])
+        .await
+        .expect("parse");
+    session
+        .bind("first", "statement", &[], &[0])
+        .await
+        .expect("bind first");
+    session
+        .bind("second", "statement", &[], &[1])
+        .await
+        .expect("bind second");
+
+    let ExecuteOutcome::Rows { rows, completion } =
+        session.execute("first", 1).await.expect("first page")
+    else {
+        panic!("expected rows");
+    };
+    assert_eq!(rows.len(), 1);
+    assert!(completion.is_none());
+    let ExecuteOutcome::Rows { rows, completion } =
+        session.execute("first", 0).await.expect("resume")
+    else {
+        panic!("expected rows");
+    };
+    assert_eq!(rows.len(), 2);
+    assert_eq!(completion.as_deref(), Some("SELECT 3"));
+
+    session
+        .close(CloseTarget::Portal("first"))
+        .await
+        .expect("close portal");
+    assert_eq!(
+        session.execute("first", 0).await.expect_err("closed").code,
+        "34000"
+    );
+    session.sync().await.expect("sync");
+    assert_eq!(
+        session.execute("second", 0).await.expect_err("synced").code,
+        "34000"
+    );
+    session
+        .describe_statement("statement")
+        .await
+        .expect("prepared survives sync");
+}
+
+#[tokio::test]
+async fn failed_unnamed_replacements_remove_old_gateway_resources() {
+    let (gateway, _handles) = MultiRangeTenant::start(tenant_config()).expect("tenant");
+    let mut session = gateway.connect();
+    session.parse("", "SELECT 1", &[]).await.expect("parse");
+    session.bind("", "", &[], &[]).await.expect("bind");
+
+    session
+        .parse("", "SELECT FROM", &[])
+        .await
+        .expect_err("bad parse");
+    assert_eq!(
+        session
+            .describe_statement("")
+            .await
+            .expect_err("removed")
+            .code,
+        "26000"
+    );
+
+    session.parse("", "SELECT 1", &[]).await.expect("reparse");
+    session.bind("", "", &[], &[]).await.expect("rebind");
+    session
+        .bind("", "missing", &[], &[])
+        .await
+        .expect_err("bad bind");
+    assert_eq!(
+        session.describe_portal("").await.expect_err("removed").code,
+        "34000"
+    );
+}
+
+#[tokio::test]
+async fn gateway_owned_command_portal_executes_side_effect_once() {
+    let (gateway, _handles) = MultiRangeTenant::start(tenant_config()).expect("tenant");
+    let mut session = gateway.connect();
+    session
+        .parse("ddl", "CREATE TABLE t150 (id int4)", &[])
+        .await
+        .expect("parse");
+    session.bind("ddl", "ddl", &[], &[]).await.expect("bind");
+    session.execute("ddl", 0).await.expect("first execute");
+    session.execute("ddl", 0).await.expect("cached execute");
+}
+
+#[tokio::test]
+async fn gateway_transaction_parse_rejects_parameter_type_hints() {
+    let (gateway, _handles) = MultiRangeTenant::start(tenant_config()).expect("tenant");
+    let mut session = gateway.connect();
+
+    let error = session
+        .parse("commit", "COMMIT WORK", &[23])
+        .await
+        .expect_err("transaction control has no parameters");
+
+    assert_eq!(error.code, "42P02");
+    assert_eq!(
+        session
+            .describe_statement("commit")
+            .await
+            .expect_err("failed parse owns no statement")
+            .code,
+        "26000"
+    );
+}
+
+fn tenant_config() -> MultiRangeTenantConfig {
+    MultiRangeTenantConfig::from_boundaries(
+        TenantName::parse("tenant_a").expect("tenant"),
+        "0,100,200",
+    )
+    .expect("config")
+}
+
+fn row_split_tenant_config() -> MultiRangeTenantConfig {
+    MultiRangeTenantConfig::from_boundaries(
+        TenantName::parse("tenant_row_split").expect("tenant"),
+        "0:0,150:100",
+    )
+    .expect("config")
+}
+
+fn hash_split_tenant_config() -> MultiRangeTenantConfig {
+    MultiRangeTenantConfig::from_boundaries(
+        TenantName::parse("tenant_hash_split").expect("tenant"),
+        "0:0:0,150:0:0,150:8:0,151:0:0",
+    )
+    .expect("config")
+}
+
+#[tokio::test]
+async fn ddl_routes_to_range0_and_dml_routes_to_table_owner() {
+    let (gateway, handles) = MultiRangeTenant::start(tenant_config()).expect("tenant");
+    let mut session = gateway.connect();
+
+    session
+        .simple_query("CREATE TABLE t150 (id int4)")
+        .await
+        .expect("create");
+    session
+        .simple_query("INSERT INTO t150 VALUES (7)")
+        .await
+        .expect("insert");
+
+    let routes = handles.route_log().await;
+    assert_eq!(routes[0].kind, StatementKind::Ddl);
+    assert_eq!(routes[0].range_id, RangeId::COORDINATOR);
+    assert_eq!(routes[1].kind, StatementKind::Dml);
+    assert_eq!(routes[1].range_id, RangeId::new(1));
+}
+
+#[tokio::test]
+async fn cross_range_statement_all_sharded_tables_is_allowed() {
+    let (gateway, _handles) = MultiRangeTenant::start(tenant_config()).expect("tenant");
+    let mut session = gateway.connect();
+
+    session
+        .simple_query("CREATE TABLE t50 (id int4) SHARDED")
+        .await
+        .expect("create t50");
+    session
+        .simple_query("CREATE TABLE t150 (id int4) SHARDED")
+        .await
+        .expect("create t150");
+    session
+        .simple_query("SELECT * FROM t50 JOIN t150 ON true")
+        .await
+        .expect("all-sharded cross-range statement is allowed");
+}
+
+#[tokio::test]
+async fn cross_range_statement_mixed_sharded_tables_is_rejected() {
+    let (gateway, _handles) = MultiRangeTenant::start(tenant_config()).expect("tenant");
+    let mut session = gateway.connect();
+
+    session
+        .simple_query("CREATE TABLE t50 (id int4) SHARDED")
+        .await
+        .expect("create t50");
+    session
+        .simple_query("CREATE TABLE t150 (id int4)")
+        .await
+        .expect("create t150");
+
+    let error = session
+        .simple_query("SELECT * FROM t50 JOIN t150 ON true")
+        .await
+        .expect_err("mixed sharded cross-range statement rejected");
+
+    assert_eq!(error.code, "0A000");
+}
+
+#[tokio::test]
+async fn cross_range_statement_all_unsharded_tables_is_rejected() {
+    let (gateway, _handles) = MultiRangeTenant::start(tenant_config()).expect("tenant");
+    let mut session = gateway.connect();
+
+    session
+        .simple_query("CREATE TABLE t50 (id int4)")
+        .await
+        .expect("create t50");
+    session
+        .simple_query("CREATE TABLE t150 (id int4)")
+        .await
+        .expect("create t150");
+
+    let error = session
+        .simple_query("SELECT * FROM t50 JOIN t150 ON true")
+        .await
+        .expect_err("unsharded cross-range statement rejected");
+
+    assert_eq!(error.code, "0A000");
+}
+
+#[tokio::test]
+async fn row_sharded_statements_keep_logical_id_independent_of_hidden_placement() {
+    let (gateway, handles) = MultiRangeTenant::start(row_split_tenant_config()).expect("tenant");
+    let mut session = gateway.connect();
+
+    session
+        .simple_query("CREATE TABLE t150 (id int4, value int4) SHARDED")
+        .await
+        .expect("create");
+    session
+        .simple_query("INSERT INTO t150 VALUES (20, 1)")
+        .await
+        .expect("insert below boundary");
+    session
+        .simple_query("INSERT INTO t150 VALUES (120, 2)")
+        .await
+        .expect("insert above boundary");
+
+    assert_eq!(
+        select_values(&mut session, "SELECT value FROM t150 WHERE id = 20").await,
+        vec![1]
+    );
+    assert_eq!(
+        select_values(&mut session, "SELECT value FROM t150 WHERE id = 120").await,
+        vec![2]
+    );
+    assert_eq!(
+        select_values(&mut session, "SELECT value FROM t150 ORDER BY id").await,
+        vec![1, 2]
+    );
+
+    let routes = handles.route_log().await;
+    let routed_ranges = routes
+        .iter()
+        .filter(|record| matches!(record.kind, StatementKind::Dml | StatementKind::Query))
+        .map(|record| record.range_id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        routed_ranges,
+        vec![
+            RangeId::COORDINATOR,
+            RangeId::COORDINATOR,
+            RangeId::COORDINATOR,
+            RangeId::new(1),
+            RangeId::COORDINATOR,
+        ]
+    );
+}
+
+#[tokio::test]
+async fn row_sharded_insert_with_explicit_columns_can_omit_logical_id() {
+    let (gateway, _handles) = MultiRangeTenant::start(row_split_tenant_config()).expect("tenant");
+    let mut session = gateway.connect();
+
+    session
+        .simple_query("CREATE TABLE t150 (id int4, value int4) SHARDED")
+        .await
+        .expect("create");
+
+    session
+        .simple_query("INSERT INTO t150 (value) VALUES (7)")
+        .await
+        .expect("hidden row identity does not require a logical id");
+
+    assert_eq!(
+        select_values(&mut session, "SELECT value FROM t150 ORDER BY id").await,
+        vec![7]
+    );
+}
+
+#[tokio::test]
+async fn hash_sharded_equality_routes_to_deterministic_bucket_range() {
+    let (gateway, handles) = MultiRangeTenant::start(hash_split_tenant_config()).expect("tenant");
+    let mut session = gateway.connect();
+
+    session
+        .simple_query("CREATE TABLE t150 (id int4, value int4) SHARDED BY HASH (id) BUCKETS 16")
+        .await
+        .expect("create");
+    session
+        .simple_query("INSERT INTO t150 VALUES (42, 7)")
+        .await
+        .expect("insert");
+
+    assert_eq!(
+        select_values(&mut session, "SELECT value FROM t150 WHERE id = 42").await,
+        vec![7]
+    );
+
+    let spec =
+        HashShardSpec::new(TableId::new(150), vec!["id".into()], 16, None).expect("hash spec");
+    let expected_range = handles
+        .range_map()
+        .route_hash_equality(&spec, 42_i32.to_be_bytes())
+        .expect("route")
+        .range_id;
+    let routes = handles.route_log().await;
+    let routed_ranges = routes
+        .iter()
+        .filter(|record| matches!(record.kind, StatementKind::Dml | StatementKind::Query))
+        .map(|record| record.range_id)
+        .collect::<Vec<_>>();
+
+    assert_eq!(routed_ranges, vec![expected_range, expected_range]);
+}
+
+#[tokio::test]
+async fn hash_sharded_insert_with_explicit_columns_missing_hash_key_fails_clear() {
+    let (gateway, _handles) = MultiRangeTenant::start(hash_split_tenant_config()).expect("tenant");
+    let mut session = gateway.connect();
+
+    session
+        .simple_query("CREATE TABLE t150 (id int4, value int4) SHARDED BY HASH (id) BUCKETS 16")
+        .await
+        .expect("create");
+
+    let error = session
+        .simple_query("INSERT INTO t150 (value) VALUES (7)")
+        .await
+        .expect_err("missing hash shard key rejected");
+
+    assert_eq!(error.code, "0A000");
+    assert_eq!(
+        select_values(&mut session, "SELECT value FROM t150 ORDER BY id").await,
+        Vec::<i32>::new()
+    );
+}
+
+#[tokio::test]
+async fn hash_sharded_multi_row_insert_routes_when_all_rows_share_range() {
+    let (gateway, handles) = MultiRangeTenant::start(hash_split_tenant_config()).expect("tenant");
+    let mut session = gateway.connect();
+    session
+        .simple_query("CREATE TABLE t150 (id int4, value int4) SHARDED BY HASH (id) BUCKETS 16")
+        .await
+        .expect("create");
+    let spec =
+        HashShardSpec::new(TableId::new(150), vec!["id".into()], 16, None).expect("hash spec");
+    let (first_id, second_id, expected_range) = same_hash_range_ids(&handles.range_map(), &spec);
+
+    session
+        .simple_query(&format!(
+            "INSERT INTO t150 VALUES ({first_id}, 10), ({second_id}, 20)"
+        ))
+        .await
+        .expect("same-range insert");
+
+    let routes = handles.route_log().await;
+    assert_eq!(routes[1].range_id, expected_range);
+}
+
+#[tokio::test]
+async fn sharded_multi_row_insert_spanning_row_ranges_commits_atomically() {
+    let (gateway, _handles) = MultiRangeTenant::start(row_split_tenant_config()).expect("tenant");
+    let mut session = gateway.connect();
+    session
+        .simple_query("CREATE TABLE t150 (id int4, value int4) SHARDED")
+        .await
+        .expect("create");
+
+    session
+        .simple_query("INSERT INTO t150 VALUES (20, 10), (120, 20)")
+        .await
+        .expect("cross-range row insert");
+    assert_eq!(
+        select_values(&mut session, "SELECT value FROM t150 ORDER BY value").await,
+        vec![10, 20]
+    );
+}
+
+#[tokio::test]
+async fn in_process_scanner_merges_partial_aggregates_across_row_ranges() {
+    let (gateway, _handles) = MultiRangeTenant::start(row_split_tenant_config()).expect("tenant");
+    let mut session = gateway.connect();
+    session
+        .simple_query("CREATE TABLE t150 (id int4, value int4) SHARDED")
+        .await
+        .expect("create");
+    for statement in [
+        "INSERT INTO t150 VALUES (20, 5)",
+        "INSERT INTO t150 VALUES (30, 15)",
+        "INSERT INTO t150 VALUES (40, 35)",
+        "INSERT INTO t150 VALUES (120, 25)",
+        "INSERT INTO t150 VALUES (130, NULL)",
+    ] {
+        session.simple_query(statement).await.expect(statement);
+    }
+
+    assert_eq!(
+        select_scalar(&mut session, "SELECT AVG(value) FROM t150 WHERE id >= 30").await,
+        "25.0000000000000000"
+    );
+    assert_eq!(
+        select_scalar(&mut session, "SELECT COUNT(value) FROM t150 WHERE id >= 30").await,
+        "3"
+    );
+    assert_eq!(
+        select_scalar(&mut session, "SELECT SUM(value) FROM t150 WHERE id >= 30").await,
+        "75"
+    );
+}
+
+#[tokio::test]
+async fn sharded_multi_row_inserts_in_explicit_transaction_read_own_writes_and_commit() {
+    let (gateway, _handles) = MultiRangeTenant::start(row_split_tenant_config()).expect("tenant");
+    let mut session = gateway.connect();
+    session
+        .simple_query("CREATE TABLE t150 (id int4, value int4) SHARDED")
+        .await
+        .expect("create");
+    session.simple_query("BEGIN").await.expect("begin");
+
+    session
+        .simple_query("INSERT INTO t150 VALUES (20, 10), (120, 20)")
+        .await
+        .expect("first timestamp statement");
+    session
+        .simple_query("INSERT INTO t150 VALUES (30, 30)")
+        .await
+        .expect("second timestamp statement");
+    session
+        .simple_query("INSERT INTO t150 VALUES (130, 40)")
+        .await
+        .expect("third timestamp statement");
+    assert_eq!(
+        select_values(&mut session, "SELECT value FROM t150 ORDER BY id").await,
+        vec![10, 30, 20, 40]
+    );
+    session.simple_query("COMMIT").await.expect("commit");
+    assert_eq!(
+        select_values(&mut session, "SELECT value FROM t150 ORDER BY id").await,
+        vec![10, 30, 20, 40]
+    );
+}
+
+#[tokio::test]
+async fn explicit_timestamp_transaction_expands_from_single_range_to_new_range() {
+    let (gateway, _handles) = MultiRangeTenant::start(row_split_tenant_config()).expect("tenant");
+    let mut session = gateway.connect();
+    session
+        .simple_query("CREATE TABLE t150 (id int4, value int4) SHARDED")
+        .await
+        .expect("create");
+    session.simple_query("BEGIN").await.expect("begin");
+    session
+        .simple_query("INSERT INTO t150 VALUES (20, 10)")
+        .await
+        .expect("first range");
+    session
+        .simple_query("INSERT INTO t150 VALUES (120, 20)")
+        .await
+        .expect("new range");
+    assert_eq!(
+        select_values(&mut session, "SELECT value FROM t150 ORDER BY id").await,
+        vec![10, 20]
+    );
+    session.simple_query("COMMIT").await.expect("commit");
+}
+
+#[tokio::test]
+async fn extended_sharded_writes_join_explicit_timestamp_transaction() {
+    let (gateway, _handles) = MultiRangeTenant::start(row_split_tenant_config()).expect("tenant");
+    let mut session = gateway.connect();
+    session
+        .simple_query("CREATE TABLE t150 (id int4, value int4) SHARDED")
+        .await
+        .expect("create");
+    session.simple_query("BEGIN").await.expect("begin");
+    session
+        .extended_query_v2(
+            "INSERT INTO t150 VALUES ($1, 10), (120, 20)",
+            &[text_param("20")],
+        )
+        .await
+        .expect("extended write");
+    assert_eq!(
+        select_values(&mut session, "SELECT value FROM t150 ORDER BY id").await,
+        vec![10, 20]
+    );
+    let rows = session
+        .extended_query_v2("SELECT value FROM t150 WHERE id = $1", &[text_param("120")])
+        .await
+        .expect("extended read-your-writes");
+    assert!(format!("{rows:?}").contains("20"));
+    session.simple_query("COMMIT").await.expect("commit");
+}
+
+#[tokio::test]
+async fn extended_timestamp_dml_accepts_non_shard_parameter_types() {
+    let (gateway, _handles) = MultiRangeTenant::start(row_split_tenant_config()).expect("tenant");
+    let mut session = gateway.connect();
+    session
+        .simple_query("CREATE TABLE t150 (id int4, flag bool, payload bytea, score float8) SHARDED")
+        .await
+        .expect("create");
+    session.simple_query("BEGIN").await.expect("begin");
+    session
+        .extended_query_v2(
+            "INSERT INTO t150 VALUES (20, $1, $2, $3), (120, false, '\\x00', 0.0)",
+            &[
+                text_typed_param("true", crabka_pgtypes::oids::BOOL),
+                binary_typed_param(&[0xde, 0xad], crabka_pgtypes::oids::BYTEA),
+                binary_typed_param(
+                    &42.5f64.to_bits().to_be_bytes(),
+                    crabka_pgtypes::oids::FLOAT8,
+                ),
+            ],
+        )
+        .await
+        .expect("typed extended write");
+    session.simple_query("COMMIT").await.expect("commit");
+}
+
+#[tokio::test]
+async fn extended_timestamp_dml_accepts_binary_uuid_non_shard_parameter() {
+    let (gateway, _handles) = MultiRangeTenant::start(row_split_tenant_config()).expect("tenant");
+    let mut session = gateway.connect();
+    session
+        .simple_query("CREATE TABLE t150 (id int4, token uuid) SHARDED")
+        .await
+        .expect("create");
+    session.simple_query("BEGIN").await.expect("begin");
+    let uuid = [
+        0x55, 0x0e, 0x84, 0x00, 0xe2, 0x9b, 0x41, 0xd4, 0xa7, 0x16, 0x44, 0x66, 0x55, 0x44, 0x00,
+        0x00,
+    ];
+    session
+        .extended_query_v2(
+            "INSERT INTO t150 VALUES (20, $1), (120, '550e8400-e29b-41d4-a716-446655440001')",
+            &[binary_typed_param(&uuid, crabka_pgtypes::oids::UUID)],
+        )
+        .await
+        .expect("binary UUID write");
+    let visible = session
+        .simple_query("SELECT token FROM t150 WHERE id = 20")
+        .await
+        .expect("read own UUID write");
+    assert!(format!("{visible:?}").contains("550e8400-e29b-41d4-a716-446655440000"));
+    session.simple_query("COMMIT").await.expect("commit");
+
+    session
+        .simple_query("BEGIN")
+        .await
+        .expect("begin malformed");
+    let error = session
+        .extended_query_v2(
+            "INSERT INTO t150 VALUES (30, $1), (130, '550e8400-e29b-41d4-a716-446655440002')",
+            &[binary_typed_param(&uuid[..15], crabka_pgtypes::oids::UUID)],
+        )
+        .await
+        .expect_err("wrong binary UUID length");
+    assert_eq!(error.code, "22P03");
+    session.simple_query("ROLLBACK").await.expect("rollback");
+}
+
+#[test]
+fn dropping_timestamp_session_without_caller_runtime_cleans_up() {
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let (gateway, session) = runtime.block_on(async {
+        let (gateway, _handles) =
+            MultiRangeTenant::start(row_split_tenant_config()).expect("tenant");
+        let mut session = gateway.connect();
+        session
+            .simple_query("CREATE TABLE t150 (id int4, value int4) SHARDED")
+            .await
+            .expect("create");
+        session.simple_query("BEGIN").await.expect("begin");
+        session
+            .simple_query("INSERT INTO t150 VALUES (20, 10), (120, 20)")
+            .await
+            .expect("prewrite");
+        (gateway, session)
+    });
+    drop(runtime);
+    drop(session);
+
+    tokio::runtime::Runtime::new()
+        .expect("observer runtime")
+        .block_on(async move {
+            let mut observer = gateway.connect();
+            observer
+                .simple_query("INSERT INTO t150 VALUES (20, 30), (120, 40)")
+                .await
+                .expect("fallback cleanup resolved intents");
+        });
+}
+
+#[tokio::test]
+async fn dropping_explicit_timestamp_session_aborts_pending_intents() {
+    let (gateway, _handles) = MultiRangeTenant::start(row_split_tenant_config()).expect("tenant");
+    let mut setup = gateway.connect();
+    setup
+        .simple_query("CREATE TABLE t150 (id int4, value int4) SHARDED")
+        .await
+        .expect("create");
+    setup.simple_query("BEGIN").await.expect("begin");
+    setup
+        .simple_query("INSERT INTO t150 VALUES (20, 10), (120, 20)")
+        .await
+        .expect("prewrite");
+    drop(setup);
+    tokio::task::yield_now().await;
+
+    let mut observer = gateway.connect();
+    observer
+        .simple_query("INSERT INTO t150 VALUES (20, 30), (120, 40)")
+        .await
+        .expect("abandoned intents were resolved");
+}
+
+#[tokio::test]
+async fn sharded_multi_row_insert_in_explicit_transaction_rolls_back() {
+    let (gateway, _handles) = MultiRangeTenant::start(row_split_tenant_config()).expect("tenant");
+    let mut session = gateway.connect();
+    session
+        .simple_query("CREATE TABLE t150 (id int4, value int4) SHARDED")
+        .await
+        .expect("create");
+    session.simple_query("BEGIN").await.expect("begin");
+    session
+        .simple_query("INSERT INTO t150 VALUES (20, 10), (120, 20)")
+        .await
+        .expect("timestamp statement");
+    session.simple_query("ROLLBACK").await.expect("rollback");
+    assert_eq!(
+        select_values(&mut session, "SELECT value FROM t150 ORDER BY id").await,
+        Vec::<i32>::new()
+    );
+}
+
+#[tokio::test]
+async fn failed_explicit_timestamp_transaction_requires_rollback_and_aborts_intents() {
+    let (gateway, _handles) = MultiRangeTenant::start(row_split_tenant_config()).expect("tenant");
+    let mut session = gateway.connect();
+    session
+        .simple_query("CREATE TABLE t150 (id int4, value int4) SHARDED")
+        .await
+        .expect("create");
+    session.simple_query("BEGIN").await.expect("begin");
+    session
+        .simple_query("INSERT INTO t150 VALUES (20, 10), (120, 20)")
+        .await
+        .expect("timestamp statement");
+    session
+        .simple_query("INSERT INTO t150 VALUES (30, 'bad'), (130, 40)")
+        .await
+        .expect_err("statement failure");
+    let failed = session
+        .simple_query("SELECT value FROM t150 ORDER BY id")
+        .await
+        .expect_err("transaction remains failed");
+    assert_eq!(failed.code, "25P02");
+    session.simple_query("ROLLBACK").await.expect("rollback");
+    assert_eq!(
+        select_values(&mut session, "SELECT value FROM t150 ORDER BY id").await,
+        Vec::<i32>::new()
+    );
+}
+
+#[tokio::test]
+async fn parameterized_row_insert_routes_at_bind() {
+    let (gateway, _handles) = MultiRangeTenant::start(row_split_tenant_config()).expect("tenant");
+    let mut session = gateway.connect();
+    session
+        .simple_query("CREATE TABLE t150 (id int4, value int4) SHARDED")
+        .await
+        .expect("create");
+    let params = [text_param("20")];
+
+    session
+        .extended_query_v2("INSERT INTO t150 VALUES ($1, 7)", &params)
+        .await
+        .expect("parameterized row insert");
+    session
+        .extended_query_v2("INSERT INTO t150 VALUES ($1, 8)", &[binary_i32_param(120)])
+        .await
+        .expect("binary parameterized remote row insert");
+
+    assert_eq!(
+        select_values(&mut session, "SELECT value FROM t150 ORDER BY id").await,
+        vec![7, 8]
+    );
+}
+
+#[tokio::test]
+async fn non_literal_logical_id_does_not_control_row_sharded_placement() {
+    let (gateway, _handles) = MultiRangeTenant::start(row_split_tenant_config()).expect("tenant");
+    let mut session = gateway.connect();
+    session
+        .simple_query("CREATE TABLE t150 (id int4, value int4) SHARDED")
+        .await
+        .expect("create");
+
+    session
+        .simple_query("INSERT INTO t150 VALUES (10 + 10, 7)")
+        .await
+        .expect("logical id expression is independent of hidden row identity");
+
+    assert_eq!(
+        select_values(&mut session, "SELECT value FROM t150 ORDER BY id").await,
+        vec![7]
+    );
+}
+
+#[tokio::test]
+async fn sharded_broad_update_delete_remain_fail_clear() {
+    let (gateway, _handles) = MultiRangeTenant::start(row_split_tenant_config()).expect("tenant");
+    let mut session = gateway.connect();
+    session
+        .simple_query("CREATE TABLE t150 (id int4, value int4) SHARDED")
+        .await
+        .expect("create");
+    session
+        .simple_query("INSERT INTO t150 VALUES (20, 10)")
+        .await
+        .expect("insert first row");
+    session
+        .simple_query("INSERT INTO t150 VALUES (120, 20)")
+        .await
+        .expect("insert second row");
+
+    let update_error = session
+        .simple_query("UPDATE t150 SET value = 99")
+        .await
+        .expect_err("broad update rejected");
+    let delete_error = session
+        .simple_query("DELETE FROM t150")
+        .await
+        .expect_err("broad delete rejected");
+
+    assert_eq!(update_error.code, "0A000");
+    assert_eq!(delete_error.code, "0A000");
+    assert_eq!(
+        select_values(&mut session, "SELECT value FROM t150 ORDER BY id").await,
+        vec![10, 20]
+    );
+}
+
+#[tokio::test]
+async fn hash_sharded_multi_row_insert_spanning_ranges_commits_atomically() {
+    let (gateway, handles) = MultiRangeTenant::start(hash_split_tenant_config()).expect("tenant");
+    let mut session = gateway.connect();
+    session
+        .simple_query("CREATE TABLE t150 (id int4, value int4) SHARDED BY HASH (id) BUCKETS 16")
+        .await
+        .expect("create");
+    let spec =
+        HashShardSpec::new(TableId::new(150), vec!["id".into()], 16, None).expect("hash spec");
+    let (first_id, second_id) = cross_hash_range_ids(&handles.range_map(), &spec);
+
+    session
+        .simple_query(&format!(
+            "INSERT INTO t150 VALUES ({first_id}, 10), ({second_id}, 20)"
+        ))
+        .await
+        .expect("cross-range hash insert");
+    assert_eq!(
+        select_values(&mut session, "SELECT value FROM t150 ORDER BY value").await,
+        vec![10, 20]
+    );
+}
+
+#[tokio::test]
+async fn parameterized_hash_insert_routes_at_bind() {
+    let (gateway, _handles) = MultiRangeTenant::start(hash_split_tenant_config()).expect("tenant");
+    let mut session = gateway.connect();
+    session
+        .simple_query("CREATE TABLE t150 (id int4, value int4) SHARDED BY HASH (id) BUCKETS 16")
+        .await
+        .expect("create");
+    let params = [text_param("42")];
+
+    session
+        .extended_query_v2("INSERT INTO t150 VALUES ($1, 7)", &params)
+        .await
+        .expect("parameterized insert");
+
+    assert_eq!(
+        select_values(&mut session, "SELECT value FROM t150 ORDER BY id").await,
+        vec![7]
+    );
+}
+
+#[tokio::test]
+async fn parameterized_hash_select_routes_at_bind() {
+    let (gateway, _handles) = MultiRangeTenant::start(hash_split_tenant_config()).expect("tenant");
+    let mut session = gateway.connect();
+    session
+        .simple_query("CREATE TABLE t150 (id int4, value int4) SHARDED BY HASH (id) BUCKETS 16")
+        .await
+        .expect("create");
+    session
+        .simple_query("INSERT INTO t150 VALUES (42, 9)")
+        .await
+        .expect("insert");
+    let params = [text_param("42")];
+
+    let results = session
+        .extended_query_v2("SELECT value FROM t150 WHERE id = $1", &params)
+        .await
+        .expect("parameterized select");
+
+    let [QueryResult::Rows { rows, .. }] = results.as_slice() else {
+        panic!("expected rows")
+    };
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        std::str::from_utf8(&rows[0][0].as_ref().expect("value").text)
+            .expect("utf8")
+            .parse::<i32>()
+            .expect("i32"),
+        9
+    );
+}
+
+#[tokio::test]
+async fn deferred_bind_accepts_null_logical_id_and_allows_reparse() {
+    let (gateway, _handles) = MultiRangeTenant::start(row_split_tenant_config()).expect("tenant");
+    let mut session = gateway.connect();
+    session
+        .simple_query("CREATE TABLE t150 (id int4, value int4) SHARDED")
+        .await
+        .expect("create");
+    session
+        .parse("deferred", "INSERT INTO t150 VALUES ($1, 7)", &[])
+        .await
+        .expect("deferred parse");
+    session
+        .bind(
+            "null-id",
+            "deferred",
+            &[BoundParam {
+                type_oid: None,
+                format: 0,
+                value: None,
+            }],
+            &[],
+        )
+        .await
+        .expect("hidden row identity does not require a logical id");
+    session
+        .close(crabka_pgwire::engine::CloseTarget::Statement("deferred"))
+        .await
+        .expect("close deferred statement");
+    session
+        .parse("deferred", "INSERT INTO t150 VALUES ($1, 7)", &[])
+        .await
+        .expect("reparse same name");
+    session
+        .bind("good", "deferred", &[text_param("20")], &[])
+        .await
+        .expect("bind after cleanup");
+}
+
+#[tokio::test]
+async fn sharded_scan_fails_when_required_range_is_not_hosted() {
+    let config = hash_split_tenant_config()
+        .with_hosted_ranges(vec![RangeId::COORDINATOR, RangeId::new(1)])
+        .expect("hosted ranges");
+    let (gateway, _handles) = MultiRangeTenant::start(config).expect("tenant");
+    let mut session = gateway.connect();
+    session
+        .simple_query("CREATE TABLE t150 (id int4, value int4) SHARDED BY HASH (id) BUCKETS 16")
+        .await
+        .expect("create");
+
+    let error = session
+        .simple_query("SELECT value FROM t150 ORDER BY id")
+        .await
+        .expect_err("partial scan rejected");
+
+    assert_eq!(error.code, "0A000");
+}
+
+fn same_hash_range_ids(
+    range_map: &crabka_gres_ranges::RangeMap,
+    spec: &HashShardSpec,
+) -> (i32, i32, RangeId) {
+    for first_id in 0_i32..100 {
+        let first_range = hash_range(range_map, spec, first_id);
+        for second_id in first_id + 1..100 {
+            if hash_range(range_map, spec, second_id) == first_range {
+                return (first_id, second_id, first_range);
+            }
+        }
+    }
+    panic!("expected two ids in one hash range")
+}
+
+fn cross_hash_range_ids(
+    range_map: &crabka_gres_ranges::RangeMap,
+    spec: &HashShardSpec,
+) -> (i32, i32) {
+    let first_id = 0_i32;
+    let first_range = hash_range(range_map, spec, first_id);
+    for second_id in 1_i32..100 {
+        if hash_range(range_map, spec, second_id) != first_range {
+            return (first_id, second_id);
+        }
+    }
+    panic!("expected ids in different hash ranges")
+}
+
+fn hash_range(range_map: &crabka_gres_ranges::RangeMap, spec: &HashShardSpec, id: i32) -> RangeId {
+    range_map
+        .route_hash_equality(spec, id.to_be_bytes())
+        .expect("route")
+        .range_id
+}
+
+fn text_param(value: &str) -> BoundParam {
+    BoundParam {
+        type_oid: None,
+        format: 0,
+        value: Some(value.as_bytes().to_vec().into()),
+    }
+}
+
+fn text_typed_param(value: &str, oid: u32) -> BoundParam {
+    BoundParam {
+        type_oid: Some(oid),
+        format: 0,
+        value: Some(value.as_bytes().to_vec().into()),
+    }
+}
+
+fn binary_typed_param(value: &[u8], oid: u32) -> BoundParam {
+    BoundParam {
+        type_oid: Some(oid),
+        format: 1,
+        value: Some(value.to_vec().into()),
+    }
+}
+
+fn binary_i32_param(value: i32) -> BoundParam {
+    BoundParam {
+        type_oid: None,
+        format: 1,
+        value: Some(value.to_be_bytes().to_vec().into()),
+    }
+}
+
+async fn select_values(
+    session: &mut crabka_gres_ranges::tenant::GatewaySession,
+    sql: &str,
+) -> Vec<i32> {
+    let results = session.simple_query(sql).await.expect(sql);
+    let [QueryResult::Rows { rows, .. }] = results.as_slice() else {
+        panic!("expected rows")
+    };
+    rows.iter()
+        .map(|row| {
+            let cell = row[0].as_ref().expect("cell");
+            std::str::from_utf8(&cell.text)
+                .expect("utf8")
+                .parse::<i32>()
+                .expect("i32")
+        })
+        .collect()
+}
+
+async fn select_scalar(
+    session: &mut crabka_gres_ranges::tenant::GatewaySession,
+    sql: &str,
+) -> String {
+    let results = session.simple_query(sql).await.expect(sql);
+    let [QueryResult::Rows { rows, .. }] = results.as_slice() else {
+        panic!("expected rows")
+    };
+    let [row] = rows.as_slice() else {
+        panic!("expected one row")
+    };
+    let cell = row[0].as_ref().expect("non-null cell");
+    std::str::from_utf8(&cell.text).expect("utf8").to_string()
+}
+mod support;
+
+use support::ExtendedQueryV2 as _;

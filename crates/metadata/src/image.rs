@@ -13,8 +13,8 @@ use crate::{
     records::{
         BrokerConfigRecord, BrokerRegistrationRecord, ClientMetricsConfigRecord, ClientQuotaRecord,
         DelegationTokenRecord, FeatureLevelRecord, FeaturesEpochRecord, KRaftVersionRecord,
-        MetadataRecord, NodeId, PartitionRecord, QuotaEntity, ScramCredentialRecord,
-        TopicConfigRecord, TopicRecord, VotersRecord,
+        MetadataRecord, NodeId, PartitionOffsetAdvanceRecord, PartitionRecord, QuotaEntity,
+        ScramCredentialRecord, TopicConfigRecord, TopicRecord, VotersRecord,
     },
 };
 
@@ -79,6 +79,7 @@ fn record_variant(rec: &MetadataRecord) -> &'static str {
         MetadataRecord::V1ClientMetricsConfig(_) => "V1ClientMetricsConfig",
         MetadataRecord::V1FeaturesEpoch(_) => "V1FeaturesEpoch",
         MetadataRecord::V1PartitionDirAssignment(_) => "V1PartitionDirAssignment",
+        MetadataRecord::V1PartitionOffsetAdvance(_) => "V1PartitionOffsetAdvance",
     }
 }
 
@@ -97,6 +98,7 @@ pub struct MetadataImage {
     /// rather than O(topics × partitions). The inner `BTreeMap` keys by
     /// partition index, so per-topic iteration is ascending-index order.
     partitions: HashMap<String, BTreeMap<i32, PartitionRecord>>,
+    partition_next_offsets: HashMap<(String, i32), i64>,
     brokers: HashMap<NodeId, BrokerRegistrationRecord>,
     topic_configs: HashMap<String, BTreeMap<String, String>>,
     broker_configs: HashMap<NodeId, BTreeMap<String, String>>,
@@ -131,6 +133,7 @@ impl MetadataImage {
             topics: HashMap::new(),
             topic_ids: HashMap::new(),
             partitions: HashMap::new(),
+            partition_next_offsets: HashMap::new(),
             brokers: HashMap::new(),
             topic_configs: HashMap::new(),
             broker_configs: HashMap::new(),
@@ -192,6 +195,15 @@ impl MetadataImage {
             .get(topic)
             .into_iter()
             .flat_map(BTreeMap::values)
+    }
+
+    /// The committed next-offset for a diskless partition, if any advance has
+    /// been applied.
+    #[must_use]
+    pub fn partition_next_offset(&self, topic: &str, partition: i32) -> Option<i64> {
+        self.partition_next_offsets
+            .get(&(topic.to_string(), partition))
+            .copied()
     }
 
     /// The live partition count for `topic`, derived from the partitions
@@ -537,6 +549,7 @@ impl MetadataImage {
                 }
                 self.topics.remove(&d.name);
                 self.partitions.remove(&d.name);
+                self.partition_next_offsets.retain(|(t, _), _| t != &d.name);
                 self.topic_configs.remove(&d.name);
             }
             MetadataRecord::V1TopicConfig(c) => {
@@ -677,6 +690,13 @@ impl MetadataImage {
                     pr.directories[slot] = r.directory;
                 }
             }
+            // Diskless offset delta: bump the partition's committed next-offset.
+            MetadataRecord::V1PartitionOffsetAdvance(r) => {
+                *self
+                    .partition_next_offsets
+                    .entry((r.topic.clone(), r.partition))
+                    .or_insert(0) += r.count;
+            }
         }
     }
 
@@ -728,6 +748,7 @@ impl MetadataImage {
         for p in self.all_partitions() {
             out.push(MetadataRecord::V1Partition(p.clone()));
         }
+        self.push_partition_offset_advances(&mut out);
         for (topic, overrides) in &self.topic_configs {
             out.push(MetadataRecord::V1TopicConfig(TopicConfigRecord {
                 topic: topic.clone(),
@@ -846,6 +867,18 @@ impl MetadataImage {
         out
     }
 
+    fn push_partition_offset_advances(&self, out: &mut Vec<MetadataRecord>) {
+        for ((topic, partition), count) in &self.partition_next_offsets {
+            out.push(MetadataRecord::V1PartitionOffsetAdvance(
+                PartitionOffsetAdvanceRecord {
+                    topic: topic.clone(),
+                    partition: *partition,
+                    count: *count,
+                },
+            ));
+        }
+    }
+
     /// Reconstruct an image from a `cluster_id` and a record sequence
     /// (typically [`Self::to_records`] output read back from a snapshot):
     /// `new` an empty image and `apply` each record in order.
@@ -953,7 +986,10 @@ impl MetadataImage {
             // `directories` slot. The handler already resolved topic/partition/
             // replica against the image; apply is an idempotent slot upsert
             // (a no-op if the partition or replica is unknown).
-            | MetadataRecord::V1PartitionDirAssignment(_) => Ok(()),
+            | MetadataRecord::V1PartitionDirAssignment(_)
+            // Diskless offset-sequencer delta. The handler supplies a positive
+            // count; image-level apply is an unconditional increment.
+            | MetadataRecord::V1PartitionOffsetAdvance(_) => Ok(()),
         }
     }
 }
@@ -989,7 +1025,7 @@ mod tests {
         records::{
             BrokerConfigRecord, ClientQuotaRecord, DeleteDelegationTokenRecord,
             DeleteScramCredentialRecord, DeleteTopicRecord, FeatureLevelRecord, LeaderEpoch,
-            QuotaEntity, ScramCredentialRecord,
+            PartitionOffsetAdvanceRecord, QuotaEntity, ScramCredentialRecord,
         },
     };
 
@@ -1063,6 +1099,47 @@ mod tests {
             replication_factor: 2,
         }));
         assert2::assert!(MetadataImage::from_records(cid, &image.to_records()) == image);
+    }
+
+    #[test]
+    fn offset_advance_applies_as_monotonic_delta() {
+        let mut image = img();
+        let advance = |count: i64| {
+            MetadataRecord::V1PartitionOffsetAdvance(PartitionOffsetAdvanceRecord {
+                topic: "t".into(),
+                partition: 0,
+                count,
+            })
+        };
+
+        image.apply(&advance(3));
+        image.apply(&advance(2));
+        image.apply(&MetadataRecord::V1PartitionOffsetAdvance(
+            PartitionOffsetAdvanceRecord {
+                topic: "t".into(),
+                partition: 1,
+                count: 7,
+            },
+        ));
+
+        assert2::assert!(image.partition_next_offset("t", 0) == Some(5));
+        assert2::assert!(image.partition_next_offset("t", 1) == Some(7));
+    }
+
+    #[test]
+    fn offset_advance_survives_snapshot_round_trip() {
+        let mut image = img();
+        image.apply(&MetadataRecord::V1PartitionOffsetAdvance(
+            PartitionOffsetAdvanceRecord {
+                topic: "t".into(),
+                partition: 0,
+                count: 5,
+            },
+        ));
+
+        let restored = MetadataImage::from_records(Uuid::nil(), &image.to_records());
+
+        assert2::assert!(restored.partition_next_offset("t", 0) == Some(5));
     }
 
     fn apply_broker_fixture(image: &mut MetadataImage) {

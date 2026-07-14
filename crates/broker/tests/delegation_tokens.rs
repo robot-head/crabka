@@ -436,10 +436,10 @@ async fn start_broker() -> (BrokerHandle, TempDir, SocketAddr) {
 ///
 /// Same protocol surface as `start_broker`: PLAIN + SCRAM-SHA-256 enabled,
 /// master delegation-token key set, 7d ceiling / 24h default renew period.
-async fn start_broker_with_super_users(
+fn start_broker_with_super_users(
     plain_creds: &[(&str, &str)],
     super_users: &[&str],
-) -> (BrokerHandle, TempDir, SocketAddr) {
+) -> impl std::future::Future<Output = (BrokerHandle, TempDir, SocketAddr)> {
     let log_dir = tempfile::tempdir().unwrap();
     let mut cfg = BrokerConfig::for_tests(log_dir.path().to_path_buf());
     cfg.listeners = vec![ListenerSpec {
@@ -474,9 +474,11 @@ async fn start_broker_with_super_users(
     cfg.delegation_token_max_lifetime_ms = 7 * 24 * 60 * 60 * 1_000;
     cfg.delegation_token_default_renew_period_ms = 24 * 60 * 60 * 1_000;
 
-    let handle = Broker::start(cfg).await.expect("broker must start");
-    let addr = handle.listen_addr();
-    (handle, log_dir, addr)
+    Box::pin(async move {
+        let handle = Broker::start(cfg).await.expect("broker must start");
+        let addr = handle.listen_addr();
+        (handle, log_dir, addr)
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

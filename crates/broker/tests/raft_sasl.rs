@@ -157,11 +157,11 @@ async fn start_two_brokers_with_controller_protocol(
 // `API_KEY_SUBMIT_CHANGE` hits the wire, and b1 accepts the registration.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn controller_listener_sasl_plaintext_two_broker_quorum() {
-    let (b1, b2, _d1, _d2) = start_two_brokers_with_controller_protocol(
+    let (b1, b2, _d1, _d2) = Box::pin(start_two_brokers_with_controller_protocol(
         ListenerProtocol::SaslPlaintext,
         "broker",
         "secret",
-    )
+    ))
     .await;
     // Wait until both brokers see two registered peers in the metadata image.
     // Event-driven: each awaiter observes `img.brokers().count() >= 2` (the

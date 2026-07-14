@@ -174,6 +174,9 @@ pub mod coordinator;
 mod data_path_model;
 pub(crate) mod delegation_token_cleanup;
 pub mod disk_scanner;
+mod diskless;
+#[cfg(test)]
+mod diskless_crash_model;
 mod error;
 mod features;
 pub mod fetch_session;
@@ -226,6 +229,7 @@ pub(crate) mod tls_reload;
 pub(crate) mod topic_resolve;
 mod txn;
 pub(crate) mod unclean_recovery;
+mod wal;
 
 pub use broker::{Broker, BrokerHandle};
 pub use config::{BootstrapMode, BrokerConfig, KafkaRlmmConfig, RemoteStorageBackend, RlmmKind};

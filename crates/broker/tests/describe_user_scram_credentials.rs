@@ -178,17 +178,21 @@ async fn sasl_plain_authenticate(
 
 /// Start a single-broker SASL/PLAINTEXT cluster.
 /// Returns `(handle, _dir, addr)`.
-async fn start_single_broker_sasl_plaintext_with_users(
+type BrokerStartup =
+    std::pin::Pin<Box<dyn std::future::Future<Output = (BrokerHandle, TempDir, SocketAddr)>>>;
+
+fn start_single_broker_sasl_plaintext_with_users(
     super_user: &str,
     users: &[(&str, &str)],
-) -> (BrokerHandle, TempDir, SocketAddr) {
-    start_single_broker_sasl_plaintext_with_acl_authorizer(&[super_user], users).await
+) -> BrokerStartup {
+    let super_users = [super_user];
+    start_single_broker_sasl_plaintext_with_acl_authorizer(&super_users, users)
 }
 
-async fn start_single_broker_sasl_plaintext_with_acl_authorizer(
+fn start_single_broker_sasl_plaintext_with_acl_authorizer(
     super_users: &[&str],
     users: &[(&str, &str)],
-) -> (BrokerHandle, TempDir, SocketAddr) {
+) -> BrokerStartup {
     let log_dir = tempfile::tempdir().unwrap();
     let mut cfg = crabka_broker::BrokerConfig::for_tests(log_dir.path().to_path_buf());
     cfg.listeners = vec![ListenerSpec {
@@ -208,9 +212,11 @@ async fn start_single_broker_sasl_plaintext_with_acl_authorizer(
     cfg.super_users = super_users.iter().map(|user| (*user).to_string()).collect();
     cfg.authorizer = std::sync::Arc::new(SimpleAclAuthorizer::new(cfg.super_users.clone()));
 
-    let handle = Broker::start(cfg).await.expect("broker must start");
-    let addr = handle.listen_addr();
-    (handle, log_dir, addr)
+    Box::pin(async move {
+        let handle = Broker::start(cfg).await.expect("broker must start");
+        let addr = handle.listen_addr();
+        (handle, log_dir, addr)
+    })
 }
 
 async fn seed_cluster_acl(handle: &BrokerHandle, principal: &str, operation: AclOperation) {

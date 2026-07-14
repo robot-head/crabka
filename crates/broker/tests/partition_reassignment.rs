@@ -543,10 +543,10 @@ async fn sasl_plain_authenticate(
 /// Returns `(handle, _dir, addr)`.
 /// `super_user` is set as the only super-user.
 /// `users` is a slice of `(username, password)` pairs added to `plain_credentials`.
-async fn start_single_broker_sasl_plaintext_with_users(
+fn start_single_broker_sasl_plaintext_with_users(
     super_user: &str,
     users: &[(&str, &str)],
-) -> (BrokerHandle, TempDir, SocketAddr) {
+) -> impl std::future::Future<Output = (BrokerHandle, TempDir, SocketAddr)> {
     let log_dir = tempfile::tempdir().unwrap();
     let mut cfg = crabka_broker::BrokerConfig::for_tests(log_dir.path().to_path_buf());
     cfg.listeners = vec![ListenerSpec {
@@ -568,9 +568,11 @@ async fn start_single_broker_sasl_plaintext_with_users(
     // fires for non-super principals; default is `AllowAllAuthorizer`.
     cfg.authorizer = std::sync::Arc::new(SimpleAclAuthorizer::new(cfg.super_users.clone()));
 
-    let handle = Broker::start(cfg).await.expect("broker must start");
-    let addr = handle.listen_addr();
-    (handle, log_dir, addr)
+    Box::pin(async move {
+        let handle = Broker::start(cfg).await.expect("broker must start");
+        let addr = handle.listen_addr();
+        (handle, log_dir, addr)
+    })
 }
 
 /// Create a topic via SASL/PLAIN as the given admin user.

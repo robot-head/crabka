@@ -650,6 +650,9 @@ fn to_kraft_iter(
         MetadataRecord::V1PartitionDirAssignment(_) => {
             vec![wincode_carrier(rec, PRIVATE_PARTITION_DIR_ASSIGNMENT_KEY)?]
         }
+        MetadataRecord::V1PartitionOffsetAdvance(_) => {
+            vec![wincode_carrier(rec, PRIVATE_PARTITION_OFFSET_ADVANCE_KEY)?]
+        }
         // ----- no KIP-631 metadata counterpart -----
         MetadataRecord::V1Voters(_) => {
             return Err(TranslateError::NoCounterpart("V1Voters"));
@@ -670,6 +673,9 @@ const PRIVATE_FEATURES_EPOCH_KEY: u32 = 1001;
 /// KIP-858 directory-assignment delta carried verbatim so it stays a
 /// one-slot merge on apply (never a full-`PartitionRecord` replace).
 const PRIVATE_PARTITION_DIR_ASSIGNMENT_KEY: u32 = 1002;
+/// Diskless offset-advance delta carried verbatim so it stays a per-partition
+/// increment on apply (never a full-record replace).
+const PRIVATE_PARTITION_OFFSET_ADVANCE_KEY: u32 = 1003;
 
 /// Wrap a wincode-serialized `MetadataRecord` in an `Unknown` KIP-631 envelope
 /// under a Crabka-private apiKey, so it round-trips byte-faithfully through the
@@ -900,7 +906,8 @@ pub fn from_kraft(
         KraftMetadataRecord::Unknown { api_key, body, .. }
             if *api_key == PRIVATE_CLIENT_METRICS_KEY
                 || *api_key == PRIVATE_FEATURES_EPOCH_KEY
-                || *api_key == PRIVATE_PARTITION_DIR_ASSIGNMENT_KEY =>
+                || *api_key == PRIVATE_PARTITION_DIR_ASSIGNMENT_KEY
+                || *api_key == PRIVATE_PARTITION_OFFSET_ADVANCE_KEY =>
         {
             <serde_wincode::SerdeCompat<MetadataRecord>>::deserialize(body)
                 .map_err(|e| TranslateError::Decode(e.to_string()))
@@ -1823,6 +1830,21 @@ mod tests {
         assert2::assert!(values.len() == 1);
         let decoded = super::from_kraft_value(&values[0], &image).expect("decode");
         assert2::assert!(decoded == rec);
+    }
+
+    #[test]
+    fn offset_advance_round_trips_through_carrier() {
+        let rec = MetadataRecord::V1PartitionOffsetAdvance(crate::PartitionOffsetAdvanceRecord {
+            topic: "t".into(),
+            partition: 2,
+            count: 9,
+        });
+
+        let values = to_kraft_values(&rec, &img()).unwrap();
+        assert_eq!(values.len(), 1);
+        let back = from_kraft_value(&values[0], &img()).unwrap();
+
+        assert_eq!(back, rec);
     }
 
     #[test]

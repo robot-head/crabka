@@ -647,9 +647,12 @@ mod tests {
             }
         }
 
-        async fn submit_change(&self, records: Vec<MetadataRecord>) -> Result<(), RaftError> {
+        async fn submit_change(
+            &self,
+            records: Vec<MetadataRecord>,
+        ) -> Result<crabka_raft::SubmitChangeResult, RaftError> {
             self.submitted.lock().await.push(records);
-            Ok(())
+            Ok(crabka_raft::SubmitChangeResult::default())
         }
 
         async fn change_membership(&self, _new_voters: BTreeSet<NodeId>) -> Result<(), RaftError> {

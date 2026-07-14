@@ -157,10 +157,10 @@ async fn sasl_plain_authenticate(
 
 /// Start a single-broker SASL/PLAINTEXT cluster.
 /// Returns `(handle, _dir, addr)`.
-async fn start_single_broker_sasl_plaintext_with_users(
+fn start_single_broker_sasl_plaintext_with_users(
     super_user: &str,
     users: &[(&str, &str)],
-) -> (BrokerHandle, TempDir, SocketAddr) {
+) -> impl std::future::Future<Output = (BrokerHandle, TempDir, SocketAddr)> {
     let log_dir = tempfile::tempdir().unwrap();
     let mut cfg = crabka_broker::BrokerConfig::for_tests(log_dir.path().to_path_buf());
     cfg.listeners = vec![ListenerSpec {
@@ -179,9 +179,11 @@ async fn start_single_broker_sasl_plaintext_with_users(
     }
     cfg.super_users = std::iter::once(super_user.to_string()).collect();
 
-    let handle = Broker::start(cfg).await.expect("broker must start");
-    let addr = handle.listen_addr();
-    (handle, log_dir, addr)
+    Box::pin(async move {
+        let handle = Broker::start(cfg).await.expect("broker must start");
+        let addr = handle.listen_addr();
+        (handle, log_dir, addr)
+    })
 }
 
 /// Start a single-broker PLAINTEXT cluster (no SASL).

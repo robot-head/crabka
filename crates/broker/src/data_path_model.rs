@@ -69,13 +69,28 @@ struct DpState {
     hwm: i64,           // leader-authoritative high watermark
     leader: u8,
     leader_epoch: u8,
-    isr: u8,            // bitmask over brokers
-    live: u8,           // bitmask over brokers
-    committed: Vec<u8>, // ghost: committed[off] = epoch, for offsets ever <= hwm
+    isr: u8,                   // bitmask over brokers
+    live: u8,                  // bitmask over brokers
+    committed: Vec<u8>,        // ghost: committed[off] = epoch, for offsets ever <= hwm
+    wal_acked: Vec<u8>, // ghost: wal_acked[off] = epoch, for offsets made WAL-durable (diskless mode)
+    seq_next: i64,      // ghost: controller's next assignable diskless offset
+    assigned: Vec<(i64, i64)>, // ghost: half-open assigned ranges
     lost: bool,         // ghost: an unclean loss has occurred
 }
 
-type StateProjection = (Vec<Vec<u8>>, i64, u8, u8, u8, u8, Vec<u8>, bool);
+type StateProjection = (
+    Vec<Vec<u8>>,
+    i64,
+    u8,
+    u8,
+    u8,
+    u8,
+    Vec<u8>,
+    Vec<u8>,
+    i64,
+    Vec<(i64, i64)>,
+    bool,
+);
 
 impl DpState {
     fn leader_leo(&self) -> i64 {
@@ -90,6 +105,9 @@ impl DpState {
             self.isr,
             self.live,
             self.committed.clone(),
+            self.wal_acked.clone(),
+            self.seq_next,
+            self.assigned.clone(),
             self.lost,
         )
     }
@@ -159,6 +177,16 @@ fn real_hwm(s: &DpState, base: Instant) -> i64 {
     }
     // Unwrap the recomputed `Offset` HWM back into this model's `i64` world.
     rs.recompute_hw_for_leader_append(Offset(leader_leo)).0
+}
+
+/// Drive the REAL diskless WAL durable-HW core. Slice 1 is local fsync only, so
+/// the model constrains the ISR to the leader broker and releases exactly the
+/// durable WAL prefix.
+fn real_wal_hwm(leader: u8, durable_leo: i64, base: Instant) -> i64 {
+    let leader = crabka_audit::NodeId(node(leader));
+    let mut rs = ReplicaState::new();
+    rs.install_isr(&[leader], &[leader], leader, base);
+    rs.recompute_hw_for_wal_durable(Offset(durable_leo)).0
 }
 
 /// The leader-epoch entries for a log: one entry per epoch change.
@@ -313,8 +341,10 @@ fn do_failover(s: &mut DpState, dead: u8, unclean: bool) {
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 enum Act {
     Produce,
+    Assign(u8),
     Replicate(u8), // follower b fetches one step from the leader
     AdvanceHwm,
+    WalSync, // diskless: make the leader's appended prefix fsync-durable
     ConsumerFetch {
         read_committed: bool,
         fetch_offset: i64,
@@ -327,7 +357,8 @@ enum Act {
 
 struct DpModel {
     base: Instant,
-    unclean: bool, // false in DPC-1/2 (clean), true in DPC-3
+    unclean: bool,  // false in DPC-1/2 (clean), true in DPC-3
+    diskless: bool, // true drives the WAL durability path instead of ISR-HWM
 }
 
 impl Model for DpModel {
@@ -340,9 +371,16 @@ impl Model for DpModel {
             hwm: 0,
             leader: 0,
             leader_epoch: 1,
-            isr: 0b111,
-            live: 0b111,
+            // Slice 1 diskless is a single-node local-fsync WAL. Keep the RF=3
+            // model for classic clean/unclean checks, but constrain diskless to
+            // the leader broker so WAL durability is not incorrectly invalidated
+            // by electing a different replica that never fsynced the record.
+            isr: if self.diskless { 0b001 } else { 0b111 },
+            live: if self.diskless { 0b001 } else { 0b111 },
             committed: vec![],
+            wal_acked: vec![],
+            seq_next: 0,
+            assigned: vec![],
             lost: false,
         }]
     }
@@ -353,16 +391,24 @@ impl Model for DpModel {
         if leader_live {
             if s.log[usize::from(s.leader)].len() < MAX_LEN && s.leader_epoch <= MAX_EPOCH {
                 acts.push(Act::Produce);
-            }
-            for b in 0..NB_U8 {
-                if b != s.leader
-                    && has(s.live, b)
-                    && model_offset(s.log[usize::from(b)].len()) < s.leader_leo()
-                {
-                    acts.push(Act::Replicate(b));
+                if self.diskless && s.assigned.len() < 3 {
+                    acts.push(Act::Assign(1));
                 }
             }
-            acts.push(Act::AdvanceHwm);
+            if self.diskless && s.wal_acked.len() < s.log[s.leader as usize].len() {
+                acts.push(Act::WalSync);
+            }
+            if !self.diskless {
+                for b in 0..NB_U8 {
+                    if b != s.leader
+                        && has(s.live, b)
+                        && model_offset(s.log[usize::from(b)].len()) < s.leader_leo()
+                    {
+                        acts.push(Act::Replicate(b));
+                    }
+                }
+                acts.push(Act::AdvanceHwm);
+            }
             for fo in 0..=s.leader_leo() {
                 acts.push(Act::ConsumerFetch {
                     read_committed: false,
@@ -377,14 +423,19 @@ impl Model for DpModel {
         // Liveness + failover.
         let live_count = u32::from(s.live).count_ones();
         for b in 0..NB_U8 {
-            if has(s.live, b) && live_count > 1 {
+            if self.diskless && b != s.leader {
+                continue;
+            }
+            if has(s.live, b) && (live_count > 1 || self.diskless) {
                 acts.push(Act::Die(b));
             }
             if !has(s.live, b) {
                 acts.push(Act::Revive(b));
                 // Controller failover: elect (dead leader, epoch headroom) or
                 // shrink the ISR (dead non-leader ISR member).
-                if (b == s.leader && s.leader_epoch < MAX_EPOCH) || (b != s.leader && has(s.isr, b))
+                if !self.diskless
+                    && ((b == s.leader && s.leader_epoch < MAX_EPOCH)
+                        || (b != s.leader && has(s.isr, b)))
                 {
                     acts.push(Act::Failover(b));
                 }
@@ -396,7 +447,12 @@ impl Model for DpModel {
             // that hasn't reconciled — which is unreachable in real Kafka, where
             // the follower fetch/OffsetForLeaderEpoch loop truncates before its
             // reported progress can make it eligible.
-            if has(s.live, b) && b != s.leader && !has(s.isr, b) && isr_eligible(s, b) {
+            if !self.diskless
+                && has(s.live, b)
+                && b != s.leader
+                && !has(s.isr, b)
+                && isr_eligible(s, b)
+            {
                 acts.push(Act::ExpandIsr(b));
             }
         }
@@ -407,6 +463,12 @@ impl Model for DpModel {
         match a {
             Act::Produce => {
                 s.log[usize::from(s.leader)].push(s.leader_epoch);
+            }
+            Act::Assign(count) => {
+                let start = s.seq_next;
+                let end = start + i64::from(count);
+                s.assigned.push((start, end));
+                s.seq_next = end;
             }
             Act::Replicate(b) => {
                 let leader_log = s.log[usize::from(s.leader)].clone();
@@ -427,6 +489,20 @@ impl Model for DpModel {
                 // `committed_durable` property, not HWM monotonicity.
                 s.hwm = real_hwm(&s, self.base);
                 let leader_log = &s.log[usize::from(s.leader)];
+                while model_offset(s.committed.len()) < s.hwm {
+                    let off = s.committed.len();
+                    s.committed.push(leader_log[off]);
+                }
+            }
+            Act::WalSync => {
+                // fsync makes the leader's appended prefix durable and releases
+                // it through the same HW seam the broker's diskless path uses.
+                let leader_log = &s.log[s.leader as usize];
+                while s.wal_acked.len() < leader_log.len() {
+                    let off = s.wal_acked.len();
+                    s.wal_acked.push(leader_log[off]);
+                }
+                s.hwm = real_wal_hwm(s.leader, model_offset(s.wal_acked.len()), self.base);
                 while model_offset(s.committed.len()) < s.hwm {
                     let off = s.committed.len();
                     s.committed.push(leader_log[off]);
@@ -477,39 +553,72 @@ impl Model for DpModel {
                     .enumerate()
                     .all(|(off, &e)| lg.get(off) == Some(&e))
             }),
+            Property::always("wal_acked_durable", |_, s: &DpState| {
+                let lg = &s.log[s.leader as usize];
+                s.wal_acked
+                    .iter()
+                    .enumerate()
+                    .all(|(off, &e)| lg.get(off) == Some(&e))
+            }),
             Property::always("hwm_within_leader_log", |_, s: &DpState| {
                 s.hwm <= s.leader_leo()
             }),
-            Property::sometimes("committed_progress", |_, s: &DpState| {
-                !s.committed.is_empty()
-            }),
-            Property::sometimes("full_replication", |_, s: &DpState| {
-                s.hwm == s.leader_leo() && s.hwm > 0
-            }),
-            // A leader change occurred.
-            Property::sometimes("leader_changed", |_, s: &DpState| s.leader_epoch >= 2),
-            // The ISR shrank below the full replica set.
-            Property::sometimes("isr_shrunk", |_, s: &DpState| {
-                u32::from(s.isr).count_ones() < u32::from(NB_U8)
-            }),
-            // Two brokers hold different epochs at one offset — truncation
-            // territory (a follower must truncate to reconcile).
-            Property::sometimes("divergence_present", |_, s: &DpState| {
-                (0..MAX_LEN).any(|off| {
-                    let mut seen: Option<u8> = None;
-                    for b in 0..NB {
-                        if let Some(&e) = s.log[b].get(off) {
-                            match seen {
-                                None => seen = Some(e),
-                                Some(x) if x != e => return true,
-                                _ => {}
+        ];
+        if self.diskless {
+            props.extend([
+                Property::always("diskless_hw_released_by_wal_sync", |_, s: &DpState| {
+                    s.hwm == model_offset(s.wal_acked.len())
+                }),
+                Property::sometimes("wal_acked_progress", |_, s: &DpState| {
+                    !s.wal_acked.is_empty()
+                }),
+                Property::sometimes("wal_acked_survives_broker_down", |_, s: &DpState| {
+                    !has(s.live, s.leader) && !s.wal_acked.is_empty()
+                }),
+                Property::always("offsets_contiguous_and_unique", |_, s: &DpState| {
+                    let mut next = 0;
+                    for &(start, end) in &s.assigned {
+                        if start != next || end <= start {
+                            return false;
+                        }
+                        next = end;
+                    }
+                    next == s.seq_next
+                }),
+            ]);
+        } else {
+            props.extend([
+                Property::sometimes("committed_progress", |_, s: &DpState| {
+                    !s.committed.is_empty()
+                }),
+                Property::sometimes("full_replication", |_, s: &DpState| {
+                    s.hwm == s.leader_leo() && s.hwm > 0
+                }),
+                // A leader change occurred.
+                Property::sometimes("leader_changed", |_, s: &DpState| s.leader_epoch >= 2),
+                // The ISR shrank below the full replica set.
+                Property::sometimes("isr_shrunk", |_, s: &DpState| {
+                    u32::from(s.isr).count_ones() < u32::from(NB_U8)
+                }),
+                // Two brokers hold different epochs at one offset — truncation
+                // territory (a follower must truncate to reconcile).
+                Property::sometimes("divergence_present", |_, s: &DpState| {
+                    (0..MAX_LEN).any(|off| {
+                        let mut seen: Option<u8> = None;
+                        for b in 0..NB {
+                            if let Some(&e) = s.log[b].get(off) {
+                                match seen {
+                                    None => seen = Some(e),
+                                    Some(x) if x != e => return true,
+                                    _ => {}
+                                }
                             }
                         }
-                    }
-                    false
-                })
-            }),
-        ];
+                        false
+                    })
+                }),
+            ]);
+        }
         if self.unclean {
             // Loss characterization: an unclean-election data loss is reachable
             // (and `committed_durable` above still holds — `committed` is the LIVE
@@ -562,6 +671,7 @@ fn data_clean() {
         DpModel {
             base: Instant::now(),
             unclean: false,
+            diskless: false,
         },
         "data_clean",
     );
@@ -573,7 +683,32 @@ fn data_unclean() {
         DpModel {
             base: Instant::now(),
             unclean: true,
+            diskless: false,
         },
         "data_unclean",
+    );
+}
+
+#[test]
+fn data_diskless_wal_acked_never_lost() {
+    run(
+        DpModel {
+            base: Instant::now(),
+            unclean: false,
+            diskless: true,
+        },
+        "data_diskless_wal_acked_never_lost",
+    );
+}
+
+#[test]
+fn data_diskless_offsets_gap_free_and_unique() {
+    run(
+        DpModel {
+            base: Instant::now(),
+            unclean: false,
+            diskless: true,
+        },
+        "data_diskless_offsets_gap_free_and_unique",
     );
 }
