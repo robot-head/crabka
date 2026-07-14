@@ -26,7 +26,13 @@ def validate(source, benchmark=script):
         'dtolnay/rust-toolchain@stable', 'Swatinem/rust-cache@v2',
         'postgresql-client', 'bash scripts/tests/gres-range-scaling-ci.sh',
         'CRABKA_GRES_RANGE_SCALING_MODE=fast',
+        'CRABKA_GRES_RANGE_SCALING_FLOOR=2.1',
+        'CRABKA_GRES_SHARDED_SCALING_FLOOR=2.1',
+        'CRABKA_GRES_DECISION_CEILING_MIN_RATIO=0.5',
         './scripts/gres-range-scaling.sh', 'artifact["mode"] == "live"',
+        '"range4_vs_range1_min": 2.1',
+        '"sharded_range4_vs_range1_min": 2.1',
+        '"decision_ceiling_range4_min_ratio": 0.5',
         'artifact["passed"]["overall"] is True', 'actions/upload-artifact@v7',
     ]
     for needle in required_job:
@@ -78,18 +84,21 @@ def validate(source, benchmark=script):
 validate(workflow)
 
 mutations = [
-    workflow.replace('./scripts/gres-range-scaling.sh', './scripts/not-the-scaling-script.sh', 1),
-    workflow.replace('artifact["mode"] == "live"', 'artifact["mode"] == "dry-run"', 1),
-    workflow.replace('  gres-range-scaling:\n', '  gres-range-scaling:\n    continue-on-error: ${{ true }}\n', 1),
-    workflow.replace('CRABKA_GRES_RANGE_SCALING_MODE=fast', '# fast mode removed', 1),
+    ('script path', workflow.replace('./scripts/gres-range-scaling.sh', './scripts/not-the-scaling-script.sh', 1)),
+    ('live artifact', workflow.replace('artifact["mode"] == "live"', 'artifact["mode"] == "dry-run"', 1)),
+    ('continue on error', workflow.replace('  gres-range-scaling:\n', '  gres-range-scaling:\n    continue-on-error: ${{ true }}\n', 1)),
+    ('fast mode', workflow.replace('CRABKA_GRES_RANGE_SCALING_MODE=fast', '# fast mode removed', 1)),
+    ('hosted range floor', workflow.replace('CRABKA_GRES_RANGE_SCALING_FLOOR=2.1', 'CRABKA_GRES_RANGE_SCALING_FLOOR=2.0', 1)),
+    ('hosted sharded floor', workflow.replace('CRABKA_GRES_SHARDED_SCALING_FLOOR=2.1', 'CRABKA_GRES_SHARDED_SCALING_FLOOR=2.0', 1)),
+    ('hosted decision floor', workflow.replace('CRABKA_GRES_DECISION_CEILING_MIN_RATIO=0.5', 'CRABKA_GRES_DECISION_CEILING_MIN_RATIO=0.4', 1)),
 ]
-for index, mutated in enumerate(mutations):
+for label, mutated in mutations:
     try:
         validate(mutated)
     except AssertionError:
         pass
     else:
-        raise AssertionError(f'negative workflow mutation {index} unexpectedly passed')
+        raise AssertionError(f'{label} workflow mutation unexpectedly passed')
 
 sharded_start = script.index('result-sharded-${range_count}-trial-${trial}.json')
 missing_re = script[:sharded_start] + script[sharded_start:].replace('import re\n', '', 1)

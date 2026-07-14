@@ -516,6 +516,9 @@ jobs:
       - name: Measure live Gres range scaling
         run: |
           CRABKA_GRES_RANGE_SCALING_MODE=fast \
+          CRABKA_GRES_RANGE_SCALING_FLOOR=2.1 \
+          CRABKA_GRES_SHARDED_SCALING_FLOOR=2.1 \
+          CRABKA_GRES_DECISION_CEILING_MIN_RATIO=0.5 \
           CRABKA_GRES_RANGE_SCALING_KEEP_ARTIFACTS=1 \
           ./scripts/gres-range-scaling.sh
       - name: Verify live scaling gates
@@ -526,6 +529,19 @@ jobs:
 
           artifact = json.loads(Path("target/gres-range-scaling-artifacts/range-scaling.json").read_text())
           assert artifact["mode"] == "live", artifact["mode"]
+          thresholds = artifact["thresholds"]
+          assert {
+              key: thresholds[key]
+              for key in (
+                  "range4_vs_range1_min",
+                  "sharded_range4_vs_range1_min",
+                  "decision_ceiling_range4_min_ratio",
+              )
+          } == {
+              "range4_vs_range1_min": 2.1,
+              "sharded_range4_vs_range1_min": 2.1,
+              "decision_ceiling_range4_min_ratio": 0.5,
+          }
           assert artifact["passed"]["range_local"] is True
           assert artifact["passed"]["sharded_ingest"] is True
           assert artifact["passed"]["decision_ceiling"] is True
