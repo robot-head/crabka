@@ -274,27 +274,31 @@ impl KeyspaceKv {
         }
         transaction.commit().map_err(io)?;
         self.sync()?;
-        self.rotate_after_ops(staged_ops)
+        self.rotate_after_ops(staged_ops);
+        Ok(())
     }
 
     /// Credit `staged_ops` toward [`ROTATE_AFTER_OPS`] and rotate the active
     /// memtable once the threshold is crossed. Runs strictly after the group's
-    /// commit and persist, so it cannot weaken the durability of a returned
-    /// `Ok`; rotation itself returns immediately and fjall's worker pool
-    /// flushes and compacts in the background.
-    fn rotate_after_ops(&self, staged_ops: u64) -> Result<(), KvError> {
+    /// commit and persist, when the group is already durable — so a rotation
+    /// failure must not fail the write: the leader clones its result to every
+    /// batch in the group, and an `Err` would tell every caller their durable
+    /// batch failed. Dropping the error hides no durability fault: fjall
+    /// poisons the database on fsync failure, which fails the next commit's
+    /// persist, and the next threshold crossing (or fjall's byte cap, or
+    /// [`Kv::maintain`]) retries the rotation.
+    fn rotate_after_ops(&self, staged_ops: u64) {
         let before = self
             .ops_since_rotate
             .fetch_add(staged_ops, Ordering::Relaxed);
         if before + staged_ops < ROTATE_AFTER_OPS {
-            return Ok(());
+            return;
         }
         self.ops_since_rotate.store(0, Ordering::Relaxed);
         // Racing rotations (another handle, fjall's own byte-cap trigger) are
         // benign: whoever loses finds a fresh or already-sealed memtable and
         // no-ops.
-        self.ks.inner().rotate_memtable().map_err(io)?;
-        Ok(())
+        let _best_effort = self.ks.inner().rotate_memtable();
     }
 }
 
