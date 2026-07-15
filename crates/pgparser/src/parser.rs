@@ -1766,6 +1766,29 @@ impl Parser {
             None
         };
         let sharded = saw_sharded;
+        // PostgreSQL storage parameters (`WITH (fillfactor=100, ...)`) tune
+        // heap/TOAST behavior Crabka has no equivalent of: accept the standard
+        // `key [= value] [, ...]` shape and discard it. pgbench -i emits this
+        // clause on every CREATE TABLE.
+        if self.eat_keyword(Keyword::With) {
+            self.expect(&Token::LParen)?;
+            loop {
+                self.expect_ident()?;
+                if *self.peek() == Token::Dot {
+                    self.bump();
+                    self.expect_ident()?;
+                }
+                if *self.peek() == Token::Eq {
+                    self.bump();
+                    self.storage_parameter_value()?;
+                }
+                if self.eat_comma() {
+                    continue;
+                }
+                break;
+            }
+            self.expect(&Token::RParen)?;
+        }
         Ok(Statement::CreateTable {
             name,
             columns,
@@ -1999,6 +2022,35 @@ impl Parser {
             ));
         }
         Ok(buckets)
+    }
+
+    /// Consume one storage-parameter value (`WITH (key = value)`): a numeric
+    /// literal (optionally negative), a string, or a bare word such as `on` /
+    /// `off`. The value is validated for shape and discarded.
+    fn storage_parameter_value(&mut self) -> Result<(), ParseError> {
+        if *self.peek() == Token::Minus {
+            self.bump();
+            let pos = self.peek_pos();
+            return match self.bump() {
+                Token::IntLit(_) | Token::FloatLit(_) => Ok(()),
+                other => Err(ParseError::new(
+                    format!("expected numeric storage parameter value, found {other:?}"),
+                    pos,
+                )),
+            };
+        }
+        let pos = self.peek_pos();
+        match self.bump() {
+            Token::IntLit(_)
+            | Token::FloatLit(_)
+            | Token::StringLit(_)
+            | Token::Ident(_)
+            | Token::Keyword(_) => Ok(()),
+            other => Err(ParseError::new(
+                format!("expected storage parameter value, found {other:?}"),
+                pos,
+            )),
+        }
     }
 
     fn drop_table(&mut self) -> Result<crate::ast::Statement, ParseError> {
@@ -4050,6 +4102,41 @@ mod tests {
                     if_exists: false,
                 }
         );
+    }
+
+    #[test]
+    fn create_table_accepts_and_ignores_storage_parameters() {
+        use assert2::assert;
+        // The pgbench -i statement verbatim, plus shape variants: value-less
+        // params, namespaced params, string / float / negative / keyword-like
+        // values. All parse to the same CreateTable as without the clause.
+        let cases = [
+            "create table pgbench_tellers(tid int not null,bid int,tbalance int,filler char(84)) with (fillfactor=100)",
+            "CREATE TABLE pgbench_tellers (tid INT NOT NULL, bid INT, tbalance INT, filler CHAR(84)) WITH (autovacuum_enabled)",
+            "CREATE TABLE pgbench_tellers (tid INT NOT NULL, bid INT, tbalance INT, filler CHAR(84)) WITH (toast.autovacuum_enabled = off, fillfactor = 70)",
+            "CREATE TABLE pgbench_tellers (tid INT NOT NULL, bid INT, tbalance INT, filler CHAR(84)) WITH (autovacuum_vacuum_scale_factor = 0.5, parallel_workers = -1, vacuum_index_cleanup = 'auto')",
+        ];
+        let bare = one(
+            "CREATE TABLE pgbench_tellers (tid INT NOT NULL, bid INT, tbalance INT, filler CHAR(84))",
+        );
+        for sql in cases {
+            assert!(one(sql) == bare, "case: {sql}");
+        }
+    }
+
+    #[test]
+    fn create_table_storage_parameters_reject_malformed_clauses() {
+        use assert2::assert;
+        for sql in [
+            "CREATE TABLE t (id INT) WITH ()",
+            "CREATE TABLE t (id INT) WITH (fillfactor=)",
+            "CREATE TABLE t (id INT) WITH (fillfactor=100",
+            "CREATE TABLE t (id INT) WITH (=100)",
+            "CREATE TABLE t (id INT) WITH (fillfactor=100,)",
+            "CREATE TABLE t (id INT) WITH (fillfactor = -'x')",
+        ] {
+            assert!(crate::parse(sql).is_err(), "case: {sql}");
+        }
     }
 
     #[test]
