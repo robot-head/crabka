@@ -362,8 +362,10 @@ const VACUUM_INTERVAL_ROWIDS: u64 = 8_192;
 /// scanned version needs a per-row freeze commit — the post-bulk-load
 /// catch-up worst case) stays well under 10% of a 2s tick; measured on a
 /// 10M-row point-SELECT workload, 32k budgets cost ~30% foreground
-/// throughput while 8k budgets are within noise.
-const VACUUM_STEP_KEY_BUDGET: usize = 8_192;
+/// throughput while 8k budgets are within noise. Pacing loops that need to
+/// catch up should prefer MORE steps over larger ones
+/// ([`SqlEngine::vacuum_step_budgeted`] callers own that trade-off).
+pub const VACUUM_STEP_KEY_BUDGET: usize = 8_192;
 
 /// Minimum budget charge per interval scan, so one step over sparse or empty
 /// rowid space still terminates after a bounded number of range scans.
@@ -386,6 +388,12 @@ const VACUUM_YIELD_EVERY_ROWS: usize = 128;
 pub(crate) struct VacuumDemand {
     /// Monotone count of committed primary-version Puts per ordinary table.
     version_puts: Mutex<HashMap<u32, u64>>,
+    /// Monotone engine-wide sum of the per-table counters. Every committed
+    /// primary-version Put is one unit of eventual sweep work (a dead version
+    /// to prune, a survivor to freeze, or a stamp to clear), so the delta of
+    /// this counter between two sweep steps is the garbage-creation side of a
+    /// pacing controller's debt ledger.
+    total_version_puts: std::sync::atomic::AtomicU64,
 }
 
 impl VacuumDemand {
@@ -417,6 +425,8 @@ impl VacuumDemand {
         for table_id in touched {
             *version_puts.entry(*table_id).or_insert(0) += 1;
         }
+        self.total_version_puts
+            .fetch_add(touched.len() as u64, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// The current committed version-Put count for one table.
@@ -717,7 +727,9 @@ impl SqlEngine {
         progress.restart_cycle();
         let mut total = VacuumStats::default();
         loop {
-            let step = self.vacuum_step_locked(&mut progress).await?;
+            let step = self
+                .vacuum_step_locked(&mut progress, VACUUM_STEP_KEY_BUDGET)
+                .await?;
             total += step.stats;
             if step.cycle_completed {
                 return Ok(total);
@@ -725,8 +737,21 @@ impl SqlEngine {
         }
     }
 
-    /// Run one bounded increment of the engine-level garbage sweep (see
-    /// [`SqlEngine::vacuum`] for what a full cycle does).
+    /// Monotone count of committed primary-version Puts across every ordinary
+    /// table (new versions and `xmax` stamps alike), observed after each
+    /// batch is durably applied. Each Put is one unit of eventual sweep work,
+    /// so the delta between two reads measures garbage creation — the input
+    /// side of an adaptive vacuum pacing loop.
+    #[must_use]
+    pub fn committed_version_puts(&self) -> u64 {
+        self.vacuum_demand
+            .total_version_puts
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Run one bounded increment of the engine-level garbage sweep with the
+    /// default [`VACUUM_STEP_KEY_BUDGET`] (see [`SqlEngine::vacuum`] for what
+    /// a full cycle does).
     ///
     /// A step examines at most a budgeted number of tuple version keys,
     /// resuming from a persistent-in-memory `(table, rowid)` cursor and
@@ -744,11 +769,28 @@ impl SqlEngine {
     /// Returns an error when catalog or store access fails or a delete batch
     /// cannot be committed.
     pub async fn vacuum_step(&self) -> Result<VacuumStepStats, ExecError> {
+        self.vacuum_step_budgeted(VACUUM_STEP_KEY_BUDGET).await
+    }
+
+    /// [`SqlEngine::vacuum_step`] with a caller-chosen key budget, for pacing
+    /// loops that tune step size to observed step latency. The budget bounds
+    /// one step's scan work; callers keep steps short (low-single-digit
+    /// milliseconds) and adapt by running MORE steps, not unbounded ones.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when catalog or store access fails or a delete batch
+    /// cannot be committed.
+    pub async fn vacuum_step_budgeted(
+        &self,
+        key_budget: usize,
+    ) -> Result<VacuumStepStats, ExecError> {
         if !self.supports_local_vacuum() {
             return Ok(VacuumStepStats::default());
         }
         let mut progress = self.vacuum_progress.lock().await;
-        self.vacuum_step_locked(&mut progress).await
+        self.vacuum_step_locked(&mut progress, key_budget.max(1))
+            .await
     }
 
     /// One budgeted sweep step over the cursor's tables (caller holds the
@@ -756,6 +798,7 @@ impl SqlEngine {
     async fn vacuum_step_locked(
         &self,
         progress: &mut VacuumProgress,
+        key_budget: usize,
     ) -> Result<VacuumStepStats, ExecError> {
         let horizon = self.checkpoint_garbage_horizon()?;
         // Timestamp/sharded tables use ts tuples with their own resolution
@@ -782,7 +825,7 @@ impl SqlEngine {
         // indistinguishable from a crashed no-op transaction.
         let mut vacuum_xid: Option<u64> = None;
         let result = self
-            .vacuum_step_chunks(progress, &tables, horizon, &mut vacuum_xid)
+            .vacuum_step_chunks(progress, &tables, horizon, &mut vacuum_xid, key_budget)
             .await;
         // Belt-and-braces: per-row sweeps release as they go; make sure nothing
         // stays held (or registered) on an error path.
@@ -824,9 +867,10 @@ impl SqlEngine {
         tables: &[crabka_pgcatalog::Table],
         horizon: u64,
         vacuum_xid: &mut Option<u64>,
+        key_budget: usize,
     ) -> Result<VacuumStepStats, ExecError> {
         let mut out = VacuumStepStats::default();
-        let mut budget = VACUUM_STEP_KEY_BUDGET;
+        let mut budget = key_budget;
         loop {
             let Some(table) = tables
                 .iter()

@@ -38,14 +38,41 @@ const CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS: i32 = 30_000;
 const TENANT_CONFIG_FETCH_MAX_WAIT_MS: i32 = 500;
 const TENANT_CONFIG_FETCH_PARTITION_MAX_BYTES: i32 = 1 << 20;
 const IDLE_MONITOR_POLL_INTERVAL: Duration = Duration::from_secs(1);
-/// How often the LOCAL (mem / --data-dir) serving engine runs one bounded
-/// `SqlEngine::vacuum_step`. Write paths prune the rows they touch
-/// opportunistically; the stepped sweep catches cold garbage (aborted
-/// inserts, deleted-then-never-touched rows). Each step examines a budgeted
-/// slice of one table and resumes from a cursor, so the interval is short: a
-/// full pass spreads across many cheap steps instead of storming the whole
-/// store in one call, and steps over settled tables are near-free.
-const LOCAL_VACUUM_STEP_INTERVAL: Duration = Duration::from_secs(2);
+/// Relaxed cadence of the LOCAL (mem / --data-dir) vacuum loop: one bounded
+/// `SqlEngine::vacuum_step` this often while the sweep is keeping up with the
+/// write rate. Write paths prune the rows they touch opportunistically; the
+/// stepped sweep catches cold garbage (aborted inserts,
+/// deleted-then-never-touched rows). Each step examines a budgeted slice of
+/// one table and resumes from a cursor; under backlog or foreground idleness
+/// the [`VacuumPacer`] shortens this interval down to zero (consecutive
+/// bounded steps) so the sweep cursor can lap the keyspace at sustained load
+/// instead of falling permanently behind.
+const LOCAL_VACUUM_IDLE_INTERVAL: Duration = Duration::from_secs(2);
+/// Shortest non-zero sleep the pacer backs off to after running hot; the
+/// interval doubles from here toward [`LOCAL_VACUUM_IDLE_INTERVAL`] while
+/// steps keep finding nothing to do.
+const LOCAL_VACUUM_BACKOFF_FLOOR: Duration = Duration::from_millis(25);
+/// Outstanding settle-work units (committed version Puts the sweep has not
+/// yet retired) above which the loop runs steps back-to-back. One default
+/// step budget (`VACUUM_STEP_KEY_BUDGET`): sustained write load trips it
+/// within a couple of steps, while a settled store's trickle never does.
+const LOCAL_VACUUM_HOT_DEBT: u64 = 8_192;
+/// Upper bound for the adaptive per-step key budget (4x the pgexec default).
+/// Budgets grow toward this only while back-to-back steps stay fast, so one
+/// step never grows into a foreground stall.
+const LOCAL_VACUUM_MAX_KEY_BUDGET: usize = 4 * crabka_pgexec::VACUUM_STEP_KEY_BUDGET;
+/// A hot step faster than this doubles the next step's key budget (the
+/// per-step fixed costs — catalog listing, horizon computation — dominate,
+/// so bigger steps reclaim more per unit of time).
+const LOCAL_VACUUM_STEP_FAST: Duration = Duration::from_millis(3);
+/// A hot step slower than this halves the next step's key budget back toward
+/// the default, keeping every step at low-single-digit milliseconds.
+const LOCAL_VACUUM_STEP_SLOW: Duration = Duration::from_millis(12);
+/// The foreground counts as idle for vacuum pacing once no session has run a
+/// statement for this long (and no write committed since the last step);
+/// idle drain then runs steps back-to-back until a full cycle proves the
+/// store clean.
+const LOCAL_VACUUM_IDLE_AFTER: Duration = Duration::from_secs(1);
 
 trait SubstrateKv: SnapshotKv + RestoreKv {}
 
@@ -1627,6 +1654,7 @@ pub async fn serve_listener_with_tenant_config_loader(
         let vacuum_token = shutdown.child_token();
         tokio::spawn(run_local_vacuum_loop(
             sql_engine.clone_handle(),
+            Arc::clone(&activity),
             vacuum_token.clone(),
         ));
         Some(vacuum_token.drop_guard())
@@ -1689,35 +1717,207 @@ pub async fn serve_listener_with_tenant_config_loader(
     serve_result
 }
 
-/// Periodically run one bounded dead-MVCC-version sweep step on the LOCAL
-/// serving engine until `shutdown` fires. The write paths already prune the
-/// rows they touch; the stepped sweep catches cold garbage a write never
-/// revisits, spreading each full pass across many steps so foreground
-/// statements never compete with a whole-store scan.
-async fn run_local_vacuum_loop(engine: SqlEngine, shutdown: CancellationToken) {
+/// One pacing decision for the local vacuum loop: how long to sleep before
+/// the next bounded step and how many version keys that step may examine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct VacuumPace {
+    interval: Duration,
+    key_budget: usize,
+}
+
+impl VacuumPace {
+    /// The relaxed cadence: one default-budget step every couple of seconds.
+    const fn idle() -> Self {
+        Self {
+            interval: LOCAL_VACUUM_IDLE_INTERVAL,
+            key_budget: crabka_pgexec::VACUUM_STEP_KEY_BUDGET,
+        }
+    }
+}
+
+/// What the vacuum loop observed across one bounded step, feeding the pacer.
+#[derive(Debug, Clone, Copy)]
+struct VacuumStepObservation {
+    /// Engine-wide committed primary-version Puts since the previous
+    /// observation: the settle work foreground writes created meanwhile.
+    writes_since_step: u64,
+    /// Settle work this step retired: versions pruned + versions frozen +
+    /// deleter stamps cleared. Same units as `writes_since_step` — every
+    /// committed version Put eventually needs exactly one of the three.
+    versions_settled: u64,
+    /// Whether the step physically deleted or rewrote anything at all
+    /// (including secondary-index and clog deletes).
+    swept_anything: bool,
+    /// Whether the step wrapped past the last table, completing a cycle.
+    cycle_completed: bool,
+    /// Whether the foreground looked idle across this step: no write
+    /// committed since the previous step and no session ran any statement
+    /// within [`LOCAL_VACUUM_IDLE_AFTER`].
+    foreground_idle: bool,
+    /// Wall-clock duration of the step itself (excluding the sleep).
+    step_elapsed: Duration,
+}
+
+/// Adaptive pacing for the local vacuum loop.
+///
+/// The controller keeps a debt ledger in settle-work units: committed
+/// version Puts add debt, retired sweep work repays it. Debt above
+/// [`LOCAL_VACUUM_HOT_DEBT`] means the sweep is behind the write rate, so
+/// steps run back-to-back (zero interval) until it catches up; once caught
+/// up, the interval doubles from [`LOCAL_VACUUM_BACKOFF_FLOOR`] toward the
+/// idle cadence. A completed cycle that swept nothing proves the whole
+/// keyspace clean, which zeroes leftover debt — writes whose garbage the
+/// write path already pruned, or pinned work a later cycle retires — so
+/// insert-heavy load cannot wedge the loop at full speed forever. When the
+/// foreground goes idle before the store is proven clean, steps run
+/// back-to-back regardless of debt: reclaim capacity is spent while it is
+/// free instead of after throughput has already decayed. Step budgets grow
+/// toward [`LOCAL_VACUUM_MAX_KEY_BUDGET`] only while hot steps stay fast and
+/// shrink as soon as they slow, so an individual step never becomes a
+/// foreground stall.
+struct VacuumPacer {
+    /// Outstanding settle-work units (saturating at zero).
+    debt: u64,
+    /// Whether the in-progress sweep cycle has physically changed anything.
+    cycle_dirty: bool,
+    /// Whether the latest completed cycle proved the store clean (swept
+    /// nothing, no concurrent writes). Any later write invalidates it.
+    store_settled: bool,
+    pace: VacuumPace,
+}
+
+impl VacuumPacer {
+    /// Start at the relaxed cadence with the store not yet proven clean, so
+    /// a store recovered with pre-existing garbage drains on the first idle
+    /// window instead of waiting for a write to trip the debt ledger.
+    const fn new() -> Self {
+        Self {
+            debt: 0,
+            cycle_dirty: false,
+            store_settled: false,
+            pace: VacuumPace::idle(),
+        }
+    }
+
+    const fn pace(&self) -> VacuumPace {
+        self.pace
+    }
+
+    /// Fold one step's outcome into the ledger and decide the next pace.
+    fn observe(&mut self, observation: &VacuumStepObservation) -> VacuumPace {
+        if observation.writes_since_step > 0 {
+            self.store_settled = false;
+        }
+        self.debt = self
+            .debt
+            .saturating_add(observation.writes_since_step)
+            .saturating_sub(observation.versions_settled);
+        self.cycle_dirty |= observation.swept_anything;
+        if observation.cycle_completed {
+            if !self.cycle_dirty {
+                self.debt = 0;
+                self.store_settled = observation.writes_since_step == 0;
+            }
+            self.cycle_dirty = false;
+        }
+        let hot = if observation.foreground_idle {
+            !self.store_settled
+        } else {
+            self.debt > LOCAL_VACUUM_HOT_DEBT
+        };
+        let interval = if hot {
+            Duration::ZERO
+        } else if self.store_settled {
+            // Proven clean: park at the idle cadence outright instead of
+            // ramping — there is nothing left the ramp could discover.
+            LOCAL_VACUUM_IDLE_INTERVAL
+        } else {
+            (self.pace.interval * 2).clamp(LOCAL_VACUUM_BACKOFF_FLOOR, LOCAL_VACUUM_IDLE_INTERVAL)
+        };
+        let key_budget = if hot {
+            if observation.step_elapsed <= LOCAL_VACUUM_STEP_FAST {
+                (self.pace.key_budget * 2).min(LOCAL_VACUUM_MAX_KEY_BUDGET)
+            } else if observation.step_elapsed >= LOCAL_VACUUM_STEP_SLOW {
+                (self.pace.key_budget / 2).max(crabka_pgexec::VACUUM_STEP_KEY_BUDGET)
+            } else {
+                self.pace.key_budget
+            }
+        } else {
+            crabka_pgexec::VACUUM_STEP_KEY_BUDGET
+        };
+        self.pace = VacuumPace {
+            interval,
+            key_budget,
+        };
+        self.pace
+    }
+}
+
+/// Run bounded dead-MVCC-version sweep steps on the LOCAL serving engine
+/// until `shutdown` fires, paced by a [`VacuumPacer`]. The write paths
+/// already prune the rows they touch; the stepped sweep catches cold garbage
+/// a write never revisits, spreading each full pass across many steps so
+/// foreground statements never compete with a whole-store scan — while the
+/// pacing keeps the sweep cursor lapping the keyspace at sustained load.
+async fn run_local_vacuum_loop(
+    engine: SqlEngine,
+    activity: Arc<crabka_pgwire::server::ActivityTracker>,
+    shutdown: CancellationToken,
+) {
+    let mut pacer = VacuumPacer::new();
+    let mut last_version_puts = engine.committed_version_puts();
+    let mut last_maintain = std::time::Instant::now();
     loop {
+        let pace = pacer.pace();
         tokio::select! {
             () = shutdown.cancelled() => return,
-            () = tokio::time::sleep(LOCAL_VACUUM_STEP_INTERVAL) => {}
+            () = tokio::time::sleep(pace.interval) => {}
         }
-        match engine.vacuum_step().await {
+        let step_started = std::time::Instant::now();
+        match engine.vacuum_step_budgeted(pace.key_budget).await {
             Ok(step) => {
+                let step_elapsed = step_started.elapsed();
                 let stats = step.stats;
-                // Rotate the LSM memtable only when the step physically
-                // deleted or rewrote something, so its tombstones (and the
-                // shadowed versions they retire) leave the scan path instead
-                // of accumulating until a byte-size rotation. Idle steps
-                // (settled tables skipped, nothing found) must not rotate:
-                // rotating every couple of seconds for no reason would spray
-                // tiny sstables.
-                let swept_something = stats.versions_pruned
+                let swept_anything = stats.versions_pruned
                     + stats.index_entries_pruned
                     + stats.versions_frozen
                     + stats.clog_entries_pruned
                     + stats.stamps_cleared
                     > 0;
-                if swept_something && let Err(error) = engine.kv_handle().maintain() {
-                    tracing::warn!(?error, "post-vacuum store maintenance failed");
+                let version_puts = engine.committed_version_puts();
+                let writes_since_step = version_puts.saturating_sub(last_version_puts);
+                last_version_puts = version_puts;
+                let foreground_idle = writes_since_step == 0
+                    && idle_window_elapsed(
+                        activity.last_activity_unix_millis(),
+                        LOCAL_VACUUM_IDLE_AFTER,
+                    );
+                let next = pacer.observe(&VacuumStepObservation {
+                    writes_since_step,
+                    versions_settled: stats.versions_pruned
+                        + stats.versions_frozen
+                        + stats.stamps_cleared,
+                    swept_anything,
+                    cycle_completed: step.cycle_completed,
+                    foreground_idle,
+                    step_elapsed,
+                });
+                // Rotate the LSM memtable only when the step physically
+                // deleted or rewrote something, so its tombstones (and the
+                // shadowed versions they retire) leave the scan path instead
+                // of accumulating until a byte-size rotation — and, during a
+                // back-to-back burst, at most once per idle interval (plus
+                // the burst's final step) so fast consecutive steps do not
+                // spray tiny sstables. Idle steps (settled tables skipped,
+                // nothing found) never rotate.
+                if swept_anything
+                    && (next.interval > Duration::ZERO
+                        || last_maintain.elapsed() >= LOCAL_VACUUM_IDLE_INTERVAL)
+                {
+                    last_maintain = std::time::Instant::now();
+                    if let Err(error) = engine.kv_handle().maintain() {
+                        tracing::warn!(?error, "post-vacuum store maintenance failed");
+                    }
                 }
                 tracing::debug!(
                     versions_pruned = stats.versions_pruned,
@@ -1725,11 +1925,203 @@ async fn run_local_vacuum_loop(engine: SqlEngine, shutdown: CancellationToken) {
                     versions_frozen = stats.versions_frozen,
                     keys_examined = step.keys_examined,
                     cycle_completed = step.cycle_completed,
+                    writes_since_step,
+                    debt = pacer.debt,
+                    foreground_idle,
+                    step_elapsed = ?step_elapsed,
+                    next_interval = ?next.interval,
+                    next_key_budget = next.key_budget,
                     "local vacuum step"
                 );
             }
             Err(error) => tracing::warn!(?error, "local vacuum step failed"),
         }
+    }
+}
+
+#[cfg(test)]
+mod vacuum_pacing_tests {
+    use assert2::assert;
+    use crabka_pgexec::VACUUM_STEP_KEY_BUDGET;
+
+    use super::*;
+
+    /// Observation template: a busy, fast, mid-cycle step that swept nothing.
+    const fn quiet_busy_step() -> VacuumStepObservation {
+        VacuumStepObservation {
+            writes_since_step: 1,
+            versions_settled: 0,
+            swept_anything: false,
+            cycle_completed: false,
+            foreground_idle: false,
+            step_elapsed: Duration::from_millis(1),
+        }
+    }
+
+    #[test]
+    fn write_backlog_drives_the_interval_to_zero_and_repayment_backs_off() {
+        let mut pacer = VacuumPacer::new();
+        // Writes outpace sweeping: once outstanding work passes the hot
+        // threshold the loop stops sleeping entirely.
+        let behind = VacuumStepObservation {
+            writes_since_step: 4_000,
+            versions_settled: 500,
+            swept_anything: true,
+            ..quiet_busy_step()
+        };
+        assert!(pacer.observe(&behind).interval == LOCAL_VACUUM_IDLE_INTERVAL); // debt 3 500
+        assert!(pacer.observe(&behind).interval == LOCAL_VACUUM_IDLE_INTERVAL); // debt 7 000
+        assert!(pacer.observe(&behind).interval == Duration::ZERO); // debt 10 500
+        // Sweeping catches up: the interval backs off multiplicatively toward
+        // the idle cadence instead of snapping straight to it.
+        let repaying = VacuumStepObservation {
+            writes_since_step: 0,
+            versions_settled: 20_000,
+            swept_anything: true,
+            ..quiet_busy_step()
+        };
+        let caught_up = pacer.observe(&repaying);
+        assert!(caught_up.interval == LOCAL_VACUUM_BACKOFF_FLOOR);
+        assert!(caught_up.key_budget == VACUUM_STEP_KEY_BUDGET);
+        let mut previous = caught_up.interval;
+        loop {
+            let pace = pacer.observe(&quiet_busy_step());
+            assert!(pace.interval == (previous * 2).min(LOCAL_VACUUM_IDLE_INTERVAL));
+            previous = pace.interval;
+            if pace.interval == LOCAL_VACUUM_IDLE_INTERVAL {
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn hot_step_budgets_track_step_latency_within_bounds() {
+        // (previous budget, observed step latency) → next hot step's budget.
+        let cases = [
+            // Fast steps double the budget…
+            (
+                VACUUM_STEP_KEY_BUDGET,
+                LOCAL_VACUUM_STEP_FAST,
+                2 * VACUUM_STEP_KEY_BUDGET,
+            ),
+            // …but never past the cap…
+            (
+                LOCAL_VACUUM_MAX_KEY_BUDGET,
+                Duration::from_millis(1),
+                LOCAL_VACUUM_MAX_KEY_BUDGET,
+            ),
+            // …mid-range latency keeps the budget…
+            (
+                2 * VACUUM_STEP_KEY_BUDGET,
+                Duration::from_millis(5),
+                2 * VACUUM_STEP_KEY_BUDGET,
+            ),
+            // …slow steps halve it…
+            (
+                2 * VACUUM_STEP_KEY_BUDGET,
+                LOCAL_VACUUM_STEP_SLOW,
+                VACUUM_STEP_KEY_BUDGET,
+            ),
+            // …but never below the pgexec default.
+            (
+                VACUUM_STEP_KEY_BUDGET,
+                Duration::from_millis(50),
+                VACUUM_STEP_KEY_BUDGET,
+            ),
+        ];
+        for (previous_budget, step_elapsed, expected) in cases {
+            let mut pacer = VacuumPacer::new();
+            pacer.debt = 2 * LOCAL_VACUUM_HOT_DEBT;
+            pacer.pace.key_budget = previous_budget;
+            let pace = pacer.observe(&VacuumStepObservation {
+                step_elapsed,
+                ..quiet_busy_step()
+            });
+            assert!(pace.interval == Duration::ZERO);
+            assert!(
+                pace.key_budget == expected,
+                "previous {previous_budget}, elapsed {step_elapsed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn idle_foreground_drains_until_a_clean_cycle_proves_the_store_settled() {
+        let mut pacer = VacuumPacer::new();
+        let idle_dirty = VacuumStepObservation {
+            writes_since_step: 0,
+            versions_settled: 300,
+            swept_anything: true,
+            cycle_completed: false,
+            foreground_idle: true,
+            step_elapsed: Duration::from_millis(1),
+        };
+        // Zero debt, but the store is not proven clean: drain back-to-back.
+        assert!(pacer.observe(&idle_dirty).interval == Duration::ZERO);
+        // A cycle that still swept something completes: keep draining (the
+        // proving lap has not happened yet).
+        let dirty_lap_end = VacuumStepObservation {
+            cycle_completed: true,
+            ..idle_dirty
+        };
+        assert!(pacer.observe(&dirty_lap_end).interval == Duration::ZERO);
+        // A full lap that swept nothing parks the loop at the idle cadence
+        // with the default budget, where it stays while nothing happens.
+        let clean_lap = VacuumStepObservation {
+            versions_settled: 0,
+            swept_anything: false,
+            cycle_completed: true,
+            ..idle_dirty
+        };
+        assert!(pacer.observe(&clean_lap) == VacuumPace::idle());
+        assert!(pacer.observe(&clean_lap) == VacuumPace::idle());
+    }
+
+    #[test]
+    fn a_clean_cycle_zeroes_debt_the_write_path_already_repaid() {
+        let mut pacer = VacuumPacer::new();
+        // Load whose garbage the write path prunes itself: debt builds even
+        // though sweeps find nothing.
+        let phantom = VacuumStepObservation {
+            writes_since_step: 20_000,
+            ..quiet_busy_step()
+        };
+        assert!(pacer.observe(&phantom).interval == Duration::ZERO);
+        // The hot lap completes without sweeping anything: the ledger resets
+        // instead of pinning the loop at full speed forever.
+        let clean_lap = VacuumStepObservation {
+            writes_since_step: 100,
+            cycle_completed: true,
+            ..quiet_busy_step()
+        };
+        assert!(pacer.observe(&clean_lap).interval == LOCAL_VACUUM_BACKOFF_FLOOR);
+        assert!(pacer.debt == 0);
+    }
+
+    #[test]
+    fn a_write_after_settling_reopens_idle_drain() {
+        let mut pacer = VacuumPacer::new();
+        let clean_idle_lap = VacuumStepObservation {
+            writes_since_step: 0,
+            versions_settled: 0,
+            swept_anything: false,
+            cycle_completed: true,
+            foreground_idle: true,
+            step_elapsed: Duration::from_millis(1),
+        };
+        assert!(pacer.observe(&clean_idle_lap).interval == LOCAL_VACUUM_IDLE_INTERVAL);
+        // A small write lands: the store is no longer proven clean, so the
+        // next idle window drains again even though debt stays tiny.
+        let small_write = VacuumStepObservation {
+            writes_since_step: 5,
+            ..quiet_busy_step()
+        };
+        assert!(pacer.observe(&small_write).interval == LOCAL_VACUUM_IDLE_INTERVAL);
+        let idle_unproven = VacuumStepObservation {
+            cycle_completed: false,
+            ..clean_idle_lap
+        };
+        assert!(pacer.observe(&idle_unproven).interval == Duration::ZERO);
     }
 }
 
