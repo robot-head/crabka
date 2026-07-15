@@ -3,9 +3,16 @@
 //! durable `/0/meta/next_xid` at open) and the set of currently-running xids,
 //! and builds `crabka_pgmvcc::visibility::Snapshot`s. After a restart it starts empty, so
 //! any clog `in-progress` xid is in no snapshot and resolves as aborted.
+//!
+//! Snapshots are LEASED: every [`ProcArray::snapshot`] registers its `xmin`
+//! until the last clone of the returned [`LeasedSnapshot`] drops. The
+//! [`ProcArray::garbage_horizon`] is the minimum across running xids and
+//! leased snapshot xmins, so opportunistic pruning never deletes a row version
+//! some live snapshot (for example a read-only REPEATABLE READ transaction,
+//! which allocates no xid) can still see.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
 };
 
@@ -21,13 +28,55 @@ use crate::{PersistMode, error::ExecError};
 struct Inner {
     next_xid: u64,
     running: BTreeSet<u64>,
+    /// Multiset of live snapshot xmins: xmin → outstanding lease count.
+    leased_xmins: BTreeMap<u64, usize>,
 }
 
 /// The running-transaction registry.
 pub(crate) struct ProcArray {
-    inner: Mutex<Inner>,
+    inner: Arc<Mutex<Inner>>,
     kv: Arc<dyn Kv>,
     mode: PersistMode,
+}
+
+/// A visibility snapshot plus the RAII lease that pins the garbage horizon at
+/// or below `xmin` while any clone is alive. Dereferences to [`Snapshot`], so
+/// read paths use it wherever a `&Snapshot` is expected; cloning shares the
+/// lease, so the horizon stays pinned as long as any copy of the snapshot is
+/// in use.
+#[derive(Clone)]
+pub(crate) struct LeasedSnapshot {
+    snapshot: Snapshot,
+    _lease: Arc<SnapshotLease>,
+}
+
+impl std::ops::Deref for LeasedSnapshot {
+    type Target = Snapshot;
+
+    fn deref(&self) -> &Snapshot {
+        &self.snapshot
+    }
+}
+
+struct SnapshotLease {
+    registry: Arc<Mutex<Inner>>,
+    xmin: u64,
+}
+
+impl Drop for SnapshotLease {
+    fn drop(&mut self) {
+        // No `expect`: panicking in Drop during an unwind aborts. A poisoned
+        // registry means a snapshot-taker panicked; leaking one lease entry is
+        // the benign outcome (the horizon only stays conservative).
+        if let Ok(mut g) = self.registry.lock()
+            && let Some(count) = g.leased_xmins.get_mut(&self.xmin)
+        {
+            *count -= 1;
+            if *count == 0 {
+                g.leased_xmins.remove(&self.xmin);
+            }
+        }
+    }
 }
 
 impl ProcArray {
@@ -44,10 +93,11 @@ impl ProcArray {
             None => FIRST_NORMAL_XID,
         };
         Ok(Self {
-            inner: Mutex::new(Inner {
+            inner: Arc::new(Mutex::new(Inner {
                 next_xid: first_allocatable_xid_at_or_after(next_xid),
                 running: BTreeSet::new(),
-            }),
+                leased_xmins: BTreeMap::new(),
+            })),
             kv,
             mode,
         })
@@ -110,13 +160,37 @@ impl ProcArray {
         self.inner.lock().expect("procarray").next_xid
     }
 
-    /// A snapshot of the currently-running transactions.
-    pub fn snapshot(&self) -> Snapshot {
-        let g = self.inner.lock().expect("procarray");
+    /// A leased snapshot of the currently-running transactions. The garbage
+    /// horizon stays at or below its `xmin` until the last clone drops.
+    pub fn snapshot(&self) -> LeasedSnapshot {
+        let mut g = self.inner.lock().expect("procarray");
         let xip: Vec<u64> = g.running.iter().copied().collect(); // BTreeSet => sorted ascending
         let xmax = g.next_xid;
         let xmin = xip.first().copied().unwrap_or(xmax);
-        Snapshot { xmin, xmax, xip }
+        *g.leased_xmins.entry(xmin).or_insert(0) += 1;
+        LeasedSnapshot {
+            snapshot: Snapshot { xmin, xmax, xip },
+            _lease: Arc::new(SnapshotLease {
+                registry: Arc::clone(&self.inner),
+                xmin,
+            }),
+        }
+    }
+
+    /// Oldest xid any live or future snapshot could still observe as running:
+    /// the minimum across running xids and leased snapshot xmins (`next_xid`
+    /// when neither exists). A row version superseded or deleted by a
+    /// transaction that committed below this horizon is invisible to every
+    /// present and future snapshot, so pruning it cannot change any read.
+    pub fn garbage_horizon(&self) -> u64 {
+        let g = self.inner.lock().expect("procarray");
+        let running = g.running.first().copied();
+        let leased = g.leased_xmins.keys().next().copied();
+        match (running, leased) {
+            (Some(r), Some(l)) => r.min(l),
+            (Some(x), None) | (None, Some(x)) => x,
+            (None, None) => g.next_xid,
+        }
     }
 
     /// Deregister a finished (committed or aborted) transaction. Call only after
@@ -239,6 +313,49 @@ mod tests {
             50,
             "reseed lifts the counter above applied"
         );
+    }
+
+    #[test]
+    fn garbage_horizon_tracks_running_xids_leases_and_next_xid() {
+        use assert2::assert;
+        let pa = ProcArray::open(Arc::new(MemKv::new()), PersistMode::Durable).expect("open");
+        // Nothing running, nothing leased: everything below next_xid is settled.
+        assert!(pa.garbage_horizon() == FIRST_NORMAL_XID);
+
+        // A running xid pins the horizon.
+        let x1 = pa.begin_write().expect("begin_write");
+        assert!(pa.garbage_horizon() == x1);
+
+        // A leased snapshot keeps pinning it after the writer finishes.
+        let snap = pa.snapshot();
+        assert!(snap.xmin == x1);
+        pa.finish(x1);
+        assert!(pa.garbage_horizon() == x1);
+
+        // A clone shares the lease: dropping one copy is not enough.
+        let clone = snap.clone();
+        drop(snap);
+        assert!(pa.garbage_horizon() == x1);
+
+        // Releasing the last clone releases the horizon to next_xid.
+        drop(clone);
+        assert!(pa.garbage_horizon() == x1 + 1);
+    }
+
+    #[test]
+    fn garbage_horizon_is_the_minimum_across_leases_and_running() {
+        use assert2::assert;
+        let pa = ProcArray::open(Arc::new(MemKv::new()), PersistMode::Durable).expect("open");
+        let old = pa.begin_write().expect("begin_write");
+        let old_snapshot = pa.snapshot();
+        pa.finish(old);
+        let newer = pa.begin_write().expect("begin_write");
+
+        // The old read-only snapshot (xmin == old) outweighs the newer writer.
+        assert!(pa.garbage_horizon() == old);
+        drop(old_snapshot);
+        assert!(pa.garbage_horizon() == newer);
+        pa.finish(newer);
     }
 
     #[test]

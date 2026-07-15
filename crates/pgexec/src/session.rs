@@ -37,8 +37,9 @@ pub(crate) struct TxnCtx {
     /// Assigned lazily at the first write (None for a read-only transaction).
     pub(crate) xid: Option<u64>,
     /// The visibility snapshot: re-taken per statement under READ COMMITTED,
-    /// fixed at BEGIN under REPEATABLE READ.
-    pub(crate) snapshot: Snapshot,
+    /// fixed at BEGIN under REPEATABLE READ. Leased: while this transaction
+    /// holds it, opportunistic pruning keeps every version it can see.
+    pub(crate) snapshot: crate::procarray::LeasedSnapshot,
     pub(crate) repeatable_read: bool,
     /// The GLOBAL snapshot the cross-range resolver (`exec::global_status`) gates
     /// `Prepared(-> g)` rows against. Captured at BEGIN for REPEATABLE READ (fixed
@@ -1891,7 +1892,9 @@ impl SqlSession {
     /// fixed at BEGIN; own xid is the txn's (Some after its first write). Gates
     /// before establishing a fresh snapshot (autocommit + RC); RR was gated at
     /// BEGIN. The global snapshot is `NO_GLOBAL_SNAPSHOT()` on a non-GTM engine.
-    async fn read_context(&mut self) -> Result<(Snapshot, Option<u64>, Snapshot), ExecError> {
+    async fn read_context(
+        &mut self,
+    ) -> Result<(crate::procarray::LeasedSnapshot, Option<u64>, Snapshot), ExecError> {
         enum Plan {
             Auto,
             RcRefresh,
@@ -2037,6 +2040,29 @@ impl SqlSession {
         }
     }
 
+    /// Fold opportunistic dead-version pruning into a write batch (single-node
+    /// `Durable` engines only). Rows this statement superseded or deleted get
+    /// `Delete` ops for chain versions no snapshot at or above the garbage
+    /// horizon can see, so hot-row version chains stay bounded instead of
+    /// growing until a checkpoint that never comes. Replicated engines skip
+    /// this: their followers serve reads whose snapshots are not leased on the
+    /// leader, and their checkpoint rewrite already prunes dead versions.
+    fn append_gc_ops(&self, ops: &mut Vec<crabka_pgkv::WriteOp>) -> Result<(), ExecError> {
+        if self.persist_mode != crate::PersistMode::Durable || self.global_xid.is_some() {
+            return Ok(());
+        }
+        let candidates = crate::prune::prune_candidates(ops);
+        if candidates.is_empty() {
+            return Ok(());
+        }
+        crate::prune::append_prune_ops(
+            self.kv.as_ref(),
+            self.procarray.garbage_horizon(),
+            &candidates,
+            ops,
+        )
+    }
+
     async fn run_write(&mut self, stmt: &Statement) -> Result<QueryResult, ExecError> {
         match &self.state {
             TxnState::InTransaction(_) => {
@@ -2118,6 +2144,7 @@ impl SqlSession {
                 if let TxnState::InTransaction(c) = &mut self.state {
                     c.written_rows.extend(touched);
                 }
+                self.append_gc_ops(&mut ops)?;
                 // A participant in a cross-range global txn `g` stamps a
                 // Prepared(xid -> g) marker into the SAME durable batch so the row
                 // carries it from the start, and deregisters `xid` from the
@@ -2189,7 +2216,12 @@ impl SqlSession {
                 let gsnap = self.global_read_snapshot(None)?;
                 let ctx = self.eval_ctx();
                 let write_ctx = self.write_context(&gsnap, &snapshot, xid, false, &ctx);
-                let outcome = crate::exec::execute_write(&write_ctx, stmt).await;
+                let outcome = crate::exec::execute_write(&write_ctx, stmt).await.and_then(
+                    |(result, mut ops)| {
+                        self.append_gc_ops(&mut ops)?;
+                        Ok((result, ops))
+                    },
+                );
                 let (result, mut ops) = match outcome {
                     Ok(v) => v,
                     Err(e) => {

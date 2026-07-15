@@ -7185,6 +7185,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn single_node_runtime_prunes_dead_versions_on_hot_row_rewrites() {
+        // The single-node serve paths (in-memory and --data-dir) hand plain
+        // SqlEngines to the runtime; those engines must prune dead MVCC
+        // versions opportunistically, or every hot-row rewrite grows the
+        // chain — and drags the whole node down — forever.
+        let engine = SqlEngine::new();
+        let handle = engine.clone_handle();
+        let mut session = RuntimeEngine::Single(Box::new(engine)).connect();
+        session
+            .simple_query("CREATE TABLE hot_gc (id int4, v int4)")
+            .await
+            .expect("create");
+        session
+            .simple_query("INSERT INTO hot_gc VALUES (1, 0), (2, 0)")
+            .await
+            .expect("seed");
+        for _ in 0..200 {
+            session
+                .simple_query("UPDATE hot_gc SET v = v + 1 WHERE id = 1")
+                .await
+                .expect("rewrite hot row");
+        }
+
+        let table = handle.catalog_table("hot_gc").expect("table");
+        let versions = handle
+            .kv_handle()
+            .scan_prefix(&crabka_pgkv::key::table_prefix(table.id))
+            .expect("scan versions")
+            .len();
+        assert2::assert!(
+            versions <= 4,
+            "single-node engines must prune dead versions, found {versions}"
+        );
+    }
+
+    #[tokio::test]
     async fn dynamic_range_service_fails_closed_during_topology_publication() {
         let dynamic = DynamicLiveRangeService::new(crabka_gres_ranges::HostedRangeService::new(
             BTreeMap::new(),

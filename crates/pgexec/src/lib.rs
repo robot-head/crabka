@@ -53,6 +53,7 @@ mod join;
 mod lockmgr;
 pub mod plan_dist;
 mod procarray;
+mod prune;
 mod query;
 mod read_gate;
 pub mod scanner;

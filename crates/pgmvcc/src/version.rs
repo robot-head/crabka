@@ -173,6 +173,25 @@ pub fn encode_ts_tuple(start_ts: u64, state: TsVersionState, row: &[Datum]) -> V
     out
 }
 
+/// Decode only a tuple version's `(xmin, xmax)` header, skipping the row
+/// payload.
+///
+/// This is the pruning fast path: garbage-horizon decisions need the header
+/// alone, so callers avoid decoding (and allocating) the row for every version
+/// in a chain.
+///
+/// # Errors
+///
+/// Returns [`KvError::CorruptRow`] when the tuple header is invalid.
+pub fn decode_tuple_header(bytes: &[u8]) -> Result<(u64, u64), KvError> {
+    let (header, _) = TupleHeader::ref_from_prefix(bytes)
+        .map_err(|_| KvError::CorruptRow("bad tuple header".into()))?;
+    if header.tag != T_TUPLE {
+        return Err(KvError::CorruptRow("bad tuple header".into()));
+    }
+    Ok((header.xmin.get(), header.xmax.get()))
+}
+
 /// Decode a tuple version into `(xmin, xmax, row)`.
 ///
 /// # Errors
@@ -385,6 +404,29 @@ mod tests {
         assert!(decode_tuple(&[]).is_err());
         assert!(decode_tuple(&[99, 0, 0, 0, 0, 0, 0, 0, 0]).is_err()); // bad tag
         assert!(decode_tuple(&[1, 0, 0]).is_err()); // too short for header
+    }
+
+    #[test]
+    fn decode_tuple_header_matches_full_decode_without_touching_the_row() {
+        use assert2::assert;
+        let row = vec![Datum::Int4(1), Datum::Text("a".into())];
+        let bytes = encode_tuple(5, 9, &row);
+        assert!(decode_tuple_header(&bytes).expect("header") == (5, 9));
+
+        // A corrupt row payload does not matter: only the header is read.
+        let mut corrupt_row = encode_tuple(5, 9, &row);
+        corrupt_row.truncate(20);
+        assert!(decode_tuple(&corrupt_row).is_err());
+        assert!(decode_tuple_header(&corrupt_row).expect("header") == (5, 9));
+    }
+
+    #[test]
+    fn decode_tuple_header_rejects_corrupt_and_timestamp_tuples() {
+        use assert2::assert;
+        assert!(decode_tuple_header(&[]).is_err());
+        assert!(decode_tuple_header(&[1, 0, 0]).is_err()); // too short for header
+        let ts = encode_ts_tuple(5, TsVersionState::Committed { commit_ts: 8 }, &[]);
+        assert!(decode_tuple_header(&ts).is_err()); // wrong tag
     }
 
     #[test]

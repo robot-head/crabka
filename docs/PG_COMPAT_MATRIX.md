@@ -216,7 +216,7 @@ The implemented rows reflect the checked-in parser/executor surface after G-1 an
 | TRUNCATE | Wave-assigned(D4) | Table lifecycle wave. |
 | UNLISTEN | Wave-assigned(S4) | Notification bus. |
 | UPDATE | Implemented | Baseline DML with `NOT NULL` enforcement on assigned rows; Q1 starter `RETURNING` supports `*`, direct columns, simple scalar expressions, and aliases on local MVCC tables. UPDATE FROM remains Q1 breadth. |
-| VACUUM | Wave-assigned(P5) | Mapped to garbage horizon/compact hint. |
+| VACUUM | Wave-assigned(P5) | Mapped to garbage horizon/compact hint; the statement is still rejected, but single-node engines already prune dead row versions opportunistically on write. |
 | VALUES | Implemented | Baseline query body. |
 
 ## Major language-feature rows
