@@ -6,9 +6,21 @@
 //! decision as [`HeartbeatVerdict`]. It explores two clients, variable grant
 //! sizes, delayed requests and replies, crash recovery, and a live fenced
 //! oracle that still has a client connection.
+//!
+//! Epoch liveness is amortized behind a certificate window rather than a
+//! per-grant heartbeat: a fenced replica whose liveness certificate has not yet
+//! lapsed keeps serving within-stride grants from memory, but it can never
+//! extend its reservation because the stride persist is epoch-fenced. The
+//! `successor_grace` knob models the successor grace rule: a successor may not
+//! serve its first grant while any older-epoch replica is still running inside
+//! its certificate window. To keep the exhaustive state space affordable the
+//! model reserves each recovering replica's first stride up front (see
+//! [`TsoModel::reserve_first_stride`]); every lazily-persisting production
+//! trace is order-isomorphic to a modeled trace.
 
 use std::num::NonZeroU64;
 
+use assert2::assert;
 use crabka_gres_ranges::{GrantLease, HeartbeatVerdict, TsoTimestamp};
 use stateright::{Checker, Model, Property};
 
@@ -19,16 +31,47 @@ const MAX_EPOCH: u8 = 2;
 const MAX_PENDING_REQUESTS: usize = 2;
 const MAX_PENDING_REPLIES: usize = 2;
 const MAX_ISSUED_GRANTS: usize = 2;
-const EXHAUSTIVE_STATE_COUNT: usize = 4_677_498;
-const EXHAUSTIVE_UNIQUE_STATE_COUNT: usize = 1_704_950;
+const EXHAUSTIVE_STATE_COUNT: usize = 11_358_628;
+const EXHAUSTIVE_UNIQUE_STATE_COUNT: usize = 3_805_290;
 const EXHAUSTIVE_MAX_DEPTH: usize = 16;
 
 #[derive(Clone, Copy)]
 struct TsoModel {
     stride: NonZeroU64,
-    persists_stride_ahead: bool,
-    requires_live_epoch: bool,
-    preserves_client_visible_max: bool,
+    stride_persistence: StridePersistence,
+    epoch_liveness: EpochLiveness,
+    successor_grace: SuccessorGrace,
+    client_visible_max: ClientVisibleMax,
+}
+
+/// Whether grants persist a stride-ahead durable horizon before being served.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StridePersistence {
+    Ahead,
+    Missing,
+}
+
+/// Whether serving requires a live epoch (fresh heartbeat or an unexpired
+/// liveness certificate).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EpochLiveness {
+    Required,
+    Unchecked,
+}
+
+/// Whether a successor waits out the certificate windows of every older-epoch
+/// replica that is still running before serving its first grant.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SuccessorGrace {
+    WaitsOutCertificate,
+    ServesImmediately,
+}
+
+/// How a delivered reply updates the client-visible timestamp.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ClientVisibleMax {
+    Preserved,
+    Overwritten,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -50,6 +93,11 @@ struct Replica {
     epoch: u8,
     next_ts: u8,
     running: bool,
+    /// Whether the amortized liveness certificate is still unexpired. Every
+    /// replica is created holding a live certificate (an active oracle renews
+    /// it on each stride persist or heartbeat, so the flag only becomes
+    /// meaningful once the replica is fenced).
+    certificate_live: bool,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -103,6 +151,7 @@ enum Action {
     CrashActive,
     RestartAfterCrash,
     FenceWithLiveZombie,
+    ExpireCertificate(usize),
 }
 
 impl Model for TsoModel {
@@ -110,13 +159,14 @@ impl Model for TsoModel {
     type Action = Action;
 
     fn init_states(&self) -> Vec<State> {
-        vec![State {
+        let mut state = State {
             durable_max_ts: 0,
             active_epoch: 0,
             replicas: vec![Replica {
                 epoch: 0,
                 next_ts: 1,
                 running: true,
+                certificate_live: true,
             }],
             requests: Vec::new(),
             replies: Vec::new(),
@@ -127,7 +177,9 @@ impl Model for TsoModel {
                 delivered_reply_max_ts: 0,
             }),
             acknowledged_commit_ts: 0,
-        }]
+        };
+        self.reserve_first_stride(&mut state);
+        vec![state]
     }
 
     fn actions(&self, state: &State, actions: &mut Vec<Action>) {
@@ -157,6 +209,11 @@ impl Model for TsoModel {
         } else if state.active_epoch < MAX_EPOCH {
             actions.push(Action::RestartAfterCrash);
         }
+        for (index, replica) in state.replicas.iter().enumerate() {
+            if replica.running && replica.epoch < state.active_epoch && replica.certificate_live {
+                actions.push(Action::ExpireCertificate(index));
+            }
+        }
     }
 
     fn next_state(&self, state: &State, action: Action) -> Option<State> {
@@ -176,8 +233,9 @@ impl Model for TsoModel {
             Action::DeliverReply(index) => self.deliver_reply(&mut next, index)?,
             Action::AcknowledgeCommit => acknowledge_latest_grant(&mut next)?,
             Action::CrashActive => active_replica_mut(&mut next)?.running = false,
-            Action::RestartAfterCrash => restart_active(&mut next)?,
-            Action::FenceWithLiveZombie => fence_with_live_zombie(&mut next)?,
+            Action::RestartAfterCrash => self.restart_active(&mut next)?,
+            Action::FenceWithLiveZombie => self.fence_with_live_zombie(&mut next)?,
+            Action::ExpireCertificate(index) => expire_certificate(&mut next, index)?,
         }
 
         Some(next)
@@ -230,6 +288,18 @@ impl Model for TsoModel {
                         .any(|replica| replica.epoch < state.active_epoch && replica.running)
                 },
             ),
+            Property::sometimes(
+                "fenced_zombie_can_serve_inside_its_certificate_window",
+                |_, state: &State| {
+                    state.replicas.iter().any(|replica| {
+                        replica.running
+                            && replica.epoch < state.active_epoch
+                            && replica.certificate_live
+                            && reservation_ceiling(state, replica.epoch, true)
+                                .is_some_and(|ceiling| replica.next_ts <= ceiling)
+                    })
+                },
+            ),
         ]
     }
 }
@@ -240,7 +310,7 @@ impl TsoModel {
         let client = state.clients.get_mut(usize::from(reply.client))?;
         let reply_last_ts = checked_last(reply.first_ts, reply.count)?;
         client.delivered_reply_max_ts = client.delivered_reply_max_ts.max(reply_last_ts);
-        if self.preserves_client_visible_max {
+        if self.client_visible_max == ClientVisibleMax::Preserved {
             client.visible_ts = client.visible_ts.max(reply_last_ts);
         } else {
             client.visible_ts = reply_last_ts;
@@ -256,8 +326,18 @@ impl TsoModel {
             .iter()
             .position(|replica| replica.epoch == request.target_epoch && replica.running)?;
         let replica_epoch = state.replicas[replica_index].epoch;
-        if self.requires_live_epoch
-            && epoch_heartbeat(replica_epoch, state.active_epoch) != HeartbeatVerdict::Live
+        let fenced = epoch_heartbeat(replica_epoch, state.active_epoch) != HeartbeatVerdict::Live;
+        if self.epoch_liveness == EpochLiveness::Required
+            && fenced
+            && !state.replicas[replica_index].certificate_live
+        {
+            return None;
+        }
+        if self.successor_grace == SuccessorGrace::WaitsOutCertificate
+            && state
+                .replicas
+                .iter()
+                .any(|older| older.epoch < replica_epoch && older.running && older.certificate_live)
         {
             return None;
         }
@@ -269,7 +349,15 @@ impl TsoModel {
 
         let first_ts = state.replicas[replica_index].next_ts;
         let last_ts = checked_last(first_ts, request.count)?;
-        if self.persists_stride_ahead && last_ts > state.durable_max_ts {
+        if self.stride_persistence == StridePersistence::Ahead
+            && last_ts > reservation_ceiling(state, replica_epoch, fenced)?
+        {
+            // Extending the reservation persists a new stride through the
+            // epoch-fenced range-0 write; a deposed epoch's persist is refused,
+            // so it can only serve what its last stride already reserved.
+            if fenced {
+                return None;
+            }
             let stride_last = checked_last(first_ts, u8::try_from(self.stride.get()).ok()?)?;
             state.durable_max_ts = state.durable_max_ts.max(last_ts.max(stride_last));
         }
@@ -290,6 +378,60 @@ impl TsoModel {
         });
         Some(())
     }
+
+    fn restart_active(&self, state: &mut State) -> Option<()> {
+        let old_active = active_replica(state)?;
+        if old_active.running || state.active_epoch >= MAX_EPOCH {
+            return None;
+        }
+        self.start_successor(state);
+        Some(())
+    }
+
+    fn fence_with_live_zombie(&self, state: &mut State) -> Option<()> {
+        if state.active_epoch >= MAX_EPOCH || !active_replica(state)?.running {
+            return None;
+        }
+        self.start_successor(state);
+        Some(())
+    }
+
+    fn start_successor(&self, state: &mut State) {
+        state.active_epoch += 1;
+        state.fence_horizons.push(FenceHorizon {
+            successor_epoch: state.active_epoch,
+            durable_max_ts: state.durable_max_ts,
+        });
+        state.replicas.push(Replica {
+            epoch: state.active_epoch,
+            next_ts: state.durable_max_ts.saturating_add(1),
+            running: true,
+            certificate_live: true,
+        });
+        self.reserve_first_stride(state);
+    }
+
+    /// Reserve the newly recovered active replica's first stride.
+    ///
+    /// Production persists strides lazily on grant, but a lazy model needs an
+    /// extra warm-up grant before every fence just to open the deposed
+    /// replica's certificate window, which pushes the issued-grant history
+    /// bound (and the reachable state space) far past what exhaustive checking
+    /// affords. Reserving the first stride at recovery keeps every lazy trace
+    /// order-isomorphic to a modeled trace while only widening what a fenced
+    /// replica may serve, so `MAX_ISSUED_GRANTS` can stay a protocol-domain
+    /// bound of two.
+    fn reserve_first_stride(&self, state: &mut State) {
+        if self.stride_persistence != StridePersistence::Ahead {
+            return;
+        }
+        if let Some(replica) = active_replica(state)
+            && let Ok(stride) = u8::try_from(self.stride.get())
+            && let Some(stride_last) = checked_last(replica.next_ts, stride)
+        {
+            state.durable_max_ts = state.durable_max_ts.max(stride_last);
+        }
+    }
 }
 
 fn epoch_heartbeat(replica_epoch: u8, active_epoch: u8) -> HeartbeatVerdict {
@@ -298,6 +440,21 @@ fn epoch_heartbeat(replica_epoch: u8, active_epoch: u8) -> HeartbeatVerdict {
     }
 
     HeartbeatVerdict::Fenced
+}
+
+/// Inclusive horizon the replica may serve from memory: the shared durable
+/// horizon while it is the active writer, or the horizon captured when it was
+/// deposed. A fenced epoch can no longer persist, so its reservation stays
+/// frozen at fence time even though successors keep advancing `durable_max_ts`.
+fn reservation_ceiling(state: &State, replica_epoch: u8, fenced: bool) -> Option<u8> {
+    if !fenced {
+        return Some(state.durable_max_ts);
+    }
+    state
+        .fence_horizons
+        .iter()
+        .find(|fence| fence.successor_epoch == replica_epoch + 1)
+        .map(|fence| fence.durable_max_ts)
 }
 
 fn acknowledge_latest_grant(state: &mut State) -> Option<()> {
@@ -311,34 +468,14 @@ fn acknowledge_latest_grant(state: &mut State) -> Option<()> {
     Some(())
 }
 
-fn restart_active(state: &mut State) -> Option<()> {
-    let old_active = active_replica(state)?;
-    if old_active.running || state.active_epoch >= MAX_EPOCH {
+fn expire_certificate(state: &mut State, index: usize) -> Option<()> {
+    let active_epoch = state.active_epoch;
+    let replica = state.replicas.get_mut(index)?;
+    if !replica.running || replica.epoch >= active_epoch || !replica.certificate_live {
         return None;
     }
-    start_successor(state);
+    replica.certificate_live = false;
     Some(())
-}
-
-fn fence_with_live_zombie(state: &mut State) -> Option<()> {
-    if state.active_epoch >= MAX_EPOCH || !active_replica(state)?.running {
-        return None;
-    }
-    start_successor(state);
-    Some(())
-}
-
-fn start_successor(state: &mut State) {
-    state.active_epoch += 1;
-    state.fence_horizons.push(FenceHorizon {
-        successor_epoch: state.active_epoch,
-        durable_max_ts: state.durable_max_ts,
-    });
-    state.replicas.push(Replica {
-        epoch: state.active_epoch,
-        next_ts: state.durable_max_ts.saturating_add(1),
-        running: true,
-    });
 }
 
 fn active_replica(state: &State) -> Option<&Replica> {
@@ -411,6 +548,12 @@ fn checker(model: TsoModel) -> impl Checker<TsoModel> {
 }
 
 fn assert_exhaustive(checker: &impl Checker<TsoModel>) {
+    eprintln!(
+        "[tso_monotonicity_model] exhaustive traversal: states={} unique_states={} max_depth={}",
+        checker.state_count(),
+        checker.unique_state_count(),
+        checker.max_depth(),
+    );
     assert!(
         checker.is_done(),
         "TSO model traversal was truncated: states={} unique_states={} max_depth={}",
@@ -418,36 +561,28 @@ fn assert_exhaustive(checker: &impl Checker<TsoModel>) {
         checker.unique_state_count(),
         checker.max_depth(),
     );
-    assert_eq!(
-        checker.state_count(),
-        EXHAUSTIVE_STATE_COUNT,
+    assert!(
+        checker.state_count() == EXHAUSTIVE_STATE_COUNT,
         "TSO model traversal generated an unexpected number of states; a checker cutoff or model-bound change may have truncated the proof",
     );
-    assert_eq!(
-        checker.unique_state_count(),
-        EXHAUSTIVE_UNIQUE_STATE_COUNT,
+    assert!(
+        checker.unique_state_count() == EXHAUSTIVE_UNIQUE_STATE_COUNT,
         "TSO model traversal visited an unexpected number of unique states; a checker cutoff or model-bound change may have truncated the proof",
     );
-    assert_eq!(
-        checker.max_depth(),
-        EXHAUSTIVE_MAX_DEPTH,
+    assert!(
+        checker.max_depth() == EXHAUSTIVE_MAX_DEPTH,
         "TSO model traversal stopped at an unexpected depth; a checker cutoff or model-bound change may have truncated the proof",
-    );
-    eprintln!(
-        "[tso_monotonicity_model] exhaustive traversal: states={} unique_states={} max_depth={}",
-        checker.state_count(),
-        checker.unique_state_count(),
-        checker.max_depth(),
     );
 }
 
 #[test]
-fn stride_ahead_and_epoch_liveness_preserve_tso_safety() {
+fn stride_ahead_epoch_liveness_and_successor_grace_preserve_tso_safety() {
     let checker = checker(TsoModel {
         stride: NonZeroU64::new(3).expect("model stride is non-zero"),
-        persists_stride_ahead: true,
-        requires_live_epoch: true,
-        preserves_client_visible_max: true,
+        stride_persistence: StridePersistence::Ahead,
+        epoch_liveness: EpochLiveness::Required,
+        successor_grace: SuccessorGrace::WaitsOutCertificate,
+        client_visible_max: ClientVisibleMax::Preserved,
     });
 
     assert_exhaustive(&checker);
@@ -459,9 +594,10 @@ fn stride_ahead_and_epoch_liveness_preserve_tso_safety() {
 fn missing_stride_ahead_has_a_crash_reuse_counterexample() {
     let checker = checker(TsoModel {
         stride: NonZeroU64::new(3).expect("model stride is non-zero"),
-        persists_stride_ahead: false,
-        requires_live_epoch: true,
-        preserves_client_visible_max: true,
+        stride_persistence: StridePersistence::Missing,
+        epoch_liveness: EpochLiveness::Required,
+        successor_grace: SuccessorGrace::WaitsOutCertificate,
+        client_visible_max: ClientVisibleMax::Preserved,
     });
 
     assert!(
@@ -475,9 +611,27 @@ fn missing_stride_ahead_has_a_crash_reuse_counterexample() {
 fn missing_epoch_liveness_has_a_live_zombie_freshness_counterexample() {
     let checker = checker(TsoModel {
         stride: NonZeroU64::new(3).expect("model stride is non-zero"),
-        persists_stride_ahead: true,
-        requires_live_epoch: false,
-        preserves_client_visible_max: true,
+        stride_persistence: StridePersistence::Ahead,
+        epoch_liveness: EpochLiveness::Unchecked,
+        successor_grace: SuccessorGrace::WaitsOutCertificate,
+        client_visible_max: ClientVisibleMax::Preserved,
+    });
+
+    assert!(
+        checker
+            .discoveries()
+            .contains_key("tso_grant_never_precedes_a_commit_acknowledged_before_it")
+    );
+}
+
+#[test]
+fn missing_successor_grace_has_a_stale_certificate_window_counterexample() {
+    let checker = checker(TsoModel {
+        stride: NonZeroU64::new(3).expect("model stride is non-zero"),
+        stride_persistence: StridePersistence::Ahead,
+        epoch_liveness: EpochLiveness::Required,
+        successor_grace: SuccessorGrace::ServesImmediately,
+        client_visible_max: ClientVisibleMax::Preserved,
     });
 
     assert!(
@@ -491,9 +645,10 @@ fn missing_epoch_liveness_has_a_live_zombie_freshness_counterexample() {
 fn direct_reply_assignment_has_a_client_visible_timestamp_regression_counterexample() {
     let checker = checker(TsoModel {
         stride: NonZeroU64::new(3).expect("model stride is non-zero"),
-        persists_stride_ahead: true,
-        requires_live_epoch: true,
-        preserves_client_visible_max: false,
+        stride_persistence: StridePersistence::Ahead,
+        epoch_liveness: EpochLiveness::Required,
+        successor_grace: SuccessorGrace::WaitsOutCertificate,
+        client_visible_max: ClientVisibleMax::Overwritten,
     });
 
     assert!(
