@@ -167,3 +167,138 @@ async fn real_range0_readiness_waits_for_in_doubt_recovery_prologue() {
     recovered.simple_query("COMMIT").await.unwrap();
     system.shutdown().await;
 }
+
+/// After a range-0 host restart, timestamp grants must resume strictly before
+/// the assembled SQL topology serves: the warming transport activates the
+/// oracle as soon as range 0 itself recovers, while SQL stays gated behind the
+/// full prologue.
+#[tokio::test]
+async fn real_range0_restart_serves_timestamp_grants_before_sql_topology() {
+    use std::time::Duration;
+
+    use assert2::assert;
+
+    let mut system = ProcessHarness::start_all_on_zero("tenant-real-early-tso").await;
+    let seed = system.sql(0).await;
+    seed.simple_query("CREATE TABLE early_tso (id int4, balance int4)")
+        .await
+        .expect("create table");
+    for chunk in 0_i32..4 {
+        let values = (0_i32..50)
+            .map(|offset| format!("({}, 1)", chunk * 50 + offset))
+            .collect::<Vec<_>>()
+            .join(", ");
+        seed.simple_query(&format!("INSERT INTO early_tso VALUES {values}"))
+            .await
+            .expect("seed rows");
+    }
+    drop(seed);
+
+    system.kill(0).await;
+    // Spawn the replacement without waiting for its recovery-complete
+    // readiness event, so the warming window is observable. The stable
+    // proxies only re-point at readiness, so probe the address the child
+    // binds early and logs (its log file was truncated by the respawn).
+    system.restart_spawned(0, "r0,r1");
+    let client = system.operator_control_client();
+    let deadline = std::time::Instant::now() + Duration::from_mins(1);
+    let warming_endpoint = loop {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "warming range transport never bound: {}",
+            system.log(0)
+        );
+        if let Some(endpoint) = range_listen_endpoint(&system.log(0)) {
+            break endpoint;
+        }
+        tokio::time::sleep(Duration::from_millis(3)).await;
+    };
+
+    // Probe SQL before grants inside each iteration: a strict ordering of
+    // the first-success indexes proves grants served during a window in
+    // which the SQL topology still refused.
+    let mut iteration = 0_u64;
+    let mut first_grant = None;
+    let first_sql = loop {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "assembled SQL topology never served: {}",
+            system.log(0)
+        );
+        if range0_sql_probe_ok(&client, &warming_endpoint).await {
+            break iteration;
+        }
+        if first_grant.is_none() && range0_grant_probe_ok(&client, &warming_endpoint).await {
+            first_grant = Some(iteration);
+        }
+        iteration += 1;
+        tokio::time::sleep(Duration::from_millis(3)).await;
+    };
+    let first_grant = first_grant.expect("grants must serve before the assembled SQL topology");
+    assert!(first_grant < first_sql);
+
+    system.finish_restart(0).await;
+
+    // Full serving still arrives with the seeded rows intact.
+    let recovered = system.sql(0).await;
+    let count: i64 = recovered
+        .query_one("SELECT count(*) FROM early_tso", &[])
+        .await
+        .expect("count seeded rows")
+        .get(0);
+    assert!(count == 200);
+    system.shutdown().await;
+}
+
+/// Extract the early-bound range transport address from a child's log.
+///
+/// The child logs through a piped `tracing` writer that keeps ANSI color
+/// codes, so scan for the loopback address digits rather than splitting on a
+/// `field=` boundary that may carry escape sequences.
+fn range_listen_endpoint(log: &str) -> Option<String> {
+    log.lines()
+        .filter(|line| line.contains("range compute listening"))
+        .find_map(|line| {
+            let start = line.rfind("127.0.0.1:")?;
+            let port = line[start + "127.0.0.1:".len()..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>();
+            (!port.is_empty()).then(|| format!("127.0.0.1:{port}"))
+        })
+}
+
+async fn range0_sql_probe_ok(client: &crabka_gres_ranges::FramedTcpClient, endpoint: &str) -> bool {
+    matches!(
+        client
+            .call(
+                endpoint,
+                &crabka_gres_ranges::RangeRequest::Sql {
+                    range_id: RangeId::new(0),
+                    sql: "SELECT 1".to_string(),
+                },
+            )
+            .await,
+        Ok(crabka_gres_ranges::RangeResponse::Sql { .. }
+            | crabka_gres_ranges::RangeResponse::SqlResults { .. })
+    )
+}
+
+async fn range0_grant_probe_ok(
+    client: &crabka_gres_ranges::FramedTcpClient,
+    endpoint: &str,
+) -> bool {
+    matches!(
+        client
+            .call(
+                endpoint,
+                &crabka_gres_ranges::RangeRequest::Tso(crabka_gres_ranges::TsoReq::Grant {
+                    count: 1,
+                }),
+            )
+            .await,
+        Ok(crabka_gres_ranges::RangeResponse::Tso(
+            crabka_gres_ranges::TsoResp::Granted { .. }
+        ))
+    )
+}

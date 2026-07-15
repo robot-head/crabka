@@ -1600,9 +1600,15 @@ pub async fn serve_listener_with_tenant_config_loader(
         lifecycle_registry = Some(registry);
     }
     let effective_args = apply_tenant_runtime_defaults(args, tenant_record.as_ref())?;
+    let (early_range_service, early_range_server) =
+        match bind_early_range_transport(&effective_args).await? {
+            Some((service, server)) => (Some(service), Some(server)),
+            None => (None, None),
+        };
     let mut runtime = Box::pin(open_runtime_with_tenant_record(
         &effective_args,
         tenant_record.as_ref(),
+        early_range_service,
     ))
     .await?;
     register_kafka_scanner_with_default_bootstrap(
@@ -1642,7 +1648,17 @@ pub async fn serve_listener_with_tenant_config_loader(
         shutdown.clone(),
     );
 
-    let range_server = start_range_service(&effective_args, range_service).await?;
+    let range_server = if let Some(server) = early_range_server {
+        if range_service.is_none() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "--range-listen requires a multi-range runtime",
+            ));
+        }
+        Some(server)
+    } else {
+        start_range_service(&effective_args, range_service).await?
+    };
     let checkpointer = live_final_checkpointer(checkpoint_runtime);
     let registry = mark_active_after_recovery(tenant_record.as_ref(), lifecycle_registry).await?;
     let suspend = if let Some(policy) = SuspendPolicy::from_tenant_record(tenant_record.as_ref()) {
@@ -1743,6 +1759,42 @@ fn lifecycle_registry_bootstrap(
         return None;
     }
     bootstrap.filter(|address| !is_in_memory_bootstrap(address))
+}
+
+/// Bind the range transport before recovery when the boot is identifiably a
+/// live multirange runtime.
+///
+/// The listener serves a warming service that answers every request with a
+/// re-resolvable error until recovery installs the range-0 timestamp oracle
+/// and, later, tenant assembly swaps in the full topology. Every other
+/// runtime mode returns `None` and keeps binding after the runtime opens.
+async fn bind_early_range_transport(
+    args: &ServeArgs,
+) -> std::io::Result<
+    Option<(
+        Arc<DynamicLiveRangeService>,
+        (tokio::task::JoinHandle<()>, SocketAddr),
+    )>,
+> {
+    if args.range_listen.is_none() {
+        return Ok(None);
+    }
+    let Some(config) = SubstrateRuntimeConfig::from_args(args)? else {
+        return Ok(None);
+    };
+    if config.ranges.is_none() || config.is_in_memory_bootstrap() {
+        return Ok(None);
+    }
+    let dynamic = Arc::new(DynamicLiveRangeService::new(
+        crabka_gres_ranges::HostedRangeService::new(BTreeMap::new()),
+    ));
+    let server = start_range_service(
+        args,
+        Some(Arc::clone(&dynamic) as Arc<dyn crabka_gres_ranges::RangeService>),
+    )
+    .await?
+    .ok_or_else(|| std::io::Error::other("early range transport did not bind"))?;
+    Ok(Some((dynamic, server)))
 }
 
 async fn start_range_service(
@@ -2431,11 +2483,13 @@ fn activation_registry_connection_options(
 async fn open_runtime_with_tenant_record(
     args: &ServeArgs,
     tenant_record: Option<&TenantRecord>,
+    early_service: Option<Arc<DynamicLiveRangeService>>,
 ) -> std::io::Result<GresRuntime> {
     if let Some(config) = SubstrateRuntimeConfig::from_args(args)? {
         return Box::pin(open_substrate_runtime_with_tenant_record(
             &config,
             tenant_record,
+            early_service,
         ))
         .await;
     }
@@ -2471,17 +2525,27 @@ pub async fn open_substrate_engine(config: &SubstrateRuntimeConfig) -> std::io::
 pub async fn open_substrate_runtime(
     config: &SubstrateRuntimeConfig,
 ) -> std::io::Result<GresRuntime> {
-    Box::pin(open_substrate_runtime_with_tenant_record(config, None)).await
+    Box::pin(open_substrate_runtime_with_tenant_record(
+        config, None, None,
+    ))
+    .await
 }
 
 async fn open_substrate_runtime_with_tenant_record(
     config: &SubstrateRuntimeConfig,
     tenant_record: Option<&TenantRecord>,
+    early_service: Option<Arc<DynamicLiveRangeService>>,
 ) -> std::io::Result<GresRuntime> {
     use std::io::Error;
 
     if let Some(boundaries) = config.ranges.as_deref() {
-        return Box::pin(open_multirange_runtime(config, boundaries, tenant_record)).await;
+        return Box::pin(open_multirange_runtime(
+            config,
+            boundaries,
+            tenant_record,
+            early_service,
+        ))
+        .await;
     }
 
     let store = open_substrate_cache(config.cache_dir.as_deref())?;
@@ -2633,6 +2697,7 @@ async fn open_multirange_runtime(
     config: &SubstrateRuntimeConfig,
     boundaries: &str,
     tenant_record: Option<&TenantRecord>,
+    early_service: Option<Arc<DynamicLiveRangeService>>,
 ) -> std::io::Result<GresRuntime> {
     let mut tenant_config = multirange_tenant_config(config, boundaries, tenant_record)?;
     if config.is_in_memory_bootstrap() {
@@ -2758,11 +2823,20 @@ async fn open_multirange_runtime(
     } else {
         None
     };
+    // Split-activation boots may rewrite the range map between recovery and
+    // assembly; they keep the conservative sequencing and the warming
+    // transport only receives the fully assembled service.
+    let early_tso_service = if activation_receipt.is_none() {
+        early_service.as_deref()
+    } else {
+        None
+    };
     let mut engines = recover_live_multirange_engines(
         config,
         &tenant_config,
         checkpoint_store.clone(),
         activation_receipt.as_ref(),
+        early_tso_service,
     )
     .await?;
     let (recovered_map, paused_control_recovery) = split_activation::reconcile_before_readiness(
@@ -2792,26 +2866,9 @@ async fn open_multirange_runtime(
         tenant_config = tenant_config.defer_timestamp_recovery();
     }
     if tenant_config.range_registry.is_some()
-        && let Some((current_layout, source_record_version, provisional_target)) =
-            provisional_registry
+        && let Some(provisional) = provisional_registry
     {
-        tenant_config.range_registry = Some(
-            crabka_gres_ranges::RangeRegistry::from_tenant_record(&provisional_target)
-                .map_err(|error| std::io::Error::other(error.to_string()))?
-                .with_authoritative_source(Arc::new(MustActivateRangeRegistrySource {
-                    live: LiveRangeRegistrySource {
-                        bootstrap: config.bootstrap.clone(),
-                        tenant: crabka_gres_control::TenantName::try_from(config.tenant.as_str())
-                            .map_err(|error| {
-                            std::io::Error::new(std::io::ErrorKind::InvalidInput, error)
-                        })?,
-                        security: config.kafka_security.clone(),
-                    },
-                    current_layout,
-                    source_record_version,
-                    provisional_target,
-                })),
-        );
+        tenant_config.range_registry = Some(must_activate_range_registry(config, provisional)?);
     }
     tracing::info!(
         recovered_ranges = ?tenant_config
@@ -2828,7 +2885,14 @@ async fn open_multirange_runtime(
             .collect::<Vec<_>>(),
         "activation recovery startup handoff"
     );
-    open_live_multirange_tenant(tenant_config, engines, config, timestamp_primary_aliases).await
+    open_live_multirange_tenant(
+        tenant_config,
+        engines,
+        config,
+        timestamp_primary_aliases,
+        early_service,
+    )
+    .await
 }
 
 fn range_map_from_tenant_layout(
@@ -2882,15 +2946,46 @@ fn remote_ranges_are_configured(config: &SubstrateRuntimeConfig, record: &Tenant
     })
 }
 
+/// Build the activation-gated provisional registry for a split-recovery boot.
+fn must_activate_range_registry(
+    config: &SubstrateRuntimeConfig,
+    provisional: (
+        Vec<crabka_gres_control::RangeLayoutEntry>,
+        u64,
+        TenantRecord,
+    ),
+) -> std::io::Result<crabka_gres_ranges::RangeRegistry> {
+    let (current_layout, source_record_version, provisional_target) = provisional;
+    Ok(
+        crabka_gres_ranges::RangeRegistry::from_tenant_record(&provisional_target)
+            .map_err(|error| std::io::Error::other(error.to_string()))?
+            .with_authoritative_source(Arc::new(MustActivateRangeRegistrySource {
+                live: LiveRangeRegistrySource {
+                    bootstrap: config.bootstrap.clone(),
+                    tenant: crabka_gres_control::TenantName::try_from(config.tenant.as_str())
+                        .map_err(|error| {
+                            std::io::Error::new(std::io::ErrorKind::InvalidInput, error)
+                        })?,
+                    security: config.kafka_security.clone(),
+                },
+                current_layout,
+                source_record_version,
+                provisional_target,
+            })),
+    )
+}
+
 async fn recover_live_multirange_engines(
     config: &SubstrateRuntimeConfig,
     tenant_config: &crabka_gres_ranges::MultiRangeTenantConfig,
     checkpoint_store: Option<Arc<dyn crabka_gres_substrate::checkpoint::CheckpointStore>>,
     activation: Option<&split_activation::ActivationDiscovery>,
+    early_service: Option<&DynamicLiveRangeService>,
 ) -> std::io::Result<LiveMultirangeEngines> {
     let recovery_configs = live_multirange_recovery_configs(config, tenant_config, activation);
     let mut engines = BTreeMap::new();
     let mut range0_tso_horizon = None;
+    let mut range0_tso = None;
     for recovery_config in recovery_configs {
         let range_id = recovery_config.range;
         reset_substrate_range_cache(
@@ -2908,18 +3003,53 @@ async fn recover_live_multirange_engines(
         .await?;
         if range_id == crabka_gres_ranges::RangeId::COORDINATOR {
             range0_tso_horizon.clone_from(&recovered.tso_horizon);
+            // Range 0 is fenced and replayed: activate the timestamp oracle
+            // on the already-listening transport now, so fleet-wide grants
+            // resume before this host's remaining ranges recover. The same
+            // oracle instance is reused by the assembled tenant — a second
+            // instance on the same epoch would let in-flight grants from the
+            // first interleave non-monotonically with the second's.
+            if let (Some(early), Some(horizon)) = (early_service, recovered.tso_horizon.as_ref()) {
+                let tso_rpc = build_range0_tso_rpc(horizon)?;
+                early.replace(
+                    crabka_gres_ranges::HostedRangeService::new(BTreeMap::new())
+                        .with_tso(Arc::clone(&tso_rpc)),
+                );
+                tracing::info!("range-0 timestamp oracle serving before full multirange recovery");
+                range0_tso = Some(tso_rpc);
+            }
         }
         engines.insert(range_id, recovered);
     }
     Ok(LiveMultirangeEngines {
         engines,
         range0_tso_horizon,
+        range0_tso,
     })
+}
+
+/// Build the range-0 timestamp oracle RPC over a recovered durable horizon.
+fn build_range0_tso_rpc(
+    tso_horizon: &crabka_gres_substrate::SubstrateTsoHorizon,
+) -> std::io::Result<Arc<dyn crabka_gres_ranges::TsoRpc>> {
+    let persisted_max_ts = tso_horizon
+        .load_max_ts()
+        .map_err(|error| std::io::Error::other(format!("range-0 TSO horizon: {error}")))?;
+    crabka_gres_ranges::tso_rpc_from_horizon(
+        tso_horizon.clone(),
+        tso_horizon.clone(),
+        tso_horizon.epoch(),
+        persisted_max_ts,
+    )
+    .map_err(|error| std::io::Error::other(format!("range-0 TSO oracle: {error}")))
 }
 
 struct LiveMultirangeEngines {
     engines: BTreeMap<crabka_gres_ranges::RangeId, LiveRangeEngine>,
     range0_tso_horizon: Option<crabka_gres_substrate::SubstrateTsoHorizon>,
+    /// Oracle RPC already activated on the early-bound transport, reused by
+    /// the assembled tenant so exactly one oracle lives per writer epoch.
+    range0_tso: Option<Arc<dyn crabka_gres_ranges::TsoRpc>>,
 }
 
 fn live_multirange_recovery_configs(
@@ -2927,7 +3057,7 @@ fn live_multirange_recovery_configs(
     tenant_config: &crabka_gres_ranges::MultiRangeTenantConfig,
     activation: Option<&split_activation::ActivationDiscovery>,
 ) -> Vec<crabka_gres_substrate::LiveRecoveryConfig> {
-    activation
+    let mut configs = activation
         .map_or(&tenant_config.range_map, |discovery| {
             &discovery.recovery_map
         })
@@ -2956,7 +3086,11 @@ fn live_multirange_recovery_configs(
             )
             .with_optional_advertised_endpoint(config.advertised_endpoint.clone())
         })
-        .collect()
+        .collect::<Vec<_>>();
+    // Recover range 0 ahead of its siblings so the timestamp oracle can start
+    // serving grants before the rest of the host finishes recovering.
+    configs.sort_by_key(|recovery| recovery.range != crabka_gres_ranges::RangeId::COORDINATOR);
+    configs
 }
 
 struct SingleRangeLiveWalSelection {
@@ -3301,19 +3435,17 @@ async fn start_live_multirange_tenant(
     tenant_config: crabka_gres_ranges::MultiRangeTenantConfig,
     live_engines: &mut LiveMultirangeEngines,
 ) -> std::io::Result<StartedLiveMultirangeTenant> {
-    let (gateway, handles, tso_rpc) = if let Some(tso_horizon) =
-        live_engines.range0_tso_horizon.take()
-    {
-        let persisted_max_ts = tso_horizon
-            .load_max_ts()
-            .map_err(|error| std::io::Error::other(format!("range-0 TSO horizon: {error}")))?;
-        let tso_rpc = crabka_gres_ranges::tso_rpc_from_horizon(
-            tso_horizon.clone(),
-            tso_horizon.clone(),
-            tso_horizon.epoch(),
-            persisted_max_ts,
-        )
-        .map_err(|error| std::io::Error::other(format!("range-0 TSO oracle: {error}")))?;
+    // Reuse the oracle already activated during recovery when present: one
+    // oracle instance per writer epoch, whether or not it served early.
+    let tso_rpc = match (
+        live_engines.range0_tso.take(),
+        live_engines.range0_tso_horizon.take(),
+    ) {
+        (Some(tso_rpc), _) => Some(tso_rpc),
+        (None, Some(tso_horizon)) => Some(build_range0_tso_rpc(&tso_horizon)?),
+        (None, None) => None,
+    };
+    let (gateway, handles, tso_rpc) = if let Some(tso_rpc) = tso_rpc {
         let timestamp_oracle =
             crabka_gres_ranges::pgexec_timestamp_oracle_from_rpc(Arc::clone(&tso_rpc));
         let (gateway, handles) =
@@ -3363,11 +3495,29 @@ async fn start_live_multirange_tenant(
     })
 }
 
+/// Publish the assembled topology on the node's dynamic range service.
+///
+/// An early-bound transport keeps its dynamic service: swapping the
+/// assembled service in here is what upgrades the warming node to serving.
+fn install_assembled_range_service(
+    early_service: Option<Arc<DynamicLiveRangeService>>,
+    range_service: crabka_gres_ranges::HostedRangeService,
+) -> Arc<DynamicLiveRangeService> {
+    match early_service {
+        Some(dynamic) => {
+            dynamic.replace(range_service);
+            dynamic
+        }
+        None => Arc::new(DynamicLiveRangeService::new(range_service)),
+    }
+}
+
 async fn open_live_multirange_tenant(
     tenant_config: crabka_gres_ranges::MultiRangeTenantConfig,
     mut live_engines: LiveMultirangeEngines,
     config: &SubstrateRuntimeConfig,
     timestamp_primary_aliases: BTreeMap<crabka_gres_ranges::RangeId, crabka_gres_ranges::RangeId>,
+    early_service: Option<Arc<DynamicLiveRangeService>>,
 ) -> std::io::Result<GresRuntime> {
     let live_resources = live_engines
         .engines
@@ -3388,7 +3538,7 @@ async fn open_live_multirange_tenant(
     if let Some(tso_rpc) = &tso_rpc {
         range_service = range_service.with_tso(Arc::clone(tso_rpc));
     }
-    let dynamic_service = Arc::new(DynamicLiveRangeService::new(range_service));
+    let dynamic_service = install_assembled_range_service(early_service, range_service);
     let transfer = Arc::new(LiveMultiRangeTransfer::new(
         live_resources,
         (*config).clone(),
@@ -7089,6 +7239,106 @@ mod tests {
             ["__gres.tenant-a.r0", "__gres.tenant-a.r2"]
         );
         assert!(topics.iter().all(|topic| topic != "__gres_wal.tenant-a"));
+    }
+
+    #[test]
+    fn live_multirange_recovery_recovers_range_zero_first() {
+        use assert2::assert;
+
+        let mut args = substrate_args();
+        args.substrate_bootstrap = Some("broker-a:9092".to_string());
+        args.ranges = Some("0,100".to_string());
+        let config = SubstrateRuntimeConfig::from_args(&args)
+            .expect("valid config")
+            .expect("substrate config");
+        let tenant = crabka_gres_ranges::TenantName::parse(config.tenant.clone()).expect("tenant");
+        let mut tenant_config = crabka_gres_ranges::MultiRangeTenantConfig::from_boundaries(
+            tenant,
+            config.ranges.as_deref().expect("ranges"),
+        )
+        .expect("range config");
+        // Post-split maps order specs by key span, not range id: put the
+        // coordinator behind a sibling to prove recovery still runs it first.
+        let mut specs = tenant_config.range_map.ranges().to_vec();
+        specs[0].range_id = crabka_gres_ranges::RangeId::new(7);
+        specs[1].range_id = crabka_gres_ranges::RangeId::COORDINATOR;
+        tenant_config.range_map = crabka_gres_ranges::RangeMap::new(
+            tenant_config.tenant.clone(),
+            crabka_gres_ranges::MapEpoch::new(1),
+            specs,
+        )
+        .expect("reordered map");
+
+        let recovery_ranges = live_multirange_recovery_configs(&config, &tenant_config, None)
+            .iter()
+            .map(|recovery| recovery.range)
+            .collect::<Vec<_>>();
+
+        assert!(
+            recovery_ranges
+                == [
+                    crabka_gres_ranges::RangeId::COORDINATOR,
+                    crabka_gres_ranges::RangeId::new(7),
+                ]
+        );
+    }
+
+    #[tokio::test]
+    async fn early_range_transport_serves_grants_before_topology_swap() {
+        use assert2::assert;
+        use crabka_gres_ranges::{
+            RangeId, RangeRequest, RangeResponse, RangeService, TsoReq, TsoResp, WireErrorKind,
+        };
+
+        let dynamic = DynamicLiveRangeService::new(crabka_gres_ranges::HostedRangeService::new(
+            BTreeMap::new(),
+        ));
+
+        // Warming: every request answers a re-resolvable error.
+        let warming_grant = dynamic
+            .handle(RangeRequest::Tso(TsoReq::Grant { count: 1 }))
+            .await;
+        assert!(
+            warming_grant
+                == RangeResponse::Error {
+                    error: WireErrorKind::StaleEndpoint,
+                    message: "range r0 timestamp oracle is not hosted here".to_string(),
+                }
+        );
+
+        // Range-0 recovery installs the oracle: grants serve, SQL stays gated.
+        let horizon =
+            crabka_gres_ranges::MemoryTsoHorizon::new(Arc::new(crabka_pgkv::MemKv::default()), 1);
+        let tso_rpc = crabka_gres_ranges::tso_rpc_from_horizon(horizon.clone(), horizon, 1, 0)
+            .expect("warming tso rpc");
+        dynamic.replace(
+            crabka_gres_ranges::HostedRangeService::new(BTreeMap::new()).with_tso(tso_rpc),
+        );
+
+        let granted = dynamic
+            .handle(RangeRequest::Tso(TsoReq::Grant { count: 3 }))
+            .await;
+        assert!(
+            granted
+                == RangeResponse::Tso(TsoResp::Granted {
+                    first_ts: 1,
+                    count: 3
+                })
+        );
+
+        let gated_sql = dynamic
+            .handle(RangeRequest::Sql {
+                range_id: RangeId::new(1),
+                sql: "SELECT 1".to_string(),
+            })
+            .await;
+        assert!(
+            gated_sql
+                == RangeResponse::Error {
+                    error: WireErrorKind::StaleEndpoint,
+                    message: "range r1 is not hosted here".to_string(),
+                }
+        );
     }
 
     #[test]
