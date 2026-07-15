@@ -466,12 +466,63 @@ pub fn create_view(
     Ok(())
 }
 
-/// Look up a view by relation name.
+/// `PostgreSQL` 18 column set for `pg_catalog.pg_range`, in catalog order.
+///
+/// The five `oid` columns use `Int4` — the same representation as the other
+/// catalog oid columns (`pg_type.oid`, `pg_namespace.oid`, …). The two
+/// `regproc` columns use `Text`, the closest representable type (`regproc`
+/// renders as a function name).
+#[must_use]
+pub fn pg_range_columns() -> Vec<Column> {
+    vec![
+        Column::new("rngtypid", ColumnType::Int4),
+        Column::new("rngsubtype", ColumnType::Int4),
+        Column::new("rngmultitypid", ColumnType::Int4),
+        Column::new("rngcollation", ColumnType::Int4),
+        Column::new("rngsubopc", ColumnType::Int4),
+        Column::new("rngcanonical", ColumnType::Text),
+        Column::new("rngsubdiff", ColumnType::Text),
+    ]
+}
+
+/// `pg_range` definition: zero rows (no built-in type in the slice is a range
+/// type), with every column typed via casts so the executed view carries the
+/// `PostgreSQL` 18 schema.
+const PG_RANGE_DEFINITION: &str = "SELECT CAST(NULL AS oid) AS rngtypid, \
+    CAST(NULL AS oid) AS rngsubtype, CAST(NULL AS oid) AS rngmultitypid, \
+    CAST(NULL AS oid) AS rngcollation, CAST(NULL AS oid) AS rngsubopc, \
+    CAST(NULL AS text) AS rngcanonical, CAST(NULL AS text) AS rngsubdiff \
+    WHERE false";
+
+/// Synthesize a built-in `pg_catalog` relation as a stored-view record.
+///
+/// Drivers introspect `pg_catalog.pg_range` (tokio-postgres LEFT JOINs it in
+/// its typeinfo query); the executor resolves relations through [`get_view`]
+/// before ordinary tables, so a synthesized view serves those lookups without
+/// persisted state. Zero rows is the correct content — none of the built-in
+/// scalar types are range types. Like `PostgreSQL`'s implicit `pg_catalog`
+/// search-path entry, the built-in wins over same-named user relations.
+fn builtin_catalog_view(name: &str) -> Option<View> {
+    match name.strip_prefix("pg_catalog.").unwrap_or(name) {
+        "pg_range" => Some(View {
+            name: "pg_range".to_string(),
+            definition: PG_RANGE_DEFINITION.to_string(),
+            columns: pg_range_columns(),
+        }),
+        _ => None,
+    }
+}
+
+/// Look up a view by relation name. Built-in `pg_catalog` views (`pg_range`)
+/// resolve first, ahead of stored user views.
 ///
 /// # Errors
 ///
 /// Returns undefined-relation or storage/corruption errors from the catalog KV seam.
 pub fn get_view(kv: &dyn Kv, name: &str) -> Result<View, CatalogError> {
+    if let Some(view) = builtin_catalog_view(name) {
+        return Ok(view);
+    }
     let bytes = kv
         .get(&view_key(name))?
         .ok_or_else(|| CatalogError::UndefinedTable(name.to_string()))?;
@@ -1934,6 +1985,36 @@ mod tests {
                 .sqlstate(),
             "42809"
         );
+    }
+
+    /// `pg_catalog.pg_range` is synthesized (not persisted): it resolves
+    /// qualified and unqualified with the `PostgreSQL` 18 column set, and — being
+    /// no stored record — it cannot be dropped.
+    #[test]
+    fn pg_range_is_a_builtin_catalog_view() {
+        use assert2::assert;
+        let kv = MemKv::new();
+        let view = get_view(&kv, "pg_catalog.pg_range").expect("builtin resolves qualified");
+        assert!(
+            view == View {
+                name: "pg_range".into(),
+                definition: PG_RANGE_DEFINITION.into(),
+                columns: vec![
+                    Column::new("rngtypid", ColumnType::Int4),
+                    Column::new("rngsubtype", ColumnType::Int4),
+                    Column::new("rngmultitypid", ColumnType::Int4),
+                    Column::new("rngcollation", ColumnType::Int4),
+                    Column::new("rngsubopc", ColumnType::Int4),
+                    Column::new("rngcanonical", ColumnType::Text),
+                    Column::new("rngsubdiff", ColumnType::Text),
+                ],
+            }
+        );
+        // Unqualified resolution mirrors PostgreSQL's implicit `pg_catalog`
+        // search-path entry.
+        assert!(get_view(&kv, "pg_range").expect("builtin resolves unqualified") == view);
+        // The built-in is not a stored record, so it cannot be dropped.
+        assert!(let Err(CatalogError::UndefinedTable(_)) = drop_view_ops(&kv, "pg_range"));
     }
 
     #[test]
