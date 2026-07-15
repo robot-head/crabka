@@ -555,12 +555,14 @@ mod tests {
         )
         .expect("recover");
 
-        // Advance past the successor grace period (ready at 1 + 10).
-        clock.0.store(11, Ordering::SeqCst);
+        // Advance strictly past the successor grace period (ready at 1 + 10):
+        // an exactly-at-boundary clock would let a regressed readiness
+        // comparison spin on zero-duration sleeps instead of failing fast.
+        clock.0.store(12, Ordering::SeqCst);
         oracle.grant(nonzero(1)).await.expect("first");
         oracle.grant(nonzero(1)).await.expect("certified");
         assert!(calls.load(Ordering::SeqCst) == 1);
-        clock.0.store(21, Ordering::SeqCst);
+        clock.0.store(22, Ordering::SeqCst);
         oracle.grant(nonzero(1)).await.expect("renewed");
         assert!(calls.load(Ordering::SeqCst) == 2);
     }
@@ -826,9 +828,11 @@ mod tests {
         )
         .expect("recover successor");
 
-        // Push the manual clock past ready_at_ms = 5 + 1000 before the first
-        // grant; a grace wait would then hang on the frozen clock forever.
-        clock.0.store(1_005, Ordering::SeqCst);
+        // Push the manual clock strictly past ready_at_ms = 5 + 1000 before
+        // the first grant; a grace wait would then hang on the frozen clock
+        // forever, and the strictly-past value makes a regressed readiness
+        // comparison underflow immediately instead of spinning.
+        clock.0.store(1_205, Ordering::SeqCst);
         let first = tokio::time::timeout(Duration::from_millis(250), oracle.grant(nonzero(1)))
             .await
             .expect("no grace wait")
