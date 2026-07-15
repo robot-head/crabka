@@ -986,6 +986,7 @@ impl Parser {
                     _ => emitted(I::DropTable, self.drop_table()),
                 }
             }
+            Token::Ident(s) if s == "truncate" => emitted(I::Truncate, self.truncate()),
             Token::Ident(s) if s == "grant" => emitted(I::Grant, self.grant_table_privileges()),
             Token::Ident(s) if s == "revoke" => emitted(I::Revoke, self.revoke_table_privileges()),
             Token::Keyword(Keyword::Import) => {
@@ -2022,6 +2023,36 @@ impl Parser {
             ));
         }
         Ok(buckets)
+    }
+
+    /// `TRUNCATE [TABLE] name [, ...] [RESTART IDENTITY | CONTINUE IDENTITY]
+    /// [CASCADE | RESTRICT]`. `CONTINUE IDENTITY` is the `PostgreSQL` default;
+    /// `CASCADE`/`RESTRICT` are accepted and equivalent because no foreign-key
+    /// enforcement exists to distinguish them.
+    fn truncate(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        self.expect_ident_eq("truncate")?;
+        let _ = self.eat_keyword(Keyword::Table);
+        let mut names = vec![self.expect_ident()?];
+        while *self.peek() == Token::Comma {
+            self.bump();
+            names.push(self.expect_ident()?);
+        }
+        let restart_identity = if self.eat_ident_eq("restart") {
+            self.expect_ident_eq("identity")?;
+            true
+        } else {
+            if self.eat_ident_eq("continue") {
+                self.expect_ident_eq("identity")?;
+            }
+            false
+        };
+        if !self.eat_ident_eq("cascade") {
+            let _ = self.eat_ident_eq("restrict");
+        }
+        Ok(crate::ast::Statement::Truncate {
+            names,
+            restart_identity,
+        })
     }
 
     /// Consume one storage-parameter value (`WITH (key = value)`): a numeric
@@ -4174,6 +4205,54 @@ mod tests {
     fn drop_table_rejects_trailing_comma() {
         use assert2::assert;
         assert!(crate::parse("DROP TABLE a, b,").is_err());
+    }
+
+    #[test]
+    fn parses_truncate_shapes() {
+        use assert2::assert;
+        // (sql, names, restart_identity) — the pgbench -i statement verbatim,
+        // the bare no-TABLE form, and the identity/cascade option tails.
+        let cases: &[(&str, &[&str], bool)] = &[
+            (
+                "truncate table pgbench_accounts, pgbench_branches, pgbench_history, pgbench_tellers",
+                &[
+                    "pgbench_accounts",
+                    "pgbench_branches",
+                    "pgbench_history",
+                    "pgbench_tellers",
+                ],
+                false,
+            ),
+            ("TRUNCATE t", &["t"], false),
+            ("TRUNCATE TABLE t RESTART IDENTITY", &["t"], true),
+            ("TRUNCATE t CONTINUE IDENTITY", &["t"], false),
+            ("TRUNCATE t, u CASCADE", &["t", "u"], false),
+            ("TRUNCATE t RESTART IDENTITY RESTRICT", &["t"], true),
+        ];
+        for (sql, names, restart_identity) in cases {
+            assert!(
+                one(sql)
+                    == Statement::Truncate {
+                        names: names.iter().map(|&n| n.into()).collect(),
+                        restart_identity: *restart_identity,
+                    },
+                "case: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn truncate_rejects_malformed_tails() {
+        use assert2::assert;
+        for sql in [
+            "TRUNCATE",
+            "TRUNCATE TABLE",
+            "TRUNCATE t,",
+            "TRUNCATE t RESTART",
+            "TRUNCATE t CONTINUE",
+        ] {
+            assert!(crate::parse(sql).is_err(), "case: {sql}");
+        }
     }
 
     #[test]

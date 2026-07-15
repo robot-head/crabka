@@ -43,7 +43,7 @@ async fn execute_probe(command: &str, sql: &str) {
 
     let setup: &[&str] = match command {
         "ALTER TABLE" | "CREATE INDEX" | "DELETE" | "DROP INDEX" | "DROP TABLE" | "INSERT"
-        | "UPDATE" => &["CREATE TABLE parser_commands_probe (id int4)"],
+        | "TRUNCATE" | "UPDATE" => &["CREATE TABLE parser_commands_probe (id int4)"],
         "GRANT" | "REVOKE" => &[
             "CREATE TABLE parser_commands_probe (id int4)",
             "CREATE ROLE parser_commands_role",
@@ -101,7 +101,7 @@ async fn execute_probe(command: &str, sql: &str) {
 #[tokio::test]
 async fn every_resolved_behavior_probe_reaches_the_session_contract() {
     let report = parser_command_report().expect("behavior manifest parses");
-    assert_eq!(report.probes.len(), 92);
+    assert_eq!(report.probes.len(), 93);
     let mut executed = 0;
     let mut refused = 0;
     for probe in report.probes {
@@ -132,7 +132,7 @@ async fn every_resolved_behavior_probe_reaches_the_session_contract() {
         );
         refused += 1;
     }
-    assert_eq!(executed, 42);
+    assert_eq!(executed, 43);
     assert_eq!(refused, 50);
 }
 

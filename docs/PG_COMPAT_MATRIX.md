@@ -213,7 +213,7 @@ The implemented rows reflect the checked-in parser/executor surface after G-1 an
 | SHOW | Implemented | F-1 GUC registry supports `SHOW name` and `SHOW ALL` over common client settings. |
 | START TRANSACTION | Mapped(BEGIN alias) | Parser accepts the stock begin alias. |
 | TABLE | Wave-assigned(Q1) | Standalone TABLE statement. |
-| TRUNCATE | Wave-assigned(D4) | Table lifecycle wave. |
+| TRUNCATE | Implemented | Multi-table comma list with optional `TABLE` noise word; all names validated before any row is touched (all-or-nothing). Executes as an MVCC unfiltered delete sharing the ordinary write path, so it is transactional (rolls back) like PostgreSQL's, not a storage-level clear. `CONTINUE IDENTITY` (the PostgreSQL default) is accepted; `RESTART IDENTITY` fails clear with 0A000 because SERIAL sequence ownership is not tracked. `CASCADE`/`RESTRICT` are accepted and equivalent since no foreign-key enforcement exists. Sharded targets fail clear with 0A000. |
 | UNLISTEN | Wave-assigned(S4) | Notification bus. |
 | UPDATE | Implemented | Baseline DML with `NOT NULL` enforcement on assigned rows; Q1 starter `RETURNING` supports `*`, direct columns, simple scalar expressions, and aliases on local MVCC tables. UPDATE FROM remains Q1 breadth. |
 | VACUUM | Wave-assigned(P5) | Mapped to garbage horizon/compact hint. |

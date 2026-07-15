@@ -74,6 +74,13 @@ pub enum Statement {
         filter: Option<Expr>,
         returning: Option<Vec<SelectItem>>,
     },
+    Truncate {
+        /// One entry per name in `TRUNCATE a, b, c`; the statement is
+        /// all-or-nothing across the list, matching `PostgreSQL`.
+        names: Vec<String>,
+        /// `RESTART IDENTITY` was given (`CONTINUE IDENTITY` is the default).
+        restart_identity: bool,
+    },
     /// SP37: `SET [LOCAL] <name> = <value>` / `SET <name> TO <value>` / `SET TIME ZONE ...`.
     Set {
         local: bool,

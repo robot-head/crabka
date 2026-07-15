@@ -1333,6 +1333,39 @@ pub(crate) async fn execute_write(
             let result = returning_result(&t, returning.as_deref(), returned_rows, tag, ctx)?;
             Ok((result, ops))
         }
+        Statement::Truncate {
+            names,
+            restart_identity,
+        } => {
+            if *restart_identity {
+                return Err(ExecError::Unsupported(
+                    "TRUNCATE RESTART IDENTITY is not supported: SERIAL sequence ownership is not tracked".into(),
+                ));
+            }
+            // Validate every name (and refuse sharded targets) before touching
+            // any table: the statement is all-or-nothing across the list.
+            for name in names {
+                let t = crabka_pgcatalog::get_table(catalog_kv, name)?;
+                if table_uses_global_visibility(&t) {
+                    return Err(ExecError::Unsupported(
+                        "TRUNCATE on sharded tables is not supported".into(),
+                    ));
+                }
+            }
+            // Desugar to an unfiltered DELETE per table: TRUNCATE shares the
+            // MVCC write path (row locks, xmax stamping, rollback) rather
+            // than clearing storage, so it is transactional like PostgreSQL's.
+            for name in names {
+                let delete = Statement::Delete {
+                    table: name.clone(),
+                    filter: None,
+                    returning: None,
+                };
+                let (_, delete_ops) = Box::pin(execute_write(write_ctx, &delete)).await?;
+                ops.extend(delete_ops);
+            }
+            Ok((command("TRUNCATE TABLE"), ops))
+        }
         _ => Err(ExecError::Unsupported("not a write statement".into())),
     }
 }
@@ -6655,6 +6688,63 @@ mod tests {
                 .expect_err("table was dropped");
             assert!(err.code == "42P01");
         }
+    }
+
+    #[tokio::test]
+    async fn truncate_empties_multiple_tables_atomically() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        run(&engine, "CREATE TABLE ta (id int4 PRIMARY KEY)").await;
+        run(&engine, "CREATE TABLE tb (id int4 PRIMARY KEY)").await;
+        run(&engine, "INSERT INTO ta VALUES (1), (2), (3)").await;
+        run(&engine, "INSERT INTO tb VALUES (7)").await;
+
+        // A missing name aborts the whole statement before any rows go.
+        let err = engine
+            .connect()
+            .simple_query("TRUNCATE ta, missing, tb")
+            .await
+            .expect_err("missing table aborts the whole truncate");
+        assert!(err.code == "42P01");
+        assert!(single_text(&run(&engine, "SELECT count(*) FROM ta").await) == "3");
+
+        let results = run(&engine, "TRUNCATE TABLE ta, tb").await;
+        assert!(tag_of(&results[0]) == "TRUNCATE TABLE");
+        assert!(single_text(&run(&engine, "SELECT count(*) FROM ta").await) == "0");
+        assert!(single_text(&run(&engine, "SELECT count(*) FROM tb").await) == "0");
+    }
+
+    #[tokio::test]
+    async fn truncate_rolls_back_inside_a_transaction() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        run(&engine, "CREATE TABLE tr (id int4 PRIMARY KEY)").await;
+        run(&engine, "INSERT INTO tr VALUES (1), (2)").await;
+
+        let mut session = engine.connect();
+        session.simple_query("BEGIN").await.expect("begin");
+        session.simple_query("TRUNCATE tr").await.expect("truncate");
+        let counted = session
+            .simple_query("SELECT count(*) FROM tr")
+            .await
+            .expect("count inside txn");
+        assert!(single_text(&counted) == "0");
+        session.simple_query("ROLLBACK").await.expect("rollback");
+
+        assert!(single_text(&run(&engine, "SELECT count(*) FROM tr").await) == "2");
+    }
+
+    #[tokio::test]
+    async fn truncate_restart_identity_fails_clear() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        run(&engine, "CREATE TABLE ti (id int4 PRIMARY KEY)").await;
+        let err = engine
+            .connect()
+            .simple_query("TRUNCATE ti RESTART IDENTITY")
+            .await
+            .expect_err("restart identity is a bounded refusal");
+        assert!(err.code == "0A000");
     }
 
     #[tokio::test]

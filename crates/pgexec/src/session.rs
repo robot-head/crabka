@@ -754,6 +754,7 @@ fn establishes_transaction_activity(stmt: &Statement) -> bool {
         | Statement::Insert { .. }
         | Statement::Update { .. }
         | Statement::Delete { .. }
+        | Statement::Truncate { .. }
         | Statement::CreateTable { .. }
         | Statement::CreateIndex { .. }
         | Statement::DropIndex { .. }
@@ -1408,9 +1409,10 @@ impl SqlSession {
             | Statement::GrantTablePrivileges { .. }
             | Statement::RevokeTablePrivileges { .. }
             | Statement::ImportForeignSchema { .. } => self.run_ddl(stmt).await,
-            Statement::Insert { .. } | Statement::Update { .. } | Statement::Delete { .. } => {
-                self.run_write(stmt).await
-            }
+            Statement::Insert { .. }
+            | Statement::Update { .. }
+            | Statement::Delete { .. }
+            | Statement::Truncate { .. } => self.run_write(stmt).await,
             Statement::Set { name, .. } if name == crabka_pgparser::ast::COPY_FROM_STDIN_SENTINEL => Err(ExecError::Unsupported(
                 "COPY FROM STDIN requires pgwire CopyData messages".into(),
             )),
