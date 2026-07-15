@@ -3,16 +3,39 @@
 //! When tokio-postgres meets an unknown type OID it prepares a catalog query
 //! that LEFT JOINs `pg_catalog.pg_range`, and on `UNDEFINED_TABLE` falls back
 //! to a variant that casts `NULL::OID`. Both must parse and execute: `pg_range`
-//! is a built-in zero-row catalog view and `oid` is a type-name alias for
-//! `int4`. Query shapes mirror `TYPEINFO_QUERY` / `TYPEINFO_FALLBACK_QUERY` in
-//! tokio-postgres 0.7.18's `src/prepare.rs`, with `$1` written as the literal
-//! 20 (`int8`) and the projection restricted to the columns `pg_type` defines
-//! today — the verbatim texts also select `t.typtype`, `t.typelem`, and
-//! `t.typbasetype`, which the `pg_type` virtual relation does not yet carry.
+//! is a zero-row virtual catalog relation and `oid` is a type-name alias for
+//! `int4`. The query texts are the verbatim `TYPEINFO_QUERY` /
+//! `TYPEINFO_FALLBACK_QUERY` from tokio-postgres 0.7.18's `src/prepare.rs`,
+//! with `$1` written as the literal 20 (`int8`).
+//!
+//! Known wire-fidelity gap (out of scope here): the `RowDescription` for these
+//! queries reports int4 (OID 23) for the oid-valued columns and text (OID 25)
+//! for `typtype`, where a real `PostgreSQL` server reports oid (OID 26) and
+//! "char" (OID 18). tokio-postgres's binary decoder checks those OIDs, so full
+//! driver decode compatibility needs per-column type fidelity in the wire
+//! layer — a separate design, not per-column overrides in the executor.
 
 use assert2::assert;
 use crabka_pgexec::SqlEngine;
 use crabka_pgwire::engine::{Cell, Engine, QueryResult, Session};
+
+/// tokio-postgres 0.7.18 `TYPEINFO_QUERY`, `$1` written as the literal 20.
+const TYPEINFO_QUERY: &str = "\
+SELECT t.typname, t.typtype, t.typelem, r.rngsubtype, t.typbasetype, n.nspname, t.typrelid
+FROM pg_catalog.pg_type t
+LEFT OUTER JOIN pg_catalog.pg_range r ON r.rngtypid = t.oid
+INNER JOIN pg_catalog.pg_namespace n ON t.typnamespace = n.oid
+WHERE t.oid = 20
+";
+
+/// tokio-postgres 0.7.18 `TYPEINFO_FALLBACK_QUERY` (pre-9.2 servers have no
+/// `pg_range`), `$1` written as the literal 20.
+const TYPEINFO_FALLBACK_QUERY: &str = "\
+SELECT t.typname, t.typtype, t.typelem, NULL::OID, t.typbasetype, n.nspname, t.typrelid
+FROM pg_catalog.pg_type t
+INNER JOIN pg_catalog.pg_namespace n ON t.typnamespace = n.oid
+WHERE t.oid = 20
+";
 
 async fn run(engine: &SqlEngine, sql: &str) -> QueryResult {
     engine
@@ -42,47 +65,29 @@ fn row_text(result: &QueryResult, index: usize) -> Vec<Option<String>> {
         .collect()
 }
 
-/// tokio-postgres `TYPEINFO_QUERY`: the `pg_range` LEFT JOIN resolves, and for
-/// a non-range type (`int8`, OID 20) the range column is NULL.
+/// Both tokio-postgres typeinfo query shapes return the same full `int8` row:
+/// a base scalar (`typtype` 'b') with no array element type, no range subtype,
+/// no domain base type, and no backing relation, in `pg_catalog`.
 #[tokio::test]
-async fn typeinfo_query_pg_range_left_join_returns_int8_row() {
+async fn typeinfo_queries_return_full_int8_row() {
     let engine = SqlEngine::new();
-    let result = run(
-        &engine,
-        "SELECT t.typname, r.rngsubtype, n.nspname \
-         FROM pg_catalog.pg_type t \
-         LEFT OUTER JOIN pg_catalog.pg_range r ON r.rngtypid = t.oid \
-         INNER JOIN pg_catalog.pg_namespace n ON t.typnamespace = n.oid \
-         WHERE t.oid = 20",
-    )
-    .await;
-    assert!(rows(&result).len() == 1);
-    assert!(row_text(&result, 0) == vec![Some("int8".into()), None, Some("pg_catalog".into())]);
-}
-
-/// tokio-postgres `TYPEINFO_FALLBACK_QUERY`: `NULL::OID` parses (the `oid`
-/// type-name alias) and the row carries a NULL range column.
-#[tokio::test]
-async fn typeinfo_fallback_query_null_oid_cast_returns_int8_row() {
-    let engine = SqlEngine::new();
-    let result = run(
-        &engine,
-        "SELECT t.typname, NULL::OID AS rngsubtype, n.nspname, t.typrelid \
-         FROM pg_catalog.pg_type t \
-         INNER JOIN pg_catalog.pg_namespace n ON t.typnamespace = n.oid \
-         WHERE t.oid = 20",
-    )
-    .await;
-    assert!(rows(&result).len() == 1);
-    assert!(
-        row_text(&result, 0)
-            == vec![
-                Some("int8".into()),
-                None,
-                Some("pg_catalog".into()),
-                Some("0".into()),
-            ]
-    );
+    let expected = vec![
+        Some("int8".into()),       // typname
+        Some("b".into()),          // typtype
+        Some("0".into()),          // typelem
+        None,                      // rngsubtype
+        Some("0".into()),          // typbasetype
+        Some("pg_catalog".into()), // nspname
+        Some("0".into()),          // typrelid
+    ];
+    for (name, sql) in [
+        ("TYPEINFO_QUERY", TYPEINFO_QUERY),
+        ("TYPEINFO_FALLBACK_QUERY", TYPEINFO_FALLBACK_QUERY),
+    ] {
+        let result = run(&engine, sql).await;
+        assert!(rows(&result).len() == 1, "{name}");
+        assert!(row_text(&result, 0) == expected, "{name}");
+    }
 }
 
 /// `oid` casts parse and evaluate; the alias reports int4 (OID 23) in the
@@ -104,22 +109,45 @@ async fn oid_casts_parse_evaluate_and_describe_as_int4() {
     assert!(type_oids == vec![23, 23, 23]);
 }
 
-/// `pg_range` exists with zero rows: none of the built-in scalar types are
-/// range types.
-///
-/// The count goes through a derived table because the single-table aggregate
-/// fast path (`single_sharded_base_table` in `exec.rs`) rejects every
-/// non-stored relation — `SELECT count(*) FROM pg_class` fails the same way.
+/// `pg_range` exists with zero rows — none of the built-in scalar types are
+/// range types — and a direct `count(*)` over it works.
 #[tokio::test]
 async fn pg_range_is_empty() {
     let engine = SqlEngine::new();
     let result = run(&engine, "SELECT * FROM pg_catalog.pg_range").await;
     assert!(rows(&result).is_empty());
 
-    let counted = run(
+    let counted = run(&engine, "SELECT count(*) FROM pg_range").await;
+    assert!(row_text(&counted, 0) == vec![Some("0".into())]);
+}
+
+/// Regression: `SELECT count(*)` directly over a virtual catalog relation
+/// used to fail with `UNDEFINED_TABLE` (42P01) because the single-table
+/// aggregate fast path (`single_sharded_base_table` in `exec.rs`) propagated
+/// the catalog miss instead of falling through to the materializing path.
+/// The count matches the number of rows the relation itself materializes.
+#[tokio::test]
+async fn count_star_over_pg_type_returns_builtin_count() {
+    let engine = SqlEngine::new();
+    let materialized = run(&engine, "SELECT typname FROM pg_catalog.pg_type").await;
+    let builtin_count = rows(&materialized).len();
+    assert!(builtin_count > 0);
+
+    let counted = run(&engine, "SELECT count(*) FROM pg_catalog.pg_type").await;
+    assert!(row_text(&counted, 0) == vec![Some(builtin_count.to_string())]);
+}
+
+/// `pg_range` is listed in `pg_class` alongside the other catalog relations,
+/// as `PostgreSQL` lists it.
+#[tokio::test]
+async fn pg_class_lists_pg_range() {
+    let engine = SqlEngine::new();
+    let result = run(
         &engine,
-        "SELECT count(*) FROM (SELECT rngtypid FROM pg_catalog.pg_range) r",
+        "SELECT relname, relnamespace FROM pg_class WHERE relname = 'pg_range'",
     )
     .await;
-    assert!(row_text(&counted, 0) == vec![Some("0".into())]);
+    assert!(rows(&result).len() == 1);
+    // 11 is pg_catalog's namespace OID in the synthesized catalog.
+    assert!(row_text(&result, 0) == vec![Some("pg_range".into()), Some("11".into())]);
 }

@@ -3906,6 +3906,12 @@ fn single_local_base_table(
     Ok(Some((table, qualifier)))
 }
 
+/// Match a FROM that is exactly one sharded base table.
+///
+/// CTE, view, virtual-catalog, local, and foreign relations all resolve
+/// through their own scan paths, so they deliberately return `None` here —
+/// as does a relation that does not exist at all, whose undefined-table
+/// error surfaces from the materializing path instead.
 fn single_sharded_base_table(
     catalog_kv: &dyn Kv,
     s: &SelectStmt,
@@ -3914,10 +3920,19 @@ fn single_sharded_base_table(
     let [crabka_pgparser::ast::TableExpr::Table { name, alias }] = s.from.as_slice() else {
         return Ok(None);
     };
-    if ctes.lookup(name).is_some() {
+    if ctes.lookup(name).is_some() || virtual_table(name).is_some() {
         return Ok(None);
     }
-    let table = crabka_pgcatalog::get_table(catalog_kv, name)?;
+    match crabka_pgcatalog::get_view(catalog_kv, name) {
+        Ok(_) => return Ok(None),
+        Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => {}
+        Err(error) => return Err(error.into()),
+    }
+    let table = match crabka_pgcatalog::get_table(catalog_kv, name) {
+        Ok(table) => table,
+        Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
     if !table.sharded || table.foreign.is_some() {
         return Ok(None);
     }
@@ -4327,6 +4342,7 @@ fn virtual_table(name: &str) -> Option<&'static str> {
         "pg_class" => Some("pg_class"),
         "pg_attribute" => Some("pg_attribute"),
         "pg_type" => Some("pg_type"),
+        "pg_range" => Some("pg_range"),
         "pg_index" => Some("pg_index"),
         "pg_settings" => Some("pg_settings"),
         "pg_roles" => Some("pg_roles"),
@@ -4381,6 +4397,23 @@ fn virtual_catalog_columns(name: &str) -> Vec<Column> {
             ("typcategory", Text),
             ("typnamespace", Int4),
             ("typrelid", Int4),
+            // `typtype` is `"char"` (OID 18) in PostgreSQL; Text is the
+            // closest synthesized type, same trade-off as `typcategory`.
+            ("typtype", Text),
+            ("typelem", Int4),
+            ("typbasetype", Int4),
+        ]),
+        // PostgreSQL 18 column set, in catalog order. The oid-valued columns
+        // use Int4 like every other synthesized catalog oid; the two regproc
+        // columns use Text (regproc renders as a function name).
+        "pg_range" => cols(&[
+            ("rngtypid", Int4),
+            ("rngsubtype", Int4),
+            ("rngmultitypid", Int4),
+            ("rngcollation", Int4),
+            ("rngsubopc", Int4),
+            ("rngcanonical", Text),
+            ("rngsubdiff", Text),
         ]),
         "pg_index" => cols(&[
             ("indexrelid", Int4),
@@ -4447,6 +4480,9 @@ fn virtual_catalog_rows(catalog_kv: &dyn Kv, name: &str) -> Result<Vec<Vec<Datum
         "pg_class" => pg_class_rows(catalog_kv),
         "pg_attribute" => pg_attribute_rows(catalog_kv),
         "pg_type" => Ok(pg_type_rows()),
+        // Zero rows: no built-in type in the exposed scalar slice is a range
+        // type. Drivers still LEFT JOIN it in their typeinfo queries.
+        "pg_range" => Ok(Vec::new()),
         "pg_index" => pg_index_rows(catalog_kv),
         "pg_settings" => pg_settings_rows(),
         "pg_roles" => pg_roles_rows(catalog_kv),
@@ -4660,6 +4696,12 @@ fn pg_type_rows() -> Vec<Vec<Datum>> {
                 text(ty.category),
                 int(PG_CATALOG_NAMESPACE_OID),
                 int(0),
+                // Every exposed built-in is a base scalar: typtype 'b', no
+                // array element type, and no domain base type — matching
+                // PostgreSQL 18's pg_type for these OIDs.
+                text("b"),
+                int(0),
+                int(0),
             ]
         })
         .collect()
@@ -4747,6 +4789,7 @@ fn virtual_table_names() -> &'static [&'static str] {
         "pg_class",
         "pg_attribute",
         "pg_type",
+        "pg_range",
         "pg_index",
         "pg_settings",
         "pg_roles",
@@ -4775,6 +4818,7 @@ fn virtual_relation_oid(name: &str) -> i32 {
         "pg_class" => 1259,
         "pg_attribute" => 1249,
         "pg_type" => 1247,
+        "pg_range" => 3541,
         "pg_index" => 2610,
         "pg_settings" => 100_001,
         "pg_roles" => 1261,
