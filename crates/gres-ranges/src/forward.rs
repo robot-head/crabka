@@ -4312,7 +4312,12 @@ mod tests {
     async fn fenced_oracle_grant_maps_to_not_leader_wire_error() {
         use assert2::assert;
 
-        let service = HostedRangeService::new(BTreeMap::new()).with_tso(Arc::new(FencedTso));
+        // Route the fenced oracle through the batching client exactly as the
+        // production wiring does: the fenced error must survive batch fan-out
+        // to reach the wire as a re-resolvable NotLeader.
+        let service = HostedRangeService::new(BTreeMap::new()).with_tso(Arc::new(
+            crate::tso::BatchedTsoClient::new(Arc::new(FencedTso)),
+        ));
 
         let response = service
             .handle(RangeRequest::Tso(TsoReq::Grant { count: 1 }))

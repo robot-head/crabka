@@ -246,9 +246,21 @@ fn split_lease(lease: GrantLease, batch: Vec<PendingGrant>) {
 }
 
 fn fail_batch(error: &TsoError, batch: Vec<PendingGrant>) {
-    let message = error.to_string();
     for pending in batch {
-        let _send_result = pending.sender.send(Err(TsoError::Rpc(message.clone())));
+        let _send_result = pending.sender.send(Err(fan_out_error(error)));
+    }
+}
+
+/// Reproduce the upstream failure for one coalesced caller.
+///
+/// A fenced epoch must survive batching as [`TsoError::FencedEpoch`]: the
+/// range service maps it to a re-resolvable wire error so gateways find the
+/// successor oracle. Flattening it into [`TsoError::Rpc`] would make a
+/// failover read as a non-retryable failure.
+fn fan_out_error(error: &TsoError) -> TsoError {
+    match error {
+        TsoError::FencedEpoch { epoch } => TsoError::FencedEpoch { epoch: *epoch },
+        other => TsoError::Rpc(other.to_string()),
     }
 }
 
@@ -501,6 +513,37 @@ mod tests {
                 }
         );
         assert!(client.stats().snapshot() == stats.snapshot());
+    }
+
+    #[tokio::test]
+    async fn fenced_upstream_error_survives_batching_for_every_caller() {
+        struct FencedRpc;
+
+        #[async_trait::async_trait]
+        impl TsoRpc for FencedRpc {
+            async fn grant(&self, _count: NonZeroU64) -> Result<GrantLease, TsoError> {
+                Err(TsoError::FencedEpoch { epoch: 7 })
+            }
+        }
+
+        let client = BatchedTsoClient::new(Arc::new(FencedRpc));
+        let first = tokio::spawn({
+            let client = client.clone();
+            async move { client.grant(count(1)).await }
+        });
+        let second = tokio::spawn({
+            let client = client.clone();
+            async move { client.grant(count(2)).await }
+        });
+
+        let first = first.await.expect("join").expect_err("fenced grant");
+        let second = second.await.expect("join").expect_err("fenced grant");
+
+        // Both coalesced callers must see the fenced epoch itself, not a
+        // flattened generic RPC failure, so the wire mapping stays
+        // re-resolvable.
+        assert!(matches!(first, TsoError::FencedEpoch { epoch: 7 }));
+        assert!(matches!(second, TsoError::FencedEpoch { epoch: 7 }));
     }
 
     #[tokio::test]

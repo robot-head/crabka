@@ -1650,12 +1650,14 @@ pub async fn serve_listener_with_tenant_config_loader(
 
     let range_server = if let Some(server) = early_range_server {
         if range_service.is_none() {
+            // Dropping the guard aborts the warming serve task before the
+            // startup error is reported.
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "--range-listen requires a multi-range runtime",
             ));
         }
-        Some(server)
+        Some(server.release())
     } else {
         start_range_service(&effective_args, range_service).await?
     };
@@ -1761,6 +1763,33 @@ fn lifecycle_registry_bootstrap(
     bootstrap.filter(|address| !is_in_memory_bootstrap(address))
 }
 
+/// Early-bound range transport whose serve task is aborted unless startup
+/// hands it to the normal serving flow.
+///
+/// A startup error after the early bind must not leave a detached task
+/// serving the warming transport — and possibly live timestamp grants — in a
+/// process that reported failure to start.
+struct EarlyRangeServer {
+    server: Option<(tokio::task::JoinHandle<()>, SocketAddr)>,
+}
+
+impl EarlyRangeServer {
+    /// Hand the serve task to the normal serving flow, disarming the abort.
+    fn release(mut self) -> (tokio::task::JoinHandle<()>, SocketAddr) {
+        self.server
+            .take()
+            .expect("early range server is released at most once")
+    }
+}
+
+impl Drop for EarlyRangeServer {
+    fn drop(&mut self) {
+        if let Some((handle, _)) = self.server.take() {
+            handle.abort();
+        }
+    }
+}
+
 /// Bind the range transport before recovery when the boot is identifiably a
 /// live multirange runtime.
 ///
@@ -1770,12 +1799,7 @@ fn lifecycle_registry_bootstrap(
 /// runtime mode returns `None` and keeps binding after the runtime opens.
 async fn bind_early_range_transport(
     args: &ServeArgs,
-) -> std::io::Result<
-    Option<(
-        Arc<DynamicLiveRangeService>,
-        (tokio::task::JoinHandle<()>, SocketAddr),
-    )>,
-> {
+) -> std::io::Result<Option<(Arc<DynamicLiveRangeService>, EarlyRangeServer)>> {
     if args.range_listen.is_none() {
         return Ok(None);
     }
@@ -1794,7 +1818,12 @@ async fn bind_early_range_transport(
     )
     .await?
     .ok_or_else(|| std::io::Error::other("early range transport did not bind"))?;
-    Ok(Some((dynamic, server)))
+    Ok(Some((
+        dynamic,
+        EarlyRangeServer {
+            server: Some(server),
+        },
+    )))
 }
 
 async fn start_range_service(
@@ -7339,6 +7368,60 @@ mod tests {
                     message: "range r1 is not hosted here".to_string(),
                 }
         );
+    }
+
+    fn spawn_guarded_listener(listener: TcpListener, address: SocketAddr) -> EarlyRangeServer {
+        let handle = tokio::spawn(async move {
+            loop {
+                let _connection = listener.accept().await;
+            }
+        });
+        EarlyRangeServer {
+            server: Some((handle, address)),
+        }
+    }
+
+    #[tokio::test]
+    async fn early_range_server_guard_aborts_the_listener_on_drop() {
+        use assert2::assert;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("listener address");
+        let guard = spawn_guarded_listener(listener, address);
+
+        drop(guard);
+
+        // The abort releases the listener: the port becomes bindable again.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match TcpListener::bind(address).await {
+                Ok(_rebound) => break,
+                Err(error) => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "early listener still bound after guard drop: {error}"
+                    );
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn early_range_server_release_keeps_the_listener_serving() {
+        use assert2::assert;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("listener address");
+        let guard = spawn_guarded_listener(listener, address);
+
+        let (handle, released_address) = guard.release();
+
+        assert!(released_address == address);
+        assert!(!handle.is_finished());
+        // The released task still owns the listener, so the port stays bound.
+        assert!(TcpListener::bind(address).await.is_err());
+        handle.abort();
     }
 
     #[test]
