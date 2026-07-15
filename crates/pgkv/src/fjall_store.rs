@@ -15,6 +15,7 @@ use std::{
 use fjall::{
     Iter, KeyspaceCreateOptions, PersistMode, Readable, SingleWriterTxDatabase,
     SingleWriterTxKeyspace, Snapshot,
+    config::{PartitioningPolicy, PinningPolicy},
 };
 
 use crate::{Kv, KvError, KvPair, KvSnapshot, RestoreKv, SnapshotKv, WriteOp, store::KvScan};
@@ -450,7 +451,23 @@ pub struct FjallKv {
 const MAX_MEMTABLE_SIZE_BYTES: u64 = 8 * 1024 * 1024;
 
 fn crabka_keyspace_options() -> KeyspaceCreateOptions {
-    KeyspaceCreateOptions::default().max_memtable_size(MAX_MEMTABLE_SIZE_BYTES)
+    // Filter and index blocks must never be monolithic-and-unpinned. Fjall's
+    // defaults partition them only from L3 down and pin only L0 filters /
+    // L0-L1 indexes, so a mid-size store keeps multi-MB monolithic filter and
+    // index blocks at L1-L2 — and lsm-tree's block cache silently rejects any
+    // block heavier than one cache shard's hot budget (~cache_size/shards),
+    // so every point read and scan re-reads those whole regions from disk:
+    // measured as ~0.5 MB of page-cache reads per point get on a 0.5 GB
+    // store, growing with total key count. Partitioning at every level keeps
+    // per-op reads to one ~4 KiB partition via the always-pinned top-level
+    // index; pinning at every level covers any monolithic block a future
+    // write path still emits (loaded once per table open, never per op).
+    KeyspaceCreateOptions::default()
+        .max_memtable_size(MAX_MEMTABLE_SIZE_BYTES)
+        .filter_block_partitioning_policy(PartitioningPolicy::all(true))
+        .index_block_partitioning_policy(PartitioningPolicy::all(true))
+        .filter_block_pinning_policy(PinningPolicy::all(true))
+        .index_block_pinning_policy(PinningPolicy::all(true))
 }
 
 impl FjallKv {
