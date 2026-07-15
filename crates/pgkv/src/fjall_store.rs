@@ -6,7 +6,10 @@
 use std::{
     collections::VecDeque,
     path::Path,
-    sync::{Arc, Condvar, Mutex, OnceLock},
+    sync::{
+        Arc, Condvar, Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use fjall::{
@@ -23,11 +26,19 @@ use crate::{Kv, KvError, KvPair, KvSnapshot, RestoreKv, SnapshotKv, WriteOp, sto
 /// share one fsync instead of paying one each. Multiple `KeyspaceKv`s over the
 /// same transactional database also share that fsync (a single `persist`
 /// flushes all pending writes).
+///
+/// Sustained writes rotate the active memtable every [`ROTATE_AFTER_OPS`]
+/// committed ops (on top of fjall's byte-based trigger), so fjall's worker
+/// pool keeps flushing sstables and compacting instead of letting shadowed
+/// entries pile up on hot key prefixes.
 pub struct KeyspaceKv {
     db: Arc<SingleWriterTxDatabase>,
     ks: SingleWriterTxKeyspace,
     persist_mode: LocalPersistMode,
     group: GroupCommit,
+    /// Ops committed since the last memtable rotation this handle requested;
+    /// crossing [`ROTATE_AFTER_OPS`] resets it and rotates.
+    ops_since_rotate: AtomicU64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -67,6 +78,19 @@ struct Pending {
     slot: Arc<OnceLock<Result<(), KvError>>>,
 }
 
+/// Rotate the active memtable after this many committed write ops.
+///
+/// Fjall's only automatic rotation trigger is byte-based
+/// ([`MAX_MEMTABLE_SIZE_BYTES`]), but the cost of scanning a hot key prefix is
+/// per *entry*: every rewrite of a key leaves another shadowed version in the
+/// active memtable's skiplist until rotation, and each MVCC prefix read skims
+/// all of them. Small values accumulate tens of thousands of entries — a
+/// measured 0.05ms -> 13ms hot-row read collapse — before the byte cap fires.
+/// Counting ops bounds that skim directly; rotation seals the memtable and
+/// fjall's worker pool flushes it to an sstable (dropping shadowed versions at
+/// flush) and then compacts.
+const ROTATE_AFTER_OPS: u64 = 1024;
+
 /// Hands leadership off when a leader finishes — including by unwinding.
 ///
 /// A leader panicking inside fjall must not leave `leader_active` set (every
@@ -105,6 +129,7 @@ impl KeyspaceKv {
             ks,
             persist_mode: LocalPersistMode::SyncAll,
             group: GroupCommit::default(),
+            ops_since_rotate: AtomicU64::new(0),
         }
     }
 
@@ -116,6 +141,7 @@ impl KeyspaceKv {
             ks,
             persist_mode: LocalPersistMode::Buffer,
             group: GroupCommit::default(),
+            ops_since_rotate: AtomicU64::new(0),
         }
     }
 
@@ -205,7 +231,7 @@ impl KeyspaceKv {
         // open, so another process cannot open a competing writer for this
         // directory.
         let mut transaction = self.db.write_tx();
-        let mut staged_any = false;
+        let mut staged_ops = 0_u64;
 
         for ops in batches {
             // Evaluate every expectation before staging any of this batch's
@@ -238,16 +264,41 @@ impl KeyspaceKv {
                     }
                 }
             }
-            staged_any = staged_any || !ops.is_empty();
+            staged_ops += ops.len() as u64;
         }
 
-        if !staged_any {
+        if staged_ops == 0 {
             // Every batch was rejected (or empty); dropping the transaction
             // discards nothing and there is nothing to make durable.
             return Ok(());
         }
         transaction.commit().map_err(io)?;
-        self.sync()
+        self.sync()?;
+        self.rotate_after_ops(staged_ops);
+        Ok(())
+    }
+
+    /// Credit `staged_ops` toward [`ROTATE_AFTER_OPS`] and rotate the active
+    /// memtable once the threshold is crossed. Runs strictly after the group's
+    /// commit and persist, when the group is already durable — so a rotation
+    /// failure must not fail the write: the leader clones its result to every
+    /// batch in the group, and an `Err` would tell every caller their durable
+    /// batch failed. Dropping the error hides no durability fault: fjall
+    /// poisons the database on fsync failure, which fails the next commit's
+    /// persist, and the next threshold crossing (or fjall's byte cap, or
+    /// [`Kv::maintain`]) retries the rotation.
+    fn rotate_after_ops(&self, staged_ops: u64) {
+        let before = self
+            .ops_since_rotate
+            .fetch_add(staged_ops, Ordering::Relaxed);
+        if before + staged_ops < ROTATE_AFTER_OPS {
+            return;
+        }
+        self.ops_since_rotate.store(0, Ordering::Relaxed);
+        // Racing rotations (another handle, fjall's own byte-cap trigger) are
+        // benign: whoever loses finds a fresh or already-sealed memtable and
+        // no-ops.
+        let _best_effort = self.ks.inner().rotate_memtable();
     }
 }
 
@@ -335,6 +386,7 @@ impl Kv for KeyspaceKv {
         // churn (MVCC version keys and their delete tombstones on one row
         // prefix) linger in the memtable for minutes, and every prefix scan
         // walks all of it.
+        self.ops_since_rotate.store(0, Ordering::Relaxed);
         self.ks.inner().rotate_memtable_and_wait().map_err(io)
     }
 }
@@ -944,6 +996,35 @@ mod tests {
                 "round {round}"
             );
         }
+    }
+
+    #[test]
+    fn sustained_hot_key_churn_flushes_memtable_to_tables() {
+        use assert2::assert;
+
+        let dir = temp();
+        let kv = FjallKv::open_cache(dir.path()).expect("open cache");
+
+        // Rewriting one key never grows the logical dataset, so a byte-based
+        // rotation trigger alone would leave every shadowed version in the
+        // active memtable. Crossing the op-count threshold must rotate and
+        // background-flush regardless of size.
+        let final_round = 2 * ROTATE_AFTER_OPS;
+        for round in 0..=final_round {
+            kv.put(b"hot".to_vec(), round.to_le_bytes().to_vec())
+                .expect("put");
+        }
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while kv.inner.ks.inner().table_count() == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no sstable appeared after sustained hot-key churn"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        assert!(kv.get(b"hot").expect("get") == Some(final_round.to_le_bytes().to_vec()));
     }
 
     #[test]
