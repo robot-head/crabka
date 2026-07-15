@@ -23,4 +23,5 @@ dashu-float = { workspace = true }
 jiff = { workspace = true }
 
 [dev-dependencies]
+assert2 = { workspace = true }
 proptest = { workspace = true }

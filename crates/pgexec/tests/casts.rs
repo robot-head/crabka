@@ -185,3 +185,101 @@ async fn error_surface() {
     // An unknown target type is a syntax error (42601).
     assert_eq!(err_code(&client, "SELECT 1::widget").await, "42601");
 }
+
+// ---- assignment-context implicit casts (INSERT VALUES / UPDATE SET) ----
+
+#[tokio::test]
+async fn insert_applies_assignment_casts_through_the_session_time_zone() {
+    use assert2::assert;
+    let client = connect(spawn().await).await;
+    client
+        .batch_execute("CREATE TABLE h (mtime timestamp); SET TIME ZONE 'America/New_York'")
+        .await
+        .expect("create + set zone");
+    // timestamptz value → timestamp column: the instant is rotated into the
+    // session zone (2024-06-01 12:00 UTC = 08:00 EDT), matching PostgreSQL's
+    // castcontext='a' timestamptz→timestamp entry.
+    client
+        .batch_execute("INSERT INTO h VALUES ('2024-06-01 12:00:00+00'::timestamptz)")
+        .await
+        .expect("assignment cast timestamptz -> timestamp");
+    assert!(text(&client, "SELECT mtime FROM h").await == Some("2024-06-01 08:00:00".into()));
+    // The pgbench_history shape: CURRENT_TIMESTAMP (timestamptz) into a
+    // timestamp column must be accepted.
+    client
+        .batch_execute("INSERT INTO h VALUES (CURRENT_TIMESTAMP)")
+        .await
+        .expect("CURRENT_TIMESTAMP into timestamp column");
+    // date → timestamp ('i'): midnight, no zone rotation.
+    client
+        .batch_execute("DELETE FROM h; INSERT INTO h VALUES ('2024-06-01'::date)")
+        .await
+        .expect("assignment cast date -> timestamp");
+    assert!(text(&client, "SELECT mtime FROM h").await == Some("2024-06-01 00:00:00".into()));
+}
+
+#[tokio::test]
+async fn insert_applies_assignment_casts_into_timestamptz_columns() {
+    use assert2::assert;
+    let client = connect(spawn().await).await;
+    client
+        .batch_execute("CREATE TABLE h (at timestamptz); SET TIME ZONE 'America/New_York'")
+        .await
+        .expect("create + set zone");
+    // timestamp → timestamptz ('i'): the wall-clock is interpreted in the
+    // session zone (08:00 EDT = 12:00 UTC).
+    client
+        .batch_execute("INSERT INTO h VALUES ('2024-06-01 08:00:00'::timestamp)")
+        .await
+        .expect("assignment cast timestamp -> timestamptz");
+    client
+        .batch_execute("SET TIME ZONE 'UTC'")
+        .await
+        .expect("zone back to UTC");
+    assert!(text(&client, "SELECT at FROM h").await == Some("2024-06-01 12:00:00+00".into()));
+    // date → timestamptz ('i'): midnight in the (now UTC) session zone.
+    client
+        .batch_execute("DELETE FROM h; INSERT INTO h VALUES ('2024-06-01'::date)")
+        .await
+        .expect("assignment cast date -> timestamptz");
+    assert!(text(&client, "SELECT at FROM h").await == Some("2024-06-01 00:00:00+00".into()));
+}
+
+#[tokio::test]
+async fn update_set_applies_assignment_casts_through_the_session_time_zone() {
+    use assert2::assert;
+    let client = connect(spawn().await).await;
+    client
+        .batch_execute(
+            "CREATE TABLE h (id int4, mtime timestamp); \
+             INSERT INTO h VALUES (1, '2000-01-01 00:00:00'::timestamp); \
+             SET TIME ZONE 'America/New_York'",
+        )
+        .await
+        .expect("seed row + set zone");
+    client
+        .batch_execute("UPDATE h SET mtime = '2024-06-01 12:00:00+00'::timestamptz WHERE id = 1")
+        .await
+        .expect("UPDATE SET with a timestamptz expression into a timestamp column");
+    assert!(text(&client, "SELECT mtime FROM h").await == Some("2024-06-01 08:00:00".into()));
+}
+
+#[tokio::test]
+async fn assignment_context_keeps_io_conversion_casts_explicit_only() {
+    use assert2::assert;
+    let client = connect(spawn().await).await;
+    client
+        .batch_execute(
+            "CREATE TABLE t (label text, n int4, mtime timestamp); \
+             INSERT INTO t VALUES ('seed', 1, NULL)",
+        )
+        .await
+        .expect("create + seed");
+    // int → text and (typed) text → int are NOT assignment casts in
+    // PostgreSQL — both keep erroring with 42804.
+    assert!(err_code(&client, "INSERT INTO t (label) VALUES (42)").await == "42804");
+    assert!(err_code(&client, "INSERT INTO t (n) VALUES ('12'::text)").await == "42804");
+    assert!(err_code(&client, "UPDATE t SET label = 42").await == "42804");
+    // Temporal truncation stays explicit-only in this conservative subset.
+    assert!(err_code(&client, "INSERT INTO t (mtime) VALUES ('12:34:56'::time)").await == "42804");
+}

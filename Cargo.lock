@@ -3341,6 +3341,7 @@ dependencies = [
 name = "crabka-pgcatalog"
 version = "0.3.9"
 dependencies = [
+ "assert2",
  "crabka-pgkv",
  "crabka-pgmvcc",
  "crabka-pgtypes",
@@ -3403,6 +3404,7 @@ dependencies = [
 name = "crabka-pgparser"
 version = "0.3.9"
 dependencies = [
+ "assert2",
  "crabka-pgtypes",
  "pg_query",
  "proptest",
@@ -3413,6 +3415,7 @@ dependencies = [
 name = "crabka-pgtypes"
 version = "0.3.9"
 dependencies = [
+ "assert2",
  "bigdecimal",
  "dashu-float",
  "jiff",

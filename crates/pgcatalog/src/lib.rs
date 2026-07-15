@@ -912,6 +912,87 @@ pub fn create_index_on_table_ops(
     Ok((id, ops))
 }
 
+/// Build the write batch for creating one constraint-backed index on an
+/// existing table, returning the full allocated [`Index`] so the caller can
+/// backfill index entries into the same durable batch.
+///
+/// Unlike [`create_index_on_table_ops`] this honors every [`NewIndex`] field —
+/// including `constraint` — so `ALTER TABLE … ADD PRIMARY KEY` records the
+/// constraint marker that blocks `DROP INDEX` and a second primary key.
+///
+/// # Errors
+///
+/// Returns duplicate-index, undefined-column, or storage/corruption errors from
+/// the catalog KV seam.
+pub fn create_constraint_index_ops(
+    kv: &dyn Kv,
+    table: &Table,
+    new_index: &NewIndex,
+) -> Result<(Index, Vec<WriteOp>), CatalogError> {
+    if kv.get(&catalog_index_key(&new_index.name))?.is_some() {
+        return Err(CatalogError::DuplicateIndex(new_index.name.clone()));
+    }
+    validate_index_columns(table, &new_index.columns)?;
+    let id = read_next_index_id(kv)?;
+    let index = Index {
+        id,
+        name: new_index.name.clone(),
+        table: table.name.clone(),
+        table_id: table.id,
+        columns: new_index.columns.clone(),
+        unique: new_index.unique,
+        placement: new_index.placement,
+        constraint: new_index.constraint,
+    };
+    let value = serialize_index(&index);
+    let ops = vec![
+        WriteOp::Put {
+            key: catalog_index_key(&index.name),
+            value: value.clone(),
+        },
+        WriteOp::Put {
+            key: catalog_table_index_key(table.id, &index.name),
+            value,
+        },
+        WriteOp::Put {
+            key: meta_next_index_id_key(),
+            value: U32::new(id + 1).as_bytes().to_vec(),
+        },
+    ];
+    Ok((index, ops))
+}
+
+/// Build the write batch that marks the named columns NOT NULL on a table's
+/// schema record (`ALTER TABLE … ADD PRIMARY KEY` sets its key columns NOT
+/// NULL, matching `PostgreSQL`). Sharding metadata and foreign-table linkage
+/// are preserved; already-NOT-NULL columns are idempotently kept.
+///
+/// # Errors
+///
+/// Returns undefined-table, undefined-column, or storage/corruption errors
+/// from the catalog KV seam.
+pub fn set_columns_not_null_ops(
+    kv: &dyn Kv,
+    table_name: &str,
+    not_null_columns: &[String],
+) -> Result<Vec<WriteOp>, CatalogError> {
+    let bytes = kv
+        .get(&key::catalog_key(table_name))?
+        .ok_or_else(|| CatalogError::UndefinedTable(table_name.to_string()))?;
+    let (id, mut columns, options, foreign) = deserialize_schema(&bytes)?;
+    for name in not_null_columns {
+        let column = columns
+            .iter_mut()
+            .find(|column| column.name == *name)
+            .ok_or_else(|| CatalogError::UndefinedColumn(name.clone()))?;
+        column.not_null = true;
+    }
+    Ok(vec![WriteOp::Put {
+        key: key::catalog_key(table_name),
+        value: serialize_schema(id, &columns, options, foreign.as_ref()),
+    }])
+}
+
 /// Build the write batch for creating secondary-index catalog records on a
 /// table that may not be visible in the catalog KV yet.
 ///

@@ -35,7 +35,10 @@ pub enum Statement {
         query: QueryExpr,
     },
     DropTable {
-        name: String,
+        /// One entry per name in `DROP TABLE a, b, c`; the drop is
+        /// all-or-nothing across the list, matching `PostgreSQL`.
+        names: Vec<String>,
+        if_exists: bool,
     },
     DropView {
         name: String,
@@ -47,6 +50,15 @@ pub enum Statement {
     AlterTableRename {
         table: String,
         rename: AlterTableRename,
+    },
+    /// `ALTER TABLE name ADD [CONSTRAINT cname] PRIMARY KEY (col, …)`. The
+    /// executor desugars this onto the local unique-index machinery (back-
+    /// validating existing rows) and marks the key columns NOT NULL.
+    AlterTableAddPrimaryKey {
+        table: String,
+        /// Explicit `CONSTRAINT cname` name; `None` defaults to `<table>_pkey`.
+        constraint_name: Option<String>,
+        columns: Vec<String>,
     },
     Insert {
         table: String,
@@ -70,6 +82,17 @@ pub enum Statement {
         table: String,
         filter: Option<Expr>,
         returning: Option<Vec<SelectItem>>,
+    },
+    /// `VACUUM` with any option/table tail, accepted as a hint: reclamation is
+    /// autonomous (adaptive background vacuum with idle drain), so the command
+    /// carries no payload.
+    Vacuum,
+    Truncate {
+        /// One entry per name in `TRUNCATE a, b, c`; the statement is
+        /// all-or-nothing across the list, matching `PostgreSQL`.
+        names: Vec<String>,
+        /// `RESTART IDENTITY` was given (`CONTINUE IDENTITY` is the default).
+        restart_identity: bool,
     },
     /// SP37: `SET [LOCAL] <name> = <value>` / `SET <name> TO <value>` / `SET TIME ZONE ...`.
     Set {

@@ -1,7 +1,9 @@
-//! Streaming local aggregates: plain COUNT/SUM/MIN/MAX/AVG over one local base
-//! table fold per cursor page, so they succeed over tables larger than the
-//! blocking-query memory budget while unsupported shapes (whole-row reads,
-//! DISTINCT, unbounded group keys) still fail closed on that budget.
+//! Streaming local aggregates: COUNT/SUM/MIN/MAX/AVG over one local base
+//! table — bare or wrapped in scalar expressions (`CAST(count(*) AS BIGINT)`,
+//! `COALESCE(sum(x), 0)`, `sum(a) / count(*)`) — fold per cursor page, so they
+//! succeed over tables larger than the blocking-query memory budget while
+//! unsupported shapes (whole-row reads, DISTINCT, non-column aggregate
+//! arguments, unbounded group keys) still fail closed on that budget.
 
 use assert2::assert;
 use crabka_pgexec::{SqlEngine, SqlSession};
@@ -45,6 +47,31 @@ async fn query_error_code(session: &mut SqlSession, sql: &str) -> String {
     match session.simple_query(sql).await {
         Ok(result) => panic!("query {sql:?} unexpectedly succeeded: {result:?}"),
         Err(error) => error.code,
+    }
+}
+
+/// Field `(name, type oid)` pairs of a query's `RowDescription`.
+async fn query_fields(session: &mut SqlSession, sql: &str) -> Vec<(String, u32)> {
+    match exec(session, sql).await.remove(0) {
+        QueryResult::Rows { fields, .. } => fields
+            .into_iter()
+            .map(|field| (field.name, field.type_oid))
+            .collect(),
+        other => panic!("expected rows for {sql:?}, got {other:?}"),
+    }
+}
+
+/// Assert each query yields exactly the expected single row of text cells.
+async fn assert_single_rows(session: &mut SqlSession, cases: &[(&str, &[Option<&str>])]) {
+    for (sql, expected) in cases {
+        let rows = query_rows(session, sql).await;
+        let expected: Vec<Vec<Option<String>>> = vec![
+            expected
+                .iter()
+                .map(|cell| cell.map(str::to_string))
+                .collect(),
+        ];
+        assert!(rows == expected, "wrong rows for {sql:?}");
     }
 }
 
@@ -138,6 +165,131 @@ async fn count_of_a_nullable_column_skips_nulls_while_streaming() {
 }
 
 #[tokio::test]
+async fn aggregates_wrapped_in_scalar_expressions_stream_over_a_big_table() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    seed_big_table(&mut session).await;
+
+    // The guard first: whole-row materialization over the same table must still
+    // exceed the budget, proving the wrapped forms below cannot be materializing.
+    assert!(query_error_code(&mut session, "SELECT * FROM big").await == "53200");
+
+    assert_single_rows(
+        &mut session,
+        &[
+            ("SELECT CAST(count(*) AS BIGINT) FROM big", &[Some("2500")]),
+            ("SELECT COALESCE(sum(id), 0) FROM big", &[Some("3126250")]),
+            ("SELECT count(*) + 1 FROM big", &[Some("2501")]),
+            // Two aggregates inside one expression: 3126250 / 2500.
+            ("SELECT sum(id) / count(*) FROM big", &[Some("1250")]),
+            // Mixed projection: a wrapped aggregate beside a bare one.
+            (
+                "SELECT COALESCE(sum(id), 0), count(*) FROM big",
+                &[Some("3126250"), Some("2500")],
+            ),
+            // A constant item beside an aggregate item.
+            ("SELECT 1, count(*) FROM big", &[Some("1"), Some("2500")]),
+            // The same aggregate bare and wrapped streams one shared spec.
+            (
+                "SELECT sum(id), COALESCE(sum(id), 0) FROM big",
+                &[Some("3126250"), Some("3126250")],
+            ),
+            // Wrapped forms keep the pushdown WHERE: 1 + … + 100.
+            (
+                "SELECT COALESCE(sum(id), 0) FROM big WHERE id <= 100",
+                &[Some("5050")],
+            ),
+        ],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn wrapped_aggregates_match_materializing_semantics_on_small_and_empty_tables() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    exec(&mut session, "CREATE TABLE s (a BIGINT, x BIGINT)").await;
+    exec(
+        &mut session,
+        "INSERT INTO s VALUES (1, 100), (2, NULL), (3, 300)",
+    )
+    .await;
+    exec(&mut session, "CREATE TABLE e (a BIGINT, x BIGINT)").await;
+
+    // Expectations recorded from the materializing path before this streamed.
+    assert_single_rows(
+        &mut session,
+        &[
+            ("SELECT CAST(count(*) AS BIGINT) FROM s", &[Some("3")]),
+            ("SELECT COALESCE(sum(x), 0) FROM s", &[Some("400")]),
+            ("SELECT count(*) + 1 FROM s", &[Some("4")]),
+            ("SELECT sum(a) / count(*) FROM s", &[Some("2")]),
+            ("SELECT CAST(avg(a) AS BIGINT) FROM s", &[Some("2")]),
+            ("SELECT abs(sum(a)) FROM s", &[Some("6")]),
+            (
+                "SELECT COALESCE(sum(a), 0), count(*) FROM s",
+                &[Some("6"), Some("3")],
+            ),
+            ("SELECT 1, count(*) FROM s", &[Some("1"), Some("3")]),
+            // The empty table is the point of the COALESCE idiom: 0, not NULL.
+            ("SELECT COALESCE(sum(x), 0) FROM e", &[Some("0")]),
+            ("SELECT sum(x) FROM e", &[None]),
+            ("SELECT CAST(count(*) AS BIGINT) FROM e", &[Some("0")]),
+            ("SELECT count(*) + 1 FROM e", &[Some("1")]),
+            ("SELECT sum(a) / count(*) FROM e", &[None]),
+            (
+                "SELECT COALESCE(sum(a), 0), count(*) FROM e",
+                &[Some("0"), Some("0")],
+            ),
+        ],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn wrapped_aggregate_row_descriptions_match_the_materializing_path() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    exec(&mut session, "CREATE TABLE s (a BIGINT, x BIGINT)").await;
+    exec(&mut session, "INSERT INTO s VALUES (1, 100)").await;
+
+    // (name, oid) pairs recorded from the materializing path before this
+    // streamed: int8 = 20, int4 = 23.
+    let cases: [(&str, &[(&str, u32)]); 4] = [
+        (
+            "SELECT CAST(count(*) AS BIGINT) FROM s",
+            &[("?column?", 20)],
+        ),
+        ("SELECT COALESCE(sum(x), 0) FROM s", &[("coalesce", 20)]),
+        ("SELECT count(*) + 1 FROM s", &[("?column?", 20)]),
+        (
+            "SELECT 1, count(*) FROM s",
+            &[("?column?", 23), ("count", 20)],
+        ),
+    ];
+    for (sql, expected) in cases {
+        let fields = query_fields(&mut session, sql).await;
+        let expected: Vec<(String, u32)> = expected
+            .iter()
+            .map(|(name, oid)| ((*name).to_string(), *oid))
+            .collect();
+        assert!(fields == expected, "wrong fields for {sql:?}");
+    }
+}
+
+#[tokio::test]
+async fn count_of_an_unknown_column_is_undefined_column() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    exec(&mut session, "CREATE TABLE t (id BIGINT)").await;
+    exec(&mut session, "INSERT INTO t VALUES (1), (2)").await;
+
+    // Before the per-call spec fix this silently streamed count(*) over all rows.
+    assert!(query_error_code(&mut session, "SELECT count(nope) FROM t").await == "42703");
+    assert!(query_error_code(&mut session, "SELECT count(nope) + 1 FROM t").await == "42703");
+}
+
+#[tokio::test]
 async fn unsupported_shapes_keep_the_memory_budget_guard() {
     let engine = SqlEngine::new();
     let mut session = engine.connect();
@@ -145,8 +297,16 @@ async fn unsupported_shapes_keep_the_memory_budget_guard() {
 
     // Whole-row materialization.
     assert!(query_error_code(&mut session, "SELECT * FROM big").await == "53200");
-    // DISTINCT aggregates are outside the partial-aggregate pushdown model.
+    // DISTINCT aggregates are outside the partial-aggregate pushdown model —
+    // bare or wrapped in a scalar expression.
     assert!(query_error_code(&mut session, "SELECT count(DISTINCT v) FROM big").await == "53200");
+    assert!(
+        query_error_code(&mut session, "SELECT count(DISTINCT v) + 1 FROM big").await == "53200"
+    );
+    // An aggregate over a non-column argument stays on the materializing scan.
+    assert!(query_error_code(&mut session, "SELECT sum(id + 1) FROM big").await == "53200");
+    // A bare column beside an aggregate is not a streamable projection.
+    assert!(query_error_code(&mut session, "SELECT id, count(*) FROM big").await == "53200");
     // Grouping by a high-cardinality wide key: the accumulated group state
     // itself exceeds the budget even though the fold streams pages.
     assert!(

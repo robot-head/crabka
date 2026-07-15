@@ -754,11 +754,13 @@ fn establishes_transaction_activity(stmt: &Statement) -> bool {
         | Statement::Insert { .. }
         | Statement::Update { .. }
         | Statement::Delete { .. }
+        | Statement::Truncate { .. }
         | Statement::CreateTable { .. }
         | Statement::CreateIndex { .. }
         | Statement::DropIndex { .. }
         | Statement::DropTable { .. }
         | Statement::AlterTableRename { .. }
+        | Statement::AlterTableAddPrimaryKey { .. }
         | Statement::CreateView { .. }
         | Statement::DropView { .. }
         | Statement::CreateFdw { .. }
@@ -783,6 +785,9 @@ fn establishes_transaction_activity(stmt: &Statement) -> bool {
         | Statement::Show { .. }
         | Statement::Reset { .. }
         | Statement::SetRole { .. }
+        // VACUUM is refused inside a transaction block, so it never marks one
+        // active.
+        | Statement::Vacuum
         | Statement::CompatibilityRefusal(_) => false,
     }
 }
@@ -1388,6 +1393,7 @@ impl SqlSession {
             | Statement::DropIndex { .. }
             | Statement::DropTable { .. }
             | Statement::AlterTableRename { .. }
+            | Statement::AlterTableAddPrimaryKey { .. }
             | Statement::CreateView { .. }
             | Statement::DropView { .. }
             // SP40: FDW DDL funnels through the same catalog-lock + execute_ddl + commit
@@ -1408,8 +1414,24 @@ impl SqlSession {
             | Statement::GrantTablePrivileges { .. }
             | Statement::RevokeTablePrivileges { .. }
             | Statement::ImportForeignSchema { .. } => self.run_ddl(stmt).await,
-            Statement::Insert { .. } | Statement::Update { .. } | Statement::Delete { .. } => {
-                self.run_write(stmt).await
+            Statement::Insert { .. }
+            | Statement::Update { .. }
+            | Statement::Delete { .. }
+            | Statement::Truncate { .. } => self.run_write(stmt).await,
+            Statement::Vacuum => {
+                // PostgreSQL refuses VACUUM inside a transaction block. The
+                // reclamation itself is autonomous here (adaptive background
+                // vacuum with idle drain), so outside a block the accepted
+                // hint returns immediately.
+                if matches!(self.state, TxnState::InTransaction(_)) {
+                    return Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
+                        "25001",
+                        "VACUUM cannot run inside a transaction block",
+                    )));
+                }
+                Ok(QueryResult::Command {
+                    tag: "VACUUM".into(),
+                })
             }
             Statement::Set { name, .. } if name == crabka_pgparser::ast::COPY_FROM_STDIN_SENTINEL => Err(ExecError::Unsupported(
                 "COPY FROM STDIN requires pgwire CopyData messages".into(),
@@ -2928,7 +2950,10 @@ impl ParamBinder<'_> {
                     let Some(idx) = table.column_index(column) else {
                         return Err(ExecError::UndefinedColumn(column.clone()).into_pg());
                     };
-                    self.bind_expr(expr, Some(table.columns[idx].ty))?;
+                    // Bind with the table scope so a parameter next to a
+                    // column reference (`balance = balance + $1`) infers its
+                    // type from that column.
+                    self.bind_expr_with_scope(expr, Some(table.columns[idx].ty), &scope)?;
                 }
                 if let Some(expr) = filter {
                     self.bind_expr_with_scope(expr, Some(ColumnType::Bool), &scope)?;
@@ -2963,7 +2988,11 @@ impl ParamBinder<'_> {
             .iter()
             .zip(self.inferred_param_types.borrow().iter())
             .map(|(param, inferred)| match param.type_oid {
-                Some(0) | None => Ok(inferred.map_or(0, ColumnType::oid)),
+                // PostgreSQL coerces a parameter whose type is still unknown
+                // after Parse to text; ParameterDescription never reports
+                // OID 0. The resolved type also feeds Bind (`typed_params`),
+                // so execution decodes the value as text too.
+                Some(0) | None => Ok(inferred.map_or(crabka_pgtypes::oids::TEXT, ColumnType::oid)),
                 Some(oid) => {
                     param_column_type(param)?;
                     Ok(oid)
@@ -3149,6 +3178,35 @@ impl ParamBinder<'_> {
         )
     }
 
+    /// A `regclass` parameter whose text value is a relation name resolves via
+    /// the catalog at bind time (PostgreSQL's `regclassin`); numeric, binary,
+    /// and NULL values return `None` and take the ordinary decode path.
+    fn regclass_param_expr(
+        &self,
+        param: &BoundParam,
+        expected: Option<ColumnType>,
+    ) -> Result<Option<Expr>, PgError> {
+        let ty = param_column_type(param)?
+            .or(expected)
+            .unwrap_or(ColumnType::Text);
+        if ty != ColumnType::Regclass || param.format != 0 {
+            return Ok(None);
+        }
+        let Some(value) = &param.value else {
+            return Ok(None);
+        };
+        let text = std::str::from_utf8(value).map_err(invalid_parameter_encoding)?;
+        if text.trim().parse::<i32>().is_ok() {
+            return Ok(None);
+        }
+        let oid =
+            crate::exec::resolve_regclass(self.catalog_kv, text).map_err(ExecError::into_pg)?;
+        Ok(Some(Expr::Const {
+            value: Datum::Int4(oid),
+            ty: ColumnType::Regclass,
+        }))
+    }
+
     fn bind_expr_with_scope(
         &self,
         expr: &mut Expr,
@@ -3177,7 +3235,9 @@ impl ParamBinder<'_> {
                 if param.type_oid.is_none() {
                     self.inferred_param_types.borrow_mut()[index] = expected;
                 }
-                *expr = bound_param_expr(param, expected, self.time_zone)?;
+                *expr = self
+                    .regclass_param_expr(param, expected)?
+                    .map_or_else(|| bound_param_expr(param, expected, self.time_zone), Ok)?;
             }
             Expr::Unary { op, expr } => {
                 let child_expected = match op {
@@ -3290,11 +3350,21 @@ fn binary_param_type(
     scope: &crate::scope::Scope,
 ) -> Option<ColumnType> {
     match op {
-        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
-            infer_param_context_type(other, scope)
-        }
+        // Comparisons and arithmetic take same-family operands, so a
+        // parameter adopts its sibling's type — matching PostgreSQL's
+        // operator resolution for `int8 + $1` and friends.
+        BinaryOp::Eq
+        | BinaryOp::Ne
+        | BinaryOp::Lt
+        | BinaryOp::Le
+        | BinaryOp::Gt
+        | BinaryOp::Ge
+        | BinaryOp::Add
+        | BinaryOp::Sub
+        | BinaryOp::Mul
+        | BinaryOp::Div => infer_param_context_type(other, scope),
         BinaryOp::Concat => Some(ColumnType::Text),
-        _ => None,
+        BinaryOp::And | BinaryOp::Or => None,
     }
 }
 
@@ -3309,6 +3379,10 @@ fn infer_param_context_type(expr: &Expr, scope: &crate::scope::Scope) -> Option<
         Expr::BoolLiteral(_) => Some(ColumnType::Bool),
         Expr::Default => None,
         Expr::Const { ty, .. } | Expr::Cast { ty, .. } => Some(*ty),
+        Expr::Unary {
+            op: UnaryOp::Neg,
+            expr,
+        } => infer_param_context_type(expr, scope),
         _ => None,
     }
 }
@@ -3530,6 +3604,10 @@ fn param_column_type(param: &BoundParam) -> Result<Option<ColumnType>, PgError> 
         // as Float8. Decode the narrower wire representations at the Bind boundary.
         Some(crabka_pgtypes::oids::INT2) => Ok(Some(ColumnType::Int4)),
         Some(crabka_pgtypes::oids::INT4) => Ok(Some(ColumnType::Int4)),
+        // `oid` aliases Int4 (see ColumnType::from_sql_name): drivers declare
+        // OID parameters in their pg_catalog typeinfo lookups.
+        Some(crabka_pgtypes::oids::OID) => Ok(Some(ColumnType::Int4)),
+        Some(crabka_pgtypes::oids::REGCLASS) => Ok(Some(ColumnType::Regclass)),
         Some(crabka_pgtypes::oids::INT8) => Ok(Some(ColumnType::Int8)),
         Some(crabka_pgtypes::oids::TEXT) => Ok(Some(ColumnType::Text)),
         Some(crabka_pgtypes::oids::VARCHAR) => Ok(Some(ColumnType::Varchar(None))),
@@ -3574,7 +3652,7 @@ fn decode_bound_param(
                 .map_err(ExecError::from)
                 .map_err(ExecError::into_pg)
         }
-        (1, ColumnType::Int4) => {
+        (1, ColumnType::Int4 | ColumnType::Regclass) => {
             let bytes = binary_array(value)?;
             Ok(Datum::Int4(i32::from_be_bytes(bytes)))
         }
@@ -5482,6 +5560,192 @@ mod tests {
             .expect("select inserted row");
 
         assert_eq!(single_text(&selected), "nine");
+    }
+
+    async fn accounts_session(engine: &SqlEngine) -> SqlSession {
+        let mut session = engine.connect();
+        session
+            .simple_query(
+                "CREATE TABLE accounts (id BIGINT PRIMARY KEY, balance BIGINT, updates BIGINT)",
+            )
+            .await
+            .expect("create accounts table");
+        session
+    }
+
+    #[tokio::test]
+    async fn extended_describe_infers_arithmetic_update_parameter_types_from_columns() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = accounts_session(&engine).await;
+
+        for sql in [
+            "UPDATE accounts SET balance = balance + $1, updates = updates + 1 WHERE id = $2",
+            "UPDATE accounts SET balance = balance - $1, updates = updates + 1 WHERE id = $2",
+            "UPDATE accounts SET balance = balance * $1, updates = updates + 1 WHERE id = $2",
+            "UPDATE accounts SET balance = balance / $1, updates = updates + 1 WHERE id = $2",
+        ] {
+            let (_, parameter_types) = session
+                .test_describe_prepared(sql, &[])
+                .await
+                .expect("describe arithmetic update");
+            assert!(
+                parameter_types == vec![crabka_pgtypes::oids::INT8, crabka_pgtypes::oids::INT8],
+                "sql: {sql}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn extended_describe_defaults_unknown_parameter_to_text() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+
+        let (_, parameter_types) = session
+            .test_describe_prepared("SELECT $1", &[])
+            .await
+            .expect("describe bare parameter select");
+
+        assert!(parameter_types == vec![crabka_pgtypes::oids::TEXT]);
+    }
+
+    #[tokio::test]
+    async fn extended_describe_accepts_declared_oid_parameter_type() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+
+        // tokio-postgres declares its pg_catalog typeinfo query's $1 as type
+        // OID (26) in the Parse message; the declared oid must round-trip
+        // through ParameterDescription instead of erroring 42P18.
+        let (_, parameter_types) = session
+            .test_describe_prepared(
+                "SELECT t.typname FROM pg_catalog.pg_type t WHERE t.oid = $1",
+                &[crabka_pgtypes::oids::OID],
+            )
+            .await
+            .expect("describe with declared oid parameter");
+
+        assert!(parameter_types == vec![crabka_pgtypes::oids::OID]);
+    }
+
+    #[tokio::test]
+    async fn extended_regclass_parameter_resolves_relation_name() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query("CREATE TABLE pgbench_accounts (aid BIGINT PRIMARY KEY)")
+            .await
+            .expect("create table");
+
+        // pgbench -i's relkind probe, verbatim: $1 inside a regclass cast is
+        // described as regclass (2205)...
+        let probe = "SELECT relkind FROM pg_catalog.pg_class WHERE oid=$1::pg_catalog.regclass";
+        let (_, parameter_types) = session
+            .test_describe_prepared(probe, &[])
+            .await
+            .expect("describe relkind probe");
+        assert!(parameter_types == vec![crabka_pgtypes::oids::REGCLASS]);
+
+        // ...and executing with the table name bound as untyped text resolves
+        // the name through the catalog.
+        let mut session = engine.connect();
+        let results = session
+            .test_extended_query(
+                probe,
+                &[crabka_pgwire::engine::BoundParam {
+                    type_oid: None,
+                    format: 0,
+                    value: Some(bytes::Bytes::from_static(b"pgbench_accounts")),
+                }],
+            )
+            .await
+            .expect("execute relkind probe");
+        let [QueryResult::Rows { rows, .. }] = results.as_slice() else {
+            panic!("expected rows, got {results:?}");
+        };
+        let text = rows[0][0]
+            .as_ref()
+            .map(|cell| String::from_utf8(cell.text.to_vec()).expect("utf8"));
+        assert!(text == Some("r".into()));
+
+        // An unknown relation name errors 42P01 like PostgreSQL.
+        let mut session = engine.connect();
+        let error = session
+            .test_extended_query(
+                probe,
+                &[crabka_pgwire::engine::BoundParam {
+                    type_oid: None,
+                    format: 0,
+                    value: Some(bytes::Bytes::from_static(b"no_such_relation")),
+                }],
+            )
+            .await
+            .expect_err("unknown relation name");
+        assert!(error.code == "42P01");
+    }
+
+    #[tokio::test]
+    async fn extended_query_executes_arithmetic_update_with_text_format_params() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = accounts_session(&engine).await;
+        session
+            .simple_query("INSERT INTO accounts VALUES (42, 100, 0)")
+            .await
+            .expect("seed account row");
+        let params = [text_param(Some("5"), None), text_param(Some("42"), None)];
+
+        let results = session
+            .test_extended_query(
+                "UPDATE accounts SET balance = balance + $1, updates = updates + 1 WHERE id = $2",
+                &params,
+            )
+            .await
+            .expect("arithmetic update with untyped text params");
+        assert!(
+            results
+                == vec![QueryResult::Command {
+                    tag: "UPDATE 1".into()
+                }]
+        );
+
+        let balance = session
+            .simple_query("SELECT balance FROM accounts WHERE id = 42")
+            .await
+            .expect("read back balance");
+        assert!(single_text(&balance) == "105");
+        let updates = session
+            .simple_query("SELECT updates FROM accounts WHERE id = 42")
+            .await
+            .expect("read back updates");
+        assert!(single_text(&updates) == "1");
+    }
+
+    #[tokio::test]
+    async fn extended_describe_never_reports_parameter_oid_zero() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = accounts_session(&engine).await;
+
+        for sql in [
+            "UPDATE accounts SET balance = balance + $1, updates = updates + 1 WHERE id = $2",
+            "UPDATE accounts SET balance = balance - $1 WHERE id = $2",
+            "SELECT $1",
+            "SELECT id FROM accounts WHERE balance * $1 > $2",
+            "INSERT INTO accounts VALUES ($1, $2, $3)",
+        ] {
+            let (_, parameter_types) = session
+                .test_describe_prepared(sql, &[])
+                .await
+                .expect("describe parameterized statement");
+            assert!(
+                !parameter_types.contains(&0),
+                "sql: {sql}, types: {parameter_types:?}"
+            );
+        }
     }
 
     #[tokio::test]

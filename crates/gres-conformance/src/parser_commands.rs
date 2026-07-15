@@ -159,6 +159,16 @@ const COMMAND_PROBES: &[CommandProbe] = &[
         expected_statement: "Insert",
     },
     CommandProbe {
+        command: "TRUNCATE",
+        sql: "TRUNCATE parser_commands_probe",
+        expected_statement: "Truncate",
+    },
+    CommandProbe {
+        command: "VACUUM",
+        sql: "VACUUM ANALYZE parser_commands_probe",
+        expected_statement: "Vacuum",
+    },
+    CommandProbe {
         command: "SELECT",
         sql: "SELECT 1",
         expected_statement: "Query",
@@ -440,11 +450,20 @@ fn statement_shape(statement: &Statement) -> &'static str {
         Statement::CreateIndex { table, .. } if table == "__crabka_sequence__" => "CreateSequence",
         Statement::CreateIndex { .. } => "CreateIndex",
         Statement::DropIndex { .. } => "DropIndex",
-        Statement::DropTable { name } if name.starts_with("__crabka_sequence__:") => "DropSequence",
+        Statement::DropTable { names, .. }
+            if names
+                .first()
+                .is_some_and(|name| name.starts_with("__crabka_sequence__:")) =>
+        {
+            "DropSequence"
+        }
         Statement::DropTable { .. } => "DropTable",
         Statement::DropView { .. } => "DropView",
         Statement::AlterTableRename { .. } => "AlterTableRename",
+        Statement::AlterTableAddPrimaryKey { .. } => "AlterTableAddPrimaryKey",
         Statement::Insert { .. } => "Insert",
+        Statement::Truncate { .. } => "Truncate",
+        Statement::Vacuum => "Vacuum",
         Statement::Query(_) => "Query",
         Statement::Begin { .. } => "Begin",
         Statement::Commit => "Commit",
@@ -493,7 +512,7 @@ mod tests {
         assert_eq!(report.format_version, PARSER_COMMAND_REPORT_FORMAT_VERSION);
         assert_eq!(
             report.commands.len(),
-            92,
+            94,
             "all resolved command rows need probes"
         );
         assert!(report.commands.windows(2).all(|pair| pair[0] < pair[1]));
@@ -531,7 +550,7 @@ mod tests {
 
         assert_eq!(json["format_version"], PARSER_COMMAND_REPORT_FORMAT_VERSION);
         assert_eq!(json["commands"][0], "ABORT");
-        assert_eq!(json["probes"].as_array().map(Vec::len), Some(92));
+        assert_eq!(json["probes"].as_array().map(Vec::len), Some(94));
         let refusal = json["probes"]
             .as_array()
             .expect("probe array")

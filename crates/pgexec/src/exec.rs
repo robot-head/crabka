@@ -209,18 +209,29 @@ pub(crate) fn execute_ddl(
                 ops,
             ))
         }
-        Statement::DropTable { name } => {
-            if let Some(sequence_name) = name.strip_prefix("__crabka_sequence__:") {
-                let ops = crabka_pgcatalog::drop_sequence_ops(kv, sequence_name)?;
-                return Ok((command("DROP SEQUENCE"), ops));
+        Statement::DropTable { names, if_exists } => {
+            // All-or-nothing across the name list, matching PostgreSQL: ops are
+            // only applied after every name resolves (or is skipped by
+            // IF EXISTS), so a missing name without IF EXISTS drops nothing.
+            let mut ops = Vec::new();
+            let mut tag = "DROP TABLE";
+            for name in names {
+                if let Some(sequence_name) = name.strip_prefix("__crabka_sequence__:") {
+                    tag = "DROP SEQUENCE";
+                    match crabka_pgcatalog::drop_sequence_ops(kv, sequence_name) {
+                        Ok(sequence_ops) => ops.extend(sequence_ops),
+                        Err(crabka_pgcatalog::CatalogError::UndefinedSequence(_)) if *if_exists => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                } else {
+                    match crabka_pgcatalog::drop_table_ops(kv, name) {
+                        Ok(table_ops) => ops.extend(table_ops),
+                        Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) if *if_exists => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                }
             }
-            let ops = crabka_pgcatalog::drop_table_ops(kv, name)?;
-            Ok((
-                QueryResult::Command {
-                    tag: "DROP TABLE".into(),
-                },
-                ops,
-            ))
+            Ok((command(tag), ops))
         }
         Statement::AlterTableRename { table, rename } => match rename {
             crabka_pgparser::ast::AlterTableRename::Table { new_name } => Ok((
@@ -233,6 +244,11 @@ pub(crate) fn execute_ddl(
                 ),
             ),
         },
+        Statement::AlterTableAddPrimaryKey {
+            table,
+            constraint_name,
+            columns,
+        } => alter_table_add_primary_key_ops(kv, table, constraint_name.as_deref(), columns),
         Statement::CreateView {
             name,
             definition,
@@ -717,6 +733,86 @@ fn create_table_constraint_index(
     }
 }
 
+/// Build the `ALTER TABLE … ADD PRIMARY KEY` batch: validate existing rows
+/// (NOT NULL first, then uniqueness through the shared unique-index backfill,
+/// matching PostgreSQL's error order), mark the key columns NOT NULL in the
+/// schema record, and create the constraint-backed `<table>_pkey` local unique
+/// index — all-or-nothing, nothing commits on any error.
+fn alter_table_add_primary_key_ops(
+    kv: &dyn Kv,
+    table_name: &str,
+    constraint_name: Option<&str>,
+    columns: &[String],
+) -> Result<(QueryResult, Vec<crabka_pgkv::WriteOp>), ExecError> {
+    let table = match crabka_pgcatalog::get_table(kv, table_name) {
+        Ok(table) => table,
+        Err(crabka_pgcatalog::CatalogError::UndefinedTable(_))
+            if crabka_pgcatalog::get_view(kv, table_name).is_ok() =>
+        {
+            return Err(ExecError::WrongObjectType(format!(
+                "\"{table_name}\" is not a table"
+            )));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if table.foreign.is_some() {
+        return Err(ExecError::WrongObjectType(format!(
+            "\"{table_name}\" is not a table"
+        )));
+    }
+    if table.sharded {
+        return Err(ExecError::Unsupported(
+            "PRIMARY KEY and UNIQUE constraints on sharded tables are not supported until global enforcement exists"
+                .into(),
+        ));
+    }
+    let indexes = crabka_pgcatalog::list_table_indexes(kv, table_name)?;
+    if indexes
+        .iter()
+        .any(|index| index.constraint == Some(crabka_pgcatalog::IndexConstraint::PrimaryKey))
+    {
+        return Err(ExecError::InvalidTableDefinition(format!(
+            "multiple primary keys for table \"{table_name}\" are not allowed"
+        )));
+    }
+    // Resolve the key columns first so a bad name is 42703 before any data scan.
+    let key_column_indices = columns
+        .iter()
+        .map(|column| {
+            table
+                .column_index(column)
+                .ok_or_else(|| ExecError::UndefinedColumn(column.clone()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    // PostgreSQL sets the key columns NOT NULL before building the index, so an
+    // existing NULL is 23502 ahead of any duplicate-key 23505. One live-row scan
+    // feeds both the NULL validation and the unique-index backfill.
+    let all_committed = all_committed_snapshot();
+    let rows = scan_live(kv, kv, &all_committed, &all_committed, None, &table)?;
+    for (_rowid, _xmin, row) in &rows {
+        for (column, column_index) in columns.iter().zip(&key_column_indices) {
+            if row[*column_index].is_null() {
+                return Err(ExecError::ColumnContainsNullValues {
+                    column: column.clone(),
+                    table: table_name.to_string(),
+                });
+            }
+        }
+    }
+    let mut ops = crabka_pgcatalog::set_columns_not_null_ops(kv, table_name, columns)?;
+    let new_index = crabka_pgcatalog::NewIndex {
+        name: constraint_name.map_or_else(|| format!("{table_name}_pkey"), str::to_string),
+        columns: columns.to_vec(),
+        unique: true,
+        placement: crabka_pgcatalog::IndexPlacement::Local,
+        constraint: Some(crabka_pgcatalog::IndexConstraint::PrimaryKey),
+    };
+    let (index, index_ops) = crabka_pgcatalog::create_constraint_index_ops(kv, &table, &new_index)?;
+    ops.extend(index_ops);
+    ops.extend(local_index_backfill_ops_for_rows(&rows, &table, &index)?);
+    Ok((command("ALTER TABLE"), ops))
+}
+
 fn create_table_primary_key_columns<'a>(
     columns: &'a [crabka_pgparser::ast::ColumnDef],
     constraints: &'a [crabka_pgparser::ast::TableConstraint],
@@ -950,6 +1046,12 @@ pub(crate) fn decode_copy_text(data: &[u8]) -> Result<Vec<Vec<Option<String>>>, 
     let mut lines = text.split('\n').peekable();
     while let Some(raw_line) = lines.next() {
         let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+        // PostgreSQL's text-format end-of-data marker: clients on the old
+        // PQputline/PQendcopy API (pgbench -i among them) send a final `\.`
+        // line; it terminates the data and everything after it is ignored.
+        if line == r"\." {
+            break;
+        }
         if raw_line.is_empty() && lines.peek().is_none() && text.ends_with('\n') {
             continue;
         }
@@ -1322,6 +1424,39 @@ pub(crate) async fn execute_write(
             let result = returning_result(&t, returning.as_deref(), returned_rows, tag, ctx)?;
             Ok((result, ops))
         }
+        Statement::Truncate {
+            names,
+            restart_identity,
+        } => {
+            if *restart_identity {
+                return Err(ExecError::Unsupported(
+                    "TRUNCATE RESTART IDENTITY is not supported: SERIAL sequence ownership is not tracked".into(),
+                ));
+            }
+            // Validate every name (and refuse sharded targets) before touching
+            // any table: the statement is all-or-nothing across the list.
+            for name in names {
+                let t = crabka_pgcatalog::get_table(catalog_kv, name)?;
+                if table_uses_global_visibility(&t) {
+                    return Err(ExecError::Unsupported(
+                        "TRUNCATE on sharded tables is not supported".into(),
+                    ));
+                }
+            }
+            // Desugar to an unfiltered DELETE per table: TRUNCATE shares the
+            // MVCC write path (row locks, xmax stamping, rollback) rather
+            // than clearing storage, so it is transactional like PostgreSQL's.
+            for name in names {
+                let delete = Statement::Delete {
+                    table: name.clone(),
+                    filter: None,
+                    returning: None,
+                };
+                let (_, delete_ops) = Box::pin(execute_write(write_ctx, &delete)).await?;
+                ops.extend(delete_ops);
+            }
+            Ok((command("TRUNCATE TABLE"), ops))
+        }
         _ => Err(ExecError::Unsupported("not a write statement".into())),
     }
 }
@@ -1529,7 +1664,11 @@ pub(crate) fn ddl_requires_unique_local_serialization(stmt: &Statement) -> bool 
             unique: true,
             placement: crabka_pgparser::ast::IndexPlacement::Local,
             ..
-        } => true,
+        }
+        // ADD PRIMARY KEY back-validates and backfills a local unique index,
+        // so it must wait out in-flight writers exactly like CREATE UNIQUE
+        // INDEX does.
+        | Statement::AlterTableAddPrimaryKey { .. } => true,
         Statement::CreateTable {
             columns,
             constraints,
@@ -1595,10 +1734,22 @@ fn local_index_backfill_ops(
 ) -> Result<Vec<crabka_pgkv::WriteOp>, ExecError> {
     let all_committed = all_committed_snapshot();
     let rows = scan_live(kv, kv, &all_committed, &all_committed, None, table)?;
+    local_index_backfill_ops_for_rows(&rows, table, index)
+}
+
+/// Backfill index entries for already-scanned live rows. A UNIQUE index
+/// back-validates the existing data: a duplicate non-NULL key is a 23505
+/// before any op is committed (rows with a NULL key column are not indexed,
+/// matching SQL NULL-distinct semantics).
+fn local_index_backfill_ops_for_rows(
+    rows: &[(u64, u64, Vec<Datum>)],
+    table: &Table,
+    index: &crabka_pgcatalog::Index,
+) -> Result<Vec<crabka_pgkv::WriteOp>, ExecError> {
     let mut seen = HashSet::new();
     let mut ops = Vec::with_capacity(rows.len());
     for (rowid, _xmin, row) in rows {
-        let values = indexed_values(table, index, &row)?;
+        let values = indexed_values(table, index, row)?;
         if values.iter().any(Datum::is_null) {
             continue;
         }
@@ -1606,7 +1757,7 @@ fn local_index_backfill_ops(
             return Err(ExecError::UniqueViolation(index.name.clone()));
         }
         ops.push(crabka_pgkv::WriteOp::Put {
-            key: crabka_pgkv::key::secondary_index_entry_key(table.id, index.id, &values, rowid),
+            key: crabka_pgkv::key::secondary_index_entry_key(table.id, index.id, &values, *rowid),
             value: Vec::new(),
         });
     }
@@ -2666,6 +2817,16 @@ fn coerce(
         (Datum::Timestamptz(ts), ColumnType::Timestamptz) => Datum::Timestamptz(ts),
         (Datum::Interval(iv), ColumnType::Interval) => Datum::Interval(iv),
         (v, target) => {
+            // Assignment-context implicit casts — PostgreSQL's pg_cast
+            // castcontext 'i'/'a' pairs (crabka subset): notably
+            // timestamptz ↔ timestamp and date → timestamp/timestamptz, all
+            // rotated through the session time zone. Anything outside that
+            // strict subset (e.g. int ↔ text) keeps erroring with 42804.
+            if let Some(from) = v.column_type()
+                && crabka_pgtypes::cast::assignment_cast_allowed(from, target)
+            {
+                return Ok(crabka_pgtypes::cast::cast(&v, target, &ctx.time_zone)?);
+            }
             return Err(ExecError::TypeMismatch(format!(
                 "column is of type {} but expression is of type {}",
                 target.name(),
@@ -3685,25 +3846,26 @@ fn try_execute_partial_aggregate_pushdown(
 /// Stream a supported local aggregate through per-page partial-aggregate
 /// folding instead of materializing every visible row before folding.
 ///
-/// Fires only for the exact shape the partial-aggregate pushdown model already
-/// supports, on exactly one ordinary non-sharded base table: plain
-/// `count`/`sum`/`min`/`max`/`avg` calls over the whole projection (or the
-/// narrow grouped shape), with a WHERE that parses into the strict pushdown
-/// predicate subset. Everything else — `DISTINCT`, `HAVING`, whole-row reads,
+/// Fires on exactly one ordinary non-sharded base table when every projection
+/// item decomposes into scalar expressions over pushdown-model aggregate calls
+/// (`CAST(count(*) AS BIGINT)`, `COALESCE(sum(x), 0)`, `sum(a) / count(*)`, …
+/// — or the narrow grouped shape), with a WHERE that parses into the strict
+/// pushdown predicate subset. Everything else — `DISTINCT`, `HAVING`, bare
+/// ungrouped columns, aggregates over non-column arguments, whole-row reads,
 /// non-pushdown filters — keeps the materializing scan and its whole-result
 /// memory budget.
 fn try_execute_local_streaming_aggregate(
     read_ctx: &crate::subquery::SubCtx<'_>,
     s: &SelectStmt,
 ) -> Result<Option<Relation>, ExecError> {
-    if !is_plain_partial_aggregate_select(s) {
+    if !is_streamable_aggregate_select(s) {
         return Ok(None);
     }
     let Some((table, qualifier)) = single_local_base_table(read_ctx.catalog_kv, s, read_ctx.ctes)?
     else {
         return Ok(None);
     };
-    let Some(specs) = local_streaming_aggregate_specs(&table, s) else {
+    let Some(plan) = local_streaming_aggregate_plan(&table, s) else {
         return Ok(None);
     };
     let Ok(predicate) = crate::plan_dist::strict_predicate_for_filter(&table, s.filter.as_ref())
@@ -3716,7 +3878,7 @@ fn try_execute_local_streaming_aggregate(
         return Ok(None);
     }
     let scope = Scope::single(&table, &qualifier);
-    let (fields, _out_exprs, tys) = resolve_projection(&s.projection, &scope)?;
+    let (fields, out_exprs, tys) = resolve_projection(&s.projection, &scope)?;
     let states = crate::scanner::collect_partial_aggregates_bounded(
         read_ctx.range_scanner,
         ScanRequest {
@@ -3734,10 +3896,32 @@ fn try_execute_local_streaming_aggregate(
             partial_aggregate: None,
             top_k: None,
         },
-        &specs,
+        plan.specs(),
         crate::scanner::BLOCKING_QUERY_MEMORY_BYTES,
     )?;
-    let rows = finalize_streaming_aggregate_rows(states, &specs, s.group_by.is_empty())?;
+    let rows = match &plan {
+        StreamingAggregatePlan::Scalar { calls, specs } => {
+            let values = finalize_scalar_streaming_aggregates(states, specs)?;
+            vec![crate::agg::eval_over_aggregate_values(
+                &out_exprs,
+                &scope,
+                calls,
+                &values,
+                read_ctx.eval_ctx,
+            )?]
+        }
+        StreamingAggregatePlan::Grouped(spec) => {
+            let Ok([state]) = <[Vec<ScannedRow>; 1]>::try_from(states) else {
+                return Err(ExecError::Unsupported(
+                    "grouped partial aggregate streaming expects exactly one spec".into(),
+                ));
+            };
+            crate::scanner::finalize_partial_aggregate_rows(state, spec)?
+                .into_iter()
+                .map(|row| row.row)
+                .collect()
+        }
+    };
     let out_scope = Scope {
         columns: fields
             .iter()
@@ -3755,60 +3939,89 @@ fn try_execute_local_streaming_aggregate(
     }))
 }
 
-/// One partial-aggregate spec per projection item for scalar aggregates, or
-/// the single grouped spec. `None` when any item is outside the pushdown model.
-fn local_streaming_aggregate_specs(
-    table: &Table,
-    s: &SelectStmt,
-) -> Option<Vec<crate::PartialAggregateSpec>> {
-    if s.group_by.is_empty() {
-        return s
-            .projection
-            .iter()
-            .map(|item| {
-                crate::plan_dist::partial_aggregate_for_select_items(
-                    table,
-                    std::slice::from_ref(item),
-                )
-            })
-            .collect();
-    }
-    crate::plan_dist::grouped_partial_aggregate_for_select(table, &s.projection, &s.group_by)
-        .map(|spec| vec![spec])
+/// How the local streaming path computes a supported aggregate SELECT.
+enum StreamingAggregatePlan {
+    /// No GROUP BY: stream one partial spec per distinct aggregate call, then
+    /// evaluate each projection expression over the finalized values.
+    Scalar {
+        /// Deduped aggregate calls, aligned index-for-index with `specs` (and
+        /// with the finalized values fed to the outer-expression evaluation).
+        calls: Vec<crabka_pgparser::ast::FuncCall>,
+        specs: Vec<crate::PartialAggregateSpec>,
+    },
+    /// The narrow grouped shape: one spec whose finalized rows — group key
+    /// columns then the aggregate, ordered by key — ARE the output rows.
+    Grouped(crate::PartialAggregateSpec),
 }
 
-/// Finalize per-spec partial states into SQL-visible output rows: scalar specs
-/// each contribute one value to a single row; the grouped spec expands to one
-/// row per group, already ordered by group key.
-fn finalize_streaming_aggregate_rows(
+impl StreamingAggregatePlan {
+    fn specs(&self) -> &[crate::PartialAggregateSpec] {
+        match self {
+            Self::Scalar { specs, .. } => specs,
+            Self::Grouped(spec) => std::slice::from_ref(spec),
+        }
+    }
+}
+
+/// Decompose the SELECT into a streaming plan: the single grouped spec for the
+/// grouped shape; with no GROUP BY, the deduped aggregate calls (each inside
+/// the pushdown model) with everything around them scalar expressions to
+/// evaluate over the finalized values. `None` when any part falls outside the
+/// model — the caller keeps the materializing scan.
+fn local_streaming_aggregate_plan(table: &Table, s: &SelectStmt) -> Option<StreamingAggregatePlan> {
+    if !s.group_by.is_empty() {
+        return crate::plan_dist::grouped_partial_aggregate_for_select(
+            table,
+            &s.projection,
+            &s.group_by,
+        )
+        .map(StreamingAggregatePlan::Grouped);
+    }
+    let mut calls = Vec::new();
+    for item in &s.projection {
+        let SelectItem::Expr { expr, .. } = item else {
+            return None;
+        };
+        if !crate::agg::collect_streamable_aggregate_calls(expr, &mut calls) {
+            return None;
+        }
+    }
+    // No aggregate anywhere means this is not an aggregate query at all (one
+    // output row per table row) — never a streaming-fold candidate.
+    if calls.is_empty() {
+        return None;
+    }
+    let specs = calls
+        .iter()
+        .map(|call| crate::plan_dist::partial_aggregate_for_call(table, call))
+        .collect::<Option<Vec<_>>>()?;
+    Some(StreamingAggregatePlan::Scalar { calls, specs })
+}
+
+/// Finalize each scalar spec's streamed partial state into the aggregate's
+/// SQL-visible value, in spec order.
+fn finalize_scalar_streaming_aggregates(
     states: Vec<Vec<ScannedRow>>,
     specs: &[crate::PartialAggregateSpec],
-    scalar: bool,
-) -> Result<Vec<Vec<Datum>>, ExecError> {
-    if scalar {
-        let mut row = Vec::with_capacity(specs.len());
-        for (state, spec) in states.into_iter().zip(specs) {
+) -> Result<Vec<Datum>, ExecError> {
+    states
+        .into_iter()
+        .zip(specs)
+        .map(|(state, spec)| {
             let finalized = crate::scanner::finalize_partial_aggregate_rows(state, spec)?;
-            let [value] = finalized.as_slice() else {
-                return Err(ExecError::Unsupported(
-                    "scalar partial aggregate produced an invalid merged shape".into(),
-                ));
+            let [ScannedRow { row, .. }] = finalized.as_slice() else {
+                return Err(invalid_scalar_aggregate_shape());
             };
-            row.extend(value.row.iter().cloned());
-        }
-        return Ok(vec![row]);
-    }
-    let ([spec], Some(state)) = (specs, states.into_iter().next()) else {
-        return Err(ExecError::Unsupported(
-            "grouped partial aggregate streaming expects exactly one spec".into(),
-        ));
-    };
-    Ok(
-        crate::scanner::finalize_partial_aggregate_rows(state, spec)?
-            .into_iter()
-            .map(|row| row.row)
-            .collect(),
-    )
+            let [value] = row.as_slice() else {
+                return Err(invalid_scalar_aggregate_shape());
+            };
+            Ok(value.clone())
+        })
+        .collect()
+}
+
+fn invalid_scalar_aggregate_shape() -> ExecError {
+    ExecError::Unsupported("scalar partial aggregate produced an invalid merged shape".into())
 }
 
 /// Match a FROM that is exactly one ordinary local base table.
@@ -3843,6 +4056,12 @@ fn single_local_base_table(
     Ok(Some((table, qualifier)))
 }
 
+/// Match a FROM that is exactly one sharded base table.
+///
+/// CTE, view, virtual-catalog, local, and foreign relations all resolve
+/// through their own scan paths, so they deliberately return `None` here —
+/// as does a relation that does not exist at all, whose undefined-table
+/// error surfaces from the materializing path instead.
 fn single_sharded_base_table(
     catalog_kv: &dyn Kv,
     s: &SelectStmt,
@@ -3851,10 +4070,19 @@ fn single_sharded_base_table(
     let [crabka_pgparser::ast::TableExpr::Table { name, alias }] = s.from.as_slice() else {
         return Ok(None);
     };
-    if ctes.lookup(name).is_some() {
+    if ctes.lookup(name).is_some() || virtual_table(name).is_some() {
         return Ok(None);
     }
-    let table = crabka_pgcatalog::get_table(catalog_kv, name)?;
+    match crabka_pgcatalog::get_view(catalog_kv, name) {
+        Ok(_) => return Ok(None),
+        Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => {}
+        Err(error) => return Err(error.into()),
+    }
+    let table = match crabka_pgcatalog::get_table(catalog_kv, name) {
+        Ok(table) => table,
+        Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
     if !table.sharded || table.foreign.is_some() {
         return Ok(None);
     }
@@ -3863,16 +4091,7 @@ fn single_sharded_base_table(
 }
 
 fn is_plain_partial_aggregate_select(s: &SelectStmt) -> bool {
-    if s.distinct || s.having.is_some() || s.limit.is_some() || s.offset.is_some() {
-        return false;
-    }
-    if !s.order_by.is_empty()
-        && (s.order_by.len() != s.group_by.len()
-            || s.order_by
-                .iter()
-                .zip(&s.group_by)
-                .any(|(order, group)| !order.asc || order.expr != *group))
-    {
+    if !select_modifiers_allow_partial_aggregate(s) {
         return false;
     }
     let Some(SelectItem::Expr {
@@ -3887,6 +4106,33 @@ fn is_plain_partial_aggregate_select(s: &SelectStmt) -> bool {
     }
     matches!(call.name.as_str(), "count" | "sum" | "avg" | "min" | "max")
         && matches!(&call.args, FuncArgs::Star | FuncArgs::Exprs(_))
+}
+
+/// Cheap AST pre-filter for the local streaming path: the modifier shape the
+/// partial-aggregate model supports, every projection item an expression, and
+/// an aggregate call somewhere in the projection. The per-item decomposition in
+/// `local_streaming_aggregate_plan` does the precise streamability check.
+fn is_streamable_aggregate_select(s: &SelectStmt) -> bool {
+    select_modifiers_allow_partial_aggregate(s)
+        && s.projection.iter().any(|item| match item {
+            SelectItem::Expr { expr, .. } => crate::agg::contains_aggregate(expr),
+            SelectItem::Wildcard | SelectItem::QualifiedWildcard(_) => false,
+        })
+}
+
+/// No `DISTINCT` / `HAVING` / `LIMIT` / `OFFSET`, and an ORDER BY only as the
+/// exact ascending echo of the GROUP BY key (the order the grouped partial
+/// fold already produces).
+fn select_modifiers_allow_partial_aggregate(s: &SelectStmt) -> bool {
+    if s.distinct || s.having.is_some() || s.limit.is_some() || s.offset.is_some() {
+        return false;
+    }
+    s.order_by.is_empty()
+        || (s.order_by.len() == s.group_by.len()
+            && s.order_by
+                .iter()
+                .zip(&s.group_by)
+                .all(|(order, group)| order.asc && order.expr == *group))
 }
 
 fn top_k_pushdown_for_select(
@@ -4246,6 +4492,7 @@ fn virtual_table(name: &str) -> Option<&'static str> {
         "pg_class" => Some("pg_class"),
         "pg_attribute" => Some("pg_attribute"),
         "pg_type" => Some("pg_type"),
+        "pg_range" => Some("pg_range"),
         "pg_index" => Some("pg_index"),
         "pg_settings" => Some("pg_settings"),
         "pg_roles" => Some("pg_roles"),
@@ -4300,6 +4547,23 @@ fn virtual_catalog_columns(name: &str) -> Vec<Column> {
             ("typcategory", Text),
             ("typnamespace", Int4),
             ("typrelid", Int4),
+            // `typtype` is `"char"` (OID 18) in PostgreSQL; Text is the
+            // closest synthesized type, same trade-off as `typcategory`.
+            ("typtype", Text),
+            ("typelem", Int4),
+            ("typbasetype", Int4),
+        ]),
+        // PostgreSQL 18 column set, in catalog order. The oid-valued columns
+        // use Int4 like every other synthesized catalog oid; the two regproc
+        // columns use Text (regproc renders as a function name).
+        "pg_range" => cols(&[
+            ("rngtypid", Int4),
+            ("rngsubtype", Int4),
+            ("rngmultitypid", Int4),
+            ("rngcollation", Int4),
+            ("rngsubopc", Int4),
+            ("rngcanonical", Text),
+            ("rngsubdiff", Text),
         ]),
         "pg_index" => cols(&[
             ("indexrelid", Int4),
@@ -4366,6 +4630,9 @@ fn virtual_catalog_rows(catalog_kv: &dyn Kv, name: &str) -> Result<Vec<Vec<Datum
         "pg_class" => pg_class_rows(catalog_kv),
         "pg_attribute" => pg_attribute_rows(catalog_kv),
         "pg_type" => Ok(pg_type_rows()),
+        // Zero rows: no built-in type in the exposed scalar slice is a range
+        // type. Drivers still LEFT JOIN it in their typeinfo queries.
+        "pg_range" => Ok(Vec::new()),
         "pg_index" => pg_index_rows(catalog_kv),
         "pg_settings" => pg_settings_rows(),
         "pg_roles" => pg_roles_rows(catalog_kv),
@@ -4579,6 +4846,12 @@ fn pg_type_rows() -> Vec<Vec<Datum>> {
                 text(ty.category),
                 int(PG_CATALOG_NAMESPACE_OID),
                 int(0),
+                // Every exposed built-in is a base scalar: typtype 'b', no
+                // array element type, and no domain base type — matching
+                // PostgreSQL 18's pg_type for these OIDs.
+                text("b"),
+                int(0),
+                int(0),
             ]
         })
         .collect()
@@ -4666,6 +4939,7 @@ fn virtual_table_names() -> &'static [&'static str] {
         "pg_class",
         "pg_attribute",
         "pg_type",
+        "pg_range",
         "pg_index",
         "pg_settings",
         "pg_roles",
@@ -4688,12 +4962,35 @@ fn virtual_relation_namespace_oid(name: &str) -> i32 {
     }
 }
 
+/// Resolve a `regclass` relation name to its `pg_class` oid: virtual catalog
+/// relations use their fixed oids; user tables use their catalog table id (the
+/// same value `pg_class_rows` reports). An optional `pg_catalog.` / `public.`
+/// qualifier is accepted like PostgreSQL's search path would.
+///
+/// # Errors
+///
+/// Propagates the catalog's undefined-table error (42P01) for an unknown
+/// relation name, matching PostgreSQL's `relation "..." does not exist`.
+pub(crate) fn resolve_regclass(catalog_kv: &dyn Kv, name: &str) -> Result<i32, ExecError> {
+    let trimmed = name.trim();
+    let bare = trimmed
+        .strip_prefix("pg_catalog.")
+        .or_else(|| trimmed.strip_prefix("public."))
+        .unwrap_or(trimmed);
+    if virtual_table_names().contains(&bare) {
+        return Ok(virtual_relation_oid(bare));
+    }
+    let table = crabka_pgcatalog::get_table(catalog_kv, bare)?;
+    oid_i32(table.id)
+}
+
 fn virtual_relation_oid(name: &str) -> i32 {
     match name {
         "pg_namespace" => 2615,
         "pg_class" => 1259,
         "pg_attribute" => 1249,
         "pg_type" => 1247,
+        "pg_range" => 3541,
         "pg_index" => 2610,
         "pg_settings" => 100_001,
         "pg_roles" => 1261,
@@ -4707,6 +5004,12 @@ fn virtual_relation_oid(name: &str) -> i32 {
 
 fn builtin_type_rows() -> &'static [BuiltinTypeRow] {
     &[
+        BuiltinTypeRow {
+            oid: 2205,
+            name: "regclass",
+            len: 4,
+            category: "N",
+        },
         BuiltinTypeRow {
             oid: crabka_pgtypes::oids::BOOL as i32,
             name: "bool",
@@ -6480,6 +6783,162 @@ mod tests {
             panic!("expected one non-null cell");
         };
         String::from_utf8(cell.text.to_vec()).expect("cell is utf8")
+    }
+
+    #[tokio::test]
+    async fn drop_table_if_exists_skips_missing_table() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let results = run(&engine, "DROP TABLE IF EXISTS missing").await;
+        assert!(tag_of(&results[0]) == "DROP TABLE");
+    }
+
+    #[tokio::test]
+    async fn drop_table_without_if_exists_errors_on_missing_table() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let err = engine
+            .connect()
+            .simple_query("DROP TABLE missing")
+            .await
+            .expect_err("missing table without IF EXISTS");
+        assert!(err.code == "42P01");
+    }
+
+    #[tokio::test]
+    async fn multi_table_drop_is_all_or_nothing() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        run(&engine, "CREATE TABLE a (id int4 PRIMARY KEY)").await;
+        run(&engine, "CREATE TABLE b (id int4 PRIMARY KEY)").await;
+
+        // A missing name without IF EXISTS aborts the whole drop.
+        let err = engine
+            .connect()
+            .simple_query("DROP TABLE a, missing, b")
+            .await
+            .expect_err("missing name aborts the whole drop");
+        assert!(err.code == "42P01");
+        run(&engine, "SELECT count(*) FROM a").await;
+        run(&engine, "SELECT count(*) FROM b").await;
+
+        // With IF EXISTS the existing names drop and the missing one is skipped.
+        let results = run(&engine, "DROP TABLE IF EXISTS a, missing, b").await;
+        assert!(tag_of(&results[0]) == "DROP TABLE");
+        for table in ["a", "b"] {
+            let err = engine
+                .connect()
+                .simple_query(&format!("SELECT count(*) FROM {table}"))
+                .await
+                .expect_err("table was dropped");
+            assert!(err.code == "42P01");
+        }
+    }
+
+    #[test]
+    fn copy_text_stops_at_the_end_of_data_marker() {
+        use assert2::assert;
+        // Old-API clients (PQputline/PQendcopy — pgbench -i) send a final
+        // `\.` line; it terminates the data and later lines are ignored.
+        let rows = super::decode_copy_text(b"1\t0\t\\N\n\\.\n").expect("decode");
+        assert!(rows == vec![vec![Some("1".into()), Some("0".into()), None]]);
+
+        let rows = super::decode_copy_text(b"1\ta\n\\.\nignored\tafter\n").expect("decode");
+        assert!(rows == vec![vec![Some("1".into()), Some("a".into())]]);
+
+        // Without the marker, behavior is unchanged.
+        let rows = super::decode_copy_text(b"1\ta\n2\tb\n").expect("decode");
+        assert!(rows.len() == 2);
+    }
+
+    #[tokio::test]
+    async fn truncate_empties_multiple_tables_atomically() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        run(&engine, "CREATE TABLE ta (id int4 PRIMARY KEY)").await;
+        run(&engine, "CREATE TABLE tb (id int4 PRIMARY KEY)").await;
+        run(&engine, "INSERT INTO ta VALUES (1), (2), (3)").await;
+        run(&engine, "INSERT INTO tb VALUES (7)").await;
+
+        // A missing name aborts the whole statement before any rows go.
+        let err = engine
+            .connect()
+            .simple_query("TRUNCATE ta, missing, tb")
+            .await
+            .expect_err("missing table aborts the whole truncate");
+        assert!(err.code == "42P01");
+        assert!(single_text(&run(&engine, "SELECT count(*) FROM ta").await) == "3");
+
+        let results = run(&engine, "TRUNCATE TABLE ta, tb").await;
+        assert!(tag_of(&results[0]) == "TRUNCATE TABLE");
+        assert!(single_text(&run(&engine, "SELECT count(*) FROM ta").await) == "0");
+        assert!(single_text(&run(&engine, "SELECT count(*) FROM tb").await) == "0");
+    }
+
+    #[tokio::test]
+    async fn vacuum_is_an_accepted_hint_outside_transactions() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        run(&engine, "CREATE TABLE tv (id int4 PRIMARY KEY)").await;
+
+        let results = run(&engine, "VACUUM ANALYZE tv").await;
+        assert!(tag_of(&results[0]) == "VACUUM");
+
+        // PostgreSQL refuses VACUUM inside a transaction block (25001).
+        let mut session = engine.connect();
+        session.simple_query("BEGIN").await.expect("begin");
+        let error = session
+            .simple_query("VACUUM")
+            .await
+            .expect_err("vacuum in a transaction block");
+        assert!(error.code == "25001");
+    }
+
+    #[tokio::test]
+    async fn truncate_rolls_back_inside_a_transaction() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        run(&engine, "CREATE TABLE tr (id int4 PRIMARY KEY)").await;
+        run(&engine, "INSERT INTO tr VALUES (1), (2)").await;
+
+        let mut session = engine.connect();
+        session.simple_query("BEGIN").await.expect("begin");
+        session.simple_query("TRUNCATE tr").await.expect("truncate");
+        let counted = session
+            .simple_query("SELECT count(*) FROM tr")
+            .await
+            .expect("count inside txn");
+        assert!(single_text(&counted) == "0");
+        session.simple_query("ROLLBACK").await.expect("rollback");
+
+        assert!(single_text(&run(&engine, "SELECT count(*) FROM tr").await) == "2");
+    }
+
+    #[tokio::test]
+    async fn truncate_restart_identity_fails_clear() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        run(&engine, "CREATE TABLE ti (id int4 PRIMARY KEY)").await;
+        let err = engine
+            .connect()
+            .simple_query("TRUNCATE ti RESTART IDENTITY")
+            .await
+            .expect_err("restart identity is a bounded refusal");
+        assert!(err.code == "0A000");
+    }
+
+    #[tokio::test]
+    async fn drop_sequence_if_exists_skips_missing_sequence() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let results = run(&engine, "DROP SEQUENCE IF EXISTS missing_seq").await;
+        assert!(tag_of(&results[0]) == "DROP SEQUENCE");
+        let err = engine
+            .connect()
+            .simple_query("DROP SEQUENCE missing_seq")
+            .await
+            .expect_err("missing sequence without IF EXISTS");
+        assert!(err.code == "42P01");
     }
 
     #[tokio::test]

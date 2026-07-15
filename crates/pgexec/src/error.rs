@@ -32,6 +32,15 @@ pub enum ExecError {
     TypeMismatch(String),
     /// A NULL value was assigned to a NOT NULL column (23502).
     NotNullViolation(String),
+    /// An existing row holds NULL in a column being constrained NOT NULL
+    /// (23502) — `ALTER TABLE … ADD PRIMARY KEY` validation over stored rows.
+    ColumnContainsNullValues {
+        column: String,
+        table: String,
+    },
+    /// The table definition itself is invalid (42P16) — e.g. adding a second
+    /// primary key.
+    InvalidTableDefinition(String),
     /// A row would duplicate a visible row in a unique index (23505).
     UniqueViolation(String),
     /// A grouping/aggregation rule was violated (42803) — e.g. a column that is
@@ -186,6 +195,11 @@ impl ExecError {
                 "23502",
                 format!("null value in column \"{column}\" violates not-null constraint"),
             ),
+            ExecError::ColumnContainsNullValues { column, table } => PgError::error(
+                "23502",
+                format!("column \"{column}\" of relation \"{table}\" contains null values"),
+            ),
+            ExecError::InvalidTableDefinition(m) => PgError::error("42P16", m),
             ExecError::UniqueViolation(index) => PgError::error(
                 "23505",
                 format!("duplicate key value violates unique constraint \"{index}\""),

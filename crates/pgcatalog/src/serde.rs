@@ -74,6 +74,8 @@ mod type_tag {
     pub const VARCHAR: u8 = 12;
     pub const BPCHAR: u8 = 13;
     pub const UUID: u8 = 14;
+    /// `regclass` — a relation oid stored as `Int4`. Append-only — no version bump.
+    pub const REGCLASS: u8 = 15;
 }
 
 /// Append a column's type (tag byte, plus the numeric typmod payload).
@@ -116,6 +118,7 @@ pub(crate) fn write_type(out: &mut Vec<u8>, ty: ColumnType) {
         }
         ColumnType::Bytea => out.push(type_tag::BYTEA),
         ColumnType::Uuid => out.push(type_tag::UUID),
+        ColumnType::Regclass => out.push(type_tag::REGCLASS),
     }
 }
 
@@ -169,6 +172,7 @@ pub(crate) fn read_type(cur: &mut &[u8]) -> Result<ColumnType, KvError> {
         }
         type_tag::BYTEA => ColumnType::Bytea,
         type_tag::UUID => ColumnType::Uuid,
+        type_tag::REGCLASS => ColumnType::Regclass,
         other => {
             return Err(KvError::CorruptRow(format!(
                 "unknown column type tag {other}"

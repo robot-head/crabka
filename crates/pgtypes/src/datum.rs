@@ -19,6 +19,15 @@ pub mod oids {
     pub const INT2: u32 = 21;
     pub const INT4: u32 = 23;
     pub const TEXT: u32 = 25;
+    /// PostgreSQL `oid` — object identifier, an unsigned 4-byte integer.
+    ///
+    /// Drivers send this OID for typeinfo-query parameters (e.g. tokio-postgres
+    /// declares `WHERE t.oid = $1` with OID). Values live in the existing `Int4`
+    /// datum — the same representation the catalog's oid-valued columns use.
+    pub const OID: u32 = 26;
+    /// PostgreSQL `regclass` — a relation's `pg_class` oid with name-based
+    /// text input; values live in the `Int4` datum like `oid`.
+    pub const REGCLASS: u32 = 2205;
     pub const BPCHAR: u32 = 1042;
     pub const VARCHAR: u32 = 1043;
     /// PostgreSQL `real`; Bind parameters widen into the existing `Float8` datum.
@@ -71,6 +80,12 @@ pub enum ColumnType {
     Bytea,
     /// PostgreSQL `uuid` (OID 2950) — 128-bit identifier.
     Uuid,
+    /// PostgreSQL `regclass` (OID 2205) — a relation's `pg_class` oid. Values
+    /// are `Datum::Int4` like `oid`; what distinguishes the type is input
+    /// conversion (a non-numeric string is a relation name needing catalog
+    /// resolution, which the session/executor layers perform — the pure
+    /// datum-parse path only accepts numeric strings).
+    Regclass,
 }
 
 impl ColumnType {
@@ -80,6 +95,12 @@ impl ColumnType {
         match name.to_ascii_lowercase().as_str() {
             "int4" | "integer" | "int" => Some(ColumnType::Int4),
             "int8" | "bigint" => Some(ColumnType::Int8),
+            // `oid` (object identifier, OID 26) is a pragmatic alias for `int4`:
+            // the catalog's oid-valued columns (pg_type.oid, pg_namespace.oid,
+            // pg_type.typnamespace, …) are Int4, so `NULL::oid` and
+            // `CAST(x AS oid)` resolve consistently with them. RowDescription
+            // consequently reports int4 (23), not oid (26), for such expressions.
+            "oid" => Some(ColumnType::Int4),
             "text" => Some(ColumnType::Text),
             "varchar" | "character varying" => Some(ColumnType::Varchar(None)),
             "char" | "character" => Some(ColumnType::Char(Some(1))),
@@ -99,6 +120,7 @@ impl ColumnType {
             // SP40: `bytea` — variable-length binary string.
             "bytea" => Some(ColumnType::Bytea),
             "uuid" => Some(ColumnType::Uuid),
+            "regclass" => Some(ColumnType::Regclass),
             _ => None,
         }
     }
@@ -120,6 +142,7 @@ impl ColumnType {
             ColumnType::Interval => oids::INTERVAL,
             ColumnType::Bytea => oids::BYTEA,
             ColumnType::Uuid => oids::UUID,
+            ColumnType::Regclass => oids::REGCLASS,
         }
     }
 
@@ -141,6 +164,7 @@ impl ColumnType {
             ColumnType::Interval => "interval",
             ColumnType::Bytea => "bytea",
             ColumnType::Uuid => "uuid",
+            ColumnType::Regclass => "regclass",
         }
     }
 
@@ -160,6 +184,7 @@ impl ColumnType {
             ColumnType::Interval => 16,
             ColumnType::Bytea => -1,
             ColumnType::Uuid => 16,
+            ColumnType::Regclass => 4,
         }
     }
 
@@ -365,6 +390,18 @@ mod tests {
         assert_eq!(ColumnType::from_sql_name("real"), None);
         assert_eq!(ColumnType::from_sql_name("widget"), None);
         assert_eq!(ColumnType::from_sql_name("uuid"), Some(ColumnType::Uuid));
+    }
+
+    /// `oid` resolves as a type name (drivers' typeinfo queries cast
+    /// `NULL::OID`) and aliases the executor's oid representation, `Int4` —
+    /// consistent with the catalog's oid-valued columns (`pg_type.oid`,
+    /// `pg_namespace.oid`, `pg_type.typnamespace`, …).
+    #[test]
+    fn oid_type_name_aliases_int4() {
+        use assert2::assert;
+        assert!(ColumnType::from_sql_name("oid") == Some(ColumnType::Int4));
+        assert!(ColumnType::from_sql_name("OID") == Some(ColumnType::Int4));
+        assert!(oids::OID == 26);
     }
 
     #[test]
