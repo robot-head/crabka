@@ -367,6 +367,24 @@ pub trait Session: Send {
         }
     }
 
+    /// Finish an extended-protocol COPY FROM STDIN after `CopyDone`. `portal`
+    /// is the portal whose Execute returned [`ExecuteOutcome::CopyIn`]; engines
+    /// that return that outcome must implement this to apply the buffered
+    /// `CopyData` frames.
+    fn copy_in_portal(
+        &mut self,
+        portal: &str,
+        data: Vec<Bytes>,
+    ) -> impl Future<Output = Result<QueryResult, PgError>> + Send {
+        let _ = (portal, data);
+        async {
+            Err(PgError::error(
+                crate::error::sqlstate::FEATURE_NOT_SUPPORTED,
+                "COPY FROM STDIN is not supported by this engine",
+            ))
+        }
+    }
+
     /// Mark the current statement as failed after a protocol-side error.
     ///
     /// COPY FROM STDIN can fail because the client sends `CopyFail`, before the

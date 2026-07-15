@@ -2714,7 +2714,16 @@ impl Session for GatewaySession {
     }
 
     async fn execute(&mut self, portal: &str, max_rows: u32) -> Result<ExecuteOutcome, PgError> {
-        let result = self.execute_portal_inner(portal, max_rows).await;
+        let result = match self.execute_portal_inner(portal, max_rows).await {
+            // A range-local session answers a COPY portal with a copy-in
+            // handshake, but the gateway has no portal-scoped copy completion
+            // path yet — fail clearly instead of half-entering copy mode.
+            Ok(ExecuteOutcome::CopyIn { .. }) => Err(PgError::error(
+                crabka_pgwire::error::sqlstate::FEATURE_NOT_SUPPORTED,
+                "COPY FROM STDIN is not supported through the multi-range gateway",
+            )),
+            other => other,
+        };
         self.finish_statement(result)
     }
 

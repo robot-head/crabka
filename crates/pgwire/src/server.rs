@@ -356,6 +356,13 @@ pub async fn serve_tls_with_activity_until<E: Engine>(
             () = shutdown.cancelled() => return Ok(()),
             accepted = listener.accept() => accepted?,
         };
+        // Response messages are written in multiple small writes; without
+        // TCP_NODELAY, Nagle + the peer's delayed ACK adds ~40ms per
+        // extended-protocol round trip. Failure is harmless (the peer may
+        // already have disconnected), so don't let it stop the accept loop.
+        if let Err(e) = stream.set_nodelay(true) {
+            tracing::debug!("set_nodelay on connection from {peer} failed: {e}");
+        }
         let engine = Arc::clone(&engine);
         let config = Arc::clone(&config);
         let registry = Arc::clone(&registry);

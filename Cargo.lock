@@ -3354,6 +3354,7 @@ dependencies = [
 name = "crabka-pgexec"
 version = "0.3.9"
 dependencies = [
+ "assert2",
  "async-trait",
  "bigdecimal",
  "bytes",
@@ -3375,6 +3376,7 @@ dependencies = [
 name = "crabka-pgkv"
 version = "0.3.9"
 dependencies = [
+ "assert2",
  "crabka-pgtypes",
  "fjall",
  "jiff",
@@ -3389,6 +3391,7 @@ dependencies = [
 name = "crabka-pgmvcc"
 version = "0.3.9"
 dependencies = [
+ "assert2",
  "crabka-pgkv",
  "crabka-pgtypes",
  "proptest",

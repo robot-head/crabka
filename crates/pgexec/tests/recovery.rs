@@ -127,3 +127,78 @@ async fn xid_is_not_reused_after_reopen() {
     let r = rows(&mut s, "SELECT id FROM t").await;
     assert_eq!(count(&r[0]), 1, "only the committed row 2 is visible");
 }
+
+#[tokio::test]
+async fn leaked_block_xids_settle_as_aborted_and_never_wedge_the_horizon() {
+    use assert2::assert;
+
+    // The durable next-xid counter is persisted a BLOCK ahead of hand-out, so a
+    // crash leaks handed-out-but-undecided xids (the crashed txn's) plus the
+    // whole unused remainder of the block — none of which have clog entries.
+    // After reopen: (1) new xids resume past the persisted reservation (no
+    // collision), (2) the garbage horizon advances past the leaked range
+    // (absent clog entries never appear in the horizon's clog walk, so they
+    // cannot wedge it), and (3) the crashed txn's versions settle as
+    // decided-by-crash and are physically reclaimed by vacuum.
+    let kv = Arc::new(MemKv::new());
+    {
+        let engine = SqlEngine::with_kv(Arc::clone(&kv) as Arc<dyn Kv>).expect("engine");
+        let mut s = engine.connect();
+        rows(&mut s, "CREATE TABLE t (id int4)").await;
+        rows(&mut s, "BEGIN").await;
+        rows(&mut s, "INSERT INTO t VALUES (1),(2),(3)").await;
+        // Crash mid-block: the engine (ProcArray, running set) is dropped; the
+        // store — including the block-ahead counter — survives.
+    }
+    let persisted = kv
+        .get(&crabka_pgkv::key::next_xid_key())
+        .expect("get")
+        .map(|b| u64::from_be_bytes(b.try_into().expect("u64")))
+        .expect("counter persisted before any xid was handed out");
+
+    let engine = SqlEngine::with_kv(Arc::clone(&kv) as Arc<dyn Kv>).expect("reopen");
+    let mut s = engine.connect();
+    // (1) No xid reuse: the first post-crash write draws from at or above the
+    // persisted reservation and its committed row is visible.
+    rows(&mut s, "INSERT INTO t VALUES (9)").await;
+    let table = engine.catalog_table("t").expect("table");
+    let version_xmins = |kv: &dyn Kv| -> Vec<u64> {
+        kv.scan_prefix(&crabka_pgkv::key::table_prefix(table.id))
+            .expect("scan")
+            .iter()
+            .map(|(_, bytes)| {
+                let (xmin, _xmax, _row) =
+                    crabka_pgmvcc::version::decode_tuple(bytes).expect("tuple decode");
+                xmin
+            })
+            .collect()
+    };
+    let xmins = version_xmins(kv.as_ref());
+    assert!(xmins.len() == 4, "3 crashed versions + 1 committed");
+    assert!(
+        xmins.iter().filter(|&&xmin| xmin >= persisted).count() == 1,
+        "the post-crash xid resumed at or past the persisted counter"
+    );
+    assert!(
+        xmins.iter().filter(|&&xmin| xmin < persisted).count() == 3,
+        "the crashed txn's xid stays below the persisted counter"
+    );
+    let r = rows(&mut s, "SELECT id FROM t").await;
+    assert!(count(&r[0]) == 1, "crashed rows invisible, new row visible");
+
+    // (2) The horizon advances past every leaked xid: absent clog entries are
+    // not visited by the horizon's clog scan, so the leaked range [crashed
+    // txn's xid, persisted) cannot hold it back.
+    let horizon = engine.checkpoint_garbage_horizon().expect("horizon");
+    assert!(horizon >= persisted, "horizon passed the leaked xid range");
+
+    // (3) The crashed txn's versions read as decided-by-crash below the
+    // horizon and vacuum physically reclaims them; the committed row survives.
+    engine.vacuum().await.expect("vacuum");
+    assert!(
+        version_xmins(kv.as_ref()).len() == 1,
+        "only the committed row's version remains"
+    );
+    let r = rows(&mut s, "SELECT id FROM t").await;
+    assert!(count(&r[0]) == 1, "vacuum preserved the committed row");
+}

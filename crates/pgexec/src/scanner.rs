@@ -878,6 +878,107 @@ pub fn collect_cursor_bounded(
     })
 }
 
+/// Stream a scan into per-spec partial aggregate states, one cursor page at a
+/// time, so a supported aggregate never materializes the whole table.
+///
+/// The cursor applies the request predicate before pages arrive, so every page
+/// row already satisfies the WHERE fragment. Peak retained memory is one page
+/// plus the accumulated aggregate states; `max_bytes` bounds each of those
+/// independently instead of the whole scanned result, which is what lets a
+/// scalar aggregate run over tables far larger than the blocking-query budget
+/// while a grouped aggregate with too many distinct keys still fails closed.
+///
+/// Returns one pre-finalize partial row set per spec, in `specs` order; callers
+/// finish with [`finalize_partial_aggregate_rows`].
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
+pub(crate) fn collect_partial_aggregates_bounded(
+    scanner: &dyn RangeScanner,
+    request: ScanRequest<'_>,
+    specs: &[PartialAggregateSpec],
+    max_bytes: usize,
+) -> Result<Vec<Vec<ScannedRow>>, ExecError> {
+    if specs.is_empty() {
+        return Err(ExecError::Unsupported(
+            "partial aggregate streaming requires at least one aggregate".into(),
+        ));
+    }
+    if request.partial_aggregate.is_some()
+        || request.top_k.is_some()
+        || request.projection != ProjectionPushdown::All
+    {
+        return Err(ExecError::Unsupported(
+            "partial aggregate streaming owns the scan pushdown contract".into(),
+        ));
+    }
+    std::thread::scope(|scope| {
+        scope
+            .spawn(move || {
+                let mut cursor = scanner.scan_cursor(request)?;
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|error| ExecError::Unsupported(error.to_string()))?;
+                runtime.block_on(async move {
+                    let mut states = vec![Vec::new(); specs.len()];
+                    loop {
+                        let page = cursor.next_page(1024).await?;
+                        let is_last = page.is_last;
+                        let rows = page.rows.into_vec();
+                        if scanned_rows_bytes(rows.iter()) > max_bytes {
+                            return Err(memory_budget_exceeded());
+                        }
+                        fold_page_into_states(rows, specs, &mut states)?;
+                        if scanned_rows_bytes(states.iter().flatten()) > max_bytes {
+                            return Err(memory_budget_exceeded());
+                        }
+                        if is_last {
+                            return Ok(states);
+                        }
+                    }
+                })
+            })
+            .join()
+            .map_err(|_| ExecError::Unsupported("blocking cursor worker panicked".into()))?
+    })
+}
+
+/// Fold one predicate-filtered page into every spec's running partial state.
+fn fold_page_into_states(
+    rows: Vec<ScannedRow>,
+    specs: &[PartialAggregateSpec],
+    states: &mut [Vec<ScannedRow>],
+) -> Result<(), ExecError> {
+    let mut rows = Some(rows);
+    for (index, (state, spec)) in states.iter_mut().zip(specs).enumerate() {
+        let page_rows = if index + 1 == specs.len() {
+            rows.take()
+                .expect("page rows are consumed only by the last spec")
+        } else {
+            rows.as_ref()
+                .expect("page rows are consumed only by the last spec")
+                .clone()
+        };
+        let mut merged = std::mem::take(state);
+        merged.extend(apply_executable_scan_pushdown(
+            page_rows,
+            &PredicatePushdown::FullScan,
+            &ProjectionPushdown::All,
+            Some(spec),
+            None,
+        )?);
+        *state = merge_partial_aggregate_rows(merged, spec)?;
+    }
+    Ok(())
+}
+
+fn scanned_rows_bytes<'a>(rows: impl Iterator<Item = &'a ScannedRow>) -> usize {
+    rows.fold(0usize, |bytes, row| {
+        bytes.saturating_add(scanned_row_bytes(row))
+    })
+}
+
 pub(crate) fn datum_row_bytes(row: &[crabka_pgtypes::Datum]) -> usize {
     row.iter().fold(0usize, |bytes, datum| {
         let variable = match datum {
@@ -2116,5 +2217,202 @@ mod cursor_contract_tests {
         ) -> Result<Vec<super::ScannedRow>, super::ExecError> {
             Ok(self.0.clone())
         }
+    }
+}
+
+#[cfg(test)]
+mod streaming_aggregate_tests {
+    use assert2::assert;
+    use crabka_pgcatalog::{Column, Table};
+    use crabka_pgkv::MemKv;
+    use crabka_pgmvcc::Snapshot;
+    use crabka_pgtypes::{ColumnType, Datum};
+
+    use super::{
+        PartialAggregateSpec, PredicatePushdown, ProjectionPushdown, RangeScanner, RowInterval,
+        ScanRequest, ScannedRow,
+    };
+
+    struct FixedRowsScanner(Vec<ScannedRow>);
+
+    impl RangeScanner for FixedRowsScanner {
+        fn scan(&self, _request: ScanRequest<'_>) -> Result<Vec<ScannedRow>, super::ExecError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    fn table() -> Table {
+        Table {
+            id: 42,
+            name: "items".into(),
+            columns: vec![Column::new("v", ColumnType::Int8)],
+            sharded: false,
+            sharding: None,
+            foreign: None,
+        }
+    }
+
+    fn request<'a>(local: &'a MemKv, snapshot: &'a Snapshot, table: &'a Table) -> ScanRequest<'a> {
+        ScanRequest {
+            local,
+            global: local,
+            global_snapshot: snapshot,
+            snapshot,
+            own_xid: None,
+            read_ts: None,
+            own_start_ts: None,
+            table,
+            interval: RowInterval::ALL,
+            predicate: PredicatePushdown::FullScan,
+            projection: ProjectionPushdown::All,
+            partial_aggregate: None,
+            top_k: None,
+        }
+    }
+
+    fn snapshot() -> Snapshot {
+        Snapshot {
+            xmin: 1,
+            xmax: 2,
+            xip: Vec::new(),
+        }
+    }
+
+    fn int_rows(count: u64) -> Vec<ScannedRow> {
+        (1..=count)
+            .map(|rowid| ScannedRow {
+                rowid,
+                xmin: 1,
+                row: vec![Datum::Int8(i64::try_from(rowid).expect("test rowid fits"))],
+            })
+            .collect()
+    }
+
+    fn spec(function: &str) -> PartialAggregateSpec {
+        PartialAggregateSpec::from_function(function, Some(0)).expect("supported aggregate")
+    }
+
+    #[test]
+    fn streaming_fold_computes_every_aggregate_under_a_per_page_budget() {
+        use std::str::FromStr;
+        let rows = int_rows(2500);
+        let whole_table_bytes = rows
+            .iter()
+            .map(|row| std::mem::size_of::<ScannedRow>() + super::datum_row_bytes(&row.row))
+            .sum::<usize>();
+        // A budget the whole table exceeds but a single 1024-row page does not:
+        // the streaming fold must succeed exactly where whole-table collection fails.
+        let budget = whole_table_bytes - 1;
+        let scanner = FixedRowsScanner(rows);
+        let (local, snapshot, table) = (MemKv::new(), snapshot(), table());
+        let specs = vec![
+            PartialAggregateSpec::from_function("count", None).expect("count(*)"),
+            spec("sum"),
+            spec("min"),
+            spec("max"),
+            spec("avg"),
+        ];
+
+        let collected =
+            super::collect_cursor_bounded(&scanner, request(&local, &snapshot, &table), budget);
+        let states = super::collect_partial_aggregates_bounded(
+            &scanner,
+            request(&local, &snapshot, &table),
+            &specs,
+            budget,
+        )
+        .expect("streaming fold stays under the per-page budget");
+
+        assert!(
+            collected
+                .expect_err("whole-table collection busts the budget")
+                .into_pg()
+                .code
+                == "53200"
+        );
+        let finalized = states
+            .into_iter()
+            .zip(&specs)
+            .map(|(state, spec)| {
+                let rows = super::finalize_partial_aggregate_rows(state, spec)
+                    .expect("finalize partial state");
+                let [row] = rows.as_slice() else {
+                    panic!("scalar aggregate must finalize to one row");
+                };
+                let [value] = row.row.as_slice() else {
+                    panic!("scalar aggregate must finalize to one value");
+                };
+                value.clone()
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            finalized
+                == vec![
+                    Datum::Int8(2500),
+                    Datum::Int8(3_126_250),
+                    Datum::Int8(1),
+                    Datum::Int8(2500),
+                    Datum::Numeric(
+                        bigdecimal::BigDecimal::from_str("1250.5").expect("test literal")
+                    ),
+                ]
+        );
+    }
+
+    #[test]
+    fn streaming_fold_rejects_a_single_page_over_the_budget() {
+        let scanner = FixedRowsScanner(vec![ScannedRow {
+            rowid: 1,
+            xmin: 1,
+            row: vec![Datum::Text("x".repeat(4096))],
+        }]);
+        let (local, snapshot, table) = (MemKv::new(), snapshot(), table());
+        let specs = vec![PartialAggregateSpec::from_function("count", None).expect("count(*)")];
+
+        let error = super::collect_partial_aggregates_bounded(
+            &scanner,
+            request(&local, &snapshot, &table),
+            &specs,
+            64,
+        )
+        .expect_err("one oversized page must fail closed");
+
+        assert!(error.into_pg().code == "53200");
+    }
+
+    #[test]
+    fn streaming_fold_rejects_grouped_state_growing_past_the_budget() {
+        // Every row is its own group, so the merged state grows with the scan
+        // even though each page fits: the accumulated-state check must fire.
+        let rows = (1..=2500_u64)
+            .map(|rowid| ScannedRow {
+                rowid,
+                xmin: 1,
+                row: vec![Datum::Text(format!("{rowid:08}{}", "k".repeat(504)))],
+            })
+            .collect::<Vec<_>>();
+        let page_bytes = rows
+            .iter()
+            .take(1024)
+            .map(|row| std::mem::size_of::<ScannedRow>() + super::datum_row_bytes(&row.row))
+            .sum::<usize>();
+        let scanner = FixedRowsScanner(rows);
+        let (local, snapshot, table) = (MemKv::new(), snapshot(), table());
+        let specs = vec![
+            PartialAggregateSpec::from_function("count", None)
+                .expect("count(*)")
+                .grouped_by(vec![0]),
+        ];
+
+        let error = super::collect_partial_aggregates_bounded(
+            &scanner,
+            request(&local, &snapshot, &table),
+            &specs,
+            // Above one page (and its per-page state), below two pages of groups.
+            page_bytes + page_bytes / 2,
+        )
+        .expect_err("unbounded distinct group keys must fail closed");
+
+        assert!(error.into_pg().code == "53200");
     }
 }

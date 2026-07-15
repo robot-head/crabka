@@ -38,7 +38,18 @@ tenant SCRAM config; `--auth scram --user-cred USER=PASSWORD` keeps the older
 explicit credential path for non-substrate runs.
 
 `memory://` remains available as an in-process substrate seam for tests and
-local smoke runs that do not need a broker.
+local smoke runs that do not need a broker. In-memory bootstraps have no
+config topic, so startup skips the tenant-record read and serves with CLI
+defaults; use `--auth trust` (or `--auth scram --user-cred USER=PASSWORD`)
+to control SQL authentication:
+
+```bash
+crabka-gres --listen 127.0.0.1:54399 \
+  --substrate-bootstrap memory:// \
+  --tenant smoke \
+  --auth trust \
+  --cache-dir /tmp/crabka-gres-memory-cache
+```
 
 ## Multi-range hosting
 

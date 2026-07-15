@@ -26,10 +26,11 @@ use crabka_pgwire::{
     },
     error::{PgError, sqlstate},
 };
-use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard};
+use tokio::sync::OwnedRwLockReadGuard;
 
 use crate::{
-    error::ExecError, lockmgr::RowLockManager, procarray::ProcArray, seq::SequenceManager,
+    error::ExecError, exec::UniqueLocalSerialization, lockmgr::RowLockManager,
+    procarray::ProcArray, seq::SequenceManager,
 };
 
 /// In-flight transaction context.
@@ -39,6 +40,12 @@ pub(crate) struct TxnCtx {
     /// The visibility snapshot: re-taken per statement under READ COMMITTED,
     /// fixed at BEGIN under REPEATABLE READ.
     pub(crate) snapshot: Snapshot,
+    /// Holds the garbage horizon at or below this transaction's BEGIN-time
+    /// snapshot xmin until COMMIT/ROLLBACK, so no version this transaction's
+    /// snapshot(s) can see is pruned while the block is open. READ COMMITTED
+    /// re-snapshots per statement, but the BEGIN-time xmin is `<=` every later
+    /// snapshot's xmin, so one conservative pin covers the whole block.
+    pub(crate) _snapshot_pin: crabka_pgmvcc::gc::SnapshotPin,
     pub(crate) repeatable_read: bool,
     /// The GLOBAL snapshot the cross-range resolver (`exec::global_status`) gates
     /// `Prepared(-> g)` rows against. Captured at BEGIN for REPEATABLE READ (fixed
@@ -63,9 +70,11 @@ pub(crate) struct TxnCtx {
     /// BEGIN). `now()`/`current_timestamp` are PG transaction-stable, so every
     /// statement in this block evaluates them against this single instant.
     pub(crate) txn_now: jiff::Timestamp,
-    /// Held by explicit transactions that have touched local unique indexes. This
-    /// serializes visible-key checks until COMMIT/ROLLBACK makes the outcome
-    /// durable, preventing two transactions from both passing before commit.
+    /// Held (SHARED) by explicit transactions that have written local tables,
+    /// until COMMIT/ROLLBACK. Never blocks other DML — it lets unique-index
+    /// DDL (which takes the same lock exclusively) wait out this transaction's
+    /// writes before backfilling. Same-key unique conflicts serialize through
+    /// per-key locks in the `RowLockManager` instead.
     pub(crate) unique_index_guard: Option<UniqueIndexGuard>,
     /// Held after the first ordinary write until COMMIT/ROLLBACK so conversion
     /// cannot rewrite an in-progress xid version out from under its commit.
@@ -86,24 +95,12 @@ pub(crate) enum TableWriteGuard {
     Shared { _guard: OwnedRwLockReadGuard<()> },
 }
 
-pub(crate) enum UniqueIndexGuard {
-    Shared { _guard: OwnedRwLockReadGuard<()> },
-    Exclusive { _guard: OwnedRwLockWriteGuard<()> },
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum UniqueIndexLockMode {
-    None,
-    Shared,
-    Exclusive,
-}
-
-fn unique_index_lock_mode(mode: crate::exec::UniqueLocalSerialization) -> UniqueIndexLockMode {
-    match mode {
-        crate::exec::UniqueLocalSerialization::None => UniqueIndexLockMode::None,
-        crate::exec::UniqueLocalSerialization::Shared => UniqueIndexLockMode::Shared,
-        crate::exec::UniqueLocalSerialization::Exclusive => UniqueIndexLockMode::Exclusive,
-    }
+/// A DML statement's SHARED hold on the engine's `unique_index_lock`. Unique
+/// CREATE INDEX backfill (and CREATE TABLE with a unique constraint) takes the
+/// same lock exclusively, so it waits for in-flight writers and blocks new
+/// ones while it scans.
+pub(crate) struct UniqueIndexGuard {
+    _guard: OwnedRwLockReadGuard<()>,
 }
 
 /// Per-connection transaction state. `Failed` carries the aborted block's
@@ -859,6 +856,15 @@ pub struct SqlSession {
     join_strategy_config: crate::plan_dist::PlannerConfig,
     /// Timestamp oracle for sharded timestamp transactions.
     timestamp_oracle: Arc<dyn crate::timestamp_txn::TimestampOracle>,
+    /// Cached durable-timestamp horizon (shared from the engine): the floor a
+    /// statement's read/transaction/commit timestamps must exceed, without
+    /// rescanning the store per statement.
+    timestamp_horizon: crate::timestamp_txn::TimestampHorizonSource,
+    /// Garbage-horizon pins + decided floor (shared from the engine). Every
+    /// statement/transaction pins its snapshot xmin here so version pruning
+    /// (write-path, `vacuum`, checkpoint compaction) never reclaims a version
+    /// a live snapshot still sees.
+    gc_horizon: Arc<crabka_pgmvcc::gc::GcHorizon>,
     timestamp_own_start_ts: Option<crate::timestamp_txn::TimestampTransactionId>,
     sequence_currvals: Arc<Mutex<HashMap<String, i64>>>,
     session_user: String,
@@ -890,6 +896,8 @@ pub(crate) struct SqlSessionConfig {
     pub join_stats: Arc<dyn crate::plan_dist::Stats>,
     pub join_strategy_config: crate::plan_dist::PlannerConfig,
     pub timestamp_oracle: Arc<dyn crate::timestamp_txn::TimestampOracle>,
+    pub timestamp_horizon: crate::timestamp_txn::TimestampHorizonSource,
+    pub gc_horizon: Arc<crabka_pgmvcc::gc::GcHorizon>,
 }
 
 #[derive(Clone)]
@@ -942,6 +950,8 @@ impl SqlSession {
             join_stats,
             join_strategy_config,
             timestamp_oracle,
+            timestamp_horizon,
+            gc_horizon,
         } = config;
         Self {
             kv,
@@ -967,6 +977,8 @@ impl SqlSession {
             join_stats,
             join_strategy_config,
             timestamp_oracle,
+            timestamp_horizon,
+            gc_horizon,
             timestamp_own_start_ts: None,
             sequence_currvals: Arc::new(Mutex::new(HashMap::new())),
             session_user: "public".into(),
@@ -1019,6 +1031,7 @@ impl SqlSession {
         xid: u64,
         repeatable_read: bool,
         eval_ctx: &'a crate::clock::EvalCtx,
+        prune_horizon: Option<u64>,
     ) -> crate::exec::WriteContext<'a> {
         crate::exec::WriteContext {
             catalog_kv: self.catalog_kv.as_ref(),
@@ -1032,7 +1045,34 @@ impl SqlSession {
             xid,
             repeatable_read,
             eval_ctx,
+            prune_horizon,
         }
+    }
+
+    /// The garbage horizon UPDATE/DELETE may prune dead row versions at, or
+    /// `None` when this session's engine must not prune locally.
+    ///
+    /// Pruning is a physical local delete outside any replicated batch
+    /// ordering, so it is only sound on the plain single-range LOCAL engine:
+    /// Durable persist mode (a replicated engine's deterministic WAL apply and
+    /// checkpoints would diverge), no GTM and no range-0 barrier (multi-range
+    /// rows can carry global xids whose lifecycle the local horizon cannot
+    /// judge), and a single store for data + catalog. Mirrors
+    /// `SqlEngine::supports_local_vacuum`.
+    fn local_prune_horizon(&self) -> Result<Option<u64>, ExecError> {
+        if self.persist_mode != crate::PersistMode::Durable
+            || self.gtm.is_some()
+            || self.range0_barrier.is_some()
+            || !Arc::ptr_eq(&self.kv, &self.catalog_kv)
+        {
+            return Ok(None);
+        }
+        crate::checkpoint_garbage_horizon(
+            self.procarray.as_ref(),
+            self.kv.as_ref(),
+            self.gc_horizon.as_ref(),
+        )
+        .map(Some)
     }
 
     /// Set the timestamp transaction whose pending intents are owned by this SQL session.
@@ -1207,12 +1247,7 @@ impl SqlSession {
             let global_snapshot = self.global_read_snapshot(None)?;
             let timestamp_read = self
                 .timestamp_oracle
-                .allocate_read_timestamp_after(
-                    crate::timestamp_txn::durable_timestamp_horizon_with_catalog(
-                        self.kv.as_ref(),
-                        self.catalog_kv.as_ref(),
-                    )?,
-                )
+                .allocate_read_timestamp_after(self.timestamp_horizon.current()?)
                 .await
                 .map_err(|error| ExecError::Unsupported(error.to_string()))?;
             if let TxnState::InTransaction(ctx) = &mut self.state {
@@ -1326,6 +1361,15 @@ impl SqlSession {
     }
 
     async fn run_one(&mut self, stmt: &Statement) -> Result<QueryResult, ExecError> {
+        // Pin the garbage horizon for this autocommit statement's duration.
+        // The pin (the ProcArray xmin now) is <= the xmin of any snapshot the
+        // statement takes below, so a concurrent pruner/vacuum can never
+        // reclaim a version this statement's snapshot(s) can still see —
+        // including between the multiple eager KV scans of a join, subquery,
+        // or index probe. Inside a block the TxnCtx pin (taken at BEGIN)
+        // already covers every statement snapshot.
+        let _statement_pin = matches!(self.state, TxnState::Idle)
+            .then(|| self.gc_horizon.pin(self.procarray.snapshot().xmin));
         self.reject_prepared_participant()?;
         if matches!(self.state, TxnState::Failed(_))
             && !matches!(stmt, Statement::Commit | Statement::Rollback)
@@ -1456,20 +1500,21 @@ impl SqlSession {
         } else {
             None
         };
+        // Pin the garbage horizon at this snapshot's xmin for the block's
+        // lifetime: an open REPEATABLE READ transaction must keep every version
+        // its fixed snapshot can see; a READ COMMITTED block's later statement
+        // snapshots all have xmin >= this pin, so it covers them conservatively.
+        let snapshot_pin = self.gc_horizon.pin(snapshot.xmin);
         self.state = TxnState::InTransaction(TxnCtx {
             xid: None,
             snapshot,
+            _snapshot_pin: snapshot_pin,
             repeatable_read: rr,
             global_snapshot,
             timestamp_read: if rr {
                 Some(
                     self.timestamp_oracle
-                        .allocate_read_timestamp_after(
-                            crate::timestamp_txn::durable_timestamp_horizon_with_catalog(
-                                self.kv.as_ref(),
-                                self.catalog_kv.as_ref(),
-                            )?,
-                        )
+                        .allocate_read_timestamp_after(self.timestamp_horizon.current()?)
                         .await
                         .map_err(|error| ExecError::Unsupported(error.to_string()))?,
                 )
@@ -1672,12 +1717,7 @@ impl SqlSession {
             }
             TxnState::InTransaction(_) | TxnState::Idle => self
                 .timestamp_oracle
-                .allocate_read_timestamp_after(
-                    crate::timestamp_txn::durable_timestamp_horizon_with_catalog(
-                        self.kv.as_ref(),
-                        self.catalog_kv.as_ref(),
-                    )?,
-                )
+                .allocate_read_timestamp_after(self.timestamp_horizon.current()?)
                 .await
                 .map_err(|error| ExecError::Unsupported(error.to_string()))?,
             TxnState::Prepared(_) | TxnState::Failed(_) => {
@@ -1987,34 +2027,16 @@ impl SqlSession {
         Ok(result)
     }
 
-    async fn ensure_unique_index_guard(&mut self, mode: UniqueIndexLockMode) {
-        if mode == UniqueIndexLockMode::None {
+    async fn ensure_unique_index_guard(&mut self, mode: UniqueLocalSerialization) {
+        if matches!(mode, UniqueLocalSerialization::None) {
             return;
         }
-        let existing = match &self.state {
-            TxnState::InTransaction(ctx) => ctx.unique_index_guard.as_ref(),
-            TxnState::Prepared(_) => return,
+        match &self.state {
+            TxnState::InTransaction(ctx) if ctx.unique_index_guard.is_none() => {}
             _ => return,
-        };
-        if matches!(existing, Some(UniqueIndexGuard::Exclusive { .. })) {
-            return;
         }
-        if mode == UniqueIndexLockMode::Shared && existing.is_some() {
-            return;
-        }
-        if matches!(existing, Some(UniqueIndexGuard::Shared { .. }))
-            && let TxnState::InTransaction(ctx) = &mut self.state
-        {
-            ctx.unique_index_guard = None;
-        }
-        let guard = match mode {
-            UniqueIndexLockMode::None => return,
-            UniqueIndexLockMode::Shared => UniqueIndexGuard::Shared {
-                _guard: Arc::clone(&self.unique_index_lock).read_owned().await,
-            },
-            UniqueIndexLockMode::Exclusive => UniqueIndexGuard::Exclusive {
-                _guard: Arc::clone(&self.unique_index_lock).write_owned().await,
-            },
+        let guard = UniqueIndexGuard {
+            _guard: Arc::clone(&self.unique_index_lock).read_owned().await,
         };
         if let TxnState::InTransaction(ctx) = &mut self.state {
             ctx.unique_index_guard = Some(guard);
@@ -2054,11 +2076,10 @@ impl SqlSession {
                     ));
                 }
                 self.ensure_write_xid()?;
-                let unique_serialization =
-                    unique_index_lock_mode(crate::exec::write_requires_unique_local_serialization(
-                        self.catalog_kv.as_ref(),
-                        stmt,
-                    )?);
+                let unique_serialization = crate::exec::write_requires_unique_local_serialization(
+                    self.catalog_kv.as_ref(),
+                    stmt,
+                )?;
                 self.ensure_unique_index_guard(unique_serialization).await;
                 // UPDATE/DELETE's eval_plan_qual re-check reads range 0's global clog
                 // to resolve a cross-range supersede, so catch range 0's replica up
@@ -2095,11 +2116,23 @@ impl SqlSession {
                 // An error here propagates to run_one, which transitions the
                 // block to Failed (keeping the xid + row locks until
                 // COMMIT/ROLLBACK, which calls release_all). In Durable mode
-                // ProcArray persisted next_xid eagerly, so no next_xid op; the
+                // ProcArray's block-ahead reservation already durably covers
+                // this xid, so no next_xid op; the
                 // txn commits later, so no clog op. In Replicated mode we fold the
                 // next_xid op into this batch (the state machine max-merges it;
                 // re-folding on a later write in the same txn is harmless).
-                let write_ctx = self.write_context(&gsnap, &snapshot, xid, repeatable_read, &ctx);
+                // Cache the garbage horizon once per statement: UPDATE/DELETE
+                // prune the chains of the rows they write against it (local
+                // engines only; None disables pruning elsewhere).
+                let prune_horizon = self.local_prune_horizon()?;
+                let write_ctx = self.write_context(
+                    &gsnap,
+                    &snapshot,
+                    xid,
+                    repeatable_read,
+                    &ctx,
+                    prune_horizon,
+                );
                 let (result, mut ops) = crate::exec::execute_write(&write_ctx, stmt).await?;
                 // Record the (table_id, rowid)s this write touched (from the version
                 // Puts it built) so the abort-atomicity fence (`effective_global_xid`)
@@ -2158,18 +2191,13 @@ impl SqlSession {
                 if targets_sharded_table {
                     return self.run_sharded_timestamp_autocommit(stmt).await;
                 }
-                let _unique_guard = match unique_index_lock_mode(
-                    crate::exec::write_requires_unique_local_serialization(
-                        self.catalog_kv.as_ref(),
-                        stmt,
-                    )?,
-                ) {
-                    UniqueIndexLockMode::None => None,
-                    UniqueIndexLockMode::Shared => Some(UniqueIndexGuard::Shared {
+                let _unique_guard = match crate::exec::write_requires_unique_local_serialization(
+                    self.catalog_kv.as_ref(),
+                    stmt,
+                )? {
+                    UniqueLocalSerialization::None => None,
+                    UniqueLocalSerialization::Shared => Some(UniqueIndexGuard {
                         _guard: Arc::clone(&self.unique_index_lock).read_owned().await,
-                    }),
-                    UniqueIndexLockMode::Exclusive => Some(UniqueIndexGuard::Exclusive {
-                        _guard: Arc::clone(&self.unique_index_lock).write_owned().await,
                     }),
                 };
                 // Autocommit UPDATE/DELETE's eval_plan_qual re-check reads range 0's
@@ -2177,7 +2205,7 @@ impl SqlSession {
                 self.ensure_global_readable().await?;
                 // Autocommit: allocate an xid, execute (taking row locks), and
                 // commit in one atomic batch (versions + clog). No global writer
-                // lock; next_xid was persisted eagerly by begin_write.
+                // lock; begin_write's durable block reservation covers the xid.
                 let xid = self.procarray.begin_write()?;
                 let sharded_write = targets_sharded_table;
                 let sharded_global = if sharded_write {
@@ -2188,7 +2216,11 @@ impl SqlSession {
                 let snapshot = self.procarray.snapshot();
                 let gsnap = self.global_read_snapshot(None)?;
                 let ctx = self.eval_ctx();
-                let write_ctx = self.write_context(&gsnap, &snapshot, xid, false, &ctx);
+                // Cache the garbage horizon once per statement (see the
+                // in-transaction branch above).
+                let prune_horizon = self.local_prune_horizon()?;
+                let write_ctx =
+                    self.write_context(&gsnap, &snapshot, xid, false, &ctx, prune_horizon);
                 let outcome = crate::exec::execute_write(&write_ctx, stmt).await;
                 let (result, mut ops) = match outcome {
                     Ok(v) => v,
@@ -2214,7 +2246,7 @@ impl SqlSession {
                 }
                 // In Replicated mode, fold the next_xid advance into the same
                 // batch as the rows + clog (the state machine max-merges it); in
-                // Durable mode begin_write already persisted it eagerly.
+                // Durable mode begin_write's block reservation already covers it.
                 if self.persist_mode == crate::PersistMode::Replicated {
                     ops.push(self.procarray.next_xid_op());
                 }
@@ -2247,6 +2279,9 @@ impl SqlSession {
         copy: &CopyStmt,
         chunks: Vec<bytes::Bytes>,
     ) -> Result<QueryResult, ExecError> {
+        // Statement-duration garbage-horizon pin — see `run_one`.
+        let _statement_pin = matches!(self.state, TxnState::Idle)
+            .then(|| self.gc_horizon.pin(self.procarray.snapshot().xmin));
         if matches!(copy.format, CopyFormat::Csv) {
             return Err(ExecError::Unsupported("COPY CSV is not supported".into()));
         }
@@ -2267,11 +2302,10 @@ impl SqlSession {
                         "COPY into sharded tables is not supported".into(),
                     ));
                 }
-                let unique_serialization =
-                    unique_index_lock_mode(crate::exec::copy_requires_unique_local_serialization(
-                        self.catalog_kv.as_ref(),
-                        copy,
-                    )?);
+                let unique_serialization = crate::exec::copy_requires_unique_local_serialization(
+                    self.catalog_kv.as_ref(),
+                    copy,
+                )?;
                 self.ensure_unique_index_guard(unique_serialization).await;
                 self.ensure_write_xid()?;
                 let xid = match &self.state {
@@ -2281,8 +2315,10 @@ impl SqlSession {
                 let ctx = self.eval_ctx();
                 let gsnap = self.global_read_snapshot(None)?;
                 let snapshot = self.procarray.snapshot();
-                let write_ctx = self.write_context(&gsnap, &snapshot, xid, false, &ctx);
-                let (result, mut ops) = crate::exec::execute_copy_write(&write_ctx, copy, &rows)?;
+                // COPY is insert-only: no chains are re-read, nothing to prune.
+                let write_ctx = self.write_context(&gsnap, &snapshot, xid, false, &ctx, None);
+                let (result, mut ops) =
+                    crate::exec::execute_copy_write(&write_ctx, copy, &rows).await?;
                 if self.persist_mode == crate::PersistMode::Replicated {
                     ops.push(self.procarray.next_xid_op());
                 }
@@ -2306,26 +2342,22 @@ impl SqlSession {
                     )?;
                     return self.commit_timestamp_write_plan(plan).await;
                 }
-                let _unique_guard = match unique_index_lock_mode(
-                    crate::exec::copy_requires_unique_local_serialization(
-                        self.catalog_kv.as_ref(),
-                        copy,
-                    )?,
-                ) {
-                    UniqueIndexLockMode::None => None,
-                    UniqueIndexLockMode::Shared => Some(UniqueIndexGuard::Shared {
+                let _unique_guard = match crate::exec::copy_requires_unique_local_serialization(
+                    self.catalog_kv.as_ref(),
+                    copy,
+                )? {
+                    UniqueLocalSerialization::None => None,
+                    UniqueLocalSerialization::Shared => Some(UniqueIndexGuard {
                         _guard: Arc::clone(&self.unique_index_lock).read_owned().await,
-                    }),
-                    UniqueIndexLockMode::Exclusive => Some(UniqueIndexGuard::Exclusive {
-                        _guard: Arc::clone(&self.unique_index_lock).write_owned().await,
                     }),
                 };
                 let xid = self.procarray.begin_write()?;
                 let ctx = self.eval_ctx();
                 let gsnap = self.global_read_snapshot(None)?;
                 let snapshot = self.procarray.snapshot();
-                let write_ctx = self.write_context(&gsnap, &snapshot, xid, false, &ctx);
-                let outcome = crate::exec::execute_copy_write(&write_ctx, copy, &rows);
+                // COPY is insert-only: no chains are re-read, nothing to prune.
+                let write_ctx = self.write_context(&gsnap, &snapshot, xid, false, &ctx, None);
+                let outcome = crate::exec::execute_copy_write(&write_ctx, copy, &rows).await;
                 let (result, mut ops) = match outcome {
                     Ok(value) => value,
                     Err(error) => {
@@ -2334,6 +2366,8 @@ impl SqlSession {
                             .commit(vec![crabka_pgmvcc::clog::put_op(xid, XidStatus::Aborted)])
                             .await;
                         self.procarray.finish(xid);
+                        // Free the unique-key locks the failed COPY acquired.
+                        self.lockmgr.release_all(xid);
                         return Err(error);
                     }
                 };
@@ -2343,6 +2377,8 @@ impl SqlSession {
                 }
                 let commit = self.committer.commit(ops).await;
                 self.procarray.finish(xid);
+                // Free the unique-key locks this COPY acquired, waking waiters.
+                self.lockmgr.release_all(xid);
                 commit?;
                 Ok(result)
             }
@@ -2400,12 +2436,7 @@ impl SqlSession {
         &self,
     ) -> Result<crate::timestamp_txn::TimestampTransactionId, ExecError> {
         self.timestamp_oracle
-            .allocate_transaction_id_after(
-                crate::timestamp_txn::durable_timestamp_horizon_with_catalog(
-                    self.kv.as_ref(),
-                    self.catalog_kv.as_ref(),
-                )?,
-            )
+            .allocate_transaction_id_after(self.timestamp_horizon.current()?)
             .await
             .map_err(|error| ExecError::Unsupported(error.to_string()))
     }
@@ -2415,13 +2446,7 @@ impl SqlSession {
         start_ts: crate::timestamp_txn::TimestampTransactionId,
     ) -> Result<crate::timestamp_txn::CommitTimestamp, ExecError> {
         self.timestamp_oracle
-            .allocate_commit_after_durable(
-                start_ts,
-                crate::timestamp_txn::durable_timestamp_horizon_with_catalog(
-                    self.kv.as_ref(),
-                    self.catalog_kv.as_ref(),
-                )?,
-            )
+            .allocate_commit_after_durable(start_ts, self.timestamp_horizon.current()?)
             .await
             .map_err(|error| ExecError::Unsupported(error.to_string()))
     }
@@ -2765,6 +2790,19 @@ fn parse_single_copy_statement(sql: &str) -> Result<Option<CopyStmt>, PgError> {
 
 fn is_copy_sentinel(stmt: &Statement) -> bool {
     matches!(stmt, Statement::Set { name, .. } if name == crabka_pgparser::ast::COPY_FROM_STDIN_SENTINEL)
+}
+
+/// Decode the COPY statement carried by a parsed COPY FROM STDIN sentinel;
+/// `None` for any other statement.
+fn copy_sentinel_stmt(stmt: &Statement) -> Result<Option<CopyStmt>, PgError> {
+    match stmt {
+        Statement::Set { name, value, .. }
+            if name == crabka_pgparser::ast::COPY_FROM_STDIN_SENTINEL =>
+        {
+            decode_copy_stmt(value).map(Some)
+        }
+        _ => Ok(None),
+    }
 }
 
 fn decode_copy_stmt(value: &crabka_pgparser::ast::SetValue) -> Result<CopyStmt, PgError> {
@@ -3782,6 +3820,39 @@ fn resolve_result_formats(requested: &[i16], count: usize) -> Result<Vec<i16>, P
 }
 
 impl SqlSession {
+    /// Validate a decoded COPY FROM STDIN statement and build the
+    /// `CopyInResponse` the wire layer answers with before entering copy-in
+    /// mode. Shared by the simple-protocol (`begin_copy_in`) and
+    /// extended-protocol (`execute` on a COPY portal) start paths.
+    fn copy_in_start(&mut self, copy: &CopyStmt) -> Result<CopyInResponse, PgError> {
+        if matches!(self.state, TxnState::Failed(_)) {
+            return Err(ExecError::InFailedTransaction.into_pg());
+        }
+        self.reject_prepared_participant()
+            .map_err(ExecError::into_pg)?;
+        if matches!(copy.format, CopyFormat::Csv) {
+            return Err(ExecError::Unsupported("COPY CSV is not supported".into()).into_pg());
+        }
+        let table = crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), &copy.table)
+            .map_err(ExecError::from)
+            .map_err(ExecError::into_pg)?;
+        let target_count = match &copy.columns {
+            Some(columns) => columns.len(),
+            None => table.columns.len(),
+        };
+        if let Some(columns) = &copy.columns {
+            for column in columns {
+                if table.column_index(column).is_none() {
+                    return Err(ExecError::UndefinedColumn(column.clone()).into_pg());
+                }
+            }
+        }
+        Ok(CopyInResponse {
+            overall_format: 0,
+            column_formats: vec![0; target_count],
+        })
+    }
+
     #[cfg(test)]
     async fn test_extended_query(
         &mut self,
@@ -3879,12 +3950,7 @@ impl SqlSession {
                     }
                     TxnState::InTransaction(_) | TxnState::Idle => self
                         .timestamp_oracle
-                        .allocate_read_timestamp_after(
-                            crate::timestamp_txn::durable_timestamp_horizon_with_catalog(
-                                self.kv.as_ref(),
-                                self.catalog_kv.as_ref(),
-                            )?,
-                        )
+                        .allocate_read_timestamp_after(self.timestamp_horizon.current()?)
                         .await
                         .map_err(|error| ExecError::Unsupported(error.to_string()))?,
                     TxnState::Prepared(_) | TxnState::Failed(_) => {
@@ -4309,6 +4375,15 @@ impl Session for SqlSession {
         );
         if needs_run {
             let statement = self.portals.get(portal).and_then(|p| p.statement.clone());
+            if let Some(stmt) = &statement
+                && let Some(copy) = copy_sentinel_stmt(stmt)?
+            {
+                // Extended-protocol COPY FROM STDIN: answer with a
+                // CopyInResponse; the buffered rows arrive via
+                // `copy_in_portal` after CopyDone.
+                let response = self.copy_in_start(&copy)?;
+                return Ok(ExecuteOutcome::CopyIn { response });
+            }
             let execution = match statement {
                 None => SqlPortalExecution::Empty,
                 Some(stmt) => match self.run_one(&stmt).await.map_err(ExecError::into_pg)? {
@@ -4394,32 +4469,7 @@ impl Session for SqlSession {
         let Some(copy) = parse_single_copy_statement(sql)? else {
             return Ok(None);
         };
-        if matches!(self.state, TxnState::Failed(_)) {
-            return Err(ExecError::InFailedTransaction.into_pg());
-        }
-        self.reject_prepared_participant()
-            .map_err(ExecError::into_pg)?;
-        if matches!(copy.format, CopyFormat::Csv) {
-            return Err(ExecError::Unsupported("COPY CSV is not supported".into()).into_pg());
-        }
-        let table = crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), &copy.table)
-            .map_err(ExecError::from)
-            .map_err(ExecError::into_pg)?;
-        let target_count = match &copy.columns {
-            Some(columns) => columns.len(),
-            None => table.columns.len(),
-        };
-        if let Some(columns) = &copy.columns {
-            for column in columns {
-                if table.column_index(column).is_none() {
-                    return Err(ExecError::UndefinedColumn(column.clone()).into_pg());
-                }
-            }
-        }
-        Ok(Some(CopyInResponse {
-            overall_format: 0,
-            column_formats: vec![0; target_count],
-        }))
+        self.copy_in_start(&copy).map(Some)
     }
 
     async fn copy_in(
@@ -4440,6 +4490,50 @@ impl Session for SqlSession {
             self.mark_transaction_failed();
         }
         result.map_err(ExecError::into_pg)
+    }
+
+    async fn copy_in_portal(
+        &mut self,
+        portal: &str,
+        data: Vec<bytes::Bytes>,
+    ) -> Result<QueryResult, PgError> {
+        let statement = self
+            .portals
+            .get(portal)
+            .ok_or_else(|| {
+                PgError::error(
+                    sqlstate::INVALID_CURSOR_NAME,
+                    format!("portal \"{portal}\" does not exist"),
+                )
+            })?
+            .statement
+            .clone();
+        let copy = statement
+            .as_ref()
+            .map(copy_sentinel_stmt)
+            .transpose()?
+            .flatten()
+            .ok_or_else(|| {
+                PgError::error(
+                    sqlstate::PROTOCOL_VIOLATION,
+                    "COPY data received for a non-COPY portal",
+                )
+            })?;
+        self.reject_prepared_participant()
+            .map_err(ExecError::into_pg)?;
+        let result = self.run_copy_in(&copy, data).await;
+        if result.is_err() {
+            self.mark_transaction_failed();
+        }
+        let result = result.map_err(ExecError::into_pg)?;
+        // Mark the portal completed so a re-Execute reports the command tag
+        // instead of restarting the copy.
+        if let QueryResult::Command { tag } = &result
+            && let Some(p) = self.portals.get_mut(portal)
+        {
+            p.execution = SqlPortalExecution::Command { tag: tag.clone() };
+        }
+        Ok(result)
     }
 
     fn mark_statement_failed(&mut self) {

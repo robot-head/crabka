@@ -304,7 +304,11 @@ pub fn strict_predicate_for_filter(
     Ok(PredicatePushdown::Conjunctive(predicates))
 }
 
-fn predicate_for_filter(table: &Table, filter: Option<&Expr>) -> PredicatePushdown {
+/// Best-effort variant of [`strict_predicate_for_filter`]: a filter with any
+/// unsupported conjunct degrades to [`PredicatePushdown::FullScan`] instead of
+/// erroring. Shared by the SELECT scan planner and the UPDATE/DELETE
+/// index-probe chooser so both extract equality conjuncts identically.
+pub(crate) fn predicate_for_filter(table: &Table, filter: Option<&Expr>) -> PredicatePushdown {
     strict_predicate_for_filter(table, filter).unwrap_or(PredicatePushdown::FullScan)
 }
 
@@ -424,7 +428,7 @@ fn projection_for_select_items(table: &Table, projection: &[SelectItem]) -> Proj
     ProjectionPushdown::Columns(columns)
 }
 
-fn partial_aggregate_for_select_items(
+pub(crate) fn partial_aggregate_for_select_items(
     table: &Table,
     projection: &[SelectItem],
 ) -> Option<PartialAggregateSpec> {
