@@ -51,6 +51,15 @@ pub enum Statement {
         table: String,
         rename: AlterTableRename,
     },
+    /// `ALTER TABLE name ADD [CONSTRAINT cname] PRIMARY KEY (col, …)`. The
+    /// executor desugars this onto the local unique-index machinery (back-
+    /// validating existing rows) and marks the key columns NOT NULL.
+    AlterTableAddPrimaryKey {
+        table: String,
+        /// Explicit `CONSTRAINT cname` name; `None` defaults to `<table>_pkey`.
+        constraint_name: Option<String>,
+        columns: Vec<String>,
+    },
     Insert {
         table: String,
         columns: Option<Vec<String>>,

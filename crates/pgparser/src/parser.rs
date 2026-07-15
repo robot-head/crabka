@@ -1188,6 +1188,21 @@ impl Parser {
         self.expect_ident_eq("alter")?;
         self.expect(&Token::Keyword(Keyword::Table))?;
         let table = self.expect_ident()?;
+        if self.eat_ident_eq("add") {
+            let constraint_name = if self.eat_ident_eq("constraint") {
+                Some(self.expect_ident()?)
+            } else {
+                None
+            };
+            self.expect_ident_eq("primary")?;
+            self.expect_ident_eq("key")?;
+            let columns = self.parse_ident_list()?;
+            return Ok(Statement::AlterTableAddPrimaryKey {
+                table,
+                constraint_name,
+                columns,
+            });
+        }
         self.expect_ident_eq("rename")?;
         let rename = if self.eat_ident_eq("column") {
             let column = self.expect_ident()?;
@@ -6422,6 +6437,65 @@ mod tests {
     }
 
     #[test]
+    fn alter_table_add_primary_key_parses_bare_multi_column_and_named_forms() {
+        use assert2::assert;
+        for (sql, expected) in [
+            (
+                "ALTER TABLE pgbench_branches ADD PRIMARY KEY (bid)",
+                Statement::AlterTableAddPrimaryKey {
+                    table: "pgbench_branches".into(),
+                    constraint_name: None,
+                    columns: vec!["bid".into()],
+                },
+            ),
+            (
+                "alter table pgbench_accounts add primary key (aid)",
+                Statement::AlterTableAddPrimaryKey {
+                    table: "pgbench_accounts".into(),
+                    constraint_name: None,
+                    columns: vec!["aid".into()],
+                },
+            ),
+            (
+                "ALTER TABLE t ADD PRIMARY KEY (a, b, c)",
+                Statement::AlterTableAddPrimaryKey {
+                    table: "t".into(),
+                    constraint_name: None,
+                    columns: vec!["a".into(), "b".into(), "c".into()],
+                },
+            ),
+            (
+                "ALTER TABLE t ADD CONSTRAINT custom_pk PRIMARY KEY (a, b)",
+                Statement::AlterTableAddPrimaryKey {
+                    table: "t".into(),
+                    constraint_name: Some("custom_pk".into()),
+                    columns: vec!["a".into(), "b".into()],
+                },
+            ),
+        ] {
+            assert!(one(sql) == expected, "{sql}");
+        }
+    }
+
+    #[test]
+    fn alter_table_add_primary_key_rejects_malformed_tails() {
+        use assert2::assert;
+        for sql in [
+            "ALTER TABLE t ADD PRIMARY (id)",
+            "ALTER TABLE t ADD PRIMARY KEY",
+            "ALTER TABLE t ADD PRIMARY KEY ()",
+            "ALTER TABLE t ADD PRIMARY KEY (id,)",
+            "ALTER TABLE t ADD PRIMARY KEY id",
+            "ALTER TABLE t ADD PRIMARY KEY (id) CASCADE",
+            "ALTER TABLE t ADD CONSTRAINT PRIMARY KEY (id)",
+            "ALTER TABLE t ADD UNIQUE (id)",
+            "ALTER TABLE t ADD FOREIGN KEY (id) REFERENCES u (id)",
+        ] {
+            assert!(crate::parse(sql).is_err(), "{sql}");
+        }
+    }
+
+    #[test]
     fn alter_ident_guard_is_case_sensitive_to_alter() {
         // Also kills: guard `s == "alter"` — "alters" is not "alter" and must error
         assert!(crate::parse("alters SERVER s OPTIONS (a 'b')").is_err());
@@ -6556,6 +6630,10 @@ fn dispatch_emits_exact_query_and_table_family_identities() {
         ("(VALUES (1))", CommandIdentity::Values),
         ("CREATE TABLE t (id int4)", CommandIdentity::CreateTable),
         ("ALTER TABLE t RENAME TO t2", CommandIdentity::AlterTable),
+        (
+            "ALTER TABLE t ADD PRIMARY KEY (id)",
+            CommandIdentity::AlterTable,
+        ),
     ] {
         let parsed = parse_with_command_identities(sql).expect(sql);
         assert_eq!(parsed[0].1, expected, "{sql}");

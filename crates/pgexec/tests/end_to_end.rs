@@ -1933,3 +1933,234 @@ async fn import_foreign_schema_materializes_foreign_tables() {
         "excluded table must be undefined"
     );
 }
+
+// ---- ALTER TABLE … ADD PRIMARY KEY ----
+
+#[tokio::test]
+async fn alter_table_add_primary_key_backfills_and_enforces_future_writes() {
+    use assert2::assert;
+    let client = connect(spawn().await).await;
+    client
+        .batch_execute(
+            "CREATE TABLE b (bid int4, bbalance int4); \
+             INSERT INTO b VALUES (1, 10), (2, 20), (3, 30); \
+             ALTER TABLE b ADD PRIMARY KEY (bid)",
+        )
+        .await
+        .expect("ADD PRIMARY KEY on a populated table with clean data");
+
+    // Future duplicates violate the backfilled unique index, named <table>_pkey.
+    let dup = client
+        .batch_execute("INSERT INTO b VALUES (2, 99)")
+        .await
+        .expect_err("duplicate key after ADD PRIMARY KEY");
+    let db = dup.as_db_error().expect("db error");
+    assert!(db.code().code() == "23505");
+    assert!(db.message().contains("b_pkey"));
+
+    // The key column became NOT NULL for future writes.
+    let null = client
+        .batch_execute("INSERT INTO b VALUES (NULL, 0)")
+        .await
+        .expect_err("NULL key after ADD PRIMARY KEY");
+    assert!(sqlstate(&null) == "23502");
+
+    // Distinct keys still insert; existing rows are intact.
+    client
+        .batch_execute("INSERT INTO b VALUES (4, 40)")
+        .await
+        .expect("distinct key inserts");
+    let rows = client
+        .query("SELECT count(*)::int4 FROM b", &[])
+        .await
+        .expect("count");
+    assert!(rows[0].get::<_, i32>(0) == 4);
+
+    // The pkey index is constraint-backed: DROP INDEX is refused like a
+    // CREATE TABLE-time primary key's index (2BP01).
+    let drop = client
+        .batch_execute("DROP INDEX b_pkey")
+        .await
+        .expect_err("constraint-backed index must not drop");
+    assert!(sqlstate(&drop) == "2BP01");
+}
+
+#[tokio::test]
+async fn alter_table_add_multi_column_primary_key_enforces_composite_keys() {
+    use assert2::assert;
+    let client = connect(spawn().await).await;
+    client
+        .batch_execute(
+            "CREATE TABLE t (a int4, b int4); \
+             INSERT INTO t VALUES (1, 1), (1, 2), (2, 1); \
+             ALTER TABLE t ADD PRIMARY KEY (a, b)",
+        )
+        .await
+        .expect("composite ADD PRIMARY KEY");
+
+    client
+        .batch_execute("INSERT INTO t VALUES (1, 3)")
+        .await
+        .expect("distinct composite key inserts");
+    let dup = client
+        .batch_execute("INSERT INTO t VALUES (1, 2)")
+        .await
+        .expect_err("duplicate composite key");
+    assert!(sqlstate(&dup) == "23505");
+    let null = client
+        .batch_execute("INSERT INTO t VALUES (5, NULL)")
+        .await
+        .expect_err("NULL in any key column");
+    assert!(sqlstate(&null) == "23502");
+}
+
+#[tokio::test]
+async fn alter_table_add_primary_key_rejects_existing_duplicates_all_or_nothing() {
+    use assert2::assert;
+    let client = connect(spawn().await).await;
+    client
+        .batch_execute(
+            "CREATE TABLE t (id int4, v text); \
+             INSERT INTO t VALUES (1, 'a'), (1, 'b'), (2, 'c')",
+        )
+        .await
+        .expect("seed duplicate keys");
+
+    let err = client
+        .batch_execute("ALTER TABLE t ADD PRIMARY KEY (id)")
+        .await
+        .expect_err("existing duplicates must fail the ADD");
+    assert!(sqlstate(&err) == "23505");
+
+    // Nothing committed: duplicates and NULL keys still insert, and no pkey
+    // index metadata leaked (42704 — the index does not exist).
+    client
+        .batch_execute("INSERT INTO t VALUES (1, 'still duplicable'), (NULL, 'still nullable')")
+        .await
+        .expect("failed ADD PRIMARY KEY must leave no constraint behind");
+    let missing = client
+        .batch_execute("DROP INDEX t_pkey")
+        .await
+        .expect_err("no index metadata may remain");
+    assert!(sqlstate(&missing) == "42704");
+}
+
+#[tokio::test]
+async fn alter_table_add_primary_key_rejects_existing_nulls_before_duplicates() {
+    use assert2::assert;
+    let client = connect(spawn().await).await;
+    client
+        .batch_execute(
+            "CREATE TABLE t (id int4, v text); \
+             INSERT INTO t VALUES (1, 'a'), (1, 'b'), (NULL, 'c')",
+        )
+        .await
+        .expect("seed NULLs and duplicates");
+
+    // PostgreSQL validates NOT NULL before building the index, so the NULL
+    // wins over the duplicate: 23502 with PG's ALTER TABLE message shape.
+    let err = client
+        .batch_execute("ALTER TABLE t ADD PRIMARY KEY (id)")
+        .await
+        .expect_err("existing NULL must fail the ADD");
+    let db = err.as_db_error().expect("db error");
+    assert!(db.code().code() == "23502");
+    assert!(db.message() == "column \"id\" of relation \"t\" contains null values");
+
+    // The column did not become NOT NULL: another NULL still inserts.
+    client
+        .batch_execute("INSERT INTO t VALUES (NULL, 'd')")
+        .await
+        .expect("failed ADD PRIMARY KEY must not mark columns NOT NULL");
+}
+
+#[tokio::test]
+async fn alter_table_add_primary_key_rejects_a_second_primary_key() {
+    use assert2::assert;
+    let client = connect(spawn().await).await;
+    client
+        .batch_execute("CREATE TABLE t (id int4 PRIMARY KEY, v int4)")
+        .await
+        .expect("create with CREATE TABLE-time primary key");
+    let err = client
+        .batch_execute("ALTER TABLE t ADD PRIMARY KEY (v)")
+        .await
+        .expect_err("a second primary key is invalid");
+    let db = err.as_db_error().expect("db error");
+    assert!(db.code().code() == "42P16");
+    assert!(db.message() == "multiple primary keys for table \"t\" are not allowed");
+
+    // The ALTER-added primary key records the same constraint marker, so a
+    // second ALTER is rejected identically.
+    client
+        .batch_execute("CREATE TABLE u (a int4, b int4); ALTER TABLE u ADD PRIMARY KEY (a)")
+        .await
+        .expect("first ALTER-added primary key");
+    let again = client
+        .batch_execute("ALTER TABLE u ADD PRIMARY KEY (b)")
+        .await
+        .expect_err("second ALTER-added primary key");
+    assert!(sqlstate(&again) == "42P16");
+}
+
+#[tokio::test]
+async fn alter_table_add_primary_key_fails_clear_on_sharded_missing_and_bad_targets() {
+    use assert2::assert;
+    let client = connect(spawn().await).await;
+    client
+        .batch_execute("CREATE TABLE s (id int4) SHARDED")
+        .await
+        .expect("create sharded table");
+    let sharded = client
+        .batch_execute("ALTER TABLE s ADD PRIMARY KEY (id)")
+        .await
+        .expect_err("sharded tables have no global enforcement");
+    assert!(sqlstate(&sharded) == "0A000");
+
+    let missing_table = client
+        .batch_execute("ALTER TABLE nope ADD PRIMARY KEY (id)")
+        .await
+        .expect_err("undefined table");
+    assert!(sqlstate(&missing_table) == "42P01");
+
+    client
+        .batch_execute("CREATE TABLE t (id int4)")
+        .await
+        .expect("create plain table");
+    let missing_column = client
+        .batch_execute("ALTER TABLE t ADD PRIMARY KEY (nope)")
+        .await
+        .expect_err("undefined column");
+    assert!(sqlstate(&missing_column) == "42703");
+
+    client
+        .batch_execute("CREATE VIEW v AS SELECT id FROM t")
+        .await
+        .expect("create view");
+    let view = client
+        .batch_execute("ALTER TABLE v ADD PRIMARY KEY (id)")
+        .await
+        .expect_err("views are not tables");
+    assert!(sqlstate(&view) == "42809");
+}
+
+#[tokio::test]
+async fn alter_table_add_named_constraint_primary_key_uses_the_given_name() {
+    use assert2::assert;
+    let client = connect(spawn().await).await;
+    client
+        .batch_execute(
+            "CREATE TABLE t (id int4); \
+             INSERT INTO t VALUES (1); \
+             ALTER TABLE t ADD CONSTRAINT custom_pk PRIMARY KEY (id)",
+        )
+        .await
+        .expect("named constraint form");
+    let dup = client
+        .batch_execute("INSERT INTO t VALUES (1)")
+        .await
+        .expect_err("duplicate under the named constraint");
+    let db = dup.as_db_error().expect("db error");
+    assert!(db.code().code() == "23505");
+    assert!(db.message().contains("custom_pk"));
+}

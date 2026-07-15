@@ -244,6 +244,11 @@ pub(crate) fn execute_ddl(
                 ),
             ),
         },
+        Statement::AlterTableAddPrimaryKey {
+            table,
+            constraint_name,
+            columns,
+        } => alter_table_add_primary_key_ops(kv, table, constraint_name.as_deref(), columns),
         Statement::CreateView {
             name,
             definition,
@@ -726,6 +731,86 @@ fn create_table_constraint_index(
             crabka_pgcatalog::IndexConstraint::Unique
         }),
     }
+}
+
+/// Build the `ALTER TABLE … ADD PRIMARY KEY` batch: validate existing rows
+/// (NOT NULL first, then uniqueness through the shared unique-index backfill,
+/// matching PostgreSQL's error order), mark the key columns NOT NULL in the
+/// schema record, and create the constraint-backed `<table>_pkey` local unique
+/// index — all-or-nothing, nothing commits on any error.
+fn alter_table_add_primary_key_ops(
+    kv: &dyn Kv,
+    table_name: &str,
+    constraint_name: Option<&str>,
+    columns: &[String],
+) -> Result<(QueryResult, Vec<crabka_pgkv::WriteOp>), ExecError> {
+    let table = match crabka_pgcatalog::get_table(kv, table_name) {
+        Ok(table) => table,
+        Err(crabka_pgcatalog::CatalogError::UndefinedTable(_))
+            if crabka_pgcatalog::get_view(kv, table_name).is_ok() =>
+        {
+            return Err(ExecError::WrongObjectType(format!(
+                "\"{table_name}\" is not a table"
+            )));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if table.foreign.is_some() {
+        return Err(ExecError::WrongObjectType(format!(
+            "\"{table_name}\" is not a table"
+        )));
+    }
+    if table.sharded {
+        return Err(ExecError::Unsupported(
+            "PRIMARY KEY and UNIQUE constraints on sharded tables are not supported until global enforcement exists"
+                .into(),
+        ));
+    }
+    let indexes = crabka_pgcatalog::list_table_indexes(kv, table_name)?;
+    if indexes
+        .iter()
+        .any(|index| index.constraint == Some(crabka_pgcatalog::IndexConstraint::PrimaryKey))
+    {
+        return Err(ExecError::InvalidTableDefinition(format!(
+            "multiple primary keys for table \"{table_name}\" are not allowed"
+        )));
+    }
+    // Resolve the key columns first so a bad name is 42703 before any data scan.
+    let key_column_indices = columns
+        .iter()
+        .map(|column| {
+            table
+                .column_index(column)
+                .ok_or_else(|| ExecError::UndefinedColumn(column.clone()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    // PostgreSQL sets the key columns NOT NULL before building the index, so an
+    // existing NULL is 23502 ahead of any duplicate-key 23505. One live-row scan
+    // feeds both the NULL validation and the unique-index backfill.
+    let all_committed = all_committed_snapshot();
+    let rows = scan_live(kv, kv, &all_committed, &all_committed, None, &table)?;
+    for (_rowid, _xmin, row) in &rows {
+        for (column, column_index) in columns.iter().zip(&key_column_indices) {
+            if row[*column_index].is_null() {
+                return Err(ExecError::ColumnContainsNullValues {
+                    column: column.clone(),
+                    table: table_name.to_string(),
+                });
+            }
+        }
+    }
+    let mut ops = crabka_pgcatalog::set_columns_not_null_ops(kv, table_name, columns)?;
+    let new_index = crabka_pgcatalog::NewIndex {
+        name: constraint_name.map_or_else(|| format!("{table_name}_pkey"), str::to_string),
+        columns: columns.to_vec(),
+        unique: true,
+        placement: crabka_pgcatalog::IndexPlacement::Local,
+        constraint: Some(crabka_pgcatalog::IndexConstraint::PrimaryKey),
+    };
+    let (index, index_ops) = crabka_pgcatalog::create_constraint_index_ops(kv, &table, &new_index)?;
+    ops.extend(index_ops);
+    ops.extend(local_index_backfill_ops_for_rows(&rows, &table, &index)?);
+    Ok((command("ALTER TABLE"), ops))
 }
 
 fn create_table_primary_key_columns<'a>(
@@ -1579,7 +1664,11 @@ pub(crate) fn ddl_requires_unique_local_serialization(stmt: &Statement) -> bool 
             unique: true,
             placement: crabka_pgparser::ast::IndexPlacement::Local,
             ..
-        } => true,
+        }
+        // ADD PRIMARY KEY back-validates and backfills a local unique index,
+        // so it must wait out in-flight writers exactly like CREATE UNIQUE
+        // INDEX does.
+        | Statement::AlterTableAddPrimaryKey { .. } => true,
         Statement::CreateTable {
             columns,
             constraints,
@@ -1645,10 +1734,22 @@ fn local_index_backfill_ops(
 ) -> Result<Vec<crabka_pgkv::WriteOp>, ExecError> {
     let all_committed = all_committed_snapshot();
     let rows = scan_live(kv, kv, &all_committed, &all_committed, None, table)?;
+    local_index_backfill_ops_for_rows(&rows, table, index)
+}
+
+/// Backfill index entries for already-scanned live rows. A UNIQUE index
+/// back-validates the existing data: a duplicate non-NULL key is a 23505
+/// before any op is committed (rows with a NULL key column are not indexed,
+/// matching SQL NULL-distinct semantics).
+fn local_index_backfill_ops_for_rows(
+    rows: &[(u64, u64, Vec<Datum>)],
+    table: &Table,
+    index: &crabka_pgcatalog::Index,
+) -> Result<Vec<crabka_pgkv::WriteOp>, ExecError> {
     let mut seen = HashSet::new();
     let mut ops = Vec::with_capacity(rows.len());
     for (rowid, _xmin, row) in rows {
-        let values = indexed_values(table, index, &row)?;
+        let values = indexed_values(table, index, row)?;
         if values.iter().any(Datum::is_null) {
             continue;
         }
@@ -1656,7 +1757,7 @@ fn local_index_backfill_ops(
             return Err(ExecError::UniqueViolation(index.name.clone()));
         }
         ops.push(crabka_pgkv::WriteOp::Put {
-            key: crabka_pgkv::key::secondary_index_entry_key(table.id, index.id, &values, rowid),
+            key: crabka_pgkv::key::secondary_index_entry_key(table.id, index.id, &values, *rowid),
             value: Vec::new(),
         });
     }
@@ -2716,6 +2817,16 @@ fn coerce(
         (Datum::Timestamptz(ts), ColumnType::Timestamptz) => Datum::Timestamptz(ts),
         (Datum::Interval(iv), ColumnType::Interval) => Datum::Interval(iv),
         (v, target) => {
+            // Assignment-context implicit casts — PostgreSQL's pg_cast
+            // castcontext 'i'/'a' pairs (crabka subset): notably
+            // timestamptz ↔ timestamp and date → timestamp/timestamptz, all
+            // rotated through the session time zone. Anything outside that
+            // strict subset (e.g. int ↔ text) keeps erroring with 42804.
+            if let Some(from) = v.column_type()
+                && crabka_pgtypes::cast::assignment_cast_allowed(from, target)
+            {
+                return Ok(crabka_pgtypes::cast::cast(&v, target, &ctx.time_zone)?);
+            }
             return Err(ExecError::TypeMismatch(format!(
                 "column is of type {} but expression is of type {}",
                 target.name(),

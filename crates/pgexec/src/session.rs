@@ -760,6 +760,7 @@ fn establishes_transaction_activity(stmt: &Statement) -> bool {
         | Statement::DropIndex { .. }
         | Statement::DropTable { .. }
         | Statement::AlterTableRename { .. }
+        | Statement::AlterTableAddPrimaryKey { .. }
         | Statement::CreateView { .. }
         | Statement::DropView { .. }
         | Statement::CreateFdw { .. }
@@ -1392,6 +1393,7 @@ impl SqlSession {
             | Statement::DropIndex { .. }
             | Statement::DropTable { .. }
             | Statement::AlterTableRename { .. }
+            | Statement::AlterTableAddPrimaryKey { .. }
             | Statement::CreateView { .. }
             | Statement::DropView { .. }
             // SP40: FDW DDL funnels through the same catalog-lock + execute_ddl + commit

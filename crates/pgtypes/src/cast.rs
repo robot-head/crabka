@@ -69,6 +69,47 @@ pub fn cast_allowed(from: ColumnType, to: ColumnType) -> bool {
     }
 }
 
+/// Is an *implicit-or-assignment* cast from `from` to `to` defined — the pairs
+/// PostgreSQL 18's `pg_cast` marks `castcontext` `'i'` or `'a'`, restricted to
+/// crabka's types? A strict SUBSET of [`cast_allowed`]: assignment (INSERT /
+/// UPDATE SET into a column) converts through these pairs automatically, while
+/// everything else keeps requiring an explicit `CAST`.
+///
+/// The allowed pairs and their `pg_cast` contexts:
+///   * identity `T → T` (no cast needed);
+///   * numeric family (`int4`/`int8`/`float8`/`numeric`) interconversion —
+///     widenings are `'i'`, narrowings are `'a'`;
+///   * string family (`text`/`varchar`/`char`) interconversion — `'i'`/`'a'`
+///     (length re-coercion applies at assignment);
+///   * `date → timestamp` and `date → timestamptz` — `'i'`;
+///   * `timestamp → timestamptz` — `'i'`; `timestamptz → timestamp` — `'a'`
+///     (both rotate through the session time zone).
+///
+/// Deliberately NOT allowed (explicit-only in this matrix):
+///   * non-string ↔ string (PostgreSQL's I/O-conversion casts are
+///     explicit-only since 8.3 — `INSERT` of an `int4` into a `text` column
+///     errors, and vice versa);
+///   * `bool ↔ int4` (`castcontext` `'e'`);
+///   * `timestamp`/`timestamptz` → `date`/`time` (kept explicit-only here as a
+///     conservative subset, though PostgreSQL marks these `'a'`);
+///   * everything involving `interval`, `bytea`, `uuid`, `regclass` across
+///     type families.
+pub fn assignment_cast_allowed(from: ColumnType, to: ColumnType) -> bool {
+    use ColumnType::{Date, Timestamp, Timestamptz};
+    let num_family = |t: ColumnType| {
+        matches!(t, ColumnType::Int4 | ColumnType::Int8 | ColumnType::Float8) || t.is_numeric()
+    };
+    match (from, to) {
+        (a, b) if a == b => true,
+        _ if num_family(from) && num_family(to) => true,
+        _ if from.is_string() && to.is_string() => true,
+        (Date, Timestamp | Timestamptz) | (Timestamp, Timestamptz) | (Timestamptz, Timestamp) => {
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Perform an explicit cast of a (possibly NULL) `Datum` to `to`. NULL casts to
 /// NULL of the target type. A text-parse failure is 22P02; a numeric overflow is
 /// 22003; an undefined `(from, to)` pair is 42846 — though callers that gate on
@@ -375,6 +416,97 @@ mod tests {
     }
 
     // ---- the static matrix ----
+
+    #[test]
+    fn assignment_cast_matrix_is_a_strict_subset_of_the_explicit_matrix() {
+        use ColumnType::{
+            Bool, Bytea, Date, Float8, Int4, Int8, Interval, Regclass, Text, Time, Timestamp,
+            Timestamptz, Uuid,
+        };
+        use assert2::assert;
+        let types = [
+            Bool,
+            Int4,
+            Int8,
+            Float8,
+            ColumnType::Numeric(None),
+            Text,
+            ColumnType::Varchar(Some(8)),
+            ColumnType::Char(Some(8)),
+            Date,
+            Time,
+            Timestamp,
+            Timestamptz,
+            Interval,
+            Bytea,
+            Uuid,
+            Regclass,
+        ];
+        for from in types {
+            for to in types {
+                assert!(
+                    !assignment_cast_allowed(from, to) || cast_allowed(from, to),
+                    "assignment allows {from:?} -> {to:?} but explicit does not"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn assignment_cast_allowed_matches_pg_cast_implicit_and_assignment_pairs() {
+        use ColumnType::{Bool, Date, Float8, Int4, Int8, Text, Time, Timestamp, Timestamptz};
+        use assert2::assert;
+        let numeric = ColumnType::Numeric(None);
+        // Allowed: pg_cast castcontext 'i'/'a' pairs among crabka's types.
+        for (from, to) in [
+            // Numeric family widenings ('i') and narrowings ('a').
+            (Int4, Int8),
+            (Int8, Int4),
+            (Int4, Float8),
+            (Float8, Int4),
+            (Int8, numeric),
+            (numeric, Float8),
+            // date → timestamp/timestamptz ('i').
+            (Date, Timestamp),
+            (Date, Timestamptz),
+            // timestamp → timestamptz ('i'); timestamptz → timestamp ('a').
+            (Timestamp, Timestamptz),
+            (Timestamptz, Timestamp),
+            // String family ('i'/'a').
+            (Text, ColumnType::Varchar(Some(4))),
+            (ColumnType::Varchar(None), Text),
+            (Text, ColumnType::Char(Some(4))),
+        ] {
+            assert!(assignment_cast_allowed(from, to), "{from:?} -> {to:?}");
+        }
+        // NOT allowed: explicit-only pairs must keep requiring a CAST.
+        for (from, to) in [
+            // I/O-conversion casts (explicit-only since PostgreSQL 8.3).
+            (Int4, Text),
+            (Text, Int4),
+            (Float8, Text),
+            (Text, Timestamp),
+            (Timestamptz, Text),
+            (Bool, Text),
+            (Text, Bool),
+            // bool ↔ int4 is castcontext 'e'.
+            (Bool, Int4),
+            (Int4, Bool),
+            // Conservative subset: temporal truncations stay explicit here.
+            (Timestamp, Date),
+            (Timestamptz, Date),
+            (Timestamp, Time),
+            (Timestamptz, Time),
+            // Cross-family nonsense.
+            (Int4, Timestamp),
+            (Timestamp, Int4),
+            (Date, Int8),
+            (ColumnType::Interval, Timestamp),
+            (Time, Timestamp),
+        ] {
+            assert!(!assignment_cast_allowed(from, to), "{from:?} -> {to:?}");
+        }
+    }
 
     #[test]
     fn cast_allowed_matches_the_postgres_matrix() {

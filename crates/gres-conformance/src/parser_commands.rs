@@ -460,6 +460,7 @@ fn statement_shape(statement: &Statement) -> &'static str {
         Statement::DropTable { .. } => "DropTable",
         Statement::DropView { .. } => "DropView",
         Statement::AlterTableRename { .. } => "AlterTableRename",
+        Statement::AlterTableAddPrimaryKey { .. } => "AlterTableAddPrimaryKey",
         Statement::Insert { .. } => "Insert",
         Statement::Truncate { .. } => "Truncate",
         Statement::Vacuum => "Vacuum",
