@@ -129,6 +129,53 @@ async fn aborted_writes_are_pruned_from_the_chain() {
     assert!(col0(&after[0]) == vec![Some("1".into())]);
 }
 
+#[tokio::test]
+async fn sweep_reclaims_delete_tombstones_and_aborted_insert_only_rows() {
+    let engine = SqlEngine::new();
+    let mut s = engine.connect();
+    run(&mut s, "CREATE TABLE q (id int4)").await;
+    run(&mut s, "INSERT INTO q VALUES (1), (2), (3), (4), (5)").await;
+    // Write-path pruning never revisits these rows: the DELETE's stamped
+    // versions commit with the batch, and the aborted INSERT's rows are never
+    // written again (rowids are monotonic).
+    run(&mut s, "DELETE FROM q").await;
+    run(&mut s, "BEGIN").await;
+    run(&mut s, "INSERT INTO q VALUES (100), (101)").await;
+    run(&mut s, "ROLLBACK").await;
+    assert!(stored_versions(&engine, "q") == 7);
+
+    let swept = engine.sweep_dead_versions().await.expect("sweep");
+
+    assert!(swept == 7);
+    assert!(stored_versions(&engine, "q") == 0);
+    let result = run(&mut s, "SELECT count(*) FROM q").await;
+    assert!(col0(&result[0]) == vec![Some("0".into())]);
+}
+
+#[tokio::test]
+async fn sweep_holds_versions_a_live_snapshot_can_still_see() {
+    let engine = SqlEngine::new();
+    let mut writer = engine.connect();
+    run(&mut writer, "CREATE TABLE t (id int4)").await;
+    run(&mut writer, "INSERT INTO t VALUES (1), (2), (3)").await;
+
+    let mut reader = engine.connect();
+    run(&mut reader, "BEGIN ISOLATION LEVEL REPEATABLE READ").await;
+    let before = run(&mut reader, "SELECT count(*) FROM t").await;
+    assert!(col0(&before[0]) == vec![Some("3".into())]);
+    run(&mut writer, "DELETE FROM t").await;
+
+    // The reader's leased snapshot pins the horizon at or below the deleting
+    // xid, so the sweep must not reclaim the tombstones yet.
+    assert!(engine.sweep_dead_versions().await.expect("sweep") == 0);
+    let held = run(&mut reader, "SELECT count(*) FROM t").await;
+    assert!(col0(&held[0]) == vec![Some("3".into())]);
+    run(&mut reader, "COMMIT").await;
+
+    assert!(engine.sweep_dead_versions().await.expect("sweep") == 3);
+    assert!(stored_versions(&engine, "t") == 0);
+}
+
 /// The measured failure mode this guards against: every UPDATE of one row
 /// appended a dead version forever, so update N re-scanned N versions and
 /// throughput decayed hyperbolically (about 20x slower after 24k rewrites of

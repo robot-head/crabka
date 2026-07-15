@@ -639,6 +639,9 @@ pub struct GresRuntime {
     range_service: Option<Arc<dyn crabka_gres_ranges::RangeService>>,
     range_transfer: Option<Arc<dyn crabka_gres_ranges::RangeTransferCapability>>,
     staged_transfer: Option<Arc<LiveMultiRangeTransfer>>,
+    /// Aborts the single-node dead-version sweeper with this runtime, so the
+    /// swept engine (and its durable store lock) can be dropped and reopened.
+    version_sweeper: Option<VersionSweeperGuard>,
 }
 
 /// Test-only fault points for live-topology preparation.
@@ -684,6 +687,23 @@ impl GresRuntime {
             range_service: None,
             range_transfer: None,
             staged_transfer: None,
+            version_sweeper: None,
+        }
+    }
+
+    /// Multi-range runtime over a dynamic range service and live transfer.
+    fn live_multirange(
+        gateway: crabka_gres_ranges::MultiRangeTenant,
+        range_service: Arc<dyn crabka_gres_ranges::RangeService>,
+        transfer: Arc<LiveMultiRangeTransfer>,
+    ) -> Self {
+        Self {
+            engine: RuntimeEngine::Multi(Box::new(gateway)),
+            checkpoint_runtime: None,
+            range_service: Some(range_service),
+            range_transfer: Some(transfer.clone()),
+            staged_transfer: Some(transfer),
+            version_sweeper: None,
         }
     }
 
@@ -700,6 +720,7 @@ impl GresRuntime {
             range_service: Some(range_service),
             range_transfer: None,
             staged_transfer: None,
+            version_sweeper: None,
         }
     }
 
@@ -713,6 +734,7 @@ impl GresRuntime {
             range_service: None,
             range_transfer: None,
             staged_transfer: None,
+            version_sweeper: None,
         }
     }
 
@@ -2319,7 +2341,56 @@ async fn open_runtime_with_tenant_record(
         }
         None => Ok(SqlEngine::new()),
     }?;
-    Ok(GresRuntime::new(engine))
+    let sweeper = spawn_single_node_version_sweeper(&engine, SINGLE_NODE_SWEEP_INTERVAL);
+    let mut runtime = GresRuntime::new(engine);
+    runtime.version_sweeper = Some(sweeper);
+    Ok(runtime)
+}
+
+/// How often a single-node engine sweeps dead MVCC row versions.
+const SINGLE_NODE_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Aborts the version-sweeper task when dropped, releasing the engine handle
+/// it holds — and with it the durable store lock, so a runtime restart can
+/// reopen the same `--data-dir`.
+struct VersionSweeperGuard(tokio::task::AbortHandle);
+
+impl Drop for VersionSweeperGuard {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Periodically sweep dead MVCC row versions on a single-node engine, until
+/// the returned guard drops or the engine itself does.
+///
+/// The write path prunes hot rows opportunistically, but versions made dead
+/// by a final DELETE or an aborted INSERT-only transaction sit on rows no
+/// statement touches again; this sweep reclaims them (and anything left over
+/// from before a restart — the first tick fires immediately). The sweep is a
+/// no-op on replicated engines, which prune through checkpoint rewrites. The
+/// task holds the engine only weakly between sweeps, so it never pins the
+/// durable store open past the runtime's drop.
+fn spawn_single_node_version_sweeper(
+    engine: &SqlEngine,
+    every: std::time::Duration,
+) -> VersionSweeperGuard {
+    let sweeper = engine.dead_version_sweeper();
+    let task = tokio::spawn(async move {
+        let mut ticks = tokio::time::interval(every);
+        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticks.tick().await;
+            match sweeper.sweep().await {
+                Ok(Some(_)) => {}
+                Ok(None) => break, // the engine is gone; nothing left to sweep
+                Err(error) => {
+                    tracing::warn!(?error, "single-node dead-version sweep failed");
+                }
+            }
+        }
+    });
+    VersionSweeperGuard(task.abort_handle())
 }
 
 /// Construct a substrate-mode engine from a disposable cache store and WAL seam.
@@ -3285,13 +3356,11 @@ async fn open_live_multirange_tenant(
             hosted_service = hosted_service.with_tso(tso_rpc);
         }
         dynamic_service.replace(hosted_service);
-        return Ok(GresRuntime {
-            engine: RuntimeEngine::Multi(Box::new(gateway)),
-            checkpoint_runtime: None,
-            range_service: Some(dynamic_service),
-            range_transfer: Some(transfer.clone()),
-            staged_transfer: Some(transfer),
-        });
+        return Ok(GresRuntime::live_multirange(
+            gateway,
+            dynamic_service,
+            transfer,
+        ));
     }
     let mut generations = transfer
         .ranges
@@ -3431,13 +3500,11 @@ async fn open_live_multirange_tenant(
         controlled_service = controlled_service.with_tso(tso_rpc);
     }
     dynamic_service.replace(controlled_service);
-    Ok(GresRuntime {
-        engine: RuntimeEngine::Multi(Box::new(gateway)),
-        checkpoint_runtime: None,
-        range_service: Some(dynamic_service),
-        range_transfer: Some(transfer.clone()),
-        staged_transfer: Some(transfer),
-    })
+    Ok(GresRuntime::live_multirange(
+        gateway,
+        dynamic_service,
+        transfer,
+    ))
 }
 
 fn parse_host_ranges(
@@ -7218,6 +7285,47 @@ mod tests {
             versions <= 4,
             "single-node engines must prune dead versions, found {versions}"
         );
+    }
+
+    #[tokio::test]
+    async fn single_node_version_sweeper_reclaims_rows_no_statement_revisits() {
+        // Write-path pruning never revisits a deleted row, so the periodic
+        // sweeper must reclaim its tombstone.
+        let engine = SqlEngine::new();
+        let handle = engine.clone_handle();
+        let _sweeper =
+            spawn_single_node_version_sweeper(&engine, std::time::Duration::from_millis(20));
+        let mut session = RuntimeEngine::Single(Box::new(engine)).connect();
+        session
+            .simple_query("CREATE TABLE swept (id int4)")
+            .await
+            .expect("create");
+        session
+            .simple_query("INSERT INTO swept VALUES (1), (2), (3)")
+            .await
+            .expect("seed");
+        session
+            .simple_query("DELETE FROM swept")
+            .await
+            .expect("delete");
+
+        let table = handle.catalog_table("swept").expect("table");
+        let stored = || {
+            handle
+                .kv_handle()
+                .scan_prefix(&crabka_pgkv::key::table_prefix(table.id))
+                .expect("scan versions")
+                .len()
+        };
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while stored() != 0 {
+            assert2::assert!(
+                tokio::time::Instant::now() < deadline,
+                "sweeper did not reclaim delete tombstones, {} versions remain",
+                stored()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
     }
 
     #[tokio::test]

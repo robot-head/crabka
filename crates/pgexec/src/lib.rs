@@ -378,6 +378,50 @@ impl SqlEngine {
         Arc::new(move || checkpoint_garbage_horizon(procarray.as_ref(), kv.as_ref()))
     }
 
+    /// Sweep the plain (unsharded) version keyspace once, deleting every row
+    /// version that is dead below the current garbage horizon. Returns the
+    /// number of versions pruned.
+    ///
+    /// The write path prunes a row's chain only when a later statement
+    /// supersedes or deletes one of its versions, so garbage on rows no
+    /// statement ever touches again — the version a final DELETE stamped, or
+    /// the versions an aborted INSERT-only transaction left behind — is
+    /// reclaimed here instead. Deleting a dead version is monotone-safe
+    /// without row locks: deadness below the horizon can only become more
+    /// settled, concurrent writers only rewrite versions that are live in the
+    /// durable state, and a double delete of the same key is a no-op.
+    ///
+    /// A no-op (returning 0) on `Replicated` engines: they prune through
+    /// checkpoint rewrites, and their followers serve reads whose snapshots
+    /// hold no leases on this node.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the keyspace scan, a clog lookup, or a delete
+    /// batch fails.
+    pub async fn sweep_dead_versions(&self) -> Result<usize, ExecError> {
+        sweep_dead_versions_once(
+            self.kv.as_ref(),
+            self.procarray.as_ref(),
+            self.committer.as_ref(),
+            self.persist_mode,
+        )
+        .await
+    }
+
+    /// A sweeping handle that does NOT keep this engine alive: it holds only
+    /// weak references, so a periodic sweeper task never pins the engine's
+    /// durable store open past the engine's own drop (a restart can reopen
+    /// the same data dir immediately).
+    pub fn dead_version_sweeper(&self) -> DeadVersionSweeper {
+        DeadVersionSweeper {
+            kv: Arc::downgrade(&self.kv),
+            procarray: Arc::downgrade(&self.procarray),
+            committer: Arc::downgrade(&self.committer),
+            persist_mode: self.persist_mode,
+        }
+    }
+
     /// Build an engine whose reads come from `sm_kv` (the applied state machine)
     /// and whose writes are proposed through `committer` (a RaftCommitter). Uses
     /// the Replicated persist mode so counters fold into the proposed batch.
@@ -1785,6 +1829,82 @@ mod cursor_terminal_tests {
             .expect("seed high-bucket physical key");
 
         assert_eq!(engine.scan_local_terminal(&table).unwrap(), 8);
+    }
+}
+
+/// Sweep dead versions once for [`SqlEngine::sweep_dead_versions`] and
+/// [`DeadVersionSweeper::sweep`].
+async fn sweep_dead_versions_once(
+    kv: &dyn Kv,
+    procarray: &ProcArray,
+    committer: &dyn crate::commit::Committer,
+    persist_mode: PersistMode,
+) -> Result<usize, ExecError> {
+    if persist_mode != PersistMode::Durable {
+        return Ok(0);
+    }
+    let horizon = procarray.garbage_horizon();
+    // User tables start at id 1; the 5-byte 0xFF bound sorts after every
+    // primary-index version key (see `reacquire_in_doubt_locks`).
+    let start = crabka_pgkv::key::table_prefix(crabka_pgkv::key::SYSTEM_TABLE_ID + 1);
+    let end = [0xFFu8; 5];
+    // Plain version keys only: row key (table, INDEX_PRIMARY, rowid) plus
+    // the 8-byte xid suffix. Hash-sharded and index keys differ in length;
+    // timestamp tuple values fail the header decode inside the rule check.
+    let version_key_len = crabka_pgkv::key::row_key(0, 0).len() + 8;
+    let mut ops = Vec::new();
+    for (key, value) in kv.scan_range(&start, &end)? {
+        if key.len() != version_key_len || crabka_pgkv::key::table_rowid_of(&key).is_none() {
+            continue;
+        }
+        if crate::prune::is_dead_version(kv, horizon, &value)? {
+            ops.push(crabka_pgkv::WriteOp::Delete { key });
+        }
+    }
+    let pruned = ops.len();
+    for chunk in ops.chunks(512) {
+        committer.commit(chunk.to_vec()).await?;
+    }
+    Ok(pruned)
+}
+
+/// Weak handle for a background dead-version sweeper.
+///
+/// Obtained from [`SqlEngine::dead_version_sweeper`]. Between sweeps it holds
+/// no strong reference to the engine, so the engine (and its durable store
+/// lock) drops on schedule even while a sweeper task retains this handle.
+pub struct DeadVersionSweeper {
+    kv: std::sync::Weak<dyn Kv>,
+    procarray: std::sync::Weak<ProcArray>,
+    committer: std::sync::Weak<dyn crate::commit::Committer>,
+    persist_mode: PersistMode,
+}
+
+impl DeadVersionSweeper {
+    /// Sweep once, as [`SqlEngine::sweep_dead_versions`] does. Returns
+    /// `Ok(None)` once the engine has been dropped — the caller's sweep loop
+    /// should exit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the keyspace scan, a clog lookup, or a delete
+    /// batch fails.
+    pub async fn sweep(&self) -> Result<Option<usize>, ExecError> {
+        let (Some(kv), Some(procarray), Some(committer)) = (
+            self.kv.upgrade(),
+            self.procarray.upgrade(),
+            self.committer.upgrade(),
+        ) else {
+            return Ok(None);
+        };
+        sweep_dead_versions_once(
+            kv.as_ref(),
+            procarray.as_ref(),
+            committer.as_ref(),
+            self.persist_mode,
+        )
+        .await
+        .map(Some)
     }
 }
 

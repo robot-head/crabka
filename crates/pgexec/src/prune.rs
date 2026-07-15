@@ -59,6 +59,24 @@ pub(crate) fn prune_candidates(ops: &[WriteOp]) -> Vec<(u32, u64)> {
     rows.into_iter().collect()
 }
 
+/// Is one stored version value dead below `horizon`, per the module rules?
+/// `false` for anything that is not an xid tuple (timestamp tuples, index
+/// payloads).
+///
+/// # Errors
+///
+/// Returns an error when a clog lookup fails.
+pub(crate) fn is_dead_version(kv: &dyn Kv, horizon: u64, value: &[u8]) -> Result<bool, ExecError> {
+    let Ok((xmin, xmax)) = version::decode_tuple_header(value) else {
+        return Ok(false);
+    };
+    if xmax != INVALID_XID && xmax < horizon && matches!(clog::get(kv, xmax)?, XidStatus::Committed)
+    {
+        return Ok(true);
+    }
+    Ok(xmin != FROZEN_XID && xmin < horizon && matches!(clog::get(kv, xmin)?, XidStatus::Aborted))
+}
+
 /// Append `Delete` ops for every version of `rows` that is dead below
 /// `horizon`, per the module rules. Decisions read the durable pre-batch
 /// state, which never overlaps the batch's own `Put`s: a statement only
@@ -77,17 +95,7 @@ pub(crate) fn append_prune_ops(
     for &(table, rowid) in rows {
         let prefix = crabka_pgkv::key::row_key(table, rowid);
         for (key, value) in kv.scan_prefix(&prefix)? {
-            let Ok((xmin, xmax)) = version::decode_tuple_header(&value) else {
-                continue; // not an xid tuple
-            };
-            let superseded = xmax != INVALID_XID
-                && xmax < horizon
-                && matches!(clog::get(kv, xmax)?, XidStatus::Committed);
-            let aborted = !superseded
-                && xmin != FROZEN_XID
-                && xmin < horizon
-                && matches!(clog::get(kv, xmin)?, XidStatus::Aborted);
-            if superseded || aborted {
+            if is_dead_version(kv, horizon, &value)? {
                 ops.push(WriteOp::Delete { key });
             }
         }
