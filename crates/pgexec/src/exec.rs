@@ -3696,25 +3696,26 @@ fn try_execute_partial_aggregate_pushdown(
 /// Stream a supported local aggregate through per-page partial-aggregate
 /// folding instead of materializing every visible row before folding.
 ///
-/// Fires only for the exact shape the partial-aggregate pushdown model already
-/// supports, on exactly one ordinary non-sharded base table: plain
-/// `count`/`sum`/`min`/`max`/`avg` calls over the whole projection (or the
-/// narrow grouped shape), with a WHERE that parses into the strict pushdown
-/// predicate subset. Everything else — `DISTINCT`, `HAVING`, whole-row reads,
+/// Fires on exactly one ordinary non-sharded base table when every projection
+/// item decomposes into scalar expressions over pushdown-model aggregate calls
+/// (`CAST(count(*) AS BIGINT)`, `COALESCE(sum(x), 0)`, `sum(a) / count(*)`, …
+/// — or the narrow grouped shape), with a WHERE that parses into the strict
+/// pushdown predicate subset. Everything else — `DISTINCT`, `HAVING`, bare
+/// ungrouped columns, aggregates over non-column arguments, whole-row reads,
 /// non-pushdown filters — keeps the materializing scan and its whole-result
 /// memory budget.
 fn try_execute_local_streaming_aggregate(
     read_ctx: &crate::subquery::SubCtx<'_>,
     s: &SelectStmt,
 ) -> Result<Option<Relation>, ExecError> {
-    if !is_plain_partial_aggregate_select(s) {
+    if !is_streamable_aggregate_select(s) {
         return Ok(None);
     }
     let Some((table, qualifier)) = single_local_base_table(read_ctx.catalog_kv, s, read_ctx.ctes)?
     else {
         return Ok(None);
     };
-    let Some(specs) = local_streaming_aggregate_specs(&table, s) else {
+    let Some(plan) = local_streaming_aggregate_plan(&table, s) else {
         return Ok(None);
     };
     let Ok(predicate) = crate::plan_dist::strict_predicate_for_filter(&table, s.filter.as_ref())
@@ -3727,7 +3728,7 @@ fn try_execute_local_streaming_aggregate(
         return Ok(None);
     }
     let scope = Scope::single(&table, &qualifier);
-    let (fields, _out_exprs, tys) = resolve_projection(&s.projection, &scope)?;
+    let (fields, out_exprs, tys) = resolve_projection(&s.projection, &scope)?;
     let states = crate::scanner::collect_partial_aggregates_bounded(
         read_ctx.range_scanner,
         ScanRequest {
@@ -3745,10 +3746,32 @@ fn try_execute_local_streaming_aggregate(
             partial_aggregate: None,
             top_k: None,
         },
-        &specs,
+        plan.specs(),
         crate::scanner::BLOCKING_QUERY_MEMORY_BYTES,
     )?;
-    let rows = finalize_streaming_aggregate_rows(states, &specs, s.group_by.is_empty())?;
+    let rows = match &plan {
+        StreamingAggregatePlan::Scalar { calls, specs } => {
+            let values = finalize_scalar_streaming_aggregates(states, specs)?;
+            vec![crate::agg::eval_over_aggregate_values(
+                &out_exprs,
+                &scope,
+                calls,
+                &values,
+                read_ctx.eval_ctx,
+            )?]
+        }
+        StreamingAggregatePlan::Grouped(spec) => {
+            let Ok([state]) = <[Vec<ScannedRow>; 1]>::try_from(states) else {
+                return Err(ExecError::Unsupported(
+                    "grouped partial aggregate streaming expects exactly one spec".into(),
+                ));
+            };
+            crate::scanner::finalize_partial_aggregate_rows(state, spec)?
+                .into_iter()
+                .map(|row| row.row)
+                .collect()
+        }
+    };
     let out_scope = Scope {
         columns: fields
             .iter()
@@ -3766,60 +3789,89 @@ fn try_execute_local_streaming_aggregate(
     }))
 }
 
-/// One partial-aggregate spec per projection item for scalar aggregates, or
-/// the single grouped spec. `None` when any item is outside the pushdown model.
-fn local_streaming_aggregate_specs(
-    table: &Table,
-    s: &SelectStmt,
-) -> Option<Vec<crate::PartialAggregateSpec>> {
-    if s.group_by.is_empty() {
-        return s
-            .projection
-            .iter()
-            .map(|item| {
-                crate::plan_dist::partial_aggregate_for_select_items(
-                    table,
-                    std::slice::from_ref(item),
-                )
-            })
-            .collect();
-    }
-    crate::plan_dist::grouped_partial_aggregate_for_select(table, &s.projection, &s.group_by)
-        .map(|spec| vec![spec])
+/// How the local streaming path computes a supported aggregate SELECT.
+enum StreamingAggregatePlan {
+    /// No GROUP BY: stream one partial spec per distinct aggregate call, then
+    /// evaluate each projection expression over the finalized values.
+    Scalar {
+        /// Deduped aggregate calls, aligned index-for-index with `specs` (and
+        /// with the finalized values fed to the outer-expression evaluation).
+        calls: Vec<crabka_pgparser::ast::FuncCall>,
+        specs: Vec<crate::PartialAggregateSpec>,
+    },
+    /// The narrow grouped shape: one spec whose finalized rows — group key
+    /// columns then the aggregate, ordered by key — ARE the output rows.
+    Grouped(crate::PartialAggregateSpec),
 }
 
-/// Finalize per-spec partial states into SQL-visible output rows: scalar specs
-/// each contribute one value to a single row; the grouped spec expands to one
-/// row per group, already ordered by group key.
-fn finalize_streaming_aggregate_rows(
+impl StreamingAggregatePlan {
+    fn specs(&self) -> &[crate::PartialAggregateSpec] {
+        match self {
+            Self::Scalar { specs, .. } => specs,
+            Self::Grouped(spec) => std::slice::from_ref(spec),
+        }
+    }
+}
+
+/// Decompose the SELECT into a streaming plan: the single grouped spec for the
+/// grouped shape; with no GROUP BY, the deduped aggregate calls (each inside
+/// the pushdown model) with everything around them scalar expressions to
+/// evaluate over the finalized values. `None` when any part falls outside the
+/// model — the caller keeps the materializing scan.
+fn local_streaming_aggregate_plan(table: &Table, s: &SelectStmt) -> Option<StreamingAggregatePlan> {
+    if !s.group_by.is_empty() {
+        return crate::plan_dist::grouped_partial_aggregate_for_select(
+            table,
+            &s.projection,
+            &s.group_by,
+        )
+        .map(StreamingAggregatePlan::Grouped);
+    }
+    let mut calls = Vec::new();
+    for item in &s.projection {
+        let SelectItem::Expr { expr, .. } = item else {
+            return None;
+        };
+        if !crate::agg::collect_streamable_aggregate_calls(expr, &mut calls) {
+            return None;
+        }
+    }
+    // No aggregate anywhere means this is not an aggregate query at all (one
+    // output row per table row) — never a streaming-fold candidate.
+    if calls.is_empty() {
+        return None;
+    }
+    let specs = calls
+        .iter()
+        .map(|call| crate::plan_dist::partial_aggregate_for_call(table, call))
+        .collect::<Option<Vec<_>>>()?;
+    Some(StreamingAggregatePlan::Scalar { calls, specs })
+}
+
+/// Finalize each scalar spec's streamed partial state into the aggregate's
+/// SQL-visible value, in spec order.
+fn finalize_scalar_streaming_aggregates(
     states: Vec<Vec<ScannedRow>>,
     specs: &[crate::PartialAggregateSpec],
-    scalar: bool,
-) -> Result<Vec<Vec<Datum>>, ExecError> {
-    if scalar {
-        let mut row = Vec::with_capacity(specs.len());
-        for (state, spec) in states.into_iter().zip(specs) {
+) -> Result<Vec<Datum>, ExecError> {
+    states
+        .into_iter()
+        .zip(specs)
+        .map(|(state, spec)| {
             let finalized = crate::scanner::finalize_partial_aggregate_rows(state, spec)?;
-            let [value] = finalized.as_slice() else {
-                return Err(ExecError::Unsupported(
-                    "scalar partial aggregate produced an invalid merged shape".into(),
-                ));
+            let [ScannedRow { row, .. }] = finalized.as_slice() else {
+                return Err(invalid_scalar_aggregate_shape());
             };
-            row.extend(value.row.iter().cloned());
-        }
-        return Ok(vec![row]);
-    }
-    let ([spec], Some(state)) = (specs, states.into_iter().next()) else {
-        return Err(ExecError::Unsupported(
-            "grouped partial aggregate streaming expects exactly one spec".into(),
-        ));
-    };
-    Ok(
-        crate::scanner::finalize_partial_aggregate_rows(state, spec)?
-            .into_iter()
-            .map(|row| row.row)
-            .collect(),
-    )
+            let [value] = row.as_slice() else {
+                return Err(invalid_scalar_aggregate_shape());
+            };
+            Ok(value.clone())
+        })
+        .collect()
+}
+
+fn invalid_scalar_aggregate_shape() -> ExecError {
+    ExecError::Unsupported("scalar partial aggregate produced an invalid merged shape".into())
 }
 
 /// Match a FROM that is exactly one ordinary local base table.
@@ -3874,16 +3926,7 @@ fn single_sharded_base_table(
 }
 
 fn is_plain_partial_aggregate_select(s: &SelectStmt) -> bool {
-    if s.distinct || s.having.is_some() || s.limit.is_some() || s.offset.is_some() {
-        return false;
-    }
-    if !s.order_by.is_empty()
-        && (s.order_by.len() != s.group_by.len()
-            || s.order_by
-                .iter()
-                .zip(&s.group_by)
-                .any(|(order, group)| !order.asc || order.expr != *group))
-    {
+    if !select_modifiers_allow_partial_aggregate(s) {
         return false;
     }
     let Some(SelectItem::Expr {
@@ -3898,6 +3941,33 @@ fn is_plain_partial_aggregate_select(s: &SelectStmt) -> bool {
     }
     matches!(call.name.as_str(), "count" | "sum" | "avg" | "min" | "max")
         && matches!(&call.args, FuncArgs::Star | FuncArgs::Exprs(_))
+}
+
+/// Cheap AST pre-filter for the local streaming path: the modifier shape the
+/// partial-aggregate model supports, every projection item an expression, and
+/// an aggregate call somewhere in the projection. The per-item decomposition in
+/// `local_streaming_aggregate_plan` does the precise streamability check.
+fn is_streamable_aggregate_select(s: &SelectStmt) -> bool {
+    select_modifiers_allow_partial_aggregate(s)
+        && s.projection.iter().any(|item| match item {
+            SelectItem::Expr { expr, .. } => crate::agg::contains_aggregate(expr),
+            SelectItem::Wildcard | SelectItem::QualifiedWildcard(_) => false,
+        })
+}
+
+/// No `DISTINCT` / `HAVING` / `LIMIT` / `OFFSET`, and an ORDER BY only as the
+/// exact ascending echo of the GROUP BY key (the order the grouped partial
+/// fold already produces).
+fn select_modifiers_allow_partial_aggregate(s: &SelectStmt) -> bool {
+    if s.distinct || s.having.is_some() || s.limit.is_some() || s.offset.is_some() {
+        return false;
+    }
+    s.order_by.is_empty()
+        || (s.order_by.len() == s.group_by.len()
+            && s.order_by
+                .iter()
+                .zip(&s.group_by)
+                .all(|(order, group)| order.asc && order.expr == *group))
 }
 
 fn top_k_pushdown_for_select(

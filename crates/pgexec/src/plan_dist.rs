@@ -3,7 +3,7 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use crabka_pgcatalog::Table;
-use crabka_pgparser::ast::{BinaryOp, Expr, FuncArgs, SelectItem};
+use crabka_pgparser::ast::{BinaryOp, Expr, FuncArgs, FuncCall, SelectItem};
 use crabka_pgtypes::{ColumnType, Datum};
 
 use crate::{
@@ -442,18 +442,35 @@ pub(crate) fn partial_aggregate_for_select_items(
     else {
         return None;
     };
+    partial_aggregate_for_call(table, call)
+}
+
+/// The pushdown spec for one aggregate call: a plain (non-`DISTINCT`)
+/// `count(*)`/`count(col)`/`sum(col)`/`avg(col)`/`min(col)`/`max(col)` whose
+/// column type the partial-aggregate model supports. `None` for every other
+/// call — including an argument column that does not exist in `table`, which
+/// must fall back so name resolution reports 42703 instead of the spec
+/// silently degrading to a whole-table `count(*)`.
+pub(crate) fn partial_aggregate_for_call(
+    table: &Table,
+    call: &FuncCall,
+) -> Option<PartialAggregateSpec> {
     if call.distinct {
         return None;
     }
     let column = match &call.args {
         FuncArgs::Star => None,
-        FuncArgs::Exprs(args) if args.len() == 1 => match &args[0] {
-            Expr::Column { table: None, name } => {
-                table.columns.iter().position(|column| column.name == *name)
-            }
-            _ => return None,
-        },
-        _ => return None,
+        FuncArgs::Exprs(args) => {
+            let [Expr::Column { table: None, name }] = args.as_slice() else {
+                return None;
+            };
+            Some(
+                table
+                    .columns
+                    .iter()
+                    .position(|column| column.name == *name)?,
+            )
+        }
     };
     let spec = PartialAggregateSpec::from_function(&call.name, column)?;
     if partial_aggregate_is_safe(table, &spec) {

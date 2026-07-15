@@ -332,6 +332,117 @@ fn collect_specs(e: &Expr, scope: &Scope, specs: &mut Vec<AggSpec>) -> Result<()
     Ok(())
 }
 
+/// Collect (deduped, in first-appearance order) the aggregate calls of one
+/// no-GROUP-BY projection expression, verifying the expression is built only
+/// from aggregate calls, constants, and scalar / date-time / formatting
+/// functions, operators, predicates, `CASE`, and casts over those.
+///
+/// Returns `false` for anything else — a bare column, an unknown function, a
+/// `DISTINCT` aggregate, a parameter, an unresolved subquery — telling the
+/// streaming-aggregate path to keep the materializing scan (and its errors)
+/// for that query. Aggregate arguments are NOT descended into: they belong to
+/// the pushdown spec, and a non-column argument fails spec construction later.
+pub(crate) fn collect_streamable_aggregate_calls(e: &Expr, calls: &mut Vec<FuncCall>) -> bool {
+    match e {
+        Expr::Func(fc) if aggregate_func(&fc.name).is_some() => {
+            if fc.distinct {
+                return false;
+            }
+            if !calls.contains(fc) {
+                calls.push(fc.clone());
+            }
+            true
+        }
+        Expr::Func(fc)
+            if crate::func::is_scalar(&fc.name)
+                || crate::datetime_fn::is_datetime_func(&fc.name)
+                || crate::format_fn::is_format_func(&fc.name) =>
+        {
+            match &fc.args {
+                FuncArgs::Star => false,
+                FuncArgs::Exprs(args) => args
+                    .iter()
+                    .all(|arg| collect_streamable_aggregate_calls(arg, calls)),
+            }
+        }
+        Expr::IntLiteral(_)
+        | Expr::NumericLiteral(_)
+        | Expr::StringLiteral(_)
+        | Expr::BoolLiteral(_)
+        | Expr::NullLiteral
+        | Expr::Const { .. } => true,
+        Expr::Unary { expr, .. } | Expr::IsNull { expr, .. } | Expr::Cast { expr, .. } => {
+            collect_streamable_aggregate_calls(expr, calls)
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_streamable_aggregate_calls(left, calls)
+                && collect_streamable_aggregate_calls(right, calls)
+        }
+        Expr::InList { expr, list, .. } => {
+            collect_streamable_aggregate_calls(expr, calls)
+                && list
+                    .iter()
+                    .all(|e| collect_streamable_aggregate_calls(e, calls))
+        }
+        Expr::Between {
+            expr, low, high, ..
+        } => {
+            collect_streamable_aggregate_calls(expr, calls)
+                && collect_streamable_aggregate_calls(low, calls)
+                && collect_streamable_aggregate_calls(high, calls)
+        }
+        Expr::Like { expr, pattern, .. } => {
+            collect_streamable_aggregate_calls(expr, calls)
+                && collect_streamable_aggregate_calls(pattern, calls)
+        }
+        Expr::Case {
+            operand,
+            whens,
+            else_result,
+        } => {
+            operand
+                .as_deref()
+                .is_none_or(|o| collect_streamable_aggregate_calls(o, calls))
+                && whens.iter().all(|(condition, result)| {
+                    collect_streamable_aggregate_calls(condition, calls)
+                        && collect_streamable_aggregate_calls(result, calls)
+                })
+                && else_result
+                    .as_deref()
+                    .is_none_or(|e| collect_streamable_aggregate_calls(e, calls))
+        }
+        Expr::Column { .. }
+        | Expr::Param(_)
+        | Expr::Default
+        | Expr::Func(_)
+        | Expr::ScalarSubquery(_)
+        | Expr::Exists(_)
+        | Expr::InSubquery { .. }
+        | Expr::Quantified { .. } => false,
+    }
+}
+
+/// Evaluate no-GROUP-BY projection expressions over already-finalized aggregate
+/// values: `values[i]` is the result of `calls[i]`. Aggregate calls resolve by
+/// spec lookup exactly as in the materializing fold, so a streamed projection
+/// evaluates identically to [`aggregate_rows`] fed the same aggregate results.
+pub(crate) fn eval_over_aggregate_values(
+    exprs: &[Expr],
+    scope: &Scope,
+    calls: &[FuncCall],
+    values: &[Datum],
+    ctx: &EvalCtx,
+) -> Result<Vec<Datum>, ExecError> {
+    let specs = calls
+        .iter()
+        .map(|call| spec_of(call, scope))
+        .collect::<Result<Vec<_>, ExecError>>()?;
+    exprs
+        .iter()
+        .map(|e| eval_grouped(e, scope, &[], &[], &specs, values, ctx))
+        .collect()
+}
+
 /// Data-independent validation: every projection / `HAVING` / `ORDER BY`
 /// expression must be built from aggregate calls, `GROUP BY` expressions, and
 /// constants. A bare ungrouped column → 42803 (even on an empty table).
