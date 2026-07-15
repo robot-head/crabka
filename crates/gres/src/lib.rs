@@ -38,11 +38,14 @@ const CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS: i32 = 30_000;
 const TENANT_CONFIG_FETCH_MAX_WAIT_MS: i32 = 500;
 const TENANT_CONFIG_FETCH_PARTITION_MAX_BYTES: i32 = 1 << 20;
 const IDLE_MONITOR_POLL_INTERVAL: Duration = Duration::from_secs(1);
-/// How often the LOCAL (mem / --data-dir) serving engine sweeps dead MVCC
-/// versions. Write paths prune the rows they touch opportunistically; this
-/// periodic `SqlEngine::vacuum` catches cold garbage (aborted inserts,
-/// deleted-then-never-touched rows).
-const LOCAL_VACUUM_INTERVAL: Duration = Duration::from_secs(30);
+/// How often the LOCAL (mem / --data-dir) serving engine runs one bounded
+/// `SqlEngine::vacuum_step`. Write paths prune the rows they touch
+/// opportunistically; the stepped sweep catches cold garbage (aborted
+/// inserts, deleted-then-never-touched rows). Each step examines a budgeted
+/// slice of one table and resumes from a cursor, so the interval is short: a
+/// full pass spreads across many cheap steps instead of storming the whole
+/// store in one call, and steps over settled tables are near-free.
+const LOCAL_VACUUM_STEP_INTERVAL: Duration = Duration::from_secs(2);
 
 trait SubstrateKv: SnapshotKv + RestoreKv {}
 
@@ -1686,30 +1689,46 @@ pub async fn serve_listener_with_tenant_config_loader(
     serve_result
 }
 
-/// Periodically reclaim dead MVCC versions on the LOCAL serving engine until
-/// `shutdown` fires. The write paths already prune the rows they touch; this
-/// sweep catches cold garbage a write never revisits.
+/// Periodically run one bounded dead-MVCC-version sweep step on the LOCAL
+/// serving engine until `shutdown` fires. The write paths already prune the
+/// rows they touch; the stepped sweep catches cold garbage a write never
+/// revisits, spreading each full pass across many steps so foreground
+/// statements never compete with a whole-store scan.
 async fn run_local_vacuum_loop(engine: SqlEngine, shutdown: CancellationToken) {
     loop {
         tokio::select! {
             () = shutdown.cancelled() => return,
-            () = tokio::time::sleep(LOCAL_VACUUM_INTERVAL) => {}
+            () = tokio::time::sleep(LOCAL_VACUUM_STEP_INTERVAL) => {}
         }
-        match engine.vacuum().await {
-            Ok(stats) => {
-                // Rotate the LSM memtable so the sweep's tombstones (and the
+        match engine.vacuum_step().await {
+            Ok(step) => {
+                let stats = step.stats;
+                // Rotate the LSM memtable only when the step physically
+                // deleted or rewrote something, so its tombstones (and the
                 // shadowed versions they retire) leave the scan path instead
-                // of accumulating until a byte-size rotation.
-                if let Err(error) = engine.kv_handle().maintain() {
+                // of accumulating until a byte-size rotation. Idle steps
+                // (settled tables skipped, nothing found) must not rotate:
+                // rotating every couple of seconds for no reason would spray
+                // tiny sstables.
+                let swept_something = stats.versions_pruned
+                    + stats.index_entries_pruned
+                    + stats.versions_frozen
+                    + stats.clog_entries_pruned
+                    + stats.stamps_cleared
+                    > 0;
+                if swept_something && let Err(error) = engine.kv_handle().maintain() {
                     tracing::warn!(?error, "post-vacuum store maintenance failed");
                 }
                 tracing::debug!(
                     versions_pruned = stats.versions_pruned,
                     index_entries_pruned = stats.index_entries_pruned,
-                    "local vacuum sweep"
+                    versions_frozen = stats.versions_frozen,
+                    keys_examined = step.keys_examined,
+                    cycle_completed = step.cycle_completed,
+                    "local vacuum step"
                 );
             }
-            Err(error) => tracing::warn!(?error, "local vacuum sweep failed"),
+            Err(error) => tracing::warn!(?error, "local vacuum step failed"),
         }
     }
 }

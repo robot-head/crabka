@@ -428,7 +428,7 @@ fn projection_for_select_items(table: &Table, projection: &[SelectItem]) -> Proj
     ProjectionPushdown::Columns(columns)
 }
 
-fn partial_aggregate_for_select_items(
+pub(crate) fn partial_aggregate_for_select_items(
     table: &Table,
     projection: &[SelectItem],
 ) -> Option<PartialAggregateSpec> {

@@ -26,10 +26,11 @@ use crabka_pgwire::{
     },
     error::{PgError, sqlstate},
 };
-use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard};
+use tokio::sync::OwnedRwLockReadGuard;
 
 use crate::{
-    error::ExecError, lockmgr::RowLockManager, procarray::ProcArray, seq::SequenceManager,
+    error::ExecError, exec::UniqueLocalSerialization, lockmgr::RowLockManager,
+    procarray::ProcArray, seq::SequenceManager,
 };
 
 /// In-flight transaction context.
@@ -69,9 +70,11 @@ pub(crate) struct TxnCtx {
     /// BEGIN). `now()`/`current_timestamp` are PG transaction-stable, so every
     /// statement in this block evaluates them against this single instant.
     pub(crate) txn_now: jiff::Timestamp,
-    /// Held by explicit transactions that have touched local unique indexes. This
-    /// serializes visible-key checks until COMMIT/ROLLBACK makes the outcome
-    /// durable, preventing two transactions from both passing before commit.
+    /// Held (SHARED) by explicit transactions that have written local tables,
+    /// until COMMIT/ROLLBACK. Never blocks other DML — it lets unique-index
+    /// DDL (which takes the same lock exclusively) wait out this transaction's
+    /// writes before backfilling. Same-key unique conflicts serialize through
+    /// per-key locks in the `RowLockManager` instead.
     pub(crate) unique_index_guard: Option<UniqueIndexGuard>,
     /// Held after the first ordinary write until COMMIT/ROLLBACK so conversion
     /// cannot rewrite an in-progress xid version out from under its commit.
@@ -92,24 +95,12 @@ pub(crate) enum TableWriteGuard {
     Shared { _guard: OwnedRwLockReadGuard<()> },
 }
 
-pub(crate) enum UniqueIndexGuard {
-    Shared { _guard: OwnedRwLockReadGuard<()> },
-    Exclusive { _guard: OwnedRwLockWriteGuard<()> },
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum UniqueIndexLockMode {
-    None,
-    Shared,
-    Exclusive,
-}
-
-fn unique_index_lock_mode(mode: crate::exec::UniqueLocalSerialization) -> UniqueIndexLockMode {
-    match mode {
-        crate::exec::UniqueLocalSerialization::None => UniqueIndexLockMode::None,
-        crate::exec::UniqueLocalSerialization::Shared => UniqueIndexLockMode::Shared,
-        crate::exec::UniqueLocalSerialization::Exclusive => UniqueIndexLockMode::Exclusive,
-    }
+/// A DML statement's SHARED hold on the engine's `unique_index_lock`. Unique
+/// CREATE INDEX backfill (and CREATE TABLE with a unique constraint) takes the
+/// same lock exclusively, so it waits for in-flight writers and blocks new
+/// ones while it scans.
+pub(crate) struct UniqueIndexGuard {
+    _guard: OwnedRwLockReadGuard<()>,
 }
 
 /// Per-connection transaction state. `Failed` carries the aborted block's
@@ -2036,34 +2027,16 @@ impl SqlSession {
         Ok(result)
     }
 
-    async fn ensure_unique_index_guard(&mut self, mode: UniqueIndexLockMode) {
-        if mode == UniqueIndexLockMode::None {
+    async fn ensure_unique_index_guard(&mut self, mode: UniqueLocalSerialization) {
+        if matches!(mode, UniqueLocalSerialization::None) {
             return;
         }
-        let existing = match &self.state {
-            TxnState::InTransaction(ctx) => ctx.unique_index_guard.as_ref(),
-            TxnState::Prepared(_) => return,
+        match &self.state {
+            TxnState::InTransaction(ctx) if ctx.unique_index_guard.is_none() => {}
             _ => return,
-        };
-        if matches!(existing, Some(UniqueIndexGuard::Exclusive { .. })) {
-            return;
         }
-        if mode == UniqueIndexLockMode::Shared && existing.is_some() {
-            return;
-        }
-        if matches!(existing, Some(UniqueIndexGuard::Shared { .. }))
-            && let TxnState::InTransaction(ctx) = &mut self.state
-        {
-            ctx.unique_index_guard = None;
-        }
-        let guard = match mode {
-            UniqueIndexLockMode::None => return,
-            UniqueIndexLockMode::Shared => UniqueIndexGuard::Shared {
-                _guard: Arc::clone(&self.unique_index_lock).read_owned().await,
-            },
-            UniqueIndexLockMode::Exclusive => UniqueIndexGuard::Exclusive {
-                _guard: Arc::clone(&self.unique_index_lock).write_owned().await,
-            },
+        let guard = UniqueIndexGuard {
+            _guard: Arc::clone(&self.unique_index_lock).read_owned().await,
         };
         if let TxnState::InTransaction(ctx) = &mut self.state {
             ctx.unique_index_guard = Some(guard);
@@ -2103,11 +2076,10 @@ impl SqlSession {
                     ));
                 }
                 self.ensure_write_xid()?;
-                let unique_serialization =
-                    unique_index_lock_mode(crate::exec::write_requires_unique_local_serialization(
-                        self.catalog_kv.as_ref(),
-                        stmt,
-                    )?);
+                let unique_serialization = crate::exec::write_requires_unique_local_serialization(
+                    self.catalog_kv.as_ref(),
+                    stmt,
+                )?;
                 self.ensure_unique_index_guard(unique_serialization).await;
                 // UPDATE/DELETE's eval_plan_qual re-check reads range 0's global clog
                 // to resolve a cross-range supersede, so catch range 0's replica up
@@ -2144,7 +2116,8 @@ impl SqlSession {
                 // An error here propagates to run_one, which transitions the
                 // block to Failed (keeping the xid + row locks until
                 // COMMIT/ROLLBACK, which calls release_all). In Durable mode
-                // ProcArray persisted next_xid eagerly, so no next_xid op; the
+                // ProcArray's block-ahead reservation already durably covers
+                // this xid, so no next_xid op; the
                 // txn commits later, so no clog op. In Replicated mode we fold the
                 // next_xid op into this batch (the state machine max-merges it;
                 // re-folding on a later write in the same txn is harmless).
@@ -2218,18 +2191,13 @@ impl SqlSession {
                 if targets_sharded_table {
                     return self.run_sharded_timestamp_autocommit(stmt).await;
                 }
-                let _unique_guard = match unique_index_lock_mode(
-                    crate::exec::write_requires_unique_local_serialization(
-                        self.catalog_kv.as_ref(),
-                        stmt,
-                    )?,
-                ) {
-                    UniqueIndexLockMode::None => None,
-                    UniqueIndexLockMode::Shared => Some(UniqueIndexGuard::Shared {
+                let _unique_guard = match crate::exec::write_requires_unique_local_serialization(
+                    self.catalog_kv.as_ref(),
+                    stmt,
+                )? {
+                    UniqueLocalSerialization::None => None,
+                    UniqueLocalSerialization::Shared => Some(UniqueIndexGuard {
                         _guard: Arc::clone(&self.unique_index_lock).read_owned().await,
-                    }),
-                    UniqueIndexLockMode::Exclusive => Some(UniqueIndexGuard::Exclusive {
-                        _guard: Arc::clone(&self.unique_index_lock).write_owned().await,
                     }),
                 };
                 // Autocommit UPDATE/DELETE's eval_plan_qual re-check reads range 0's
@@ -2237,7 +2205,7 @@ impl SqlSession {
                 self.ensure_global_readable().await?;
                 // Autocommit: allocate an xid, execute (taking row locks), and
                 // commit in one atomic batch (versions + clog). No global writer
-                // lock; next_xid was persisted eagerly by begin_write.
+                // lock; begin_write's durable block reservation covers the xid.
                 let xid = self.procarray.begin_write()?;
                 let sharded_write = targets_sharded_table;
                 let sharded_global = if sharded_write {
@@ -2278,7 +2246,7 @@ impl SqlSession {
                 }
                 // In Replicated mode, fold the next_xid advance into the same
                 // batch as the rows + clog (the state machine max-merges it); in
-                // Durable mode begin_write already persisted it eagerly.
+                // Durable mode begin_write's block reservation already covers it.
                 if self.persist_mode == crate::PersistMode::Replicated {
                     ops.push(self.procarray.next_xid_op());
                 }
@@ -2334,11 +2302,10 @@ impl SqlSession {
                         "COPY into sharded tables is not supported".into(),
                     ));
                 }
-                let unique_serialization =
-                    unique_index_lock_mode(crate::exec::copy_requires_unique_local_serialization(
-                        self.catalog_kv.as_ref(),
-                        copy,
-                    )?);
+                let unique_serialization = crate::exec::copy_requires_unique_local_serialization(
+                    self.catalog_kv.as_ref(),
+                    copy,
+                )?;
                 self.ensure_unique_index_guard(unique_serialization).await;
                 self.ensure_write_xid()?;
                 let xid = match &self.state {
@@ -2350,7 +2317,8 @@ impl SqlSession {
                 let snapshot = self.procarray.snapshot();
                 // COPY is insert-only: no chains are re-read, nothing to prune.
                 let write_ctx = self.write_context(&gsnap, &snapshot, xid, false, &ctx, None);
-                let (result, mut ops) = crate::exec::execute_copy_write(&write_ctx, copy, &rows)?;
+                let (result, mut ops) =
+                    crate::exec::execute_copy_write(&write_ctx, copy, &rows).await?;
                 if self.persist_mode == crate::PersistMode::Replicated {
                     ops.push(self.procarray.next_xid_op());
                 }
@@ -2374,18 +2342,13 @@ impl SqlSession {
                     )?;
                     return self.commit_timestamp_write_plan(plan).await;
                 }
-                let _unique_guard = match unique_index_lock_mode(
-                    crate::exec::copy_requires_unique_local_serialization(
-                        self.catalog_kv.as_ref(),
-                        copy,
-                    )?,
-                ) {
-                    UniqueIndexLockMode::None => None,
-                    UniqueIndexLockMode::Shared => Some(UniqueIndexGuard::Shared {
+                let _unique_guard = match crate::exec::copy_requires_unique_local_serialization(
+                    self.catalog_kv.as_ref(),
+                    copy,
+                )? {
+                    UniqueLocalSerialization::None => None,
+                    UniqueLocalSerialization::Shared => Some(UniqueIndexGuard {
                         _guard: Arc::clone(&self.unique_index_lock).read_owned().await,
-                    }),
-                    UniqueIndexLockMode::Exclusive => Some(UniqueIndexGuard::Exclusive {
-                        _guard: Arc::clone(&self.unique_index_lock).write_owned().await,
                     }),
                 };
                 let xid = self.procarray.begin_write()?;
@@ -2394,7 +2357,7 @@ impl SqlSession {
                 let snapshot = self.procarray.snapshot();
                 // COPY is insert-only: no chains are re-read, nothing to prune.
                 let write_ctx = self.write_context(&gsnap, &snapshot, xid, false, &ctx, None);
-                let outcome = crate::exec::execute_copy_write(&write_ctx, copy, &rows);
+                let outcome = crate::exec::execute_copy_write(&write_ctx, copy, &rows).await;
                 let (result, mut ops) = match outcome {
                     Ok(value) => value,
                     Err(error) => {
@@ -2403,6 +2366,8 @@ impl SqlSession {
                             .commit(vec![crabka_pgmvcc::clog::put_op(xid, XidStatus::Aborted)])
                             .await;
                         self.procarray.finish(xid);
+                        // Free the unique-key locks the failed COPY acquired.
+                        self.lockmgr.release_all(xid);
                         return Err(error);
                     }
                 };
@@ -2412,6 +2377,8 @@ impl SqlSession {
                 }
                 let commit = self.committer.commit(ops).await;
                 self.procarray.finish(xid);
+                // Free the unique-key locks this COPY acquired, waking waiters.
+                self.lockmgr.release_all(xid);
                 commit?;
                 Ok(result)
             }

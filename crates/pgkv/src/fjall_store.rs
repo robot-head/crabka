@@ -1,7 +1,13 @@
 //! Durable Kv over a fjall LSM partition. Crash recovery is fjall's journal
-//! replay on open; durability is fsync on each commit.
+//! replay on open; durability is one fsync per commit group — concurrent
+//! `write_batch` callers coalesce into a single fjall transaction and share
+//! its trailing fsync.
 
-use std::{path::Path, sync::Arc};
+use std::{
+    collections::VecDeque,
+    path::Path,
+    sync::{Arc, Condvar, Mutex, OnceLock},
+};
 
 use fjall::{
     Iter, KeyspaceCreateOptions, PersistMode, Readable, SingleWriterTxDatabase,
@@ -11,19 +17,83 @@ use fjall::{
 use crate::{Kv, KvError, KvPair, KvSnapshot, RestoreKv, SnapshotKv, WriteOp, store::KvScan};
 
 /// A `Kv` over one fjall keyspace within a (possibly shared) transactional
-/// database. Every mutation fsyncs the whole database as its tail, so a returned
-/// `Ok` is power-loss durable. Multiple `KeyspaceKv`s over the same transactional
-/// database share that fsync (a single `persist` flushes all pending writes).
+/// database. Mutations are group-committed: concurrent `write_batch` callers
+/// coalesce into one fjall transaction whose tail is a single whole-database
+/// fsync, so a returned `Ok` is power-loss durable and N concurrent writers
+/// share one fsync instead of paying one each. Multiple `KeyspaceKv`s over the
+/// same transactional database also share that fsync (a single `persist`
+/// flushes all pending writes).
 pub struct KeyspaceKv {
     db: Arc<SingleWriterTxDatabase>,
     ks: SingleWriterTxKeyspace,
     persist_mode: LocalPersistMode,
+    group: GroupCommit,
 }
 
 #[derive(Debug, Clone, Copy)]
 enum LocalPersistMode {
     SyncAll,
     Buffer,
+}
+
+/// Leader/follower group-commit coordinator for one `KeyspaceKv`.
+///
+/// A `write_batch` caller that finds no leader running becomes the leader: it
+/// drains the queue, applies every queued batch plus its own in one fjall
+/// transaction, commits, fsyncs once, and completes every drained slot. A
+/// caller that finds a leader running enqueues its batch and waits; batches
+/// that arrive during the leader's fsync form the next group. The leader never
+/// holds `state` while it touches fjall's single-writer transaction, so the
+/// coordinator cannot deadlock with fjall's own write serialization.
+#[derive(Default)]
+struct GroupCommit {
+    state: Mutex<GroupState>,
+    /// Signalled by a finishing leader; wakes completed followers to return
+    /// and still-queued followers to elect the next leader.
+    wake: Condvar,
+}
+
+#[derive(Default)]
+struct GroupState {
+    /// Batches awaiting the next group, in enqueue (application) order.
+    queue: VecDeque<Pending>,
+    /// Whether a leader is currently committing a group.
+    leader_active: bool,
+}
+
+/// One enqueued batch and the slot its leader completes it through.
+struct Pending {
+    ops: Vec<WriteOp>,
+    slot: Arc<OnceLock<Result<(), KvError>>>,
+}
+
+/// Hands leadership off when a leader finishes — including by unwinding.
+///
+/// A leader panicking inside fjall must not leave `leader_active` set (every
+/// later writer would block forever) or its drained batches uncompleted
+/// (their callers would block forever, and re-electing a leader cannot help
+/// because the drained batches are no longer queued). Completing on `Drop`
+/// turns a leader panic into propagated errors instead of a stalled store.
+struct LeaderHandoff<'a> {
+    coordinator: &'a GroupCommit,
+    group: &'a [Pending],
+}
+
+impl Drop for LeaderHandoff<'_> {
+    fn drop(&mut self) {
+        for pending in self.group {
+            // A no-op on the normal path, where the leader already completed
+            // every slot with the group's real result.
+            let _unreached = pending
+                .slot
+                .set(Err(KvError::Io("group commit leader panicked".to_owned())));
+        }
+        // `if let` rather than `expect`: never double-panic during an unwind.
+        if let Ok(mut state) = self.coordinator.state.lock() {
+            state.leader_active = false;
+            self.coordinator.wake.notify_all();
+        }
+    }
 }
 
 impl KeyspaceKv {
@@ -34,6 +104,7 @@ impl KeyspaceKv {
             db,
             ks,
             persist_mode: LocalPersistMode::SyncAll,
+            group: GroupCommit::default(),
         }
     }
 
@@ -44,6 +115,7 @@ impl KeyspaceKv {
             db,
             ks,
             persist_mode: LocalPersistMode::Buffer,
+            group: GroupCommit::default(),
         }
     }
 
@@ -56,6 +128,126 @@ impl KeyspaceKv {
 
     fn is_empty(&self) -> Result<bool, KvError> {
         self.db.read_tx().is_empty(&self.ks).map_err(io)
+    }
+
+    /// Group-commit a batch: lead a group if no leader is running, otherwise
+    /// enqueue and wait for a leader to commit it.
+    fn write_batch_grouped(&self, ops: &[WriteOp]) -> Result<(), KvError> {
+        let mut state = self.group.state.lock().expect("group commit lock");
+        if !state.leader_active {
+            state.leader_active = true;
+            let group: Vec<Pending> = state.queue.drain(..).collect();
+            drop(state);
+            // Own ops apply last: everything queued was enqueued earlier.
+            return self.lead(&group, Some(ops));
+        }
+
+        let slot = Arc::new(OnceLock::new());
+        state.queue.push_back(Pending {
+            ops: ops.to_vec(),
+            slot: Arc::clone(&slot),
+        });
+        state = self
+            .group
+            .wake
+            .wait_while(state, |state| state.leader_active && slot.get().is_none())
+            .expect("group commit lock");
+        if let Some(result) = slot.get() {
+            return result.clone();
+        }
+        // No leader is running and this batch is still queued (a leader sets
+        // every drained slot before clearing `leader_active`, and both reads
+        // happen under `state`): lead the group that accumulated behind the
+        // previous leader. This batch keeps its enqueue position in `group`.
+        state.leader_active = true;
+        let group: Vec<Pending> = state.queue.drain(..).collect();
+        drop(state);
+        self.lead(&group, None)
+    }
+
+    /// Commit `group` (plus the leader's own trailing batch, when it is not
+    /// already queued) as one transaction with one fsync, then complete every
+    /// slot and hand off leadership.
+    fn lead(&self, group: &[Pending], trailing_ops: Option<&[WriteOp]>) -> Result<(), KvError> {
+        let handoff = LeaderHandoff {
+            coordinator: &self.group,
+            group,
+        };
+        let result = self.commit_group(
+            group
+                .iter()
+                .map(|pending| pending.ops.as_slice())
+                .chain(trailing_ops),
+        );
+        // A commit or persist failure fails every batch in the group: none of
+        // them became durable. Slots are completed before `handoff` clears
+        // `leader_active`; a follower observing no leader while its slot is
+        // still empty can therefore conclude its batch is still queued.
+        for pending in group {
+            pending
+                .slot
+                .set(result.clone())
+                .expect("each pending batch is completed by exactly one leader");
+        }
+        drop(handoff);
+        result
+    }
+
+    /// Apply `batches` in order inside one fjall transaction and persist once
+    /// via [`Self::sync`]. Equivalent to committing each batch sequentially:
+    /// a batch's conditional reads observe earlier batches' staged writes.
+    fn commit_group<'ops, I>(&self, batches: I) -> Result<(), KvError>
+    where
+        I: IntoIterator<Item = &'ops [WriteOp]>,
+    {
+        // Fjall's single-writer transaction serializes every handle sharing
+        // this database. Fjall holds the database directory lock while it is
+        // open, so another process cannot open a competing writer for this
+        // directory.
+        let mut transaction = self.db.write_tx();
+        let mut staged_any = false;
+
+        for ops in batches {
+            // Evaluate every expectation before staging any of this batch's
+            // mutations. MemKv defines conditional puts against the state at
+            // the start of the batch; a conditional must not observe its own
+            // batch's earlier staged writes.
+            let mut expectations_hold = true;
+            for op in ops {
+                let WriteOp::ConditionalPut { key, expected, .. } = op else {
+                    continue;
+                };
+                if transaction.get(&self.ks, key).map_err(io)?.as_deref() != expected.as_deref() {
+                    expectations_hold = false;
+                    break;
+                }
+            }
+            if !expectations_hold {
+                // Match MemKv's compare-and-swap contract: reject the complete
+                // batch (Ok, no state change) without failing the group's
+                // other batches.
+                continue;
+            }
+            for op in ops {
+                match op {
+                    WriteOp::Put { key, value } | WriteOp::ConditionalPut { key, value, .. } => {
+                        transaction.insert(&self.ks, key, value);
+                    }
+                    WriteOp::Delete { key } => {
+                        transaction.remove(&self.ks, key);
+                    }
+                }
+            }
+            staged_any = staged_any || !ops.is_empty();
+        }
+
+        if !staged_any {
+            // Every batch was rejected (or empty); dropping the transaction
+            // discards nothing and there is nothing to make durable.
+            return Ok(());
+        }
+        transaction.commit().map_err(io)?;
+        self.sync()
     }
 }
 
@@ -128,37 +320,13 @@ impl Kv for KeyspaceKv {
     }
 
     fn write_batch(&self, ops: &[WriteOp]) -> Result<(), KvError> {
-        // Fjall's single-writer transaction serializes every handle sharing this
-        // database. Fjall holds the database directory lock while it is open, so
-        // another process cannot open a competing writer for this directory.
-        let mut transaction = self.db.write_tx();
-
-        // Evaluate every expectation before staging any mutation. MemKv defines
-        // conditional puts against the durable state at the start of the batch;
-        // using transaction reads while applying would accidentally make a later
-        // conditional observe an earlier staged write.
-        for op in ops {
-            let WriteOp::ConditionalPut { key, expected, .. } = op else {
-                continue;
-            };
-            if transaction.get(&self.ks, key).map_err(io)?.as_deref() != expected.as_deref() {
-                // Match MemKv's compare-and-swap contract: reject the complete
-                // batch without changing durable state.
-                return Ok(());
-            }
+        match self.persist_mode {
+            // Group commit amortizes the per-commit fsync across concurrent
+            // callers; a lone caller leads a group of one with no extra wait.
+            LocalPersistMode::SyncAll => self.write_batch_grouped(ops),
+            // Buffer mode has no durability wait to amortize; commit inline.
+            LocalPersistMode::Buffer => self.commit_group(std::iter::once(ops)),
         }
-        for op in ops {
-            match op {
-                WriteOp::Put { key, value } | WriteOp::ConditionalPut { key, value, .. } => {
-                    transaction.insert(&self.ks, key, value);
-                }
-                WriteOp::Delete { key } => {
-                    transaction.remove(&self.ks, key);
-                }
-            }
-        }
-        transaction.commit().map_err(io)?;
-        self.sync()
     }
 
     fn maintain(&self) -> Result<(), KvError> {
@@ -572,6 +740,210 @@ mod tests {
 
         let reopened = FjallKv::open(dir.path()).expect("reopen");
         assert_eq!(reopened.get(b"descriptor").expect("durable read"), winner);
+    }
+
+    #[test]
+    fn concurrent_write_batches_are_all_durable() {
+        use std::sync::Barrier;
+
+        use assert2::assert;
+
+        const WRITERS: usize = 8;
+        const BATCHES_PER_WRITER: usize = 5;
+
+        let dir = temp();
+        {
+            let kv = FjallKv::open(dir.path()).expect("open");
+            let barrier = Barrier::new(WRITERS);
+            std::thread::scope(|scope| {
+                for writer in 0..WRITERS {
+                    let kv = &kv;
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        barrier.wait();
+                        for batch in 0..BATCHES_PER_WRITER {
+                            kv.write_batch(&[WriteOp::Put {
+                                key: format!("w{writer}/b{batch}").into_bytes(),
+                                value: format!("{writer}-{batch}").into_bytes(),
+                            }])
+                            .expect("write batch");
+                        }
+                    });
+                }
+            });
+        }
+
+        // Every batch returned Ok before the handle dropped, so every write
+        // must survive reopen (journal replay of fsynced state).
+        let reopened = FjallKv::open(dir.path()).expect("reopen");
+        for writer in 0..WRITERS {
+            for batch in 0..BATCHES_PER_WRITER {
+                let key = format!("w{writer}/b{batch}");
+                let value = reopened.get(key.as_bytes()).expect("get");
+                assert!(
+                    value == Some(format!("{writer}-{batch}").into_bytes()),
+                    "key {key}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn group_applies_batches_in_enqueue_order_within_one_transaction() {
+        use assert2::assert;
+
+        let dir = temp();
+        let kv = FjallKv::open(dir.path()).expect("open");
+        kv.put(b"k".to_vec(), b"old".to_vec()).expect("seed");
+
+        // The second batch's conditional observes the first batch's staged
+        // (not yet committed) write, exactly as sequential application would.
+        kv.inner
+            .commit_group([
+                &[WriteOp::Put {
+                    key: b"k".to_vec(),
+                    value: b"first".to_vec(),
+                }][..],
+                &[WriteOp::ConditionalPut {
+                    key: b"k".to_vec(),
+                    expected: Some(b"first".to_vec()),
+                    value: b"second".to_vec(),
+                }][..],
+            ])
+            .expect("group");
+
+        assert!(kv.get(b"k").expect("get") == Some(b"second".to_vec()));
+    }
+
+    #[test]
+    fn group_conditional_expecting_pre_group_state_is_skipped() {
+        use assert2::assert;
+
+        let dir = temp();
+        let kv = FjallKv::open(dir.path()).expect("open");
+        kv.put(b"k".to_vec(), b"old".to_vec()).expect("seed");
+
+        // Sequentially, the conditional batch runs after the put batch, so an
+        // expectation pinned to the pre-group value must fail and skip the
+        // whole second batch.
+        kv.inner
+            .commit_group([
+                &[WriteOp::Put {
+                    key: b"k".to_vec(),
+                    value: b"first".to_vec(),
+                }][..],
+                &[
+                    WriteOp::ConditionalPut {
+                        key: b"k".to_vec(),
+                        expected: Some(b"old".to_vec()),
+                        value: b"lost".to_vec(),
+                    },
+                    WriteOp::Put {
+                        key: b"marker".to_vec(),
+                        value: b"ran".to_vec(),
+                    },
+                ][..],
+            ])
+            .expect("group");
+
+        assert!(kv.get(b"k").expect("get") == Some(b"first".to_vec()));
+        assert!(kv.get(b"marker").expect("get") == None);
+    }
+
+    #[test]
+    fn failing_conditional_batch_no_ops_without_poisoning_its_group() {
+        use assert2::assert;
+
+        let dir = temp();
+        let kv = FjallKv::open(dir.path()).expect("open");
+        kv.put(b"k".to_vec(), b"old".to_vec()).expect("seed");
+
+        kv.inner
+            .commit_group([
+                &[WriteOp::Put {
+                    key: b"before".to_vec(),
+                    value: b"1".to_vec(),
+                }][..],
+                &[
+                    WriteOp::ConditionalPut {
+                        key: b"k".to_vec(),
+                        expected: Some(b"stale".to_vec()),
+                        value: b"clobbered".to_vec(),
+                    },
+                    WriteOp::Put {
+                        key: b"skipped".to_vec(),
+                        value: b"x".to_vec(),
+                    },
+                ][..],
+                &[WriteOp::Put {
+                    key: b"after".to_vec(),
+                    value: b"2".to_vec(),
+                }][..],
+            ])
+            .expect("group");
+
+        assert!(kv.get(b"before").expect("get") == Some(b"1".to_vec()));
+        assert!(kv.get(b"after").expect("get") == Some(b"2".to_vec()));
+        assert!(kv.get(b"k").expect("get") == Some(b"old".to_vec()));
+        assert!(kv.get(b"skipped").expect("get") == None);
+    }
+
+    #[test]
+    fn concurrent_conditional_put_matches_a_sequential_order() {
+        use std::sync::Barrier;
+
+        use assert2::assert;
+
+        let dir = temp();
+        let kv = FjallKv::open(dir.path()).expect("open");
+
+        for round in 0..20_u32 {
+            let k1 = format!("r{round}/k1").into_bytes();
+            let k2 = format!("r{round}/k2").into_bytes();
+            kv.put(k1.clone(), b"old".to_vec()).expect("seed");
+
+            let barrier = Barrier::new(2);
+            std::thread::scope(|scope| {
+                let put_key = k1.clone();
+                let put = scope.spawn(|| {
+                    barrier.wait();
+                    kv.write_batch(&[WriteOp::Put {
+                        key: put_key,
+                        value: b"a".to_vec(),
+                    }])
+                });
+                let (cas_key, marker_key) = (k1.clone(), k2.clone());
+                let cas = scope.spawn(|| {
+                    barrier.wait();
+                    kv.write_batch(&[
+                        WriteOp::ConditionalPut {
+                            key: cas_key,
+                            expected: Some(b"old".to_vec()),
+                            value: b"b".to_vec(),
+                        },
+                        WriteOp::Put {
+                            key: marker_key,
+                            value: b"b-ran".to_vec(),
+                        },
+                    ])
+                });
+                put.join().expect("put thread").expect("put ok");
+                // A failed compare-and-swap still returns Ok, matching MemKv.
+                cas.join().expect("cas thread").expect("cas ok");
+            });
+
+            // Whichever way the group (or two groups) applied, the outcome
+            // must match one sequential order:
+            //   put then cas: the expectation fails -> k1 = "a", k2 absent;
+            //   cas then put: both apply -> k1 = "a", k2 = "b-ran".
+            let k1_value = kv.get(&k1).expect("get k1");
+            let k2_value = kv.get(&k2).expect("get k2");
+            assert!(k1_value == Some(b"a".to_vec()), "round {round}");
+            assert!(
+                k2_value.is_none() || k2_value == Some(b"b-ran".to_vec()),
+                "round {round}"
+            );
+        }
     }
 
     #[test]

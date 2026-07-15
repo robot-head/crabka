@@ -24,6 +24,7 @@ fjall = { workspace = true }
 zerocopy = { workspace = true }
 
 [dev-dependencies]
+assert2 = { workspace = true }
 proptest = { workspace = true }
 tempfile = { workspace = true }
 jiff = { workspace = true }

@@ -1,13 +1,15 @@
-//! In-memory row-lock manager for concurrent writers. Per `(table, rowid)`
-//! exclusive/shared locks, transaction-scoped (released at COMMIT/ROLLBACK). A
-//! blocked writer calls the integrated async `acquire`, which detects a
+//! In-memory lock manager for concurrent writers. Exclusive/shared locks over
+//! two key spaces — heap rows (`(table, rowid)`) and unique local index keys
+//! (`LockKey::UniqueKey`) — transaction-scoped (released at COMMIT/ROLLBACK).
+//! A blocked writer calls the integrated async `acquire`, which detects a
 //! conflict and registers a per-waiter `Notify` ATOMICALLY under one guard; the
 //! holder's `release_all` wakes each waiter with `notify_one` (which stores a
 //! permit if the waiter has not yet awaited, so no wakeup is ever lost). A
 //! wait-for graph (each waiting xid -> the xid it blocks on) is checked eagerly
 //! for cycles before blocking, aborting the would-be waiter with a deadlock
-//! error. Purely in-memory: after a restart no transactions are in flight, so
-//! no lock state must survive.
+//! error; both key spaces share the one graph, so a cycle spanning a row lock
+//! and a unique-key lock is still detected. Purely in-memory: after a restart
+//! no transactions are in flight, so no lock state must survive.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -35,13 +37,27 @@ pub enum CycleCheck {
     Deadlock,
 }
 
-struct RowLock {
+/// Identity of a lockable resource. Row locks and unique-key locks live in the
+/// same table (and the same wait-for graph), so deadlock cycles spanning both
+/// kinds are detected.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum LockKey {
+    /// A heap row: `(table, rowid)`.
+    Row(crabka_pgcatalog::TableId, u64),
+    /// A unique local index key: the encoded index-entry prefix
+    /// (`secondary_index_entry_prefix(table, index, values)`), a deterministic
+    /// identity for `(table, index, key values)`. Serializes the
+    /// check-then-write unique probe per key instead of engine-wide.
+    UniqueKey(Vec<u8>),
+}
+
+struct HeldLock {
     mode: LockMode,
     holders: HashSet<u64>,
 }
 
 struct Inner {
-    locks: HashMap<(crabka_pgcatalog::TableId, u64), RowLock>,
+    locks: HashMap<LockKey, HeldLock>,
     waiters: HashMap<u64, Vec<Arc<Notify>>>, // holder xid -> waiters' notifiers
     // wait-for graph: each waiting xid -> the single holder xid it blocks on.
     // NOTE: this is single-successor (one out-edge per waiter), so the eager
@@ -80,7 +96,14 @@ impl RowLockManager {
         my_xid: u64,
     ) -> Acquire {
         let mut g = self.inner.lock().expect("lockmgr");
-        try_acquire_locked(&mut g, table, rowid, mode, my_xid)
+        try_acquire_locked(&mut g, LockKey::Row(table, rowid), mode, my_xid)
+    }
+
+    /// Number of lock-table entries currently held (both key spaces). Lets
+    /// tests assert released entries are REMOVED, not left empty.
+    #[cfg(test)]
+    pub(crate) fn held_entry_count(&self) -> usize {
+        self.inner.lock().expect("lockmgr").locks.len()
     }
 
     /// Recovery re-acquisition (SP24 abort atomicity): grab `(table, rowid)`
@@ -107,20 +130,20 @@ impl RowLockManager {
         // so this only ever installs a NEW lock or no-ops on a re-scan of the same
         // `Li`. Keeping it unconditional makes recovery deterministic regardless of
         // sweep re-entry.
-        let lock = g.locks.entry((table, rowid)).or_insert_with(|| RowLock {
-            mode: LockMode::Exclusive,
-            holders: HashSet::new(),
-        });
+        let lock = g
+            .locks
+            .entry(LockKey::Row(table, rowid))
+            .or_insert_with(|| HeldLock {
+                mode: LockMode::Exclusive,
+                holders: HashSet::new(),
+            });
         lock.mode = LockMode::Exclusive;
         lock.holders.insert(my_xid);
     }
 
     /// Acquire `(table, rowid)` in `mode` for `my_xid`, blocking until granted.
     /// Returns `Err(())` if blocking would close a wait-for cycle (caller maps
-    /// to 40P01). Conflict-detect and waiter-register happen ATOMICALLY under
-    /// one guard, and the holder's `release_all` wakes us via a permit-backed
-    /// `notify_one` — so there is no lost-wakeup window and no chance of
-    /// registering on a holder that already released.
+    /// to 40P01). See [`Self::acquire_key`].
     pub async fn acquire(
         &self,
         table: crabka_pgcatalog::TableId,
@@ -128,10 +151,21 @@ impl RowLockManager {
         mode: LockMode,
         my_xid: u64,
     ) -> Result<(), ()> {
+        self.acquire_key(LockKey::Row(table, rowid), mode, my_xid)
+            .await
+    }
+
+    /// Acquire `key` in `mode` for `my_xid`, blocking until granted. Returns
+    /// `Err(())` if blocking would close a wait-for cycle (caller maps to
+    /// 40P01). Conflict-detect and waiter-register happen ATOMICALLY under
+    /// one guard, and the holder's `release_all` wakes us via a permit-backed
+    /// `notify_one` — so there is no lost-wakeup window and no chance of
+    /// registering on a holder that already released.
+    pub async fn acquire_key(&self, key: LockKey, mode: LockMode, my_xid: u64) -> Result<(), ()> {
         loop {
             let notify = {
                 let mut g = self.inner.lock().expect("lockmgr");
-                match try_acquire_locked(&mut g, table, rowid, mode, my_xid) {
+                match try_acquire_locked(&mut g, key.clone(), mode, my_xid) {
                     Acquire::Acquired => {
                         g.wait_for.remove(&my_xid); // no longer waiting
                         return Ok(());
@@ -155,6 +189,35 @@ impl RowLockManager {
             // we await, so this cannot lose a wakeup; on wake we loop and
             // re-attempt the acquire.
             notify.notified().await;
+        }
+    }
+
+    /// Release ONE lock held by `my_xid`, waking every waiter blocked on
+    /// `my_xid` and clearing its edge.
+    ///
+    /// O(1) in the lock-table size, unlike [`Self::release_all`]'s full-table
+    /// walk. The vacuum sweep holds at most one row lock at a time and drops
+    /// it after every candidate row; paying a full-table walk per row is
+    /// quadratic whenever a concurrent bulk writer holds a large lock set. A
+    /// waiter woken here that was actually blocked on a DIFFERENT key still
+    /// held by `my_xid` (impossible for the single-lock sweep, but harmless
+    /// in general) simply re-attempts its acquire and re-blocks.
+    pub fn release_key(&self, key: &LockKey, my_xid: u64) {
+        let to_wake = {
+            let mut g = self.inner.lock().expect("lockmgr");
+            if let Some(lock) = g.locks.get_mut(key) {
+                lock.holders.remove(&my_xid);
+                if lock.holders.is_empty() {
+                    g.locks.remove(key);
+                }
+            }
+            g.wait_for.remove(&my_xid);
+            g.waiters.remove(&my_xid).unwrap_or_default()
+        };
+        // Permit-backed like `release_all`: `notify_one` stores a permit if
+        // the waiter has not yet reached `.await`, so no wakeup is ever lost.
+        for n in to_wake {
+            n.notify_one();
         }
     }
 
@@ -197,20 +260,12 @@ impl RowLockManager {
 
 /// Locked, non-blocking acquire over `&mut Inner`. Idempotent if `my_xid`
 /// already holds compatibly; a sole shared holder may upgrade to exclusive.
-fn try_acquire_locked(
-    inner: &mut Inner,
-    table: crabka_pgcatalog::TableId,
-    rowid: u64,
-    mode: LockMode,
-    my_xid: u64,
-) -> Acquire {
-    match inner.locks.get_mut(&(table, rowid)) {
+fn try_acquire_locked(inner: &mut Inner, key: LockKey, mode: LockMode, my_xid: u64) -> Acquire {
+    match inner.locks.get_mut(&key) {
         None => {
             let mut holders = HashSet::new();
             holders.insert(my_xid);
-            inner
-                .locks
-                .insert((table, rowid), RowLock { mode, holders });
+            inner.locks.insert(key, HeldLock { mode, holders });
             Acquire::Acquired
         }
         Some(lock) => {
@@ -302,6 +357,37 @@ mod tests {
             m.try_acquire(1, 2, LockMode::Exclusive, 11),
             Acquire::Acquired
         ));
+    }
+
+    #[tokio::test]
+    async fn release_key_frees_only_that_entry_and_wakes_its_waiter() {
+        use std::sync::Arc;
+
+        use assert2::assert;
+        let m = Arc::new(RowLockManager::new());
+        m.try_acquire(1, 1, LockMode::Exclusive, 10);
+        m.try_acquire(1, 2, LockMode::Exclusive, 10);
+        let m2 = Arc::clone(&m);
+        let waiter = tokio::spawn(async move {
+            // blocks: row (1,1) is held exclusively by xid 10
+            m2.acquire(1, 1, LockMode::Exclusive, 11)
+                .await
+                .expect("not a deadlock");
+        });
+        tokio::task::yield_now().await;
+        m.release_key(&LockKey::Row(1, 1), 10);
+        // bound the wait so a regression FAILS instead of hanging forever
+        tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
+            .await
+            .expect("waiter did not hang")
+            .expect("waiter completes");
+        // Only the released entry was freed: (1,2) is still held by xid 10,
+        // and the released entry was REMOVED (the waiter now holds it anew).
+        assert!(matches!(
+            m.try_acquire(1, 2, LockMode::Exclusive, 11),
+            Acquire::Conflict(10)
+        ));
+        assert!(m.held_entry_count() == 2);
     }
 
     #[test]
@@ -418,6 +504,76 @@ mod tests {
         .await
         .expect("did not hang");
         assert!(res.is_err(), "closing the cycle must abort with Err(())");
+    }
+
+    #[tokio::test]
+    async fn unique_key_locks_conflict_per_key_and_release_removes_entries() {
+        use std::sync::Arc;
+
+        use assert2::assert;
+        let m = Arc::new(RowLockManager::new());
+        let k = LockKey::UniqueKey(vec![1, 2, 3]);
+        m.acquire_key(k.clone(), LockMode::Exclusive, 10)
+            .await
+            .expect("free key");
+        // A DIFFERENT key does not conflict.
+        m.acquire_key(LockKey::UniqueKey(vec![9]), LockMode::Exclusive, 11)
+            .await
+            .expect("different key is free");
+        // Re-acquiring my own key is idempotent.
+        m.acquire_key(k.clone(), LockMode::Exclusive, 10)
+            .await
+            .expect("idempotent re-acquire");
+        // The SAME key by another xid blocks until the holder releases.
+        let m2 = Arc::clone(&m);
+        let waiter = tokio::spawn(async move { m2.acquire_key(k, LockMode::Exclusive, 12).await });
+        tokio::task::yield_now().await;
+        m.release_all(10);
+        tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
+            .await
+            .expect("waiter did not hang")
+            .expect("waiter join")
+            .expect("not a deadlock");
+        // Memory hygiene: releasing every holder REMOVES the entries (no
+        // unbounded growth under key churn).
+        m.release_all(11);
+        m.release_all(12);
+        assert!(m.held_entry_count() == 0);
+    }
+
+    #[tokio::test]
+    async fn row_and_unique_key_locks_share_the_wait_graph() {
+        use std::sync::Arc;
+
+        use assert2::assert;
+        let m = Arc::new(RowLockManager::new());
+        let key = LockKey::UniqueKey(vec![7]);
+        // xid 10 holds row (1,1); xid 11 holds unique key K.
+        m.try_acquire(1, 1, LockMode::Exclusive, 10);
+        m.acquire_key(key.clone(), LockMode::Exclusive, 11)
+            .await
+            .expect("free key");
+        // 10 blocks on K (registers the edge 10 -> 11 in the shared graph).
+        let m2 = Arc::clone(&m);
+        let waiter =
+            tokio::spawn(async move { m2.acquire_key(key, LockMode::Exclusive, 10).await });
+        tokio::task::yield_now().await;
+        // 11 now tries the row 10 holds: the edge 11 -> 10 closes a cycle that
+        // SPANS a row lock and a unique-key lock — must be Err, not a hang.
+        let res = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            m.acquire(1, 1, LockMode::Exclusive, 11),
+        )
+        .await
+        .expect("did not hang");
+        assert!(res.is_err());
+        // Unblock the waiter so the test ends cleanly.
+        m.release_all(11);
+        tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
+            .await
+            .expect("waiter did not hang")
+            .expect("waiter join")
+            .expect("not a deadlock");
     }
 
     #[test]

@@ -270,9 +270,12 @@ async fn replicated_mode_never_prunes_and_vacuum_is_a_no_op() {
     // Write-path pruning must not engage: every superseded version survives.
     assert!(version_count(kv.as_ref(), table.id, 1) == 6);
 
-    // And the engine-level sweep refuses to touch a replicated store.
+    // And the engine-level sweep refuses to touch a replicated store — the
+    // full pass and the bounded step alike.
     let stats = engine.vacuum().await.expect("vacuum");
     assert!(stats == crabka_pgexec::VacuumStats::default());
+    let step = engine.vacuum_step().await.expect("vacuum step");
+    assert!(step == crabka_pgexec::VacuumStepStats::default());
     assert!(version_count(kv.as_ref(), table.id, 1) == 6);
 }
 
@@ -401,6 +404,156 @@ async fn vacuum_freezes_survivors_truncates_the_clog_and_updates_still_work() {
     engine.vacuum().await.expect("second vacuum");
     assert!(version_count(kv.as_ref(), table.id, 1) == 1);
     assert!(version_count(kv.as_ref(), table.id, 2) == 1);
+}
+
+// ── bounded incremental sweeps (vacuum_step) ─────────────────────────────────
+
+/// Run bounded sweep steps until a cycle completes, returning the aggregated
+/// stats and the number of steps the cycle took.
+async fn run_steps_to_cycle_end(engine: &SqlEngine) -> (crabka_pgexec::VacuumStats, u32) {
+    let mut total = crabka_pgexec::VacuumStats::default();
+    for steps in 1..=1_000 {
+        let step = engine.vacuum_step().await.expect("vacuum step");
+        total += step.stats;
+        if step.cycle_completed {
+            return (total, steps);
+        }
+    }
+    panic!("sweep cycle did not complete within 1000 steps");
+}
+
+/// Populate `table` with `rows` single-column bigint rows in bulk batches.
+async fn load_rows(session: &mut SqlSession, table: &str, rows: u64) {
+    let mut next = 1;
+    while next <= rows {
+        let batch_end = (next + 999).min(rows);
+        let values: Vec<String> = (next..=batch_end).map(|i| format!("({i})")).collect();
+        exec(
+            session,
+            &format!("INSERT INTO {table} VALUES {}", values.join(",")),
+        )
+        .await;
+        next = batch_end + 1;
+    }
+}
+
+#[tokio::test]
+async fn chunked_steps_sweep_a_large_table_and_truncate_the_clog_only_at_cycle_end() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    exec(&mut session, "CREATE TABLE big (id BIGINT PRIMARY KEY)").await;
+    // More rows than one step's key budget, so the pass MUST span steps.
+    load_rows(&mut session, "big", 50_000).await;
+    let table = engine.catalog_table("big").expect("table");
+    let kv = engine.kv_handle();
+    let floor_before = engine.clog_scan_lo().expect("scan lo");
+
+    // The first step is budget-bounded: it must stop mid-table without
+    // completing the cycle, and clog truncation must NOT fire mid-cycle.
+    let first = engine.vacuum_step().await.expect("first step");
+    assert!(!first.cycle_completed);
+    assert!(first.keys_examined > 0 && first.keys_examined < 50_000);
+    assert!(first.stats.clog_entries_pruned == 0);
+    assert!(engine.clog_scan_lo().expect("scan lo") == floor_before);
+
+    // Resuming from the cursor completes the pass; every insert-created
+    // version is frozen exactly once (no chunk overlap, no gaps).
+    let (rest, _) = run_steps_to_cycle_end(&engine).await;
+    assert!(first.stats.versions_frozen + rest.versions_frozen == 50_000);
+    // Completing the clean cycle truncates the clog and advances the floor.
+    assert!(rest.clog_entries_pruned > 0);
+    let floor = engine.clog_scan_lo().expect("scan lo");
+    assert!(floor > floor_before);
+    let below_floor = kv
+        .scan_range(
+            &crabka_pgkv::key::clog_key(0),
+            &crabka_pgkv::key::clog_key(floor),
+        )
+        .expect("scan clog")
+        .len();
+    assert!(below_floor == 0, "clog below the floor must be empty");
+
+    // With every surviving version settled and no writes since, the next
+    // cycle proves the table clean from its demand counters and never scans.
+    let idle = engine.vacuum_step().await.expect("idle step");
+    assert!(idle.cycle_completed);
+    assert!(idle.keys_examined == 0);
+    assert!(idle.stats.versions_pruned == 0 && idle.stats.versions_frozen == 0);
+
+    // Garbage created after a pass is found by the next pass: the deletions
+    // re-dirty the table and a fresh chunked cycle reclaims exactly them.
+    exec(&mut session, "DELETE FROM big WHERE id <= 1000").await;
+    let (reclaim, _) = run_steps_to_cycle_end(&engine).await;
+    assert!(reclaim.versions_pruned == 1_000);
+    assert!(reclaim.index_entries_pruned == 1_000);
+    assert!(table_version_count(kv.as_ref(), table.id) == 49_000);
+    let rows = select_rows(&mut session, "SELECT count(*) FROM big").await;
+    assert!(rows == vec![vec![Some("49000".to_owned())]]);
+}
+
+#[tokio::test]
+async fn settled_tables_are_skipped_until_new_writes_re_dirty_them() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    exec(&mut session, "CREATE TABLE g (id BIGINT PRIMARY KEY)").await;
+    exec(&mut session, "INSERT INTO g VALUES (1),(2),(3)").await;
+
+    let stats = engine.vacuum().await.expect("vacuum");
+    assert!(stats.versions_frozen == 3);
+
+    // Settled and unwritten-to: subsequent cycles do no scan work at all.
+    let idle = engine.vacuum_step().await.expect("idle step");
+    assert!(idle.cycle_completed && idle.keys_examined == 0);
+
+    // New cold garbage (an aborted insert) re-dirties the table; the next
+    // pass finds it without help from the write path.
+    exec(&mut session, "BEGIN").await;
+    exec(&mut session, "INSERT INTO g VALUES (4)").await;
+    exec(&mut session, "ROLLBACK").await;
+    let (reclaim, _) = run_steps_to_cycle_end(&engine).await;
+    assert!(reclaim.versions_pruned == 1);
+
+    // And the table settles again afterwards.
+    let idle = engine.vacuum_step().await.expect("second idle step");
+    assert!(idle.cycle_completed && idle.keys_examined == 0);
+}
+
+#[tokio::test]
+async fn aborted_delete_stamps_are_cleared_so_the_row_settles() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    exec(
+        &mut session,
+        "CREATE TABLE s (id BIGINT PRIMARY KEY, v TEXT)",
+    )
+    .await;
+    exec(&mut session, "INSERT INTO s VALUES (1,'keep')").await;
+    exec(&mut session, "BEGIN").await;
+    exec(&mut session, "DELETE FROM s WHERE id = 1").await;
+    exec(&mut session, "ROLLBACK").await;
+
+    // The rolled-back delete left an aborted xmax stamp on the survivor; the
+    // sweep freezes the version AND clears the dead stamp.
+    let stats = engine.vacuum().await.expect("vacuum");
+    assert!(stats.stamps_cleared == 1);
+    assert!(stats.versions_frozen == 1);
+    assert!(stats.versions_pruned == 0);
+
+    // Clearing is invisible: the row is still there.
+    let rows = select_rows(&mut session, "SELECT id, v FROM s").await;
+    assert!(rows == vec![vec![Some("1".to_owned()), Some("keep".to_owned())]]);
+
+    // Fully settled now (frozen xmin, no stamp): later cycles skip the table.
+    let idle = engine.vacuum_step().await.expect("idle step");
+    assert!(idle.cycle_completed && idle.keys_examined == 0);
+
+    // The cleared row still updates and deletes normally afterwards.
+    exec(&mut session, "UPDATE s SET v = 'new' WHERE id = 1").await;
+    let rows = select_rows(&mut session, "SELECT id, v FROM s").await;
+    assert!(rows == vec![vec![Some("1".to_owned()), Some("new".to_owned())]]);
+    let table = engine.catalog_table("s").expect("table");
+    let (_, _) = run_steps_to_cycle_end(&engine).await;
+    assert!(version_count(engine.kv_handle().as_ref(), table.id, 1) == 1);
 }
 
 // ── vacuum advances the durable clog scan floor ──────────────────────────────

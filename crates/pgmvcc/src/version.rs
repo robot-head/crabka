@@ -253,6 +253,30 @@ pub fn freeze_tuple_xmin(bytes: &[u8]) -> Result<Vec<u8>, KvError> {
     rewrite_tuple_xmin(bytes, FROZEN_XID)
 }
 
+/// Rewrite only the tuple header's `xmax` to [`crate::xid::INVALID_XID`],
+/// preserving `xmin` and the row bytes.
+///
+/// Vacuum uses this to erase an aborted (or crashed sub-horizon) deleter's
+/// stamp from a surviving version. Such a deleter's verdict is immutable and
+/// can never become a commit, so every snapshot already reads the version as
+/// not deleted; clearing the stamp only removes the version's dependence on
+/// the deleter's clog entry.
+///
+/// # Errors
+///
+/// Returns [`KvError::CorruptRow`] when the tuple header is invalid.
+pub fn clear_tuple_xmax(bytes: &[u8]) -> Result<Vec<u8>, KvError> {
+    let (header, _) = TupleHeader::ref_from_prefix(bytes)
+        .map_err(|_| KvError::CorruptRow("bad tuple header".into()))?;
+    if header.tag != T_TUPLE {
+        return Err(KvError::CorruptRow("bad tuple header".into()));
+    }
+
+    let mut rewritten = bytes.to_vec();
+    rewritten[9..17].copy_from_slice(U64::new(crate::xid::INVALID_XID).as_bytes());
+    Ok(rewritten)
+}
+
 #[cfg(test)]
 mod tests {
     use crabka_pgtypes::Datum;
@@ -359,6 +383,26 @@ mod tests {
                 row,
             }
         );
+    }
+
+    #[test]
+    fn clear_tuple_xmax_erases_only_the_deleter_stamp() {
+        use assert2::assert;
+
+        let row = vec![Datum::Int4(1), Datum::Text("a".into())];
+        let stamped = encode_tuple(5, 9, &row);
+        let cleared = clear_tuple_xmax(&stamped).expect("clear");
+        assert!(decode_tuple(&cleared).expect("decode") == (5, crate::xid::INVALID_XID, row));
+
+        // Composes with a freeze rewrite of the same value.
+        let frozen = freeze_tuple_xmin(&stamped).expect("freeze");
+        let settled = clear_tuple_xmax(&frozen).expect("clear frozen");
+        let (xmin, xmax, _) = decode_tuple(&settled).expect("decode");
+        assert!((xmin, xmax) == (FROZEN_XID, crate::xid::INVALID_XID));
+
+        // Non-tuple bytes are rejected, not rewritten.
+        let ts = encode_ts_tuple(5, TsVersionState::Intent, &[]);
+        assert!(clear_tuple_xmax(&ts).is_err());
     }
 
     #[test]

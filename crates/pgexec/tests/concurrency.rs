@@ -459,3 +459,54 @@ async fn deadlock_yields_one_40p01() {
     );
     assert_eq!(ok_count, 1, "expected exactly one transaction to succeed");
 }
+
+/// End-to-end INSERT storm on a durable (disk-backed) store: block-cached
+/// rowid allocation must hand every concurrent statement a disjoint range, so
+/// the whole-table read-back count matches the inserted count exactly. A
+/// shared rowid would make one row's version shadow the other's and the count
+/// would come up short. The row volume crosses several allocation-block
+/// boundaries (blocks of 1024), so block extension itself runs under
+/// contention.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_insert_storm_lands_every_row_exactly_once() {
+    const TASKS: usize = 8;
+    const STATEMENTS_PER_TASK: usize = 20;
+    const ROWS_PER_STATEMENT: usize = 8;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let engine = Arc::new(SqlEngine::open(dir.path()).expect("open"));
+    engine
+        .connect()
+        .simple_query("CREATE TABLE storm (id int4)")
+        .await
+        .expect("create");
+
+    let mut tasks = Vec::new();
+    for task in 0..TASKS {
+        let e = Arc::clone(&engine);
+        tasks.push(tokio::spawn(async move {
+            let mut s = e.connect();
+            for statement in 0..STATEMENTS_PER_TASK {
+                let base = (task * STATEMENTS_PER_TASK + statement) * ROWS_PER_STATEMENT;
+                let values = (0..ROWS_PER_STATEMENT)
+                    .map(|i| format!("({})", base + i))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                s.simple_query(&format!("INSERT INTO storm VALUES {values}"))
+                    .await
+                    .expect("insert");
+            }
+        }));
+    }
+    for task in tasks {
+        task.await.expect("insert task");
+    }
+
+    let mut s = engine.connect();
+    let count = col0(&run(&mut s, "SELECT count(*) FROM storm").await[0]);
+    let expected = TASKS * STATEMENTS_PER_TASK * ROWS_PER_STATEMENT;
+    assert2::assert!(
+        count == vec![Some(expected.to_string())],
+        "every inserted row must land on a unique rowid"
+    );
+}

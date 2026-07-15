@@ -256,6 +256,11 @@ pub struct SqlEngine {
     /// additionally retain `writer_fence` through their terminal outcome.
     pub(crate) table_write_gate: Arc<tokio::sync::RwLock<()>>,
     pub(crate) writer_fence: Arc<WriterFence>,
+    /// DML on local tables holds this SHARED (per statement, or until
+    /// COMMIT/ROLLBACK in an explicit transaction); unique-index DDL (CREATE
+    /// UNIQUE INDEX backfill, CREATE TABLE with a unique constraint) holds it
+    /// EXCLUSIVELY so its backfill scan cannot race in-flight writers.
+    /// Same-key DML conflicts serialize through per-key locks in `lockmgr`.
     pub(crate) unique_index_lock: Arc<tokio::sync::RwLock<()>>,
     pub(crate) committer: Arc<dyn crate::commit::Committer>,
     pub(crate) linearizer: Arc<dyn crate::read_gate::Linearizer>,
@@ -295,6 +300,17 @@ pub struct SqlEngine {
     /// Sessions pin their snapshots here so neither write-path pruning, `vacuum`,
     /// nor checkpoint compaction can reclaim a version a live snapshot still sees.
     pub(crate) gc_horizon: Arc<crabka_pgmvcc::gc::GcHorizon>,
+    /// The committer vacuum sweeps use for their own prune/freeze/clear
+    /// batches. On local engines this is `committer` WITHOUT the
+    /// demand-observing wrapper, so a sweep's version rewrites do not re-mark
+    /// the swept table as dirty.
+    pub(crate) sweep_committer: Arc<dyn crate::commit::Committer>,
+    /// Per-table committed version-write counters feeding demand-driven
+    /// vacuum skipping (see [`VacuumDemand`]).
+    pub(crate) vacuum_demand: Arc<VacuumDemand>,
+    /// Resumable sweep cursor and cycle bookkeeping; the async mutex also
+    /// serializes concurrent `vacuum`/`vacuum_step` callers.
+    vacuum_progress: Arc<tokio::sync::Mutex<VacuumProgress>>,
 }
 
 /// Counts returned by [`SqlEngine::vacuum`].
@@ -308,6 +324,232 @@ pub struct VacuumStats {
     pub versions_frozen: u64,
     /// Clog entries below the horizon physically deleted.
     pub clog_entries_pruned: u64,
+    /// Aborted/crashed deleter stamps (`xmax`) cleared from surviving versions.
+    pub stamps_cleared: u64,
+}
+
+impl std::ops::AddAssign for VacuumStats {
+    fn add_assign(&mut self, other: Self) {
+        self.versions_pruned += other.versions_pruned;
+        self.index_entries_pruned += other.index_entries_pruned;
+        self.versions_frozen += other.versions_frozen;
+        self.clog_entries_pruned += other.clog_entries_pruned;
+        self.stamps_cleared += other.stamps_cleared;
+    }
+}
+
+/// Counts returned by one bounded [`SqlEngine::vacuum_step`].
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct VacuumStepStats {
+    /// Physical reclamation performed by this step.
+    pub stats: VacuumStats,
+    /// Tuple version keys examined by this step's interval scans.
+    pub keys_examined: u64,
+    /// Whether this step completed a full sweep cycle over every ordinary
+    /// table (including tables provably clean enough to skip).
+    pub cycle_completed: bool,
+}
+
+/// Rowids spanned by one bounded vacuum interval scan. Version keys sort by
+/// rowid within a table, so `[cursor, cursor + stride)` is a cheap range scan
+/// that never materializes more than one interval of chain keys.
+const VACUUM_INTERVAL_ROWIDS: u64 = 8_192;
+
+/// Tuple version keys one [`SqlEngine::vacuum_step`] examines before pausing;
+/// the sweep resumes from its cursor on the next step. Bounds a step's work at
+/// O(budget) instead of O(total data) so the periodic sweep cannot starve
+/// foreground statements on large stores. Sized so a fully-dirty step (every
+/// scanned version needs a per-row freeze commit — the post-bulk-load
+/// catch-up worst case) stays well under 10% of a 2s tick; measured on a
+/// 10M-row point-SELECT workload, 32k budgets cost ~30% foreground
+/// throughput while 8k budgets are within noise.
+const VACUUM_STEP_KEY_BUDGET: usize = 8_192;
+
+/// Minimum budget charge per interval scan, so one step over sparse or empty
+/// rowid space still terminates after a bounded number of range scans.
+const VACUUM_INTERVAL_MIN_COST: usize = 64;
+
+/// Candidate rows processed between cooperative yields inside one interval.
+const VACUUM_YIELD_EVERY_ROWS: usize = 128;
+
+/// Per-table version-write accounting driving demand-driven vacuum sweeps.
+///
+/// The demand-observing committer bumps a table's counter after every
+/// committed batch that Puts an ordinary primary MVCC version key (new
+/// versions and `xmax` stamps alike). The sweep snapshots the counter when it
+/// enters a table and skips the table on later cycles while the counter is
+/// unchanged AND the recorded sweep left every surviving version fully
+/// settled (frozen `xmin`, invalid `xmax`): such a table holds no reclaimable
+/// garbage, nothing to freeze or clear, and no clog dependence, so skipping
+/// it can never invalidate a later clog truncation.
+#[derive(Default)]
+pub(crate) struct VacuumDemand {
+    /// Monotone count of committed primary-version Puts per ordinary table.
+    version_puts: Mutex<HashMap<u32, u64>>,
+}
+
+impl VacuumDemand {
+    /// Table ids of every ordinary primary-version Put in `ops` (duplicates
+    /// kept: each Put counts once).
+    fn version_put_tables(ops: &[crabka_pgkv::WriteOp]) -> Vec<u32> {
+        ops.iter()
+            .filter_map(|op| {
+                let (crabka_pgkv::WriteOp::Put { key, .. }
+                | crabka_pgkv::WriteOp::ConditionalPut { key, .. }) = op
+                else {
+                    return None;
+                };
+                match crabka_pgkv::key::classify_key(key) {
+                    crabka_pgkv::key::KeyClass::PrimaryVersion { table_id, .. } => Some(table_id),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
+    /// Record committed version Puts. Called only AFTER the batch is durably
+    /// applied, so a sweep that observed a count has the counted data visible.
+    fn record(&self, touched: &[u32]) {
+        if touched.is_empty() {
+            return;
+        }
+        let mut version_puts = self.version_puts.lock().expect("vacuum demand counters");
+        for table_id in touched {
+            *version_puts.entry(*table_id).or_insert(0) += 1;
+        }
+    }
+
+    /// The current committed version-Put count for one table.
+    fn version_puts_to(&self, table_id: u32) -> u64 {
+        self.version_puts
+            .lock()
+            .expect("vacuum demand counters")
+            .get(&table_id)
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
+/// Committer decorator feeding [`VacuumDemand`]. Counting happens after the
+/// inner commit succeeds, so a sweep never observes a count whose data is not
+/// yet visible. The engine's own sweep commits bypass this wrapper (through
+/// `sweep_committer`) so freeze/clear rewrites do not re-mark their table as
+/// dirty and re-trigger the sweep forever.
+struct VacuumDemandObservingCommitter {
+    inner: Arc<dyn crate::commit::Committer>,
+    demand: Arc<VacuumDemand>,
+}
+
+#[async_trait::async_trait]
+impl crate::commit::Committer for VacuumDemandObservingCommitter {
+    async fn commit(&self, ops: Vec<crabka_pgkv::WriteOp>) -> Result<(), ExecError> {
+        let touched = VacuumDemand::version_put_tables(&ops);
+        self.inner.commit(ops).await?;
+        self.demand.record(&touched);
+        Ok(())
+    }
+}
+
+/// Resumable engine-level sweep state: the table/rowid cursor, per-cycle clog
+/// bookkeeping, and the per-table clean-sweep records demand skipping uses.
+/// Shared by every handle of one engine; steps serialize on the enclosing
+/// async mutex.
+#[derive(Default)]
+struct VacuumProgress {
+    /// The sweep resumes at the first ordinary table whose id is at least
+    /// this (`u64` so advancing past `u32::MAX` cannot overflow).
+    cursor_table: u64,
+    /// The sweep resumes at this rowid within the cursor table.
+    cursor_rowid: u64,
+    /// Lowest garbage horizon used by any interval of the in-progress cycle:
+    /// the only clog-truncation floor every swept region provably supports.
+    /// (The horizon is monotone across steps, so this is normally the first
+    /// step's horizon.)
+    cycle_floor: Option<u64>,
+    /// Whether any candidate row was skipped this cycle (a transient lock
+    /// verdict) — defers clog truncation to the next full cycle.
+    cycle_skipped: bool,
+    /// Scratch for the table currently under the cursor.
+    current: Option<TableSweepScratch>,
+    /// Latest completed clean sweep per table id (see [`VacuumDemand`]).
+    swept: HashMap<u32, TableSweepRecord>,
+}
+
+impl VacuumProgress {
+    /// Restart at the beginning of a fresh cycle (the full-pass
+    /// [`SqlEngine::vacuum`] entry point), discarding partial-cycle state but
+    /// keeping the per-table clean-sweep records — their validity depends
+    /// only on the demand counters, not on cycle boundaries.
+    fn restart_cycle(&mut self) {
+        self.cursor_table = 0;
+        self.cursor_rowid = 0;
+        self.cycle_floor = None;
+        self.cycle_skipped = false;
+        self.current = None;
+    }
+}
+
+/// In-progress accounting for the table currently under the sweep cursor.
+struct TableSweepScratch {
+    table_id: u32,
+    /// Demand counter value when this cycle's sweep entered the table.
+    entry_version_puts: u64,
+    /// Surviving versions this sweep leaves less than fully settled
+    /// (non-frozen `xmin` or a deleter stamp it cannot clear).
+    unsettled: u64,
+    /// Whether a transient lock verdict skipped a candidate row in this table.
+    skipped: bool,
+    /// Exclusive rowid bound for this table's sweep: the table's durable
+    /// next-rowid at entry. Durable-mode sequences persist a block ahead of
+    /// every handed-out rowid (see `SequenceManager`), so no row present at
+    /// entry can sit at or beyond it; rows inserted afterwards carry xids at
+    /// or above the cycle floor and need no pruning, freezing, or clog entry
+    /// this cycle.
+    terminal: u64,
+}
+
+/// One table's latest completed clean sweep (no lock-skipped rows).
+struct TableSweepRecord {
+    /// Demand counter snapshot taken when that sweep entered the table.
+    version_puts_at_entry: u64,
+    /// Surviving versions that sweep left less than fully settled.
+    unsettled: u64,
+}
+
+/// Outcome of sweeping one bounded rowid interval of one table.
+#[derive(Default)]
+struct VacuumIntervalOutcome {
+    stats: VacuumStats,
+    /// Tuple version keys the interval scan returned.
+    keys: usize,
+    /// Surviving versions left less than fully settled.
+    unsettled: u64,
+    /// Whether a transient lock verdict skipped a candidate row.
+    skipped: bool,
+}
+
+/// Whether `xmax` is a deleter stamp vacuum may clear at `horizon`: a decided
+/// abort (terminal, immutable at any xid), or a sub-horizon absent/in-progress
+/// entry — a crashed transaction that can never commit (every xid below the
+/// horizon is decided, and a PRESENT sub-horizon entry is always terminal).
+/// Committed stamps are never cleared: a committed sub-horizon deleter makes
+/// the version dead instead, and a committed deleter at or above the horizon
+/// may still be visible-to-delete for some snapshot.
+fn vacuum_stamp_is_clearable(
+    xmax: u64,
+    horizon: u64,
+    clog_status: &impl Fn(u64) -> Result<crabka_pgmvcc::clog::XidStatus, crabka_pgkv::KvError>,
+) -> Result<bool, crabka_pgkv::KvError> {
+    if xmax == crabka_pgmvcc::xid::INVALID_XID {
+        return Ok(false);
+    }
+    Ok(match clog_status(xmax)? {
+        crabka_pgmvcc::clog::XidStatus::Aborted => true,
+        crabka_pgmvcc::clog::XidStatus::InProgress => xmax < horizon,
+        crabka_pgmvcc::clog::XidStatus::Committed | crabka_pgmvcc::clog::XidStatus::Prepared(_) => {
+            false
+        }
+    })
 }
 
 /// Timestamp ownership carried by a local MVCC scan.
@@ -348,12 +590,18 @@ impl SqlEngine {
     pub fn with_kv(kv: Arc<dyn Kv>) -> Result<Self, ExecError> {
         let coordination = coordination_for(&kv);
         let procarray = Arc::new(ProcArray::open(Arc::clone(&kv), PersistMode::Durable)?);
-        let committer = timestamp_txn::HorizonObservingCommitter::wrap(
+        let sweep_committer = timestamp_txn::HorizonObservingCommitter::wrap(
             Arc::new(crate::commit::LocalCommitter {
                 kv: Arc::clone(&kv),
             }),
             &kv,
         );
+        let vacuum_demand = Arc::new(VacuumDemand::default());
+        let committer: Arc<dyn crate::commit::Committer> =
+            Arc::new(VacuumDemandObservingCommitter {
+                inner: Arc::clone(&sweep_committer),
+                demand: Arc::clone(&vacuum_demand),
+            });
         let timestamp_horizon =
             timestamp_txn::TimestampHorizonSource::new(Arc::clone(&kv), Arc::clone(&kv), false);
         Ok(Self {
@@ -380,6 +628,9 @@ impl SqlEngine {
             timestamp_oracle: Arc::new(timestamp_txn::LocalTimestampOracle::default()),
             timestamp_horizon,
             gc_horizon: Arc::new(crabka_pgmvcc::gc::GcHorizon::new()),
+            sweep_committer,
+            vacuum_demand,
+            vacuum_progress: Arc::new(tokio::sync::Mutex::new(VacuumProgress::default())),
         })
     }
 
@@ -448,6 +699,12 @@ impl SqlEngine {
     /// A no-op (returning zeroed [`VacuumStats`]) on engines where
     /// [`SqlEngine::supports_local_vacuum`] is false.
     ///
+    /// Internally this restarts the incremental sweep at the first table and
+    /// runs bounded [`SqlEngine::vacuum_step`] chunks until the cycle
+    /// completes, so one call still means one full pass. Long-running
+    /// processes should call `vacuum_step` on a short period instead and let
+    /// the pass spread across steps.
+    ///
     /// # Errors
     ///
     /// Returns an error when catalog or store access fails or a delete batch
@@ -456,37 +713,388 @@ impl SqlEngine {
         if !self.supports_local_vacuum() {
             return Ok(VacuumStats::default());
         }
+        let mut progress = self.vacuum_progress.lock().await;
+        progress.restart_cycle();
+        let mut total = VacuumStats::default();
+        loop {
+            let step = self.vacuum_step_locked(&mut progress).await?;
+            total += step.stats;
+            if step.cycle_completed {
+                return Ok(total);
+            }
+        }
+    }
+
+    /// Run one bounded increment of the engine-level garbage sweep (see
+    /// [`SqlEngine::vacuum`] for what a full cycle does).
+    ///
+    /// A step examines at most a budgeted number of tuple version keys,
+    /// resuming from a persistent-in-memory `(table, rowid)` cursor and
+    /// wrapping around the table list, so a full pass over a large store
+    /// spreads across many steps instead of storming the store in one call.
+    /// Tables whose demand counters prove them fully settled since their last
+    /// clean sweep are skipped without scanning. The clog-truncation + scan
+    /// floor advance runs only on the step that completes a cycle in which
+    /// nothing was lock-skipped.
+    ///
+    /// A no-op on engines where [`SqlEngine::supports_local_vacuum`] is false.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when catalog or store access fails or a delete batch
+    /// cannot be committed.
+    pub async fn vacuum_step(&self) -> Result<VacuumStepStats, ExecError> {
+        if !self.supports_local_vacuum() {
+            return Ok(VacuumStepStats::default());
+        }
+        let mut progress = self.vacuum_progress.lock().await;
+        self.vacuum_step_locked(&mut progress).await
+    }
+
+    /// One budgeted sweep step over the cursor's tables (caller holds the
+    /// progress lock).
+    async fn vacuum_step_locked(
+        &self,
+        progress: &mut VacuumProgress,
+    ) -> Result<VacuumStepStats, ExecError> {
         let horizon = self.checkpoint_garbage_horizon()?;
-        let tables = crabka_pgcatalog::list_tables(self.catalog_kv.as_ref())?;
-        // A unique lock-owner id for the sweep. `begin_write` registers it as
-        // running (harmless: it is the newest xid, so it lowers no horizon) and
-        // it writes no tuples and no clog entry, so after `finish` it is
+        // Timestamp/sharded tables use ts tuples with their own resolution
+        // rules; only ordinary xid-MVCC tables are swept.
+        let mut tables: Vec<crabka_pgcatalog::Table> =
+            crabka_pgcatalog::list_tables(self.catalog_kv.as_ref())?
+                .into_iter()
+                .filter(|table| !table.sharded && table.sharding.is_none())
+                .collect();
+        tables.sort_unstable_by_key(|table| table.id);
+        progress
+            .swept
+            .retain(|id, _| tables.iter().any(|table| table.id == *id));
+        progress.cycle_floor = Some(
+            progress
+                .cycle_floor
+                .map_or(horizon, |floor| floor.min(horizon)),
+        );
+
+        // A unique lock-owner id for the sweep, allocated lazily on the first
+        // interval that actually locks a row. `begin_write` registers it as
+        // running (harmless: it is the newest xid, so it lowers no horizon)
+        // and it writes no tuples and no clog entry, so after `finish` it is
         // indistinguishable from a crashed no-op transaction.
-        let vacuum_xid = self.procarray.begin_write()?;
-        let result = self.vacuum_tables(&tables, horizon, vacuum_xid).await;
+        let mut vacuum_xid: Option<u64> = None;
+        let result = self
+            .vacuum_step_chunks(progress, &tables, horizon, &mut vacuum_xid)
+            .await;
         // Belt-and-braces: per-row sweeps release as they go; make sure nothing
         // stays held (or registered) on an error path.
-        self.lockmgr.release_all(vacuum_xid);
-        self.procarray.finish(vacuum_xid);
-        let (mut stats, fully_swept) = result?;
-        // Truncate the clog below the horizon — but only after EVERY ordinary
-        // table was fully swept at this horizon: sweeping pruned every dead
-        // sub-horizon version and froze every surviving one, so no visibility
-        // check can consult a deleted entry (an absent sub-horizon entry
-        // already reads as decided-by-crash). A row skipped by a transient
-        // lock verdict defers truncation to the next sweep.
-        if fully_swept {
-            stats.clog_entries_pruned = self.truncate_clog_below(horizon).await?;
-            // Advance the durable clog scan floor. Safe by the horizon
-            // contract: every xid below `horizon` is decided (or a crashed
-            // leftover that can never commit), and the horizon never passes a
-            // non-terminal (InProgress/Prepared) entry — so the recovery
-            // watermark invariant ("never advance past a non-terminal
-            // marker") holds. On this single-range local engine no Prepared
-            // marker can exist at all.
-            self.advance_clog_scan_lo(horizon).await?;
+        if let Some(xid) = vacuum_xid {
+            self.lockmgr.release_all(xid);
+            self.procarray.finish(xid);
         }
-        Ok(stats)
+        let mut out = result?;
+        if out.cycle_completed {
+            let floor = progress.cycle_floor.take();
+            let lock_skipped = std::mem::take(&mut progress.cycle_skipped);
+            // Truncate the clog below the cycle floor — but only after EVERY
+            // ordinary table was fully swept this cycle (or skipped as
+            // provably settled): sweeping pruned every dead sub-floor version
+            // and froze every surviving one, so no visibility check can
+            // consult a deleted entry (an absent sub-floor entry already
+            // reads as decided-by-crash). A row skipped by a transient lock
+            // verdict defers truncation to the next cycle.
+            if !lock_skipped && let Some(floor) = floor {
+                out.stats.clog_entries_pruned += self.truncate_clog_below(floor).await?;
+                // Advance the durable clog scan floor. Safe by the horizon
+                // contract: every xid below `floor` is decided (or a crashed
+                // leftover that can never commit), and the horizon never
+                // passes a non-terminal (InProgress/Prepared) entry — so the
+                // recovery watermark invariant ("never advance past a
+                // non-terminal marker") holds. On this single-range local
+                // engine no Prepared marker can exist at all.
+                self.advance_clog_scan_lo(floor).await?;
+            }
+        }
+        Ok(out)
+    }
+
+    /// Walk the sweep cursor forward until the step budget is spent or the
+    /// cycle wraps past the last table.
+    async fn vacuum_step_chunks(
+        &self,
+        progress: &mut VacuumProgress,
+        tables: &[crabka_pgcatalog::Table],
+        horizon: u64,
+        vacuum_xid: &mut Option<u64>,
+    ) -> Result<VacuumStepStats, ExecError> {
+        let mut out = VacuumStepStats::default();
+        let mut budget = VACUUM_STEP_KEY_BUDGET;
+        loop {
+            let Some(table) = tables
+                .iter()
+                .find(|table| u64::from(table.id) >= progress.cursor_table)
+            else {
+                // Past the last table: the cycle is complete; wrap the cursor.
+                out.cycle_completed = true;
+                progress.cursor_table = 0;
+                progress.cursor_rowid = 0;
+                progress.current = None;
+                break;
+            };
+            let entering = u64::from(table.id) != progress.cursor_table
+                || progress.current.as_ref().map(|scratch| scratch.table_id) != Some(table.id);
+            if entering {
+                progress.cursor_table = u64::from(table.id);
+                progress.cursor_rowid = 0;
+                let entry_version_puts = self.vacuum_demand.version_puts_to(table.id);
+                if progress.swept.get(&table.id).is_some_and(|record| {
+                    record.version_puts_at_entry == entry_version_puts && record.unsettled == 0
+                }) {
+                    // No version write since the table's last clean sweep, and
+                    // that sweep left every survivor fully settled (frozen
+                    // xmin, invalid xmax): nothing to prune, freeze, or clear,
+                    // and no clog dependence — skip the table without a scan.
+                    progress.cursor_table = u64::from(table.id) + 1;
+                    progress.current = None;
+                    continue;
+                }
+                progress.current = Some(TableSweepScratch {
+                    table_id: table.id,
+                    entry_version_puts,
+                    unsettled: 0,
+                    skipped: false,
+                    terminal: crate::exec::read_seq_kv(self.kv.as_ref(), table.id)?,
+                });
+            }
+            let terminal = progress.current.as_ref().expect("sweep scratch").terminal;
+            if progress.cursor_rowid >= terminal {
+                // Table finished: record the sweep so demand skipping can
+                // prove the table clean on later cycles.
+                let scratch = progress.current.take().expect("sweep scratch");
+                if scratch.skipped {
+                    progress.cycle_skipped = true;
+                    progress.swept.remove(&table.id);
+                } else {
+                    progress.swept.insert(
+                        table.id,
+                        TableSweepRecord {
+                            version_puts_at_entry: scratch.entry_version_puts,
+                            unsettled: scratch.unsettled,
+                        },
+                    );
+                }
+                progress.cursor_table = u64::from(table.id) + 1;
+                progress.cursor_rowid = 0;
+                continue;
+            }
+            if budget == 0 {
+                break;
+            }
+            let start = progress.cursor_rowid;
+            let end = start.saturating_add(VACUUM_INTERVAL_ROWIDS).min(terminal);
+            let interval = self
+                .vacuum_interval(table, horizon, vacuum_xid, start..end)
+                .await?;
+            budget = budget.saturating_sub(interval.keys.max(VACUUM_INTERVAL_MIN_COST));
+            out.keys_examined += interval.keys as u64;
+            out.stats += interval.stats;
+            let scratch = progress.current.as_mut().expect("sweep scratch");
+            scratch.unsettled += interval.unsettled;
+            scratch.skipped |= interval.skipped;
+            progress.cursor_rowid = end;
+            // Yield between intervals so foreground statements interleave
+            // even when every interval completes without blocking.
+            tokio::task::yield_now().await;
+        }
+        Ok(out)
+    }
+
+    /// Sweep one table's version chains for rowids in `interval` at `horizon`
+    /// (see `vacuum`). Allocates the sweep's lock-owner xid on first use.
+    async fn vacuum_interval(
+        &self,
+        table: &crabka_pgcatalog::Table,
+        horizon: u64,
+        vacuum_xid: &mut Option<u64>,
+        interval: std::ops::Range<u64>,
+    ) -> Result<VacuumIntervalOutcome, ExecError> {
+        let mut outcome = VacuumIntervalOutcome::default();
+        // Hold the shared physical gate so a concurrent conversion (which
+        // rewrites the whole table under the exclusive half) serializes with
+        // the sweep, exactly like an ordinary writer.
+        let _gate = Arc::clone(&self.table_write_gate).read_owned().await;
+        let clog_status = |xid| crabka_pgmvcc::clog::get(self.kv.as_ref(), xid);
+        let scan = self.kv.scan_range(
+            &crabka_pgkv::key::row_key(table.id, interval.start),
+            &crabka_pgkv::key::row_key(table.id, interval.end),
+        )?;
+        outcome.keys = scan.len();
+        // Lock-free candidate pre-scan: deadness, freezability, and stamp
+        // clearability at a fixed horizon are stable (terminal clog states
+        // are immutable), so this can only under-report relative to the
+        // locked re-read below — and versions written after it carry xids at
+        // or above the horizon, which need no sweep work this cycle. The
+        // per-rowid flag records whether any version needs a stamp clear, so
+        // the common freeze-only row skips a third chain scan under its lock.
+        let mut candidates: std::collections::BTreeMap<u64, bool> =
+            std::collections::BTreeMap::new();
+        for (key, value) in scan {
+            let (xmin, xmax, _row) = crabka_pgmvcc::version::decode_tuple(&value)?;
+            let dead = crabka_pgmvcc::gc::version_is_dead(xmin, xmax, horizon, &clog_status)?;
+            let freezable = !dead
+                && xmin != crabka_pgmvcc::xid::FROZEN_XID
+                && xmin < horizon
+                && matches!(
+                    clog_status(xmin)?,
+                    crabka_pgmvcc::clog::XidStatus::Committed
+                );
+            let clearable = !dead && vacuum_stamp_is_clearable(xmax, horizon, &clog_status)?;
+            if dead || freezable || clearable {
+                let prefix = crabka_pgmvcc::version::row_prefix_of(&key)?;
+                *candidates
+                    .entry(crabka_pgkv::key::rowid_of(table.id, prefix)?)
+                    .or_insert(false) |= clearable;
+            }
+            // Count survivors this pass will NOT leave fully settled: they
+            // keep the table on the sweep schedule for the next cycle.
+            if !dead
+                && !((xmin == crabka_pgmvcc::xid::FROZEN_XID || freezable)
+                    && (xmax == crabka_pgmvcc::xid::INVALID_XID || clearable))
+            {
+                outcome.unsettled += 1;
+            }
+        }
+        if candidates.is_empty() {
+            return Ok(outcome);
+        }
+        let local_indexes: Vec<crabka_pgcatalog::Index> =
+            crabka_pgcatalog::list_table_indexes(self.catalog_kv.as_ref(), &table.name)?
+                .into_iter()
+                .filter(|index| index.placement == crabka_pgcatalog::IndexPlacement::Local)
+                .collect();
+        let owner_xid = match *vacuum_xid {
+            Some(xid) => xid,
+            None => {
+                let xid = self.procarray.begin_write()?;
+                *vacuum_xid = Some(xid);
+                xid
+            }
+        };
+        for (processed, (rowid, needs_clear)) in candidates.into_iter().enumerate() {
+            if processed != 0 && processed % VACUUM_YIELD_EVERY_ROWS == 0 {
+                tokio::task::yield_now().await;
+            }
+            // Take the writer's exclusive row lock: dead version KEYS never
+            // collide with a writer's puts, but the index-entry survivor
+            // computation must not race a concurrent writer re-adding the
+            // same indexed values, and a freeze/clear rewrite must not race a
+            // writer stamping xmax on the same key. Holding at most this
+            // one lock, the sweep cannot close a wait-for cycle of its
+            // own; a transient deadlock verdict (a just-woken waiter's
+            // stale edge) simply skips the row until the next sweep.
+            if self
+                .lockmgr
+                .acquire(
+                    table.id,
+                    rowid,
+                    crate::lockmgr::LockMode::Exclusive,
+                    owner_xid,
+                )
+                .await
+                .is_err()
+            {
+                outcome.skipped = true;
+                continue;
+            }
+            let pruned = crate::exec::prune_rowid_chain_ops(
+                self.kv.as_ref(),
+                table,
+                &local_indexes,
+                &crate::exec::ChainPruneRequest {
+                    rowid,
+                    horizon,
+                    keep_xids: &[],
+                    new_row: None,
+                    freeze_below: Some(horizon),
+                },
+            )
+            .and_then(|mut prune| {
+                // A row whose pre-scan saw no clearable stamp skips the clear
+                // re-scan; a stamp aborted since then stays unsettled in this
+                // interval's accounting, so the next cycle picks it up.
+                let cleared = if needs_clear {
+                    self.clear_settled_stamp_ops(table.id, rowid, horizon, &mut prune)?
+                } else {
+                    0
+                };
+                Ok((prune, cleared))
+            });
+            let commit = match pruned {
+                Ok((prune, _)) if prune.ops.is_empty() => Ok(()),
+                Ok((prune, cleared)) => {
+                    outcome.stats.versions_pruned += prune.versions;
+                    outcome.stats.index_entries_pruned += prune.index_entries;
+                    outcome.stats.versions_frozen += prune.frozen;
+                    outcome.stats.stamps_cleared += cleared;
+                    self.sweep_committer.commit(prune.ops).await
+                }
+                Err(error) => Err(error),
+            };
+            // Targeted release of the single row lock this iteration took:
+            // `release_all` walks the WHOLE lock table, which is quadratic
+            // per interval whenever a concurrent bulk writer holds a large
+            // lock set.
+            self.lockmgr
+                .release_key(&crate::lockmgr::LockKey::Row(table.id, rowid), owner_xid);
+            commit?;
+        }
+        Ok(outcome)
+    }
+
+    /// Under the row's exclusive lock, extend a prune batch with rewrites that
+    /// clear aborted/crashed deleter stamps from surviving versions (see
+    /// [`vacuum_stamp_is_clearable`]). Every snapshot already reads such a
+    /// version as not deleted, so the rewrite is invisible; it only removes
+    /// the version's dependence on the deleter's clog entry so the row can
+    /// become fully settled and its table skippable. Returns the number of
+    /// stamps cleared.
+    fn clear_settled_stamp_ops(
+        &self,
+        table_id: u32,
+        rowid: u64,
+        horizon: u64,
+        prune: &mut crate::exec::ChainPrune,
+    ) -> Result<u64, ExecError> {
+        let clog_status = |xid| crabka_pgmvcc::clog::get(self.kv.as_ref(), xid);
+        let mut cleared: u64 = 0;
+        for (key, value) in self
+            .kv
+            .scan_prefix(&crabka_pgkv::key::row_key(table_id, rowid))?
+        {
+            // Versions the batch already deletes need no stamp rewrite.
+            if prune.ops.iter().any(
+                |op| matches!(op, crabka_pgkv::WriteOp::Delete { key: deleted } if *deleted == key),
+            ) {
+                continue;
+            }
+            let (_, xmax, _) = crabka_pgmvcc::version::decode_tuple(&value)?;
+            if !vacuum_stamp_is_clearable(xmax, horizon, &clog_status)? {
+                continue;
+            }
+            // Rebase on the batch's own freeze rewrite of the same key, if
+            // any, so both header rewrites land in one Put.
+            if let Some(pending) = prune.ops.iter_mut().find_map(|op| match op {
+                crabka_pgkv::WriteOp::Put { key: frozen, value } if *frozen == key => Some(value),
+                _ => None,
+            }) {
+                *pending = crabka_pgmvcc::version::clear_tuple_xmax(pending)?;
+            } else {
+                prune.ops.push(crabka_pgkv::WriteOp::Put {
+                    key,
+                    value: crabka_pgmvcc::version::clear_tuple_xmax(&value)?,
+                });
+            }
+            cleared += 1;
+        }
+        Ok(cleared)
     }
 
     /// Delete every clog entry strictly below `horizon`, in bounded batches.
@@ -509,110 +1117,6 @@ impl SqlEngine {
             self.committer.commit(batch).await?;
         }
         Ok(deleted)
-    }
-
-    /// Sweep every ordinary table's version chains at `horizon` (see `vacuum`).
-    /// Returns the sweep counts and whether EVERY candidate row was swept
-    /// (false when a transient lock verdict skipped one — the caller must not
-    /// truncate the clog in that case).
-    async fn vacuum_tables(
-        &self,
-        tables: &[crabka_pgcatalog::Table],
-        horizon: u64,
-        vacuum_xid: u64,
-    ) -> Result<(VacuumStats, bool), ExecError> {
-        let mut stats = VacuumStats::default();
-        let mut fully_swept = true;
-        for table in tables {
-            // Timestamp/sharded tables use ts tuples with their own
-            // resolution rules; only ordinary xid-MVCC tables are swept.
-            if table.sharded || table.sharding.is_some() {
-                continue;
-            }
-            // Hold the shared physical gate so a concurrent conversion (which
-            // rewrites the whole table under the exclusive half) serializes
-            // with the sweep, exactly like an ordinary writer.
-            let _gate = Arc::clone(&self.table_write_gate).read_owned().await;
-            let local_indexes: Vec<crabka_pgcatalog::Index> =
-                crabka_pgcatalog::list_table_indexes(self.catalog_kv.as_ref(), &table.name)?
-                    .into_iter()
-                    .filter(|index| index.placement == crabka_pgcatalog::IndexPlacement::Local)
-                    .collect();
-            // Lock-free candidate pre-scan: deadness and freezability at a
-            // fixed horizon are stable (terminal clog states are immutable),
-            // so this can only under-report relative to the locked re-read
-            // below — and versions written after it carry xids at or above
-            // the horizon, which need neither pruning nor freezing.
-            let clog_status = |xid| crabka_pgmvcc::clog::get(self.kv.as_ref(), xid);
-            let mut candidates = std::collections::BTreeSet::new();
-            for (key, value) in self
-                .kv
-                .scan_prefix(&crabka_pgkv::key::table_prefix(table.id))?
-            {
-                let (xmin, xmax, _row) = crabka_pgmvcc::version::decode_tuple(&value)?;
-                let dead = crabka_pgmvcc::gc::version_is_dead(xmin, xmax, horizon, &clog_status)?;
-                let freezable = !dead
-                    && xmin != crabka_pgmvcc::xid::FROZEN_XID
-                    && xmin < horizon
-                    && matches!(
-                        clog_status(xmin)?,
-                        crabka_pgmvcc::clog::XidStatus::Committed
-                    );
-                if dead || freezable {
-                    let prefix = crabka_pgmvcc::version::row_prefix_of(&key)?;
-                    candidates.insert(crabka_pgkv::key::rowid_of(table.id, prefix)?);
-                }
-            }
-            for rowid in candidates {
-                // Take the writer's exclusive row lock: dead version KEYS never
-                // collide with a writer's puts, but the index-entry survivor
-                // computation must not race a concurrent writer re-adding the
-                // same indexed values, and a freeze rewrite must not race a
-                // writer stamping xmax on the same key. Holding at most this
-                // one lock, the sweep cannot close a wait-for cycle of its
-                // own; a transient deadlock verdict (a just-woken waiter's
-                // stale edge) simply skips the row until the next sweep.
-                if self
-                    .lockmgr
-                    .acquire(
-                        table.id,
-                        rowid,
-                        crate::lockmgr::LockMode::Exclusive,
-                        vacuum_xid,
-                    )
-                    .await
-                    .is_err()
-                {
-                    fully_swept = false;
-                    continue;
-                }
-                let pruned = crate::exec::prune_rowid_chain_ops(
-                    self.kv.as_ref(),
-                    table,
-                    &local_indexes,
-                    &crate::exec::ChainPruneRequest {
-                        rowid,
-                        horizon,
-                        keep_xids: &[],
-                        new_row: None,
-                        freeze_below: Some(horizon),
-                    },
-                );
-                let commit = match pruned {
-                    Ok(prune) if prune.ops.is_empty() => Ok(()),
-                    Ok(prune) => {
-                        stats.versions_pruned += prune.versions;
-                        stats.index_entries_pruned += prune.index_entries;
-                        stats.versions_frozen += prune.frozen;
-                        self.committer.commit(prune.ops).await
-                    }
-                    Err(error) => Err(error),
-                };
-                self.lockmgr.release_all(vacuum_xid);
-                commit?;
-            }
-        }
-        Ok((stats, fully_swept))
     }
 
     /// Build an engine whose reads come from `sm_kv` (the applied state machine)
@@ -653,6 +1157,9 @@ impl SqlEngine {
             table_write_gate: Arc::clone(&coordination.table_write_gate),
             writer_fence: Arc::clone(&coordination.writer_fence),
             unique_index_lock: Arc::new(tokio::sync::RwLock::new(())),
+            // Replicated engines never vacuum locally, so no demand-observing
+            // wrapper and the sweep committer is the ordinary one.
+            sweep_committer: Arc::clone(&committer),
             committer,
             linearizer,
             persist_mode: PersistMode::Replicated,
@@ -666,6 +1173,8 @@ impl SqlEngine {
             timestamp_oracle: Arc::new(timestamp_txn::LocalTimestampOracle::default()),
             timestamp_horizon,
             gc_horizon: Arc::new(crabka_pgmvcc::gc::GcHorizon::new()),
+            vacuum_demand: Arc::new(VacuumDemand::default()),
+            vacuum_progress: Arc::new(tokio::sync::Mutex::new(VacuumProgress::default())),
         })
     }
 
@@ -722,6 +1231,9 @@ impl SqlEngine {
             timestamp_oracle: Arc::clone(&self.timestamp_oracle),
             timestamp_horizon: self.timestamp_horizon.clone(),
             gc_horizon: Arc::clone(&self.gc_horizon),
+            sweep_committer: Arc::clone(&self.sweep_committer),
+            vacuum_demand: Arc::clone(&self.vacuum_demand),
+            vacuum_progress: Arc::clone(&self.vacuum_progress),
         }
     }
 

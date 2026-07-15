@@ -1087,13 +1087,14 @@ pub(crate) async fn execute_write(
                 }
                 let full = build_insert_row(&t, &target_idx, row_exprs, ctx)?;
                 enforce_unique_local_indexes(
-                    &write_ctx.mvcc_read(),
+                    write_ctx,
                     &t,
                     &local_indexes,
                     rowid,
                     &full,
                     &mut pending_unique_keys,
-                )?;
+                )
+                .await?;
                 if returning.is_some() {
                     returned_rows.push(full.clone());
                 }
@@ -1167,14 +1168,15 @@ pub(crate) async fn execute_write(
                 }
                 enforce_not_null(&t, &next)?;
                 enforce_unique_local_index_updates(
-                    &write_ctx.mvcc_read(),
+                    write_ctx,
                     &t,
                     &local_indexes,
                     rowid,
                     &cur_row,
                     &next,
                     &mut pending_unique_keys,
-                )?;
+                )
+                .await?;
                 if returning.is_some() {
                     returned_rows.push(next.clone());
                 }
@@ -1346,7 +1348,7 @@ fn returning_result(
     ))
 }
 
-pub(crate) fn execute_copy_write(
+pub(crate) async fn execute_copy_write(
     write_ctx: &WriteContext<'_>,
     copy: &crabka_pgparser::ast::CopyStmt,
     rows: &[Vec<Option<String>>],
@@ -1377,13 +1379,14 @@ pub(crate) fn execute_copy_write(
         }
         let full = build_copy_row(&table, &target_idx, row_values, ctx)?;
         enforce_unique_local_indexes(
-            &write_ctx.mvcc_read(),
+            write_ctx,
             &table,
             &local_indexes,
             rowid,
             &full,
             &mut pending_unique_keys,
-        )?;
+        )
+        .await?;
         ops.push(crabka_pgkv::WriteOp::Put {
             key: crabka_pgmvcc::version::version_key_xid(table.id, rowid, snapshot_xid),
             value: crabka_pgmvcc::version::encode_tuple(
@@ -1488,10 +1491,16 @@ fn writable_local_indexes(
     Ok(local_indexes)
 }
 
+/// Whether a DML statement must hold the engine's `unique_index_lock` SHARED
+/// for its duration (until COMMIT/ROLLBACK in an explicit transaction). Shared
+/// mode never blocks other DML — it only lets unique-index DDL (CREATE UNIQUE
+/// INDEX backfill, CREATE TABLE with a unique constraint), which takes the
+/// same lock EXCLUSIVELY, wait out in-flight writers and block new ones while
+/// it scans. Same-key DML conflicts serialize through per-key locks in the
+/// `RowLockManager` instead (see `enforce_unique_local_index`).
 pub(crate) enum UniqueLocalSerialization {
     None,
     Shared,
-    Exclusive,
 }
 
 pub(crate) fn write_requires_unique_local_serialization(
@@ -1560,17 +1569,12 @@ fn table_requires_unique_local_serialization(
         return Ok(UniqueLocalSerialization::None);
     }
     let indexes = crabka_pgcatalog::list_table_indexes(catalog_kv, table_name)?;
-    let mut has_unique_local_index = false;
     for index in indexes {
         if index.unique && index.placement != crabka_pgcatalog::IndexPlacement::Local {
             return Err(ExecError::Unsupported(
                 "unique global indexes are not supported until global enforcement exists".into(),
             ));
         }
-        has_unique_local_index |= index.unique;
-    }
-    if has_unique_local_index {
-        return Ok(UniqueLocalSerialization::Exclusive);
     }
     Ok(UniqueLocalSerialization::Shared)
 }
@@ -1611,8 +1615,8 @@ fn local_index_backfill_ops(
 
 type PendingUniqueKey = (crabka_pgcatalog::IndexId, Vec<Datum>);
 
-fn enforce_unique_local_index_updates(
-    mvcc: &MvccReadContext<'_>,
+async fn enforce_unique_local_index_updates(
+    write_ctx: &WriteContext<'_>,
     table: &Table,
     indexes: &[crabka_pgcatalog::Index],
     rowid: u64,
@@ -1624,15 +1628,26 @@ fn enforce_unique_local_index_updates(
         let old_values = indexed_values(table, index, old_row)?;
         let new_values = indexed_values(table, index, new_row)?;
         if old_values == new_values {
+            // The indexed key is untouched: no probe, and — crucially for
+            // write throughput — no key lock (a PK-preserving UPDATE takes
+            // only its row lock).
             continue;
         }
-        enforce_unique_local_index(mvcc, table, index, rowid, new_values, pending_unique_keys)?;
+        enforce_unique_local_index(
+            write_ctx,
+            table,
+            index,
+            rowid,
+            new_values,
+            pending_unique_keys,
+        )
+        .await?;
     }
     Ok(())
 }
 
-fn enforce_unique_local_indexes(
-    mvcc: &MvccReadContext<'_>,
+async fn enforce_unique_local_indexes(
+    write_ctx: &WriteContext<'_>,
     table: &Table,
     indexes: &[crabka_pgcatalog::Index],
     rowid: u64,
@@ -1641,13 +1656,14 @@ fn enforce_unique_local_indexes(
 ) -> Result<(), ExecError> {
     for index in indexes.iter().filter(|index| index.unique) {
         let values = indexed_values(table, index, row)?;
-        enforce_unique_local_index(mvcc, table, index, rowid, values, pending_unique_keys)?;
+        enforce_unique_local_index(write_ctx, table, index, rowid, values, pending_unique_keys)
+            .await?;
     }
     Ok(())
 }
 
-fn enforce_unique_local_index(
-    mvcc: &MvccReadContext<'_>,
+async fn enforce_unique_local_index(
+    write_ctx: &WriteContext<'_>,
     table: &Table,
     index: &crabka_pgcatalog::Index,
     rowid: u64,
@@ -1655,18 +1671,39 @@ fn enforce_unique_local_index(
     pending_unique_keys: &mut HashSet<PendingUniqueKey>,
 ) -> Result<(), ExecError> {
     if values.iter().any(Datum::is_null) {
+        // SQL unique ignores NULLs: nothing to enforce, so no key lock either.
         return Ok(());
     }
     let pending_key = (index.id, values.clone());
     if !pending_unique_keys.insert(pending_key) {
         return Err(ExecError::UniqueViolation(index.name.clone()));
     }
+    // Serialize check-then-write PER KEY: take this key's exclusive lock (in
+    // the row-lock manager, so it shares the deadlock wait-for graph and is
+    // released with the row locks at COMMIT/ROLLBACK) before probing. Without
+    // it, two concurrent writers of the same key would both pass the probe —
+    // neither sees the other's uncommitted version — and both commit. A waiter
+    // that wakes here after the holder's terminal outcome re-probes against
+    // the then-current committed state: a violation if the holder committed,
+    // success if it rolled back.
+    write_ctx
+        .lockmgr
+        .acquire_key(
+            crate::lockmgr::LockKey::UniqueKey(crabka_pgkv::key::secondary_index_entry_prefix(
+                table.id, index.id, &values,
+            )),
+            crate::lockmgr::LockMode::Exclusive,
+            write_ctx.xid,
+        )
+        .await
+        .map_err(|()| ExecError::Deadlock)?;
     // Probe the index for exactly this key instead of scanning the whole table.
     // The probe keeps the scan path's visibility (all-committed local + global
     // snapshots plus our own xid), and `lookup_local_index_equal` resolves each
     // candidate rowid through MVCC and re-checks its visible row's values, so
     // dead entries left by old versions or aborted writers never count. A
     // visible holder other than the row being written is a violation.
+    let mvcc = write_ctx.mvcc_read();
     let current_visibility = all_committed_snapshot();
     let probe = MvccReadContext {
         kv: mvcc.kv,
@@ -3645,6 +3682,167 @@ fn try_execute_partial_aggregate_pushdown(
     }))
 }
 
+/// Stream a supported local aggregate through per-page partial-aggregate
+/// folding instead of materializing every visible row before folding.
+///
+/// Fires only for the exact shape the partial-aggregate pushdown model already
+/// supports, on exactly one ordinary non-sharded base table: plain
+/// `count`/`sum`/`min`/`max`/`avg` calls over the whole projection (or the
+/// narrow grouped shape), with a WHERE that parses into the strict pushdown
+/// predicate subset. Everything else — `DISTINCT`, `HAVING`, whole-row reads,
+/// non-pushdown filters — keeps the materializing scan and its whole-result
+/// memory budget.
+fn try_execute_local_streaming_aggregate(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    s: &SelectStmt,
+) -> Result<Option<Relation>, ExecError> {
+    if !is_plain_partial_aggregate_select(s) {
+        return Ok(None);
+    }
+    let Some((table, qualifier)) = single_local_base_table(read_ctx.catalog_kv, s, read_ctx.ctes)?
+    else {
+        return Ok(None);
+    };
+    let Some(specs) = local_streaming_aggregate_specs(&table, s) else {
+        return Ok(None);
+    };
+    let Ok(predicate) = crate::plan_dist::strict_predicate_for_filter(&table, s.filter.as_ref())
+    else {
+        return Ok(None);
+    };
+    // An equality probe over a local index reads less than any table scan:
+    // keep that existing path (and its materializing budget) for those filters.
+    if choose_local_index_equality(read_ctx.catalog_kv, &table, &predicate)?.is_some() {
+        return Ok(None);
+    }
+    let scope = Scope::single(&table, &qualifier);
+    let (fields, _out_exprs, tys) = resolve_projection(&s.projection, &scope)?;
+    let states = crate::scanner::collect_partial_aggregates_bounded(
+        read_ctx.range_scanner,
+        ScanRequest {
+            local: read_ctx.kv,
+            global: read_ctx.global,
+            global_snapshot: read_ctx.gsnap,
+            snapshot: read_ctx.snapshot,
+            own_xid: read_ctx.own,
+            read_ts: None,
+            own_start_ts: None,
+            table: &table,
+            interval: RowInterval::ALL,
+            predicate,
+            projection: crate::ProjectionPushdown::All,
+            partial_aggregate: None,
+            top_k: None,
+        },
+        &specs,
+        crate::scanner::BLOCKING_QUERY_MEMORY_BYTES,
+    )?;
+    let rows = finalize_streaming_aggregate_rows(states, &specs, s.group_by.is_empty())?;
+    let out_scope = Scope {
+        columns: fields
+            .iter()
+            .zip(&tys)
+            .map(|(field, ty)| ColumnBinding {
+                qualifier: None,
+                name: field.name.clone(),
+                ty: *ty,
+            })
+            .collect(),
+    };
+    Ok(Some(Relation {
+        scope: out_scope,
+        rows,
+    }))
+}
+
+/// One partial-aggregate spec per projection item for scalar aggregates, or
+/// the single grouped spec. `None` when any item is outside the pushdown model.
+fn local_streaming_aggregate_specs(
+    table: &Table,
+    s: &SelectStmt,
+) -> Option<Vec<crate::PartialAggregateSpec>> {
+    if s.group_by.is_empty() {
+        return s
+            .projection
+            .iter()
+            .map(|item| {
+                crate::plan_dist::partial_aggregate_for_select_items(
+                    table,
+                    std::slice::from_ref(item),
+                )
+            })
+            .collect();
+    }
+    crate::plan_dist::grouped_partial_aggregate_for_select(table, &s.projection, &s.group_by)
+        .map(|spec| vec![spec])
+}
+
+/// Finalize per-spec partial states into SQL-visible output rows: scalar specs
+/// each contribute one value to a single row; the grouped spec expands to one
+/// row per group, already ordered by group key.
+fn finalize_streaming_aggregate_rows(
+    states: Vec<Vec<ScannedRow>>,
+    specs: &[crate::PartialAggregateSpec],
+    scalar: bool,
+) -> Result<Vec<Vec<Datum>>, ExecError> {
+    if scalar {
+        let mut row = Vec::with_capacity(specs.len());
+        for (state, spec) in states.into_iter().zip(specs) {
+            let finalized = crate::scanner::finalize_partial_aggregate_rows(state, spec)?;
+            let [value] = finalized.as_slice() else {
+                return Err(ExecError::Unsupported(
+                    "scalar partial aggregate produced an invalid merged shape".into(),
+                ));
+            };
+            row.extend(value.row.iter().cloned());
+        }
+        return Ok(vec![row]);
+    }
+    let ([spec], Some(state)) = (specs, states.into_iter().next()) else {
+        return Err(ExecError::Unsupported(
+            "grouped partial aggregate streaming expects exactly one spec".into(),
+        ));
+    };
+    Ok(
+        crate::scanner::finalize_partial_aggregate_rows(state, spec)?
+            .into_iter()
+            .map(|row| row.row)
+            .collect(),
+    )
+}
+
+/// Match a FROM that is exactly one ordinary local base table.
+///
+/// CTE, view, virtual-catalog, sharded, and foreign relations all resolve
+/// through their own scan paths, so they deliberately return `None` here.
+fn single_local_base_table(
+    catalog_kv: &dyn Kv,
+    s: &SelectStmt,
+    ctes: &crate::cte::CteContext,
+) -> Result<Option<(Table, String)>, ExecError> {
+    let [crabka_pgparser::ast::TableExpr::Table { name, alias }] = s.from.as_slice() else {
+        return Ok(None);
+    };
+    if ctes.lookup(name).is_some() || virtual_table(name).is_some() {
+        return Ok(None);
+    }
+    match crabka_pgcatalog::get_view(catalog_kv, name) {
+        Ok(_) => return Ok(None),
+        Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => {}
+        Err(error) => return Err(error.into()),
+    }
+    let table = match crabka_pgcatalog::get_table(catalog_kv, name) {
+        Ok(table) => table,
+        Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if table.sharded || table.foreign.is_some() {
+        return Ok(None);
+    }
+    let qualifier = alias.clone().unwrap_or_else(|| table.name.clone());
+    Ok(Some((table, qualifier)))
+}
+
 fn single_sharded_base_table(
     catalog_kv: &dyn Kv,
     s: &SelectStmt,
@@ -3823,6 +4021,9 @@ pub(crate) fn select_to_relation_with_ctes(
             None
         };
         if let Some(relation) = try_execute_partial_aggregate_pushdown(read_ctx, s)? {
+            return Ok(relation);
+        }
+        if let Some(relation) = try_execute_local_streaming_aggregate(read_ctx, s)? {
             return Ok(relation);
         }
         let scan_plan = match s.from.as_slice() {

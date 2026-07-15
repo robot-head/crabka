@@ -3376,6 +3376,7 @@ dependencies = [
 name = "crabka-pgkv"
 version = "0.3.9"
 dependencies = [
+ "assert2",
  "crabka-pgtypes",
  "fjall",
  "jiff",
