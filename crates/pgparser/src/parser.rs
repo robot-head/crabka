@@ -1949,10 +1949,13 @@ impl Parser {
     fn drop_sequence(&mut self) -> Result<crate::ast::Statement, ParseError> {
         self.expect(&Token::Keyword(Keyword::Drop))?;
         self.expect_ident_eq("sequence")?;
-        self.eat_if_exists()?;
-        Ok(crate::ast::Statement::DropTable {
-            name: format!("__crabka_sequence__:{}", self.expect_ident()?),
-        })
+        let if_exists = self.eat_if_exists()?;
+        let mut names = vec![format!("__crabka_sequence__:{}", self.expect_ident()?)];
+        while *self.peek() == Token::Comma {
+            self.bump();
+            names.push(format!("__crabka_sequence__:{}", self.expect_ident()?));
+        }
+        Ok(crate::ast::Statement::DropTable { names, if_exists })
     }
 
     fn expect_i64(&mut self, what: &str) -> Result<i64, ParseError> {
@@ -2002,11 +2005,13 @@ impl Parser {
         use crate::ast::Statement;
         self.expect(&Token::Keyword(Keyword::Drop))?;
         self.expect(&Token::Keyword(Keyword::Table))?;
-        // SP40: accept IF EXISTS (consistent with DROP SERVER / FOREIGN TABLE).
-        self.eat_if_exists()?;
-        Ok(Statement::DropTable {
-            name: self.expect_ident()?,
-        })
+        let if_exists = self.eat_if_exists()?;
+        let mut names = vec![self.expect_ident()?];
+        while *self.peek() == Token::Comma {
+            self.bump();
+            names.push(self.expect_ident()?);
+        }
+        Ok(Statement::DropTable { names, if_exists })
     }
 
     fn drop_index(&mut self) -> Result<crate::ast::Statement, ParseError> {
@@ -4037,9 +4042,65 @@ mod tests {
 
     #[test]
     fn parses_drop_table() {
-        assert_eq!(
-            one("DROP TABLE t"),
-            Statement::DropTable { name: "t".into() }
+        use assert2::assert;
+        assert!(
+            one("DROP TABLE t")
+                == Statement::DropTable {
+                    names: vec!["t".into()],
+                    if_exists: false,
+                }
+        );
+    }
+
+    #[test]
+    fn parses_drop_table_if_exists() {
+        use assert2::assert;
+        assert!(
+            one("DROP TABLE IF EXISTS t")
+                == Statement::DropTable {
+                    names: vec!["t".into()],
+                    if_exists: true,
+                }
+        );
+    }
+
+    #[test]
+    fn parses_multi_table_drop() {
+        use assert2::assert;
+        // pgbench -i's first statement: a comma-separated drop list.
+        assert!(
+            one(
+                "DROP TABLE IF EXISTS pgbench_accounts, pgbench_branches, pgbench_history, pgbench_tellers"
+            ) == Statement::DropTable {
+                names: vec![
+                    "pgbench_accounts".into(),
+                    "pgbench_branches".into(),
+                    "pgbench_history".into(),
+                    "pgbench_tellers".into(),
+                ],
+                if_exists: true,
+            }
+        );
+    }
+
+    #[test]
+    fn drop_table_rejects_trailing_comma() {
+        use assert2::assert;
+        assert!(crate::parse("DROP TABLE a, b,").is_err());
+    }
+
+    #[test]
+    fn parses_drop_sequence_if_exists_list() {
+        use assert2::assert;
+        assert!(
+            one("DROP SEQUENCE IF EXISTS s1, s2")
+                == Statement::DropTable {
+                    names: vec![
+                        "__crabka_sequence__:s1".into(),
+                        "__crabka_sequence__:s2".into(),
+                    ],
+                    if_exists: true,
+                }
         );
     }
 

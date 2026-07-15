@@ -209,18 +209,29 @@ pub(crate) fn execute_ddl(
                 ops,
             ))
         }
-        Statement::DropTable { name } => {
-            if let Some(sequence_name) = name.strip_prefix("__crabka_sequence__:") {
-                let ops = crabka_pgcatalog::drop_sequence_ops(kv, sequence_name)?;
-                return Ok((command("DROP SEQUENCE"), ops));
+        Statement::DropTable { names, if_exists } => {
+            // All-or-nothing across the name list, matching PostgreSQL: ops are
+            // only applied after every name resolves (or is skipped by
+            // IF EXISTS), so a missing name without IF EXISTS drops nothing.
+            let mut ops = Vec::new();
+            let mut tag = "DROP TABLE";
+            for name in names {
+                if let Some(sequence_name) = name.strip_prefix("__crabka_sequence__:") {
+                    tag = "DROP SEQUENCE";
+                    match crabka_pgcatalog::drop_sequence_ops(kv, sequence_name) {
+                        Ok(sequence_ops) => ops.extend(sequence_ops),
+                        Err(crabka_pgcatalog::CatalogError::UndefinedSequence(_)) if *if_exists => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                } else {
+                    match crabka_pgcatalog::drop_table_ops(kv, name) {
+                        Ok(table_ops) => ops.extend(table_ops),
+                        Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) if *if_exists => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                }
             }
-            let ops = crabka_pgcatalog::drop_table_ops(kv, name)?;
-            Ok((
-                QueryResult::Command {
-                    tag: "DROP TABLE".into(),
-                },
-                ops,
-            ))
+            Ok((command(tag), ops))
         }
         Statement::AlterTableRename { table, rename } => match rename {
             crabka_pgparser::ast::AlterTableRename::Table { new_name } => Ok((
@@ -6480,6 +6491,70 @@ mod tests {
             panic!("expected one non-null cell");
         };
         String::from_utf8(cell.text.to_vec()).expect("cell is utf8")
+    }
+
+    #[tokio::test]
+    async fn drop_table_if_exists_skips_missing_table() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let results = run(&engine, "DROP TABLE IF EXISTS missing").await;
+        assert!(tag_of(&results[0]) == "DROP TABLE");
+    }
+
+    #[tokio::test]
+    async fn drop_table_without_if_exists_errors_on_missing_table() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let err = engine
+            .connect()
+            .simple_query("DROP TABLE missing")
+            .await
+            .expect_err("missing table without IF EXISTS");
+        assert!(err.code == "42P01");
+    }
+
+    #[tokio::test]
+    async fn multi_table_drop_is_all_or_nothing() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        run(&engine, "CREATE TABLE a (id int4 PRIMARY KEY)").await;
+        run(&engine, "CREATE TABLE b (id int4 PRIMARY KEY)").await;
+
+        // A missing name without IF EXISTS aborts the whole drop.
+        let err = engine
+            .connect()
+            .simple_query("DROP TABLE a, missing, b")
+            .await
+            .expect_err("missing name aborts the whole drop");
+        assert!(err.code == "42P01");
+        run(&engine, "SELECT count(*) FROM a").await;
+        run(&engine, "SELECT count(*) FROM b").await;
+
+        // With IF EXISTS the existing names drop and the missing one is skipped.
+        let results = run(&engine, "DROP TABLE IF EXISTS a, missing, b").await;
+        assert!(tag_of(&results[0]) == "DROP TABLE");
+        for table in ["a", "b"] {
+            let err = engine
+                .connect()
+                .simple_query(&format!("SELECT count(*) FROM {table}"))
+                .await
+                .expect_err("table was dropped");
+            assert!(err.code == "42P01");
+        }
+    }
+
+    #[tokio::test]
+    async fn drop_sequence_if_exists_skips_missing_sequence() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let results = run(&engine, "DROP SEQUENCE IF EXISTS missing_seq").await;
+        assert!(tag_of(&results[0]) == "DROP SEQUENCE");
+        let err = engine
+            .connect()
+            .simple_query("DROP SEQUENCE missing_seq")
+            .await
+            .expect_err("missing sequence without IF EXISTS");
+        assert!(err.code == "42P01");
     }
 
     #[tokio::test]

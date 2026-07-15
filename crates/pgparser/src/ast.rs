@@ -35,7 +35,10 @@ pub enum Statement {
         query: QueryExpr,
     },
     DropTable {
-        name: String,
+        /// One entry per name in `DROP TABLE a, b, c`; the drop is
+        /// all-or-nothing across the list, matching `PostgreSQL`.
+        names: Vec<String>,
+        if_exists: bool,
     },
     DropView {
         name: String,

@@ -3403,6 +3403,7 @@ dependencies = [
 name = "crabka-pgparser"
 version = "0.3.9"
 dependencies = [
+ "assert2",
  "crabka-pgtypes",
  "pg_query",
  "proptest",

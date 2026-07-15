@@ -440,7 +440,13 @@ fn statement_shape(statement: &Statement) -> &'static str {
         Statement::CreateIndex { table, .. } if table == "__crabka_sequence__" => "CreateSequence",
         Statement::CreateIndex { .. } => "CreateIndex",
         Statement::DropIndex { .. } => "DropIndex",
-        Statement::DropTable { name } if name.starts_with("__crabka_sequence__:") => "DropSequence",
+        Statement::DropTable { names, .. }
+            if names
+                .first()
+                .is_some_and(|name| name.starts_with("__crabka_sequence__:")) =>
+        {
+            "DropSequence"
+        }
         Statement::DropTable { .. } => "DropTable",
         Statement::DropView { .. } => "DropView",
         Statement::AlterTableRename { .. } => "AlterTableRename",
