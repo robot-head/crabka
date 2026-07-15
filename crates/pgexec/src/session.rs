@@ -2928,7 +2928,10 @@ impl ParamBinder<'_> {
                     let Some(idx) = table.column_index(column) else {
                         return Err(ExecError::UndefinedColumn(column.clone()).into_pg());
                     };
-                    self.bind_expr(expr, Some(table.columns[idx].ty))?;
+                    // Bind with the table scope so a parameter next to a
+                    // column reference (`balance = balance + $1`) infers its
+                    // type from that column.
+                    self.bind_expr_with_scope(expr, Some(table.columns[idx].ty), &scope)?;
                 }
                 if let Some(expr) = filter {
                     self.bind_expr_with_scope(expr, Some(ColumnType::Bool), &scope)?;
@@ -2963,7 +2966,11 @@ impl ParamBinder<'_> {
             .iter()
             .zip(self.inferred_param_types.borrow().iter())
             .map(|(param, inferred)| match param.type_oid {
-                Some(0) | None => Ok(inferred.map_or(0, ColumnType::oid)),
+                // PostgreSQL coerces a parameter whose type is still unknown
+                // after Parse to text; ParameterDescription never reports
+                // OID 0. The resolved type also feeds Bind (`typed_params`),
+                // so execution decodes the value as text too.
+                Some(0) | None => Ok(inferred.map_or(crabka_pgtypes::oids::TEXT, ColumnType::oid)),
                 Some(oid) => {
                     param_column_type(param)?;
                     Ok(oid)
@@ -3290,11 +3297,21 @@ fn binary_param_type(
     scope: &crate::scope::Scope,
 ) -> Option<ColumnType> {
     match op {
-        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
-            infer_param_context_type(other, scope)
-        }
+        // Comparisons and arithmetic take same-family operands, so a
+        // parameter adopts its sibling's type — matching PostgreSQL's
+        // operator resolution for `int8 + $1` and friends.
+        BinaryOp::Eq
+        | BinaryOp::Ne
+        | BinaryOp::Lt
+        | BinaryOp::Le
+        | BinaryOp::Gt
+        | BinaryOp::Ge
+        | BinaryOp::Add
+        | BinaryOp::Sub
+        | BinaryOp::Mul
+        | BinaryOp::Div => infer_param_context_type(other, scope),
         BinaryOp::Concat => Some(ColumnType::Text),
-        _ => None,
+        BinaryOp::And | BinaryOp::Or => None,
     }
 }
 
@@ -3309,6 +3326,10 @@ fn infer_param_context_type(expr: &Expr, scope: &crate::scope::Scope) -> Option<
         Expr::BoolLiteral(_) => Some(ColumnType::Bool),
         Expr::Default => None,
         Expr::Const { ty, .. } | Expr::Cast { ty, .. } => Some(*ty),
+        Expr::Unary {
+            op: UnaryOp::Neg,
+            expr,
+        } => infer_param_context_type(expr, scope),
         _ => None,
     }
 }
@@ -3530,6 +3551,9 @@ fn param_column_type(param: &BoundParam) -> Result<Option<ColumnType>, PgError> 
         // as Float8. Decode the narrower wire representations at the Bind boundary.
         Some(crabka_pgtypes::oids::INT2) => Ok(Some(ColumnType::Int4)),
         Some(crabka_pgtypes::oids::INT4) => Ok(Some(ColumnType::Int4)),
+        // `oid` aliases Int4 (see ColumnType::from_sql_name): drivers declare
+        // OID parameters in their pg_catalog typeinfo lookups.
+        Some(crabka_pgtypes::oids::OID) => Ok(Some(ColumnType::Int4)),
         Some(crabka_pgtypes::oids::INT8) => Ok(Some(ColumnType::Int8)),
         Some(crabka_pgtypes::oids::TEXT) => Ok(Some(ColumnType::Text)),
         Some(crabka_pgtypes::oids::VARCHAR) => Ok(Some(ColumnType::Varchar(None))),
@@ -5482,6 +5506,135 @@ mod tests {
             .expect("select inserted row");
 
         assert_eq!(single_text(&selected), "nine");
+    }
+
+    async fn accounts_session(engine: &SqlEngine) -> SqlSession {
+        let mut session = engine.connect();
+        session
+            .simple_query(
+                "CREATE TABLE accounts (id BIGINT PRIMARY KEY, balance BIGINT, updates BIGINT)",
+            )
+            .await
+            .expect("create accounts table");
+        session
+    }
+
+    #[tokio::test]
+    async fn extended_describe_infers_arithmetic_update_parameter_types_from_columns() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = accounts_session(&engine).await;
+
+        for sql in [
+            "UPDATE accounts SET balance = balance + $1, updates = updates + 1 WHERE id = $2",
+            "UPDATE accounts SET balance = balance - $1, updates = updates + 1 WHERE id = $2",
+            "UPDATE accounts SET balance = balance * $1, updates = updates + 1 WHERE id = $2",
+            "UPDATE accounts SET balance = balance / $1, updates = updates + 1 WHERE id = $2",
+        ] {
+            let (_, parameter_types) = session
+                .test_describe_prepared(sql, &[])
+                .await
+                .expect("describe arithmetic update");
+            assert!(
+                parameter_types == vec![crabka_pgtypes::oids::INT8, crabka_pgtypes::oids::INT8],
+                "sql: {sql}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn extended_describe_defaults_unknown_parameter_to_text() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+
+        let (_, parameter_types) = session
+            .test_describe_prepared("SELECT $1", &[])
+            .await
+            .expect("describe bare parameter select");
+
+        assert!(parameter_types == vec![crabka_pgtypes::oids::TEXT]);
+    }
+
+    #[tokio::test]
+    async fn extended_describe_accepts_declared_oid_parameter_type() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+
+        // tokio-postgres declares its pg_catalog typeinfo query's $1 as type
+        // OID (26) in the Parse message; the declared oid must round-trip
+        // through ParameterDescription instead of erroring 42P18.
+        let (_, parameter_types) = session
+            .test_describe_prepared(
+                "SELECT t.typname FROM pg_catalog.pg_type t WHERE t.oid = $1",
+                &[crabka_pgtypes::oids::OID],
+            )
+            .await
+            .expect("describe with declared oid parameter");
+
+        assert!(parameter_types == vec![crabka_pgtypes::oids::OID]);
+    }
+
+    #[tokio::test]
+    async fn extended_query_executes_arithmetic_update_with_text_format_params() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = accounts_session(&engine).await;
+        session
+            .simple_query("INSERT INTO accounts VALUES (42, 100, 0)")
+            .await
+            .expect("seed account row");
+        let params = [text_param(Some("5"), None), text_param(Some("42"), None)];
+
+        let results = session
+            .test_extended_query(
+                "UPDATE accounts SET balance = balance + $1, updates = updates + 1 WHERE id = $2",
+                &params,
+            )
+            .await
+            .expect("arithmetic update with untyped text params");
+        assert!(
+            results
+                == vec![QueryResult::Command {
+                    tag: "UPDATE 1".into()
+                }]
+        );
+
+        let balance = session
+            .simple_query("SELECT balance FROM accounts WHERE id = 42")
+            .await
+            .expect("read back balance");
+        assert!(single_text(&balance) == "105");
+        let updates = session
+            .simple_query("SELECT updates FROM accounts WHERE id = 42")
+            .await
+            .expect("read back updates");
+        assert!(single_text(&updates) == "1");
+    }
+
+    #[tokio::test]
+    async fn extended_describe_never_reports_parameter_oid_zero() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = accounts_session(&engine).await;
+
+        for sql in [
+            "UPDATE accounts SET balance = balance + $1, updates = updates + 1 WHERE id = $2",
+            "UPDATE accounts SET balance = balance - $1 WHERE id = $2",
+            "SELECT $1",
+            "SELECT id FROM accounts WHERE balance * $1 > $2",
+            "INSERT INTO accounts VALUES ($1, $2, $3)",
+        ] {
+            let (_, parameter_types) = session
+                .test_describe_prepared(sql, &[])
+                .await
+                .expect("describe parameterized statement");
+            assert!(
+                !parameter_types.contains(&0),
+                "sql: {sql}, types: {parameter_types:?}"
+            );
+        }
     }
 
     #[tokio::test]
