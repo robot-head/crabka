@@ -25,6 +25,9 @@ pub mod oids {
     /// declares `WHERE t.oid = $1` with OID). Values live in the existing `Int4`
     /// datum — the same representation the catalog's oid-valued columns use.
     pub const OID: u32 = 26;
+    /// PostgreSQL `regclass` — a relation's `pg_class` oid with name-based
+    /// text input; values live in the `Int4` datum like `oid`.
+    pub const REGCLASS: u32 = 2205;
     pub const BPCHAR: u32 = 1042;
     pub const VARCHAR: u32 = 1043;
     /// PostgreSQL `real`; Bind parameters widen into the existing `Float8` datum.
@@ -77,6 +80,12 @@ pub enum ColumnType {
     Bytea,
     /// PostgreSQL `uuid` (OID 2950) — 128-bit identifier.
     Uuid,
+    /// PostgreSQL `regclass` (OID 2205) — a relation's `pg_class` oid. Values
+    /// are `Datum::Int4` like `oid`; what distinguishes the type is input
+    /// conversion (a non-numeric string is a relation name needing catalog
+    /// resolution, which the session/executor layers perform — the pure
+    /// datum-parse path only accepts numeric strings).
+    Regclass,
 }
 
 impl ColumnType {
@@ -111,6 +120,7 @@ impl ColumnType {
             // SP40: `bytea` — variable-length binary string.
             "bytea" => Some(ColumnType::Bytea),
             "uuid" => Some(ColumnType::Uuid),
+            "regclass" => Some(ColumnType::Regclass),
             _ => None,
         }
     }
@@ -132,6 +142,7 @@ impl ColumnType {
             ColumnType::Interval => oids::INTERVAL,
             ColumnType::Bytea => oids::BYTEA,
             ColumnType::Uuid => oids::UUID,
+            ColumnType::Regclass => oids::REGCLASS,
         }
     }
 
@@ -153,6 +164,7 @@ impl ColumnType {
             ColumnType::Interval => "interval",
             ColumnType::Bytea => "bytea",
             ColumnType::Uuid => "uuid",
+            ColumnType::Regclass => "regclass",
         }
     }
 
@@ -172,6 +184,7 @@ impl ColumnType {
             ColumnType::Interval => 16,
             ColumnType::Bytea => -1,
             ColumnType::Uuid => 16,
+            ColumnType::Regclass => 4,
         }
     }
 

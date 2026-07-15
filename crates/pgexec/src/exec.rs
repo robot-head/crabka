@@ -961,6 +961,12 @@ pub(crate) fn decode_copy_text(data: &[u8]) -> Result<Vec<Vec<Option<String>>>, 
     let mut lines = text.split('\n').peekable();
     while let Some(raw_line) = lines.next() {
         let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+        // PostgreSQL's text-format end-of-data marker: clients on the old
+        // PQputline/PQendcopy API (pgbench -i among them) send a final `\.`
+        // line; it terminates the data and everything after it is ignored.
+        if line == r"\." {
+            break;
+        }
         if raw_line.is_empty() && lines.peek().is_none() && text.ends_with('\n') {
             continue;
         }
@@ -4845,6 +4851,28 @@ fn virtual_relation_namespace_oid(name: &str) -> i32 {
     }
 }
 
+/// Resolve a `regclass` relation name to its `pg_class` oid: virtual catalog
+/// relations use their fixed oids; user tables use their catalog table id (the
+/// same value `pg_class_rows` reports). An optional `pg_catalog.` / `public.`
+/// qualifier is accepted like PostgreSQL's search path would.
+///
+/// # Errors
+///
+/// Propagates the catalog's undefined-table error (42P01) for an unknown
+/// relation name, matching PostgreSQL's `relation "..." does not exist`.
+pub(crate) fn resolve_regclass(catalog_kv: &dyn Kv, name: &str) -> Result<i32, ExecError> {
+    let trimmed = name.trim();
+    let bare = trimmed
+        .strip_prefix("pg_catalog.")
+        .or_else(|| trimmed.strip_prefix("public."))
+        .unwrap_or(trimmed);
+    if virtual_table_names().contains(&bare) {
+        return Ok(virtual_relation_oid(bare));
+    }
+    let table = crabka_pgcatalog::get_table(catalog_kv, bare)?;
+    oid_i32(table.id)
+}
+
 fn virtual_relation_oid(name: &str) -> i32 {
     match name {
         "pg_namespace" => 2615,
@@ -4865,6 +4893,12 @@ fn virtual_relation_oid(name: &str) -> i32 {
 
 fn builtin_type_rows() -> &'static [BuiltinTypeRow] {
     &[
+        BuiltinTypeRow {
+            oid: 2205,
+            name: "regclass",
+            len: 4,
+            category: "N",
+        },
         BuiltinTypeRow {
             oid: crabka_pgtypes::oids::BOOL as i32,
             name: "bool",
@@ -6690,6 +6724,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn copy_text_stops_at_the_end_of_data_marker() {
+        use assert2::assert;
+        // Old-API clients (PQputline/PQendcopy — pgbench -i) send a final
+        // `\.` line; it terminates the data and later lines are ignored.
+        let rows = super::decode_copy_text(b"1\t0\t\\N\n\\.\n").expect("decode");
+        assert!(rows == vec![vec![Some("1".into()), Some("0".into()), None]]);
+
+        let rows = super::decode_copy_text(b"1\ta\n\\.\nignored\tafter\n").expect("decode");
+        assert!(rows == vec![vec![Some("1".into()), Some("a".into())]]);
+
+        // Without the marker, behavior is unchanged.
+        let rows = super::decode_copy_text(b"1\ta\n2\tb\n").expect("decode");
+        assert!(rows.len() == 2);
+    }
+
     #[tokio::test]
     async fn truncate_empties_multiple_tables_atomically() {
         use assert2::assert;
@@ -6712,6 +6762,25 @@ mod tests {
         assert!(tag_of(&results[0]) == "TRUNCATE TABLE");
         assert!(single_text(&run(&engine, "SELECT count(*) FROM ta").await) == "0");
         assert!(single_text(&run(&engine, "SELECT count(*) FROM tb").await) == "0");
+    }
+
+    #[tokio::test]
+    async fn vacuum_is_an_accepted_hint_outside_transactions() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        run(&engine, "CREATE TABLE tv (id int4 PRIMARY KEY)").await;
+
+        let results = run(&engine, "VACUUM ANALYZE tv").await;
+        assert!(tag_of(&results[0]) == "VACUUM");
+
+        // PostgreSQL refuses VACUUM inside a transaction block (25001).
+        let mut session = engine.connect();
+        session.simple_query("BEGIN").await.expect("begin");
+        let error = session
+            .simple_query("VACUUM")
+            .await
+            .expect_err("vacuum in a transaction block");
+        assert!(error.code == "25001");
     }
 
     #[tokio::test]

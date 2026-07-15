@@ -105,5 +105,6 @@ command_identities!(
     (StartTransaction, "START TRANSACTION"),
     (Truncate, "TRUNCATE"),
     (Update, "UPDATE"),
+    (Vacuum, "VACUUM"),
     (Values, "VALUES"),
 );

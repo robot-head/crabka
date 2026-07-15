@@ -151,3 +151,49 @@ async fn pg_class_lists_pg_range() {
     // 11 is pg_catalog's namespace OID in the synthesized catalog.
     assert!(row_text(&result, 0) == vec![Some("pg_range".into()), Some("11".into())]);
 }
+
+/// The relkind probe pgbench -i issues before COPY, in both spellings: a
+/// literal relation name cast (simple protocol) and the schema-qualified form.
+/// `regclass` resolves a relation name to its `pg_class` oid.
+#[tokio::test]
+async fn regclass_cast_resolves_relation_names_for_the_relkind_probe() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    session
+        .simple_query("CREATE TABLE pgbench_accounts (aid int4 PRIMARY KEY, bid int4)")
+        .await
+        .expect("create table");
+
+    for cast in [
+        "'pgbench_accounts'::pg_catalog.regclass",
+        "'pgbench_accounts'::regclass",
+        "'public.pgbench_accounts'::regclass",
+        "CAST('pgbench_accounts' AS regclass)",
+    ] {
+        let result = run(
+            &engine,
+            &format!("SELECT relkind FROM pg_catalog.pg_class WHERE oid={cast}"),
+        )
+        .await;
+        assert!(
+            row_text(&result, 0) == vec![Some("r".into())],
+            "cast: {cast}"
+        );
+    }
+
+    // Virtual catalog relations resolve to their fixed oids.
+    let result = run(&engine, "SELECT 'pg_class'::regclass").await;
+    assert!(row_text(&result, 0) == vec![Some("1259".into())]);
+
+    // Numeric input passes through without catalog resolution.
+    let result = run(&engine, "SELECT '1259'::regclass").await;
+    assert!(row_text(&result, 0) == vec![Some("1259".into())]);
+
+    // Unknown relation names error like PostgreSQL (42P01).
+    let error = engine
+        .connect()
+        .simple_query("SELECT 'no_such_relation'::regclass")
+        .await
+        .expect_err("unknown relation");
+    assert!(error.code == "42P01");
+}

@@ -47,6 +47,10 @@ pub fn cast_allowed(from: ColumnType, to: ColumnType) -> bool {
         _ if num_family(from) && num_family(to) => true,
         // PostgreSQL defines bool↔int only for int4 (not int8 / float8 / numeric).
         (Bool, Int4) | (Int4, Bool) => true,
+        // `regclass` interconverts with the integer oid family; text↔regclass is
+        // covered by the string rules below.
+        (Int4 | ColumnType::Int8, ColumnType::Regclass)
+        | (ColumnType::Regclass, Int4 | ColumnType::Int8) => true,
         _ if from.is_string() || to.is_string() => true,
         // Anything → text (the output function), and text → anything (the input
         // function). Together these also cover text→text (already by identity),
@@ -134,6 +138,21 @@ pub fn cast(value: &Datum, to: ColumnType, tz: &jiff::tz::TimeZone) -> Result<Da
         (Datum::Text(s), Int4) => text_to_i32(s),
         (Datum::Text(s), Int8) => text_to_i64(s),
         (Datum::Text(s), Float8) => text_to_f64(s),
+        // `regclass` values are relation oids in the Int4 datum. The pure cast
+        // accepts numeric input only; a relation NAME needs catalog resolution,
+        // which the executor layers perform before reaching here (a name that
+        // falls through is 22P02, mirroring an unresolvable input).
+        (Datum::Int4(n), ColumnType::Regclass) => Ok(Datum::Int4(*n)),
+        (Datum::Int8(n), ColumnType::Regclass) => i4_from_i64(*n),
+        (Datum::Text(s), ColumnType::Regclass) => {
+            s.trim()
+                .parse::<i32>()
+                .map(Datum::Int4)
+                .map_err(|_| TypeError::InvalidText {
+                    type_name: "regclass",
+                    value: s.clone(),
+                })
+        }
         (Datum::Text(s), Numeric(tm)) => {
             let d = crate::numeric::parse(s).ok_or_else(|| TypeError::InvalidText {
                 type_name: "numeric",

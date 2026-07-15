@@ -83,7 +83,7 @@ The implemented rows reflect the checked-in parser/executor surface after G-1 an
 | COMMENT | Wave-assigned(D4) | COMMENT across supported object kinds. |
 | COMMIT | Implemented | Transaction commit is parsed and executed in the baseline. |
 | COMMIT PREPARED | Error-with-notice(55000) | Typed session refusal with exact `55000`; participant lifecycle remains internal. |
-| COPY | Implemented | Q5 starter subset only: `COPY table [(cols...)] FROM STDIN` over pgwire simple query, text format only. Supports tab-delimited rows, `\\N` NULL, common backslash escapes, explicit column lists, defaults, and NOT NULL enforcement. `COPY TO`, file/program sources, binary, CSV, and COPY options beyond `WITH (FORMAT text)` return clear errors. CopyData is buffered and committed as one statement on CopyDone; CopyFail discards buffered rows. |
+| COPY | Implemented | Q5 starter subset only: `COPY table [(cols...)] FROM STDIN` over pgwire simple query, text format only. Supports tab-delimited rows, `\\N` NULL, common backslash escapes, explicit column lists, defaults, and NOT NULL enforcement. `COPY TO`, file/program sources, binary, CSV, and COPY options beyond `WITH (FORMAT text)` return clear errors — except `FREEZE`, which is accepted and ignored (a visibility-bookkeeping performance hint; rows load as ordinary MVCC rows, and pgbench -i sends `WITH (freeze on)` on every COPY). CopyData is buffered and committed as one statement on CopyDone; CopyFail discards buffered rows. |
 | CREATE ACCESS METHOD | Non-goal(C-bound access methods) | C-bound object kind excluded. |
 | CREATE AGGREGATE | Wave-assigned(P6) | Stretch SQL aggregate support. |
 | CREATE CAST | Wave-assigned(P6) | Stretch SQL/PLpgSQL cast support. |
@@ -216,7 +216,7 @@ The implemented rows reflect the checked-in parser/executor surface after G-1 an
 | TRUNCATE | Implemented | Multi-table comma list with optional `TABLE` noise word; all names validated before any row is touched (all-or-nothing). Executes as an MVCC unfiltered delete sharing the ordinary write path, so it is transactional (rolls back) like PostgreSQL's, not a storage-level clear. `CONTINUE IDENTITY` (the PostgreSQL default) is accepted; `RESTART IDENTITY` fails clear with 0A000 because SERIAL sequence ownership is not tracked. `CASCADE`/`RESTRICT` are accepted and equivalent since no foreign-key enforcement exists. Sharded targets fail clear with 0A000. |
 | UNLISTEN | Wave-assigned(S4) | Notification bus. |
 | UPDATE | Implemented | Baseline DML with `NOT NULL` enforcement on assigned rows; Q1 starter `RETURNING` supports `*`, direct columns, simple scalar expressions, and aliases on local MVCC tables. UPDATE FROM remains Q1 breadth. |
-| VACUUM | Wave-assigned(P5) | Mapped to garbage horizon/compact hint. |
+| VACUUM | Mapped(autonomous-vacuum hint) | The full `VACUUM [(options)] [FULL] [FREEZE] [VERBOSE] [ANALYZE] [table [, ...]]` tail is parsed for shape and discarded; the command returns `VACUUM` immediately. Reclamation is autonomous: the adaptive background vacuum paces to write pressure and drains at full speed when the foreground goes idle, so the hint has nothing left to schedule. Inside a transaction block it fails with 25001 like PostgreSQL. Planner statistics (`ANALYZE`) do not exist yet — see the ANALYZE row. |
 | VALUES | Implemented | Baseline query body. |
 
 ## Major language-feature rows

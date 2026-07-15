@@ -213,6 +213,13 @@ impl Parser {
     fn parse_type_name(&mut self) -> Result<crabka_pgtypes::ColumnType, ParseError> {
         let type_pos = self.peek_pos();
         let mut type_word = self.expect_ident()?;
+        // PostgreSQL allows qualifying any built-in type with its schema
+        // (`$1::pg_catalog.regclass`, `x::pg_catalog.text`); built-ins all
+        // live in pg_catalog, so the qualifier resolves to the bare name.
+        if type_word == "pg_catalog" && *self.peek() == Token::Dot {
+            self.bump();
+            type_word = self.expect_ident()?;
+        }
         if type_word.eq_ignore_ascii_case("double")
             && matches!(self.peek(), Token::Ident(w) if w.eq_ignore_ascii_case("precision"))
         {
@@ -987,6 +994,7 @@ impl Parser {
                 }
             }
             Token::Ident(s) if s == "truncate" => emitted(I::Truncate, self.truncate()),
+            Token::Ident(s) if s == "vacuum" => emitted(I::Vacuum, self.vacuum()),
             Token::Ident(s) if s == "grant" => emitted(I::Grant, self.grant_table_privileges()),
             Token::Ident(s) if s == "revoke" => emitted(I::Revoke, self.revoke_table_privileges()),
             Token::Keyword(Keyword::Import) => {
@@ -2025,6 +2033,52 @@ impl Parser {
         Ok(buckets)
     }
 
+    /// `VACUUM [ ( option [value] [, ...] ) ] [FULL] [FREEZE] [VERBOSE]
+    /// [ANALYZE] [name [, ...]]` — the whole tail is validated for shape and
+    /// discarded: reclamation is autonomous, so the command is a hint.
+    fn vacuum(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        self.expect_ident_eq("vacuum")?;
+        if *self.peek() == Token::LParen {
+            self.bump();
+            loop {
+                self.expect_ident()?;
+                if !matches!(self.peek(), Token::Comma | Token::RParen) {
+                    self.storage_parameter_value()?;
+                }
+                if self.eat_comma() {
+                    continue;
+                }
+                break;
+            }
+            self.expect(&Token::RParen)?;
+        } else {
+            // `FULL` lexes as a keyword (FULL JOIN); the rest are plain idents.
+            loop {
+                match self.peek() {
+                    Token::Keyword(Keyword::Full) => {
+                        self.bump();
+                    }
+                    Token::Ident(word)
+                        if matches!(word.as_str(), "freeze" | "verbose" | "analyze") =>
+                    {
+                        self.bump();
+                    }
+                    _ => break,
+                }
+            }
+        }
+        if matches!(self.peek(), Token::Ident(_)) {
+            loop {
+                self.expect_ident()?;
+                if self.eat_comma() {
+                    continue;
+                }
+                break;
+            }
+        }
+        Ok(crate::ast::Statement::Vacuum)
+    }
+
     /// `TRUNCATE [TABLE] name [, ...] [RESTART IDENTITY | CONTINUE IDENTITY]
     /// [CASCADE | RESTRICT]`. `CONTINUE IDENTITY` is the `PostgreSQL` default;
     /// `CASCADE`/`RESTRICT` are accepted and equivalent because no foreign-key
@@ -2278,6 +2332,26 @@ impl Parser {
                             "COPY BINARY is not supported",
                             self.peek_pos(),
                         ));
+                    }
+                    // FREEZE is a performance hint (skip per-row visibility
+                    // bookkeeping on a freshly created/truncated table). Rows
+                    // load as ordinary MVCC rows regardless, so the hint is
+                    // accepted and ignored; pgbench -i sends `freeze on`.
+                    "freeze" => {
+                        if matches!(
+                            self.peek(),
+                            Token::Keyword(Keyword::On | Keyword::True | Keyword::False)
+                        ) {
+                            self.bump();
+                        } else if !matches!(self.peek(), Token::Comma | Token::RParen) {
+                            let value = self.expect_ident()?.to_ascii_lowercase();
+                            if value != "off" {
+                                return Err(ParseError::new(
+                                    format!("unsupported COPY FREEZE value `{value}`"),
+                                    self.peek_pos(),
+                                ));
+                            }
+                        }
                     }
                     _ => {
                         return Err(ParseError::new_sqlstate(
@@ -4205,6 +4279,61 @@ mod tests {
     fn drop_table_rejects_trailing_comma() {
         use assert2::assert;
         assert!(crate::parse("DROP TABLE a, b,").is_err());
+    }
+
+    #[test]
+    fn parses_vacuum_shapes_as_a_hint() {
+        use assert2::assert;
+        // pgbench -i's statement verbatim, plus the bare-option, parenthesized,
+        // and table-list forms; the whole tail is discarded.
+        for sql in [
+            "vacuum analyze pgbench_branches",
+            "VACUUM",
+            "VACUUM FULL FREEZE VERBOSE ANALYZE",
+            "VACUUM (ANALYZE, VERBOSE off) t1, t2",
+            "VACUUM t1, t2",
+        ] {
+            assert!(one(sql) == Statement::Vacuum, "case: {sql}");
+        }
+        for sql in ["VACUUM (", "VACUUM ()", "VACUUM t1,", "VACUUM (analyze,) t"] {
+            assert!(crate::parse(sql).is_err(), "case: {sql}");
+        }
+    }
+
+    #[test]
+    fn copy_accepts_and_ignores_the_freeze_hint() {
+        use assert2::assert;
+        // pgbench -i's COPY statement verbatim, plus value-form variants; all
+        // parse identically to the un-hinted COPY.
+        let bare = one("copy pgbench_accounts from stdin");
+        for sql in [
+            "copy pgbench_accounts from stdin with (freeze on)",
+            "COPY pgbench_accounts FROM STDIN WITH (FREEZE)",
+            "COPY pgbench_accounts FROM STDIN WITH (freeze off)",
+            "COPY pgbench_accounts FROM STDIN WITH (freeze true)",
+        ] {
+            assert!(one(sql) == bare, "case: {sql}");
+        }
+        assert!(crate::parse("COPY t FROM STDIN WITH (freeze maybe)").is_err());
+    }
+
+    #[test]
+    fn parses_schema_qualified_type_names_in_casts() {
+        use assert2::assert;
+        // pg_catalog-qualified names resolve to the bare type; regclass is a
+        // recognized type in both spellings.
+        let cases = [
+            ("SELECT $1::pg_catalog.regclass", "SELECT $1::regclass"),
+            ("SELECT $1::pg_catalog.text", "SELECT $1::text"),
+            (
+                "SELECT CAST(x AS pg_catalog.int8) FROM t",
+                "SELECT CAST(x AS int8) FROM t",
+            ),
+        ];
+        for (qualified, bare) in cases {
+            assert!(one(qualified) == one(bare), "case: {qualified}");
+        }
+        assert!(crate::parse("SELECT $1::pg_catalog.not_a_type").is_err());
     }
 
     #[test]

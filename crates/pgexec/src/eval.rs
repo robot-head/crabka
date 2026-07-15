@@ -152,6 +152,16 @@ fn eval_depth(
         // surfaces here; NULL casts to NULL. The session zone comes from `ctx`.
         Expr::Cast { expr, ty } => {
             let v = eval_depth(expr, scope, values, ctx, d)?;
+            // `'name'::regclass`: a non-numeric string is a relation name only
+            // the catalog can resolve (PostgreSQL's regclassin); numeric and
+            // NULL inputs take the pure cast below.
+            if *ty == crabka_pgtypes::ColumnType::Regclass
+                && let Datum::Text(name) = &v
+                && name.trim().parse::<i32>().is_err()
+                && let Some(sequence) = &ctx.sequence
+            {
+                return crate::exec::resolve_regclass(sequence.kv.as_ref(), name).map(Datum::Int4);
+            }
             Ok(crabka_pgtypes::cast::cast(&v, *ty, &ctx.time_zone)?)
         }
         // SP34: a resolved subquery folded to a constant.

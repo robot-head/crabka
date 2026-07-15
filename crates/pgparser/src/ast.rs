@@ -74,6 +74,10 @@ pub enum Statement {
         filter: Option<Expr>,
         returning: Option<Vec<SelectItem>>,
     },
+    /// `VACUUM` with any option/table tail, accepted as a hint: reclamation is
+    /// autonomous (adaptive background vacuum with idle drain), so the command
+    /// carries no payload.
+    Vacuum,
     Truncate {
         /// One entry per name in `TRUNCATE a, b, c`; the statement is
         /// all-or-nothing across the list, matching `PostgreSQL`.

@@ -784,6 +784,9 @@ fn establishes_transaction_activity(stmt: &Statement) -> bool {
         | Statement::Show { .. }
         | Statement::Reset { .. }
         | Statement::SetRole { .. }
+        // VACUUM is refused inside a transaction block, so it never marks one
+        // active.
+        | Statement::Vacuum
         | Statement::CompatibilityRefusal(_) => false,
     }
 }
@@ -1413,6 +1416,21 @@ impl SqlSession {
             | Statement::Update { .. }
             | Statement::Delete { .. }
             | Statement::Truncate { .. } => self.run_write(stmt).await,
+            Statement::Vacuum => {
+                // PostgreSQL refuses VACUUM inside a transaction block. The
+                // reclamation itself is autonomous here (adaptive background
+                // vacuum with idle drain), so outside a block the accepted
+                // hint returns immediately.
+                if matches!(self.state, TxnState::InTransaction(_)) {
+                    return Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
+                        "25001",
+                        "VACUUM cannot run inside a transaction block",
+                    )));
+                }
+                Ok(QueryResult::Command {
+                    tag: "VACUUM".into(),
+                })
+            }
             Statement::Set { name, .. } if name == crabka_pgparser::ast::COPY_FROM_STDIN_SENTINEL => Err(ExecError::Unsupported(
                 "COPY FROM STDIN requires pgwire CopyData messages".into(),
             )),
@@ -3158,6 +3176,35 @@ impl ParamBinder<'_> {
         )
     }
 
+    /// A `regclass` parameter whose text value is a relation name resolves via
+    /// the catalog at bind time (PostgreSQL's `regclassin`); numeric, binary,
+    /// and NULL values return `None` and take the ordinary decode path.
+    fn regclass_param_expr(
+        &self,
+        param: &BoundParam,
+        expected: Option<ColumnType>,
+    ) -> Result<Option<Expr>, PgError> {
+        let ty = param_column_type(param)?
+            .or(expected)
+            .unwrap_or(ColumnType::Text);
+        if ty != ColumnType::Regclass || param.format != 0 {
+            return Ok(None);
+        }
+        let Some(value) = &param.value else {
+            return Ok(None);
+        };
+        let text = std::str::from_utf8(value).map_err(invalid_parameter_encoding)?;
+        if text.trim().parse::<i32>().is_ok() {
+            return Ok(None);
+        }
+        let oid =
+            crate::exec::resolve_regclass(self.catalog_kv, text).map_err(ExecError::into_pg)?;
+        Ok(Some(Expr::Const {
+            value: Datum::Int4(oid),
+            ty: ColumnType::Regclass,
+        }))
+    }
+
     fn bind_expr_with_scope(
         &self,
         expr: &mut Expr,
@@ -3186,7 +3233,9 @@ impl ParamBinder<'_> {
                 if param.type_oid.is_none() {
                     self.inferred_param_types.borrow_mut()[index] = expected;
                 }
-                *expr = bound_param_expr(param, expected, self.time_zone)?;
+                *expr = self
+                    .regclass_param_expr(param, expected)?
+                    .map_or_else(|| bound_param_expr(param, expected, self.time_zone), Ok)?;
             }
             Expr::Unary { op, expr } => {
                 let child_expected = match op {
@@ -3556,6 +3605,7 @@ fn param_column_type(param: &BoundParam) -> Result<Option<ColumnType>, PgError> 
         // `oid` aliases Int4 (see ColumnType::from_sql_name): drivers declare
         // OID parameters in their pg_catalog typeinfo lookups.
         Some(crabka_pgtypes::oids::OID) => Ok(Some(ColumnType::Int4)),
+        Some(crabka_pgtypes::oids::REGCLASS) => Ok(Some(ColumnType::Regclass)),
         Some(crabka_pgtypes::oids::INT8) => Ok(Some(ColumnType::Int8)),
         Some(crabka_pgtypes::oids::TEXT) => Ok(Some(ColumnType::Text)),
         Some(crabka_pgtypes::oids::VARCHAR) => Ok(Some(ColumnType::Varchar(None))),
@@ -3600,7 +3650,7 @@ fn decode_bound_param(
                 .map_err(ExecError::from)
                 .map_err(ExecError::into_pg)
         }
-        (1, ColumnType::Int4) => {
+        (1, ColumnType::Int4 | ColumnType::Regclass) => {
             let bytes = binary_array(value)?;
             Ok(Datum::Int4(i32::from_be_bytes(bytes)))
         }
@@ -5576,6 +5626,63 @@ mod tests {
             .expect("describe with declared oid parameter");
 
         assert!(parameter_types == vec![crabka_pgtypes::oids::OID]);
+    }
+
+    #[tokio::test]
+    async fn extended_regclass_parameter_resolves_relation_name() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query("CREATE TABLE pgbench_accounts (aid BIGINT PRIMARY KEY)")
+            .await
+            .expect("create table");
+
+        // pgbench -i's relkind probe, verbatim: $1 inside a regclass cast is
+        // described as regclass (2205)...
+        let probe = "SELECT relkind FROM pg_catalog.pg_class WHERE oid=$1::pg_catalog.regclass";
+        let (_, parameter_types) = session
+            .test_describe_prepared(probe, &[])
+            .await
+            .expect("describe relkind probe");
+        assert!(parameter_types == vec![crabka_pgtypes::oids::REGCLASS]);
+
+        // ...and executing with the table name bound as untyped text resolves
+        // the name through the catalog.
+        let mut session = engine.connect();
+        let results = session
+            .test_extended_query(
+                probe,
+                &[crabka_pgwire::engine::BoundParam {
+                    type_oid: None,
+                    format: 0,
+                    value: Some(bytes::Bytes::from_static(b"pgbench_accounts")),
+                }],
+            )
+            .await
+            .expect("execute relkind probe");
+        let [QueryResult::Rows { rows, .. }] = results.as_slice() else {
+            panic!("expected rows, got {results:?}");
+        };
+        let text = rows[0][0]
+            .as_ref()
+            .map(|cell| String::from_utf8(cell.text.to_vec()).expect("utf8"));
+        assert!(text == Some("r".into()));
+
+        // An unknown relation name errors 42P01 like PostgreSQL.
+        let mut session = engine.connect();
+        let error = session
+            .test_extended_query(
+                probe,
+                &[crabka_pgwire::engine::BoundParam {
+                    type_oid: None,
+                    format: 0,
+                    value: Some(bytes::Bytes::from_static(b"no_such_relation")),
+                }],
+            )
+            .await
+            .expect_err("unknown relation name");
+        assert!(error.code == "42P01");
     }
 
     #[tokio::test]
