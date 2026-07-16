@@ -104,7 +104,7 @@ object_store = { version = "0.13", features = ["aws", "gcp"] }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 multer = "3"
 snap = "1"
-lz4_flex = { version = "0.13", default-features = false, features = ["frame"] }
+lz4_flex = { version = "0.14", default-features = false, features = ["frame"] }
 zstd = "0.13"
 zerocopy = { version = "0.8", features = ["derive"] }
 crc32c = "0.6"
