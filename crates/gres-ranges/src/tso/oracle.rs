@@ -357,6 +357,7 @@ where
     /// On failure the reserved timestamps are burned, never granted: gaps
     /// are harmless, monotonicity is the requirement.
     async fn advance_horizon(&self, first: u64, last: u64) -> Result<(), TsoError> {
+        self.stats.record_horizon_wait();
         let mut slow = self.slow.lock().await;
         // Another waiter may have advanced the horizon past this reservation.
         if last <= self.durable_max_ts.load(Ordering::Acquire) {
@@ -514,6 +515,22 @@ mod tests {
         NonZeroU64::new(value).expect("test count is non-zero")
     }
 
+    /// Grant with a hang bound: any regression that turns a grant into an
+    /// unbounded wait must fail the suite promptly rather than stalling it
+    /// past the mutation-testing budget.
+    async fn grant_within<C, H>(
+        oracle: &TsoOracle<C, H>,
+        count: NonZeroU64,
+    ) -> Result<GrantLease, TsoError>
+    where
+        C: TsoHorizonCommitter,
+        H: EpochHeartbeat,
+    {
+        tokio::time::timeout(Duration::from_secs(5), oracle.grant(count))
+            .await
+            .expect("grant must complete promptly")
+    }
+
     #[derive(Clone)]
     struct CountingHeartbeat {
         calls: Arc<AtomicUsize>,
@@ -559,11 +576,13 @@ mod tests {
         // an exactly-at-boundary clock would let a regressed readiness
         // comparison spin on zero-duration sleeps instead of failing fast.
         clock.0.store(12, Ordering::SeqCst);
-        oracle.grant(nonzero(1)).await.expect("first");
-        oracle.grant(nonzero(1)).await.expect("certified");
+        grant_within(&oracle, nonzero(1)).await.expect("first");
+        grant_within(&oracle, nonzero(1)).await.expect("certified");
         assert!(calls.load(Ordering::SeqCst) == 1);
-        clock.0.store(22, Ordering::SeqCst);
-        oracle.grant(nonzero(1)).await.expect("renewed");
+        // Strictly past the certificate (12 + 10): at the exact boundary a
+        // flipped renewal recheck is indistinguishable from the real one.
+        clock.0.store(23, Ordering::SeqCst);
+        grant_within(&oracle, nonzero(1)).await.expect("renewed");
         assert!(calls.load(Ordering::SeqCst) == 2);
     }
 
@@ -589,32 +608,87 @@ mod tests {
 
         // First grant persists one stride and issues the first-grant
         // heartbeat; the second is served within stride and certificate.
-        oracle.grant(nonzero(3)).await.expect("first");
-        oracle.grant(nonzero(2)).await.expect("second");
+        grant_within(&oracle, nonzero(3)).await.expect("first");
+        grant_within(&oracle, nonzero(2)).await.expect("second");
         assert!(
             stats.snapshot()
                 == TsoOracleStatsSnapshot {
                     grants_served: 2,
                     timestamps_granted: 5,
+                    horizon_waits: 1,
                     horizon_persists: 1,
                     heartbeats: 1,
                 }
         );
 
-        // Certificate expiry renews via one more heartbeat; the grant stays
-        // within the persisted stride.
-        clock.0.store(11, Ordering::SeqCst);
-        oracle.grant(nonzero(1)).await.expect("renewed");
+        // Certificate expiry (strictly past 1 + 10) renews via one more
+        // heartbeat; the grant stays within the persisted stride.
+        clock.0.store(12, Ordering::SeqCst);
+        grant_within(&oracle, nonzero(1)).await.expect("renewed");
         assert!(
             stats.snapshot()
                 == TsoOracleStatsSnapshot {
                     grants_served: 3,
                     timestamps_granted: 6,
+                    horizon_waits: 1,
                     horizon_persists: 1,
                     heartbeats: 2,
                 }
         );
         assert!(oracle.stats().snapshot() == stats.snapshot());
+    }
+
+    #[tokio::test]
+    async fn boundary_grant_at_durable_horizon_stays_on_the_fast_path() {
+        use crate::tso::stats::TsoOracleStatsSnapshot;
+
+        let store = Arc::new(MemKv::default());
+        let horizon = MemoryTsoHorizon::new(store, 3);
+        let stats = Arc::new(TsoOracleStats::default());
+        let oracle = TsoOracle::recover(horizon.clone(), horizon.clone(), 3, nonzero(4), 0)
+            .expect("recover")
+            .with_stats(Arc::clone(&stats));
+
+        // First grant persists the stride to 4; the second consumes exactly
+        // up to the durable horizon and must be served lock-free.
+        grant_within(&oracle, nonzero(2)).await.expect("first");
+        grant_within(&oracle, nonzero(2)).await.expect("boundary");
+
+        assert!(
+            stats.snapshot()
+                == TsoOracleStatsSnapshot {
+                    grants_served: 2,
+                    timestamps_granted: 4,
+                    horizon_waits: 1,
+                    horizon_persists: 1,
+                    heartbeats: 1,
+                }
+        );
+    }
+
+    #[tokio::test]
+    async fn grace_wait_sleeps_only_the_remaining_interval() {
+        let store = Arc::new(MemKv::default());
+        let horizon = MemoryTsoHorizon::new(store, 2);
+        let oracle = TsoOracle::recover_with_heartbeat_interval(
+            horizon.clone(),
+            horizon.clone(),
+            2,
+            nonzero(8),
+            4,
+            Duration::from_millis(400),
+        )
+        .expect("recover successor");
+
+        // Enter the grace window late: the wait must sleep only the remaining
+        // ~100ms, not a duration derived from the absolute clock reading.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let first = tokio::time::timeout(Duration::from_millis(350), oracle.grant(nonzero(1)))
+            .await
+            .expect("grace wait must sleep only the remainder")
+            .expect("grant");
+
+        assert!(first == GrantLease::new(TsoTimestamp::new(nonzero(5)), nonzero(1)));
     }
 
     #[tokio::test]
@@ -632,16 +706,18 @@ mod tests {
             clock.clone(),
         )
         .expect("recover");
-        oracle.grant(nonzero(1)).await.expect("first");
+        grant_within(&oracle, nonzero(1)).await.expect("first");
         horizon.set_live_epoch(4).await;
-        oracle.grant(nonzero(1)).await.expect("within certificate");
+        grant_within(&oracle, nonzero(1))
+            .await
+            .expect("within certificate");
         clock.0.store(11, Ordering::SeqCst);
         assert!(matches!(
-            oracle.grant(nonzero(1)).await,
+            grant_within(&oracle, nonzero(1)).await,
             Err(TsoError::FencedEpoch { epoch: 3 })
         ));
         assert!(matches!(
-            oracle.grant(nonzero(1)).await,
+            grant_within(&oracle, nonzero(1)).await,
             Err(TsoError::FencedEpoch { epoch: 3 })
         ));
     }
@@ -653,8 +729,12 @@ mod tests {
         let oracle = TsoOracle::recover(horizon.clone(), horizon.clone(), 3, nonzero(10), 0)
             .expect("recover");
 
-        let first = oracle.grant(nonzero(3)).await.expect("first grant");
-        let second = oracle.grant(nonzero(3)).await.expect("second grant");
+        let first = grant_within(&oracle, nonzero(3))
+            .await
+            .expect("first grant");
+        let second = grant_within(&oracle, nonzero(3))
+            .await
+            .expect("second grant");
 
         assert!(first == GrantLease::new(TsoTimestamp::FIRST, nonzero(3)));
         assert!(second == GrantLease::new(TsoTimestamp::new(nonzero(4)), nonzero(3)));
@@ -668,7 +748,7 @@ mod tests {
         let oracle = TsoOracle::recover(horizon.clone(), horizon.clone(), 5, nonzero(8), 0)
             .expect("recover");
 
-        let before_crash = oracle.grant(nonzero(2)).await.expect("grant");
+        let before_crash = grant_within(&oracle, nonzero(2)).await.expect("grant");
         let recovered = TsoOracle::recover(
             horizon.clone(),
             horizon.clone(),
@@ -677,7 +757,7 @@ mod tests {
             horizon.load_max_ts().expect("horizon"),
         )
         .expect("recover successor");
-        let after_crash = recovered.grant(nonzero(1)).await.expect("grant");
+        let after_crash = grant_within(&recovered, nonzero(1)).await.expect("grant");
 
         assert!(before_crash.last_ts().expect("last") < after_crash.first_ts);
     }
@@ -690,7 +770,7 @@ mod tests {
             .expect("recover");
 
         horizon.set_live_epoch(8).await;
-        let error = oracle.grant(nonzero(1)).await.expect_err("fenced");
+        let error = grant_within(&oracle, nonzero(1)).await.expect_err("fenced");
 
         assert!(matches!(error, TsoError::FencedEpoch { epoch: 7 }));
     }
@@ -705,7 +785,9 @@ mod tests {
         let stale = TsoOracle::recover(racing_horizon.clone(), horizon.clone(), 1, nonzero(4), 0)
             .expect("recover stale");
 
-        let error = stale.grant(nonzero(1)).await.expect_err("fenced persist");
+        let error = grant_within(&stale, nonzero(1))
+            .await
+            .expect_err("fenced persist");
 
         assert!(matches!(error, TsoError::FencedEpoch { epoch: 1 }));
         assert!(horizon.load_max_ts().expect("horizon") == 0);
@@ -718,7 +800,9 @@ mod tests {
             horizon.load_max_ts().expect("horizon"),
         )
         .expect("recover successor");
-        let grant = successor.grant(nonzero(1)).await.expect("successor grant");
+        let grant = grant_within(&successor, nonzero(1))
+            .await
+            .expect("successor grant");
 
         assert!(grant == GrantLease::new(TsoTimestamp::FIRST, nonzero(1)));
     }
@@ -774,7 +858,9 @@ mod tests {
         )
         .expect("recover successor");
 
-        let first = oracle.grant(nonzero(1)).await.expect("first grant");
+        let first = grant_within(&oracle, nonzero(1))
+            .await
+            .expect("first grant");
 
         assert!(started.elapsed() >= Duration::from_millis(50));
         assert!(first == GrantLease::new(TsoTimestamp::new(nonzero(41)), nonzero(1)));

@@ -4430,6 +4430,51 @@ mod tests {
         assert!(calls.load(Ordering::SeqCst) == 2);
     }
 
+    /// Range service that answers every request with a non-retryable failure.
+    struct AlwaysFailed {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl RangeService for AlwaysFailed {
+        async fn handle(&self, _request: RangeRequest) -> RangeResponse {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            RangeResponse::Error {
+                error: WireErrorKind::Failed,
+                message: "oracle storage failed".to_string(),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn non_reresolvable_grant_error_fails_without_retry() {
+        use assert2::assert;
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let addr = spawn_loopback(Arc::new(AlwaysFailed {
+            calls: Arc::clone(&calls),
+        }))
+        .await
+        .unwrap();
+        let source = Arc::new(CurrentRecord {
+            record: Mutex::new(range_zero_record(addr.to_string())),
+        });
+        let registry = RangeRegistry::from_tenant_record(&range_zero_record(addr.to_string()))
+            .unwrap()
+            .with_authoritative_source(source);
+        let rpc = RegistryTsoRpc::new(registry, FramedTcpClient::default());
+
+        let error = rpc
+            .grant(NonZeroU64::new(1).unwrap())
+            .await
+            .expect_err("failed grant must not retry");
+
+        // A non-retryable failure earns no registry refresh and no second
+        // attempt: exactly one upstream call.
+        assert!(matches!(error, TsoError::Rpc(message) if message == "oracle storage failed"));
+        assert!(calls.load(Ordering::SeqCst) == 1);
+    }
+
     #[tokio::test]
     async fn remote_sql_error_preserves_owner_sqlstate() {
         let engine = crabka_pgexec::SqlEngine::new();

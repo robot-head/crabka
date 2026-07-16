@@ -387,6 +387,46 @@ mod tests {
         NonZeroU64::new(value).expect("test count is non-zero")
     }
 
+    /// Grant with a hang bound: any regression that turns a grant into an
+    /// unbounded wait (a flusher that never spawns or never re-arms) must
+    /// fail the suite promptly rather than stalling it past the
+    /// mutation-testing budget.
+    async fn grant_within<R: TsoRpc>(
+        client: &BatchedTsoClient<R>,
+        requested: NonZeroU64,
+    ) -> Result<GrantLease, TsoError> {
+        tokio::time::timeout(std::time::Duration::from_secs(5), client.grant(requested))
+            .await
+            .expect("grant must complete promptly")
+    }
+
+    #[test]
+    fn disarmed_reset_guard_leaves_the_queue_untouched() {
+        // White-box: the disarm must neutralize the guard entirely. An armed
+        // drop after a clean exit would clear a successor flusher's flag and
+        // cancel requests it was about to serve — a window too narrow to
+        // provoke through the public API.
+        let (sender, _receiver) = oneshot::channel();
+        let queue = Arc::new(Mutex::new(GrantQueue {
+            pending: vec![PendingGrant {
+                count: count(1),
+                sender,
+            }],
+            flusher_running: true,
+        }));
+        let mut guard = FlusherResetGuard {
+            queue: Arc::clone(&queue),
+            armed: true,
+        };
+
+        guard.disarm();
+        drop(guard);
+
+        let state = lock_queue(&queue);
+        assert!(state.flusher_running);
+        assert!(state.pending.len() == 1);
+    }
+
     // Assert `leases` partition the contiguous timestamp range starting at
     // `first_ts` and covering `total` timestamps, with no gaps or overlaps.
     fn assert_leases_tile(leases: &[GrantLease], first_ts: u64, total: u64) {
@@ -413,11 +453,11 @@ mod tests {
 
         let first = tokio::spawn({
             let client = client.clone();
-            async move { client.grant(count(2)).await }
+            async move { grant_within(&client, count(2)).await }
         });
         let second = tokio::spawn({
             let client = client.clone();
-            async move { client.grant(count(3)).await }
+            async move { grant_within(&client, count(3)).await }
         });
 
         let first = first.await.expect("join").expect("grant");
@@ -435,7 +475,7 @@ mod tests {
 
         let first = tokio::spawn({
             let client = client.clone();
-            async move { client.grant(count(2)).await }
+            async move { grant_within(&client, count(2)).await }
         });
         while !rpc.in_flight.load(Ordering::SeqCst) {
             tokio::task::yield_now().await;
@@ -446,7 +486,7 @@ mod tests {
         for &requested in &queued_counts {
             queued.push(tokio::spawn({
                 let client = client.clone();
-                async move { client.grant(count(requested)).await }
+                async move { grant_within(&client, count(requested)).await }
             }));
         }
         while lock_queue(&client.queue).pending.len() < queued_counts.len() {
@@ -480,7 +520,7 @@ mod tests {
 
         let first = tokio::spawn({
             let client = client.clone();
-            async move { client.grant(count(2)).await }
+            async move { grant_within(&client, count(2)).await }
         });
         while !rpc.in_flight.load(Ordering::SeqCst) {
             tokio::task::yield_now().await;
@@ -491,7 +531,7 @@ mod tests {
         for &requested in &queued_counts {
             queued.push(tokio::spawn({
                 let client = client.clone();
-                async move { client.grant(count(requested)).await }
+                async move { grant_within(&client, count(requested)).await }
             }));
         }
         while lock_queue(&client.queue).pending.len() < queued_counts.len() {
@@ -529,11 +569,11 @@ mod tests {
         let client = BatchedTsoClient::new(Arc::new(FencedRpc));
         let first = tokio::spawn({
             let client = client.clone();
-            async move { client.grant(count(1)).await }
+            async move { grant_within(&client, count(1)).await }
         });
         let second = tokio::spawn({
             let client = client.clone();
-            async move { client.grant(count(2)).await }
+            async move { grant_within(&client, count(2)).await }
         });
 
         let first = first.await.expect("join").expect_err("fenced grant");
@@ -554,13 +594,13 @@ mod tests {
         });
         let client = BatchedTsoClient::new(rpc.clone());
 
-        let first = client.grant(count(2)).await.expect("first grant");
+        let first = grant_within(&client, count(2)).await.expect("first grant");
         while lock_queue(&client.queue).flusher_running {
             tokio::task::yield_now().await;
         }
         let calls_after_first = rpc.calls.load(Ordering::SeqCst);
 
-        let second = client.grant(count(3)).await.expect("second grant");
+        let second = grant_within(&client, count(3)).await.expect("second grant");
 
         assert!(first == GrantLease::new(TsoTimestamp::new(count(1)), count(2)));
         assert!(second == GrantLease::new(TsoTimestamp::new(count(3)), count(3)));
@@ -575,17 +615,21 @@ mod tests {
         });
         let client = BatchedTsoClient::new(rpc.clone());
 
-        let error = client.grant(count(1)).await.expect_err("panicking rpc");
+        let error = grant_within(&client, count(1))
+            .await
+            .expect_err("panicking rpc");
         assert!(matches!(error, TsoError::Rpc(_)));
 
         // Bound the recovery grant: a client wedged by a broken reset guard
         // must fail this test promptly instead of awaiting a flusher that
         // will never be re-armed.
-        let recovered =
-            tokio::time::timeout(std::time::Duration::from_secs(5), client.grant(count(2)))
-                .await
-                .expect("client must not wedge after an upstream panic")
-                .expect("post-panic grant");
+        let recovered = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            grant_within(&client, count(2)),
+        )
+        .await
+        .expect("client must not wedge after an upstream panic")
+        .expect("post-panic grant");
 
         assert!(recovered == GrantLease::new(TsoTimestamp::new(count(1)), count(2)));
         assert!(rpc.calls.load(Ordering::SeqCst) == 2);
@@ -601,11 +645,11 @@ mod tests {
 
         let first = tokio::spawn({
             let client = client.clone();
-            async move { client.grant(count(u64::MAX)).await }
+            async move { grant_within(&client, count(u64::MAX)).await }
         });
         let second = tokio::spawn({
             let client = client.clone();
-            async move { client.grant(count(1)).await }
+            async move { grant_within(&client, count(1)).await }
         });
 
         let first = first.await.expect("join").expect_err("overflowed batch");
@@ -632,7 +676,9 @@ mod tests {
                     let mut leases = Vec::new();
                     for round in 0..4_u64 {
                         let requested = task_index + round + 1;
-                        let lease = client.grant(count(requested)).await.expect("hammer grant");
+                        let lease = grant_within(&client, count(requested))
+                            .await
+                            .expect("hammer grant");
                         assert!(lease.count.get() == requested);
                         leases.push(lease);
                     }

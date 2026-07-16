@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub struct TsoOracleStats {
     grants_served: AtomicU64,
     timestamps_granted: AtomicU64,
+    horizon_waits: AtomicU64,
     horizon_persists: AtomicU64,
     heartbeats: AtomicU64,
 }
@@ -26,6 +27,9 @@ pub struct TsoOracleStatsSnapshot {
     pub grants_served: u64,
     /// Timestamps handed out across all served grants.
     pub timestamps_granted: u64,
+    /// Grants that crossed the durable horizon and waited on the slow path;
+    /// a high rate relative to `grants_served` signals an undersized stride.
+    pub horizon_waits: u64,
     /// Durable horizon advances committed through range 0.
     pub horizon_persists: u64,
     /// Epoch-liveness heartbeats issued.
@@ -37,6 +41,11 @@ impl TsoOracleStats {
     pub fn record_grant(&self, count: u64) {
         self.grants_served.fetch_add(1, Ordering::Relaxed);
         self.timestamps_granted.fetch_add(count, Ordering::Relaxed);
+    }
+
+    /// Record one grant that crossed the horizon onto the slow path.
+    pub fn record_horizon_wait(&self) {
+        self.horizon_waits.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Record one durable horizon advance.
@@ -55,6 +64,7 @@ impl TsoOracleStats {
         TsoOracleStatsSnapshot {
             grants_served: self.grants_served.load(Ordering::Relaxed),
             timestamps_granted: self.timestamps_granted.load(Ordering::Relaxed),
+            horizon_waits: self.horizon_waits.load(Ordering::Relaxed),
             horizon_persists: self.horizon_persists.load(Ordering::Relaxed),
             heartbeats: self.heartbeats.load(Ordering::Relaxed),
         }
@@ -108,6 +118,7 @@ mod tests {
 
         stats.record_grant(3);
         stats.record_grant(2);
+        stats.record_horizon_wait();
         stats.record_horizon_persist();
         stats.record_heartbeat();
         stats.record_heartbeat();
@@ -117,6 +128,7 @@ mod tests {
                 == TsoOracleStatsSnapshot {
                     grants_served: 2,
                     timestamps_granted: 5,
+                    horizon_waits: 1,
                     horizon_persists: 1,
                     heartbeats: 2,
                 }
