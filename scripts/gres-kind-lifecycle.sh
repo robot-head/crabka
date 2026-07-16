@@ -11,6 +11,11 @@ readonly P95_CEILING_MS="${CRABKA_GRES_COLDSTART_P95_CEILING_MS:-30000}"
 readonly PGPASSWORD_VALUE="${CRABKA_GRES_KIND_PASSWORD:-g5-secret-password}"
 readonly PGDOG_IMAGE="ghcr.io/pgdogdev/pgdog:0.1.47"
 readonly IMAGE_TAG="g5-e2e"
+# Safety margin between a wake no-roll observation and the operator-stamped
+# pgdogCredentialGraceUntilUnixMs deadline. The host and the Kind node share a
+# kernel clock, so this only needs to absorb the gap between the kubectl reads
+# returning and the timestamp being taken.
+readonly WAKE_NOROLL_MARGIN_MS=500
 PORT_FORWARD_PID=""
 COMPUTE_FORWARD_PID=""
 KEEPER_PID=""
@@ -305,6 +310,8 @@ COMPUTE_FORWARD_PID=""
 
 : >"$ARTIFACT_DIR/iteration-timings.tsv"
 : >"$ARTIFACT_DIR/physical-wal-generations.tsv"
+: >"$ARTIFACT_DIR/wake-noroll-proof.tsv"
+noroll_within_grace=0
 lifecycle_start_ns=$(date +%s%N)
 for iteration in $(seq 1 "$ITERATIONS"); do
     # Real compute self-suspend closes admission, writes the final manifest,
@@ -341,7 +348,32 @@ for iteration in $(seq 1 "$ITERATIONS"); do
     latency_ms=$(measure_tls_query_ms)
     end_ns=$(date +%s%N)
     printf '%s\t%s\n' "$iteration" "$latency_ms" >>"$ARTIFACT_DIR/iteration-timings.tsv"
+    # Observe PgDog immediately after the wake query, before the slower
+    # rollout/port-forward/keeper round-trips below. The operator holds the
+    # suspended activator route only until the bounded grace deadline it
+    # stamps on the suspended->active transition, after which the lazy flip
+    # to direct compute legitimately changes the config and rolls the pod.
+    # A no-roll assertion is therefore only sound when the observation
+    # provably landed inside that window.
+    after_wake_hash=$(kubectl get secret fleet-pgdog-config -o jsonpath='{.metadata.annotations.crabka\.io/pgdog-config-hash}')
+    after_wake_pod=$(kubectl get pods -l app.kubernetes.io/name=crabka-pgdog,app.kubernetes.io/instance=fleet -o jsonpath='{.items[0].metadata.uid}')
+    observed_unix_ms=$(($(date +%s%N) / 1000000))
     wait_lifecycle active
+    grace_deadline_ms=$(kubectl get grestenant tenant-a -o jsonpath='{.status.pgdogCredentialGraceUntilUnixMs}')
+    [ -n "$grace_deadline_ms" ] || fail "active tenant lacks a PgDog credential grace deadline"
+    if (( observed_unix_ms < grace_deadline_ms - WAKE_NOROLL_MARGIN_MS )); then
+        [ "$after_wake_hash" = "$before_wake_hash" ] || \
+            fail "wake path changed PgDog config before the held first session completed"
+        [ "$after_wake_pod" = "$before_wake_pod" ] || \
+            fail "wake path rolled PgDog before the held first session completed"
+        noroll_within_grace=$((noroll_within_grace + 1))
+        noroll_verdict=asserted
+    else
+        noroll_verdict=window-elapsed
+        echo "iteration $iteration: no-roll observation at ${observed_unix_ms} missed the grace deadline ${grace_deadline_ms}; skipping" >&2
+    fi
+    printf '%s\t%s\t%s\t%s\n' "$iteration" "$observed_unix_ms" "$grace_deadline_ms" "$noroll_verdict" \
+        >>"$ARTIFACT_DIR/wake-noroll-proof.tsv"
     timeout 180s kubectl rollout status deploy/tenant-a-gres --timeout=170s
     kubectl port-forward deploy/tenant-a-gres 17432:5432 >"$ARTIFACT_DIR/compute-port-forward.log" 2>&1 &
     COMPUTE_FORWARD_PID=$!
@@ -360,10 +392,6 @@ for iteration in $(seq 1 "$ITERATIONS"); do
     KEEPER_PID=$!
     sleep 1
     kill -0 "$KEEPER_PID" 2>/dev/null || fail "post-wake busy-session keeper exited"
-    [ "$(kubectl get secret fleet-pgdog-config -o jsonpath='{.metadata.annotations.crabka\.io/pgdog-config-hash}')" = "$before_wake_hash" ] || \
-        fail "wake path changed PgDog config before the held first session completed"
-    [ "$(kubectl get pods -l app.kubernetes.io/name=crabka-pgdog,app.kubernetes.io/instance=fleet -o jsonpath='{.items[0].metadata.uid}')" = "$before_wake_pod" ] || \
-        fail "wake path rolled PgDog before the held first session completed"
     deadline_wait 120 "active PgDog tenant credential removal" \
         "! kubectl get secret fleet-pgdog-config -o jsonpath='{.data.users\\.toml}' | base64 -d | grep -q 'g5-secret-password'"
     deadline_wait 120 "confirmed direct PgDog route" \
@@ -414,6 +442,11 @@ for iteration in $(seq 1 "$ITERATIONS"); do
 done
 lifecycle_end_ns=$(date +%s%N)
 printf '%s\t%s\n' "$lifecycle_start_ns" "$lifecycle_end_ns" >"$ARTIFACT_DIR/lifecycle-window.tsv"
+# An observation that misses the 4-second grace window (loaded runner) cannot
+# distinguish the legitimate lazy flip from a premature roll, so it is skipped
+# above — but the run as a whole must still have exercised the property.
+[ "$noroll_within_grace" -ge 1 ] || \
+    fail "no wake iteration observed PgDog inside the credential grace window; the no-roll property was never exercised"
 
 # Real missing-final-manifest refusal: stop the operator, let the real compute
 # publish Suspended, delete the exact newest manifest, then restore the
