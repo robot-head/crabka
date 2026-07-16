@@ -41,7 +41,7 @@ jobs:
       - uses: azure/setup-helm@v5
         with:
           version: v4.2.3
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7.0.0
         with:
           go-version: stable
       - uses: taiki-e/install-action@v2
