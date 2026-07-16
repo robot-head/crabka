@@ -578,7 +578,14 @@ mod tests {
         let error = client.grant(count(1)).await.expect_err("panicking rpc");
         assert!(matches!(error, TsoError::Rpc(_)));
 
-        let recovered = client.grant(count(2)).await.expect("post-panic grant");
+        // Bound the recovery grant: a client wedged by a broken reset guard
+        // must fail this test promptly instead of awaiting a flusher that
+        // will never be re-armed.
+        let recovered =
+            tokio::time::timeout(std::time::Duration::from_secs(5), client.grant(count(2)))
+                .await
+                .expect("client must not wedge after an upstream panic")
+                .expect("post-panic grant");
 
         assert!(recovered == GrantLease::new(TsoTimestamp::new(count(1)), count(2)));
         assert!(rpc.calls.load(Ordering::SeqCst) == 2);
