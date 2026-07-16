@@ -81,7 +81,8 @@ pub use self::{
         WireJoinStrategy, WireJoinTableInterval, WireRangeKey, serve_tls,
     },
     tso::{
-        BatchedTsoClient, EpochHeartbeat, GrantLease, HeartbeatVerdict, MemoryTsoHorizon, TsoError,
-        TsoHorizonCommitter, TsoOracle, TsoRpc, TsoTimestamp,
+        BatchedTsoClient, EpochHeartbeat, GrantLease, HeartbeatVerdict, MemoryTsoHorizon,
+        TsoClientStats, TsoClientStatsSnapshot, TsoError, TsoHorizonCommitter, TsoOracle,
+        TsoOracleStats, TsoOracleStatsSnapshot, TsoRpc, TsoTimestamp,
     },
 };

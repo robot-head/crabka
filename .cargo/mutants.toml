@@ -113,6 +113,18 @@ exclude_re = [
     # on a prometheus counter — so the observable metric state is identical and no
     # test can distinguish them. (`> with <` / `> with ==` ARE caught.)
     "profiles/src/metrics\\.rs.*replace > with >= in ServiceMetrics::record_ingest",
+    # `BatchedTsoClient` flusher-liveness mutants: never spawning a flusher
+    # (`delete !` flips the single-flusher test-and-set) or spawning a no-op one
+    # makes every timestamp grant await a reply that can never arrive. The
+    # dedicated unit tests bound their grants and fail within seconds — the
+    # mutants ARE detected — but the tenant-level integration suites in the same
+    # package (jepsen, cross-range 2PC) issue grants through unbounded SQL
+    # paths and hang the remainder of the run past any mutant budget, so the
+    # outcome is always recorded as a timeout rather than a kill. Excluded as
+    # detected-but-unreportable; the flusher's drain loop, clean-exit flag
+    # handshake, reset guard, and error fan-out all remain mutation-tested.
+    "gres-ranges/src/tso/client\\.rs.*delete ! in BatchedTsoClient<R>::grant",
+    "gres-ranges/src/tso/client\\.rs.*replace BatchedTsoClient<R>::spawn_flush with \\(\\)",
     # ListPartitionReassignments `removing_replicas` echo: only populated for a
     # partition with an *in-flight* removal, which the controller cannot hold from a
     # directly-seeded `PartitionRecord` — apply auto-completes the removal (verified:

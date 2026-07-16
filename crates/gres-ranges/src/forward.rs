@@ -1447,8 +1447,15 @@ fn sql_result_summary(results: &[QueryResult]) -> String {
 }
 
 fn tso_error_response(error: &TsoError) -> RangeResponse {
+    // A fenced epoch means a successor oracle owns range 0 elsewhere, so the
+    // caller should re-resolve and retry rather than treat the grant as failed.
+    let kind = if matches!(error, TsoError::FencedEpoch { .. }) {
+        WireErrorKind::NotLeader
+    } else {
+        WireErrorKind::Failed
+    };
     RangeResponse::Error {
-        error: WireErrorKind::Failed,
+        error: kind,
         message: error.to_string(),
     }
 }
@@ -1594,31 +1601,60 @@ impl RegistryTsoRpc {
 #[async_trait]
 impl TsoRpc for RegistryTsoRpc {
     async fn grant(&self, count: NonZeroU64) -> Result<GrantLease, TsoError> {
-        let endpoint = self
-            .registry
-            .resolve(RangeId::COORDINATOR)
-            .await
-            .map_err(|error| TsoError::Rpc(error.to_string()))?;
-        match self
-            .client
-            .call(
-                &endpoint.endpoint,
-                &RangeRequest::Tso(crate::transport::TsoReq::Grant { count: count.get() }),
-            )
-            .await
-            .map_err(|error| TsoError::Rpc(error.to_string()))?
-        {
-            RangeResponse::Tso(crate::transport::TsoResp::Granted { first_ts, count }) => {
-                let first_ts = crate::tso::TsoTimestamp::new(
-                    NonZeroU64::new(first_ts).ok_or(TsoError::TimestampOverflow)?,
-                );
-                let count = NonZeroU64::new(count).ok_or(TsoError::TimestampOverflow)?;
-                Ok(GrantLease::new(first_ts, count))
+        let mut retry_used = false;
+        loop {
+            // Resolve inside the loop so a retry sees the refreshed registry.
+            let endpoint = self
+                .registry
+                .resolve(RangeId::COORDINATOR)
+                .await
+                .map_err(|error| TsoError::Rpc(error.to_string()))?;
+            let response = self
+                .client
+                .call(
+                    &endpoint.endpoint,
+                    &RangeRequest::Tso(crate::transport::TsoReq::Grant { count: count.get() }),
+                )
+                .await;
+            match response {
+                Ok(RangeResponse::Tso(crate::transport::TsoResp::Granted { first_ts, count })) => {
+                    let first_ts = crate::tso::TsoTimestamp::new(
+                        NonZeroU64::new(first_ts).ok_or(TsoError::TimestampOverflow)?,
+                    );
+                    let count = NonZeroU64::new(count).ok_or(TsoError::TimestampOverflow)?;
+                    return Ok(GrantLease::new(first_ts, count));
+                }
+                Ok(RangeResponse::Error { error, message }) if error.permits_reresolve() => {
+                    if retry_used {
+                        return Err(TsoError::Rpc(message));
+                    }
+                    retry_used = true;
+                    self.registry
+                        .refresh_authoritatively()
+                        .await
+                        .map_err(|error| TsoError::Rpc(error.to_string()))?;
+                }
+                Ok(
+                    RangeResponse::Error { message, .. } | RangeResponse::SqlError { message, .. },
+                ) => {
+                    return Err(TsoError::Rpc(message));
+                }
+                Ok(_) => return Err(TsoError::Rpc("unexpected range-zero TSO response".into())),
+                // A grant is safe to retry even if the lost request actually
+                // executed: an unclaimed grant only burns timestamps, which
+                // never violates monotonicity. So ANY transport error earns
+                // the one re-resolve retry, not just re-resolvable kinds.
+                Err(error) => {
+                    if retry_used {
+                        return Err(TsoError::Rpc(error.to_string()));
+                    }
+                    retry_used = true;
+                    self.registry
+                        .refresh_authoritatively()
+                        .await
+                        .map_err(|error| TsoError::Rpc(error.to_string()))?;
+                }
             }
-            RangeResponse::Error { message, .. } | RangeResponse::SqlError { message, .. } => {
-                Err(TsoError::Rpc(message))
-            }
-            _ => Err(TsoError::Rpc("unexpected range-zero TSO response".into())),
         }
     }
 }
@@ -3991,7 +4027,7 @@ mod tests {
             }))
         }
     }
-    use crate::transport::{RangeService, spawn_loopback};
+    use crate::transport::{RangeService, TsoReq, TsoResp, spawn_loopback};
 
     struct StaleThenOk {
         calls: AtomicUsize,
@@ -4041,6 +4077,38 @@ mod tests {
         calls: Arc<AtomicUsize>,
     }
 
+    /// Oracle that was fenced by a successor epoch.
+    struct FencedTso;
+
+    #[async_trait]
+    impl TsoRpc for FencedTso {
+        async fn grant(&self, _count: NonZeroU64) -> Result<GrantLease, TsoError> {
+            Err(TsoError::FencedEpoch { epoch: 3 })
+        }
+    }
+
+    /// Range service that grants every timestamp request starting at 10.
+    struct GrantingTsoService {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl RangeService for GrantingTsoService {
+        async fn handle(&self, request: RangeRequest) -> RangeResponse {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let RangeRequest::Tso(TsoReq::Grant { count }) = request else {
+                return RangeResponse::Error {
+                    error: WireErrorKind::Failed,
+                    message: "expected tso grant".to_string(),
+                };
+            };
+            RangeResponse::Tso(TsoResp::Granted {
+                first_ts: 10,
+                count,
+            })
+        }
+    }
+
     struct CurrentRecord {
         record: Mutex<TenantRecord>,
     }
@@ -4066,6 +4134,17 @@ mod tests {
     fn record(endpoint: String) -> TenantRecord {
         record_with_layout(vec![RangeLayoutEntry {
             range_id: 1,
+            end_key: None,
+            endpoint,
+            wal_generation: 1,
+            lifecycle: crabka_gres_control::RangeLifecycle::default(),
+            retirement: None,
+        }])
+    }
+
+    fn range_zero_record(endpoint: String) -> TenantRecord {
+        record_with_layout(vec![RangeLayoutEntry {
+            range_id: 0,
             end_key: None,
             endpoint,
             wal_generation: 1,
@@ -4227,6 +4306,173 @@ mod tests {
             }
         ));
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn fenced_oracle_grant_maps_to_not_leader_wire_error() {
+        use assert2::assert;
+
+        // Route the fenced oracle through the batching client exactly as the
+        // production wiring does: the fenced error must survive batch fan-out
+        // to reach the wire as a re-resolvable NotLeader.
+        let service = HostedRangeService::new(BTreeMap::new()).with_tso(Arc::new(
+            crate::tso::BatchedTsoClient::new(Arc::new(FencedTso)),
+        ));
+
+        let response = service
+            .handle(RangeRequest::Tso(TsoReq::Grant { count: 1 }))
+            .await;
+
+        assert!(
+            response
+                == RangeResponse::Error {
+                    error: WireErrorKind::NotLeader,
+                    message: "timestamp oracle epoch 3 was fenced".to_string(),
+                }
+        );
+    }
+
+    #[tokio::test]
+    async fn tso_grant_reresolves_once_after_stale_endpoint_and_succeeds() {
+        use assert2::assert;
+
+        // The stale endpoint hosts no oracle, so grants answer StaleEndpoint,
+        // which permits re-resolve.
+        let stale_addr = spawn_loopback(Arc::new(HostedRangeService::new(BTreeMap::new())))
+            .await
+            .unwrap();
+        let grants = Arc::new(AtomicUsize::new(0));
+        let live_addr = spawn_loopback(Arc::new(GrantingTsoService {
+            calls: Arc::clone(&grants),
+        }))
+        .await
+        .unwrap();
+        let source = Arc::new(CurrentRecord {
+            record: Mutex::new(range_zero_record(live_addr.to_string())),
+        });
+        let registry =
+            RangeRegistry::from_tenant_record(&range_zero_record(stale_addr.to_string()))
+                .unwrap()
+                .with_authoritative_source(source);
+        let rpc = RegistryTsoRpc::new(registry, FramedTcpClient::default());
+
+        let lease = rpc
+            .grant(NonZeroU64::new(5).unwrap())
+            .await
+            .expect("grant succeeds after one re-resolve retry");
+
+        assert!(
+            lease
+                == GrantLease::new(
+                    crate::tso::TsoTimestamp::new(NonZeroU64::new(10).unwrap()),
+                    NonZeroU64::new(5).unwrap(),
+                )
+        );
+        assert!(grants.load(Ordering::SeqCst) == 1);
+    }
+
+    #[tokio::test]
+    async fn tso_grant_retries_after_transport_error_and_succeeds() {
+        use assert2::assert;
+
+        // Reserve an address, then drop the listener so the first call fails
+        // at the transport layer (connection refused).
+        let dead_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_addr = dead_listener.local_addr().unwrap();
+        drop(dead_listener);
+        let grants = Arc::new(AtomicUsize::new(0));
+        let live_addr = spawn_loopback(Arc::new(GrantingTsoService {
+            calls: Arc::clone(&grants),
+        }))
+        .await
+        .unwrap();
+        let source = Arc::new(CurrentRecord {
+            record: Mutex::new(range_zero_record(live_addr.to_string())),
+        });
+        let registry = RangeRegistry::from_tenant_record(&range_zero_record(dead_addr.to_string()))
+            .unwrap()
+            .with_authoritative_source(source);
+        let rpc = RegistryTsoRpc::new(registry, FramedTcpClient::default());
+
+        let lease = rpc
+            .grant(NonZeroU64::new(2).unwrap())
+            .await
+            .expect("grant succeeds after transport-error retry");
+
+        assert!(lease.count.get() == 2);
+        assert!(grants.load(Ordering::SeqCst) == 1);
+    }
+
+    #[tokio::test]
+    async fn tso_grant_retry_is_bounded_to_two_attempts() {
+        use assert2::assert;
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let addr = spawn_loopback(Arc::new(AlwaysNotLeader {
+            calls: Arc::clone(&calls),
+        }))
+        .await
+        .unwrap();
+        let source = Arc::new(CurrentRecord {
+            record: Mutex::new(range_zero_record(addr.to_string())),
+        });
+        let registry = RangeRegistry::from_tenant_record(&range_zero_record(addr.to_string()))
+            .unwrap()
+            .with_authoritative_source(source);
+        let rpc = RegistryTsoRpc::new(registry, FramedTcpClient::default());
+
+        let error = rpc
+            .grant(NonZeroU64::new(1).unwrap())
+            .await
+            .expect_err("second not-leader must stop retrying");
+
+        assert!(matches!(error, TsoError::Rpc(message) if message == "not writer"));
+        assert!(calls.load(Ordering::SeqCst) == 2);
+    }
+
+    /// Range service that answers every request with a non-retryable failure.
+    struct AlwaysFailed {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl RangeService for AlwaysFailed {
+        async fn handle(&self, _request: RangeRequest) -> RangeResponse {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            RangeResponse::Error {
+                error: WireErrorKind::Failed,
+                message: "oracle storage failed".to_string(),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn non_reresolvable_grant_error_fails_without_retry() {
+        use assert2::assert;
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let addr = spawn_loopback(Arc::new(AlwaysFailed {
+            calls: Arc::clone(&calls),
+        }))
+        .await
+        .unwrap();
+        let source = Arc::new(CurrentRecord {
+            record: Mutex::new(range_zero_record(addr.to_string())),
+        });
+        let registry = RangeRegistry::from_tenant_record(&range_zero_record(addr.to_string()))
+            .unwrap()
+            .with_authoritative_source(source);
+        let rpc = RegistryTsoRpc::new(registry, FramedTcpClient::default());
+
+        let error = rpc
+            .grant(NonZeroU64::new(1).unwrap())
+            .await
+            .expect_err("failed grant must not retry");
+
+        // A non-retryable failure earns no registry refresh and no second
+        // attempt: exactly one upstream call.
+        assert!(matches!(error, TsoError::Rpc(message) if message == "oracle storage failed"));
+        assert!(calls.load(Ordering::SeqCst) == 1);
     }
 
     #[tokio::test]

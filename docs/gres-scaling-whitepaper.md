@@ -83,10 +83,14 @@ Leasing out timestamp *blocks* to gateways was rejected too: a client holding a 
 **Batching plus stride-ahead durability make one counter fast enough.**
 Grants are served from memory in batches (order 10⁵–10⁶ timestamps per second per tenant); the oracle never persists individual grants but durably advances a `max_ts` watermark in large strides through its ordinary WAL.
 After a crash or fence, the successor resumes past the last durable stride — timestamps may be skipped but never reused, and monotonicity holds across generations because the stride is on the log and recovery is fence-first.
+The grant path is engineered like a data path, not a control path: gateways coalesce concurrent requests through a conveyor batcher (at most one grant RPC in flight, and everything that queues behind it drains into the next single RPC, so batch size self-tunes to upstream latency), and the oracle serves within-stride grants lock-free through a compare-exchange reservation, with only stride persists and liveness-certificate renewals serializing on a mutex.
+Grant and batch-fill counters ride both halves, so the per-tenant observation point of section 8 is measured rather than estimated.
 
 **Fencing, not clock freshness, closes the failure case.**
 The one hazard that resembles a clock problem — a deposed-but-alive oracle serving stale-yet-monotone timestamps from memory, silently violating read-your-writes — is closed by epoch liveness: the oracle amortizes a heartbeat (a no-op produce on its transactional session) into each grant batch and stops granting the instant a heartbeat returns fenced.
 The staleness window is the heartbeat interval, a stated configuration bound, and the model corpus carries a live-zombie action verifying that the invariant "no granted read timestamp precedes a commit acknowledged before the grant" fails without the gate and holds with it.
+The liveness gate closes the zombie's half of the hazard; a successor grace period closes the other half: a recovering oracle refuses its first grant until the predecessor's largest possible certificate has lapsed, so arbitrarily fast failover cannot acknowledge a commit while a deposed oracle may still be serving from memory.
+The model corpus represents the certificate windows explicitly — the safe configuration passes exhaustively at 11.4 million states, and removing the grace rule reproduces the freshness counterexample — and gateways converge on a successor without client involvement: a fenced oracle answers as a deposed leader, and grant RPCs re-resolve the registry and retry once, which is safe because an unclaimed grant only burns timestamps.
 
 **Commits are range-local, so commit rate scales with ranges.**
 A transaction's writes land as durable **intents** (which are the locks — they replay, so recovery re-derives them from the log rather than reconstructing in-memory state) in each participant range's own WAL; the primary range (first write) holds the single write-once commit record at `commit_ts`; secondaries resolve asynchronously and lazily.
@@ -119,7 +123,7 @@ What remains, and what breaks first:
 
 - **Per range:** the executor's scan envelope on unindexed access paths (for one growing tenant with no useful index, the read path breaks first) and the group-commit latency floor.
 - **Per tenant:** the TSO RPC path — a measured observation point at 10⁵–10⁶ grants/second, not a projected ceiling — and range 0's residual role in DDL and layout changes, both far above ordinary commit traffic.
-  The TSO is also a liveness dependency: sharded-table transactions stall while range 0's writer recovers, bounded by the same fence-and-prologue story as any range.
+  The TSO is also a liveness dependency: sharded-table transactions stall while range 0's writer recovers — bounded by range 0's own fence and replay rather than its host's full recovery, because a restarting multirange host binds its range transport before recovering and activates the oracle the moment range 0 is replayed, while SQL serving stays gated behind the full prologue.
 - **Per fleet:** the configuration/reload pipeline around 10³ tenants per cell, then broker per-topic overhead around 10⁴ topics — which ranges multiply, making the named broker workstreams (follower-fetch multiplexing, per-topic metadata indexing) bind sooner in range-heavy deployments.
 - **Gateway memory:** scatter-gather materializes working sets at the gateway, the same envelope as the single-node engine; pushdown narrows it but a general distributed exchange operator is explicitly out of scope.
 
@@ -148,3 +152,4 @@ The design documents behind this paper, for readers who want the decision-by-dec
 - [Multi-range tenants design](superpowers/specs/2026-07-09-crabka-gres-g7-multirange-design.md) — ranges, routing, the log-derived barrier.
 - [Sharded tables design](superpowers/specs/2026-07-09-crabka-gres-g8-sharded-tables-design.md) — rowid-interval sharding, scatter-gather, checkpoint-fork splits.
 - [Distributed maturity design](superpowers/specs/2026-07-09-crabka-gres-g9-distributed-maturity-design.md) — timestamp transactions, pushdown, hash sharding, indexes, the balancer, auto-sharding.
+- [Early TSO activation design](superpowers/specs/2026-07-15-gres-early-tso-activation-design.md) — grant availability during host startup and failover.

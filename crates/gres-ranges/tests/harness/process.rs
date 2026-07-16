@@ -375,6 +375,14 @@ impl ProcessHarness {
     }
 
     async fn restart_node(&mut self, range: u32, hosted_ranges: &str) {
+        self.restart_spawned(range, hosted_ranges);
+        self.finish_restart(range).await;
+    }
+
+    /// Spawn the replacement child without waiting for its recovery-complete
+    /// readiness event, so a test can observe the child while it recovers.
+    /// Follow with [`Self::finish_restart`].
+    pub fn restart_spawned(&mut self, range: u32, hosted_ranges: &str) {
         let node_range = {
             let node = self.node(range);
             node.range
@@ -400,6 +408,11 @@ impl ProcessHarness {
             self.r2_proxy.set_backend(replacement_port);
             self.r3_proxy.set_backend(replacement_port);
         }
+    }
+
+    /// Wait for a [`Self::restart_spawned`] child's recovery-complete
+    /// readiness event and re-point the stable proxies at it.
+    pub async fn finish_restart(&mut self, range: u32) {
         self.wait_ready(range).await;
     }
 
