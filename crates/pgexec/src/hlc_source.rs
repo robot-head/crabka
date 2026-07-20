@@ -96,6 +96,10 @@ pub struct HlcTimestampSource {
     /// Maximum clock offset in the packed timestamp domain (physical ms shifted
     /// into the high bits). Zero means an empty uncertainty window.
     max_offset: u64,
+    /// This node's dense per-tenant index, stamped into every transaction
+    /// identity this source originates so two nodes minting the same `start_ts`
+    /// stay distinct. `0` collapses to single-source behavior.
+    node_id: u16,
 }
 
 impl std::fmt::Debug for HlcTimestampSource {
@@ -104,34 +108,43 @@ impl std::fmt::Debug for HlcTimestampSource {
             .debug_struct("HlcTimestampSource")
             .field("clock", &self.clock)
             .field("max_offset", &self.max_offset)
+            .field("node_id", &self.node_id)
             .finish_non_exhaustive()
     }
 }
 
 impl HlcTimestampSource {
-    /// Build a fresh source over `wall` with a `max_offset_ms` uncertainty bound.
+    /// Build a fresh source over `wall` with a `max_offset_ms` uncertainty bound,
+    /// minting on node `node_id`.
     #[must_use]
-    pub fn new(wall: Arc<dyn WallClock>, max_offset_ms: u64) -> Self {
+    pub fn new(wall: Arc<dyn WallClock>, max_offset_ms: u64, node_id: u16) -> Self {
         Self {
             clock: HybridLogicalClock::new(),
             wall,
             max_offset: pack(max_offset_ms, 0),
+            node_id,
         }
     }
 
     /// Build a source whose clock is seeded so no stamp it mints can fall at or
-    /// below `horizon`.
+    /// below `horizon`, minting on node `node_id`.
     ///
     /// This is the promotion constructor: `horizon` is the fenced solo tenant's
     /// persisted `LogicalTso` horizon (a packed stamp with physical component
     /// zero). Seeding folds it in so the first — and, by monotonicity, every —
     /// distributed stamp strictly dominates it.
     #[must_use]
-    pub fn seeded_from_horizon(horizon: u64, wall: Arc<dyn WallClock>, max_offset_ms: u64) -> Self {
+    pub fn seeded_from_horizon(
+        horizon: u64,
+        wall: Arc<dyn WallClock>,
+        max_offset_ms: u64,
+        node_id: u16,
+    ) -> Self {
         Self {
             clock: HybridLogicalClock::seeded_at(horizon),
             wall,
             max_offset: pack(max_offset_ms, 0),
+            node_id,
         }
     }
 
@@ -199,6 +212,10 @@ impl TimestampSource for HlcTimestampSource {
     fn uncertainty_window(&self) -> u64 {
         self.max_offset
     }
+
+    fn node_id(&self) -> u16 {
+        self.node_id
+    }
 }
 
 #[cfg(test)]
@@ -211,8 +228,15 @@ mod tests {
     fn source_at(wall_ms: u64, max_offset_ms: u64) -> (HlcTimestampSource, Arc<ManualWallClock>) {
         let wall = Arc::new(ManualWallClock::new(wall_ms));
         let source =
-            HlcTimestampSource::new(Arc::clone(&wall) as Arc<dyn WallClock>, max_offset_ms);
+            HlcTimestampSource::new(Arc::clone(&wall) as Arc<dyn WallClock>, max_offset_ms, 0);
         (source, wall)
+    }
+
+    #[test]
+    fn node_id_is_reported_from_construction() {
+        let wall = Arc::new(ManualWallClock::new(100));
+        let source = HlcTimestampSource::new(wall as Arc<dyn WallClock>, 0, 42);
+        assert!(TimestampSource::node_id(&source) == 42);
     }
 
     #[tokio::test]
@@ -287,6 +311,7 @@ mod tests {
             horizon,
             Arc::clone(&wall) as Arc<dyn WallClock>,
             250,
+            0,
         );
         // Drive wall time backwards and forwards; no stamp may reach the horizon.
         for wall_ms in [0, 0, 1, 0, 2, 1] {

@@ -619,7 +619,7 @@ impl HostedRangeService {
                     Ok(engine) => engine,
                     Err(response) => return response,
                 };
-                match resolve_primary(engine, request.start_ts) {
+                match resolve_primary(engine, request.start_ts, request.node_id) {
                     Ok(response) => RangeResponse::ResolveTxn(response),
                     Err(error) => RangeResponse::Error {
                         error: WireErrorKind::Failed,
@@ -729,12 +729,17 @@ impl HostedRangeService {
         }
         let result = if request.add_participant {
             engine
-                .add_timestamp_transaction_participant(identity.start_ts, request.participant_range)
+                .add_timestamp_transaction_participant(
+                    identity.start_ts,
+                    identity.node_id,
+                    request.participant_range,
+                )
                 .await
         } else {
             engine
                 .acknowledge_timestamp_participant_operations(
                     identity.start_ts,
+                    identity.node_id,
                     request.participant_range,
                     &operations,
                 )
@@ -939,7 +944,7 @@ impl HostedRangeService {
         }
         let result = if decision == crabka_pgexec::PrimaryTxnDecision::Aborted {
             engine
-                .abort_timestamp_transaction_intents(identity.start_ts)
+                .abort_timestamp_transaction_intents(identity.start_ts, identity.node_id)
                 .await
         } else {
             match engine
@@ -1004,7 +1009,7 @@ impl HostedRangeService {
             })
             .collect();
         match engine
-            .recover_timestamp_transaction(identity.start_ts)
+            .recover_timestamp_transaction(identity.start_ts, identity.node_id)
             .await
         {
             Ok(decision) => RangeResponse::TimestampPrimaryDecision {
@@ -2149,6 +2154,7 @@ impl RemoteRangeSession {
     pub async fn timestamp_primary_decision(
         &self,
         start_ts: crabka_pgexec::TimestampTransactionId,
+        node_id: u16,
     ) -> Result<crabka_pgexec::PrimaryTxnDecision, PgError> {
         let endpoint = self
             .registry
@@ -2162,6 +2168,7 @@ impl RemoteRangeSession {
                 &RangeRequest::ResolveTxn(crate::transport::ResolveTxnReq {
                     primary_range: self.range_id,
                     start_ts: start_ts.get(),
+                    node_id,
                 }),
             )
             .await
@@ -3254,7 +3261,7 @@ impl RangeService for TimestampResolveService {
                 message: format!("range r{} is not hosted here", request.primary_range),
             };
         };
-        match resolve_primary(engine, request.start_ts) {
+        match resolve_primary(engine, request.start_ts, request.node_id) {
             Ok(response) => RangeResponse::ResolveTxn(response),
             Err(error) => RangeResponse::Error {
                 error: WireErrorKind::Failed,
@@ -3267,17 +3274,20 @@ impl RangeService for TimestampResolveService {
 fn resolve_primary(
     engine: &crabka_pgexec::SqlEngine,
     start_ts: u64,
+    node_id: u16,
 ) -> Result<ResolveTxnResp, crabka_pgexec::ExecError> {
     let start_ts = crabka_pgexec::TimestampTransactionId::new(start_ts).map_err(|error| {
         crabka_pgexec::ExecError::Unsupported(format!("invalid resolve timestamp: {error}"))
     })?;
-    Ok(match engine.primary_timestamp_decision(start_ts)? {
-        crabka_pgexec::PrimaryTxnDecision::Pending => ResolveTxnResp::Pending,
-        crabka_pgexec::PrimaryTxnDecision::Aborted => ResolveTxnResp::Aborted,
-        crabka_pgexec::PrimaryTxnDecision::Committed(commit_ts) => ResolveTxnResp::Committed {
-            commit_ts: commit_ts.get(),
+    Ok(
+        match engine.primary_timestamp_decision(start_ts, node_id)? {
+            crabka_pgexec::PrimaryTxnDecision::Pending => ResolveTxnResp::Pending,
+            crabka_pgexec::PrimaryTxnDecision::Aborted => ResolveTxnResp::Aborted,
+            crabka_pgexec::PrimaryTxnDecision::Committed(commit_ts) => ResolveTxnResp::Committed {
+                commit_ts: commit_ts.get(),
+            },
         },
-    })
+    )
 }
 
 impl RangeScanService {
@@ -3713,6 +3723,7 @@ fn decode_timestamp_identity(
     Ok(crabka_pgexec::TimestampTxnIdentity {
         start_ts: crabka_pgexec::TimestampTransactionId::new(identity.start_ts)
             .map_err(|error| error.to_string())?,
+        node_id: identity.node_id,
         global_xid: identity.global_xid,
         primary_range: identity.primary_range,
     })
@@ -3740,6 +3751,7 @@ fn encode_timestamp_identity(
 ) -> crate::transport::WireTimestampIdentity {
     crate::transport::WireTimestampIdentity {
         start_ts: identity.start_ts.get(),
+        node_id: identity.node_id,
         global_xid: identity.global_xid,
         primary_range: identity.primary_range,
     }
@@ -5647,7 +5659,7 @@ mod tests {
         let engine = crabka_pgexec::SqlEngine::with_kv(kv.clone()).expect("engine");
         let start = crabka_pgexec::TimestampTransactionId::new(5).expect("start");
         let commit = crabka_pgexec::CommitTimestamp::after_start(start, 8).expect("commit");
-        let mut descriptor = crabka_pgexec::TimestampTxnDescriptor::begun(start, 5, vec![]);
+        let mut descriptor = crabka_pgexec::TimestampTxnDescriptor::begun(start, 0, 5, vec![]);
         descriptor
             .decide(crabka_pgexec::PrimaryTxnDecision::Committed(commit))
             .expect("descriptor decision");
@@ -5664,6 +5676,7 @@ mod tests {
             .handle(RangeRequest::ResolveTxn(crate::transport::ResolveTxnReq {
                 primary_range: RangeId::new(7),
                 start_ts: 5,
+                node_id: 0,
             }))
             .await;
 
@@ -5694,7 +5707,7 @@ mod tests {
         for (start, decision) in decisions {
             let start = crabka_pgexec::TimestampTransactionId::new(start).expect("start");
             let mut descriptor =
-                crabka_pgexec::TimestampTxnDescriptor::begun(start, start.get(), vec![]);
+                crabka_pgexec::TimestampTxnDescriptor::begun(start, 0, start.get(), vec![]);
             if decision != crabka_pgexec::PrimaryTxnDecision::Pending {
                 descriptor.decide(decision).expect("descriptor decision");
             }
@@ -5723,6 +5736,7 @@ mod tests {
                     .handle(RangeRequest::ResolveTxn(crate::transport::ResolveTxnReq {
                         primary_range: predecessor,
                         start_ts: start,
+                        node_id: 0,
                     }))
                     .await;
                 assert_eq!(response, RangeResponse::ResolveTxn(expected));
@@ -5737,6 +5751,7 @@ mod tests {
         engine
             .begin_timestamp_transaction(&crabka_pgexec::TimestampTxnDescriptor::begun(
                 start_ts,
+                0,
                 91,
                 vec![1],
             ))
@@ -5749,6 +5764,7 @@ mod tests {
                     primary_range: RangeId::new(1),
                     identity: crate::transport::WireTimestampIdentity {
                         start_ts: start_ts.get(),
+                        node_id: 0,
                         global_xid: 999,
                         primary_range: 1,
                     },
@@ -5768,6 +5784,7 @@ mod tests {
         let start_ts = crabka_pgexec::TimestampTransactionId::new(100).expect("start timestamp");
         let identity = crabka_pgexec::TimestampTxnIdentity {
             start_ts,
+            node_id: 0,
             global_xid: 101,
             primary_range: 1,
         };
@@ -5782,6 +5799,7 @@ mod tests {
         primary
             .begin_timestamp_transaction(&crabka_pgexec::TimestampTxnDescriptor::begun(
                 start_ts,
+                0,
                 identity.global_xid,
                 vec![1, 2],
             ))
@@ -5793,7 +5811,7 @@ mod tests {
             .await
             .expect("secondary prewrite");
         primary
-            .decide_timestamp_transaction(start_ts, crabka_pgexec::PrimaryTxnDecision::Aborted)
+            .decide_timestamp_transaction(start_ts, 0, crabka_pgexec::PrimaryTxnDecision::Aborted)
             .await
             .expect("abort primary");
         let service = HostedRangeService::new(BTreeMap::from([
@@ -5820,6 +5838,7 @@ mod tests {
         let start_ts = crabka_pgexec::TimestampTransactionId::new(300).expect("start timestamp");
         let identity = crabka_pgexec::TimestampTxnIdentity {
             start_ts,
+            node_id: 0,
             global_xid: 301,
             primary_range: 1,
         };
@@ -5834,6 +5853,7 @@ mod tests {
         primary
             .begin_timestamp_transaction(&crabka_pgexec::TimestampTxnDescriptor::begun(
                 start_ts,
+                0,
                 identity.global_xid,
                 vec![1, 2],
             ))
@@ -5854,6 +5874,7 @@ mod tests {
                     range_id: RangeId::new(2),
                     identity: crate::transport::WireTimestampIdentity {
                         start_ts: start_ts.get(),
+                        node_id: 0,
                         global_xid: 999,
                         primary_range: 9,
                     },
@@ -5876,6 +5897,7 @@ mod tests {
         let start_ts = crabka_pgexec::TimestampTransactionId::new(310).expect("start timestamp");
         let identity = crabka_pgexec::TimestampTxnIdentity {
             start_ts,
+            node_id: 0,
             global_xid: 311,
             primary_range: 1,
         };
@@ -5897,6 +5919,7 @@ mod tests {
         primary
             .begin_timestamp_transaction(&crabka_pgexec::TimestampTxnDescriptor::begun(
                 start_ts,
+                0,
                 identity.global_xid,
                 vec![2],
             ))
@@ -5908,7 +5931,7 @@ mod tests {
             .await
             .expect("secondary prewrite");
         primary
-            .acknowledge_timestamp_participant_operations(start_ts, 2, &[operation])
+            .acknowledge_timestamp_participant_operations(start_ts, 0, 2, &[operation])
             .await
             .expect("ack operations");
         let actual_commit =
@@ -5916,6 +5939,7 @@ mod tests {
         primary
             .decide_timestamp_transaction(
                 start_ts,
+                0,
                 crabka_pgexec::PrimaryTxnDecision::Committed(actual_commit),
             )
             .await
@@ -5954,6 +5978,7 @@ mod tests {
         let start_ts = crabka_pgexec::TimestampTransactionId::new(400).expect("start timestamp");
         let identity = crabka_pgexec::TimestampTxnIdentity {
             start_ts,
+            node_id: 0,
             global_xid: 401,
             primary_range: 1,
         };
@@ -5968,6 +5993,7 @@ mod tests {
         primary
             .begin_timestamp_transaction(&crabka_pgexec::TimestampTxnDescriptor::begun(
                 start_ts,
+                0,
                 identity.global_xid,
                 vec![2],
             ))
@@ -6011,7 +6037,7 @@ mod tests {
         assert!(matches!(response, RangeResponse::SqlError { code, .. } if code == "40001"));
         assert_eq!(
             primary
-                .primary_timestamp_decision(start_ts)
+                .primary_timestamp_decision(start_ts, 0)
                 .expect("primary decision"),
             crabka_pgexec::PrimaryTxnDecision::Pending
         );
@@ -6028,6 +6054,7 @@ mod tests {
         let start_ts = crabka_pgexec::TimestampTransactionId::new(600).expect("start timestamp");
         let identity = crabka_pgexec::TimestampTxnIdentity {
             start_ts,
+            node_id: 0,
             global_xid: 601,
             primary_range: 1,
         };
@@ -6058,6 +6085,7 @@ mod tests {
         primary
             .begin_timestamp_transaction(&crabka_pgexec::TimestampTxnDescriptor::begun(
                 start_ts,
+                0,
                 identity.global_xid,
                 vec![2],
             ))
@@ -6069,7 +6097,7 @@ mod tests {
             .await
             .expect("prewrite");
         primary
-            .acknowledge_timestamp_participant_operations(start_ts, 2, &operations)
+            .acknowledge_timestamp_participant_operations(start_ts, 0, 2, &operations)
             .await
             .expect("ack operations");
         let commit_ts =
@@ -6077,6 +6105,7 @@ mod tests {
         primary
             .decide_timestamp_transaction(
                 start_ts,
+                0,
                 crabka_pgexec::PrimaryTxnDecision::Committed(commit_ts),
             )
             .await
@@ -6149,10 +6178,14 @@ mod tests {
                 bucket,
                 write.rowid,
                 start_ts.get(),
+                0,
             ),
-            None => {
-                crabka_pgmvcc::version::version_key_ts(write.table_id, write.rowid, start_ts.get())
-            }
+            None => crabka_pgmvcc::version::version_key_ts(
+                write.table_id,
+                write.rowid,
+                start_ts.get(),
+                0,
+            ),
         };
         let bytes = engine
             .kv_handle()

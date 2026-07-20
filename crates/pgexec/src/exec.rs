@@ -2947,8 +2947,11 @@ pub(crate) fn scan_ts_live_interval(
             })?;
             // Corrupt or unreadable descriptor metadata is never a legacy version:
             // failing closed prevents an unverified participant write becoming visible.
-            let descriptor =
-                crate::timestamp_txn::read_timestamp_txn_descriptor(primary_kv, start_ts)?;
+            let descriptor = crate::timestamp_txn::read_timestamp_txn_descriptor(
+                primary_kv,
+                start_ts,
+                version.node_id,
+            )?;
             let verified_distributed_intent = match descriptor.as_ref() {
                 Some(descriptor) => crate::timestamp_txn::local_intent_matches_descriptor(
                     kv, descriptor, table.id, bucket, rowid,

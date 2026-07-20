@@ -4500,8 +4500,10 @@ fn timestamp_metadata_in_interval(
         .strip_prefix(INTENT)
         .or_else(|| key.strip_prefix(PREWRITE))
     {
-        let suffix = usize::from(key.starts_with(INTENT)) * 8;
-        if !matches!(tail.len(), 12 | 17 | 20 | 25) || tail.len() < suffix + 12 {
+        // Intent keys append start_ts(8) + node_id(2); prewrite keys have no
+        // transaction suffix. Intent tails are 22/27, prewrite tails 12/17.
+        let suffix = usize::from(key.starts_with(INTENT)) * 10;
+        if !matches!(tail.len(), 12 | 17 | 22 | 27) || tail.len() < suffix + 12 {
             return Err("malformed timestamp metadata key".into());
         }
         let row = &tail[..tail.len() - suffix];
@@ -4524,15 +4526,17 @@ fn timestamp_metadata_in_interval(
         return Ok(start <= physical.as_slice() && physical.as_slice() < end);
     }
     if let Some(raw) = key.strip_prefix(DESCRIPTOR) {
-        if raw.len() != 8 {
+        if raw.len() != 10 {
             return Err("malformed timestamp descriptor key".into());
         }
         let start_ts = crabka_pgexec::TimestampTransactionId::new(u64::from_be_bytes(
-            raw.try_into().expect("8 bytes"),
+            raw[..8].try_into().expect("8 bytes"),
         ))
         .map_err(|error| format!("malformed timestamp descriptor timestamp: {error}"))?;
-        let descriptor = crabka_pgexec::decode_timestamp_txn_descriptor_value(start_ts, value)
-            .map_err(|error| format!("malformed timestamp descriptor: {error}"))?;
+        let node_id = u16::from_be_bytes(raw[8..10].try_into().expect("2 bytes"));
+        let descriptor =
+            crabka_pgexec::decode_timestamp_txn_descriptor_value(start_ts, node_id, value)
+                .map_err(|error| format!("malformed timestamp descriptor: {error}"))?;
         let mut matches = false;
         let mut crosses_table = false;
         for operation in descriptor.operations {
@@ -8080,6 +8084,7 @@ mod tests {
                 primary_range: crabka_gres_ranges::RangeId::COORDINATOR,
                 identity: crabka_gres_ranges::transport::WireTimestampIdentity {
                     start_ts: 1,
+                    node_id: 0,
                     global_xid: 1,
                     primary_range: 0,
                 },

@@ -178,9 +178,10 @@ async fn reopened_engine_seeds_the_floor_from_durable_timestamp_state() {
 async fn floor_seed_covers_timestamp_state_written_before_the_engine_opened() {
     let kv: Arc<dyn Kv> = Arc::new(MemKv::new());
     kv.write_batch(&[WriteOp::Put {
-        key: crabka_pgmvcc::version::version_key_ts(7, 1, 3_000_000),
+        key: crabka_pgmvcc::version::version_key_ts(7, 1, 3_000_000, 0),
         value: crabka_pgmvcc::version::encode_ts_tuple(
             3_000_000,
+            0,
             crabka_pgmvcc::version::TsVersionState::Committed {
                 commit_ts: 3_000_777,
             },
@@ -212,7 +213,7 @@ async fn descriptor_commit_on_a_shared_catalog_store_raises_other_engines_floor(
 
     let start_ts = TimestampTransactionId::new(4_000_000).expect("start timestamp");
     let commit_ts = CommitTimestamp::new(4_000_900).expect("commit timestamp");
-    let descriptor = TimestampTxnDescriptor::begun(start_ts, 42, vec![1]);
+    let descriptor = TimestampTxnDescriptor::begun(start_ts, 0, 42, vec![1]);
     range0
         .begin_timestamp_transaction(&descriptor)
         .await
@@ -220,6 +221,7 @@ async fn descriptor_commit_on_a_shared_catalog_store_raises_other_engines_floor(
     range0
         .acknowledge_timestamp_participant_operations(
             start_ts,
+            0,
             1,
             &[TimestampTxnOperation {
                 range_id: 1,
@@ -232,7 +234,7 @@ async fn descriptor_commit_on_a_shared_catalog_store_raises_other_engines_floor(
         .await
         .expect("acknowledge participant");
     let decision = range0
-        .decide_timestamp_transaction(start_ts, PrimaryTxnDecision::Committed(commit_ts))
+        .decide_timestamp_transaction(start_ts, 0, PrimaryTxnDecision::Committed(commit_ts))
         .await
         .expect("decide commit");
     assert!(decision == PrimaryTxnDecision::Committed(commit_ts));

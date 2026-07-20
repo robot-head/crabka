@@ -772,6 +772,7 @@ async fn restart_durably_aborts_matching_global_index_intents_without_touching_o
     let start_ts = TimestampTransactionId::new(10).expect("start timestamp");
     let identity = crabka_pgexec::TimestampTxnIdentity {
         start_ts,
+        node_id: 0,
         global_xid: 9,
         primary_range: 0,
     };
@@ -793,6 +794,7 @@ async fn restart_durably_aborts_matching_global_index_intents_without_touching_o
     coordinator
         .begin_timestamp_transaction(&crabka_pgexec::TimestampTxnDescriptor::begun(
             start_ts,
+            0,
             identity.global_xid,
             vec![1],
         ))
@@ -917,6 +919,11 @@ fn assert_matching_timestamp_state(
 
 fn assert_no_timestamp_sidecars(kv: &dyn Kv, start_ts: u64) {
     let timestamp = start_ts.to_be_bytes();
+    let intent_suffix = {
+        let mut suffix = start_ts.to_be_bytes().to_vec();
+        suffix.extend_from_slice(&0_u16.to_be_bytes());
+        suffix
+    };
     assert!(
         kv.scan_prefix(b"\0\0\0\0meta/ts_prewrite/")
             .expect("scan prewrite reservations")
@@ -927,7 +934,7 @@ fn assert_no_timestamp_sidecars(kv: &dyn Kv, start_ts: u64) {
         kv.scan_prefix(b"\0\0\0\0meta/ts_intent/")
             .expect("scan timestamp identities")
             .into_iter()
-            .all(|(key, _value)| !key.ends_with(&timestamp))
+            .all(|(key, _value)| !key.ends_with(intent_suffix.as_slice()))
     );
 }
 

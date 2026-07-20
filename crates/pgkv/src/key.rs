@@ -80,12 +80,17 @@ pub fn classify_key(bytes: &[u8]) -> KeyClass {
         };
     }
 
+    // Version keys carry an 8-byte version suffix. The xid path stops there
+    // (24 / 28 bytes); the timestamp path appends a 2-byte `node_id`
+    // discriminator (26 / 30 bytes). Both classify as the same version class —
+    // `version` is the 8-byte `start_ts`/`xid`, and the trailing `node_id` is not
+    // part of the ordering identity surfaced here.
     match bytes.len() {
         16 => KeyClass::PrimaryRow {
             table_id,
             rowid: u64_component(&bytes[8..16]),
         },
-        24 => KeyClass::PrimaryVersion {
+        24 | 26 => KeyClass::PrimaryVersion {
             table_id,
             rowid: u64_component(&bytes[8..16]),
             version: u64_component(&bytes[16..24]),
@@ -95,7 +100,7 @@ pub fn classify_key(bytes: &[u8]) -> KeyClass {
             bucket: u32_component(&bytes[8..12]),
             rowid: u64_component(&bytes[12..20]),
         },
-        28 => KeyClass::HashPrimaryVersion {
+        28 | 30 => KeyClass::HashPrimaryVersion {
             table_id,
             bucket: u32_component(&bytes[8..12]),
             rowid: u64_component(&bytes[12..20]),

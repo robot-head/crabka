@@ -176,9 +176,9 @@ fn rewrite_pair_for_conversion(
     };
     let start_ts = boundary.synthetic_commit_ts - 1;
     let key = match key_shape {
-        VersionKeyShape::Plain => version::version_key_ts(table_id, rowid, start_ts),
+        VersionKeyShape::Plain => version::version_key_ts(table_id, rowid, start_ts, 0),
         VersionKeyShape::Hash { bucket } => {
-            version::hash_version_key_ts(table_id, bucket, rowid, start_ts)
+            version::hash_version_key_ts(table_id, bucket, rowid, start_ts, 0)
         }
     };
     Ok(Some((key, value)))
@@ -211,6 +211,7 @@ fn convert_tuple_value(
 
     Ok(Some(version::encode_ts_tuple(
         boundary.synthetic_commit_ts - 1,
+        0,
         version::TsVersionState::Committed {
             commit_ts: boundary.synthetic_commit_ts,
         },
@@ -366,10 +367,10 @@ mod tests {
 
     #[test]
     fn drops_resolved_aborted_timestamp_intents_below_horizon() {
-        let tuple = version::encode_ts_tuple(4, TsVersionState::Aborted, &[Datum::Int4(1)]);
+        let tuple = version::encode_ts_tuple(4, 0, TsVersionState::Aborted, &[Datum::Int4(1)]);
 
         let decision =
-            rewrite_for_checkpoint(&version_key_ts(7, 1, 4), &tuple, 9, &BTreeMap::new())
+            rewrite_for_checkpoint(&version_key_ts(7, 1, 4, 0), &tuple, 9, &BTreeMap::new())
                 .expect("rewrite");
 
         assert!(decision == RewriteDecision::Drop);
@@ -377,10 +378,10 @@ mod tests {
 
     #[test]
     fn keeps_pending_timestamp_intents_until_primary_resolution_is_known() {
-        let tuple = version::encode_ts_tuple(4, TsVersionState::Intent, &[Datum::Int4(1)]);
+        let tuple = version::encode_ts_tuple(4, 0, TsVersionState::Intent, &[Datum::Int4(1)]);
 
         let decision =
-            rewrite_for_checkpoint(&version_key_ts(7, 1, 4), &tuple, 9, &BTreeMap::new())
+            rewrite_for_checkpoint(&version_key_ts(7, 1, 4, 0), &tuple, 9, &BTreeMap::new())
                 .expect("rewrite");
 
         assert!(decision == RewriteDecision::Keep);
@@ -390,12 +391,13 @@ mod tests {
     fn drops_timestamp_delete_markers_below_horizon() {
         let tuple = version::encode_ts_tuple(
             4,
+            0,
             TsVersionState::Deleted { commit_ts: 8 },
             &[Datum::Int4(1)],
         );
 
         let decision =
-            rewrite_for_checkpoint(&version_key_ts(7, 1, 4), &tuple, 9, &BTreeMap::new())
+            rewrite_for_checkpoint(&version_key_ts(7, 1, 4, 0), &tuple, 9, &BTreeMap::new())
                 .expect("rewrite");
 
         assert!(decision == RewriteDecision::Drop);
@@ -405,12 +407,13 @@ mod tests {
     fn keeps_timestamp_delete_markers_at_or_above_horizon() {
         let tuple = version::encode_ts_tuple(
             4,
+            0,
             TsVersionState::Deleted { commit_ts: 9 },
             &[Datum::Int4(1)],
         );
 
         let decision =
-            rewrite_for_checkpoint(&version_key_ts(7, 1, 4), &tuple, 9, &BTreeMap::new())
+            rewrite_for_checkpoint(&version_key_ts(7, 1, 4, 0), &tuple, 9, &BTreeMap::new())
                 .expect("rewrite");
 
         assert!(decision == RewriteDecision::Keep);
@@ -438,7 +441,7 @@ mod tests {
 
         let (_, converted_value) = rewritten
             .iter()
-            .find(|(key, _)| *key == version_key_ts(7, 42, 89))
+            .find(|(key, _)| *key == version_key_ts(7, 42, 89, 0))
             .expect("converted tuple");
         let converted = version::decode_ts_tuple(converted_value).expect("timestamp tuple");
         assert!(converted.start_ts == 89);
@@ -507,11 +510,11 @@ mod tests {
                 2 => TsVersionState::Committed { commit_ts: start_ts + commit_delta },
                 _ => TsVersionState::Deleted { commit_ts: start_ts + commit_delta },
             };
-            let tuple = version::encode_ts_tuple(start_ts, state, &[Datum::Int4(1)]);
+            let tuple = version::encode_ts_tuple(start_ts, 0, state, &[Datum::Int4(1)]);
             let read_ts = horizon + read_delta;
             let original = crabka_pgmvcc::visibility::satisfies_ts(read_ts, state);
 
-            let decision = rewrite_for_checkpoint(&version_key_ts(7, 1, start_ts), &tuple, horizon, &BTreeMap::new())
+            let decision = rewrite_for_checkpoint(&version_key_ts(7, 1, start_ts, 0), &tuple, horizon, &BTreeMap::new())
                 .expect("rewrite");
 
             match decision {

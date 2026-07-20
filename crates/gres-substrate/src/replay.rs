@@ -258,7 +258,7 @@ mod tests {
             .with_physical_to_logical(BTreeMap::from([(TableId::new(1), TableId::new(52))]))
             .with_target_range(crabka_gres_ranges::RangeId::new(3));
         let start_ts = crabka_pgexec::TimestampTransactionId::new(9).unwrap();
-        let mut descriptor = crabka_pgexec::TimestampTxnDescriptor::begun(start_ts, 10, vec![1]);
+        let mut descriptor = crabka_pgexec::TimestampTxnDescriptor::begun(start_ts, 0, 10, vec![1]);
         descriptor
             .acknowledge_operations(
                 1,
@@ -275,7 +275,8 @@ mod tests {
         intent_key.extend_from_slice(&1_u32.to_be_bytes());
         intent_key.extend_from_slice(&1_u64.to_be_bytes());
         intent_key.extend_from_slice(&9_u64.to_be_bytes());
-        let mut identity = vec![0; 24];
+        intent_key.extend_from_slice(&0_u16.to_be_bytes());
+        let mut identity = vec![0; 26];
         identity[16..20].copy_from_slice(&1_u32.to_be_bytes());
         identity[20..24].copy_from_slice(&1_u32.to_be_bytes());
         let ops = filter_write_ops(
@@ -293,7 +294,7 @@ mod tests {
             panic!("descriptor put")
         };
         let rewritten =
-            crabka_pgexec::decode_timestamp_txn_descriptor_value(start_ts, value).unwrap();
+            crabka_pgexec::decode_timestamp_txn_descriptor_value(start_ts, 0, value).unwrap();
         assert_eq!(rewritten.participants, vec![3]);
         assert_eq!(rewritten.prepared, vec![3]);
         assert_eq!(rewritten.operations[0].range_id, 3);

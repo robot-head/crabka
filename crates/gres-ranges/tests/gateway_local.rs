@@ -987,6 +987,7 @@ async fn assert_recovered_timestamp_commit(
             operation.table_id,
             operation.rowid,
             descriptor.start_ts.get(),
+            0,
         );
         let bytes = kv
             .get(&key)

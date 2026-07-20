@@ -380,6 +380,7 @@ async fn committed_descriptor_recovery_resolves_put_delete_and_global_index_inte
     let commit_ts = CommitTimestamp::after_start(start_ts, 20).expect("commit timestamp");
     let identity = TimestampTxnIdentity {
         start_ts,
+        node_id: 0,
         global_xid: 10,
         primary_range: 0,
     };
@@ -407,7 +408,7 @@ async fn committed_descriptor_recovery_resolves_put_delete_and_global_index_inte
         global_index_intents: Vec::new(),
     };
     coordinator
-        .begin_timestamp_transaction(&TimestampTxnDescriptor::begun(start_ts, 10, vec![1]))
+        .begin_timestamp_transaction(&TimestampTxnDescriptor::begun(start_ts, 0, 10, vec![1]))
         .await
         .expect("descriptor");
     participant
@@ -426,11 +427,11 @@ async fn committed_descriptor_recovery_resolves_put_delete_and_global_index_inte
         })
         .collect::<Vec<_>>();
     coordinator
-        .acknowledge_timestamp_participant_operations(start_ts, 1, &operations)
+        .acknowledge_timestamp_participant_operations(start_ts, 0, 1, &operations)
         .await
         .expect("durable operations");
     coordinator
-        .decide_timestamp_transaction(start_ts, PrimaryTxnDecision::Committed(commit_ts))
+        .decide_timestamp_transaction(start_ts, 0, PrimaryTxnDecision::Committed(commit_ts))
         .await
         .expect("durable decision");
 
@@ -525,6 +526,7 @@ async fn timestamp_descriptor_commit_makes_unresolved_participants_visible_at_on
         .expect("global xid");
     let identity = TimestampTxnIdentity {
         start_ts,
+        node_id: 0,
         global_xid,
         primary_range: 0,
     };
@@ -547,6 +549,7 @@ async fn timestamp_descriptor_commit_makes_unresolved_participants_visible_at_on
     coordinator
         .begin_timestamp_transaction(&TimestampTxnDescriptor::begun(
             start_ts,
+            0,
             global_xid,
             vec![1, 2],
         ))
@@ -557,7 +560,7 @@ async fn timestamp_descriptor_commit_makes_unresolved_participants_visible_at_on
         .await
         .expect("left prewrite");
     coordinator
-        .acknowledge_timestamp_participant_operations(start_ts, 1, &left_operations)
+        .acknowledge_timestamp_participant_operations(start_ts, 0, 1, &left_operations)
         .await
         .expect("left acknowledgement");
     right
@@ -566,7 +569,7 @@ async fn timestamp_descriptor_commit_makes_unresolved_participants_visible_at_on
         .await
         .expect("right prewrite");
     coordinator
-        .acknowledge_timestamp_participant_operations(start_ts, 2, &right_operations)
+        .acknowledge_timestamp_participant_operations(start_ts, 0, 2, &right_operations)
         .await
         .expect("right acknowledgement");
 
@@ -575,7 +578,7 @@ async fn timestamp_descriptor_commit_makes_unresolved_participants_visible_at_on
 
     assert_eq!(
         coordinator
-            .decide_timestamp_transaction(start_ts, PrimaryTxnDecision::Committed(commit_ts))
+            .decide_timestamp_transaction(start_ts, 0, PrimaryTxnDecision::Committed(commit_ts))
             .await
             .expect("durable commit decision"),
         PrimaryTxnDecision::Committed(commit_ts)
@@ -644,6 +647,7 @@ async fn timestamp_recovery_aborts_undecided_descriptor_and_fences_delayed_commi
     coordinator
         .begin_timestamp_transaction(&TimestampTxnDescriptor::begun(
             start_ts,
+            0,
             global_xid,
             vec![1],
         ))
@@ -651,7 +655,7 @@ async fn timestamp_recovery_aborts_undecided_descriptor_and_fences_delayed_commi
         .expect("begin descriptor");
     assert_eq!(
         coordinator
-            .recover_timestamp_transaction(start_ts)
+            .recover_timestamp_transaction(start_ts, 0)
             .await
             .expect("recover undecided descriptor"),
         PrimaryTxnDecision::Aborted
@@ -660,6 +664,7 @@ async fn timestamp_recovery_aborts_undecided_descriptor_and_fences_delayed_commi
         coordinator
             .decide_timestamp_transaction(
                 start_ts,
+                0,
                 PrimaryTxnDecision::Committed(
                     CommitTimestamp::after_start(start_ts, 20).expect("commit timestamp"),
                 ),
@@ -676,13 +681,13 @@ async fn timestamp_acknowledgement_requires_durable_operations() {
     let coordinator = SqlEngine::with_kv(Arc::clone(&kv)).expect("coordinator");
     let start_ts = TimestampTransactionId::new(10).expect("start timestamp");
     coordinator
-        .begin_timestamp_transaction(&TimestampTxnDescriptor::begun(start_ts, 9, vec![1]))
+        .begin_timestamp_transaction(&TimestampTxnDescriptor::begun(start_ts, 0, 9, vec![1]))
         .await
         .expect("descriptor");
 
     assert!(
         coordinator
-            .acknowledge_timestamp_participant_operations(start_ts, 1, &[])
+            .acknowledge_timestamp_participant_operations(start_ts, 0, 1, &[])
             .await
             .is_err()
     );
@@ -695,7 +700,7 @@ async fn timestamp_acknowledgement_requires_durable_operations() {
     assert!(descriptor.prepared.is_empty());
     assert!(descriptor.operations.is_empty());
 
-    let mut fabricated = TimestampTxnDescriptor::begun(start_ts, 10, vec![1]);
+    let mut fabricated = TimestampTxnDescriptor::begun(start_ts, 0, 10, vec![1]);
     fabricated.prepared.push(1);
     assert!(
         coordinator
@@ -712,15 +717,19 @@ async fn concurrent_timestamp_commit_requests_return_the_one_durable_timestamp()
     coordinator.init_gtm_coordinator().expect("gtm");
     let start_ts = TimestampTransactionId::new(10).expect("start timestamp");
     coordinator
-        .begin_timestamp_transaction(&TimestampTxnDescriptor::begun(start_ts, 10, vec![]))
+        .begin_timestamp_transaction(&TimestampTxnDescriptor::begun(start_ts, 0, 10, vec![]))
         .await
         .expect("begin descriptor");
     let first = CommitTimestamp::after_start(start_ts, 20).expect("first commit timestamp");
     let second = CommitTimestamp::after_start(start_ts, 30).expect("second commit timestamp");
 
     let (left, right) = tokio::join!(
-        coordinator.decide_timestamp_transaction(start_ts, PrimaryTxnDecision::Committed(first)),
-        coordinator.decide_timestamp_transaction(start_ts, PrimaryTxnDecision::Committed(second)),
+        coordinator.decide_timestamp_transaction(start_ts, 0, PrimaryTxnDecision::Committed(first)),
+        coordinator.decide_timestamp_transaction(
+            start_ts,
+            0,
+            PrimaryTxnDecision::Committed(second)
+        ),
     );
     let left = left.expect("left decision");
     let right = right.expect("right decision");
@@ -730,7 +739,7 @@ async fn concurrent_timestamp_commit_requests_return_the_one_durable_timestamp()
     );
     assert_eq!(
         coordinator
-            .primary_timestamp_decision(start_ts)
+            .primary_timestamp_decision(start_ts, 0)
             .expect("durable primary decision"),
         left
     );
@@ -742,7 +751,7 @@ async fn timestamp_descriptor_transitions_are_fenced_across_separate_engine_hand
     let first = SqlEngine::with_kv(Arc::clone(&kv)).expect("first replica handle");
     let second = SqlEngine::with_kv(Arc::clone(&kv)).expect("second replica handle");
     let start_ts = TimestampTransactionId::new(50).expect("start timestamp");
-    let descriptor = TimestampTxnDescriptor::begun(start_ts, 9, vec![1]);
+    let descriptor = TimestampTxnDescriptor::begun(start_ts, 0, 9, vec![1]);
 
     first
         .begin_timestamp_transaction(&descriptor)
@@ -750,7 +759,7 @@ async fn timestamp_descriptor_transitions_are_fenced_across_separate_engine_hand
         .expect("first create");
     assert!(
         second
-            .begin_timestamp_transaction(&TimestampTxnDescriptor::begun(start_ts, 10, vec![1]))
+            .begin_timestamp_transaction(&TimestampTxnDescriptor::begun(start_ts, 0, 10, vec![1]))
             .await
             .is_err()
     );
@@ -769,7 +778,12 @@ async fn timestamp_descriptor_transitions_are_fenced_across_separate_engine_hand
         delete: false,
     };
     first
-        .acknowledge_timestamp_participant_operations(start_ts, 1, std::slice::from_ref(&operation))
+        .acknowledge_timestamp_participant_operations(
+            start_ts,
+            0,
+            1,
+            std::slice::from_ref(&operation),
+        )
         .await
         .expect("current acknowledgement");
     let mut stale_writer = stale.clone();
@@ -783,12 +797,12 @@ async fn timestamp_descriptor_transitions_are_fenced_across_separate_engine_hand
 
     let commit_ts = CommitTimestamp::after_start(start_ts, 60).expect("commit timestamp");
     first
-        .decide_timestamp_transaction(start_ts, PrimaryTxnDecision::Committed(commit_ts))
+        .decide_timestamp_transaction(start_ts, 0, PrimaryTxnDecision::Committed(commit_ts))
         .await
         .expect("commit");
     assert_eq!(
         second
-            .decide_timestamp_transaction(start_ts, PrimaryTxnDecision::Aborted)
+            .decide_timestamp_transaction(start_ts, 0, PrimaryTxnDecision::Aborted)
             .await
             .expect("stale terminal writer observes durable decision"),
         PrimaryTxnDecision::Committed(commit_ts)
@@ -812,7 +826,7 @@ async fn concurrent_timestamp_acknowledgements_preserve_every_participant_operat
     .expect("coordinator");
     let start_ts = TimestampTransactionId::new(90).expect("start timestamp");
     coordinator
-        .begin_timestamp_transaction(&TimestampTxnDescriptor::begun(start_ts, 90, vec![1, 2]))
+        .begin_timestamp_transaction(&TimestampTxnDescriptor::begun(start_ts, 0, 90, vec![1, 2]))
         .await
         .expect("descriptor");
     let first_operation = crabka_pgexec::TimestampTxnOperation {
@@ -833,8 +847,13 @@ async fn concurrent_timestamp_acknowledgements_preserve_every_participant_operat
     let second_operations = [second_operation];
 
     let (first, second) = tokio::join!(
-        coordinator.acknowledge_timestamp_participant_operations(start_ts, 1, &first_operations),
-        coordinator.acknowledge_timestamp_participant_operations(start_ts, 2, &second_operations),
+        coordinator.acknowledge_timestamp_participant_operations(start_ts, 0, 1, &first_operations),
+        coordinator.acknowledge_timestamp_participant_operations(
+            start_ts,
+            0,
+            2,
+            &second_operations
+        ),
     );
     first.expect("first acknowledgement");
     second.expect("second acknowledgement");
@@ -863,17 +882,19 @@ async fn timestamp_participant_rejects_stale_prewrite_and_invalid_terminal_times
     let start_ts = TimestampTransactionId::new(70).expect("start timestamp");
     let identity = TimestampTxnIdentity {
         start_ts,
+        node_id: 0,
         global_xid: 17,
         primary_range: 0,
     };
     coordinator
-        .begin_timestamp_transaction(&TimestampTxnDescriptor::begun(start_ts, 17, vec![1]))
+        .begin_timestamp_transaction(&TimestampTxnDescriptor::begun(start_ts, 0, 17, vec![1]))
         .await
         .expect("descriptor");
     let write = timestamp_write(1, 1, 0);
     coordinator
         .acknowledge_timestamp_participant_operations(
             start_ts,
+            0,
             1,
             std::slice::from_ref(&timestamp_operation(1, &write)),
         )
@@ -883,6 +904,7 @@ async fn timestamp_participant_rejects_stale_prewrite_and_invalid_terminal_times
         coordinator
             .decide_timestamp_transaction(
                 start_ts,
+                0,
                 PrimaryTxnDecision::Committed(CommitTimestamp::new(70).expect("nonzero"))
             )
             .await
@@ -890,12 +912,12 @@ async fn timestamp_participant_rejects_stale_prewrite_and_invalid_terminal_times
     );
     assert_eq!(
         coordinator
-            .primary_timestamp_decision(start_ts)
+            .primary_timestamp_decision(start_ts, 0)
             .expect("invalid timestamp did not persist a terminal decision"),
         PrimaryTxnDecision::Pending
     );
     coordinator
-        .decide_timestamp_transaction(start_ts, PrimaryTxnDecision::Aborted)
+        .decide_timestamp_transaction(start_ts, 0, PrimaryTxnDecision::Aborted)
         .await
         .expect("abort");
     assert!(
@@ -917,11 +939,12 @@ async fn timestamp_participant_rejects_descriptor_non_member() {
     let start_ts = TimestampTransactionId::new(71).expect("start timestamp");
     let identity = TimestampTxnIdentity {
         start_ts,
+        node_id: 0,
         global_xid: 18,
         primary_range: 0,
     };
     coordinator
-        .begin_timestamp_transaction(&TimestampTxnDescriptor::begun(start_ts, 18, vec![1]))
+        .begin_timestamp_transaction(&TimestampTxnDescriptor::begun(start_ts, 0, 18, vec![1]))
         .await
         .expect("descriptor");
 
@@ -946,19 +969,20 @@ async fn descriptor_commit_does_not_expose_legacy_or_forged_local_version() {
     let start_ts = TimestampTransactionId::new(75).expect("start timestamp");
     let commit_ts = CommitTimestamp::after_start(start_ts, 76).expect("commit timestamp");
     engine
-        .begin_timestamp_transaction(&TimestampTxnDescriptor::begun(start_ts, 19, vec![]))
+        .begin_timestamp_transaction(&TimestampTxnDescriptor::begun(start_ts, 0, 19, vec![]))
         .await
         .expect("descriptor");
     engine
-        .decide_timestamp_transaction(start_ts, PrimaryTxnDecision::Committed(commit_ts))
+        .decide_timestamp_transaction(start_ts, 0, PrimaryTxnDecision::Committed(commit_ts))
         .await
         .expect("terminal decision");
     engine
         .kv_handle()
         .write_batch(&[crabka_pgkv::WriteOp::Put {
-            key: crabka_pgmvcc::version::version_key_ts(table.id, 1, start_ts.get()),
+            key: crabka_pgmvcc::version::version_key_ts(table.id, 1, start_ts.get(), 0),
             value: crabka_pgmvcc::version::encode_ts_tuple(
                 start_ts.get(),
+                0,
                 crabka_pgmvcc::version::TsVersionState::Intent,
                 &[crabka_pgtypes::Datum::Int4(1)],
             ),
@@ -980,20 +1004,22 @@ async fn concurrent_same_row_timestamp_prewrite_has_one_winner() {
     let first_start = TimestampTransactionId::new(80).expect("first start");
     let second_start = TimestampTransactionId::new(81).expect("second start");
     coordinator
-        .begin_timestamp_transaction(&TimestampTxnDescriptor::begun(first_start, 80, vec![1]))
+        .begin_timestamp_transaction(&TimestampTxnDescriptor::begun(first_start, 0, 80, vec![1]))
         .await
         .expect("first descriptor");
     coordinator
-        .begin_timestamp_transaction(&TimestampTxnDescriptor::begun(second_start, 81, vec![1]))
+        .begin_timestamp_transaction(&TimestampTxnDescriptor::begun(second_start, 0, 81, vec![1]))
         .await
         .expect("second descriptor");
     let first_identity = TimestampTxnIdentity {
         start_ts: first_start,
+        node_id: 0,
         global_xid: 80,
         primary_range: 0,
     };
     let second_identity = TimestampTxnIdentity {
         start_ts: second_start,
+        node_id: 0,
         global_xid: 81,
         primary_range: 0,
     };
@@ -1029,6 +1055,7 @@ async fn timestamp_prewrite_failure_after_first_participant_durably_aborts() {
         .expect("global xid");
     let identity = TimestampTxnIdentity {
         start_ts,
+        node_id: 0,
         global_xid,
         primary_range: 0,
     };
@@ -1037,6 +1064,7 @@ async fn timestamp_prewrite_failure_after_first_participant_durably_aborts() {
     coordinator
         .begin_timestamp_transaction(&TimestampTxnDescriptor::begun(
             start_ts,
+            0,
             global_xid,
             vec![1, 2],
         ))
@@ -1050,6 +1078,7 @@ async fn timestamp_prewrite_failure_after_first_participant_durably_aborts() {
     coordinator
         .acknowledge_timestamp_participant_operations(
             start_ts,
+            0,
             1,
             std::slice::from_ref(&timestamp_operation(1, &first_write)),
         )
@@ -1074,7 +1103,7 @@ async fn timestamp_prewrite_failure_after_first_participant_durably_aborts() {
 
     assert_eq!(
         coordinator
-            .decide_timestamp_transaction(start_ts, PrimaryTxnDecision::Aborted)
+            .decide_timestamp_transaction(start_ts, 0, PrimaryTxnDecision::Aborted)
             .await
             .expect("durable abort decision"),
         PrimaryTxnDecision::Aborted
@@ -1103,6 +1132,7 @@ async fn timestamp_prewrite_failure_after_first_participant_durably_aborts() {
         crabka_pgexec::timestamp_txn::read_timestamp_txn_descriptor(
             coordinator.kv_handle().as_ref(),
             start_ts,
+            0,
         )
         .expect("durable descriptor")
         .expect("timestamp descriptor")
@@ -1121,13 +1151,14 @@ async fn abort_recovery_removes_timestamp_identity_and_reservation_sidecars() {
     let start_ts = TimestampTransactionId::new(10).expect("start timestamp");
     let identity = TimestampTxnIdentity {
         start_ts,
+        node_id: 0,
         global_xid: 9,
         primary_range: 0,
     };
     let write = timestamp_write(7, 8, 42);
     let operation = timestamp_operation(1, &write);
     coordinator
-        .begin_timestamp_transaction(&TimestampTxnDescriptor::begun(start_ts, 9, vec![1]))
+        .begin_timestamp_transaction(&TimestampTxnDescriptor::begun(start_ts, 0, 9, vec![1]))
         .await
         .expect("descriptor");
     participant
@@ -1136,11 +1167,16 @@ async fn abort_recovery_removes_timestamp_identity_and_reservation_sidecars() {
         .await
         .expect("prewrite");
     coordinator
-        .acknowledge_timestamp_participant_operations(start_ts, 1, std::slice::from_ref(&operation))
+        .acknowledge_timestamp_participant_operations(
+            start_ts,
+            0,
+            1,
+            std::slice::from_ref(&operation),
+        )
         .await
         .expect("acknowledgement");
     coordinator
-        .decide_timestamp_transaction(start_ts, PrimaryTxnDecision::Aborted)
+        .decide_timestamp_transaction(start_ts, 0, PrimaryTxnDecision::Aborted)
         .await
         .expect("abort decision");
     participant

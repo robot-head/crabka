@@ -1581,13 +1581,16 @@ impl SqlEngine {
     pub fn primary_timestamp_decision(
         &self,
         start_ts: TimestampTransactionId,
+        node_id: u16,
     ) -> Result<PrimaryTxnDecision, ExecError> {
-        Ok(
-            crate::timestamp_txn::read_timestamp_txn_descriptor(self.kv.as_ref(), start_ts)?
-                .map_or(PrimaryTxnDecision::Pending, |descriptor| {
-                    descriptor.decision
-                }),
-        )
+        Ok(crate::timestamp_txn::read_timestamp_txn_descriptor(
+            self.kv.as_ref(),
+            start_ts,
+            node_id,
+        )?
+        .map_or(PrimaryTxnDecision::Pending, |descriptor| {
+            descriptor.decision
+        }))
     }
 
     /// Build sharded timestamp write operations for one autocommit DML statement.
@@ -1647,6 +1650,15 @@ impl SqlEngine {
         }
         plan.commit_ops.clear();
         Ok(plan)
+    }
+
+    /// The minting `node_id` of this engine's timestamp source. It discriminates
+    /// two HLC nodes that mint the same `start_ts`, so a fresh transaction identity
+    /// stamps it into every descriptor and intent. `0` in single-source
+    /// (LogicalTso) mode.
+    #[must_use]
+    pub fn timestamp_node_id(&self) -> u16 {
+        self.timestamp_oracle.node_id()
     }
 
     /// # Errors
@@ -1811,9 +1823,11 @@ impl SqlEngine {
                 "timestamp transaction descriptor must begin without prepared operations".into(),
             ));
         }
-        if let Some(existing) =
-            timestamp_txn::read_timestamp_txn_descriptor(self.kv.as_ref(), descriptor.start_ts)?
-        {
+        if let Some(existing) = timestamp_txn::read_timestamp_txn_descriptor(
+            self.kv.as_ref(),
+            descriptor.start_ts,
+            descriptor.node_id,
+        )? {
             if existing == *descriptor {
                 return Ok(());
             }
@@ -1826,8 +1840,11 @@ impl SqlEngine {
                 descriptor, None,
             )])
             .await?;
-        let stored =
-            timestamp_txn::read_timestamp_txn_descriptor(self.kv.as_ref(), descriptor.start_ts)?;
+        let stored = timestamp_txn::read_timestamp_txn_descriptor(
+            self.kv.as_ref(),
+            descriptor.start_ts,
+            descriptor.node_id,
+        )?;
         if stored.as_ref() == Some(descriptor) {
             return Ok(());
         }
@@ -1844,12 +1861,13 @@ impl SqlEngine {
     pub async fn acknowledge_timestamp_participant_operations(
         &self,
         start_ts: TimestampTransactionId,
+        node_id: u16,
         range_id: u32,
         operations: &[TimestampTxnOperation],
     ) -> Result<TimestampTxnDescriptor, ExecError> {
         loop {
             let Some(current) =
-                timestamp_txn::read_timestamp_txn_descriptor(self.kv.as_ref(), start_ts)?
+                timestamp_txn::read_timestamp_txn_descriptor(self.kv.as_ref(), start_ts, node_id)?
             else {
                 return Err(ExecError::Unsupported(
                     "timestamp transaction descriptor is missing".into(),
@@ -1868,10 +1886,13 @@ impl SqlEngine {
                     Some(&current),
                 )])
                 .await?;
-            let stored = timestamp_txn::read_timestamp_txn_descriptor(self.kv.as_ref(), start_ts)?
-                .ok_or_else(|| {
-                    ExecError::Unsupported("timestamp transaction descriptor disappeared".into())
-                })?;
+            let stored =
+                timestamp_txn::read_timestamp_txn_descriptor(self.kv.as_ref(), start_ts, node_id)?
+                    .ok_or_else(|| {
+                        ExecError::Unsupported(
+                            "timestamp transaction descriptor disappeared".into(),
+                        )
+                    })?;
             if stored == acknowledged {
                 return Ok(stored);
             }
@@ -1886,11 +1907,12 @@ impl SqlEngine {
         &self,
         identity: TimestampTxnIdentity,
     ) -> Result<TimestampTxnDescriptor, ExecError> {
-        let descriptor =
-            timestamp_txn::read_timestamp_txn_descriptor(self.kv.as_ref(), identity.start_ts)?
-                .ok_or_else(|| {
-                    ExecError::Unsupported("timestamp primary identity is fenced".into())
-                })?;
+        let descriptor = timestamp_txn::read_timestamp_txn_descriptor(
+            self.kv.as_ref(),
+            identity.start_ts,
+            identity.node_id,
+        )?
+        .ok_or_else(|| ExecError::Unsupported("timestamp primary identity is fenced".into()))?;
         if descriptor.global_xid != identity.global_xid {
             return Err(ExecError::Unsupported(
                 "timestamp primary identity is fenced".into(),
@@ -1906,11 +1928,12 @@ impl SqlEngine {
     pub async fn add_timestamp_transaction_participant(
         &self,
         start_ts: TimestampTransactionId,
+        node_id: u16,
         range_id: u32,
     ) -> Result<TimestampTxnDescriptor, ExecError> {
         loop {
             let Some(current) =
-                timestamp_txn::read_timestamp_txn_descriptor(self.kv.as_ref(), start_ts)?
+                timestamp_txn::read_timestamp_txn_descriptor(self.kv.as_ref(), start_ts, node_id)?
             else {
                 return Err(ExecError::Unsupported(
                     "timestamp transaction descriptor is missing".into(),
@@ -1929,10 +1952,13 @@ impl SqlEngine {
                     Some(&current),
                 )])
                 .await?;
-            let stored = timestamp_txn::read_timestamp_txn_descriptor(self.kv.as_ref(), start_ts)?
-                .ok_or_else(|| {
-                    ExecError::Unsupported("timestamp transaction descriptor disappeared".into())
-                })?;
+            let stored =
+                timestamp_txn::read_timestamp_txn_descriptor(self.kv.as_ref(), start_ts, node_id)?
+                    .ok_or_else(|| {
+                        ExecError::Unsupported(
+                            "timestamp transaction descriptor disappeared".into(),
+                        )
+                    })?;
             if stored == expanded {
                 return Ok(stored);
             }
@@ -1948,11 +1974,12 @@ impl SqlEngine {
     pub async fn decide_timestamp_transaction(
         &self,
         start_ts: TimestampTransactionId,
+        node_id: u16,
         requested: PrimaryTxnDecision,
     ) -> Result<PrimaryTxnDecision, ExecError> {
         loop {
             let Some(current) =
-                timestamp_txn::read_timestamp_txn_descriptor(self.kv.as_ref(), start_ts)?
+                timestamp_txn::read_timestamp_txn_descriptor(self.kv.as_ref(), start_ts, node_id)?
             else {
                 return Err(ExecError::Unsupported(
                     "timestamp transaction descriptor is missing".into(),
@@ -1976,10 +2003,13 @@ impl SqlEngine {
                     Some(&current),
                 )])
                 .await?;
-            let stored = timestamp_txn::read_timestamp_txn_descriptor(self.kv.as_ref(), start_ts)?
-                .ok_or_else(|| {
-                    ExecError::Unsupported("timestamp transaction descriptor disappeared".into())
-                })?;
+            let stored =
+                timestamp_txn::read_timestamp_txn_descriptor(self.kv.as_ref(), start_ts, node_id)?
+                    .ok_or_else(|| {
+                        ExecError::Unsupported(
+                            "timestamp transaction descriptor disappeared".into(),
+                        )
+                    })?;
             if stored.decision != PrimaryTxnDecision::Pending {
                 return Ok(stored.decision);
             }
@@ -1995,8 +2025,9 @@ impl SqlEngine {
     pub async fn recover_timestamp_transaction(
         &self,
         start_ts: TimestampTransactionId,
+        node_id: u16,
     ) -> Result<PrimaryTxnDecision, ExecError> {
-        self.decide_timestamp_transaction(start_ts, PrimaryTxnDecision::Aborted)
+        self.decide_timestamp_transaction(start_ts, node_id, PrimaryTxnDecision::Aborted)
             .await
     }
 
@@ -2165,8 +2196,9 @@ impl SqlEngine {
     pub async fn abort_timestamp_transaction_intents(
         &self,
         start_ts: TimestampTransactionId,
+        node_id: u16,
     ) -> Result<(), ExecError> {
-        let ops = timestamp_txn::abort_timestamp_intent_ops(self.kv.as_ref(), start_ts)?;
+        let ops = timestamp_txn::abort_timestamp_intent_ops(self.kv.as_ref(), start_ts, node_id)?;
         if ops.is_empty() {
             return Ok(());
         }
@@ -2710,7 +2742,7 @@ mod cursor_terminal_tests {
         engine
             .kv_handle()
             .write_batch(&[WriteOp::Put {
-                key: crabka_pgmvcc::version::hash_version_key_ts(table.id, 15, 7, 1),
+                key: crabka_pgmvcc::version::hash_version_key_ts(table.id, 15, 7, 1, 0),
                 value: vec![0],
             }])
             .expect("seed high-bucket physical key");
@@ -2820,9 +2852,10 @@ fn timestamp_conversion_ops(
         visible
             .into_iter()
             .map(|(rowid, _, row)| crabka_pgkv::WriteOp::Put {
-                key: crabka_pgmvcc::version::version_key_ts(table.id, rowid, start_ts),
+                key: crabka_pgmvcc::version::version_key_ts(table.id, rowid, start_ts, 0),
                 value: crabka_pgmvcc::version::encode_ts_tuple(
                     start_ts,
+                    0,
                     crabka_pgmvcc::version::TsVersionState::Committed { commit_ts },
                     &row,
                 ),

@@ -7,7 +7,8 @@
 use crabka_pgkv::KvError;
 use crabka_pgtypes::Datum;
 use zerocopy::{
-    FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned, byteorder::big_endian::U64,
+    FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned,
+    byteorder::big_endian::{U16, U64},
 };
 
 use crate::xid::{FROZEN_XID, Xid};
@@ -32,20 +33,36 @@ pub fn hash_version_key_xid(table_id: u32, bucket: u32, rowid: u64, xid: u64) ->
     k
 }
 
+/// Width of the timestamp-transaction version-key suffix: an 8-byte `start_ts`
+/// followed by a 2-byte `node_id`. The `node_id` discriminates two HLC nodes
+/// that mint the same `start_ts`, so `(start_ts, node_id)` uniquely names a
+/// transaction across the cluster; it is `0` in single-source (`LogicalTso`)
+/// mode, keeping the encoding uniform across modes.
+pub const TS_VERSION_SUFFIX_LEN: usize = 10;
+
 /// Timestamp-transaction version key: the row key followed by the creating
-/// transaction's `start_ts` (big-endian, ascending).
+/// transaction's `start_ts` (big-endian, ascending) and its minting `node_id`.
+/// Versions sort by `(start_ts, node_id)`.
 #[must_use]
-pub fn version_key_ts(table_id: u32, rowid: u64, start_ts: u64) -> Vec<u8> {
+pub fn version_key_ts(table_id: u32, rowid: u64, start_ts: u64, node_id: u16) -> Vec<u8> {
     let mut k = crabka_pgkv::key::row_key(table_id, rowid);
     k.extend_from_slice(U64::new(start_ts).as_bytes());
+    k.extend_from_slice(&node_id.to_be_bytes());
     k
 }
 
 /// Timestamp-transaction version key for a hash-sharded row.
 #[must_use]
-pub fn hash_version_key_ts(table_id: u32, bucket: u32, rowid: u64, start_ts: u64) -> Vec<u8> {
+pub fn hash_version_key_ts(
+    table_id: u32,
+    bucket: u32,
+    rowid: u64,
+    start_ts: u64,
+    node_id: u16,
+) -> Vec<u8> {
     let mut k = crabka_pgkv::key::hash_row_key(table_id, bucket, rowid);
     k.extend_from_slice(U64::new(start_ts).as_bytes());
+    k.extend_from_slice(&node_id.to_be_bytes());
     k
 }
 
@@ -70,6 +87,37 @@ pub fn xid_of_key(key: &[u8]) -> Result<u64, KvError> {
     let (_, xid) = U64::read_from_suffix(key)
         .map_err(|_| KvError::CorruptRow("version key too short".into()))?;
     Ok(xid.get())
+}
+
+/// The row-key prefix of a timestamp-transaction version key (everything but the
+/// [`TS_VERSION_SUFFIX_LEN`]-byte `start_ts` + `node_id` suffix).
+///
+/// # Errors
+///
+/// Returns [`KvError::CorruptRow`] when the key is shorter than the suffix.
+pub fn ts_row_prefix_of(key: &[u8]) -> Result<&[u8], KvError> {
+    if key.len() < TS_VERSION_SUFFIX_LEN {
+        return Err(KvError::CorruptRow("ts version key too short".into()));
+    }
+    Ok(&key[..key.len() - TS_VERSION_SUFFIX_LEN])
+}
+
+/// The `(start_ts, node_id)` identity encoded in a timestamp-transaction version
+/// key's [`TS_VERSION_SUFFIX_LEN`]-byte suffix.
+///
+/// # Errors
+///
+/// Returns [`KvError::CorruptRow`] when the key is shorter than the suffix.
+pub fn ts_identity_of_key(key: &[u8]) -> Result<(u64, u16), KvError> {
+    let corrupt = || KvError::CorruptRow("ts version key too short".into());
+    let suffix = key
+        .len()
+        .checked_sub(TS_VERSION_SUFFIX_LEN)
+        .map(|start| &key[start..])
+        .ok_or_else(corrupt)?;
+    let start_ts = u64::from_be_bytes(suffix[..8].try_into().map_err(|_| corrupt())?);
+    let node_id = u16::from_be_bytes(suffix[8..10].try_into().map_err(|_| corrupt())?);
+    Ok((start_ts, node_id))
 }
 
 /// Fixed 17-byte tuple header: tag + big-endian xmin/xmax. `#[repr(C)]` with
@@ -119,8 +167,11 @@ impl TsVersionState {
 /// Decoded timestamp-transaction tuple version.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TsTupleVersion {
-    /// Transaction start timestamp and version-key suffix.
+    /// Transaction start timestamp; with `node_id` the version-key suffix.
     pub start_ts: u64,
+    /// Minting node of `start_ts`, disambiguating equal `start_ts` across HLC
+    /// nodes. `0` in single-source (`LogicalTso`) mode.
+    pub node_id: u16,
     /// Intent/commit/abort state.
     pub state: TsVersionState,
     /// Decoded row payload.
@@ -134,6 +185,7 @@ struct TsTupleHeader {
     state: u8,
     start_ts: U64,
     commit_ts: U64,
+    node_id: U16,
 }
 
 /// Encode a tuple version: a 1-byte tag, the `xmin`/`xmax` header, then the row.
@@ -154,7 +206,12 @@ pub fn encode_tuple(xmin: u64, xmax: u64, row: &[Datum]) -> Vec<u8> {
 
 /// Encode a sharded-table timestamp version.
 #[must_use]
-pub fn encode_ts_tuple(start_ts: u64, state: TsVersionState, row: &[Datum]) -> Vec<u8> {
+pub fn encode_ts_tuple(
+    start_ts: u64,
+    node_id: u16,
+    state: TsVersionState,
+    row: &[Datum],
+) -> Vec<u8> {
     let commit_ts = match state {
         TsVersionState::Committed { commit_ts } | TsVersionState::Deleted { commit_ts } => {
             commit_ts
@@ -166,8 +223,9 @@ pub fn encode_ts_tuple(start_ts: u64, state: TsVersionState, row: &[Datum]) -> V
         state: state.code(),
         start_ts: U64::new(start_ts),
         commit_ts: U64::new(commit_ts),
+        node_id: U16::new(node_id),
     };
-    let mut out = Vec::with_capacity(18 + row.len() * 8);
+    let mut out = Vec::with_capacity(20 + row.len() * 8);
     out.extend_from_slice(header.as_bytes());
     out.extend_from_slice(&crabka_pgkv::rowenc::encode_row(row));
     out
@@ -219,6 +277,7 @@ pub fn decode_ts_tuple(bytes: &[u8]) -> Result<TsTupleVersion, KvError> {
     let row = crabka_pgkv::rowenc::decode_row(rest)?;
     Ok(TsTupleVersion {
         start_ts: header.start_ts.get(),
+        node_id: header.node_id.get(),
         state,
         row,
     })
@@ -289,8 +348,8 @@ mod tests {
     }
 
     #[test]
-    fn timestamp_tuple_header_is_packed_18_bytes() {
-        assert_eq!(core::mem::size_of::<TsTupleHeader>(), 18);
+    fn timestamp_tuple_header_is_packed_20_bytes() {
+        assert_eq!(core::mem::size_of::<TsTupleHeader>(), 20);
     }
 
     #[test]
@@ -354,31 +413,34 @@ mod tests {
     #[test]
     fn timestamp_tuple_roundtrips_intent_commit_and_abort_states() {
         let row = vec![Datum::Int4(1), Datum::Text("a".into())];
-        let intent = encode_ts_tuple(5, TsVersionState::Intent, &row);
+        let intent = encode_ts_tuple(5, 7, TsVersionState::Intent, &row);
         assert_eq!(
             decode_ts_tuple(&intent).expect("intent"),
             TsTupleVersion {
                 start_ts: 5,
+                node_id: 7,
                 state: TsVersionState::Intent,
                 row: row.clone(),
             }
         );
 
-        let committed = encode_ts_tuple(5, TsVersionState::Committed { commit_ts: 8 }, &row);
+        let committed = encode_ts_tuple(5, 7, TsVersionState::Committed { commit_ts: 8 }, &row);
         assert_eq!(
             decode_ts_tuple(&committed).expect("committed"),
             TsTupleVersion {
                 start_ts: 5,
+                node_id: 7,
                 state: TsVersionState::Committed { commit_ts: 8 },
                 row: row.clone(),
             }
         );
 
-        let aborted = encode_ts_tuple(5, TsVersionState::Aborted, &row);
+        let aborted = encode_ts_tuple(5, 7, TsVersionState::Aborted, &row);
         assert_eq!(
             decode_ts_tuple(&aborted).expect("aborted"),
             TsTupleVersion {
                 start_ts: 5,
+                node_id: 7,
                 state: TsVersionState::Aborted,
                 row,
             }
@@ -401,14 +463,15 @@ mod tests {
         assert!((xmin, xmax) == (FROZEN_XID, crate::xid::INVALID_XID));
 
         // Non-tuple bytes are rejected, not rewritten.
-        let ts = encode_ts_tuple(5, TsVersionState::Intent, &[]);
+        let ts = encode_ts_tuple(5, 0, TsVersionState::Intent, &[]);
         assert!(clear_tuple_xmax(&ts).is_err());
     }
 
     #[test]
     fn timestamp_tuple_rejects_impossible_commit_order() {
-        let encoded = encode_ts_tuple(5, TsVersionState::Committed { commit_ts: 8 }, &[]);
+        let encoded = encode_ts_tuple(5, 0, TsVersionState::Committed { commit_ts: 8 }, &[]);
         let mut bad = encoded.clone();
+        // commit_ts occupies bytes [10..18]; node_id is appended at [18..20].
         bad[10..18].copy_from_slice(&5_u64.to_be_bytes());
 
         assert!(decode_ts_tuple(&bad).is_err());
@@ -416,11 +479,21 @@ mod tests {
     }
 
     #[test]
-    fn version_key_ts_sorts_by_start_timestamp() {
-        assert!(version_key_ts(7, 42, 100) < version_key_ts(7, 42, 200));
-        assert_eq!(
-            xid_of_key(&version_key_ts(7, 42, 100)).expect("suffix"),
-            100
+    fn version_key_ts_sorts_by_start_timestamp_then_node() {
+        use assert2::assert;
+
+        // Primary sort is start_ts.
+        assert!(version_key_ts(7, 42, 100, 0) < version_key_ts(7, 42, 200, 0));
+        // node_id is the tie-breaker within an equal start_ts.
+        assert!(version_key_ts(7, 42, 100, 0) < version_key_ts(7, 42, 100, 1));
+        // The suffix round-trips both components.
+        assert!(ts_identity_of_key(&version_key_ts(7, 42, 100, 3)).expect("suffix") == (100, 3));
+        // Two nodes minting the same start_ts on the same row produce distinct
+        // keys — neither clobbers the other's version.
+        assert!(version_key_ts(7, 42, 100, 1) != version_key_ts(7, 42, 100, 2));
+        assert!(
+            ts_row_prefix_of(&version_key_ts(7, 42, 100, 9)).expect("prefix")
+                == crabka_pgkv::key::row_key(7, 42).as_slice()
         );
     }
 

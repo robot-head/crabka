@@ -618,8 +618,8 @@ fn put_prepared_version(
         GlobalOutcome::Pending => version::TsVersionState::Intent,
     };
     kv.write_batch(&[WriteOp::Put {
-        key: version::version_key_ts(table, rowid, start_ts),
-        value: version::encode_ts_tuple(start_ts, state, row),
+        key: version::version_key_ts(table, rowid, start_ts, 0),
+        value: version::encode_ts_tuple(start_ts, 0, state, row),
     }])
     .expect("seed timestamp version");
 }

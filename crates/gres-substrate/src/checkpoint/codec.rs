@@ -76,11 +76,12 @@ impl CheckpointFilter {
             let target = self.target_range.ok_or_else(|| {
                 SubstrateError::Checkpoint("timestamp intent filter lacks target range".into())
             })?;
-            let mut value: [u8; 24] = value.try_into().map_err(|_| {
+            let mut value: [u8; 26] = value.try_into().map_err(|_| {
                 SubstrateError::Checkpoint("malformed timestamp intent identity".into())
             })?;
             value[16..20].copy_from_slice(&target.to_be_bytes());
             value[20..24].copy_from_slice(&target.to_be_bytes());
+            // Bytes [24..26] carry the minting node_id, preserved untouched.
             return Ok(Some(value.to_vec()));
         }
         if !key.starts_with(b"\0\0\0\0meta/ts_txn/") {
@@ -88,11 +89,12 @@ impl CheckpointFilter {
                 .contains_pair(key, Some(value))
                 .map(|selected| selected.then(|| value.to_vec()));
         }
-        let start_ts = timestamp_descriptor_start(key)?;
-        let mut descriptor = crabka_pgexec::decode_timestamp_txn_descriptor_value(start_ts, value)
-            .map_err(|error| {
-                SubstrateError::Checkpoint(format!("malformed timestamp descriptor: {error}"))
-            })?;
+        let (start_ts, node_id) = timestamp_descriptor_start(key)?;
+        let mut descriptor =
+            crabka_pgexec::decode_timestamp_txn_descriptor_value(start_ts, node_id, value)
+                .map_err(|error| {
+                    SubstrateError::Checkpoint(format!("malformed timestamp descriptor: {error}"))
+                })?;
         let target_range = self.target_range.ok_or_else(|| {
             SubstrateError::Checkpoint("timestamp descriptor filter lacks target range".into())
         })?;
@@ -163,9 +165,9 @@ impl CheckpointFilter {
             return Ok(self.contains_range_key(key));
         }
         if bytes.starts_with(b"\0\0\0\0meta/ts_txn/") {
-            let start_ts = timestamp_descriptor_start(bytes)?;
+            let (start_ts, node_id) = timestamp_descriptor_start(bytes)?;
             return match value {
-                Some(value) => self.timestamp_descriptor_belongs(start_ts, value),
+                Some(value) => self.timestamp_descriptor_belongs(start_ts, node_id, value),
                 None => Ok(true),
             };
         }
@@ -212,12 +214,14 @@ impl CheckpointFilter {
         const INTENT: &[u8] = b"\0\0\0\0meta/ts_intent/";
         const PREWRITE: &[u8] = b"\0\0\0\0meta/ts_prewrite/";
         let (tail, suffix_len) = if let Some(tail) = bytes.strip_prefix(INTENT) {
-            if !matches!(tail.len(), 20 | 25) {
+            // Intent key suffix is start_ts(8) + node_id(2): plain 4+8+10 = 22,
+            // hash 4+1+4+8+10 = 27.
+            if !matches!(tail.len(), 22 | 27) {
                 return Err(SubstrateError::Checkpoint(
                     "malformed timestamp intent metadata key".into(),
                 ));
             }
-            (tail, 8)
+            (tail, 10)
         } else if let Some(tail) = bytes.strip_prefix(PREWRITE) {
             if !matches!(tail.len(), 12 | 17) {
                 return Err(SubstrateError::Checkpoint(
@@ -253,12 +257,14 @@ impl CheckpointFilter {
     fn timestamp_descriptor_belongs(
         &self,
         start_ts: crabka_pgexec::TimestampTransactionId,
+        node_id: u16,
         value: &[u8],
     ) -> Result<bool, SubstrateError> {
-        let descriptor = crabka_pgexec::decode_timestamp_txn_descriptor_value(start_ts, value)
-            .map_err(|error| {
-                SubstrateError::Checkpoint(format!("malformed timestamp descriptor: {error}"))
-            })?;
+        let descriptor =
+            crabka_pgexec::decode_timestamp_txn_descriptor_value(start_ts, node_id, value)
+                .map_err(|error| {
+                    SubstrateError::Checkpoint(format!("malformed timestamp descriptor: {error}"))
+                })?;
         descriptor
             .operations
             .into_iter()
@@ -283,14 +289,18 @@ impl CheckpointFilter {
 
 fn timestamp_descriptor_start(
     bytes: &[u8],
-) -> Result<crabka_pgexec::TimestampTransactionId, SubstrateError> {
+) -> Result<(crabka_pgexec::TimestampTransactionId, u16), SubstrateError> {
     const PREFIX: &[u8] = b"\0\0\0\0meta/ts_txn/";
     let raw = bytes.strip_prefix(PREFIX).expect("prefix checked");
-    let raw: [u8; 8] = raw
+    let raw: [u8; 10] = raw
         .try_into()
         .map_err(|_| SubstrateError::Checkpoint("malformed timestamp descriptor key".into()))?;
-    crabka_pgexec::TimestampTransactionId::new(u64::from_be_bytes(raw))
-        .map_err(|_| SubstrateError::Checkpoint("zero timestamp descriptor key".into()))
+    let start_ts = crabka_pgexec::TimestampTransactionId::new(u64::from_be_bytes(
+        raw[..8].try_into().expect("8 bytes"),
+    ))
+    .map_err(|_| SubstrateError::Checkpoint("zero timestamp descriptor key".into()))?;
+    let node_id = u16::from_be_bytes(raw[8..10].try_into().expect("2 bytes"));
+    Ok((start_ts, node_id))
 }
 
 /// A checkpoint part containing key-ordered KV snapshot chunks.
@@ -419,7 +429,7 @@ mod tests {
 
     fn descriptor_pair(operations: &[(u32, u64)]) -> (Vec<u8>, Vec<u8>) {
         let start_ts = crabka_pgexec::TimestampTransactionId::new(9).unwrap();
-        let mut descriptor = crabka_pgexec::TimestampTxnDescriptor::begun(start_ts, 10, vec![1]);
+        let mut descriptor = crabka_pgexec::TimestampTxnDescriptor::begun(start_ts, 0, 10, vec![1]);
         let operations = operations
             .iter()
             .map(|(table_id, rowid)| crabka_pgexec::TimestampTxnOperation {
@@ -469,7 +479,8 @@ mod tests {
         intent.extend_from_slice(&1_u32.to_be_bytes());
         intent.extend_from_slice(&1_u64.to_be_bytes());
         intent.extend_from_slice(&9_u64.to_be_bytes());
-        let mut identity = vec![0; 24];
+        intent.extend_from_slice(&0_u16.to_be_bytes());
+        let mut identity = vec![0; 26];
         identity[16..20].copy_from_slice(&1_u32.to_be_bytes());
         identity[20..24].copy_from_slice(&1_u32.to_be_bytes());
         assert!(left.filter_pair(&intent, &identity).unwrap().is_none());
@@ -504,10 +515,11 @@ mod tests {
             key.extend_from_slice(&7_u64.to_be_bytes());
             if let Some(start_ts) = start_ts {
                 key.extend_from_slice(&start_ts.to_be_bytes());
+                key.extend_from_slice(&0_u16.to_be_bytes());
             }
             key
         };
-        let mut identity = vec![0; 24];
+        let mut identity = vec![0; 26];
         identity[16..20].copy_from_slice(&1_u32.to_be_bytes());
         identity[20..24].copy_from_slice(&1_u32.to_be_bytes());
         let bucket_zero = metadata_key(b"\0\0\0\0meta/ts_intent/", 0, Some(9));
@@ -537,7 +549,8 @@ mod tests {
         let (cross_key, cross_value) = descriptor_pair(&[(2, 12), (1, 1)]);
         let start_ts = crabka_pgexec::TimestampTransactionId::new(9).unwrap();
         let mut committed =
-            crabka_pgexec::decode_timestamp_txn_descriptor_value(start_ts, &cross_value).unwrap();
+            crabka_pgexec::decode_timestamp_txn_descriptor_value(start_ts, 0, &cross_value)
+                .unwrap();
         committed
             .decide(crabka_pgexec::PrimaryTxnDecision::Committed(
                 crabka_pgexec::CommitTimestamp::after_start(start_ts, 10).unwrap(),
@@ -562,9 +575,10 @@ mod tests {
             .unwrap()
             .expect("right descriptor");
         let left_descriptor =
-            crabka_pgexec::decode_timestamp_txn_descriptor_value(start_ts, &left_value).unwrap();
+            crabka_pgexec::decode_timestamp_txn_descriptor_value(start_ts, 0, &left_value).unwrap();
         let right_descriptor =
-            crabka_pgexec::decode_timestamp_txn_descriptor_value(start_ts, &right_value).unwrap();
+            crabka_pgexec::decode_timestamp_txn_descriptor_value(start_ts, 0, &right_value)
+                .unwrap();
         assert_eq!(left_descriptor.participants, vec![2]);
         assert_eq!(right_descriptor.participants, vec![3]);
         assert!(left_descriptor.operations.iter().all(|op| op.range_id == 2));

@@ -1750,15 +1750,22 @@ async fn real_child_hash_durable_inspection_covers_pinned_bucket_corpus() {
                 crabka_pgkv::key::KeyClass::System => {
                     if record.key.starts_with(b"\0\0\0\0meta/ts_txn/") {
                         assert!(record.value.starts_with(b"TXD2"));
+                        let key_len = record.key.len();
                         let raw_start = u64::from_be_bytes(
-                            record.key[record.key.len() - 8..]
+                            record.key[key_len - 10..key_len - 2]
                                 .try_into()
                                 .expect("descriptor timestamp"),
+                        );
+                        let node_id = u16::from_be_bytes(
+                            record.key[key_len - 2..]
+                                .try_into()
+                                .expect("descriptor node id"),
                         );
                         let descriptor =
                             crabka_pgexec::timestamp_txn::decode_timestamp_txn_descriptor_value(
                                 crabka_pgexec::TimestampTransactionId::new(raw_start)
                                     .expect("descriptor timestamp id"),
+                                node_id,
                                 &record.value,
                             )
                             .expect("decode TXD2 descriptor");
@@ -2394,15 +2401,22 @@ async fn collect_hash_snapshots(
                 {
                     continue;
                 }
+                let key_len = record.key.len();
                 let start_ts = u64::from_be_bytes(
-                    record.key[record.key.len() - 8..]
+                    record.key[key_len - 10..key_len - 2]
                         .try_into()
                         .expect("TXD2 key timestamp"),
+                );
+                let node_id = u16::from_be_bytes(
+                    record.key[key_len - 2..]
+                        .try_into()
+                        .expect("TXD2 key node id"),
                 );
                 let descriptor =
                     crabka_pgexec::timestamp_txn::decode_timestamp_txn_descriptor_value(
                         crabka_pgexec::TimestampTransactionId::new(start_ts)
                             .expect("TXD2 start timestamp"),
+                        node_id,
                         &record.value,
                     )
                     .expect("decode raw TXD2 evidence");

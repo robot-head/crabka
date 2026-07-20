@@ -493,6 +493,7 @@ pub enum TsoResp {
 pub struct ResolveTxnReq {
     pub primary_range: RangeId,
     pub start_ts: u64,
+    pub node_id: u16,
 }
 
 /// Primary-range timestamp transaction resolution response.
@@ -589,6 +590,7 @@ pub enum WireDatum {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireTimestampIdentity {
     pub start_ts: u64,
+    pub node_id: u16,
     pub global_xid: u64,
     pub primary_range: u32,
 }
@@ -2620,6 +2622,7 @@ mod tests {
                 &RangeRequest::ResolveTxn(ResolveTxnReq {
                     primary_range: RangeId::new(7),
                     start_ts: 42,
+                    node_id: 0,
                 }),
             )
             .await

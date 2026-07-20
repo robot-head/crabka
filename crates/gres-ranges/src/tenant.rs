@@ -70,6 +70,10 @@ pub struct MultiRangeTenantConfig {
     pub recover_timestamps_on_start: bool,
     /// Which timestamp-ordering source this tenant installs on its engines.
     pub timestamp_source_mode: TimestampSourceMode,
+    /// This node's dense per-tenant index. In `Hlc` mode it discriminates two
+    /// nodes that mint the same `start_ts`; it is `0` in single-source
+    /// (`LogicalTso`) deployments, where the range-0 oracle is the sole authority.
+    pub node_id: u16,
     #[doc(hidden)]
     pub commit_fault_for_testing: Option<GatewayCommitFault>,
     #[doc(hidden)]
@@ -169,6 +173,7 @@ impl MultiRangeTenantConfig {
             range_client: None,
             recover_timestamps_on_start: true,
             timestamp_source_mode: TimestampSourceMode::default(),
+            node_id: 0,
             commit_fault_for_testing: None,
             empty_table_split_test_hook: None,
         })
@@ -606,7 +611,7 @@ impl MultiRangeTenant {
             None if hosts_range0 => match config.timestamp_source_mode {
                 TimestampSourceMode::LogicalTso => install_memory_timestamp_oracle(&mut engines)?,
                 TimestampSourceMode::Hlc { max_offset_ms } => {
-                    install_hlc_timestamp_source(&mut engines, max_offset_ms)?;
+                    install_hlc_timestamp_source(&mut engines, max_offset_ms, config.node_id)?;
                 }
             },
             None => {
@@ -1389,6 +1394,7 @@ fn recover_durable_timestamp_transactions(
                         for (primary_range, descriptor) in descriptors {
                             let identity = crabka_pgexec::TimestampTxnIdentity {
                                 start_ts: descriptor.start_ts,
+                                node_id: descriptor.node_id,
                                 global_xid: descriptor.global_xid,
                                 primary_range: primary_range.as_u32(),
                             };
@@ -1430,7 +1436,10 @@ fn recover_durable_timestamp_transactions(
                             }
                             let primary = engines.get(&primary_range).expect("hosted primary");
                             let decision = primary
-                                .recover_timestamp_transaction(descriptor.start_ts)
+                                .recover_timestamp_transaction(
+                                    descriptor.start_ts,
+                                    descriptor.node_id,
+                                )
                                 .await
                                 .map_err(|error| {
                                     TenantError::TimestampRecovery(format!("{error:?}"))
@@ -1470,6 +1479,7 @@ fn recover_durable_timestamp_transactions(
                                         participant
                                             .abort_timestamp_transaction_intents(
                                                 descriptor.start_ts,
+                                                descriptor.node_id,
                                             )
                                             .await
                                     } else {
@@ -1540,7 +1550,7 @@ async fn recover_orphan_timestamp_participants(
         let remote_primary_decision;
         let (primary, primary_decision) = if let Some(primary) = engines.get(&primary_range) {
             let decision = primary
-                .primary_timestamp_decision(identity.start_ts)
+                .primary_timestamp_decision(identity.start_ts, identity.node_id)
                 .map_err(recovery_error)?;
             (Some(primary), decision)
         } else {
@@ -1559,7 +1569,10 @@ async fn recover_orphan_timestamp_participants(
                     })?;
                     if primary_decision == crabka_pgexec::PrimaryTxnDecision::Aborted {
                         participant
-                            .abort_timestamp_transaction_intents(identity.start_ts)
+                            .abort_timestamp_transaction_intents(
+                                identity.start_ts,
+                                identity.node_id,
+                            )
                             .await
                             .map_err(recovery_error)?;
                     } else {
@@ -1587,7 +1600,7 @@ async fn recover_orphan_timestamp_participants(
                 })?;
                 if primary_decision == crabka_pgexec::PrimaryTxnDecision::Aborted {
                     participant
-                        .abort_timestamp_transaction_intents(identity.start_ts)
+                        .abort_timestamp_transaction_intents(identity.start_ts, identity.node_id)
                         .await
                         .map_err(recovery_error)?;
                     continue;
@@ -1613,6 +1626,7 @@ async fn recover_orphan_timestamp_participants(
         let primary = primary.expect("pending decision requires hosted primary");
         let descriptor = crabka_pgexec::TimestampTxnDescriptor::begun(
             identity.start_ts,
+            identity.node_id,
             identity.global_xid,
             participants.iter().map(|range| range.as_u32()).collect(),
         );
@@ -1623,6 +1637,7 @@ async fn recover_orphan_timestamp_participants(
         primary
             .decide_timestamp_transaction(
                 identity.start_ts,
+                identity.node_id,
                 crabka_pgexec::PrimaryTxnDecision::Aborted,
             )
             .await
@@ -1635,7 +1650,7 @@ async fn recover_orphan_timestamp_participants(
                         "orphan participant r{range_id} is not hosted"
                     ))
                 })?
-                .abort_timestamp_transaction_intents(identity.start_ts)
+                .abort_timestamp_transaction_intents(identity.start_ts, identity.node_id)
                 .await
                 .map_err(recovery_error)?;
         }
@@ -1663,6 +1678,7 @@ async fn recover_remote_timestamp_primary(
             primary_range,
             identity: crate::transport::WireTimestampIdentity {
                 start_ts: identity.start_ts.get(),
+                node_id: identity.node_id,
                 global_xid: identity.global_xid,
                 primary_range: identity.primary_range,
             },
@@ -1733,6 +1749,7 @@ async fn recover_remote_timestamp_participant(
             range_id,
             identity: crate::transport::WireTimestampIdentity {
                 start_ts: identity.start_ts.get(),
+                node_id: identity.node_id,
                 global_xid: identity.global_xid,
                 primary_range: identity.primary_range,
             },
@@ -1996,6 +2013,7 @@ fn install_memory_timestamp_oracle(
 fn install_hlc_timestamp_source(
     engines: &mut BTreeMap<RangeId, SqlEngine>,
     max_offset_ms: u64,
+    node_id: u16,
 ) -> Result<(), TenantError> {
     let Some(coordinator) = engines.get(&RangeId::COORDINATOR) else {
         return Ok(());
@@ -2012,6 +2030,7 @@ fn install_hlc_timestamp_source(
             persisted_max_ts,
             wall,
             max_offset_ms,
+            node_id,
         ));
     install_timestamp_oracle(engines, &timestamp_source);
     Ok(())
@@ -4192,6 +4211,13 @@ impl GatewaySession {
                 .map_err(ExecError::into_pg)?;
             lease
         };
+        // The minting node's `node_id` disambiguates two HLC nodes that share a
+        // `start_ts`; source it from the same engine that allocated the lease.
+        let node_id = if let Some(engine) = bypass_engine {
+            engine.timestamp_node_id()
+        } else {
+            coordinator.timestamp_node_id()
+        };
         let write_routes = timestamp_insert_write_routes(
             &self.current_serving()?.range_map,
             &table,
@@ -4216,6 +4242,7 @@ impl GatewaySession {
             let start_ts = write_lease.start_ts;
             let identity = crabka_pgexec::TimestampTxnIdentity {
                 start_ts,
+                node_id,
                 global_xid: start_ts.get(),
                 primary_range: primary_range.as_u32(),
             };
@@ -4302,6 +4329,7 @@ impl GatewaySession {
             let primary_range = timestamp_primary_range(&writes_by_range).expect("primary range");
             let identity = crabka_pgexec::TimestampTxnIdentity {
                 start_ts: write_lease.start_ts,
+                node_id,
                 global_xid: write_lease.start_ts.get(),
                 primary_range: primary_range.as_u32(),
             };
@@ -4550,6 +4578,7 @@ impl GatewaySession {
             return engine
                 .add_timestamp_transaction_participant(
                     identity.start_ts,
+                    identity.node_id,
                     participant_range.as_u32(),
                 )
                 .await
@@ -4588,6 +4617,7 @@ impl GatewaySession {
             return engine
                 .acknowledge_timestamp_participant_operations(
                     identity.start_ts,
+                    identity.node_id,
                     participant_range.as_u32(),
                     &operations,
                 )
@@ -4953,13 +4983,13 @@ async fn cleanup_dropped_timestamp_session(
     let primary_range = RangeId::new(identity.primary_range);
     let primary_decision = if let Some(engine) = serving.engine(primary_range) {
         engine
-            .primary_timestamp_decision(identity.start_ts)
+            .primary_timestamp_decision(identity.start_ts, identity.node_id)
             .map_err(ExecError::into_pg)?
     } else {
         remote_sessions
             .get(&primary_range)
             .ok_or_else(|| PgError::error("08003", "remote timestamp primary session is missing"))?
-            .timestamp_primary_decision(identity.start_ts)
+            .timestamp_primary_decision(identity.start_ts, identity.node_id)
             .await?
     };
     let decision = match primary_decision {
@@ -6325,7 +6355,8 @@ mod tests {
         )
         .expect("post-split map");
         let start_ts = crabka_pgexec::TimestampTransactionId::new(10).expect("start timestamp");
-        let mut descriptor = crabka_pgexec::TimestampTxnDescriptor::begun(start_ts, 7, vec![0, 1]);
+        let mut descriptor =
+            crabka_pgexec::TimestampTxnDescriptor::begun(start_ts, 0, 7, vec![0, 1]);
         descriptor.prepared = vec![0, 1];
         descriptor.operations = vec![
             crabka_pgexec::TimestampTxnOperation {
@@ -6372,7 +6403,7 @@ mod tests {
             .expect("active map")
             .range_map;
         let start_ts = crabka_pgexec::TimestampTransactionId::new(10).expect("start timestamp");
-        let mut descriptor = crabka_pgexec::TimestampTxnDescriptor::begun(start_ts, 7, vec![0]);
+        let mut descriptor = crabka_pgexec::TimestampTxnDescriptor::begun(start_ts, 0, 7, vec![0]);
         descriptor.prepared = vec![0];
         descriptor.operations = vec![crabka_pgexec::TimestampTxnOperation {
             range_id: 0,
@@ -6395,12 +6426,13 @@ mod tests {
         let start_ts = crabka_pgexec::TimestampTransactionId::new(10).expect("start timestamp");
         let commit_ts =
             crabka_pgexec::CommitTimestamp::after_start(start_ts, 20).expect("commit timestamp");
-        let mut descriptor = crabka_pgexec::TimestampTxnDescriptor::begun(start_ts, 7, vec![1]);
+        let mut descriptor = crabka_pgexec::TimestampTxnDescriptor::begun(start_ts, 0, 7, vec![1]);
         descriptor
             .decide(crabka_pgexec::PrimaryTxnDecision::Committed(commit_ts))
             .expect("terminal descriptor");
         let identity = crabka_pgexec::TimestampTxnIdentity {
             start_ts,
+            node_id: 0,
             global_xid: 7,
             primary_range: 0,
         };
@@ -6422,7 +6454,7 @@ mod tests {
             &outstanding,
         ));
 
-        let pending = crabka_pgexec::TimestampTxnDescriptor::begun(start_ts, 7, vec![1]);
+        let pending = crabka_pgexec::TimestampTxnDescriptor::begun(start_ts, 0, 7, vec![1]);
         assert!(hosted_participant_requires_recovery(
             &pending,
             identity,
@@ -6582,6 +6614,7 @@ mod tests {
         session.transaction = GatewayTransaction::Timestamp {
             identity: crabka_pgexec::TimestampTxnIdentity {
                 start_ts: crabka_pgexec::TimestampTransactionId::new(10).expect("timestamp"),
+                node_id: 0,
                 global_xid: 10,
                 primary_range: RangeId::COORDINATOR.as_u32(),
             },
@@ -6604,6 +6637,7 @@ mod tests {
         session.transaction = GatewayTransaction::Timestamp {
             identity: crabka_pgexec::TimestampTxnIdentity {
                 start_ts: crabka_pgexec::TimestampTransactionId::new(11).expect("timestamp"),
+                node_id: 0,
                 global_xid: 11,
                 primary_range: RangeId::COORDINATOR.as_u32(),
             },
@@ -6666,6 +6700,7 @@ mod tests {
         session.transaction = GatewayTransaction::Timestamp {
             identity: crabka_pgexec::TimestampTxnIdentity {
                 start_ts: crabka_pgexec::TimestampTransactionId::new(12).expect("timestamp"),
+                node_id: 0,
                 global_xid: 12,
                 primary_range: RangeId::COORDINATOR.as_u32(),
             },
@@ -6735,6 +6770,7 @@ mod tests {
         session.transaction = GatewayTransaction::Timestamp {
             identity: crabka_pgexec::TimestampTxnIdentity {
                 start_ts: crabka_pgexec::TimestampTransactionId::new(10).expect("timestamp"),
+                node_id: 0,
                 global_xid: 10,
                 primary_range: RangeId::COORDINATOR.as_u32(),
             },
@@ -6770,6 +6806,7 @@ mod tests {
         let start_ts = crabka_pgexec::TimestampTransactionId::new(700).expect("timestamp");
         let identity = crabka_pgexec::TimestampTxnIdentity {
             start_ts,
+            node_id: 0,
             global_xid: 701,
             primary_range: 1,
         };
@@ -7141,6 +7178,7 @@ mod tests {
         engine
             .begin_timestamp_transaction(&crabka_pgexec::TimestampTxnDescriptor::begun(
                 start_ts,
+                0,
                 start_ts.get() + 1,
                 vec![RangeId::COORDINATOR.as_u32()],
             ))
@@ -7159,7 +7197,7 @@ mod tests {
         .expect("ordinary startup");
         assert_eq!(
             observer
-                .primary_timestamp_decision(start_ts)
+                .primary_timestamp_decision(start_ts, 0)
                 .expect("ordinary startup decision"),
             crabka_pgexec::PrimaryTxnDecision::Aborted
         );
@@ -7177,7 +7215,7 @@ mod tests {
         .expect("activation startup");
         assert_eq!(
             observer
-                .primary_timestamp_decision(start_ts)
+                .primary_timestamp_decision(start_ts, 0)
                 .expect("deferred startup decision"),
             crabka_pgexec::PrimaryTxnDecision::Pending
         );
@@ -7194,6 +7232,7 @@ mod tests {
         let start_ts = crabka_pgexec::TimestampTransactionId::new(10).expect("start timestamp");
         let identity = crabka_pgexec::TimestampTxnIdentity {
             start_ts,
+            node_id: 0,
             global_xid: 9,
             primary_range: RangeId::COORDINATOR.as_u32(),
         };
@@ -7221,6 +7260,7 @@ mod tests {
             coordinator
                 .begin_timestamp_transaction(&crabka_pgexec::TimestampTxnDescriptor::begun(
                     start_ts,
+                    0,
                     identity.global_xid,
                     vec![1],
                 ))
@@ -7259,7 +7299,7 @@ mod tests {
             .expect("repeat recovery");
 
         let tuple_key =
-            crabka_pgmvcc::version::version_key_ts(write.table_id, write.rowid, start_ts.get());
+            crabka_pgmvcc::version::version_key_ts(write.table_id, write.rowid, start_ts.get(), 0);
         let tuple = participant_kv
             .get(&tuple_key)
             .expect("read settled tuple")
@@ -7295,6 +7335,7 @@ mod tests {
         let start_ts = crabka_pgexec::TimestampTransactionId::new(20).expect("start timestamp");
         let identity = crabka_pgexec::TimestampTxnIdentity {
             start_ts,
+            node_id: 0,
             global_xid: 21,
             primary_range: 1,
         };
@@ -7345,6 +7386,7 @@ mod tests {
             secondary_write.table_id,
             secondary_write.rowid,
             start_ts.get(),
+            0,
         );
         let tuple = secondary_kv
             .get(&tuple_key)
@@ -7374,6 +7416,7 @@ mod tests {
         let start_ts = crabka_pgexec::TimestampTransactionId::new(30).expect("start timestamp");
         let identity = crabka_pgexec::TimestampTxnIdentity {
             start_ts,
+            node_id: 0,
             global_xid: 31,
             primary_range: 1,
         };
@@ -7615,6 +7658,7 @@ mod tests {
         let start_ts = crabka_pgexec::TimestampTransactionId::new(500).expect("start timestamp");
         let identity = crabka_pgexec::TimestampTxnIdentity {
             start_ts,
+            node_id: 0,
             global_xid: 501,
             primary_range: 0,
         };
@@ -7629,6 +7673,7 @@ mod tests {
         primary
             .begin_timestamp_transaction(&crabka_pgexec::TimestampTxnDescriptor::begun(
                 start_ts,
+                0,
                 identity.global_xid,
                 vec![1],
             ))
@@ -7640,7 +7685,7 @@ mod tests {
             .await
             .expect("prewrite");
         primary
-            .decide_timestamp_transaction(start_ts, crabka_pgexec::PrimaryTxnDecision::Aborted)
+            .decide_timestamp_transaction(start_ts, 0, crabka_pgexec::PrimaryTxnDecision::Aborted)
             .await
             .expect("abort primary");
         let session = gateway.connect();
@@ -7673,6 +7718,7 @@ mod tests {
         let start_ts = crabka_pgexec::TimestampTransactionId::new(510).expect("start timestamp");
         let identity = crabka_pgexec::TimestampTxnIdentity {
             start_ts,
+            node_id: 0,
             global_xid: 511,
             primary_range: 0,
         };
@@ -7687,6 +7733,7 @@ mod tests {
         primary
             .begin_timestamp_transaction(&crabka_pgexec::TimestampTxnDescriptor::begun(
                 start_ts,
+                0,
                 identity.global_xid,
                 vec![1],
             ))
@@ -7711,7 +7758,7 @@ mod tests {
         );
         assert_eq!(
             primary
-                .primary_timestamp_decision(start_ts)
+                .primary_timestamp_decision(start_ts, 0)
                 .expect("decision"),
             crabka_pgexec::PrimaryTxnDecision::Pending
         );
@@ -7731,6 +7778,7 @@ mod tests {
         let start_ts = crabka_pgexec::TimestampTransactionId::new(610).expect("start timestamp");
         let identity = crabka_pgexec::TimestampTxnIdentity {
             start_ts,
+            node_id: 0,
             global_xid: 611,
             primary_range: 0,
         };
@@ -7760,6 +7808,7 @@ mod tests {
         primary
             .begin_timestamp_transaction(&crabka_pgexec::TimestampTxnDescriptor::begun(
                 start_ts,
+                0,
                 identity.global_xid,
                 vec![1],
             ))
@@ -7771,7 +7820,7 @@ mod tests {
             .await
             .expect("prewrite");
         primary
-            .acknowledge_timestamp_participant_operations(start_ts, 1, &operations)
+            .acknowledge_timestamp_participant_operations(start_ts, 0, 1, &operations)
             .await
             .expect("ack operations");
         let commit_ts =
@@ -7779,6 +7828,7 @@ mod tests {
         primary
             .decide_timestamp_transaction(
                 start_ts,
+                0,
                 crabka_pgexec::PrimaryTxnDecision::Committed(commit_ts),
             )
             .await
@@ -7809,7 +7859,7 @@ mod tests {
         start_ts: crabka_pgexec::TimestampTransactionId,
     ) -> crabka_pgmvcc::version::TsVersionState {
         let key =
-            crabka_pgmvcc::version::version_key_ts(write.table_id, write.rowid, start_ts.get());
+            crabka_pgmvcc::version::version_key_ts(write.table_id, write.rowid, start_ts.get(), 0);
         let bytes = engine
             .kv_handle()
             .get(&key)
