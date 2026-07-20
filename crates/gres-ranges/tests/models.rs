@@ -904,3 +904,259 @@ mod recovery_watermark_model {
         );
     }
 }
+
+/// Two ranges, each committing single-shard transactions from its own local
+/// sequence and publishing a closed timestamp, plus a cross-range snapshot read
+/// that reconciles against those watermarks.
+///
+/// This is the safety proof for the single-shard commit bypass. The instant a
+/// commit is stamped from a per-range local sequence rather than the global
+/// timestamp source, a cross-range read at `read_ts` could miss it unless the
+/// read waits for the range's published closed timestamp to reach `read_ts`.
+/// The model encodes the two primitive guarantees the real `LocalSequence`
+/// enforces — a commit is allocated from `next` (monotone), and a publish
+/// reserves `next` strictly above the target before raising the watermark, so
+/// the sequence invariant `next > closed` holds for all time — and checks that
+/// reconciling reads never miss a qualifying commit. Flipping the reconcile
+/// knob off reintroduces the linearizability bug and the checker witnesses it.
+mod single_shard_closed_timestamp_model {
+    use stateright::{Checker, Model, Property};
+
+    /// Highest timestamp a range's local sequence will hand out in the model.
+    /// Two ranges each committing/publishing up to this bound is enough to reach
+    /// the boundary interleaving (read, then a later commit at or below
+    /// `read_ts`) that the closed-timestamp discipline must forbid.
+    const MAX_TS: u8 = 3;
+    /// Exploration-depth guard keeping the state space finite and small.
+    const MAX_STEPS: u8 = 10;
+
+    /// One range's local sequence: `next` is the next allocatable timestamp,
+    /// `closed` the published closed-timestamp watermark, and `commits` the
+    /// commit timestamps of single-shard transactions already durable on it.
+    #[derive(Clone, Debug, Hash, PartialEq, Eq)]
+    struct Sequence {
+        next: u8,
+        closed: u8,
+        commits: Vec<u8>,
+    }
+
+    impl Sequence {
+        fn new() -> Self {
+            // Seeded at horizon 0: first allocation is 1, watermark starts at 0.
+            Self {
+                next: 1,
+                closed: 0,
+                commits: Vec::new(),
+            }
+        }
+
+        /// Allocate one commit timestamp (mirrors `allocate_transaction_id` /
+        /// `allocate_commit_after` collapsed to a single monotone tick).
+        fn commit(&mut self) -> Option<u8> {
+            if self.next > MAX_TS {
+                return None;
+            }
+            let commit_ts = self.next;
+            self.next = self.next.checked_add(1)?;
+            self.commits.push(commit_ts);
+            Some(commit_ts)
+        }
+
+        /// Raise the closed timestamp toward `target`, reserving `next` strictly
+        /// above it first (mirrors `publish_closed_timestamp`). Preserves the
+        /// `next > closed` invariant the whole bypass rests on.
+        fn publish(&mut self, target: u8) -> Option<()> {
+            self.next = self.next.max(target.checked_add(1)?);
+            self.closed = self.closed.max(target);
+            Some(())
+        }
+    }
+
+    #[derive(Clone, Debug, Hash, PartialEq, Eq)]
+    struct State {
+        a: Sequence,
+        b: Sequence,
+        /// The cross-range read's snapshot timestamp; `0` before it is chosen.
+        read_ts: u8,
+        /// Whether the read has already observed range A / range B.
+        read_a: bool,
+        read_b: bool,
+        /// A commit with `commit_ts <= read_ts` became durable on a range the
+        /// read had already observed: the read missed a qualifying commit.
+        missed: bool,
+        steps: u8,
+    }
+
+    struct ClosedTimestampModel {
+        /// Whether a cross-range read waits for a range's closed timestamp to
+        /// reach `read_ts` before observing it. Off reintroduces the bug.
+        reconcile_before_read: bool,
+    }
+
+    #[derive(Clone, Debug, Hash, PartialEq, Eq)]
+    enum Action {
+        StartRead(u8),
+        CommitA,
+        CommitB,
+        PublishA(u8),
+        PublishB(u8),
+        ReadA,
+        ReadB,
+    }
+
+    impl Model for ClosedTimestampModel {
+        type State = State;
+        type Action = Action;
+
+        fn init_states(&self) -> Vec<State> {
+            vec![State {
+                a: Sequence::new(),
+                b: Sequence::new(),
+                read_ts: 0,
+                read_a: false,
+                read_b: false,
+                missed: false,
+                steps: 0,
+            }]
+        }
+
+        fn actions(&self, state: &State, out: &mut Vec<Action>) {
+            if state.steps >= MAX_STEPS {
+                return;
+            }
+            if state.read_ts == 0 {
+                // A cross-range read draws `read_ts` from the global source; it
+                // may land anywhere in the domain relative to local commits,
+                // including above every timestamp allocated so far.
+                for read_ts in 1..=MAX_TS + 1 {
+                    out.push(Action::StartRead(read_ts));
+                }
+            }
+            out.push(Action::CommitA);
+            out.push(Action::CommitB);
+            for target in 1..=MAX_TS {
+                out.push(Action::PublishA(target));
+                out.push(Action::PublishB(target));
+            }
+            if state.read_ts != 0 && !state.read_a {
+                out.push(Action::ReadA);
+            }
+            if state.read_ts != 0 && !state.read_b {
+                out.push(Action::ReadB);
+            }
+        }
+
+        fn next_state(&self, state: &State, action: Action) -> Option<State> {
+            let mut next = state.clone();
+            next.steps = next.steps.checked_add(1)?;
+            match action {
+                Action::StartRead(read_ts) => {
+                    if next.read_ts != 0 {
+                        return None;
+                    }
+                    next.read_ts = read_ts;
+                }
+                Action::CommitA => {
+                    let already_read = next.read_a;
+                    let commit_ts = next.a.commit()?;
+                    record_commit(&mut next, commit_ts, already_read);
+                }
+                Action::CommitB => {
+                    let already_read = next.read_b;
+                    let commit_ts = next.b.commit()?;
+                    record_commit(&mut next, commit_ts, already_read);
+                }
+                Action::PublishA(target) => next.a.publish(target)?,
+                Action::PublishB(target) => next.b.publish(target)?,
+                Action::ReadA => self.observe_range(&mut next, Range::A)?,
+                Action::ReadB => self.observe_range(&mut next, Range::B)?,
+            }
+            Some(next)
+        }
+
+        fn properties(&self) -> Vec<Property<Self>> {
+            vec![
+                Property::<Self>::always(
+                    "cross-range read never misses a single-shard commit at or below read_ts",
+                    |_, state| !state.missed,
+                ),
+                Property::<Self>::sometimes(
+                    "a cross-range read observes single-shard commits on both ranges",
+                    |_, state| {
+                        state.read_a
+                            && state.read_b
+                            && state.a.commits.iter().any(|&ts| ts <= state.read_ts)
+                            && state.b.commits.iter().any(|&ts| ts <= state.read_ts)
+                    },
+                ),
+            ]
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum Range {
+        A,
+        B,
+    }
+
+    impl ClosedTimestampModel {
+        fn observe_range(&self, state: &mut State, range: Range) -> Option<()> {
+            let (sequence, already_read) = match range {
+                Range::A => (&state.a, state.read_a),
+                Range::B => (&state.b, state.read_b),
+            };
+            if already_read {
+                return None;
+            }
+            // The reconciliation rule: a range may serve the cross-range read
+            // only once its closed timestamp has reached `read_ts`.
+            if self.reconcile_before_read && sequence.closed < state.read_ts {
+                return None;
+            }
+            // The read observes exactly the commits with `commit_ts <= read_ts`;
+            // anything already durable here is captured. What safety forbids is a
+            // *later* qualifying commit, tracked by `record_commit`.
+            match range {
+                Range::A => state.read_a = true,
+                Range::B => state.read_b = true,
+            }
+            Some(())
+        }
+    }
+
+    /// Fold a freshly durable commit into the missed-commit witness: if the read
+    /// has already observed this range and the commit qualifies for the snapshot
+    /// (`commit_ts <= read_ts`), the read missed it.
+    fn record_commit(state: &mut State, commit_ts: u8, range_already_read: bool) {
+        if range_already_read && state.read_ts != 0 && commit_ts <= state.read_ts {
+            state.missed = true;
+        }
+    }
+
+    #[test]
+    fn reconciled_cross_range_read_never_misses_a_single_shard_commit() {
+        let checker = ClosedTimestampModel {
+            reconcile_before_read: true,
+        }
+        .checker()
+        .spawn_bfs()
+        .join();
+
+        checker.assert_properties();
+        assert!(checker.unique_state_count() > 1);
+    }
+
+    #[test]
+    fn reading_before_closure_misses_a_single_shard_commit() {
+        let checker = ClosedTimestampModel {
+            reconcile_before_read: false,
+        }
+        .checker()
+        .spawn_bfs()
+        .join();
+
+        assert!(checker.discoveries().contains_key(
+            "cross-range read never misses a single-shard commit at or below read_ts"
+        ));
+    }
+}

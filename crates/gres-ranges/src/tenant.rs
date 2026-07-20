@@ -4146,6 +4146,16 @@ impl GatewaySession {
             )
         })?;
         let autocommit = matches!(self.transaction, GatewayTransaction::Idle);
+        // Single-shard bypass: an autocommit statement routed to exactly one
+        // hosted range commits against that range's own local sequence instead
+        // of the global timestamp source. `ranges` is the routed range set, so a
+        // one-element set is the single-shard classification; the target engine
+        // must be hosted here to reach its local sequence.
+        let bypass_engine = if autocommit && ranges.len() == 1 {
+            serving.engine(ranges[0])
+        } else {
+            None
+        };
         let mut plan = coordinator
             .plan_timestamp_write_sql(statement)
             .map_err(ExecError::into_pg)?;
@@ -4167,10 +4177,16 @@ impl GatewaySession {
             .table_for_timestamp_writes(&plan.writes)
             .map_err(ExecError::into_pg)?;
         let write_lease = {
-            let lease = coordinator
-                .allocate_timestamp_write_lease(plan.writes.len())
-                .await
-                .map_err(ExecError::into_pg)?;
+            let lease = if let Some(engine) = bypass_engine {
+                engine
+                    .allocate_local_timestamp_write_lease(plan.writes.len())
+                    .map_err(ExecError::into_pg)?
+            } else {
+                coordinator
+                    .allocate_timestamp_write_lease(plan.writes.len())
+                    .await
+                    .map_err(ExecError::into_pg)?
+            };
             plan = coordinator
                 .plan_timestamp_write_sql_with_rowids(statement, &lease.hidden_rowids)
                 .map_err(ExecError::into_pg)?;
@@ -4223,10 +4239,16 @@ impl GatewaySession {
                     "injected crash after timestamp prewrites before durable decision",
                 ));
             }
-            let commit_ts = coordinator
-                .allocate_commit_timestamp_after(start_ts)
-                .await
-                .map_err(ExecError::into_pg)?;
+            let commit_ts = if let Some(engine) = bypass_engine {
+                engine
+                    .allocate_local_commit_timestamp_after(start_ts)
+                    .map_err(ExecError::into_pg)?
+            } else {
+                coordinator
+                    .allocate_commit_timestamp_after(start_ts)
+                    .await
+                    .map_err(ExecError::into_pg)?
+            };
             self.timestamp_resolve(
                 primary_range,
                 identity,

@@ -865,6 +865,11 @@ pub struct SqlSession {
     /// statement's read/transaction/commit timestamps must exceed, without
     /// rescanning the store per statement.
     timestamp_horizon: crate::timestamp_txn::TimestampHorizonSource,
+    /// This range's local sequence (shared from the engine). A statement read
+    /// timestamp falls back to it when the global source cannot grant above the
+    /// durable horizon a single-shard bypass commit lifted; see
+    /// [`SqlSession::allocate_statement_read_timestamp`].
+    local_sequence: Arc<crate::local_sequence::LocalSequence>,
     /// Garbage-horizon pins + decided floor (shared from the engine). Every
     /// statement/transaction pins its snapshot xmin here so version pruning
     /// (write-path, `vacuum`, checkpoint compaction) never reclaims a version
@@ -902,6 +907,7 @@ pub(crate) struct SqlSessionConfig {
     pub join_strategy_config: crate::plan_dist::PlannerConfig,
     pub timestamp_oracle: Arc<dyn crate::timestamp_txn::TimestampSource>,
     pub timestamp_horizon: crate::timestamp_txn::TimestampHorizonSource,
+    pub local_sequence: Arc<crate::local_sequence::LocalSequence>,
     pub gc_horizon: Arc<crabka_pgmvcc::gc::GcHorizon>,
 }
 
@@ -956,6 +962,7 @@ impl SqlSession {
             join_strategy_config,
             timestamp_oracle,
             timestamp_horizon,
+            local_sequence,
             gc_horizon,
         } = config;
         Self {
@@ -983,6 +990,7 @@ impl SqlSession {
             join_strategy_config,
             timestamp_oracle,
             timestamp_horizon,
+            local_sequence,
             gc_horizon,
             timestamp_own_start_ts: None,
             sequence_currvals: Arc::new(Mutex::new(HashMap::new())),
@@ -1250,11 +1258,7 @@ impl SqlSession {
             self.ensure_global_readable().await?;
             let snapshot = self.procarray.snapshot();
             let global_snapshot = self.global_read_snapshot(None)?;
-            let timestamp_read = self
-                .timestamp_oracle
-                .allocate_read_timestamp_after(self.timestamp_horizon.current()?)
-                .await
-                .map_err(|error| ExecError::Unsupported(error.to_string()))?;
+            let timestamp_read = self.allocate_statement_read_timestamp().await?;
             if let TxnState::InTransaction(ctx) = &mut self.state {
                 ctx.repeatable_read = true;
                 ctx.snapshot = snapshot;
@@ -1534,12 +1538,7 @@ impl SqlSession {
             repeatable_read: rr,
             global_snapshot,
             timestamp_read: if rr {
-                Some(
-                    self.timestamp_oracle
-                        .allocate_read_timestamp_after(self.timestamp_horizon.current()?)
-                        .await
-                        .map_err(|error| ExecError::Unsupported(error.to_string()))?,
-                )
+                Some(self.allocate_statement_read_timestamp().await?)
             } else {
                 None
             },
@@ -1729,6 +1728,33 @@ impl SqlSession {
         Ok(crate::NO_GLOBAL_SNAPSHOT()) // single-range engine: no global xids exist
     }
 
+    /// Allocate a statement read timestamp strictly above this range's durable
+    /// horizon.
+    ///
+    /// The global timestamp source grants it in the common case, unchanged. When
+    /// a single-shard bypass commit has lifted the durable horizon past the
+    /// global source's position — so the source can no longer grant above the
+    /// floor — the read falls back to this range's local sequence, which folds
+    /// the horizon in and sits strictly above it. Genuine source unavailability
+    /// (not a below-horizon grant) still propagates as an error.
+    async fn allocate_statement_read_timestamp(
+        &self,
+    ) -> Result<crate::timestamp_txn::ReadTimestamp, ExecError> {
+        let horizon = self.timestamp_horizon.current()?;
+        let granted = self
+            .timestamp_oracle
+            .allocate_read_timestamp()
+            .await
+            .map_err(|error| ExecError::Unsupported(error.to_string()))?;
+        if granted.get() > horizon {
+            return Ok(granted);
+        }
+        self.local_sequence.observe(horizon);
+        self.local_sequence
+            .allocate_read_timestamp()
+            .map_err(|error| ExecError::Unsupported(error.to_string()))
+    }
+
     async fn run_select(&mut self, stmt: &Statement) -> Result<QueryResult, ExecError> {
         let (snapshot, own, gsnap) = self.read_context().await?;
         let read_ts = match &self.state {
@@ -1737,11 +1763,9 @@ impl SqlSession {
                     ExecError::Unsupported("repeatable-read timestamp is missing".into())
                 })?
             }
-            TxnState::InTransaction(_) | TxnState::Idle => self
-                .timestamp_oracle
-                .allocate_read_timestamp_after(self.timestamp_horizon.current()?)
-                .await
-                .map_err(|error| ExecError::Unsupported(error.to_string()))?,
+            TxnState::InTransaction(_) | TxnState::Idle => {
+                self.allocate_statement_read_timestamp().await?
+            }
             TxnState::Prepared(_) | TxnState::Failed(_) => {
                 return Err(ExecError::InFailedTransaction);
             }
@@ -4026,11 +4050,9 @@ impl SqlSession {
                             ExecError::Unsupported("repeatable-read timestamp is missing".into())
                         })?
                     }
-                    TxnState::InTransaction(_) | TxnState::Idle => self
-                        .timestamp_oracle
-                        .allocate_read_timestamp_after(self.timestamp_horizon.current()?)
-                        .await
-                        .map_err(|error| ExecError::Unsupported(error.to_string()))?,
+                    TxnState::InTransaction(_) | TxnState::Idle => {
+                        self.allocate_statement_read_timestamp().await?
+                    }
                     TxnState::Prepared(_) | TxnState::Failed(_) => {
                         return Err(ExecError::InFailedTransaction);
                     }

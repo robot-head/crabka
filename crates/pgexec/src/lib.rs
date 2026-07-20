@@ -211,6 +211,16 @@ impl Drop for WriterFenceGuard {
     }
 }
 
+/// Build a fresh per-range local sequence seeded at 0. The first local
+/// allocation folds in the durable horizon (the Lamport receive rule), so the
+/// seed is only a floor the horizon fold immediately lifts to the range's true
+/// durable timestamp state.
+fn new_local_sequence() -> Arc<local_sequence::LocalSequence> {
+    Arc::new(
+        local_sequence::LocalSequence::seeded_at(0).expect("zero is a valid local-sequence seed"),
+    )
+}
+
 fn coordination_for(kv: &Arc<dyn Kv>) -> Arc<EngineCoordination> {
     static COORDINATORS: OnceLock<Mutex<HashMap<usize, Weak<EngineCoordination>>>> =
         OnceLock::new();
@@ -302,6 +312,16 @@ pub struct SqlEngine {
     /// with one full scan, then kept exact by the horizon-observing committer,
     /// so per-statement read floors are O(1) instead of a store scan.
     pub(crate) timestamp_horizon: timestamp_txn::TimestampHorizonSource,
+    /// This range's local sequence for the single-shard commit bypass: a
+    /// per-range monotone allocator in the shared timestamp domain plus its
+    /// published closed timestamp. Autocommit transactions confined to this
+    /// range draw `start_ts`/`commit_ts` here instead of the global source, and
+    /// every timestamp read of this range's data reconciles against the closed
+    /// timestamp so no single-shard commit can be missed. Seeded at 0 and
+    /// lifted to the durable horizon (the Lamport receive rule) on each local
+    /// allocation, so a local grant always exceeds every global stamp this
+    /// range has applied. Shared across `clone_handle` handles for one range.
+    pub(crate) local_sequence: Arc<local_sequence::LocalSequence>,
     /// Snapshot pins and the cached decided floor backing the garbage horizon.
     /// Sessions pin their snapshots here so neither write-path pruning, `vacuum`,
     /// nor checkpoint compaction can reclaim a version a live snapshot still sees.
@@ -643,6 +663,7 @@ impl SqlEngine {
             join_strategy_config: plan_dist::PlannerConfig::default(),
             timestamp_oracle: Arc::new(timestamp_txn::LocalTimestampSource::default()),
             timestamp_horizon,
+            local_sequence: new_local_sequence(),
             gc_horizon: Arc::new(crabka_pgmvcc::gc::GcHorizon::new()),
             sweep_committer,
             vacuum_demand,
@@ -1222,6 +1243,7 @@ impl SqlEngine {
             join_strategy_config: plan_dist::PlannerConfig::default(),
             timestamp_oracle: Arc::new(timestamp_txn::LocalTimestampSource::default()),
             timestamp_horizon,
+            local_sequence: new_local_sequence(),
             gc_horizon: Arc::new(crabka_pgmvcc::gc::GcHorizon::new()),
             vacuum_demand: Arc::new(VacuumDemand::default()),
             vacuum_progress: Arc::new(tokio::sync::Mutex::new(VacuumProgress::default())),
@@ -1280,6 +1302,7 @@ impl SqlEngine {
             join_strategy_config: self.join_strategy_config,
             timestamp_oracle: Arc::clone(&self.timestamp_oracle),
             timestamp_horizon: self.timestamp_horizon.clone(),
+            local_sequence: Arc::clone(&self.local_sequence),
             gc_horizon: Arc::clone(&self.gc_horizon),
             sweep_committer: Arc::clone(&self.sweep_committer),
             vacuum_demand: Arc::clone(&self.vacuum_demand),
@@ -1411,6 +1434,10 @@ impl SqlEngine {
                     "sharded scans require a finite statement read timestamp".into(),
                 )
             })?;
+            // Single-shard bypass: reconcile against this range's closed
+            // timestamp before serving, so a cross-range snapshot at `read_ts`
+            // can never miss a single-shard commit that will land at or below it.
+            self.reconcile_local_read(read_ts);
             return crate::exec::scan_ts_live_interval(
                 self.kv.as_ref(),
                 self.catalog_kv.as_ref(),
@@ -1633,6 +1660,86 @@ impl SqlEngine {
             .allocate_write_lease(hidden_rowid_count)
             .await
             .map_err(|error| ExecError::Unsupported(error.to_string()))
+    }
+
+    /// Allocate a write lease for a single-shard transaction confined to this
+    /// range from the range's [`local_sequence`](Self::local_sequence), bypassing
+    /// the global timestamp source. The durable horizon is folded in first (the
+    /// Lamport receive rule), so the allocated `start_ts` and hidden rowids
+    /// strictly exceed every global stamp this range has already applied.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExecError::Unsupported`] when the local sequence exhausts the
+    /// `u64` timestamp domain or the durable horizon cannot be read.
+    pub fn allocate_local_timestamp_write_lease(
+        &self,
+        hidden_rowid_count: usize,
+    ) -> Result<crate::timestamp_txn::TimestampWriteLease, ExecError> {
+        self.local_sequence
+            .observe(self.timestamp_horizon.current()?);
+        let start_ts = self
+            .local_sequence
+            .allocate_transaction_id()
+            .map_err(|error| ExecError::Unsupported(error.to_string()))?;
+        let mut hidden_rowids = Vec::with_capacity(hidden_rowid_count);
+        for _ in 0..hidden_rowid_count {
+            hidden_rowids.push(
+                self.local_sequence
+                    .allocate_read_timestamp()
+                    .map_err(|error| ExecError::Unsupported(error.to_string()))?
+                    .get(),
+            );
+        }
+        Ok(crate::timestamp_txn::TimestampWriteLease {
+            start_ts,
+            hidden_rowids,
+        })
+    }
+
+    /// Allocate a single-shard commit timestamp from this range's
+    /// [`local_sequence`](Self::local_sequence), preserving `commit_ts > start_ts`
+    /// and the durable-horizon floor (folded in first).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExecError::Unsupported`] when the local sequence exhausts the
+    /// `u64` timestamp domain or the durable horizon cannot be read.
+    pub fn allocate_local_commit_timestamp_after(
+        &self,
+        start_ts: TimestampTransactionId,
+    ) -> Result<CommitTimestamp, ExecError> {
+        self.local_sequence
+            .observe(self.timestamp_horizon.current()?);
+        self.local_sequence
+            .allocate_commit_after(start_ts)
+            .map_err(|error| ExecError::Unsupported(error.to_string()))
+    }
+
+    /// Reconcile a cross-range or single-range timestamp read against this
+    /// range's closed timestamp: reserve strictly above `read_ts` and publish the
+    /// watermark, so no single-shard commit this range subsequently allocates can
+    /// land at or below `read_ts`. Any single-shard commit already durable at or
+    /// below `read_ts` is visible to the read; any still in prewrite carries a
+    /// durable intent the scan resolves. This is the linearizability guarantee
+    /// the single-shard bypass rests on (proven by the two-range closed-timestamp
+    /// Stateright model).
+    ///
+    /// At `u64::MAX` there is nothing above to reserve, but the local sequence can
+    /// never allocate a commit there either, so the read is already safe and the
+    /// reservation is skipped.
+    pub fn reconcile_local_read(&self, read_ts: ReadTimestamp) {
+        if read_ts.get() < u64::MAX {
+            // Only fails at domain exhaustion, which `read_ts < u64::MAX` rules
+            // out; the watermark is monotone, so a redundant publish is a no-op.
+            let _ = self.local_sequence.publish_closed_timestamp(read_ts.get());
+        }
+    }
+
+    /// This range's currently published closed timestamp.
+    #[must_use]
+    pub fn local_closed_timestamp(&self) -> u64 {
+        self.local_sequence.closed_timestamp()
     }
 
     /// Return a timestamp transaction participant for this engine's local range.
@@ -2771,6 +2878,7 @@ impl Engine for SqlEngine {
             join_strategy_config: self.join_strategy_config,
             timestamp_oracle: Arc::clone(&self.timestamp_oracle),
             timestamp_horizon: self.timestamp_horizon.clone(),
+            local_sequence: Arc::clone(&self.local_sequence),
             gc_horizon: Arc::clone(&self.gc_horizon),
         })
     }
