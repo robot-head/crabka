@@ -18,6 +18,8 @@ use crate::{
     leader_epoch_checkpoint::LeaderEpochCheckpoint,
     name, retention,
     segment::{RawSegmentRead, Segment},
+    stamp_index::{StampEntry, StampIndex},
+    stamp_source::StampSource,
     txn_index::{AbortedTxn, TxnIndex},
 };
 
@@ -56,6 +58,19 @@ pub struct Log {
 
     /// Active segment's `TxnIndex`. Reopened on segment roll.
     active_txn_index: TxnIndex,
+
+    /// Injected source of the additional internal stamp coordinate. `None`
+    /// (the default) means this partition stamps nothing — behavior and all
+    /// wire-exact bytes are exactly as without stamping. Set via
+    /// [`Log::set_stamp_source`]; wiring a real HLC / solo-mode oracle is
+    /// broker-side future work.
+    stamp_source: Option<std::sync::Arc<dyn StampSource>>,
+
+    /// Active segment's `.stampindex` sidecar, present exactly when a
+    /// [`StampSource`] is injected. Reopened on segment roll, mirroring
+    /// `active_txn_index`. The stamp is derived state stored beside the
+    /// wire-exact `.log`; it is never consulted by any produce/fetch path.
+    active_stamp_index: Option<StampIndex>,
 
     /// Per-partition leader-epoch checkpoint. Shared across segments —
     /// epoch history accumulates over the log's lifetime.
@@ -332,6 +347,8 @@ impl Log {
             lso,
             pending: HashMap::new(),
             active_txn_index,
+            stamp_source: None,
+            active_stamp_index: None,
             epoch_checkpoint,
             reconciled_frontier: Offset(0),
         })
@@ -432,10 +449,13 @@ impl Log {
 
         let new_active = Segment::create(&self.dir, new_base)?;
         self.active_txn_index = TxnIndex::open(new_active.txn_index_path())?;
+        let stamp_index_path = new_active.stamp_index_path();
         self.pending.clear(); // reset_to is a hard reset (after divergence)
         self.lso = new_active.last_offset() + 1; // = new_base (empty segment)
         self.active = Some(new_active);
         self.dir_sync_needed = true;
+        // Preserve any injected stamp source; reopen its (fresh) sidecar.
+        self.reopen_active_stamp_index(stamp_index_path)?;
         // The log now holds no records, so the leader-epoch cache must hold no
         // entries (Kafka's truncateFullyAndStartAt → leaderEpochCache.clearAndFlush).
         // Leaving stale entries makes a follower advertise a `last_fetched_epoch`
@@ -525,6 +545,82 @@ impl Log {
             .aborted_in_range(start, end)
             .copied()
             .collect()
+    }
+
+    /// Inject the [`StampSource`] that folds the additional internal stamp
+    /// coordinate into this partition. Opens (or recovers) the active
+    /// segment's `.stampindex`; from now on every durably-appended data batch
+    /// records a stamped range there.
+    ///
+    /// This is the sole enabling switch: with no source injected the log
+    /// stamps nothing and is byte-for-byte identical to today. It touches no
+    /// wire-facing state — not the `.log` bytes, offset assignment, LSO, or
+    /// high-watermark.
+    ///
+    /// # Errors
+    /// Returns an error when opening the `.stampindex` sidecar fails.
+    /// # Panics
+    /// Panics only if there is no active segment, which cannot happen after
+    /// [`Log::open`].
+    pub fn set_stamp_source(
+        &mut self,
+        source: std::sync::Arc<dyn StampSource>,
+    ) -> Result<(), LogError> {
+        let path = self
+            .active
+            .as_ref()
+            .expect("active segment must exist after Log::open")
+            .stamp_index_path();
+        self.active_stamp_index = Some(StampIndex::open(path)?);
+        self.stamp_source = Some(source);
+        Ok(())
+    }
+
+    /// The internal stamp covering `offset`, or `None` when this partition is
+    /// unstamped (no source injected) or no stamped range covers `offset`.
+    ///
+    /// Consults only the active segment's `.stampindex`, mirroring
+    /// [`Log::aborted_in_range`]. This is an internal, server-side query: no
+    /// produce or fetch handler calls it, so the stamp can never reach a
+    /// client-facing response.
+    #[must_use]
+    pub fn stamp_for_offset(&self, offset: Offset) -> Option<u64> {
+        self.active_stamp_index.as_ref()?.stamp_for_offset(offset)
+    }
+
+    /// Record a stamped `[base, last]` range for a durably-appended data
+    /// batch. No-op when no [`StampSource`] is injected. Callers invoke this
+    /// strictly after the batch is durable and only for non-control batches,
+    /// in append (offset) order, so recorded ranges are non-overlapping and
+    /// their `base_offset`s strictly increase — satisfying
+    /// [`StampIndex::append`]'s ordering precondition.
+    fn record_stamp(&mut self, base: Offset, last: Offset) -> Result<(), LogError> {
+        if let (Some(index), Some(source)) =
+            (self.active_stamp_index.as_mut(), self.stamp_source.as_ref())
+        {
+            let stamp = source.next_stamp();
+            index.append(StampEntry {
+                base_offset: base,
+                last_offset: last,
+                stamp,
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Reopen the active `.stampindex` for a new active segment, mirroring the
+    /// `active_txn_index` reopen on roll / truncate / reset. When no source is
+    /// injected this clears the (already-absent) index and does no I/O.
+    ///
+    /// # Errors
+    /// Returns an error when opening the `.stampindex` sidecar fails.
+    fn reopen_active_stamp_index(&mut self, path: PathBuf) -> Result<(), LogError> {
+        self.active_stamp_index = if self.stamp_source.is_some() {
+            Some(StampIndex::open(path)?)
+        } else {
+            None
+        };
+        Ok(())
     }
 
     /// Append a `RecordBatch`. The batch's `base_offset` is overwritten
@@ -739,6 +835,13 @@ impl Log {
             self.active_segment_flush()?;
         }
 
+        // --- .stampindex write (internal sidecar; never a control batch on
+        // this path, so every verbatim batch is stampable data). Written
+        // strictly after the batch is durable, exactly like the `.txnindex`
+        // below, and affects no offset/LSO/HWM/wire-byte state. ---
+        let last_offset = Offset(base_offset.0 + i64::from(batch.last_offset_delta));
+        self.record_stamp(base_offset, last_offset)?;
+
         // --- LSO tracking (no control batches on this path) ---
         let pid = batch.producer_id;
         if batch.is_transactional && !pid.is_none() {
@@ -853,6 +956,19 @@ impl Log {
             self.active_segment_flush()?;
         }
 
+        // --- .stampindex write (internal sidecar) ---
+        // Stamp only data batches, never control batches (commit/abort
+        // markers): the stamp is a coordinate for records, not markers.
+        // Written strictly after the batch is durable, mirroring the
+        // `.txnindex` write below, so no offset/LSO/HWM/wire-byte effect.
+        // (First-cut: transactional data is stamped here at append rather
+        // than at commit-marker time; commit-time stamping via the internal
+        // cross-domain bridge is out-of-scope follow-up.)
+        if !batch.attributes.is_control_batch() {
+            let last = Offset(batch.base_offset + i64::from(batch.last_offset_delta));
+            self.record_stamp(Offset(batch.base_offset), last)?;
+        }
+
         // --- LSO tracking + .txnindex writes ---
         let pid = ProducerId(batch.producer_id);
         if batch.attributes.is_control_batch() {
@@ -910,8 +1026,10 @@ impl Log {
         self.segments.push(old);
         let new_seg = Segment::create(&self.dir, new_base)?;
         self.active_txn_index = TxnIndex::open(new_seg.txn_index_path())?;
+        let stamp_index_path = new_seg.stamp_index_path();
         self.active = Some(new_seg);
         self.dir_sync_needed = true;
+        self.reopen_active_stamp_index(stamp_index_path)?;
         Ok(())
     }
 
@@ -1225,12 +1343,16 @@ impl Log {
                     .map_err(|_| LogError::BadSegmentName("offset overflow".into()))?;
                 seg.truncate_to_relative(rel)?;
                 self.active_txn_index = TxnIndex::open(seg.txn_index_path())?;
+                let stamp_index_path = seg.stamp_index_path();
                 self.active = Some(seg);
+                self.reopen_active_stamp_index(stamp_index_path)?;
             } else {
                 let new_seg = Segment::create(&self.dir, offset)?;
                 self.active_txn_index = TxnIndex::open(new_seg.txn_index_path())?;
+                let stamp_index_path = new_seg.stamp_index_path();
                 self.active = Some(new_seg);
                 self.dir_sync_needed = true;
+                self.reopen_active_stamp_index(stamp_index_path)?;
             }
         } else if let Some(active) = self.active.as_mut()
             && active.last_offset() >= offset
@@ -1241,6 +1363,8 @@ impl Log {
                 .map_err(|_| LogError::BadSegmentName("offset overflow".into()))?;
             active.truncate_to_relative(rel)?;
             self.active_txn_index = TxnIndex::open(active.txn_index_path())?;
+            let stamp_index_path = active.stamp_index_path();
+            self.reopen_active_stamp_index(stamp_index_path)?;
         }
         // After truncation, LSO can't exceed log_end_offset.
         self.lso = self.lso.min(self.log_end_offset());
@@ -2589,6 +2713,168 @@ mod tests {
         let mut commit = commit_marker(1000, 0);
         log.append(&mut commit).unwrap();
         assert2::assert!(log.lso() == log.log_end_offset());
+    }
+
+    // ---- .stampindex append-path wiring tests ----
+
+    /// Append three data batches spanning distinct offset ranges to a
+    /// stamp-enabled log; the `.stampindex` records one entry per batch (in
+    /// order, with the source's successive stamps) and `stamp_for_offset`
+    /// resolves every covered offset, including interior and inclusive-end
+    /// offsets, while gaps past the end resolve to `None`.
+    #[test]
+    fn stampindex_records_appended_batches_and_resolves_offsets() {
+        let (dir, mut log) = test_log();
+        log.set_stamp_source(std::sync::Arc::new(
+            crate::stamp_source::MonotonicStampSource::new(1_000, 10),
+        ))
+        .unwrap();
+
+        log.append(&mut sample_batch(2)).unwrap(); // offsets 0..=1, stamp 1000
+        log.append(&mut sample_batch(1)).unwrap(); // offset  2,     stamp 1010
+        log.append(&mut sample_batch(3)).unwrap(); // offsets 3..=5, stamp 1020
+
+        // Query surface resolves every covered offset to its batch's stamp.
+        check!(log.stamp_for_offset(Offset(0)) == Some(1_000));
+        check!(log.stamp_for_offset(Offset(1)) == Some(1_000));
+        check!(log.stamp_for_offset(Offset(2)) == Some(1_010));
+        check!(log.stamp_for_offset(Offset(3)) == Some(1_020));
+        check!(log.stamp_for_offset(Offset(5)) == Some(1_020));
+        check!(log.stamp_for_offset(Offset(6)) == None);
+
+        // The durable on-disk sidecar holds exactly one entry per data batch.
+        let idx = StampIndex::open(dir.path().join("00000000000000000000.stampindex")).unwrap();
+        assert2::assert!(
+            idx.entries()
+                == [
+                    StampEntry {
+                        base_offset: Offset(0),
+                        last_offset: Offset(1),
+                        stamp: 1_000,
+                    },
+                    StampEntry {
+                        base_offset: Offset(2),
+                        last_offset: Offset(2),
+                        stamp: 1_010,
+                    },
+                    StampEntry {
+                        base_offset: Offset(3),
+                        last_offset: Offset(5),
+                        stamp: 1_020,
+                    },
+                ]
+        );
+    }
+
+    /// A log with no injected stamp source stamps nothing: `stamp_for_offset`
+    /// is always `None` and no `.stampindex` file is ever created — the
+    /// unchanged-behavior guarantee for pure-Kafka partitions.
+    #[test]
+    fn no_stamp_source_stamps_nothing() {
+        let (dir, mut log) = test_log();
+        log.append(&mut sample_batch(2)).unwrap();
+        log.append(&mut sample_batch(3)).unwrap();
+
+        check!(log.stamp_for_offset(Offset(0)) == None);
+        check!(log.stamp_for_offset(Offset(4)) == None);
+        assert2::assert!(!dir.path().join("00000000000000000000.stampindex").exists());
+    }
+
+    /// The control (commit/abort) marker of a transaction is NOT stamped —
+    /// stamps are a coordinate for data records, not markers. The two data
+    /// batches around the marker are stamped; the marker's own offset is not.
+    #[test]
+    fn control_markers_are_not_stamped() {
+        let (dir, mut log) = test_log();
+        log.set_stamp_source(std::sync::Arc::new(
+            crate::stamp_source::MonotonicStampSource::new(1, 1),
+        ))
+        .unwrap();
+
+        // Transactional data at offsets 0..=1, then its commit marker at 2.
+        log.append(&mut transactional_batch(1000, 0, &["a", "b"]))
+            .unwrap();
+        log.append(&mut commit_marker(1000, 0)).unwrap();
+        // A following non-txn data batch at offset 3.
+        log.append(&mut sample_batch(1)).unwrap();
+
+        check!(log.stamp_for_offset(Offset(0)) == Some(1)); // txn data
+        check!(log.stamp_for_offset(Offset(1)) == Some(1));
+        check!(log.stamp_for_offset(Offset(2)) == None); // commit marker: unstamped
+        check!(log.stamp_for_offset(Offset(3)) == Some(2)); // next data batch
+
+        let idx = StampIndex::open(dir.path().join("00000000000000000000.stampindex")).unwrap();
+        assert2::assert!(
+            idx.entries()
+                == [
+                    StampEntry {
+                        base_offset: Offset(0),
+                        last_offset: Offset(1),
+                        stamp: 1,
+                    },
+                    StampEntry {
+                        base_offset: Offset(3),
+                        last_offset: Offset(3),
+                        stamp: 2,
+                    },
+                ]
+        );
+    }
+
+    /// Wire-exactness invariance: appending an identical mixed sequence
+    /// (non-txn, transactional data, commit marker, non-txn) to a
+    /// stamp-enabled log and an unstamped log yields byte-for-byte identical
+    /// `.log` output and identical assigned offsets and LSO at every step.
+    /// The stamp is a pure additional sidecar — it cannot perturb any
+    /// client-facing coordinate (high-watermark is derived from these, so it
+    /// too is unaffected).
+    #[test]
+    fn stamping_does_not_change_offsets_lso_or_log_bytes() {
+        // Build the same append script for both logs.
+        fn script() -> Vec<RecordBatch> {
+            vec![
+                sample_batch(2),                      // non-txn, offsets 0..=1
+                transactional_batch(1000, 0, &["a"]), // txn data, offset 2
+                commit_marker(1000, 0),               // commit marker, offset 3
+                sample_batch(3),                      // non-txn, offsets 4..=6
+            ]
+        }
+
+        let dir_plain = tempdir().unwrap();
+        let mut plain = Log::open(dir_plain.path(), LogConfig::default()).unwrap();
+
+        let dir_stamped = tempdir().unwrap();
+        let mut stamped = Log::open(dir_stamped.path(), LogConfig::default()).unwrap();
+        stamped
+            .set_stamp_source(std::sync::Arc::new(
+                crate::stamp_source::MonotonicStampSource::new(7, 3),
+            ))
+            .unwrap();
+
+        let mut plain_bases = Vec::new();
+        let mut stamped_bases = Vec::new();
+        let mut plain_lsos = Vec::new();
+        let mut stamped_lsos = Vec::new();
+        for (mut pb, mut sb) in script().into_iter().zip(script()) {
+            plain_bases.push(plain.append(&mut pb).unwrap());
+            stamped_bases.push(stamped.append(&mut sb).unwrap());
+            plain_lsos.push(plain.lso());
+            stamped_lsos.push(stamped.lso());
+        }
+
+        // Identical offset assignment and LSO progression at every step.
+        assert2::assert!(plain_bases == stamped_bases);
+        assert2::assert!(plain_lsos == stamped_lsos);
+        assert2::assert!(plain.log_end_offset() == stamped.log_end_offset());
+        // The unstamped log never sees a stamp; the stamped one does.
+        check!(plain.stamp_for_offset(Offset(0)) == None);
+        check!(stamped.stamp_for_offset(Offset(0)) == Some(7));
+
+        // Byte-for-byte identical client-facing `.log` output.
+        let end = plain.log_end_offset();
+        let plain_raw = plain.read_raw(Offset(0), end, 10 * 1024 * 1024).unwrap();
+        let stamped_raw = stamped.read_raw(Offset(0), end, 10 * 1024 * 1024).unwrap();
+        assert2::assert!(plain_raw.bytes == stamped_raw.bytes);
     }
 
     #[test]

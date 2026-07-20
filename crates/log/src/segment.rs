@@ -323,6 +323,12 @@ impl Segment {
         crate::name::txnindex_path(&self.dir, self.base_offset.0)
     }
 
+    /// Path to this segment's `.stampindex` sidecar (may not exist yet).
+    #[must_use]
+    pub fn stamp_index_path(&self) -> std::path::PathBuf {
+        crate::name::stampindex_path(&self.dir, self.base_offset.0)
+    }
+
     /// Path to the per-partition `.leader-epoch-checkpoint` file in this
     /// segment's directory. The checkpoint is shared across all segments
     /// in a partition — epoch history accumulates over the log's lifetime.

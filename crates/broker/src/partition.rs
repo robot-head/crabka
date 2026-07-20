@@ -393,6 +393,21 @@ impl Partition {
         }
     }
 
+    /// The additional internal stamp coordinate covering `offset`, or `None`
+    /// when this partition is unstamped (no [`crabka_log::StampSource`]
+    /// injected) or no stamped range covers `offset`.
+    ///
+    /// Locks the `Arc<Mutex<Log>>` briefly. This is a server-side query only:
+    /// no produce or fetch handler consults it, so the stamp cannot leak into
+    /// any client-facing response. Returns `None` if the mutex is poisoned.
+    #[must_use]
+    pub fn stamp_for_offset(&self, offset: Offset) -> Option<u64> {
+        match self.log.lock() {
+            Ok(g) => g.stamp_for_offset(offset),
+            Err(_) => None,
+        }
+    }
+
     /// Read batches from the underlying [`Log`] starting at `offset`,
     /// returning up to `max_bytes` of data.
     ///
