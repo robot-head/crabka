@@ -354,7 +354,7 @@ impl VisibilityWorld {
         // hundreds. A real range-0 TSO has already advanced past those commits;
         // model that boundary explicitly rather than relying on MAX visibility.
         query_engine.set_timestamp_oracle(Arc::new(
-            crabka_pgexec::timestamp_txn::LocalTimestampOracle::new(
+            crabka_pgexec::timestamp_txn::LocalTimestampSource::new(
                 crabka_pgexec::timestamp_txn::MonotonicTimestampAllocator::starting_at(10_000)
                     .expect("finite test timestamp allocator"),
             ),

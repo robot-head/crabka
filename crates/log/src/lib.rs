@@ -95,6 +95,8 @@ mod name;
 mod recovery;
 mod retention;
 mod segment;
+mod stamp_index;
+mod stamp_source;
 mod txn_index;
 
 pub use config::{CleanupPolicy, LogConfig};
@@ -114,4 +116,8 @@ sendfile_cfg! {
 // `crabka_log::FileRegion` without depending on the protocol crate's path.
 pub use crabka_protocol::records::FileRegion;
 pub use segment::{RawSegmentRead, Segment};
+pub use stamp_index::{StampEntry, StampIndex};
+#[cfg(any(test, feature = "test-helpers"))]
+pub use stamp_source::MonotonicStampSource;
+pub use stamp_source::StampSource;
 pub use txn_index::{AbortedTxn, TxnIndex};

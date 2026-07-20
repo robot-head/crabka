@@ -52,7 +52,7 @@ pub enum TimestampTxnError {
 
 /// Errors raised by a timestamp oracle implementation.
 #[derive(Debug, Error)]
-pub enum TimestampOracleError {
+pub enum TimestampSourceError {
     /// The oracle returned a timestamp that cannot satisfy the transaction
     /// timestamp invariants.
     #[error(transparent)]
@@ -71,18 +71,18 @@ pub struct TimestampWriteLease {
 
 /// Narrow timestamp grant seam used by sharded timestamp DML.
 #[async_trait::async_trait]
-pub trait TimestampOracle: Send + Sync {
+pub trait TimestampSource: Send + Sync {
     /// Allocate the single read timestamp used by one SQL statement.
-    async fn allocate_read_timestamp(&self) -> Result<ReadTimestamp, TimestampOracleError>;
+    async fn allocate_read_timestamp(&self) -> Result<ReadTimestamp, TimestampSourceError>;
 
     /// Allocate a start timestamp for a timestamp transaction.
     async fn allocate_transaction_id(&self)
-    -> Result<TimestampTransactionId, TimestampOracleError>;
+    -> Result<TimestampTransactionId, TimestampSourceError>;
 
     async fn allocate_write_lease(
         &self,
         hidden_rowid_count: usize,
-    ) -> Result<TimestampWriteLease, TimestampOracleError> {
+    ) -> Result<TimestampWriteLease, TimestampSourceError> {
         let start_ts = self.allocate_transaction_id().await?;
         let mut hidden_rowids = Vec::with_capacity(hidden_rowid_count);
         for _ in 0..hidden_rowid_count {
@@ -98,19 +98,19 @@ pub trait TimestampOracle: Send + Sync {
     async fn allocate_commit_after(
         &self,
         start_ts: TimestampTransactionId,
-    ) -> Result<CommitTimestamp, TimestampOracleError>;
+    ) -> Result<CommitTimestamp, TimestampSourceError>;
 
     /// Allocate a read timestamp strictly after durable timestamp state already
     /// present on this range.
     async fn allocate_read_timestamp_after(
         &self,
         durable_horizon: u64,
-    ) -> Result<ReadTimestamp, TimestampOracleError> {
+    ) -> Result<ReadTimestamp, TimestampSourceError> {
         let timestamp = self.allocate_read_timestamp().await?;
         if timestamp.get() > durable_horizon {
             return Ok(timestamp);
         }
-        Err(TimestampOracleError::Unavailable(
+        Err(TimestampSourceError::Unavailable(
             "timestamp oracle granted a read before the durable timestamp horizon".into(),
         ))
     }
@@ -120,12 +120,12 @@ pub trait TimestampOracle: Send + Sync {
     async fn allocate_transaction_id_after(
         &self,
         durable_horizon: u64,
-    ) -> Result<TimestampTransactionId, TimestampOracleError> {
+    ) -> Result<TimestampTransactionId, TimestampSourceError> {
         let timestamp = self.allocate_transaction_id().await?;
         if timestamp.get() > durable_horizon {
             return Ok(timestamp);
         }
-        Err(TimestampOracleError::Unavailable(
+        Err(TimestampSourceError::Unavailable(
             "timestamp oracle granted a transaction before the durable timestamp horizon".into(),
         ))
     }
@@ -136,24 +136,48 @@ pub trait TimestampOracle: Send + Sync {
         &self,
         start_ts: TimestampTransactionId,
         durable_horizon: u64,
-    ) -> Result<CommitTimestamp, TimestampOracleError> {
+    ) -> Result<CommitTimestamp, TimestampSourceError> {
         let timestamp = self.allocate_commit_after(start_ts).await?;
         if timestamp.get() > durable_horizon {
             return Ok(timestamp);
         }
-        Err(TimestampOracleError::Unavailable(
+        Err(TimestampSourceError::Unavailable(
             "timestamp oracle granted a commit before the durable timestamp horizon".into(),
         ))
     }
+
+    /// Fold a timestamp learned from another source into this one so that every
+    /// subsequent allocation strictly exceeds it (the Lamport/HLC receive rule).
+    ///
+    /// The default is a no-op: a centralized source such as `LogicalTso` is the
+    /// sole timestamp authority for its tenant and learns nothing from peer
+    /// timestamps. Distributed (HLC) and range-local sources override this to
+    /// advance their clock past the observed value.
+    fn observe(&self, _observed_ts: u64) {}
+
+    /// The maximum clock offset, in the packed timestamp domain, that a reader
+    /// must treat as uncertain above its read timestamp (see
+    /// [`crabka_pgmvcc::visibility::read_verdict`]).
+    ///
+    /// The default is `0` — an empty window. A centralized source such as
+    /// `LogicalTso` is the sole authority, so a commit above the read timestamp
+    /// is genuinely concurrent and never uncertain. A distributed (HLC) source
+    /// overrides this with its configured `max_offset`, and only that non-zero
+    /// value can ever yield an [`Uncertain`] verdict.
+    ///
+    /// [`Uncertain`]: crabka_pgmvcc::visibility::ReadVerdict::Uncertain
+    fn uncertainty_window(&self) -> u64 {
+        0
+    }
 }
 
-/// Default in-process timestamp oracle preserving single-engine behavior.
+/// Default in-process timestamp source preserving single-engine behavior.
 #[derive(Debug, Default)]
-pub struct LocalTimestampOracle {
+pub struct LocalTimestampSource {
     allocator: Mutex<MonotonicTimestampAllocator>,
 }
 
-impl LocalTimestampOracle {
+impl LocalTimestampSource {
     /// Build a local oracle from an existing monotonic allocator.
     #[must_use]
     pub fn new(allocator: MonotonicTimestampAllocator) -> Self {
@@ -164,83 +188,91 @@ impl LocalTimestampOracle {
 }
 
 #[async_trait::async_trait]
-impl TimestampOracle for LocalTimestampOracle {
-    async fn allocate_read_timestamp(&self) -> Result<ReadTimestamp, TimestampOracleError> {
+impl TimestampSource for LocalTimestampSource {
+    async fn allocate_read_timestamp(&self) -> Result<ReadTimestamp, TimestampSourceError> {
         let mut allocator = self
             .allocator
             .lock()
-            .map_err(|_| TimestampOracleError::Unavailable("local oracle lock poisoned".into()))?;
+            .map_err(|_| TimestampSourceError::Unavailable("local oracle lock poisoned".into()))?;
         allocator
             .allocate_read_timestamp()
-            .map_err(TimestampOracleError::from)
+            .map_err(TimestampSourceError::from)
     }
 
     async fn allocate_transaction_id(
         &self,
-    ) -> Result<TimestampTransactionId, TimestampOracleError> {
+    ) -> Result<TimestampTransactionId, TimestampSourceError> {
         let mut allocator = self
             .allocator
             .lock()
-            .map_err(|_| TimestampOracleError::Unavailable("local oracle lock poisoned".into()))?;
+            .map_err(|_| TimestampSourceError::Unavailable("local oracle lock poisoned".into()))?;
         allocator
             .allocate_transaction_id()
-            .map_err(TimestampOracleError::from)
+            .map_err(TimestampSourceError::from)
     }
 
     async fn allocate_commit_after(
         &self,
         start_ts: TimestampTransactionId,
-    ) -> Result<CommitTimestamp, TimestampOracleError> {
+    ) -> Result<CommitTimestamp, TimestampSourceError> {
         let mut allocator = self
             .allocator
             .lock()
-            .map_err(|_| TimestampOracleError::Unavailable("local oracle lock poisoned".into()))?;
+            .map_err(|_| TimestampSourceError::Unavailable("local oracle lock poisoned".into()))?;
         allocator
             .allocate_commit_after(start_ts)
-            .map_err(TimestampOracleError::from)
+            .map_err(TimestampSourceError::from)
     }
 
     async fn allocate_read_timestamp_after(
         &self,
         durable_horizon: u64,
-    ) -> Result<ReadTimestamp, TimestampOracleError> {
+    ) -> Result<ReadTimestamp, TimestampSourceError> {
         let mut allocator = self
             .allocator
             .lock()
-            .map_err(|_| TimestampOracleError::Unavailable("local oracle lock poisoned".into()))?;
+            .map_err(|_| TimestampSourceError::Unavailable("local oracle lock poisoned".into()))?;
         allocator.advance_past(durable_horizon)?;
         allocator
             .allocate_read_timestamp()
-            .map_err(TimestampOracleError::from)
+            .map_err(TimestampSourceError::from)
     }
 
     async fn allocate_transaction_id_after(
         &self,
         durable_horizon: u64,
-    ) -> Result<TimestampTransactionId, TimestampOracleError> {
+    ) -> Result<TimestampTransactionId, TimestampSourceError> {
         let mut allocator = self
             .allocator
             .lock()
-            .map_err(|_| TimestampOracleError::Unavailable("local oracle lock poisoned".into()))?;
+            .map_err(|_| TimestampSourceError::Unavailable("local oracle lock poisoned".into()))?;
         allocator.advance_past(durable_horizon)?;
         allocator
             .allocate_transaction_id()
-            .map_err(TimestampOracleError::from)
+            .map_err(TimestampSourceError::from)
     }
 
     async fn allocate_commit_after_durable(
         &self,
         start_ts: TimestampTransactionId,
         durable_horizon: u64,
-    ) -> Result<CommitTimestamp, TimestampOracleError> {
+    ) -> Result<CommitTimestamp, TimestampSourceError> {
         let mut allocator = self
             .allocator
             .lock()
-            .map_err(|_| TimestampOracleError::Unavailable("local oracle lock poisoned".into()))?;
+            .map_err(|_| TimestampSourceError::Unavailable("local oracle lock poisoned".into()))?;
         allocator.advance_past(durable_horizon.max(start_ts.get()))?;
         allocator
             .allocate_commit_after(start_ts)
-            .map_err(TimestampOracleError::from)
+            .map_err(TimestampSourceError::from)
+    }
+
+    fn observe(&self, observed_ts: u64) {
+        if let Ok(mut allocator) = self.allocator.lock() {
+            // Best-effort: `advance_past` only fails at u64 exhaustion, where the
+            // allocator can no longer serve any grant regardless of this fold.
+            let _ = allocator.advance_past(observed_ts);
+        }
     }
 }
 
@@ -3025,6 +3057,36 @@ mod tests {
             delete: false,
             global_index_intents: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn local_source_observe_advances_future_allocations_past_the_folded_timestamp() {
+        use assert2::assert;
+
+        let source = LocalTimestampSource::default();
+        source.observe(100);
+        let start = source
+            .allocate_transaction_id()
+            .await
+            .expect("allocate after observe");
+        assert!(start.get() > 100);
+    }
+
+    #[tokio::test]
+    async fn local_source_observe_below_the_clock_never_regresses_it() {
+        use assert2::assert;
+
+        let source = LocalTimestampSource::default();
+        let first = source
+            .allocate_transaction_id()
+            .await
+            .expect("first allocation");
+        source.observe(0);
+        let second = source
+            .allocate_transaction_id()
+            .await
+            .expect("second allocation");
+        assert!(second.get() > first.get());
     }
 
     #[test]

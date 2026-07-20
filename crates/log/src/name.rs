@@ -42,6 +42,12 @@ pub fn txnindex_path(dir: &Path, base_offset: i64) -> std::path::PathBuf {
     dir.join(format!("{}.txnindex", format_base_offset(base_offset)))
 }
 
+/// Path to the per-segment `.stampindex` sidecar (the additional internal
+/// stamp coordinate; never a client-facing file).
+pub fn stampindex_path(dir: &Path, base_offset: i64) -> std::path::PathBuf {
+    dir.join(format!("{}.stampindex", format_base_offset(base_offset)))
+}
+
 /// Path to the per-partition `.leader-epoch-checkpoint` file.
 pub fn leader_epoch_checkpoint_path(dir: &Path) -> std::path::PathBuf {
     dir.join("leader-epoch-checkpoint")

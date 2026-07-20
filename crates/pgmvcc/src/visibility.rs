@@ -92,6 +92,63 @@ pub const fn satisfies_ts(read_ts: u64, state: TsVersionState) -> bool {
     }
 }
 
+/// The verdict of a timestamp read against one version under a clock-skew bound.
+///
+/// A two-valued visible/invisible check suffices when there is a single
+/// timestamp authority. Under a distributed clock, a version committed just
+/// above the read timestamp may nevertheless have happened before the read in
+/// real time — within the skew bound — so it is neither safely visible nor
+/// safely invisible but [`Uncertain`], and the read path restarts above it.
+///
+/// [`Uncertain`]: ReadVerdict::Uncertain
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadVerdict {
+    /// The version is committed at or below the read timestamp.
+    Visible,
+    /// The version is invisible: an intent, an abort, a delete marker, or a
+    /// commit genuinely concurrent with (beyond the uncertainty window above)
+    /// the read.
+    Invisible,
+    /// The version committed inside `(read_ts, read_ts + uncertainty]`: it may
+    /// have preceded the read in real time, so the reader must restart above it.
+    Uncertain,
+}
+
+/// Timestamp visibility with a clock-skew uncertainty window — the tri-state the
+/// distributed (HLC) read path consumes to decide between a visible version, an
+/// invisible one, and a read restart.
+///
+/// A committed version is [`Visible`] when `commit_ts <= read_ts`, [`Uncertain`]
+/// when `read_ts < commit_ts <= read_ts + uncertainty`, and [`Invisible`]
+/// beyond that. Intents, aborts, and delete markers follow [`satisfies_ts`] and
+/// are always [`Invisible`].
+///
+/// With `uncertainty == 0` the window is empty and the result matches
+/// [`satisfies_ts`] exactly: [`Visible`] where it returns `true`, [`Invisible`]
+/// where it returns `false`, and never [`Uncertain`]. Every centralized
+/// (`LogicalTso`) caller therefore sees the unchanged two-valued behavior.
+///
+/// [`Visible`]: ReadVerdict::Visible
+/// [`Invisible`]: ReadVerdict::Invisible
+/// [`Uncertain`]: ReadVerdict::Uncertain
+#[must_use]
+pub const fn read_verdict(read_ts: u64, state: TsVersionState, uncertainty: u64) -> ReadVerdict {
+    match state {
+        TsVersionState::Committed { commit_ts } => {
+            if commit_ts <= read_ts {
+                ReadVerdict::Visible
+            } else if commit_ts <= read_ts.saturating_add(uncertainty) {
+                ReadVerdict::Uncertain
+            } else {
+                ReadVerdict::Invisible
+            }
+        }
+        TsVersionState::Intent | TsVersionState::Aborted | TsVersionState::Deleted { .. } => {
+            ReadVerdict::Invisible
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
@@ -220,6 +277,64 @@ mod tests {
         ));
         assert!(!satisfies_ts(100, TsVersionState::Intent));
         assert!(!satisfies_ts(100, TsVersionState::Aborted));
+    }
+
+    #[test]
+    fn read_verdict_covers_the_boundary_and_window_edges() {
+        use assert2::assert;
+
+        let committed = |commit_ts| TsVersionState::Committed { commit_ts };
+        // (read_ts, state, uncertainty, expected verdict)
+        let cases = [
+            // commit_ts == read_ts is visible regardless of the window.
+            (10, committed(10), 0, ReadVerdict::Visible),
+            (10, committed(10), 5, ReadVerdict::Visible),
+            // commit_ts one past the read is invisible with an empty window...
+            (10, committed(11), 0, ReadVerdict::Invisible),
+            // ...and uncertain once the window admits it.
+            (10, committed(11), 1, ReadVerdict::Uncertain),
+            (10, committed(11), 5, ReadVerdict::Uncertain),
+            // The far edge of the window is still uncertain.
+            (10, committed(15), 5, ReadVerdict::Uncertain),
+            // Just past the window is genuinely concurrent, hence invisible.
+            (10, committed(16), 5, ReadVerdict::Invisible),
+            // saturating_add keeps a huge window from overflowing.
+            (u64::MAX - 1, committed(u64::MAX), 5, ReadVerdict::Uncertain),
+            // Non-committed states never depend on the window.
+            (10, TsVersionState::Intent, 5, ReadVerdict::Invisible),
+            (10, TsVersionState::Aborted, 5, ReadVerdict::Invisible),
+            (
+                10,
+                TsVersionState::Deleted { commit_ts: 8 },
+                5,
+                ReadVerdict::Invisible,
+            ),
+        ];
+        for (read_ts, state, uncertainty, expected) in cases {
+            assert!(read_verdict(read_ts, state, uncertainty) == expected);
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn read_verdict_at_zero_uncertainty_matches_satisfies_ts(
+            read_ts in 0_u64..1_000,
+            commit_ts in 0_u64..1_000,
+            variant in 0_u8..4,
+        ) {
+            let state = match variant {
+                0 => TsVersionState::Committed { commit_ts },
+                1 => TsVersionState::Deleted { commit_ts },
+                2 => TsVersionState::Intent,
+                _ => TsVersionState::Aborted,
+            };
+            let expected = if satisfies_ts(read_ts, state) {
+                ReadVerdict::Visible
+            } else {
+                ReadVerdict::Invisible
+            };
+            prop_assert_eq!(read_verdict(read_ts, state, 0), expected);
+        }
     }
 
     proptest! {

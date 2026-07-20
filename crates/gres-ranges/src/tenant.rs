@@ -68,10 +68,38 @@ pub struct MultiRangeTenantConfig {
     /// Whether tenant assembly should settle durable timestamp transactions immediately.
     /// Activation recovery disables this until successor publication owns recovery.
     pub recover_timestamps_on_start: bool,
+    /// Which timestamp-ordering source this tenant installs on its engines.
+    pub timestamp_source_mode: TimestampSourceMode,
     #[doc(hidden)]
     pub commit_fault_for_testing: Option<GatewayCommitFault>,
     #[doc(hidden)]
     pub empty_table_split_test_hook: Option<EmptyTableSplitTestHook>,
+}
+
+/// The timestamp-ordering source a tenant installs, chosen at provision time.
+///
+/// Mode is explicit tenant configuration, not inferred from topology: a
+/// distributed topology running [`LogicalTso`](TimestampSourceMode::LogicalTso)
+/// is a legitimate single-zone-HA configuration, and promotion to
+/// [`Hlc`](TimestampSourceMode::Hlc) is an administrative act. The existing
+/// topology-based selection (in-process oracle vs. registry-forwarded vs.
+/// unavailable) still decides *how* the chosen mode is wired for this node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TimestampSourceMode {
+    /// Centralized range-0 logical oracle — the solo default. Timestamps flow
+    /// through one authority with its successor grace period, stride batching,
+    /// and epoch fencing.
+    #[default]
+    LogicalTso,
+    /// Node-local Hybrid Logical Clock. Each node mints stamps from its own
+    /// clock with no RPC. A single `HlcTimestampSource` fanned to every engine
+    /// is correct on its own (one authority, so no cross-node skew); multi-node
+    /// stamping and uncertainty-window read-restart are documented follow-up.
+    Hlc {
+        /// Maximum tolerated clock offset in milliseconds; sizes the read
+        /// uncertainty window.
+        max_offset_ms: u64,
+    },
 }
 
 #[doc(hidden)]
@@ -140,6 +168,7 @@ impl MultiRangeTenantConfig {
             range_registry: None,
             range_client: None,
             recover_timestamps_on_start: true,
+            timestamp_source_mode: TimestampSourceMode::default(),
             commit_fault_for_testing: None,
             empty_table_split_test_hook: None,
         })
@@ -202,6 +231,13 @@ impl MultiRangeTenantConfig {
         self
     }
 
+    /// Select the timestamp-ordering source this tenant installs.
+    #[must_use]
+    pub fn with_timestamp_source_mode(mut self, mode: TimestampSourceMode) -> Self {
+        self.timestamp_source_mode = mode;
+        self
+    }
+
     #[doc(hidden)]
     #[must_use]
     pub fn with_commit_fault_for_testing(mut self, fault: GatewayCommitFault) -> Self {
@@ -246,7 +282,7 @@ pub enum TenantError {
     MissingRangeZeroReplica,
     /// The range-0 timestamp oracle failed to start.
     #[error("range r0 timestamp oracle: {0}")]
-    TimestampOracle(TsoError),
+    TimestampSource(TsoError),
     /// A durable timestamp transaction could not be settled before serving.
     #[error("timestamp transaction recovery: {0}")]
     TimestampRecovery(String),
@@ -525,7 +561,7 @@ impl MultiRangeTenant {
     pub fn start_with_engine_factory_and_timestamp_oracle(
         mut config: MultiRangeTenantConfig,
         mut open_engine: impl FnMut(Option<&PathBuf>, RangeId) -> Result<SqlEngine, ExecError>,
-        timestamp_oracle: Option<Arc<dyn crabka_pgexec::TimestampOracle>>,
+        timestamp_oracle: Option<Arc<dyn crabka_pgexec::TimestampSource>>,
     ) -> Result<(Self, MultiRangeTenantHandles), TenantError> {
         let hosts_range0 = Self::validate_range0_assembly(&mut config)?;
         let mut engines = BTreeMap::new();
@@ -567,13 +603,18 @@ impl MultiRangeTenant {
 
         match timestamp_oracle {
             Some(timestamp_oracle) => install_timestamp_oracle(&mut engines, &timestamp_oracle),
-            None if hosts_range0 => install_memory_timestamp_oracle(&mut engines)?,
+            None if hosts_range0 => match config.timestamp_source_mode {
+                TimestampSourceMode::LogicalTso => install_memory_timestamp_oracle(&mut engines)?,
+                TimestampSourceMode::Hlc { max_offset_ms } => {
+                    install_hlc_timestamp_source(&mut engines, max_offset_ms)?;
+                }
+            },
             None => {
                 if let (Some(registry), Some(client)) =
                     (config.range_registry.clone(), config.range_client.clone())
                 {
                     let rpc = Arc::new(RegistryTsoRpc::new(registry, client));
-                    let timestamp_oracle: Arc<dyn crabka_pgexec::TimestampOracle> =
+                    let timestamp_oracle: Arc<dyn crabka_pgexec::TimestampSource> =
                         Arc::new(PgexecTsoOracle {
                             client: BatchedTsoClient::new(rpc),
                         });
@@ -1752,13 +1793,13 @@ impl TsoRpc for SharedTsoRpc {
 }
 
 #[async_trait::async_trait]
-impl<R> crabka_pgexec::TimestampOracle for PgexecTsoOracle<R>
+impl<R> crabka_pgexec::TimestampSource for PgexecTsoOracle<R>
 where
     R: TsoRpc,
 {
     async fn allocate_read_timestamp(
         &self,
-    ) -> Result<crabka_pgexec::timestamp_txn::ReadTimestamp, crabka_pgexec::TimestampOracleError>
+    ) -> Result<crabka_pgexec::timestamp_txn::ReadTimestamp, crabka_pgexec::TimestampSourceError>
     {
         let timestamp = self.grant_one().await?;
         crabka_pgexec::timestamp_txn::ReadTimestamp::new(timestamp).map_err(Into::into)
@@ -1766,7 +1807,7 @@ where
 
     async fn allocate_transaction_id(
         &self,
-    ) -> Result<crabka_pgexec::TimestampTransactionId, crabka_pgexec::TimestampOracleError> {
+    ) -> Result<crabka_pgexec::TimestampTransactionId, crabka_pgexec::TimestampSourceError> {
         let timestamp = self.grant_one().await?;
         crabka_pgexec::TimestampTransactionId::new(timestamp).map_err(Into::into)
     }
@@ -1776,20 +1817,20 @@ where
         hidden_rowid_count: usize,
     ) -> Result<
         crabka_pgexec::timestamp_txn::TimestampWriteLease,
-        crabka_pgexec::TimestampOracleError,
+        crabka_pgexec::TimestampSourceError,
     > {
         let count = u64::try_from(hidden_rowid_count)
             .ok()
             .and_then(|count| count.checked_add(1))
             .and_then(NonZeroU64::new)
             .ok_or_else(|| {
-                crabka_pgexec::TimestampOracleError::Unavailable(
+                crabka_pgexec::TimestampSourceError::Unavailable(
                     "timestamp write lease is too large".into(),
                 )
             })?;
         let lease =
             self.client.grant(count).await.map_err(|error| {
-                crabka_pgexec::TimestampOracleError::Unavailable(error.to_string())
+                crabka_pgexec::TimestampSourceError::Unavailable(error.to_string())
             })?;
         let start_ts = crabka_pgexec::TimestampTransactionId::new(lease.first_ts.get())?;
         let hidden_rowids = (1..=hidden_rowid_count)
@@ -1799,7 +1840,7 @@ where
                     .get()
                     .checked_add(u64::try_from(offset).expect("offset fits u64"))
                     .ok_or_else(|| {
-                        crabka_pgexec::TimestampOracleError::Unavailable(
+                        crabka_pgexec::TimestampSourceError::Unavailable(
                             "timestamp write lease overflow".into(),
                         )
                     })
@@ -1814,7 +1855,7 @@ where
     async fn allocate_commit_after(
         &self,
         start_ts: crabka_pgexec::TimestampTransactionId,
-    ) -> Result<crabka_pgexec::CommitTimestamp, crabka_pgexec::TimestampOracleError> {
+    ) -> Result<crabka_pgexec::CommitTimestamp, crabka_pgexec::TimestampSourceError> {
         let timestamp = self.grant_one().await?;
         crabka_pgexec::CommitTimestamp::after_start(start_ts, timestamp).map_err(Into::into)
     }
@@ -1824,13 +1865,13 @@ impl<R> PgexecTsoOracle<R>
 where
     R: TsoRpc,
 {
-    async fn grant_one(&self) -> Result<u64, crabka_pgexec::TimestampOracleError> {
+    async fn grant_one(&self) -> Result<u64, crabka_pgexec::TimestampSourceError> {
         let count = NonZeroU64::new(1).expect("one is non-zero");
         self.client
             .grant(count)
             .await
             .map(|lease| lease.first_ts.get())
-            .map_err(|error| crabka_pgexec::TimestampOracleError::Unavailable(error.to_string()))
+            .map_err(|error| crabka_pgexec::TimestampSourceError::Unavailable(error.to_string()))
     }
 }
 
@@ -1868,7 +1909,7 @@ pub fn pgexec_timestamp_oracle_from_horizon<C, H>(
     heartbeat: H,
     epoch: i16,
     persisted_max_ts: u64,
-) -> Result<Arc<dyn crabka_pgexec::TimestampOracle>, TsoError>
+) -> Result<Arc<dyn crabka_pgexec::TimestampSource>, TsoError>
 where
     C: TsoHorizonCommitter + 'static,
     H: EpochHeartbeat + 'static,
@@ -1890,7 +1931,7 @@ where
 #[must_use]
 pub fn pgexec_timestamp_oracle_from_rpc(
     rpc: Arc<dyn TsoRpc>,
-) -> Arc<dyn crabka_pgexec::TimestampOracle> {
+) -> Arc<dyn crabka_pgexec::TimestampSource> {
     Arc::new(PgexecTsoOracle {
         client: BatchedTsoClient::new(Arc::new(SharedTsoRpc(rpc))),
     })
@@ -1936,58 +1977,89 @@ fn install_memory_timestamp_oracle(
     let horizon = MemoryTsoHorizon::new(coordinator.kv_handle(), 1);
     let persisted_max_ts = horizon
         .load_max_ts()
-        .map_err(TenantError::TimestampOracle)?;
+        .map_err(TenantError::TimestampSource)?;
     let timestamp_oracle =
         pgexec_timestamp_oracle_from_horizon(horizon.clone(), horizon, 1, persisted_max_ts)
-            .map_err(TenantError::TimestampOracle)?;
+            .map_err(TenantError::TimestampSource)?;
 
     install_timestamp_oracle(engines, &timestamp_oracle);
     Ok(())
 }
 
+/// Install a node-local Hybrid Logical Clock source, seeded from the durable
+/// `LogicalTso` horizon so its first stamp dominates every solo-mode stamp.
+///
+/// This mirrors [`install_memory_timestamp_oracle`]: it fans one source to every
+/// hosted engine. A single `HlcTimestampSource` is the sole timestamp authority
+/// here, so it is correct on its own — multi-node stamping and the
+/// uncertainty-window read-restart are the documented follow-up.
+fn install_hlc_timestamp_source(
+    engines: &mut BTreeMap<RangeId, SqlEngine>,
+    max_offset_ms: u64,
+) -> Result<(), TenantError> {
+    let Some(coordinator) = engines.get(&RangeId::COORDINATOR) else {
+        return Ok(());
+    };
+    // The persisted LogicalTso horizon is a packed stamp with physical zero;
+    // seeding folds it in so every distributed stamp strictly dominates it.
+    let horizon = MemoryTsoHorizon::new(coordinator.kv_handle(), 1);
+    let persisted_max_ts = horizon
+        .load_max_ts()
+        .map_err(TenantError::TimestampSource)?;
+    let wall: Arc<dyn crabka_pgexec::WallClock> = Arc::new(crabka_pgexec::SystemWallClock);
+    let timestamp_source: Arc<dyn crabka_pgexec::TimestampSource> =
+        Arc::new(crabka_pgexec::HlcTimestampSource::seeded_from_horizon(
+            persisted_max_ts,
+            wall,
+            max_offset_ms,
+        ));
+    install_timestamp_oracle(engines, &timestamp_source);
+    Ok(())
+}
+
 fn install_timestamp_oracle(
     engines: &mut BTreeMap<RangeId, SqlEngine>,
-    timestamp_oracle: &Arc<dyn crabka_pgexec::TimestampOracle>,
+    timestamp_oracle: &Arc<dyn crabka_pgexec::TimestampSource>,
 ) {
     for engine in engines.values_mut() {
         engine.set_timestamp_oracle(Arc::clone(timestamp_oracle));
     }
 }
 
-struct UnavailableRange0TimestampOracle;
+struct UnavailableRange0TimestampSource;
 
 #[async_trait::async_trait]
-impl crabka_pgexec::TimestampOracle for UnavailableRange0TimestampOracle {
+impl crabka_pgexec::TimestampSource for UnavailableRange0TimestampSource {
     async fn allocate_read_timestamp(
         &self,
-    ) -> Result<crabka_pgexec::timestamp_txn::ReadTimestamp, crabka_pgexec::TimestampOracleError>
+    ) -> Result<crabka_pgexec::timestamp_txn::ReadTimestamp, crabka_pgexec::TimestampSourceError>
     {
         Err(timestamp_oracle_unavailable())
     }
 
     async fn allocate_transaction_id(
         &self,
-    ) -> Result<crabka_pgexec::TimestampTransactionId, crabka_pgexec::TimestampOracleError> {
+    ) -> Result<crabka_pgexec::TimestampTransactionId, crabka_pgexec::TimestampSourceError> {
         Err(timestamp_oracle_unavailable())
     }
 
     async fn allocate_commit_after(
         &self,
         _start_ts: crabka_pgexec::TimestampTransactionId,
-    ) -> Result<crabka_pgexec::CommitTimestamp, crabka_pgexec::TimestampOracleError> {
+    ) -> Result<crabka_pgexec::CommitTimestamp, crabka_pgexec::TimestampSourceError> {
         Err(timestamp_oracle_unavailable())
     }
 }
 
-fn timestamp_oracle_unavailable() -> crabka_pgexec::TimestampOracleError {
-    crabka_pgexec::TimestampOracleError::Unavailable(
+fn timestamp_oracle_unavailable() -> crabka_pgexec::TimestampSourceError {
+    crabka_pgexec::TimestampSourceError::Unavailable(
         "range-0 timestamp oracle is unavailable on an rN-only compute".into(),
     )
 }
 
 fn install_unavailable_timestamp_oracle(engines: &mut BTreeMap<RangeId, SqlEngine>) {
-    let timestamp_oracle: Arc<dyn crabka_pgexec::TimestampOracle> =
-        Arc::new(UnavailableRange0TimestampOracle);
+    let timestamp_oracle: Arc<dyn crabka_pgexec::TimestampSource> =
+        Arc::new(UnavailableRange0TimestampSource);
     install_timestamp_oracle(engines, &timestamp_oracle);
 }
 
@@ -4074,6 +4146,16 @@ impl GatewaySession {
             )
         })?;
         let autocommit = matches!(self.transaction, GatewayTransaction::Idle);
+        // Single-shard bypass: an autocommit statement routed to exactly one
+        // hosted range commits against that range's own local sequence instead
+        // of the global timestamp source. `ranges` is the routed range set, so a
+        // one-element set is the single-shard classification; the target engine
+        // must be hosted here to reach its local sequence.
+        let bypass_engine = if autocommit && ranges.len() == 1 {
+            serving.engine(ranges[0])
+        } else {
+            None
+        };
         let mut plan = coordinator
             .plan_timestamp_write_sql(statement)
             .map_err(ExecError::into_pg)?;
@@ -4095,10 +4177,16 @@ impl GatewaySession {
             .table_for_timestamp_writes(&plan.writes)
             .map_err(ExecError::into_pg)?;
         let write_lease = {
-            let lease = coordinator
-                .allocate_timestamp_write_lease(plan.writes.len())
-                .await
-                .map_err(ExecError::into_pg)?;
+            let lease = if let Some(engine) = bypass_engine {
+                engine
+                    .allocate_local_timestamp_write_lease(plan.writes.len())
+                    .map_err(ExecError::into_pg)?
+            } else {
+                coordinator
+                    .allocate_timestamp_write_lease(plan.writes.len())
+                    .await
+                    .map_err(ExecError::into_pg)?
+            };
             plan = coordinator
                 .plan_timestamp_write_sql_with_rowids(statement, &lease.hidden_rowids)
                 .map_err(ExecError::into_pg)?;
@@ -4151,10 +4239,16 @@ impl GatewaySession {
                     "injected crash after timestamp prewrites before durable decision",
                 ));
             }
-            let commit_ts = coordinator
-                .allocate_commit_timestamp_after(start_ts)
-                .await
-                .map_err(ExecError::into_pg)?;
+            let commit_ts = if let Some(engine) = bypass_engine {
+                engine
+                    .allocate_local_commit_timestamp_after(start_ts)
+                    .map_err(ExecError::into_pg)?
+            } else {
+                coordinator
+                    .allocate_commit_timestamp_after(start_ts)
+                    .await
+                    .map_err(ExecError::into_pg)?
+            };
             self.timestamp_resolve(
                 primary_range,
                 identity,
@@ -6707,6 +6801,51 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn hlc_mode_serves_monotonic_timestamps_through_the_allocation_path() {
+        let config = MultiRangeTenantConfig::from_boundaries(tenant(), "0:0,50:10")
+            .expect("config")
+            .with_timestamp_source_mode(TimestampSourceMode::Hlc { max_offset_ms: 250 });
+        let (gateway, _handles) = MultiRangeTenant::start(config).expect("tenant");
+        let engines = gateway.hosted_range_engines();
+        let source = engines[&RangeId::COORDINATOR].timestamp_oracle_handle();
+
+        // Selecting Hlc installs a real, working single-source clock: its
+        // uncertainty window is the configured offset in the packed domain.
+        assert!(source.uncertainty_window() == crabka_pgexec::hlc::pack(250, 0));
+        assert!(source.uncertainty_window() > 0);
+
+        // Every stamp minted through the normal allocation path is monotone.
+        let mut previous = 0;
+        for _ in 0..8 {
+            let read = source.allocate_read_timestamp().await.expect("read").get();
+            assert!(read > previous);
+            previous = read;
+
+            let start = source
+                .allocate_transaction_id()
+                .await
+                .expect("start timestamp");
+            assert!(start.get() > previous);
+            previous = start.get();
+
+            let commit = source
+                .allocate_commit_after(start)
+                .await
+                .expect("commit timestamp");
+            assert!(commit.get() > start.get());
+            assert!(commit.get() > previous);
+            previous = commit.get();
+        }
+    }
+
+    #[test]
+    fn logical_tso_mode_is_the_default() {
+        let config =
+            MultiRangeTenantConfig::from_boundaries(tenant(), "0:0,50:10").expect("config");
+        assert!(config.timestamp_source_mode == TimestampSourceMode::LogicalTso);
+    }
+
     #[test]
     fn control_markers_accepts_exact_r0_owner() {
         let config =
@@ -7701,7 +7840,7 @@ mod tests {
             client: BatchedTsoClient::new(rpc),
         };
 
-        let error = crabka_pgexec::TimestampOracle::allocate_transaction_id(&timestamp_oracle)
+        let error = crabka_pgexec::TimestampSource::allocate_transaction_id(&timestamp_oracle)
             .await
             .expect_err("fenced oracle rejects grants");
 

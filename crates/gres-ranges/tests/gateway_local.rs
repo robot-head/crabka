@@ -874,8 +874,8 @@ async fn cross_range_single_statement_returns_feature_not_supported() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gateway_forwards_remote_autocommit_over_tcp() {
     let mut remote = crabka_pgexec::SqlEngine::new();
-    let timestamp_oracle: Arc<dyn crabka_pgexec::TimestampOracle> =
-        Arc::new(crabka_pgexec::timestamp_txn::LocalTimestampOracle::default());
+    let timestamp_oracle: Arc<dyn crabka_pgexec::TimestampSource> =
+        Arc::new(crabka_pgexec::timestamp_txn::LocalTimestampSource::default());
     remote.set_timestamp_oracle(Arc::clone(&timestamp_oracle));
     let mut remote_session = remote.connect();
     remote_session
