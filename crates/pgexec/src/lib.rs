@@ -49,7 +49,9 @@ pub mod foreign;
 mod format_fn;
 mod func;
 mod gtm;
+pub mod hlc;
 mod join;
+mod local_sequence;
 mod lockmgr;
 pub mod plan_dist;
 mod procarray;
@@ -75,6 +77,8 @@ use crabka_pgkv::{FjallKv, Kv, MemKv};
 use crabka_pgwire::engine::Engine;
 pub use error::ExecError;
 pub use gtm::GlobalXidLease;
+pub use hlc::{Hlc, HybridLogicalClock};
+pub use local_sequence::LocalSequence;
 pub use read_gate::{Linearizer, LocalLinearizer};
 pub use scanner::{
     ColumnPredicate, JoinExecutionStrategy, JoinKind, JoinRangeRequest, JoinRangeResult, JoinRow,
