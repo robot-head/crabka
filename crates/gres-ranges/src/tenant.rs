@@ -68,10 +68,38 @@ pub struct MultiRangeTenantConfig {
     /// Whether tenant assembly should settle durable timestamp transactions immediately.
     /// Activation recovery disables this until successor publication owns recovery.
     pub recover_timestamps_on_start: bool,
+    /// Which timestamp-ordering source this tenant installs on its engines.
+    pub timestamp_source_mode: TimestampSourceMode,
     #[doc(hidden)]
     pub commit_fault_for_testing: Option<GatewayCommitFault>,
     #[doc(hidden)]
     pub empty_table_split_test_hook: Option<EmptyTableSplitTestHook>,
+}
+
+/// The timestamp-ordering source a tenant installs, chosen at provision time.
+///
+/// Mode is explicit tenant configuration, not inferred from topology: a
+/// distributed topology running [`LogicalTso`](TimestampSourceMode::LogicalTso)
+/// is a legitimate single-zone-HA configuration, and promotion to
+/// [`Hlc`](TimestampSourceMode::Hlc) is an administrative act. The existing
+/// topology-based selection (in-process oracle vs. registry-forwarded vs.
+/// unavailable) still decides *how* the chosen mode is wired for this node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TimestampSourceMode {
+    /// Centralized range-0 logical oracle — the solo default. Timestamps flow
+    /// through one authority with its successor grace period, stride batching,
+    /// and epoch fencing.
+    #[default]
+    LogicalTso,
+    /// Node-local Hybrid Logical Clock. Each node mints stamps from its own
+    /// clock with no RPC. A single `HlcTimestampSource` fanned to every engine
+    /// is correct on its own (one authority, so no cross-node skew); multi-node
+    /// stamping and uncertainty-window read-restart are documented follow-up.
+    Hlc {
+        /// Maximum tolerated clock offset in milliseconds; sizes the read
+        /// uncertainty window.
+        max_offset_ms: u64,
+    },
 }
 
 #[doc(hidden)]
@@ -140,6 +168,7 @@ impl MultiRangeTenantConfig {
             range_registry: None,
             range_client: None,
             recover_timestamps_on_start: true,
+            timestamp_source_mode: TimestampSourceMode::default(),
             commit_fault_for_testing: None,
             empty_table_split_test_hook: None,
         })
@@ -199,6 +228,13 @@ impl MultiRangeTenantConfig {
     #[must_use]
     pub fn defer_timestamp_recovery(mut self) -> Self {
         self.recover_timestamps_on_start = false;
+        self
+    }
+
+    /// Select the timestamp-ordering source this tenant installs.
+    #[must_use]
+    pub fn with_timestamp_source_mode(mut self, mode: TimestampSourceMode) -> Self {
+        self.timestamp_source_mode = mode;
         self
     }
 
@@ -567,7 +603,12 @@ impl MultiRangeTenant {
 
         match timestamp_oracle {
             Some(timestamp_oracle) => install_timestamp_oracle(&mut engines, &timestamp_oracle),
-            None if hosts_range0 => install_memory_timestamp_oracle(&mut engines)?,
+            None if hosts_range0 => match config.timestamp_source_mode {
+                TimestampSourceMode::LogicalTso => install_memory_timestamp_oracle(&mut engines)?,
+                TimestampSourceMode::Hlc { max_offset_ms } => {
+                    install_hlc_timestamp_source(&mut engines, max_offset_ms)?;
+                }
+            },
             None => {
                 if let (Some(registry), Some(client)) =
                     (config.range_registry.clone(), config.range_client.clone())
@@ -1942,6 +1983,37 @@ fn install_memory_timestamp_oracle(
             .map_err(TenantError::TimestampSource)?;
 
     install_timestamp_oracle(engines, &timestamp_oracle);
+    Ok(())
+}
+
+/// Install a node-local Hybrid Logical Clock source, seeded from the durable
+/// `LogicalTso` horizon so its first stamp dominates every solo-mode stamp.
+///
+/// This mirrors [`install_memory_timestamp_oracle`]: it fans one source to every
+/// hosted engine. A single `HlcTimestampSource` is the sole timestamp authority
+/// here, so it is correct on its own — multi-node stamping and the
+/// uncertainty-window read-restart are the documented follow-up.
+fn install_hlc_timestamp_source(
+    engines: &mut BTreeMap<RangeId, SqlEngine>,
+    max_offset_ms: u64,
+) -> Result<(), TenantError> {
+    let Some(coordinator) = engines.get(&RangeId::COORDINATOR) else {
+        return Ok(());
+    };
+    // The persisted LogicalTso horizon is a packed stamp with physical zero;
+    // seeding folds it in so every distributed stamp strictly dominates it.
+    let horizon = MemoryTsoHorizon::new(coordinator.kv_handle(), 1);
+    let persisted_max_ts = horizon
+        .load_max_ts()
+        .map_err(TenantError::TimestampSource)?;
+    let wall: Arc<dyn crabka_pgexec::WallClock> = Arc::new(crabka_pgexec::SystemWallClock);
+    let timestamp_source: Arc<dyn crabka_pgexec::TimestampSource> =
+        Arc::new(crabka_pgexec::HlcTimestampSource::seeded_from_horizon(
+            persisted_max_ts,
+            wall,
+            max_offset_ms,
+        ));
+    install_timestamp_oracle(engines, &timestamp_source);
     Ok(())
 }
 
@@ -6705,6 +6777,51 @@ mod tests {
                 hash_bucket: None,
             }]
         );
+    }
+
+    #[tokio::test]
+    async fn hlc_mode_serves_monotonic_timestamps_through_the_allocation_path() {
+        let config = MultiRangeTenantConfig::from_boundaries(tenant(), "0:0,50:10")
+            .expect("config")
+            .with_timestamp_source_mode(TimestampSourceMode::Hlc { max_offset_ms: 250 });
+        let (gateway, _handles) = MultiRangeTenant::start(config).expect("tenant");
+        let engines = gateway.hosted_range_engines();
+        let source = engines[&RangeId::COORDINATOR].timestamp_oracle_handle();
+
+        // Selecting Hlc installs a real, working single-source clock: its
+        // uncertainty window is the configured offset in the packed domain.
+        assert!(source.uncertainty_window() == crabka_pgexec::hlc::pack(250, 0));
+        assert!(source.uncertainty_window() > 0);
+
+        // Every stamp minted through the normal allocation path is monotone.
+        let mut previous = 0;
+        for _ in 0..8 {
+            let read = source.allocate_read_timestamp().await.expect("read").get();
+            assert!(read > previous);
+            previous = read;
+
+            let start = source
+                .allocate_transaction_id()
+                .await
+                .expect("start timestamp");
+            assert!(start.get() > previous);
+            previous = start.get();
+
+            let commit = source
+                .allocate_commit_after(start)
+                .await
+                .expect("commit timestamp");
+            assert!(commit.get() > start.get());
+            assert!(commit.get() > previous);
+            previous = commit.get();
+        }
+    }
+
+    #[test]
+    fn logical_tso_mode_is_the_default() {
+        let config =
+            MultiRangeTenantConfig::from_boundaries(tenant(), "0:0,50:10").expect("config");
+        assert!(config.timestamp_source_mode == TimestampSourceMode::LogicalTso);
     }
 
     #[test]

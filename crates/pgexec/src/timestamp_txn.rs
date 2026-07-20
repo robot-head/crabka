@@ -154,6 +154,21 @@ pub trait TimestampSource: Send + Sync {
     /// timestamps. Distributed (HLC) and range-local sources override this to
     /// advance their clock past the observed value.
     fn observe(&self, _observed_ts: u64) {}
+
+    /// The maximum clock offset, in the packed timestamp domain, that a reader
+    /// must treat as uncertain above its read timestamp (see
+    /// [`crabka_pgmvcc::visibility::read_verdict`]).
+    ///
+    /// The default is `0` — an empty window. A centralized source such as
+    /// `LogicalTso` is the sole authority, so a commit above the read timestamp
+    /// is genuinely concurrent and never uncertain. A distributed (HLC) source
+    /// overrides this with its configured `max_offset`, and only that non-zero
+    /// value can ever yield an [`Uncertain`] verdict.
+    ///
+    /// [`Uncertain`]: crabka_pgmvcc::visibility::ReadVerdict::Uncertain
+    fn uncertainty_window(&self) -> u64 {
+        0
+    }
 }
 
 /// Default in-process timestamp source preserving single-engine behavior.
