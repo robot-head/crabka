@@ -197,6 +197,17 @@ mod tests {
         );
     }
 
+    /// Only a genuine `NotFound` means "no index yet"; any other I/O error
+    /// must surface as `LogError::Io`. Here the path is a directory, so the
+    /// read fails with a non-`NotFound` kind — swallowing it would silently
+    /// return an empty index over a real error.
+    #[test]
+    fn open_surfaces_non_notfound_io_error() {
+        let dir = TempDir::new().unwrap();
+        let err = StampIndex::open(dir.path().to_path_buf()).unwrap_err();
+        assert2::assert!(let LogError::Io(_) = err);
+    }
+
     #[test]
     fn stamp_corrupt_length_is_rejected() {
         let dir = TempDir::new().unwrap();

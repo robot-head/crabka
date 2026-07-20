@@ -2821,6 +2821,89 @@ mod tests {
         );
     }
 
+    /// The verbatim (replication) append path stamps the batch's *full*
+    /// offset span: a multi-record batch appended through `append_verbatim`
+    /// records `last_offset == base_offset + last_offset_delta`, so interior
+    /// and inclusive-end offsets resolve and one past the end does not. Guards
+    /// the `base + delta` arithmetic on that path, which the owned-append
+    /// tests above don't exercise.
+    #[test]
+    fn append_verbatim_stamps_full_offset_range() {
+        let (dir, mut log) = test_log();
+        log.set_stamp_source(std::sync::Arc::new(
+            crate::stamp_source::MonotonicStampSource::new(500, 1),
+        ))
+        .unwrap();
+
+        // A four-record producer batch, appended verbatim, spans offsets 0..=3.
+        let mut producer = sample_batch(4);
+        producer.base_offset = 999; // bogus; the log overwrites it with 0
+        producer.partition_leader_epoch = -1;
+        let (_wire, vb) = verbatim_from(&producer, LeaderEpoch(4));
+        log.append_verbatim(&vb).unwrap();
+
+        // last_offset is base(0) + delta(3) = 3.
+        check!(log.stamp_for_offset(Offset(0)) == Some(500));
+        check!(log.stamp_for_offset(Offset(3)) == Some(500));
+        check!(log.stamp_for_offset(Offset(4)) == None);
+
+        let idx = StampIndex::open(dir.path().join("00000000000000000000.stampindex")).unwrap();
+        assert2::assert!(
+            idx.entries()
+                == [StampEntry {
+                    base_offset: Offset(0),
+                    last_offset: Offset(3),
+                    stamp: 500,
+                }]
+        );
+    }
+
+    /// Rolling to a new segment reopens the active `.stampindex` at the new
+    /// segment's own sidecar: the post-roll batch's entry lands in the new
+    /// segment's file, and does not leak back into the sealed segment's file.
+    /// Guards the reopen — a no-op reopen would keep stamping the sealed
+    /// segment's index.
+    #[test]
+    fn roll_reopens_stampindex_for_new_segment() {
+        let dir = tempdir().unwrap();
+        let mut log = Log::open(
+            dir.path(),
+            LogConfig {
+                segment_bytes: 1, // roll on every append after the first
+                ..LogConfig::default()
+            },
+        )
+        .unwrap();
+        log.set_stamp_source(std::sync::Arc::new(
+            crate::stamp_source::MonotonicStampSource::new(100, 5),
+        ))
+        .unwrap();
+
+        log.append(&mut sample_batch(1)).unwrap(); // offset 0, segment 0, stamp 100
+        log.append(&mut sample_batch(1)).unwrap(); // rolls: segment @ base 1, stamp 105
+
+        // The new segment's own sidecar holds exactly its post-roll entry.
+        let seg1 = StampIndex::open(dir.path().join("00000000000000000001.stampindex")).unwrap();
+        assert2::assert!(
+            seg1.entries()
+                == [StampEntry {
+                    base_offset: Offset(1),
+                    last_offset: Offset(1),
+                    stamp: 105,
+                }]
+        );
+        // The sealed segment kept only its pre-roll entry — nothing leaked back.
+        let seg0 = StampIndex::open(dir.path().join("00000000000000000000.stampindex")).unwrap();
+        assert2::assert!(
+            seg0.entries()
+                == [StampEntry {
+                    base_offset: Offset(0),
+                    last_offset: Offset(0),
+                    stamp: 100,
+                }]
+        );
+    }
+
     /// Wire-exactness invariance: appending an identical mixed sequence
     /// (non-txn, transactional data, commit marker, non-txn) to a
     /// stamp-enabled log and an unstamped log yields byte-for-byte identical

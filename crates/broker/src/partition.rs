@@ -773,6 +773,33 @@ mod tests {
             .expect("append");
     }
 
+    /// `Partition::stamp_for_offset` returns the log's actual stamp for a
+    /// covered offset and `None` beyond the stamped range — not a constant.
+    /// A distinctive stamp (`4242`) pins the delegated value so a mutant that
+    /// hard-codes `Some(0)`, `Some(1)`, or `None` is caught.
+    #[tokio::test]
+    async fn stamp_for_offset_delegates_actual_stamp() {
+        #[derive(Debug)]
+        struct FixedStamp(u64);
+        impl crabka_log::StampSource for FixedStamp {
+            fn next_stamp(&self) -> u64 {
+                self.0
+            }
+        }
+
+        let (p, _dir) = test_partition(Arc::new(Notify::new()));
+        p.log
+            .lock()
+            .expect("log mutex")
+            .set_stamp_source(Arc::new(FixedStamp(4242)))
+            .expect("set stamp source");
+        append_records(&p, 3); // offsets 0..=2, each stamped 4242
+
+        check!(p.stamp_for_offset(Offset(0)) == Some(4242));
+        check!(p.stamp_for_offset(Offset(2)) == Some(4242));
+        check!(p.stamp_for_offset(Offset(3)) == None); // beyond the stamped range
+    }
+
     #[test]
     fn partition_is_clone_and_send() {
         // Compile-time check.
