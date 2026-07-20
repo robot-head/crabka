@@ -86,7 +86,7 @@ pub use scanner::{
 pub use session::SqlSession;
 pub use timestamp_txn::{
     CommitTimestamp, DurableTimestampIntentIdentity, PrimaryTxnDecision, ReadTimestamp,
-    TimestampOracle, TimestampOracleError, TimestampTransactionId, TimestampTxnDecision,
+    TimestampSource, TimestampSourceError, TimestampTransactionId, TimestampTxnDecision,
     TimestampTxnDescriptor, TimestampTxnIdentity, TimestampTxnOperation, TimestampTxnParticipant,
     TimestampWrite, decode_timestamp_txn_descriptor_value, timestamp_txn_descriptor_op,
 };
@@ -291,7 +291,7 @@ pub struct SqlEngine {
     pub(crate) join_stats: Arc<dyn plan_dist::Stats>,
     pub(crate) join_strategy_config: plan_dist::PlannerConfig,
     /// Timestamp oracle backing the sharded timestamp transaction path.
-    pub(crate) timestamp_oracle: Arc<dyn timestamp_txn::TimestampOracle>,
+    pub(crate) timestamp_oracle: Arc<dyn timestamp_txn::TimestampSource>,
     /// Cached durable-timestamp horizon over `kv`/`catalog_kv`. Seeded lazily
     /// with one full scan, then kept exact by the horizon-observing committer,
     /// so per-statement read floors are O(1) instead of a store scan.
@@ -635,7 +635,7 @@ impl SqlEngine {
             range_scanner: Arc::new(scanner::LocalRangeScanner),
             join_stats: Arc::new(plan_dist::DurableSequenceStats::new(Arc::clone(&kv))),
             join_strategy_config: plan_dist::PlannerConfig::default(),
-            timestamp_oracle: Arc::new(timestamp_txn::LocalTimestampOracle::default()),
+            timestamp_oracle: Arc::new(timestamp_txn::LocalTimestampSource::default()),
             timestamp_horizon,
             gc_horizon: Arc::new(crabka_pgmvcc::gc::GcHorizon::new()),
             sweep_committer,
@@ -1214,7 +1214,7 @@ impl SqlEngine {
             range_scanner: Arc::new(scanner::LocalRangeScanner),
             join_stats: Arc::new(plan_dist::DurableSequenceStats::new(Arc::clone(&sm_kv))),
             join_strategy_config: plan_dist::PlannerConfig::default(),
-            timestamp_oracle: Arc::new(timestamp_txn::LocalTimestampOracle::default()),
+            timestamp_oracle: Arc::new(timestamp_txn::LocalTimestampSource::default()),
             timestamp_horizon,
             gc_horizon: Arc::new(crabka_pgmvcc::gc::GcHorizon::new()),
             vacuum_demand: Arc::new(VacuumDemand::default()),
@@ -1285,7 +1285,7 @@ impl SqlEngine {
     #[must_use]
     pub fn with_timestamp_oracle(
         mut self,
-        timestamp_oracle: Arc<dyn timestamp_txn::TimestampOracle>,
+        timestamp_oracle: Arc<dyn timestamp_txn::TimestampSource>,
     ) -> Self {
         self.timestamp_oracle = timestamp_oracle;
         self
@@ -1294,7 +1294,7 @@ impl SqlEngine {
     /// Replace this engine's timestamp oracle for subsequently created sessions.
     pub fn set_timestamp_oracle(
         &mut self,
-        timestamp_oracle: Arc<dyn timestamp_txn::TimestampOracle>,
+        timestamp_oracle: Arc<dyn timestamp_txn::TimestampSource>,
     ) {
         self.timestamp_oracle = timestamp_oracle;
     }
@@ -1348,7 +1348,7 @@ impl SqlEngine {
 
     /// Return the timestamp oracle shared by subsequently initialized local engines.
     #[must_use]
-    pub fn timestamp_oracle_handle(&self) -> Arc<dyn timestamp_txn::TimestampOracle> {
+    pub fn timestamp_oracle_handle(&self) -> Arc<dyn timestamp_txn::TimestampSource> {
         Arc::clone(&self.timestamp_oracle)
     }
 

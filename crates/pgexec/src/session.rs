@@ -860,7 +860,7 @@ pub struct SqlSession {
     join_stats: Arc<dyn crate::plan_dist::Stats>,
     join_strategy_config: crate::plan_dist::PlannerConfig,
     /// Timestamp oracle for sharded timestamp transactions.
-    timestamp_oracle: Arc<dyn crate::timestamp_txn::TimestampOracle>,
+    timestamp_oracle: Arc<dyn crate::timestamp_txn::TimestampSource>,
     /// Cached durable-timestamp horizon (shared from the engine): the floor a
     /// statement's read/transaction/commit timestamps must exceed, without
     /// rescanning the store per statement.
@@ -900,7 +900,7 @@ pub(crate) struct SqlSessionConfig {
     pub range_scanner: Arc<dyn crate::scanner::RangeScanner>,
     pub join_stats: Arc<dyn crate::plan_dist::Stats>,
     pub join_strategy_config: crate::plan_dist::PlannerConfig,
-    pub timestamp_oracle: Arc<dyn crate::timestamp_txn::TimestampOracle>,
+    pub timestamp_oracle: Arc<dyn crate::timestamp_txn::TimestampSource>,
     pub timestamp_horizon: crate::timestamp_txn::TimestampHorizonSource,
     pub gc_horizon: Arc<crabka_pgmvcc::gc::GcHorizon>,
 }
@@ -4939,10 +4939,10 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl crate::timestamp_txn::TimestampOracle for FailFirstCommitOracle {
+    impl crate::timestamp_txn::TimestampSource for FailFirstCommitOracle {
         async fn allocate_read_timestamp(
             &self,
-        ) -> Result<crate::timestamp_txn::ReadTimestamp, crate::timestamp_txn::TimestampOracleError>
+        ) -> Result<crate::timestamp_txn::ReadTimestamp, crate::timestamp_txn::TimestampSourceError>
         {
             let timestamp = self.next_start_ts.fetch_add(1, Ordering::SeqCst);
             crate::timestamp_txn::ReadTimestamp::new(timestamp).map_err(Into::into)
@@ -4952,7 +4952,7 @@ mod tests {
             &self,
         ) -> Result<
             crate::timestamp_txn::TimestampTransactionId,
-            crate::timestamp_txn::TimestampOracleError,
+            crate::timestamp_txn::TimestampSourceError,
         > {
             let timestamp = self.next_start_ts.fetch_add(1, Ordering::SeqCst);
             crate::timestamp_txn::TimestampTransactionId::new(timestamp).map_err(Into::into)
@@ -4961,10 +4961,10 @@ mod tests {
         async fn allocate_commit_after(
             &self,
             start_ts: crate::timestamp_txn::TimestampTransactionId,
-        ) -> Result<crate::timestamp_txn::CommitTimestamp, crate::timestamp_txn::TimestampOracleError>
+        ) -> Result<crate::timestamp_txn::CommitTimestamp, crate::timestamp_txn::TimestampSourceError>
         {
             if self.should_fail_commit.swap(false, Ordering::SeqCst) {
-                return Err(crate::timestamp_txn::TimestampOracleError::Unavailable(
+                return Err(crate::timestamp_txn::TimestampSourceError::Unavailable(
                     "injected commit timestamp failure".into(),
                 ));
             }

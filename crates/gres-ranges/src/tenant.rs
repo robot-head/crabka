@@ -246,7 +246,7 @@ pub enum TenantError {
     MissingRangeZeroReplica,
     /// The range-0 timestamp oracle failed to start.
     #[error("range r0 timestamp oracle: {0}")]
-    TimestampOracle(TsoError),
+    TimestampSource(TsoError),
     /// A durable timestamp transaction could not be settled before serving.
     #[error("timestamp transaction recovery: {0}")]
     TimestampRecovery(String),
@@ -525,7 +525,7 @@ impl MultiRangeTenant {
     pub fn start_with_engine_factory_and_timestamp_oracle(
         mut config: MultiRangeTenantConfig,
         mut open_engine: impl FnMut(Option<&PathBuf>, RangeId) -> Result<SqlEngine, ExecError>,
-        timestamp_oracle: Option<Arc<dyn crabka_pgexec::TimestampOracle>>,
+        timestamp_oracle: Option<Arc<dyn crabka_pgexec::TimestampSource>>,
     ) -> Result<(Self, MultiRangeTenantHandles), TenantError> {
         let hosts_range0 = Self::validate_range0_assembly(&mut config)?;
         let mut engines = BTreeMap::new();
@@ -573,7 +573,7 @@ impl MultiRangeTenant {
                     (config.range_registry.clone(), config.range_client.clone())
                 {
                     let rpc = Arc::new(RegistryTsoRpc::new(registry, client));
-                    let timestamp_oracle: Arc<dyn crabka_pgexec::TimestampOracle> =
+                    let timestamp_oracle: Arc<dyn crabka_pgexec::TimestampSource> =
                         Arc::new(PgexecTsoOracle {
                             client: BatchedTsoClient::new(rpc),
                         });
@@ -1752,13 +1752,13 @@ impl TsoRpc for SharedTsoRpc {
 }
 
 #[async_trait::async_trait]
-impl<R> crabka_pgexec::TimestampOracle for PgexecTsoOracle<R>
+impl<R> crabka_pgexec::TimestampSource for PgexecTsoOracle<R>
 where
     R: TsoRpc,
 {
     async fn allocate_read_timestamp(
         &self,
-    ) -> Result<crabka_pgexec::timestamp_txn::ReadTimestamp, crabka_pgexec::TimestampOracleError>
+    ) -> Result<crabka_pgexec::timestamp_txn::ReadTimestamp, crabka_pgexec::TimestampSourceError>
     {
         let timestamp = self.grant_one().await?;
         crabka_pgexec::timestamp_txn::ReadTimestamp::new(timestamp).map_err(Into::into)
@@ -1766,7 +1766,7 @@ where
 
     async fn allocate_transaction_id(
         &self,
-    ) -> Result<crabka_pgexec::TimestampTransactionId, crabka_pgexec::TimestampOracleError> {
+    ) -> Result<crabka_pgexec::TimestampTransactionId, crabka_pgexec::TimestampSourceError> {
         let timestamp = self.grant_one().await?;
         crabka_pgexec::TimestampTransactionId::new(timestamp).map_err(Into::into)
     }
@@ -1776,20 +1776,20 @@ where
         hidden_rowid_count: usize,
     ) -> Result<
         crabka_pgexec::timestamp_txn::TimestampWriteLease,
-        crabka_pgexec::TimestampOracleError,
+        crabka_pgexec::TimestampSourceError,
     > {
         let count = u64::try_from(hidden_rowid_count)
             .ok()
             .and_then(|count| count.checked_add(1))
             .and_then(NonZeroU64::new)
             .ok_or_else(|| {
-                crabka_pgexec::TimestampOracleError::Unavailable(
+                crabka_pgexec::TimestampSourceError::Unavailable(
                     "timestamp write lease is too large".into(),
                 )
             })?;
         let lease =
             self.client.grant(count).await.map_err(|error| {
-                crabka_pgexec::TimestampOracleError::Unavailable(error.to_string())
+                crabka_pgexec::TimestampSourceError::Unavailable(error.to_string())
             })?;
         let start_ts = crabka_pgexec::TimestampTransactionId::new(lease.first_ts.get())?;
         let hidden_rowids = (1..=hidden_rowid_count)
@@ -1799,7 +1799,7 @@ where
                     .get()
                     .checked_add(u64::try_from(offset).expect("offset fits u64"))
                     .ok_or_else(|| {
-                        crabka_pgexec::TimestampOracleError::Unavailable(
+                        crabka_pgexec::TimestampSourceError::Unavailable(
                             "timestamp write lease overflow".into(),
                         )
                     })
@@ -1814,7 +1814,7 @@ where
     async fn allocate_commit_after(
         &self,
         start_ts: crabka_pgexec::TimestampTransactionId,
-    ) -> Result<crabka_pgexec::CommitTimestamp, crabka_pgexec::TimestampOracleError> {
+    ) -> Result<crabka_pgexec::CommitTimestamp, crabka_pgexec::TimestampSourceError> {
         let timestamp = self.grant_one().await?;
         crabka_pgexec::CommitTimestamp::after_start(start_ts, timestamp).map_err(Into::into)
     }
@@ -1824,13 +1824,13 @@ impl<R> PgexecTsoOracle<R>
 where
     R: TsoRpc,
 {
-    async fn grant_one(&self) -> Result<u64, crabka_pgexec::TimestampOracleError> {
+    async fn grant_one(&self) -> Result<u64, crabka_pgexec::TimestampSourceError> {
         let count = NonZeroU64::new(1).expect("one is non-zero");
         self.client
             .grant(count)
             .await
             .map(|lease| lease.first_ts.get())
-            .map_err(|error| crabka_pgexec::TimestampOracleError::Unavailable(error.to_string()))
+            .map_err(|error| crabka_pgexec::TimestampSourceError::Unavailable(error.to_string()))
     }
 }
 
@@ -1868,7 +1868,7 @@ pub fn pgexec_timestamp_oracle_from_horizon<C, H>(
     heartbeat: H,
     epoch: i16,
     persisted_max_ts: u64,
-) -> Result<Arc<dyn crabka_pgexec::TimestampOracle>, TsoError>
+) -> Result<Arc<dyn crabka_pgexec::TimestampSource>, TsoError>
 where
     C: TsoHorizonCommitter + 'static,
     H: EpochHeartbeat + 'static,
@@ -1890,7 +1890,7 @@ where
 #[must_use]
 pub fn pgexec_timestamp_oracle_from_rpc(
     rpc: Arc<dyn TsoRpc>,
-) -> Arc<dyn crabka_pgexec::TimestampOracle> {
+) -> Arc<dyn crabka_pgexec::TimestampSource> {
     Arc::new(PgexecTsoOracle {
         client: BatchedTsoClient::new(Arc::new(SharedTsoRpc(rpc))),
     })
@@ -1936,10 +1936,10 @@ fn install_memory_timestamp_oracle(
     let horizon = MemoryTsoHorizon::new(coordinator.kv_handle(), 1);
     let persisted_max_ts = horizon
         .load_max_ts()
-        .map_err(TenantError::TimestampOracle)?;
+        .map_err(TenantError::TimestampSource)?;
     let timestamp_oracle =
         pgexec_timestamp_oracle_from_horizon(horizon.clone(), horizon, 1, persisted_max_ts)
-            .map_err(TenantError::TimestampOracle)?;
+            .map_err(TenantError::TimestampSource)?;
 
     install_timestamp_oracle(engines, &timestamp_oracle);
     Ok(())
@@ -1947,47 +1947,47 @@ fn install_memory_timestamp_oracle(
 
 fn install_timestamp_oracle(
     engines: &mut BTreeMap<RangeId, SqlEngine>,
-    timestamp_oracle: &Arc<dyn crabka_pgexec::TimestampOracle>,
+    timestamp_oracle: &Arc<dyn crabka_pgexec::TimestampSource>,
 ) {
     for engine in engines.values_mut() {
         engine.set_timestamp_oracle(Arc::clone(timestamp_oracle));
     }
 }
 
-struct UnavailableRange0TimestampOracle;
+struct UnavailableRange0TimestampSource;
 
 #[async_trait::async_trait]
-impl crabka_pgexec::TimestampOracle for UnavailableRange0TimestampOracle {
+impl crabka_pgexec::TimestampSource for UnavailableRange0TimestampSource {
     async fn allocate_read_timestamp(
         &self,
-    ) -> Result<crabka_pgexec::timestamp_txn::ReadTimestamp, crabka_pgexec::TimestampOracleError>
+    ) -> Result<crabka_pgexec::timestamp_txn::ReadTimestamp, crabka_pgexec::TimestampSourceError>
     {
         Err(timestamp_oracle_unavailable())
     }
 
     async fn allocate_transaction_id(
         &self,
-    ) -> Result<crabka_pgexec::TimestampTransactionId, crabka_pgexec::TimestampOracleError> {
+    ) -> Result<crabka_pgexec::TimestampTransactionId, crabka_pgexec::TimestampSourceError> {
         Err(timestamp_oracle_unavailable())
     }
 
     async fn allocate_commit_after(
         &self,
         _start_ts: crabka_pgexec::TimestampTransactionId,
-    ) -> Result<crabka_pgexec::CommitTimestamp, crabka_pgexec::TimestampOracleError> {
+    ) -> Result<crabka_pgexec::CommitTimestamp, crabka_pgexec::TimestampSourceError> {
         Err(timestamp_oracle_unavailable())
     }
 }
 
-fn timestamp_oracle_unavailable() -> crabka_pgexec::TimestampOracleError {
-    crabka_pgexec::TimestampOracleError::Unavailable(
+fn timestamp_oracle_unavailable() -> crabka_pgexec::TimestampSourceError {
+    crabka_pgexec::TimestampSourceError::Unavailable(
         "range-0 timestamp oracle is unavailable on an rN-only compute".into(),
     )
 }
 
 fn install_unavailable_timestamp_oracle(engines: &mut BTreeMap<RangeId, SqlEngine>) {
-    let timestamp_oracle: Arc<dyn crabka_pgexec::TimestampOracle> =
-        Arc::new(UnavailableRange0TimestampOracle);
+    let timestamp_oracle: Arc<dyn crabka_pgexec::TimestampSource> =
+        Arc::new(UnavailableRange0TimestampSource);
     install_timestamp_oracle(engines, &timestamp_oracle);
 }
 
@@ -7701,7 +7701,7 @@ mod tests {
             client: BatchedTsoClient::new(rpc),
         };
 
-        let error = crabka_pgexec::TimestampOracle::allocate_transaction_id(&timestamp_oracle)
+        let error = crabka_pgexec::TimestampSource::allocate_transaction_id(&timestamp_oracle)
             .await
             .expect_err("fenced oracle rejects grants");
 
