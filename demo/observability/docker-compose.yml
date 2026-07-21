@@ -393,7 +393,7 @@ services:
 
   # ---- COLLECTOR + GRAFANA ----
   alloy:
-    image: mirror.gcr.io/grafana/alloy:v1.17.1
+    image: mirror.gcr.io/grafana/alloy:v1.18.0
     <<: *alloy-res
     command: ["run", "--server.http.listen-addr=0.0.0.0:12345", "/etc/alloy/config.alloy"]
     volumes:
