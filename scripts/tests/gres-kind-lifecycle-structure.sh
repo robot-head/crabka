@@ -17,6 +17,7 @@ required_patterns=(
     'CRABKA_GRES_COLDSTART_ITERATIONS:-10'
     'ghcr.io/pgdogdev/pgdog:0.1.47'
     'kubectl logs -l app.kubernetes.io/name=crabka-pgdog,app.kubernetes.io/instance=fleet'
+    'deployment\.kubernetes\.io/revision'
     'post-grace-pgdog-${iteration}.log'
     'timeout '
 )
@@ -26,6 +27,7 @@ done
 
 test "$(grep -Fc 'kubectl port-forward deploy/tenant-a-gres 17432:5432' "$gate")" -eq 2
 ! grep -Fq 'kubectl port-forward svc/tenant-a-gres 17432:5432' "$gate"
+! grep -Fq '.items[0].metadata.uid' "$gate"
 
 grep -Fq -- '-p crabka-gres -p crabka-gres-activator' packaging/melange/crabka.yaml
 test -f packaging/apko/crabka-gres.yaml

@@ -343,7 +343,7 @@ for iteration in $(seq 1 "$ITERATIONS"); do
         "timeout 1 bash -c '</dev/tcp/127.0.0.1/16432' 2>/dev/null"
     before_generation=$(kubectl get grestenant tenant-a -o jsonpath='{.status.registryVersion}')
     before_wake_hash=$(kubectl get secret fleet-pgdog-config -o jsonpath='{.metadata.annotations.crabka\.io/pgdog-config-hash}')
-    before_wake_pod=$(kubectl get pods -l app.kubernetes.io/name=crabka-pgdog,app.kubernetes.io/instance=fleet -o jsonpath='{.items[0].metadata.uid}')
+    before_wake_revision=$(kubectl get deploy fleet-pgdog -o jsonpath='{.metadata.annotations.deployment\.kubernetes\.io/revision}')
     start_ns=$(date +%s%N)
     latency_ms=$(measure_tls_query_ms)
     end_ns=$(date +%s%N)
@@ -356,7 +356,7 @@ for iteration in $(seq 1 "$ITERATIONS"); do
     # A no-roll assertion is therefore only sound when the observation
     # provably landed inside that window.
     after_wake_hash=$(kubectl get secret fleet-pgdog-config -o jsonpath='{.metadata.annotations.crabka\.io/pgdog-config-hash}')
-    after_wake_pod=$(kubectl get pods -l app.kubernetes.io/name=crabka-pgdog,app.kubernetes.io/instance=fleet -o jsonpath='{.items[0].metadata.uid}')
+    after_wake_revision=$(kubectl get deploy fleet-pgdog -o jsonpath='{.metadata.annotations.deployment\.kubernetes\.io/revision}')
     observed_unix_ms=$(($(date +%s%N) / 1000000))
     wait_lifecycle active
     grace_deadline_ms=$(kubectl get grestenant tenant-a -o jsonpath='{.status.pgdogCredentialGraceUntilUnixMs}')
@@ -364,7 +364,7 @@ for iteration in $(seq 1 "$ITERATIONS"); do
     if (( observed_unix_ms < grace_deadline_ms - WAKE_NOROLL_MARGIN_MS )); then
         [ "$after_wake_hash" = "$before_wake_hash" ] || \
             fail "wake path changed PgDog config before the held first session completed"
-        [ "$after_wake_pod" = "$before_wake_pod" ] || \
+        [ "$after_wake_revision" = "$before_wake_revision" ] || \
             fail "wake path rolled PgDog before the held first session completed"
         noroll_within_grace=$((noroll_within_grace + 1))
         noroll_verdict=asserted
