@@ -239,10 +239,17 @@ mod tests {
         }
     }
 
+    // Bounded so a wait that can never be satisfied (for example under a
+    // mutant that skips sampling) fails as an assertion gap, not a test hang.
     async fn wait_for_calls(calls: &AtomicUsize, at_least: usize) {
-        while calls.load(Ordering::SeqCst) < at_least {
-            tokio::task::yield_now().await;
-        }
+        let spin = async {
+            while calls.load(Ordering::SeqCst) < at_least {
+                tokio::task::yield_now().await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(5), spin)
+            .await
+            .unwrap_or_else(|_| panic!("sampler never reached {at_least} calls"));
     }
 
     #[tokio::test]
@@ -388,9 +395,14 @@ mod tests {
 
         assert!(barrier.wait_for_fresh_end().await.is_ok());
 
-        poll_loop.await.expect("join poll loop");
+        // Assert the side effects before joining: a wait that skipped the poke
+        // or the sample must fail here, not hang on a never-poked poll loop.
         assert!(tail.applied_offset() == 2);
         assert!(sampler.calls.load(Ordering::SeqCst) == 1);
+        tokio::time::timeout(Duration::from_secs(5), poll_loop)
+            .await
+            .expect("poll loop must have been poked")
+            .expect("join poll loop");
     }
 
     #[tokio::test]
