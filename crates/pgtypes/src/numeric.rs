@@ -1168,7 +1168,7 @@ fn num_ordinal_suffix(n: i64, upper: bool) -> String {
 // The method forms (`.exp()`, `.ln()`, `.sqrt()`, `.powf()`) use the embedded
 // context, so we carry `prec` only to the `num_to_bf` constructor.
 // ---------------------------------------------------------------------------
-use dashu_float::{DBig, ops::SquareRoot};
+use dashu_float::DBig;
 
 /// Parse a plain-decimal string into a `DBig` with `prec` significant digits.
 fn num_to_bf(s: &str, prec: usize) -> DBig {

@@ -233,7 +233,7 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 # Chapter Gres — vendored crabgresql engine (crabgresql@93f3d17).
 bigdecimal = "0.4"
-dashu-float = "0.4"
+dashu-float = "0.5"
 fjall = "3.1.8"
 jiff = { version = "0.2", features = ["tzdb-bundle-always"] }
 num-bigint = "0.4"
