@@ -33,9 +33,8 @@ use crate::{
     barrier::{BarrierError, Range0Barrier, Range0EndSampler},
     coordinator::{LocalCoordinator, LocalCoordinatorError, TransactionDecision},
     forward::{
-        ForwardError, RegistryRangeScanner, RegistryRemoteForward, RegistryTsoRpc,
-        RemoteExplicitGateLease, RemoteForward, RemoteRangeSession,
-        canonicalize_timestamp_operations,
+        ForwardError, RegistryRangeScanner, RegistryRemoteForward, RegistryTsoRpc, RemoteForward,
+        RemoteRangeSession, canonicalize_timestamp_operations,
     },
     registry::RangeRegistry,
     run_split,
@@ -737,7 +736,6 @@ impl MultiRangeTenant {
             schema_gate: Arc::new(Mutex::new(())),
             table_write_gates: StdMutex::new(BTreeMap::new()),
             topology_mutation_gate: Arc::new(RwLock::new(())),
-            explicit_transaction_gate: Arc::new(Mutex::new(())),
             active_explicit_transactions: AtomicUsize::new(0),
             empty_table_split_test_hook: config.empty_table_split_test_hook,
             commit_fault_for_testing: config
@@ -2388,7 +2386,6 @@ impl Engine for MultiRangeTenant {
             timestamp_topology_guard: None,
             serving_epoch: serving.range_map.epoch(),
             explicit_transaction: false,
-            explicit_transaction_guard: None,
             transaction: GatewayTransaction::Idle,
             status: TxStatus::Idle,
             prepared: BTreeMap::new(),
@@ -2412,7 +2409,6 @@ struct TenantInner {
     schema_gate: Arc<Mutex<()>>,
     table_write_gates: StdMutex<BTreeMap<TableId, Arc<RwLock<()>>>>,
     topology_mutation_gate: Arc<RwLock<()>>,
-    explicit_transaction_gate: Arc<Mutex<()>>,
     active_explicit_transactions: AtomicUsize,
     empty_table_split_test_hook: Option<EmptyTableSplitTestHook>,
     commit_fault_for_testing: Option<Arc<StdMutex<Option<GatewayCommitFault>>>>,
@@ -2745,19 +2741,11 @@ pub struct GatewaySession {
     timestamp_topology_guard: Option<tokio::sync::OwnedRwLockReadGuard<()>>,
     serving_epoch: MapEpoch,
     explicit_transaction: bool,
-    explicit_transaction_guard: Option<ExplicitTransactionGuard>,
     transaction: GatewayTransaction,
     status: TxStatus,
     prepared: BTreeMap<String, GatewayPrepared>,
     portals: BTreeMap<String, GatewayPortal>,
     next_internal_statement: u64,
-}
-
-enum ExplicitTransactionGuard {
-    Local {
-        _guard: tokio::sync::OwnedMutexGuard<()>,
-    },
-    Distributed(Box<RemoteExplicitGateLease>),
 }
 
 #[derive(Debug, Clone)]
@@ -3180,6 +3168,37 @@ impl GatewaySession {
         global_xid: u64,
         commit: bool,
     ) -> Result<(), PgError> {
+        // A release validates the durable decision against the participant's
+        // LOCAL range-0 replica, which follows range 0's log at a polling
+        // cadence — so a release arriving right behind its own decision can
+        // transiently read the decision as still in doubt (55000) until the
+        // replica applies it. Retrying here turns that lag into a short wait
+        // instead of failing a transaction whose decision is already durable;
+        // any other error (and lag beyond the deadline) surfaces unchanged
+        // and leaves the commit-recovery path to resolve it.
+        const RELEASE_LAG_RETRIES: u32 = 10;
+        const RELEASE_LAG_BACKOFF: std::time::Duration = std::time::Duration::from_millis(200);
+        let mut attempt = 0;
+        loop {
+            let result = self
+                .release_on_range_once(range_id, global_xid, commit)
+                .await;
+            match result {
+                Err(error) if error.code == "55000" && attempt < RELEASE_LAG_RETRIES => {
+                    attempt += 1;
+                    tokio::time::sleep(RELEASE_LAG_BACKOFF).await;
+                }
+                result => return result,
+            }
+        }
+    }
+
+    async fn release_on_range_once(
+        &mut self,
+        range_id: RangeId,
+        global_xid: u64,
+        commit: bool,
+    ) -> Result<(), PgError> {
         if let Some(session) = self.sessions.get_mut(&range_id) {
             if commit {
                 session.release_global_participant_commit(global_xid).await
@@ -3588,12 +3607,6 @@ impl GatewaySession {
             .acquire_routed_dml_fences(&route, timestamp_write)
             .await?;
 
-        if self.explicit_transaction
-            && !matches!(route.kind, StatementKind::Begin | StatementKind::Rollback)
-        {
-            self.renew_explicit_transaction().await?;
-        }
-
         if let Some(ranges) = route.scatter_ranges.clone() {
             return self
                 .execute_timestamp_scatter(statement, ranges)
@@ -3608,7 +3621,7 @@ impl GatewaySession {
         }
 
         match route.kind {
-            StatementKind::Begin => self.begin_transaction().await,
+            StatementKind::Begin => self.begin_transaction(),
             StatementKind::Commit => self.commit_transaction().await,
             StatementKind::Rollback => self.rollback_transaction().await,
             StatementKind::Ddl => self.execute_ddl(statement).await,
@@ -3619,36 +3632,10 @@ impl GatewaySession {
         }
     }
 
-    async fn begin_transaction(&mut self) -> Result<Vec<QueryResult>, PgError> {
+    fn begin_transaction(&mut self) -> Result<Vec<QueryResult>, PgError> {
         if !matches!(self.transaction, GatewayTransaction::Idle) {
             return Err(PgError::error("25001", "transaction already in progress"));
         }
-        self.explicit_transaction_guard = if let Some(forward) = &self.inner.remote_forward {
-            match forward
-                .acquire_explicit_gate()
-                .await
-                .map_err(ForwardError::into_pg)?
-            {
-                Some(lease) => Some(ExplicitTransactionGuard::Distributed(Box::new(lease))),
-                None => Some(ExplicitTransactionGuard::Local {
-                    _guard: self
-                        .inner
-                        .explicit_transaction_gate
-                        .clone()
-                        .lock_owned()
-                        .await,
-                }),
-            }
-        } else {
-            Some(ExplicitTransactionGuard::Local {
-                _guard: self
-                    .inner
-                    .explicit_transaction_gate
-                    .clone()
-                    .lock_owned()
-                    .await,
-            })
-        };
         self.transaction = GatewayTransaction::Open {
             touched: Vec::new(),
             escalated: false,
@@ -4966,6 +4953,19 @@ impl GatewaySession {
             *escalated = true;
         }
         touched.push(range_id);
+        if *escalated {
+            // The transaction now spans ranges, so a deadlock cycle it joins
+            // can span engines and no single engine's wait-for graph will see
+            // it. Bound every enlisted local session's lock waits so such a
+            // cycle aborts (40P01) instead of hanging; remote participants are
+            // hosted sessions, which are born with this cap.
+            let enlisted = touched.clone();
+            for enlisted_range in enlisted {
+                if let Some(session) = self.sessions.get_mut(&enlisted_range) {
+                    session.set_lock_wait_cap(Some(crate::forward::CROSS_RANGE_LOCK_WAIT_CAP));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -5006,18 +5006,15 @@ impl GatewaySession {
             return;
         }
         self.explicit_transaction = false;
-        self.explicit_transaction_guard = None;
+        // Escalation bounded the touched local sessions' lock waits for the
+        // cross-range transaction's lifetime; restore exact engine-local
+        // blocking for whatever runs on them next.
+        for session in self.sessions.values_mut() {
+            session.set_lock_wait_cap(None);
+        }
         self.inner
             .active_explicit_transactions
             .fetch_sub(1, Ordering::AcqRel);
-    }
-
-    async fn renew_explicit_transaction(&self) -> Result<(), PgError> {
-        if let Some(ExplicitTransactionGuard::Distributed(lease)) = &self.explicit_transaction_guard
-        {
-            lease.renew().await.map_err(ForwardError::into_pg)?;
-        }
-        Ok(())
     }
 }
 

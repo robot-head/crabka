@@ -10,10 +10,18 @@
 //! error; both key spaces share the one graph, so a cycle spanning a row lock
 //! and a unique-key lock is still detected. Purely in-memory: after a restart
 //! no transactions are in flight, so no lock state must survive.
+//!
+//! The graph sees only this engine's waits, so a cycle whose edges span two
+//! engines (each leg of a cross-range transaction waiting on the other's
+//! participant) is invisible to it. Sessions that can be enlisted in such a
+//! cycle pass a wait cap to `acquire`; the cap expiring aborts the waiter as a
+//! presumed distributed deadlock, the detector of last resort where no shared
+//! wait-for graph exists.
 
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use tokio::sync::Notify;
@@ -35,6 +43,17 @@ pub enum Acquire {
 pub enum CycleCheck {
     Ok,
     Deadlock,
+}
+
+/// Why a blocking acquire refused to keep waiting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcquireError {
+    /// Blocking would close a wait-for cycle on this engine.
+    Deadlock,
+    /// The caller's wait cap expired before the lock was granted — treated as
+    /// a distributed deadlock, since a cross-engine cycle never shows up in
+    /// any single engine's wait-for graph.
+    CapExpired,
 }
 
 /// Identity of a lockable resource. Row locks and unique-key locks live in the
@@ -141,27 +160,37 @@ impl RowLockManager {
         lock.holders.insert(my_xid);
     }
 
-    /// Acquire `(table, rowid)` in `mode` for `my_xid`, blocking until granted.
-    /// Returns `Err(())` if blocking would close a wait-for cycle (caller maps
-    /// to 40P01). See [`Self::acquire_key`].
+    /// Acquire `(table, rowid)` in `mode` for `my_xid`, blocking until granted
+    /// or `wait_cap` (when given) expires. Returns the deadlock or cap error
+    /// (caller maps both to 40P01). See [`Self::acquire_key`].
     pub async fn acquire(
         &self,
         table: crabka_pgcatalog::TableId,
         rowid: u64,
         mode: LockMode,
         my_xid: u64,
-    ) -> Result<(), ()> {
-        self.acquire_key(LockKey::Row(table, rowid), mode, my_xid)
+        wait_cap: Option<Duration>,
+    ) -> Result<(), AcquireError> {
+        self.acquire_key(LockKey::Row(table, rowid), mode, my_xid, wait_cap)
             .await
     }
 
-    /// Acquire `key` in `mode` for `my_xid`, blocking until granted. Returns
-    /// `Err(())` if blocking would close a wait-for cycle (caller maps to
-    /// 40P01). Conflict-detect and waiter-register happen ATOMICALLY under
-    /// one guard, and the holder's `release_all` wakes us via a permit-backed
+    /// Acquire `key` in `mode` for `my_xid`, blocking until granted or
+    /// `wait_cap` (when given) expires. Returns [`AcquireError::Deadlock`] if
+    /// blocking would close a wait-for cycle and [`AcquireError::CapExpired`]
+    /// when the cap runs out first (callers map both to 40P01).
+    /// Conflict-detect and waiter-register happen ATOMICALLY under one guard,
+    /// and the holder's `release_all` wakes us via a permit-backed
     /// `notify_one` — so there is no lost-wakeup window and no chance of
     /// registering on a holder that already released.
-    pub async fn acquire_key(&self, key: LockKey, mode: LockMode, my_xid: u64) -> Result<(), ()> {
+    pub async fn acquire_key(
+        &self,
+        key: LockKey,
+        mode: LockMode,
+        my_xid: u64,
+        wait_cap: Option<Duration>,
+    ) -> Result<(), AcquireError> {
+        let deadline = wait_cap.map(|cap| tokio::time::Instant::now() + cap);
         loop {
             let notify = {
                 let mut g = self.inner.lock().expect("lockmgr");
@@ -176,7 +205,7 @@ impl RowLockManager {
                             CycleCheck::Deadlock
                         ) {
                             g.wait_for.remove(&my_xid);
-                            return Err(());
+                            return Err(AcquireError::Deadlock);
                         }
                         g.wait_for.insert(my_xid, holder);
                         let n = Arc::new(Notify::new());
@@ -188,7 +217,23 @@ impl RowLockManager {
             // Guard dropped. `notify_one()` stores a permit if it fires before
             // we await, so this cannot lose a wakeup; on wake we loop and
             // re-attempt the acquire.
-            notify.notified().await;
+            match deadline {
+                None => notify.notified().await,
+                Some(deadline) => {
+                    if tokio::time::timeout_at(deadline, notify.notified())
+                        .await
+                        .is_err()
+                    {
+                        // Clear our wait edge so the abandoned wait cannot feed
+                        // false cycles. The registered `Notify` stays in
+                        // `waiters` until the holder releases; an un-awaited
+                        // notification is harmless.
+                        let mut g = self.inner.lock().expect("lockmgr");
+                        g.wait_for.remove(&my_xid);
+                        return Err(AcquireError::CapExpired);
+                    }
+                }
+            }
         }
     }
 
@@ -370,7 +415,7 @@ mod tests {
         let m2 = Arc::clone(&m);
         let waiter = tokio::spawn(async move {
             // blocks: row (1,1) is held exclusively by xid 10
-            m2.acquire(1, 1, LockMode::Exclusive, 11)
+            m2.acquire(1, 1, LockMode::Exclusive, 11, None)
                 .await
                 .expect("not a deadlock");
         });
@@ -430,7 +475,7 @@ mod tests {
         let m2 = Arc::clone(&m);
         let waiter = tokio::spawn(async move {
             // blocks: row is held exclusively by xid 10
-            m2.acquire(1, 1, LockMode::Exclusive, 11)
+            m2.acquire(1, 1, LockMode::Exclusive, 11, None)
                 .await
                 .expect("not a deadlock");
         });
@@ -454,7 +499,7 @@ mod tests {
             m.try_acquire(1, 1, LockMode::Exclusive, 10);
             let m2 = Arc::clone(&m);
             let waiter =
-                tokio::spawn(async move { m2.acquire(1, 1, LockMode::Exclusive, 11).await });
+                tokio::spawn(async move { m2.acquire(1, 1, LockMode::Exclusive, 11, None).await });
             let m3 = Arc::clone(&m);
             let releaser = tokio::spawn(async move {
                 m3.release_all(10);
@@ -481,7 +526,7 @@ mod tests {
         m.release_all(10); // released before the waiter starts
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            m.acquire(1, 1, LockMode::Exclusive, 11),
+            m.acquire(1, 1, LockMode::Exclusive, 11, None),
         )
         .await
         .expect("did not hang")
@@ -499,7 +544,7 @@ mod tests {
         m.try_acquire(1, 1, LockMode::Exclusive, 10); // 10 holds row 1
         let res = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            m.acquire(1, 1, LockMode::Exclusive, 11), // 11 wants row 1 held by 10
+            m.acquire(1, 1, LockMode::Exclusive, 11, None), // 11 wants row 1 held by 10
         )
         .await
         .expect("did not hang");
@@ -513,20 +558,21 @@ mod tests {
         use assert2::assert;
         let m = Arc::new(RowLockManager::new());
         let k = LockKey::UniqueKey(vec![1, 2, 3]);
-        m.acquire_key(k.clone(), LockMode::Exclusive, 10)
+        m.acquire_key(k.clone(), LockMode::Exclusive, 10, None)
             .await
             .expect("free key");
         // A DIFFERENT key does not conflict.
-        m.acquire_key(LockKey::UniqueKey(vec![9]), LockMode::Exclusive, 11)
+        m.acquire_key(LockKey::UniqueKey(vec![9]), LockMode::Exclusive, 11, None)
             .await
             .expect("different key is free");
         // Re-acquiring my own key is idempotent.
-        m.acquire_key(k.clone(), LockMode::Exclusive, 10)
+        m.acquire_key(k.clone(), LockMode::Exclusive, 10, None)
             .await
             .expect("idempotent re-acquire");
         // The SAME key by another xid blocks until the holder releases.
         let m2 = Arc::clone(&m);
-        let waiter = tokio::spawn(async move { m2.acquire_key(k, LockMode::Exclusive, 12).await });
+        let waiter =
+            tokio::spawn(async move { m2.acquire_key(k, LockMode::Exclusive, 12, None).await });
         tokio::task::yield_now().await;
         m.release_all(10);
         tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
@@ -550,19 +596,19 @@ mod tests {
         let key = LockKey::UniqueKey(vec![7]);
         // xid 10 holds row (1,1); xid 11 holds unique key K.
         m.try_acquire(1, 1, LockMode::Exclusive, 10);
-        m.acquire_key(key.clone(), LockMode::Exclusive, 11)
+        m.acquire_key(key.clone(), LockMode::Exclusive, 11, None)
             .await
             .expect("free key");
         // 10 blocks on K (registers the edge 10 -> 11 in the shared graph).
         let m2 = Arc::clone(&m);
         let waiter =
-            tokio::spawn(async move { m2.acquire_key(key, LockMode::Exclusive, 10).await });
+            tokio::spawn(async move { m2.acquire_key(key, LockMode::Exclusive, 10, None).await });
         tokio::task::yield_now().await;
         // 11 now tries the row 10 holds: the edge 11 -> 10 closes a cycle that
         // SPANS a row lock and a unique-key lock — must be Err, not a hang.
         let res = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            m.acquire(1, 1, LockMode::Exclusive, 11),
+            m.acquire(1, 1, LockMode::Exclusive, 11, None),
         )
         .await
         .expect("did not hang");
@@ -574,6 +620,51 @@ mod tests {
             .expect("waiter did not hang")
             .expect("waiter join")
             .expect("not a deadlock");
+    }
+
+    #[tokio::test]
+    async fn capped_wait_expires_as_presumed_distributed_deadlock() {
+        use assert2::assert;
+        let m = RowLockManager::new();
+        m.try_acquire(1, 1, LockMode::Exclusive, 10);
+
+        let result = m
+            .acquire(
+                1,
+                1,
+                LockMode::Exclusive,
+                11,
+                Some(Duration::from_millis(50)),
+            )
+            .await;
+
+        assert!(result == Err(AcquireError::CapExpired));
+        // The abandoned wait's edge is cleared: the holder later waiting on
+        // the expired waiter must not read as a cycle through a ghost edge.
+        assert!(matches!(m.check_cycle(11, 10), CycleCheck::Ok));
+    }
+
+    #[tokio::test]
+    async fn capped_wait_granted_before_expiry_succeeds() {
+        use std::sync::Arc;
+
+        use assert2::assert;
+        let m = Arc::new(RowLockManager::new());
+        m.try_acquire(1, 1, LockMode::Exclusive, 10);
+        let m2 = Arc::clone(&m);
+        let waiter = tokio::spawn(async move {
+            m2.acquire(1, 1, LockMode::Exclusive, 11, Some(Duration::from_secs(30)))
+                .await
+        });
+        tokio::task::yield_now().await;
+
+        m.release_all(10);
+
+        let granted = tokio::time::timeout(Duration::from_secs(5), waiter)
+            .await
+            .expect("waiter did not hang")
+            .expect("waiter join");
+        assert!(granted == Ok(()));
     }
 
     #[test]
