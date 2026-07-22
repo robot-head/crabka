@@ -323,7 +323,7 @@ fn passes_filter(q: &JpQuery, rec: &ConsumerRecord) -> bool {
         return false;
     }
     for r in refs {
-        match r.val() {
+        match r.val {
             Value::Null | Value::Bool(false) => return false,
             _ => {}
         }

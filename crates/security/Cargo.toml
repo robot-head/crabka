@@ -58,7 +58,7 @@ sspi.workspace = true
 hex.workspace = true
 mutants = { workspace = true }
 tempfile.workspace = true
-criterion = { version = "5.0.0", package = "codspeed-criterion-compat" }
+criterion = { version = "5.0.1", package = "codspeed-criterion-compat" }
 tokio = { workspace = true, features = ["macros", "rt", "sync"] }
 
 [[bench]]

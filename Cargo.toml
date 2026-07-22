@@ -153,18 +153,16 @@ bon = "3"
 # so the marginal build cost is one small proc-macro crate.
 strum = { version = "0.28", features = ["derive"] }
 # wincode + serde-wincode replace bincode for serde-derived wire shapes.
-# Pinned to 0.4: serde-wincode 0.1.0 depends on wincode ^0.4, so a 0.5
-# pin would silently duplicate wincode in the dep graph and fail trait
-# resolution on `SerdeCompat`.
-wincode = "=0.4"
-serde-wincode = "0.1"
+# Keep these paired so `SerdeCompat` implements this wincode's traits.
+wincode = "=0.6"
+serde-wincode = "=0.1.2"
 async-trait = "0.1"
 addr2line = "0.27"
 object = { version = "0.39", default-features = false, features = ["read_core", "elf", "macho", "pe", "std"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
 # rustls-pemfile retired upstream (RUSTSEC-2025-0134, archived 2025-08).
 # Use the PEM parsers in `rustls-pki-types` (same code; pull explicitly).
-rustls-pki-types = { version = "1.14", features = ["alloc"] }
+rustls-pki-types = { version = "1.15", features = ["alloc"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"] }
 # Linux kTLS: offload TLS record encryption to the kernel so `sendfile(2)`
 # works THROUGH TLS (zero-copy fetch over encrypted connections). v6 tracks
@@ -233,7 +231,7 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 # Chapter Gres — vendored crabgresql engine (crabgresql@93f3d17).
 bigdecimal = "0.4"
 dashu-float = "0.4"
-fjall = "3.1.5"
+fjall = "3.1.8"
 jiff = { version = "0.2", features = ["tzdb-bundle-always"] }
 num-bigint = "0.4"
 # pg_query wraps libpg_query (C): dev/oracle-only, optional, never default —

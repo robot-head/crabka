@@ -49,7 +49,7 @@ hex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 once_cell = { workspace = true }
-criterion = { version = "5.0.0", package = "codspeed-criterion-compat" }
+criterion = { version = "5.0.1", package = "codspeed-criterion-compat" }
 
 [[bench]]
 name = "codec"
