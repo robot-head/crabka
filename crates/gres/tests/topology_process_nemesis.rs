@@ -2511,3 +2511,4 @@ async fn real_child_keeps_range_control_receipt_runtime_alive_while_serving() {
     );
     system.shutdown().await;
 }
+// CI probe: baseline flake-rate measurement for the process-nemesis suite on main.
