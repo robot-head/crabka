@@ -22,8 +22,19 @@ pub struct Range0Barrier {
     tail: Range0Tail,
     sampler: Arc<dyn Range0EndSampler>,
     timeout: Duration,
-    inflight: Arc<Mutex<Option<watch::Receiver<SampleState>>>>,
+    samples: Arc<Mutex<SampleQueue>>,
     refresh_poke: Option<Arc<Notify>>,
+}
+
+/// The in-flight end sample, tagged so late arrivals can refuse to adopt it.
+struct InflightSample {
+    generation: u64,
+    receiver: watch::Receiver<SampleState>,
+}
+
+struct SampleQueue {
+    next_generation: u64,
+    current: Option<InflightSample>,
 }
 
 impl Range0Barrier {
@@ -44,7 +55,10 @@ impl Range0Barrier {
             tail,
             sampler,
             timeout,
-            inflight: Arc::new(Mutex::new(None)),
+            samples: Arc::new(Mutex::new(SampleQueue {
+                next_generation: 0,
+                current: None,
+            })),
             refresh_poke: None,
         }
     }
@@ -59,8 +73,9 @@ impl Range0Barrier {
     /// Wait using a committed-end sample initiated by this call.
     ///
     /// Never joins an inflight sample: a caller whose write committed before
-    /// this call began must not be satisfied by a sample that started earlier
-    /// (`join_or_start_sample` allows that for plain read barriers). If a
+    /// this call began must not be satisfied by a sample that started earlier.
+    /// (Read barriers enforce the same rule per generation and additionally
+    /// coalesce concurrent callers; this path also wakes the follower.) If a
     /// refresh poke is configured, the follower's poll loop is woken before
     /// sampling so the tail can catch up without waiting out its poll timer.
     ///
@@ -80,38 +95,87 @@ impl Range0Barrier {
         Ok(())
     }
 
+    /// Return an end offset from a sample whose broker fetch started after
+    /// this call began — the [`Range0EndSampler`] contract.
+    ///
+    /// A sample already in flight at arrival may have read the log end before
+    /// a write this caller must observe (a commit decision acknowledged just
+    /// before the caller's release RPC, say), so adopting it would wait to a
+    /// too-low offset and serve a stale read. Such a sample is only waited
+    /// OUT: arrivals during a fetch form the next generation's batch and share
+    /// one fresh fetch — the same conveyor coalescing as a single in-flight
+    /// slot, one generation later.
     async fn sample_target_offset(&self) -> Result<i64, BarrierError> {
-        let mut receiver = self.join_or_start_sample().await;
+        let mut stale_generation: Option<u64> = None;
         loop {
-            let state = receiver.borrow_and_update().clone();
-            match state {
-                SampleState::Pending => {
-                    receiver.changed().await.map_err(|_| BarrierError::Closed)?;
+            let (mut receiver, adopted) = {
+                let mut guard = self.samples.lock().await;
+                // A completed sample whose fetch task has not yet cleared the
+                // slot would otherwise be re-observed as in flight; clear it
+                // here so the next generation can start without waiting on
+                // (or spinning against) that task's own deferred clear.
+                if guard
+                    .current
+                    .as_ref()
+                    .is_some_and(|sample| *sample.receiver.borrow() != SampleState::Pending)
+                {
+                    guard.current = None;
                 }
-                SampleState::Ready(Ok(offset)) => return Ok(offset),
-                SampleState::Ready(Err(message)) => return Err(BarrierError::Sample(message)),
+                match &guard.current {
+                    Some(sample)
+                        if stale_generation.is_none()
+                            || stale_generation == Some(sample.generation) =>
+                    {
+                        stale_generation = Some(sample.generation);
+                        (sample.receiver.clone(), false)
+                    }
+                    Some(sample) => (sample.receiver.clone(), true),
+                    None => (self.start_sample(&mut guard), true),
+                }
+            };
+            loop {
+                let state = receiver.borrow_and_update().clone();
+                match state {
+                    SampleState::Pending => {
+                        receiver.changed().await.map_err(|_| BarrierError::Closed)?;
+                    }
+                    SampleState::Ready(result) if adopted => {
+                        return result.map_err(BarrierError::Sample);
+                    }
+                    SampleState::Ready(_) => break,
+                }
             }
         }
     }
 
-    async fn join_or_start_sample(&self) -> watch::Receiver<SampleState> {
-        let mut guard = self.inflight.lock().await;
-        if let Some(receiver) = guard.as_ref() {
-            return receiver.clone();
-        }
-
+    /// Start a new sample generation under the queue lock and return its
+    /// receiver. The spawned fetch clears the slot on completion so the next
+    /// arrival starts the following generation.
+    fn start_sample(&self, guard: &mut SampleQueue) -> watch::Receiver<SampleState> {
         let (sender, receiver) = watch::channel(SampleState::Pending);
-        *guard = Some(receiver.clone());
+        let generation = guard.next_generation;
+        guard.next_generation += 1;
+        guard.current = Some(InflightSample {
+            generation,
+            receiver: receiver.clone(),
+        });
 
         let sampler = self.sampler.clone();
-        let inflight = self.inflight.clone();
+        let queue = Arc::clone(&self.samples);
         tokio::spawn(async move {
             let result = sampler
                 .sample_end_after_call_begins()
                 .await
                 .map_err(|error| error.to_string());
             let _send_result = sender.send(SampleState::Ready(result));
-            *inflight.lock().await = None;
+            let mut guard = queue.lock().await;
+            if guard
+                .current
+                .as_ref()
+                .is_some_and(|sample| sample.generation == generation)
+            {
+                guard.current = None;
+            }
         });
 
         receiver
@@ -305,7 +369,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn concurrent_callers_piggyback_on_one_sample() {
+    async fn arrivals_during_a_fetch_coalesce_into_the_next_generation() {
         let store = Arc::new(MemKv::default());
         let tail = Range0Tail::new(store);
         tail.apply_committed(&Range0Frame::new(5, Vec::new()))
@@ -317,7 +381,16 @@ mod tests {
             let barrier = barrier.clone();
             async move { barrier.ensure_readable().await }
         });
+        while sampler.calls.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        // Both arrive while the first fetch is in flight: neither may adopt
+        // it, and both share ONE next-generation fetch.
         let second = tokio::spawn({
+            let barrier = barrier.clone();
+            async move { barrier.ensure_readable().await }
+        });
+        let third = tokio::spawn({
             let barrier = barrier.clone();
             async move { barrier.ensure_readable().await }
         });
@@ -326,7 +399,100 @@ mod tests {
 
         assert!(first.await.expect("join").is_ok());
         assert!(second.await.expect("join").is_ok());
-        assert!(sampler.calls.load(Ordering::SeqCst) == 1);
+        assert!(third.await.expect("join").is_ok());
+        assert!(sampler.calls.load(Ordering::SeqCst) == 2);
+    }
+
+    /// Per-call scripted sampler: each fetch pops the next queued offset,
+    /// blocking until the test releases it.
+    struct ScriptedSampler {
+        calls: AtomicUsize,
+        offsets: TokioMutex<Vec<i64>>,
+        released: AtomicUsize,
+        notify: Notify,
+    }
+
+    impl ScriptedSampler {
+        fn new(offsets: Vec<i64>) -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                offsets: TokioMutex::new(offsets),
+                released: AtomicUsize::new(0),
+                notify: Notify::new(),
+            }
+        }
+
+        fn release_next(&self) {
+            self.released.fetch_add(1, Ordering::SeqCst);
+            self.notify.notify_waiters();
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Range0EndSampler for ScriptedSampler {
+        async fn sample_end_after_call_begins(&self) -> Result<i64, BarrierError> {
+            let index = self.calls.fetch_add(1, Ordering::SeqCst);
+            loop {
+                if self.released.load(Ordering::SeqCst) > index {
+                    return Ok(self.offsets.lock().await[index]);
+                }
+                self.notify.notified().await;
+            }
+        }
+    }
+
+    /// The linearizability floor: a caller must never be satisfied by a
+    /// sample whose fetch started before the caller arrived. Here the stale
+    /// in-flight fetch returns 3 — enough for the tail's applied offset — but
+    /// the late caller must wait for a FRESH fetch (returning 9, covering the
+    /// write it must observe) and only complete once the tail applies 9.
+    /// Under the old join-any-in-flight behavior the late caller adopted the
+    /// stale 3 and returned early, serving a stale read (the 55000
+    /// "decision is `InProgress`" release failures under concurrent load).
+    #[tokio::test]
+    async fn caller_never_adopts_a_sample_started_before_its_arrival() {
+        let store = Arc::new(MemKv::default());
+        let tail = Range0Tail::new(store);
+        tail.apply_committed(&Range0Frame::new(3, Vec::new()))
+            .expect("apply through 3");
+        let sampler = Arc::new(ScriptedSampler::new(vec![3, 9]));
+        let barrier =
+            Range0Barrier::with_timeout(tail.clone(), sampler.clone(), Duration::from_secs(5));
+
+        let early = tokio::spawn({
+            let barrier = barrier.clone();
+            async move { barrier.ensure_readable().await }
+        });
+        while sampler.calls.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+
+        // The late caller arrives while the first fetch is in flight.
+        let late = tokio::spawn({
+            let barrier = barrier.clone();
+            async move { barrier.ensure_readable().await }
+        });
+        tokio::task::yield_now().await;
+        sampler.release_next();
+
+        // The early caller's own fetch (3) satisfies it immediately.
+        assert!(early.await.expect("join").is_ok());
+
+        // The late caller must be waiting on the second fetch, not done on
+        // the stale first one.
+        tokio::task::yield_now().await;
+        assert!(!late.is_finished());
+        sampler.release_next();
+        tokio::task::yield_now().await;
+        assert!(
+            !late.is_finished(),
+            "the fresh sample's offset 9 is beyond the applied tail"
+        );
+
+        tail.apply_committed(&Range0Frame::new(9, Vec::new()))
+            .expect("apply through 9");
+        assert!(late.await.expect("join").is_ok());
+        assert!(sampler.calls.load(Ordering::SeqCst) == 2);
     }
 
     #[tokio::test]
