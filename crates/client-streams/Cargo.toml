@@ -34,7 +34,7 @@ tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time",
 tokio-util = { workspace = true, features = ["rt"] }
 tracing = { workspace = true }
 turso = "0.7"
-pollster = "0.4"
+pollster = "1.0"
 
 # Columnar / dataframe support (opt-in via the `arrow`, `columnar`, and
 # `polars` cargo features).
