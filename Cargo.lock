@@ -2841,7 +2841,7 @@ dependencies = [
  "crabka-schema-serde",
  "crabka-security",
  "jiff",
- "num-bigint 0.4.8",
+ "num-bigint 0.5.1",
  "prost-reflect",
  "protox",
  "rustls",
@@ -8771,6 +8771,16 @@ dependencies = [
  "num-integer",
  "num-traits",
  "serde",
+]
+
+[[package]]
+name = "num-bigint"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93e7820bc0a80a0238e650327316f929ba18d5be054b647490a3a6a339f3e7c0"
+dependencies = [
+ "num-integer",
+ "num-traits",
 ]
 
 [[package]]
