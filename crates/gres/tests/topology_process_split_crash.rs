@@ -41,6 +41,7 @@ use process::ProcessHarness;
 #[serde(rename_all = "snake_case")]
 enum PayloadKind {
     Attempt,
+    Retry,
     Ack,
     RecoveredAck,
 }
@@ -67,6 +68,7 @@ struct PayloadEvent {
 #[derive(Debug)]
 struct PayloadLedger {
     attempts: BTreeMap<(u64, u64), PayloadEvent>,
+    retries: BTreeMap<(u64, u64), usize>,
     acknowledged: BTreeMap<(u64, u64), PayloadEvent>,
     recovered: usize,
     max_ack_gap_ms: u128,
@@ -74,6 +76,7 @@ struct PayloadLedger {
 
 fn parse_payload_ledger(body: &str) -> Result<PayloadLedger, String> {
     let mut attempts = BTreeMap::new();
+    let mut retries: BTreeMap<(u64, u64), usize> = BTreeMap::new();
     let mut acknowledged = BTreeMap::new();
     let mut recovered = 0;
     let mut previous_timestamp = None;
@@ -99,6 +102,15 @@ fn parse_payload_ledger(body: &str) -> Result<PayloadLedger, String> {
                 if event.rowid.is_some() || attempts.insert(key, event).is_some() {
                     return Err(format!("invalid duplicate attempt {key:?}"));
                 }
+            }
+            PayloadKind::Retry => {
+                if event.rowid.is_some() {
+                    return Err(format!("ambiguity retry {key:?} has a physical rowid"));
+                }
+                if !attempts.contains_key(&key) {
+                    return Err(format!("ambiguity retry {key:?} has no attempt"));
+                }
+                *retries.entry(key).or_default() += 1;
             }
             PayloadKind::Ack | PayloadKind::RecoveredAck => {
                 if event.rowid.is_none() {
@@ -128,10 +140,71 @@ fn parse_payload_ledger(body: &str) -> Result<PayloadLedger, String> {
     }
     Ok(PayloadLedger {
         attempts,
+        retries,
         acknowledged,
         recovered,
         max_ack_gap_ms,
     })
+}
+
+/// Client-side time the workload's ambiguity protocol may spend on top of
+/// engine recovery before an acknowledgement can land: a 3s healthy-empty-read
+/// streak plus polling and psql round trips. Added to the observed-safe engine
+/// ack-gap bounds.
+const WORKLOAD_AMBIGUITY_RESOLUTION_MS: u128 = 4_000;
+
+/// Client-side INSERT timeout for the live workload. Must exceed every
+/// observed-safe ack-gap bound ([`SplitKillPoint::pause_bound_ms`] plus
+/// [`WORKLOAD_AMBIGUITY_RESOLUTION_MS`]): abandoning a statement the server
+/// may still commit is what creates unresolvable ambiguity, so a statement is
+/// only abandoned once the run has already blown its liveness bound.
+const WORKLOAD_INSERT_TIMEOUT: &str = "30s";
+
+/// Explains a terminal rows-vs-ledger mismatch per offending (table, seq),
+/// using the client attempt and ambiguity-retry records to distinguish engine
+/// double-apply (extra physical rows without any client retry) from a workload
+/// grace-window breach (extra rows after the client concluded absence and
+/// re-attempted).
+fn describe_payload_mismatch(
+    observed: &BTreeSet<PhysicalPayloadRow>,
+    expected: &BTreeSet<PhysicalPayloadRow>,
+    ledger: &PayloadLedger,
+) -> String {
+    let mut counts: BTreeMap<(u64, u64, &str), (usize, usize)> = BTreeMap::new();
+    for row in observed {
+        counts
+            .entry((row.table_id, row.seq, row.checksum.as_str()))
+            .or_default()
+            .0 += 1;
+    }
+    for row in expected {
+        counts
+            .entry((row.table_id, row.seq, row.checksum.as_str()))
+            .or_default()
+            .1 += 1;
+    }
+    let mut lines = Vec::new();
+    for ((table_id, seq, checksum), (observed, acknowledged)) in counts {
+        if observed == acknowledged {
+            continue;
+        }
+        let key = (table_id, seq);
+        let retries = ledger.retries.get(&key).copied().unwrap_or_default();
+        let attempts = usize::from(ledger.attempts.contains_key(&key)) + retries;
+        let verdict = if observed < acknowledged {
+            "acknowledged write is missing from the database"
+        } else if retries == 0 {
+            "duplicated without any client retry, implicating the engine"
+        } else {
+            "duplicated after an ambiguity retry, so the workload concluded absence prematurely"
+        };
+        lines.push(format!(
+            "table {table_id} seq {seq} checksum {checksum}: {observed} database rows vs \
+             {acknowledged} acknowledged with {attempts} client attempts and {retries} \
+             ambiguity retries ({verdict})"
+        ));
+    }
+    lines.join("; ")
 }
 
 fn parse_closed_payload_ledger(path: &Path) -> Result<PayloadLedger, String> {
@@ -196,6 +269,11 @@ while [[ ! -e "$CRABKA_G8_WORKLOAD_STOP" ]]; do
     sync -d "$CRABKA_G8_WORKLOAD_LEDGER"
     attempted_seq=$seq
   fi
+  # The client timeout must exceed every observed-safe ack-gap bound:
+  # abandoning a statement the server may still commit is what creates
+  # unresolvable ambiguity, so a statement is only abandoned once the run has
+  # already blown its liveness bound. Connection-phase failures stay fast via
+  # PGCONNECT_TIMEOUT.
   if timeout "$CRABKA_G8_INSERT_TIMEOUT" psql -X -q -v ON_ERROR_STOP=1 \
       -c "INSERT INTO $table_name (id, seq, checksum) VALUES ($rowid, $seq, '$checksum')" \
       >/dev/null 2>>"$CRABKA_G8_WORKLOAD_ERRORS"; then
@@ -217,11 +295,34 @@ while [[ ! -e "$CRABKA_G8_WORKLOAD_STOP" ]]; do
   elif [[ "$response_known" == true ]]; then
     kind=ack
   else
-    actual=$(timeout "$CRABKA_G8_RECOVERY_TIMEOUT" psql -X -A -t -q -v ON_ERROR_STOP=1 \
-      -c "SELECT checksum FROM $table_name WHERE id = $rowid" \
-      2>>"$CRABKA_G8_WORKLOAD_ERRORS" || true)
-    [[ "$actual" == "$checksum" ]] || continue
-    kind=recovered_ack
+    # Ambiguous outcome: the attempt may still commit server-side. Resolve by
+    # polling the row; a read only counts when psql SUCCEEDS, and absence is
+    # concluded only after a sustained streak of healthy empty reads, so a
+    # still-parked attempt has become visible (or died with its process)
+    # before any re-INSERT.
+    kind=""
+    empty_streak_start=""
+    while [[ ! -e "$CRABKA_G8_WORKLOAD_STOP" ]]; do
+      if actual=$(timeout "$CRABKA_G8_RECOVERY_TIMEOUT" psql -X -A -t -q -v ON_ERROR_STOP=1 \
+          -c "SELECT checksum FROM $table_name WHERE id = $rowid" \
+          2>>"$CRABKA_G8_WORKLOAD_ERRORS"); then
+        if [[ -n "$actual" ]]; then kind=recovered_ack; break; fi
+        now_raw=$(date +%s%N); now=$((now_raw / 1000000))
+        if [[ -z "$empty_streak_start" ]]; then empty_streak_start=$now; fi
+        if (( now - empty_streak_start >= 3000 )); then break; fi
+      else
+        empty_streak_start=""
+      fi
+      sleep 0.25
+    done
+    if [[ -z "$kind" ]]; then
+      [[ -e "$CRABKA_G8_WORKLOAD_STOP" ]] && break
+      now_raw=$(date +%s%N); now=$((now_raw / 1000000))
+      printf '{"kind":"retry","provenance":"workload","table_id":%s,"rowid":null,"seq":%s,"checksum":"%s","timestamp_ms":%s}\n' \
+        "$table_id" "$seq" "$checksum" "$now" >> "$CRABKA_G8_WORKLOAD_LEDGER"
+      sync -d "$CRABKA_G8_WORKLOAD_LEDGER"
+      continue
+    fi
   fi
   now_raw=$(date +%s%N); now=$((now_raw / 1000000))
   printf '{"kind":"%s","provenance":"workload","table_id":%s,"rowid":%s,"seq":%s,"checksum":"%s","timestamp_ms":%s}\n' \
@@ -627,13 +728,6 @@ impl SplitWorkload {
         match self {
             Self::Ordinary => "0.02",
             Self::Hash => "0.10",
-        }
-    }
-
-    const fn insert_timeout(self) -> &'static str {
-        match self {
-            Self::Ordinary => "1s",
-            Self::Hash => "10s",
         }
     }
 }
@@ -1217,6 +1311,83 @@ fn payload_ledger_parses_attempt_ack_and_recovered_ack() {
 }
 
 #[test]
+fn payload_ledger_counts_attempts_and_ambiguity_retries() {
+    let parsed = parse_payload_ledger(
+        r#"{"kind":"attempt","provenance":"workload","table_id":50,"rowid":null,"seq":1,"checksum":"a","timestamp_ms":10}
+{"kind":"ack","provenance":"workload","table_id":50,"rowid":17,"seq":1,"checksum":"a","timestamp_ms":12}
+{"kind":"attempt","provenance":"workload","table_id":51,"rowid":null,"seq":2,"checksum":"b","timestamp_ms":18}
+{"kind":"retry","provenance":"workload","table_id":51,"rowid":null,"seq":2,"checksum":"b","timestamp_ms":19}
+{"kind":"recovered_ack","provenance":"workload","table_id":51,"rowid":16,"seq":2,"checksum":"b","timestamp_ms":20}
+"#,
+    )
+    .expect("retried payload ledger");
+    assert_eq!(parsed.acknowledged.len(), 2);
+    assert_eq!(parsed.recovered, 1);
+    assert_eq!(parsed.retries, BTreeMap::from([((51, 2), 1)]));
+}
+
+#[test]
+fn payload_ledger_rejects_orphan_or_physical_retries() {
+    assert!(
+        parse_payload_ledger(
+            r#"{"kind":"retry","provenance":"workload","table_id":50,"rowid":null,"seq":1,"checksum":"a","timestamp_ms":10}"#,
+        )
+        .is_err()
+    );
+    assert!(
+        parse_payload_ledger(
+            r#"{"kind":"attempt","provenance":"workload","table_id":50,"rowid":null,"seq":1,"checksum":"a","timestamp_ms":10}
+{"kind":"retry","provenance":"workload","table_id":50,"rowid":7,"seq":1,"checksum":"a","timestamp_ms":11}"#,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn payload_mismatch_distinguishes_engine_duplicates_from_workload_retries() {
+    use assert2::assert;
+    let ledger = parse_payload_ledger(
+        r#"{"kind":"attempt","provenance":"workload","table_id":50,"rowid":null,"seq":1,"checksum":"a","timestamp_ms":10}
+{"kind":"ack","provenance":"workload","table_id":50,"rowid":17,"seq":1,"checksum":"a","timestamp_ms":12}
+{"kind":"attempt","provenance":"workload","table_id":51,"rowid":null,"seq":2,"checksum":"b","timestamp_ms":18}
+{"kind":"retry","provenance":"workload","table_id":51,"rowid":null,"seq":2,"checksum":"b","timestamp_ms":19}
+{"kind":"recovered_ack","provenance":"workload","table_id":51,"rowid":16,"seq":2,"checksum":"b","timestamp_ms":20}
+"#,
+    )
+    .expect("retried payload ledger");
+    let row = |table_id, rowid, seq, checksum: &str| PhysicalPayloadRow {
+        table_id,
+        rowid,
+        seq,
+        checksum: checksum.to_owned(),
+    };
+    let expected = BTreeSet::from([row(50, 17, 1, "a"), row(51, 16, 2, "b")]);
+
+    let engine_duplicate = BTreeSet::from([
+        row(50, 17, 1, "a"),
+        row(50, 42, 1, "a"),
+        row(51, 16, 2, "b"),
+    ]);
+    let message = describe_payload_mismatch(&engine_duplicate, &expected, &ledger);
+    assert!(message.contains("table 50 seq 1"));
+    assert!(message.contains("implicating the engine"));
+
+    let retry_duplicate = BTreeSet::from([
+        row(50, 17, 1, "a"),
+        row(51, 16, 2, "b"),
+        row(51, 43, 2, "b"),
+    ]);
+    let message = describe_payload_mismatch(&retry_duplicate, &expected, &ledger);
+    assert!(message.contains("table 51 seq 2"));
+    assert!(message.contains("2 client attempts and 1 ambiguity retries"));
+    assert!(message.contains("concluded absence prematurely"));
+
+    let missing = BTreeSet::from([row(50, 17, 1, "a")]);
+    let message = describe_payload_mismatch(&missing, &expected, &ledger);
+    assert!(message.contains("missing from the database"));
+}
+
+#[test]
 fn payload_ledger_rejects_incomplete_or_inconsistent_events() {
     assert!(parse_payload_ledger(r#"{"kind":"ack"}"#).is_err());
     assert!(
@@ -1300,10 +1471,12 @@ fn continuous_payload_workload_records_two_tables_and_fsyncs_every_event() {
         "CRABKA_G8_RAW_RECOVERY",
         "CRABKA_G8_WORKLOAD_SLEEP",
         "CRABKA_G8_INSERT_TIMEOUT",
+        "\"kind\":\"retry\"",
+        "empty_streak_start",
     ] {
         assert!(script.contains(required_fragment));
     }
-    assert!(script.matches("sync -d").count() >= 2);
+    assert!(script.matches("sync -d").count() >= 3);
     let raw_wait = script
         .find("while [[ ! -e \"$CRABKA_G8_RAW_RECOVERY\"")
         .expect("seq=2 waits for exact raw authorization");
@@ -1610,6 +1783,7 @@ fn ordinary_and_hash_workloads_share_kill_mapping_but_not_physical_contract() {
 
 #[test]
 fn split_workload_mode_is_explicit_and_fail_closed() {
+    use assert2::assert;
     for (value, expected) in [
         (None, Ok(SplitWorkload::Ordinary)),
         (Some("ordinary"), Ok(SplitWorkload::Ordinary)),
@@ -1620,14 +1794,20 @@ fn split_workload_mode_is_explicit_and_fail_closed() {
     for invalid in ["", "HASH"] {
         assert!(SplitWorkload::parse(Some(invalid)).is_err());
     }
-    for (workload, expected_delay, expected_timeout) in [
-        (SplitWorkload::Ordinary, "0.02", "1s"),
-        (SplitWorkload::Hash, "0.10", "10s"),
+    for (workload, expected_delay) in [
+        (SplitWorkload::Ordinary, "0.02"),
+        (SplitWorkload::Hash, "0.10"),
     ] {
-        assert_eq!(
-            (workload.inter_insert_delay(), workload.insert_timeout()),
-            (expected_delay, expected_timeout)
-        );
+        assert_eq!(workload.inter_insert_delay(), expected_delay);
+    }
+    let insert_timeout_ms: u128 = WORKLOAD_INSERT_TIMEOUT
+        .strip_suffix('s')
+        .expect("seconds-denominated INSERT timeout")
+        .parse::<u128>()
+        .expect("integral INSERT timeout")
+        * 1_000;
+    for point in SplitKillPoint::ALL {
+        assert!(insert_timeout_ms > point.pause_bound_ms() + WORKLOAD_AMBIGUITY_RESOLUTION_MS);
     }
 }
 
@@ -2637,7 +2817,16 @@ async fn direct_payload_rows(
             else {
                 panic!("unexpected terminal payload tuple {values:?}");
             };
-            assert_eq!(u64::try_from(*id).expect("positive payload id"), row.rowid);
+            {
+                use assert2::assert;
+                assert!(
+                    u64::try_from(*id).expect("positive payload id") == row.rowid,
+                    "table{table_id} id {id} diverges from physical rowid {} (seq {seq}, \
+                     checksum {checksum}): a second committed insert for the same id takes \
+                     a fresh hidden rowid, so this indicates a duplicate-applied write",
+                    row.rowid
+                );
+            }
             PhysicalPayloadRow {
                 table_id,
                 rowid: row.rowid,
@@ -2911,10 +3100,10 @@ async fn verify_terminal_payload(
         "raw-authorized response recovery is absent; ledger={payload_events:?}"
     );
     assert!(
-        ledger.max_ack_gap_ms <= point.pause_bound_ms(),
+        ledger.max_ack_gap_ms <= point.pause_bound_ms() + WORKLOAD_AMBIGUITY_RESOLUTION_MS,
         "max ACK gap {}ms exceeded {}ms bound at {point:?}",
         ledger.max_ack_gap_ms,
-        point.pause_bound_ms()
+        point.pause_bound_ms() + WORKLOAD_AMBIGUITY_RESOLUTION_MS
     );
     assert!(
         ledger
@@ -2982,7 +3171,14 @@ async fn verify_terminal_payload(
         .iter()
         .flat_map(|scan| scan.rows.iter().cloned())
         .collect::<BTreeSet<_>>();
-    assert_eq!(direct_union, expected, "direct terminal hash union");
+    {
+        use assert2::assert;
+        assert!(
+            direct_union == expected,
+            "direct terminal union must exactly equal the durable ACK ledger; {}",
+            describe_payload_mismatch(&direct_union, &expected, &ledger)
+        );
+    }
 
     let sql = system.sql(0).await;
     let mut sql_rows = BTreeSet::new();
@@ -3010,7 +3206,14 @@ async fn verify_terminal_payload(
             });
         }
     }
-    assert_eq!(sql_rows, expected, "terminal SQL union");
+    {
+        use assert2::assert;
+        assert!(
+            sql_rows == expected,
+            "terminal SQL union must exactly equal the durable ACK ledger; {}",
+            describe_payload_mismatch(&sql_rows, &expected, &ledger)
+        );
+    }
     VerifiedTerminalPayload {
         payload_events,
         ledger,
@@ -3557,7 +3760,7 @@ async fn verify_completed_split_case(input: VerifyCompletedSplitCase<'_>) -> Spl
         acknowledged_rows: expected.len(),
         recovered_acknowledgements: ledger.recovered,
         max_ack_gap_ms: ledger.max_ack_gap_ms,
-        max_ack_gap_bound_ms: point.pause_bound_ms(),
+        max_ack_gap_bound_ms: point.pause_bound_ms() + WORKLOAD_AMBIGUITY_RESOLUTION_MS,
         operation_elapsed_ms: elapsed_ms,
         operation_bound_ms: SplitKillPoint::operation_bound_ms(),
         marker_count: markers.len(),
@@ -3796,6 +3999,66 @@ async fn wait_for_payload_acks(path: &Path, errors_path: &Path, minimum: usize) 
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+}
+
+async fn authorize_ordinary_response_recovery(
+    system: &ProcessHarness,
+    ledger_path: &Path,
+    recovery_path: &Path,
+) {
+    let expected = PhysicalPayloadRow {
+        table_id: 50,
+        rowid: 17,
+        seq: 2,
+        checksum: "split-50-0000000000000002".into(),
+    };
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let attempted = std::fs::read_to_string(ledger_path)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<PayloadEvent>(line).ok())
+            .any(|event| {
+                event.kind == PayloadKind::Attempt
+                    && event.provenance == PayloadProvenance::Workload
+                    && event.table_id == expected.table_id
+                    && event.seq == expected.seq
+                    && event.checksum == expected.checksum
+            });
+        if attempted {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "ordinary response-loss attempt missing"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    loop {
+        let mut matches = 0;
+        for range_id in [0, 1] {
+            matches += direct_payload_rows(
+                system,
+                range_id,
+                expected.table_id,
+                Some(expected.rowid),
+                Some(expected.rowid + 1),
+            )
+            .await
+            .into_iter()
+            .filter(|row| *row == expected)
+            .count();
+        }
+        if matches == 1 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "raw recovery found {matches} exact committed ordinary rows"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    std::fs::write(recovery_path, &expected.checksum).expect("authorize raw ordinary recovery");
 }
 
 async fn authorize_hash_response_recovery(
@@ -4251,7 +4514,8 @@ async fn prepare_split_workload(
                 "10s"
             },
         )
-        .env("CRABKA_G8_INSERT_TIMEOUT", workload_mode.insert_timeout())
+        .env("CRABKA_G8_INSERT_TIMEOUT", WORKLOAD_INSERT_TIMEOUT)
+        .env("PGCONNECT_TIMEOUT", "3")
         .env(
             "CRABKA_G8_WORKLOAD_SLEEP",
             workload_mode.inter_insert_delay(),
@@ -4266,8 +4530,13 @@ async fn prepare_split_workload(
     let child = command.spawn().expect("spawn Split workload");
     let process_group = child.id().expect("Split workload PID");
     let workload = WorkloadChild::new(child, process_group, stop_path);
-    if workload_mode == SplitWorkload::Hash {
-        authorize_hash_response_recovery(system, &ledger_path, &raw_recovery).await;
+    match workload_mode {
+        SplitWorkload::Ordinary => {
+            authorize_ordinary_response_recovery(system, &ledger_path, &raw_recovery).await;
+        }
+        SplitWorkload::Hash => {
+            authorize_hash_response_recovery(system, &ledger_path, &raw_recovery).await;
+        }
     }
     wait_for_payload_acks(&ledger_path, &errors_path, 8).await;
     if workload_mode == SplitWorkload::Ordinary {
