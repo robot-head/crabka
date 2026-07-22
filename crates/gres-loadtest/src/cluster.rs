@@ -67,9 +67,15 @@ use crate::{
 const TENANT: &str = "loadtest";
 /// SQL login role provisioned for the tenant.
 const SQL_USER_NAME: &str = "loadtest";
-/// Password backing the provisioned SCRAM verifier. Nodes run `--auth trust`,
-/// so this is provisioning completeness, not a live credential check.
-const SQL_PASSWORD: &str = "loadtest-secret";
+/// Password backing the provisioned SCRAM verifier, generated fresh per
+/// cluster launch. Nodes run `--auth trust`, so this is provisioning
+/// completeness, not a live credential check — generating it (rather than
+/// hard-coding one) just ensures no fixed string ever doubles as a real
+/// secret.
+fn generate_sql_password() -> String {
+    use rand::RngExt as _;
+    format!("loadtest-{:016x}", rand::rng().random::<u64>())
+}
 /// Database name clients connect to (mirrors the scaling script's conninfo).
 const SQL_DATABASE: &str = "crab";
 /// Range `i` starts at table id `i * RANGE_TABLE_STRIDE`, so workload tables
@@ -207,6 +213,7 @@ pub struct SchemaBootstrap {
     bootstrap_slot: NodeSlot,
     bootstrap_sql_addr: SocketAddr,
     roster: ProcessRoster,
+    sql_password: String,
 }
 
 impl SchemaBootstrap {
@@ -214,7 +221,7 @@ impl SchemaBootstrap {
     /// not through a chaos proxy — faults make no sense during bootstrap).
     #[must_use]
     pub fn sql_endpoint(&self) -> SqlEndpoint {
-        sql_endpoint_at(self.bootstrap_sql_addr)
+        sql_endpoint_at(self.bootstrap_sql_addr, &self.sql_password)
     }
 
     /// SIGKILLs the bootstrap node and spawns the real per-node topology;
@@ -236,6 +243,7 @@ impl SchemaBootstrap {
             mut bootstrap_slot,
             bootstrap_sql_addr: _,
             roster,
+            sql_password,
         } = self;
         if let Some(mut process) = bootstrap_slot.running.take() {
             kill_child(&bootstrap_slot.spec.label, &mut process.child, process.pid).await?;
@@ -266,6 +274,7 @@ impl SchemaBootstrap {
             sql_proxies,
             nodes,
             roster,
+            sql_password,
         };
         for index in 0..cluster.nodes.len() {
             wait_node_ready(&mut cluster.nodes[index]).await?;
@@ -293,6 +302,7 @@ pub struct Cluster {
     sql_proxies: Vec<ChaosProxy>,
     nodes: Vec<NodeSlot>,
     roster: ProcessRoster,
+    sql_password: String,
 }
 
 impl Cluster {
@@ -356,7 +366,14 @@ impl Cluster {
         let sql_proxies = spawn_proxies(topology.nodes).await.context("sql proxies")?;
         let tls = write_tls_fixture(&work_dir)?;
         let range_endpoints: Vec<SocketAddr> = range_proxies.iter().map(ChaosProxy::addr).collect();
-        provision_tenant(&kafka_bootstrap, topology.ranges, &range_endpoints).await?;
+        let sql_password = generate_sql_password();
+        provision_tenant(
+            &kafka_bootstrap,
+            topology.ranges,
+            &range_endpoints,
+            &sql_password,
+        )
+        .await?;
         tracing::info!(
             tenant = TENANT,
             ranges = topology.ranges,
@@ -414,6 +431,7 @@ impl Cluster {
             bootstrap_slot,
             bootstrap_sql_addr,
             roster,
+            sql_password,
         })
     }
 
@@ -432,7 +450,10 @@ impl Cluster {
     /// SQL connection parameters for a node's front door.
     #[must_use]
     pub fn sql_endpoint(&self, node: u16) -> SqlEndpoint {
-        sql_endpoint_at(self.sql_proxies[usize::from(node)].addr())
+        sql_endpoint_at(
+            self.sql_proxies[usize::from(node)].addr(),
+            &self.sql_password,
+        )
     }
 
     /// The chaos proxy in front of a range's RPC endpoint.
@@ -653,11 +674,11 @@ struct SpecContext<'a> {
 }
 
 /// The SQL endpoint clients use for a given listener address.
-fn sql_endpoint_at(addr: SocketAddr) -> SqlEndpoint {
+fn sql_endpoint_at(addr: SocketAddr, password: &str) -> SqlEndpoint {
     SqlEndpoint {
         addr,
         user: SQL_USER_NAME.to_owned(),
-        password: SQL_PASSWORD.to_owned(),
+        password: password.to_owned(),
         database: SQL_DATABASE.to_owned(),
     }
 }
@@ -1083,6 +1104,7 @@ async fn provision_tenant(
     bootstrap: &str,
     ranges: u16,
     range_endpoints: &[SocketAddr],
+    sql_password: &str,
 ) -> anyhow::Result<()> {
     let mut admin = AdminClient::connect(&[bootstrap.to_owned()])
         .await
@@ -1103,7 +1125,7 @@ async fn provision_tenant(
         outcomes.iter().all(|outcome| outcome.error.is_none()),
         "WAL topic creation failed: {outcomes:?}"
     );
-    let record = tenant_record(ranges, range_endpoints)?;
+    let record = tenant_record(ranges, range_endpoints, sql_password)?;
     let mut registry = Registry::connect(bootstrap)
         .await
         .context("connect registry")?;
@@ -1118,8 +1140,12 @@ async fn provision_tenant(
 
 /// Builds the tenant registry record: SQL user + SCRAM verifier plus the
 /// proxy-fronted range layout.
-fn tenant_record(ranges: u16, range_endpoints: &[SocketAddr]) -> anyhow::Result<TenantRecord> {
-    let verifier = crabka_security::scram::PgScramVerifier::generate(SQL_PASSWORD, 4096)
+fn tenant_record(
+    ranges: u16,
+    range_endpoints: &[SocketAddr],
+    sql_password: &str,
+) -> anyhow::Result<TenantRecord> {
+    let verifier = crabka_security::scram::PgScramVerifier::generate(sql_password, 4096)
         .context("generate SCRAM verifier")?;
     let record = TenantRecord::new(
         1,
