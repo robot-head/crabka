@@ -40,6 +40,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     process::Stdio,
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::Duration,
 };
 
@@ -161,6 +162,35 @@ pub struct ProcessInfo {
     pub pid: u32,
 }
 
+/// Live, append-only roster of every process the harness has launched for
+/// the current topology (broker plus every node incarnation). Shared with
+/// the `/proc` sampler, which re-snapshots it on every tick so a node
+/// restarted mid-run (fresh pid, `#N`-suffixed label) is attached as it
+/// appears. Cloning is cheap; clones share the same list.
+#[derive(Debug, Clone, Default)]
+pub struct ProcessRoster(Arc<Mutex<Vec<ProcessInfo>>>);
+
+impl ProcessRoster {
+    /// Appends a newly-launched process. Existing entries are never removed
+    /// or reordered, so index-based consumers only ever see new tail
+    /// entries.
+    pub fn push(&self, process: ProcessInfo) {
+        self.lock().push(process);
+    }
+
+    /// The roster contents, in launch order.
+    #[must_use]
+    pub fn snapshot(&self) -> Vec<ProcessInfo> {
+        self.lock().clone()
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Vec<ProcessInfo>> {
+        // A poisoned lock only means another thread panicked mid-push; the
+        // Vec is still coherent, so keep serving it.
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
 /// Phase one of a launch: broker, proxies, and tenant provisioning are live,
 /// and a single `bootstrap` node hosts every range so schema DDL executed
 /// against [`SchemaBootstrap::sql_endpoint`] reaches all of them. Convert to
@@ -176,6 +206,7 @@ pub struct SchemaBootstrap {
     node_specs: Vec<NodeSpec>,
     bootstrap_slot: NodeSlot,
     bootstrap_sql_addr: SocketAddr,
+    roster: ProcessRoster,
 }
 
 impl SchemaBootstrap {
@@ -204,6 +235,7 @@ impl SchemaBootstrap {
             node_specs,
             mut bootstrap_slot,
             bootstrap_sql_addr: _,
+            roster,
         } = self;
         if let Some(mut process) = bootstrap_slot.running.take() {
             kill_child(&bootstrap_slot.spec.label, &mut process.child, process.pid).await?;
@@ -215,9 +247,14 @@ impl SchemaBootstrap {
             std::fs::create_dir_all(&spec.cache_dir)
                 .with_context(|| format!("create cache dir {}", spec.cache_dir.display()))?;
             let running = spawn_node(&binaries.gres, &spec)?;
+            roster.push(ProcessInfo {
+                label: spec.label.clone(),
+                pid: running.pid,
+            });
             nodes.push(NodeSlot {
                 spec,
                 running: Some(running),
+                incarnation: 1,
             });
         }
         let mut cluster = Cluster {
@@ -228,6 +265,7 @@ impl SchemaBootstrap {
             range_proxies,
             sql_proxies,
             nodes,
+            roster,
         };
         for index in 0..cluster.nodes.len() {
             wait_node_ready(&mut cluster.nodes[index]).await?;
@@ -254,6 +292,7 @@ pub struct Cluster {
     range_proxies: Vec<ChaosProxy>,
     sql_proxies: Vec<ChaosProxy>,
     nodes: Vec<NodeSlot>,
+    roster: ProcessRoster,
 }
 
 impl Cluster {
@@ -342,6 +381,7 @@ impl Cluster {
         let mut bootstrap_slot = NodeSlot {
             spec,
             running: Some(running),
+            incarnation: 1,
         };
         wait_node_ready(&mut bootstrap_slot).await?;
         let (bootstrap_sql_addr, bootstrap_range_addr) = {
@@ -355,6 +395,14 @@ impl Cluster {
             proxy.set_backend(bootstrap_range_addr);
         }
         tracing::info!(sql = %bootstrap_sql_addr, "schema bootstrap node ready");
+        // The roster starts with the broker only; topology nodes join in
+        // `into_topology`. The bootstrap node is deliberately absent — it is
+        // dead before any sampling window can start.
+        let roster = ProcessRoster::default();
+        roster.push(ProcessInfo {
+            label: "broker".to_owned(),
+            pid: broker.pid,
+        });
         Ok(SchemaBootstrap {
             topology,
             binaries,
@@ -365,6 +413,7 @@ impl Cluster {
             node_specs,
             bootstrap_slot,
             bootstrap_sql_addr,
+            roster,
         })
     }
 
@@ -422,6 +471,15 @@ impl Cluster {
         &self.log_dir
     }
 
+    /// Live roster of every process launched for this topology (broker plus
+    /// every node incarnation). [`Cluster::restart_node`] appends the
+    /// replacement process under a `label#N` entry, so a `/proc` sampler
+    /// holding this roster attaches restarted nodes mid-run.
+    #[must_use]
+    pub fn process_roster(&self) -> ProcessRoster {
+        self.roster.clone()
+    }
+
     /// SIGKILLs a node's process group. The node's proxies keep refusing
     /// until [`Cluster::restart_node`].
     ///
@@ -463,7 +521,15 @@ impl Cluster {
             "node {node} is already running"
         );
         let running = spawn_node(&self.binaries.gres, &self.nodes[index].spec)?;
+        let pid = running.pid;
         self.nodes[index].running = Some(running);
+        self.nodes[index].incarnation += 1;
+        // Append (never replace): the previous incarnation's entry keeps its
+        // sampled totals; the fresh pid gets a disambiguated label.
+        self.roster.push(ProcessInfo {
+            label: incarnation_label(&self.nodes[index].spec.label, self.nodes[index].incarnation),
+            pid,
+        });
         wait_node_ready(&mut self.nodes[index]).await?;
         self.point_proxies_at(node);
         tracing::info!(node, "node restarted");
@@ -531,10 +597,13 @@ impl Drop for BrokerProcess {
 
 /// One node's slot: its immutable spawn parameters plus the live child, if
 /// any (`None` between [`Cluster::kill_node`] and [`Cluster::restart_node`]).
+/// `incarnation` counts spawns of this slot (1 = original), naming roster
+/// entries for restarts.
 #[derive(Debug)]
 struct NodeSlot {
     spec: NodeSpec,
     running: Option<NodeProcess>,
+    incarnation: u32,
 }
 
 /// Everything needed to (re-)spawn one node with identical flags.
@@ -596,6 +665,17 @@ fn sql_endpoint_at(addr: SocketAddr) -> SqlEndpoint {
 /// The node hosting `range` under round-robin assignment.
 fn node_for_range(range: u16, nodes: u16) -> u16 {
     range % nodes
+}
+
+/// Roster label for the `incarnation`-th process spawned into a node slot
+/// (1-based): the first incarnation keeps the bare label, later ones get a
+/// `#N` suffix (`node2` → `node2#2`).
+fn incarnation_label(label: &str, incarnation: u32) -> String {
+    if incarnation <= 1 {
+        label.to_owned()
+    } else {
+        format!("{label}#{incarnation}")
+    }
 }
 
 /// The `--ranges` boundary list: range `i` starts at table id
@@ -1218,6 +1298,48 @@ mod tests {
     }
 
     #[test]
+    fn incarnation_labels_disambiguate_restarts() {
+        let cases = [
+            ("node2", 1, "node2"),
+            ("node2", 2, "node2#2"),
+            ("node0", 3, "node0#3"),
+            ("broker", 1, "broker"),
+        ];
+        for (label, incarnation, expected) in cases {
+            assert!(
+                incarnation_label(label, incarnation) == expected,
+                "label {label} incarnation {incarnation}"
+            );
+        }
+    }
+
+    #[test]
+    fn roster_appends_in_order_and_clones_share_state() {
+        let roster = ProcessRoster::default();
+        let clone = roster.clone();
+        roster.push(ProcessInfo {
+            label: "broker".to_owned(),
+            pid: 10,
+        });
+        clone.push(ProcessInfo {
+            label: "node0".to_owned(),
+            pid: 20,
+        });
+        let expected = vec![
+            ProcessInfo {
+                label: "broker".to_owned(),
+                pid: 10,
+            },
+            ProcessInfo {
+                label: "node0".to_owned(),
+                pid: 20,
+            },
+        ];
+        assert!(roster.snapshot() == expected);
+        assert!(clone.snapshot() == expected);
+    }
+
+    #[test]
     fn round_robin_assigns_ranges_to_nodes() {
         let cases = [
             (0, 3, 0),
@@ -1498,6 +1620,13 @@ mod tests {
         assert!(cluster.node_for_range(0) == 0);
         assert!(cluster.node_for_range(1) == 1);
         assert!(cluster.processes().len() == 3);
+        let roster = cluster.process_roster();
+        let labels: Vec<String> = roster
+            .snapshot()
+            .into_iter()
+            .map(|process| process.label)
+            .collect();
+        assert!(labels == ["broker", "node0", "node1"]);
 
         // t1000000 lives on range 1 (hosted by node 1); inserting through
         // node 0's gateway proves the bootstrap-phase schema propagated to a
@@ -1510,7 +1639,17 @@ mod tests {
 
         cluster.kill_node(1).await.expect("kill node 1");
         assert!(cluster.processes().len() == 2);
+        // A kill leaves the roster untouched (the dead pid keeps its totals).
+        assert!(roster.snapshot().len() == 3);
         cluster.restart_node(1).await.expect("restart node 1");
+        // The restart appended the replacement pid under a `#2` label; the
+        // original entry (and its pid) survives. The pre-restart roster
+        // clone observes the append — it is live, not a snapshot.
+        let entries = roster.snapshot();
+        assert!(entries.len() == 4);
+        assert!(entries[2].label == "node1");
+        assert!(entries[3].label == "node1#2");
+        assert!(entries[3].pid != entries[2].pid);
         // Node 1's SQL front door answers again. DML must still enter via
         // node 0's gateway: the gateway catalog/coordinator checks need a
         // local range-0 engine (`range r0 is not hosted` otherwise), so the

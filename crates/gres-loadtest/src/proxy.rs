@@ -8,7 +8,9 @@
 //!   exactly as they would on a real partition; live connections survive a
 //!   heal. [`PartitionStyle::Reset`] closes live connections and refuses new
 //!   ones. New connections during a blackhole are accepted but not connected
-//!   to the backend until the partition heals.
+//!   to the backend until the partition heals. Chunks already read but still
+//!   waiting out configured latency are likewise held for the duration of a
+//!   blackhole and delivered, in order, after the heal.
 //! - **Latency** — each chunk read is stamped with a delivery time of
 //!   `read_time + base + uniform(0..=jitter)` and forwarded no earlier than
 //!   that, preserving order and pipelining (a busy stream is delayed, not
@@ -264,8 +266,8 @@ async fn pump(
 ) {
     let (queue_tx, queue_rx) = mpsc::channel(DELAY_QUEUE_DEPTH);
     tokio::join!(
-        read_side(reader, queue_tx, partition, latency, throttle),
-        write_side(queue_rx, writer),
+        read_side(reader, queue_tx, partition.clone(), latency, throttle),
+        write_side(queue_rx, writer, partition),
     );
 }
 
@@ -314,11 +316,34 @@ async fn read_side(
 }
 
 /// Write half of a pump: delivers queued chunks in order, each no earlier
-/// than its deadline, then propagates the half-close once the read side is
-/// done.
-async fn write_side(mut queue: mpsc::Receiver<(Vec<u8>, Instant)>, mut writer: OwnedWriteHalf) {
+/// than its deadline and never during a blackhole, then propagates the
+/// half-close once the read side is done.
+async fn write_side(
+    mut queue: mpsc::Receiver<(Vec<u8>, Instant)>,
+    mut writer: OwnedWriteHalf,
+    mut partition: watch::Receiver<Option<PartitionStyle>>,
+) {
     while let Some((chunk, deliver_at)) = queue.recv().await {
-        tokio::time::sleep_until(deliver_at).await;
+        // Wait out the delivery deadline, gated on the blackhole state: a
+        // partition arriving mid-wait holds the chunk (and everything queued
+        // behind it) until the heal, after which the now-past deadline lets
+        // it flow immediately. `biased` polls the partition watch first, so
+        // once a blackhole is acknowledged no queued chunk can win the race
+        // against it.
+        loop {
+            if !wait_until_pumping(&mut partition).await {
+                return;
+            }
+            tokio::select! {
+                biased;
+                changed = partition.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                }
+                () = tokio::time::sleep_until(deliver_at) => break,
+            }
+        }
         if writer.write_all(&chunk).await.is_err() {
             return;
         }
@@ -576,6 +601,43 @@ mod tests {
         echo_round_trip(&mut conn, b"after").await;
         let late_echoed = read_exactly(&mut late, 5, Duration::from_secs(5)).await;
         assert!(late_echoed == b"later");
+    }
+
+    #[tokio::test]
+    async fn blackhole_holds_latency_delayed_chunks_until_heal() {
+        let echo = spawn_echo(std::convert::identity).await;
+        let proxy = ChaosProxy::spawn(echo).await.expect("spawn proxy");
+        let mut conn = connect(&proxy).await;
+        echo_round_trip(&mut conn, b"warm").await;
+
+        // Queue a burst behind a delay deadline, then cut the link before
+        // the deadline elapses.
+        proxy.set_latency(Some(LatencySpec {
+            ms: 300,
+            jitter_ms: 0,
+        }));
+        let payload: Vec<u8> = (0..=255_u8).cycle().take(8192).collect();
+        conn.write_all(&payload).await.expect("write burst");
+        // Give the proxy time to read and queue the burst, well inside the
+        // 300 ms deadline, so the hold exercises the delay queue rather than
+        // the read gate.
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        proxy.set_partitioned(Some(PartitionStyle::Blackhole)).await;
+
+        // The queued chunks' deadlines elapse during the partition, but
+        // nothing may be delivered while it holds.
+        let mut buf = [0_u8; 1];
+        let held = timeout(Duration::from_millis(400), conn.read(&mut buf)).await;
+        assert!(
+            held.is_err(),
+            "delay-queued chunks must be held during a blackhole"
+        );
+
+        // After the heal the full burst arrives, in order, on the same
+        // connection.
+        proxy.set_partitioned(None).await;
+        let echoed = read_exactly(&mut conn, payload.len(), Duration::from_secs(5)).await;
+        assert!(echoed == payload);
     }
 
     #[tokio::test]

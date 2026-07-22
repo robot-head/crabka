@@ -2,10 +2,13 @@
 //!
 //! The sampler polls `/proc/<pid>/stat` (utime + stime, converted to
 //! core-seconds via `rustix::param::clock_ticks_per_second`) and
-//! `/proc/<pid>/status` (`VmRSS`) for every launched process on a fixed
-//! interval. A process that disappears mid-run (killed by a fault) keeps its
-//! last observed totals; a restarted node gets a fresh pid and is *not*
-//! re-attached — its post-restart CPU is not counted (documented limitation).
+//! `/proc/<pid>/status` (`VmRSS`) on a fixed interval for every process in a
+//! live [`ProcessRoster`]. The roster is re-snapshotted on every tick, so an
+//! entry appended mid-run — a node restarted by a fault, with a fresh pid
+//! under a `label#N` entry — is attached at the next tick, its CPU window
+//! starting at attach (the correct attribution for a process born mid-run).
+//! A process that disappears (killed by a fault) keeps its last observed
+//! totals under its own entry.
 
 use std::{fs, time::Duration};
 
@@ -15,7 +18,10 @@ use tokio::{
     time::{Instant, MissedTickBehavior, interval_at},
 };
 
-use crate::{cluster::ProcessInfo, report::ProcessResources};
+use crate::{
+    cluster::{ProcessInfo, ProcessRoster},
+    report::ProcessResources,
+};
 
 /// Handle to a background resource sampler.
 ///
@@ -28,23 +34,23 @@ pub struct ProcSampler {
 }
 
 impl ProcSampler {
-    /// Starts sampling the given processes every `interval`.
+    /// Starts sampling the roster's processes every `interval`.
     ///
     /// One sample is taken synchronously before the background task starts,
     /// so a window shorter than `interval` still observes every process, and
     /// the reported CPU covers only the sampled window (last observed total
-    /// minus first observed total), not the whole process lifetime. A pid
-    /// whose `/proc` entries are never readable reports zeros.
+    /// minus first observed total), not the whole process lifetime. The
+    /// roster is re-snapshotted on every tick: entries appended after spawn
+    /// (restarted nodes) are attached then, their windows starting at
+    /// attach. A pid whose `/proc` entries are never readable reports zeros.
     ///
     /// # Panics
     ///
     /// Panics if called outside a Tokio runtime, or if `interval` is zero.
     #[must_use]
-    pub fn spawn(processes: Vec<ProcessInfo>, interval: Duration) -> Self {
-        let mut tracked: Vec<Tracked> = processes.into_iter().map(Tracked::new).collect();
-        for process in &mut tracked {
-            process.sample();
-        }
+    pub fn spawn(roster: ProcessRoster, interval: Duration) -> Self {
+        let mut tracked: Vec<Tracked> = Vec::new();
+        attach_and_sample(&roster, &mut tracked);
         let (stop_tx, mut stop_rx) = oneshot::channel();
         let task = tokio::spawn(async move {
             let mut ticker = interval_at(Instant::now() + interval, interval);
@@ -52,24 +58,19 @@ impl ProcSampler {
             loop {
                 tokio::select! {
                     _ = &mut stop_rx => break,
-                    _ = ticker.tick() => {
-                        for process in &mut tracked {
-                            process.sample();
-                        }
-                    }
+                    _ = ticker.tick() => attach_and_sample(&roster, &mut tracked),
                 }
             }
-            // Final sample so the window ends at `stop`, not at the last tick.
-            for process in &mut tracked {
-                process.sample();
-            }
+            // Final pass so the window ends at `stop`, not at the last tick
+            // (and a process born after the last tick still gets a row).
+            attach_and_sample(&roster, &mut tracked);
             tracked
         });
         Self { stop_tx, task }
     }
 
     /// Stops sampling and returns totals over the sampled window, one entry
-    /// per process in the order given to [`ProcSampler::spawn`].
+    /// per roster entry in roster (launch) order.
     ///
     /// A final sample of still-alive pids is taken before totals are
     /// computed; processes that vanished mid-run keep their last observed
@@ -85,6 +86,19 @@ impl ProcSampler {
         let _: Result<(), ()> = stop_tx.send(());
         let tracked = task.await.expect("resource sampler task panicked");
         tracked.into_iter().map(Tracked::into_resources).collect()
+    }
+}
+
+/// Attaches roster entries not yet tracked, then samples every tracked
+/// process. The roster is append-only, so the untracked entries are exactly
+/// the tail past `tracked.len()` and result ordering stays roster order. A
+/// process attached mid-run starts its CPU window at attach.
+fn attach_and_sample(roster: &ProcessRoster, tracked: &mut Vec<Tracked>) {
+    for info in roster.snapshot().into_iter().skip(tracked.len()) {
+        tracked.push(Tracked::new(info));
+    }
+    for process in &mut *tracked {
+        process.sample();
     }
 }
 
@@ -281,22 +295,36 @@ mod tests {
         }
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn samples_own_process_cpu_and_rss() {
-        let sampler = ProcSampler::spawn(
-            vec![ProcessInfo {
-                label: "self".to_string(),
-                pid: std::process::id(),
-            }],
-            Duration::from_millis(50),
-        );
-        // Burn CPU so the window's utime delta is at least a few clock ticks.
+    /// A roster pre-populated with the given entries.
+    fn roster_of(entries: Vec<ProcessInfo>) -> ProcessRoster {
+        let roster = ProcessRoster::default();
+        for entry in entries {
+            roster.push(entry);
+        }
+        roster
+    }
+
+    /// Burns CPU on the current thread for roughly `duration`.
+    fn burn_cpu(duration: Duration) {
         let start = std::time::Instant::now();
         let mut spin: u64 = 0;
-        while start.elapsed() < Duration::from_millis(200) {
+        while start.elapsed() < duration {
             spin = spin.wrapping_add(1);
         }
         std::hint::black_box(spin);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn samples_own_process_cpu_and_rss() {
+        let sampler = ProcSampler::spawn(
+            roster_of(vec![ProcessInfo {
+                label: "self".to_string(),
+                pid: std::process::id(),
+            }]),
+            Duration::from_millis(50),
+        );
+        // Burn CPU so the window's utime delta is at least a few clock ticks.
+        burn_cpu(Duration::from_millis(200));
         let resources = sampler.stop().await;
         assert!(resources.len() == 1);
         assert!(resources[0].label == "self");
@@ -305,10 +333,38 @@ mod tests {
         assert!(resources[0].max_rss_bytes > 0);
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn roster_entries_appended_mid_run_are_attached_and_reported() {
+        let roster = roster_of(vec![ProcessInfo {
+            label: "self".to_string(),
+            pid: std::process::id(),
+        }]);
+        let sampler = ProcSampler::spawn(roster.clone(), Duration::from_millis(20));
+        // Let at least one tick pass before the roster grows, as it would
+        // when a fault restarts a node mid-window.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        roster.push(ProcessInfo {
+            label: "self#2".to_string(),
+            pid: std::process::id(),
+        });
+        burn_cpu(Duration::from_millis(100));
+        // Leave the sampler a few ticks to attach and sample the new entry.
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        let resources = sampler.stop().await;
+        assert!(resources.len() == 2);
+        assert!(resources[0].label == "self");
+        assert!(resources[1].label == "self#2");
+        assert!(resources[1].pid == std::process::id());
+        // The late entry's window starts at attach: sampled, non-negative,
+        // and its RSS was observed.
+        assert!(resources[1].cpu_core_seconds >= 0.0);
+        assert!(resources[1].max_rss_bytes > 0);
+    }
+
     #[tokio::test]
     async fn never_readable_pids_report_zeros_in_spawn_order() {
         let sampler = ProcSampler::spawn(
-            vec![
+            roster_of(vec![
                 ProcessInfo {
                     label: "ghost-b".to_string(),
                     pid: 999_999_999,
@@ -317,7 +373,7 @@ mod tests {
                     label: "ghost-a".to_string(),
                     pid: 999_999_998,
                 },
-            ],
+            ]),
             Duration::from_millis(10),
         );
         tokio::time::sleep(Duration::from_millis(30)).await;

@@ -415,6 +415,28 @@ impl Scenario {
     }
 
     fn validate_fault(&self, event: &FaultEvent) -> Result<(), ScenarioError> {
+        let window_s = self.workload.duration_s;
+        if event.at_s >= window_s {
+            return Err(ScenarioError::Invalid(format!(
+                "fault at t={}s starts at or after the {window_s}s measurement window ends",
+                event.at_s
+            )));
+        }
+        let end_s = match &event.action {
+            FaultAction::Partition { duration_s, .. }
+            | FaultAction::Latency { duration_s, .. }
+            | FaultAction::Throttle { duration_s, .. }
+            | FaultAction::Flap { duration_s, .. } => event.at_s.saturating_add(*duration_s),
+            FaultAction::KillNode {
+                restart_after_s, ..
+            } => event.at_s.saturating_add(restart_after_s.unwrap_or(0)),
+        };
+        if end_s > window_s {
+            return Err(ScenarioError::Invalid(format!(
+                "fault at t={}s runs until t={end_s}s, past the {window_s}s measurement window",
+                event.at_s
+            )));
+        }
         let check_target = |target: &FaultTarget| {
             let (label, index, bound) = match target {
                 FaultTarget::Range(range) => ("range", *range, self.topology.ranges),
@@ -529,7 +551,7 @@ faults:
     throttle: { target: 'sql:1', bytes_per_sec: 65536, duration_s: 5 }
   - at_s: 50
     kill_node: { node: 2, restart_after_s: 5 }
-  - at_s: 55
+  - at_s: 50
     flap: { target: 'range:1', period_s: 2, duration_s: 8 }
 ";
         let scenario: Scenario = serde_yaml::from_str(yaml).expect("parse");
@@ -622,6 +644,61 @@ faults:
         let scenario: Scenario = serde_yaml::from_str(yaml).expect("parse");
         assert!(let Err(ScenarioError::Invalid(message)) = scenario.validate());
         assert!(message.contains("kills node 7"));
+
+        // Faults must fit inside the measurement window: application after
+        // the window ends, and timed faults (or restarts) running past it,
+        // are both rejected; ending exactly at the window bound is allowed.
+        let bounds_cases = [
+            ("partition: { target: 'range:0', duration_s: 3 }", 7, false),
+            ("partition: { target: 'range:0', duration_s: 5 }", 6, true),
+            (
+                "latency: { target: all-ranges, ms: 50, duration_s: 4 }",
+                7,
+                true,
+            ),
+            ("kill_node: { node: 1, restart_after_s: 8 }", 3, true),
+            ("kill_node: { node: 1 }", 9, false),
+            (
+                "flap: { target: 'range:1', period_s: 2, duration_s: 4 }",
+                6,
+                false,
+            ),
+        ];
+        for (action, at_s, rejected) in bounds_cases {
+            let yaml = format!(
+                "
+name: bounds
+topology: {{ nodes: 2, ranges: 2 }}
+workload:
+  connections: 4
+  duration_s: 10
+  mix: {{ single_shard_insert: 1 }}
+faults:
+  - at_s: {at_s}
+    {action}
+"
+            );
+            let scenario: Scenario = serde_yaml::from_str(&yaml).expect("parse");
+            let result = scenario.validate();
+            assert!(
+                result.is_err() == rejected,
+                "action {action} at t={at_s}: {result:?}"
+            );
+        }
+        let yaml = "
+name: late-start
+topology: { nodes: 2, ranges: 2 }
+workload:
+  connections: 4
+  duration_s: 10
+  mix: { single_shard_insert: 1 }
+faults:
+  - at_s: 10
+    partition: { target: 'range:0', duration_s: 1 }
+";
+        let scenario: Scenario = serde_yaml::from_str(yaml).expect("parse");
+        assert!(let Err(ScenarioError::Invalid(message)) = scenario.validate());
+        assert!(message.contains("starts at or after"));
 
         let yaml = "
 name: cross-shard-one-range

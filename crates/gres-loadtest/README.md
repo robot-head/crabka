@@ -118,7 +118,7 @@ Each run writes two files into the output directory, named `<scenario>-<mode-slu
 ## Limitations
 
 - **Single-authority HLC today.** Non-r0 nodes still fetch timestamps from range 0 via RPC, so per-node `clock_skew_ms` is only observable on the node hosting range 0 until multi-node HLC stamping lands.
-- **Restarted nodes lose CPU attribution.** The `/proc` sampler keeps the original pids; a node restarted by `kill_node` gets a fresh pid whose post-restart CPU is not counted.
+- **Restarted nodes report as separate rows.** The `/proc` sampler follows a live process roster: a node restarted by `kill_node` is attached at the next sample tick under a `label#N` entry (e.g. `node2#2`), so its post-restart CPU/RSS is counted alongside — not merged into — the original incarnation's row.
 - **Localhost only.** The chaos proxies model the network in user space; OS-level `netem`/`tc` shaping is out of scope.
 - **Relative numbers, not benchmarks.** Results depend on the machine, debug/release build, and concurrent load; they are for comparing modes and scenarios on the same host, not for absolute claims.
 

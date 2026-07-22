@@ -267,7 +267,9 @@ async fn drive(cluster: &mut Cluster, scenario: &Scenario) -> anyhow::Result<Dri
     let endpoints: Vec<SqlEndpoint> = (0..cluster.node_count())
         .map(|node| cluster.sql_endpoint(node))
         .collect();
-    let sampler = ProcSampler::spawn(cluster.processes(), SAMPLE_INTERVAL);
+    // The live roster (not a one-shot process list) lets the sampler attach
+    // nodes restarted by kill_node faults mid-window under `label#N` entries.
+    let sampler = ProcSampler::spawn(cluster.process_roster(), SAMPLE_INTERVAL);
 
     // The fault schedule anchors at the measurement-window start, warmup_s
     // from now. This is an approximation: the workload starts its warmup a
