@@ -146,6 +146,8 @@ fn tenant_record() -> crabka_gres_control::TenantRecord {
 
 #[test]
 fn binary_help_exposes_only_single_node_serve_surface() {
+    use assert2::assert;
+
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_crabka-gres"))
         .arg("--help")
         .output()
@@ -160,6 +162,9 @@ fn binary_help_exposes_only_single_node_serve_surface() {
     assert!(help.contains("--cache-dir"));
     assert!(help.contains("--ranges"));
     assert!(help.contains("--host-ranges"));
+    assert!(help.contains("--timestamp-source"));
+    assert!(help.contains("--hlc-max-offset-ms"));
+    assert!(help.contains("--hlc-wall-offset-ms"));
     assert!(help.contains("--range-listen"));
     assert!(help.contains("--checkpoint-bucket"));
     assert!(help.contains("--checkpoint-store"));
@@ -186,6 +191,9 @@ fn test_args(listen: String, data_dir: Option<std::path::PathBuf>) -> crabka_gre
         cache_dir: None,
         ranges: None,
         host_ranges: None,
+        timestamp_source: crabka_gres::TimestampSourceKind::LogicalTso,
+        hlc_max_offset_ms: 250,
+        hlc_wall_offset_ms: 0,
         range_listen: None,
         range_tls_cert: None,
         range_tls_key: None,
@@ -336,6 +344,8 @@ async fn live_multirange_substrate_default_fdw_server_reads_own_broker() {
         host_ranges: None,
         range_rpc: None,
         advertised_endpoint: None,
+        timestamp_source_mode: crabka_gres_ranges::TimestampSourceMode::LogicalTso,
+        hlc_wall_offset_ms: 0,
     })
     .await
     .expect("open live multi-range substrate runtime");
@@ -366,6 +376,73 @@ async fn live_multirange_substrate_default_fdw_server_reads_own_broker() {
         rows[0][0].as_ref().expect("value").text,
         b"\\x7375627374726174652d666477"[..]
     );
+
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_multirange_substrate_hlc_mode_commits_and_mints_wall_anchored_stamps() {
+    use assert2::assert;
+    use crabka_pgexec::WallClock as _;
+
+    let _permit = broker_test_permit().await;
+    let broker_dir = tempfile::tempdir().expect("broker tempdir");
+    let broker = Broker::start(BrokerConfig::for_tests(broker_dir.path().to_path_buf()))
+        .await
+        .expect("broker start");
+    let bootstrap = broker.listen_addr().to_string();
+
+    let before_ms = crabka_pgexec::SystemWallClock.now_ms();
+    let runtime = crabka_gres::open_substrate_runtime(&crabka_gres::SubstrateRuntimeConfig {
+        bootstrap,
+        tenant: "g6-hlc-runtime".to_string(),
+        cache_dir: None,
+        checkpoints: None,
+        kafka_security: None,
+        ranges: Some("0,5".to_string()),
+        host_ranges: None,
+        range_rpc: None,
+        advertised_endpoint: None,
+        timestamp_source_mode: crabka_gres_ranges::TimestampSourceMode::Hlc { max_offset_ms: 500 },
+        hlc_wall_offset_ms: 0,
+    })
+    .await
+    .expect("open live multi-range substrate runtime in HLC mode");
+
+    // Writes commit end-to-end under the HLC-backed range-0 grant oracle.
+    let mut session = runtime.engine.connect();
+    session
+        .simple_query("CREATE TABLE hlc_live (id int4)")
+        .await
+        .expect("create table under hlc mode");
+    session
+        .simple_query("INSERT INTO hlc_live VALUES (7)")
+        .await
+        .expect("insert under hlc mode");
+    let results = session
+        .simple_query("SELECT id FROM hlc_live")
+        .await
+        .expect("select under hlc mode");
+    let [crabka_pgwire::engine::QueryResult::Rows { rows, .. }] = results.as_slice() else {
+        panic!("expected one row result, got {results:?}");
+    };
+    assert!(rows.len() == 1);
+
+    // The tenant's installed timestamp source mints wall-anchored packed
+    // stamps: their physical component reaches the wall reading taken before
+    // boot. A logical oracle's small dense integers would unpack with a
+    // physical component of zero, so this can only pass when HLC genuinely
+    // engaged on the live boot path.
+    let crabka_gres::RuntimeEngine::Multi(gateway) = &runtime.engine else {
+        panic!("live multi-range runtime must expose the gateway");
+    };
+    let source = gateway.hosted_range_engines()[&RangeId::COORDINATOR].timestamp_oracle_handle();
+    let minted = source
+        .allocate_read_timestamp()
+        .await
+        .expect("allocate through the live tenant timestamp source")
+        .get();
+    assert!(crabka_pgexec::hlc::unpack(minted).physical_ms >= before_ms);
 
     broker.shutdown().await;
 }
@@ -481,6 +558,8 @@ async fn live_multirange_transfer_stages_populated_successor_without_publishing_
         host_ranges: None,
         range_rpc: None,
         advertised_endpoint: Some("127.0.0.1:7443".into()),
+        timestamp_source_mode: crabka_gres_ranges::TimestampSourceMode::LogicalTso,
+        hlc_wall_offset_ms: 0,
     })
     .await
     .expect("open live multi-range runtime");
@@ -828,6 +907,8 @@ fn activation_crash_config(
         host_ranges: None,
         range_rpc: None,
         advertised_endpoint: Some("127.0.0.1:7443".into()),
+        timestamp_source_mode: crabka_gres_ranges::TimestampSourceMode::LogicalTso,
+        hlc_wall_offset_ms: 0,
     }
 }
 
@@ -2286,6 +2367,8 @@ async fn live_populated_hash_split_partitions_physical_rows_and_sequence() {
         host_ranges: None,
         range_rpc: None,
         advertised_endpoint: Some("127.0.0.1:7443".into()),
+        timestamp_source_mode: crabka_gres_ranges::TimestampSourceMode::LogicalTso,
+        hlc_wall_offset_ms: 0,
     })
     .await
     .expect("open live multi-range runtime");
@@ -2446,6 +2529,8 @@ async fn live_multirange_transfer_rejects_concurrent_pause_without_waiting() {
         host_ranges: None,
         range_rpc: None,
         advertised_endpoint: None,
+        timestamp_source_mode: crabka_gres_ranges::TimestampSourceMode::LogicalTso,
+        hlc_wall_offset_ms: 0,
     })
     .await
     .expect("open live multi-range runtime");
@@ -2507,6 +2592,8 @@ async fn non_live_runtimes_do_not_expose_range_transfer_capability() {
         host_ranges: None,
         range_rpc: None,
         advertised_endpoint: None,
+        timestamp_source_mode: crabka_gres_ranges::TimestampSourceMode::LogicalTso,
+        hlc_wall_offset_ms: 0,
     })
     .await
     .expect("open in-memory single-range runtime");
@@ -2522,6 +2609,8 @@ async fn non_live_runtimes_do_not_expose_range_transfer_capability() {
             host_ranges: None,
             range_rpc: None,
             advertised_endpoint: None,
+            timestamp_source_mode: crabka_gres_ranges::TimestampSourceMode::LogicalTso,
+            hlc_wall_offset_ms: 0,
         }
     })
     .await

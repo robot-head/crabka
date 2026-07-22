@@ -18,6 +18,7 @@
 //! [`Hlc`]: crate::hlc
 
 use std::{
+    num::NonZeroU64,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -29,7 +30,7 @@ use crate::{
     hlc::{HybridLogicalClock, pack},
     timestamp_txn::{
         CommitTimestamp, ReadTimestamp, TimestampSource, TimestampSourceError,
-        TimestampTransactionId,
+        TimestampTransactionId, TimestampWriteLease,
     },
 };
 
@@ -76,6 +77,49 @@ impl ManualWallClock {
 impl WallClock for ManualWallClock {
     fn now_ms(&self) -> u64 {
         self.0.load(Ordering::Acquire)
+    }
+}
+
+/// Fault-injection [`WallClock`] decorator applying a fixed signed skew.
+///
+/// Load and chaos tests wrap a node's [`SystemWallClock`] in this decorator to
+/// emulate a wall clock running ahead of (positive skew) or behind (negative
+/// skew) its peers. Arithmetic saturates in both directions — a negative skew
+/// larger than the inner reading clamps to zero rather than panicking — so a
+/// skewed clock is safe under any inner reading. Testing seam only, not a
+/// production configuration.
+#[derive(Clone)]
+pub struct SkewedWallClock {
+    inner: Arc<dyn WallClock>,
+    skew_ms: i64,
+}
+
+impl std::fmt::Debug for SkewedWallClock {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SkewedWallClock")
+            .field("skew_ms", &self.skew_ms)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SkewedWallClock {
+    /// Wrap `inner`, shifting every reading by `skew_ms` milliseconds.
+    #[must_use]
+    pub fn new(inner: Arc<dyn WallClock>, skew_ms: i64) -> Self {
+        Self { inner, skew_ms }
+    }
+}
+
+impl WallClock for SkewedWallClock {
+    fn now_ms(&self) -> u64 {
+        let now = self.inner.now_ms();
+        let magnitude = self.skew_ms.unsigned_abs();
+        if self.skew_ms >= 0 {
+            now.saturating_add(magnitude)
+        } else {
+            now.saturating_sub(magnitude)
+        }
     }
 }
 
@@ -135,6 +179,17 @@ impl HlcTimestampSource {
         }
     }
 
+    /// Atomically reserve a contiguous run of `count` stamps against the
+    /// current wall reading, returning the first stamp of the run.
+    ///
+    /// See [`HybridLogicalClock::allocate_batch`] for the reservation rule.
+    /// Returns [`None`] only when the reservation would overflow the `u64`
+    /// stamp space.
+    #[must_use]
+    pub fn allocate_batch(&self, count: NonZeroU64) -> Option<u64> {
+        self.clock.allocate_batch(count, self.wall.now_ms())
+    }
+
     /// Mint a fresh stamp under the HLC local/send rule.
     fn mint(&self) -> u64 {
         self.clock.now(self.wall.now_ms())
@@ -156,6 +211,32 @@ impl TimestampSource for HlcTimestampSource {
         &self,
     ) -> Result<TimestampTransactionId, TimestampSourceError> {
         TimestampTransactionId::new(self.mint()).map_err(Into::into)
+    }
+
+    async fn allocate_write_lease(
+        &self,
+        hidden_rowid_count: usize,
+    ) -> Result<TimestampWriteLease, TimestampSourceError> {
+        // One batch reservation covers the start timestamp and every hidden
+        // row ID: the lease is contiguous by construction instead of stitched
+        // from sequential mints.
+        let count = u64::try_from(hidden_rowid_count)
+            .ok()
+            .and_then(|count| count.checked_add(1))
+            .and_then(NonZeroU64::new)
+            .ok_or_else(|| {
+                TimestampSourceError::Unavailable("timestamp write lease is too large".into())
+            })?;
+        let first = self.allocate_batch(count).ok_or_else(|| {
+            TimestampSourceError::Unavailable("hybrid logical clock stamp space exhausted".into())
+        })?;
+        let start_ts = TimestampTransactionId::new(first)?;
+        // `first + count - 1` was overflow-checked by the reservation itself.
+        let hidden_rowids = (1..count.get()).map(|offset| first + offset).collect();
+        Ok(TimestampWriteLease {
+            start_ts,
+            hidden_rowids,
+        })
     }
 
     async fn allocate_commit_after(
@@ -296,6 +377,68 @@ mod tests {
             let start = source.allocate_transaction_id().await.expect("start").get();
             assert!(start > horizon);
         }
+    }
+
+    #[tokio::test]
+    async fn write_lease_is_one_contiguous_wall_anchored_reservation() {
+        let (source, _wall) = source_at(50, 0);
+        let lease = source.allocate_write_lease(3).await.expect("write lease");
+        // A fresh clock anchors the lease exactly at the wall reading and the
+        // hidden row IDs pack densely behind the start timestamp.
+        let first = pack(50, 0);
+        assert!(
+            lease
+                == crate::timestamp_txn::TimestampWriteLease {
+                    start_ts: TimestampTransactionId::new(first).expect("start"),
+                    hidden_rowids: vec![first + 1, first + 2, first + 3],
+                }
+        );
+        // The next allocation lands strictly after the whole lease.
+        let next = source.allocate_read_timestamp().await.expect("read").get();
+        assert!(next > first + 3);
+    }
+
+    #[tokio::test]
+    async fn batch_reservation_respects_observed_remote_stamps() {
+        let (source, _wall) = source_at(5, 0);
+        let remote = pack(2_000, 9);
+        source.observe(remote);
+        let count = NonZeroU64::new(4).expect("count is non-zero");
+        let first = source.allocate_batch(count).expect("batch");
+        assert!(first > remote);
+        // A later mint continues past the reserved run.
+        let next = source.allocate_read_timestamp().await.expect("read").get();
+        assert!(next > first + 3);
+    }
+
+    #[test]
+    fn skewed_wall_clock_applies_signed_offsets_with_saturation() {
+        let cases = [
+            // (inner reading, skew, expected skewed reading)
+            (1_000, 250, 1_250),
+            (1_000, -250, 750),
+            (100, -1_000, 0),
+            (0, i64::MIN, 0),
+            (u64::MAX, 1, u64::MAX),
+            (1_000, 0, 1_000),
+        ];
+        for (inner_ms, skew_ms, expected) in cases {
+            let inner = Arc::new(ManualWallClock::new(inner_ms));
+            let skewed = SkewedWallClock::new(inner as Arc<dyn WallClock>, skew_ms);
+            assert!(
+                skewed.now_ms() == expected,
+                "inner {inner_ms} skewed by {skew_ms}"
+            );
+        }
+    }
+
+    #[test]
+    fn skewed_wall_clock_tracks_its_inner_clock() {
+        let inner = Arc::new(ManualWallClock::new(500));
+        let skewed = SkewedWallClock::new(Arc::clone(&inner) as Arc<dyn WallClock>, -200);
+        assert!(skewed.now_ms() == 300);
+        inner.set(1_500);
+        assert!(skewed.now_ms() == 1_300);
     }
 
     #[tokio::test]

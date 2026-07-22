@@ -14,7 +14,10 @@
 //! [`HybridLogicalClock::observe`] rather than read from `SystemTime`, so the
 //! clock is deterministic under test.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::{
+    num::NonZeroU64,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 /// Low bits of a packed stamp holding the logical counter.
 pub const LOGICAL_BITS: u32 = 22;
@@ -180,6 +183,45 @@ impl HybridLogicalClock {
     pub fn observe(&self, remote_packed: u64, wall_ms: u64) -> u64 {
         let wall_ms = wall_ms.min(MAX_PHYSICAL_MS);
         self.update(|last| receive(last, remote_packed, wall_ms))
+    }
+
+    /// Atomically reserve a contiguous run of `count` stamps, returning the
+    /// first stamp of the run.
+    ///
+    /// The run starts at `max(last + 1, pack(wall_ms, 0))`: wall-anchored when
+    /// the injected wall clock has moved past the last-issued stamp, densely
+    /// packed right behind the previous reservation otherwise. Because a packed
+    /// stamp is one integer, `last + 1` is exactly the HLC logical bump —
+    /// including the carry into the physical field when the logical counter is
+    /// saturated — so a run that crosses the logical-field boundary simply
+    /// borrows a future millisecond, the same bounded drift a stalled wall
+    /// clock already produces. A reservation of one is identical to
+    /// [`Self::now`].
+    ///
+    /// Concurrent reservations are disjoint and ordered: each run ends strictly
+    /// below the next run's first stamp.
+    ///
+    /// Returns [`None`] only when the reservation would overflow the `u64`
+    /// stamp space, which a sane millisecond clock cannot reach for over a
+    /// century.
+    #[must_use]
+    pub fn allocate_batch(&self, count: NonZeroU64, wall_ms: u64) -> Option<u64> {
+        let wall_ms = wall_ms.min(MAX_PHYSICAL_MS);
+        let floor = pack(wall_ms, 0);
+        let mut last = self.last.load(Ordering::Acquire);
+        loop {
+            let first = last.checked_add(1)?.max(floor);
+            let new_last = first.checked_add(count.get() - 1)?;
+            match self.last.compare_exchange_weak(
+                last,
+                new_last,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Some(first),
+                Err(current) => last = current,
+            }
+        }
     }
 
     fn update(&self, transition: impl Fn(u64) -> u64) -> u64 {
@@ -389,6 +431,122 @@ mod tests {
         // The remote physical component is now baked into local state, so a
         // subsequent read with stale wall time still exceeds it.
         assert!(clock.now(6) > remote);
+    }
+
+    fn batch(count: u64) -> NonZeroU64 {
+        NonZeroU64::new(count).expect("test batch count is non-zero")
+    }
+
+    #[test]
+    fn allocate_batch_anchors_at_wall_and_packs_densely_behind_it() {
+        let clock = HybridLogicalClock::new();
+        // Wall ahead of the last stamp: the run starts at the wall reading.
+        let first = clock.allocate_batch(batch(3), 5).expect("first batch");
+        assert!(first == pack(5, 0));
+        assert!(clock.peek() == pack(5, 2));
+        // Wall stalled: the next run packs right behind the previous one.
+        let second = clock.allocate_batch(batch(2), 5).expect("second batch");
+        assert!(second == pack(5, 3));
+        // Wall regressed: still dense, never below the previous run.
+        let third = clock.allocate_batch(batch(1), 1).expect("third batch");
+        assert!(third == pack(5, 5));
+        // Wall jumped forward again: the run re-anchors at the wall.
+        let fourth = clock.allocate_batch(batch(2), 9).expect("fourth batch");
+        assert!(fourth == pack(9, 0));
+    }
+
+    #[test]
+    fn allocate_batch_of_one_matches_now() {
+        let batched = HybridLogicalClock::new();
+        let minted = HybridLogicalClock::new();
+        for wall_ms in [100, 100, 50, 101, 101, 10, 102] {
+            let from_batch = batched.allocate_batch(batch(1), wall_ms).expect("batch");
+            assert!(from_batch == minted.now(wall_ms), "wall {wall_ms}");
+        }
+    }
+
+    #[test]
+    fn allocate_batch_carries_into_physical_at_the_logical_boundary() {
+        let clock = HybridLogicalClock::seeded_at(pack(7, MAX_LOGICAL - 1));
+        // Wall pinned at the physical component: the run starts at the last
+        // logical slot and carries into the next millisecond by integer
+        // arithmetic alone.
+        let first = clock.allocate_batch(batch(4), 7).expect("boundary batch");
+        assert!(first == pack(7, MAX_LOGICAL));
+        assert!(
+            unpack(first + 3)
+                == Hlc {
+                    physical_ms: 8,
+                    logical: 2
+                }
+        );
+        assert!(clock.peek() == pack(8, 2));
+        // A follow-up single stamp continues after the carried run.
+        assert!(clock.now(7) == pack(8, 3));
+    }
+
+    #[test]
+    fn allocate_batch_interacts_with_observe_in_both_directions() {
+        let clock = HybridLogicalClock::new();
+        // Observe first: the next run starts strictly above the remote stamp.
+        let remote = pack(1_000, 3);
+        clock.observe(remote, 5);
+        let first = clock.allocate_batch(batch(4), 5).expect("post-observe");
+        assert!(first > remote);
+        // Batch first: an observe of an older stamp lands above the whole run.
+        let observed = clock.observe(pack(500, 0), 5);
+        assert!(observed > first + 3);
+    }
+
+    #[test]
+    fn allocate_batch_fails_only_on_stamp_space_overflow() {
+        let clock = HybridLogicalClock::seeded_at(u64::MAX - 2);
+        assert!(clock.allocate_batch(batch(5), 0).is_none());
+        assert!(clock.allocate_batch(batch(2), 0) == Some(u64::MAX - 1));
+        assert!(clock.allocate_batch(batch(1), 0).is_none());
+    }
+
+    #[test]
+    fn concurrent_batches_are_disjoint_and_strictly_ordered() {
+        const THREADS: u64 = 8;
+        const BATCHES_PER_THREAD: u64 = 200;
+
+        let clock = HybridLogicalClock::new();
+        let wall = AtomicU64::new(1);
+        let mut runs = Vec::new();
+        std::thread::scope(|scope| {
+            let mut workers = Vec::new();
+            for thread in 0..THREADS {
+                let clock = &clock;
+                let wall = &wall;
+                workers.push(scope.spawn(move || {
+                    let mut reserved = Vec::new();
+                    for round in 0..BATCHES_PER_THREAD {
+                        let count = thread + round + 1;
+                        // Mix stalled, advancing, and regressing wall readings.
+                        let wall_ms = wall.fetch_add(round % 3, Ordering::Relaxed);
+                        let first = clock
+                            .allocate_batch(batch(count), wall_ms)
+                            .expect("concurrent batch");
+                        reserved.push((first, first + count - 1));
+                    }
+                    reserved
+                }));
+            }
+            for worker in workers {
+                runs.extend(worker.join().expect("batch worker"));
+            }
+        });
+
+        // Sorted by first stamp, every run ends strictly below the next run's
+        // first stamp: disjoint and strictly ordered.
+        runs.sort_unstable();
+        for window in runs.windows(2) {
+            let [(_, previous_last), (next_first, _)] = window else {
+                unreachable!("windows(2) yields pairs");
+            };
+            assert!(previous_last < next_first);
+        }
     }
 
     #[test]

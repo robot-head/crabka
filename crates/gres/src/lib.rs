@@ -134,6 +134,26 @@ pub struct ServeArgs {
     #[arg(long = "host-ranges", requires = "ranges")]
     pub host_ranges: Option<String>,
 
+    /// Timestamp-ordering source the multi-range tenant installs. Every
+    /// process serving one tenant must select the same source.
+    #[arg(long = "timestamp-source", value_enum, default_value = "logical-tso")]
+    pub timestamp_source: TimestampSourceKind,
+
+    /// Maximum tolerated clock offset in milliseconds for --timestamp-source
+    /// hlc; sizes the read uncertainty window.
+    #[arg(long = "hlc-max-offset-ms", default_value_t = 250)]
+    pub hlc_max_offset_ms: u64,
+
+    /// Fault-injection knob for load and chaos testing only, not for
+    /// production use: skew this process's HLC wall-clock reads by a signed
+    /// millisecond offset. Only meaningful with --timestamp-source hlc.
+    #[arg(
+        long = "hlc-wall-offset-ms",
+        default_value_t = 0,
+        allow_negative_numbers = true
+    )]
+    pub hlc_wall_offset_ms: i64,
+
     /// Range-compute RPC address for hosted ranges. Required by deployments
     /// whose registry layout routes any range to this process.
     #[arg(long = "range-listen", requires = "ranges")]
@@ -223,6 +243,33 @@ pub struct ServeArgs {
     pub checkpoint_retain: Option<NonZeroUsize>,
 }
 
+/// Timestamp-ordering source selected by `--timestamp-source`.
+///
+/// The kind mirrors [`crabka_gres_ranges::TimestampSourceMode`] without the
+/// mode's parameters, which arrive through their own flags; [`Self::to_mode`]
+/// reattaches them.
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TimestampSourceKind {
+    /// Centralized range-0 logical oracle — the solo default.
+    #[default]
+    LogicalTso,
+    /// Node-local Hybrid Logical Clock minting stamps without RPC.
+    Hlc,
+}
+
+impl TimestampSourceKind {
+    /// Attach the HLC uncertainty bound and produce the tenant-level mode.
+    #[must_use]
+    pub fn to_mode(self, hlc_max_offset_ms: u64) -> crabka_gres_ranges::TimestampSourceMode {
+        match self {
+            Self::LogicalTso => crabka_gres_ranges::TimestampSourceMode::LogicalTso,
+            Self::Hlc => crabka_gres_ranges::TimestampSourceMode::Hlc {
+                max_offset_ms: hlc_max_offset_ms,
+            },
+        }
+    }
+}
+
 /// Object-store backend selected for substrate checkpoints.
 #[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckpointStoreKind {
@@ -257,6 +304,10 @@ pub struct SubstrateRuntimeConfig {
     pub range_rpc: Option<RangeRpcRuntimeConfig>,
     /// Authenticated endpoint advertised for local range-control operations.
     pub advertised_endpoint: Option<String>,
+    /// Timestamp-ordering source a multi-range tenant installs on this node.
+    pub timestamp_source_mode: crabka_gres_ranges::TimestampSourceMode,
+    /// Testing-only signed HLC wall-clock skew in milliseconds for this node.
+    pub hlc_wall_offset_ms: i64,
 }
 
 /// Validated TLS-only range RPC configuration.
@@ -379,6 +430,8 @@ impl SubstrateRuntimeConfig {
             host_ranges: parse_host_ranges(args.host_ranges.as_deref())?,
             range_rpc: RangeRpcRuntimeConfig::from_args(args)?,
             advertised_endpoint: args.range_listen.clone(),
+            timestamp_source_mode: args.timestamp_source.to_mode(args.hlc_max_offset_ms),
+            hlc_wall_offset_ms: args.hlc_wall_offset_ms,
         }))
     }
 
@@ -3065,7 +3118,9 @@ fn multirange_tenant_config(
     })?;
     let mut tenant_config =
         crabka_gres_ranges::MultiRangeTenantConfig::from_boundaries(tenant, boundaries)
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?
+            .with_timestamp_source_mode(config.timestamp_source_mode)
+            .with_hlc_wall_offset_ms(config.hlc_wall_offset_ms);
     if let Some(record) = tenant_record {
         tenant_config.range_map = range_map_from_tenant_layout(
             tenant_config.tenant.clone(),
@@ -3429,9 +3484,15 @@ async fn recover_live_multirange_engines(
             // resume before this host's remaining ranges recover. The same
             // oracle instance is reused by the assembled tenant — a second
             // instance on the same epoch would let in-flight grants from the
-            // first interleave non-monotonically with the second's.
+            // first interleave non-monotonically with the second's. The
+            // early oracle is already mode-appropriate, so an `Hlc` tenant
+            // never serves logical grants, not even during recovery.
             if let (Some(early), Some(horizon)) = (early_service, recovered.tso_horizon.as_ref()) {
-                let tso_rpc = build_range0_tso_rpc(horizon)?;
+                let tso_rpc = build_range0_tso_rpc(
+                    horizon,
+                    tenant_config.timestamp_source_mode,
+                    tenant_config.hlc_wall_offset_ms,
+                )?;
                 early.replace(
                     crabka_gres_ranges::HostedRangeService::new(BTreeMap::new())
                         .with_tso(Arc::clone(&tso_rpc)),
@@ -3449,20 +3510,58 @@ async fn recover_live_multirange_engines(
     })
 }
 
-/// Build the range-0 timestamp oracle RPC over a recovered durable horizon.
+/// Build the range-0 timestamp oracle RPC over a recovered durable horizon,
+/// honoring the configured timestamp-source mode.
 fn build_range0_tso_rpc(
     tso_horizon: &crabka_gres_substrate::SubstrateTsoHorizon,
+    mode: crabka_gres_ranges::TimestampSourceMode,
+    hlc_wall_offset_ms: i64,
 ) -> std::io::Result<Arc<dyn crabka_gres_ranges::TsoRpc>> {
     let persisted_max_ts = tso_horizon
         .load_max_ts()
         .map_err(|error| std::io::Error::other(format!("range-0 TSO horizon: {error}")))?;
-    crabka_gres_ranges::tso_rpc_from_horizon(
-        tso_horizon.clone(),
-        tso_horizon.clone(),
-        tso_horizon.epoch(),
-        persisted_max_ts,
-    )
-    .map_err(|error| std::io::Error::other(format!("range-0 TSO oracle: {error}")))
+    mode_tso_rpc_from_horizon(tso_horizon, persisted_max_ts, mode, hlc_wall_offset_ms)
+        .map_err(|error| std::io::Error::other(format!("range-0 TSO oracle: {error}")))
+}
+
+/// Build the mode-appropriate range-0 grant oracle from an already-loaded
+/// durable horizon.
+///
+/// Range 0 stays the single timestamp authority in both modes; only what
+/// backs the authority differs. `LogicalTso` recovers the dense logical
+/// oracle. `Hlc` recovers the wall-anchored oracle: its clock is seeded from
+/// the same persisted horizon (so its first grant dominates everything any
+/// predecessor granted, even across a wall-clock regression), it persists the
+/// horizon in packed strides through the same epoch-gated committer, and the
+/// node's fault-injection wall skew is applied exactly as on the in-memory
+/// bootstrap path. The returned RPC serves both remote `RangeRequest::Tso`
+/// grants and, wrapped by [`crabka_gres_ranges::pgexec_timestamp_oracle_from_rpc`],
+/// the local tenant timestamp source.
+fn mode_tso_rpc_from_horizon(
+    tso_horizon: &crabka_gres_substrate::SubstrateTsoHorizon,
+    persisted_max_ts: u64,
+    mode: crabka_gres_ranges::TimestampSourceMode,
+    hlc_wall_offset_ms: i64,
+) -> Result<Arc<dyn crabka_gres_ranges::TsoRpc>, crabka_gres_ranges::TsoError> {
+    match mode {
+        crabka_gres_ranges::TimestampSourceMode::LogicalTso => {
+            crabka_gres_ranges::tso_rpc_from_horizon(
+                tso_horizon.clone(),
+                tso_horizon.clone(),
+                tso_horizon.epoch(),
+                persisted_max_ts,
+            )
+        }
+        crabka_gres_ranges::TimestampSourceMode::Hlc { .. } => {
+            crabka_gres_ranges::hlc_tso_rpc_from_horizon(
+                tso_horizon.clone(),
+                tso_horizon.clone(),
+                tso_horizon.epoch(),
+                persisted_max_ts,
+                crabka_gres_ranges::hlc_wall_clock(hlc_wall_offset_ms),
+            )
+        }
+    }
 }
 
 struct LiveMultirangeEngines {
@@ -3857,13 +3956,20 @@ async fn start_live_multirange_tenant(
     live_engines: &mut LiveMultirangeEngines,
 ) -> std::io::Result<StartedLiveMultirangeTenant> {
     // Reuse the oracle already activated during recovery when present: one
-    // oracle instance per writer epoch, whether or not it served early.
+    // oracle instance per writer epoch, whether or not it served early. Both
+    // arms honor the configured timestamp-source mode — the early oracle was
+    // built with it, and the fresh oracle receives it here — so `Hlc` mode
+    // genuinely serves wall-anchored grants on the live path.
     let tso_rpc = match (
         live_engines.range0_tso.take(),
         live_engines.range0_tso_horizon.take(),
     ) {
         (Some(tso_rpc), _) => Some(tso_rpc),
-        (None, Some(tso_horizon)) => Some(build_range0_tso_rpc(&tso_horizon)?),
+        (None, Some(tso_horizon)) => Some(build_range0_tso_rpc(
+            &tso_horizon,
+            tenant_config.timestamp_source_mode,
+            tenant_config.hlc_wall_offset_ms,
+        )?),
         (None, None) => None,
     };
     let (gateway, handles, tso_rpc) = if let Some(tso_rpc) = tso_rpc {
@@ -5537,11 +5643,11 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
                             reason: format!("recover successor TSO horizon: {error}"),
                         }
                     })?;
-                    let tso_rpc = crabka_gres_ranges::tso_rpc_from_horizon(
-                        horizon.clone(),
-                        horizon.clone(),
-                        horizon.epoch(),
+                    let tso_rpc = mode_tso_rpc_from_horizon(
+                        horizon,
                         persisted_max_ts,
+                        self.config.timestamp_source_mode,
+                        self.config.hlc_wall_offset_ms,
                     )
                     .map_err(|error| {
                         crabka_gres_ranges::RangeTransferError::Runtime {
@@ -6825,6 +6931,9 @@ mod tests {
             cache_dir: None,
             ranges: None,
             host_ranges: None,
+            timestamp_source: TimestampSourceKind::LogicalTso,
+            hlc_max_offset_ms: 250,
+            hlc_wall_offset_ms: 0,
             range_listen: None,
             range_tls_cert: None,
             range_tls_key: None,
@@ -7170,6 +7279,8 @@ mod tests {
 
     #[test]
     fn cli_help_exposes_only_single_node_serve_surface() {
+        use assert2::assert;
+
         let mut help = Vec::new();
         Cli::command()
             .write_long_help(&mut help)
@@ -7183,6 +7294,9 @@ mod tests {
         assert!(help.contains("--cache-dir"));
         assert!(help.contains("--ranges"));
         assert!(help.contains("--host-ranges"));
+        assert!(help.contains("--timestamp-source"));
+        assert!(help.contains("--hlc-max-offset-ms"));
+        assert!(help.contains("--hlc-wall-offset-ms"));
         assert!(help.contains("--checkpoint-bucket"));
         assert!(help.contains("--checkpoint-store"));
         assert!(help.contains("--checkpoint-frames"));
@@ -7240,6 +7354,71 @@ mod tests {
             cli.serve.cache_dir,
             Some(std::path::PathBuf::from("/tmp/crabka-gres-cache"))
         );
+    }
+
+    #[test]
+    fn timestamp_source_hlc_flags_reach_the_tenant_config() {
+        use assert2::assert;
+
+        let cli = Cli::try_parse_from([
+            "crabka-gres",
+            "--substrate-bootstrap",
+            "memory://",
+            "--tenant",
+            "tenant-a",
+            "--ranges",
+            "0,100",
+            "--timestamp-source",
+            "hlc",
+            "--hlc-max-offset-ms",
+            "500",
+            "--hlc-wall-offset-ms",
+            "-200",
+        ])
+        .expect("hlc timestamp-source flags parse");
+        let config = SubstrateRuntimeConfig::from_args(&cli.serve)
+            .expect("valid config")
+            .expect("substrate config");
+
+        let tenant_config =
+            multirange_tenant_config(&config, "0,100", None).expect("tenant config");
+
+        assert!(
+            tenant_config.timestamp_source_mode
+                == crabka_gres_ranges::TimestampSourceMode::Hlc { max_offset_ms: 500 }
+        );
+        assert!(tenant_config.hlc_wall_offset_ms == -200);
+    }
+
+    #[test]
+    fn timestamp_source_defaults_to_the_logical_tso_mode() {
+        use assert2::assert;
+
+        let cli = Cli::try_parse_from([
+            "crabka-gres",
+            "--substrate-bootstrap",
+            "memory://",
+            "--tenant",
+            "tenant-a",
+            "--ranges",
+            "0,100",
+        ])
+        .expect("substrate options parse");
+        assert!(cli.serve.timestamp_source == TimestampSourceKind::LogicalTso);
+        assert!(cli.serve.hlc_max_offset_ms == 250);
+        assert!(cli.serve.hlc_wall_offset_ms == 0);
+        let config = SubstrateRuntimeConfig::from_args(&cli.serve)
+            .expect("valid config")
+            .expect("substrate config");
+
+        let tenant_config =
+            multirange_tenant_config(&config, "0,100", None).expect("tenant config");
+
+        assert!(
+            tenant_config.timestamp_source_mode
+                == crabka_gres_ranges::TimestampSourceMode::LogicalTso
+        );
+        assert!(tenant_config.hlc_wall_offset_ms == 0);
     }
 
     #[test]
@@ -7475,6 +7654,8 @@ mod tests {
             host_ranges: None,
             range_rpc: None,
             advertised_endpoint: None,
+            timestamp_source_mode: crabka_gres_ranges::TimestampSourceMode::LogicalTso,
+            hlc_wall_offset_ms: 0,
         };
 
         let Err(error) = open_substrate_runtime(&config).await else {
@@ -7543,6 +7724,8 @@ mod tests {
             host_ranges: None,
             range_rpc: None,
             advertised_endpoint: None,
+            timestamp_source_mode: crabka_gres_ranges::TimestampSourceMode::LogicalTso,
+            hlc_wall_offset_ms: 0,
         };
         let wal_selection = single_range_live_wal_selection(&config, None).expect("wal selection");
         let kv = Arc::new(MemKv::default());
@@ -7894,6 +8077,8 @@ mod tests {
             host_ranges: None,
             range_rpc: None,
             advertised_endpoint: None,
+            timestamp_source_mode: crabka_gres_ranges::TimestampSourceMode::LogicalTso,
+            hlc_wall_offset_ms: 0,
         };
 
         let wal_selection = single_range_live_wal_selection(&config, None).expect("wal selection");
@@ -7973,6 +8158,8 @@ mod tests {
             host_ranges: None,
             range_rpc: None,
             advertised_endpoint: None,
+            timestamp_source_mode: crabka_gres_ranges::TimestampSourceMode::LogicalTso,
+            hlc_wall_offset_ms: 0,
         };
 
         let Err(error) = open_substrate_engine(&config).await else {
