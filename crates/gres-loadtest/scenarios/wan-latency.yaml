@@ -1,0 +1,22 @@
+name: wan-latency
+description: >-
+  Adds 50ms +/- 10ms of one-way delay to every inter-node range link for
+  the whole measured window, simulating a geo-distributed deployment.
+  Timestamp grants, 2PC rounds, and cross-range scans all pay the WAN
+  round trip; the mode comparison shows which coordination steps a
+  node-local clock removes from the critical path.
+topology:
+  nodes: 3
+  ranges: 4
+workload:
+  connections: 32
+  rate: saturate
+  warmup_s: 10
+  duration_s: 60
+  mix:
+    single_shard_insert: 50
+    cross_shard_txn: 25
+    read_only: 25
+faults:
+  - at_s: 0
+    latency: { target: all-ranges, ms: 50, jitter_ms: 10, duration_s: 60 }

@@ -1,0 +1,23 @@
+name: flappy-network
+description: >-
+  Flaps the link to range 1 (down 3s, up 3s) for 30 seconds, plus a
+  bandwidth-throttled window on range 2. Exercises reconnect storms,
+  endpoint re-resolution, and retry behavior under an unreliable rather
+  than cleanly-partitioned network.
+topology:
+  nodes: 3
+  ranges: 4
+workload:
+  connections: 24
+  rate: saturate
+  warmup_s: 10
+  duration_s: 75
+  mix:
+    single_shard_insert: 60
+    cross_shard_txn: 20
+    read_only: 20
+faults:
+  - at_s: 15
+    flap: { target: "range:1", period_s: 3, duration_s: 30 }
+  - at_s: 50
+    throttle: { target: "range:2", bytes_per_sec: 131072, duration_s: 15 }

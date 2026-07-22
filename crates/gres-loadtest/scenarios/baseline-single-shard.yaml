@@ -1,0 +1,16 @@
+name: baseline-single-shard
+description: >-
+  Pure single-shard insert saturation across 3 nodes / 3 ranges with no
+  faults. The headline scalability number: committed tps should grow
+  near-linearly with ranges, and the mode comparison isolates the cost of
+  the global timestamp path on the hot write loop.
+topology:
+  nodes: 3
+  ranges: 3
+workload:
+  connections: 24
+  rate: saturate
+  warmup_s: 10
+  duration_s: 60
+  mix:
+    single_shard_insert: 100

@@ -64,6 +64,7 @@ pub use self::{
     tenant::{
         GatewayCommitFault, LocalSqlSplitError, MultiRangeTenant, MultiRangeTenantConfig,
         MultiRangeTenantHandles, ReadOnlyRange0Replica, RouteRecord, StatementKind, TenantError,
+        TimestampSourceMode, hlc_tso_rpc_from_horizon, hlc_wall_clock,
         pgexec_timestamp_oracle_from_rpc, tso_rpc_from_horizon,
     },
     transfer::{

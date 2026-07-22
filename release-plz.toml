@@ -200,6 +200,11 @@ publish = false
 release = false
 
 [[package]]
+name = "crabka-gres-loadtest"
+publish = false
+release = false
+
+[[package]]
 name = "crabka-gres-ranges"
 publish = false
 release = false

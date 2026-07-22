@@ -86,6 +86,13 @@ exclude_globs = [
     "crates/*/src/**/test_*.rs",
     "crates/*/benches/**",
     "crates/bench-driver/**",
+    # The gres load/chaos harness drives real broker + crabka-gres child
+    # processes behind chaos proxies end-to-end — same "test/bench harness, not
+    # the system under test" rationale as `bench-driver` above. Most of its
+    # surface (cluster orchestration, fault execution, process sampling) is only
+    # reachable with built binaries via its `#[ignore]`d live test, which
+    # mutant runs cannot execute.
+    "crates/gres-loadtest/**",
     # Chapter Gres vendored crates (crabgresql@93f3d17): imported wholesale in
     # the G-1 vendoring PR; mutating ~68k imported lines under --in-diff would
     # swamp the shard budget. Re-evaluate per-crate once gres development is

@@ -1,0 +1,59 @@
+[package]
+name = "crabka-gres-loadtest"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Scenario-driven scalability and fault-injection harness for crabka-gres"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+readme = "README.md"
+keywords = ["postgres", "benchmark", "load-test", "chaos", "crabka"]
+categories = ["development-tools::profiling"]
+
+[[bin]]
+name = "crabka-gres-loadtest"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true, features = ["env"] }
+crabka-client-admin = { version = "0.3.9", path = "../client-admin" }
+crabka-gres-control = { version = "0.3.9", path = "../gres-control" }
+crabka-security = { version = "0.3.9", path = "../security" }
+futures = { workspace = true }
+hdrhistogram = { version = "7.5", default-features = false }
+rand = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "io-util",
+    "time",
+    "sync",
+    "process",
+    "fs",
+    "signal",
+] }
+tokio-postgres = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# `/proc` sampling is Linux-only; other platforms report zero resource usage
+# (the harness itself targets Linux, but the workspace builds everywhere).
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { workspace = true, features = ["param"] }
+
+[dev-dependencies]
+assert2 = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

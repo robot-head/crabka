@@ -1,0 +1,24 @@
+name: clock-skew
+description: >-
+  HLC-only scenario: node 0 (the current single HLC authority) runs with
+  its wall clock skewed +400ms — beyond the configured 250ms uncertainty
+  bound — under a mixed workload. Today this measures throughput and
+  correctness-adjacent symptoms (retries, restarts) under skew; once
+  skew self-fencing and multi-node HLC stamping land, the same scenario
+  should show the node refusing service instead.
+topology:
+  nodes: 3
+  ranges: 4
+  clock_skew_ms: { 0: 400 }
+mode:
+  hlc: { max_offset_ms: 250 }
+workload:
+  connections: 24
+  rate: saturate
+  warmup_s: 10
+  duration_s: 60
+  mix:
+    single_shard_insert: 50
+    cross_shard_txn: 20
+    read_only: 25
+    contended_update: 5

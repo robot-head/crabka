@@ -1,0 +1,21 @@
+name: tso-partition
+description: >-
+  Partitions range 0 (catalog, coordinator, and timestamp authority) for
+  15 seconds mid-run. Under logical-tso every timestamp grant crosses this
+  link, so writes on other ranges should stall for the window and recover
+  on heal; the timeline makes the stall and recovery visible. Run under
+  both modes to measure how much availability the timestamp mode buys.
+topology:
+  nodes: 3
+  ranges: 4
+workload:
+  connections: 24
+  rate: saturate
+  warmup_s: 10
+  duration_s: 60
+  mix:
+    single_shard_insert: 70
+    read_only: 30
+faults:
+  - at_s: 20
+    partition: { target: "range:0", duration_s: 15, style: blackhole }
