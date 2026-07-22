@@ -319,7 +319,9 @@ mod tests {
         roster
     }
 
-    /// Burns CPU on the current thread for roughly `duration`.
+    /// Burns CPU on the current thread for roughly `duration`. Only the
+    /// Linux-gated self-sampling tests need it.
+    #[cfg(target_os = "linux")]
     fn burn_cpu(duration: Duration) {
         let start = std::time::Instant::now();
         let mut spin: u64 = 0;
@@ -329,6 +331,9 @@ mod tests {
         std::hint::black_box(spin);
     }
 
+    // Sampling the test's own process requires `/proc` — Linux-only; other
+    // platforms report zeros by design.
+    #[cfg(target_os = "linux")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn samples_own_process_cpu_and_rss() {
         let sampler = ProcSampler::spawn(
@@ -348,6 +353,9 @@ mod tests {
         assert!(resources[0].max_rss_bytes > 0);
     }
 
+    // Asserts nonzero readings from the live-attached entry, so `/proc` is
+    // required — Linux-only.
+    #[cfg(target_os = "linux")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn roster_entries_appended_mid_run_are_attached_and_reported() {
         let roster = roster_of(vec![ProcessInfo {
