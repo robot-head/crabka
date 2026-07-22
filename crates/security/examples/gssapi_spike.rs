@@ -176,10 +176,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let names = server.query_context_names()?;
     let recovered = names.username;
     println!(
-        "    recovered principal: inner={:?} account={:?} domain={:?}",
+        "    recovered principal: inner={:?} account={:?} parts={:?}",
         recovered.inner(),
         recovered.account_name(),
-        recovered.domain_name()
+        recovered.parts()
     );
     // sspi lowercases the realm in client_upn(); compare case-insensitively.
     let expected = format!("alice@{}", REALM.to_ascii_lowercase());
