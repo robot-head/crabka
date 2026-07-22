@@ -1835,6 +1835,37 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dropping_the_registry_aborts_its_reader_task() {
+        let directory = TempDir::new().expect("broker tempdir");
+        let broker = Broker::start(BrokerConfig::for_tests(directory.path().to_path_buf()))
+            .await
+            .expect("broker start");
+        let bootstrap = broker.listen_addr().to_string();
+        let mut registry = Registry::connect(&bootstrap)
+            .await
+            .expect("registry connect");
+        registry.ensure_topic(1).await.expect("registry topic");
+
+        let reader = registry
+            .reader
+            .as_ref()
+            .expect("ensure_topic starts the reader")
+            .abort_handle();
+        assert!(!reader.is_finished());
+
+        drop(registry);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !reader.is_finished() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "reader task still alive 5s after the registry was dropped"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        broker.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn kafka_split_operation_journal_survives_reconnect_and_retries_idempotently() {
         let directory = TempDir::new().expect("broker tempdir");
         let broker = Broker::start(BrokerConfig::for_tests(directory.path().to_path_buf()))
