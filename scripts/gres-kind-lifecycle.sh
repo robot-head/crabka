@@ -525,3 +525,4 @@ kubectl logs -n crabka-operator deploy/crabka-gres-operator --timestamps >"$ARTI
 grep -E 'ResumeRequested|resume_requested|parking|wal_generation|Suspended|suspended' \
     "$ARTIFACT_DIR/operator.log" >"$ARTIFACT_DIR/lifecycle-events.log" || true
 echo "PASS: operator-backed Kind lifecycle and N=$ITERATIONS verified-TLS cold starts"
+# CI probe: cold-start gate baseline on post-#863 main.
