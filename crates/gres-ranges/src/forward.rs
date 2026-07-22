@@ -99,9 +99,10 @@ const MAX_REMOTE_SESSIONS: usize = 1024;
 // barrier shares it so a stalled broker end sample cannot block DDL forever.
 pub(crate) const RANGE0_BARRIER_REPLY_BUDGET: Duration = Duration::from_secs(4);
 
-/// Cap on lock waits by sessions that can be enlisted in a cross-range
-/// transaction (a hosted remote-participant session, or a gateway-local
-/// session once its transaction escalates past one range). A deadlock cycle
+/// Cap on lock waits by sessions enlisted in a cross-range transaction (a
+/// gateway-local session once its transaction escalates past one range, or a
+/// hosted remote-participant session for the statements such a transaction
+/// sends it, carried per statement on the wire). A deadlock cycle
 /// spanning engines never appears in any single engine's wait-for graph, so
 /// the expired cap — surfaced as a retryable 40P01 — is the only detector such
 /// a cycle has. Purely local transactions keep unbounded waits under the
@@ -109,6 +110,12 @@ pub(crate) const RANGE0_BARRIER_REPLY_BUDGET: Duration = Duration::from_secs(4);
 /// transport's 5 s RPC timeout so the participant reports the abort instead of
 /// the gateway timing the RPC out first.
 pub(crate) const CROSS_RANGE_LOCK_WAIT_CAP: Duration = Duration::from_secs(2);
+
+/// Encode a lock-wait cap for the session wire, saturating instead of failing
+/// on a pathological over-large duration.
+fn cap_to_millis(cap: Duration) -> u64 {
+    u64::try_from(cap.as_millis()).unwrap_or(u64::MAX)
+}
 
 impl HostedRangeService {
     /// Build a hosted range service. Only range 0 may be given a TSO RPC.
@@ -376,16 +383,11 @@ impl HostedRangeService {
                     };
                 }
                 let session_id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
-                // A hosted session always acts for a remote gateway, so its
-                // transaction can span ranges; cap its lock waits so a
-                // distributed deadlock aborts (40P01) instead of hanging.
-                let mut session = engine.connect();
-                session.set_lock_wait_cap(Some(CROSS_RANGE_LOCK_WAIT_CAP));
                 sessions.insert(
                     session_id,
                     HostedSession {
                         range_id,
-                        session,
+                        session: engine.connect(),
                         last_used: now,
                     },
                 );
@@ -1253,7 +1255,11 @@ async fn handle_session_operation(
     operation: WireSessionOperation,
 ) -> Result<WireSessionResult, PgError> {
     match operation {
-        WireSessionOperation::SimpleQuery { sql } => {
+        WireSessionOperation::SimpleQuery {
+            sql,
+            lock_wait_cap_ms,
+        } => {
+            session.set_lock_wait_cap(lock_wait_cap_ms.map(Duration::from_millis));
             session
                 .simple_query(&sql)
                 .await
@@ -1308,10 +1314,14 @@ async fn handle_session_operation(
                     fields: description.fields.into_iter().map(Into::into).collect(),
                 })
         }
-        WireSessionOperation::Execute { portal, max_rows } => session
-            .execute(&portal, max_rows)
-            .await
-            .and_then(|outcome| match outcome {
+        WireSessionOperation::Execute {
+            portal,
+            max_rows,
+            lock_wait_cap_ms,
+        } => {
+            session.set_lock_wait_cap(lock_wait_cap_ms.map(Duration::from_millis));
+            let outcome = session.execute(&portal, max_rows).await;
+            outcome.and_then(|outcome| match outcome {
                 ExecuteOutcome::Rows { rows, completion } => {
                     Ok(WireSessionResult::Execute(WireExecuteOutcome::Rows {
                         rows: rows
@@ -1337,7 +1347,8 @@ async fn handle_session_operation(
                     "0A000",
                     "remote range session does not support this execute outcome",
                 )),
-            }),
+            })
+        }
         WireSessionOperation::PrepareGlobal { global_xid } => session
             .prepare_global_participant(global_xid)
             .await
@@ -2256,8 +2267,18 @@ impl RemoteRangeSession {
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
-    pub async fn simple_query(&mut self, sql: String) -> Result<Vec<QueryResult>, PgError> {
-        match self.call(WireSessionOperation::SimpleQuery { sql }).await? {
+    pub async fn simple_query(
+        &mut self,
+        sql: String,
+        lock_wait_cap: Option<Duration>,
+    ) -> Result<Vec<QueryResult>, PgError> {
+        match self
+            .call(WireSessionOperation::SimpleQuery {
+                sql,
+                lock_wait_cap_ms: lock_wait_cap.map(cap_to_millis),
+            })
+            .await?
+        {
             WireSessionResult::Query { results } => {
                 Ok(results.into_iter().map(Into::into).collect())
             }
@@ -2374,9 +2395,14 @@ impl RemoteRangeSession {
         &mut self,
         portal: String,
         max_rows: u32,
+        lock_wait_cap: Option<Duration>,
     ) -> Result<ExecuteOutcome, PgError> {
         match self
-            .call(WireSessionOperation::Execute { portal, max_rows })
+            .call(WireSessionOperation::Execute {
+                portal,
+                max_rows,
+                lock_wait_cap_ms: lock_wait_cap.map(cap_to_millis),
+            })
             .await?
         {
             WireSessionResult::Execute(WireExecuteOutcome::Rows { rows, completion }) => {
@@ -4455,6 +4481,64 @@ mod tests {
 
         let pg = error.into_pg();
         assert_eq!(pg.code, "42P01");
+    }
+
+    #[tokio::test]
+    async fn hosted_statement_cap_bounds_a_blocked_lock_wait() {
+        let engine = crabka_pgexec::SqlEngine::new();
+        let mut setup = engine.connect();
+        setup
+            .simple_query("CREATE TABLE t (id int, v int)")
+            .await
+            .expect("create table");
+        setup
+            .simple_query("INSERT INTO t VALUES (1, 0)")
+            .await
+            .expect("seed row");
+        let mut holder = engine.connect();
+        holder.simple_query("BEGIN").await.expect("holder begin");
+        holder
+            .simple_query("UPDATE t SET v = 1 WHERE id = 1")
+            .await
+            .expect("holder locks the row");
+
+        let address = spawn_loopback(Arc::new(HostedRangeService::new(BTreeMap::from([(
+            RangeId::new(1),
+            engine,
+        )]))))
+        .await
+        .expect("start range service");
+        let registry =
+            RangeRegistry::from_tenant_record(&record(address.to_string())).expect("registry");
+        let forward = RegistryRemoteForward::new(registry, FramedTcpClient::default());
+        let mut session = forward
+            .open_session(RangeId::new(1))
+            .await
+            .expect("open hosted session");
+        session
+            .simple_query("BEGIN".into(), None)
+            .await
+            .expect("remote begin");
+
+        // A statement carrying a cap must abort the blocked wait as a
+        // presumed distributed deadlock instead of hanging behind the holder.
+        let error = session
+            .simple_query(
+                "UPDATE t SET v = 2 WHERE id = 1".into(),
+                Some(Duration::from_millis(100)),
+            )
+            .await
+            .expect_err("capped wait expires");
+        assert_eq!(error.code, "40P01");
+
+        session
+            .simple_query("ROLLBACK".into(), None)
+            .await
+            .expect("remote rollback");
+        holder
+            .simple_query("ROLLBACK")
+            .await
+            .expect("holder rollback");
     }
 
     #[tokio::test]

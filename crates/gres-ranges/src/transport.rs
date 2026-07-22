@@ -378,6 +378,12 @@ pub enum WireGlobalStatus {
 pub enum WireSessionOperation {
     SimpleQuery {
         sql: String,
+        /// Bound, in milliseconds, on every lock wait this statement performs.
+        /// `Some` only for statements of a gateway transaction that has
+        /// escalated past one range — the only sessions a cross-engine
+        /// deadlock cycle can enlist; `None` keeps exact engine-local
+        /// blocking for single-range and autocommit forwarding.
+        lock_wait_cap_ms: Option<u64>,
     },
     Parse {
         name: String,
@@ -399,6 +405,8 @@ pub enum WireSessionOperation {
     Execute {
         portal: String,
         max_rows: u32,
+        /// See [`WireSessionOperation::SimpleQuery::lock_wait_cap_ms`].
+        lock_wait_cap_ms: Option<u64>,
     },
     PrepareGlobal {
         global_xid: u64,

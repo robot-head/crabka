@@ -192,7 +192,7 @@ impl RowLockManager {
     ) -> Result<(), AcquireError> {
         let deadline = wait_cap.map(|cap| tokio::time::Instant::now() + cap);
         loop {
-            let notify = {
+            let (notify, holder) = {
                 let mut g = self.inner.lock().expect("lockmgr");
                 match try_acquire_locked(&mut g, key.clone(), mode, my_xid) {
                     Acquire::Acquired => {
@@ -210,7 +210,7 @@ impl RowLockManager {
                         g.wait_for.insert(my_xid, holder);
                         let n = Arc::new(Notify::new());
                         g.waiters.entry(holder).or_default().push(Arc::clone(&n));
-                        n
+                        (n, holder)
                     }
                 }
             };
@@ -224,17 +224,36 @@ impl RowLockManager {
                         .await
                         .is_err()
                     {
-                        // Clear our wait edge so the abandoned wait cannot feed
-                        // false cycles. The registered `Notify` stays in
-                        // `waiters` until the holder releases; an un-awaited
-                        // notification is harmless.
+                        // Deregister the abandoned wait entirely: the edge, so
+                        // it cannot feed false cycles, and this waiter's entry
+                        // in the holder's wake list, so a long-running holder
+                        // on a hot key does not accumulate one dead `Notify`
+                        // per expired wait until it releases.
                         let mut g = self.inner.lock().expect("lockmgr");
                         g.wait_for.remove(&my_xid);
+                        if let Some(queue) = g.waiters.get_mut(&holder) {
+                            queue.retain(|waiter| !Arc::ptr_eq(waiter, &notify));
+                            if queue.is_empty() {
+                                g.waiters.remove(&holder);
+                            }
+                        }
                         return Err(AcquireError::CapExpired);
                     }
                 }
             }
         }
+    }
+
+    /// Number of waiters currently registered against `holder` (test-only:
+    /// lets the cap-expiry test assert the abandoned wait was deregistered).
+    #[cfg(test)]
+    pub(crate) fn waiter_queue_len(&self, holder: u64) -> usize {
+        self.inner
+            .lock()
+            .expect("lockmgr")
+            .waiters
+            .get(&holder)
+            .map_or(0, Vec::len)
     }
 
     /// Release ONE lock held by `my_xid`, waking every waiter blocked on
@@ -642,6 +661,9 @@ mod tests {
         // The abandoned wait's edge is cleared: the holder later waiting on
         // the expired waiter must not read as a cycle through a ghost edge.
         assert!(matches!(m.check_cycle(11, 10), CycleCheck::Ok));
+        // And its wake registration is gone: a long-running holder on a hot
+        // key must not retain one dead Notify per expired wait.
+        assert!(m.waiter_queue_len(10) == 0);
     }
 
     #[tokio::test]

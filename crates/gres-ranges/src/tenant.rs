@@ -3133,11 +3133,12 @@ impl GatewaySession {
         if let Some(session) = self.sessions.get_mut(&range_id) {
             session.simple_query(sql).await
         } else {
+            let cap = self.cross_range_statement_cap();
             self.ensure_remote_session(range_id).await?;
             self.remote_sessions
                 .get_mut(&range_id)
                 .expect("remote session inserted")
-                .simple_query(sql.to_owned())
+                .simple_query(sql.to_owned(), cap)
                 .await
         }
     }
@@ -3539,6 +3540,7 @@ impl GatewaySession {
             session.set_timestamp_own_start_ts(own_start_ts);
             session.execute(portal, max_rows).await
         } else {
+            let cap = self.cross_range_statement_cap();
             self.ensure_remote_session(portal_state.route.range_id)
                 .await?;
             let remote = self
@@ -3546,7 +3548,7 @@ impl GatewaySession {
                 .get_mut(&portal_state.route.range_id)
                 .expect("remote session inserted");
             remote.set_timestamp_own_start_ts(own_start_ts).await?;
-            remote.execute(portal.to_owned(), max_rows).await
+            remote.execute(portal.to_owned(), max_rows, cap).await
         }
     }
 
@@ -4293,12 +4295,13 @@ impl GatewaySession {
             }
             _ => None,
         };
+        let cap = self.cross_range_statement_cap();
         let remote = self
             .remote_sessions
             .get_mut(&range_id)
             .expect("remote session inserted");
         remote.set_timestamp_own_start_ts(own_start_ts).await?;
-        remote.simple_query(statement.to_owned()).await
+        remote.simple_query(statement.to_owned(), cap).await
     }
 
     #[allow(
@@ -4942,7 +4945,7 @@ impl GatewaySession {
             self.remote_sessions
                 .get_mut(&range_id)
                 .expect("remote session inserted")
-                .simple_query("BEGIN".into())
+                .simple_query("BEGIN".into(), None)
                 .await?;
         }
 
@@ -4999,6 +5002,22 @@ impl GatewaySession {
         let serving = self.current_serving()?;
         let catalog = planner_engine(&serving)?;
         route_statement(&serving.range_map, catalog, sql)
+    }
+
+    /// The lock-wait cap this session's next remote statement should carry:
+    /// bounded only while the transaction spans more than one range — the only
+    /// state in which a wait can be an edge of a cross-engine deadlock cycle.
+    /// Single-range and autocommit forwarding keep `None`, preserving exact
+    /// engine-local blocking on the remote host.
+    fn cross_range_statement_cap(&self) -> Option<std::time::Duration> {
+        matches!(
+            self.transaction,
+            GatewayTransaction::Open {
+                escalated: true,
+                ..
+            }
+        )
+        .then_some(crate::forward::CROSS_RANGE_LOCK_WAIT_CAP)
     }
 
     fn release_explicit_transaction(&mut self) {
