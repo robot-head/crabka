@@ -107,8 +107,9 @@ const REMOTE_SESSION_IDLE: Duration = Duration::from_mins(1);
 const MAX_REMOTE_SESSIONS: usize = 1024;
 // Reply budget for a follower catalog barrier, kept below the client's 5 s
 // wire-silence timeout so a slow catch-up surfaces as a typed error frame
-// instead of an ambiguous transport timeout.
-const RANGE0_BARRIER_REPLY_BUDGET: Duration = Duration::from_secs(4);
+// instead of an ambiguous transport timeout. The gateway's local replica
+// barrier shares it so a stalled broker end sample cannot block DDL forever.
+pub(crate) const RANGE0_BARRIER_REPLY_BUDGET: Duration = Duration::from_secs(4);
 #[cfg(not(test))]
 const EXPLICIT_GATE_LEASE: Duration = Duration::from_secs(2);
 #[cfg(test)]

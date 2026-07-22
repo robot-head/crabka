@@ -4065,14 +4065,25 @@ impl GatewaySession {
     /// already committed on range 0; only its visibility is unconfirmed.
     async fn barrier_ddl_visibility(&self) -> Result<(), PgError> {
         if let Some(replica) = &self.inner.range0_replica {
-            replica.wait_for_latest_catalog().await.map_err(|error| {
-                PgError::error(
-                    "58000",
-                    format!(
-                        "ddl committed on range 0 but local catalog visibility was not confirmed: {error}"
-                    ),
-                )
-            })?;
+            // The barrier's own timeout only bounds tail catch-up; the broker
+            // end sample inside it can stall (for example on an admin
+            // connection hang), so the whole local wait shares the follower
+            // RPC reply budget to keep committed DDL from blocking forever.
+            let wait = tokio::time::timeout(
+                crate::forward::RANGE0_BARRIER_REPLY_BUDGET,
+                replica.wait_for_latest_catalog(),
+            );
+            wait.await
+                .map_err(|_| BarrierError::CatchUpTimeout(crate::forward::RANGE0_BARRIER_REPLY_BUDGET))
+                .and_then(|outcome| outcome)
+                .map_err(|error| {
+                    PgError::error(
+                        "58000",
+                        format!(
+                            "ddl committed on range 0 but local catalog visibility was not confirmed: {error}"
+                        ),
+                    )
+                })?;
         }
         if let Some(forward) = &self.inner.remote_forward {
             forward.barrier_catalog_followers().await.map_err(|error| {
@@ -8050,6 +8061,90 @@ mod tests {
             .simple_query("SELECT id FROM t61")
             .await
             .expect("table exists on range 0 despite the failed barrier");
+        assert!(text_rows(&rows).is_empty());
+    }
+
+    struct StalledRange0End;
+
+    #[async_trait::async_trait]
+    impl crate::barrier::Range0EndSampler for StalledRange0End {
+        async fn sample_end_after_call_begins(&self) -> Result<i64, crate::barrier::BarrierError> {
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn ddl_bounds_a_stalled_local_replica_barrier() {
+        let catalog_kv: Arc<dyn Kv> = Arc::new(MemKv::default());
+        let range0_engine = SqlEngine::with_kv(Arc::clone(&catalog_kv)).expect("range-0 engine");
+        let horizon = MemoryTsoHorizon::new(range0_engine.kv_handle(), 1);
+        let persisted_max_ts = horizon.load_max_ts().expect("load TSO horizon");
+        let tso = tso_rpc_from_horizon(horizon.clone(), horizon, 1, persisted_max_ts)
+            .expect("durable TSO rpc");
+        let service = Arc::new(
+            crate::forward::HostedRangeService::new(BTreeMap::from([(
+                RangeId::COORDINATOR,
+                range0_engine.clone_handle(),
+            )]))
+            .with_ddl_gate(Arc::new(Mutex::new(())))
+            .with_tso(tso),
+        );
+        let address = crate::transport::spawn_loopback(service)
+            .await
+            .expect("spawn range-0 service");
+        let registry = ddl_registry(
+            "ddl-stalled-local-barrier",
+            vec![
+                ddl_layout_entry(
+                    0,
+                    Some(crabka_gres_control::RangeBoundary::table_start(60)),
+                    address.to_string(),
+                ),
+                ddl_layout_entry(1, None, address.to_string()),
+            ],
+        );
+        // The replica's broker end sample never resolves, standing in for an
+        // admin connection hang after the DDL has already committed on r0.
+        let replica = ReadOnlyRange0Replica::new(
+            crate::range0_tail::Range0Tail::new(Arc::clone(&catalog_kv)),
+            Arc::new(StalledRange0End),
+        );
+        let config = MultiRangeTenantConfig::from_boundaries(
+            TenantName::parse("ddl_stalled_local_barrier").expect("tenant"),
+            "0,60",
+        )
+        .expect("config")
+        .with_hosted_ranges(vec![RangeId::new(1)])
+        .expect("r1 host")
+        .with_read_only_range0_replica(replica)
+        .with_range_registry(registry)
+        .with_range_client(FramedTcpClient::default());
+        let (gateway, _handles) =
+            MultiRangeTenant::start_with_engine_factory(config, |_dir, _id| Ok(SqlEngine::new()))
+                .expect("rN-only gateway");
+        let mut session = gateway.connect();
+
+        let started = std::time::Instant::now();
+        let error = session
+            .simple_query("CREATE TABLE t61 (id int4)")
+            .await
+            .expect_err("a stalled local barrier must surface, not hang");
+        assert!(error.code == "58000");
+        assert!(
+            error.message.contains("local catalog visibility"),
+            "message must name the unconfirmed local barrier: {error:?}"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(8),
+            "the local barrier wait must share the follower reply budget"
+        );
+
+        // Honest partial application: the DDL genuinely committed on range 0.
+        let rows = range0_engine
+            .connect()
+            .simple_query("SELECT id FROM t61")
+            .await
+            .expect("table exists on range 0 despite the stalled barrier");
         assert!(text_rows(&rows).is_empty());
     }
 
