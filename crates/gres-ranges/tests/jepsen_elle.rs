@@ -74,7 +74,7 @@ type ElleChecker = Arc<Mutex<LinearizabilityTester<u8, ListAppendSpec>>>;
 async fn stateright_elle_accepts_real_process_history_across_participant_kill() {
     let mut system = ProcessHarness::start("tenant-real-elle").await;
     system
-        .create_table_on_all(
+        .create_table(
             "CREATE TABLE elle50 (position int4, value int4); \
              CREATE TABLE elle150 (position int4, value int4)",
         )

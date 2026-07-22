@@ -30,7 +30,7 @@ async fn range0_cascade_kill_bank_fences_coordinator_before_recovery() {
 async fn real_cascade_kill_recovers_both_writers_and_accepts_new_transfer() {
     let mut system = ProcessHarness::start("tenant-real-cascade-bank").await;
     system
-        .create_table_on_all(
+        .create_table(
             "CREATE TABLE bank50 (id int4, balance int4); \
              CREATE TABLE bank150 (id int4, balance int4)",
         )
@@ -96,7 +96,7 @@ async fn real_cascade_kill_recovers_acknowledged_predecision_prepare_as_abort() 
     )
     .await;
     system
-        .create_table_on_all(
+        .create_table(
             "CREATE TABLE bank50 (id int4, balance int4); CREATE TABLE bank150 (id int4, balance int4)",
         )
         .await;
@@ -152,7 +152,7 @@ async fn real_cascade_kill_recovers_acknowledged_commit_decision_before_release(
     )
     .await;
     system
-        .create_table_on_all(
+        .create_table(
             "CREATE TABLE bank50 (id int4, balance int4); CREATE TABLE bank150 (id int4, balance int4)",
         )
         .await;

@@ -1,7 +1,7 @@
 //! Registry-backed remote SQL forwarding with bounded stale-endpoint retry.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     num::NonZeroU64,
     sync::{
         Arc,
@@ -21,6 +21,7 @@ use crabka_pgwire::{
 
 use crate::{
     RangeId,
+    barrier::Range0Barrier,
     registry::{RangeRegistry, RegistryError},
     transport::{
         ExplicitGateReq, ExplicitGateResp, FramedTcpClient, InspectDurableRecordsReq,
@@ -73,6 +74,8 @@ pub struct HostedRangeService {
     explicit_gate: Arc<ExplicitGate>,
     range_control: Option<Arc<crate::control::GenerationFencedRangeControl>>,
     durable_inspector: Option<Arc<dyn DurableRecordInspector>>,
+    ddl_gate: Arc<tokio::sync::Mutex<()>>,
+    catalog_follower: Option<Arc<Range0Barrier>>,
 }
 
 #[async_trait]
@@ -102,6 +105,11 @@ struct HostedSession {
 
 const REMOTE_SESSION_IDLE: Duration = Duration::from_mins(1);
 const MAX_REMOTE_SESSIONS: usize = 1024;
+// Reply budget for a follower catalog barrier, kept below the client's 5 s
+// wire-silence timeout so a slow catch-up surfaces as a typed error frame
+// instead of an ambiguous transport timeout. The gateway's local replica
+// barrier shares it so a stalled broker end sample cannot block DDL forever.
+pub(crate) const RANGE0_BARRIER_REPLY_BUDGET: Duration = Duration::from_secs(4);
 #[cfg(not(test))]
 const EXPLICIT_GATE_LEASE: Duration = Duration::from_secs(2);
 #[cfg(test)]
@@ -125,7 +133,27 @@ impl HostedRangeService {
             }),
             range_control: None,
             durable_inspector: None,
+            ddl_gate: Arc::new(tokio::sync::Mutex::new(())),
+            catalog_follower: None,
         }
+    }
+
+    /// Share the mutex that serializes catalog schema changes.
+    ///
+    /// On the node hosting range 0 this must be the same `Arc` as the local
+    /// gateway's schema gate, so local DDL, forwarded DDL, and split
+    /// activation all serialize behind one mutex.
+    #[must_use]
+    pub fn with_ddl_gate(mut self, gate: Arc<tokio::sync::Mutex<()>>) -> Self {
+        self.ddl_gate = gate;
+        self
+    }
+
+    /// Attach the local range-0 follower barrier that answers catalog barriers.
+    #[must_use]
+    pub fn with_catalog_follower(mut self, barrier: Arc<Range0Barrier>) -> Self {
+        self.catalog_follower = Some(barrier);
+        self
     }
 
     #[must_use]
@@ -157,6 +185,18 @@ impl HostedRangeService {
     #[must_use]
     pub fn durable_inspector_dispatcher(&self) -> Option<Arc<dyn DurableRecordInspector>> {
         self.durable_inspector.clone()
+    }
+
+    /// Borrow the shared DDL gate while replacing the hosted-engine snapshot.
+    #[must_use]
+    pub fn ddl_gate_dispatcher(&self) -> Arc<tokio::sync::Mutex<()>> {
+        Arc::clone(&self.ddl_gate)
+    }
+
+    /// Borrow the range-0 catalog follower while replacing the hosted-engine snapshot.
+    #[must_use]
+    pub fn catalog_follower_dispatcher(&self) -> Option<Arc<Range0Barrier>> {
+        self.catalog_follower.clone()
     }
 
     /// Borrow remote timestamp-primary routing while replacing the hosted-engine snapshot.
@@ -1106,6 +1146,55 @@ impl HostedRangeService {
             Err(error) => tso_error_response(&error),
         }
     }
+
+    async fn handle_ddl(&self, sql: &str) -> RangeResponse {
+        // When the gate is shared through `with_ddl_gate`, this serializes
+        // forwarded DDL with the gateway's local DDL and split activation.
+        let _ddl_serialization = self.ddl_gate.lock().await;
+        let engine = match self.hosted_engine(RangeId::COORDINATOR) {
+            Ok(engine) => engine,
+            Err(response) => return response,
+        };
+        // DDL autocommits, so a fresh session carries no state past this call.
+        match engine.connect().simple_query(sql).await {
+            Ok(results) => RangeResponse::SqlResults {
+                results: results.into_iter().map(WireQueryResult::from).collect(),
+            },
+            Err(error) => sql_error_response(error),
+        }
+    }
+
+    async fn handle_range0_barrier(&self) -> RangeResponse {
+        if self.engines.contains_key(&RangeId::COORDINATOR) {
+            // Co-hosted engines share the owner's catalog Arc directly, so
+            // every committed catalog write is already visible here.
+            return RangeResponse::Range0Barriered;
+        }
+        let Some(follower) = &self.catalog_follower else {
+            return RangeResponse::Error {
+                error: WireErrorKind::Failed,
+                message: "node hosts neither range 0 nor a range-0 follower replica".to_string(),
+            };
+        };
+        // The barrier's own timeout only bounds tail catch-up, not the broker
+        // end sample, so this outer timeout is the one mechanism that bounds
+        // the whole reply below the client's 5 s wire-silence deadline.
+        match tokio::time::timeout(RANGE0_BARRIER_REPLY_BUDGET, follower.wait_for_fresh_end()).await
+        {
+            Ok(Ok(())) => RangeResponse::Range0Barriered,
+            Ok(Err(error)) => RangeResponse::Error {
+                error: WireErrorKind::Failed,
+                message: error.to_string(),
+            },
+            Err(_elapsed) => RangeResponse::Error {
+                error: WireErrorKind::Failed,
+                message: format!(
+                    "range-0 follower did not cover the catalog barrier within \
+                     {RANGE0_BARRIER_REPLY_BUDGET:?}"
+                ),
+            },
+        }
+    }
 }
 
 fn sql_error_response(error: PgError) -> RangeResponse {
@@ -1151,6 +1240,8 @@ impl RangeService for HostedRangeService {
             RangeRequest::Tso(crate::transport::TsoReq::Grant { count }) => {
                 self.handle_tso_grant(count).await
             }
+            RangeRequest::Ddl { sql } => self.handle_ddl(&sql).await,
+            RangeRequest::Range0Barrier => self.handle_range0_barrier().await,
             // TxnReq has no payload for the participant's previously executed
             // transaction/session. Refusing is correct until that narrow stateful
             // participant RPC is introduced; accepting would fabricate 2PC.
@@ -1466,6 +1557,19 @@ pub trait RemoteForward: Send + Sync {
     /// Forward SQL to the owning range and return the remote command summary.
     async fn forward_sql(&self, range_id: RangeId, sql: String) -> Result<String, ForwardError>;
 
+    /// Execute one data-definition statement on the range-0 owner and return
+    /// its results.
+    async fn forward_ddl(&self, sql: String) -> Result<Vec<QueryResult>, ForwardError>;
+
+    /// Block until every follower node's range-0 replica covers all catalog
+    /// writes committed before this call.
+    ///
+    /// Non-distributed forwarders have no followers, so the default barrier is
+    /// already covered.
+    async fn barrier_catalog_followers(&self) -> Result<(), ForwardError> {
+        Ok(())
+    }
+
     /// Forward SQL and preserve row descriptions, values, and command results.
     async fn forward_query(
         &self,
@@ -1721,6 +1825,99 @@ impl RemoteForward for RegistryRemoteForward {
                 }
                 Err(error) => return Err(error.into()),
             }
+        }
+    }
+
+    async fn forward_ddl(&self, sql: String) -> Result<Vec<QueryResult>, ForwardError> {
+        let mut retry_used = false;
+        loop {
+            // Resolve inside the loop so a retry sees the refreshed registry.
+            let endpoint = self.registry.resolve(RangeId::COORDINATOR).await?;
+            let response = self
+                .client
+                .call(&endpoint.endpoint, &RangeRequest::Ddl { sql: sql.clone() })
+                .await;
+            match response {
+                Ok(RangeResponse::SqlResults { results }) => {
+                    return Ok(results.into_iter().map(QueryResult::from).collect());
+                }
+                Ok(RangeResponse::SqlError { code, message }) => {
+                    return Err(ForwardError::RemoteSql { code, message });
+                }
+                Ok(RangeResponse::Error { error, message }) if error.permits_reresolve() => {
+                    if retry_used {
+                        return Err(ForwardError::Remote {
+                            kind: error,
+                            message,
+                        });
+                    }
+                    retry_used = true;
+                    self.registry.refresh_authoritatively().await?;
+                }
+                Ok(RangeResponse::Error { error, message }) => {
+                    return Err(ForwardError::Remote {
+                        kind: error,
+                        message,
+                    });
+                }
+                Ok(_) => return Err(ForwardError::UnexpectedResponse),
+                // DDL is not idempotent. Stale-endpoint and not-leader
+                // rejections arrive before the statement runs, so they earn
+                // the one re-resolve retry; an ambiguous transport failure
+                // (for example a connection lost mid-execution) may have
+                // already executed the statement and must surface as an
+                // error, never retry.
+                Err(TransportError::Remote { kind, message }) if kind.permits_reresolve() => {
+                    if retry_used {
+                        return Err(ForwardError::Remote { kind, message });
+                    }
+                    retry_used = true;
+                    self.registry.refresh_authoritatively().await?;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
+    async fn barrier_catalog_followers(&self) -> Result<(), ForwardError> {
+        let mut retry_used = false;
+        'fan_out: loop {
+            let range_zero = self.registry.resolve(RangeId::COORDINATOR).await?;
+            let follower_endpoints: BTreeSet<String> = self
+                .registry
+                .endpoints()
+                .await
+                .into_iter()
+                .map(|range| range.endpoint)
+                .filter(|endpoint| *endpoint != range_zero.endpoint)
+                .collect();
+            // Follower counts are small; sequential calls keep failure
+            // attribution deterministic without new fan-out machinery.
+            for endpoint in &follower_endpoints {
+                let (kind, message) = match self
+                    .client
+                    .call(endpoint, &RangeRequest::Range0Barrier)
+                    .await
+                {
+                    Ok(RangeResponse::Range0Barriered) => continue,
+                    Ok(RangeResponse::Error { error, message }) => (Some(error), message),
+                    Ok(_) => (None, "unexpected range-0 barrier response".to_string()),
+                    Err(TransportError::Remote { kind, message }) => (Some(kind), message),
+                    Err(error) => (None, error.to_string()),
+                };
+                // The barrier is idempotent, so one re-resolvable rejection
+                // refreshes the registry and redoes the whole fan-out.
+                if !retry_used && kind.is_some_and(WireErrorKind::permits_reresolve) {
+                    retry_used = true;
+                    self.registry.refresh_authoritatively().await?;
+                    continue 'fan_out;
+                }
+                return Err(ForwardError::Remote {
+                    kind: kind.unwrap_or(WireErrorKind::Failed),
+                    message: format!("range-0 catalog barrier on {endpoint} failed: {message}"),
+                });
+            }
+            return Ok(());
         }
     }
 
@@ -4045,7 +4242,9 @@ mod tests {
             }
             match request {
                 RangeRequest::Sql { sql, .. } => RangeResponse::Sql { result: sql },
-                RangeRequest::ScanRange(_)
+                RangeRequest::Ddl { .. }
+                | RangeRequest::Range0Barrier
+                | RangeRequest::ScanRange(_)
                 | RangeRequest::JoinRange(_)
                 | RangeRequest::ScanCursor(_)
                 | RangeRequest::SessionOpen { .. }
@@ -6230,5 +6429,225 @@ mod tests {
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].row, vec![Datum::Int4(42)]);
+    }
+
+    /// Sampler that immediately returns a fixed committed range-0 end.
+    struct FixedEndSampler {
+        end: i64,
+    }
+
+    #[async_trait]
+    impl crate::barrier::Range0EndSampler for FixedEndSampler {
+        async fn sample_end_after_call_begins(&self) -> Result<i64, crate::barrier::BarrierError> {
+            Ok(self.end)
+        }
+    }
+
+    /// Barrier stub that counts calls and immediately confirms coverage.
+    struct RecordingBarrierService {
+        barrier_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl RangeService for RecordingBarrierService {
+        async fn handle(&self, request: RangeRequest) -> RangeResponse {
+            if request == RangeRequest::Range0Barrier {
+                self.barrier_calls.fetch_add(1, Ordering::SeqCst);
+                RangeResponse::Range0Barriered
+            } else {
+                RangeResponse::Error {
+                    error: WireErrorKind::Failed,
+                    message: "expected a range-0 barrier".to_string(),
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn hosted_service_rejects_ddl_without_range_zero() {
+        use assert2::assert;
+
+        let service = HostedRangeService::new(BTreeMap::new());
+
+        let response = service
+            .handle(RangeRequest::Ddl {
+                sql: "CREATE TABLE orphan (id int)".to_string(),
+            })
+            .await;
+
+        assert!(
+            response
+                == RangeResponse::Error {
+                    error: WireErrorKind::StaleEndpoint,
+                    message: "range r0 is not hosted here".to_string(),
+                }
+        );
+    }
+
+    #[tokio::test]
+    async fn hosted_service_executes_forwarded_ddl_on_range_zero() {
+        use assert2::assert;
+
+        let address = spawn_loopback(Arc::new(HostedRangeService::new(BTreeMap::from([(
+            RangeId::COORDINATOR,
+            crabka_pgexec::SqlEngine::new(),
+        )]))))
+        .await
+        .expect("start range-zero service");
+        let registry = RangeRegistry::from_tenant_record(&range_zero_record(address.to_string()))
+            .expect("registry");
+        let forward = RegistryRemoteForward::new(registry, FramedTcpClient::default());
+
+        let results = forward
+            .forward_ddl("CREATE TABLE forwarded (id int)".to_string())
+            .await
+            .expect("forwarded DDL executes");
+
+        assert!(
+            results
+                == vec![QueryResult::Command {
+                    tag: "CREATE TABLE".to_string(),
+                }]
+        );
+        // The new table must be visible to a follow-up query on range 0.
+        let follow_up = forward
+            .forward_query(RangeId::COORDINATOR, "SELECT id FROM forwarded".to_string())
+            .await
+            .expect("query the forwarded table");
+        let [QueryResult::Rows { fields, rows, tag }] = follow_up.as_slice() else {
+            panic!("expected a row result: {follow_up:?}");
+        };
+        assert!(fields.len() == 1);
+        assert!(fields[0].name == "id");
+        assert!(rows.is_empty());
+        assert!(tag == "SELECT 0");
+    }
+
+    #[tokio::test]
+    async fn forwarded_ddl_waits_for_the_shared_ddl_gate() {
+        use assert2::assert;
+
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        let service = Arc::new(
+            HostedRangeService::new(BTreeMap::from([(
+                RangeId::COORDINATOR,
+                crabka_pgexec::SqlEngine::new(),
+            )]))
+            .with_ddl_gate(Arc::clone(&gate)),
+        );
+
+        let held = gate.lock().await;
+        let pending = tokio::spawn({
+            let service = Arc::clone(&service);
+            async move {
+                service
+                    .handle(RangeRequest::Ddl {
+                        sql: "CREATE TABLE gated (id int)".to_string(),
+                    })
+                    .await
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!pending.is_finished(), "DDL must wait for the shared gate");
+
+        drop(held);
+        let response = pending.await.expect("join forwarded DDL");
+        assert!(matches!(response, RangeResponse::SqlResults { .. }));
+    }
+
+    #[tokio::test]
+    async fn range0_barrier_completes_only_after_follower_applies() {
+        use assert2::assert;
+
+        use crate::range0_tail::{Range0Frame, Range0Tail};
+
+        let tail = Range0Tail::new(Arc::new(MemKv::new()));
+        let barrier = Arc::new(crate::barrier::Range0Barrier::new(
+            tail.clone(),
+            Arc::new(FixedEndSampler { end: 3 }),
+        ));
+        let service =
+            Arc::new(HostedRangeService::new(BTreeMap::new()).with_catalog_follower(barrier));
+
+        let pending = tokio::spawn({
+            let service = Arc::clone(&service);
+            async move { service.handle(RangeRequest::Range0Barrier).await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !pending.is_finished(),
+            "barrier must wait for the lagging tail"
+        );
+
+        tail.apply_committed(&Range0Frame::new(3, Vec::new()))
+            .expect("apply the sampled end");
+        let response = pending.await.expect("join barrier");
+        assert!(response == RangeResponse::Range0Barriered);
+    }
+
+    #[tokio::test]
+    async fn barrier_fan_out_skips_the_range0_endpoint() {
+        use assert2::assert;
+
+        let range_zero_calls = Arc::new(AtomicUsize::new(0));
+        let first_follower_calls = Arc::new(AtomicUsize::new(0));
+        let second_follower_calls = Arc::new(AtomicUsize::new(0));
+        let range_zero = spawn_loopback(Arc::new(RecordingBarrierService {
+            barrier_calls: Arc::clone(&range_zero_calls),
+        }))
+        .await
+        .expect("start range-zero stub");
+        let first_follower = spawn_loopback(Arc::new(RecordingBarrierService {
+            barrier_calls: Arc::clone(&first_follower_calls),
+        }))
+        .await
+        .expect("start first follower stub");
+        let second_follower = spawn_loopback(Arc::new(RecordingBarrierService {
+            barrier_calls: Arc::clone(&second_follower_calls),
+        }))
+        .await
+        .expect("start second follower stub");
+        // Ranges 1 and 2 share the first follower node, so its distinct
+        // endpoint must be barriered exactly once.
+        let layout = [
+            (
+                0,
+                range_zero,
+                Some(crabka_gres_control::RangeBoundary::new(10, 100)),
+            ),
+            (
+                1,
+                first_follower,
+                Some(crabka_gres_control::RangeBoundary::new(20, 100)),
+            ),
+            (
+                2,
+                first_follower,
+                Some(crabka_gres_control::RangeBoundary::new(30, 100)),
+            ),
+            (3, second_follower, None),
+        ]
+        .into_iter()
+        .map(|(range_id, address, end_key)| RangeLayoutEntry {
+            range_id,
+            end_key,
+            endpoint: address.to_string(),
+            wal_generation: 1,
+            lifecycle: crabka_gres_control::RangeLifecycle::default(),
+            retirement: None,
+        })
+        .collect();
+        let registry =
+            RangeRegistry::from_tenant_record(&record_with_layout(layout)).expect("registry");
+        let forward = RegistryRemoteForward::new(registry, FramedTcpClient::default());
+
+        forward
+            .barrier_catalog_followers()
+            .await
+            .expect("barrier fan-out succeeds");
+
+        assert!(range_zero_calls.load(Ordering::SeqCst) == 0);
+        assert!(first_follower_calls.load(Ordering::SeqCst) == 1);
+        assert!(second_follower_calls.load(Ordering::SeqCst) == 1);
     }
 }

@@ -31,9 +31,9 @@ async fn crossrange_2pc_nemesis_commits_only_after_all_killed_writers_recover() 
 
 #[tokio::test]
 async fn real_range_partition_aborts_transfer_and_heal_restores_2pc() {
-    let mut system = ProcessHarness::start("tenant-real-partition-bank").await;
+    let system = ProcessHarness::start("tenant-real-partition-bank").await;
     system
-        .create_table_on_all(
+        .create_table(
             "CREATE TABLE bank50 (id int4, balance int4); \
              CREATE TABLE bank150 (id int4, balance int4)",
         )

@@ -783,7 +783,8 @@ impl GresRuntime {
 
     fn multi(engine: crabka_gres_ranges::MultiRangeTenant) -> Self {
         let mut range_service =
-            crabka_gres_ranges::HostedRangeService::new(engine.hosted_range_engines());
+            crabka_gres_ranges::HostedRangeService::new(engine.hosted_range_engines())
+                .with_ddl_gate(engine.schema_gate());
         if let Some((registry, client)) = engine.timestamp_primary_remote() {
             range_service = range_service.with_timestamp_primary_remote(registry, client);
         }
@@ -3224,8 +3225,10 @@ async fn open_multirange_runtime(
         let sampler = Arc::new(crabka_gres_substrate::BrokerRange0EndSampler(Arc::new(
             crabka_gres_substrate::LiveCommittedEndSampler::new(follower_config.clone()),
         )));
+        let catalog_refresh_poke = Arc::new(tokio::sync::Notify::new());
         tenant_config = tenant_config.with_read_only_range0_replica(
-            crabka_gres_ranges::ReadOnlyRange0Replica::new(tail, sampler),
+            crabka_gres_ranges::ReadOnlyRange0Replica::new(tail, sampler)
+                .with_catalog_refresh_poke(Arc::clone(&catalog_refresh_poke)),
         );
         tokio::spawn(async move {
             loop {
@@ -3254,7 +3257,12 @@ async fn open_multirange_runtime(
                     Ok(_) => {}
                     Err(error) => tracing::warn!(%error, "range-0 follower end sample failed"),
                 }
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                // A catalog barrier pokes the refresh so waiters catch up
+                // immediately instead of on the next periodic tick.
+                tokio::select! {
+                    () = catalog_refresh_poke.notified() => {}
+                    () = tokio::time::sleep(Duration::from_millis(100)) => {}
+                }
             }
         });
     }
@@ -4039,6 +4047,29 @@ fn install_assembled_range_service(
     }
 }
 
+/// Assemble a hosted range service over the gateway's engines with the
+/// node-level attachments every assembled topology shares: timestamp-primary
+/// aliases and remote routing, plus the DDL gate and catalog-follower barrier.
+///
+/// Forwarded DDL must serialize behind the same mutex as local DDL and split
+/// activation, and follower catalog barriers must observe the replica actually
+/// installed on this gateway.
+fn assembled_hosted_service(
+    gateway: &crabka_gres_ranges::MultiRangeTenant,
+    timestamp_primary_aliases: &BTreeMap<crabka_gres_ranges::RangeId, crabka_gres_ranges::RangeId>,
+) -> crabka_gres_ranges::HostedRangeService {
+    let mut service = crabka_gres_ranges::HostedRangeService::new(gateway.hosted_range_engines())
+        .with_timestamp_primary_aliases(timestamp_primary_aliases.clone())
+        .with_ddl_gate(gateway.schema_gate());
+    if let Some(replica) = gateway.range0_replica() {
+        service = service.with_catalog_follower(replica.barrier());
+    }
+    if let Some((registry, client)) = gateway.timestamp_primary_remote() {
+        service = service.with_timestamp_primary_remote(registry, client);
+    }
+    service
+}
+
 async fn open_live_multirange_tenant(
     tenant_config: crabka_gres_ranges::MultiRangeTenantConfig,
     mut live_engines: LiveMultirangeEngines,
@@ -4056,12 +4087,7 @@ async fn open_live_multirange_tenant(
         _handles,
         tso_rpc,
     } = start_live_multirange_tenant(tenant_config, &mut live_engines).await?;
-    let mut range_service =
-        crabka_gres_ranges::HostedRangeService::new(gateway.hosted_range_engines())
-            .with_timestamp_primary_aliases(timestamp_primary_aliases.clone());
-    if let Some((registry, client)) = gateway.timestamp_primary_remote() {
-        range_service = range_service.with_timestamp_primary_remote(registry, client);
-    }
+    let mut range_service = assembled_hosted_service(&gateway, &timestamp_primary_aliases);
     if let Some(tso_rpc) = &tso_rpc {
         range_service = range_service.with_tso(Arc::clone(tso_rpc));
     }
@@ -4075,13 +4101,8 @@ async fn open_live_multirange_tenant(
         timestamp_primary_aliases.clone(),
     ));
     if transfer.current_range_zero_engine().is_err() {
-        let mut hosted_service =
-            crabka_gres_ranges::HostedRangeService::new(gateway.hosted_range_engines())
-                .with_timestamp_primary_aliases(timestamp_primary_aliases.clone())
-                .with_durable_inspector(transfer.clone());
-        if let Some((registry, client)) = gateway.timestamp_primary_remote() {
-            hosted_service = hosted_service.with_timestamp_primary_remote(registry, client);
-        }
+        let mut hosted_service = assembled_hosted_service(&gateway, &timestamp_primary_aliases)
+            .with_durable_inspector(transfer.clone());
         if let Some(tso_rpc) = transfer
             .tso_rpc
             .read()
@@ -4220,14 +4241,9 @@ async fn open_live_multirange_tenant(
             )));
         }
     }
-    let mut controlled_service =
-        crabka_gres_ranges::HostedRangeService::new(gateway.hosted_range_engines())
-            .with_timestamp_primary_aliases(timestamp_primary_aliases.clone())
-            .with_range_control(control)
-            .with_durable_inspector(transfer.clone());
-    if let Some((registry, client)) = gateway.timestamp_primary_remote() {
-        controlled_service = controlled_service.with_timestamp_primary_remote(registry, client);
-    }
+    let mut controlled_service = assembled_hosted_service(&gateway, &timestamp_primary_aliases)
+        .with_range_control(control)
+        .with_durable_inspector(transfer.clone());
     if let Some(tso_rpc) = transfer
         .tso_rpc
         .read()
