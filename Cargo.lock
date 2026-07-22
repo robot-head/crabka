@@ -2853,6 +2853,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "crabka-gres-loadtest"
+version = "0.3.9"
+dependencies = [
+ "anyhow",
+ "assert2",
+ "clap",
+ "crabka-client-admin",
+ "crabka-gres-control",
+ "crabka-security",
+ "futures",
+ "hdrhistogram",
+ "rand 0.10.2",
+ "rustix 1.1.4",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tokio-postgres",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "crabka-gres-ranges"
 version = "0.3.9"
 dependencies = [

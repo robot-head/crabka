@@ -1,0 +1,21 @@
+name: mixed-oltp
+description: >-
+  Representative OLTP mix (writes, cross-shard transactions, reads, a
+  little contention) at a fixed rate, no faults. The steady-state
+  efficiency scenario: compare txn-per-cpu-second and tail latency
+  between timestamp modes at identical offered load.
+topology:
+  nodes: 3
+  ranges: 4
+workload:
+  connections: 32
+  rate:
+    fixed: { tps: 2000 }
+  warmup_s: 10
+  duration_s: 60
+  mix:
+    single_shard_insert: 55
+    cross_shard_txn: 20
+    read_only: 20
+    contended_update: 5
+  hot_rows: 500
