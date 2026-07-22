@@ -460,7 +460,19 @@ pub struct Registry {
     applied_rx: watch::Receiver<i64>,
     applied_tx: watch::Sender<i64>,
     write_gate: Mutex<()>,
-    reader_started: bool,
+    /// Background reader task keeping `tenants`/`split_operations` fresh.
+    /// Aborted when the registry is dropped so short-lived holders (CLI
+    /// provisioning, test harnesses) do not leak a poll loop that retries
+    /// against a broker that may already be gone.
+    reader: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for Registry {
+    fn drop(&mut self) {
+        if let Some(reader) = self.reader.take() {
+            reader.abort();
+        }
+    }
 }
 
 impl Registry {
@@ -486,7 +498,7 @@ impl Registry {
             applied_rx,
             applied_tx,
             write_gate: Mutex::new(()),
-            reader_started: false,
+            reader: None,
         })
     }
 
@@ -496,17 +508,16 @@ impl Registry {
     /// Returns an error when the requested operation cannot be completed.
     pub async fn ensure_topic(&mut self, replicas: i32) -> Result<(), ControlError> {
         let topic_id = ensure_registry_topic(&self.bootstrap, replicas).await?;
-        if self.reader_started {
+        if self.reader.is_some() {
             return Ok(());
         }
-        spawn_reader(
+        self.reader = Some(spawn_reader(
             self.bootstrap.clone(),
             topic_id,
             Arc::clone(&self.tenants),
             Arc::clone(&self.split_operations),
             self.applied_tx.clone(),
-        );
-        self.reader_started = true;
+        ));
         Ok(())
     }
 
@@ -1388,7 +1399,7 @@ fn spawn_reader(
     tenants: Arc<RwLock<BTreeMap<String, TenantRecord>>>,
     split_operations: Arc<RwLock<BTreeMap<(String, String), SplitOperationRecord>>>,
     applied_tx: watch::Sender<i64>,
-) {
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut next_offset = 0_i64;
         loop {
@@ -1459,7 +1470,7 @@ fn spawn_reader(
                 }
             }
         }
-    });
+    })
 }
 
 fn split_bootstrap(bootstrap: &str) -> Vec<String> {
