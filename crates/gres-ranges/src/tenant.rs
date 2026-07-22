@@ -70,6 +70,16 @@ pub struct MultiRangeTenantConfig {
     pub recover_timestamps_on_start: bool,
     /// Which timestamp-ordering source this tenant installs on its engines.
     pub timestamp_source_mode: TimestampSourceMode,
+    /// Signed wall-clock skew in milliseconds applied to this node's HLC reads.
+    ///
+    /// Fault-injection knob for load and chaos testing, not a production
+    /// setting: when [`TimestampSourceMode::Hlc`] is installed, the system
+    /// clock is wrapped in a [`crabka_pgexec::SkewedWallClock`] so this node
+    /// mints stamps as if its wall clock ran ahead of (positive) or behind
+    /// (negative) its peers. Node-local by design — unlike the mode, it need
+    /// not match across nodes — and ignored under
+    /// [`TimestampSourceMode::LogicalTso`].
+    pub hlc_wall_offset_ms: i64,
     #[doc(hidden)]
     pub commit_fault_for_testing: Option<GatewayCommitFault>,
     #[doc(hidden)]
@@ -169,6 +179,7 @@ impl MultiRangeTenantConfig {
             range_client: None,
             recover_timestamps_on_start: true,
             timestamp_source_mode: TimestampSourceMode::default(),
+            hlc_wall_offset_ms: 0,
             commit_fault_for_testing: None,
             empty_table_split_test_hook: None,
         })
@@ -235,6 +246,16 @@ impl MultiRangeTenantConfig {
     #[must_use]
     pub fn with_timestamp_source_mode(mut self, mode: TimestampSourceMode) -> Self {
         self.timestamp_source_mode = mode;
+        self
+    }
+
+    /// Skew this node's HLC wall-clock reads by a signed millisecond offset.
+    ///
+    /// Fault-injection knob for load and chaos testing, not production
+    /// configuration; ignored unless [`TimestampSourceMode::Hlc`] is selected.
+    #[must_use]
+    pub fn with_hlc_wall_offset_ms(mut self, hlc_wall_offset_ms: i64) -> Self {
+        self.hlc_wall_offset_ms = hlc_wall_offset_ms;
         self
     }
 
@@ -627,11 +648,18 @@ impl MultiRangeTenant {
         }
 
         match timestamp_oracle {
+            // Explicitly supplied oracles are already mode-appropriate: the
+            // live boot path builds a logical or wall-anchored HLC grant
+            // oracle from the recovered range-0 horizon before assembly.
             Some(timestamp_oracle) => install_timestamp_oracle(&mut engines, &timestamp_oracle),
             None if hosts_range0 => match config.timestamp_source_mode {
                 TimestampSourceMode::LogicalTso => install_memory_timestamp_oracle(&mut engines)?,
                 TimestampSourceMode::Hlc { max_offset_ms } => {
-                    install_hlc_timestamp_source(&mut engines, max_offset_ms)?;
+                    install_hlc_timestamp_source(
+                        &mut engines,
+                        max_offset_ms,
+                        config.hlc_wall_offset_ms,
+                    )?;
                 }
             },
             None => {
@@ -2009,6 +2037,75 @@ where
     }))))
 }
 
+/// Milliseconds of wall-clock headroom the wall-anchored HLC oracle persists
+/// ahead of its grants.
+///
+/// The horizon advances in whole-millisecond strides of the packed domain: one
+/// persist covers everything the clock can grant during the next stride of
+/// wall time, so the persist rate is bounded by wall time (a handful per
+/// second) independent of grant volume, and a successor's first stamp lands at
+/// most this far ahead of real time after a crash.
+const HLC_HORIZON_STRIDE_MS: u64 = 128;
+
+/// Build the in-process RPC endpoint for a wall-anchored HLC grant oracle
+/// recovered from a durable horizon.
+///
+/// This is the `Hlc`-mode counterpart of [`tso_rpc_from_horizon`]: range 0
+/// stays the single timestamp authority, but grants are packed HLC stamps
+/// anchored to `wall` instead of dense logical integers. The oracle seeds its
+/// clock from `persisted_max_ts`, so every grant strictly dominates everything
+/// any predecessor granted even when `wall` reads behind the predecessor's
+/// wall clock, and it persists the horizon [`HLC_HORIZON_STRIDE_MS`] ahead
+/// through the same epoch-gated committer the logical oracle uses.
+/// # Panics
+///
+/// Panics if an internal invariant is violated.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
+pub fn hlc_tso_rpc_from_horizon<C, H>(
+    committer: C,
+    heartbeat: H,
+    epoch: i16,
+    persisted_max_ts: u64,
+    wall: Arc<dyn crabka_pgexec::WallClock>,
+) -> Result<Arc<dyn TsoRpc>, TsoError>
+where
+    C: TsoHorizonCommitter + 'static,
+    H: EpochHeartbeat + 'static,
+{
+    let stride = NonZeroU64::new(crabka_pgexec::hlc::pack(HLC_HORIZON_STRIDE_MS, 0))
+        .expect("packed stride is non-zero");
+    let oracle = Arc::new(TsoOracle::recover_hlc(
+        committer,
+        heartbeat,
+        epoch,
+        stride,
+        persisted_max_ts,
+        wall,
+    )?);
+    Ok(Arc::new(BatchedTsoClient::new(Arc::new(InProcessTsoRpc {
+        oracle,
+    }))))
+}
+
+/// The wall clock an HLC component on this node should read.
+///
+/// A zero `wall_offset_ms` is the plain system clock; a nonzero offset wraps
+/// it in the fault-injection [`crabka_pgexec::SkewedWallClock`] used by load
+/// and chaos tests to emulate cross-node wall-clock skew.
+#[must_use]
+pub fn hlc_wall_clock(wall_offset_ms: i64) -> Arc<dyn crabka_pgexec::WallClock> {
+    if wall_offset_ms == 0 {
+        Arc::new(crabka_pgexec::SystemWallClock)
+    } else {
+        Arc::new(crabka_pgexec::SkewedWallClock::new(
+            Arc::new(crabka_pgexec::SystemWallClock),
+            wall_offset_ms,
+        ))
+    }
+}
+
 fn install_memory_timestamp_oracle(
     engines: &mut BTreeMap<RangeId, SqlEngine>,
 ) -> Result<(), TenantError> {
@@ -2035,9 +2132,14 @@ fn install_memory_timestamp_oracle(
 /// hosted engine. A single `HlcTimestampSource` is the sole timestamp authority
 /// here, so it is correct on its own — multi-node stamping and the
 /// uncertainty-window read-restart are the documented follow-up.
+///
+/// A nonzero `wall_offset_ms` wraps the system clock in a fault-injection
+/// [`crabka_pgexec::SkewedWallClock`], for load and chaos tests emulating
+/// cross-node wall-clock skew.
 fn install_hlc_timestamp_source(
     engines: &mut BTreeMap<RangeId, SqlEngine>,
     max_offset_ms: u64,
+    wall_offset_ms: i64,
 ) -> Result<(), TenantError> {
     let Some(coordinator) = engines.get(&RangeId::COORDINATOR) else {
         return Ok(());
@@ -2048,7 +2150,7 @@ fn install_hlc_timestamp_source(
     let persisted_max_ts = horizon
         .load_max_ts()
         .map_err(TenantError::TimestampSource)?;
-    let wall: Arc<dyn crabka_pgexec::WallClock> = Arc::new(crabka_pgexec::SystemWallClock);
+    let wall = hlc_wall_clock(wall_offset_ms);
     let timestamp_source: Arc<dyn crabka_pgexec::TimestampSource> =
         Arc::new(crabka_pgexec::HlcTimestampSource::seeded_from_horizon(
             persisted_max_ts,
@@ -6349,7 +6451,7 @@ fn configure_successor_engine(coordinator: &SqlEngine, successor: &mut SqlEngine
 #[cfg(test)]
 mod tests {
     use assert2::assert;
-    use crabka_pgexec::TimestampSource;
+    use crabka_pgexec::{TimestampSource, WallClock as _};
     use crabka_pgkv::{Kv, MemKv};
 
     use super::*;
@@ -6895,11 +6997,45 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn hlc_wall_offset_skews_minted_timestamps_by_the_configured_amount() {
+        // One hour dwarfs any wall-clock movement during the test, so the
+        // configured skew is unambiguous in the minted physical component.
+        const SKEW_MAGNITUDE_MS: i64 = 3_600_000;
+        for skew_ms in [SKEW_MAGNITUDE_MS, -SKEW_MAGNITUDE_MS] {
+            let config = MultiRangeTenantConfig::from_boundaries(tenant(), "0:0,50:10")
+                .expect("config")
+                .with_timestamp_source_mode(TimestampSourceMode::Hlc { max_offset_ms: 250 })
+                .with_hlc_wall_offset_ms(skew_ms);
+            let before_ms = crabka_pgexec::SystemWallClock.now_ms();
+            let (gateway, _handles) = MultiRangeTenant::start(config).expect("tenant");
+            let engines = gateway.hosted_range_engines();
+            let source = engines[&RangeId::COORDINATOR].timestamp_oracle_handle();
+
+            let minted = source.allocate_read_timestamp().await.expect("read").get();
+            let after_ms = crabka_pgexec::SystemWallClock.now_ms();
+
+            // The fresh clock mints straight off the (skewed) wall reading, so
+            // the physical component sits exactly in the skewed wall interval
+            // spanning the allocation.
+            let physical_ms = crabka_pgexec::hlc::unpack(minted).physical_ms;
+            assert!(
+                physical_ms >= before_ms.saturating_add_signed(skew_ms),
+                "skew {skew_ms}"
+            );
+            assert!(
+                physical_ms <= after_ms.saturating_add_signed(skew_ms),
+                "skew {skew_ms}"
+            );
+        }
+    }
+
     #[test]
     fn logical_tso_mode_is_the_default() {
         let config =
             MultiRangeTenantConfig::from_boundaries(tenant(), "0:0,50:10").expect("config");
         assert!(config.timestamp_source_mode == TimestampSourceMode::LogicalTso);
+        assert!(config.hlc_wall_offset_ms == 0);
     }
 
     #[test]
@@ -8522,6 +8658,51 @@ mod tests {
             .expect_err("fenced oracle rejects grants");
 
         assert!(error.to_string().contains("fenced"));
+    }
+
+    #[tokio::test]
+    async fn hlc_grant_rpc_is_wall_anchored_and_restart_seeds_from_the_horizon() {
+        use crabka_pgexec::hlc::unpack;
+
+        let count = NonZeroU64::new(4).expect("count");
+        let kv = Arc::new(crabka_pgkv::MemKv::new());
+        let horizon = MemoryTsoHorizon::new(kv, 1);
+        // Live-shaped assembly: the same builder the live boot path uses, with
+        // a pinned wall clock so anchoring is deterministic.
+        let predecessor_wall = Arc::new(crabka_pgexec::ManualWallClock::new(5_000));
+        let rpc = hlc_tso_rpc_from_horizon(
+            horizon.clone(),
+            horizon.clone(),
+            1,
+            horizon.load_max_ts().expect("fresh horizon"),
+            predecessor_wall as Arc<dyn crabka_pgexec::WallClock>,
+        )
+        .expect("hlc tso rpc");
+        let before_restart = rpc.grant(count).await.expect("grant");
+        assert!(unpack(before_restart.first_ts.get()).physical_ms == 5_000);
+
+        // Simulated restart: rebuild from the persisted horizon with a wall
+        // clock far BEHIND the predecessor's, proving horizon seeding — not
+        // wall luck — provides monotonicity across the restart.
+        drop(rpc);
+        let persisted = horizon.load_max_ts().expect("persisted horizon");
+        let successor_wall = Arc::new(crabka_pgexec::ManualWallClock::new(3));
+        let restarted = hlc_tso_rpc_from_horizon(
+            horizon.clone(),
+            horizon.clone(),
+            1,
+            persisted,
+            successor_wall as Arc<dyn crabka_pgexec::WallClock>,
+        )
+        .expect("restarted hlc tso rpc");
+        let after_restart = restarted
+            .grant(NonZeroU64::new(1).expect("count"))
+            .await
+            .expect("post-restart grant");
+
+        assert!(persisted >= before_restart.last_ts().expect("last").get());
+        assert!(after_restart.first_ts.get() > persisted);
+        assert!(after_restart.first_ts > before_restart.last_ts().expect("last"));
     }
 
     #[tokio::test]

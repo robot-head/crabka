@@ -334,11 +334,11 @@ impl LiveMultiRangeTransfer {
                 pending.predecessor,
             )?;
             tso_rpc = Some(
-                crabka_gres_ranges::tso_rpc_from_horizon(
-                    horizon.clone(),
-                    horizon.clone(),
-                    horizon.epoch(),
+                super::mode_tso_rpc_from_horizon(
+                    &horizon,
                     persisted_max_ts,
+                    self.config.timestamp_source_mode,
+                    self.config.hlc_wall_offset_ms,
                 )
                 .map_err(|error| {
                     crabka_gres_ranges::RangeTransferError::Runtime {

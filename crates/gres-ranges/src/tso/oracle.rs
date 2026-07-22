@@ -1,4 +1,14 @@
 //! Range-0 monotone timestamp oracle with stride-ahead durability.
+//!
+//! One oracle serves both timestamp domains: the dense logical counter of
+//! `LogicalTso` mode and the wall-anchored packed-HLC stamps of `Hlc` mode.
+//! The durable machinery — persisting `max_ts` a stride ahead of grants so a
+//! restarted range 0 never re-mints below granted stamps, the successor grace
+//! period, liveness certificates, and epoch fencing — is mode-independent
+//! because both domains are plain `u64`s reserved in contiguous runs; only
+//! how a run's first stamp is chosen differs. In the wall-anchored mode the
+//! stride is expressed in the packed domain (whole milliseconds of headroom),
+//! so the persist rate is bounded by wall time rather than by grant volume.
 
 use std::{
     num::NonZeroU64,
@@ -9,6 +19,7 @@ use std::{
     time::Duration,
 };
 
+use crabka_pgexec::{HybridLogicalClock, WallClock};
 use crabka_pgkv::{Kv, WriteOp};
 use tokio::{sync::Mutex, time::Instant};
 
@@ -117,6 +128,67 @@ struct SlowState {
     has_granted: bool,
 }
 
+/// How the oracle carves each contiguous reservation out of the timestamp
+/// space.
+///
+/// Both arms share every other oracle obligation — the successor grace period,
+/// liveness certificates, stride-ahead horizon persistence, and epoch fencing —
+/// which is why the wall-anchored variant lives inside [`TsoOracle`] rather
+/// than beside it: only the choice of a run's first stamp differs.
+enum GrantReservation {
+    /// Dense logical counter: each run starts immediately after the previous
+    /// one, so timestamps are small consecutive integers (`LogicalTso` mode).
+    Logical(AtomicU64),
+    /// Wall-anchored Hybrid Logical Clock over the packed stamp domain: each
+    /// run starts at the current wall reading when the wall has moved past the
+    /// last stamp, and packs densely behind the previous run otherwise (`Hlc`
+    /// mode). Logical-counter overflow carries into the physical field by
+    /// plain integer arithmetic — bounded drift ahead of the wall, the same
+    /// budget a stalled wall clock already spends.
+    WallAnchored {
+        clock: HybridLogicalClock,
+        wall: Arc<dyn WallClock>,
+    },
+}
+
+impl GrantReservation {
+    /// Reserve `count` contiguous timestamps, returning `(first, last)`.
+    fn reserve(&self, count: NonZeroU64) -> Result<(u64, u64), TsoError> {
+        match self {
+            // Compare-exchange over `fetch_add` so overflow fails the grant
+            // instead of wrapping the counter.
+            Self::Logical(next_ts) => {
+                let mut first = next_ts.load(Ordering::Acquire);
+                loop {
+                    let last = first
+                        .checked_add(count.get() - 1)
+                        .ok_or(TsoError::TimestampOverflow)?;
+                    let next = last.checked_add(1).ok_or(TsoError::TimestampOverflow)?;
+                    match next_ts.compare_exchange_weak(
+                        first,
+                        next,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    ) {
+                        Ok(_) => return Ok((first, last)),
+                        Err(observed) => first = observed,
+                    }
+                }
+            }
+            Self::WallAnchored { clock, wall } => {
+                let first = clock
+                    .allocate_batch(count, wall.now_ms())
+                    .ok_or(TsoError::TimestampOverflow)?;
+                // The reservation overflow-checked `first + count - 1` itself.
+                let last = first
+                    .checked_add(count.get() - 1)
+                    .ok_or(TsoError::TimestampOverflow)?;
+                Ok((first, last))
+            }
+        }
+    }
+}
+
 trait TsoClock: Send + Sync {
     fn now_ms(&self) -> u64;
 }
@@ -134,19 +206,33 @@ impl TsoClock for SystemTsoClock {
 
 const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(10);
 
+/// Recovery-time parameters shared by both reservation modes.
+#[derive(Clone, Copy)]
+struct RecoverySettings {
+    epoch: i16,
+    stride: NonZeroU64,
+    persisted_max_ts: u64,
+    heartbeat_interval: Duration,
+}
+
 /// Range-0 timestamp oracle.
 ///
-/// Within-stride grants are served lock-free: `next_ts`, `durable_max_ts`,
-/// and `certified_until_ms` are atomics read on the hot path, and only
-/// horizon advancement and certificate renewal serialize through the
-/// slow-path mutex.
+/// Within-stride grants are served lock-free: the reservation state,
+/// `durable_max_ts`, and `certified_until_ms` are atomics read on the hot
+/// path, and only horizon advancement and certificate renewal serialize
+/// through the slow-path mutex.
 ///
 /// Ordering: `durable_max_ts` and `certified_until_ms` are stored with
 /// `Release` only after the epoch-gated persist or heartbeat succeeded and
 /// loaded with `Acquire`, so a fast path that observes a horizon or
-/// certificate also observes the liveness check that produced it. `next_ts`
-/// is a pure reservation counter — no other data is published through it —
-/// so `AcqRel` on its compare-exchange is already stronger than it needs.
+/// certificate also observes the liveness check that produced it. The
+/// reservation state is a pure counter/clock — no other data is published
+/// through it — so `AcqRel` on its compare-exchange is already stronger than
+/// it needs.
+///
+/// The [`GrantReservation`] arm decides the timestamp *domain* — dense
+/// logical integers or wall-anchored packed HLC stamps — while everything
+/// durable and fencing-related is identical across both.
 pub struct TsoOracle<C, H> {
     committer: C,
     heartbeat: H,
@@ -156,7 +242,7 @@ pub struct TsoOracle<C, H> {
     clock: Arc<dyn TsoClock>,
     ready: AtomicBool,
     ready_at_ms: u64,
-    next_ts: AtomicU64,
+    reservation: GrantReservation,
     durable_max_ts: AtomicU64,
     certified_until_ms: AtomicU64,
     slow: Mutex<SlowState>,
@@ -220,6 +306,85 @@ where
         heartbeat_interval: Duration,
         clock: Arc<dyn TsoClock>,
     ) -> Result<Self, TsoError> {
+        let reservation = GrantReservation::Logical(AtomicU64::new(
+            TsoTimestamp::from_persisted_next(persisted_max_ts)?.get(),
+        ));
+        let settings = RecoverySettings {
+            epoch,
+            stride,
+            persisted_max_ts,
+            heartbeat_interval,
+        };
+        Ok(Self::assemble(
+            committer,
+            heartbeat,
+            settings,
+            clock,
+            reservation,
+        ))
+    }
+
+    /// Recover a wall-anchored HLC oracle from an already-replayed durable
+    /// horizon.
+    ///
+    /// The reservation clock is seeded at `persisted_max_ts`, so the first —
+    /// and, by monotonicity, every — grant strictly dominates everything any
+    /// predecessor oracle could have granted, even when `wall` reads behind
+    /// the predecessor's wall clock. `stride` is in the packed stamp domain;
+    /// see the horizon-persistence notes on [`TsoOracle`].
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
+    pub fn recover_hlc(
+        committer: C,
+        heartbeat: H,
+        epoch: i16,
+        stride: NonZeroU64,
+        persisted_max_ts: u64,
+        wall: Arc<dyn WallClock>,
+    ) -> Result<Self, TsoError> {
+        let settings = RecoverySettings {
+            epoch,
+            stride,
+            persisted_max_ts,
+            heartbeat_interval: DEFAULT_HEARTBEAT_INTERVAL,
+        };
+        Ok(Self::recover_hlc_with_clock(
+            committer,
+            heartbeat,
+            settings,
+            wall,
+            Arc::new(SystemTsoClock(Instant::now())),
+        ))
+    }
+
+    fn recover_hlc_with_clock(
+        committer: C,
+        heartbeat: H,
+        settings: RecoverySettings,
+        wall: Arc<dyn WallClock>,
+        clock: Arc<dyn TsoClock>,
+    ) -> Self {
+        let reservation = GrantReservation::WallAnchored {
+            clock: HybridLogicalClock::seeded_at(settings.persisted_max_ts),
+            wall,
+        };
+        Self::assemble(committer, heartbeat, settings, clock, reservation)
+    }
+
+    fn assemble(
+        committer: C,
+        heartbeat: H,
+        settings: RecoverySettings,
+        clock: Arc<dyn TsoClock>,
+        reservation: GrantReservation,
+    ) -> Self {
+        let RecoverySettings {
+            epoch,
+            stride,
+            persisted_max_ts,
+            heartbeat_interval,
+        } = settings;
         // A zero horizon proves no predecessor ever granted (every grant
         // persists a stride first), so no successor grace period is needed.
         let ready_at_ms = if persisted_max_ts == 0 {
@@ -229,7 +394,7 @@ where
                 .now_ms()
                 .saturating_add(duration_ms(heartbeat_interval))
         };
-        Ok(Self {
+        Self {
             committer,
             heartbeat,
             epoch,
@@ -238,12 +403,12 @@ where
             clock,
             ready: AtomicBool::new(ready_at_ms == 0),
             ready_at_ms,
-            next_ts: AtomicU64::new(TsoTimestamp::from_persisted_next(persisted_max_ts)?.get()),
+            reservation,
             durable_max_ts: AtomicU64::new(persisted_max_ts),
             certified_until_ms: AtomicU64::new(0),
             slow: Mutex::new(SlowState { has_granted: false }),
             stats: Arc::default(),
-        })
+        }
     }
 
     /// Record grant activity into `stats` so an external poller can observe
@@ -305,27 +470,9 @@ where
         self.ready.store(true, Ordering::Release);
     }
 
-    /// Reserve `count` contiguous timestamps from the shared counter.
-    ///
-    /// Uses a compare-exchange loop over `fetch_add` so overflow fails the
-    /// grant instead of wrapping the counter.
+    /// Reserve `count` contiguous timestamps from the shared reservation state.
     fn reserve(&self, count: NonZeroU64) -> Result<(u64, u64), TsoError> {
-        let mut first = self.next_ts.load(Ordering::Acquire);
-        loop {
-            let last = first
-                .checked_add(count.get() - 1)
-                .ok_or(TsoError::TimestampOverflow)?;
-            let next = last.checked_add(1).ok_or(TsoError::TimestampOverflow)?;
-            match self.next_ts.compare_exchange_weak(
-                first,
-                next,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => return Ok((first, last)),
-                Err(observed) => first = observed,
-            }
-        }
+        self.reservation.reserve(count)
     }
 
     /// Renew the epoch-liveness certificate under the slow-path mutex.
@@ -925,6 +1072,130 @@ mod tests {
             .expect("grant");
 
         assert!(first == GrantLease::new(TsoTimestamp::new(nonzero(17)), nonzero(1)));
+    }
+
+    fn hlc_settings(epoch: i16, stride_ms: u64, persisted_max_ts: u64) -> RecoverySettings {
+        RecoverySettings {
+            epoch,
+            stride: nonzero(crabka_pgexec::hlc::pack(stride_ms, 0)),
+            persisted_max_ts,
+            heartbeat_interval: Duration::from_millis(10),
+        }
+    }
+
+    #[tokio::test]
+    async fn hlc_grants_are_wall_anchored_and_persist_packed_strides() {
+        use crabka_pgexec::hlc::pack;
+
+        let store = Arc::new(MemKv::default());
+        let horizon = MemoryTsoHorizon::new(store, 3);
+        let persists = Arc::new(AtomicU64::new(0));
+        let committer = CountingCommitter {
+            inner: horizon.clone(),
+            persists: Arc::clone(&persists),
+        };
+        let wall = Arc::new(crabka_pgexec::ManualWallClock::new(1_000));
+        let clock = Arc::new(ManualClock(AtomicU64::new(1)));
+        let oracle = TsoOracle::recover_hlc_with_clock(
+            committer,
+            horizon.clone(),
+            hlc_settings(3, 128, 0),
+            Arc::clone(&wall) as Arc<dyn WallClock>,
+            clock,
+        );
+
+        // The first grant anchors at the wall reading and persists one packed
+        // stride (128 ms of headroom) ahead of it.
+        let first = grant_within(&oracle, nonzero(3)).await.expect("first");
+        assert!(first == GrantLease::new(TsoTimestamp::new(nonzero(pack(1_000, 0))), nonzero(3)));
+        assert!(horizon.load_max_ts().expect("horizon") == pack(1_000, 0) + pack(128, 0) - 1);
+        assert!(persists.load(Ordering::SeqCst) == 1);
+
+        // A stalled wall packs the next grant densely behind the first, still
+        // under the persisted stride: no new persist.
+        let second = grant_within(&oracle, nonzero(2)).await.expect("second");
+        assert!(second == GrantLease::new(TsoTimestamp::new(nonzero(pack(1_000, 3))), nonzero(2)));
+        assert!(persists.load(Ordering::SeqCst) == 1);
+
+        // An advancing wall re-anchors the run at the new reading; 50 ms of
+        // movement stays inside the 128 ms stride, so still no persist.
+        wall.set(1_050);
+        let third = grant_within(&oracle, nonzero(1)).await.expect("third");
+        assert!(third == GrantLease::new(TsoTimestamp::new(nonzero(pack(1_050, 0))), nonzero(1)));
+        assert!(persists.load(Ordering::SeqCst) == 1);
+
+        // Crossing the persisted stride advances the horizon exactly once more.
+        wall.set(1_200);
+        let fourth = grant_within(&oracle, nonzero(1)).await.expect("fourth");
+        assert!(fourth == GrantLease::new(TsoTimestamp::new(nonzero(pack(1_200, 0))), nonzero(1)));
+        assert!(persists.load(Ordering::SeqCst) == 2);
+        assert!(horizon.load_max_ts().expect("horizon") == pack(1_200, 0) + pack(128, 0) - 1);
+    }
+
+    #[tokio::test]
+    async fn hlc_restart_dominates_predecessor_grants_despite_wall_regression() {
+        use crabka_pgexec::hlc::unpack;
+
+        let store = Arc::new(MemKv::default());
+        let horizon = MemoryTsoHorizon::new(store, 5);
+        let predecessor_wall = Arc::new(crabka_pgexec::ManualWallClock::new(2_000));
+        let predecessor_clock = Arc::new(ManualClock(AtomicU64::new(1)));
+        let predecessor = TsoOracle::recover_hlc_with_clock(
+            horizon.clone(),
+            horizon.clone(),
+            hlc_settings(5, 64, 0),
+            predecessor_wall as Arc<dyn WallClock>,
+            predecessor_clock,
+        );
+        let before_crash = grant_within(&predecessor, nonzero(10))
+            .await
+            .expect("grant");
+        assert!(unpack(before_crash.first_ts.get()).physical_ms == 2_000);
+        drop(predecessor);
+
+        // The successor's wall clock reads far BEHIND the predecessor's, so
+        // only horizon seeding — not wall luck — can provide monotonicity.
+        let persisted = horizon.load_max_ts().expect("horizon");
+        let successor_wall = Arc::new(crabka_pgexec::ManualWallClock::new(10));
+        let successor_clock = Arc::new(ManualClock(AtomicU64::new(1)));
+        let successor = TsoOracle::recover_hlc_with_clock(
+            horizon.clone(),
+            horizon.clone(),
+            hlc_settings(5, 64, persisted),
+            successor_wall as Arc<dyn WallClock>,
+            Arc::clone(&successor_clock) as Arc<dyn TsoClock>,
+        );
+        // Step the manual clock strictly past the successor grace period.
+        successor_clock.0.store(12, Ordering::SeqCst);
+        let after_crash = grant_within(&successor, nonzero(1)).await.expect("grant");
+
+        assert!(after_crash.first_ts > before_crash.last_ts().expect("last"));
+        // The stride persistence guarantees the persisted horizon dominates
+        // every predecessor grant; the successor continues right above it.
+        assert!(persisted >= before_crash.last_ts().expect("last").get());
+        assert!(after_crash.first_ts.get() == persisted + 1);
+        assert!(unpack(after_crash.first_ts.get()).physical_ms >= 2_000);
+    }
+
+    #[tokio::test]
+    async fn hlc_oracle_refuses_grants_once_fenced() {
+        let store = Arc::new(MemKv::default());
+        let horizon = MemoryTsoHorizon::new(store, 7);
+        let wall = Arc::new(crabka_pgexec::ManualWallClock::new(500));
+        let oracle = TsoOracle::recover_hlc(
+            horizon.clone(),
+            horizon.clone(),
+            7,
+            nonzero(crabka_pgexec::hlc::pack(128, 0)),
+            0,
+            wall as Arc<dyn WallClock>,
+        )
+        .expect("recover");
+
+        horizon.set_live_epoch(8).await;
+        let error = grant_within(&oracle, nonzero(1)).await.expect_err("fenced");
+
+        assert!(matches!(error, TsoError::FencedEpoch { epoch: 7 }));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

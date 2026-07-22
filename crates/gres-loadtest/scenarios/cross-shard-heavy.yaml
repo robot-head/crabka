@@ -1,0 +1,18 @@
+name: cross-shard-heavy
+description: >-
+  Cross-shard-transaction-dominated load. Every such transaction takes the
+  2PC path and a global timestamp, so this is the worst case for the
+  centralized oracle and the best probe of coordination overhead between
+  modes.
+topology:
+  nodes: 3
+  ranges: 4
+workload:
+  connections: 32
+  rate: saturate
+  warmup_s: 10
+  duration_s: 60
+  mix:
+    cross_shard_txn: 70
+    single_shard_insert: 20
+    read_only: 10

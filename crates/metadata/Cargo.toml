@@ -34,7 +34,7 @@ tracing = { workspace = true }
 [dev-dependencies]
 mutants = { workspace = true }
 proptest = { workspace = true }
-criterion = { version = "5.0.0", package = "codspeed-criterion-compat" }
+criterion = { version = "5.0.1", package = "codspeed-criterion-compat" }
 
 [[bench]]
 name = "image"

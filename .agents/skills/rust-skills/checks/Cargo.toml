@@ -44,7 +44,7 @@ proptest = "1"
 insta = "1"
 criterion = "0.8"
 loom = "0.7"
-syn = { version = "2", features = ["full", "extra-traits", "derive"] }
+syn = { version = "3", features = ["full", "extra-traits", "derive"] }
 quote = "1"
 proc-macro2 = "1"
 

@@ -111,7 +111,7 @@ fn predicate_matches(predicate: &CompiledPredicate, value: &Value) -> bool {
     };
     matches
         .into_iter()
-        .any(|matched| expected_value_matches(&predicate.expected, matched.val()))
+        .any(|matched| expected_value_matches(&predicate.expected, matched.val))
 }
 
 fn expected_value_matches(expected: &PredicateValue, actual: &Value) -> bool {

@@ -79,7 +79,9 @@ use crabka_pgwire::engine::Engine;
 pub use error::ExecError;
 pub use gtm::GlobalXidLease;
 pub use hlc::{Hlc, HybridLogicalClock};
-pub use hlc_source::{HlcTimestampSource, SystemWallClock, WallClock};
+pub use hlc_source::{
+    HlcTimestampSource, ManualWallClock, SkewedWallClock, SystemWallClock, WallClock,
+};
 pub use local_sequence::LocalSequence;
 pub use read_gate::{Linearizer, LocalLinearizer};
 pub use scanner::{

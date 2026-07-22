@@ -288,7 +288,7 @@ pub(crate) fn extract_source(
             let json = body_json?;
             let refs = js_path_process(q, json).ok()?;
             for r in refs {
-                if let Some(s) = r.val().as_str() {
+                if let Some(s) = r.val.as_str() {
                     return Some(s.to_string());
                 }
             }
