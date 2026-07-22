@@ -30,7 +30,7 @@ use crate::{
     RangeSpec, RangeTransferCapability, RangeTransferError, RouteIntent,
     RowInterval as MapRowInterval, SplitCommand, SplitError, SplitHooks, SplitState,
     SplitStateStore, TableId, TenantName, ValidatedSplitTransferPlan,
-    barrier::{Range0Barrier, Range0EndSampler},
+    barrier::{BarrierError, Range0Barrier, Range0EndSampler},
     coordinator::{LocalCoordinator, LocalCoordinatorError, TransactionDecision},
     forward::{
         ForwardError, RegistryRangeScanner, RegistryRemoteForward, RegistryTsoRpc,
@@ -315,6 +315,31 @@ impl ReadOnlyRange0Replica {
             catalog_kv: tail.store_handle(),
             barrier: Arc::new(Range0Barrier::new(tail, sampler)),
         }
+    }
+
+    /// Barrier handle bound to this replica's follower tail.
+    #[must_use]
+    pub fn barrier(&self) -> Arc<Range0Barrier> {
+        Arc::clone(&self.barrier)
+    }
+
+    /// Rebuild with a poke that wakes the follower poll loop before sampling.
+    #[must_use]
+    pub fn with_catalog_refresh_poke(self, poke: Arc<tokio::sync::Notify>) -> Self {
+        Self {
+            catalog_kv: self.catalog_kv,
+            barrier: Arc::new(self.barrier.as_ref().clone().with_refresh_poke(poke)),
+        }
+    }
+
+    /// Wait until this replica covers every catalog write committed before this call.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BarrierError`] when the committed end cannot be sampled or the
+    /// follower tail does not apply it within the barrier timeout.
+    pub async fn wait_for_latest_catalog(&self) -> Result<(), BarrierError> {
+        self.barrier.wait_for_fresh_end().await
     }
 }
 
@@ -674,6 +699,7 @@ impl MultiRangeTenant {
             tenant: config.tenant,
             serving: ArcSwap::from_pointee(ServingSnapshot::ready(config.range_map, engines)),
             remote_forward,
+            range0_replica: config.range0_replica,
             timestamp_primary_remote,
             coordinator: LocalCoordinator::default(),
             route_log: Mutex::new(Vec::new()),
@@ -728,6 +754,22 @@ impl MultiRangeTenant {
     #[must_use]
     pub fn timestamp_primary_remote(&self) -> Option<(RangeRegistry, FramedTcpClient)> {
         self.inner.timestamp_primary_remote.clone()
+    }
+
+    /// Process-wide DDL/schema serialization gate, shared with the range RPC service.
+    ///
+    /// The node binary must hand this same `Arc` to its
+    /// [`HostedRangeService`](crate::forward::HostedRangeService) so local DDL,
+    /// forwarded DDL, and split activation serialize behind one mutex.
+    #[must_use]
+    pub fn schema_gate(&self) -> Arc<Mutex<()>> {
+        Arc::clone(&self.inner.schema_gate)
+    }
+
+    /// The read-only range-0 replica on an rN-only node.
+    #[must_use]
+    pub fn range0_replica(&self) -> Option<ReadOnlyRange0Replica> {
+        self.inner.range0_replica.clone()
     }
 
     /// Install one foreign scanner on every currently served range engine.
@@ -2258,6 +2300,7 @@ struct TenantInner {
     tenant: TenantName,
     serving: ArcSwap<ServingSnapshot>,
     remote_forward: Option<Arc<dyn RemoteForward>>,
+    range0_replica: Option<ReadOnlyRange0Replica>,
     timestamp_primary_remote: Option<(RangeRegistry, FramedTcpClient)>,
     coordinator: LocalCoordinator,
     route_log: Mutex<Vec<RouteRecord>>,
@@ -2371,6 +2414,25 @@ impl ServingSnapshot {
             .then(|| self.engines.get(&range_id))
             .flatten()
     }
+
+    /// The engine that stands in for range 0 on this node: r0's own engine when
+    /// hosted, otherwise any hosted data-range engine. Every hosted engine shares
+    /// the certified range-0 (follower) catalog KV and the installed timestamp
+    /// oracle, so catalog classification, timestamp-write planning, and TSO
+    /// allocation behave identically on any seat.
+    fn planner_engine(&self) -> Option<&SqlEngine> {
+        self.engine(RangeId::COORDINATOR)
+            .or_else(|| self.engines.values().next())
+    }
+}
+
+fn planner_engine(serving: &ServingSnapshot) -> Result<&SqlEngine, PgError> {
+    serving.planner_engine().ok_or_else(|| {
+        PgError::error(
+            sqlstate::FEATURE_NOT_SUPPORTED,
+            "tenant has no hosted engine with a range-0 catalog view",
+        )
+    })
 }
 
 struct LocalSqlSplitBridge<'a> {
@@ -2564,7 +2626,7 @@ pub enum StatementKind {
     Commit,
     /// Transaction rollback.
     Rollback,
-    /// DDL routed through range 0.
+    /// DDL executed on the range-0 catalog owner, forwarded when r0 is remote.
     Ddl,
     /// DML routed through the owning data range.
     Dml,
@@ -2621,7 +2683,6 @@ enum GatewayTransaction {
     Timestamp {
         identity: crabka_pgexec::TimestampTxnIdentity,
         participants: BTreeMap<RangeId, Vec<crabka_pgexec::TimestampWrite>>,
-        commit_ops: Vec<crabka_pgkv::WriteOp>,
     },
     Failed {
         touched: Vec<RangeId>,
@@ -3062,15 +3123,7 @@ impl GatewaySession {
         };
         if route.is_none() {
             let serving = self.current_serving()?;
-            let catalog = serving
-                .engine(RangeId::COORDINATOR)
-                .or_else(|| serving.engines.values().next())
-                .ok_or_else(|| {
-                    PgError::error(
-                        sqlstate::FEATURE_NOT_SUPPORTED,
-                        "tenant has no hosted engine with a range-0 catalog view",
-                    )
-                })?;
+            let catalog = planner_engine(&serving)?;
             let mut inference = catalog.connect();
             let description = inference.parse("", sql, parameter_types).await?;
             self.prepared.insert(
@@ -3406,17 +3459,9 @@ impl GatewaySession {
         };
         let identity = *identity;
         let participants = participants.clone();
-        let serving = self.current_serving()?;
-        let coordinator = serving
-            .engine(RangeId::COORDINATOR)
-            .ok_or_else(|| PgError::error("0A000", "range r0 is not hosted"))?;
-        self.abort_timestamp_scatter(
-            coordinator,
-            identity,
-            &participants.into_iter().collect::<Vec<_>>(),
-        )
-        .await
-        .map_err(ExecError::into_pg)?;
+        self.abort_timestamp_scatter(identity, &participants.into_iter().collect::<Vec<_>>())
+            .await
+            .map_err(ExecError::into_pg)?;
         self.complete_timestamp_abort();
         Ok(())
     }
@@ -3589,17 +3634,9 @@ impl GatewaySession {
         {
             let identity = *identity;
             let participants = participants.clone();
-            let serving = self.current_serving()?;
-            let coordinator = serving
-                .engine(RangeId::COORDINATOR)
-                .ok_or_else(|| PgError::error("0A000", "range r0 is not hosted"))?;
-            self.abort_timestamp_scatter(
-                coordinator,
-                identity,
-                &participants.into_iter().collect::<Vec<_>>(),
-            )
-            .await
-            .map_err(ExecError::into_pg)?;
+            self.abort_timestamp_scatter(identity, &participants.into_iter().collect::<Vec<_>>())
+                .await
+                .map_err(ExecError::into_pg)?;
             self.complete_timestamp_rollback();
             return Ok(rollback_command_response());
         }
@@ -3994,9 +4031,60 @@ impl GatewaySession {
 
     async fn execute_ddl(&mut self, statement: &str) -> Result<Vec<QueryResult>, PgError> {
         let _schema_gate = self.inner.schema_gate.clone().lock_owned().await;
-        self.session_for(RangeId::COORDINATOR)?
-            .simple_query(statement)
-            .await
+        // DDL always executes on the range-0 catalog owner: locally when this
+        // node hosts r0, otherwise forwarded to the owner over the range RPC.
+        let results = if self.sessions.contains_key(&RangeId::COORDINATOR) {
+            self.session_for(RangeId::COORDINATOR)?
+                .simple_query(statement)
+                .await?
+        } else if let Some(forward) = &self.inner.remote_forward {
+            forward
+                .forward_ddl(statement.to_owned())
+                .await
+                .map_err(ForwardError::into_pg)?
+        } else {
+            return Err(PgError::error(
+                sqlstate::FEATURE_NOT_SUPPORTED,
+                format!(
+                    "range r{} is not hosted by tenant {} and no remote forwarder is configured",
+                    RangeId::COORDINATOR,
+                    self.inner.tenant
+                ),
+            ));
+        };
+        self.barrier_ddl_visibility().await?;
+        Ok(results)
+    }
+
+    /// Confirm the committed catalog change is visible cluster-wide.
+    ///
+    /// Barrier contract: once DDL returns, a statement on any node observes the
+    /// change — the local replica (if any) and every follower node's replica
+    /// have applied it. A single-process topology has neither, so this is a
+    /// no-op there. Failures here are reported as `58000` because the DDL is
+    /// already committed on range 0; only its visibility is unconfirmed.
+    async fn barrier_ddl_visibility(&self) -> Result<(), PgError> {
+        if let Some(replica) = &self.inner.range0_replica {
+            replica.wait_for_latest_catalog().await.map_err(|error| {
+                PgError::error(
+                    "58000",
+                    format!(
+                        "ddl committed on range 0 but local catalog visibility was not confirmed: {error}"
+                    ),
+                )
+            })?;
+        }
+        if let Some(forward) = &self.inner.remote_forward {
+            forward.barrier_catalog_followers().await.map_err(|error| {
+                PgError::error(
+                    "58000",
+                    format!(
+                        "ddl committed on range 0 but cluster-wide visibility was not confirmed: {error}"
+                    ),
+                )
+            })?;
+        }
+        Ok(())
     }
 
     async fn acquire_routed_dml_fences(
@@ -4046,9 +4134,7 @@ impl GatewaySession {
             return Ok(false);
         };
         let serving = self.current_serving()?;
-        let catalog = serving
-            .engine(RangeId::COORDINATOR)
-            .ok_or_else(|| PgError::error("0A000", "range r0 is not hosted"))?;
+        let catalog = planner_engine(&serving)?;
         catalog_table_is_sharded(catalog, &table_ref.name)
     }
 
@@ -4137,14 +4223,12 @@ impl GatewaySession {
                 self.ensure_remote_session(*range_id).await?;
             }
         }
+        // The INSERT-only check must stay ahead of planning: UPDATE/DELETE
+        // planning scans the planning engine's own KV, which is only correct on
+        // the range that owns the rows — not on an arbitrary planner seat.
         ensure_timestamp_scatter_is_supported(statement)?;
         let serving = self.current_serving()?;
-        let coordinator = serving.engine(RangeId::COORDINATOR).ok_or_else(|| {
-            PgError::error(
-                sqlstate::FEATURE_NOT_SUPPORTED,
-                "range r0 is not hosted by this tenant",
-            )
-        })?;
+        let planner = planner_engine(&serving)?;
         let autocommit = matches!(self.transaction, GatewayTransaction::Idle);
         // Single-shard bypass: an autocommit statement routed to exactly one
         // hosted range commits against that range's own local sequence instead
@@ -4156,7 +4240,7 @@ impl GatewaySession {
         } else {
             None
         };
-        let mut plan = coordinator
+        let mut plan = planner
             .plan_timestamp_write_sql(statement)
             .map_err(ExecError::into_pg)?;
         if plan.writes.is_empty() {
@@ -4182,12 +4266,12 @@ impl GatewaySession {
                     .allocate_local_timestamp_write_lease(plan.writes.len())
                     .map_err(ExecError::into_pg)?
             } else {
-                coordinator
+                planner
                     .allocate_timestamp_write_lease(plan.writes.len())
                     .await
                     .map_err(ExecError::into_pg)?
             };
-            plan = coordinator
+            plan = planner
                 .plan_timestamp_write_sql_with_rowids(statement, &lease.hidden_rowids)
                 .map_err(ExecError::into_pg)?;
             lease
@@ -4244,7 +4328,7 @@ impl GatewaySession {
                     .allocate_local_commit_timestamp_after(start_ts)
                     .map_err(ExecError::into_pg)?
             } else {
-                coordinator
+                planner
                     .allocate_commit_timestamp_after(start_ts)
                     .await
                     .map_err(ExecError::into_pg)?
@@ -4285,12 +4369,6 @@ impl GatewaySession {
                     "injected crash after durable timestamp commit decision",
                 ));
             }
-            if !plan.commit_ops.is_empty() {
-                coordinator
-                    .commit_timestamp_statement_ops(plan.commit_ops)
-                    .await
-                    .map_err(ExecError::into_pg)?;
-            }
             return Ok(plan.result);
         }
         let existing = matches!(self.transaction, GatewayTransaction::Timestamp { .. });
@@ -4308,7 +4386,6 @@ impl GatewaySession {
             self.transaction = GatewayTransaction::Timestamp {
                 identity,
                 participants: BTreeMap::new(),
-                commit_ops: Vec::new(),
             };
             identity
         };
@@ -4334,7 +4411,7 @@ impl GatewaySession {
             };
             if let Err(error) = prewrite {
                 let participants = self.timestamp_participants_with(&statement_participants);
-                self.abort_timestamp_scatter(coordinator, identity, &participants)
+                self.abort_timestamp_scatter(identity, &participants)
                     .await
                     .map_err(ExecError::into_pg)?;
                 return Err(error);
@@ -4350,22 +4427,12 @@ impl GatewaySession {
             }
         }
         if !autocommit {
-            let GatewayTransaction::Timestamp {
-                participants,
-                commit_ops,
-                ..
-            } = &mut self.transaction
-            else {
+            let GatewayTransaction::Timestamp { participants, .. } = &mut self.transaction else {
                 unreachable!()
             };
             for (range_id, writes) in statement_participants {
                 participants.entry(range_id).or_default().extend(writes);
             }
-            coordinator
-                .commit_timestamp_statement_ops(plan.commit_ops)
-                .await
-                .map_err(ExecError::into_pg)?;
-            commit_ops.clear();
             return Ok(plan.result);
         }
         unreachable!("autocommit timestamp writes return through the primary-range fast path")
@@ -4389,18 +4456,14 @@ impl GatewaySession {
         let GatewayTransaction::Timestamp {
             identity,
             participants,
-            commit_ops,
         } = &self.transaction
         else {
             unreachable!()
         };
         let identity = *identity;
         let participants = participants.clone();
-        let commit_ops = commit_ops.clone();
         let serving = self.current_serving()?;
-        let coordinator = serving
-            .engine(RangeId::COORDINATOR)
-            .ok_or_else(|| PgError::error("0A000", "range r0 is not hosted"))?;
+        let planner = planner_engine(&serving)?;
         if self
             .take_commit_fault_for_testing(GatewayCommitFault::AfterTimestampPrewriteBeforeDecision)
         {
@@ -4409,7 +4472,7 @@ impl GatewaySession {
                 "injected crash after timestamp prewrites before durable decision",
             ));
         }
-        let commit_ts = coordinator
+        let commit_ts = planner
             .allocate_commit_timestamp_after(identity.start_ts)
             .await
             .map_err(ExecError::into_pg)?;
@@ -4442,10 +4505,6 @@ impl GatewaySession {
             )
             .await?;
         }
-        coordinator
-            .commit_timestamp_statement_ops(commit_ops)
-            .await
-            .map_err(ExecError::into_pg)?;
         self.complete_timestamp_commit();
         Ok(vec![QueryResult::Command {
             tag: "COMMIT".into(),
@@ -4689,7 +4748,6 @@ impl GatewaySession {
 
     async fn abort_timestamp_scatter(
         &self,
-        _coordinator: &SqlEngine,
         identity: crabka_pgexec::TimestampTxnIdentity,
         participants: &[(RangeId, Vec<crabka_pgexec::TimestampWrite>)],
     ) -> Result<(), ExecError> {
@@ -4739,9 +4797,9 @@ impl GatewaySession {
                 "current serving snapshot is unavailable: {error:?}"
             ))
         })?;
-        let catalog = serving
-            .engine(RangeId::COORDINATOR)
-            .ok_or_else(|| ExecError::Unsupported("range r0 is not hosted".into()))?;
+        let catalog = serving.planner_engine().ok_or_else(|| {
+            ExecError::Unsupported("tenant has no hosted engine with a range-0 catalog view".into())
+        })?;
         crabka_pgcatalog::list_tables(catalog.catalog_kv())?
             .into_iter()
             .find(|table| table.id == first.table_id)
@@ -4826,17 +4884,7 @@ impl GatewaySession {
 
     fn route_statement(&self, sql: &str) -> Result<StatementRoute, PgError> {
         let serving = self.current_serving()?;
-        // Every hosted data-range engine points its catalog KV at the certified
-        // range-0 follower, so an rN-only gateway can route without hosting r0.
-        let Some(catalog) = serving
-            .engine(RangeId::COORDINATOR)
-            .or_else(|| serving.engines.values().next())
-        else {
-            return Err(PgError::error(
-                sqlstate::FEATURE_NOT_SUPPORTED,
-                "tenant has no hosted engine with a range-0 catalog view",
-            ));
-        };
+        let catalog = planner_engine(&serving)?;
         route_statement(&serving.range_map, catalog, sql)
     }
 
@@ -6290,6 +6338,7 @@ fn configure_successor_engine(coordinator: &SqlEngine, successor: &mut SqlEngine
 #[cfg(test)]
 mod tests {
     use assert2::assert;
+    use crabka_pgexec::TimestampSource;
     use crabka_pgkv::{Kv, MemKv};
 
     use super::*;
@@ -6586,7 +6635,6 @@ mod tests {
                 primary_range: RangeId::COORDINATOR.as_u32(),
             },
             participants: BTreeMap::new(),
-            commit_ops: Vec::new(),
         };
 
         session.complete_timestamp_commit();
@@ -6608,7 +6656,6 @@ mod tests {
                 primary_range: RangeId::COORDINATOR.as_u32(),
             },
             participants: BTreeMap::new(),
-            commit_ops: Vec::new(),
         };
 
         session.complete_timestamp_abort();
@@ -6670,7 +6717,6 @@ mod tests {
                 primary_range: RangeId::COORDINATOR.as_u32(),
             },
             participants: BTreeMap::new(),
-            commit_ops: Vec::new(),
         };
         session
     }
@@ -6739,7 +6785,6 @@ mod tests {
                 primary_range: RangeId::COORDINATOR.as_u32(),
             },
             participants: BTreeMap::new(),
-            commit_ops: Vec::new(),
         };
         let publication = tokio::spawn(handles.inner.topology_mutation_gate.clone().write_owned());
         tokio::task::yield_now().await;
@@ -6978,6 +7023,296 @@ mod tests {
                 .contains("range-0 timestamp oracle is unavailable"),
             "unexpected rN-only DML error: {error:?}"
         );
+    }
+
+    /// Counting delegate around [`LocalTimestampSource`]: read grants pass
+    /// through untouched so visibility checks stay exact, while write leases and
+    /// commit grants are tallied to prove when the global oracle is bypassed.
+    ///
+    /// [`LocalTimestampSource`]: crabka_pgexec::timestamp_txn::LocalTimestampSource
+    #[derive(Default)]
+    struct CountingTimestampSource {
+        inner: crabka_pgexec::timestamp_txn::LocalTimestampSource,
+        write_leases: AtomicUsize,
+        commit_grants: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl TimestampSource for CountingTimestampSource {
+        async fn allocate_read_timestamp(
+            &self,
+        ) -> Result<crabka_pgexec::timestamp_txn::ReadTimestamp, crabka_pgexec::TimestampSourceError>
+        {
+            self.inner.allocate_read_timestamp().await
+        }
+
+        async fn allocate_transaction_id(
+            &self,
+        ) -> Result<crabka_pgexec::TimestampTransactionId, crabka_pgexec::TimestampSourceError>
+        {
+            self.write_leases.fetch_add(1, Ordering::SeqCst);
+            self.inner.allocate_transaction_id().await
+        }
+
+        async fn allocate_write_lease(
+            &self,
+            hidden_rowid_count: usize,
+        ) -> Result<
+            crabka_pgexec::timestamp_txn::TimestampWriteLease,
+            crabka_pgexec::TimestampSourceError,
+        > {
+            self.write_leases.fetch_add(1, Ordering::SeqCst);
+            self.inner.allocate_write_lease(hidden_rowid_count).await
+        }
+
+        async fn allocate_commit_after(
+            &self,
+            start_ts: crabka_pgexec::TimestampTransactionId,
+        ) -> Result<crabka_pgexec::CommitTimestamp, crabka_pgexec::TimestampSourceError> {
+            self.commit_grants.fetch_add(1, Ordering::SeqCst);
+            self.inner.allocate_commit_after(start_ts).await
+        }
+
+        async fn allocate_read_timestamp_after(
+            &self,
+            durable_horizon: u64,
+        ) -> Result<crabka_pgexec::timestamp_txn::ReadTimestamp, crabka_pgexec::TimestampSourceError>
+        {
+            self.inner
+                .allocate_read_timestamp_after(durable_horizon)
+                .await
+        }
+
+        async fn allocate_transaction_id_after(
+            &self,
+            durable_horizon: u64,
+        ) -> Result<crabka_pgexec::TimestampTransactionId, crabka_pgexec::TimestampSourceError>
+        {
+            self.write_leases.fetch_add(1, Ordering::SeqCst);
+            self.inner
+                .allocate_transaction_id_after(durable_horizon)
+                .await
+        }
+
+        async fn allocate_commit_after_durable(
+            &self,
+            start_ts: crabka_pgexec::TimestampTransactionId,
+            durable_horizon: u64,
+        ) -> Result<crabka_pgexec::CommitTimestamp, crabka_pgexec::TimestampSourceError> {
+            self.commit_grants.fetch_add(1, Ordering::SeqCst);
+            self.inner
+                .allocate_commit_after_durable(start_ts, durable_horizon)
+                .await
+        }
+
+        fn observe(&self, observed_ts: u64) {
+            self.inner.observe(observed_ts);
+        }
+
+        fn uncertainty_window(&self) -> u64 {
+            self.inner.uncertainty_window()
+        }
+    }
+
+    /// An rN-only gateway hosting `[r1]` whose follower catalog carries the
+    /// hash-sharded table `t7`, with a counting global timestamp source
+    /// installed. Boundaries `0,7` put every `t7` hash bucket in r1, so
+    /// statically routable inserts land entirely on the hosted data range.
+    async fn rn_only_timestamp_gateway(
+        tenant_name: &str,
+    ) -> (MultiRangeTenant, Arc<CountingTimestampSource>) {
+        let follower_kv: Arc<dyn Kv> = Arc::new(MemKv::default());
+        let seed_catalog =
+            SqlEngine::with_kv(Arc::clone(&follower_kv)).expect("seed catalog engine");
+        seed_catalog
+            .connect()
+            .simple_query("CREATE TABLE t7 (id int4, note int4) SHARDED BY HASH (id) BUCKETS 16")
+            .await
+            .expect("seed sharded table");
+        let replica = ReadOnlyRange0Replica::new(
+            crate::range0_tail::Range0Tail::new(Arc::clone(&follower_kv)),
+            Arc::new(EmptyRange0End),
+        );
+        let config = MultiRangeTenantConfig::from_boundaries(
+            TenantName::parse(tenant_name).expect("tenant"),
+            "0,7",
+        )
+        .expect("config")
+        .with_hosted_ranges(vec![RangeId::new(1)])
+        .expect("r1 host")
+        .with_read_only_range0_replica(replica);
+        let oracle = Arc::new(CountingTimestampSource::default());
+        let (gateway, _) = MultiRangeTenant::start_with_engine_factory_and_timestamp_oracle(
+            config,
+            |_dir, _range_id| Ok(SqlEngine::new()),
+            Some(Arc::clone(&oracle) as Arc<dyn TimestampSource>),
+        )
+        .expect("rN-only assembly");
+        (gateway, oracle)
+    }
+
+    #[tokio::test]
+    async fn planner_seat_prefers_r0_and_falls_back_to_hosted_data_range() {
+        // An r0-hosting node classifies sharded DML through range 0 itself.
+        let config = MultiRangeTenantConfig::from_boundaries(
+            TenantName::parse("planner_seat_r0").expect("tenant"),
+            "0,7",
+        )
+        .expect("config");
+        let (gateway, _) = MultiRangeTenant::start(config).expect("tenant");
+        let mut session = gateway.connect();
+        session
+            .simple_query("CREATE TABLE t7 (id int4, note int4) SHARDED BY HASH (id) BUCKETS 16")
+            .await
+            .expect("create sharded table");
+        assert!(
+            session
+                .statement_targets_sharded_table("INSERT INTO t7 VALUES (1, 10)")
+                .expect("r0-seat classification")
+        );
+
+        // An rN-only node classifies and routes the same DML through a hosted
+        // data-range seat instead of demanding a local r0.
+        let (gateway, _oracle) = rn_only_timestamp_gateway("planner_seat_rn_only").await;
+        let session = gateway.connect();
+        assert!(
+            session
+                .statement_targets_sharded_table("INSERT INTO t7 VALUES (1, 10)")
+                .expect("fallback-seat classification")
+        );
+        assert!(
+            session
+                .route_statement("INSERT INTO t7 VALUES (1, 10)")
+                .is_ok()
+        );
+
+        // With no hosted engine at all there is no seat left: fail closed.
+        let replica = ReadOnlyRange0Replica::new(
+            crate::range0_tail::Range0Tail::new(Arc::new(MemKv::default())),
+            Arc::new(EmptyRange0End),
+        );
+        let config = MultiRangeTenantConfig::from_boundaries(
+            TenantName::parse("planner_seat_zero_engines").expect("tenant"),
+            "0,7",
+        )
+        .expect("config")
+        .with_hosted_ranges(Vec::new())
+        .expect("no hosted ranges")
+        .with_read_only_range0_replica(replica);
+        let (gateway, _) = MultiRangeTenant::start_with_engine_factory(config, |_dir, range_id| {
+            panic!("no engine must open for r{range_id}")
+        })
+        .expect("zero-engine assembly");
+        let session = gateway.connect();
+        let error = session
+            .statement_targets_sharded_table("INSERT INTO t7 VALUES (1, 10)")
+            .expect_err("zero-engine classification must fail closed");
+        assert!(
+            error
+                .message
+                .contains("tenant has no hosted engine with a range-0 catalog view"),
+            "unexpected zero-engine error: {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rn_only_gateway_commits_explicit_timestamp_transaction() {
+        let (gateway, _oracle) = rn_only_timestamp_gateway("rn_only_commit").await;
+        let mut session = gateway.connect();
+
+        session.simple_query("BEGIN").await.expect("begin");
+        session
+            .simple_query("INSERT INTO t7 VALUES (1, 10)")
+            .await
+            .expect("first timestamp write");
+        session
+            .simple_query("INSERT INTO t7 VALUES (2, 20)")
+            .await
+            .expect("second timestamp write");
+        session
+            .simple_query("COMMIT")
+            .await
+            .expect("commit through the planner seat");
+
+        let rows = session
+            .simple_query("SELECT id, note FROM t7")
+            .await
+            .expect("read committed rows");
+        let mut rows = text_rows(&rows);
+        rows.sort();
+        assert!(
+            rows == vec![
+                vec![Some("1".to_string()), Some("10".to_string())],
+                vec![Some("2".to_string()), Some("20".to_string())],
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn rn_only_gateway_rolls_back_and_recovers_failed_timestamp_transactions() {
+        let (gateway, _oracle) = rn_only_timestamp_gateway("rn_only_rollback").await;
+        let mut session = gateway.connect();
+
+        session.simple_query("BEGIN").await.expect("begin");
+        session
+            .simple_query("INSERT INTO t7 VALUES (1, 10)")
+            .await
+            .expect("timestamp write");
+        session
+            .simple_query("ROLLBACK")
+            .await
+            .expect("rollback through the planner seat");
+        let rows = session
+            .simple_query("SELECT id, note FROM t7")
+            .await
+            .expect("read after rollback");
+        assert!(text_rows(&rows).is_empty());
+
+        session.simple_query("BEGIN").await.expect("begin again");
+        session
+            .simple_query("INSERT INTO t7 VALUES (2, 20)")
+            .await
+            .expect("good timestamp write");
+        let error = session
+            .simple_query("INSERT INTO t7 VALUES (3, 'zap')")
+            .await
+            .expect_err("type error must fail the statement");
+        assert!(
+            !error.message.contains("r0 is not hosted"),
+            "aborting a failed transaction must not demand a local r0: {error:?}"
+        );
+        session
+            .simple_query("ROLLBACK")
+            .await
+            .expect("rollback the failed transaction");
+        session
+            .simple_query("INSERT INTO t7 VALUES (5, 50)")
+            .await
+            .expect("fresh autocommit write after recovery");
+        let rows = session
+            .simple_query("SELECT id, note FROM t7")
+            .await
+            .expect("read recovered state");
+        assert!(text_rows(&rows) == vec![vec![Some("5".to_string()), Some("50".to_string())]]);
+    }
+
+    #[tokio::test]
+    async fn rn_only_single_shard_bypass_skips_the_global_oracle() {
+        let (gateway, oracle) = rn_only_timestamp_gateway("rn_only_bypass").await;
+        let mut session = gateway.connect();
+
+        session
+            .simple_query("INSERT INTO t7 VALUES (4, 40)")
+            .await
+            .expect("autocommit single-range write");
+
+        assert!(oracle.write_leases.load(Ordering::SeqCst) == 0);
+        assert!(oracle.commit_grants.load(Ordering::SeqCst) == 0);
+        let rows = session
+            .simple_query("SELECT id, note FROM t7")
+            .await
+            .expect("read bypass-committed row");
+        assert!(text_rows(&rows) == vec![vec![Some("4".to_string()), Some("40".to_string())]]);
     }
 
     #[test]
@@ -7469,6 +7804,253 @@ mod tests {
                 .expect("scan identity sidecars")
                 .is_empty()
         );
+    }
+
+    /// Sampler that reports a fixed committed range-0 end.
+    struct FixedRange0End {
+        end: i64,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::barrier::Range0EndSampler for FixedRange0End {
+        async fn sample_end_after_call_begins(&self) -> Result<i64, crate::barrier::BarrierError> {
+            Ok(self.end)
+        }
+    }
+
+    fn ddl_layout_entry(
+        range_id: u32,
+        end_key: Option<crabka_gres_control::RangeBoundary>,
+        endpoint: String,
+    ) -> crabka_gres_control::RangeLayoutEntry {
+        crabka_gres_control::RangeLayoutEntry {
+            range_id,
+            end_key,
+            endpoint,
+            wal_generation: 1,
+            lifecycle: crabka_gres_control::RangeLifecycle::default(),
+            retirement: None,
+        }
+    }
+
+    fn ddl_registry(
+        record_tenant: &str,
+        layout: Vec<crabka_gres_control::RangeLayoutEntry>,
+    ) -> RangeRegistry {
+        let record = crabka_gres_control::TenantRecord::new(
+            1,
+            crabka_gres_control::TenantId::try_from(record_tenant).expect("tenant id"),
+            crabka_gres_control::TenantName::try_from(record_tenant).expect("record tenant"),
+            crabka_gres_control::TenantState::Active,
+            crabka_gres_control::SqlUser::try_from("alice").expect("user"),
+            "SCRAM-SHA-256$4096:salt$stored:server".to_string(),
+            1,
+        )
+        .expect("record")
+        .with_range_layout(layout)
+        .expect("layout");
+        RangeRegistry::from_tenant_record(&record).expect("registry")
+    }
+
+    /// A gateway hosting `{r0, r1}` whose registry maps r1 to
+    /// `follower_endpoint`. The r0 entry's address is never dialed: local DDL
+    /// needs no forward, and the follower fan-out only compares it.
+    fn range0_host_gateway_with_follower(
+        tenant_name: &str,
+        record_tenant: &str,
+        follower_endpoint: &str,
+    ) -> MultiRangeTenant {
+        let registry = ddl_registry(
+            record_tenant,
+            vec![
+                ddl_layout_entry(
+                    0,
+                    Some(crabka_gres_control::RangeBoundary::table_start(60)),
+                    "127.0.0.1:1".to_string(),
+                ),
+                ddl_layout_entry(1, None, follower_endpoint.to_string()),
+            ],
+        );
+        let config = MultiRangeTenantConfig::from_boundaries(
+            TenantName::parse(tenant_name).expect("tenant"),
+            "0,60",
+        )
+        .expect("config")
+        .with_range_registry(registry)
+        .with_range_client(FramedTcpClient::default());
+        MultiRangeTenant::start(config)
+            .expect("range-0 hosting gateway")
+            .0
+    }
+
+    #[tokio::test]
+    async fn ddl_on_rn_only_gateway_forwards_to_range0_owner() {
+        let catalog_kv: Arc<dyn Kv> = Arc::new(MemKv::default());
+        let range0_engine = SqlEngine::with_kv(Arc::clone(&catalog_kv)).expect("range-0 engine");
+        // The gateway mints read timestamps through the registry TSO path, so
+        // the r0 owner must serve the timestamp oracle as well as DDL.
+        let horizon = MemoryTsoHorizon::new(range0_engine.kv_handle(), 1);
+        let persisted_max_ts = horizon.load_max_ts().expect("load TSO horizon");
+        let tso = tso_rpc_from_horizon(horizon.clone(), horizon, 1, persisted_max_ts)
+            .expect("durable TSO rpc");
+        let service = Arc::new(
+            crate::forward::HostedRangeService::new(BTreeMap::from([(
+                RangeId::COORDINATOR,
+                range0_engine.clone_handle(),
+            )]))
+            .with_ddl_gate(Arc::new(Mutex::new(())))
+            .with_tso(tso),
+        );
+        let address = crate::transport::spawn_loopback(service)
+            .await
+            .expect("spawn range-0 service");
+
+        // Both layout entries share the r0 endpoint, so the follower fan-out
+        // finds no distinct non-r0 endpoint to barrier.
+        let registry = ddl_registry(
+            "ddl-rn-only-forward",
+            vec![
+                ddl_layout_entry(
+                    0,
+                    Some(crabka_gres_control::RangeBoundary::table_start(60)),
+                    address.to_string(),
+                ),
+                ddl_layout_entry(1, None, address.to_string()),
+            ],
+        );
+        // The replica shares the r0 engine's store `Arc`, so it is always
+        // current and the barrier needs no committed frames beyond offset -1.
+        let replica = ReadOnlyRange0Replica::new(
+            crate::range0_tail::Range0Tail::new(Arc::clone(&catalog_kv)),
+            Arc::new(EmptyRange0End),
+        );
+        let config = MultiRangeTenantConfig::from_boundaries(
+            TenantName::parse("ddl_rn_only_forward").expect("tenant"),
+            "0,60",
+        )
+        .expect("config")
+        .with_hosted_ranges(vec![RangeId::new(1)])
+        .expect("r1 host")
+        .with_read_only_range0_replica(replica)
+        .with_range_registry(registry)
+        .with_range_client(FramedTcpClient::default());
+        let (gateway, _handles) =
+            MultiRangeTenant::start_with_engine_factory(config, |_dir, _id| Ok(SqlEngine::new()))
+                .expect("rN-only gateway");
+        let mut session = gateway.connect();
+
+        let results = session
+            .simple_query("CREATE TABLE t61 (id int4)")
+            .await
+            .expect("DDL forwarded to the range-0 owner");
+        assert!(
+            results
+                == vec![QueryResult::Command {
+                    tag: "CREATE TABLE".to_string()
+                }]
+        );
+
+        // Behavioral proof the new table routes: DML and reads on the same
+        // gateway connection see the forwarded catalog change.
+        let results = session
+            .simple_query("INSERT INTO t61 VALUES (7)")
+            .await
+            .expect("insert into the forwarded table");
+        assert!(
+            results
+                == vec![QueryResult::Command {
+                    tag: "INSERT 0 1".to_string()
+                }]
+        );
+        let rows = session
+            .simple_query("SELECT id FROM t61")
+            .await
+            .expect("read the forwarded table");
+        assert!(text_rows(&rows) == vec![vec![Some("7".to_string())]]);
+    }
+
+    #[tokio::test]
+    async fn ddl_from_range0_host_blocks_until_followers_apply() {
+        let follower_tail = crate::range0_tail::Range0Tail::new(Arc::new(MemKv::default()));
+        let follower_barrier = Arc::new(Range0Barrier::new(
+            follower_tail.clone(),
+            Arc::new(FixedRange0End { end: 3 }),
+        ));
+        let follower = Arc::new(
+            crate::forward::HostedRangeService::new(BTreeMap::new())
+                .with_catalog_follower(follower_barrier),
+        );
+        let follower_address = crate::transport::spawn_loopback(follower)
+            .await
+            .expect("spawn follower service");
+        let gateway = range0_host_gateway_with_follower(
+            "ddl_barrier_wait",
+            "ddl-barrier-wait",
+            &follower_address.to_string(),
+        );
+
+        let ddl = tokio::spawn({
+            let gateway = gateway.clone();
+            async move {
+                gateway
+                    .connect()
+                    .simple_query("CREATE TABLE t61 (id int4)")
+                    .await
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            !ddl.is_finished(),
+            "DDL must wait for the lagging follower replica"
+        );
+
+        follower_tail
+            .apply_committed(&crate::range0_tail::Range0Frame::new(3, Vec::new()))
+            .expect("apply the outstanding catalog frames");
+        let results = ddl
+            .await
+            .expect("join DDL")
+            .expect("DDL returns once every follower covers the change");
+        assert!(
+            results
+                == vec![QueryResult::Command {
+                    tag: "CREATE TABLE".to_string()
+                }]
+        );
+    }
+
+    #[tokio::test]
+    async fn ddl_reports_partial_visibility_when_a_follower_barrier_fails() {
+        // A follower node with neither r0 nor a follower replica answers the
+        // catalog barrier with a Failed error.
+        let follower = Arc::new(crate::forward::HostedRangeService::new(BTreeMap::new()));
+        let follower_address = crate::transport::spawn_loopback(follower)
+            .await
+            .expect("spawn broken follower service");
+        let gateway = range0_host_gateway_with_follower(
+            "ddl_barrier_failure",
+            "ddl-barrier-failure",
+            &follower_address.to_string(),
+        );
+
+        let mut session = gateway.connect();
+        let error = session
+            .simple_query("CREATE TABLE t61 (id int4)")
+            .await
+            .expect_err("failed follower barrier must surface");
+        assert!(error.code == "58000");
+        assert!(
+            error.message.contains("committed"),
+            "message must state the range-0 commit: {error:?}"
+        );
+
+        // Honest partial application: the DDL genuinely committed on range 0.
+        let rows = gateway.hosted_range_engines()[&RangeId::COORDINATOR]
+            .connect()
+            .simple_query("SELECT id FROM t61")
+            .await
+            .expect("table exists on range 0 despite the failed barrier");
+        assert!(text_rows(&rows).is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

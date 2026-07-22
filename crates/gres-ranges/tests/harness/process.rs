@@ -278,20 +278,13 @@ impl ProcessHarness {
             .unwrap_or_else(|error| format!("<read {} failed: {error}>", path.display()))
     }
 
-    pub async fn create_table_on_all(&mut self, sql: &str) {
-        self.stop_node(0).await;
-        self.stop_node(1).await;
-
-        self.restart_node(1, "r0,r1").await;
+    /// DDL through the non-r0 node: exercises forwarding plus the cluster barrier.
+    pub async fn create_table(&self, sql: &str) {
         self.sql(1)
             .await
             .simple_query(sql)
             .await
-            .expect("create table in participant catalog");
-        self.stop_node(1).await;
-
-        self.restart_node(0, "r0").await;
-        self.restart_node(1, "r1").await;
+            .expect("create table through non-r0 node");
     }
 
     pub async fn kill_and_restart(&mut self, range: u32) {

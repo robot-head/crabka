@@ -33,6 +33,11 @@ const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(5);
 pub enum RangeRequest {
     /// Forward one SQL statement to its owning range.
     Sql { range_id: RangeId, sql: String },
+    /// Execute one data-definition statement on the range-0 catalog owner.
+    Ddl { sql: String },
+    /// Wait until this node's range-0 catalog view covers every write
+    /// committed before this request was sent.
+    Range0Barrier,
     /// Open one owner-side connection session.
     SessionOpen { range_id: RangeId },
     /// Execute one stateful protocol operation in an owner session.
@@ -104,6 +109,8 @@ pub enum RangeResponse {
     SqlResultsDone,
     /// SQL execution failed with a `PostgreSQL` error preserved from the owner.
     SqlError { code: String, message: String },
+    /// The node's range-0 catalog view covers every prior committed write.
+    Range0Barriered,
     /// A newly allocated owner session.
     SessionOpened { session_id: u64 },
     /// Result of one stateful owner-session operation.
@@ -2196,6 +2203,10 @@ mod tests {
                     RangeResponse::ResolveTxn(ResolveTxnResp::Pending)
                 }
                 RangeRequest::Sql { sql, .. } => RangeResponse::Sql { result: sql },
+                RangeRequest::Ddl { sql } => RangeResponse::SqlResults {
+                    results: vec![WireQueryResult::Command { tag: sql }],
+                },
+                RangeRequest::Range0Barrier => RangeResponse::Range0Barriered,
                 RangeRequest::ScanRange(request) => RangeResponse::ScanRange(ScanRangeResp {
                     rows: vec![ScanRangeRow {
                         rowid: request.interval.start.unwrap_or(1),
@@ -2585,6 +2596,46 @@ mod tests {
                 }]
             })
         );
+    }
+
+    #[tokio::test]
+    async fn ddl_request_roundtrips_over_loopback() {
+        use assert2::assert;
+        let addr = spawn_loopback(Arc::new(EchoService::default()))
+            .await
+            .unwrap();
+        let response = FramedTcpClient::default()
+            .call(
+                &addr.to_string(),
+                &RangeRequest::Ddl {
+                    sql: "create table t (id int4)".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            response
+                == RangeResponse::SqlResults {
+                    results: vec![WireQueryResult::Command {
+                        tag: "create table t (id int4)".to_string(),
+                    }],
+                }
+        );
+    }
+
+    #[tokio::test]
+    async fn range0_barrier_roundtrips_over_loopback() {
+        use assert2::assert;
+        let addr = spawn_loopback(Arc::new(EchoService::default()))
+            .await
+            .unwrap();
+        let response = FramedTcpClient::default()
+            .call(&addr.to_string(), &RangeRequest::Range0Barrier)
+            .await
+            .unwrap();
+
+        assert!(response == RangeResponse::Range0Barriered);
     }
 
     #[tokio::test]

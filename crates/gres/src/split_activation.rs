@@ -357,6 +357,10 @@ impl LiveMultiRangeTransfer {
         )
         .with_timestamp_primary_aliases(self.timestamp_primary_aliases.clone());
         let current_service = self.range_service.load();
+        service = service.with_ddl_gate(current_service.ddl_gate_dispatcher());
+        if let Some(barrier) = current_service.catalog_follower_dispatcher() {
+            service = service.with_catalog_follower(barrier);
+        }
         if let Some(inspector) = current_service.durable_inspector_dispatcher() {
             service = service.with_durable_inspector(inspector);
         }

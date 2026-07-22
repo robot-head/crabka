@@ -12,13 +12,15 @@ use crabka_gres_control::{
     RangeLayoutEntry, RangeLifecycle, SqlUser, TenantId, TenantRecord, TenantState,
 };
 use crabka_gres_ranges::{
-    CheckpointManifest, ClaimedStagedSuccessor, ClaimedStagedSuccessors, CommittedTailRecord,
-    FramedTcpClient, GatewayCommitFault, HostedRangeService, LocalSqlSplitError, MultiRangeTenant,
-    MultiRangeTenantConfig, RangeId, RangeKey, RangeRegistry, RangeRequest, RangeResponse,
+    BarrierError, CheckpointManifest, ClaimedStagedSuccessor, ClaimedStagedSuccessors,
+    CommittedTailRecord, FramedTcpClient, GatewayCommitFault, HostedRangeService,
+    LocalSqlSplitError, MemoryTsoHorizon, MultiRangeTenant, MultiRangeTenantConfig, Range0Barrier,
+    Range0EndSampler, Range0Tail, RangeId, RangeKey, RangeRegistry, RangeRequest, RangeResponse,
     RangeService, RangeSpec, RangeTlsClientConfig, RangeTlsServerConfig, RangeTransferBarrier,
-    RangeTransferCapability, RangeTransferError, SplitCommand, StagedRangeSuccessor,
-    StagedRangeSuccessors, SuccessorDescriptor, TableId, TableTransferRequest, TenantName,
-    ValidatedSplitTransferPlan, serve_tls, tenant::EmptyTableSplitTestHook,
+    RangeTransferCapability, RangeTransferError, ReadOnlyRange0Replica, SplitCommand,
+    StagedRangeSuccessor, StagedRangeSuccessors, SuccessorDescriptor, TableId,
+    TableTransferRequest, TenantName, ValidatedSplitTransferPlan, serve_tls,
+    tenant::EmptyTableSplitTestHook, tso_rpc_from_horizon,
 };
 use crabka_pgexec::SqlEngine;
 use crabka_pgkv::{Kv, MemKv};
@@ -884,10 +886,10 @@ async fn gateway_forwards_remote_autocommit_over_tcp() {
         .expect("create remote table");
     let fixture = MtlsFixture::new();
     let remote_address = spawn_tls(
-        Arc::new(HostedRangeService::new(BTreeMap::from([(
-            RangeId::new(1),
-            remote.clone_handle(),
-        )]))),
+        Arc::new(
+            HostedRangeService::new(BTreeMap::from([(RangeId::new(1), remote.clone_handle())]))
+                .with_catalog_follower(shared_catalog_follower()),
+        ),
         fixture.server,
     )
     .await;
@@ -956,6 +958,181 @@ async fn gateway_forwards_remote_autocommit_over_tcp() {
         panic!("expected rows");
     };
     assert_eq!(rows[0][0].as_ref().expect("cell").text, "7");
+}
+
+/// The rN-only gateway's replica shares range 0's store `Arc`, so it is always
+/// current and its barrier needs no committed frames beyond offset -1.
+struct AlwaysCurrentRange0End;
+
+#[async_trait]
+impl Range0EndSampler for AlwaysCurrentRange0End {
+    async fn sample_end_after_call_begins(&self) -> Result<i64, BarrierError> {
+        Ok(-1)
+    }
+}
+
+/// Catalog-follower barrier for fixture nodes whose catalog is kept current
+/// out of band (a shared range-0 store `Arc` or manual mirroring), so the
+/// post-DDL `Range0Barrier` fan-out is covered immediately.
+fn shared_catalog_follower() -> Arc<Range0Barrier> {
+    Arc::new(Range0Barrier::new(
+        Range0Tail::new(Arc::new(MemKv::new())),
+        Arc::new(AlwaysCurrentRange0End),
+    ))
+}
+
+fn text_rows(results: &[QueryResult]) -> Vec<Vec<Option<String>>> {
+    let [QueryResult::Rows { rows, .. }] = results else {
+        panic!("expected one row result: {results:?}")
+    };
+    rows.iter()
+        .map(|row| {
+            row.iter()
+                .map(|cell| {
+                    cell.as_ref()
+                        .map(|cell| String::from_utf8(cell.text.to_vec()).expect("UTF-8 cell"))
+                })
+                .collect()
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ddl_through_rn_only_gateway_reaches_range0_and_is_locally_visible() {
+    use assert2::assert;
+
+    let fixture = MtlsFixture::new();
+    let catalog_kv: Arc<dyn Kv> = Arc::new(MemKv::new());
+    let range0_engine = SqlEngine::with_kv(Arc::clone(&catalog_kv)).expect("range-0 engine");
+    // The gateway mints read timestamps through the registry TSO path, so the
+    // remote r0 owner serves the timestamp oracle alongside forwarded DDL.
+    let horizon = MemoryTsoHorizon::new(range0_engine.kv_handle(), 1);
+    let persisted_max_ts = horizon.load_max_ts().expect("load TSO horizon");
+    let tso = tso_rpc_from_horizon(horizon.clone(), horizon, 1, persisted_max_ts)
+        .expect("durable TSO rpc");
+    let range0_address = spawn_tls(
+        Arc::new(
+            HostedRangeService::new(BTreeMap::from([(
+                RangeId::COORDINATOR,
+                range0_engine.clone_handle(),
+            )]))
+            .with_ddl_gate(Arc::new(tokio::sync::Mutex::new(())))
+            .with_tso(tso),
+        ),
+        fixture.server.clone(),
+    )
+    .await;
+
+    let mut record = TenantRecord::new(
+        1,
+        TenantId::try_from("tenant-rn-only-ddl").expect("tenant id"),
+        crabka_gres_control::TenantName::try_from("tenant-rn-only-ddl").expect("record tenant"),
+        TenantState::Active,
+        SqlUser::try_from("alice").expect("user"),
+        "SCRAM-SHA-256$4096:salt$stored:server".to_string(),
+        1,
+    )
+    .expect("record")
+    .with_range_layout(vec![
+        RangeLayoutEntry {
+            range_id: 0,
+            end_key: Some(crabka_gres_control::RangeBoundary::table_start(100)),
+            endpoint: range0_address.to_string(),
+            wal_generation: 1,
+            lifecycle: RangeLifecycle::default(),
+            retirement: None,
+        },
+        RangeLayoutEntry {
+            range_id: 1,
+            end_key: None,
+            endpoint: "127.0.0.1:1".to_string(),
+            wal_generation: 1,
+            lifecycle: RangeLifecycle::default(),
+            retirement: None,
+        },
+    ])
+    .expect("layout");
+    let registry = RangeRegistry::from_tenant_record(&record).expect("registry");
+    let replica = ReadOnlyRange0Replica::new(
+        Range0Tail::new(Arc::clone(&catalog_kv)),
+        Arc::new(AlwaysCurrentRange0End),
+    );
+    let follower_barrier = replica.barrier();
+    let config = MultiRangeTenantConfig::from_boundaries(
+        TenantName::parse("tenant_rn_only_ddl").expect("tenant"),
+        "0,100",
+    )
+    .expect("config")
+    .with_hosted_ranges(vec![RangeId::new(1)])
+    .expect("host r1 only")
+    .with_read_only_range0_replica(replica)
+    .with_range_registry(registry.clone())
+    .with_range_client(FramedTcpClient::with_tls(fixture.client).expect("mTLS range client"));
+    let gateway =
+        MultiRangeTenant::start_with_engine_factory(config, |_dir, _range_id| Ok(SqlEngine::new()))
+            .expect("rN-only gateway")
+            .0;
+
+    // The gateway node is itself a catalog follower. Publishing its distinct
+    // endpoint makes `barrier_catalog_followers` fan a real `Range0Barrier`
+    // RPC back over mTLS after the forwarded DDL commits; were r1 to share
+    // r0's endpoint instead, the fan-out set would be empty and the barrier
+    // trivially satisfied.
+    let gateway_address = spawn_tls(
+        Arc::new(
+            HostedRangeService::new(BTreeMap::from([(
+                RangeId::new(1),
+                gateway.hosted_range_engines()[&RangeId::new(1)].clone_handle(),
+            )]))
+            .with_catalog_follower(follower_barrier),
+        ),
+        fixture.server,
+    )
+    .await;
+    record.ranges[1].endpoint = gateway_address.to_string();
+    registry
+        .refresh_from_tenant_record(&record)
+        .await
+        .expect("publish gateway endpoint");
+
+    let mut session = gateway.connect();
+    let results = session
+        .simple_query("CREATE TABLE t150 (id int4, note text)")
+        .await
+        .expect("DDL forwarded from a non-r0 gateway to the range-0 owner over mTLS");
+    assert!(
+        results
+            == vec![QueryResult::Command {
+                tag: "CREATE TABLE".to_string()
+            }]
+    );
+
+    // Behavioral proof the barriered catalog change is visible and routable
+    // locally: DML and reads on the same gateway connection use the new table.
+    let results = session
+        .simple_query("INSERT INTO t150 VALUES (7, 'routed')")
+        .await
+        .expect("insert into the just-created table on the same connection");
+    assert!(
+        results
+            == vec![QueryResult::Command {
+                tag: "INSERT 0 1".to_string()
+            }]
+    );
+    let rows = session
+        .simple_query("SELECT id, note FROM t150")
+        .await
+        .expect("read the just-created table on the same connection");
+    assert!(text_rows(&rows) == vec![vec![Some("7".to_string()), Some("routed".to_string())]]);
+
+    // The row physically landed in the gateway's locally hosted r1 engine.
+    let hosted = gateway.hosted_range_engines();
+    let rows = hosted[&RangeId::new(1)]
+        .connect()
+        .simple_query("SELECT id, note FROM t150")
+        .await
+        .expect("hosted r1 engine serves the new table's rows");
+    assert!(text_rows(&rows) == vec![vec![Some("7".to_string()), Some("routed".to_string())]]);
 }
 
 async fn assert_recovered_timestamp_commit(
@@ -1085,10 +1262,13 @@ async fn ambiguous_remote_timestamp_commit_recovers_once_after_gateway_restart()
     let hosted = gateway.hosted_range_engines();
     let coordinator = hosted.get(&RangeId::COORDINATOR).expect("r0");
     let (primary_address, primary_server) = spawn_tls_with_handle(
-        Arc::new(HostedRangeService::new(BTreeMap::from([(
-            RangeId::new(1),
-            hosted[&RangeId::new(1)].clone_handle(),
-        )]))),
+        Arc::new(
+            HostedRangeService::new(BTreeMap::from([(
+                RangeId::new(1),
+                hosted[&RangeId::new(1)].clone_handle(),
+            )]))
+            .with_catalog_follower(shared_catalog_follower()),
+        ),
         fixture.server.clone(),
     )
     .await;
@@ -1103,7 +1283,8 @@ async fn ambiguous_remote_timestamp_commit_recovers_once_after_gateway_restart()
     remote.set_timestamp_oracle(coordinator.timestamp_oracle_handle());
     let service = Arc::new(CountingTimestampService {
         inner: HostedRangeService::new(BTreeMap::from([(RangeId::new(2), remote.clone_handle())]))
-            .with_timestamp_primary_remote(registry.clone(), range_client.clone()),
+            .with_timestamp_primary_remote(registry.clone(), range_client.clone())
+            .with_catalog_follower(shared_catalog_follower()),
         prewrites: AtomicUsize::new(0),
         resolves: AtomicUsize::new(0),
         recoveries: AtomicUsize::new(0),

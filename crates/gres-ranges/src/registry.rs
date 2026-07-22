@@ -128,6 +128,11 @@ impl RangeRegistry {
     pub async fn range_ids(&self) -> Vec<RangeId> {
         self.ranges.read().await.keys().copied().collect()
     }
+
+    /// Snapshot every known range endpoint in deterministic range order.
+    pub async fn endpoints(&self) -> Vec<RangeEndpoint> {
+        self.ranges.read().await.values().cloned().collect()
+    }
 }
 
 /// Registry discovery failures.
@@ -175,6 +180,7 @@ fn range_endpoints_from_layout(layout: &[RangeLayoutEntry]) -> BTreeMap<RangeId,
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
     use crabka_gres_control::{
         InMemoryRegistryStore, RangeLayoutEntry, SqlUser, TenantId, TenantName, TenantRecord,
         TenantRegistryStore, TenantState,
@@ -220,9 +226,34 @@ mod tests {
 
         let endpoint = registry.resolve(RangeId::new(1)).await.unwrap();
 
-        assert_eq!(endpoint.endpoint, "127.0.0.1:7001");
-        assert_eq!(endpoint.wal_generation, 4);
-        assert_eq!(endpoint.end_key, None);
+        assert!(endpoint.endpoint == "127.0.0.1:7001");
+        assert!(endpoint.wal_generation == 4);
+        assert!(endpoint.end_key.is_none());
+    }
+
+    #[tokio::test]
+    async fn discovery_snapshots_all_endpoints() {
+        let registry = RangeRegistry::from_tenant_record(&tenant_record()).unwrap();
+
+        let endpoints = registry.endpoints().await;
+
+        assert!(
+            endpoints
+                == vec![
+                    RangeEndpoint {
+                        range_id: RangeId::new(0),
+                        end_key: Some(crate::RangeKey::new(crate::TableId::new(10), 25)),
+                        endpoint: "127.0.0.1:7000".to_string(),
+                        wal_generation: 1,
+                    },
+                    RangeEndpoint {
+                        range_id: RangeId::new(1),
+                        end_key: None,
+                        endpoint: "127.0.0.1:7001".to_string(),
+                        wal_generation: 4,
+                    },
+                ]
+        );
     }
 
     #[tokio::test]
@@ -235,13 +266,13 @@ mod tests {
 
         registry.refresh_from_store(&store, &tenant).await.unwrap();
 
-        assert_eq!(
+        assert!(
             registry
                 .resolve(RangeId::COORDINATOR)
                 .await
                 .unwrap()
-                .endpoint,
-            "127.0.0.1:7000"
+                .endpoint
+                == "127.0.0.1:7000"
         );
     }
 }

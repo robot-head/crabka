@@ -29,7 +29,7 @@ async fn jepsen_bank_deterministic_transfers_preserve_total_balance() {
 async fn real_process_bank_history_preserves_exact_balances_across_writer_kill() {
     let mut system = ProcessHarness::start("tenant-real-jepsen-bank").await;
     system
-        .create_table_on_all(
+        .create_table(
             "CREATE TABLE bank50 (id int4, balance int4); \
              CREATE TABLE bank150 (id int4, balance int4)",
         )

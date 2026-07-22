@@ -35,7 +35,7 @@ async fn participant_kill_bank_aborts_blocked_transfer_and_recovery_preserves_to
 async fn real_participant_kill_aborts_partial_bank_transfer_and_preserves_total() {
     let mut system = ProcessHarness::start("tenant-real-participant-bank").await;
     system
-        .create_table_on_all(
+        .create_table(
             "CREATE TABLE bank50 (id int4, balance int4); \
              CREATE TABLE bank150 (id int4, balance int4)",
         )

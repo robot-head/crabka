@@ -35,7 +35,7 @@ async fn range0_writer_kill_drain_is_fence_plus_prologue_before_serving() {
 async fn real_range0_kill_fences_old_session_and_recovers_before_serving() {
     let mut system = ProcessHarness::start("tenant-real-range0-drain").await;
     system
-        .create_table_on_all(
+        .create_table(
             "CREATE TABLE bank50 (id int4, balance int4); \
              CREATE TABLE bank150 (id int4, balance int4)",
         )
@@ -103,7 +103,7 @@ async fn real_range0_readiness_waits_for_in_doubt_recovery_prologue() {
     )
     .await;
     system
-        .create_table_on_all(
+        .create_table(
             "CREATE TABLE bank50 (id int4, balance int4); CREATE TABLE bank150 (id int4, balance int4)",
         )
         .await;
