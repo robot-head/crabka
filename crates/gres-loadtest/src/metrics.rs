@@ -1,7 +1,8 @@
 //! Per-process resource sampling via `/proc`.
 //!
 //! The sampler polls `/proc/<pid>/stat` (utime + stime, converted to
-//! core-seconds via `rustix::param::clock_ticks_per_second`) and
+//! core-seconds via `rustix::param::clock_ticks_per_second`; Linux-only —
+//! on other platforms `/proc` reads fail and every process reports zeros) and
 //! `/proc/<pid>/status` (`VmRSS`) on a fixed interval for every process in a
 //! live [`ProcessRoster`]. The roster is re-snapshotted on every tick, so an
 //! entry appended mid-run — a node restarted by a fault, with a fresh pid
@@ -122,7 +123,7 @@ impl Tracked {
     fn new(info: ProcessInfo) -> Self {
         Self {
             info,
-            ticks_per_second: rustix::param::clock_ticks_per_second(),
+            ticks_per_second: clock_ticks_per_second(),
             cpu: None,
             max_rss_bytes: 0,
         }
@@ -210,6 +211,20 @@ fn parse_vm_rss_bytes(status: &str) -> Option<u64> {
 
 /// Converts a clock-tick count to seconds. A zero `ticks_per_second`
 /// (impossible on Linux, but cheap to guard) is treated as 1.
+/// The kernel's clock-tick rate for `/proc` CPU fields.
+#[cfg(target_os = "linux")]
+fn clock_ticks_per_second() -> u64 {
+    rustix::param::clock_ticks_per_second()
+}
+
+/// Off Linux there is no `/proc` to sample — reads fail and every process
+/// reports zeros — so the divisor is never observable; any nonzero constant
+/// keeps the arithmetic well-defined.
+#[cfg(not(target_os = "linux"))]
+fn clock_ticks_per_second() -> u64 {
+    100
+}
+
 fn ticks_to_seconds(ticks: u64, ticks_per_second: u64) -> f64 {
     u64_as_f64(ticks) / u64_as_f64(ticks_per_second.max(1))
 }
