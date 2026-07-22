@@ -46,7 +46,7 @@ hex = { workspace = true }
 testcontainers = { workspace = true }
 testcontainers-modules = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-criterion = { version = "5.0.0", package = "codspeed-criterion-compat" }
+criterion = { version = "5.0.1", package = "codspeed-criterion-compat" }
 
 [[bench]]
 name = "log"

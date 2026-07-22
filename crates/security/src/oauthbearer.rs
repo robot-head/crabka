@@ -284,7 +284,7 @@ fn extract_groups(path: &JpQuery, claims: &Value, delimiter: Option<&str>) -> Ve
     };
     let mut out = Vec::new();
     for r in refs {
-        match r.val() {
+        match r.val {
             Value::String(s) => match delimiter {
                 Some(d) => out.extend(
                     s.split(d)
@@ -315,7 +315,7 @@ fn evaluate_custom_claim_check(path: &JpQuery, claims: &Value) -> bool {
         return false;
     }
     for r in refs {
-        match r.val() {
+        match r.val {
             Value::Null | Value::Bool(false) => return false,
             _ => {}
         }
