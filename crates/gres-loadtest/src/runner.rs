@@ -394,6 +394,8 @@ mod tests {
                 nodes: 2,
                 ranges: 3,
                 clock_skew_ms: skew_ms.iter().copied().collect(),
+                cpus_per_node: None,
+                broker_cpus: None,
             },
             mode,
             workload: WorkloadSpec {

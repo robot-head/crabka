@@ -2,14 +2,21 @@
 
 #[cfg(test)]
 use std::net::SocketAddr;
-use std::{collections::BTreeSet, future::Future, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeSet, HashMap},
+    future::Future,
+    pin::Pin,
+    sync::{Arc, Mutex},
+    task::{Context, Poll},
+    time::{Duration, Instant},
+};
 
 use async_trait::async_trait;
 use crabka_pgwire::engine::{ResultPage, ResultSink};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf},
     net::{TcpListener, TcpStream},
 };
 use tokio_rustls::{TlsAcceptor, TlsConnector};
@@ -22,6 +29,16 @@ const MAX_FRAME_BYTES: usize = 1 << 20;
 // emitted frame below the hard decoder limit without accumulating an encoded copy.
 const SQL_CHUNK_TARGET_BYTES: usize = MAX_FRAME_BYTES - (4 << 10);
 const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a kept-alive server connection may sit without a next frame
+/// before the server closes it quietly, so dead peers cannot pin tasks.
+const SERVER_IDLE_TIMEOUT: Duration = Duration::from_mins(1);
+/// Idle age past which a pooled client connection is discarded instead of
+/// reused. Kept far below [`SERVER_IDLE_TIMEOUT`] so the client always evicts
+/// an idle connection before the server would close it.
+const POOL_IDLE_TTL: Duration = Duration::from_secs(5);
+/// Maximum idle connections retained per endpoint. Connections returned to a
+/// full pool are dropped; checkout never blocks waiting for the pool.
+const POOL_MAX_IDLE_PER_ENDPOINT: usize = 32;
 
 /// Request sent between range computes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1104,6 +1121,12 @@ pub trait RangeService: Send + Sync + 'static {
     async fn handle(&self, request: RangeRequest) -> RangeResponse;
 
     /// Optionally consume a request while owning the live response writer.
+    ///
+    /// Returning `Ok(None)` asserts the implementation wrote one complete
+    /// framed response stream (single frame, or SQL chunks ending with a
+    /// terminal [`RangeResponse::SqlResultsDone`]/[`RangeResponse::SqlError`]
+    /// frame) and left the stream at a frame boundary, so the transport keeps
+    /// the connection alive for the peer's next request.
     async fn handle_connection(
         &self,
         request: RangeRequest,
@@ -1114,21 +1137,199 @@ pub trait RangeService: Send + Sync + 'static {
 }
 
 /// Authenticated client for framed TLS range RPC.
+///
+/// Established connections are pooled per endpoint and reused across calls;
+/// clones share one pool, so cloning this client is cheap and preserves reuse.
+/// A connection returns to the pool only after its response was fully
+/// consumed; any error, timeout, or partial read drops the connection and
+/// surfaces the error unchanged — the client never retries on its own.
 #[derive(Debug, Clone)]
 pub struct FramedTcpClient {
     timeout: Duration,
+    idle_ttl: Duration,
+    max_idle_per_endpoint: usize,
     mode: RangeClientMode,
+    pool: Arc<ConnectionPool>,
 }
 
 #[derive(Debug, Clone)]
 enum RangeClientMode {
-    Tls(RangeTlsClientConfig),
-    PreparedTls {
+    Tls {
         config: Arc<rustls::ClientConfig>,
         server_name: String,
     },
     #[cfg(test)]
     Plaintext,
+}
+
+/// One established client stream that can be parked in the connection pool.
+enum RangeStream {
+    Tls(Box<tokio_rustls::client::TlsStream<TcpStream>>),
+    #[cfg(test)]
+    Plaintext(TcpStream),
+}
+
+impl RangeStream {
+    fn tcp(&self) -> &TcpStream {
+        match self {
+            Self::Tls(stream) => stream.get_ref().0,
+            #[cfg(test)]
+            Self::Plaintext(stream) => stream,
+        }
+    }
+
+    /// Non-blocking liveness probe on the underlying socket.
+    ///
+    /// This protocol never carries unsolicited server bytes, so any pending
+    /// input while the connection is idle means the server closed the stream
+    /// (EOF or TLS `close_notify`) or an error is pending, and the caller must
+    /// discard the connection instead of reusing it. The probe uses a direct
+    /// non-blocking `try_read` rather than tokio readiness (which caches a
+    /// stale readable flag after a fully drained read): consuming a byte is
+    /// harmless because every branch that observes input discards the
+    /// connection, and `WouldBlock` — the only branch that permits reuse —
+    /// consumes nothing.
+    fn dead_while_idle(&self) -> bool {
+        let mut scratch = [0_u8; 1];
+        match self.tcp().try_read(&mut scratch) {
+            Ok(_) => true,
+            Err(error) => error.kind() != std::io::ErrorKind::WouldBlock,
+        }
+    }
+}
+
+impl AsyncRead for RangeStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Self::Tls(stream) => Pin::new(stream.as_mut()).poll_read(cx, buf),
+            #[cfg(test)]
+            Self::Plaintext(stream) => Pin::new(stream).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for RangeStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            Self::Tls(stream) => Pin::new(stream.as_mut()).poll_write(cx, buf),
+            #[cfg(test)]
+            Self::Plaintext(stream) => Pin::new(stream).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Self::Tls(stream) => Pin::new(stream.as_mut()).poll_flush(cx),
+            #[cfg(test)]
+            Self::Plaintext(stream) => Pin::new(stream).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Self::Tls(stream) => Pin::new(stream.as_mut()).poll_shutdown(cx),
+            #[cfg(test)]
+            Self::Plaintext(stream) => Pin::new(stream).poll_shutdown(cx),
+        }
+    }
+}
+
+/// One pooled connection and the instant it last finished a call.
+struct PooledConn {
+    stream: RangeStream,
+    last_used: Instant,
+}
+
+/// Idle connections shared by every clone of one [`FramedTcpClient`],
+/// partitioned by the runtime that dialed them.
+///
+/// Tokio sockets are registered with the IO driver of the runtime that
+/// created them and error once that runtime shuts down. Several engine paths
+/// (the blocking [`crabka_pgexec::RangeScanner`] entry points, bounded cursor
+/// collectors, timestamp-session cleanup) run range RPCs on short-lived
+/// single-call runtimes, so a connection must only ever be reused by the
+/// runtime that dialed it. Ephemeral runtimes therefore get no reuse — the
+/// same behavior as before pooling existed — while long-lived runtimes reap
+/// the full benefit. Expired entries are swept on every check-in so sockets
+/// parked by runtimes that never return cannot accumulate.
+#[derive(Default)]
+struct ConnectionPool {
+    idle: Mutex<HashMap<tokio::runtime::Id, HashMap<String, Vec<PooledConn>>>>,
+}
+
+type PoolGuard<'a> =
+    std::sync::MutexGuard<'a, HashMap<tokio::runtime::Id, HashMap<String, Vec<PooledConn>>>>;
+
+impl std::fmt::Debug for ConnectionPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectionPool").finish_non_exhaustive()
+    }
+}
+
+impl ConnectionPool {
+    fn lock(&self) -> PoolGuard<'_> {
+        self.idle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Pop the most recently parked healthy connection this runtime dialed
+    /// for `endpoint`.
+    ///
+    /// Connections idle past `idle_ttl`, and connections whose socket became
+    /// readable while parked (the server closed or reset the stream), are
+    /// dropped instead of returned.
+    fn take(&self, endpoint: &str, idle_ttl: Duration) -> Option<RangeStream> {
+        let runtime = tokio::runtime::Handle::current().id();
+        let mut idle = self.lock();
+        let conns = idle.get_mut(&runtime)?.get_mut(endpoint)?;
+        while let Some(conn) = conns.pop() {
+            if conn.last_used.elapsed() > idle_ttl {
+                continue;
+            }
+            if conn.stream.dead_while_idle() {
+                continue;
+            }
+            return Some(conn.stream);
+        }
+        None
+    }
+
+    /// Park a connection whose response was fully consumed, and sweep
+    /// expired connections across every runtime partition.
+    ///
+    /// When the endpoint already holds `max_idle` parked connections the
+    /// overflow connection is dropped; check-in never blocks.
+    fn put(&self, endpoint: &str, stream: RangeStream, max_idle: usize, idle_ttl: Duration) {
+        let runtime = tokio::runtime::Handle::current().id();
+        let mut idle = self.lock();
+        idle.retain(|_, endpoints| {
+            endpoints.retain(|_, conns| {
+                conns.retain(|conn| conn.last_used.elapsed() <= idle_ttl);
+                !conns.is_empty()
+            });
+            !endpoints.is_empty()
+        });
+        let conns = idle
+            .entry(runtime)
+            .or_default()
+            .entry(endpoint.to_string())
+            .or_default();
+        if conns.len() < max_idle {
+            conns.push(PooledConn {
+                stream,
+                last_used: Instant::now(),
+            });
+        }
+    }
 }
 
 /// Plaintext range transport exists only inside this crate's unit tests.
@@ -1138,10 +1339,7 @@ enum RangeClientMode {
 #[cfg(test)]
 impl Default for FramedTcpClient {
     fn default() -> Self {
-        Self {
-            timeout: DEFAULT_RPC_TIMEOUT,
-            mode: RangeClientMode::Plaintext,
-        }
+        Self::with_timeout(DEFAULT_RPC_TIMEOUT)
     }
 }
 
@@ -1166,39 +1364,76 @@ impl FramedTcpClient {
             trust_roots_pem,
         )
         .map_err(|error| TransportError::Tls(error.to_string()))?;
-        Ok(Self {
-            timeout: DEFAULT_RPC_TIMEOUT,
-            mode: RangeClientMode::PreparedTls {
-                config,
-                server_name,
-            },
-        })
+        Ok(Self::with_mode(RangeClientMode::Tls {
+            config,
+            server_name,
+        }))
     }
 
     /// Build a plaintext client with an explicit wire-silence timeout for unit tests.
     #[cfg(test)]
     #[must_use]
-    pub const fn with_timeout(timeout: Duration) -> Self {
+    pub fn with_timeout(timeout: Duration) -> Self {
         Self {
             timeout,
-            mode: RangeClientMode::Plaintext,
+            ..Self::with_mode(RangeClientMode::Plaintext)
         }
+    }
+
+    /// Override pool tuning knobs for unit tests.
+    #[cfg(test)]
+    #[must_use]
+    pub fn with_pool_tuning(mut self, idle_ttl: Duration, max_idle_per_endpoint: usize) -> Self {
+        self.idle_ttl = idle_ttl;
+        self.max_idle_per_endpoint = max_idle_per_endpoint;
+        self
     }
 
     /// Build a TLS-only forwarding client. This path always presents a client
     /// identity and validates the remote certificate and SNI name.
+    ///
+    /// The TLS connector configuration (certificate parsing included) is built
+    /// once here and shared by every subsequent dial.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
     pub fn with_tls(config: RangeTlsClientConfig) -> Result<Self, TransportError> {
-        config.build_connector()?;
-        Ok(Self {
+        if config.tls.trust_roots_path.is_none() {
+            return Err(TransportError::Tls(
+                "range TLS requires a server trust CA".to_string(),
+            ));
+        }
+        if config.server_name.trim().is_empty() {
+            return Err(TransportError::Tls(
+                "range TLS requires a non-empty server name".to_string(),
+            ));
+        }
+        let client_config = config
+            .tls
+            .build_client_config_with_identity()
+            .map_err(|error| TransportError::Tls(error.to_string()))?;
+        Ok(Self::with_mode(RangeClientMode::Tls {
+            config: client_config,
+            server_name: config.server_name,
+        }))
+    }
+
+    fn with_mode(mode: RangeClientMode) -> Self {
+        Self {
             timeout: DEFAULT_RPC_TIMEOUT,
-            mode: RangeClientMode::Tls(config),
-        })
+            idle_ttl: POOL_IDLE_TTL,
+            max_idle_per_endpoint: POOL_MAX_IDLE_PER_ENDPOINT,
+            mode,
+            pool: Arc::default(),
+        }
     }
 
     /// Send one request and await one response.
+    ///
+    /// Reuses a pooled connection to `endpoint` when a healthy one is parked,
+    /// dialing (and handshaking) a fresh connection otherwise. The connection
+    /// returns to the pool only after the response was fully consumed; any
+    /// error drops it and surfaces unchanged.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -1207,44 +1442,17 @@ impl FramedTcpClient {
         endpoint: &str,
         request: &RangeRequest,
     ) -> Result<RangeResponse, TransportError> {
-        let stream = timeout(self.timeout, TcpStream::connect(endpoint)).await??;
-        match &self.mode {
-            RangeClientMode::Tls(config) => {
-                let connector = config.build_connector()?;
-                let server_name =
-                    rustls::pki_types::ServerName::try_from(config.server_name.as_str())
-                        .map_err(|error| {
-                            TransportError::Tls(format!("invalid range server name: {error}"))
-                        })?
-                        .to_owned();
-                let stream = timeout(self.timeout, connector.connect(server_name, stream))
-                    .await
-                    .map_err(|_| TransportError::Timeout(self.timeout))?
-                    .map_err(|error| TransportError::Tls(error.to_string()))?;
-                call_stream(stream, request, self.timeout).await
-            }
-            RangeClientMode::PreparedTls {
-                config,
-                server_name,
-            } => {
-                let connector = TlsConnector::from(Arc::clone(config));
-                let server_name = rustls::pki_types::ServerName::try_from(server_name.as_str())
-                    .map_err(|error| {
-                        TransportError::Tls(format!("invalid range server name: {error}"))
-                    })?
-                    .to_owned();
-                let stream = timeout(self.timeout, connector.connect(server_name, stream))
-                    .await
-                    .map_err(|_| TransportError::Timeout(self.timeout))?
-                    .map_err(|error| TransportError::Tls(error.to_string()))?;
-                call_stream(stream, request, self.timeout).await
-            }
-            #[cfg(test)]
-            RangeClientMode::Plaintext => call_stream(stream, request, self.timeout).await,
-        }
+        let mut stream = self.checkout(endpoint).await?;
+        let response = call_stream(&mut stream, request, self.timeout).await?;
+        self.pool
+            .put(endpoint, stream, self.max_idle_per_endpoint, self.idle_ttl);
+        Ok(response)
     }
 
     /// Send one SQL request and forward bounded result pages as they arrive.
+    ///
+    /// Connection reuse matches [`FramedTcpClient::call`]: the connection is
+    /// pooled only after the final SQL chunk was consumed.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -1254,23 +1462,29 @@ impl FramedTcpClient {
         request: &RangeRequest,
         sink: &mut dyn ResultSink,
     ) -> Result<(), TransportError> {
+        let mut stream = self.checkout(endpoint).await?;
+        call_sql_stream_into(&mut stream, request, self.timeout, sink).await?;
+        self.pool
+            .put(endpoint, stream, self.max_idle_per_endpoint, self.idle_ttl);
+        Ok(())
+    }
+
+    /// Take a healthy pooled connection or dial and handshake a fresh one.
+    async fn checkout(&self, endpoint: &str) -> Result<RangeStream, TransportError> {
+        if let Some(stream) = self.pool.take(endpoint, self.idle_ttl) {
+            return Ok(stream);
+        }
+        self.dial(endpoint).await
+    }
+
+    async fn dial(&self, endpoint: &str) -> Result<RangeStream, TransportError> {
         let stream = timeout(self.timeout, TcpStream::connect(endpoint)).await??;
+        // Persistent request/response connections interact badly with
+        // Nagle + delayed ACK (a ~40 ms stall per reused-connection round
+        // trip); RPC frames are latency-critical, so flush segments eagerly.
+        stream.set_nodelay(true)?;
         match &self.mode {
-            RangeClientMode::Tls(config) => {
-                let connector = config.build_connector()?;
-                let server_name =
-                    rustls::pki_types::ServerName::try_from(config.server_name.as_str())
-                        .map_err(|error| {
-                            TransportError::Tls(format!("invalid range server name: {error}"))
-                        })?
-                        .to_owned();
-                let stream = timeout(self.timeout, connector.connect(server_name, stream))
-                    .await
-                    .map_err(|_| TransportError::Timeout(self.timeout))?
-                    .map_err(|error| TransportError::Tls(error.to_string()))?;
-                call_sql_stream_into(stream, request, self.timeout, sink).await
-            }
-            RangeClientMode::PreparedTls {
+            RangeClientMode::Tls {
                 config,
                 server_name,
             } => {
@@ -1281,21 +1495,18 @@ impl FramedTcpClient {
                     })?
                     .to_owned();
                 let stream = timeout(self.timeout, connector.connect(server_name, stream))
-                    .await
-                    .map_err(|_| TransportError::Timeout(self.timeout))?
+                    .await?
                     .map_err(|error| TransportError::Tls(error.to_string()))?;
-                call_sql_stream_into(stream, request, self.timeout, sink).await
+                Ok(RangeStream::Tls(Box::new(stream)))
             }
             #[cfg(test)]
-            RangeClientMode::Plaintext => {
-                call_sql_stream_into(stream, request, self.timeout, sink).await
-            }
+            RangeClientMode::Plaintext => Ok(RangeStream::Plaintext(stream)),
         }
     }
 }
 
 async fn call_sql_stream_into<S>(
-    mut stream: S,
+    stream: &mut S,
     request: &RangeRequest,
     wait: Duration,
     sink: &mut dyn ResultSink,
@@ -1303,10 +1514,10 @@ async fn call_sql_stream_into<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
-    timeout(wait, write_frame(&mut stream, request)).await??;
+    timeout(wait, write_frame(stream, request)).await??;
     timeout(wait, stream.flush()).await??;
     loop {
-        match timeout(wait, read_frame(&mut stream)).await?? {
+        match timeout(wait, read_frame(stream)).await?? {
             RangeResponse::SqlResultsChunk { chunk } => {
                 sink.send(wire_chunk_to_result_page(chunk)?)
                     .await
@@ -1383,10 +1594,11 @@ pub async fn serve_tcp(
     service: Arc<dyn RangeService>,
 ) -> Result<(), TransportError> {
     loop {
-        let (stream, _) = listener.accept().await?;
-        let service = Arc::clone(&service);
+        let (mut stream, _) = listener.accept().await?;
+        let _ = stream.set_nodelay(true);
+        let service = Arc::downgrade(&service);
         tokio::spawn(async move {
-            if let Err(error) = handle_stream(stream, service).await {
+            if let Err(error) = serve_frames(&mut stream, &service, |_| Ok(())).await {
                 tracing::warn!(%error, "range transport connection failed");
             }
         });
@@ -1405,7 +1617,8 @@ pub async fn serve_tls(
     let acceptor = config.build_acceptor()?;
     loop {
         let (stream, _) = listener.accept().await?;
-        let service = Arc::clone(&service);
+        let _ = stream.set_nodelay(true);
+        let service = Arc::downgrade(&service);
         let acceptor = acceptor.clone();
         let range_rpc_principals = config.range_rpc_principals.clone();
         let operator_control_principals = config.operator_control_principals.clone();
@@ -1431,22 +1644,69 @@ pub async fn serve_tls(
                     .ok_or_else(|| TransportError::UnauthorizedPeer {
                         tenant: tenant.clone(),
                     })?;
-                let request = read_frame(&mut stream).await?;
-                if !principal_authorized_for_request(
-                    &principal,
-                    &request,
-                    &range_rpc_principals,
-                    &operator_control_principals,
-                ) {
-                    return Err(TransportError::UnauthorizedPeer { tenant });
-                }
-                handle_request_on_stream(&mut stream, service, request).await
+                serve_frames(&mut stream, &service, |request: &RangeRequest| {
+                    if principal_authorized_for_request(
+                        &principal,
+                        request,
+                        &range_rpc_principals,
+                        &operator_control_principals,
+                    ) {
+                        Ok(())
+                    } else {
+                        Err(TransportError::UnauthorizedPeer {
+                            tenant: tenant.clone(),
+                        })
+                    }
+                })
+                .await
             }
             .await;
             if let Err(error) = result {
                 tracing::warn!(%error, "range TLS transport connection rejected");
             }
         });
+    }
+}
+
+/// Serve framed requests on one authenticated stream until the peer
+/// disconnects, the idle deadline lapses, the service shuts down, or a
+/// request fails.
+///
+/// The peer certificate was authenticated once when the connection was
+/// established; `authorize` re-checks the stored principal against every
+/// decoded request, since authorization is request-type-dependent.
+///
+/// A peer that disconnects while the server is waiting for the next frame is
+/// a normal end of a kept-alive connection and closes without error; pooled
+/// clients drop idle connections this way as a matter of course.
+///
+/// The connection holds only a weak service reference while parked between
+/// requests, so aborting the accept loop releases the service — and the
+/// storage handles it owns — deterministically instead of pinning them until
+/// every kept-alive peer disconnects.
+async fn serve_frames<S, F>(
+    stream: &mut S,
+    service: &std::sync::Weak<dyn RangeService>,
+    authorize: F,
+) -> Result<(), TransportError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+    F: Fn(&RangeRequest) -> Result<(), TransportError>,
+{
+    loop {
+        let next = tokio::time::timeout(SERVER_IDLE_TIMEOUT, read_request_or_eof(stream)).await;
+        let request = match next {
+            // Idle past the deadline, or a clean peer disconnect: close quietly.
+            Err(_) | Ok(Ok(None)) => return Ok(()),
+            Ok(Ok(Some(request))) => request,
+            Ok(Err(error)) => return Err(error),
+        };
+        authorize(&request)?;
+        let Some(service) = service.upgrade() else {
+            // The listener was torn down; close as if the server went away.
+            return Ok(());
+        };
+        handle_request_on_stream(stream, &service, request).await?;
     }
 }
 
@@ -1480,16 +1740,16 @@ pub async fn spawn_loopback(service: Arc<dyn RangeService>) -> Result<SocketAddr
 }
 
 async fn call_stream<S>(
-    mut stream: S,
+    stream: &mut S,
     request: &RangeRequest,
     wait: Duration,
 ) -> Result<RangeResponse, TransportError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
-    timeout(wait, write_frame(&mut stream, request)).await??;
+    timeout(wait, write_frame(stream, request)).await??;
     timeout(wait, stream.flush()).await??;
-    let first = timeout(wait, read_frame(&mut stream)).await??;
+    let first = timeout(wait, read_frame(stream)).await??;
     let chunk = match first {
         RangeResponse::SqlResultsChunk { chunk } => chunk,
         RangeResponse::SqlResultsDone => return Ok(RangeResponse::SqlResults { results: vec![] }),
@@ -1498,7 +1758,7 @@ where
     let mut results = Vec::new();
     consume_sql_chunk(&mut results, chunk)?;
     loop {
-        match timeout(wait, read_frame(&mut stream)).await?? {
+        match timeout(wait, read_frame(stream)).await?? {
             RangeResponse::SqlResultsChunk { chunk } => consume_sql_chunk(&mut results, chunk)?,
             RangeResponse::SqlResultsDone => return Ok(RangeResponse::SqlResults { results }),
             RangeResponse::SqlError { code, message } => {
@@ -1578,13 +1838,14 @@ async fn handle_stream<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
-    let request = read_frame(&mut stream).await?;
-    handle_request_on_stream(&mut stream, service, request).await
+    serve_frames(&mut stream, &Arc::downgrade(&service), |_| Ok(())).await
 }
 
+/// Handle one decoded request, leaving the stream at a frame boundary so the
+/// caller's serve loop can read the peer's next request.
 async fn handle_request_on_stream<S>(
     stream: &mut S,
-    service: Arc<dyn RangeService>,
+    service: &Arc<dyn RangeService>,
     request: RangeRequest,
 ) -> Result<(), TransportError>
 where
@@ -1807,6 +2068,54 @@ where
         return Err(TransportError::Json(error));
     }
     Ok(writer.bytes)
+}
+
+/// Read one length-prefixed request, or `None` when the peer disconnected at
+/// a frame boundary.
+///
+/// A clean EOF before any prefix byte, and an abrupt close reported before
+/// any prefix byte (pooled TLS clients drop idle connections without sending
+/// `close_notify`), are both normal ends of a kept-alive connection.
+/// Disconnecting inside a frame is an error.
+async fn read_request_or_eof<R>(reader: &mut R) -> Result<Option<RangeRequest>, TransportError>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut prefix = [0_u8; 4];
+    let mut filled = 0_usize;
+    while filled < prefix.len() {
+        let read = match reader.read(&mut prefix[filled..]).await {
+            Ok(read) => read,
+            Err(error) if filled == 0 && error.kind() == std::io::ErrorKind::UnexpectedEof => {
+                return Ok(None);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if read == 0 {
+            if filled == 0 {
+                return Ok(None);
+            }
+            return Err(TransportError::Io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "peer closed the stream inside a frame length prefix",
+            )));
+        }
+        filled += read;
+    }
+    let len =
+        usize::try_from(u32::from_be_bytes(prefix)).map_err(|_| TransportError::FrameTooLarge {
+            actual: MAX_FRAME_BYTES.saturating_add(1),
+            limit: MAX_FRAME_BYTES,
+        })?;
+    if len > MAX_FRAME_BYTES {
+        return Err(TransportError::FrameTooLarge {
+            actual: len,
+            limit: MAX_FRAME_BYTES,
+        });
+    }
+    let mut bytes = vec![0; len];
+    reader.read_exact(&mut bytes).await?;
+    Ok(Some(serde_json::from_slice(&bytes)?))
 }
 
 async fn read_frame<R, T>(reader: &mut R) -> Result<T, TransportError>
@@ -2726,6 +3035,337 @@ mod tests {
             .await
             .expect("inspection response");
         assert!(matches!(response, RangeResponse::InspectDurableRecords(_)));
+    }
+
+    /// Bind a loopback server that counts accepted connections and serves the
+    /// kept-alive frame loop on each of them.
+    async fn spawn_counting_loopback(
+        service: Arc<dyn RangeService>,
+    ) -> (SocketAddr, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let addr = listener.local_addr().expect("loopback address");
+        let accepts = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&accepts);
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                counter.fetch_add(1, Ordering::SeqCst);
+                let service = Arc::clone(&service);
+                tokio::spawn(async move {
+                    let _ = handle_stream(stream, service).await;
+                });
+            }
+        });
+        (addr, accepts)
+    }
+
+    /// Bind a loopback server that answers exactly one request per connection
+    /// and then closes it, imitating a server that does not keep connections.
+    async fn spawn_one_shot_loopback(
+        service: Arc<dyn RangeService>,
+    ) -> (SocketAddr, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let addr = listener.local_addr().expect("loopback address");
+        let accepts = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&accepts);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                counter.fetch_add(1, Ordering::SeqCst);
+                let service = Arc::clone(&service);
+                tokio::spawn(async move {
+                    if let Ok(request) = read_frame::<_, RangeRequest>(&mut stream).await {
+                        let _ = handle_request_on_stream(&mut stream, &service, request).await;
+                    }
+                });
+            }
+        });
+        (addr, accepts)
+    }
+
+    /// Service whose handlers block until the shared gate opens, forcing every
+    /// concurrent call onto its own connection.
+    struct GateService {
+        entered: Arc<AtomicUsize>,
+        gate: tokio::sync::watch::Receiver<bool>,
+    }
+
+    #[async_trait]
+    impl RangeService for GateService {
+        async fn handle(&self, _request: RangeRequest) -> RangeResponse {
+            self.entered.fetch_add(1, Ordering::SeqCst);
+            let mut gate = self.gate.clone();
+            let _ = gate.wait_for(|open| *open).await.expect("gate sender");
+            RangeResponse::Range0Barriered
+        }
+    }
+
+    async fn wait_until(counter: &AtomicUsize, expected: usize) {
+        while counter.load(Ordering::SeqCst) < expected {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    }
+
+    fn spawn_barrier_calls(
+        client: &FramedTcpClient,
+        addr: SocketAddr,
+        count: usize,
+    ) -> Vec<tokio::task::JoinHandle<Result<RangeResponse, TransportError>>> {
+        (0..count)
+            .map(|_| {
+                let client = client.clone();
+                let endpoint = addr.to_string();
+                tokio::spawn(
+                    async move { client.call(&endpoint, &RangeRequest::Range0Barrier).await },
+                )
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn sequential_calls_reuse_one_server_accepted_connection() {
+        use assert2::assert;
+        let (addr, accepts) = spawn_counting_loopback(Arc::new(EchoService::default())).await;
+        let client = FramedTcpClient::default();
+
+        for _ in 0..2 {
+            let response = client
+                .call(&addr.to_string(), &RangeRequest::Range0Barrier)
+                .await
+                .expect("pooled RPC");
+            assert!(response == RangeResponse::Range0Barriered);
+        }
+
+        assert!(accepts.load(Ordering::SeqCst) == 1);
+    }
+
+    #[tokio::test]
+    async fn concurrent_calls_pool_up_to_the_cap_and_reuse_pooled_connections() {
+        use assert2::assert;
+        let (gate_tx, gate_rx) = tokio::sync::watch::channel(false);
+        let entered = Arc::new(AtomicUsize::new(0));
+        let service = Arc::new(GateService {
+            entered: Arc::clone(&entered),
+            gate: gate_rx,
+        });
+        let (addr, accepts) = spawn_counting_loopback(service).await;
+        let client = FramedTcpClient::default().with_pool_tuning(POOL_IDLE_TTL, 2);
+
+        // Four concurrent calls must each open their own connection.
+        let handles = spawn_barrier_calls(&client, addr, 4);
+        wait_until(&entered, 4).await;
+        gate_tx.send(true).expect("open gate");
+        for handle in handles {
+            assert!(handle.await.expect("join call").is_ok());
+        }
+        assert!(accepts.load(Ordering::SeqCst) == 4);
+
+        // Only the per-endpoint cap of connections was pooled: three more
+        // concurrent calls reuse the two pooled connections and must dial
+        // exactly one fresh connection.
+        gate_tx.send(false).expect("close gate");
+        entered.store(0, Ordering::SeqCst);
+        let handles = spawn_barrier_calls(&client, addr, 3);
+        wait_until(&entered, 3).await;
+        gate_tx.send(true).expect("reopen gate");
+        for handle in handles {
+            assert!(handle.await.expect("join call").is_ok());
+        }
+        assert!(accepts.load(Ordering::SeqCst) == 5);
+    }
+
+    #[tokio::test]
+    async fn staleness_probe_discards_server_closed_connection_without_error() {
+        use assert2::assert;
+        let (addr, accepts) = spawn_one_shot_loopback(Arc::new(EchoService::default())).await;
+        let client = FramedTcpClient::default();
+
+        let first = client
+            .call(&addr.to_string(), &RangeRequest::Range0Barrier)
+            .await
+            .expect("first call");
+        assert!(first == RangeResponse::Range0Barriered);
+        // Let the server's close reach the pooled socket.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let second = client
+            .call(&addr.to_string(), &RangeRequest::Range0Barrier)
+            .await
+            .expect("second call transparently dials fresh");
+        assert!(second == RangeResponse::Range0Barriered);
+
+        assert!(accepts.load(Ordering::SeqCst) == 2);
+    }
+
+    #[tokio::test]
+    async fn idle_ttl_evicts_pooled_connection_instead_of_reusing_it() {
+        use assert2::assert;
+        let (addr, accepts) = spawn_counting_loopback(Arc::new(EchoService::default())).await;
+        let client = FramedTcpClient::default()
+            .with_pool_tuning(Duration::from_millis(50), POOL_MAX_IDLE_PER_ENDPOINT);
+
+        for _ in 0..2 {
+            let response = client
+                .call(&addr.to_string(), &RangeRequest::Range0Barrier)
+                .await
+                .expect("pooled RPC");
+            assert!(response == RangeResponse::Range0Barriered);
+            tokio::time::sleep(Duration::from_millis(120)).await;
+        }
+
+        assert!(accepts.load(Ordering::SeqCst) == 2);
+    }
+
+    #[tokio::test]
+    async fn mid_call_peer_drop_surfaces_error_and_is_not_pooled() {
+        use assert2::assert;
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let addr = listener.local_addr().expect("loopback address");
+        let accepts = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&accepts);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let accepted = counter.fetch_add(1, Ordering::SeqCst) + 1;
+                tokio::spawn(async move {
+                    if accepted == 1 {
+                        // Read the request, then drop the connection without
+                        // responding.
+                        let _ = read_frame::<_, RangeRequest>(&mut stream).await;
+                    } else {
+                        let _ = handle_stream(stream, Arc::new(EchoService::default())).await;
+                    }
+                });
+            }
+        });
+        let client = FramedTcpClient::default();
+
+        let error = client
+            .call(&addr.to_string(), &RangeRequest::Range0Barrier)
+            .await
+            .expect_err("peer dropped after the request write");
+        assert!(matches!(error, TransportError::Io(_)));
+        let response = client
+            .call(&addr.to_string(), &RangeRequest::Range0Barrier)
+            .await
+            .expect("fresh connection succeeds");
+        assert!(response == RangeResponse::Range0Barriered);
+
+        assert!(accepts.load(Ordering::SeqCst) == 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pooled_connections_never_cross_runtimes() {
+        use assert2::assert;
+        let (addr, accepts) = spawn_counting_loopback(Arc::new(EchoService::default())).await;
+        let client = FramedTcpClient::default();
+
+        let first = client
+            .call(&addr.to_string(), &RangeRequest::Range0Barrier)
+            .await
+            .expect("main runtime call");
+        assert!(first == RangeResponse::Range0Barriered);
+        assert!(accepts.load(Ordering::SeqCst) == 1);
+
+        // A short-lived scan runtime must not see the main runtime's pooled
+        // connection (tokio sockets die with the runtime that dialed them),
+        // and its own connection must not poison the shared pool.
+        let ephemeral_client = client.clone();
+        let endpoint = addr.to_string();
+        let ephemeral = std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("ephemeral runtime")
+                .block_on(async move {
+                    ephemeral_client
+                        .call(&endpoint, &RangeRequest::Range0Barrier)
+                        .await
+                        .expect("ephemeral runtime call")
+                })
+        })
+        .join()
+        .expect("ephemeral runtime thread");
+        assert!(ephemeral == RangeResponse::Range0Barriered);
+        assert!(accepts.load(Ordering::SeqCst) == 2);
+
+        // Back on the main runtime the original connection is still reusable.
+        let third = client
+            .call(&addr.to_string(), &RangeRequest::Range0Barrier)
+            .await
+            .expect("main runtime reuse");
+        assert!(third == RangeResponse::Range0Barriered);
+        assert!(accepts.load(Ordering::SeqCst) == 2);
+    }
+
+    /// Service returning a rows result large enough to span several SQL chunks.
+    struct BigRowsService;
+
+    #[async_trait]
+    impl RangeService for BigRowsService {
+        async fn handle(&self, _request: RangeRequest) -> RangeResponse {
+            let cell = WireCell {
+                text: vec![120; 150_000],
+                binary: Vec::new(),
+            };
+            let row = vec![Some(cell)];
+            RangeResponse::SqlResults {
+                results: vec![WireQueryResult::Rows {
+                    fields: vec![WireFieldDescription {
+                        name: "c".into(),
+                        table_oid: 0,
+                        column_id: 0,
+                        type_oid: 25,
+                        type_size: -1,
+                        type_modifier: -1,
+                        format: 0,
+                    }],
+                    rows: vec![row.clone(), row.clone(), row],
+                    tag: "SELECT 3".into(),
+                }],
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn call_sql_into_reuses_one_connection_across_multi_chunk_results() {
+        use assert2::assert;
+        let (addr, accepts) = spawn_counting_loopback(Arc::new(BigRowsService)).await;
+        let client = FramedTcpClient::default();
+
+        for _ in 0..2 {
+            let mut sink = crabka_pgwire::engine::CollectingResultSink::default();
+            client
+                .call_sql_into(
+                    &addr.to_string(),
+                    &RangeRequest::Sql {
+                        range_id: RangeId::new(1),
+                        sql: "select big".into(),
+                    },
+                    &mut sink,
+                )
+                .await
+                .expect("chunked SQL RPC");
+            let row_pages = sink
+                .pages()
+                .iter()
+                .filter(|page| matches!(page, ResultPage::Rows { .. }))
+                .count();
+            assert!(row_pages >= 2);
+        }
+
+        assert!(accepts.load(Ordering::SeqCst) == 1);
     }
 
     #[test]

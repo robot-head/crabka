@@ -65,6 +65,14 @@ topology:
   nodes: 3                 # crabka-gres processes
   ranges: 4                # ranges r0..r3, round-robin over nodes (r0 on node 0)
   clock_skew_ms: { 0: 400 }  # per-node HLC wall-clock offset (hlc mode only)
+  cpus_per_node: 3           # optional: pin each node to 3 dedicated CPUs
+                             # (broker gets CPUs 0-1). Makes each node a
+                             # fixed-capacity "host" so single-machine scaling
+                             # curves measure the architecture, not one box
+                             # partitioned N ways. For full isolation run the
+                             # harness itself under `taskset` on the leftover
+                             # CPUs. Fails fast if 2 + nodes*cpus exceeds the
+                             # machine.
 mode: logical-tso          # or:  mode: { hlc: { max_offset_ms: 250 } }
 workload:
   connections: 24          # concurrent clients, round-robin over node front doors
