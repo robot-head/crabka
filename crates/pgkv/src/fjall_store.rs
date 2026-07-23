@@ -28,7 +28,7 @@ use crate::{Kv, KvError, KvPair, KvSnapshot, RestoreKv, SnapshotKv, WriteOp, sto
 /// same transactional database also share that fsync (a single `persist`
 /// flushes all pending writes).
 ///
-/// Sustained writes rotate the active memtable every [`ROTATE_AFTER_OPS`]
+/// Sustained writes rotate the active memtable every [`KeyspaceKv::rotate_after`]
 /// committed ops (on top of fjall's byte-based trigger), so fjall's worker
 /// pool keeps flushing sstables and compacting instead of letting shadowed
 /// entries pile up on hot key prefixes.
@@ -38,8 +38,11 @@ pub struct KeyspaceKv {
     persist_mode: LocalPersistMode,
     group: GroupCommit,
     /// Ops committed since the last memtable rotation this handle requested;
-    /// crossing [`ROTATE_AFTER_OPS`] resets it and rotates.
+    /// crossing [`Self::rotate_after`] resets it and rotates.
     ops_since_rotate: AtomicU64,
+    /// Committed-op rotation threshold for this handle (see
+    /// [`DEFAULT_ROTATE_AFTER_OPS`]).
+    rotate_after: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -90,7 +93,29 @@ struct Pending {
 /// Counting ops bounds that skim directly; rotation seals the memtable and
 /// fjall's worker pool flushes it to an sstable (dropping shadowed versions at
 /// flush) and then compacts.
-const ROTATE_AFTER_OPS: u64 = 1024;
+///
+/// The default is deliberately high: write-path MVCC pruning bounds hot-key
+/// version chains independently, so the rotation cap no longer has to fire
+/// early to keep hot-row reads fast, and a low cap under distinct-key insert
+/// load flushes tiny sstables every few tens of milliseconds — a compaction
+/// storm that halves sustained insert throughput. Overridable at process
+/// start via `CRABKA_PGKV_ROTATE_AFTER_OPS` for workload-specific tuning; the
+/// byte cap still bounds absolute memtable size.
+const DEFAULT_ROTATE_AFTER_OPS: u64 = 262_144;
+
+/// Rotation threshold in effect for this process, read once from
+/// `CRABKA_PGKV_ROTATE_AFTER_OPS` (falling back to [`DEFAULT_ROTATE_AFTER_OPS`]
+/// on an absent, empty, unparsable, or zero value).
+fn rotate_threshold() -> u64 {
+    static VALUE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("CRABKA_PGKV_ROTATE_AFTER_OPS")
+            .ok()
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_ROTATE_AFTER_OPS)
+    })
+}
 
 /// Hands leadership off when a leader finishes — including by unwinding.
 ///
@@ -131,6 +156,7 @@ impl KeyspaceKv {
             persist_mode: LocalPersistMode::SyncAll,
             group: GroupCommit::default(),
             ops_since_rotate: AtomicU64::new(0),
+            rotate_after: rotate_threshold(),
         }
     }
 
@@ -143,6 +169,7 @@ impl KeyspaceKv {
             persist_mode: LocalPersistMode::Buffer,
             group: GroupCommit::default(),
             ops_since_rotate: AtomicU64::new(0),
+            rotate_after: rotate_threshold(),
         }
     }
 
@@ -279,7 +306,7 @@ impl KeyspaceKv {
         Ok(())
     }
 
-    /// Credit `staged_ops` toward [`ROTATE_AFTER_OPS`] and rotate the active
+    /// Credit `staged_ops` toward [`DEFAULT_ROTATE_AFTER_OPS`] and rotate the active
     /// memtable once the threshold is crossed. Runs strictly after the group's
     /// commit and persist, when the group is already durable — so a rotation
     /// failure must not fail the write: the leader clones its result to every
@@ -292,7 +319,7 @@ impl KeyspaceKv {
         let before = self
             .ops_since_rotate
             .fetch_add(staged_ops, Ordering::Relaxed);
-        if before + staged_ops < ROTATE_AFTER_OPS {
+        if before + staged_ops < self.rotate_after {
             return;
         }
         self.ops_since_rotate.store(0, Ordering::Relaxed);
@@ -1020,13 +1047,16 @@ mod tests {
         use assert2::assert;
 
         let dir = temp();
-        let kv = FjallKv::open_cache(dir.path()).expect("open cache");
+        let mut kv = FjallKv::open_cache(dir.path()).expect("open cache");
 
         // Rewriting one key never grows the logical dataset, so a byte-based
         // rotation trigger alone would leave every shadowed version in the
         // active memtable. Crossing the op-count threshold must rotate and
         // background-flush regardless of size.
-        let final_round = 2 * ROTATE_AFTER_OPS;
+        // Shrink the rotation threshold for this handle so the test crosses
+        // it quickly rather than churning the 256k-op default.
+        kv.inner.rotate_after = 512;
+        let final_round: u64 = 2 * kv.inner.rotate_after;
         for round in 0..=final_round {
             kv.put(b"hot".to_vec(), round.to_le_bytes().to_vec())
                 .expect("put");
