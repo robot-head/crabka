@@ -552,8 +552,8 @@ pub fn project(
 
 #[cfg(test)]
 mod tests {
-    use crabka_pgtypes::{ColumnType, Datum};
     use bigdecimal::num_bigint::BigInt;
+    use crabka_pgtypes::{ColumnType, Datum};
 
     use super::*;
 
