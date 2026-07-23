@@ -222,3 +222,64 @@ async fn reads_and_prewrites_below_the_published_floor_are_refused() {
         .await;
     assert!(let Err(ExecError::SerializationFailure) = stale_write);
 }
+
+#[tokio::test]
+async fn participant_commit_resolves_publish_closure_and_reclaim() {
+    // The live range service commits through participant prewrite/resolve
+    // calls, and a pure-write workload may serve every planning read at the
+    // owner timestamp (`u64::MAX`), which never reconciles closure. Commit
+    // resolution itself must therefore publish the committed timestamp as
+    // closed: without it the reclaim floor sits at zero forever and every
+    // superseded version survives (the load-test regression).
+    let engine = SqlEngine::new();
+    engine.ts_version_gc().set_floor_lag(Duration::ZERO);
+    let participant = engine.timestamp_txn_participant(3);
+    let write = TimestampWrite {
+        table_id: 42,
+        bucket: None,
+        rowid: 7,
+        row: vec![
+            crabka_pgtypes::Datum::Int4(1),
+            crabka_pgtypes::Datum::Int4(1),
+        ],
+        delete: false,
+        global_index_intents: Vec::new(),
+    };
+    for i in 0_u64..40 {
+        let start_ts =
+            timestamp_txn::TimestampTransactionId::new(1_000 + 10 * i).expect("start ts");
+        let identity = crabka_pgexec::TimestampTxnIdentity {
+            start_ts,
+            global_xid: start_ts.get(),
+            primary_range: 3,
+        };
+        participant
+            .prewrite_as_primary(identity, &[3], std::slice::from_ref(&write))
+            .await
+            .expect("prewrite");
+        let commit_ts = timestamp_txn::CommitTimestamp::after_start(start_ts, start_ts.get() + 1)
+            .expect("commit ts");
+        participant
+            .resolve_as_primary(
+                identity,
+                crabka_pgexec::TimestampTxnDecision::Committed(commit_ts),
+                std::slice::from_ref(&write),
+            )
+            .await
+            .expect("resolve");
+    }
+
+    // Each resolve published its commit timestamp as closed.
+    assert!(engine.local_closed_timestamp() >= 1_000);
+
+    // Superseded versions were pruned in the resolve batches: the physical
+    // chain stays bounded instead of holding all 40 versions.
+    let versions = engine
+        .kv_handle()
+        .scan_prefix(&crabka_pgkv::key::row_key(42, 7))
+        .expect("scan")
+        .into_iter()
+        .filter(|(_, value)| crabka_pgmvcc::version::decode_ts_tuple(value).is_ok())
+        .count();
+    assert!(versions <= 3);
+}

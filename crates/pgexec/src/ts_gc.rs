@@ -1,11 +1,10 @@
 //! Timestamp-domain dead-version reclamation for sharded tables.
 //!
-//! The xid path reclaims dead versions through write-path chain pruning and
-//! the engine-level vacuum, but both are confined to plain single-range
-//! tables: the vacuum skips sharded tables outright and never runs on
-//! replicated engines (a local delete outside the WAL would diverge
-//! replicas). Timestamp-stamped versions therefore accumulated forever, and
-//! every update of a hot row paid O(total updates) to rescan its chain.
+//! The xid path reclaims dead versions through write-path chain pruning (on
+//! every engine kind) and the engine-level vacuum (single-range local
+//! engines), but both cover only xid tuples. Timestamp-stamped versions had
+//! no reclamation at all: they accumulated forever, and every update of a
+//! hot row paid O(total updates) to rescan its chain.
 //!
 //! [`TsVersionGc`] closes that gap with write-path opportunistic pruning:
 //! when a timestamp transaction resolves a row to a committed or deleted
@@ -62,6 +61,21 @@ pub(crate) const TS_PRUNE_ROW_VERSION_CAP: usize = 64;
 /// reclamation at all.
 const TS_PRUNE_FLOOR_LAG: Duration = Duration::from_secs(5);
 
+/// Minimum interval between reclamation-telemetry log lines
+/// ([`TsVersionGc::log_engagement`]).
+const TS_GC_LOG_EVERY: Duration = Duration::from_secs(1);
+
+/// Reclamation telemetry accumulated between rate-limited log emissions.
+#[derive(Default)]
+struct EngagementLog {
+    /// When the previous line was emitted; `None` before the first.
+    last_emitted: Option<Instant>,
+    /// Commit batches that ran pruning since the previous line.
+    batches: u64,
+    /// Dead versions deleted since the previous line.
+    pruned: u64,
+}
+
 /// Shared timestamp-version GC state for one engine (one range): the
 /// timestamp-domain pin registry plus the closed-timestamp floor source.
 /// Shared across `clone_handle` handles and sessions like the local sequence.
@@ -79,6 +93,8 @@ pub struct TsVersionGc {
     /// [`TS_PRUNE_FLOOR_LAG`]); tests shrink it to observe reclamation
     /// without waiting out the production lag.
     floor_lag_millis: std::sync::atomic::AtomicU64,
+    /// Rate-limited reclamation telemetry (see [`Self::log_engagement`]).
+    engagement: Mutex<EngagementLog>,
 }
 
 impl TsVersionGc {
@@ -93,6 +109,7 @@ impl TsVersionGc {
             floor_lag_millis: std::sync::atomic::AtomicU64::new(
                 u64::try_from(TS_PRUNE_FLOOR_LAG.as_millis()).unwrap_or(u64::MAX),
             ),
+            engagement: Mutex::new(EngagementLog::default()),
         }
     }
 
@@ -227,6 +244,7 @@ impl TsVersionGc {
                 });
             }
         }
+        self.log_engagement(floor, u64::try_from(ops.len()).unwrap_or(u64::MAX));
         if !ops.is_empty() {
             // The published floor must cover every pruned version's superseding
             // commit; `floor` does (the rule only kills versions superseded at
@@ -238,6 +256,33 @@ impl TsVersionGc {
             });
         }
         Ok(ops)
+    }
+
+    /// Emit rate-limited reclamation telemetry: at most one debug line per
+    /// [`TS_GC_LOG_EVERY`], carrying the current floor and the batch/deletion
+    /// counts accumulated since the previous line. A live node logging a zero
+    /// floor with growing `batches` shows pruning is wired but closure is not
+    /// advancing; a non-zero `pruned` confirms end-to-end engagement.
+    fn log_engagement(&self, floor: u64, pruned: u64) {
+        let mut log = self.engagement.lock().expect("engagement log");
+        log.batches += 1;
+        log.pruned += pruned;
+        let now = Instant::now();
+        let due = log
+            .last_emitted
+            .is_none_or(|last| now.duration_since(last) >= TS_GC_LOG_EVERY);
+        if !due {
+            return;
+        }
+        tracing::debug!(
+            floor,
+            pruned = log.pruned,
+            batches = log.batches,
+            "ts_version_gc_engagement"
+        );
+        log.last_emitted = Some(now);
+        log.batches = 0;
+        log.pruned = 0;
     }
 }
 

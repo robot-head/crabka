@@ -81,10 +81,11 @@ pub(crate) struct WriteContext<'a> {
     pub repeatable_read: bool,
     pub eval_ctx: &'a crate::clock::EvalCtx,
     /// `Some(garbage horizon)` iff this statement may opportunistically prune
-    /// dead versions of the rows it writes (single-range LOCAL engines only —
-    /// the session computes it once per statement; `None` disables pruning,
-    /// as on replicated engines where a local delete outside the WAL would
-    /// diverge replicas and checkpoints).
+    /// dead versions of the rows it writes (the session computes it once per
+    /// statement). Insert-only statements pass `None`: they re-read no
+    /// chains, so there is nothing to prune. The prune deletes ride this
+    /// statement's own commit batch, so they replicate and replay like any
+    /// other write.
     pub prune_horizon: Option<u64>,
     /// Bound on every lock wait this statement performs (`None` waits
     /// indefinitely under the engine-local deadlock detector). Set for
@@ -1983,10 +1984,12 @@ pub(crate) struct ChainPrune {
 /// is ever dead — but the survivor computation for shared index entries must
 /// not race a writer re-adding the same indexed values for this rowid.
 ///
-/// Only meaningful on single-range LOCAL engines: local xids only, no
-/// `Prepared` clog states, so plain local clog reads decide status. Callers
-/// gate on the engine mode (`WriteContext::prune_horizon` /
-/// `SqlEngine::supports_local_vacuum`).
+/// Engine kinds: sound everywhere, because the returned ops are folded into
+/// the caller's own commit batch — on replicated engines they replicate
+/// through the WAL and replay deterministically. Global 2PC writes are
+/// self-protecting: an undecided enlisted xid reads as `Prepared` (which
+/// [`crabka_pgmvcc::gc::version_is_dead`] never treats as dead), and global
+/// xids sit numerically above every local horizon.
 ///
 /// One rowid-chain prune request (see [`prune_rowid_chain_ops`]).
 pub(crate) struct ChainPruneRequest<'a> {
@@ -2009,6 +2012,49 @@ pub(crate) struct ChainPruneRequest<'a> {
     /// horizon, so a committed sub-horizon creator was already
     /// settled-and-committed for it.
     pub freeze_below: Option<u64>,
+}
+
+/// Rate-limited write-path reclamation telemetry accumulated between
+/// emissions (process-wide; see [`log_prune_engagement`]).
+#[derive(Default)]
+struct PruneEngagementLog {
+    /// When the previous line was emitted; `None` before the first.
+    last_emitted: Option<std::time::Instant>,
+    /// Row chains examined since the previous line.
+    rows: u64,
+    /// Dead versions selected for deletion since the previous line.
+    pruned: u64,
+}
+
+static PRUNE_ENGAGEMENT: std::sync::LazyLock<std::sync::Mutex<PruneEngagementLog>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(PruneEngagementLog::default()));
+
+/// Emit at most one `xid_chain_prune_engaged` debug line per second, carrying
+/// the current horizon and the chain/deletion counts accumulated since the
+/// previous line. A live node logging a low `horizon` with growing `rows` and
+/// zero `pruned` shows the write path consults the horizon but finds nothing
+/// dead; non-zero `pruned` confirms end-to-end reclamation.
+fn log_prune_engagement(horizon: u64, pruned: u64) {
+    const EMIT_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
+    let mut log = PRUNE_ENGAGEMENT.lock().expect("prune engagement log");
+    log.rows += 1;
+    log.pruned += pruned;
+    let now = std::time::Instant::now();
+    let due = log
+        .last_emitted
+        .is_none_or(|last| now.duration_since(last) >= EMIT_EVERY);
+    if !due {
+        return;
+    }
+    tracing::debug!(
+        horizon,
+        pruned = log.pruned,
+        rows = log.rows,
+        "xid_chain_prune_engaged"
+    );
+    log.last_emitted = Some(now);
+    log.rows = 0;
+    log.pruned = 0;
 }
 
 pub(crate) fn prune_rowid_chain_ops(
@@ -2047,6 +2093,7 @@ pub(crate) fn prune_rowid_chain_ops(
         }
         surviving.push(row);
     }
+    log_prune_engagement(horizon, dead.len() as u64);
     if dead.is_empty() && freeze.is_empty() {
         return Ok(ChainPrune {
             ops: Vec::new(),

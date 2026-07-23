@@ -1085,30 +1085,34 @@ impl SqlSession {
         }
     }
 
-    /// The garbage horizon UPDATE/DELETE may prune dead row versions at, or
-    /// `None` when this session's engine must not prune locally.
+    /// The garbage horizon UPDATE/DELETE may prune dead row versions at.
     ///
-    /// Pruning is a physical local delete outside any replicated batch
-    /// ordering, so it is only sound on the plain single-range LOCAL engine:
-    /// Durable persist mode (a replicated engine's deterministic WAL apply and
-    /// checkpoints would diverge), no GTM and no range-0 barrier (multi-range
-    /// rows can carry global xids whose lifecycle the local horizon cannot
-    /// judge), and a single store for data + catalog. Mirrors
-    /// `SqlEngine::supports_local_vacuum`.
-    fn local_prune_horizon(&self) -> Result<Option<u64>, ExecError> {
-        if self.persist_mode != crate::PersistMode::Durable
-            || self.gtm.is_some()
-            || self.range0_barrier.is_some()
-            || !Arc::ptr_eq(&self.kv, &self.catalog_kv)
-        {
-            return Ok(None);
-        }
+    /// Sound on every engine kind — unlike [`SqlEngine::vacuum`], whose local
+    /// sweeps are why it stays confined to single-range local engines:
+    ///
+    /// - The prune deletes ride the statement's own commit batch through the
+    ///   engine committer, so on replicated engines they replicate through
+    ///   the WAL and replay deterministically on followers, in recovery, and
+    ///   in committed folds — never a local delete outside batch ordering.
+    /// - The horizon is capped by this engine's oldest running writer and
+    ///   lowest registered snapshot pin, which covers every reader of this
+    ///   store: plain-table reads are always served by owner-local sessions
+    ///   (forwarded DML and queries open sessions here; cross-range scatter
+    ///   scans exist only for sharded tables, whose timestamp tuples this
+    ///   pruning never touches), and a snapshot allocated after a prune
+    ///   commits sees the pruned version's committed deleter, so the version
+    ///   was already invisible to it.
+    /// - Global 2PC writes stay untouched: an undecided enlisted xid reads as
+    ///   `Prepared` (never dead), and global xids sit numerically above every
+    ///   local horizon.
+    ///
+    /// [`SqlEngine::vacuum`]: crate::SqlEngine::vacuum
+    fn local_prune_horizon(&self) -> Result<u64, ExecError> {
         crate::checkpoint_garbage_horizon(
             self.procarray.as_ref(),
             self.kv.as_ref(),
             self.gc_horizon.as_ref(),
         )
-        .map(Some)
     }
 
     /// Set the timestamp transaction whose pending intents are owned by this SQL session.
@@ -2220,9 +2224,9 @@ impl SqlSession {
                 // next_xid op into this batch (the state machine max-merges it;
                 // re-folding on a later write in the same txn is harmless).
                 // Cache the garbage horizon once per statement: UPDATE/DELETE
-                // prune the chains of the rows they write against it (local
-                // engines only; None disables pruning elsewhere).
-                let prune_horizon = self.local_prune_horizon()?;
+                // prune the chains of the rows they write against it, in the
+                // same commit batch as the write itself.
+                let prune_horizon = Some(self.local_prune_horizon()?);
                 let write_ctx = self.write_context(
                     &gsnap,
                     &snapshot,
@@ -2316,7 +2320,7 @@ impl SqlSession {
                 let ctx = self.eval_ctx();
                 // Cache the garbage horizon once per statement (see the
                 // in-transaction branch above).
-                let prune_horizon = self.local_prune_horizon()?;
+                let prune_horizon = Some(self.local_prune_horizon()?);
                 let write_ctx =
                     self.write_context(&gsnap, &snapshot, xid, false, &ctx, prune_horizon);
                 let outcome = crate::exec::execute_write(&write_ctx, stmt).await;
@@ -2523,13 +2527,10 @@ impl SqlSession {
             .commit_with_ops(start_ts, commit_ts, &plan.writes, plan.commit_ops)
             .await
         {
-            Ok(()) => {
-                // No range gateway reconciles reads on this path, so close the
-                // committed timestamp here: it both upholds monotone reads and
-                // feeds the reclaim floor that prunes superseded versions.
-                self.ts_gc.observe_committed(commit_ts);
-                Ok(plan.result)
-            }
+            // The participant publishes closure for the committed timestamp
+            // itself (`observe_committed_decision`), feeding the reclaim
+            // floor that prunes superseded versions.
+            Ok(()) => Ok(plan.result),
             Err(error) => {
                 let _ = participant.abort(start_ts, &plan.writes).await;
                 Err(error)

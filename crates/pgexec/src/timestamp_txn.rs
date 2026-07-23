@@ -1530,6 +1530,23 @@ impl TimestampTxnParticipant {
         ts_gc.prune_batch_ops(self.kv.as_ref(), writes)
     }
 
+    /// Publish closure for a durably committed decision through the attached
+    /// GC state (a no-op on bare participants or aborts). Commit resolution
+    /// is the closure source that works under a pure-write workload: served
+    /// reads also publish closure, but a range whose reads all arrive at the
+    /// owner timestamp (`u64::MAX` never reconciles) would otherwise never
+    /// advance its closed timestamp, and a reclaim floor derived from it
+    /// would sit at zero forever with every dead version left in place.
+    /// Call only after the resolve batch is durably committed.
+    fn observe_committed_decision(&self, decision: TimestampTxnDecision) {
+        if let Some(ts_gc) = &self.ts_gc
+            && let TimestampTxnDecision::Committed(commit_ts)
+            | TimestampTxnDecision::Deleted(commit_ts) = decision
+        {
+            ts_gc.observe_committed(commit_ts);
+        }
+    }
+
     /// Require the range-0 primary replica to be current before validating it.
     #[must_use]
     pub(crate) fn with_primary_barrier(
@@ -1731,7 +1748,9 @@ impl TimestampTxnParticipant {
             )?);
         }
         ops.extend(self.commit_prune_ops(decision, writes)?);
-        self.committer.commit(ops).await
+        self.committer.commit(ops).await?;
+        self.observe_committed_decision(decision);
+        Ok(())
     }
 
     /// Write the primary decision and resolve local intents to committed versions.
@@ -1772,7 +1791,9 @@ impl TimestampTxnParticipant {
         )?);
         ops.extend(self.commit_prune_ops(TimestampTxnDecision::Committed(commit_ts), writes)?);
         ops.extend(extra_ops);
-        self.committer.commit(ops).await
+        self.committer.commit(ops).await?;
+        self.observe_committed_decision(TimestampTxnDecision::Committed(commit_ts));
+        Ok(())
     }
 
     /// Abort the primary decision and resolve local intents to aborted versions.
@@ -1841,7 +1862,9 @@ impl TimestampTxnParticipant {
                 writes.iter().map(|write| (write.table_id, write.rowid)),
             )?);
         }
+        ops.extend(self.commit_prune_ops(decision, writes)?);
         self.committer.commit(ops).await?;
+        self.observe_committed_decision(decision);
         if decision != TimestampTxnDecision::Aborted
             && let Some(sequence) = &self.sequence
         {
@@ -1899,6 +1922,7 @@ impl TimestampTxnParticipant {
         }
         ops.extend(self.commit_prune_ops(decision, writes)?);
         self.committer.commit(ops).await?;
+        self.observe_committed_decision(decision);
         let stored = read_timestamp_txn_descriptor(self.kv.as_ref(), identity.start_ts)?;
         if stored.as_ref() != Some(&terminal) {
             return Err(map_ts_error(TimestampTxnError::IdentityFenced));
@@ -1963,10 +1987,23 @@ impl TimestampTxnParticipant {
                     .map(|operation| (operation.table_id, operation.rowid)),
             )?);
         }
+        let prune_writes = operations
+            .iter()
+            .map(|operation| TimestampWrite {
+                table_id: operation.table_id,
+                bucket: operation.bucket,
+                rowid: operation.rowid,
+                row: Vec::new(),
+                delete: operation.delete,
+                global_index_intents: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        ops.extend(self.commit_prune_ops(decision, &prune_writes)?);
         if ops.is_empty() {
             return Ok(());
         }
         self.committer.commit(ops).await?;
+        self.observe_committed_decision(decision);
         if decision != TimestampTxnDecision::Aborted
             && let Some(sequence) = &self.sequence
         {

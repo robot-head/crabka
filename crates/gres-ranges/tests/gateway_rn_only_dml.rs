@@ -495,6 +495,57 @@ async fn rn_only_gateway_forwards_ordinary_dml_for_unhosted_and_hosted_ranges() 
     assert!(sorted_rows(&rows) == expected_rows(&[&[9]]));
 }
 
+/// The contended-update regression: an update-heavy autocommit workload
+/// forwarded to an unhosted range must not grow the hot row's physical
+/// version chain without bound. The owner engine prunes superseded versions
+/// inside each forwarded statement's own commit batch (there is no vacuum on
+/// multi-range engines), so the chain stays O(1) while throughput-relevant
+/// scans stay O(chain).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rn_only_gateway_forwarded_update_loop_keeps_owner_chain_bounded() {
+    let topology = rn_only_topology("rn_only_dml_prune", "rn-only-dml-prune").await;
+    let mut session = topology.gateway.connect();
+
+    session
+        .simple_query(&format!("INSERT INTO {REMOTE_PLAIN_TABLE} VALUES (1)"))
+        .await
+        .expect("seed the hot row through the gateway");
+    for _ in 0..40 {
+        let results = session
+            .simple_query(&format!(
+                "UPDATE {REMOTE_PLAIN_TABLE} SET id = 1 WHERE id = 1"
+            ))
+            .await
+            .expect("forwarded autocommit update");
+        assert!(
+            results
+                == vec![QueryResult::Command {
+                    tag: "UPDATE 1".to_string()
+                }]
+        );
+    }
+
+    // The row is still current and unique through the gateway.
+    let rows = session
+        .simple_query(&format!("SELECT id FROM {REMOTE_PLAIN_TABLE}"))
+        .await
+        .expect("gateway read");
+    assert!(sorted_rows(&rows) == expected_rows(&[&[1]]));
+
+    // Superseded versions were reclaimed on the owner: the physical chain in
+    // the remote r2 store stays bounded instead of holding all 40 versions.
+    let table_id = catalog_table_id(&topology.catalog_engine, REMOTE_PLAIN_TABLE);
+    let versions = topology
+        .remote_engine
+        .kv_handle()
+        .scan_prefix(&crabka_pgkv::key::table_prefix(table_id))
+        .expect("scan owner store")
+        .iter()
+        .filter(|(_, value)| crabka_pgmvcc::version::decode_tuple(value).is_ok())
+        .count();
+    assert!(versions <= 3, "owner chain grew to {versions} versions");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rn_only_gateway_commits_ordinary_multi_range_explicit_transaction() {
     let topology = rn_only_topology("rn_only_dml_global", "rn-only-dml-global").await;

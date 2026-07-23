@@ -710,15 +710,16 @@ impl SqlEngine {
         })
     }
 
-    /// Whether this engine may physically reclaim dead MVCC versions locally
-    /// (write-path chain pruning and [`SqlEngine::vacuum`]).
+    /// Whether this engine may run [`SqlEngine::vacuum`] sweeps locally.
     ///
     /// True only for the plain single-range local engine (`new`/`open`/
     /// `with_kv`): Durable persist mode, no GTM, no range-0 barrier, and a
-    /// single store for data + catalog. Replicated engines apply WAL batches
-    /// deterministically — a local delete outside the WAL would diverge
-    /// replicas and checkpoints — and multi-range engines can carry global
-    /// xids whose lifecycle the local horizon cannot judge.
+    /// single store for data + catalog. A vacuum sweep commits batches of its
+    /// own, outside any statement's replicated ordering — on a replicated
+    /// engine that local delete outside the WAL would diverge replicas and
+    /// checkpoints. Write-path chain pruning is independent of this gate: its
+    /// deletes ride each statement's own commit batch, so every engine kind
+    /// prunes the rows it rewrites.
     #[must_use]
     pub fn supports_local_vacuum(&self) -> bool {
         self.persist_mode == PersistMode::Durable
