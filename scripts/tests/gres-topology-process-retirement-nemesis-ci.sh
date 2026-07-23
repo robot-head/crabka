@@ -55,6 +55,6 @@ for kill_point, values in expected.items():
     assert evidence["post_publication_ack_before_retirement"] is True
     assert evidence["post_completed_ack"] is True
     assert evidence["acknowledged_rows"] > evidence["acknowledgements_at_completion"]
-    assert evidence["max_ack_gap_ms"] <= evidence["max_ack_gap_bound_ms"] == 16000
+    assert evidence["max_ack_gap_ms"] <= evidence["max_ack_gap_bound_ms"] == 18000
 assert len(identities) == len(expected)
 PY

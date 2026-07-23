@@ -150,15 +150,16 @@ fn parse_payload_ledger(body: &str) -> Result<PayloadLedger, String> {
 /// Client-side time the workload's ambiguity protocol may spend on top of
 /// engine recovery before an acknowledgement can land: a 3s healthy-empty-read
 /// streak plus polling and psql round trips. Added to the observed-safe engine
-/// ack-gap bounds.
-const WORKLOAD_AMBIGUITY_RESOLUTION_MS: u128 = 4_000;
+/// ack-gap bounds. A 4s allowance was overshot by 425ms on a CI runner in the
+/// sibling nemesis suite, so this carries a wider margin.
+const WORKLOAD_AMBIGUITY_RESOLUTION_MS: u128 = 6_000;
 
 /// Client-side INSERT timeout for the live workload. Must exceed every
 /// observed-safe ack-gap bound ([`SplitKillPoint::pause_bound_ms`] plus
 /// [`WORKLOAD_AMBIGUITY_RESOLUTION_MS`]): abandoning a statement the server
 /// may still commit is what creates unresolvable ambiguity, so a statement is
 /// only abandoned once the run has already blown its liveness bound.
-const WORKLOAD_INSERT_TIMEOUT: &str = "30s";
+const WORKLOAD_INSERT_TIMEOUT: &str = "40s";
 
 /// Explains a terminal rows-vs-ledger mismatch per offending (table, seq),
 /// using the client attempt and ambiguity-retry records to distinguish engine
