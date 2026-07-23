@@ -231,14 +231,48 @@ pub(crate) async fn run(mut cfg: SenderConfig) {
             _ = ticker.tick() => {
                 drain_once(&mut cfg, &mut state).await;
             }
-            _ = cfg.wake_rx.recv() => {
+            received = cfg.wake_rx.recv() => {
+                // A closed wake channel means every producer handle is gone,
+                // so no further record can ever arrive: fall through to the
+                // final drain instead of hot-looping on the closed receiver.
+                if received.is_none() {
+                    break;
+                }
                 drain_once(&mut cfg, &mut state).await;
             }
         }
     }
 
-    // Drain anything left when we shut down so `close()` doesn't drop records.
-    drain_once(&mut cfg, &mut state).await;
+    // Settle everything left when we shut down so neither `close()` nor a
+    // dropped-without-close producer strands records: one drain can cap out at
+    // `max_in_flight` or park a transiently failed batch in a retry slot, so
+    // keep draining on the linger cadence until the accumulators, retry slots,
+    // and in-flight count are all settled. Bounded by the same budget a
+    // failing batch is given before it is terminally failed, so a dead broker
+    // cannot pin the task forever; whatever remains past the budget resolves
+    // its acknowledgements through the drain's terminal-failure paths or drops
+    // as cancellation exactly as before.
+    let settle_deadline = Instant::now() + ROUTING_RETRY_BUDGET;
+    loop {
+        drain_once(&mut cfg, &mut state).await;
+        let mut settled =
+            state.retry.is_empty() && cfg.in_flight.load(std::sync::atomic::Ordering::Acquire) == 0;
+        if settled {
+            for entry in cfg.accumulators.iter() {
+                let accumulator = entry.value().lock().await;
+                if accumulator.current.as_ref().is_some_and(|b| !b.is_empty())
+                    || !accumulator.ready.is_empty()
+                {
+                    settled = false;
+                    break;
+                }
+            }
+        }
+        if settled || Instant::now() >= settle_deadline {
+            break;
+        }
+        tokio::time::sleep(cfg.linger.max(Duration::from_millis(1))).await;
+    }
 }
 
 /// One drained partition's batch, prepared for sending: the encoded v2
