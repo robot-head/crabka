@@ -9,6 +9,12 @@
 //! how a run's first stamp is chosen differs. In the wall-anchored mode the
 //! stride is expressed in the packed domain (whole milliseconds of headroom),
 //! so the persist rate is bounded by wall time rather than by grant volume.
+//! The dense logical counter has no such intrinsic bound — a fixed count
+//! stride would persist once per that many grants, so its durable-write rate
+//! would climb with load — so it paces its stride against wall time instead,
+//! widening it under grant pressure and narrowing it when idle to hold the
+//! persist rate near a handful per second regardless of grant volume (see
+//! [`TsoOracle::persist_stride`]).
 
 use std::{
     num::NonZeroU64,
@@ -126,6 +132,15 @@ pub enum HeartbeatVerdict {
 /// State touched only on the slow path, guarded by the slow-path mutex.
 struct SlowState {
     has_granted: bool,
+    /// Logical mode only: the current horizon stride, widened under grant
+    /// pressure and narrowed when idle so the durable persist rate stays
+    /// bounded by wall time (see [`TsoOracle::advance_horizon`]). Seeded at the
+    /// configured base stride; unused by the wall-anchored arm, whose packed
+    /// stride is already wall-bounded.
+    persist_stride: u64,
+    /// Monotone-clock reading (ms) of the last horizon persist, or `u64::MAX`
+    /// before the first, used to measure the interval between persists.
+    last_persist_ms: u64,
 }
 
 /// How the oracle carves each contiguous reservation out of the timestamp
@@ -205,6 +220,24 @@ impl TsoClock for SystemTsoClock {
 }
 
 const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(10);
+
+/// Target minimum wall interval between logical-mode horizon persists.
+///
+/// The dense logical counter advances with grant volume, so a fixed-count
+/// stride would persist more frequently as load rises — a synchronous durable
+/// range-0 write on the serialized grant path every `stride` timestamps. When
+/// persists arrive faster than this interval the stride is widened (halving the
+/// persist rate) until they space out to roughly this cadence, so a busy
+/// logical oracle persists a handful of times per second regardless of grant
+/// volume — the same wall-time bound the wall-anchored arm gets from its packed
+/// stride, and comparable to that arm's own cadence.
+const LOGICAL_MIN_PERSIST_INTERVAL_MS: u64 = 100;
+
+/// Ceiling on the widened logical stride. Caps how far ahead the durable
+/// horizon runs, and therefore how many otherwise-unused timestamps a crash
+/// burns — trivial for the dense `u64` counter, whose space this never
+/// meaningfully dents.
+const LOGICAL_MAX_PERSIST_STRIDE: u64 = 1 << 24;
 
 /// Recovery-time parameters shared by both reservation modes.
 #[derive(Clone, Copy)]
@@ -406,7 +439,11 @@ where
             reservation,
             durable_max_ts: AtomicU64::new(persisted_max_ts),
             certified_until_ms: AtomicU64::new(0),
-            slow: Mutex::new(SlowState { has_granted: false }),
+            slow: Mutex::new(SlowState {
+                has_granted: false,
+                persist_stride: stride.get(),
+                last_persist_ms: u64::MAX,
+            }),
             stats: Arc::default(),
         }
     }
@@ -510,14 +547,16 @@ where
         if last <= self.durable_max_ts.load(Ordering::Acquire) {
             return Ok(());
         }
+        // Anchor the certificate before the epoch-gated persist round-trip, and
+        // reuse the same reading to pace the logical stride against wall time.
+        let now_ms = self.clock.now_ms();
+        let stride = self.persist_stride(&mut slow, now_ms);
         let stride_last = first
-            .checked_add(self.stride.get() - 1)
+            .checked_add(stride - 1)
             .ok_or(TsoError::TimestampOverflow)?;
         let new_horizon = last.max(stride_last);
         let persisted =
             TsoTimestamp::new(NonZeroU64::new(new_horizon).ok_or(TsoError::TimestampOverflow)?);
-        // Anchor the certificate before the epoch-gated persist round-trip.
-        let now_ms = self.clock.now_ms();
         self.committer
             .persist_max_ts_for_epoch(self.epoch, persisted)
             .await?;
@@ -532,6 +571,38 @@ where
             Ordering::Release,
         );
         Ok(())
+    }
+
+    /// Choose the horizon stride for this persist, pacing the logical arm
+    /// against wall time.
+    ///
+    /// The wall-anchored arm keeps its fixed packed stride — already whole
+    /// milliseconds of wall headroom, so its persist cadence is wall-bounded.
+    /// The dense logical arm advances with grant volume, so a fixed count
+    /// stride would persist more often as load rises, flooding the serialized
+    /// grant path with synchronous durable writes. Pace it against wall time
+    /// instead: widen the stride (halving the persist rate) whenever persists
+    /// arrive closer together than [`LOGICAL_MIN_PERSIST_INTERVAL_MS`], and
+    /// narrow it back toward the base once they space out, so the persist rate
+    /// settles at a handful per second under any grant volume while a light or
+    /// idle oracle keeps a tight horizon. Called under the slow-path mutex.
+    fn persist_stride(&self, slow: &mut SlowState, now_ms: u64) -> u64 {
+        match &self.reservation {
+            GrantReservation::WallAnchored { .. } => self.stride.get(),
+            GrantReservation::Logical(_) => {
+                let elapsed = now_ms.saturating_sub(slow.last_persist_ms);
+                if slow.last_persist_ms != u64::MAX && elapsed < LOGICAL_MIN_PERSIST_INTERVAL_MS {
+                    slow.persist_stride = slow
+                        .persist_stride
+                        .saturating_mul(2)
+                        .min(LOGICAL_MAX_PERSIST_STRIDE);
+                } else if elapsed > LOGICAL_MIN_PERSIST_INTERVAL_MS.saturating_mul(4) {
+                    slow.persist_stride = (slow.persist_stride / 2).max(self.stride.get());
+                }
+                slow.last_persist_ms = now_ms;
+                slow.persist_stride
+            }
+        }
     }
 
     async fn ensure_epoch_live(&self) -> Result<(), TsoError> {
@@ -987,6 +1058,110 @@ mod tests {
             self.persists.fetch_add(1, Ordering::SeqCst);
             self.inner.persist_max_ts_for_epoch(epoch, max_ts).await
         }
+    }
+
+    #[tokio::test]
+    async fn logical_persist_cadence_stays_bounded_under_sustained_grants() {
+        // The dense logical counter advances with grant volume, so a fixed
+        // count stride would persist once per `STRIDE` timestamps. A pinned
+        // wall clock models the worst case: grants pour in with no wall time
+        // passing between persists. Without pacing this run would perform
+        // `GRANTS` = 4096 synchronous durable writes; the adaptive stride
+        // widens on each too-soon persist, holding the count logarithmic.
+        const STRIDE: u64 = 8;
+        const GRANTS: u64 = 4096; // GRANTS * STRIDE timestamps consumed
+
+        let store = Arc::new(MemKv::default());
+        let horizon = MemoryTsoHorizon::new(store, 3);
+        let persists = Arc::new(AtomicU64::new(0));
+        let committer = CountingCommitter {
+            inner: horizon.clone(),
+            persists: Arc::clone(&persists),
+        };
+        // Clock pinned at 1 (past the absent grace period) and never advanced,
+        // so every persist sees a zero interval and must widen the stride.
+        let clock = Arc::new(ManualClock(AtomicU64::new(1)));
+        let oracle = TsoOracle::recover_with_clock(
+            committer,
+            horizon.clone(),
+            3,
+            nonzero(STRIDE),
+            0,
+            Duration::from_millis(10),
+            clock,
+        )
+        .expect("recover");
+
+        for _ in 0..GRANTS {
+            grant_within(&oracle, nonzero(STRIDE)).await.expect("grant");
+        }
+
+        // Geometric widening bounds this to ~log2(GRANTS) plus a small
+        // constant, versus GRANTS = 4096 without pacing.
+        let persist_count = persists.load(Ordering::SeqCst);
+        assert!(
+            persist_count <= 20,
+            "logical persists should stay logarithmic, got {persist_count}"
+        );
+        // Durability is preserved — only the cadence changed. The horizon still
+        // dominates every granted timestamp.
+        assert!(horizon.load_max_ts().expect("horizon") >= GRANTS * STRIDE);
+    }
+
+    #[tokio::test]
+    async fn persist_stride_widens_under_pressure_and_narrows_when_idle() {
+        let store = Arc::new(MemKv::default());
+        let horizon = MemoryTsoHorizon::new(store, 1);
+        let clock = Arc::new(ManualClock(AtomicU64::new(0)));
+        let oracle = TsoOracle::recover_with_clock(
+            horizon.clone(),
+            horizon.clone(),
+            1,
+            nonzero(1024),
+            0,
+            Duration::from_millis(10),
+            clock,
+        )
+        .expect("recover");
+
+        let mut slow = oracle.slow.lock().await;
+        // The first persist has no prior interval to measure, so the stride
+        // stays at the base.
+        assert!(oracle.persist_stride(&mut slow, 1_000) == 1_024);
+        // Persists arriving within the target interval keep doubling the
+        // stride, halving the persist rate each time.
+        assert!(oracle.persist_stride(&mut slow, 1_000) == 2_048);
+        assert!(oracle.persist_stride(&mut slow, 1_000) == 4_096);
+        let last_persist = 1_000 + LOGICAL_MIN_PERSIST_INTERVAL_MS - 1;
+        assert!(oracle.persist_stride(&mut slow, last_persist) == 8_192);
+        // A gap well past the target interval narrows the stride back toward
+        // the base, so an idle oracle keeps a tight horizon.
+        let idle_at = last_persist + LOGICAL_MIN_PERSIST_INTERVAL_MS * 4 + 1;
+        assert!(oracle.persist_stride(&mut slow, idle_at) == 4_096);
+    }
+
+    #[tokio::test]
+    async fn persist_stride_leaves_the_wall_anchored_stride_fixed() {
+        let store = Arc::new(MemKv::default());
+        let horizon = MemoryTsoHorizon::new(store, 1);
+        let wall = Arc::new(crabka_pgexec::ManualWallClock::new(1_000));
+        let clock = Arc::new(ManualClock(AtomicU64::new(0)));
+        let oracle = TsoOracle::recover_hlc_with_clock(
+            horizon.clone(),
+            horizon.clone(),
+            hlc_settings(1, 128, 0),
+            Arc::clone(&wall) as Arc<dyn WallClock>,
+            clock,
+        );
+        let fixed = crabka_pgexec::hlc::pack(128, 0);
+
+        let mut slow = oracle.slow.lock().await;
+        // The wall-anchored arm's packed stride is already whole milliseconds
+        // of wall headroom, so pacing never touches it however fast persists
+        // arrive.
+        assert!(oracle.persist_stride(&mut slow, 1_000) == fixed);
+        assert!(oracle.persist_stride(&mut slow, 1_000) == fixed);
+        assert!(oracle.persist_stride(&mut slow, 1_000) == fixed);
     }
 
     #[tokio::test]
