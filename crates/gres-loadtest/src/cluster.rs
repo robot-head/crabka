@@ -18,16 +18,10 @@
 //!    `--hlc-wall-offset-ms` skew. Parse `CRABKA_GRES_READY <sql> <range>`
 //!    from stdout for the OS-assigned ports, then point the proxies at them.
 //!
-//! Launch is two-phase because `crabka-gres` executes DDL only against
-//! locally-hosted range engines: [`Cluster::launch_schema_bootstrap`] first
-//! brings up ONE node (label `bootstrap`) hosting every range so the caller
-//! can run schema DDL against [`SchemaBootstrap::sql_endpoint`], then
-//! [`SchemaBootstrap::into_topology`] SIGKILLs it (DDL is durable once the
-//! query returns; WAL append is synchronous) and spawns the real round-robin
-//! topology, whose per-range WAL recovery replays the schema on every node.
-//! This mirrors the `create_table_on_all` workaround in the gres-ranges
-//! process harness; range WAL generations are left untouched across the
-//! writer change — producer-epoch fencing handles it.
+//! Schema DDL needs no special phase: any node's gateway routes DDL to
+//! every range engine and returns only after the cluster-wide catalog
+//! barrier, so callers issue it through an arbitrary [`Cluster::sql_endpoint`]
+//! once the topology is up.
 //!
 //! Node processes are `SIGKILL`ed on kill/shutdown (process-group kill), and a
 //! restart re-spawns with identical flags and repoints the node's proxies.
@@ -197,100 +191,6 @@ impl ProcessRoster {
     }
 }
 
-/// Phase one of a launch: broker, proxies, and tenant provisioning are live,
-/// and a single `bootstrap` node hosts every range so schema DDL executed
-/// against [`SchemaBootstrap::sql_endpoint`] reaches all of them. Convert to
-/// the real topology with [`SchemaBootstrap::into_topology`].
-#[derive(Debug)]
-pub struct SchemaBootstrap {
-    topology: TopologySpec,
-    binaries: Binaries,
-    log_dir: PathBuf,
-    broker: BrokerProcess,
-    range_proxies: Vec<ChaosProxy>,
-    sql_proxies: Vec<ChaosProxy>,
-    node_specs: Vec<NodeSpec>,
-    bootstrap_slot: NodeSlot,
-    bootstrap_sql_addr: SocketAddr,
-    roster: ProcessRoster,
-    sql_password: String,
-}
-
-impl SchemaBootstrap {
-    /// SQL connection parameters for the bootstrap node (served directly,
-    /// not through a chaos proxy — faults make no sense during bootstrap).
-    #[must_use]
-    pub fn sql_endpoint(&self) -> SqlEndpoint {
-        sql_endpoint_at(self.bootstrap_sql_addr, &self.sql_password)
-    }
-
-    /// SIGKILLs the bootstrap node and spawns the real per-node topology;
-    /// per-range WAL recovery replays the bootstrap-phase schema everywhere.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the bootstrap node cannot be reaped, a node fails
-    /// to spawn, or readiness times out.
-    pub async fn into_topology(self) -> anyhow::Result<Cluster> {
-        let Self {
-            topology,
-            binaries,
-            log_dir,
-            broker,
-            range_proxies,
-            sql_proxies,
-            node_specs,
-            mut bootstrap_slot,
-            bootstrap_sql_addr: _,
-            roster,
-            sql_password,
-        } = self;
-        if let Some(mut process) = bootstrap_slot.running.take() {
-            kill_child(&bootstrap_slot.spec.label, &mut process.child, process.pid).await?;
-            let _ = tokio::time::timeout(Duration::from_secs(5), &mut process.log_task).await;
-        }
-        tracing::info!("bootstrap node killed; spawning real topology");
-        let mut nodes = Vec::with_capacity(node_specs.len());
-        for spec in node_specs {
-            std::fs::create_dir_all(&spec.cache_dir)
-                .with_context(|| format!("create cache dir {}", spec.cache_dir.display()))?;
-            let running = spawn_node(&binaries.gres, &spec)?;
-            roster.push(ProcessInfo {
-                label: spec.label.clone(),
-                pid: running.pid,
-            });
-            nodes.push(NodeSlot {
-                spec,
-                running: Some(running),
-                incarnation: 1,
-            });
-        }
-        let mut cluster = Cluster {
-            topology,
-            binaries,
-            log_dir,
-            broker,
-            range_proxies,
-            sql_proxies,
-            nodes,
-            roster,
-            sql_password,
-        };
-        for index in 0..cluster.nodes.len() {
-            wait_node_ready(&mut cluster.nodes[index]).await?;
-        }
-        for node in 0..cluster.topology.nodes {
-            cluster.point_proxies_at(node);
-        }
-        tracing::info!(
-            nodes = cluster.topology.nodes,
-            ranges = cluster.topology.ranges,
-            "cluster ready"
-        );
-        Ok(cluster)
-    }
-}
-
 /// A running cluster: broker child, node children, and their proxies.
 #[derive(Debug)]
 pub struct Cluster {
@@ -308,33 +208,11 @@ pub struct Cluster {
 impl Cluster {
     /// Launches the cluster and waits until every node reports ready.
     ///
-    /// Equivalent to [`Cluster::launch_schema_bootstrap`] followed
-    /// immediately by [`SchemaBootstrap::into_topology`], for callers that
-    /// need no schema DDL between the phases.
-    ///
     /// # Errors
     ///
     /// Returns an error if any process fails to start, provisioning fails,
     /// or readiness times out.
     pub async fn launch(options: ClusterOptions) -> anyhow::Result<Self> {
-        Self::launch_schema_bootstrap(options)
-            .await?
-            .into_topology()
-            .await
-    }
-
-    /// Launches the shared infrastructure (broker, proxies, provisioning)
-    /// plus a single `bootstrap` node hosting every range, so the caller can
-    /// run schema DDL that reaches all range engines before the real
-    /// topology starts.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if any process fails to start, provisioning fails,
-    /// or readiness times out.
-    pub async fn launch_schema_bootstrap(
-        options: ClusterOptions,
-    ) -> anyhow::Result<SchemaBootstrap> {
         let ClusterOptions {
             topology,
             mode,
@@ -391,48 +269,49 @@ impl Cluster {
         let node_specs: Vec<NodeSpec> = (0..topology.nodes)
             .map(|node| node_spec(node, &context))
             .collect();
-        let spec = bootstrap_node_spec(&context);
-        std::fs::create_dir_all(&spec.cache_dir)
-            .with_context(|| format!("create cache dir {}", spec.cache_dir.display()))?;
-        let running = spawn_node(&binaries.gres, &spec)?;
-        let mut bootstrap_slot = NodeSlot {
-            spec,
-            running: Some(running),
-            incarnation: 1,
-        };
-        wait_node_ready(&mut bootstrap_slot).await?;
-        let (bootstrap_sql_addr, bootstrap_range_addr) = {
-            let process = bootstrap_slot
-                .running
-                .as_ref()
-                .context("bootstrap node vanished after readiness")?;
-            (process.sql_addr, process.range_addr)
-        };
-        for proxy in &range_proxies {
-            proxy.set_backend(bootstrap_range_addr);
-        }
-        tracing::info!(sql = %bootstrap_sql_addr, "schema bootstrap node ready");
-        // The roster starts with the broker only; topology nodes join in
-        // `into_topology`. The bootstrap node is deliberately absent — it is
-        // dead before any sampling window can start.
         let roster = ProcessRoster::default();
         roster.push(ProcessInfo {
             label: "broker".to_owned(),
             pid: broker.pid,
         });
-        Ok(SchemaBootstrap {
+        let mut nodes = Vec::with_capacity(node_specs.len());
+        for spec in node_specs {
+            std::fs::create_dir_all(&spec.cache_dir)
+                .with_context(|| format!("create cache dir {}", spec.cache_dir.display()))?;
+            let running = spawn_node(&binaries.gres, &spec)?;
+            roster.push(ProcessInfo {
+                label: spec.label.clone(),
+                pid: running.pid,
+            });
+            nodes.push(NodeSlot {
+                spec,
+                running: Some(running),
+                incarnation: 1,
+            });
+        }
+        let mut cluster = Self {
             topology,
             binaries,
             log_dir,
             broker,
             range_proxies,
             sql_proxies,
-            node_specs,
-            bootstrap_slot,
-            bootstrap_sql_addr,
+            nodes,
             roster,
             sql_password,
-        })
+        };
+        for index in 0..cluster.nodes.len() {
+            wait_node_ready(&mut cluster.nodes[index]).await?;
+        }
+        for node in 0..cluster.topology.nodes {
+            cluster.point_proxies_at(node);
+        }
+        tracing::info!(
+            nodes = cluster.topology.nodes,
+            ranges = cluster.topology.ranges,
+            "cluster ready"
+        );
+        Ok(cluster)
     }
 
     /// Number of compute nodes.
@@ -766,19 +645,6 @@ fn node_spec(node: u16, context: &SpecContext<'_>) -> NodeSpec {
             .get(&node)
             .copied()
             .unwrap_or(0),
-        context,
-    )
-}
-
-/// Builds the spawn parameters for the schema-bootstrap node: every range
-/// hosted on one process, no checkpointing, no clock skew (mirrors the
-/// temporarily-hosting node in the process harness's `create_table_on_all`).
-fn bootstrap_node_spec(context: &SpecContext<'_>) -> NodeSpec {
-    build_spec(
-        "bootstrap",
-        host_ranges_flag(0, 1, context.topology.ranges),
-        false,
-        0,
         context,
     )
 }
@@ -1413,7 +1279,7 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_spec_hosts_all_ranges_and_matches_topology_specs() {
+    fn node_specs_wire_topology_flags() {
         let topology = TopologySpec {
             nodes: 3,
             ranges: 4,
@@ -1428,26 +1294,12 @@ mod tests {
             log_dir: Path::new("/work/logs"),
             tls: &tls,
         };
-        let bootstrap = bootstrap_node_spec(&context);
-        assert!(bootstrap.label == "bootstrap");
-        assert!(arg_value(&bootstrap.args, "--host-ranges") == Some("r0,r1,r2,r3"));
-        assert!(arg_value(&bootstrap.args, "--ranges") == Some("0,1000000,2000000,3000000"));
-        assert!(!bootstrap.args.iter().any(|arg| arg == "--checkpoint-store"));
-
-        // The bootstrap node must agree with the real topology on everything
-        // schema durability depends on: boundaries, tenant, timestamp mode.
         let node0 = node_spec(0, &context);
-        assert!(arg_value(&node0.args, "--ranges") == arg_value(&bootstrap.args, "--ranges"));
-        assert!(arg_value(&node0.args, "--tenant") == arg_value(&bootstrap.args, "--tenant"));
-        assert!(
-            arg_value(&node0.args, "--timestamp-source")
-                == arg_value(&bootstrap.args, "--timestamp-source")
-        );
-        assert!(
-            arg_value(&node0.args, "--substrate-bootstrap")
-                == arg_value(&bootstrap.args, "--substrate-bootstrap")
-        );
+        assert!(node0.label == "node0");
+        assert!(arg_value(&node0.args, "--ranges") == Some("0,1000000,2000000,3000000"));
         assert!(arg_value(&node0.args, "--host-ranges") == Some("r0,r3"));
+        assert!(arg_value(&node0.args, "--tenant") == Some(TENANT));
+        assert!(arg_value(&node0.args, "--substrate-bootstrap") == Some("127.0.0.1:19092"));
     }
 
     #[test]
@@ -1475,11 +1327,6 @@ mod tests {
         let node1 = node_spec(1, &context);
         assert!(!node1.args.iter().any(|arg| arg == "--checkpoint-store"));
         assert!(arg_value(&node1.args, "--hlc-wall-offset-ms") == Some("250"));
-
-        // The bootstrap node keeps the tenant's mode but never skews.
-        let bootstrap = bootstrap_node_spec(&context);
-        assert!(arg_value(&bootstrap.args, "--timestamp-source") == Some("hlc"));
-        assert!(arg_value(&bootstrap.args, "--hlc-wall-offset-ms") == None);
     }
 
     #[test]
@@ -1617,7 +1464,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "needs built crabka-broker, crabka, and crabka-gres binaries"]
-    async fn live_two_node_cluster_bootstraps_schema_and_survives_kill_and_restart() {
+    async fn live_two_node_cluster_serves_any_gateway_and_survives_kill_and_restart() {
         let binaries = Binaries::resolve().expect("resolve binaries");
         let work_dir = tempfile::tempdir().expect("work dir");
         let options = ClusterOptions {
@@ -1630,18 +1477,7 @@ mod tests {
             work_dir: work_dir.path().to_path_buf(),
             binaries,
         };
-        let bootstrap = Cluster::launch_schema_bootstrap(options)
-            .await
-            .expect("launch schema bootstrap");
-        run_sql(
-            &bootstrap.sql_endpoint(),
-            &[
-                "CREATE TABLE t0 (id int4)",
-                "CREATE TABLE t1000000 (id int4)",
-            ],
-        )
-        .await;
-        let mut cluster = bootstrap.into_topology().await.expect("into topology");
+        let mut cluster = Cluster::launch(options).await.expect("launch cluster");
         assert!(cluster.node_count() == 2);
         assert!(cluster.node_for_range(0) == 0);
         assert!(cluster.node_for_range(1) == 1);
@@ -1654,14 +1490,23 @@ mod tests {
             .collect();
         assert!(labels == ["broker", "node0", "node1"]);
 
-        // t1000000 lives on range 1 (hosted by node 1); inserting through
-        // node 0's gateway proves the bootstrap-phase schema propagated to a
-        // remotely-hosted range engine.
+        // DDL through node 1's gateway — a node NOT hosting range 0 — and
+        // then a write for each range through the opposite node's gateway:
+        // any gateway routes DDL and DML to remotely-hosted range engines.
+        run_sql(
+            &cluster.sql_endpoint(1),
+            &[
+                "CREATE TABLE t0 (id int4)",
+                "CREATE TABLE t1000000 (id int4)",
+            ],
+        )
+        .await;
         run_sql(
             &cluster.sql_endpoint(0),
             &["INSERT INTO t1000000 VALUES (1)"],
         )
         .await;
+        run_sql(&cluster.sql_endpoint(1), &["INSERT INTO t0 VALUES (1)"]).await;
 
         cluster.kill_node(1).await.expect("kill node 1");
         assert!(cluster.processes().len() == 2);
@@ -1676,14 +1521,9 @@ mod tests {
         assert!(entries[2].label == "node1");
         assert!(entries[3].label == "node1#2");
         assert!(entries[3].pid != entries[2].pid);
-        // Node 1's SQL front door answers again. DML must still enter via
-        // node 0's gateway: the gateway catalog/coordinator checks need a
-        // local range-0 engine (`range r0 is not hosted` otherwise), so the
-        // second insert goes through node 0 and forwards to the restarted
-        // node 1 — proving the re-spawned node serves range 1 writes.
-        run_sql(&cluster.sql_endpoint(1), &["SELECT 1"]).await;
+        // The restarted node serves range 1 writes through its own gateway.
         run_sql(
-            &cluster.sql_endpoint(0),
+            &cluster.sql_endpoint(1),
             &["INSERT INTO t1000000 VALUES (2)"],
         )
         .await;
