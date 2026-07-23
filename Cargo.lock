@@ -2405,6 +2405,7 @@ dependencies = [
  "prost 0.14.4",
  "qubit-clock",
  "rcgen",
+ "refined_type",
  "regex",
  "reqwest 0.13.4",
  "ring",
@@ -11587,6 +11588,17 @@ dependencies = [
  "parking_lot",
  "percent-encoding",
  "serde_json",
+]
+
+[[package]]
+name = "refined_type"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "55fd965c177adfc691bf4d2f3d5e67b2bf91cf35643f6b2ea48a6f98006bcc01"
+dependencies = [
+ "paste",
+ "regex",
+ "serde",
 ]
 
 [[package]]

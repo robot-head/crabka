@@ -69,6 +69,7 @@ tokio-metrics = { workspace = true }
 toml = { workspace = true }
 dashmap = { workspace = true }
 regex = { workspace = true }
+refined_type = { workspace = true }
 tracing = { workspace = true }
 rustix = { workspace = true }
 socket2 = "0.6"
