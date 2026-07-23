@@ -89,6 +89,49 @@ Tasks 3–5 implement every row in this table. Integer constraints are inclusive
 | `operator_recovery_deadline_ms` | `u64` | `25000` | `>= 1` |
 | `quota_throttle_max_ms` | `u64` | `1000` | `>= 1` |
 
+The exhaustive broker audit found additional production policy after this
+initial table was written. Tasks 3–5 must also carry these values through the
+same `BrokerConfig` → CLI/environment/file → CRD path:
+
+| Field | Type | Default | Constraint |
+|---|---:|---:|---|
+| `self_registration_max_attempts` | `u32` | `8` | `>= 1` |
+| `observer_fetch_max_bytes` | `u32` | `1048576` | `>= 1` |
+| `audit_event_queue_capacity` | `usize` | `8192` | `>= 1` |
+| `audit_tail_window_offsets` | `i64` | `4096` | `>= 1` |
+| `audit_tail_read_max_bytes` | `usize` | `1048576` | `>= 1` |
+| `offsets_topic_metadata_wait_timeout_ms` | `u64` | `30000` | `>= 1` |
+| `client_metrics_stale_push_intervals` | `u32` | `3` | `>= 1` |
+| `coordinator_actor_mailbox_capacity` | `usize` | `64` | `>= 1` |
+| `unclean_recovery_queue_capacity` | `usize` | `256` | `>= 1` |
+| `share_recovery_read_max_bytes` | `usize` | `1048576` | `>= 1` |
+| `share_session_cache_max_when_unlimited` | `usize` | `10000` | `>= 1` |
+| `socket_request_max_bytes` | `usize` | `104857600` | `1..=u32::MAX` |
+| `sendfile_min_bytes` | `usize` | `32768` | `>= 1` |
+| `socket_send_buffer_bytes` | `usize` | `1048576` | `>= 1` |
+| `socket_receive_buffer_bytes` | `usize` | `1048576` | `>= 1` |
+| `acl_max_principal_bytes` | `usize` | `256` | `>= 1` |
+| `acl_max_resource_name_bytes` | `usize` | `256` | `>= 1` |
+| `telemetry_max_decompression_ratio` | `usize` | `100` | `>= 1` |
+| `telemetry_decompressed_output_floor_bytes` | `usize` | `16777216` | `>= 1`, `<= ceiling` |
+| `telemetry_decompressed_output_ceiling_bytes` | `usize` | `1073741824` | `>= floor` |
+| `inter_broker_server_name` | `String` | `"localhost"` | nonempty |
+| `producer_id_expiration_ms` | `i64` | `86400000` | `>= 1` |
+| `max_produce_group` | `usize` | `1024` | `>= 1` |
+| `partition_writer_queue_depth` | `usize` | `64` | `>= 1` |
+| `default_min_insync_replicas` | `i32` | `1` | `>= 1` |
+| `future_log_move_read_chunk_bytes` | `usize` | `1048576` | `>= 1` |
+| `share_state_num_partitions` | `i32` | `50` | `>= 1` |
+| `transaction_state_num_partitions` | `i32` | `50` | `>= 1` |
+| `transaction_min_timeout_ms` | `i32` | `1000` | `>= 1`, `< max` |
+| `transaction_max_timeout_ms` | `i32` | `900000` | `>= min`, `< i32::MAX` |
+
+Behaviorally consumed Share and Streams group fields remain owned by their
+existing component config structs and must receive CLI/file/CRD values rather
+than duplicate fields on `BrokerConfig`. Do not expose staged Streams
+`enable`, `max_groups`, or `max_size` fields until production behavior consumes
+them.
+
 The following broker settings already have direct CLI/environment inputs. Task 5 adds their missing typed CRD path; Tasks 1 and 4 replace ad hoc scalar validation with refined parsers where a constraint exists.
 
 | Existing field | Type | Default | Constraint |
