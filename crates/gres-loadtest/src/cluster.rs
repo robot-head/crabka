@@ -756,6 +756,22 @@ fn timestamp_args(mode: ModeSpec, skew_ms: i64) -> Vec<String> {
     args
 }
 
+/// Diagnostic knob for the coordinator-vs-data per-write cost investigation:
+/// which nodes are launched with the local-checkpoint flags. Defaults to node 0
+/// only (the shipped harness behaviour). `CRABKA_GRES_LOADTEST_CHECKPOINT_NODES`
+/// may be set to `all` (every node checkpoints) or `none` (no node does) to
+/// A/B whether the node0/data-node CPU asymmetry tracks the checkpoint config.
+fn checkpoints_enabled_for(node: u16) -> bool {
+    match std::env::var("CRABKA_GRES_LOADTEST_CHECKPOINT_NODES")
+        .ok()
+        .as_deref()
+    {
+        Some("all") => true,
+        Some("none") => false,
+        _ => node == 0,
+    }
+}
+
 /// Builds the restart-stable spawn parameters for the real-topology node
 /// `node`: round-robin `--host-ranges`, checkpoint flags on node 0 (the
 /// range-0 host), and the node's configured HLC wall-clock skew.
@@ -763,7 +779,7 @@ fn node_spec(node: u16, context: &SpecContext<'_>) -> NodeSpec {
     build_spec(
         &format!("node{node}"),
         host_ranges_flag(node, context.topology.nodes, context.topology.ranges),
-        node == 0,
+        checkpoints_enabled_for(node),
         context
             .topology
             .clock_skew_ms
