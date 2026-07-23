@@ -5,7 +5,6 @@ metadata:
 spec:
   group: crabka.io
   names:
-    categories: []
     kind: KafkaGrpcGateway
     plural: kafkagrpcgateways
     shortNames:
@@ -13,8 +12,7 @@ spec:
     singular: kafkagrpcgateway
   scope: Namespaced
   versions:
-  - additionalPrinterColumns: []
-    name: v1alpha1
+  - name: v1alpha1
     schema:
       openAPIV3Schema:
         description: Auto-generated derived type for KafkaGrpcGatewaySpec via `CustomResource`

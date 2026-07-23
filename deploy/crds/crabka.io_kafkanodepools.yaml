@@ -5,7 +5,6 @@ metadata:
 spec:
   group: crabka.io
   names:
-    categories: []
     kind: KafkaNodePool
     plural: kafkanodepools
     shortNames:
@@ -13,8 +12,7 @@ spec:
     singular: kafkanodepool
   scope: Namespaced
   versions:
-  - additionalPrinterColumns: []
-    name: v1alpha1
+  - name: v1alpha1
     schema:
       openAPIV3Schema:
         description: Auto-generated derived type for KafkaNodePoolSpec via `CustomResource`

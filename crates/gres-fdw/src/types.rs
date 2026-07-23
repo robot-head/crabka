@@ -333,7 +333,7 @@ fn avro_value_to_datum(value: &AvroValue, col_ty: ColumnType, decimal_scale: Opt
         // in via `decimal_scale`. `BigDecimal::new(bigint, scale)` represents
         // `bigint * 10^-scale`, so we pass the Avro scale directly.
         AvroValue::Decimal(d) => {
-            use num_bigint::BigInt;
+            use bigdecimal::num_bigint::BigInt;
             let big_int: BigInt = BigInt::from(d.clone());
             let scale = i64::from(decimal_scale.unwrap_or(0));
             let bd = bigdecimal::BigDecimal::new(big_int, scale);
@@ -552,8 +552,8 @@ pub fn project(
 
 #[cfg(test)]
 mod tests {
+    use bigdecimal::num_bigint::BigInt;
     use crabka_pgtypes::{ColumnType, Datum};
-    use num_bigint::BigInt;
 
     use super::*;
 

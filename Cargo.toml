@@ -236,7 +236,7 @@ bigdecimal = "0.4"
 dashu-float = "0.5"
 fjall = "3.1.8"
 jiff = { version = "0.2", features = ["tzdb-bundle-always"] }
-num-bigint = "0.4"
+num-bigint = "0.5"
 # pg_query wraps libpg_query (C): dev/oracle-only, optional, never default —
 # the shipped gres tree stays pure Rust.
 pg_query = "6"
