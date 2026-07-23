@@ -24,16 +24,16 @@ use crate::{
     barrier::Range0Barrier,
     registry::{RangeRegistry, RegistryError},
     transport::{
-        ExplicitGateReq, ExplicitGateResp, FramedTcpClient, InspectDurableRecordsReq,
-        InspectDurableRecordsResp, JoinRangeReq, JoinRangeResp, JoinRangeRow, RangeRequest,
-        RangeResponse, RangeService, ResolveTxnResp, ScanCursorReq, ScanCursorResp, ScanRangeReq,
-        ScanRangeResp, ScanRangeRow, TimestampPrewriteReq, TimestampPrimaryAckReq,
-        TimestampPrimaryRecoverReq, TimestampRecoverReq, TimestampResolveReq, TransportError,
-        WireColumnPredicate, WireDatum, WireErrorKind, WireExecuteOutcome, WireGlobalStatus,
-        WireJoinKind, WireJoinStrategy, WireJoinTableInterval, WirePartialAggregateFunction,
-        WirePartialAggregateSpec, WirePredicateOp, WirePredicatePushdown, WireProjectionPushdown,
-        WireQueryResult, WireRowInterval, WireSessionOperation, WireSessionResult, WireSnapshot,
-        WireSqlResultChunk, WireTopKColumn, WireTopKSpec, write_frame,
+        FramedTcpClient, InspectDurableRecordsReq, InspectDurableRecordsResp, JoinRangeReq,
+        JoinRangeResp, JoinRangeRow, RangeRequest, RangeResponse, RangeService, ResolveTxnResp,
+        ScanCursorReq, ScanCursorResp, ScanRangeReq, ScanRangeResp, ScanRangeRow,
+        TimestampPrewriteReq, TimestampPrimaryAckReq, TimestampPrimaryRecoverReq,
+        TimestampRecoverReq, TimestampResolveReq, TransportError, WireColumnPredicate, WireDatum,
+        WireErrorKind, WireExecuteOutcome, WireGlobalStatus, WireJoinKind, WireJoinStrategy,
+        WireJoinTableInterval, WirePartialAggregateFunction, WirePartialAggregateSpec,
+        WirePredicateOp, WirePredicatePushdown, WireProjectionPushdown, WireQueryResult,
+        WireRowInterval, WireSessionOperation, WireSessionResult, WireSnapshot, WireSqlResultChunk,
+        WireTopKColumn, WireTopKSpec, write_frame,
     },
     tso::{GrantLease, TsoError, TsoRpc},
 };
@@ -71,7 +71,6 @@ pub struct HostedRangeService {
     timestamp_primary_aliases: BTreeMap<RangeId, RangeId>,
     next_session_id: AtomicU64,
     sessions: tokio::sync::Mutex<BTreeMap<u64, HostedSession>>,
-    explicit_gate: Arc<ExplicitGate>,
     range_control: Option<Arc<crate::control::GenerationFencedRangeControl>>,
     durable_inspector: Option<Arc<dyn DurableRecordInspector>>,
     ddl_gate: Arc<tokio::sync::Mutex<()>>,
@@ -84,17 +83,6 @@ pub trait DurableRecordInspector: Send + Sync + 'static {
         &self,
         request: InspectDurableRecordsReq,
     ) -> Result<InspectDurableRecordsResp, String>;
-}
-
-struct ExplicitGate {
-    state: tokio::sync::Mutex<Option<ExplicitGateOwner>>,
-    changed: tokio::sync::Notify,
-    next_token: AtomicU64,
-}
-
-struct ExplicitGateOwner {
-    token: u64,
-    deadline: Instant,
 }
 
 struct HostedSession {
@@ -110,10 +98,24 @@ const MAX_REMOTE_SESSIONS: usize = 1024;
 // instead of an ambiguous transport timeout. The gateway's local replica
 // barrier shares it so a stalled broker end sample cannot block DDL forever.
 pub(crate) const RANGE0_BARRIER_REPLY_BUDGET: Duration = Duration::from_secs(4);
-#[cfg(not(test))]
-const EXPLICIT_GATE_LEASE: Duration = Duration::from_secs(2);
-#[cfg(test)]
-const EXPLICIT_GATE_LEASE: Duration = Duration::from_millis(100);
+
+/// Cap on lock waits by sessions enlisted in a cross-range transaction (a
+/// gateway-local session once its transaction escalates past one range, or a
+/// hosted remote-participant session for the statements such a transaction
+/// sends it, carried per statement on the wire). A deadlock cycle
+/// spanning engines never appears in any single engine's wait-for graph, so
+/// the expired cap — surfaced as a retryable 40P01 — is the only detector such
+/// a cycle has. Purely local transactions keep unbounded waits under the
+/// exact engine-local cycle check. Must stay comfortably below the range
+/// transport's 5 s RPC timeout so the participant reports the abort instead of
+/// the gateway timing the RPC out first.
+pub(crate) const CROSS_RANGE_LOCK_WAIT_CAP: Duration = Duration::from_secs(2);
+
+/// Encode a lock-wait cap for the session wire, saturating instead of failing
+/// on a pathological over-large duration.
+fn cap_to_millis(cap: Duration) -> u64 {
+    u64::try_from(cap.as_millis()).unwrap_or(u64::MAX)
+}
 
 impl HostedRangeService {
     /// Build a hosted range service. Only range 0 may be given a TSO RPC.
@@ -126,11 +128,6 @@ impl HostedRangeService {
             timestamp_primary_aliases: BTreeMap::new(),
             next_session_id: AtomicU64::new(1),
             sessions: tokio::sync::Mutex::new(BTreeMap::new()),
-            explicit_gate: Arc::new(ExplicitGate {
-                state: tokio::sync::Mutex::new(None),
-                changed: tokio::sync::Notify::new(),
-                next_token: AtomicU64::new(1),
-            }),
             range_control: None,
             durable_inspector: None,
             ddl_gate: Arc::new(tokio::sync::Mutex::new(())),
@@ -248,74 +245,6 @@ impl HostedRangeService {
             .copied()
             .unwrap_or(range_id);
         self.hosted_engine(physical_range)
-    }
-
-    async fn handle_explicit_gate(&self, request: ExplicitGateReq) -> ExplicitGateResp {
-        match request {
-            ExplicitGateReq::Acquire => loop {
-                let notified = self.explicit_gate.changed.notified();
-                let wait = {
-                    let mut state = self.explicit_gate.state.lock().await;
-                    let now = Instant::now();
-                    if state.as_ref().is_some_and(|owner| owner.deadline <= now) {
-                        *state = None;
-                    }
-                    if state.is_none() {
-                        let token = self
-                            .explicit_gate
-                            .next_token
-                            .fetch_add(1, Ordering::Relaxed);
-                        *state = Some(ExplicitGateOwner {
-                            token,
-                            deadline: now + EXPLICIT_GATE_LEASE,
-                        });
-                        return ExplicitGateResp::Acquired {
-                            token,
-                            lease_millis: u64::try_from(EXPLICIT_GATE_LEASE.as_millis())
-                                .unwrap_or(u64::MAX),
-                        };
-                    }
-                    state
-                        .as_ref()
-                        .expect("checked occupied")
-                        .deadline
-                        .saturating_duration_since(now)
-                };
-                tokio::select! {
-                    () = notified => {}
-                    () = tokio::time::sleep(wait) => {}
-                }
-            },
-            ExplicitGateReq::Renew { token } => {
-                let mut state = self.explicit_gate.state.lock().await;
-                let now = Instant::now();
-                let Some(owner) = state.as_mut() else {
-                    return ExplicitGateResp::Stale;
-                };
-                if owner.token != token || owner.deadline <= now {
-                    if owner.deadline <= now {
-                        *state = None;
-                        self.explicit_gate.changed.notify_waiters();
-                    }
-                    return ExplicitGateResp::Stale;
-                }
-                owner.deadline = now + EXPLICIT_GATE_LEASE;
-                ExplicitGateResp::Renewed {
-                    lease_millis: u64::try_from(EXPLICIT_GATE_LEASE.as_millis())
-                        .unwrap_or(u64::MAX),
-                }
-            }
-            ExplicitGateReq::Release { token } => {
-                let mut state = self.explicit_gate.state.lock().await;
-                if state.as_ref().is_some_and(|owner| owner.token == token) {
-                    *state = None;
-                    self.explicit_gate.changed.notify_waiters();
-                    ExplicitGateResp::Released
-                } else {
-                    ExplicitGateResp::Stale
-                }
-            }
-        }
     }
 
     async fn authenticated_primary_outcome(
@@ -545,12 +474,6 @@ impl HostedRangeService {
                     Ok(global_xid) => RangeResponse::GlobalXid { global_xid },
                     Err(error) => sql_error_response(error.into_pg()),
                 }
-            }
-            RangeRequest::ExplicitGate(request) => {
-                if let Err(response) = self.hosted_engine(RangeId::COORDINATOR) {
-                    return response;
-                }
-                RangeResponse::ExplicitGate(self.handle_explicit_gate(request).await)
             }
             RangeRequest::RecoverGlobal {
                 range_id,
@@ -1216,7 +1139,6 @@ impl RangeService for HostedRangeService {
             | RangeRequest::SessionClose { .. }) => self.handle_session_request(request).await,
             request @ (RangeRequest::GlobalDecision { .. }
             | RangeRequest::GlobalBegin { .. }
-            | RangeRequest::ExplicitGate(_)
             | RangeRequest::RecoverGlobal { .. }) => self.handle_global_request(request).await,
             request @ (RangeRequest::Sql { .. }
             | RangeRequest::ScanRange(_)
@@ -1333,7 +1255,11 @@ async fn handle_session_operation(
     operation: WireSessionOperation,
 ) -> Result<WireSessionResult, PgError> {
     match operation {
-        WireSessionOperation::SimpleQuery { sql } => {
+        WireSessionOperation::SimpleQuery {
+            sql,
+            lock_wait_cap_ms,
+        } => {
+            session.set_lock_wait_cap(lock_wait_cap_ms.map(Duration::from_millis));
             session
                 .simple_query(&sql)
                 .await
@@ -1388,10 +1314,14 @@ async fn handle_session_operation(
                     fields: description.fields.into_iter().map(Into::into).collect(),
                 })
         }
-        WireSessionOperation::Execute { portal, max_rows } => session
-            .execute(&portal, max_rows)
-            .await
-            .and_then(|outcome| match outcome {
+        WireSessionOperation::Execute {
+            portal,
+            max_rows,
+            lock_wait_cap_ms,
+        } => {
+            session.set_lock_wait_cap(lock_wait_cap_ms.map(Duration::from_millis));
+            let outcome = session.execute(&portal, max_rows).await;
+            outcome.and_then(|outcome| match outcome {
                 ExecuteOutcome::Rows { rows, completion } => {
                     Ok(WireSessionResult::Execute(WireExecuteOutcome::Rows {
                         rows: rows
@@ -1417,7 +1347,8 @@ async fn handle_session_operation(
                     "0A000",
                     "remote range session does not support this execute outcome",
                 )),
-            }),
+            })
+        }
         WireSessionOperation::PrepareGlobal { global_xid } => session
             .prepare_global_participant(global_xid)
             .await
@@ -1588,12 +1519,6 @@ pub trait RemoteForward: Send + Sync {
     /// Open a stateful owner-side session for extended protocol and transactions.
     async fn open_session(&self, range_id: RangeId) -> Result<RemoteRangeSession, ForwardError>;
 
-    /// Acquire the range-0 ordinary explicit-transaction lease when this
-    /// forwarder represents a distributed topology.
-    async fn acquire_explicit_gate(&self) -> Result<Option<RemoteExplicitGateLease>, ForwardError> {
-        Ok(None)
-    }
-
     async fn recover_global(
         &self,
         _range_id: RangeId,
@@ -1601,84 +1526,6 @@ pub trait RemoteForward: Send + Sync {
         _commit: bool,
     ) -> Result<(), ForwardError> {
         Ok(())
-    }
-}
-
-#[derive(Debug)]
-pub struct RemoteExplicitGateLease {
-    token: Option<u64>,
-    registry: RangeRegistry,
-    client: FramedTcpClient,
-}
-
-impl RemoteExplicitGateLease {
-    /// # Errors
-    ///
-    /// Returns an error when the requested operation cannot be completed.
-    pub async fn renew(&self) -> Result<(), ForwardError> {
-        let token = self.token.ok_or(ForwardError::UnexpectedResponse)?;
-        match self.call(ExplicitGateReq::Renew { token }).await? {
-            ExplicitGateResp::Renewed { .. } => Ok(()),
-            ExplicitGateResp::Stale => Err(ForwardError::RemoteSql {
-                code: "40001".into(),
-                message: "explicit transaction lease expired or was fenced".into(),
-            }),
-            _ => Err(ForwardError::UnexpectedResponse),
-        }
-    }
-
-    /// # Errors
-    ///
-    /// Returns an error when the requested operation cannot be completed.
-    pub async fn release(&mut self) -> Result<(), ForwardError> {
-        let Some(token) = self.token.take() else {
-            return Ok(());
-        };
-        match self.call(ExplicitGateReq::Release { token }).await? {
-            ExplicitGateResp::Released | ExplicitGateResp::Stale => Ok(()),
-            _ => Err(ForwardError::UnexpectedResponse),
-        }
-    }
-
-    async fn call(&self, request: ExplicitGateReq) -> Result<ExplicitGateResp, ForwardError> {
-        let endpoint = self.registry.resolve(RangeId::COORDINATOR).await?;
-        match self
-            .client
-            .call(&endpoint.endpoint, &RangeRequest::ExplicitGate(request))
-            .await?
-        {
-            RangeResponse::ExplicitGate(response) => Ok(response),
-            RangeResponse::SqlError { code, message } => {
-                Err(ForwardError::RemoteSql { code, message })
-            }
-            RangeResponse::Error { error, message } => Err(ForwardError::Remote {
-                kind: error,
-                message,
-            }),
-            _ => Err(ForwardError::UnexpectedResponse),
-        }
-    }
-}
-
-impl Drop for RemoteExplicitGateLease {
-    fn drop(&mut self) {
-        let Some(token) = self.token.take() else {
-            return;
-        };
-        let registry = self.registry.clone();
-        let client = self.client.clone();
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn(async move {
-                if let Ok(endpoint) = registry.resolve(RangeId::COORDINATOR).await {
-                    let _ = client
-                        .call(
-                            &endpoint.endpoint,
-                            &RangeRequest::ExplicitGate(ExplicitGateReq::Release { token }),
-                        )
-                        .await;
-                }
-            });
-        }
     }
 }
 
@@ -1918,34 +1765,6 @@ impl RemoteForward for RegistryRemoteForward {
                 });
             }
             return Ok(());
-        }
-    }
-
-    async fn acquire_explicit_gate(&self) -> Result<Option<RemoteExplicitGateLease>, ForwardError> {
-        let endpoint = self.registry.resolve(RangeId::COORDINATOR).await?;
-        match self
-            .client
-            .call(
-                &endpoint.endpoint,
-                &RangeRequest::ExplicitGate(ExplicitGateReq::Acquire),
-            )
-            .await?
-        {
-            RangeResponse::ExplicitGate(ExplicitGateResp::Acquired { token, .. }) => {
-                Ok(Some(RemoteExplicitGateLease {
-                    token: Some(token),
-                    registry: self.registry.clone(),
-                    client: self.client.clone(),
-                }))
-            }
-            RangeResponse::SqlError { code, message } => {
-                Err(ForwardError::RemoteSql { code, message })
-            }
-            RangeResponse::Error { error, message } => Err(ForwardError::Remote {
-                kind: error,
-                message,
-            }),
-            _ => Err(ForwardError::UnexpectedResponse),
         }
     }
 
@@ -2448,8 +2267,18 @@ impl RemoteRangeSession {
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
-    pub async fn simple_query(&mut self, sql: String) -> Result<Vec<QueryResult>, PgError> {
-        match self.call(WireSessionOperation::SimpleQuery { sql }).await? {
+    pub async fn simple_query(
+        &mut self,
+        sql: String,
+        lock_wait_cap: Option<Duration>,
+    ) -> Result<Vec<QueryResult>, PgError> {
+        match self
+            .call(WireSessionOperation::SimpleQuery {
+                sql,
+                lock_wait_cap_ms: lock_wait_cap.map(cap_to_millis),
+            })
+            .await?
+        {
             WireSessionResult::Query { results } => {
                 Ok(results.into_iter().map(Into::into).collect())
             }
@@ -2566,9 +2395,14 @@ impl RemoteRangeSession {
         &mut self,
         portal: String,
         max_rows: u32,
+        lock_wait_cap: Option<Duration>,
     ) -> Result<ExecuteOutcome, PgError> {
         match self
-            .call(WireSessionOperation::Execute { portal, max_rows })
+            .call(WireSessionOperation::Execute {
+                portal,
+                max_rows,
+                lock_wait_cap_ms: lock_wait_cap.map(cap_to_millis),
+            })
             .await?
         {
             WireSessionResult::Execute(WireExecuteOutcome::Rows { rows, completion }) => {
@@ -4123,50 +3957,6 @@ mod tests {
 
     use super::*;
 
-    #[tokio::test]
-    async fn range_zero_explicit_gate_serializes_expires_and_fences_stale_owners() {
-        let service = Arc::new(HostedRangeService::new(BTreeMap::new()));
-        let ExplicitGateResp::Acquired { token: first, .. } =
-            service.handle_explicit_gate(ExplicitGateReq::Acquire).await
-        else {
-            panic!("first lease");
-        };
-
-        let contender = {
-            let service = Arc::clone(&service);
-            tokio::spawn(
-                async move { service.handle_explicit_gate(ExplicitGateReq::Acquire).await },
-            )
-        };
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        assert!(!contender.is_finished(), "conflicting owner must wait");
-
-        let ExplicitGateResp::Acquired { token: second, .. } = contender.await.unwrap() else {
-            panic!("second lease after expiry");
-        };
-        assert_ne!(first, second);
-        assert_eq!(
-            service
-                .handle_explicit_gate(ExplicitGateReq::Release { token: first })
-                .await,
-            ExplicitGateResp::Stale
-        );
-        assert_eq!(
-            service
-                .handle_explicit_gate(ExplicitGateReq::Renew { token: second })
-                .await,
-            ExplicitGateResp::Renewed {
-                lease_millis: u64::try_from(EXPLICIT_GATE_LEASE.as_millis()).unwrap_or(u64::MAX),
-            }
-        );
-        assert_eq!(
-            service
-                .handle_explicit_gate(ExplicitGateReq::Release { token: second })
-                .await,
-            ExplicitGateResp::Released
-        );
-    }
-
     struct EndlessCursorScanner {
         dropped: Arc<AtomicUsize>,
     }
@@ -4252,7 +4042,6 @@ mod tests {
                 | RangeRequest::SessionClose { .. }
                 | RangeRequest::GlobalDecision { .. }
                 | RangeRequest::GlobalBegin { .. }
-                | RangeRequest::ExplicitGate(_)
                 | RangeRequest::RecoverGlobal { .. }
                 | RangeRequest::Txn(_)
                 | RangeRequest::Tso(_)
@@ -4692,6 +4481,64 @@ mod tests {
 
         let pg = error.into_pg();
         assert_eq!(pg.code, "42P01");
+    }
+
+    #[tokio::test]
+    async fn hosted_statement_cap_bounds_a_blocked_lock_wait() {
+        let engine = crabka_pgexec::SqlEngine::new();
+        let mut setup = engine.connect();
+        setup
+            .simple_query("CREATE TABLE t (id int, v int)")
+            .await
+            .expect("create table");
+        setup
+            .simple_query("INSERT INTO t VALUES (1, 0)")
+            .await
+            .expect("seed row");
+        let mut holder = engine.connect();
+        holder.simple_query("BEGIN").await.expect("holder begin");
+        holder
+            .simple_query("UPDATE t SET v = 1 WHERE id = 1")
+            .await
+            .expect("holder locks the row");
+
+        let address = spawn_loopback(Arc::new(HostedRangeService::new(BTreeMap::from([(
+            RangeId::new(1),
+            engine,
+        )]))))
+        .await
+        .expect("start range service");
+        let registry =
+            RangeRegistry::from_tenant_record(&record(address.to_string())).expect("registry");
+        let forward = RegistryRemoteForward::new(registry, FramedTcpClient::default());
+        let mut session = forward
+            .open_session(RangeId::new(1))
+            .await
+            .expect("open hosted session");
+        session
+            .simple_query("BEGIN".into(), None)
+            .await
+            .expect("remote begin");
+
+        // A statement carrying a cap must abort the blocked wait as a
+        // presumed distributed deadlock instead of hanging behind the holder.
+        let error = session
+            .simple_query(
+                "UPDATE t SET v = 2 WHERE id = 1".into(),
+                Some(Duration::from_millis(100)),
+            )
+            .await
+            .expect_err("capped wait expires");
+        assert_eq!(error.code, "40P01");
+
+        session
+            .simple_query("ROLLBACK".into(), None)
+            .await
+            .expect("remote rollback");
+        holder
+            .simple_query("ROLLBACK")
+            .await
+            .expect("holder rollback");
     }
 
     #[tokio::test]

@@ -60,6 +60,14 @@ impl ForeignCtx<'_> {
     }
 }
 
+/// Map a refused blocking acquire to its statement-level error (both 40P01).
+fn lock_acquire_error(error: crate::lockmgr::AcquireError) -> ExecError {
+    match error {
+        crate::lockmgr::AcquireError::Deadlock => ExecError::Deadlock,
+        crate::lockmgr::AcquireError::CapExpired => ExecError::LockWaitCapExpired,
+    }
+}
+
 pub(crate) struct WriteContext<'a> {
     pub catalog_kv: &'a dyn Kv,
     pub kv: &'a dyn Kv,
@@ -78,6 +86,12 @@ pub(crate) struct WriteContext<'a> {
     /// as on replicated engines where a local delete outside the WAL would
     /// diverge replicas and checkpoints).
     pub prune_horizon: Option<u64>,
+    /// Bound on every lock wait this statement performs (`None` waits
+    /// indefinitely under the engine-local deadlock detector). Set for
+    /// sessions that can be enlisted in a cross-range transaction, whose
+    /// deadlock cycles span engines and are invisible to any one engine's
+    /// wait-for graph.
+    pub lock_wait_cap: Option<std::time::Duration>,
 }
 
 #[derive(Clone, Copy)]
@@ -1244,13 +1258,16 @@ pub(crate) async fn execute_write(
                     continue;
                 }
                 // 2. Lock only matching candidates.
-                match lockmgr
-                    .acquire(t.id, rowid, crate::lockmgr::LockMode::Exclusive, xid)
+                lockmgr
+                    .acquire(
+                        t.id,
+                        rowid,
+                        crate::lockmgr::LockMode::Exclusive,
+                        xid,
+                        write_ctx.lock_wait_cap,
+                    )
                     .await
-                {
-                    Ok(()) => {}
-                    Err(()) => return Err(ExecError::Deadlock),
-                }
+                    .map_err(lock_acquire_error)?;
                 // 3. EvalPlanQual: re-read this row under the lock and decide what to
                 //    operate on (40001 under RR if changed since our snapshot).
                 let Some((cur_key_xid, cur_xmin, cur_row)) =
@@ -1360,13 +1377,16 @@ pub(crate) async fn execute_write(
                     continue;
                 }
                 // 2. Lock only matching candidates.
-                match lockmgr
-                    .acquire(t.id, rowid, crate::lockmgr::LockMode::Exclusive, xid)
+                lockmgr
+                    .acquire(
+                        t.id,
+                        rowid,
+                        crate::lockmgr::LockMode::Exclusive,
+                        xid,
+                        write_ctx.lock_wait_cap,
+                    )
                     .await
-                {
-                    Ok(()) => {}
-                    Err(()) => return Err(ExecError::Deadlock),
-                }
+                    .map_err(lock_acquire_error)?;
                 // 3. EvalPlanQual: re-read this row under the lock.
                 let Some((cur_key_xid, cur_xmin, cur_row)) =
                     eval_plan_qual(&write_ctx.mutation(), &t, rowid)?
@@ -1845,9 +1865,10 @@ async fn enforce_unique_local_index(
             )),
             crate::lockmgr::LockMode::Exclusive,
             write_ctx.xid,
+            write_ctx.lock_wait_cap,
         )
         .await
-        .map_err(|()| ExecError::Deadlock)?;
+        .map_err(lock_acquire_error)?;
     // Probe the index for exactly this key instead of scanning the whole table.
     // The probe keeps the scan path's visibility (all-committed local + global
     // snapshots plus our own xid), and `lookup_local_index_equal` resolves each
@@ -5174,6 +5195,7 @@ pub(crate) async fn execute_read_locking(
     lockmgr: &crate::lockmgr::RowLockManager,
     repeatable_read: bool,
     mode: crate::lockmgr::LockMode,
+    lock_wait_cap: Option<std::time::Duration>,
     s: &SelectStmt,
 ) -> Result<QueryResult, ExecError> {
     let catalog_kv = read_ctx.catalog_kv;
@@ -5248,11 +5270,11 @@ pub(crate) async fn execute_read_locking(
             continue;
         }
 
-        // 2. Lock only matching candidates (40P01 on deadlock).
+        // 2. Lock only matching candidates (40P01 on deadlock or expired cap).
         lockmgr
-            .acquire(t.id, rowid, mode, xid)
+            .acquire(t.id, rowid, mode, xid, lock_wait_cap)
             .await
-            .map_err(|()| ExecError::Deadlock)?;
+            .map_err(lock_acquire_error)?;
 
         // 3. EvalPlanQual: re-read the row under the lock (40001 under RR if
         //    changed since our snapshot; RC re-finds the latest live version).
