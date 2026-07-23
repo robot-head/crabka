@@ -111,7 +111,11 @@ impl LocalCoordinator {
         participants: Vec<RangeId>,
     ) -> Result<(), LocalCoordinatorError> {
         let mut state = self.state.lock().await;
-        state.next_id = state.next_id.max(xid);
+        // The local counter must never be synced to a GTM-allocated xid:
+        // global xids live at or above `GLOBAL_XID_BASE`, disjoint from the
+        // local domain by design, and dragging `next_id` up there makes the
+        // next locally recorded decision squat on the xid the GTM allocates
+        // next — its stale `Local` record then rejects that global begin.
         state.insert_existing_begun(xid, participants)
     }
 
@@ -643,6 +647,28 @@ mod tests {
             }
         );
         assert!(r0.saw_substrate_barrier.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn local_decisions_never_squat_on_future_global_xids() {
+        use crabka_pgmvcc::xid::GLOBAL_XID_BASE;
+
+        let coordinator = LocalCoordinator::default();
+        let participants = vec![RangeId::new(0), RangeId::new(1)];
+        coordinator
+            .begin_existing_xid(GLOBAL_XID_BASE + 1, participants.clone())
+            .await
+            .expect("first GTM xid begins");
+
+        // A single-range decision recorded after a global begin must keep its
+        // bookkeeping xid in the local domain (< GLOBAL_XID_BASE), so the
+        // GTM's next allocation is not rejected by a stale Local record.
+        let decision = coordinator.commit(vec![RangeId::new(0)], false).await;
+        assert_eq!(decision, TransactionDecision::Commit);
+        coordinator
+            .begin_existing_xid(GLOBAL_XID_BASE + 2, participants)
+            .await
+            .expect("next GTM xid begins despite an interleaved local decision");
     }
 
     #[tokio::test]

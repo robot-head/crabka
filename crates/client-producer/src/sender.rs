@@ -231,7 +231,13 @@ pub(crate) async fn run(mut cfg: SenderConfig) {
             _ = ticker.tick() => {
                 drain_once(&mut cfg, &mut state).await;
             }
-            _ = cfg.wake_rx.recv() => {
+            received = cfg.wake_rx.recv() => {
+                // A closed wake channel means every producer handle is gone,
+                // so no further record can ever arrive: fall through to the
+                // final drain instead of hot-looping on the closed receiver.
+                if received.is_none() {
+                    break;
+                }
                 drain_once(&mut cfg, &mut state).await;
             }
         }
