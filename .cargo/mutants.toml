@@ -219,6 +219,15 @@ exclude_re = [
     # static ASCII strings without HTML metacharacters; dynamic page body escaping is
     # asserted through Dioxus SSR view tests.
     "admin-ui/src/views/page\\.rs.*push_escaped",
+    # `live_committed_end` is a live-broker seam adapter: it constructs a
+    # `LiveCommittedEndSampler` over the real broker dialer and delegates. The
+    # sampler's committed-end logic is unit-tested against a counting fake
+    # dialer (follower.rs); only the live-broker construction — which returns
+    # a real committed offset the tests below cannot pin without a broker —
+    # remains, so the `Ok(-1|0|1)` mutants are covered only by broker
+    # integration tests. Same rationale as the client-producer/admin-ui live
+    # adapters above.
+    "(crates/)?gres-substrate/src/recovery\\.rs.*replace live_committed_end",
     # Live broker/client SCRAM wire-shape fields are integration-level signal; the
     # branch's new admin UI unit tests cover the DTO/seam behaviour without a
     # running broker.

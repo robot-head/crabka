@@ -1232,6 +1232,25 @@ mod tests {
     };
 
     #[test]
+    fn fetch_request_carries_the_requested_wait_and_committed_isolation() {
+        let topic_id = WireUuid([7_u8; 16]);
+        let request = build_fetch_request("__gres_wal.t.r0", topic_id, 42, 250);
+
+        assert!(request.max_wait_ms == 250);
+        assert!(request.isolation_level == READ_COMMITTED);
+        assert!(request.min_bytes == 1);
+        let partition = &request.topics[0].partitions[0];
+        assert!(partition.partition == PARTITION);
+        assert!(partition.fetch_offset == 42);
+        assert!(partition.partition_max_bytes == FETCH_MAX_BYTES);
+
+        // The zero-wait sampler path must stay zero-wait: a positioned fetch at
+        // the log end returns immediately instead of long-polling.
+        let poll = build_fetch_request("__gres_wal.t.r0", topic_id, 42, 0);
+        assert!(poll.max_wait_ms == 0);
+    }
+
+    #[test]
     fn live_recovery_config_selects_range_topic_and_transactional_id() {
         let tenant = TenantName::parse("tenant-a").expect("tenant");
         let coordinator =
