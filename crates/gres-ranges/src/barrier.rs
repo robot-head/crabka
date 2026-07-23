@@ -316,6 +316,16 @@ mod tests {
             .unwrap_or_else(|_| panic!("sampler never reached {at_least} calls"));
     }
 
+    // Bounded await for the same reason: a mutant that turns barrier
+    // coordination into a hang (never adopting a sample, never sampling at
+    // all) must fail the suite promptly, not stall it past the
+    // mutation-testing budget.
+    async fn within<T>(future: impl std::future::Future<Output = T>) -> T {
+        tokio::time::timeout(Duration::from_secs(5), future)
+            .await
+            .expect("barrier wait must complete promptly")
+    }
+
     #[tokio::test]
     async fn barrier_conservative_with_open_uncommitted_producer_transaction() {
         let store = Arc::new(MemKv::default());
@@ -343,7 +353,7 @@ mod tests {
         ))
         .expect("apply committed marker");
 
-        assert!(waiter.await.expect("join").is_ok());
+        assert!(within(waiter).await.expect("join").is_ok());
         assert!(store.get(b"txn-visible").expect("get") == Some(b"yes".to_vec()));
     }
 
@@ -363,7 +373,7 @@ mod tests {
         sampler.release(7).await;
         let barrier = Range0Barrier::new(tail, sampler);
 
-        barrier.ensure_readable().await.expect("readable");
+        within(barrier.ensure_readable()).await.expect("readable");
 
         assert!(store.get(b"catalog-row").expect("get") == Some(b"acked".to_vec()));
     }
@@ -381,9 +391,7 @@ mod tests {
             let barrier = barrier.clone();
             async move { barrier.ensure_readable().await }
         });
-        while sampler.calls.load(Ordering::SeqCst) == 0 {
-            tokio::task::yield_now().await;
-        }
+        wait_for_calls(&sampler.calls, 1).await;
         // Both arrive while the first fetch is in flight: neither may adopt
         // it, and both share ONE next-generation fetch.
         let second = tokio::spawn({
@@ -397,9 +405,9 @@ mod tests {
         tokio::task::yield_now().await;
         sampler.release(5).await;
 
-        assert!(first.await.expect("join").is_ok());
-        assert!(second.await.expect("join").is_ok());
-        assert!(third.await.expect("join").is_ok());
+        assert!(within(first).await.expect("join").is_ok());
+        assert!(within(second).await.expect("join").is_ok());
+        assert!(within(third).await.expect("join").is_ok());
         assert!(sampler.calls.load(Ordering::SeqCst) == 2);
     }
 
@@ -463,9 +471,7 @@ mod tests {
             let barrier = barrier.clone();
             async move { barrier.ensure_readable().await }
         });
-        while sampler.calls.load(Ordering::SeqCst) == 0 {
-            tokio::task::yield_now().await;
-        }
+        wait_for_calls(&sampler.calls, 1).await;
 
         // The late caller arrives while the first fetch is in flight.
         let late = tokio::spawn({
@@ -476,7 +482,7 @@ mod tests {
         sampler.release_next();
 
         // The early caller's own fetch (3) satisfies it immediately.
-        assert!(early.await.expect("join").is_ok());
+        assert!(within(early).await.expect("join").is_ok());
 
         // The late caller must be waiting on the second fetch, not done on
         // the stale first one.
@@ -491,7 +497,7 @@ mod tests {
 
         tail.apply_committed(&Range0Frame::new(9, Vec::new()))
             .expect("apply through 9");
-        assert!(late.await.expect("join").is_ok());
+        assert!(within(late).await.expect("join").is_ok());
         assert!(sampler.calls.load(Ordering::SeqCst) == 2);
     }
 
