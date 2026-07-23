@@ -166,6 +166,7 @@ mod client_server_failover_model;
 pub mod codes;
 pub mod config;
 pub(crate) mod config_keys;
+pub mod config_value;
 pub mod coordinator;
 /// Compositional end-to-end data-path verification model (produce → replicate →
 /// commit → fetch across clean + unclean failover); wraps the real HWM/ISR,
