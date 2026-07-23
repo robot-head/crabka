@@ -56,6 +56,11 @@ pub(crate) struct TxnCtx {
     /// Finite range-0 read timestamp fixed at BEGIN for REPEATABLE READ.
     /// READ COMMITTED and autocommit allocate one per statement instead.
     pub(crate) timestamp_read: Option<crate::timestamp_txn::ReadTimestamp>,
+    /// Holds the timestamp-domain reclaim floor at or below
+    /// [`TxnCtx::timestamp_read`] while the block is open, so write-path
+    /// timestamp pruning on this engine never reclaims a sharded-table
+    /// version the fixed REPEATABLE READ timestamp can still see.
+    pub(crate) _timestamp_read_pin: Option<crabka_pgmvcc::gc::SnapshotPin>,
     /// The `(table_id, rowid)` set this transaction's local xid has written, in
     /// write order (deduped is unnecessary — the abort-atomicity fence only scans
     /// these rows' versions, and a repeated entry just re-scans). Used by the
@@ -883,6 +888,11 @@ pub struct SqlSession {
     /// (write-path, `vacuum`, checkpoint compaction) never reclaims a version
     /// a live snapshot still sees.
     gc_horizon: Arc<crabka_pgmvcc::gc::GcHorizon>,
+    /// Timestamp-version GC state (shared from the engine): statement read
+    /// timestamps over sharded tables pin here so write-path timestamp
+    /// pruning never reclaims a version an in-flight read may resolve to,
+    /// and commit resolutions fold their opportunistic prune ops through it.
+    ts_gc: Arc<crate::ts_gc::TsVersionGc>,
     timestamp_own_start_ts: Option<crate::timestamp_txn::TimestampTransactionId>,
     sequence_currvals: Arc<Mutex<HashMap<String, i64>>>,
     session_user: String,
@@ -917,6 +927,7 @@ pub(crate) struct SqlSessionConfig {
     pub timestamp_horizon: crate::timestamp_txn::TimestampHorizonSource,
     pub local_sequence: Arc<crate::local_sequence::LocalSequence>,
     pub gc_horizon: Arc<crabka_pgmvcc::gc::GcHorizon>,
+    pub ts_gc: Arc<crate::ts_gc::TsVersionGc>,
 }
 
 #[derive(Clone)]
@@ -972,6 +983,7 @@ impl SqlSession {
             timestamp_horizon,
             local_sequence,
             gc_horizon,
+            ts_gc,
         } = config;
         Self {
             kv,
@@ -1001,6 +1013,7 @@ impl SqlSession {
             timestamp_horizon,
             local_sequence,
             gc_horizon,
+            ts_gc,
             timestamp_own_start_ts: None,
             sequence_currvals: Arc::new(Mutex::new(HashMap::new())),
             session_user: "public".into(),
@@ -1072,30 +1085,34 @@ impl SqlSession {
         }
     }
 
-    /// The garbage horizon UPDATE/DELETE may prune dead row versions at, or
-    /// `None` when this session's engine must not prune locally.
+    /// The garbage horizon UPDATE/DELETE may prune dead row versions at.
     ///
-    /// Pruning is a physical local delete outside any replicated batch
-    /// ordering, so it is only sound on the plain single-range LOCAL engine:
-    /// Durable persist mode (a replicated engine's deterministic WAL apply and
-    /// checkpoints would diverge), no GTM and no range-0 barrier (multi-range
-    /// rows can carry global xids whose lifecycle the local horizon cannot
-    /// judge), and a single store for data + catalog. Mirrors
-    /// `SqlEngine::supports_local_vacuum`.
-    fn local_prune_horizon(&self) -> Result<Option<u64>, ExecError> {
-        if self.persist_mode != crate::PersistMode::Durable
-            || self.gtm.is_some()
-            || self.range0_barrier.is_some()
-            || !Arc::ptr_eq(&self.kv, &self.catalog_kv)
-        {
-            return Ok(None);
-        }
+    /// Sound on every engine kind — unlike [`SqlEngine::vacuum`], whose local
+    /// sweeps are why it stays confined to single-range local engines:
+    ///
+    /// - The prune deletes ride the statement's own commit batch through the
+    ///   engine committer, so on replicated engines they replicate through
+    ///   the WAL and replay deterministically on followers, in recovery, and
+    ///   in committed folds — never a local delete outside batch ordering.
+    /// - The horizon is capped by this engine's oldest running writer and
+    ///   lowest registered snapshot pin, which covers every reader of this
+    ///   store: plain-table reads are always served by owner-local sessions
+    ///   (forwarded DML and queries open sessions here; cross-range scatter
+    ///   scans exist only for sharded tables, whose timestamp tuples this
+    ///   pruning never touches), and a snapshot allocated after a prune
+    ///   commits sees the pruned version's committed deleter, so the version
+    ///   was already invisible to it.
+    /// - Global 2PC writes stay untouched: an undecided enlisted xid reads as
+    ///   `Prepared` (never dead), and global xids sit numerically above every
+    ///   local horizon.
+    ///
+    /// [`SqlEngine::vacuum`]: crate::SqlEngine::vacuum
+    fn local_prune_horizon(&self) -> Result<u64, ExecError> {
         crate::checkpoint_garbage_horizon(
             self.procarray.as_ref(),
             self.kv.as_ref(),
             self.gc_horizon.as_ref(),
         )
-        .map(Some)
     }
 
     /// Set the timestamp transaction whose pending intents are owned by this SQL session.
@@ -1281,16 +1298,19 @@ impl SqlSession {
             let snapshot = self.procarray.snapshot();
             let global_snapshot = self.global_read_snapshot(None)?;
             let timestamp_read = self.allocate_statement_read_timestamp().await?;
+            let timestamp_read_pin = self.ts_gc.pin_read(self.kv.as_ref(), timestamp_read)?;
             if let TxnState::InTransaction(ctx) = &mut self.state {
                 ctx.repeatable_read = true;
                 ctx.snapshot = snapshot;
                 ctx.global_snapshot = Some(global_snapshot);
                 ctx.timestamp_read = Some(timestamp_read);
+                ctx._timestamp_read_pin = Some(timestamp_read_pin);
             }
         } else if let TxnState::InTransaction(ctx) = &mut self.state {
             ctx.repeatable_read = false;
             ctx.global_snapshot = None;
             ctx.timestamp_read = None;
+            ctx._timestamp_read_pin = None;
         }
         Ok(QueryResult::Command { tag: "SET".into() })
     }
@@ -1553,17 +1573,25 @@ impl SqlSession {
         // its fixed snapshot can see; a READ COMMITTED block's later statement
         // snapshots all have xmin >= this pin, so it covers them conservatively.
         let snapshot_pin = self.gc_horizon.pin(snapshot.xmin);
+        let timestamp_read = if rr {
+            Some(self.allocate_statement_read_timestamp().await?)
+        } else {
+            None
+        };
+        // Mirror pin in the timestamp domain: a fixed RR read timestamp must
+        // hold the reclaim floor so sharded-table pruning keeps its history.
+        let timestamp_read_pin = match timestamp_read {
+            Some(read_ts) => Some(self.ts_gc.pin_read(self.kv.as_ref(), read_ts)?),
+            None => None,
+        };
         self.state = TxnState::InTransaction(TxnCtx {
             xid: None,
             snapshot,
             _snapshot_pin: snapshot_pin,
             repeatable_read: rr,
             global_snapshot,
-            timestamp_read: if rr {
-                Some(self.allocate_statement_read_timestamp().await?)
-            } else {
-                None
-            },
+            timestamp_read,
+            _timestamp_read_pin: timestamp_read_pin,
             written_rows: Vec::new(),
             // PG transaction-stable `now()`/`current_timestamp`: fix it once at BEGIN.
             txn_now: self.clock.now(),
@@ -1792,6 +1820,10 @@ impl SqlSession {
                 return Err(ExecError::InFailedTransaction);
             }
         };
+        // Hold the timestamp-domain reclaim floor at or below this statement's
+        // read timestamp for its duration, so concurrent write-path timestamp
+        // pruning on this engine cannot reclaim a version it may resolve to.
+        let _ts_read_pin = self.ts_gc.pin_read(self.kv.as_ref(), read_ts)?;
         let statement_scanner = if let Some(own_start_ts) = self.timestamp_own_start_ts {
             crate::scanner::TimestampedRangeScanner::with_own_transaction(
                 Arc::clone(&self.range_scanner),
@@ -2192,9 +2224,9 @@ impl SqlSession {
                 // next_xid op into this batch (the state machine max-merges it;
                 // re-folding on a later write in the same txn is harmless).
                 // Cache the garbage horizon once per statement: UPDATE/DELETE
-                // prune the chains of the rows they write against it (local
-                // engines only; None disables pruning elsewhere).
-                let prune_horizon = self.local_prune_horizon()?;
+                // prune the chains of the rows they write against it, in the
+                // same commit batch as the write itself.
+                let prune_horizon = Some(self.local_prune_horizon()?);
                 let write_ctx = self.write_context(
                     &gsnap,
                     &snapshot,
@@ -2288,7 +2320,7 @@ impl SqlSession {
                 let ctx = self.eval_ctx();
                 // Cache the garbage horizon once per statement (see the
                 // in-transaction branch above).
-                let prune_horizon = self.local_prune_horizon()?;
+                let prune_horizon = Some(self.local_prune_horizon()?);
                 let write_ctx =
                     self.write_context(&gsnap, &snapshot, xid, false, &ctx, prune_horizon);
                 let outcome = crate::exec::execute_write(&write_ctx, stmt).await;
@@ -2487,13 +2519,17 @@ impl SqlSession {
             Arc::clone(&self.catalog_kv),
             Arc::clone(&self.committer),
             0,
-        );
+        )
+        .with_ts_gc(Arc::clone(&self.ts_gc));
         let commit_ts = self.allocate_commit_timestamp_after(start_ts).await?;
         participant.prewrite(start_ts, &plan.writes).await?;
         match participant
             .commit_with_ops(start_ts, commit_ts, &plan.writes, plan.commit_ops)
             .await
         {
+            // The participant publishes closure for the committed timestamp
+            // itself (`observe_committed_decision`), feeding the reclaim
+            // floor that prunes superseded versions.
             Ok(()) => Ok(plan.result),
             Err(error) => {
                 let _ = participant.abort(start_ts, &plan.writes).await;
@@ -4081,6 +4117,8 @@ impl SqlSession {
                         return Err(ExecError::InFailedTransaction);
                     }
                 };
+                // Statement-duration timestamp-domain pin — see `run_select`.
+                let _ts_read_pin = self.ts_gc.pin_read(self.kv.as_ref(), read_ts)?;
                 let scanner = crate::scanner::TimestampedRangeScanner::new(
                     Arc::clone(&self.range_scanner),
                     read_ts,

@@ -1466,6 +1466,11 @@ pub struct TimestampTxnParticipant {
     committer: std::sync::Arc<dyn Committer>,
     primary_barrier: Option<std::sync::Arc<dyn crate::read_gate::Linearizer>>,
     sequence: Option<std::sync::Arc<crate::seq::SequenceManager>>,
+    /// Timestamp-version GC state for opportunistic dead-version pruning and
+    /// reclaim-floor admission (`None` on bare participants, which then
+    /// neither prune nor enforce the floor in memory — the durable floor
+    /// still fences prewrites through [`prewrite_ops`]).
+    ts_gc: Option<std::sync::Arc<crate::ts_gc::TsVersionGc>>,
     range_id: u32,
 }
 
@@ -1491,7 +1496,54 @@ impl TimestampTxnParticipant {
             committer,
             primary_barrier: None,
             sequence: None,
+            ts_gc: None,
             range_id,
+        }
+    }
+
+    /// Attach timestamp-version GC state: commit resolutions then fold
+    /// opportunistic dead-version prune ops into their batches (see
+    /// [`crate::ts_gc::TsVersionGc::prune_batch_ops`]).
+    #[must_use]
+    pub fn with_ts_gc(mut self, ts_gc: std::sync::Arc<crate::ts_gc::TsVersionGc>) -> Self {
+        self.ts_gc = Some(ts_gc);
+        self
+    }
+
+    /// Opportunistic prune ops for the rows `writes` just resolved, when GC
+    /// state is attached and the decision publishes committed/deleted
+    /// versions; empty otherwise.
+    fn commit_prune_ops(
+        &self,
+        decision: TimestampTxnDecision,
+        writes: &[TimestampWrite],
+    ) -> Result<Vec<crabka_pgkv::WriteOp>, ExecError> {
+        let Some(ts_gc) = &self.ts_gc else {
+            return Ok(Vec::new());
+        };
+        if !matches!(
+            decision,
+            TimestampTxnDecision::Committed(_) | TimestampTxnDecision::Deleted(_)
+        ) {
+            return Ok(Vec::new());
+        }
+        ts_gc.prune_batch_ops(self.kv.as_ref(), writes)
+    }
+
+    /// Publish closure for a durably committed decision through the attached
+    /// GC state (a no-op on bare participants or aborts). Commit resolution
+    /// is the closure source that works under a pure-write workload: served
+    /// reads also publish closure, but a range whose reads all arrive at the
+    /// owner timestamp (`u64::MAX` never reconciles) would otherwise never
+    /// advance its closed timestamp, and a reclaim floor derived from it
+    /// would sit at zero forever with every dead version left in place.
+    /// Call only after the resolve batch is durably committed.
+    fn observe_committed_decision(&self, decision: TimestampTxnDecision) {
+        if let Some(ts_gc) = &self.ts_gc
+            && let TimestampTxnDecision::Committed(commit_ts)
+            | TimestampTxnDecision::Deleted(commit_ts) = decision
+        {
+            ts_gc.observe_committed(commit_ts);
         }
     }
 
@@ -1695,7 +1747,10 @@ impl TimestampTxnParticipant {
                 writes.iter().map(|write| (write.table_id, write.rowid)),
             )?);
         }
-        self.committer.commit(ops).await
+        ops.extend(self.commit_prune_ops(decision, writes)?);
+        self.committer.commit(ops).await?;
+        self.observe_committed_decision(decision);
+        Ok(())
     }
 
     /// Write the primary decision and resolve local intents to committed versions.
@@ -1734,8 +1789,11 @@ impl TimestampTxnParticipant {
             commit_ts,
             writes,
         )?);
+        ops.extend(self.commit_prune_ops(TimestampTxnDecision::Committed(commit_ts), writes)?);
         ops.extend(extra_ops);
-        self.committer.commit(ops).await
+        self.committer.commit(ops).await?;
+        self.observe_committed_decision(TimestampTxnDecision::Committed(commit_ts));
+        Ok(())
     }
 
     /// Abort the primary decision and resolve local intents to aborted versions.
@@ -1804,7 +1862,9 @@ impl TimestampTxnParticipant {
                 writes.iter().map(|write| (write.table_id, write.rowid)),
             )?);
         }
+        ops.extend(self.commit_prune_ops(decision, writes)?);
         self.committer.commit(ops).await?;
+        self.observe_committed_decision(decision);
         if decision != TimestampTxnDecision::Aborted
             && let Some(sequence) = &self.sequence
         {
@@ -1860,7 +1920,9 @@ impl TimestampTxnParticipant {
                 writes.iter().map(|write| (write.table_id, write.rowid)),
             )?);
         }
+        ops.extend(self.commit_prune_ops(decision, writes)?);
         self.committer.commit(ops).await?;
+        self.observe_committed_decision(decision);
         let stored = read_timestamp_txn_descriptor(self.kv.as_ref(), identity.start_ts)?;
         if stored.as_ref() != Some(&terminal) {
             return Err(map_ts_error(TimestampTxnError::IdentityFenced));
@@ -1925,10 +1987,23 @@ impl TimestampTxnParticipant {
                     .map(|operation| (operation.table_id, operation.rowid)),
             )?);
         }
+        let prune_writes = operations
+            .iter()
+            .map(|operation| TimestampWrite {
+                table_id: operation.table_id,
+                bucket: operation.bucket,
+                rowid: operation.rowid,
+                row: Vec::new(),
+                delete: operation.delete,
+                global_index_intents: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        ops.extend(self.commit_prune_ops(decision, &prune_writes)?);
         if ops.is_empty() {
             return Ok(());
         }
         self.committer.commit(ops).await?;
+        self.observe_committed_decision(decision);
         if decision != TimestampTxnDecision::Aborted
             && let Some(sequence) = &self.sequence
         {
@@ -2408,6 +2483,25 @@ pub fn prewrite_ops(
     start_ts: TimestampTransactionId,
     writes: &[TimestampWrite],
 ) -> Result<Vec<crabka_pgkv::WriteOp>, TimestampTxnError> {
+    // Fence against reclaimed history: a transaction starting below the
+    // published reclaim floor could run its first-committer-wins check over a
+    // chain whose covering committed versions were already pruned. Timestamps
+    // are allocated near the present, so this only fires for transactions
+    // that stalled across a reclamation — a retryable conflict.
+    if let Some(write) = writes.first() {
+        let reclaim_floor = crate::ts_gc::durable_reclaim_floor(kv).map_err(|_| {
+            TimestampTxnError::WriteConflict {
+                table_id: write.table_id,
+                rowid: write.rowid,
+            }
+        })?;
+        if start_ts.get() < reclaim_floor {
+            return Err(TimestampTxnError::WriteConflict {
+                table_id: write.table_id,
+                rowid: write.rowid,
+            });
+        }
+    }
     let index_intent_count = writes
         .iter()
         .map(|write| write.global_index_intents.len())

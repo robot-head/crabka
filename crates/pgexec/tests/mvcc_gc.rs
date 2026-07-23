@@ -239,7 +239,7 @@ impl Committer for ApplyCommitter {
 }
 
 #[tokio::test]
-async fn replicated_mode_never_prunes_and_vacuum_is_a_no_op() {
+async fn replicated_mode_prunes_in_commit_batches_and_vacuum_is_a_no_op() {
     let kv: Arc<dyn Kv> = Arc::new(MemKv::new());
     let engine = SqlEngine::replicated(
         Arc::clone(&kv),
@@ -267,22 +267,26 @@ async fn replicated_mode_never_prunes_and_vacuum_is_a_no_op() {
     }
     let table = engine.catalog_table("r").expect("table");
 
-    // Write-path pruning must not engage: every superseded version survives.
-    assert!(version_count(kv.as_ref(), table.id, 1) == 6);
+    // Write-path pruning engages on replicated engines too — the deletes ride
+    // each statement's replicated commit batch, so the chain stays bounded
+    // instead of holding all six versions.
+    let pruned_chain = version_count(kv.as_ref(), table.id, 1);
+    assert!(pruned_chain <= 3);
 
-    // And the engine-level sweep refuses to touch a replicated store — the
-    // full pass and the bounded step alike.
+    // The engine-level sweep still refuses to touch a replicated store — its
+    // batches would commit outside statement order. Full pass and bounded
+    // step alike leave the store untouched.
     let stats = engine.vacuum().await.expect("vacuum");
     assert!(stats == crabka_pgexec::VacuumStats::default());
     let step = engine.vacuum_step().await.expect("vacuum step");
     assert!(step == crabka_pgexec::VacuumStepStats::default());
-    assert!(version_count(kv.as_ref(), table.id, 1) == 6);
+    assert!(version_count(kv.as_ref(), table.id, 1) == pruned_chain);
 }
 
 // ── (e) pruning does not change UPDATE/DELETE results ────────────────────────
 
-/// Run one DML script against a pruning LOCAL engine and a non-pruning
-/// replicated engine; the visible table contents must be identical.
+/// Run one DML script against a LOCAL engine and a replicated engine (both
+/// prune on the write path); the visible table contents must be identical.
 #[tokio::test]
 async fn update_and_delete_results_are_unchanged_with_pruning_active() {
     let script: Vec<String> = {

@@ -160,6 +160,48 @@ Any of these must be validated against the fault and formal suites the barrier
 underpins (`tso-partition`, `node-crash`, `flappy-network`, and the two-range
 closed-timestamp Stateright model), not just the happy-path load test.
 
+## Fix (2026-07-23): persistent incremental committed-end sampling
+
+Option 1 was implemented, extended with an incremental scan cursor
+(`crates/gres-substrate/src/follower.rs`):
+
+- `LiveCommittedEndSampler` now keeps **one broker attachment** (raw fetch
+  connection + resolved topic UUID, dialed via a `CommittedEndDialer` seam in
+  `crates/gres-substrate/src/recovery.rs`) and a **monotone scan cursor**
+  (`next_fetch`, `last_visible`) across calls.
+- Per barrier call the remaining work is: one `Fetch` round-trip on the live
+  connection positioned at the cursor (with `max_wait_ms = 0`, so an
+  at-the-end cursor returns immediately). The response's `last_stable_offset`
+  is the linearization point — read by a fetch that started after the call
+  began — and only records in `[cursor, stable_end)` are decoded. History
+  below the cursor is immutable and already folded into `last_visible`, so
+  the per-call full-topic re-scan is gone along with the per-call
+  `connect_secured` + `resolve_topic_uuid` + reader `open_connection`.
+- Records at or above the stable end are never counted and the cursor never
+  crosses it, so an open transaction that later aborts cannot poison the
+  cached value.
+- **Invalidation:** any error on the cached attachment drops it and falls
+  back to a fresh dial inside the same call (exactly the old per-call path);
+  only the fresh attempt's failure surfaces to the barrier, so availability
+  under broker restart/partition is unchanged. The cursor survives redials —
+  it describes broker-side log state, not connection state. Pruned history
+  (OFFSET_OUT_OF_RANGE) jumps the cursor to the retained log start.
+- The follower poll loop in `crates/gres/src/lib.rs` shares the same sampler
+  instance as the barrier, removing its independent reconnect-per-tick end
+  probe as well. (Its bounded tail *read* still dials per catch-up; that is
+  per poll tick under load, not per statement.)
+- `live_committed_end()` now delegates to a one-shot sampler, so recovery and
+  split-activation callers keep today's fresh-dial semantics through one scan
+  implementation.
+
+The barrier semantics in `crates/gres-ranges/src/barrier.rs` (fresh sample
+per generation, never adopt an in-flight sample, wait for the local tail) are
+untouched — the sampler still performs a broker fetch that begins after every
+call, so no staleness window was introduced. Covered by unit tests over a
+counting fake broker (connection reuse, incremental cursor, redial fallback,
+stable-end exclusion, pruning) plus an end-to-end barrier test in
+`follower.rs`, and the existing barrier/jepsen/nemesis suites.
+
 ## Tooling used
 
 - `crates/gres-loadtest`: added `CRABKA_GRES_LOADTEST_CHECKPOINT_NODES`

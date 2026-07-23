@@ -3,11 +3,12 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use crabka_gres_loadtest::{
     cluster::Binaries,
+    external::{self, ExternalTarget},
     report::{self, LatencySummary, RunReport},
-    runner::{self, RunConfig},
+    runner::{self, ExternalRunConfig, RunConfig},
     scenario::{ModeSpec, Scenario},
 };
 use tracing_subscriber::EnvFilter;
@@ -34,8 +35,8 @@ enum CliCommand {
         #[arg(long)]
         scenario: PathBuf,
         /// Override the scenario's timestamp-source mode
-        /// (`logical-tso` or `hlc`).
-        #[arg(long)]
+        /// (`logical-tso` or `hlc`). Meaningless with `--external`.
+        #[arg(long, conflicts_with = "external")]
         mode: Option<String>,
         /// `max_offset_ms` when `--mode hlc` is given.
         #[arg(long, default_value_t = 250)]
@@ -46,6 +47,8 @@ enum CliCommand {
         /// Keep the cluster work dir (data + logs) after a successful run.
         #[arg(long)]
         keep_work_dir: bool,
+        #[command(flatten)]
+        external: ExternalFlags,
     },
     /// Run one scenario under both timestamp modes and render a comparison.
     Compare {
@@ -58,6 +61,11 @@ enum CliCommand {
         /// Keep the cluster work dirs (data + logs) after successful runs.
         #[arg(long)]
         keep_work_dir: bool,
+        /// Not supported here: `compare` contrasts crabka's timestamp-source
+        /// modes on a harness-launched cluster. Use `run --external` per
+        /// target system instead.
+        #[arg(long)]
+        external: Option<String>,
     },
     /// Parse and validate a scenario without running it.
     Validate {
@@ -65,6 +73,73 @@ enum CliCommand {
         #[arg(long)]
         scenario: PathBuf,
     },
+}
+
+/// The `--external*` flag family: benchmark an existing pgwire-speaking SQL
+/// system (`CockroachDB`, `YugabyteDB`, `PostgreSQL`, a remote crabka cluster)
+/// instead of launching a crabka cluster.
+#[derive(Args)]
+struct ExternalFlags {
+    /// Comma-separated `host:port` SQL endpoints of the external system;
+    /// enables external mode (no crabka processes are launched, the
+    /// scenario's faults must be empty, and its `mode` is ignored).
+    #[arg(long)]
+    external: Option<String>,
+    /// SQL user for the external endpoints (required with `--external`).
+    #[arg(long, requires = "external")]
+    external_user: Option<String>,
+    /// SQL password for the external endpoints (omit for no password).
+    #[arg(long, requires = "external")]
+    external_password: Option<String>,
+    /// Database name on the external endpoints (required with `--external`).
+    #[arg(long, requires = "external")]
+    external_database: Option<String>,
+    /// Manual resource roster as comma-separated `label=pid` entries,
+    /// overriding port-based discovery — for multi-process systems (e.g. a
+    /// `YugabyteDB` master + tserver) or when `/proc` discovery is not
+    /// permitted.
+    #[arg(long, requires = "external")]
+    external_pids: Option<String>,
+}
+
+/// Builds the external target from the flag family: `None` without
+/// `--external`; with it, user and database are required (external mode
+/// never guesses credentials) and the password defaults to empty.
+fn external_target(flags: ExternalFlags) -> anyhow::Result<Option<ExternalTarget>> {
+    let Some(endpoints) = flags.external else {
+        return Ok(None);
+    };
+    let endpoints = external::parse_endpoint_list(&endpoints)?;
+    let user = flags
+        .external_user
+        .context("--external-user is required with --external")?;
+    let database = flags
+        .external_database
+        .context("--external-database is required with --external")?;
+    let pids_override = flags
+        .external_pids
+        .as_deref()
+        .map(external::parse_pid_overrides)
+        .transpose()?;
+    Ok(Some(ExternalTarget {
+        endpoints,
+        user,
+        password: flags.external_password.unwrap_or_default(),
+        database,
+        pids_override,
+    }))
+}
+
+/// Rejects `compare --external`: the comparison is between crabka's
+/// timestamp-source modes, which needs a harness-launched cluster.
+fn ensure_compare_is_internal(external: Option<&str>) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        external.is_none(),
+        "`compare` does not support --external: it contrasts crabka's timestamp-source \
+         modes (logical-tso vs hlc) on a harness-launched cluster; benchmark an external \
+         system with `run --external` once per target and diff the reports instead"
+    );
+    Ok(())
 }
 
 #[tokio::main]
@@ -80,6 +155,7 @@ async fn main() -> anyhow::Result<()> {
             hlc_max_offset_ms,
             out,
             keep_work_dir,
+            external,
         } => {
             run(
                 &scenario,
@@ -87,6 +163,7 @@ async fn main() -> anyhow::Result<()> {
                 hlc_max_offset_ms,
                 &out,
                 keep_work_dir,
+                external,
             )
             .await
         }
@@ -94,20 +171,36 @@ async fn main() -> anyhow::Result<()> {
             scenario,
             out,
             keep_work_dir,
-        } => compare(&scenario, &out, keep_work_dir).await,
+            external,
+        } => {
+            ensure_compare_is_internal(external.as_deref())?;
+            compare(&scenario, &out, keep_work_dir).await
+        }
         CliCommand::Validate { scenario } => validate(&scenario),
     }
 }
 
-/// The `run` subcommand: one scenario, optional mode override.
+/// The `run` subcommand: one scenario, optional mode override, optionally
+/// against an external system.
 async fn run(
     scenario_path: &Path,
     mode: Option<&str>,
     hlc_max_offset_ms: u64,
     out: &Path,
     keep_work_dir: bool,
+    external: ExternalFlags,
 ) -> anyhow::Result<()> {
     let scenario = load_scenario(scenario_path)?;
+    if let Some(target) = external_target(external)? {
+        let report = runner::run_external_scenario(ExternalRunConfig {
+            scenario,
+            target,
+            out_dir: out.to_path_buf(),
+        })
+        .await?;
+        print_summary(&report, out, runner::EXTERNAL_MODE);
+        return Ok(());
+    }
     let mode_override = parse_mode(mode, hlc_max_offset_ms)?;
     let effective_mode = mode_override.unwrap_or(scenario.mode);
     let binaries = Binaries::resolve()?;
@@ -119,7 +212,7 @@ async fn run(
         keep_work_dir,
     })
     .await?;
-    print_summary(&report, out, effective_mode);
+    print_summary(&report, out, &runner::mode_slug(effective_mode));
     Ok(())
 }
 
@@ -145,7 +238,7 @@ async fn compare(scenario_path: &Path, out: &Path, keep_work_dir: bool) -> anyho
         })
         .await
         .with_context(|| format!("run scenario {} under {mode}", scenario.name))?;
-        print_summary(&report, out, mode);
+        print_summary(&report, out, &runner::mode_slug(mode));
         reports.push(report);
     }
     let (left, right) = (&reports[0], &reports[1]);
@@ -182,9 +275,10 @@ fn parse_mode(mode: Option<&str>, hlc_max_offset_ms: u64) -> anyhow::Result<Opti
     }
 }
 
-/// Prints the short human summary of one run to stdout.
-fn print_summary(report: &RunReport, out_dir: &Path, mode: ModeSpec) {
-    let paths = runner::report_paths(out_dir, &report.scenario, mode);
+/// Prints the short human summary of one run to stdout. `slug` names the
+/// report files: a mode slug, or [`runner::EXTERNAL_MODE`].
+fn print_summary(report: &RunReport, out_dir: &Path, slug: &str) {
+    let paths = runner::report_paths(out_dir, &report.scenario, slug);
     println!("scenario:  {} ({})", report.scenario, report.mode);
     println!(
         "committed: {} txn, {:.2} tps mean, {} failed",
@@ -327,6 +421,172 @@ mod tests {
 
         let empty = fixture("logical-tso", 100.0, &[]);
         assert!(busiest_class(&empty) == None);
+    }
+
+    #[test]
+    fn external_target_requires_user_and_database_and_defaults_password() {
+        use crabka_gres_loadtest::{cluster::ProcessInfo, external::HostPort};
+
+        /// One flag-combination case: `(external, user, password, database,
+        /// pids)` and whether building the target should succeed.
+        struct Case {
+            flags: ExternalFlags,
+            expected: Result<Option<ExternalTarget>, &'static str>,
+        }
+        let flags = |external: Option<&str>,
+                     user: Option<&str>,
+                     password: Option<&str>,
+                     database: Option<&str>,
+                     pids: Option<&str>| ExternalFlags {
+            external: external.map(str::to_owned),
+            external_user: user.map(str::to_owned),
+            external_password: password.map(str::to_owned),
+            external_database: database.map(str::to_owned),
+            external_pids: pids.map(str::to_owned),
+        };
+        let cases = [
+            // No --external: external mode is off regardless of the rest.
+            Case {
+                flags: flags(None, None, None, None, None),
+                expected: Ok(None),
+            },
+            // Fully specified, with a manual pid roster.
+            Case {
+                flags: flags(
+                    Some("db1:5432, db2:5433"),
+                    Some("roach"),
+                    Some("s3cret"),
+                    Some("bench"),
+                    Some("master=1,tserver=2"),
+                ),
+                expected: Ok(Some(ExternalTarget {
+                    endpoints: vec![
+                        HostPort {
+                            host: "db1".to_owned(),
+                            port: 5432,
+                        },
+                        HostPort {
+                            host: "db2".to_owned(),
+                            port: 5433,
+                        },
+                    ],
+                    user: "roach".to_owned(),
+                    password: "s3cret".to_owned(),
+                    database: "bench".to_owned(),
+                    pids_override: Some(vec![
+                        ProcessInfo {
+                            label: "master".to_owned(),
+                            pid: 1,
+                        },
+                        ProcessInfo {
+                            label: "tserver".to_owned(),
+                            pid: 2,
+                        },
+                    ]),
+                })),
+            },
+            // Password omitted: empty (no password), pids omitted: discover.
+            Case {
+                flags: flags(
+                    Some("localhost:5432"),
+                    Some("postgres"),
+                    None,
+                    Some("postgres"),
+                    None,
+                ),
+                expected: Ok(Some(ExternalTarget {
+                    endpoints: vec![HostPort {
+                        host: "localhost".to_owned(),
+                        port: 5432,
+                    }],
+                    user: "postgres".to_owned(),
+                    password: String::new(),
+                    database: "postgres".to_owned(),
+                    pids_override: None,
+                })),
+            },
+            Case {
+                flags: flags(Some("localhost:5432"), None, None, Some("postgres"), None),
+                expected: Err("--external-user is required"),
+            },
+            Case {
+                flags: flags(Some("localhost:5432"), Some("postgres"), None, None, None),
+                expected: Err("--external-database is required"),
+            },
+            Case {
+                flags: flags(Some("not-an-endpoint"), Some("u"), None, Some("d"), None),
+                expected: Err("invalid endpoint"),
+            },
+            Case {
+                flags: flags(
+                    Some("localhost:5432"),
+                    Some("u"),
+                    None,
+                    Some("d"),
+                    Some("bad"),
+                ),
+                expected: Err("expected label=pid"),
+            },
+        ];
+        for (index, case) in cases.into_iter().enumerate() {
+            match (external_target(case.flags), case.expected) {
+                (Ok(target), Ok(expected)) => assert!(target == expected, "case {index}"),
+                (Err(error), Err(fragment)) => {
+                    let message = format!("{error:#}");
+                    assert!(
+                        message.contains(fragment),
+                        "case {index}: expected {fragment:?} in {message:?}"
+                    );
+                }
+                (result, expected) => panic!(
+                    "case {index}: got {result:?}, expected success = {}",
+                    expected.is_ok()
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn compare_rejects_external_with_a_clear_error() {
+        assert!(let Ok(()) = ensure_compare_is_internal(None));
+        let error = ensure_compare_is_internal(Some("db:5432")).expect_err("must reject");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("`compare` does not support --external"),
+            "message {message:?}"
+        );
+        assert!(message.contains("run --external"), "message {message:?}");
+    }
+
+    #[test]
+    fn cli_couples_external_flags_to_external_and_conflicts_with_mode() {
+        let base = ["crabka-gres-loadtest", "run", "--scenario", "s.yaml"];
+        // (extra args, parse must succeed)
+        let cases: [(&[&str], bool); 6] = [
+            (&[], true),
+            (
+                &[
+                    "--external",
+                    "localhost:5432",
+                    "--external-user",
+                    "u",
+                    "--external-database",
+                    "d",
+                ],
+                true,
+            ),
+            // --mode is meaningless against an external system.
+            (&["--external", "localhost:5432", "--mode", "hlc"], false),
+            // The sub-flags require --external itself.
+            (&["--external-user", "u"], false),
+            (&["--external-database", "d"], false),
+            (&["--external-pids", "db=1"], false),
+        ];
+        for (extra, ok) in cases {
+            let args = base.iter().chain(extra).copied();
+            let result = Cli::try_parse_from(args);
+            assert!(result.is_ok() == ok, "extra args {extra:?}");
+        }
     }
 
     #[test]

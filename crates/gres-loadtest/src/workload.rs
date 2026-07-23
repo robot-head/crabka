@@ -8,7 +8,10 @@
 //! gets `t{r * 1_000_000} (id int4)`, and a hot table
 //! `t{(ranges - 1) * 1_000_000 + 1} (id int4, v int4)` lands inside the last
 //! range's span, seeded with `hot_rows` rows (`id` 1..=`hot_rows`, `v` 0) via
-//! batched multi-row `INSERT`s.
+//! batched multi-row `INSERT`s. Each table is preceded by a
+//! `DROP TABLE IF EXISTS`, so re-runs against a persistent external system
+//! (`run --external`) start from a clean slate; against a freshly-launched
+//! crabka cluster the drops are no-ops.
 //!
 //! # Operation classes
 //!
@@ -57,7 +60,6 @@
 use std::{
     collections::BTreeMap,
     error::Error as _,
-    fmt::Write as _,
     io::ErrorKind as IoErrorKind,
     mem,
     sync::{
@@ -176,24 +178,33 @@ pub async fn prepare_schema(
     topology: &TopologySpec,
 ) -> anyhow::Result<()> {
     let client = connect_with_retry(endpoint).await?;
-    let mut ddl = String::new();
-    for range in 0..topology.ranges {
-        let table_id = range_table_id(range);
-        let _ = write!(ddl, "CREATE TABLE t{table_id} (id int4);");
-    }
-    let hot_id = hot_table_id(topology.ranges);
-    let _ = write!(ddl, "CREATE TABLE t{hot_id} (id int4, v int4);");
-    client
-        .simple_query(&ddl)
-        .await
-        .context("create workload tables")?;
-    for statement in seed_statements(hot_id, workload.hot_rows) {
+    for statement in schema_statements(topology.ranges, workload.hot_rows) {
         client
             .simple_query(&statement)
             .await
-            .context("seed hot table")?;
+            .with_context(|| format!("prepare schema: {statement}"))?;
     }
     Ok(())
+}
+
+/// Every statement [`prepare_schema`] issues, in order: per range table a
+/// `DROP TABLE IF EXISTS` then its `CREATE TABLE`, the same pair for the
+/// hot table, then the hot-table seed `INSERT`s. Statements are issued one
+/// at a time — each in its own implicit transaction — because external
+/// targets (`run --external`) may not accept DDL inside a multi-statement
+/// batch.
+fn schema_statements(ranges: u16, hot_rows: u32) -> Vec<String> {
+    let mut statements = Vec::new();
+    for range in 0..ranges {
+        let table_id = range_table_id(range);
+        statements.push(format!("DROP TABLE IF EXISTS t{table_id}"));
+        statements.push(format!("CREATE TABLE t{table_id} (id int4)"));
+    }
+    let hot_id = hot_table_id(ranges);
+    statements.push(format!("DROP TABLE IF EXISTS t{hot_id}"));
+    statements.push(format!("CREATE TABLE t{hot_id} (id int4, v int4)"));
+    statements.extend(seed_statements(hot_id, hot_rows));
+    statements
 }
 
 /// Runs warmup then the measured window against the given SQL endpoints
@@ -1227,6 +1238,59 @@ mod tests {
         check!(insert_id(2_000, 5) == 5);
         check!(insert_id(1_999, 999_999) == 1_999_999_999);
         check!(i64::from(i32::MAX) > insert_id(1_999, 999_999));
+    }
+
+    #[test]
+    fn schema_statements_drop_each_table_before_creating_it_then_seed() {
+        // (ranges, hot_rows, expected DDL prefix of the statement list).
+        let cases: [(u16, u32, &[&str]); 3] = [
+            (
+                1,
+                0,
+                &[
+                    "DROP TABLE IF EXISTS t0",
+                    "CREATE TABLE t0 (id int4)",
+                    "DROP TABLE IF EXISTS t1",
+                    "CREATE TABLE t1 (id int4, v int4)",
+                ],
+            ),
+            (
+                2,
+                3,
+                &[
+                    "DROP TABLE IF EXISTS t0",
+                    "CREATE TABLE t0 (id int4)",
+                    "DROP TABLE IF EXISTS t1000000",
+                    "CREATE TABLE t1000000 (id int4)",
+                    "DROP TABLE IF EXISTS t1000001",
+                    "CREATE TABLE t1000001 (id int4, v int4)",
+                ],
+            ),
+            (
+                3,
+                1,
+                &[
+                    "DROP TABLE IF EXISTS t0",
+                    "CREATE TABLE t0 (id int4)",
+                    "DROP TABLE IF EXISTS t1000000",
+                    "CREATE TABLE t1000000 (id int4)",
+                    "DROP TABLE IF EXISTS t2000000",
+                    "CREATE TABLE t2000000 (id int4)",
+                    "DROP TABLE IF EXISTS t2000001",
+                    "CREATE TABLE t2000001 (id int4, v int4)",
+                ],
+            ),
+        ];
+        for (ranges, hot_rows, expected_ddl) in cases {
+            let statements = schema_statements(ranges, hot_rows);
+            let expected_seeds = seed_statements(hot_table_id(ranges), hot_rows);
+            let mut expected: Vec<String> = expected_ddl.iter().map(|s| (*s).to_owned()).collect();
+            expected.extend(expected_seeds);
+            assert!(
+                statements == expected,
+                "ranges {ranges}, hot_rows {hot_rows}"
+            );
+        }
     }
 
     #[test]

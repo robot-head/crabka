@@ -65,6 +65,7 @@ mod session;
 mod setops;
 mod subquery;
 pub mod timestamp_txn;
+pub mod ts_gc;
 mod values;
 
 use std::{
@@ -328,6 +329,10 @@ pub struct SqlEngine {
     /// Sessions pin their snapshots here so neither write-path pruning, `vacuum`,
     /// nor checkpoint compaction can reclaim a version a live snapshot still sees.
     pub(crate) gc_horizon: Arc<crabka_pgmvcc::gc::GcHorizon>,
+    /// Timestamp-domain dead-version reclamation state (read pins, reclaim
+    /// floor) for sharded tables; see [`ts_gc::TsVersionGc`]. Shared across
+    /// `clone_handle` handles for one range, like the local sequence.
+    pub(crate) ts_gc: Arc<ts_gc::TsVersionGc>,
     /// The committer vacuum sweeps use for their own prune/freeze/clear
     /// batches. On local engines this is `committer` WITHOUT the
     /// demand-observing wrapper, so a sweep's version rewrites do not re-mark
@@ -642,6 +647,8 @@ impl SqlEngine {
             });
         let timestamp_horizon =
             timestamp_txn::TimestampHorizonSource::new(Arc::clone(&kv), Arc::clone(&kv), false);
+        let local_sequence = new_local_sequence();
+        let ts_gc = Arc::new(ts_gc::TsVersionGc::new(Arc::clone(&local_sequence)));
         Ok(Self {
             coordination: Arc::clone(&coordination),
             catalog_kv: Arc::clone(&kv),
@@ -665,8 +672,9 @@ impl SqlEngine {
             join_strategy_config: plan_dist::PlannerConfig::default(),
             timestamp_oracle: Arc::new(timestamp_txn::LocalTimestampSource::default()),
             timestamp_horizon,
-            local_sequence: new_local_sequence(),
+            local_sequence,
             gc_horizon: Arc::new(crabka_pgmvcc::gc::GcHorizon::new()),
+            ts_gc,
             sweep_committer,
             vacuum_demand,
             vacuum_progress: Arc::new(tokio::sync::Mutex::new(VacuumProgress::default())),
@@ -702,15 +710,16 @@ impl SqlEngine {
         })
     }
 
-    /// Whether this engine may physically reclaim dead MVCC versions locally
-    /// (write-path chain pruning and [`SqlEngine::vacuum`]).
+    /// Whether this engine may run [`SqlEngine::vacuum`] sweeps locally.
     ///
     /// True only for the plain single-range local engine (`new`/`open`/
     /// `with_kv`): Durable persist mode, no GTM, no range-0 barrier, and a
-    /// single store for data + catalog. Replicated engines apply WAL batches
-    /// deterministically — a local delete outside the WAL would diverge
-    /// replicas and checkpoints — and multi-range engines can carry global
-    /// xids whose lifecycle the local horizon cannot judge.
+    /// single store for data + catalog. A vacuum sweep commits batches of its
+    /// own, outside any statement's replicated ordering — on a replicated
+    /// engine that local delete outside the WAL would diverge replicas and
+    /// checkpoints. Write-path chain pruning is independent of this gate: its
+    /// deletes ride each statement's own commit batch, so every engine kind
+    /// prunes the rows it rewrites.
     #[must_use]
     pub fn supports_local_vacuum(&self) -> bool {
         self.persist_mode == PersistMode::Durable
@@ -1220,6 +1229,8 @@ impl SqlEngine {
             Arc::clone(&catalog_kv),
             false,
         );
+        let local_sequence = new_local_sequence();
+        let ts_gc = Arc::new(ts_gc::TsVersionGc::new(Arc::clone(&local_sequence)));
         Ok(Self {
             coordination: Arc::clone(&coordination),
             catalog_kv,
@@ -1246,8 +1257,9 @@ impl SqlEngine {
             join_strategy_config: plan_dist::PlannerConfig::default(),
             timestamp_oracle: Arc::new(timestamp_txn::LocalTimestampSource::default()),
             timestamp_horizon,
-            local_sequence: new_local_sequence(),
+            local_sequence,
             gc_horizon: Arc::new(crabka_pgmvcc::gc::GcHorizon::new()),
+            ts_gc,
             vacuum_demand: Arc::new(VacuumDemand::default()),
             vacuum_progress: Arc::new(tokio::sync::Mutex::new(VacuumProgress::default())),
         })
@@ -1307,6 +1319,7 @@ impl SqlEngine {
             timestamp_horizon: self.timestamp_horizon.clone(),
             local_sequence: Arc::clone(&self.local_sequence),
             gc_horizon: Arc::clone(&self.gc_horizon),
+            ts_gc: Arc::clone(&self.ts_gc),
             sweep_committer: Arc::clone(&self.sweep_committer),
             vacuum_demand: Arc::clone(&self.vacuum_demand),
             vacuum_progress: Arc::clone(&self.vacuum_progress),
@@ -1437,6 +1450,11 @@ impl SqlEngine {
                     "sharded scans require a finite statement read timestamp".into(),
                 )
             })?;
+            // Pin the read timestamp for the duration of the scan (and refuse
+            // reads below the reclaim floor): while the pin lives, write-path
+            // pruning on this engine cannot reclaim any version this read may
+            // still resolve to.
+            let _read_pin = self.ts_gc.pin_read(self.kv.as_ref(), read_ts)?;
             // Single-shard bypass: reconcile against this range's closed
             // timestamp before serving, so a cross-range snapshot at `read_ts`
             // can never miss a single-shard commit that will land at or below it.
@@ -1745,6 +1763,13 @@ impl SqlEngine {
         self.local_sequence.closed_timestamp()
     }
 
+    /// The timestamp-version GC state shared by every handle of this engine
+    /// (see [`ts_gc::TsVersionGc`]).
+    #[must_use]
+    pub fn ts_version_gc(&self) -> Arc<ts_gc::TsVersionGc> {
+        Arc::clone(&self.ts_gc)
+    }
+
     /// The highest timestamp this range has locally spent or durably applied:
     /// the floor a cross-range allocation must strictly exceed so its stamps
     /// (and the hidden rowids derived from them) cannot collide with rows this
@@ -1778,6 +1803,7 @@ impl SqlEngine {
         )
         .with_primary_barrier(self.range0_barrier.as_ref().map(Arc::clone))
         .with_sequence_manager(Arc::clone(&self.seq))
+        .with_ts_gc(Arc::clone(&self.ts_gc))
     }
 
     /// Allocate a timestamp transaction id from this engine's configured oracle.
@@ -2905,6 +2931,7 @@ impl Engine for SqlEngine {
             timestamp_horizon: self.timestamp_horizon.clone(),
             local_sequence: Arc::clone(&self.local_sequence),
             gc_horizon: Arc::clone(&self.gc_horizon),
+            ts_gc: Arc::clone(&self.ts_gc),
         })
     }
 }

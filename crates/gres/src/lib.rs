@@ -3170,6 +3170,89 @@ fn multirange_tenant_config(
     Ok(tenant_config)
 }
 
+/// Bootstrap a read-only range-0 follower on a node that does not host the
+/// coordinator range and install its read barrier plus continuous tailing.
+async fn attach_range0_read_barrier(
+    config: &SubstrateRuntimeConfig,
+    tenant_config: crabka_gres_ranges::MultiRangeTenantConfig,
+    checkpoint_store: Option<&dyn crabka_gres_substrate::checkpoint::CheckpointStore>,
+) -> std::io::Result<crabka_gres_ranges::MultiRangeTenantConfig> {
+    let follower_config = crabka_gres_substrate::LiveRecoveryConfig::new(
+        config.bootstrap.clone(),
+        tenant_config.tenant.clone(),
+        crabka_gres_ranges::RangeId::COORDINATOR,
+        config.kafka_security.clone(),
+    );
+    let follower_store: Arc<dyn RestoreKv> = match config.cache_dir.as_deref() {
+        Some(parent) => {
+            let dir = parent.join("r0-follower");
+            std::fs::create_dir_all(&dir)?;
+            Arc::new(FjallKv::open_cache(&dir).map_err(|error| {
+                std::io::Error::other(format!("range-0 follower cache: {error:?}"))
+            })?)
+        }
+        None => Arc::new(MemKv::default()),
+    };
+    let follower = crabka_gres_substrate::bootstrap_live_range0_follower(
+        &follower_config,
+        follower_store,
+        checkpoint_store,
+    )
+    .await
+    .map_err(|error| std::io::Error::other(format!("range-0 follower bootstrap: {error}")))?;
+    let tail = follower.tail();
+    // One persistent sampler serves both the per-statement read barrier
+    // and the follower poll loop: it holds a live broker connection and
+    // an incremental scan cursor, so neither path re-dials per call.
+    let end_sampler = Arc::new(crabka_gres_substrate::LiveCommittedEndSampler::new(
+        follower_config.clone(),
+    ));
+    let sampler = Arc::new(crabka_gres_substrate::BrokerRange0EndSampler(
+        Arc::clone(&end_sampler) as Arc<dyn crabka_gres_substrate::CommittedEndSampler>,
+    ));
+    let catalog_refresh_poke = Arc::new(tokio::sync::Notify::new());
+    let tenant_config = tenant_config.with_read_only_range0_replica(
+        crabka_gres_ranges::ReadOnlyRange0Replica::new(tail, sampler)
+            .with_catalog_refresh_poke(Arc::clone(&catalog_refresh_poke)),
+    );
+    tokio::spawn(async move {
+        loop {
+            let applied = follower.tail().applied_offset();
+            match end_sampler.committed_end().await {
+                Ok(end) if end > applied => {
+                    match crabka_gres_substrate::read_live_committed_tail(
+                        &follower_config,
+                        applied,
+                        end,
+                    )
+                    .await
+                    {
+                        Ok(items) => {
+                            for item in &items {
+                                if follower.apply_committed(item).is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "range-0 follower tail read failed");
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => tracing::warn!(%error, "range-0 follower end sample failed"),
+            }
+            // A catalog barrier pokes the refresh so waiters catch up
+            // immediately instead of on the next periodic tick.
+            tokio::select! {
+                () = catalog_refresh_poke.notified() => {}
+                () = tokio::time::sleep(Duration::from_millis(100)) => {}
+            }
+        }
+    });
+    Ok(tenant_config)
+}
+
 async fn open_multirange_runtime(
     config: &SubstrateRuntimeConfig,
     boundaries: &str,
@@ -3198,73 +3281,8 @@ async fn open_multirange_runtime(
         .as_ref()
         .is_some_and(|ranges| !ranges.contains(&crabka_gres_ranges::RangeId::COORDINATOR))
     {
-        let follower_config = crabka_gres_substrate::LiveRecoveryConfig::new(
-            config.bootstrap.clone(),
-            tenant_config.tenant.clone(),
-            crabka_gres_ranges::RangeId::COORDINATOR,
-            config.kafka_security.clone(),
-        );
-        let follower_store: Arc<dyn RestoreKv> = match config.cache_dir.as_deref() {
-            Some(parent) => {
-                let dir = parent.join("r0-follower");
-                std::fs::create_dir_all(&dir)?;
-                Arc::new(FjallKv::open_cache(&dir).map_err(|error| {
-                    std::io::Error::other(format!("range-0 follower cache: {error:?}"))
-                })?)
-            }
-            None => Arc::new(MemKv::default()),
-        };
-        let follower = crabka_gres_substrate::bootstrap_live_range0_follower(
-            &follower_config,
-            follower_store,
-            checkpoint_store.as_deref(),
-        )
-        .await
-        .map_err(|error| std::io::Error::other(format!("range-0 follower bootstrap: {error}")))?;
-        let tail = follower.tail();
-        let sampler = Arc::new(crabka_gres_substrate::BrokerRange0EndSampler(Arc::new(
-            crabka_gres_substrate::LiveCommittedEndSampler::new(follower_config.clone()),
-        )));
-        let catalog_refresh_poke = Arc::new(tokio::sync::Notify::new());
-        tenant_config = tenant_config.with_read_only_range0_replica(
-            crabka_gres_ranges::ReadOnlyRange0Replica::new(tail, sampler)
-                .with_catalog_refresh_poke(Arc::clone(&catalog_refresh_poke)),
-        );
-        tokio::spawn(async move {
-            loop {
-                let applied = follower.tail().applied_offset();
-                match crabka_gres_substrate::live_committed_end(&follower_config).await {
-                    Ok(end) if end > applied => {
-                        match crabka_gres_substrate::read_live_committed_tail(
-                            &follower_config,
-                            applied,
-                            end,
-                        )
-                        .await
-                        {
-                            Ok(items) => {
-                                for item in &items {
-                                    if follower.apply_committed(item).is_err() {
-                                        break;
-                                    }
-                                }
-                            }
-                            Err(error) => {
-                                tracing::warn!(%error, "range-0 follower tail read failed");
-                            }
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(error) => tracing::warn!(%error, "range-0 follower end sample failed"),
-                }
-                // A catalog barrier pokes the refresh so waiters catch up
-                // immediately instead of on the next periodic tick.
-                tokio::select! {
-                    () = catalog_refresh_poke.notified() => {}
-                    () = tokio::time::sleep(Duration::from_millis(100)) => {}
-                }
-            }
-        });
+        tenant_config =
+            attach_range0_read_barrier(config, tenant_config, checkpoint_store.as_deref()).await?;
     }
     let mut activation_receipt =
         split_activation::discover_activation_receipt(config, checkpoint_store.as_deref())
