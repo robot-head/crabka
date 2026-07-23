@@ -92,6 +92,11 @@ pub enum ExecError {
     SerializationFailure,
     /// A deadlock was detected and this transaction was chosen as the victim (40P01).
     Deadlock,
+    /// A lock wait by a cross-range transaction outlived its bounded-wait cap
+    /// (40P01). A cycle spanning ranges is invisible to any single engine's
+    /// wait-for graph, so the expired cap is treated as a presumed distributed
+    /// deadlock; retrying is safe exactly as for a locally-detected one.
+    LockWaitCapExpired,
     /// The write hit a node that is not the Raft leader; the client should retry.
     NotLeader,
     /// The write could not reach a majority (partition/timeout); no partial state
@@ -217,6 +222,11 @@ impl ExecError {
                 "could not serialize access due to concurrent update",
             ),
             ExecError::Deadlock => PgError::error("40P01", "deadlock detected"),
+            ExecError::LockWaitCapExpired => PgError::error(
+                "40P01",
+                "lock wait by a cross-range transaction exceeded its cap; \
+                 presumed distributed deadlock",
+            ),
             ExecError::NotLeader => {
                 PgError::error("40001", "could not complete: not the leader, retry")
             }

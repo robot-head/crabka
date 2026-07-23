@@ -42,6 +42,8 @@ struct LedgerEvent {
 #[derive(Debug)]
 struct AckLedger {
     acknowledgements: BTreeMap<i64, u128>,
+    attempts: BTreeMap<i64, usize>,
+    retries: BTreeMap<i64, usize>,
     recovered: usize,
     max_ack_gap_ms: u128,
     max_ack_gap_endpoints: Option<(i64, u128, i64, u128)>,
@@ -473,8 +475,16 @@ async fn probe_durable_retire_receipt(
     true
 }
 
+/// Client-side time the workload's ambiguity protocol may spend on top of
+/// engine recovery before an acknowledgement can land: a 3s healthy-empty-read
+/// streak plus polling and psql round trips. Added to the observed-safe engine
+/// ack-gap bounds.
+const WORKLOAD_AMBIGUITY_RESOLUTION_MS: u128 = 4_000;
+
 fn parse_ack_ledger(contents: &str) -> Result<AckLedger, String> {
     let mut acknowledgements = BTreeMap::new();
+    let mut attempts: BTreeMap<i64, usize> = BTreeMap::new();
+    let mut retries: BTreeMap<i64, usize> = BTreeMap::new();
     let mut recovered = 0;
     for line in contents.lines() {
         let value: serde_json::Value =
@@ -493,17 +503,38 @@ fn parse_ack_ledger(contents: &str) -> Result<AckLedger, String> {
                     .ok_or_else(|| "ledger event timestamp is missing".to_owned())?,
             ),
         };
-        if event.kind == "ack" || event.kind == "recovered_ack" {
-            if acknowledgements
-                .insert(event.seq, event.timestamp_ms)
-                .is_some()
-            {
-                return Err(format!(
-                    "duplicate acknowledgement for sequence {}",
-                    event.seq
-                ));
+        match event.kind.as_str() {
+            "attempt" => {
+                *attempts.entry(event.seq).or_default() += 1;
             }
-            recovered += usize::from(event.kind == "recovered_ack");
+            "retry" => {
+                if !attempts.contains_key(&event.seq) {
+                    return Err(format!(
+                        "ambiguity retry without a recorded attempt for sequence {}",
+                        event.seq
+                    ));
+                }
+                *retries.entry(event.seq).or_default() += 1;
+            }
+            "ack" | "recovered_ack" => {
+                if !attempts.contains_key(&event.seq) {
+                    return Err(format!(
+                        "acknowledgement without a recorded attempt for sequence {}",
+                        event.seq
+                    ));
+                }
+                if acknowledgements
+                    .insert(event.seq, event.timestamp_ms)
+                    .is_some()
+                {
+                    return Err(format!(
+                        "duplicate acknowledgement for sequence {}",
+                        event.seq
+                    ));
+                }
+                recovered += usize::from(event.kind == "recovered_ack");
+            }
+            other => return Err(format!("unknown ledger event kind {other:?}")),
         }
     }
     for (expected, actual) in (0_i64..).zip(acknowledgements.keys().copied()) {
@@ -523,10 +554,60 @@ fn parse_ack_ledger(contents: &str) -> Result<AckLedger, String> {
         .unwrap_or_default();
     Ok(AckLedger {
         acknowledgements,
+        attempts,
+        retries,
         recovered,
         max_ack_gap_ms,
         max_ack_gap_endpoints,
     })
+}
+
+/// Explains a final-ledger mismatch per offending sequence, using the client
+/// attempt and ambiguity-retry records to distinguish engine double-apply
+/// (duplicate rows without any client retry) from a workload grace-window
+/// breach (duplicate rows after the client concluded absence and re-INSERTed).
+fn describe_ledger_mismatch(
+    rows: &[(i64, String)],
+    expected: &[(i64, String)],
+    ledger: &AckLedger,
+) -> String {
+    let mut row_counts: BTreeMap<&(i64, String), usize> = BTreeMap::new();
+    for row in rows {
+        *row_counts.entry(row).or_default() += 1;
+    }
+    let mut expected_counts: BTreeMap<&(i64, String), usize> = BTreeMap::new();
+    for entry in expected {
+        *expected_counts.entry(entry).or_default() += 1;
+    }
+    let mut lines = Vec::new();
+    for key in row_counts
+        .keys()
+        .chain(expected_counts.keys())
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>()
+    {
+        let observed = row_counts.get(key).copied().unwrap_or_default();
+        let acknowledged = expected_counts.get(key).copied().unwrap_or_default();
+        if observed == acknowledged {
+            continue;
+        }
+        let (seq, checksum) = key;
+        let attempts = ledger.attempts.get(seq).copied().unwrap_or_default();
+        let retries = ledger.retries.get(seq).copied().unwrap_or_default();
+        let verdict = if observed < acknowledged {
+            "acknowledged write is missing from the database"
+        } else if retries == 0 {
+            "duplicated without any client retry, implicating the engine"
+        } else {
+            "duplicated after an ambiguity retry, so the workload concluded absence prematurely"
+        };
+        lines.push(format!(
+            "seq {seq} checksum {checksum}: {observed} database rows vs {acknowledged} \
+             acknowledged with {attempts} client attempts and {retries} ambiguity \
+             retries ({verdict})"
+        ));
+    }
+    lines.join("; ")
 }
 
 fn timestamp_ms() -> u128 {
@@ -656,6 +737,7 @@ async fn wait_for_ack_count(path: &Path, minimum: usize) {
 
 #[test]
 fn ack_ledger_rejects_duplicate_acknowledgements() {
+    use assert2::assert;
     let ledger = concat!(
         "{\"kind\":\"attempt\",\"seq\":1,\"timestamp_ms\":10}\n",
         "{\"kind\":\"ack\",\"seq\":1,\"timestamp_ms\":11}\n",
@@ -666,11 +748,92 @@ fn ack_ledger_rejects_duplicate_acknowledgements() {
 
 #[test]
 fn ack_ledger_rejects_noncontiguous_sequences() {
+    use assert2::assert;
     let ledger = concat!(
+        "{\"kind\":\"attempt\",\"seq\":0,\"timestamp_ms\":9}\n",
         "{\"kind\":\"ack\",\"seq\":0,\"timestamp_ms\":10}\n",
+        "{\"kind\":\"attempt\",\"seq\":2,\"timestamp_ms\":11}\n",
         "{\"kind\":\"ack\",\"seq\":2,\"timestamp_ms\":12}\n",
     );
     assert!(parse_ack_ledger(ledger).is_err());
+}
+
+#[test]
+fn ack_ledger_rejects_acknowledgement_without_attempt() {
+    use assert2::assert;
+    let ledger = "{\"kind\":\"ack\",\"seq\":0,\"timestamp_ms\":10}\n";
+    assert!(parse_ack_ledger(ledger).is_err());
+}
+
+#[test]
+fn ack_ledger_rejects_retry_without_attempt() {
+    use assert2::assert;
+    let ledger = "{\"kind\":\"retry\",\"seq\":0,\"timestamp_ms\":10}\n";
+    assert!(parse_ack_ledger(ledger).is_err());
+}
+
+#[test]
+fn ack_ledger_rejects_unknown_event_kinds() {
+    use assert2::assert;
+    let ledger = "{\"kind\":\"mystery\",\"seq\":0,\"timestamp_ms\":10}\n";
+    assert!(parse_ack_ledger(ledger).is_err());
+}
+
+#[test]
+fn ack_ledger_counts_attempts_and_ambiguity_retries() {
+    use assert2::assert;
+    let ledger = parse_ack_ledger(concat!(
+        "{\"kind\":\"attempt\",\"seq\":0,\"timestamp_ms\":10}\n",
+        "{\"kind\":\"ack\",\"seq\":0,\"timestamp_ms\":11}\n",
+        "{\"kind\":\"attempt\",\"seq\":1,\"timestamp_ms\":12}\n",
+        "{\"kind\":\"retry\",\"seq\":1,\"timestamp_ms\":13}\n",
+        "{\"kind\":\"attempt\",\"seq\":1,\"timestamp_ms\":14}\n",
+        "{\"kind\":\"recovered_ack\",\"seq\":1,\"timestamp_ms\":15}\n",
+    ))
+    .expect("valid retried ledger");
+    assert!(ledger.acknowledgements.len() == 2);
+    assert!(ledger.recovered == 1);
+    assert!(ledger.attempts == BTreeMap::from([(0, 1), (1, 2)]));
+    assert!(ledger.retries == BTreeMap::from([(1, 1)]));
+}
+
+#[test]
+fn ledger_mismatch_distinguishes_engine_duplicates_from_workload_retries() {
+    use assert2::assert;
+    let ledger = parse_ack_ledger(concat!(
+        "{\"kind\":\"attempt\",\"seq\":0,\"timestamp_ms\":10}\n",
+        "{\"kind\":\"ack\",\"seq\":0,\"timestamp_ms\":11}\n",
+        "{\"kind\":\"attempt\",\"seq\":1,\"timestamp_ms\":12}\n",
+        "{\"kind\":\"retry\",\"seq\":1,\"timestamp_ms\":13}\n",
+        "{\"kind\":\"attempt\",\"seq\":1,\"timestamp_ms\":14}\n",
+        "{\"kind\":\"ack\",\"seq\":1,\"timestamp_ms\":15}\n",
+    ))
+    .expect("valid retried ledger");
+    let expected = vec![(0, "a".to_owned()), (1, "b".to_owned())];
+    let engine_duplicate = describe_ledger_mismatch(
+        &[
+            (0, "a".to_owned()),
+            (0, "a".to_owned()),
+            (1, "b".to_owned()),
+        ],
+        &expected,
+        &ledger,
+    );
+    assert!(engine_duplicate.contains("seq 0"));
+    assert!(engine_duplicate.contains("implicating the engine"));
+    let retry_duplicate = describe_ledger_mismatch(
+        &[
+            (0, "a".to_owned()),
+            (1, "b".to_owned()),
+            (1, "b".to_owned()),
+        ],
+        &expected,
+        &ledger,
+    );
+    assert!(retry_duplicate.contains("seq 1"));
+    assert!(retry_duplicate.contains("concluded absence prematurely"));
+    let missing = describe_ledger_mismatch(&[(0, "a".to_owned())], &expected, &ledger);
+    assert!(missing.contains("missing from the database"));
 }
 
 #[test]
@@ -2074,13 +2237,40 @@ while [[ ! -e "$CRABKA_G8_WORKLOAD_STOP" ]]; do
   now_raw=$(date +%s%N); now=$((now_raw / 1000000))
   printf '{"kind":"attempt","seq":%s,"timestamp_ms":%s}\n' "$seq" "$now" >> "$CRABKA_G8_WORKLOAD_LEDGER"
   sync -d "$CRABKA_G8_WORKLOAD_LEDGER"
-  if timeout 2s psql -X -q -v ON_ERROR_STOP=1 -c "INSERT INTO live_ledger (id, checksum) VALUES ($seq, '$checksum')" >/dev/null 2>>"$CRABKA_G8_WORKLOAD_ERRORS"; then
+  # The client timeout must exceed every observed-safe ack-gap bound below:
+  # abandoning a statement the server may still commit is what creates
+  # unresolvable ambiguity, so a statement is only abandoned once the run has
+  # already blown its liveness bound. Connection-phase failures stay fast via
+  # PGCONNECT_TIMEOUT.
+  if timeout 25s psql -X -q -v ON_ERROR_STOP=1 -c "INSERT INTO live_ledger (id, checksum) VALUES ($seq, '$checksum')" >/dev/null 2>>"$CRABKA_G8_WORKLOAD_ERRORS"; then
     if [[ "$seq" -eq 2 && ! -e "$CRABKA_G8_RESPONSE_LOSS" ]]; then touch "$CRABKA_G8_RESPONSE_LOSS"; response_known=false; else response_known=true; fi
   else response_known=false; fi
   if [[ "$response_known" == true ]]; then kind=ack; else
-    actual=$(timeout 2s psql -X -A -t -q -v ON_ERROR_STOP=1 -c "SELECT checksum FROM live_ledger WHERE id = $seq" 2>>"$CRABKA_G8_WORKLOAD_ERRORS" || true)
-    [[ "$actual" == "$checksum" ]] || continue
-    kind=recovered_ack
+    # Ambiguous outcome: the attempt may still commit server-side. Resolve by
+    # polling the row; a read only counts when psql SUCCEEDS, and absence is
+    # concluded only after a sustained streak of healthy empty reads, so a
+    # still-parked attempt has become visible (or died with its process)
+    # before any re-INSERT.
+    kind=""
+    empty_streak_start=""
+    while [[ ! -e "$CRABKA_G8_WORKLOAD_STOP" ]]; do
+      if actual=$(timeout 5s psql -X -A -t -q -v ON_ERROR_STOP=1 -c "SELECT checksum FROM live_ledger WHERE id = $seq" 2>>"$CRABKA_G8_WORKLOAD_ERRORS"); then
+        if [[ -n "$actual" ]]; then kind=recovered_ack; break; fi
+        now_raw=$(date +%s%N); now=$((now_raw / 1000000))
+        if [[ -z "$empty_streak_start" ]]; then empty_streak_start=$now; fi
+        if (( now - empty_streak_start >= 3000 )); then break; fi
+      else
+        empty_streak_start=""
+      fi
+      sleep 0.25
+    done
+    if [[ -z "$kind" ]]; then
+      [[ -e "$CRABKA_G8_WORKLOAD_STOP" ]] && break
+      now_raw=$(date +%s%N); now=$((now_raw / 1000000))
+      printf '{"kind":"retry","seq":%s,"timestamp_ms":%s}\n' "$seq" "$now" >> "$CRABKA_G8_WORKLOAD_LEDGER"
+      sync -d "$CRABKA_G8_WORKLOAD_LEDGER"
+      continue
+    fi
   fi
   now_raw=$(date +%s%N); now=$((now_raw / 1000000))
   printf '{"kind":"%s","seq":%s,"timestamp_ms":%s}\n' "$kind" "$seq" "$now" >> "$CRABKA_G8_WORKLOAD_LEDGER"
@@ -2096,6 +2286,7 @@ done
         .env("CRABKA_G8_WORKLOAD_ERRORS", &workload_error_path)
         .env("CRABKA_G8_RESPONSE_LOSS", &response_loss_path)
         .env("PGHOST", "127.0.0.1")
+        .env("PGCONNECT_TIMEOUT", "3")
         .env("PGPORT", system.stable_sql_port().to_string())
         .env("PGUSER", "alice")
         .env("PGPASSWORD", process::fixture_password())
@@ -2257,6 +2448,7 @@ fn write_move_kill_evidence(input: &MoveKillEvidence<'_>) {
         "acknowledgements_at_completion": input.acknowledgements_at_completion,
         "post_completed_ack": ledger.acknowledgements.len() > input.acknowledgements_at_completion,
         "recovered_acknowledgements": ledger.recovered,
+        "ambiguity_retries": ledger.retries.values().sum::<usize>(),
         "max_ack_gap_ms": ledger.max_ack_gap_ms,
         "max_ack_gap_bound_ms": input.max_observed_safe_ack_gap_ms,
         "max_ack_gap_endpoints": ledger.max_ack_gap_endpoints.map(|(before_seq, before_ms, after_seq, after_ms)| serde_json::json!({
@@ -2390,19 +2582,20 @@ async fn real_process_move_source_phase_sigkill_with_exact_ack_ledger() {
         ledger.acknowledgements.len() > acknowledgements_at_completion,
         "at least one write must be acknowledged after Completed is durable"
     );
-    let max_observed_safe_ack_gap_ms = match kill_point {
-        SourceKillPoint::PausedBeforeStage
-        | SourceKillPoint::PausedAfterStage
-        | SourceKillPoint::Restored => 20_000,
-        SourceKillPoint::Running | SourceKillPoint::Checkpointed => 15_000,
-        SourceKillPoint::ActivatedBeforeCutover
-        | SourceKillPoint::ActivatedAfterTenantCas
-        | SourceKillPoint::LayoutPublished
-        | SourceKillPoint::RetiringBeforeDelete
-        | SourceKillPoint::RetiringAfterDelete
-        | SourceKillPoint::RetiringParked
-        | SourceKillPoint::Resuming => 12_000,
-    };
+    let max_observed_safe_ack_gap_ms = WORKLOAD_AMBIGUITY_RESOLUTION_MS
+        + match kill_point {
+            SourceKillPoint::PausedBeforeStage
+            | SourceKillPoint::PausedAfterStage
+            | SourceKillPoint::Restored => 20_000,
+            SourceKillPoint::Running | SourceKillPoint::Checkpointed => 15_000,
+            SourceKillPoint::ActivatedBeforeCutover
+            | SourceKillPoint::ActivatedAfterTenantCas
+            | SourceKillPoint::LayoutPublished
+            | SourceKillPoint::RetiringBeforeDelete
+            | SourceKillPoint::RetiringAfterDelete
+            | SourceKillPoint::RetiringParked
+            | SourceKillPoint::Resuming => 12_000,
+        };
     assert!(
         ledger.recovered >= 1,
         "deterministic response loss must recover an ACK"
@@ -2446,10 +2639,14 @@ async fn real_process_move_source_phase_sigkill_with_exact_ack_ledger() {
         .into_iter()
         .map(|row| (i64::from(row.get::<_, i32>(0)), row.get::<_, String>(1)))
         .collect::<Vec<_>>();
-    assert_eq!(
-        rows, expected,
-        "database rows must exactly equal durable ACK ledger"
-    );
+    {
+        use assert2::assert;
+        assert!(
+            rows == expected,
+            "database rows must exactly equal durable ACK ledger; {}",
+            describe_ledger_mismatch(&rows, &expected, &ledger)
+        );
+    }
 
     let MoveTerminalTopology {
         topic_names,

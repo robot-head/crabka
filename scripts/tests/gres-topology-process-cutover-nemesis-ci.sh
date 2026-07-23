@@ -17,10 +17,10 @@ import json
 from pathlib import Path
 
 expected = {
-    "restored": ("Restored", "current", None, 2, 20000),
-    "activated_before_cutover": ("Activated", "current", None, 2, 12000),
-    "activated_after_tenant_cas": ("Activated", "target", "Parking", 3, 12000),
-    "layout_published": ("LayoutPublished", "target", "Parking", 3, 12000),
+    "restored": ("Restored", "current", None, 2, 24000),
+    "activated_before_cutover": ("Activated", "current", None, 2, 16000),
+    "activated_after_tenant_cas": ("Activated", "target", "Parking", 3, 16000),
+    "layout_published": ("LayoutPublished", "target", "Parking", 3, 16000),
 }
 identities = set()
 for kill_point, (phase, layout, retirement, record_version, gap_bound) in expected.items():
