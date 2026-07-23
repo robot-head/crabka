@@ -1070,6 +1070,7 @@ impl SqlEngine {
                     rowid,
                     crate::lockmgr::LockMode::Exclusive,
                     owner_xid,
+                    None,
                 )
                 .await
                 .is_err()
@@ -3517,7 +3518,13 @@ mod tests {
         let other_xid = li + 1000;
         let waiter = tokio::spawn(async move {
             lockmgr
-                .acquire(table, /*rowid*/ 1, LockMode::Exclusive, other_xid)
+                .acquire(
+                    table,
+                    /*rowid*/ 1,
+                    LockMode::Exclusive,
+                    other_xid,
+                    None,
+                )
                 .await
                 .expect("not a deadlock");
             blocked2.store(true, std::sync::atomic::Ordering::SeqCst);

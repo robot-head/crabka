@@ -83,13 +83,19 @@ async fn stateright_elle_accepts_real_process_history_across_participant_kill() 
         ListAppendSpec::default(),
     )));
 
-    let first =
-        real_observe_then_append(system.sql(0).await, Arc::clone(&checker), 0, Key::Left, 20);
-    let second =
-        real_observe_then_append(system.sql(0).await, Arc::clone(&checker), 1, Key::Right, 30);
-    let (first, second) = tokio::join!(first, second);
-    first.expect("first concurrent list append");
-    second.expect("second concurrent list append");
+    // The two seed appends run one after the other: each observes the whole
+    // two-key state before appending, and concurrent snapshot-isolated
+    // transactions may both observe the other's absence (exactly as in
+    // vanilla PostgreSQL), which a strict linearizability checker rejects.
+    // Serializing the CLIENTS keeps the checker sound while the property
+    // under test stays what the title says: history validity across a
+    // participant kill and recovery.
+    real_observe_then_append(system.sql(0).await, Arc::clone(&checker), 0, Key::Left, 20)
+        .await
+        .expect("first list append");
+    real_observe_then_append(system.sql(0).await, Arc::clone(&checker), 1, Key::Right, 30)
+        .await
+        .expect("second list append");
 
     system.kill(1).await;
     assert!(
