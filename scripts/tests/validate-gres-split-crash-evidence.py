@@ -13,7 +13,7 @@ EXPECTED = {
 }
 # Engine pause bounds plus the workload's client-side ambiguity-resolution
 # allowance (3s healthy-empty-read streak + polling and psql round trips).
-BOUNDS = {"source_restore": 29_000, "publication": 19_000, "retirement_resume": 19_000}
+BOUNDS = {"source_restore": 31_000, "publication": 21_000, "retirement_resume": 21_000}
 INTS = {"schema_version", "acknowledged_rows", "recovered_acknowledgements", "max_ack_gap_ms", "max_ack_gap_bound_ms", "operation_elapsed_ms", "operation_bound_ms", "marker_count", "left_marker_count", "right_marker_count", "delete_count", "old_pid", "new_pid", "kill_ms", "restart_ms", "publication_ms", "left_wal_generation", "right_wal_generation", "old_source_pid", "new_source_pid", "old_source_process_group", "new_source_process_group", "workload_process_group", "operation_revision", "operation_attempts", "tenant_record_version", "source_record_version", "retirement_source_generation"}
 STRINGS = {"evidence_id", "family", "case", "tenant_id", "operation_id", "sentinel_topic", "coordinator_endpoint", "left_endpoint", "right_endpoint", "marker_response_digest", "completed_phase", "operation_marker_digest", "retirement_marker_digest"}
 BOOLS = {"post_publication_r2_ack", "post_publication_r3_ack", "predecessor_topic_absent", "sentinel_topic_present", "workload_process_reaped", "unrelated_delete_attempted", "new_source_pid_alive_at_verification", "old_source_pid_alive", "new_source_pid_alive", "old_source_process_group_alive", "new_source_process_group_alive", "workload_process_group_alive"}

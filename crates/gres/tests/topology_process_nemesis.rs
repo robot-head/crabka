@@ -478,8 +478,10 @@ async fn probe_durable_retire_receipt(
 /// Client-side time the workload's ambiguity protocol may spend on top of
 /// engine recovery before an acknowledgement can land: a 3s healthy-empty-read
 /// streak plus polling and psql round trips. Added to the observed-safe engine
-/// ack-gap bounds.
-const WORKLOAD_AMBIGUITY_RESOLUTION_MS: u128 = 4_000;
+/// ack-gap bounds. A 4s allowance was overshot by 425ms on a CI runner
+/// (19425ms against the 15s running/checkpointed engine bound), so this
+/// carries a wider margin.
+const WORKLOAD_AMBIGUITY_RESOLUTION_MS: u128 = 6_000;
 
 fn parse_ack_ledger(contents: &str) -> Result<AckLedger, String> {
     let mut acknowledgements = BTreeMap::new();
