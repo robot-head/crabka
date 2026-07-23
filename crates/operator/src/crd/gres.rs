@@ -27,6 +27,13 @@ pub struct GresSpec {
     /// `PgDog` front-door deployment settings.
     pub pgdog: PgdogSpec,
 
+    /// Runtime tuning for the PgDog and Gres activator microservices. Every
+    /// operational timeout, retry, probe, and activator port used by the
+    /// controller is surfaced here so it can be tuned without rebuilding the
+    /// operator.
+    #[serde(default)]
+    pub runtime: GresRuntimeSpec,
+
     /// Default tenant runtime settings inherited by `GresTenant`s unless
     /// they set `spec.overrides`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -36,6 +43,56 @@ pub struct GresSpec {
     /// not performed by the operator yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub balancer: Option<GresBalancerSpec>,
+}
+
+/// Operational tuning values for a Gres fleet's managed microservices.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GresRuntimeSpec {
+    /// Container image override for the Gres activator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activator_image: Option<String>,
+    /// TCP port used by the Gres activator service and container.
+    #[schemars(range(min = 1, max = 65_535))]
+    pub activator_port: i32,
+    /// Number of PgDog admin reload attempts before reconciliation requeues.
+    #[schemars(range(min = 1, max = 100))]
+    pub reload_retry_limit: usize,
+    /// Delay between PgDog admin reload attempts in milliseconds.
+    pub reload_retry_delay_ms: u64,
+    /// Requeue delay after PgDog reload verification fails, in seconds.
+    pub reload_requeue_seconds: u64,
+    /// Maximum duration of a PgDog admin operation, in seconds.
+    pub admin_operation_timeout_seconds: u64,
+    /// Credential grace period after a route transition, in milliseconds.
+    pub direct_bootstrap_ms: u64,
+    /// Maximum time PgDog waits for a cold tenant backend, in seconds.
+    pub cold_start_ceiling_seconds: u64,
+    /// Idle timeout used while tenant idleness is enabled, in seconds.
+    pub idle_timeout_seconds: u64,
+    /// Fallback reconcile interval when no credential grace deadline exists.
+    pub transition_requeue_seconds: u64,
+    /// Kubernetes readiness probe period for PgDog and the activator, in seconds.
+    #[schemars(range(min = 1))]
+    pub readiness_probe_period_seconds: i32,
+}
+
+impl Default for GresRuntimeSpec {
+    fn default() -> Self {
+        Self {
+            activator_image: None,
+            activator_port: 6_543,
+            reload_retry_limit: 3,
+            reload_retry_delay_ms: 100,
+            reload_requeue_seconds: 15,
+            admin_operation_timeout_seconds: 20,
+            direct_bootstrap_ms: 4_000,
+            cold_start_ceiling_seconds: 90,
+            idle_timeout_seconds: 1,
+            transition_requeue_seconds: 60,
+            readiness_probe_period_seconds: 5,
+        }
+    }
 }
 
 /// Dry-run balancer integration settings for a Gres fleet.
@@ -333,6 +390,17 @@ mod tests {
     }
 
     #[test]
+    fn crd_exposes_runtime_tuning_defaults() {
+        let crd = Gres::crd();
+        let schema = serde_json::to_value(&crd).expect("CRD serializes");
+        let runtime = &schema["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]
+            ["spec"]["properties"]["runtime"];
+        check!(runtime["default"]["activatorPort"] == 6_543);
+        check!(runtime["default"]["reloadRetryLimit"] == 3);
+        check!(runtime["default"]["coldStartCeilingSeconds"] == 90);
+    }
+
+    #[test]
     fn spec_round_trips_through_json() {
         let spec = GresSpec {
             kafka_cluster: "demo".into(),
@@ -348,6 +416,7 @@ mod tests {
                     key: "password".into(),
                 },
             },
+            runtime: GresRuntimeSpec::default(),
             defaults: Some(TenantDefaults {
                 wal_replication: Some(3),
                 checkpoint_frames: Some(10_000),

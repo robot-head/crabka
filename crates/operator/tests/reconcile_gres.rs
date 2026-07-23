@@ -10,8 +10,8 @@ use crabka_operator::{
     crd::{
         Gres, GresBalancerGoal, GresBalancerGoals, GresBalancerOperationKind,
         GresBalancerPlanSnapshot, GresBalancerRegistryLayout, GresBalancerSpec,
-        GresBalancerThresholds, GresSpec, GresTenant, GresTenantSpec, PgdogSpec, SecretKeyRef,
-        SecretRef,
+        GresBalancerThresholds, GresRuntimeSpec, GresSpec, GresTenant, GresTenantSpec, PgdogSpec,
+        SecretKeyRef, SecretRef,
     },
 };
 use http::Method;
@@ -66,6 +66,7 @@ fn gres() -> Gres {
                     key: "password".into(),
                 },
             },
+            runtime: GresRuntimeSpec::default(),
             defaults: None,
             balancer: Some(GresBalancerSpec {
                 enabled: true,

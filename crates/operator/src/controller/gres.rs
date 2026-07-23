@@ -43,12 +43,6 @@ const DEFAULT_ACTIVATOR_IMAGE: &str = concat!(
     "ghcr.io/robot-head/crabka-gres-activator:",
     env!("CARGO_PKG_VERSION")
 );
-const ACTIVATOR_PORT: i32 = 6543;
-const ACTIVATOR_PORT_U16: u16 = 6543;
-const RELOAD_RETRY_LIMIT: usize = 3;
-const RELOAD_REQUEUE: Duration = Duration::from_secs(15);
-const PGDOG_ADMIN_OPERATION_TIMEOUT: Duration = Duration::from_secs(20);
-const PGDOG_DIRECT_BOOTSTRAP_MS: u64 = 4_000;
 
 /// Run the controller forever.
 /// # Errors
@@ -123,8 +117,9 @@ async fn reconcile_inner(obj: Arc<Gres>, ctx: Arc<Context>) -> Result<Action, Re
             .and_then(|status| status.pgdog_credential_grace_until_unix_ms);
         let now = current_unix_millis();
         let needs_bootstrap_credential = endpoint.state != TenantState::Active
-            || grace_deadline
-                .is_some_and(|deadline| now < deadline.saturating_add(PGDOG_DIRECT_BOOTSTRAP_MS));
+            || grace_deadline.is_some_and(|deadline| {
+                now < deadline.saturating_add(obj.spec.runtime.direct_bootstrap_ms)
+            });
         let password = if needs_bootstrap_credential {
             let reference = &tenant.spec.password_secret_ref;
             let secret = secret_api.get(&reference.name).await?;
@@ -156,9 +151,16 @@ async fn reconcile_inner(obj: Arc<Gres>, ctx: Arc<Context>) -> Result<Action, Re
 
     let render_input = PgdogRenderInput {
         tenants: &endpoints,
-        activator: Some((activator_service_host(&name, &ns), ACTIVATOR_PORT_U16)),
+        activator: Some((
+            activator_service_host(&name, &ns),
+            u16::try_from(obj.spec.runtime.activator_port).map_err(|error| {
+                ReconcileError::Malformed(format!("activatorPort is outside u16 range: {error}"))
+            })?,
+        )),
         general: PgdogGeneral {
-            listen_port: u16::try_from(obj.spec.pgdog.listen_port).unwrap_or(6_432),
+            listen_port: u16::try_from(obj.spec.pgdog.listen_port).map_err(|error| {
+                ReconcileError::Malformed(format!("PgDog listenPort is outside u16 range: {error}"))
+            })?,
             tls_cert_path: obj
                 .spec
                 .pgdog
@@ -184,15 +186,14 @@ async fn reconcile_inner(obj: Arc<Gres>, ctx: Arc<Context>) -> Result<Action, Re
                 .and_then(|defaults| defaults.idle_seconds)
                 .is_some()
             {
-                Duration::from_secs(1)
+                Duration::from_secs(obj.spec.runtime.idle_timeout_seconds)
             } else {
                 PgdogGeneral::default().idle_timeout
             },
             // A suspended route terminates its backend connect only after the
-            // activator has restored compute. Give each derived PgDog connect
-            // attempt the activator's full 30-second wait window instead of
-            // the default 10-second third of the ceiling.
-            cold_start_ceiling: Duration::from_secs(90),
+            // activator has restored compute. The CRD controls the full
+            // cold-start window independently of PgDog's internal default.
+            cold_start_ceiling: Duration::from_secs(obj.spec.runtime.cold_start_ceiling_seconds),
             users,
             ..Default::default()
         },
@@ -218,7 +219,7 @@ async fn reconcile_inner(obj: Arc<Gres>, ctx: Arc<Context>) -> Result<Action, Re
     apply_object(&service_api, &service_name(&name), &render_service(&obj)?).await?;
     let deployment_api: Api<Deployment> = Api::namespaced(ctx.client.clone(), &ns);
     let image = pgdog_image(&obj, &ctx);
-    let activator_image = activator_image(&ctx);
+    let activator_image = activator_image(&obj, &ctx);
     apply_object(
         &deployment_api,
         &activator_deployment_name(&name),
@@ -239,18 +240,21 @@ async fn reconcile_inner(obj: Arc<Gres>, ctx: Arc<Context>) -> Result<Action, Re
         != Some(hash.as_str())
     {
         let verified = tokio::time::timeout(
-            PGDOG_ADMIN_OPERATION_TIMEOUT,
+            Duration::from_secs(obj.spec.runtime.admin_operation_timeout_seconds),
             verify_pgdog_reload(&obj, &ctx, &endpoints, &rollout_hash),
         )
         .await
         .map_err(|_| {
             ReconcileError::PgdogAdmin(crate::context::PgdogAdminError::Fleet(format!(
-                "admin reload verification exceeded {PGDOG_ADMIN_OPERATION_TIMEOUT:?}"
+                "admin reload verification exceeded {} seconds",
+                obj.spec.runtime.admin_operation_timeout_seconds,
             )))
         })??;
         if !verified {
             tracing::warn!(gres = %name, config_hash = %hash, "pgdog admin view is stale after reload attempts");
-            return Ok(Action::requeue(RELOAD_REQUEUE));
+            return Ok(Action::requeue(Duration::from_secs(
+                obj.spec.runtime.reload_requeue_seconds,
+            )));
         }
     }
 
@@ -265,17 +269,27 @@ async fn reconcile_inner(obj: Arc<Gres>, ctx: Arc<Context>) -> Result<Action, Re
                 .and_then(|status| status.pgdog_credential_grace_until_unix_ms)
         }),
         now,
+        &obj.spec.runtime,
     );
     Ok(Action::requeue(requeue))
 }
 
-fn next_pgdog_transition_requeue(grace_deadlines: impl Iterator<Item = u64>, now: u64) -> Duration {
+fn next_pgdog_transition_requeue(
+    grace_deadlines: impl Iterator<Item = u64>,
+    now: u64,
+    runtime: &crate::crd::GresRuntimeSpec,
+) -> Duration {
     grace_deadlines
-        .flat_map(|deadline| [deadline, deadline.saturating_add(PGDOG_DIRECT_BOOTSTRAP_MS)])
+        .flat_map(|deadline| {
+            [
+                deadline,
+                deadline.saturating_add(runtime.direct_bootstrap_ms),
+            ]
+        })
         .filter(|deadline| *deadline > now)
         .map(|deadline| Duration::from_millis(deadline.saturating_sub(now).max(1)))
         .min()
-        .unwrap_or(Duration::from_mins(1))
+        .unwrap_or(Duration::from_secs(runtime.transition_requeue_seconds))
 }
 
 fn current_unix_millis() -> u64 {
@@ -304,10 +318,12 @@ fn pgdog_image(obj: &Gres, ctx: &Context) -> String {
         .unwrap_or_else(|| DEFAULT_IMAGE.to_string())
 }
 
-fn activator_image(ctx: &Context) -> String {
-    ctx.config
-        .default_gres_activator_image
+fn activator_image(obj: &Gres, ctx: &Context) -> String {
+    obj.spec
+        .runtime
+        .activator_image
         .clone()
+        .or_else(|| ctx.config.default_gres_activator_image.clone())
         .unwrap_or_else(|| DEFAULT_ACTIVATOR_IMAGE.to_string())
 }
 
@@ -346,7 +362,7 @@ async fn verify_pgdog_reload(
             } else {
                 (
                     activator_service_host(&obj.name_any(), &ns),
-                    ACTIVATOR_PORT_U16,
+                    u16::try_from(obj.spec.runtime.activator_port).unwrap_or_default(),
                 )
             };
             PgdogExpectedRoute {
@@ -399,7 +415,7 @@ async fn verify_pgdog_reload(
         })
         .collect::<Vec<_>>();
 
-    for attempt in 1..=RELOAD_RETRY_LIMIT {
+    for attempt in 1..=obj.spec.runtime.reload_retry_limit {
         if ctx
             .pgdog_admin
             .reload_and_database_views_match(&requests)
@@ -407,8 +423,11 @@ async fn verify_pgdog_reload(
         {
             return Ok(true);
         }
-        if attempt < RELOAD_RETRY_LIMIT {
-            tokio::time::sleep(Duration::from_millis(100)).await;
+        if attempt < obj.spec.runtime.reload_retry_limit {
+            tokio::time::sleep(Duration::from_millis(
+                obj.spec.runtime.reload_retry_delay_ms,
+            ))
+            .await;
         }
     }
     Ok(false)
@@ -672,7 +691,7 @@ fn render_service(obj: &Gres) -> Result<Service, ReconcileError> {
 fn render_activator_service(obj: &Gres) -> Result<Service, ReconcileError> {
     Ok(serde_json::from_value(json!({
         "metadata": { "name": activator_service_name(&obj.name_any()), "namespace": obj.namespace(), "labels": activator_meta_labels(obj), "ownerReferences": [owner_ref::<Gres>(obj)?] },
-        "spec": { "type": "ClusterIP", "selector": activator_selector_labels(obj), "ports": [{ "name": "postgres", "port": ACTIVATOR_PORT, "targetPort": ACTIVATOR_PORT, "protocol": "TCP" }] }
+        "spec": { "type": "ClusterIP", "selector": activator_selector_labels(obj), "ports": [{ "name": "postgres", "port": obj.spec.runtime.activator_port, "targetPort": obj.spec.runtime.activator_port, "protocol": "TCP" }] }
     }))?)
 }
 
@@ -711,7 +730,7 @@ fn render_deployment(obj: &Gres, image: &str, hash: &str) -> Result<Deployment, 
                         }],
                         "ports": [{ "name": "postgres", "containerPort": obj.spec.pgdog.listen_port, "protocol": "TCP" }],
                         "volumeMounts": mounts,
-                        "readinessProbe": { "tcpSocket": { "port": obj.spec.pgdog.listen_port }, "periodSeconds": 5 }
+                        "readinessProbe": { "tcpSocket": { "port": obj.spec.pgdog.listen_port }, "periodSeconds": obj.spec.runtime.readiness_probe_period_seconds }
                     }]
                 }
             }
@@ -739,12 +758,12 @@ fn render_activator_deployment(
                         "name": "gres-activator",
                         "image": image,
                         "args": [
-                            "--listen", format!("0.0.0.0:{ACTIVATOR_PORT}"),
+                            "--listen", format!("0.0.0.0:{}", obj.spec.runtime.activator_port),
                             "--bootstrap", bootstrap,
                             "--backend-endpoint-template", format!("{{tenant}}-gres.{namespace}.svc:{COMPUTE_PORT}", namespace = obj.namespace().unwrap_or_else(|| "default".into()))
                         ],
-                        "ports": [{ "name": "postgres", "containerPort": ACTIVATOR_PORT, "protocol": "TCP" }],
-                        "readinessProbe": { "tcpSocket": { "port": ACTIVATOR_PORT }, "periodSeconds": 5 }
+                        "ports": [{ "name": "postgres", "containerPort": obj.spec.runtime.activator_port, "protocol": "TCP" }],
+                        "readinessProbe": { "tcpSocket": { "port": obj.spec.runtime.activator_port }, "periodSeconds": obj.spec.runtime.readiness_probe_period_seconds }
                     }]
                 }
             }
@@ -968,7 +987,9 @@ mod tests {
     use assert2::assert;
 
     use super::*;
-    use crate::crd::{GresSpec, GresTenantSpec, GresTenantStatus, PgdogSpec, SecretKeyRef};
+    use crate::crd::{
+        GresRuntimeSpec, GresSpec, GresTenantSpec, GresTenantStatus, PgdogSpec, SecretKeyRef,
+    };
 
     fn gres() -> Gres {
         let mut obj = Gres::new(
@@ -985,6 +1006,7 @@ mod tests {
                         key: "password".into(),
                     },
                 },
+                runtime: GresRuntimeSpec::default(),
                 defaults: None,
                 balancer: None,
             },
@@ -1027,7 +1049,7 @@ mod tests {
 
         let activator = Some((
             "fleet-gres-activator.ns.svc.cluster.local".to_string(),
-            ACTIVATOR_PORT_U16,
+            6_543,
         ));
         let general = PgdogGeneral::default();
         let suspended_toml = render_pgdog_toml(&PgdogRenderInput {
@@ -1219,8 +1241,47 @@ mod tests {
         let now = grace_deadline + 1_000;
 
         assert_eq!(
-            next_pgdog_transition_requeue([grace_deadline].into_iter(), now),
-            Duration::from_millis(PGDOG_DIRECT_BOOTSTRAP_MS - 1_000)
+            next_pgdog_transition_requeue(
+                [grace_deadline].into_iter(),
+                now,
+                &GresRuntimeSpec::default(),
+            ),
+            Duration::from_millis(GresRuntimeSpec::default().direct_bootstrap_ms - 1_000)
+        );
+    }
+
+    #[test]
+    fn runtime_spec_controls_managed_microservice_ports_and_probes() {
+        let mut obj = gres();
+        obj.spec.runtime.activator_port = 7_654;
+        obj.spec.runtime.readiness_probe_period_seconds = 17;
+
+        let activator = render_activator_deployment(&obj, "broker:9092", "example/activator")
+            .expect("activator deployment renders");
+        let container = &activator
+            .spec
+            .expect("spec")
+            .template
+            .spec
+            .expect("pod spec")
+            .containers[0];
+        assert!(
+            container
+                .args
+                .as_ref()
+                .is_some_and(|args| args.contains(&"0.0.0.0:7654".into()))
+        );
+        assert!(
+            container
+                .ports
+                .as_ref()
+                .is_some_and(|ports| ports[0].container_port == 7_654)
+        );
+        assert!(
+            container
+                .readiness_probe
+                .as_ref()
+                .is_some_and(|probe| probe.period_seconds == Some(17))
         );
     }
 }

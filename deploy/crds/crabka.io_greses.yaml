@@ -227,6 +227,81 @@ spec:
                 - listenPort
                 - replicas
                 type: object
+              runtime:
+                default:
+                  activatorPort: 6543
+                  adminOperationTimeoutSeconds: 20
+                  coldStartCeilingSeconds: 90
+                  directBootstrapMs: 4000
+                  idleTimeoutSeconds: 1
+                  readinessProbePeriodSeconds: 5
+                  reloadRequeueSeconds: 15
+                  reloadRetryDelayMs: 100
+                  reloadRetryLimit: 3
+                  transitionRequeueSeconds: 60
+                description: |-
+                  Runtime tuning for the PgDog and Gres activator microservices. Every
+                  operational timeout, retry, probe, and activator port used by the
+                  controller is surfaced here so it can be tuned without rebuilding the
+                  operator.
+                properties:
+                  activatorImage:
+                    description: Container image override for the Gres activator.
+                    nullable: true
+                    type: string
+                  activatorPort:
+                    description: TCP port used by the Gres activator service and container.
+                    format: int32
+                    maximum: 65535.0
+                    minimum: 1.0
+                    type: integer
+                  adminOperationTimeoutSeconds:
+                    description: Maximum duration of a PgDog admin operation, in seconds.
+                    format: uint64
+                    minimum: 0.0
+                    type: integer
+                  coldStartCeilingSeconds:
+                    description: Maximum time PgDog waits for a cold tenant backend, in seconds.
+                    format: uint64
+                    minimum: 0.0
+                    type: integer
+                  directBootstrapMs:
+                    description: Credential grace period after a route transition, in milliseconds.
+                    format: uint64
+                    minimum: 0.0
+                    type: integer
+                  idleTimeoutSeconds:
+                    description: Idle timeout used while tenant idleness is enabled, in seconds.
+                    format: uint64
+                    minimum: 0.0
+                    type: integer
+                  readinessProbePeriodSeconds:
+                    description: Kubernetes readiness probe period for PgDog and the activator, in seconds.
+                    format: int32
+                    minimum: 1.0
+                    type: integer
+                  reloadRequeueSeconds:
+                    description: Requeue delay after PgDog reload verification fails, in seconds.
+                    format: uint64
+                    minimum: 0.0
+                    type: integer
+                  reloadRetryDelayMs:
+                    description: Delay between PgDog admin reload attempts in milliseconds.
+                    format: uint64
+                    minimum: 0.0
+                    type: integer
+                  reloadRetryLimit:
+                    description: Number of PgDog admin reload attempts before reconciliation requeues.
+                    format: uint
+                    maximum: 100.0
+                    minimum: 1.0
+                    type: integer
+                  transitionRequeueSeconds:
+                    description: Fallback reconcile interval when no credential grace deadline exists.
+                    format: uint64
+                    minimum: 0.0
+                    type: integer
+                type: object
             required:
             - kafkaCluster
             - pgdog
