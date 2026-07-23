@@ -1950,6 +1950,13 @@ where
     /// Grants are contiguous and strictly monotone across calls, so each
     /// deficit re-grant closes the gap and the loop only repeats when a
     /// concurrent observation raises the floor mid-flight.
+    ///
+    /// The floor is a best-effort high-water mark, not a reservation: a
+    /// bypass allocation racing this grant can still mint overlapping stamps,
+    /// and that collision is caught by the prewrite reservation checks as a
+    /// retryable serialization conflict. Serializing against every range's
+    /// local allocator would reintroduce exactly the global coordination the
+    /// single-shard bypass exists to avoid.
     async fn grant_above_floor(
         &self,
         count: u64,
@@ -3551,6 +3558,9 @@ impl GatewaySession {
             }
             StatementKind::Dml | StatementKind::Query | StatementKind::Local => {}
         }
+        if portal_state.route.kind == StatementKind::Query {
+            self.fold_hosted_read_floors()?;
+        }
         if portal_state.route.kind == StatementKind::Dml
             && self.statement_targets_sharded_table(&portal_state.sql)?
             && (portal_state.route.scatter_ranges.is_some()
@@ -3613,6 +3623,25 @@ impl GatewaySession {
         Ok(serving)
     }
 
+    /// Fold the highest hosted local timestamp floor into every hosted
+    /// engine's source before a statement read timestamp is allocated:
+    /// single-shard bypass commits advance per-range sequences without the
+    /// global oracle, and a read timestamp minted below an already
+    /// acknowledged commit would serve a stale (non-linearizable) snapshot.
+    /// The fold targets every engine because the read stamp is drawn from
+    /// whichever engine seats the session — routed, forwarded, or portal.
+    fn fold_hosted_read_floors(&self) -> Result<(), PgError> {
+        let serving = self.current_serving()?;
+        let mut floor = 0;
+        for engine in serving.engines.values() {
+            floor = floor.max(engine.local_timestamp_floor().map_err(ExecError::into_pg)?);
+        }
+        for engine in serving.engines.values() {
+            engine.observe_timestamp_source(floor);
+        }
+        Ok(())
+    }
+
     async fn execute_one(&mut self, statement: &str) -> Result<Vec<QueryResult>, PgError> {
         let result = self.execute_one_inner(statement).await;
         if result.is_err() && matches!(self.transaction, GatewayTransaction::Timestamp { .. }) {
@@ -3670,6 +3699,9 @@ impl GatewaySession {
             self.renew_explicit_transaction().await?;
         }
 
+        if route.kind == StatementKind::Query {
+            self.fold_hosted_read_floors()?;
+        }
         if let Some(ranges) = route.scatter_ranges.clone() {
             return self
                 .execute_timestamp_scatter(statement, ranges)
@@ -4464,7 +4496,13 @@ impl GatewaySession {
                 // the global source first: single-shard bypass commits advance
                 // per-range sequences without the global oracle, so an unfolded
                 // grant could mint hidden rowids that collide with rows those
-                // ranges already committed locally.
+                // ranges already committed locally. Only hosted engines can be
+                // sampled — LogicalTso is the solo (co-hosted) mode, and
+                // distributed deployments run the HLC source whose receive
+                // rule folds remote stamps instead. A floor that is stale by
+                // the time the lease lands (a concurrent bypass allocation)
+                // fails closed through the prewrite reservation checks as a
+                // retryable serialization conflict.
                 for range_id in &ranges {
                     if let Some(engine) = serving.engine(*range_id) {
                         planner.observe_timestamp_source(

@@ -331,13 +331,22 @@ def validate_record_v2(r: dict[str, Any], family: str, case: str, source: str, h
     expected_topics = sorted({f"__gres_wal.{r['tenant_id']}.r0", f"__gres_wal.{r['tenant_id']}.r2.g0000000001", f"__gres_wal.{r['tenant_id']}.r3.g0000000001", r["sentinel_topic"]})
     if not r["sentinel_topic"].startswith("g8-sentinel-") or r["topology_topics"] != expected_topics: fail(f"{source}: exact topology topics differ")
 
-def expected_hash_marker(case: str) -> tuple[int,int,int,int]:
+def expected_hash_marker(case: str) -> tuple[int,int,int,int] | None:
+    # Post-restart ("late") markers inherit however many timestamps the
+    # pre-kill run burned, so only the structural identity is checkable there;
+    # pre-CLI markers run on a fresh oracle and stay pinned at (1, 2).
     late={"initiated_before_running_cas","checkpoint_receipt_before_journal_cas","checkpointed_after_journal_cas"}
-    return (1025,52,2,1026) if case in late else (1,52,2,2)
+    return None if case in late else (1,52,2,2)
 
 def validate_hash_evidence(value: Any, record: dict[str, Any], source: str) -> None:
     evidence=exact_object(value,HASH_EVIDENCE_KEYS,"hash evidence")
-    if marker_rows(record["source_markers"], "hash source markers") != [expected_hash_marker(record["case"])]: fail(f"{source}: hash marker physical identity differs")
+    markers=marker_rows(record["source_markers"], "hash source markers")
+    if len(markers)!=1: fail(f"{source}: hash marker count differs")
+    transaction_id,table_id,bucket,rowid=markers[0]
+    if (table_id,bucket)!=(52,2) or rowid!=transaction_id+1: fail(f"{source}: hash marker physical identity differs")
+    pinned=expected_hash_marker(record["case"])
+    if pinned is not None and markers[0]!=pinned: fail(f"{source}: hash marker physical identity differs")
+    if pinned is None and transaction_id<=16: fail(f"{source}: post-restart hash marker timestamp implausibly low")
     algorithm=exact_object(evidence["algorithm"],{"name","offset_basis","prime","bucket_count"},"hash algorithm")
     if algorithm!={"name":"fnv1a64-int4-be","offset_basis":FNV_OFFSET,"prime":FNV_PRIME,"bucket_count":16}: fail(f"{source}: hash algorithm differs")
     boundary=exact_object(evidence["boundary"],{"table_id","bucket","rowid","request_bucket","receipt_bucket"},"hash boundary")
@@ -366,11 +375,13 @@ def validate_hash_evidence(value: Any, record: dict[str, Any], source: str) -> N
             if item["summary"]!=summary: fail(f"{source}: raw row summary differs")
             decoded.append((snapshot["stage"],snapshot["range_id"],item["corpus"],summary))
     after=[summary for stage,_range,_corpus,summary in decoded if stage=="after" and summary["state"]=="committed"]
-    if len({(row["table_id"],row["rowid"],row["version"]) for row in after})!=len(after): fail(f"{source}: raw hash rows are not unique")
+    # Hidden rowids are minted per range, so raw-row identity carries the
+    # bucket: distinct buckets legitimately reuse rowid values.
+    if len({(row["table_id"],row["bucket"],row["rowid"],row["version"]) for row in after})!=len(after): fail(f"{source}: raw hash rows are not unique")
     latest={}
     for stage,_range,corpus,row in decoded:
         if stage!="after" or row["state"]!="committed": continue
-        key=(row["table_id"],row["rowid"])
+        key=(row["table_id"],row["bucket"],row["rowid"])
         if key not in latest or latest[key][1]["version"]<row["version"]: latest[key]=(corpus,row)
     folds=exact_object(evidence["folds"],{"left_corpus","right_corpus","raw_after_sha256","sql_sha256","ack_sha256"},"hash folds")
     corpus_after=[summary for corpus,summary in latest.values() if corpus and summary["table_id"]==50]
@@ -481,7 +492,7 @@ def encode_txd2(start_ts:int,decision:str)->tuple[str,str,dict[str,Any]]:
 def synthetic_v3(family:str,case:str,index:int)->dict[str,Any]:
     result=synthetic(family,case,index); result["schema_version"]=3
     result["split_boundary_rowid"]=0; result["r0_static_ids"]=[]
-    transaction_id,table_id,bucket,rowid=expected_hash_marker(case)
+    transaction_id,table_id,bucket,rowid=expected_hash_marker(case) or (1025,52,2,1026)
     marker={"transaction_id":transaction_id,"table_id":table_id,"bucket":bucket,"rowid":rowid}
     wire={"transaction_id":transaction_id,"key":{"table_id":table_id,"bucket":bucket,"rowid":rowid}}
     marker_hash=marker_digest([(transaction_id,table_id,bucket,rowid)])

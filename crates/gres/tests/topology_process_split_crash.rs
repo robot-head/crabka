@@ -3261,6 +3261,14 @@ async fn verify_terminal_payload(
     }
     {
         use assert2::assert;
+        if sql_rows != expected {
+            system
+                .preserve_logs(
+                    &Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("../../target/g8-sql-union-debug-logs"),
+                )
+                .await;
+        }
         assert!(
             sql_rows == expected,
             "terminal SQL union must exactly equal the durable ACK ledger; {}",
@@ -3334,20 +3342,21 @@ fn verify_marker_receipts(
             }
         }
         SplitWorkload::Hash => {
-            let expected = if point.inject_marker_before_cli() {
-                (1, 52, Some(2), 2)
-            } else {
-                (1025, 52, Some(2), 1026)
-            };
+            // Same timestamp-domain identity as ordinary mode, plus the
+            // pinned hash bucket of logical id 1. Post-restart markers
+            // inherit however many stamps the pre-kill run burned (including
+            // the recovered TSO stride), so only the structural relation is
+            // asserted there.
             assert_eq!(
-                (
-                    markers[0].transaction_id,
-                    markers[0].key.table_id,
-                    markers[0].key.bucket,
-                    markers[0].key.rowid,
-                ),
-                expected
+                (markers[0].key.table_id, markers[0].key.bucket),
+                (52, Some(2))
             );
+            assert_eq!(markers[0].key.rowid, markers[0].transaction_id + 1);
+            if point.inject_marker_before_cli() {
+                assert_eq!((markers[0].transaction_id, markers[0].key.rowid), (1, 2));
+            } else {
+                assert!(markers[0].transaction_id > 16);
+            }
         }
     }
     assert!(
