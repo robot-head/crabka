@@ -7663,9 +7663,9 @@ dependencies = [
 
 [[package]]
 name = "jsonpath-rust"
-version = "1.0.5"
+version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4222e00941bfe18bf81b79fa23ad933e233bfa18f3ee27254c5dd9b1543b5d5f"
+checksum = "a2dbe0623574defe58ba113596c848797f131727e8f54d4b4d10793e1fe14d40"
 dependencies = [
  "pest",
  "pest_derive",
