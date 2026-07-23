@@ -2981,7 +2981,15 @@ pub(crate) fn scan_ts_live_interval(
                     descriptor, table.id, bucket, rowid,
                 )
             });
-            let primary_decision = descriptor.as_ref().map(|descriptor| descriptor.decision);
+            // Per-range local sequences reuse stamp values, so an unrelated
+            // transaction's descriptor can sit at this version's start
+            // timestamp. A descriptor that names this row neither as a
+            // verified intent nor as a terminal operation belongs to such a
+            // colliding transaction; treating it as authoritative would fence
+            // a committed single-shard row invisible.
+            let primary_decision = (verified_distributed_intent || descriptor_operation)
+                .then(|| descriptor.as_ref().map(|descriptor| descriptor.decision))
+                .flatten();
             let candidate = match (version.state, primary_decision, verified_distributed_intent) {
                 (
                     crabka_pgmvcc::version::TsVersionState::Intent,

@@ -669,6 +669,7 @@ impl MultiRangeTenant {
                     let timestamp_oracle: Arc<dyn crabka_pgexec::TimestampSource> =
                         Arc::new(PgexecTsoOracle {
                             client: BatchedTsoClient::new(rpc),
+                            observed_floor: std::sync::atomic::AtomicU64::new(0),
                         });
                     install_timestamp_oracle(&mut engines, &timestamp_oracle);
                 } else {
@@ -1849,6 +1850,12 @@ where
 
 struct PgexecTsoOracle<R> {
     client: BatchedTsoClient<R>,
+    /// Highest range-local timestamp observed via the Lamport receive seam.
+    /// Single-shard bypass commits advance per-range local sequences without
+    /// consulting the global oracle, so a grant may lag behind stamps a range
+    /// has already spent; every allocation skips to strictly above this floor
+    /// so cross-range leases never collide with locally minted rowids.
+    observed_floor: std::sync::atomic::AtomicU64,
 }
 
 struct SharedTsoRpc(Arc<dyn TsoRpc>);
@@ -1890,22 +1897,16 @@ where
         let count = u64::try_from(hidden_rowid_count)
             .ok()
             .and_then(|count| count.checked_add(1))
-            .and_then(NonZeroU64::new)
             .ok_or_else(|| {
                 crabka_pgexec::TimestampSourceError::Unavailable(
                     "timestamp write lease is too large".into(),
                 )
             })?;
-        let lease =
-            self.client.grant(count).await.map_err(|error| {
-                crabka_pgexec::TimestampSourceError::Unavailable(error.to_string())
-            })?;
-        let start_ts = crabka_pgexec::TimestampTransactionId::new(lease.first_ts.get())?;
+        let first = self.grant_above_floor(count).await?;
+        let start_ts = crabka_pgexec::TimestampTransactionId::new(first)?;
         let hidden_rowids = (1..=hidden_rowid_count)
             .map(|offset| {
-                lease
-                    .first_ts
-                    .get()
+                first
                     .checked_add(u64::try_from(offset).expect("offset fits u64"))
                     .ok_or_else(|| {
                         crabka_pgexec::TimestampSourceError::Unavailable(
@@ -1927,6 +1928,11 @@ where
         let timestamp = self.grant_one().await?;
         crabka_pgexec::CommitTimestamp::after_start(start_ts, timestamp).map_err(Into::into)
     }
+
+    fn observe(&self, observed_ts: u64) {
+        self.observed_floor
+            .fetch_max(observed_ts, std::sync::atomic::Ordering::AcqRel);
+    }
 }
 
 impl<R> PgexecTsoOracle<R>
@@ -1934,12 +1940,56 @@ where
     R: TsoRpc,
 {
     async fn grant_one(&self) -> Result<u64, crabka_pgexec::TimestampSourceError> {
-        let count = NonZeroU64::new(1).expect("one is non-zero");
-        self.client
-            .grant(count)
-            .await
-            .map(|lease| lease.first_ts.get())
-            .map_err(|error| crabka_pgexec::TimestampSourceError::Unavailable(error.to_string()))
+        self.grant_above_floor(1).await
+    }
+
+    /// Grant `count` contiguous timestamps whose first stamp strictly exceeds
+    /// the observed range-local floor, burning below-floor stamps as needed.
+    /// Grants are contiguous and strictly monotone across calls, so each
+    /// deficit re-grant closes the gap and the loop only repeats when a
+    /// concurrent observation raises the floor mid-flight.
+    ///
+    /// The floor is a best-effort high-water mark, not a reservation: a
+    /// bypass allocation racing this grant can still mint overlapping stamps,
+    /// and that collision is caught by the prewrite reservation checks as a
+    /// retryable serialization conflict. Serializing against every range's
+    /// local allocator would reintroduce exactly the global coordination the
+    /// single-shard bypass exists to avoid.
+    async fn grant_above_floor(
+        &self,
+        count: u64,
+    ) -> Result<u64, crabka_pgexec::TimestampSourceError> {
+        let mut request = count;
+        loop {
+            let requested = NonZeroU64::new(request).ok_or_else(|| {
+                crabka_pgexec::TimestampSourceError::Unavailable("timestamp grant is empty".into())
+            })?;
+            let lease = self.client.grant(requested).await.map_err(|error| {
+                crabka_pgexec::TimestampSourceError::Unavailable(error.to_string())
+            })?;
+            let floor = self
+                .observed_floor
+                .load(std::sync::atomic::Ordering::Acquire);
+            // Use the top `count` stamps of the contiguous grant.
+            let first = lease
+                .first_ts
+                .get()
+                .checked_add(request - count)
+                .ok_or_else(|| {
+                    crabka_pgexec::TimestampSourceError::Unavailable(
+                        "timestamp grant overflow".into(),
+                    )
+                })?;
+            if first > floor {
+                return Ok(first);
+            }
+            let deficit = floor - first + 1;
+            request = count.checked_add(deficit).ok_or_else(|| {
+                crabka_pgexec::TimestampSourceError::Unavailable(
+                    "timestamp floor exhausts the grant domain".into(),
+                )
+            })?;
+        }
     }
 }
 
@@ -2002,6 +2052,7 @@ pub fn pgexec_timestamp_oracle_from_rpc(
 ) -> Arc<dyn crabka_pgexec::TimestampSource> {
     Arc::new(PgexecTsoOracle {
         client: BatchedTsoClient::new(Arc::new(SharedTsoRpc(rpc))),
+        observed_floor: std::sync::atomic::AtomicU64::new(0),
     })
 }
 
@@ -2280,11 +2331,38 @@ fn hash_scan_segments(
     let Some(ShardingStrategy::Hash(hash)) = table.sharding.as_ref() else {
         return Ok(None);
     };
+    let table_id = routing_table_id(&table.name);
     let Some(hash_value) = hash_equality_value(table, hash, &request.predicate) else {
-        return Ok(None);
+        // Full scan: a hash table partitions across ranges by bucket, so the
+        // rowid-sliced `scan_segments` decomposition would hand each range a
+        // rowid interval that does not correspond to the rows it stores
+        // (per-range sequences reuse rowid values). Cover every bucket via
+        // the bucket-aware segmenter and scan each owning range exactly once.
+        let mut range_ids = BTreeSet::new();
+        for bucket in 0..hash.buckets {
+            for segment in range_map
+                .scan_hash_bucket_segments(
+                    table_id,
+                    bucket,
+                    map_interval_from_exec(request.interval),
+                )
+                .map_err(|error| ExecError::Unsupported(error.to_string()))?
+            {
+                range_ids.insert(segment.range_id);
+            }
+        }
+        return Ok(Some(
+            range_ids
+                .into_iter()
+                .map(|range_id| RangeScanSegment {
+                    range_id,
+                    table_id,
+                    interval: map_interval_from_exec(request.interval),
+                })
+                .collect(),
+        ));
     };
 
-    let table_id = routing_table_id(&table.name);
     let spec = HashShardSpec::new(
         table_id,
         hash.columns.clone(),
@@ -3500,6 +3578,9 @@ impl GatewaySession {
             }
             StatementKind::Dml | StatementKind::Query | StatementKind::Local => {}
         }
+        if portal_state.route.kind == StatementKind::Query {
+            self.fold_hosted_read_floors()?;
+        }
         if portal_state.route.kind == StatementKind::Dml
             && self.statement_targets_sharded_table(&portal_state.sql)?
             && (portal_state.route.scatter_ranges.is_some()
@@ -3563,6 +3644,25 @@ impl GatewaySession {
         Ok(serving)
     }
 
+    /// Fold the highest hosted local timestamp floor into every hosted
+    /// engine's source before a statement read timestamp is allocated:
+    /// single-shard bypass commits advance per-range sequences without the
+    /// global oracle, and a read timestamp minted below an already
+    /// acknowledged commit would serve a stale (non-linearizable) snapshot.
+    /// The fold targets every engine because the read stamp is drawn from
+    /// whichever engine seats the session — routed, forwarded, or portal.
+    fn fold_hosted_read_floors(&self) -> Result<(), PgError> {
+        let serving = self.current_serving()?;
+        let mut floor = 0;
+        for engine in serving.engines.values() {
+            floor = floor.max(engine.local_timestamp_floor().map_err(ExecError::into_pg)?);
+        }
+        for engine in serving.engines.values() {
+            engine.observe_timestamp_source(floor);
+        }
+        Ok(())
+    }
+
     async fn execute_one(&mut self, statement: &str) -> Result<Vec<QueryResult>, PgError> {
         let result = self.execute_one_inner(statement).await;
         if result.is_err() && matches!(self.transaction, GatewayTransaction::Timestamp { .. }) {
@@ -3582,9 +3682,14 @@ impl GatewaySession {
         };
         let identity = *identity;
         let participants = participants.clone();
-        self.abort_timestamp_scatter(identity, &participants.into_iter().collect::<Vec<_>>())
-            .await
-            .map_err(ExecError::into_pg)?;
+        // Nothing durable exists until the first prewrite lands, so a scatter
+        // abort has nothing to resolve and would only replace the statement's
+        // failure with its own error.
+        if !participants.is_empty() {
+            self.abort_timestamp_scatter(identity, &participants.into_iter().collect::<Vec<_>>())
+                .await
+                .map_err(ExecError::into_pg)?;
+        }
         self.complete_timestamp_abort();
         Ok(())
     }
@@ -3609,6 +3714,9 @@ impl GatewaySession {
             .acquire_routed_dml_fences(&route, timestamp_write)
             .await?;
 
+        if route.kind == StatementKind::Query {
+            self.fold_hosted_read_floors()?;
+        }
         if let Some(ranges) = route.scatter_ranges.clone() {
             return self
                 .execute_timestamp_scatter(statement, ranges)
@@ -3725,9 +3833,14 @@ impl GatewaySession {
         {
             let identity = *identity;
             let participants = participants.clone();
-            self.abort_timestamp_scatter(identity, &participants.into_iter().collect::<Vec<_>>())
+            if !participants.is_empty() {
+                self.abort_timestamp_scatter(
+                    identity,
+                    &participants.into_iter().collect::<Vec<_>>(),
+                )
                 .await
                 .map_err(ExecError::into_pg)?;
+            }
             self.complete_timestamp_rollback();
             return Ok(rollback_command_response());
         }
@@ -4369,6 +4482,24 @@ impl GatewaySession {
                     .allocate_local_timestamp_write_lease(plan.writes.len())
                     .map_err(ExecError::into_pg)?
             } else {
+                // Fold every routed hosted range's local timestamp floor into
+                // the global source first: single-shard bypass commits advance
+                // per-range sequences without the global oracle, so an unfolded
+                // grant could mint hidden rowids that collide with rows those
+                // ranges already committed locally. Only hosted engines can be
+                // sampled — LogicalTso is the solo (co-hosted) mode, and
+                // distributed deployments run the HLC source whose receive
+                // rule folds remote stamps instead. A floor that is stale by
+                // the time the lease lands (a concurrent bypass allocation)
+                // fails closed through the prewrite reservation checks as a
+                // retryable serialization conflict.
+                for range_id in &ranges {
+                    if let Some(engine) = serving.engine(*range_id) {
+                        planner.observe_timestamp_source(
+                            engine.local_timestamp_floor().map_err(ExecError::into_pg)?,
+                        );
+                    }
+                }
                 planner
                     .allocate_timestamp_write_lease(plan.writes.len())
                     .await
@@ -4513,10 +4644,15 @@ impl GatewaySession {
                     .await
             };
             if let Err(error) = prewrite {
+                // Nothing durable exists until the first prewrite lands, so a
+                // scatter abort has nothing to resolve and would only replace
+                // the prewrite failure with its own error.
                 let participants = self.timestamp_participants_with(&statement_participants);
-                self.abort_timestamp_scatter(identity, &participants)
-                    .await
-                    .map_err(ExecError::into_pg)?;
+                if !participants.is_empty() {
+                    self.abort_timestamp_scatter(identity, &participants)
+                        .await
+                        .map_err(ExecError::into_pg)?;
+                }
                 return Err(error);
             }
             statement_participants.push((*range_id, writes.clone()));
@@ -6839,13 +6975,17 @@ mod tests {
     async fn session_with_unabortable_timestamp(gateway: &MultiRangeTenant) -> GatewaySession {
         let mut session = gateway.connect();
         session.acquire_timestamp_topology_guard().await;
+        // A prewritten secondary without its primary participant cannot be
+        // scatter-aborted; an EMPTY participant set is trivially abortable
+        // (nothing durable exists yet), so the unabortable fixture must carry
+        // a participant while the primary is absent.
         session.transaction = GatewayTransaction::Timestamp {
             identity: crabka_pgexec::TimestampTxnIdentity {
                 start_ts: crabka_pgexec::TimestampTransactionId::new(12).expect("timestamp"),
                 global_xid: 12,
                 primary_range: RangeId::COORDINATOR.as_u32(),
             },
-            participants: BTreeMap::new(),
+            participants: BTreeMap::from([(RangeId::new(1), Vec::new())]),
         };
         session
     }
@@ -8650,6 +8790,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tso_oracle_allocations_skip_above_observed_local_stamps() {
+        use crabka_pgexec::TimestampSource as _;
+
+        let kv = Arc::new(crabka_pgkv::MemKv::new());
+        let horizon = MemoryTsoHorizon::new(kv, 1);
+        let oracle = Arc::new(
+            TsoOracle::recover(
+                horizon.clone(),
+                horizon.clone(),
+                1,
+                NonZeroU64::new(8).expect("stride"),
+                0,
+            )
+            .expect("oracle"),
+        );
+        let rpc = Arc::new(InProcessTsoRpc { oracle });
+        let timestamp_oracle = PgexecTsoOracle {
+            client: BatchedTsoClient::new(rpc),
+            observed_floor: std::sync::atomic::AtomicU64::new(0),
+        };
+
+        // A range's single-shard bypass has locally spent stamps up to 100;
+        // once observed, every global allocation must land strictly above.
+        timestamp_oracle.observe(100);
+        let lease = timestamp_oracle
+            .allocate_write_lease(2)
+            .await
+            .expect("floored write lease");
+        assert!(lease.start_ts.get() > 100);
+        assert!(lease.hidden_rowids == vec![lease.start_ts.get() + 1, lease.start_ts.get() + 2]);
+        let commit = timestamp_oracle
+            .allocate_commit_after(lease.start_ts)
+            .await
+            .expect("floored commit");
+        assert!(commit.get() > lease.start_ts.get());
+
+        // A stale (lower) observation never drags allocations backwards.
+        timestamp_oracle.observe(5);
+        let next = timestamp_oracle
+            .allocate_transaction_id()
+            .await
+            .expect("monotone transaction id");
+        assert!(next.get() > commit.get());
+    }
+
+    #[tokio::test]
     async fn fenced_range_zero_timestamp_oracle_fails_clear() {
         let kv = Arc::new(crabka_pgkv::MemKv::new());
         let horizon = MemoryTsoHorizon::new(kv, 1);
@@ -8667,6 +8853,7 @@ mod tests {
         let rpc = Arc::new(InProcessTsoRpc { oracle });
         let timestamp_oracle = PgexecTsoOracle {
             client: BatchedTsoClient::new(rpc),
+            observed_floor: std::sync::atomic::AtomicU64::new(0),
         };
 
         let error = crabka_pgexec::TimestampSource::allocate_transaction_id(&timestamp_oracle)

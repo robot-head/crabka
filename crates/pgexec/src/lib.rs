@@ -1745,6 +1745,28 @@ impl SqlEngine {
         self.local_sequence.closed_timestamp()
     }
 
+    /// The highest timestamp this range has locally spent or durably applied:
+    /// the floor a cross-range allocation must strictly exceed so its stamps
+    /// (and the hidden rowids derived from them) cannot collide with rows this
+    /// range minted through the single-shard bypass.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExecError::Unsupported`] when the durable horizon cannot be
+    /// read.
+    pub fn local_timestamp_floor(&self) -> Result<u64, ExecError> {
+        Ok(self
+            .timestamp_horizon
+            .current()?
+            .max(self.local_sequence.next_timestamp().saturating_sub(1)))
+    }
+
+    /// Fold a range-local timestamp into the global source's observed floor
+    /// (the Lamport receive rule in the local-to-global direction).
+    pub fn observe_timestamp_source(&self, observed_ts: u64) {
+        self.timestamp_oracle.observe(observed_ts);
+    }
+
     /// Return a timestamp transaction participant for this engine's local range.
     #[must_use]
     pub fn timestamp_txn_participant(&self, range_id: u32) -> TimestampTxnParticipant {
