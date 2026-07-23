@@ -50,7 +50,6 @@ Tasks 3–5 implement every row in this table. Integer constraints are inclusive
 | `gauge_poll_interval_ms` | `u64` | `1000` | `>= 1` |
 | `isr_scan_interval_ms` | `u64` | `1000` | `>= 1` |
 | `cleaner_interval_ms` | `u64` | `30000` | `>= 1` |
-| `diskless_flush_interval_ms` | `u64` | `250` | `>= 1` |
 | `future_log_move_retry_backoff_ms` | `u64` | `50` | `>= 1` |
 | `client_metrics_eviction_tick_ms` | `u64` | `60000` | `>= 1` |
 | `client_metrics_stale_floor_ms` | `u64` | `600000` | `>= eviction tick` |
@@ -338,7 +337,7 @@ The audit follows the scope in the runtime-configuration design. Paths and line 
 
 - Startup and registration: `STARTUP_LEADER_WAIT_TIMEOUT`, `SELF_REGISTRATION_BACKOFF_MIN`, `SELF_REGISTRATION_BACKOFF_MAX`, `OBSERVER_POLL_INTERVAL`.
 - Audit maintenance: `AUDIT_SPOOL_REPLAY_INTERVAL`, `AUDIT_STATS_POLL_INTERVAL`, `AUDIT_PARTITION_WAIT_TIMEOUT`.
-- Broker maintenance: `LIVENESS_TICK_INTERVAL`, `GAUGE_POLL_INTERVAL`, `ISR_SCAN_INTERVAL`, `DEFAULT_COMPACTION_INTERVAL`, `FLUSH_INTERVAL`, `MOVE_RETRY_BACKOFF`.
+- Broker maintenance: `LIVENESS_TICK_INTERVAL`, `GAUGE_POLL_INTERVAL`, `ISR_SCAN_INTERVAL`, `DEFAULT_COMPACTION_INTERVAL`, `MOVE_RETRY_BACKOFF`.
 - Client metrics: `CLIENT_METRICS_EVICTION_TICK`, `CLIENT_METRICS_STALE_FLOOR`, `DEFAULT_TELEMETRY_MAX_BYTES`, `PROM_SNAPSHOT_TTL`.
 - Remote log metadata: `RLMM_RECONCILE_TICK`, `RLMM_BOOTSTRAP_BACKOFF_INITIAL`, `RLMM_BOOTSTRAP_BACKOFF_MAX`.
 - Network and auth: `CONNECTION_CREATION_THROTTLE_MAX`, `OPA_HTTP_TIMEOUT`, JWKS HTTP timeout.
@@ -353,6 +352,7 @@ The audit follows the scope in the runtime-configuration design. Paths and line 
 - `wal/quorum/wire.rs` metadata topic id, API version, and error codes: KRaft wire compatibility.
 - State-file names and probe filenames: persisted-format identifiers, not tuning.
 - Metrics histogram bucket arrays: exported metric schema; changing them breaks time-series continuity.
+- `diskless/flusher.rs::FLUSH_INTERVAL`: staged dead code with no production scheduler; exposing it would create a no-op setting.
 - Model-checking constants and all values under test-only modules: verification inputs.
 - Epoch sentinels, bit masks, record markers, and fixed collection sizes derived from protocol shapes: invariants.
 ```
