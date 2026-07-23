@@ -234,13 +234,27 @@ fn append_payload_event(file: &mut tempfile::NamedTempFile, event: &PayloadEvent
     file.as_file().sync_data().expect("fsync payload event");
 }
 
-fn successor_partition(table_id: u64, rowid: u64) -> Result<u32, String> {
-    match (table_id, rowid) {
-        (50, 0..10) => Ok(0),
-        (50, 10..) | (51, 0..16) => Ok(2),
+/// Project an ordinary-mode logical row onto its sealed post-split owner.
+///
+/// Hidden rowids are minted from the timestamp domain, so ledger rows are
+/// keyed by the client-chosen `id` column. Seed rows whose minted rowid fell
+/// below the static `(50, 10)` coordinator boundary stay on r0; that set is
+/// timestamp-dependent, so it is captured empirically before the workload
+/// starts and threaded through as `r0_table50_ids`. Everything else follows
+/// the seed-versus-workload split: table 50 flows to the left successor, and
+/// table 51 seeds (`id < 16`) stay left of the runtime split boundary while
+/// workload rows (`id >= 16`) land on the right successor.
+fn successor_partition(
+    table_id: u64,
+    id: u64,
+    r0_table50_ids: &BTreeSet<u64>,
+) -> Result<u32, String> {
+    match (table_id, id) {
+        (50, id) if r0_table50_ids.contains(&id) => Ok(0),
+        (50, _) | (51, 0..16) => Ok(2),
         (51, 16..) => Ok(3),
         _ => Err(format!(
-            "physical key ({table_id},{rowid}) is outside the two active post-split streams"
+            "logical key ({table_id},{id}) is outside the two active post-split streams"
         )),
     }
 }
@@ -708,8 +722,12 @@ impl SplitWorkload {
     }
 
     fn contract(self, point: SplitKillPoint) -> SplitWorkloadContract {
+        // Ordinary mode's boundary rowid lives in the timestamp domain and is
+        // captured at runtime ([`PreSplitLayout::split_boundary_rowid`]), so
+        // only the routed table is static; the hash boundary is a pinned
+        // bucket coordinate and stays fully static.
         let (split_args, schema_version, physical_key_class) = match self {
-            Self::Ordinary => (vec!["51", "16"], 2, "primary_version"),
+            Self::Ordinary => (vec!["51"], 2, "primary_version"),
             Self::Hash => (vec!["50", "0", "--bucket", "8"], 3, "hash_primary_version"),
         };
         SplitWorkloadContract {
@@ -1412,17 +1430,24 @@ fn payload_ledger_rejects_incomplete_or_inconsistent_events() {
 
 #[test]
 fn payload_ledger_projects_each_table_to_its_sealed_successor() {
-    for (table_id, rowid, expected_range) in [
-        (50, 9, 0),
-        (50, 10, 2),
+    let r0_ids = BTreeSet::from([1, 2]);
+    for (table_id, id, expected_range) in [
+        (50, 1, 0),
+        (50, 2, 0),
+        (50, 3, 2),
         (50, 20, 2),
+        (51, 1, 2),
         (51, 15, 2),
         (51, 16, 3),
         (51, 32, 3),
     ] {
-        assert_eq!(successor_partition(table_id, rowid), Ok(expected_range));
+        assert_eq!(
+            successor_partition(table_id, id, &r0_ids),
+            Ok(expected_range)
+        );
     }
-    assert!(successor_partition(52, 1).is_err());
+    assert_eq!(successor_partition(50, 7, &BTreeSet::new()), Ok(2));
+    assert!(successor_partition(52, 1, &r0_ids).is_err());
 }
 
 #[test]
@@ -1751,12 +1776,7 @@ fn marker_rollback_accepts_only_the_post_publication_stale_session_rejection() {
 fn ordinary_and_hash_workloads_share_kill_mapping_but_not_physical_contract() {
     for point in SplitKillPoint::ALL {
         for (workload, split_args, schema_version, physical_key_class) in [
-            (
-                SplitWorkload::Ordinary,
-                vec!["51", "16"],
-                2,
-                "primary_version",
-            ),
+            (SplitWorkload::Ordinary, vec!["51"], 2, "primary_version"),
             (
                 SplitWorkload::Hash,
                 vec!["50", "0", "--bucket", "8"],
@@ -2004,10 +2024,12 @@ async fn real_child_hash_durable_inspection_covers_pinned_bucket_corpus() {
             .collect::<BTreeSet<_>>(),
         (0..16).collect()
     );
+    // Hidden rowids are minted per range since the single-shard bypass, so
+    // they are only unique per (bucket, rowid) coordinate — not globally.
     assert_eq!(
         decoded_rows
             .iter()
-            .map(|row| row.rowid)
+            .map(|row| (row.bucket, row.rowid))
             .collect::<BTreeSet<_>>()
             .len(),
         16
@@ -2028,7 +2050,12 @@ fn cli_binary() -> PathBuf {
         .join("target/debug/crabka")
 }
 
-async fn initiate_split(system: &ProcessHarness, operation_id: &str, workload: SplitWorkload) {
+async fn initiate_split(
+    system: &ProcessHarness,
+    operation_id: &str,
+    workload: SplitWorkload,
+    layout: &PreSplitLayout,
+) {
     let [left, right] = system.split_successor_endpoints();
     let contract = workload.contract(SplitKillPoint::InitiatedBeforeRunningCas);
     let mut command = tokio::process::Command::new(cli_binary());
@@ -2040,6 +2067,10 @@ async fn initiate_split(system: &ProcessHarness, operation_id: &str, workload: S
         system.tenant(),
     ]);
     command.args(contract.split_args);
+    let boundary = layout.split_boundary_rowid.to_string();
+    if workload == SplitWorkload::Ordinary {
+        command.arg(&boundary);
+    }
     let output = command
         .args([
             "--operation-id",
@@ -2136,154 +2167,103 @@ async fn predecessor_topic_present(admin: &mut dyn RangeRetirementAdmin, topic: 
         .any(|entry| entry.name == topic && entry.error.is_none())
 }
 
-async fn assert_static_ids_match_physical_rows(system: &ProcessHarness, table_id: u64) {
-    let scan = crabka_gres_ranges::transport::ScanRangeReq {
-        range_id: RangeId::new(1),
-        table_name: format!("live_ledger{table_id}"),
-        interval: crabka_gres_ranges::transport::WireRowInterval {
-            start: Some(16),
-            end: None,
-        },
-        local_snapshot: crabka_gres_ranges::transport::WireSnapshot {
-            xmin: 1,
-            xmax: u64::MAX,
-            xip: vec![],
-        },
-        global_snapshot: crabka_gres_ranges::transport::WireSnapshot {
-            xmin: 1,
-            xmax: u64::MAX,
-            xip: vec![],
-        },
-        own_xid: None,
-        read_ts: Some(u64::MAX),
-        own_start_ts: None,
-        predicate: crabka_gres_ranges::transport::WirePredicatePushdown::FullScan,
-        projection: crabka_gres_ranges::transport::WireProjectionPushdown::All,
-        partial_aggregate: None,
-        top_k: None,
-    };
-    let response = system
-        .operator_control_client()
-        .call(
-            &system.range_endpoint(1),
-            &crabka_gres_ranges::RangeRequest::ScanRange(scan),
-        )
-        .await
-        .expect("direct static-id scan");
-    let crabka_gres_ranges::RangeResponse::ScanRange(response) = response else {
-        panic!("unexpected direct static-id response {response:?}");
-    };
-    let mut workload_rows = 0;
-    for row in response.rows {
-        let (_, _, values) =
-            crabka_pgmvcc::version::decode_tuple(&row.tuple).expect("decode static-id tuple");
-        let [
-            crabka_pgtypes::Datum::Int4(id),
-            crabka_pgtypes::Datum::Int4(seq),
-            crabka_pgtypes::Datum::Text(_),
-        ] = values.as_slice()
-        else {
-            panic!("unexpected static-id tuple {values:?}");
-        };
-        assert_eq!(u64::try_from(*id).expect("positive id"), row.rowid);
-        assert!(successor_partition(table_id, row.rowid).is_ok());
-        if *seq < 1_000_000 {
-            workload_rows += 1;
+/// The ordinary-mode physical layout captured after seeding and before the
+/// live workload starts.
+#[derive(Clone, Debug, Default)]
+struct PreSplitLayout {
+    /// Table-50 seed ids whose minted hidden rowid fell left of the static
+    /// `(50, 10)` coordinator boundary and therefore live on r0 for the whole
+    /// run.
+    r0_table50_ids: BTreeSet<u64>,
+    /// Runtime split boundary: strictly above every hidden rowid minted so
+    /// far, so every seed row stays left of it and every workload row (minted
+    /// later from the monotone timestamp domain) lands right of it.
+    split_boundary_rowid: u64,
+}
+
+/// Capture where the seeds physically landed and derive the split boundary.
+///
+/// Hidden rowids are timestamps, so the exact rowid of each seed depends on
+/// how many stamps earlier transactions burned; only the structure is
+/// deterministic: each table's seeds are complete, live exactly once across
+/// r0 and r1, table 51 never reaches r0, and rowids grow monotonically with
+/// insertion order.
+async fn capture_pre_split_layout(system: &ProcessHarness) -> PreSplitLayout {
+    use assert2::assert;
+    let mut r0_table50_ids = BTreeSet::new();
+    let mut max_rowid = 0_u64;
+    for table_id in [50_u64, 51] {
+        let r0 = direct_ordinary_physical_rows(system, 0, table_id).await;
+        let r1 = direct_ordinary_physical_rows(system, 1, table_id).await;
+        assert!(
+            table_id == 50 || r0.is_empty(),
+            "table{table_id} rows on r0 violate the (50,10) coordinator boundary: {r0:?}"
+        );
+        let mut ids = BTreeSet::new();
+        for (range_id, row) in r0
+            .iter()
+            .map(|row| (0_u32, row))
+            .chain(r1.iter().map(|row| (1, row)))
+        {
+            assert!(
+                row.seq == 1_000_000 + row.id
+                    && row.checksum == format!("seed-{table_id}-{}", row.id),
+                "unexpected pre-workload row {row:?} on r{range_id}"
+            );
+            assert!(
+                ids.insert(row.id),
+                "seed id {} of table{table_id} is physically duplicated",
+                row.id
+            );
+            // Only table 50 straddles the (50, 10) coordinator boundary;
+            // table 51 sorts entirely after it regardless of minted rowid.
+            assert!(
+                table_id != 50 || (range_id == 0) == (row.physical_rowid < 10),
+                "seed row {row:?} is hosted on r{range_id} against the (50,10) boundary"
+            );
+            max_rowid = max_rowid.max(row.physical_rowid);
+            if range_id == 0 {
+                r0_table50_ids.insert(row.id);
+            }
+        }
+        assert!(
+            ids == (1..16).collect::<BTreeSet<_>>(),
+            "table{table_id} seed ids are incomplete: {ids:?}"
+        );
+    }
+    assert!(max_rowid >= 16, "seed rowids implausibly low: {max_rowid}");
+    PreSplitLayout {
+        r0_table50_ids,
+        split_boundary_rowid: max_rowid + 1,
+    }
+}
+
+/// Assert the live ordinary workload's acknowledged rows are visible via
+/// direct scans of the coordinator and predecessor ranges.
+async fn assert_ordinary_acks_visible(system: &ProcessHarness, ledger_path: &Path) {
+    use assert2::assert;
+    let acknowledged = parse_closed_payload_ledger(ledger_path)
+        .expect("pre-split ordinary payload ledger")
+        .acknowledged
+        .into_values()
+        .map(|event| PhysicalPayloadRow {
+            table_id: event.table_id,
+            rowid: event.rowid.expect("pre-split ordinary ACK id"),
+            seq: event.seq,
+            checksum: event.checksum,
+        })
+        .collect::<BTreeSet<_>>();
+    let mut visible = BTreeSet::new();
+    for range_id in [0, 1] {
+        for table_id in [50, 51] {
+            visible.extend(direct_payload_rows(system, range_id, table_id).await);
         }
     }
-    assert!(workload_rows > 0, "table{table_id} live stream reached r1");
-}
-
-async fn assert_pre_split_seed_rows_on_predecessor(system: &ProcessHarness) {
-    let r0_locations = direct_payload_locations(system, 0, 50).await;
-    let r1_locations = direct_payload_locations(system, 1, 50).await;
-    let r0 = direct_payload_rows(system, 0, 50, Some(10), Some(16))
-        .await
-        .into_iter()
-        .collect::<BTreeSet<_>>();
-    let r1 = direct_payload_rows(system, 1, 50, Some(10), Some(16))
-        .await
-        .into_iter()
-        .collect::<BTreeSet<_>>();
-    let expected = (10..16)
-        .map(|rowid| PhysicalPayloadRow {
-            table_id: 50,
-            rowid,
-            seq: 1_000_000 + rowid,
-            checksum: format!("seed-50-{rowid}"),
-        })
-        .collect::<BTreeSet<_>>();
-    if r1 != expected {
-        system
-            .preserve_logs(Path::new("target/g8-checkpoint-child-logs"))
-            .await;
-    }
-    assert_eq!(
-        r1, expected,
-        "pre-split predecessor seed rows; r0={r0:?}; r0_locations={r0_locations:?}; r1_locations={r1_locations:?}"
+    let missing = acknowledged.difference(&visible).collect::<Vec<_>>();
+    assert!(
+        missing.is_empty(),
+        "pre-split ordinary acknowledgements missing from direct scans: {missing:?}"
     );
-}
-
-async fn direct_payload_locations(
-    system: &ProcessHarness,
-    range_id: u32,
-    table_id: u64,
-) -> Vec<(u64, i32, i32, String)> {
-    let scan = crabka_gres_ranges::transport::ScanRangeReq {
-        range_id: RangeId::new(range_id),
-        table_name: format!("live_ledger{table_id}"),
-        interval: crabka_gres_ranges::transport::WireRowInterval {
-            start: None,
-            end: None,
-        },
-        local_snapshot: crabka_gres_ranges::transport::WireSnapshot {
-            xmin: 1,
-            xmax: u64::MAX,
-            xip: vec![],
-        },
-        global_snapshot: crabka_gres_ranges::transport::WireSnapshot {
-            xmin: 1,
-            xmax: u64::MAX,
-            xip: vec![],
-        },
-        own_xid: None,
-        read_ts: Some(u64::MAX),
-        own_start_ts: None,
-        predicate: crabka_gres_ranges::transport::WirePredicatePushdown::FullScan,
-        projection: crabka_gres_ranges::transport::WireProjectionPushdown::All,
-        partial_aggregate: None,
-        top_k: None,
-    };
-    let response = system
-        .operator_control_client()
-        .call(
-            &system.range_endpoint(range_id),
-            &crabka_gres_ranges::RangeRequest::ScanRange(scan),
-        )
-        .await
-        .expect("direct payload-location scan");
-    let crabka_gres_ranges::RangeResponse::ScanRange(response) = response else {
-        panic!("unexpected direct payload-location response {response:?}");
-    };
-    response
-        .rows
-        .into_iter()
-        .filter_map(|row| {
-            let (_, _, values) = crabka_pgmvcc::version::decode_tuple(&row.tuple)
-                .expect("decode payload-location tuple");
-            let [
-                crabka_pgtypes::Datum::Int4(id),
-                crabka_pgtypes::Datum::Int4(seq),
-                crabka_pgtypes::Datum::Text(checksum),
-            ] = values.as_slice()
-            else {
-                panic!("unexpected payload-location tuple {values:?}");
-            };
-            (10..16)
-                .contains(id)
-                .then(|| (row.rowid, *id, *seq, checksum.clone()))
-        })
-        .collect()
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -2763,17 +2743,29 @@ struct JournalReceiptExpectation {
     expected_response_kind: String,
 }
 
-async fn direct_payload_rows(
+/// One ordinary-mode row as physically stored: the timestamp-domain hidden
+/// rowid alongside the client-chosen logical columns.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct OrdinaryPhysicalRow {
+    table_id: u64,
+    physical_rowid: u64,
+    id: u64,
+    seq: u64,
+    checksum: String,
+}
+
+async fn direct_ordinary_physical_rows(
     system: &ProcessHarness,
     range_id: u32,
     table_id: u64,
-    start: Option<u64>,
-    end: Option<u64>,
-) -> Vec<PhysicalPayloadRow> {
+) -> Vec<OrdinaryPhysicalRow> {
     let scan = crabka_gres_ranges::transport::ScanRangeReq {
         range_id: RangeId::new(range_id),
         table_name: format!("live_ledger{table_id}"),
-        interval: crabka_gres_ranges::transport::WireRowInterval { start, end },
+        interval: crabka_gres_ranges::transport::WireRowInterval {
+            start: None,
+            end: None,
+        },
         local_snapshot: crabka_gres_ranges::transport::WireSnapshot {
             xmin: 1,
             xmax: u64::MAX,
@@ -2817,22 +2809,50 @@ async fn direct_payload_rows(
             else {
                 panic!("unexpected terminal payload tuple {values:?}");
             };
-            {
-                use assert2::assert;
-                assert!(
-                    u64::try_from(*id).expect("positive payload id") == row.rowid,
-                    "table{table_id} id {id} diverges from physical rowid {} (seq {seq}, \
-                     checksum {checksum}): a second committed insert for the same id takes \
-                     a fresh hidden rowid, so this indicates a duplicate-applied write",
-                    row.rowid
-                );
-            }
-            PhysicalPayloadRow {
+            OrdinaryPhysicalRow {
                 table_id,
-                rowid: row.rowid,
+                physical_rowid: row.rowid,
+                id: u64::try_from(*id).expect("positive payload id"),
                 seq: u64::try_from(*seq).expect("positive payload seq"),
                 checksum: checksum.clone(),
             }
+        })
+        .collect()
+}
+
+/// Scan one range's ordinary-mode table and project it into the logical row
+/// domain the payload ledger records. A logical id appearing at two distinct
+/// hidden rowids is a duplicate-applied write (a re-INSERT of the same id
+/// mints a fresh timestamp rowid), so uniqueness is asserted before the
+/// physical coordinate is dropped.
+async fn direct_payload_rows(
+    system: &ProcessHarness,
+    range_id: u32,
+    table_id: u64,
+) -> Vec<PhysicalPayloadRow> {
+    use assert2::assert;
+    let rows = direct_ordinary_physical_rows(system, range_id, table_id).await;
+    let mut rowids_by_id = BTreeMap::<u64, Vec<u64>>::new();
+    for row in &rows {
+        rowids_by_id
+            .entry(row.id)
+            .or_default()
+            .push(row.physical_rowid);
+    }
+    for (id, rowids) in &rowids_by_id {
+        assert!(
+            rowids.len() == 1,
+            "table{table_id} id {id} occupies {} hidden rowids {rowids:?} on r{range_id}: \
+             a duplicate-applied write minted a fresh timestamp rowid for the same id",
+            rowids.len()
+        );
+    }
+    rows.into_iter()
+        .map(|row| PhysicalPayloadRow {
+            table_id,
+            rowid: row.id,
+            seq: row.seq,
+            checksum: row.checksum,
         })
         .collect()
 }
@@ -2978,6 +2998,14 @@ struct SplitCrashEvidence {
     terminal_operation_evidence: TerminalOperationEvidence,
     completed_phase: String,
     terminal_layout: Vec<TerminalRangeEvidence>,
+    /// Ordinary mode: the runtime split boundary in hidden-rowid (timestamp)
+    /// space; zero in hash mode, whose boundary is the pinned bucket
+    /// coordinate.
+    split_boundary_rowid: u64,
+    /// Ordinary mode: `(table_id, id)` seed rows whose minted rowid landed
+    /// left of the static `(50, 10)` coordinator boundary; empty in hash
+    /// mode.
+    r0_static_ids: Vec<(u64, u64)>,
     pre_kill_predicate: SplitPredicateState,
     operation_marker_digest: String,
     retirement_marker_digest: String,
@@ -3049,6 +3077,7 @@ struct VerifyCompletedSplitCase<'a> {
     system: &'a ProcessHarness,
     workload_mode: SplitWorkload,
     point: SplitKillPoint,
+    layout: &'a PreSplitLayout,
     operation_id: &'a str,
     ledger_path: &'a Path,
     observations: &'a [ControlObservation],
@@ -3080,15 +3109,27 @@ struct VerifiedTerminalPayload {
     publication_ack: PublicationAckEvidence,
 }
 
+/// Wall-clock milestones of one crash case, in epoch milliseconds.
+#[derive(Clone, Copy, Debug)]
+struct RunMilestonesMs {
+    kill: u128,
+    restart: u128,
+    publication: u128,
+}
+
 async fn verify_terminal_payload(
     system: &ProcessHarness,
     workload_mode: SplitWorkload,
     point: SplitKillPoint,
+    layout: &PreSplitLayout,
     ledger_path: &Path,
-    kill_ms: u128,
-    restart_ms: u128,
-    publication_ms: u128,
+    milestones: RunMilestonesMs,
 ) -> VerifiedTerminalPayload {
+    let RunMilestonesMs {
+        kill: kill_ms,
+        restart: restart_ms,
+        publication: publication_ms,
+    } = milestones;
     let payload_events = std::fs::read_to_string(ledger_path)
         .expect("read reopened payload ledger")
         .lines()
@@ -3149,18 +3190,30 @@ async fn verify_terminal_payload(
             checksum: event.checksum.clone(),
         })
         .collect::<BTreeSet<_>>();
-    for row in &expected {
-        assert!(successor_partition(row.table_id, row.rowid).is_ok());
+    if workload_mode == SplitWorkload::Ordinary {
+        for row in &expected {
+            assert!(successor_partition(row.table_id, row.rowid, &layout.r0_table50_ids).is_ok());
+        }
     }
     let mut direct_physical_rows = Vec::new();
     for (range_id, table_id) in [(0, 50), (0, 51), (2, 50), (2, 51), (3, 50), (3, 51)] {
         let mut rows = match workload_mode {
-            SplitWorkload::Ordinary => {
-                direct_payload_rows(system, range_id, table_id, None, None).await
-            }
+            SplitWorkload::Ordinary => direct_payload_rows(system, range_id, table_id).await,
             SplitWorkload::Hash => direct_hash_payload_rows(system, range_id, table_id).await,
         };
         rows.sort();
+        if workload_mode == SplitWorkload::Ordinary {
+            use assert2::assert;
+            for row in &rows {
+                let owner = successor_partition(table_id, row.rowid, &layout.r0_table50_ids);
+                assert!(
+                    owner == Ok(range_id),
+                    "table{table_id} id {} is hosted on r{range_id} but the sealed \
+                     partition places it on {owner:?}",
+                    row.rowid
+                );
+            }
+        }
         direct_physical_rows.push(DirectScanEvidence {
             range_id,
             table_id,
@@ -3266,14 +3319,20 @@ fn verify_marker_receipts(
     );
     assert_eq!(right, markers, "table52 marker belongs to right successor");
     match workload_mode {
-        SplitWorkload::Ordinary => assert_eq!(
-            (
-                markers[0].key.table_id,
-                markers[0].key.bucket,
-                markers[0].key.rowid,
-            ),
-            (52, None, 1)
-        ),
+        SplitWorkload::Ordinary => {
+            // The marker's identity lives in the timestamp domain: its hidden
+            // rowid is always `start_ts + 1`. Only the pre-CLI injection runs
+            // on a fresh oracle whose exact stamps are pinned; the
+            // post-restart variants inherit however many stamps the pre-kill
+            // run burned, so only the structural relation is asserted there.
+            assert_eq!((markers[0].key.table_id, markers[0].key.bucket), (52, None));
+            assert_eq!(markers[0].key.rowid, markers[0].transaction_id + 1);
+            if point.inject_marker_before_cli() {
+                assert_eq!((markers[0].transaction_id, markers[0].key.rowid), (1, 2));
+            } else {
+                assert!(markers[0].transaction_id > 16);
+            }
+        }
         SplitWorkload::Hash => {
             let expected = if point.inject_marker_before_cli() {
                 (1, 52, Some(2), 2)
@@ -3646,6 +3705,7 @@ async fn verify_completed_split_case(input: VerifyCompletedSplitCase<'_>) -> Spl
         system,
         workload_mode,
         point,
+        layout,
         operation_id,
         ledger_path,
         observations,
@@ -3678,10 +3738,13 @@ async fn verify_completed_split_case(input: VerifyCompletedSplitCase<'_>) -> Spl
         system,
         workload_mode,
         point,
+        layout,
         ledger_path,
-        kill_ms,
-        restart_ms,
-        publication_ms,
+        RunMilestonesMs {
+            kill: kill_ms,
+            restart: restart_ms,
+            publication: publication_ms,
+        },
     )
     .await;
     let VerifiedMarkers {
@@ -3706,6 +3769,7 @@ async fn verify_completed_split_case(input: VerifyCompletedSplitCase<'_>) -> Spl
         retirement_source_generation,
         retirement_successor_generations,
     } = verify_terminal_topology(system, operation_id, &marker_digest, workload_mode).await;
+    assert_sealed_ordinary_boundary(workload_mode, layout, &terminal_layout);
     let plan = operation.plan.as_ref().expect("sealed completed plan");
 
     let VerifiedTerminalEnvironment {
@@ -3792,6 +3856,8 @@ async fn verify_completed_split_case(input: VerifyCompletedSplitCase<'_>) -> Spl
         terminal_operation_evidence: terminal_operation_evidence(&operation),
         completed_phase: "completed".into(),
         terminal_layout,
+        split_boundary_rowid: layout.split_boundary_rowid,
+        r0_static_ids: layout.r0_table50_ids.iter().map(|id| (50, *id)).collect(),
         pre_kill_predicate,
         operation_marker_digest: operation
             .evidence
@@ -3825,6 +3891,31 @@ async fn verify_completed_split_case(input: VerifyCompletedSplitCase<'_>) -> Spl
         },
         hash_evidence,
     }
+}
+
+/// Assert the sealed left-successor boundary equals the runtime split
+/// boundary captured before the workload started (ordinary mode only; the
+/// hash boundary is pinned and checked via [`HashBoundaryEvidence`]).
+fn assert_sealed_ordinary_boundary(
+    workload_mode: SplitWorkload,
+    layout: &PreSplitLayout,
+    terminal_layout: &[TerminalRangeEvidence],
+) {
+    use assert2::assert;
+    if workload_mode != SplitWorkload::Ordinary {
+        return;
+    }
+    let r2 = terminal_layout
+        .iter()
+        .find(|range| range.range_id == 2)
+        .expect("sealed r2 layout");
+    assert!(
+        (r2.end_table_id, r2.end_rowid) == (Some(51), Some(layout.split_boundary_rowid)),
+        "sealed r2 boundary ({:?}, {:?}) differs from the captured split boundary (51, {})",
+        r2.end_table_id,
+        r2.end_rowid,
+        layout.split_boundary_rowid
+    );
 }
 
 const fn family_name(family: Family) -> &'static str {
@@ -4037,17 +4128,15 @@ async fn authorize_ordinary_response_recovery(
     loop {
         let mut matches = 0;
         for range_id in [0, 1] {
-            matches += direct_payload_rows(
-                system,
-                range_id,
-                expected.table_id,
-                Some(expected.rowid),
-                Some(expected.rowid + 1),
-            )
-            .await
-            .into_iter()
-            .filter(|row| *row == expected)
-            .count();
+            matches += direct_ordinary_physical_rows(system, range_id, expected.table_id)
+                .await
+                .into_iter()
+                .filter(|row| {
+                    row.id == expected.rowid
+                        && row.seq == expected.seq
+                        && row.checksum == expected.checksum
+                })
+                .count();
         }
         if matches == 1 {
             break;
@@ -4426,6 +4515,7 @@ struct PreparedSplitWorkload {
     errors_path: PathBuf,
     workload: WorkloadChild,
     process_group: u32,
+    layout: PreSplitLayout,
 }
 
 async fn prepare_split_workload(
@@ -4434,6 +4524,13 @@ async fn prepare_split_workload(
 ) -> PreparedSplitWorkload {
     use std::os::unix::process::CommandExt as _;
 
+    // Capture the seed layout and split boundary before the live workload can
+    // mint further timestamp rowids.
+    let layout = if workload_mode == SplitWorkload::Ordinary {
+        capture_pre_split_layout(system).await
+    } else {
+        PreSplitLayout::default()
+    };
     let root = tempfile::tempdir().expect("Split crash workload root");
     let mut ledger_file = tempfile::NamedTempFile::new_in(root.path()).expect("payload ledger");
     let seed_start = u64::from(workload_mode != SplitWorkload::Hash);
@@ -4540,10 +4637,7 @@ async fn prepare_split_workload(
     }
     wait_for_payload_acks(&ledger_path, &errors_path, 8).await;
     if workload_mode == SplitWorkload::Ordinary {
-        for table_id in [50, 51] {
-            assert_static_ids_match_physical_rows(system, table_id).await;
-        }
-        assert_pre_split_seed_rows_on_predecessor(system).await;
+        assert_ordinary_acks_visible(system, &ledger_path).await;
     } else {
         let acknowledged = parse_closed_payload_ledger(&ledger_path)
             .expect("pre-split hash payload ledger")
@@ -4562,7 +4656,26 @@ async fn prepare_split_workload(
                 visible.extend(direct_hash_payload_rows(system, range_id, table_id).await);
             }
         }
-        assert!(acknowledged.is_subset(&visible));
+        {
+            use assert2::assert;
+            let missing = acknowledged.difference(&visible).collect::<Vec<_>>();
+            if !missing.is_empty() {
+                let (snapshots, _) =
+                    collect_hash_snapshots(system, "debug", &[(0, 0), (1, 0)]).await;
+                for snapshot in &snapshots {
+                    for record in &snapshot.records {
+                        eprintln!(
+                            "G8_DEBUG_DURABLE r{} {:?}",
+                            snapshot.range_id, record.summary
+                        );
+                    }
+                }
+            }
+            assert!(
+                missing.is_empty(),
+                "pre-split hash acknowledgements missing from direct scans: {missing:?}; visible={visible:?}"
+            );
+        }
         let (snapshots, _) = collect_hash_snapshots(system, "before", &[(0, 0), (1, 0)]).await;
         for table_id in [50, 51] {
             assert_eq!(
@@ -4584,6 +4697,7 @@ async fn prepare_split_workload(
         errors_path,
         workload,
         process_group,
+        layout,
     }
 }
 
@@ -5027,8 +5141,9 @@ async fn run_real_split_crash_case(point: SplitKillPoint, workload_mode: SplitWo
         errors_path,
         mut workload,
         process_group,
+        layout,
     } = prepare_split_workload(&system, workload_mode).await;
-    initiate_split(&system, &operation_id, workload_mode).await;
+    initiate_split(&system, &operation_id, workload_mode, &layout).await;
 
     let SplitDriveOutcome {
         observations,
@@ -5068,6 +5183,7 @@ async fn run_real_split_crash_case(point: SplitKillPoint, workload_mode: SplitWo
         system: &system,
         workload_mode,
         point,
+        layout: &layout,
         operation_id: &operation_id,
         ledger_path: &ledger_path,
         observations: &observations,

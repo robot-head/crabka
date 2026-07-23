@@ -14,10 +14,10 @@ EXPECTED = {
 # Engine pause bounds plus the workload's client-side ambiguity-resolution
 # allowance (3s healthy-empty-read streak + polling and psql round trips).
 BOUNDS = {"source_restore": 29_000, "publication": 19_000, "retirement_resume": 19_000}
-INTS = {"schema_version", "acknowledged_rows", "recovered_acknowledgements", "max_ack_gap_ms", "max_ack_gap_bound_ms", "operation_elapsed_ms", "operation_bound_ms", "marker_count", "left_marker_count", "right_marker_count", "delete_count", "old_pid", "new_pid", "kill_ms", "restart_ms", "publication_ms", "left_wal_generation", "right_wal_generation", "old_source_pid", "new_source_pid", "old_source_process_group", "new_source_process_group", "workload_process_group", "operation_revision", "operation_attempts", "tenant_record_version", "source_record_version", "retirement_source_generation"}
+INTS = {"split_boundary_rowid", "schema_version", "acknowledged_rows", "recovered_acknowledgements", "max_ack_gap_ms", "max_ack_gap_bound_ms", "operation_elapsed_ms", "operation_bound_ms", "marker_count", "left_marker_count", "right_marker_count", "delete_count", "old_pid", "new_pid", "kill_ms", "restart_ms", "publication_ms", "left_wal_generation", "right_wal_generation", "old_source_pid", "new_source_pid", "old_source_process_group", "new_source_process_group", "workload_process_group", "operation_revision", "operation_attempts", "tenant_record_version", "source_record_version", "retirement_source_generation"}
 STRINGS = {"evidence_id", "family", "case", "tenant_id", "operation_id", "sentinel_topic", "coordinator_endpoint", "left_endpoint", "right_endpoint", "marker_response_digest", "completed_phase", "operation_marker_digest", "retirement_marker_digest"}
 BOOLS = {"post_publication_r2_ack", "post_publication_r3_ack", "predecessor_topic_absent", "sentinel_topic_present", "workload_process_reaped", "unrelated_delete_attempted", "new_source_pid_alive_at_verification", "old_source_pid_alive", "new_source_pid_alive", "old_source_process_group_alive", "new_source_process_group_alive", "workload_process_group_alive"}
-LISTS = {"topology_topics", "payload_events", "reopened_oracle_rows", "direct_physical_rows", "sql_union_rows", "source_markers", "left_markers", "right_markers", "authenticated_receipts", "journal_receipt_expectations", "delete_attempts", "terminal_layout", "retirement_successor_generations"}
+LISTS = {"r0_static_ids", "topology_topics", "payload_events", "reopened_oracle_rows", "direct_physical_rows", "sql_union_rows", "source_markers", "left_markers", "right_markers", "authenticated_receipts", "journal_receipt_expectations", "delete_attempts", "terminal_layout", "retirement_successor_generations"}
 OBJECTS = {"pre_kill_predicate", "terminal_operation_evidence"}
 KEYS = INTS | STRINGS | BOOLS | LISTS | OBJECTS
 RECEIPTS = {"checkpoint", "pause", "stage", "markers", "prologue", "retire"}
@@ -225,8 +225,27 @@ def validate_record_v2(r: dict[str, Any], family: str, case: str, source: str, h
     projected = sorted((table, rowid, seq, checksum) for _range, table, rowid, seq, checksum in direct)
     if oracle != projected or oracle != sql or len(projected)!=len(set(projected)): fail(f"{source}: oracle/direct/SQL row equality failed")
     if len(oracle) != r["acknowledged_rows"] or not oracle: fail(f"{source}: acknowledged row count mismatch")
+    # Hidden rowids are timestamp-domain values, so ordinary-mode rows are keyed
+    # by logical id: table-50 seeds whose minted rowid landed on r0 are listed in
+    # r0_static_ids, everything else in table 50 flows to r2, and table 51 splits
+    # seed-versus-workload at logical id 16 (the physical boundary is the runtime
+    # split_boundary_rowid mirrored in the terminal layout).
+    if hash_mode:
+        if r["split_boundary_rowid"] != 0 or r["r0_static_ids"] != []: fail(f"{source}: hash mode must not carry an ordinary split boundary")
+        r0_ids = set()
+    else:
+        entries = r["r0_static_ids"]
+        if any(not isinstance(item, list) or len(item) != 2 or item[0] != 50 or type(item[1]) is not int or not 1 <= item[1] <= 15 for item in entries): fail(f"{source}: malformed r0_static_ids")
+        if entries != sorted(entries) or len(entries) != len({tuple(item) for item in entries}): fail(f"{source}: r0_static_ids must be sorted and unique")
+        if r["split_boundary_rowid"] < 16: fail(f"{source}: split boundary below the seed rowid domain")
+        r0_ids = {tuple(item) for item in entries}
+        observed_r0 = {(50, rowid) for range_id, table, rowid, _seq, _checksum in direct if range_id == 0 and table == 50}
+        if r0_ids != observed_r0: fail(f"{source}: r0_static_ids differ from the r0 direct scan")
     for range_id, table, rowid, _seq, _checksum in direct:
-        owner = hash_owner(table,rowid) if hash_mode else 0 if table == 50 and rowid < 10 else 2 if (table == 50 or table == 51 and rowid < 16) else 3 if table == 51 else None
+        if hash_mode: owner = hash_owner(table, rowid)
+        elif table == 50: owner = 0 if (50, rowid) in r0_ids else 2
+        elif table == 51: owner = 2 if rowid < 16 else 3
+        else: owner = None
         if owner is None or range_id != owner: fail(f"{source}: physical row ownership mismatch")
 
     source_markers = marker_rows(r["source_markers"], "source markers")
@@ -298,7 +317,7 @@ def validate_record_v2(r: dict[str, Any], family: str, case: str, source: str, h
     if r["operation_revision"] <= 0 or r["operation_attempts"] < 1 or r["tenant_record_version"] != r["source_record_version"] + 2 or r["retirement_source_generation"] != 0 or r["retirement_successor_generations"] != [[0, 0], [2, 1], [3, 1]]: fail(f"{source}: journal/tenant/retirement versions invalid")
     if r["completed_phase"]!="completed" or r["pre_kill_predicate"]!=expected_predicate(case): fail(f"{source}: completed/pre-kill state mismatch")
     if not (r["marker_response_digest"]==r["operation_marker_digest"]==r["retirement_marker_digest"]==terminal["marker_digest"]): fail(f"{source}: marker digest chain differs")
-    expected_layout=([{"range_id":0,"end_table_id":50,"end_bucket":4,"end_rowid":0,"endpoint":r["coordinator_endpoint"],"wal_generation":0},{"range_id":2,"end_table_id":50,"end_bucket":8,"end_rowid":0,"endpoint":r["left_endpoint"],"wal_generation":1},{"range_id":3,"end_table_id":None,"end_rowid":None,"endpoint":r["right_endpoint"],"wal_generation":1}] if hash_mode else [{"range_id":0,"end_table_id":50,"end_rowid":10,"endpoint":r["coordinator_endpoint"],"wal_generation":0},{"range_id":2,"end_table_id":51,"end_rowid":16,"endpoint":r["left_endpoint"],"wal_generation":1},{"range_id":3,"end_table_id":None,"end_rowid":None,"endpoint":r["right_endpoint"],"wal_generation":1}])
+    expected_layout=([{"range_id":0,"end_table_id":50,"end_bucket":4,"end_rowid":0,"endpoint":r["coordinator_endpoint"],"wal_generation":0},{"range_id":2,"end_table_id":50,"end_bucket":8,"end_rowid":0,"endpoint":r["left_endpoint"],"wal_generation":1},{"range_id":3,"end_table_id":None,"end_rowid":None,"endpoint":r["right_endpoint"],"wal_generation":1}] if hash_mode else [{"range_id":0,"end_table_id":50,"end_rowid":10,"endpoint":r["coordinator_endpoint"],"wal_generation":0},{"range_id":2,"end_table_id":51,"end_rowid":r["split_boundary_rowid"],"endpoint":r["left_endpoint"],"wal_generation":1},{"range_id":3,"end_table_id":None,"end_rowid":None,"endpoint":r["right_endpoint"],"wal_generation":1}])
     layout=[]
     for entry in r["terminal_layout"]:
         keys=set(expected_layout[len(layout)])
@@ -420,7 +439,7 @@ def synthetic(family: str, case: str, index: int) -> dict[str, Any]:
         proof=next(item for item in proofs if item["operation"]==name)
         expectations.append({"operation":name,"tenant":tenant,"endpoint":proof["endpoint"],"range_id":1,"generation":0,"operation_id":operation,"request":copy.deepcopy(proof["request"]),"request_sha256":proof["request_sha256"],"expected_response_kind":"applied_or_already_applied" if name in {"prologue","retire"} else next(iter(RESPONSE_KINDS[name]))})
     result={key:0 for key in INTS}; result.update({key:"x" for key in STRINGS}); result.update({key:False for key in BOOLS}); result.update({key:[] for key in LISTS})
-    result.update({"schema_version":1,"family":family,"case":case,"tenant_id":tenant,"operation_id":operation,"evidence_id":digest(f"{family}\0{case}\0{tenant}\0{operation}".encode()),"acknowledged_rows":1,"recovered_acknowledgements":1,"max_ack_gap_ms":1,"max_ack_gap_bound_ms":BOUNDS[family],"operation_elapsed_ms":2,"operation_bound_ms":240000,"marker_count":1,"right_marker_count":1,"delete_count":1,"old_pid":index*3+1,"new_pid":index*3+2,"old_source_pid":index*3+1,"new_source_pid":index*3+2,"workload_process_group":index*3+3,"kill_ms":1,"restart_ms":2,"publication_ms":3,"left_wal_generation":1,"right_wal_generation":1,"operation_revision":9,"operation_attempts":2,"tenant_record_version":6,"source_record_version":4,"retirement_successor_generations":[[0,0],[2,1],[3,1]],"sentinel_topic":sentinel,"left_endpoint":"left","right_endpoint":"right","marker_response_digest":marker_digest([(700,52,1)]),"post_publication_r2_ack":True,"post_publication_r3_ack":True,"predecessor_topic_absent":True,"sentinel_topic_present":True,"workload_process_reaped":True,"new_source_pid_alive_at_verification":True,"topology_topics":sorted([f"__gres_wal.{tenant}.r0",f"__gres_wal.{tenant}.r2.g0000000001",f"__gres_wal.{tenant}.r3.g0000000001",sentinel]),"reopened_oracle_rows":[row],"direct_physical_rows":[{"range_id":2,**row}],"sql_union_rows":[row],"source_markers":[marker],"right_markers":[marker],"authenticated_receipts":proofs,"delete_attempts":[{"targets":[f"__gres_wal.{tenant}.r1"],"outcome":"deleted"}]})
+    result.update({"schema_version":1,"family":family,"case":case,"tenant_id":tenant,"operation_id":operation,"split_boundary_rowid":16,"r0_static_ids":[],"evidence_id":digest(f"{family}\0{case}\0{tenant}\0{operation}".encode()),"acknowledged_rows":1,"recovered_acknowledgements":1,"max_ack_gap_ms":1,"max_ack_gap_bound_ms":BOUNDS[family],"operation_elapsed_ms":2,"operation_bound_ms":240000,"marker_count":1,"right_marker_count":1,"delete_count":1,"old_pid":index*3+1,"new_pid":index*3+2,"old_source_pid":index*3+1,"new_source_pid":index*3+2,"workload_process_group":index*3+3,"kill_ms":1,"restart_ms":2,"publication_ms":3,"left_wal_generation":1,"right_wal_generation":1,"operation_revision":9,"operation_attempts":2,"tenant_record_version":6,"source_record_version":4,"retirement_successor_generations":[[0,0],[2,1],[3,1]],"sentinel_topic":sentinel,"left_endpoint":"left","right_endpoint":"right","marker_response_digest":marker_digest([(700,52,1)]),"post_publication_r2_ack":True,"post_publication_r3_ack":True,"predecessor_topic_absent":True,"sentinel_topic_present":True,"workload_process_reaped":True,"new_source_pid_alive_at_verification":True,"topology_topics":sorted([f"__gres_wal.{tenant}.r0",f"__gres_wal.{tenant}.r2.g0000000001",f"__gres_wal.{tenant}.r3.g0000000001",sentinel]),"reopened_oracle_rows":[row],"direct_physical_rows":[{"range_id":2,**row}],"sql_union_rows":[row],"source_markers":[marker],"right_markers":[marker],"authenticated_receipts":proofs,"delete_attempts":[{"targets":[f"__gres_wal.{tenant}.r1"],"outcome":"deleted"}]})
     synthetic_rows=[{"table_id":50,"rowid":10,"seq":1,"checksum":"pre"},{"table_id":50,"rowid":16,"seq":2,"checksum":"left"},{"table_id":51,"rowid":16,"seq":3,"checksum":"right"}]
     payload=[]
     for item,timestamp,kind in [(synthetic_rows[0],10,"ack"),(synthetic_rows[1],50,"recovered_ack"),(synthetic_rows[2],51,"ack")]:
@@ -461,6 +480,7 @@ def encode_txd2(start_ts:int,decision:str)->tuple[str,str,dict[str,Any]]:
 
 def synthetic_v3(family:str,case:str,index:int)->dict[str,Any]:
     result=synthetic(family,case,index); result["schema_version"]=3
+    result["split_boundary_rowid"]=0; result["r0_static_ids"]=[]
     transaction_id,table_id,bucket,rowid=expected_hash_marker(case)
     marker={"transaction_id":transaction_id,"table_id":table_id,"bucket":bucket,"rowid":rowid}
     wire={"transaction_id":transaction_id,"key":{"table_id":table_id,"bucket":bucket,"rowid":rowid}}
@@ -557,6 +577,10 @@ def self_test() -> None:
             ("retire replay forbidden kind",lambda r:mutate_last_response(r,"retire",{"result":"rejected"})),
             ("stage replay invalid hash",lambda r:next(item for item in r["authenticated_receipts"] if item["operation"]=="stage").update(response={"result":"staged","tail_sha256":"bad"},response_sha256=digest(compact({"result":"staged","tail_sha256":"bad"})))),
             ("stage replay terminal mismatch",lambda r:r["terminal_operation_evidence"].__setitem__("tail_sha256","3"*64)),
+            ("boundary layout mismatch",lambda r:r.__setitem__("split_boundary_rowid",17)),
+            ("boundary below seed domain",lambda r:(r.__setitem__("split_boundary_rowid",8),r["terminal_layout"][1].__setitem__("end_rowid",8))),
+            ("r0 ids unobserved",lambda r:r.__setitem__("r0_static_ids",[[50,3]])),
+            ("r0 ids malformed",lambda r:r.__setitem__("r0_static_ids",[[51,3]])),
         ])
         validate_record(good,family,case,"operation-specific replay positive")
         for label,mutation in negatives: expect_bad(good,family,case,mutation,label)
@@ -578,6 +602,8 @@ def self_test() -> None:
             ("hash wrong boundary",lambda r:r["hash_evidence"]["boundary"].__setitem__("receipt_bucket",7)),
             ("hash missing stage",lambda r:r["hash_evidence"]["snapshots"].pop()),
             ("hash wrong schema",lambda r:r.__setitem__("schema_version",2)),
+            ("hash ordinary boundary",lambda r:r.__setitem__("split_boundary_rowid",16)),
+            ("hash ordinary r0 ids",lambda r:r.__setitem__("r0_static_ids",[[50,1]])),
         ]
         for label,mutation in hash_negatives: expect_bad(hash_good,family,case,mutation,label)
         cross=copy.deepcopy(good); cross["schema_version"]=3
