@@ -1,14 +1,14 @@
 //! Ties one scenario run together: cluster, workload, faults, sampling.
 //!
-//! Sequence: apply the mode override and re-validate → launch the
-//! schema-bootstrap phase in a scratch work dir (a single temporary node
-//! hosting every range, because gres DDL only reaches locally-hosted range
-//! engines) → prepare the workload schema through it → promote to the real
-//! per-node topology → start the `/proc` sampler → run the workload (it
-//! warms up, then measures) concurrently with the fault schedule anchored at
-//! the measurement-window start → stop the sampler → shut the cluster down →
-//! assemble a [`RunReport`] and write `<out_dir>/<scenario>-<mode-slug>.json`
-//! plus the rendered Markdown alongside it.
+//! Sequence: apply the mode override and re-validate → launch the cluster in
+//! a scratch work dir → prepare the workload schema through the last node's
+//! gateway (any gateway routes DDL and DML; picking a node that does not
+//! host range 0 exercises exactly that) → start the `/proc` sampler → run
+//! the workload (it warms up, then measures) concurrently with the fault
+//! schedule anchored at the measurement-window start → stop the sampler →
+//! shut the cluster down → assemble a [`RunReport`] and write
+//! `<out_dir>/<scenario>-<mode-slug>.json` plus the rendered Markdown
+//! alongside it.
 //!
 //! On a failure after launch the cluster is still shut down, the work dir
 //! (holding every process log) is kept, and the error names its log
@@ -111,27 +111,34 @@ pub async fn run_scenario(config: RunConfig) -> anyhow::Result<RunReport> {
         work_dir: work_dir.path().to_path_buf(),
         binaries,
     };
-    let bootstrap = match Cluster::launch_schema_bootstrap(options).await {
-        Ok(bootstrap) => bootstrap,
+    let mut cluster = match Cluster::launch(options).await {
+        Ok(cluster) => cluster,
         Err(error) => {
             let kept = work_dir.persist();
             return Err(error.context(format!(
-                "launch schema bootstrap for scenario {}; process logs kept under {}",
+                "launch cluster for scenario {}; process logs kept under {}",
                 scenario.name,
                 kept.join("logs").display()
             )));
         }
     };
-    // DDL and seeding run against the bootstrap node, which hosts every
-    // range: gres DDL only reaches locally-hosted range engines, so the
-    // schema must exist in each range's WAL before the real topology boots.
+    // DDL and seeding go through the last node's gateway — in multi-node
+    // topologies a node NOT hosting range 0 — proving any gateway routes
+    // schema DDL (with its cluster-wide catalog barrier) and seed DML.
+    let schema_node = cluster.node_count().saturating_sub(1);
     if let Err(error) = workload::prepare_schema(
-        &bootstrap.sql_endpoint(),
+        &cluster.sql_endpoint(schema_node),
         &scenario.workload,
         &scenario.topology,
     )
     .await
     {
+        if let Err(shutdown_error) = cluster.shutdown().await {
+            tracing::warn!(
+                error = format!("{shutdown_error:#}"),
+                "cluster shutdown failed"
+            );
+        }
         let kept = work_dir.persist();
         return Err(error.context(format!(
             "prepare workload schema for scenario {}; process logs kept under {}",
@@ -139,17 +146,6 @@ pub async fn run_scenario(config: RunConfig) -> anyhow::Result<RunReport> {
             kept.join("logs").display()
         )));
     }
-    let mut cluster = match bootstrap.into_topology().await {
-        Ok(cluster) => cluster,
-        Err(error) => {
-            let kept = work_dir.persist();
-            return Err(error.context(format!(
-                "promote bootstrap to topology for scenario {}; process logs kept under {}",
-                scenario.name,
-                kept.join("logs").display()
-            )));
-        }
-    };
 
     let driven = drive(&mut cluster, &scenario).await;
     if let Err(error) = cluster.shutdown().await {
@@ -259,7 +255,7 @@ struct Driven {
 }
 
 /// Runs the measured window against a live cluster (schema already
-/// bootstrapped): `/proc` sampler + workload + fault schedule.
+/// prepared): `/proc` sampler + workload + fault schedule.
 async fn drive(cluster: &mut Cluster, scenario: &Scenario) -> anyhow::Result<Driven> {
     // The workload only needs the SQL endpoints, collected up front so the
     // workload future does not borrow the cluster (the fault schedule needs
