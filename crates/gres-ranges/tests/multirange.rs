@@ -1049,3 +1049,136 @@ async fn select_scalar(
 mod support;
 
 use support::ExtendedQueryV2 as _;
+
+#[tokio::test]
+async fn explicit_cross_range_transactions_run_concurrently() {
+    use assert2::assert;
+    // A second cross-range BEGIN..COMMIT must run to completion while the
+    // first transaction is still open. A regression that reintroduces a
+    // one-at-a-time explicit-transaction gate blocks the second session's
+    // writes until the first commits, tripping the timeout below.
+    let config = MultiRangeTenantConfig::from_boundaries(
+        TenantName::parse("tenant_concurrent_explicit").expect("tenant"),
+        "0,100",
+    )
+    .expect("config");
+    let (gateway, _handles) = MultiRangeTenant::start(config).expect("tenant");
+    let mut setup = gateway.connect();
+    setup
+        .simple_query("CREATE TABLE t0 (id int4); CREATE TABLE t100 (id int4)")
+        .await
+        .expect("create tables");
+
+    let mut first = gateway.connect();
+    let mut second = gateway.connect();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        first.simple_query("BEGIN").await.expect("begin first");
+        first
+            .simple_query("INSERT INTO t0 VALUES (1)")
+            .await
+            .expect("first t0");
+        first
+            .simple_query("INSERT INTO t100 VALUES (1)")
+            .await
+            .expect("first t100");
+        // The first transaction is open and escalated across both ranges;
+        // the second must not queue behind it.
+        second.simple_query("BEGIN").await.expect("begin second");
+        second
+            .simple_query("INSERT INTO t0 VALUES (2)")
+            .await
+            .expect("second t0");
+        second
+            .simple_query("INSERT INTO t100 VALUES (2)")
+            .await
+            .expect("second t100");
+        second.simple_query("COMMIT").await.expect("commit second");
+        first.simple_query("COMMIT").await.expect("commit first");
+    })
+    .await
+    .expect("concurrent explicit transactions must not serialize");
+
+    assert!(select_scalar(&mut setup, "SELECT count(*) FROM t0").await == "2");
+    assert!(select_scalar(&mut setup, "SELECT count(*) FROM t100").await == "2");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cross_engine_deadlock_aborts_within_the_lock_wait_cap() {
+    use assert2::assert;
+    // Two cross-range transactions lock one row on each of two ranges in
+    // opposite orders. Each engine's wait-for graph sees only its own edge,
+    // so no local detector can fire; the bounded lock wait must abort at
+    // least one side with 40P01 instead of hanging both forever.
+    let config = MultiRangeTenantConfig::from_boundaries(
+        TenantName::parse("tenant_cross_engine_deadlock").expect("tenant"),
+        "0,100",
+    )
+    .expect("config");
+    let (gateway, _handles) = MultiRangeTenant::start(config).expect("tenant");
+    let mut setup = gateway.connect();
+    setup
+        .simple_query(
+            "CREATE TABLE t0 (id int4, v int4); CREATE TABLE t100 (id int4, v int4); \
+             INSERT INTO t0 VALUES (1, 0); INSERT INTO t100 VALUES (1, 0)",
+        )
+        .await
+        .expect("create and seed");
+
+    let mut s1 = gateway.connect();
+    let mut s2 = gateway.connect();
+    s1.simple_query("BEGIN").await.expect("begin s1");
+    s2.simple_query("BEGIN").await.expect("begin s2");
+    s1.simple_query("UPDATE t0 SET v = 1 WHERE id = 1")
+        .await
+        .expect("s1 locks t0 row");
+    s2.simple_query("UPDATE t100 SET v = 2 WHERE id = 1")
+        .await
+        .expect("s2 locks t100 row");
+
+    // Close the cycle concurrently: s1 wants s2's t100 row, s2 wants s1's
+    // t0 row.
+    let crossing1 = tokio::spawn(async move {
+        let result = s1.simple_query("UPDATE t100 SET v = 1 WHERE id = 1").await;
+        (s1, result)
+    });
+    let crossing2 = tokio::spawn(async move {
+        let result = s2.simple_query("UPDATE t0 SET v = 2 WHERE id = 1").await;
+        (s2, result)
+    });
+    let (first, second) = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        tokio::join!(crossing1, crossing2)
+    })
+    .await
+    .expect("a cross-engine deadlock must abort, not hang");
+    let (mut s1, result1) = first.expect("s1 task");
+    let (mut s2, result2) = second.expect("s2 task");
+
+    let mut aborted = 0;
+    for (session, result) in [(&mut s1, result1), (&mut s2, result2)] {
+        match result {
+            Ok(_) => session
+                .simple_query("COMMIT")
+                .await
+                .map(|_| ())
+                .expect("commit survivor"),
+            Err(error) => {
+                assert!(error.code == "40P01");
+                aborted += 1;
+                session
+                    .simple_query("ROLLBACK")
+                    .await
+                    .expect("rollback victim");
+            }
+        }
+    }
+    assert!(
+        aborted >= 1,
+        "at least one side must be the deadlock victim"
+    );
+
+    // Atomicity: whatever survived committed on BOTH ranges or on neither.
+    let t0_v = select_scalar(&mut setup, "SELECT v FROM t0 WHERE id = 1").await;
+    let t100_v = select_scalar(&mut setup, "SELECT v FROM t100 WHERE id = 1").await;
+    let outcome = (t0_v.as_str(), t100_v.as_str());
+    assert!(outcome == ("0", "0") || outcome == ("1", "1") || outcome == ("2", "2"));
+}

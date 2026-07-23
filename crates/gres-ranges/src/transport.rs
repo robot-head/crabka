@@ -56,8 +56,6 @@ pub enum RangeRequest {
     },
     /// Allocate and durably publish one global transaction id on range 0.
     GlobalBegin { range_id: RangeId },
-    /// Acquire, renew, or release the range-0 ordinary transaction lease.
-    ExplicitGate(ExplicitGateReq),
     /// Settle abandoned live owner sessions for one durable global xid.
     RecoverGlobal {
         range_id: RangeId,
@@ -119,8 +117,6 @@ pub enum RangeResponse {
     GlobalStatus { status: WireGlobalStatus },
     /// Newly allocated global transaction id.
     GlobalXid { global_xid: u64 },
-    /// Range-0 ordinary transaction lease result.
-    ExplicitGate(ExplicitGateResp),
     /// Abandoned live owner sessions were inspected and settled idempotently.
     GlobalRecovered,
     /// Visible rows returned by a range scan.
@@ -308,23 +304,6 @@ pub enum RangeControlResp {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "operation")]
-pub enum ExplicitGateReq {
-    Acquire,
-    Renew { token: u64 },
-    Release { token: u64 },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "result")]
-pub enum ExplicitGateResp {
-    Acquired { token: u64, lease_millis: u64 },
-    Renewed { lease_millis: u64 },
-    Released,
-    Stale,
-}
-
 /// Serializable simple-query result returned by a range owner.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
@@ -399,6 +378,12 @@ pub enum WireGlobalStatus {
 pub enum WireSessionOperation {
     SimpleQuery {
         sql: String,
+        /// Bound, in milliseconds, on every lock wait this statement performs.
+        /// `Some` only for statements of a gateway transaction that has
+        /// escalated past one range — the only sessions a cross-engine
+        /// deadlock cycle can enlist; `None` keeps exact engine-local
+        /// blocking for single-range and autocommit forwarding.
+        lock_wait_cap_ms: Option<u64>,
     },
     Parse {
         name: String,
@@ -420,6 +405,8 @@ pub enum WireSessionOperation {
     Execute {
         portal: String,
         max_rows: u32,
+        /// See [`WireSessionOperation::SimpleQuery::lock_wait_cap_ms`].
+        lock_wait_cap_ms: Option<u64>,
     },
     PrepareGlobal {
         global_xid: u64,
@@ -2228,7 +2215,6 @@ mod tests {
                 | RangeRequest::SessionClose { .. }
                 | RangeRequest::GlobalDecision { .. }
                 | RangeRequest::GlobalBegin { .. }
-                | RangeRequest::ExplicitGate(_)
                 | RangeRequest::RecoverGlobal { .. }
                 | RangeRequest::TimestampPrewrite(_)
                 | RangeRequest::TimestampPrimaryAck(_)

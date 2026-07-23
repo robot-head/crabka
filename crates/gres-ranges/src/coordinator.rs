@@ -353,7 +353,6 @@ impl TxnRpc {
             | RangeResponse::SessionResult { .. }
             | RangeResponse::GlobalStatus { .. }
             | RangeResponse::GlobalXid { .. }
-            | RangeResponse::ExplicitGate(_)
             | RangeResponse::GlobalRecovered
             | RangeResponse::ScanRange(_)
             | RangeResponse::JoinRange(_)
