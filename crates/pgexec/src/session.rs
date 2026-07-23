@@ -842,6 +842,14 @@ pub struct SqlSession {
     /// write also stamps a `Prepared(local_xid -> g)` clog marker and deregisters
     /// the local xid at prepare time. `None` for ordinary single-range txns.
     global_xid: Option<u64>,
+    /// Bound on every lock wait this session performs (`None` waits
+    /// indefinitely under the engine-local deadlock detector). Set by owners
+    /// that can enlist this session in a cross-range transaction — a gateway
+    /// escalating an explicit transaction past one range, or a range service
+    /// hosting the session for a remote gateway — because a deadlock cycle
+    /// spanning engines is invisible to any one engine's wait-for graph and
+    /// only a capped wait resolves it.
+    lock_wait_cap: Option<std::time::Duration>,
     /// SP37: the injectable clock (shared from the engine). Backs the per-statement
     /// `EvalCtx`'s `now`/`stmt_now` and `clock_timestamp()`. `SystemClock` in
     /// production; a `FixedClock` in tests for deterministic temporal evaluation.
@@ -982,6 +990,7 @@ impl SqlSession {
             gtm,
             range0_barrier,
             global_xid: None,
+            lock_wait_cap: None,
             clock,
             guc: GucState::default(),
             foreign_scanner,
@@ -1059,6 +1068,7 @@ impl SqlSession {
             repeatable_read,
             eval_ctx,
             prune_horizon,
+            lock_wait_cap: self.lock_wait_cap,
         }
     }
 
@@ -1094,6 +1104,18 @@ impl SqlSession {
         start_ts: Option<crate::timestamp_txn::TimestampTransactionId>,
     ) {
         self.timestamp_own_start_ts = start_ts;
+    }
+
+    /// Bound (or unbound, with `None`) every lock wait this session performs.
+    ///
+    /// Owners set a cap when this session can be enlisted in a cross-range
+    /// transaction: a deadlock cycle spanning engines never appears in any one
+    /// engine's wait-for graph, so an expired cap — surfaced as a 40P01 the
+    /// client retries — is the only detector such a cycle has. Purely local
+    /// waits should keep the default `None` and rely on the exact
+    /// engine-local cycle check.
+    pub fn set_lock_wait_cap(&mut self, cap: Option<std::time::Duration>) {
+        self.lock_wait_cap = cap;
     }
 
     /// Apply a typed practical-subset GUC mutation and return the `SET` command
@@ -1906,6 +1928,7 @@ impl SqlSession {
                     &self.lockmgr,
                     repeatable_read,
                     mode,
+                    self.lock_wait_cap,
                     s,
                 )
                 .await
@@ -1947,6 +1970,7 @@ impl SqlSession {
                     &self.lockmgr,
                     false, // autocommit is always READ COMMITTED
                     mode,
+                    self.lock_wait_cap,
                     s,
                 )
                 .await;

@@ -56,44 +56,23 @@ async fn concurrent_process_harnesses_publish_distinct_ports_and_shutdown_cleanl
 }
 
 #[tokio::test]
-async fn range_zero_lease_serializes_explicit_transactions_across_compute_gateways_and_expires() {
-    let computes = ProcessHarness::start("tenant-real-explicit-gate").await;
+async fn explicit_transactions_run_concurrently_across_compute_gateways() {
+    let computes = ProcessHarness::start("tenant-real-concurrent-explicit").await;
     let r0 = computes.sql(0).await;
     let r1 = computes.sql(1).await;
 
-    r0.simple_query("BEGIN").await.expect("r0 begin owns lease");
-    let waiting = tokio::spawn(async move {
-        let result = r1.simple_query("BEGIN").await;
-        (r1, result)
-    });
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    assert!(
-        !waiting.is_finished(),
-        "direct r1 BEGIN must wait for r0 owner"
-    );
-    r0.simple_query("COMMIT").await.expect("release r0 lease");
-    let (r1, result) = waiting.await.expect("r1 waiter task");
-    result.expect("r1 begins after release");
-    r1.simple_query("ROLLBACK").await.expect("release r1 lease");
-
-    let abandoned = computes.sql(0).await;
-    abandoned
-        .simple_query("BEGIN")
-        .await
-        .expect("idle owner begins");
-    let recovered = computes.sql(1).await;
-    tokio::time::timeout(
-        std::time::Duration::from_secs(7),
-        recovered.simple_query("BEGIN"),
-    )
+    r0.simple_query("BEGIN").await.expect("r0 begin");
+    // The removed range-0 explicit-transaction lease serialized every
+    // BEGIN..COMMIT in the cluster through one token; a second gateway's
+    // transaction must now run to completion while the first stays open.
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        r1.simple_query("BEGIN").await?;
+        r1.simple_query("COMMIT").await
+    })
     .await
-    .expect("bounded lease recovery")
-    .expect("new owner after lease expiry");
-    recovered
-        .simple_query("ROLLBACK")
-        .await
-        .expect("release lease");
-    drop(abandoned);
+    .expect("explicit transactions must not serialize across gateways")
+    .expect("r1 transaction");
+    r0.simple_query("COMMIT").await.expect("r0 commit");
     computes.shutdown().await;
 }
 
