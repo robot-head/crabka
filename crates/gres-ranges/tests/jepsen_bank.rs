@@ -44,11 +44,16 @@ async fn real_process_bank_history_preserves_exact_balances_across_writer_kill()
         .await
         .expect("seed bank");
 
-    let debit_seven = real_transfer(system.sql(0).await, true, 7);
-    let credit_three = real_transfer(system.sql(0).await, false, 3);
-    let debit_five = real_transfer(system.sql(0).await, true, 5);
-    let credit_eleven = real_transfer(system.sql(0).await, false, 11);
-    let concurrent_results = tokio::join!(debit_seven, credit_three, debit_five, credit_eleven);
+    let first_client = system.sql(0).await;
+    let second_client = system.sql(0).await;
+    let third_client = system.sql(0).await;
+    let fourth_client = system.sql(0).await;
+    let concurrent_results = tokio::join!(
+        transfer_until_committed(&first_client, true, 7),
+        transfer_until_committed(&second_client, false, 3),
+        transfer_until_committed(&third_client, true, 5),
+        transfer_until_committed(&fourth_client, false, 11),
+    );
     for result in [
         concurrent_results.0,
         concurrent_results.1,
@@ -59,13 +64,16 @@ async fn real_process_bank_history_preserves_exact_balances_across_writer_kill()
     }
 
     system.kill(1).await;
-    assert!(real_transfer(system.sql(0).await, true, 13).await.is_err());
+    let kill_window_client = system.sql(0).await;
+    assert!(real_transfer(&kill_window_client, true, 13).await.is_err());
     system.restart(1).await;
 
-    let post_recovery_debit = real_transfer(system.sql(0).await, true, 2);
-    let post_recovery_credit = real_transfer(system.sql(0).await, false, 4);
-    let (post_recovery_debit, post_recovery_credit) =
-        tokio::join!(post_recovery_debit, post_recovery_credit);
+    let debit_client = system.sql(0).await;
+    let credit_client = system.sql(0).await;
+    let (post_recovery_debit, post_recovery_credit) = tokio::join!(
+        transfer_until_committed(&debit_client, true, 2),
+        transfer_until_committed(&credit_client, false, 4),
+    );
     post_recovery_debit.expect("post-recovery debit");
     post_recovery_credit.expect("post-recovery credit");
 
@@ -83,34 +91,64 @@ async fn real_process_bank_history_preserves_exact_balances_across_writer_kill()
     assert_eq!((left, right, left + right), (104, 96, 200));
 }
 
+/// Drives one transfer to `COMMIT`, retrying the retryable aborts every
+/// Postgres client must handle (40P01 deadlock, 40001 serialization failure)
+/// — routine while a killed participant recovers. Bounded so a livelock fails
+/// the test instead of hanging it; the relative-delta transfer makes a retry
+/// after an abort exact.
+async fn transfer_until_committed(
+    client: &tokio_postgres::Client,
+    from_left: bool,
+    amount: i32,
+) -> Result<(), tokio_postgres::Error> {
+    const ATTEMPTS: usize = 20;
+    for attempt in 1..=ATTEMPTS {
+        match real_transfer(client, from_left, amount).await {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                let retryable = error
+                    .code()
+                    .is_some_and(|code| matches!(code.code(), "40P01" | "40001"));
+                if !retryable || attempt == ATTEMPTS {
+                    return Err(error);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        }
+    }
+    unreachable!("every attempt either returns or continues")
+}
+
+/// One bank transfer as a cross-range read-modify-write transaction.
+///
+/// The deltas are applied in SQL (`balance = balance - 7`) rather than read
+/// into the client and written back as absolute values: at `READ COMMITTED` a
+/// client-side read-modify-write loses updates under concurrency (in
+/// vanilla `PostgreSQL` exactly as here), while a relative `UPDATE`
+/// re-evaluates against the current row under the row lock, so concurrent
+/// transfers commute and the final balances stay exact. Both statements
+/// update `bank50` first, so transfers never invert lock order across the
+/// two ranges.
 async fn real_transfer(
-    client: tokio_postgres::Client,
+    client: &tokio_postgres::Client,
     from_left: bool,
     amount: i32,
 ) -> Result<(), tokio_postgres::Error> {
     client.simple_query("BEGIN").await?;
+    let (left_delta, right_delta) = if from_left {
+        (format!("- {amount}"), format!("+ {amount}"))
+    } else {
+        (format!("+ {amount}"), format!("- {amount}"))
+    };
     let transfer = async {
-        let left: i32 = client
-            .query_one("SELECT balance FROM bank50 WHERE id = 1", &[])
-            .await?
-            .get(0);
-        let right: i32 = client
-            .query_one("SELECT balance FROM bank150 WHERE id = 1", &[])
-            .await?
-            .get(0);
-        let (new_left, new_right) = if from_left {
-            (left - amount, right + amount)
-        } else {
-            (left + amount, right - amount)
-        };
         client
             .simple_query(&format!(
-                "UPDATE bank50 SET balance = {new_left} WHERE id = 1"
+                "UPDATE bank50 SET balance = balance {left_delta} WHERE id = 1"
             ))
             .await?;
         client
             .simple_query(&format!(
-                "UPDATE bank150 SET balance = {new_right} WHERE id = 1"
+                "UPDATE bank150 SET balance = balance {right_delta} WHERE id = 1"
             ))
             .await?;
         Ok::<(), tokio_postgres::Error>(())

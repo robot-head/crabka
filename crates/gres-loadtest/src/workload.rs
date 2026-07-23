@@ -33,21 +33,13 @@
 //!
 //! # Connection routing
 //!
-//! The gateway DML path currently needs a **local** range-0 engine
-//! (`statement_targets_sharded_table` in `gres-ranges/src/tenant.rs` and the
-//! timestamp-coordinator paths resolve `RangeId::COORDINATOR` locally), so a
-//! write issued through a node not hosting r0 fails with `SQLSTATE` 0A000
-//! "range r0 is not hosted". Node 0 always hosts r0 under the harness's
-//! round-robin range assignment, so every worker sends the write classes
-//! (inserts, cross-shard transactions, contended updates) over a connection
-//! to `endpoints[0]` — node 0's SQL front door — while
-//! [`OpClass::ReadOnly`] traffic fans out round-robin across every node's
-//! front door. A worker whose read endpoint is node 0, or whose mix never
-//! issues one of the two kinds, holds a single connection instead of two.
-//! Each connection reconnects with independent backoff, and only node 0's
-//! front door must accept a connection at startup; other endpoints'
-//! initial unavailability is counted and retried like any mid-run
-//! connection error.
+//! Every gateway routes DDL and DML for ranges it does not host locally, so
+//! no endpoint is special: worker `w` holds one connection to
+//! `endpoints[w % endpoint_count]` and issues its whole mix — writes and
+//! reads alike — through it, fanning load round-robin across every node's
+//! SQL front door. Each worker reconnects with independent backoff, and an
+//! endpoint's initial unavailability is counted and retried like any
+//! mid-run connection error.
 //!
 //! # Pacing, faults, and measurement
 //!
@@ -109,7 +101,7 @@ const MAX_SERIALIZATION_RETRIES: u32 = 5;
 const OP_TIMEOUT: Duration = Duration::from_secs(30);
 /// Timeout for a single connection attempt.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-/// Total budget for the startup probe / schema connection.
+/// Total budget for the schema-preparation connection.
 const STARTUP_DEADLINE: Duration = Duration::from_secs(30);
 /// How long in-flight operations may finish after the window closes.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
@@ -171,10 +163,9 @@ pub struct WorkloadOutcome {
 
 /// Creates the workload schema and seed rows through one node.
 ///
-/// The runner invokes this against the schema-bootstrap node — a temporary
-/// node hosting **all** ranges (see `Cluster::launch_schema_bootstrap` in
-/// the cluster module) — so the DDL and hot-table seeding all execute
-/// range-locally.
+/// Any node's front door works: gateways route DDL and DML to every range
+/// engine, and DDL returns only after the cluster-wide catalog barrier, so
+/// the schema is visible everywhere once this returns.
 ///
 /// # Errors
 ///
@@ -210,33 +201,24 @@ pub async fn prepare_schema(
 ///
 /// # Errors
 ///
-/// Returns an error only on harness-level failures (e.g. the write gateway —
-/// node 0's SQL front door, which every write path requires — never accepted
-/// a connection during startup); workload-level errors are counted in the
-/// outcome, because faults are expected to cause them.
+/// Returns an error only on harness-level failures (no endpoints to drive);
+/// workload-level errors are counted in the outcome, because faults are
+/// expected to cause them.
 pub async fn run(
     endpoints: &[SqlEndpoint],
     workload: &WorkloadSpec,
     topology: &TopologySpec,
 ) -> anyhow::Result<WorkloadOutcome> {
     anyhow::ensure!(!endpoints.is_empty(), "no SQL endpoints to drive");
-    // Only the write gateway must accept at startup; other endpoints'
-    // unavailability is retried by workers like any mid-run fault.
-    drop(
-        connect_with_retry(&endpoints[0])
-            .await
-            .context("startup probe of node 0's SQL front door (the write gateway)")?,
-    );
-
     let context = Arc::new(build_context(workload, topology));
     let (stop_tx, stop_rx) = watch::channel(false);
     let handles: Vec<_> = (0..workload.connections)
         .map(|worker| {
-            let routing = route_worker(worker, endpoints.len(), &workload.mix);
+            let endpoint = endpoints[route_worker(worker, endpoints.len())].clone();
             tokio::spawn(worker_loop(
                 Arc::clone(&context),
                 worker,
-                build_connections(endpoints, routing),
+                ConnectionSlot::new(endpoint),
                 stop_rx.clone(),
             ))
         })
@@ -315,59 +297,11 @@ fn build_context(workload: &WorkloadSpec, topology: &TopologySpec) -> WorkerCont
     }
 }
 
-/// Which endpoints a worker's connections dial.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct WorkerRouting {
-    /// Endpoint index for the write classes, if the mix issues any. Always
-    /// node 0's front door: the only gateway hosting range 0 today (see the
-    /// module docs on connection routing).
-    write_endpoint: Option<usize>,
-    /// Endpoint index for read-only traffic, if the mix issues any:
-    /// round-robin over every node's front door.
-    read_endpoint: Option<usize>,
-    /// Both kinds ride one connection (the read endpoint IS the write one).
-    shared: bool,
-}
-
-/// Whether the mix ever issues a class that must write through node 0.
-fn mix_needs_write_connection(mix: &MixSpec) -> bool {
-    mix.single_shard_insert > 0 || mix.cross_shard_txn > 0 || mix.contended_update > 0
-}
-
-/// Whether the mix ever issues read-only operations.
-fn mix_needs_read_connection(mix: &MixSpec) -> bool {
-    mix.read_only > 0
-}
-
-/// Routes one worker's connections; workers never open a connection their
-/// mix cannot use, and never open two connections to the same endpoint.
-fn route_worker(worker: u32, endpoint_count: usize, mix: &MixSpec) -> WorkerRouting {
-    let needs_write = mix_needs_write_connection(mix);
-    let needs_read = mix_needs_read_connection(mix);
-    let read_index = usize::try_from(worker).unwrap_or(usize::MAX) % endpoint_count.max(1);
-    WorkerRouting {
-        write_endpoint: needs_write.then_some(0),
-        read_endpoint: needs_read.then_some(read_index),
-        shared: needs_write && needs_read && read_index == 0,
-    }
-}
-
-/// Materialises a routing decision into (up to two) connection slots; when
-/// the routes coincide the write slot serves both kinds.
-fn build_connections(endpoints: &[SqlEndpoint], routing: WorkerRouting) -> WorkerConnections {
-    let slot = |index: usize| ConnectionSlot::new(endpoint_at(endpoints, index));
-    WorkerConnections {
-        write: routing.write_endpoint.map(&slot),
-        read: if routing.shared {
-            None
-        } else {
-            routing.read_endpoint.map(&slot)
-        },
-    }
-}
-
-fn endpoint_at(endpoints: &[SqlEndpoint], index: usize) -> SqlEndpoint {
-    endpoints[index % endpoints.len().max(1)].clone()
+/// The endpoint index a worker's connection dials: round-robin over every
+/// node's front door, for writes and reads alike (any gateway routes DML
+/// and DDL for ranges it does not host).
+fn route_worker(worker: u32, endpoint_count: usize) -> usize {
+    usize::try_from(worker).unwrap_or(usize::MAX) % endpoint_count.max(1)
 }
 
 /// The numeric id of range `range`'s table; the table lands on that range
@@ -903,34 +837,12 @@ impl ConnectionSlot {
     }
 }
 
-/// A worker's connection slots: writes through node 0's gateway, reads
-/// through the worker's round-robin endpoint. `read` is `None` when the mix
-/// never reads or when the read route coincides with the write route (the
-/// write slot then serves both — see [`WorkerConnections::slot_for`]).
-struct WorkerConnections {
-    write: Option<ConnectionSlot>,
-    read: Option<ConnectionSlot>,
-}
-
-impl WorkerConnections {
-    /// The slot a class must use; read-only falls back to the write slot
-    /// when the routes are shared.
-    fn slot_for(&mut self, class: OpClass) -> Option<&mut ConnectionSlot> {
-        match class {
-            OpClass::ReadOnly => self.read.as_mut().or(self.write.as_mut()),
-            OpClass::SingleShardInsert | OpClass::CrossShardTxn | OpClass::ContendedUpdate => {
-                self.write.as_mut()
-            }
-        }
-    }
-}
-
-/// One worker: pick a class, run it on that class's connection (connecting
-/// with per-slot backoff as needed, forever), until told to stop.
+/// One worker: pick a class, run it on the worker's connection
+/// (reconnecting with backoff as needed, forever), until told to stop.
 async fn worker_loop(
     context: Arc<WorkerContext>,
     worker: u32,
-    mut connections: WorkerConnections,
+    mut slot: ConnectionSlot,
     mut stop: watch::Receiver<bool>,
 ) {
     let mut rng = SmallRng::seed_from_u64(u64::from(worker).wrapping_add(0x5eed_c0de));
@@ -952,11 +864,6 @@ async fn worker_loop(
             &context.zipf,
             &mut rng,
         );
-        let Some(slot) = connections.slot_for(class) else {
-            // Unreachable with a validated scenario: the mix only picks
-            // classes whose connection the routing opened.
-            return;
-        };
         let Some(client) = slot
             .ensure_connected(worker, &context.stats, &mut stop)
             .await
@@ -1443,127 +1350,22 @@ mod tests {
         }
     }
 
-    fn mix_of(write_insert: u32, cross: u32, read: u32, contended: u32) -> MixSpec {
-        MixSpec {
-            single_shard_insert: write_insert,
-            cross_shard_txn: cross,
-            read_only: read,
-            contended_update: contended,
-        }
-    }
-
-    fn full_mix() -> MixSpec {
-        mix_of(4, 3, 2, 1)
-    }
-
     #[test]
-    fn mix_predicates_identify_needed_connections() {
+    fn route_worker_spreads_workers_round_robin_across_endpoints() {
         let cases = [
-            (mix_of(1, 0, 0, 0), true, false),
-            (mix_of(0, 1, 0, 0), true, false),
-            (mix_of(0, 0, 0, 1), true, false),
-            (mix_of(0, 0, 1, 0), false, true),
-            (mix_of(4, 3, 2, 1), true, true),
-            (mix_of(0, 0, 0, 0), false, false),
+            (0, 1, 0),
+            (2, 1, 0),
+            (0, 3, 0),
+            (1, 3, 1),
+            (2, 3, 2),
+            (3, 3, 0),
+            (5, 4, 1),
         ];
-        for (mix, needs_write, needs_read) in cases {
+        for (worker, endpoint_count, expected) in cases {
             assert!(
-                mix_needs_write_connection(&mix) == needs_write,
-                "write predicate for {mix:?}"
-            );
-            assert!(
-                mix_needs_read_connection(&mix) == needs_read,
-                "read predicate for {mix:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn route_worker_pins_writes_to_node_zero_and_spreads_reads() {
-        let cases = [
-            (0, 1, 0, true),
-            (2, 1, 0, true),
-            (0, 3, 0, true),
-            (1, 3, 1, false),
-            (2, 3, 2, false),
-            (3, 3, 0, true),
-            (5, 4, 1, false),
-        ];
-        for (worker, endpoint_count, read_index, shared) in cases {
-            let routing = route_worker(worker, endpoint_count, &full_mix());
-            let expected = WorkerRouting {
-                write_endpoint: Some(0),
-                read_endpoint: Some(read_index),
-                shared,
-            };
-            assert!(
-                routing == expected,
+                route_worker(worker, endpoint_count) == expected,
                 "worker {worker} over {endpoint_count} endpoints"
             );
         }
-    }
-
-    #[test]
-    fn route_worker_omits_connections_the_mix_never_uses() {
-        let cases = [
-            // Pure-read mixes open no write connection.
-            (mix_of(0, 0, 1, 0), 0, None, Some(0), false),
-            (mix_of(0, 0, 1, 0), 1, None, Some(1), false),
-            // Pure-write mixes open no read connection.
-            (mix_of(1, 0, 0, 0), 1, Some(0), None, false),
-            (mix_of(0, 1, 0, 0), 2, Some(0), None, false),
-            (mix_of(0, 0, 0, 1), 1, Some(0), None, false),
-        ];
-        for (mix, worker, write_endpoint, read_endpoint, shared) in cases {
-            let routing = route_worker(worker, 3, &mix);
-            let expected = WorkerRouting {
-                write_endpoint,
-                read_endpoint,
-                shared,
-            };
-            assert!(routing == expected, "worker {worker} with mix {mix:?}");
-        }
-    }
-
-    fn test_endpoints(count: u16) -> Vec<SqlEndpoint> {
-        (0..count)
-            .map(|node| SqlEndpoint {
-                addr: format!("127.0.0.1:{}", 5_000 + node).parse().expect("addr"),
-                user: "crab".to_owned(),
-                password: String::new(),
-                database: "crab".to_owned(),
-            })
-            .collect()
-    }
-
-    #[test]
-    fn shared_routes_hold_one_connection_and_reads_fall_back_to_it() {
-        let endpoints = test_endpoints(3);
-        let mut shared = build_connections(&endpoints, route_worker(0, 3, &full_mix()));
-        assert!(shared.write.is_some());
-        assert!(
-            shared.read.is_none(),
-            "shared route must not open a second connection"
-        );
-        let slot = shared.slot_for(OpClass::ReadOnly).expect("read slot");
-        check!(slot.endpoint.addr == endpoints[0].addr);
-
-        let mut split = build_connections(&endpoints, route_worker(1, 3, &full_mix()));
-        let read = split.slot_for(OpClass::ReadOnly).expect("read slot");
-        check!(read.endpoint.addr == endpoints[1].addr);
-        for class in [
-            OpClass::SingleShardInsert,
-            OpClass::CrossShardTxn,
-            OpClass::ContendedUpdate,
-        ] {
-            let write = split.slot_for(class).expect("write slot");
-            check!(write.endpoint.addr == endpoints[0].addr, "class {class:?}");
-        }
-
-        let mut read_only = build_connections(&endpoints, route_worker(2, 3, &mix_of(0, 0, 1, 0)));
-        assert!(read_only.write.is_none());
-        let slot = read_only.slot_for(OpClass::ReadOnly).expect("read slot");
-        check!(slot.endpoint.addr == endpoints[2].addr);
-        assert!(read_only.slot_for(OpClass::SingleShardInsert).is_none());
     }
 }
