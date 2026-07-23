@@ -22,6 +22,7 @@ use tokio::sync::Mutex;
 use crate::{
     checkpoint::{CheckpointStore, CheckpointWalPruner, restore_latest},
     error::SubstrateError,
+    follower::{CommittedEndConnection, CommittedEndDialer, LiveCommittedEndSampler},
     frame::{BARRIER_SEQ, WalFrame},
     replay::{ReplayItem, ReplayOutcome, replay_committed_frames, replay_committed_frames_from},
     topic::{ensure_wal_topic_name, transactional_id_for_range, wal_topic_for_generation},
@@ -34,6 +35,10 @@ use crate::{
 const READ_COMMITTED: i8 = 1;
 const PARTITION: i32 = 0;
 const FETCH_MAX_WAIT_MS: i32 = 100;
+/// Committed-end sample fetches must return immediately when the cursor is
+/// already at the stable end; a positive wait would park every barrier call
+/// on the broker's long-poll timer.
+const END_SAMPLE_MAX_WAIT_MS: i32 = 0;
 const FETCH_MAX_BYTES: i32 = 1_048_576;
 const EMPTY_FETCH_RETRIES: usize = 100;
 const OFFSET_OUT_OF_RANGE: i16 = 1;
@@ -293,47 +298,73 @@ pub async fn read_live_retained_committed(
 ///
 /// Returns an error when the requested operation cannot be completed.
 pub async fn live_committed_end(config: &LiveRecoveryConfig) -> Result<i64, SubstrateError> {
-    let bootstrap_addrs = parse_bootstrap_addrs(&config.bootstrap)?;
-    let topic = config.wal_topic();
-    let mut admin = AdminClient::connect_secured(&bootstrap_addrs, config.security.clone())
+    LiveCommittedEndSampler::new(config.clone())
+        .committed_end()
         .await
-        .map_err(|error| SubstrateError::Unavailable(format!("admin connect: {error}")))?;
-    let topic_uuid = resolve_topic_uuid(&mut admin, &topic).await?;
-    let reader = KafkaCommittedWalReader::new(
-        bootstrap_addrs,
-        topic,
-        topic_uuid,
-        0,
-        config.security.clone(),
-    );
-    let conn = reader.open_connection().await?;
-    let fetched = reader.fetch_partition_log_start(&conn).await?;
-    let mut next = fetched.log_start_offset.max(0);
-    let mut last_visible = None;
-    while next < fetched.last_stable_offset {
-        let page = fetch_partition_with_isolation_progress(
-            &conn,
-            IsolatedFetch {
-                topic: &reader.topic,
-                topic_id: reader.topic_uuid,
-                partition: PARTITION,
-                fetch_offset: next,
-                max_wait_ms: FETCH_MAX_WAIT_MS,
-                partition_max_bytes: FETCH_MAX_BYTES,
-                isolation_level: READ_COMMITTED,
-            },
-        )
-        .await
-        .map_err(|error| SubstrateError::Unavailable(format!("committed-end fetch: {error}")))?;
-        if let Some(record) = page.records.last() {
-            last_visible = Some(record.offset);
-        }
-        let Some(progress) = page.next_offset.filter(|progress| *progress > next) else {
-            break;
-        };
-        next = progress;
+}
+
+/// Dials live broker attachments for [`LiveCommittedEndSampler`].
+pub(crate) struct LiveEndDialer {
+    config: LiveRecoveryConfig,
+}
+
+impl LiveEndDialer {
+    pub(crate) const fn new(config: LiveRecoveryConfig) -> Self {
+        Self { config }
     }
-    Ok(last_visible.unwrap_or(-1))
+}
+
+#[async_trait::async_trait]
+impl CommittedEndDialer for LiveEndDialer {
+    async fn dial(&self) -> Result<Box<dyn CommittedEndConnection>, SubstrateError> {
+        let bootstrap_addrs = parse_bootstrap_addrs(&self.config.bootstrap)?;
+        let topic = self.config.wal_topic();
+        let mut admin =
+            AdminClient::connect_secured(&bootstrap_addrs, self.config.security.clone())
+                .await
+                .map_err(|error| SubstrateError::Unavailable(format!("admin connect: {error}")))?;
+        let topic_uuid = resolve_topic_uuid(&mut admin, &topic).await?;
+        let connection = open_wal_connection(
+            &bootstrap_addrs,
+            self.config.security.clone(),
+            "crabka-gres-substrate-end-sample",
+        )
+        .await?;
+        Ok(Box::new(LiveEndConnection {
+            connection,
+            topic,
+            topic_uuid,
+        }))
+    }
+}
+
+/// One dialed broker connection with its resolved topic identity.
+struct LiveEndConnection {
+    connection: Connection,
+    topic: String,
+    topic_uuid: WireUuid,
+}
+
+#[async_trait::async_trait]
+impl CommittedEndConnection for LiveEndConnection {
+    async fn fetch_page(&self, fetch_offset: i64) -> Result<FetchedWalPartition, SubstrateError> {
+        let response: FetchResponse = self
+            .connection
+            .send(build_fetch_request(
+                &self.topic,
+                self.topic_uuid,
+                fetch_offset,
+                END_SAMPLE_MAX_WAIT_MS,
+            ))
+            .await
+            .map_err(|error| {
+                SubstrateError::Unavailable(format!(
+                    "committed-end fetch {} offset {fetch_offset}: {error}",
+                    self.topic
+                ))
+            })?;
+        decode_fetch_response(&response, true)
+    }
 }
 
 /// Ensure the selected range-generation WAL topic exists without constructing
@@ -614,27 +645,41 @@ impl KafkaCommittedWalReader {
     }
 
     async fn open_connection(&self) -> Result<Connection, SubstrateError> {
-        let host_port = self.bootstrap_addrs.first().ok_or_else(|| {
-            SubstrateError::Unavailable("substrate bootstrap address list is empty".into())
-        })?;
-        let mut addrs = tokio::net::lookup_host(host_port).await.map_err(|error| {
-            SubstrateError::Unavailable(format!("DNS lookup {host_port}: {error}"))
-        })?;
-        let addr = addrs
-            .next()
-            .ok_or_else(|| SubstrateError::Unavailable(format!("no addresses for {host_port}")))?;
-        Connection::connect_with_options(
-            addr,
-            ConnectionOptions {
-                client_id: "crabka-gres-substrate-replay".to_string(),
-                connect_timeout: std::time::Duration::from_secs(10),
-                request_timeout: std::time::Duration::from_secs(30),
-                security: self.security.clone().map(Box::new),
-            },
+        open_wal_connection(
+            &self.bootstrap_addrs,
+            self.security.clone(),
+            "crabka-gres-substrate-replay",
         )
         .await
-        .map_err(|error| SubstrateError::Unavailable(format!("connect to {host_port}: {error}")))
     }
+}
+
+/// Open one raw broker connection to the first bootstrap address.
+async fn open_wal_connection(
+    bootstrap_addrs: &[String],
+    security: Option<ClientSecurity>,
+    client_id: &str,
+) -> Result<Connection, SubstrateError> {
+    let host_port = bootstrap_addrs.first().ok_or_else(|| {
+        SubstrateError::Unavailable("substrate bootstrap address list is empty".into())
+    })?;
+    let mut addrs = tokio::net::lookup_host(host_port)
+        .await
+        .map_err(|error| SubstrateError::Unavailable(format!("DNS lookup {host_port}: {error}")))?;
+    let addr = addrs
+        .next()
+        .ok_or_else(|| SubstrateError::Unavailable(format!("no addresses for {host_port}")))?;
+    Connection::connect_with_options(
+        addr,
+        ConnectionOptions {
+            client_id: client_id.to_string(),
+            connect_timeout: std::time::Duration::from_secs(10),
+            request_timeout: std::time::Duration::from_secs(30),
+            security: security.map(Box::new),
+        },
+    )
+    .await
+    .map_err(|error| SubstrateError::Unavailable(format!("connect to {host_port}: {error}")))
 }
 
 #[async_trait::async_trait]
@@ -691,14 +736,15 @@ impl CommittedWalReader for KafkaCommittedWalReader {
     }
 }
 
+/// One decoded committed-isolation fetch page of a WAL partition.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct FetchedWalPartition {
-    log_start_offset: i64,
-    high_watermark: i64,
-    last_stable_offset: i64,
-    decoded_batches: usize,
-    next_offset: i64,
-    records: Vec<ReplayItem>,
+pub(crate) struct FetchedWalPartition {
+    pub(crate) log_start_offset: i64,
+    pub(crate) high_watermark: i64,
+    pub(crate) last_stable_offset: i64,
+    pub(crate) decoded_batches: usize,
+    pub(crate) next_offset: i64,
+    pub(crate) records: Vec<ReplayItem>,
 }
 
 impl KafkaCommittedWalReader {
@@ -750,7 +796,12 @@ impl KafkaCommittedWalReader {
         conn: &Connection,
     ) -> Result<FetchedWalPartition, SubstrateError> {
         let response: FetchResponse = conn
-            .send(build_fetch_request(&self.topic, self.topic_uuid, 0))
+            .send(build_fetch_request(
+                &self.topic,
+                self.topic_uuid,
+                0,
+                FETCH_MAX_WAIT_MS,
+            ))
             .await
             .map_err(|error| {
                 SubstrateError::Unavailable(format!(
@@ -762,9 +813,14 @@ impl KafkaCommittedWalReader {
     }
 }
 
-fn build_fetch_request(topic: &str, topic_id: WireUuid, fetch_offset: i64) -> FetchRequest {
+fn build_fetch_request(
+    topic: &str,
+    topic_id: WireUuid,
+    fetch_offset: i64,
+    max_wait_ms: i32,
+) -> FetchRequest {
     FetchRequest {
-        max_wait_ms: FETCH_MAX_WAIT_MS,
+        max_wait_ms,
         min_bytes: 1,
         max_bytes: 50 * 1024 * 1024,
         isolation_level: READ_COMMITTED,
