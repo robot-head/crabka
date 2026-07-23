@@ -47,6 +47,15 @@ pub struct TopologySpec {
     /// HLC authority) is observable.
     #[serde(default)]
     pub clock_skew_ms: BTreeMap<u16, i64>,
+    /// Pin each node to this many dedicated CPUs (the broker gets its own
+    /// two, nodes get disjoint slices after it). On a single machine this
+    /// makes each node behave like a fixed-capacity host, so adding nodes
+    /// adds real compute and scaling curves measure the architecture rather
+    /// than one box being partitioned N ways. Launch fails if the machine
+    /// has fewer CPUs than `2 + nodes * cpus_per_node`. For full isolation
+    /// run the harness binary itself under `taskset` on the leftover CPUs.
+    #[serde(default)]
+    pub cpus_per_node: Option<u32>,
 }
 
 /// Timestamp-source mode for the tenant under test.
@@ -393,6 +402,9 @@ impl Scenario {
         if !self.topology.clock_skew_ms.is_empty() && self.mode == ModeSpec::LogicalTso {
             return invalid("clock_skew_ms requires hlc mode".to_owned());
         }
+        if self.topology.cpus_per_node == Some(0) {
+            return invalid("cpus_per_node must be at least 1 when set".to_owned());
+        }
         if self.workload.connections == 0 {
             return invalid("workload.connections must be at least 1".to_owned());
         }
@@ -497,6 +509,7 @@ workload:
                 nodes: 2,
                 ranges: 2,
                 clock_skew_ms: BTreeMap::new(),
+                cpus_per_node: None,
             },
             mode: ModeSpec::LogicalTso,
             workload: WorkloadSpec {

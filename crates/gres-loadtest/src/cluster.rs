@@ -232,9 +232,28 @@ impl Cluster {
             .with_context(|| format!("create log dir {}", log_dir.display()))?;
         std::fs::create_dir_all(work_dir.join("checkpoints")).context("create checkpoint dir")?;
 
+        let allocation = topology
+            .cpus_per_node
+            .map(|cpus| cpu_allocation(topology.nodes, cpus, online_cpu_count()?))
+            .transpose()?;
+        if let Some(allocation) = &allocation {
+            tracing::info!(
+                broker = %allocation.broker,
+                nodes = ?allocation.nodes,
+                "CPU pinning active"
+            );
+        }
+
         let (broker_port, controller_port) = pick_free_ports().await?;
         run_crabka_format(&binaries.crabka_cli, &work_dir, &log_dir, controller_port).await?;
-        let broker = start_broker(&binaries.broker, &work_dir, &log_dir, broker_port).await?;
+        let broker = start_broker(
+            &binaries.broker,
+            &work_dir,
+            &log_dir,
+            broker_port,
+            allocation.as_ref().map(|cpus| cpus.broker.as_str()),
+        )
+        .await?;
         let kafka_bootstrap = format!("127.0.0.1:{broker_port}");
         tracing::info!(bootstrap = %kafka_bootstrap, "broker ready");
 
@@ -265,6 +284,7 @@ impl Cluster {
             work_dir: &work_dir,
             log_dir: &log_dir,
             tls: &tls,
+            cpu_allocation: allocation.as_ref(),
         };
         let node_specs: Vec<NodeSpec> = (0..topology.nodes)
             .map(|node| node_spec(node, &context))
@@ -513,6 +533,101 @@ struct NodeSpec {
     args: Vec<String>,
     cache_dir: PathBuf,
     log_path: PathBuf,
+    /// `taskset -c` CPU list pinning this node, when the topology asks for
+    /// fixed-capacity nodes.
+    cpuset: Option<String>,
+}
+
+/// CPUs the broker is pinned to when `cpus_per_node` pinning is active.
+const BROKER_CPUS: u32 = 2;
+
+/// Disjoint CPU slices for the broker and each node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CpuAllocation {
+    broker: String,
+    nodes: Vec<String>,
+}
+
+/// Carves `available` CPUs into a broker slice (`0..BROKER_CPUS`) and one
+/// disjoint `cpus_per_node`-wide slice per node, so each process behaves
+/// like a fixed-capacity host.
+///
+/// # Errors
+///
+/// Returns an error if the machine has fewer CPUs than the layout needs;
+/// oversubscribed pinning would silently reintroduce the shared-CPU
+/// distortion the knob exists to remove.
+fn cpu_allocation(
+    node_count: u16,
+    cpus_per_node: u32,
+    available: u32,
+) -> anyhow::Result<CpuAllocation> {
+    let needed = BROKER_CPUS + u32::from(node_count) * cpus_per_node;
+    ensure!(
+        needed <= available,
+        "cpus_per_node = {cpus_per_node} needs {needed} CPUs \
+         ({BROKER_CPUS} broker + {node_count} x {cpus_per_node}) but only {available} exist"
+    );
+    let span = |start: u32, width: u32| {
+        if width == 1 {
+            start.to_string()
+        } else {
+            format!("{start}-{}", start + width - 1)
+        }
+    };
+    Ok(CpuAllocation {
+        broker: span(0, BROKER_CPUS),
+        nodes: (0..u32::from(node_count))
+            .map(|node| span(BROKER_CPUS + node * cpus_per_node, cpus_per_node))
+            .collect(),
+    })
+}
+
+/// CPUs that exist on the machine, from `/sys/devices/system/cpu/online`.
+///
+/// Deliberately NOT `available_parallelism()`: that respects the calling
+/// process's own affinity mask, and the recommended setup runs the harness
+/// under `taskset` on leftover CPUs — children may still be pinned to any
+/// online CPU regardless of the parent's mask.
+fn online_cpu_count() -> anyhow::Result<u32> {
+    let raw = std::fs::read_to_string("/sys/devices/system/cpu/online")
+        .context("read /sys/devices/system/cpu/online")?;
+    parse_cpu_list_count(raw.trim()).with_context(|| format!("parse online CPU list {raw:?}"))
+}
+
+/// Counts CPUs in a kernel CPU-list string such as `0-15` or `0,2-3,7`.
+fn parse_cpu_list_count(list: &str) -> anyhow::Result<u32> {
+    let mut count: u32 = 0;
+    for part in list.split(',') {
+        let part = part.trim();
+        count += if let Some((low, high)) = part.split_once('-') {
+            let low: u32 = low.parse().with_context(|| format!("bad bound {part:?}"))?;
+            let high: u32 = high
+                .parse()
+                .with_context(|| format!("bad bound {part:?}"))?;
+            ensure!(low <= high, "inverted CPU range {part:?}");
+            high - low + 1
+        } else {
+            let _: u32 = part
+                .parse()
+                .with_context(|| format!("bad CPU id {part:?}"))?;
+            1
+        };
+    }
+    ensure!(count > 0, "empty CPU list");
+    Ok(count)
+}
+
+/// The command for `binary`, wrapped in `taskset -c <cpuset>` when pinned.
+fn pinned_command(binary: &Path, cpuset: Option<&str>) -> Command {
+    match cpuset {
+        Some(cpus) => {
+            let mut command = Command::new("taskset");
+            command.arg("-c").arg(cpus).arg(binary);
+            command
+        }
+        None => Command::new(binary),
+    }
 }
 
 /// A live node child and its OS-assigned listener addresses.
@@ -550,6 +665,7 @@ struct SpecContext<'a> {
     work_dir: &'a Path,
     log_dir: &'a Path,
     tls: &'a TlsPaths,
+    cpu_allocation: Option<&'a CpuAllocation>,
 }
 
 /// The SQL endpoint clients use for a given listener address.
@@ -645,6 +761,9 @@ fn node_spec(node: u16, context: &SpecContext<'_>) -> NodeSpec {
             .get(&node)
             .copied()
             .unwrap_or(0),
+        context
+            .cpu_allocation
+            .map(|allocation| allocation.nodes[usize::from(node)].clone()),
         context,
     )
 }
@@ -655,6 +774,7 @@ fn build_spec(
     host_ranges: String,
     with_checkpoints: bool,
     skew_ms: i64,
+    cpuset: Option<String>,
     context: &SpecContext<'_>,
 ) -> NodeSpec {
     let cache_dir = context.work_dir.join(format!("{label}-cache"));
@@ -704,6 +824,7 @@ fn build_spec(
         args,
         cache_dir,
         log_path: context.log_dir.join(format!("{label}.log")),
+        cpuset,
     }
 }
 
@@ -712,7 +833,7 @@ fn build_spec(
 fn spawn_node(gres_binary: &Path, spec: &NodeSpec) -> anyhow::Result<NodeProcess> {
     let stderr = File::create(&spec.log_path)
         .with_context(|| format!("create {}", spec.log_path.display()))?;
-    let mut command = Command::new(gres_binary);
+    let mut command = pinned_command(gres_binary, spec.cpuset.as_deref());
     command
         .args(&spec.args)
         .stdout(Stdio::piped())
@@ -886,6 +1007,7 @@ async fn start_broker(
     work_dir: &Path,
     log_dir: &Path,
     broker_port: u16,
+    cpuset: Option<&str>,
 ) -> anyhow::Result<BrokerProcess> {
     let broker_data = work_dir.join("broker-data");
     let config_path = work_dir.join("broker.toml");
@@ -913,7 +1035,7 @@ super_users = ["ANONYMOUS"]
     let log_file =
         File::create(&log_path).with_context(|| format!("create {}", log_path.display()))?;
     let stderr_file = log_file.try_clone().context("clone broker log handle")?;
-    let mut command = Command::new(broker_binary);
+    let mut command = pinned_command(broker_binary, cpuset);
     command
         .arg("--log-dir")
         .arg(&broker_data)
@@ -1278,12 +1400,86 @@ mod tests {
         }
     }
 
+    /// Expected outcome of one [`cpu_allocation`] case: broker slice plus
+    /// per-node slices, or `None` for an overcommitted layout.
+    type ExpectedAllocation = Option<(&'static str, &'static [&'static str])>;
+
+    #[test]
+    fn cpu_allocation_carves_disjoint_slices_and_rejects_overcommit() {
+        let cases: [(u16, u32, u32, ExpectedAllocation); 5] = [
+            (1, 3, 16, Some(("0-1", &["2-4"]))),
+            (4, 3, 16, Some(("0-1", &["2-4", "5-7", "8-10", "11-13"]))),
+            (2, 1, 4, Some(("0-1", &["2", "3"]))),
+            (4, 4, 16, None),
+            (1, 15, 16, None),
+        ];
+        for (nodes, cpus, available, expected) in cases {
+            let result = cpu_allocation(nodes, cpus, available);
+            match expected {
+                Some((broker, node_slices)) => {
+                    let allocation = result.unwrap_or_else(|error| {
+                        panic!("{nodes} nodes x {cpus} on {available}: {error}")
+                    });
+                    let expected = CpuAllocation {
+                        broker: broker.to_owned(),
+                        nodes: node_slices.iter().map(|s| (*s).to_owned()).collect(),
+                    };
+                    assert!(allocation == expected, "{nodes} nodes x {cpus}");
+                }
+                None => {
+                    assert!(
+                        result.is_err(),
+                        "{nodes} nodes x {cpus} on {available} must overcommit"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cpu_list_counting_handles_ranges_singles_and_rejects_garbage() {
+        let good = [("0-15", 16), ("0", 1), ("0,2-3,7", 4), ("0-1,4-7", 6)];
+        for (list, expected) in good {
+            assert!(
+                parse_cpu_list_count(list).expect(list) == expected,
+                "list {list}"
+            );
+        }
+        for bad in ["", "3-1", "x", "1-", "0,,2"] {
+            assert!(parse_cpu_list_count(bad).is_err(), "list {bad:?}");
+        }
+    }
+
+    #[test]
+    fn node_specs_carry_their_cpu_slice_when_pinning_is_active() {
+        let topology = TopologySpec {
+            nodes: 2,
+            ranges: 2,
+            clock_skew_ms: BTreeMap::new(),
+            cpus_per_node: Some(3),
+        };
+        let allocation = cpu_allocation(2, 3, 16).expect("fits");
+        let tls = test_tls();
+        let context = SpecContext {
+            topology: &topology,
+            mode: ModeSpec::LogicalTso,
+            kafka_bootstrap: "127.0.0.1:19092",
+            work_dir: Path::new("/work"),
+            log_dir: Path::new("/work/logs"),
+            tls: &tls,
+            cpu_allocation: Some(&allocation),
+        };
+        assert!(node_spec(0, &context).cpuset.as_deref() == Some("2-4"));
+        assert!(node_spec(1, &context).cpuset.as_deref() == Some("5-7"));
+    }
+
     #[test]
     fn node_specs_wire_topology_flags() {
         let topology = TopologySpec {
             nodes: 3,
             ranges: 4,
             clock_skew_ms: BTreeMap::new(),
+            cpus_per_node: None,
         };
         let tls = test_tls();
         let context = SpecContext {
@@ -1293,6 +1489,7 @@ mod tests {
             work_dir: Path::new("/work"),
             log_dir: Path::new("/work/logs"),
             tls: &tls,
+            cpu_allocation: None,
         };
         let node0 = node_spec(0, &context);
         assert!(node0.label == "node0");
@@ -1308,6 +1505,7 @@ mod tests {
             nodes: 2,
             ranges: 2,
             clock_skew_ms: BTreeMap::from([(1, 250)]),
+            cpus_per_node: None,
         };
         let tls = test_tls();
         let context = SpecContext {
@@ -1317,6 +1515,7 @@ mod tests {
             work_dir: Path::new("/work"),
             log_dir: Path::new("/work/logs"),
             tls: &tls,
+            cpu_allocation: None,
         };
         let node0 = node_spec(0, &context);
         assert!(arg_value(&node0.args, "--checkpoint-store") == Some("local"));
@@ -1472,6 +1671,7 @@ mod tests {
                 nodes: 2,
                 ranges: 2,
                 clock_skew_ms: BTreeMap::new(),
+                cpus_per_node: None,
             },
             mode: ModeSpec::LogicalTso,
             work_dir: work_dir.path().to_path_buf(),
