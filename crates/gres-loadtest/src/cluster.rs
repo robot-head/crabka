@@ -234,7 +234,14 @@ impl Cluster {
 
         let allocation = topology
             .cpus_per_node
-            .map(|cpus| cpu_allocation(topology.nodes, cpus, online_cpu_count()?))
+            .map(|cpus| {
+                cpu_allocation(
+                    topology.nodes,
+                    cpus,
+                    topology.broker_cpus.unwrap_or(DEFAULT_BROKER_CPUS),
+                    online_cpu_count()?,
+                )
+            })
             .transpose()?;
         if let Some(allocation) = &allocation {
             tracing::info!(
@@ -538,8 +545,9 @@ struct NodeSpec {
     cpuset: Option<String>,
 }
 
-/// CPUs the broker is pinned to when `cpus_per_node` pinning is active.
-const BROKER_CPUS: u32 = 2;
+/// Default CPUs pinned to the broker when `cpus_per_node` pinning is
+/// active and the topology does not say otherwise.
+const DEFAULT_BROKER_CPUS: u32 = 2;
 
 /// Disjoint CPU slices for the broker and each node.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -548,7 +556,7 @@ struct CpuAllocation {
     nodes: Vec<String>,
 }
 
-/// Carves `available` CPUs into a broker slice (`0..BROKER_CPUS`) and one
+/// Carves `available` CPUs into a broker slice (`0..broker_cpus`) and one
 /// disjoint `cpus_per_node`-wide slice per node, so each process behaves
 /// like a fixed-capacity host.
 ///
@@ -560,13 +568,14 @@ struct CpuAllocation {
 fn cpu_allocation(
     node_count: u16,
     cpus_per_node: u32,
+    broker_cpus: u32,
     available: u32,
 ) -> anyhow::Result<CpuAllocation> {
-    let needed = BROKER_CPUS + u32::from(node_count) * cpus_per_node;
+    let needed = broker_cpus + u32::from(node_count) * cpus_per_node;
     ensure!(
         needed <= available,
         "cpus_per_node = {cpus_per_node} needs {needed} CPUs \
-         ({BROKER_CPUS} broker + {node_count} x {cpus_per_node}) but only {available} exist"
+         ({broker_cpus} broker + {node_count} x {cpus_per_node}) but only {available} exist"
     );
     let span = |start: u32, width: u32| {
         if width == 1 {
@@ -576,9 +585,9 @@ fn cpu_allocation(
         }
     };
     Ok(CpuAllocation {
-        broker: span(0, BROKER_CPUS),
+        broker: span(0, broker_cpus),
         nodes: (0..u32::from(node_count))
-            .map(|node| span(BROKER_CPUS + node * cpus_per_node, cpus_per_node))
+            .map(|node| span(broker_cpus + node * cpus_per_node, cpus_per_node))
             .collect(),
     })
 }
@@ -1406,15 +1415,17 @@ mod tests {
 
     #[test]
     fn cpu_allocation_carves_disjoint_slices_and_rejects_overcommit() {
-        let cases: [(u16, u32, u32, ExpectedAllocation); 5] = [
-            (1, 3, 16, Some(("0-1", &["2-4"]))),
-            (4, 3, 16, Some(("0-1", &["2-4", "5-7", "8-10", "11-13"]))),
-            (2, 1, 4, Some(("0-1", &["2", "3"]))),
-            (4, 4, 16, None),
-            (1, 15, 16, None),
+        let cases: [(u16, u32, u32, u32, ExpectedAllocation); 7] = [
+            (1, 3, 2, 16, Some(("0-1", &["2-4"]))),
+            (4, 3, 2, 16, Some(("0-1", &["2-4", "5-7", "8-10", "11-13"]))),
+            (2, 1, 2, 4, Some(("0-1", &["2", "3"]))),
+            (4, 2, 4, 16, Some(("0-3", &["4-5", "6-7", "8-9", "10-11"]))),
+            (2, 2, 1, 16, Some(("0", &["1-2", "3-4"]))),
+            (4, 4, 2, 16, None),
+            (1, 15, 2, 16, None),
         ];
-        for (nodes, cpus, available, expected) in cases {
-            let result = cpu_allocation(nodes, cpus, available);
+        for (nodes, cpus, broker, available, expected) in cases {
+            let result = cpu_allocation(nodes, cpus, broker, available);
             match expected {
                 Some((broker, node_slices)) => {
                     let allocation = result.unwrap_or_else(|error| {
@@ -1457,8 +1468,9 @@ mod tests {
             ranges: 2,
             clock_skew_ms: BTreeMap::new(),
             cpus_per_node: Some(3),
+            broker_cpus: None,
         };
-        let allocation = cpu_allocation(2, 3, 16).expect("fits");
+        let allocation = cpu_allocation(2, 3, 2, 16).expect("fits");
         let tls = test_tls();
         let context = SpecContext {
             topology: &topology,
@@ -1480,6 +1492,7 @@ mod tests {
             ranges: 4,
             clock_skew_ms: BTreeMap::new(),
             cpus_per_node: None,
+            broker_cpus: None,
         };
         let tls = test_tls();
         let context = SpecContext {
@@ -1506,6 +1519,7 @@ mod tests {
             ranges: 2,
             clock_skew_ms: BTreeMap::from([(1, 250)]),
             cpus_per_node: None,
+            broker_cpus: None,
         };
         let tls = test_tls();
         let context = SpecContext {
@@ -1672,6 +1686,7 @@ mod tests {
                 ranges: 2,
                 clock_skew_ms: BTreeMap::new(),
                 cpus_per_node: None,
+                broker_cpus: None,
             },
             mode: ModeSpec::LogicalTso,
             work_dir: work_dir.path().to_path_buf(),

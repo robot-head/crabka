@@ -48,14 +48,20 @@ pub struct TopologySpec {
     #[serde(default)]
     pub clock_skew_ms: BTreeMap<u16, i64>,
     /// Pin each node to this many dedicated CPUs (the broker gets its own
-    /// two, nodes get disjoint slices after it). On a single machine this
-    /// makes each node behave like a fixed-capacity host, so adding nodes
-    /// adds real compute and scaling curves measure the architecture rather
-    /// than one box being partitioned N ways. Launch fails if the machine
-    /// has fewer CPUs than `2 + nodes * cpus_per_node`. For full isolation
-    /// run the harness binary itself under `taskset` on the leftover CPUs.
+    /// slice first — see `broker_cpus` — and nodes get disjoint slices
+    /// after it). On a single machine this makes each node behave like a
+    /// fixed-capacity host, so adding nodes adds real compute and scaling
+    /// curves measure the architecture rather than one box being
+    /// partitioned N ways. Launch fails if the machine has fewer CPUs than
+    /// `broker_cpus + nodes * cpus_per_node`. For full isolation run the
+    /// harness binary itself under `taskset` on the leftover CPUs.
     #[serde(default)]
     pub cpus_per_node: Option<u32>,
+    /// CPUs pinned to the broker when `cpus_per_node` pinning is active
+    /// (default 2). Raise it to test whether the shared WAL broker is the
+    /// scaling ceiling. Only meaningful together with `cpus_per_node`.
+    #[serde(default)]
+    pub broker_cpus: Option<u32>,
 }
 
 /// Timestamp-source mode for the tenant under test.
@@ -405,6 +411,12 @@ impl Scenario {
         if self.topology.cpus_per_node == Some(0) {
             return invalid("cpus_per_node must be at least 1 when set".to_owned());
         }
+        if self.topology.broker_cpus == Some(0) {
+            return invalid("broker_cpus must be at least 1 when set".to_owned());
+        }
+        if self.topology.broker_cpus.is_some() && self.topology.cpus_per_node.is_none() {
+            return invalid("broker_cpus requires cpus_per_node pinning".to_owned());
+        }
         if self.workload.connections == 0 {
             return invalid("workload.connections must be at least 1".to_owned());
         }
@@ -510,6 +522,7 @@ workload:
                 ranges: 2,
                 clock_skew_ms: BTreeMap::new(),
                 cpus_per_node: None,
+                broker_cpus: None,
             },
             mode: ModeSpec::LogicalTso,
             workload: WorkloadSpec {
