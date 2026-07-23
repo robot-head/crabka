@@ -151,6 +151,14 @@ async fn scan_to_stable_end(
 ) -> Result<i64, SubstrateError> {
     let mut page = connection.fetch_page(cursor.next_fetch).await?;
     let stable_end = page.last_stable_offset;
+    // Each continuing iteration advances `next_fetch` strictly toward
+    // `stable_end`, so the scan cannot legitimately take more iterations than
+    // the offset span. Bound it explicitly: a broker whose pages never let the
+    // scan reach the stable end must surface an error rather than spin the
+    // barrier — and thus every read waiting on it — forever.
+    let mut remaining_iterations = u64::try_from(stable_end.saturating_sub(cursor.next_fetch))
+        .unwrap_or(u64::MAX)
+        .saturating_add(2);
     loop {
         if let Some(record) = page
             .records
@@ -165,6 +173,11 @@ async fn scan_to_stable_end(
             cursor.next_fetch = cursor.next_fetch.max(progress);
             break;
         }
+        remaining_iterations = remaining_iterations.checked_sub(1).ok_or_else(|| {
+            SubstrateError::Unavailable(
+                "range-0 committed-end scan did not reach the stable end".to_owned(),
+            )
+        })?;
         cursor.next_fetch = progress;
         page = connection.fetch_page(cursor.next_fetch).await?;
     }
