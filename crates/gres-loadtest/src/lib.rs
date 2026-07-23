@@ -10,9 +10,17 @@
 //! summary; `compare` runs the same scenario under both timestamp modes and
 //! renders them side by side.
 //!
+//! An external-cluster mode ([`external`], `run --external`) points the same
+//! workload/measurement/reporting pipeline at any pgwire-speaking SQL system
+//! (`CockroachDB`, `YugabyteDB`, `PostgreSQL`, a remote crabka cluster) without
+//! launching crabka processes; faults are unavailable there, and resource
+//! sampling covers local processes discovered by listening port (or named
+//! via `--external-pids`).
+//!
 //! Module map:
 //! - [`scenario`] — the YAML schema and its validation.
 //! - [`cluster`] — broker + node process orchestration and tenant provisioning.
+//! - [`external`] — external-endpoint parsing, validation, pid discovery.
 //! - [`proxy`] — the chaos TCP proxy every endpoint sits behind.
 //! - [`workload`] — the SQL load driver (mix, pacing, latency histograms).
 //! - [`faults`] — executes a scenario's fault timeline against a live cluster.
@@ -21,6 +29,7 @@
 //! - [`runner`] — ties the above together for one scenario run.
 
 pub mod cluster;
+pub mod external;
 pub mod faults;
 pub mod metrics;
 pub mod proxy;

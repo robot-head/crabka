@@ -6,7 +6,7 @@ Part of [Crabka](https://github.com/robot-head/crabka), a Rust implementation of
 
 ## Overview
 
-The harness boots a real multi-process cluster — one `crabka-broker` plus N `crabka-gres` compute nodes — with every inter-node and client-facing TCP endpoint fronted by a chaos proxy. A YAML scenario describes the topology, the timestamp-source mode (Percolator-style `logical-tso` or hybrid logical clock `hlc`), the SQL workload mix, and a timeline of network faults. A run produces a JSON report plus a Markdown summary; `compare` runs the same scenario under both timestamp modes and renders them side by side, so the cost of the global-timestamp path is measurable per workload shape and per fault.
+The harness boots a real multi-process cluster — one `crabka-broker` plus N `crabka-gres` compute nodes — with every inter-node and client-facing TCP endpoint fronted by a chaos proxy. A YAML scenario describes the topology, the timestamp-source mode (Percolator-style `logical-tso` or hybrid logical clock `hlc`), the SQL workload mix, and a timeline of network faults. A run produces a JSON report plus a Markdown summary; `compare` runs the same scenario under both timestamp modes and renders them side by side, so the cost of the global-timestamp path is measurable per workload shape and per fault. An external mode (`run --external`) drives the identical workload against any pgwire-speaking SQL system without launching crabka — see [External systems](#external-systems).
 
 ## Prerequisites
 
@@ -122,6 +122,62 @@ Each run writes two files into the output directory, named `<scenario>-<mode-slu
 - `<scenario>-<mode>.md` — the same run rendered as Markdown, with the timeline reduced to the interesting seconds (near a fault or deviating from median throughput).
 
 `compare` additionally writes `<scenario>-comparison.md`: both modes side by side with relative deltas and both fault logs.
+
+## External systems
+
+`run --external` points the identical workload, measurement, and reporting pipeline at any pgwire-speaking SQL system — CockroachDB, YugabyteDB, PostgreSQL, or a remote crabka cluster — without launching any crabka processes:
+
+```bash
+cargo run -p crabka-gres-loadtest -- run \
+  --scenario crates/gres-loadtest/scenarios/mixed-oltp.yaml \
+  --external "127.0.0.1:26257,127.0.0.1:26258,127.0.0.1:26259" \
+  --external-user roach --external-database bench
+```
+
+- `--external` takes a comma-separated `host:port` list; the workload's connections spread round-robin across the endpoints exactly as they do across crabka node front doors.
+- `--external-user` and `--external-database` are required (external mode never guesses credentials); `--external-password` is optional, and omitting it means no password.
+- Schema prep is the same standard SQL as against crabka (`DROP TABLE IF EXISTS` + `CREATE TABLE t<id> (id int4)` per table, a `(id int4, v int4)` hot table, multi-row `INSERT` seeding), so re-runs against a persistent system start clean.
+- The scenario's `topology.ranges` sets the number of `t{i * 1000000}` workload tables; an external system spreads those tables by its own sharding, so "ranges" simply means "N tables" there. `topology.nodes` is only recorded in the report.
+- The scenario's `mode` is ignored (with a logged notice) — the external system uses its own timestamp source — and the report's `mode` field is the string `external`; reports are named `<scenario>-external.{json,md}`.
+- The scenario's `faults` must be empty: no chaos proxies front an external system, so `run --external` fails fast on a fault timeline. `compare` does not support `--external` for the same reason it exists — it contrasts crabka's timestamp modes on a harness-launched cluster; run `run --external` once per target and diff the reports.
+
+**Resource sampling.** The harness discovers which local processes serve the given ports (`/proc/net/tcp{,6}` listening-socket inodes matched against `/proc/<pid>/fd`) and samples them under `ext:<port>` labels. Discovery only covers loopback endpoints — a remote system's processes cannot be read from the local `/proc`. For multi-process systems (e.g. a YugabyteDB master + tserver) or when `/proc` is permission-restricted, pass the roster manually:
+
+```bash
+--external-pids "master=41230,tserver=41288"
+```
+
+If discovery finds nothing and no override is given, the run warns and proceeds: throughput and latency are still measured, the report's resource and efficiency sections are just empty.
+
+**Fairness caveats for any cross-system comparison.** Numbers from `run --external` are only comparable to a crabka run (or another external run) after accounting for:
+
+- *Replication factor.* The harness launches crabka unreplicated (one broker, replication factor 1); CockroachDB and YugabyteDB default to 3× replication and pay for it on every write. Compare against a 1× external cluster, or a replicated crabka deployment, not across durability models.
+- *Commit durability.* fsync/commit settings differ per system (`synchronous_commit`, YCQL/YSQL durability knobs, crabka's broker flush policy). Align them explicitly before quoting a delta.
+- *No fault injection.* External runs measure fault-free steady state only; crabka scenario results that include fault windows are not comparable.
+- *Resource attribution scope.* `ext:<port>` rows cover only the discovered (or manually listed) local processes — a remote node, a separate storage service, or an undiscovered helper process contributes load but no CPU/RSS rows, so txn-per-CPU-second is comparable only when the rosters cover equivalent scopes.
+- *Everything in [Limitations](#limitations)* — debug vs release builds, shared-machine noise — applies doubly across systems.
+
+### Worked example: local PostgreSQL
+
+```bash
+# A throwaway PostgreSQL 16 on the default port.
+docker run --rm -d --name loadtest-pg -e POSTGRES_PASSWORD=secret \
+  -p 5432:5432 postgres:16
+
+# Wait for readiness, then create the benchmark database.
+docker exec loadtest-pg pg_isready -t 30
+docker exec loadtest-pg psql -U postgres -c 'CREATE DATABASE bench'
+
+# Drive the mixed OLTP scenario against it.
+cargo run --release -p crabka-gres-loadtest -- run \
+  --scenario crates/gres-loadtest/scenarios/mixed-oltp.yaml \
+  --external "127.0.0.1:5432" \
+  --external-user postgres --external-password secret --external-database bench
+
+docker stop loadtest-pg
+```
+
+Reports land in `loadtest-out/mixed-oltp-external.{json,md}`. Note that a containerized server may defeat pid discovery from the host's `/proc` view depending on the runtime; `--external-pids "postgres=$(docker inspect -f '{{.State.Pid}}' loadtest-pg)"` pins the roster explicitly (that pid samples the postmaster only — PostgreSQL backends are separate forked processes, so per-connection CPU is not attributed; treat resource rows as a lower bound).
 
 ## Limitations
 

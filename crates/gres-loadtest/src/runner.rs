@@ -23,7 +23,8 @@ use anyhow::Context as _;
 use tokio::time::Instant;
 
 use crate::{
-    cluster::{Binaries, Cluster, ClusterOptions, SqlEndpoint},
+    cluster::{Binaries, Cluster, ClusterOptions, ProcessRoster, SqlEndpoint},
+    external::{self, ExternalTarget},
     faults,
     metrics::ProcSampler,
     report::{
@@ -36,6 +37,10 @@ use crate::{
 
 /// Interval between `/proc` resource samples.
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Mode string recorded in external-mode reports; the crabka
+/// timestamp-source modes do not apply to an external system.
+pub const EXTERNAL_MODE: &str = "external";
 
 /// Configuration for one scenario run.
 #[derive(Debug, Clone)]
@@ -73,10 +78,10 @@ pub fn mode_slug(mode: ModeSpec) -> String {
     }
 }
 
-/// Report file paths for one scenario × mode under `out_dir`.
+/// Report file paths for one scenario × mode slug (a [`mode_slug`] or
+/// [`EXTERNAL_MODE`]) under `out_dir`.
 #[must_use]
-pub fn report_paths(out_dir: &Path, scenario: &str, mode: ModeSpec) -> ReportPaths {
-    let slug = mode_slug(mode);
+pub fn report_paths(out_dir: &Path, scenario: &str, slug: &str) -> ReportPaths {
     ReportPaths {
         json: out_dir.join(format!("{scenario}-{slug}.json")),
         markdown: out_dir.join(format!("{scenario}-{slug}.md")),
@@ -166,18 +171,118 @@ pub async fn run_scenario(config: RunConfig) -> anyhow::Result<RunReport> {
     // Removes the work dir unless it is a kept directory under `out_dir`.
     drop(work_dir);
 
-    let report = assemble_report(&scenario, driven);
-    let paths = report_paths(&out_dir, &scenario.name, mode);
-    let json = serde_json::to_string_pretty(&report).context("serialize report JSON")?;
+    let report = assemble_report(&scenario, &mode.to_string(), driven);
+    write_reports(&report, &out_dir, &scenario.name, &mode_slug(mode))?;
+    Ok(report)
+}
+
+/// Configuration for one external-cluster scenario run.
+#[derive(Debug, Clone)]
+pub struct ExternalRunConfig {
+    /// The parsed scenario. Its `mode` is ignored (with a logged notice) and
+    /// its fault timeline must be empty; `topology.ranges` still sets the
+    /// number of workload tables.
+    pub scenario: Scenario,
+    /// The external system to drive.
+    pub target: ExternalTarget,
+    /// Directory for reports.
+    pub out_dir: PathBuf,
+}
+
+/// Runs one scenario against an external pgwire-speaking system and writes
+/// the same report files as [`run_scenario`]: identical schema preparation,
+/// workload, measurement window, and rendering — with no crabka processes
+/// launched and no faults injected. The report's `mode` is
+/// [`EXTERNAL_MODE`]. Resource rows cover the target's manual
+/// `--external-pids` roster, or the local processes discovered listening on
+/// the loopback endpoints' ports; when neither yields anything the run
+/// proceeds with an empty roster (throughput and latency are unaffected).
+///
+/// # Errors
+///
+/// Returns an error if the scenario declares faults, an endpoint does not
+/// resolve, schema preparation fails, or a report cannot be written.
+pub async fn run_external_scenario(config: ExternalRunConfig) -> anyhow::Result<RunReport> {
+    let ExternalRunConfig {
+        scenario,
+        target,
+        out_dir,
+    } = config;
+    external::validate_scenario(&scenario)?;
+    tracing::info!(
+        scenario_mode = %scenario.mode,
+        "external mode: the scenario's timestamp-source mode is ignored \
+         (the external system uses its own)"
+    );
+    std::fs::create_dir_all(&out_dir)
+        .with_context(|| format!("create out dir {}", out_dir.display()))?;
+    let endpoints = target.sql_endpoints()?;
+    let schema_endpoint = endpoints.last().context("no external endpoints")?;
+    workload::prepare_schema(schema_endpoint, &scenario.workload, &scenario.topology)
+        .await
+        .with_context(|| {
+            format!(
+                "prepare workload schema for scenario {} on {}",
+                scenario.name, schema_endpoint.addr
+            )
+        })?;
+
+    let processes = match &target.pids_override {
+        Some(pids) => pids.clone(),
+        None => external::pids_for_ports(&external::loopback_ports(&endpoints)),
+    };
+    if processes.is_empty() {
+        tracing::warn!(
+            "no local processes found for the external endpoints; resource usage will be \
+             empty (throughput and latency are still measured; pass --external-pids to \
+             attribute resources manually)"
+        );
+    } else {
+        tracing::info!(?processes, "sampling external processes");
+    }
+    let roster = ProcessRoster::default();
+    for process in processes {
+        roster.push(process);
+    }
+    let sampler = ProcSampler::spawn(roster, SAMPLE_INTERVAL);
+    let started_unix_ms =
+        unix_ms(SystemTime::now()).saturating_add(scenario.workload.warmup_s.saturating_mul(1000));
+    let outcome = workload::run(&endpoints, &scenario.workload, &scenario.topology)
+        .await
+        .context("drive workload")?;
+    let resources = sampler.stop().await;
+    let report = assemble_report(
+        &scenario,
+        EXTERNAL_MODE,
+        Driven {
+            started_unix_ms,
+            outcome,
+            resources,
+            faults: Vec::new(),
+        },
+    );
+    write_reports(&report, &out_dir, &scenario.name, EXTERNAL_MODE)?;
+    Ok(report)
+}
+
+/// Serializes and writes the JSON + Markdown report pair for one run.
+fn write_reports(
+    report: &RunReport,
+    out_dir: &Path,
+    scenario: &str,
+    slug: &str,
+) -> anyhow::Result<()> {
+    let paths = report_paths(out_dir, scenario, slug);
+    let json = serde_json::to_string_pretty(report).context("serialize report JSON")?;
     std::fs::write(&paths.json, json).with_context(|| format!("write {}", paths.json.display()))?;
-    std::fs::write(&paths.markdown, report::render_markdown(&report))
+    std::fs::write(&paths.markdown, report::render_markdown(report))
         .with_context(|| format!("write {}", paths.markdown.display()))?;
     tracing::info!(
         json = %paths.json.display(),
         markdown = %paths.markdown.display(),
         "reports written"
     );
-    Ok(report)
+    Ok(())
 }
 
 /// The scenario actually run: the mode override applied, then re-validated
@@ -296,8 +401,9 @@ async fn drive(cluster: &mut Cluster, scenario: &Scenario) -> anyhow::Result<Dri
 }
 
 /// Assembles the report from the measured window's outcome, resource
-/// totals, and applied-fault log.
-fn assemble_report(scenario: &Scenario, driven: Driven) -> RunReport {
+/// totals, and applied-fault log. `mode` is the report's mode string: the
+/// scenario mode's display form, or [`EXTERNAL_MODE`].
+fn assemble_report(scenario: &Scenario, mode: &str, driven: Driven) -> RunReport {
     let Driven {
         started_unix_ms,
         outcome,
@@ -329,7 +435,7 @@ fn assemble_report(scenario: &Scenario, driven: Driven) -> RunReport {
     RunReport {
         scenario: scenario.name.clone(),
         description: scenario.description.clone(),
-        mode: scenario.mode.to_string(),
+        mode: mode.to_owned(),
         started_unix_ms,
         topology: TopologySummary {
             nodes: scenario.topology.nodes,
@@ -429,17 +535,27 @@ mod tests {
     }
 
     #[test]
-    fn report_paths_join_scenario_and_mode_slug() {
-        let paths = report_paths(
-            Path::new("out"),
-            "tso-partition",
-            ModeSpec::Hlc { max_offset_ms: 250 },
-        );
-        let expected = ReportPaths {
-            json: PathBuf::from("out/tso-partition-hlc.json"),
-            markdown: PathBuf::from("out/tso-partition-hlc.md"),
-        };
-        assert!(paths == expected);
+    fn report_paths_join_scenario_and_slug() {
+        let cases = [
+            (
+                mode_slug(ModeSpec::Hlc { max_offset_ms: 250 }),
+                "out/tso-partition-hlc.json",
+                "out/tso-partition-hlc.md",
+            ),
+            (
+                EXTERNAL_MODE.to_owned(),
+                "out/tso-partition-external.json",
+                "out/tso-partition-external.md",
+            ),
+        ];
+        for (slug, json, markdown) in cases {
+            let paths = report_paths(Path::new("out"), "tso-partition", &slug);
+            let expected = ReportPaths {
+                json: PathBuf::from(json),
+                markdown: PathBuf::from(markdown),
+            };
+            assert!(paths == expected, "slug {slug}");
+        }
     }
 
     #[test]
@@ -465,6 +581,29 @@ mod tests {
         );
         assert!(let Err(ScenarioError::Invalid(message)) = result);
         assert!(message.contains("clock_skew_ms requires hlc mode"));
+    }
+
+    #[test]
+    fn external_validation_rejects_scenarios_with_faults() {
+        use crate::scenario::{FaultAction, FaultEvent, FaultTarget, PartitionStyle};
+
+        let mut scenario = test_scenario(ModeSpec::LogicalTso, &[]);
+        external::validate_scenario(&scenario).expect("no faults is valid");
+
+        scenario.faults.push(FaultEvent {
+            at_s: 5,
+            action: FaultAction::Partition {
+                target: FaultTarget::Range(0),
+                duration_s: 5,
+                style: PartitionStyle::Blackhole,
+            },
+        });
+        let error = external::validate_scenario(&scenario).expect_err("faults must be rejected");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("external mode cannot inject faults"),
+            "message {message:?}"
+        );
     }
 
     #[test]
@@ -547,7 +686,7 @@ mod tests {
             },
             faults,
         };
-        assert!(assemble_report(&scenario, driven) == expected);
+        assert!(assemble_report(&scenario, "logical-tso", driven) == expected);
     }
 
     #[test]
@@ -566,7 +705,8 @@ mod tests {
             resources: Vec::new(),
             faults: Vec::new(),
         };
-        let report = assemble_report(&scenario, driven);
+        let report = assemble_report(&scenario, EXTERNAL_MODE, driven);
+        assert!(report.mode == EXTERNAL_MODE);
         assert!(
             report.throughput
                 == ThroughputSummary {
