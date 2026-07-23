@@ -1479,6 +1479,10 @@ impl FramedTcpClient {
 
     async fn dial(&self, endpoint: &str) -> Result<RangeStream, TransportError> {
         let stream = timeout(self.timeout, TcpStream::connect(endpoint)).await??;
+        // Persistent request/response connections interact badly with
+        // Nagle + delayed ACK (a ~40 ms stall per reused-connection round
+        // trip); RPC frames are latency-critical, so flush segments eagerly.
+        stream.set_nodelay(true)?;
         match &self.mode {
             RangeClientMode::Tls {
                 config,
@@ -1591,6 +1595,7 @@ pub async fn serve_tcp(
 ) -> Result<(), TransportError> {
     loop {
         let (mut stream, _) = listener.accept().await?;
+        let _ = stream.set_nodelay(true);
         let service = Arc::downgrade(&service);
         tokio::spawn(async move {
             if let Err(error) = serve_frames(&mut stream, &service, |_| Ok(())).await {
@@ -1612,6 +1617,7 @@ pub async fn serve_tls(
     let acceptor = config.build_acceptor()?;
     loop {
         let (stream, _) = listener.accept().await?;
+        let _ = stream.set_nodelay(true);
         let service = Arc::downgrade(&service);
         let acceptor = acceptor.clone();
         let range_rpc_principals = config.range_rpc_principals.clone();
