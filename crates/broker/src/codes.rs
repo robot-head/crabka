@@ -296,6 +296,7 @@ pub fn from_broker_error(err: &crate::error::BrokerError) -> i16 {
         | BrokerError::BootstrapFile { .. }
         | BrokerError::InvalidLeaderRebalanceInterval { .. }
         | BrokerError::InvalidLeaderRebalanceThreshold { .. }
+        | BrokerError::InvalidRuntimeConfig(_)
         | BrokerError::ShutdownTimeout(_) => UNKNOWN_SERVER_ERROR,
     }
 }

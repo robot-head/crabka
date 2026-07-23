@@ -167,6 +167,10 @@ pub enum BrokerError {
     #[error("invalid leader_imbalance_per_broker_percentage = {value}: must be <= 100")]
     InvalidLeaderRebalanceThreshold { value: u32 },
 
+    /// Runtime tuning contains an invalid scalar or field relation.
+    #[error("invalid runtime configuration: {0}")]
+    InvalidRuntimeConfig(String),
+
     #[error("controlled shutdown did not complete within {0:?}")]
     ShutdownTimeout(std::time::Duration),
 }
