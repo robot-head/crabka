@@ -871,7 +871,10 @@ work. Remediation commit `e9e4e07c` extracted
 `validate_range0_follower_poll_interval` and calls it before I/O in both serve
 entry points as well as in `SubstrateRuntimeConfig::from_args`. Its rejection
 test now scrubs the host environment in child processes and separately proves
-that an environment value without `--ranges` is rejected.
+that an environment value without `--ranges` is rejected. Follow-up commit
+`f32cc3e8` moved the occupied-listener regression into the same scrubbed-child
+pattern; the complete range-0 follower filter passes four of four tests even
+when the host provides a hostile poll-interval environment value.
 
 The complete live consumer path is:
 
@@ -908,11 +911,11 @@ generic WAL recovery fetch/retry policy, beginning with `FETCH_MAX_WAIT_MS` and
 
 ### Gres Range-0 Follower Poll Evidence
 
-On 2026-07-24 `tools/audit-runtime-values.sh` reported 5,940 repository
-matches. The exact focused search reported 95 references: six shared-default
+On 2026-07-24 `tools/audit-runtime-values.sh` reported 5,941 repository
+matches. The exact focused search reported 98 references: six shared-default
 owner/import/fallback references, 27 live configured parser/validation/schema/
 render/runtime-consumer references, five fixed range-0 topology/bootstrap
-references, 57 test/harness references, and no next-owner reference in the
+references, 60 test/harness references, and no next-owner reference in the
 focused path set. The four exact 100 ms literals in that result are one shared
 production default and three test/harness waits; there is no unexplained fixed
 production 100 ms follower sleep.
@@ -934,5 +937,7 @@ production 100 ms follower sleep.
 - Focused tests proved CLI-over-environment precedence, default selection,
   zero and explicit non-multirange rejection, pre-I/O validation,
   environment-hermetic rejection including environment-without-ranges,
+  scrubbed occupied-listener precedence under a hostile environment,
   configured timer wake, notification wake preservation, multi-range argument
-  rendering, and single-range omission.
+  rendering, and single-range omission. The hostile-environment range-0
+  follower filter passed 4/4.
