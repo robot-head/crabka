@@ -216,6 +216,12 @@ spec:
                     minimum: 1.0
                     nullable: true
                     type: integer
+                  range0FollowerPollIntervalMs:
+                    description: Periodic range-0 follower refresh cadence in milliseconds.
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
                   readinessProbePeriodSeconds:
                     description: Compute readiness probe period in seconds.
                     format: int32

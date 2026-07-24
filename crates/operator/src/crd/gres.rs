@@ -5,7 +5,8 @@
 use crabka_gres_control::{
     CheckpointPartBytes, DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS,
     DEFAULT_CHECKPOINT_POLL_INTERVAL_MS, DEFAULT_IDLE_SUSPEND_POLL_INTERVAL_MS,
-    PgdogConnectAttempts, PgdogPoolerMode, PositiveI32, PositiveMillis, PositiveUsize,
+    DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS, PgdogConnectAttempts, PgdogPoolerMode, PositiveI32,
+    PositiveMillis, PositiveUsize,
 };
 use crabka_gres_substrate::{DEFAULT_CHECKPOINT_RETAIN, DEFAULT_PART_MAX_BYTES};
 use kube::CustomResource;
@@ -120,6 +121,11 @@ pub struct GresComputeSpec {
     #[schemars(range(min = 1))]
     pub idle_suspend_poll_interval_ms: Option<u64>,
 
+    /// Periodic range-0 follower refresh cadence in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub range0_follower_poll_interval_ms: Option<u64>,
+
     /// Tenant lifecycle reconciliation interval in milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
@@ -134,6 +140,7 @@ pub(crate) struct EffectiveGresComputePolicy {
     pub(crate) checkpoint_delete_records_timeout_ms: PositiveI32,
     pub(crate) checkpoint_poll_interval_ms: PositiveMillis,
     pub(crate) idle_suspend_poll_interval_ms: PositiveMillis,
+    pub(crate) range0_follower_poll_interval_ms: PositiveMillis,
     pub(crate) lifecycle_requeue_ms: PositiveMillis,
 }
 
@@ -170,6 +177,11 @@ impl GresComputeSpec {
                     .unwrap_or(DEFAULT_IDLE_SUSPEND_POLL_INTERVAL_MS),
             )
             .map_err(|error| format!("spec.compute.idleSuspendPollIntervalMs: {error}"))?,
+            range0_follower_poll_interval_ms: PositiveMillis::new(
+                self.range0_follower_poll_interval_ms
+                    .unwrap_or(DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS),
+            )
+            .map_err(|error| format!("spec.compute.range0FollowerPollIntervalMs: {error}"))?,
             lifecycle_requeue_ms: PositiveMillis::new(
                 self.lifecycle_requeue_ms
                     .unwrap_or(DEFAULT_LIFECYCLE_REQUEUE_MS),
@@ -709,6 +721,7 @@ mod tests {
             checkpoint_delete_records_timeout_ms: Some(i32::MAX),
             checkpoint_poll_interval_ms: Some(1),
             idle_suspend_poll_interval_ms: Some(1),
+            range0_follower_poll_interval_ms: Some(1),
             lifecycle_requeue_ms: Some(1),
             ..GresComputeSpec::default()
         };
@@ -727,6 +740,7 @@ mod tests {
             "checkpointDeleteRecordsTimeoutMs",
             "checkpointPollIntervalMs",
             "idleSuspendPollIntervalMs",
+            "range0FollowerPollIntervalMs",
             "lifecycleRequeueMs",
         ] {
             assert!(
@@ -758,6 +772,10 @@ mod tests {
         assert!(
             defaults.idle_suspend_poll_interval_ms.into_value()
                 == DEFAULT_IDLE_SUSPEND_POLL_INTERVAL_MS
+        );
+        assert!(
+            defaults.range0_follower_poll_interval_ms.into_value()
+                == DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS
         );
         assert!(defaults.lifecycle_requeue_ms.into_value() == DEFAULT_LIFECYCLE_REQUEUE_MS);
 
@@ -796,6 +814,13 @@ mod tests {
                     ..GresComputeSpec::default()
                 },
                 "spec.compute.idleSuspendPollIntervalMs",
+            ),
+            (
+                GresComputeSpec {
+                    range0_follower_poll_interval_ms: Some(0),
+                    ..GresComputeSpec::default()
+                },
+                "spec.compute.range0FollowerPollIntervalMs",
             ),
             (
                 GresComputeSpec {
