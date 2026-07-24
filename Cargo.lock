@@ -2765,6 +2765,8 @@ dependencies = [
  "crabka-pgkv",
  "crabka-pgwire",
  "futures-util",
+ "refined_type",
+ "temp-env",
  "thiserror 2.0.19",
  "tokio",
  "tracing",
