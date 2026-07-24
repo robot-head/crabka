@@ -633,6 +633,9 @@ pub fn config_hash(content: &str) -> String {
 /// `RUST_LOG` on restart, so a *value* change (not just on/off) must roll the
 /// cluster. `None` (logging unset, or external resolution failed) contributes
 /// an empty segment, preserving the empty-hash collapse.
+///
+/// Nonempty `broker_tuning` contributes its deterministic rendered `[runtime]`
+/// TOML. Absent and all-`None` tuning contribute an empty segment.
 #[must_use]
 pub fn combined_config_hash(
     spec: &crate::crd::KafkaSpec,
@@ -666,8 +669,14 @@ pub fn combined_config_hash(
     let ca_part = cluster_ca_cert_pem.unwrap_or("");
     let metadata_part = metadata_version_pin.unwrap_or("");
     let logging_part = logging_filter.unwrap_or("");
+    let runtime_part = spec
+        .broker_tuning
+        .as_ref()
+        .map(crate::crd::BrokerTuning::render_runtime_toml)
+        .unwrap_or_default();
     // Hash-collapse compatibility: when listeners, metricsConfig, the CA cert,
-    // an explicit metadataVersion pin, and logging are all absent, the hash
+    // an explicit metadataVersion pin, logging, and rendered runtime tuning
+    // are all absent, the hash
     // collapses to `config_hash(config_part)` — byte-identical to the
     // bare config hash for the same `spec.config`. This is what makes an
     // in-place upgrade from a config-only cluster not trigger a hash-driven roll (the
@@ -677,17 +686,19 @@ pub fn combined_config_hash(
         && ca_part.is_empty()
         && metadata_part.is_empty()
         && logging_part.is_empty()
+        && runtime_part.is_empty()
     {
         return config_hash(&config_part);
     }
     let mut buf = String::with_capacity(
         config_part.len()
-            + 5
+            + 6
             + intent.len()
             + metrics_part.len()
             + ca_part.len()
             + metadata_part.len()
-            + logging_part.len(),
+            + logging_part.len()
+            + runtime_part.len(),
     );
     buf.push_str(&config_part);
     buf.push('\x1F'); // ASCII unit separator
@@ -700,6 +711,8 @@ pub fn combined_config_hash(
     buf.push_str(metadata_part);
     buf.push('\x1F');
     buf.push_str(logging_part);
+    buf.push('\x1F');
+    buf.push_str(&runtime_part);
     config_hash(&buf)
 }
 
@@ -956,6 +969,46 @@ mod config_hash_tests {
         assert!(
             h != h_with_listener,
             "non-empty listener intent must change hash"
+        );
+    }
+
+    #[test]
+    fn combined_hash_tracks_nonempty_broker_tuning_only() {
+        use crate::crd::{BrokerTuning, KafkaSpec};
+
+        let mut spec = KafkaSpec {
+            kafka_version: "0.1.1".into(),
+            metadata_version: None,
+            config: None,
+            listeners: vec![],
+            inter_broker_listener_name: None,
+            metrics_config: None,
+            network_policy: None,
+            cluster_ca: None,
+            clients_ca: None,
+            logging: None,
+            delegation_token: None,
+            authorization: None,
+            tiered_storage: None,
+            inter_broker_kerberos: None,
+            krb5_conf_secret_ref: None,
+            tracing: None,
+            broker_tuning: None,
+        };
+        let absent = combined_config_hash(&spec, None, None, None);
+
+        spec.broker_tuning = Some(BrokerTuning::default());
+        let empty = combined_config_hash(&spec, None, None, None);
+        assert!(empty == absent, "empty tuning must preserve hash collapse");
+
+        spec.broker_tuning = Some(BrokerTuning {
+            cleaner_interval_ms: Some(7_000),
+            ..BrokerTuning::default()
+        });
+        let nonempty = combined_config_hash(&spec, None, None, None);
+        assert!(
+            nonempty != absent,
+            "rendered runtime tuning must roll broker pods"
         );
     }
 
