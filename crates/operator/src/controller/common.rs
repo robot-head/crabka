@@ -7,7 +7,7 @@
 //! SSA / merge-patch wrappers, and the labels / owner-ref helpers are
 //! shared verbatim.
 
-use std::{collections::BTreeMap, fmt::Debug, future::Future, pin::Pin};
+use std::{collections::BTreeMap, fmt::Debug, future::Future, pin::Pin, sync::Arc};
 
 use k8s_openapi::{
     ByteString,
@@ -44,6 +44,12 @@ pub(crate) const DEFAULT_BROKER_IMAGE: &str = concat!(
     "ghcr.io/robot-head/crabka-broker:",
     env!("CARGO_PKG_VERSION")
 );
+
+pub(super) fn error_requeue(ctx: Arc<Context>) -> Action {
+    let delay = ctx.config.controller_error_requeue_ms.duration();
+    drop(ctx);
+    Action::requeue(delay)
+}
 
 /// Reconcile-error surface shared by both reconcilers.
 #[derive(Debug, thiserror::Error)]
