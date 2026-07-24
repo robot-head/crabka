@@ -24,6 +24,7 @@ use super::{
         SchemaRegistryIdentity, select_master,
     },
 };
+use crate::config::RegistryRuntimeConfig;
 
 // Kafka group error codes (defined locally to avoid a crabka-broker dependency).
 const NONE: i16 = 0;
@@ -35,9 +36,22 @@ const UNKNOWN_MEMBER_ID: i16 = 25;
 const REBALANCE_IN_PROGRESS: i16 = 27;
 const MEMBER_ID_REQUIRED: i16 = 79;
 
-const SESSION_TIMEOUT_MS: i32 = 10_000;
-const REBALANCE_TIMEOUT_MS: i32 = 30_000;
-const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(3);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ElectionPolicy {
+    session_timeout_ms: i32,
+    rebalance_timeout_ms: i32,
+    heartbeat_interval: Duration,
+    reconnect_backoff: Duration,
+}
+
+fn election_policy(runtime: &RegistryRuntimeConfig) -> ElectionPolicy {
+    ElectionPolicy {
+        session_timeout_ms: runtime.election_session_timeout_ms,
+        rebalance_timeout_ms: runtime.election_rebalance_timeout_ms,
+        heartbeat_interval: Duration::from_millis(runtime.election_heartbeat_interval_ms),
+        reconnect_backoff: Duration::from_millis(runtime.election_reconnect_backoff_ms),
+    }
+}
 
 pub(super) struct ElectionClient {
     pub bootstrap: String,
@@ -48,6 +62,7 @@ pub(super) struct ElectionClient {
     /// SR-to-broker Kafka-client security for the coordinator connections.
     /// `None` = plaintext (the pre-security default).
     pub security: Option<ClientSecurity>,
+    pub runtime: RegistryRuntimeConfig,
 }
 
 impl ElectionClient {
@@ -67,7 +82,9 @@ impl ElectionClient {
                     member_id.clear();
                     let _ = self.tx.send(PrimaryState::default());
                     if cancel
-                        .run_until_cancelled(tokio::time::sleep(Duration::from_millis(500)))
+                        .run_until_cancelled(tokio::time::sleep(
+                            election_policy(&self.runtime).reconnect_backoff,
+                        ))
                         .await
                         .is_none()
                     {
@@ -110,7 +127,7 @@ impl ElectionClient {
                         }).await;
                         return Ok(());
                     }
-                    () = tokio::time::sleep(HEARTBEAT_INTERVAL) => {
+                    () = tokio::time::sleep(election_policy(&self.runtime).heartbeat_interval) => {
                         let hb = coord.send(HeartbeatRequest {
                             group_id: self.group_id.clone(),
                             generation_id: generation,
@@ -174,10 +191,11 @@ impl ElectionClient {
         member_id: &mut String,
     ) -> anyhow::Result<(i32, Bytes)> {
         let metadata = Bytes::from(serde_json::to_vec(&self.identity)?);
+        let policy = election_policy(&self.runtime);
         let mk_join = |mid: String| JoinGroupRequest {
             group_id: self.group_id.clone(),
-            session_timeout_ms: SESSION_TIMEOUT_MS,
-            rebalance_timeout_ms: REBALANCE_TIMEOUT_MS,
+            session_timeout_ms: policy.session_timeout_ms,
+            rebalance_timeout_ms: policy.rebalance_timeout_ms,
             member_id: mid,
             protocol_type: SR_PROTOCOL_TYPE.to_string(),
             protocols: vec![JoinGroupRequestProtocol {
@@ -262,5 +280,32 @@ impl ElectionClient {
             is_primary,
             primary_url,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::RegistryRuntimeConfig;
+
+    #[test]
+    fn election_policy_uses_configured_runtime() {
+        let runtime = RegistryRuntimeConfig {
+            election_session_timeout_ms: 12_000,
+            election_rebalance_timeout_ms: 40_000,
+            election_heartbeat_interval_ms: 2_000,
+            election_reconnect_backoff_ms: 750,
+            ..RegistryRuntimeConfig::default()
+        };
+
+        assert2::assert!(
+            election_policy(&runtime)
+                == ElectionPolicy {
+                    session_timeout_ms: 12_000,
+                    rebalance_timeout_ms: 40_000,
+                    heartbeat_interval: Duration::from_secs(2),
+                    reconnect_backoff: Duration::from_millis(750),
+                }
+        );
     }
 }

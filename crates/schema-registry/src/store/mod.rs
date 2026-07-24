@@ -61,19 +61,44 @@ struct VersionEntry {
     deleted: bool,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct StoreState {
     subjects: BTreeMap<String, Vec<VersionEntry>>,
     by_id: BTreeMap<SchemaId, RegisteredSchema>,
     by_canonical: BTreeMap<String, SchemaId>,
     global_compat: Option<String>,
+    default_compatibility: String,
     subject_compat: BTreeMap<String, String>,
     global_mode: Option<String>,
+    default_mode: String,
     subject_mode: BTreeMap<String, String>,
     max_id: SchemaId,
 }
 
+impl Default for StoreState {
+    fn default() -> Self {
+        let runtime = crate::config::RegistryRuntimeConfig::default();
+        Self::with_defaults(runtime.default_compatibility_level, runtime.default_mode)
+    }
+}
+
 impl StoreState {
+    #[must_use]
+    pub fn with_defaults(compatibility: String, mode: String) -> Self {
+        Self {
+            subjects: BTreeMap::new(),
+            by_id: BTreeMap::new(),
+            by_canonical: BTreeMap::new(),
+            global_compat: None,
+            default_compatibility: compatibility,
+            subject_compat: BTreeMap::new(),
+            global_mode: None,
+            default_mode: mode,
+            subject_mode: BTreeMap::new(),
+            max_id: SchemaId::default(),
+        }
+    }
+
     /// Decide id/version for a registration AND apply it locally. Validates the
     /// schema (NONE compat still rejects unparseable schemas -> `InvalidSchema`).
     /// `id` is global (keyed by canonical form); `version` is per-subject.
@@ -318,7 +343,9 @@ impl StoreState {
 
     #[must_use]
     pub fn global_compat(&self) -> &str {
-        self.global_compat.as_deref().unwrap_or("BACKWARD")
+        self.global_compat
+            .as_deref()
+            .unwrap_or(&self.default_compatibility)
     }
 
     #[must_use]
@@ -514,7 +541,7 @@ impl StoreState {
 
     #[must_use]
     pub fn global_mode(&self) -> &str {
-        self.global_mode.as_deref().unwrap_or("READWRITE")
+        self.global_mode.as_deref().unwrap_or(&self.default_mode)
     }
     #[must_use]
     pub fn subject_mode(&self, subject: &str) -> Option<&str> {
@@ -778,6 +805,16 @@ mod tests {
         assert2::assert!(s.subject_compat("x") == None);
         s.set_subject_compat("x", "NONE".into());
         assert2::assert!(s.subject_compat("x") == Some("NONE"));
+    }
+
+    #[test]
+    fn configured_defaults_are_overridden_by_replayed_globals() {
+        let mut s = StoreState::with_defaults("FULL".into(), "READONLY".into());
+        assert2::assert!((s.global_compat(), s.global_mode()) == ("FULL", "READONLY"));
+
+        s.set_global_compat("FORWARD".into());
+        s.set_global_mode("IMPORT".into());
+        assert2::assert!((s.global_compat(), s.global_mode()) == ("FORWARD", "IMPORT"));
     }
 
     #[test]

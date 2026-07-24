@@ -75,7 +75,11 @@ impl KafkaStore {
         // pre-security default; threaded identically into every client below.
         let security = cfg.security.client.clone();
         let topic_id = topic::ensure_schemas_topic(cfg, security.clone()).await?;
-        let r = reader::spawn(cfg, topic_id, security.clone(), cancel);
+        let initial_state = StoreState::with_defaults(
+            cfg.runtime.default_compatibility_level.clone(),
+            cfg.runtime.default_mode.clone(),
+        );
+        let r = reader::spawn(cfg, topic_id, initial_state, security.clone(), cancel);
         let writer = writer::SchemaWriter::start(cfg, security).await?;
         Ok(Arc::new(Self {
             store: r.store,
