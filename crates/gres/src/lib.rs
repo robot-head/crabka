@@ -6567,7 +6567,10 @@ mod tests {
     #[test]
     fn registry_policy_options_use_validated_defaults() {
         let defaults = Cli::try_parse_from(["crabka-gres"]).expect("defaults");
-        assert!(defaults.serve.registry.policy() == crabka_gres_control::RegistryPolicy::default());
+        assert_eq!(
+            defaults.serve.registry.policy(),
+            crabka_gres_control::RegistryPolicy::default()
+        );
         for option in [
             "--registry-replication-factor=0",
             "--registry-replication-factor=32768",
@@ -6604,10 +6607,10 @@ mod tests {
             return;
         }
         let environment = Cli::try_parse_from(["crabka-gres"]).expect("environment policy");
-        assert!(
-            environment.serve.registry.policy()
-                == crabka_gres_control::RegistryPolicy::new(2, 15_001, 251, 501, 1_048_577)
-                    .expect("policy")
+        assert_eq!(
+            environment.serve.registry.policy(),
+            crabka_gres_control::RegistryPolicy::new(2, 15_001, 251, 501, 1_048_577)
+                .expect("policy")
         );
         let cli = Cli::try_parse_from([
             "crabka-gres",
@@ -6618,10 +6621,10 @@ mod tests {
             "--registry-fetch-partition-max-bytes=1048578",
         ])
         .expect("CLI policy");
-        assert!(
-            cli.serve.registry.policy()
-                == crabka_gres_control::RegistryPolicy::new(3, 15_002, 252, 502, 1_048_578)
-                    .expect("policy")
+        assert_eq!(
+            cli.serve.registry.policy(),
+            crabka_gres_control::RegistryPolicy::new(3, 15_002, 252, 502, 1_048_578)
+                .expect("policy")
         );
     }
 

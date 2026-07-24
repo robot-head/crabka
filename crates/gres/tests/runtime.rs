@@ -4,6 +4,7 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
+use clap::Parser as _;
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_core::Client;
 use crabka_client_producer::{Acks, Producer, ProducerRecord};
@@ -180,6 +181,7 @@ fn binary_help_exposes_only_single_node_serve_surface() {
 
 fn test_args(listen: String, data_dir: Option<std::path::PathBuf>) -> crabka_gres::ServeArgs {
     crabka_gres::ServeArgs {
+        registry: crabka_gres::Cli::parse_from(["crabka-gres"]).serve.registry,
         listen,
         tls_cert: None,
         tls_key: None,
@@ -346,6 +348,7 @@ async fn live_multirange_substrate_default_fdw_server_reads_own_broker() {
         advertised_endpoint: None,
         timestamp_source_mode: crabka_gres_ranges::TimestampSourceMode::LogicalTso,
         hlc_wall_offset_ms: 0,
+        registry_policy: crabka_gres_control::RegistryPolicy::default(),
     })
     .await
     .expect("open live multi-range substrate runtime");
@@ -405,6 +408,7 @@ async fn live_multirange_substrate_hlc_mode_commits_and_mints_wall_anchored_stam
         advertised_endpoint: None,
         timestamp_source_mode: crabka_gres_ranges::TimestampSourceMode::Hlc { max_offset_ms: 500 },
         hlc_wall_offset_ms: 0,
+        registry_policy: crabka_gres_control::RegistryPolicy::default(),
     })
     .await
     .expect("open live multi-range substrate runtime in HLC mode");
@@ -560,6 +564,7 @@ async fn live_multirange_transfer_stages_populated_successor_without_publishing_
         advertised_endpoint: Some("127.0.0.1:7443".into()),
         timestamp_source_mode: crabka_gres_ranges::TimestampSourceMode::LogicalTso,
         hlc_wall_offset_ms: 0,
+        registry_policy: crabka_gres_control::RegistryPolicy::default(),
     })
     .await
     .expect("open live multi-range runtime");
@@ -909,6 +914,7 @@ fn activation_crash_config(
         advertised_endpoint: Some("127.0.0.1:7443".into()),
         timestamp_source_mode: crabka_gres_ranges::TimestampSourceMode::LogicalTso,
         hlc_wall_offset_ms: 0,
+        registry_policy: crabka_gres_control::RegistryPolicy::default(),
     }
 }
 
@@ -1042,7 +1048,7 @@ async fn seed_control_operation(
     let mut registry = crabka_gres_control::Registry::connect(bootstrap)
         .await
         .unwrap();
-    registry.ensure_topic(1).await.unwrap();
+    registry.ensure_topic().await.unwrap();
     registry.replace_if_version(&record, None).await.unwrap();
     let operation = registry.begin_split_operation(&operation).await.unwrap();
     if operation.phase == crabka_gres_control::SplitOperationPhase::Initiated {
@@ -1066,7 +1072,7 @@ async fn advance_control_operation(
     let mut registry = crabka_gres_control::Registry::connect(bootstrap)
         .await
         .unwrap();
-    registry.ensure_topic(1).await.unwrap();
+    registry.ensure_topic().await.unwrap();
     let current = registry
         .load_split_operation(tenant, operation_id)
         .await
@@ -1210,7 +1216,7 @@ async fn live_authority_allows_exact_target_status_at_activated_before_layout_cu
     let mut registry = crabka_gres_control::Registry::connect(&broker.listen_addr().to_string())
         .await
         .unwrap();
-    registry.ensure_topic(1).await.unwrap();
+    registry.ensure_topic().await.unwrap();
     let operation = registry
         .load_split_operation(tenant, "authority-op")
         .await
@@ -2369,6 +2375,7 @@ async fn live_populated_hash_split_partitions_physical_rows_and_sequence() {
         advertised_endpoint: Some("127.0.0.1:7443".into()),
         timestamp_source_mode: crabka_gres_ranges::TimestampSourceMode::LogicalTso,
         hlc_wall_offset_ms: 0,
+        registry_policy: crabka_gres_control::RegistryPolicy::default(),
     })
     .await
     .expect("open live multi-range runtime");
@@ -2531,6 +2538,7 @@ async fn live_multirange_transfer_rejects_concurrent_pause_without_waiting() {
         advertised_endpoint: None,
         timestamp_source_mode: crabka_gres_ranges::TimestampSourceMode::LogicalTso,
         hlc_wall_offset_ms: 0,
+        registry_policy: crabka_gres_control::RegistryPolicy::default(),
     })
     .await
     .expect("open live multi-range runtime");
@@ -2594,6 +2602,7 @@ async fn non_live_runtimes_do_not_expose_range_transfer_capability() {
         advertised_endpoint: None,
         timestamp_source_mode: crabka_gres_ranges::TimestampSourceMode::LogicalTso,
         hlc_wall_offset_ms: 0,
+        registry_policy: crabka_gres_control::RegistryPolicy::default(),
     })
     .await
     .expect("open in-memory single-range runtime");
@@ -2611,6 +2620,7 @@ async fn non_live_runtimes_do_not_expose_range_transfer_capability() {
             advertised_endpoint: None,
             timestamp_source_mode: crabka_gres_ranges::TimestampSourceMode::LogicalTso,
             hlc_wall_offset_ms: 0,
+            registry_policy: crabka_gres_control::RegistryPolicy::default(),
         }
     })
     .await

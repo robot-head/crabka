@@ -1357,10 +1357,7 @@ async fn restart_operation_source(input: OperationRestartInput<'_>) -> KillObser
     let mut fresh_registry = Registry::connect(input.system.bootstrap())
         .await
         .expect("fresh post-kill registry");
-    fresh_registry
-        .ensure_topic(1)
-        .await
-        .expect("registry topic");
+    fresh_registry.ensure_topic().await.expect("registry topic");
     *input.control = Arc::new(BrokerControl {
         registry: Mutex::new(fresh_registry),
     });
@@ -1572,7 +1569,7 @@ async fn drive_operation(
     let mut registry = Registry::connect(system.bootstrap())
         .await
         .expect("registry");
-    registry.ensure_topic(1).await.expect("registry topic");
+    registry.ensure_topic().await.expect("registry topic");
     let mut control: GresControlHandle = Arc::new(BrokerControl {
         registry: Mutex::new(registry),
     });

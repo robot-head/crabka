@@ -801,7 +801,7 @@ async fn provision_control(bootstrap: &str, tenant: &str, r0_port: u16, r1_port:
     ])
     .expect("range layout");
     let mut registry = Registry::connect(bootstrap).await.expect("registry");
-    registry.ensure_topic(1).await.expect("registry topic");
+    registry.ensure_topic().await.expect("registry topic");
     registry.upsert(&record).await.expect("registry record");
     registry
         .upsert_tenant_config(&record, 1)
