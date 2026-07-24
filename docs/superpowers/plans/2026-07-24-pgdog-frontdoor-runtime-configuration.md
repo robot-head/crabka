@@ -57,7 +57,8 @@ compatibility, topology, or safety:
 
 - `min_pool_size = 0`;
 - PgDog's disabled idle-healthcheck sentinel `3155760000000ms`;
-- passthrough authentication and TLS-required derivation from mounted TLS;
+- passthrough authentication fixed enabled for the forwarding model, and
+  TLS-required state derived from mounted frontend TLS;
 - internal activator/compute ports, TCP, command/config paths, UID/GID,
   labels, names, and admin command/column protocol;
 - the one-millisecond minimum scheduled delay, saturating Unix-deadline

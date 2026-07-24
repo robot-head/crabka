@@ -680,8 +680,8 @@ than the common reconcile-error delay.
   eager backend session.
 - `3155760000000ms` is PgDog's documented disabled idle-healthcheck sentinel;
   a healthcheck must not wake a suspended tenant.
-- Passthrough authentication and TLS-client-required state are derived from
-  mounted frontend TLS, not independent policy.
+- Passthrough authentication is fixed enabled for the forwarding model.
+  TLS-client-required state is derived from mounted frontend TLS.
 - Activator/compute ports, TCP, command and configuration paths, UID/GID,
   Kubernetes names and labels, and the PgDog admin command/column protocol are
   topology, security, or compatibility invariants.
