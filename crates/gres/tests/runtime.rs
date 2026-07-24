@@ -188,6 +188,8 @@ fn test_args(listen: String, data_dir: Option<std::path::PathBuf>) -> crabka_gre
         "wal_recovery_fetch_partition_max_bytes",
         "wal_recovery_fetch_response_max_bytes",
         "wal_recovery_empty_fetch_retries",
+        "wal_recovery_connect_timeout_ms",
+        "wal_recovery_request_timeout_ms",
     ] {
         command = command.mut_arg(argument, |arg| arg.env(None::<&str>));
     }
@@ -217,6 +219,8 @@ fn test_args(listen: String, data_dir: Option<std::path::PathBuf>) -> crabka_gre
         wal_recovery_fetch_partition_max_bytes: None,
         wal_recovery_fetch_response_max_bytes: None,
         wal_recovery_empty_fetch_retries: None,
+        wal_recovery_connect_timeout_ms: None,
+        wal_recovery_request_timeout_ms: None,
         host_ranges: None,
         timestamp_source: crabka_gres::TimestampSourceKind::LogicalTso,
         hlc_max_offset_ms: 250,
