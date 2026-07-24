@@ -71,7 +71,7 @@ defaults remain configurable even when the scanner reports the default constant.
   `FETCH_MAX_WAIT_MS`, `FETCH_MIN_BYTES`, `THROTTLE_EXHAUSTED_BACKOFF`,
   `SEND_ERROR_BACKOFF`, `UNKNOWN_TOPIC_RETRY_DELAY`, `EPOCH_FENCE_BACKOFF`,
   `UNEXPECTED_ERROR_BACKOFF`, `RECONNECT_INITIAL_DELAY`, and
-  `RECONNECT_DELAY_CAP`.
+  `RECONNECT_DELAY_CAP`; and the AddRaftVoter request timeout.
 - Coordinators: `ACTOR_MAILBOX_CAPACITY`, `SESSION_EXPIRY_TICK_INTERVAL`,
   `SHUTDOWN_ACK_TIMEOUT`, `DEFAULT_SESSION_TIMEOUT`,
   `DEFAULT_HEARTBEAT_INTERVAL`, `DEFAULT_MIN_SESSION_TIMEOUT`,
@@ -94,10 +94,10 @@ defaults remain configurable even when the scanner reports the default constant.
 - Produce policy: `PRODUCER_ID_EXPIRATION_MS`, its expiration scan interval,
   `MAX_PRODUCE_GROUP`, `PARTITION_WRITER_QUEUE_DEPTH`, and
   `DEFAULT_MIN_INSYNC_REPLICAS`.
-- Internal-topic sizing: each `NUM_PARTITIONS` in
-  `share_coordinator/bootstrap.rs` and
-  `txn/bootstrap.rs`. Internal topic names and fixed partition sentinels remain
-  fixed.
+- Internal-topic sizing: the partition counts and replication factors for
+  `__share_group_state` and `__transaction_state`. Replication factors are
+  capped by the number of available brokers. Internal topic names and fixed
+  partition sentinels remain fixed.
 - Transaction policy: `MIN_TXN_TIMEOUT_MS` and `MAX_TXN_TIMEOUT_MS`.
 - Existing `BrokerConfig` defaults in `config.rs`: RLMM snapshot interval,
   heartbeat interval and timeout, replica lag, metadata snapshot byte/time/
@@ -195,6 +195,9 @@ defaults remain configurable even when the scanner reports the default constant.
   minimum of 100 ms, and fallback rebalance deadlines derived from configured
   group timeouts: algorithmic safety bounds or derived values, not independent
   tuning controls.
+- Nonnegative and positive wire-value clamps such as `.max(0)` and `.max(1)`:
+  protocol sanitization before signed-to-unsigned conversion, not independent
+  tuning controls.
 - The 100 ms startup-leader watch wake and 10 ms audit-partition registry poll:
   internal observation quanta bounded by their configured deadlines, not
   independent tuning controls.
@@ -210,28 +213,30 @@ defaults remain configurable even when the scanner reports the default constant.
 
 ## Audit Snapshot
 
-On 2026-07-24 the scanner reports 5,503 matches across all crates, including
-1,246 broker matches across 148 files. Of the broker matches, 428 are named
-constant declarations and 818 are other literal, capacity, or duration
-expressions. The positional first-`#[cfg(test)]` heuristic yields 501 matches
-before and 745 after the boundary. That split is not semantic because mixed
+On 2026-07-24 the scanner reports 5,849 matches across all crates, including
+1,293 broker matches across 149 files. Of the broker matches, 428 are named
+constant declarations and 865 are other literal, capacity, or duration
+expressions. The positional first-`#[cfg(test)]` heuristic yields 514 matches
+before and 779 after the boundary. That split is not semantic because mixed
 files contain test-gated items before later production items. The semantic
-rules above are authoritative, and every broker match has been classified.
+rules above are authoritative. Independent review and the strengthened scan
+found four production-policy omissions; all four were remediated and rechecked.
 
 ## Broker Slice Completion Evidence
 
 The broker slice passed these gates on 2026-07-24:
 
-- `tools/audit-runtime-values.sh`: 5,503 repository matches; the broker subset
-  contains 1,246 matches across 148 files, with no unclassified production
-  policy.
+- `tools/audit-runtime-values.sh`: 5,849 repository matches; the broker subset
+  contains 1,293 matches across 149 files, with no unclassified production
+  policy after semantic review.
 - `cargo +nightly fmt --all -- --check`: passed.
 - `cargo clippy -p crabka-broker -p crabka-operator --all-targets -- -D warnings`:
   passed.
 - `cargo nextest run -p crabka-broker -p crabka-operator --test-threads 1`:
-  3,085 passed, 71 skipped, and no failures.
+  completed with exit status zero.
 - `cargo run -p crabka-broker -- --help`: exposes cleaner-interval,
-  OPA HTTP timeout, and replication-fetch settings.
+  OPA HTTP timeout, replication-fetch, auto-join voter timeout, and Share and
+  transaction and Streams internal-topic replication-factor settings.
 - `cargo run -p crabka-operator -- gen-crds <temporary-directory>` followed by
   `diff -ru deploy/crds <temporary-directory>`: all nine generated CRDs match
   the checked-in manifests.
