@@ -36,8 +36,8 @@ use std::time::Duration;
 
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_core::{
-    Client, Connection, ConnectionOptions, FetchedRecord, IsolatedFetch,
-    fetch_partition_with_isolation,
+    Client, Connection, ConnectionOptions, DEFAULT_FETCH_RESPONSE_MAX_BYTES, FetchedRecord,
+    IsolatedFetch, fetch_partition_with_isolation,
 };
 use crabka_client_streams::{
     I64Serde, KafkaStreams, NodeHandle, ProcessingGuarantee, Processor, ProcessorContext, Record,
@@ -216,6 +216,7 @@ async fn collect_committed(
                 partition: 0,
                 fetch_offset: next_offset,
                 max_wait_ms: 500,
+                max_bytes: DEFAULT_FETCH_RESPONSE_MAX_BYTES,
                 partition_max_bytes: 1 << 20,
                 isolation_level: READ_COMMITTED,
             },

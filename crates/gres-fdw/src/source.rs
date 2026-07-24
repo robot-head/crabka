@@ -9,7 +9,8 @@
 
 use crabka_client_admin::AdminClient;
 use crabka_client_core::{
-    Connection, FetchedHeader, IsolatedFetch, fetch_partition_with_isolation,
+    Connection, DEFAULT_FETCH_RESPONSE_MAX_BYTES, FetchedHeader, IsolatedFetch,
+    fetch_partition_with_isolation,
 };
 use crabka_pgexec::foreign::ScanBounds;
 use crabka_protocol::{
@@ -334,6 +335,7 @@ pub async fn scan_topic(
                     partition,
                     fetch_offset: next_offset,
                     max_wait_ms: MAX_WAIT_MS,
+                    max_bytes: DEFAULT_FETCH_RESPONSE_MAX_BYTES,
                     partition_max_bytes: PARTITION_MAX_BYTES,
                     isolation_level: READ_COMMITTED,
                 },

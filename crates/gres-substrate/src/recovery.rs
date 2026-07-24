@@ -17,6 +17,7 @@ use crabka_protocol::{
     },
     primitives::uuid::Uuid as WireUuid,
 };
+use refined_type::rule::{GreaterI32, GreaterUsize};
 use tokio::sync::Mutex;
 
 use crate::{
@@ -34,14 +35,93 @@ use crate::{
 
 const READ_COMMITTED: i8 = 1;
 const PARTITION: i32 = 0;
-const FETCH_MAX_WAIT_MS: i32 = 100;
+/// Default broker long-poll wait for committed-WAL recovery fetches.
+pub const DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT_MS: i32 = 100;
+/// Default per-partition byte limit for committed-WAL recovery fetches.
+pub const DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES: i32 = 1_048_576;
+/// Default whole-response byte limit for committed-WAL recovery fetches.
+pub const DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES: i32 =
+    crabka_client_core::DEFAULT_FETCH_RESPONSE_MAX_BYTES;
+/// Default consecutive empty-fetch retries after the initial empty fetch.
+pub const DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES: usize = 100;
 /// Committed-end sample fetches must return immediately when the cursor is
 /// already at the stable end; a positive wait would park every barrier call
 /// on the broker's long-poll timer.
 const END_SAMPLE_MAX_WAIT_MS: i32 = 0;
-const FETCH_MAX_BYTES: i32 = 1_048_576;
-const EMPTY_FETCH_RETRIES: usize = 100;
 const OFFSET_OUT_OF_RANGE: i16 = 1;
+
+/// Validated limits for committed-WAL recovery reads.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RecoveryReadPolicy {
+    fetch_max_wait_ms: i32,
+    fetch_partition_max_bytes: i32,
+    fetch_response_max_bytes: i32,
+    empty_fetch_retries: usize,
+}
+
+impl RecoveryReadPolicy {
+    /// Validate recovery read limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any value is not positive.
+    pub fn new(
+        fetch_max_wait_ms: i32,
+        fetch_partition_max_bytes: i32,
+        fetch_response_max_bytes: i32,
+        empty_fetch_retries: usize,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            fetch_max_wait_ms: GreaterI32::<0>::new(fetch_max_wait_ms)
+                .map_err(|error| error.to_string())?
+                .into_value(),
+            fetch_partition_max_bytes: GreaterI32::<0>::new(fetch_partition_max_bytes)
+                .map_err(|error| error.to_string())?
+                .into_value(),
+            fetch_response_max_bytes: GreaterI32::<0>::new(fetch_response_max_bytes)
+                .map_err(|error| error.to_string())?
+                .into_value(),
+            empty_fetch_retries: GreaterUsize::<0>::new(empty_fetch_retries)
+                .map_err(|error| error.to_string())?
+                .into_value(),
+        })
+    }
+
+    /// Return the broker long-poll wait in milliseconds.
+    #[must_use]
+    pub const fn fetch_max_wait_ms(self) -> i32 {
+        self.fetch_max_wait_ms
+    }
+
+    /// Return the per-partition fetch byte limit.
+    #[must_use]
+    pub const fn fetch_partition_max_bytes(self) -> i32 {
+        self.fetch_partition_max_bytes
+    }
+
+    /// Return the whole-response fetch byte limit.
+    #[must_use]
+    pub const fn fetch_response_max_bytes(self) -> i32 {
+        self.fetch_response_max_bytes
+    }
+
+    /// Return consecutive empty-fetch retries after the initial empty fetch.
+    #[must_use]
+    pub const fn empty_fetch_retries(self) -> usize {
+        self.empty_fetch_retries
+    }
+}
+
+impl Default for RecoveryReadPolicy {
+    fn default() -> Self {
+        Self {
+            fetch_max_wait_ms: DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT_MS,
+            fetch_partition_max_bytes: DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES,
+            fetch_response_max_bytes: DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES,
+            empty_fetch_retries: DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES,
+        }
+    }
+}
 
 /// Live Kafka recovery output.
 pub struct LiveRecovered {
@@ -72,6 +152,7 @@ pub struct LiveRecoveryConfig {
     pub wal_generation: u64,
     /// Authenticated local range-control endpoint advertised by this compute.
     pub advertised_endpoint: Option<String>,
+    read_policy: RecoveryReadPolicy,
     /// Noncanonical identity used while a recovered range is staged and must not fence serving.
     staging_identity: Option<String>,
     replay_seed: Option<(i64, u64)>,
@@ -108,9 +189,23 @@ impl LiveRecoveryConfig {
             checkpoints: None,
             wal_generation: 0,
             advertised_endpoint: None,
+            read_policy: RecoveryReadPolicy::default(),
             staging_identity: None,
             replay_seed: None,
         }
+    }
+
+    /// Override committed-WAL recovery read limits.
+    #[must_use]
+    pub fn with_read_policy(mut self, read_policy: RecoveryReadPolicy) -> Self {
+        self.read_policy = read_policy;
+        self
+    }
+
+    /// Return committed-WAL recovery read limits.
+    #[must_use]
+    pub const fn read_policy(&self) -> RecoveryReadPolicy {
+        self.read_policy
     }
 
     /// Use checkpoint restore before committed WAL tail replay.
@@ -264,6 +359,7 @@ pub async fn read_live_committed_tail(
         topic_uuid,
         barrier_offset,
         config.security.clone(),
+        config.read_policy,
     );
     bounded_committed_tail(&reader, after_offset, barrier_offset).await
 }
@@ -288,6 +384,7 @@ pub async fn read_live_retained_committed(
         topic_uuid,
         barrier_offset,
         config.security.clone(),
+        config.read_policy,
     );
     let start = reader.log_start_offset().await?.unwrap_or(0);
     bounded_committed_tail(&reader, start.saturating_sub(1), barrier_offset).await
@@ -334,6 +431,7 @@ impl CommittedEndDialer for LiveEndDialer {
             connection,
             topic,
             topic_uuid,
+            read_policy: self.config.read_policy,
         }))
     }
 }
@@ -343,6 +441,7 @@ struct LiveEndConnection {
     connection: Connection,
     topic: String,
     topic_uuid: WireUuid,
+    read_policy: RecoveryReadPolicy,
 }
 
 #[async_trait::async_trait]
@@ -355,6 +454,7 @@ impl CommittedEndConnection for LiveEndConnection {
                 self.topic_uuid,
                 fetch_offset,
                 END_SAMPLE_MAX_WAIT_MS,
+                self.read_policy,
             ))
             .await
             .map_err(|error| {
@@ -402,6 +502,7 @@ pub async fn bootstrap_live_range0_follower(
         topic_uuid,
         end,
         config.security.clone(),
+        config.read_policy,
     );
     crate::follower::ReadOnlyRange0Follower::bootstrap(config, store, &reader, checkpoints, end)
         .await
@@ -457,6 +558,7 @@ async fn recover_live_for_range_inner(
         topic_uuid,
         barrier.offset,
         config.security,
+        config.read_policy,
     );
     let recovery_barrier = RecoveryBarrier {
         generation: WriterGeneration(config.wal_generation),
@@ -607,6 +709,7 @@ struct KafkaCommittedWalReader {
     topic_uuid: WireUuid,
     barrier_offset: i64,
     security: Option<ClientSecurity>,
+    read_policy: RecoveryReadPolicy,
 }
 
 /// Construct the private Kafka reader for one already-sampled committed end.
@@ -626,6 +729,7 @@ pub(crate) async fn live_committed_reader(
         topic_uuid,
         sample_offset,
         config.security.clone(),
+        config.read_policy,
     ))
 }
 
@@ -636,6 +740,7 @@ impl KafkaCommittedWalReader {
         topic_uuid: WireUuid,
         barrier_offset: i64,
         security: Option<ClientSecurity>,
+        read_policy: RecoveryReadPolicy,
     ) -> Self {
         Self {
             bootstrap_addrs,
@@ -643,6 +748,7 @@ impl KafkaCommittedWalReader {
             topic_uuid,
             barrier_offset,
             security,
+            read_policy,
         }
     }
 
@@ -693,15 +799,14 @@ impl CommittedWalReader for KafkaCommittedWalReader {
         let mut empty_fetches = 0_usize;
         loop {
             let fetched = self.fetch_partition(&conn, next_offset).await?;
+            empty_fetches = next_empty_fetch_count(empty_fetches, next_offset, &fetched);
 
             if fetched.records.is_empty() {
                 if fetched.next_offset > next_offset {
                     next_offset = fetched.next_offset;
-                    empty_fetches = 0;
                     continue;
                 }
-                empty_fetches += 1;
-                if empty_fetches > EMPTY_FETCH_RETRIES {
+                if empty_fetches > self.read_policy.empty_fetch_retries() {
                     return Err(SubstrateError::Unavailable(format!(
                         "replay could not read recovery barrier {} for {} (topic id {:?}, next offset {}, log start {}, high watermark {}, last stable offset {}, decoded batches {}) before retry limit",
                         self.barrier_offset,
@@ -716,7 +821,6 @@ impl CommittedWalReader for KafkaCommittedWalReader {
                 }
                 continue;
             }
-            empty_fetches = 0;
 
             for record in fetched.records {
                 if record.offset >= next_offset {
@@ -735,6 +839,18 @@ impl CommittedWalReader for KafkaCommittedWalReader {
         let conn = self.open_connection().await?;
         let fetched = self.fetch_partition_log_start(&conn).await?;
         Ok((fetched.log_start_offset >= 0).then_some(fetched.log_start_offset))
+    }
+}
+
+const fn next_empty_fetch_count(
+    current: usize,
+    fetch_offset: i64,
+    fetched: &FetchedWalPartition,
+) -> usize {
+    if !fetched.records.is_empty() || fetched.next_offset > fetch_offset {
+        0
+    } else {
+        current.saturating_add(1)
     }
 }
 
@@ -757,15 +873,7 @@ impl KafkaCommittedWalReader {
     ) -> Result<FetchedWalPartition, SubstrateError> {
         let result = fetch_partition_with_isolation_progress(
             conn,
-            IsolatedFetch {
-                topic: &self.topic,
-                topic_id: self.topic_uuid,
-                partition: PARTITION,
-                fetch_offset,
-                max_wait_ms: FETCH_MAX_WAIT_MS,
-                partition_max_bytes: FETCH_MAX_BYTES,
-                isolation_level: READ_COMMITTED,
-            },
+            recovery_fetch(&self.topic, self.topic_uuid, fetch_offset, self.read_policy),
         )
         .await
         .map_err(|error| {
@@ -802,7 +910,8 @@ impl KafkaCommittedWalReader {
                 &self.topic,
                 self.topic_uuid,
                 0,
-                FETCH_MAX_WAIT_MS,
+                self.read_policy.fetch_max_wait_ms(),
+                self.read_policy,
             ))
             .await
             .map_err(|error| {
@@ -820,11 +929,12 @@ fn build_fetch_request(
     topic_id: WireUuid,
     fetch_offset: i64,
     max_wait_ms: i32,
+    read_policy: RecoveryReadPolicy,
 ) -> FetchRequest {
     FetchRequest {
         max_wait_ms,
         min_bytes: 1,
-        max_bytes: 50 * 1024 * 1024,
+        max_bytes: read_policy.fetch_response_max_bytes(),
         isolation_level: READ_COMMITTED,
         topics: vec![FetchTopic {
             topic: topic.to_owned(),
@@ -832,12 +942,30 @@ fn build_fetch_request(
             partitions: vec![FetchPartition {
                 partition: PARTITION,
                 fetch_offset,
-                partition_max_bytes: FETCH_MAX_BYTES,
+                partition_max_bytes: read_policy.fetch_partition_max_bytes(),
                 ..Default::default()
             }],
             ..Default::default()
         }],
         ..Default::default()
+    }
+}
+
+fn recovery_fetch(
+    topic: &str,
+    topic_id: WireUuid,
+    fetch_offset: i64,
+    read_policy: RecoveryReadPolicy,
+) -> IsolatedFetch<'_> {
+    IsolatedFetch {
+        topic,
+        topic_id,
+        partition: PARTITION,
+        fetch_offset,
+        max_wait_ms: read_policy.fetch_max_wait_ms(),
+        max_bytes: read_policy.fetch_response_max_bytes(),
+        partition_max_bytes: read_policy.fetch_partition_max_bytes(),
+        isolation_level: READ_COMMITTED,
     }
 }
 
@@ -1234,9 +1362,131 @@ mod tests {
     };
 
     #[test]
+    fn recovery_read_policy_owns_defaults() {
+        let policy = RecoveryReadPolicy::default();
+
+        assert_eq!(
+            policy.fetch_max_wait_ms(),
+            DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT_MS
+        );
+        assert_eq!(
+            policy.fetch_partition_max_bytes(),
+            DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES
+        );
+        assert_eq!(
+            policy.fetch_response_max_bytes(),
+            DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES
+        );
+        assert_eq!(
+            policy.empty_fetch_retries(),
+            DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES
+        );
+    }
+
+    #[test]
+    fn recovery_read_policy_rejects_zero_values() {
+        assert!(RecoveryReadPolicy::new(0, 2, 3, 4).is_err());
+        assert!(RecoveryReadPolicy::new(1, 0, 3, 4).is_err());
+        assert!(RecoveryReadPolicy::new(1, 2, 0, 4).is_err());
+        assert!(RecoveryReadPolicy::new(1, 2, 3, 0).is_err());
+    }
+
+    #[test]
+    fn recovery_read_policy_preserves_valid_values() {
+        let policy = RecoveryReadPolicy::new(11, 22, 33, 44).expect("valid policy");
+
+        assert_eq!(policy.fetch_max_wait_ms(), 11);
+        assert_eq!(policy.fetch_partition_max_bytes(), 22);
+        assert_eq!(policy.fetch_response_max_bytes(), 33);
+        assert_eq!(policy.empty_fetch_retries(), 44);
+    }
+
+    #[test]
+    fn recovery_read_policy_defaults_and_replaces_in_live_config() {
+        let tenant = TenantName::parse("tenant-a").expect("tenant");
+        let config = LiveRecoveryConfig::new("localhost:9092", tenant, RangeId::COORDINATOR, None);
+        assert_eq!(config.read_policy(), RecoveryReadPolicy::default());
+
+        let replacement = RecoveryReadPolicy::new(11, 22, 33, 44).expect("valid policy");
+        assert_eq!(
+            config.with_read_policy(replacement).read_policy(),
+            replacement
+        );
+    }
+
+    #[test]
+    fn recovery_read_policy_wires_normal_fetch_settings() {
+        let policy = RecoveryReadPolicy::new(11, 22, 33, 44).expect("valid policy");
+        let fetch = recovery_fetch("topic", WireUuid([7; 16]), 42, policy);
+
+        assert_eq!(fetch.max_wait_ms, 11);
+        assert_eq!(fetch.partition_max_bytes, 22);
+        assert_eq!(fetch.max_bytes, 33);
+    }
+
+    #[test]
+    fn recovery_read_policy_keeps_end_sample_zero_wait() {
+        let policy = RecoveryReadPolicy::new(11, 22, 33, 44).expect("valid policy");
+        let request = build_fetch_request(
+            "__gres_wal.t.r0",
+            WireUuid([7; 16]),
+            42,
+            END_SAMPLE_MAX_WAIT_MS,
+            policy,
+        );
+
+        assert_eq!(request.max_wait_ms, 0);
+        assert_eq!(request.max_bytes, 33);
+        assert_eq!(request.topics[0].partitions[0].partition_max_bytes, 22);
+    }
+
+    #[test]
+    fn recovery_read_policy_retry_count_crosses_limit_after_retries() {
+        let stalled = FetchedWalPartition {
+            log_start_offset: 0,
+            high_watermark: 1,
+            last_stable_offset: 1,
+            decoded_batches: 0,
+            next_offset: 0,
+            records: Vec::new(),
+        };
+
+        let initial_empty = next_empty_fetch_count(0, 0, &stalled);
+        let retry_empty = next_empty_fetch_count(initial_empty, 0, &stalled);
+
+        assert_eq!(initial_empty, 1);
+        assert_eq!(retry_empty, 2);
+        assert!(initial_empty <= 1 && retry_empty > 1);
+    }
+
+    #[test]
+    fn recovery_read_policy_progress_resets_retry_count() {
+        let progressed = FetchedWalPartition {
+            log_start_offset: 0,
+            high_watermark: 2,
+            last_stable_offset: 2,
+            decoded_batches: 1,
+            next_offset: 1,
+            records: Vec::new(),
+        };
+        let records = FetchedWalPartition {
+            next_offset: 1,
+            records: vec![ReplayItem {
+                offset: 0,
+                bytes: Vec::new(),
+            }],
+            ..progressed.clone()
+        };
+
+        assert_eq!(next_empty_fetch_count(44, 0, &progressed), 0);
+        assert_eq!(next_empty_fetch_count(44, 0, &records), 0);
+    }
+
+    #[test]
     fn fetch_request_carries_the_requested_wait_and_committed_isolation() {
         let topic_id = WireUuid([7_u8; 16]);
-        let request = build_fetch_request("__gres_wal.t.r0", topic_id, 42, 250);
+        let policy = RecoveryReadPolicy::default();
+        let request = build_fetch_request("__gres_wal.t.r0", topic_id, 42, 250, policy);
 
         assert!(request.max_wait_ms == 250);
         assert!(request.isolation_level == READ_COMMITTED);
@@ -1244,11 +1494,11 @@ mod tests {
         let partition = &request.topics[0].partitions[0];
         assert!(partition.partition == PARTITION);
         assert!(partition.fetch_offset == 42);
-        assert!(partition.partition_max_bytes == FETCH_MAX_BYTES);
+        assert!(partition.partition_max_bytes == DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES);
 
         // The zero-wait sampler path must stay zero-wait: a positioned fetch at
         // the log end returns immediately instead of long-polling.
-        let poll = build_fetch_request("__gres_wal.t.r0", topic_id, 42, 0);
+        let poll = build_fetch_request("__gres_wal.t.r0", topic_id, 42, 0, policy);
         assert!(poll.max_wait_ms == 0);
     }
 

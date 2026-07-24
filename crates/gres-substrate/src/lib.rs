@@ -51,10 +51,13 @@ pub use self::{
         committed_fold_snapshot_live, committed_fold_snapshot_live_at,
     },
     recovery::{
-        CommittedWalReader, InMemoryWalLog, LiveRecovered, LiveRecoveryConfig, RecoveryBarrier,
-        RecoveryFencer, bootstrap_live_range0_follower, bounded_committed_tail,
-        ensure_live_wal_topic, live_committed_end, read_live_committed_tail,
-        read_live_retained_committed, recover_after_barrier, recover_live, recover_live_for_range,
+        CommittedWalReader, DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES,
+        DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT_MS, DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES,
+        DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES, InMemoryWalLog, LiveRecovered,
+        LiveRecoveryConfig, RecoveryBarrier, RecoveryFencer, RecoveryReadPolicy,
+        bootstrap_live_range0_follower, bounded_committed_tail, ensure_live_wal_topic,
+        live_committed_end, read_live_committed_tail, read_live_retained_committed,
+        recover_after_barrier, recover_live, recover_live_for_range,
         recover_live_for_range_with_restore,
     },
     replay::{
