@@ -6,7 +6,7 @@ use crabka_client_admin::{AdminClientLike, CreateTopicSpec};
 use crabka_gres_ranges::{
     RangeId, TenantName, txn_id as range_txn_id, wal_topic as range_wal_topic,
 };
-use refined_type::rule::{GreaterI32, GreaterU64};
+use refined_type::rule::{GreaterI32, GreaterU64, MinMaxI32};
 
 use crate::error::SubstrateError;
 
@@ -14,8 +14,12 @@ use crate::error::SubstrateError;
 pub const WAL_TOPIC_PARTITIONS: i32 = 1;
 /// Default replication factor requested for the WAL topic.
 pub const DEFAULT_WAL_TOPIC_REPLICATION_FACTOR: i32 = 1;
+/// Compatibility alias for the default WAL topic replication factor.
+pub const WAL_TOPIC_REPLICAS: i32 = DEFAULT_WAL_TOPIC_REPLICATION_FACTOR;
 /// Timeout used by the admin ensure path.
 pub const DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT_MS: i32 = 30_000;
+/// Compatibility alias for the default WAL topic ensure timeout.
+pub const WAL_TOPIC_ENSURE_TIMEOUT_MS: i32 = DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT_MS;
 /// Default timeout for establishing a WAL admin connection.
 pub const DEFAULT_WAL_ADMIN_CONNECT_TIMEOUT_MS: u64 = 5_000;
 /// Default timeout for WAL admin requests.
@@ -44,7 +48,7 @@ impl WalAdminPolicy {
         request_timeout_ms: u64,
     ) -> Result<Self, String> {
         Ok(Self {
-            replication_factor: GreaterI32::<0>::new(replication_factor)
+            replication_factor: MinMaxI32::<1, { i16::MAX as i32 }>::new(replication_factor)
                 .map_err(|error| error.to_string())?
                 .into_value(),
             topic_ensure_timeout_ms: GreaterI32::<0>::new(topic_ensure_timeout_ms)
@@ -140,12 +144,18 @@ pub trait TopicAdmin: Send {
     async fn topic_exists(&mut self, topic: &str) -> Result<bool, SubstrateError>;
 
     /// Create `topic` if the broker does not already have it.
-    async fn create_wal_topic(
+    async fn create_wal_topic(&mut self, topic: &str) -> Result<(), SubstrateError>;
+
+    /// Create `topic` with explicit replication and timeout settings.
+    async fn create_wal_topic_with_policy(
         &mut self,
         topic: &str,
         replication_factor: i32,
         timeout_ms: i32,
-    ) -> Result<(), SubstrateError>;
+    ) -> Result<(), SubstrateError> {
+        let _ = (replication_factor, timeout_ms);
+        self.create_wal_topic(topic).await
+    }
 }
 
 #[async_trait::async_trait]
@@ -164,7 +174,17 @@ where
             .any(|entry| entry.name == topic && entry.error.is_none()))
     }
 
-    async fn create_wal_topic(
+    async fn create_wal_topic(&mut self, topic: &str) -> Result<(), SubstrateError> {
+        let policy = WalAdminPolicy::default();
+        self.create_wal_topic_with_policy(
+            topic,
+            policy.replication_factor(),
+            policy.topic_ensure_timeout_ms(),
+        )
+        .await
+    }
+
+    async fn create_wal_topic_with_policy(
         &mut self,
         topic: &str,
         replication_factor: i32,
@@ -247,7 +267,7 @@ pub async fn ensure_wal_topic_name_with_policy(
 ) -> Result<String, SubstrateError> {
     if !admin.topic_exists(topic).await? {
         admin
-            .create_wal_topic(
+            .create_wal_topic_with_policy(
                 topic,
                 policy.replication_factor(),
                 policy.topic_ensure_timeout_ms(),
@@ -280,18 +300,29 @@ mod tests {
             Ok(self.existing)
         }
 
-        async fn create_wal_topic(
+        async fn create_wal_topic(&mut self, topic: &str) -> Result<(), SubstrateError> {
+            self.record_create(topic, WAL_TOPIC_REPLICAS, WAL_TOPIC_ENSURE_TIMEOUT_MS);
+            Ok(())
+        }
+
+        async fn create_wal_topic_with_policy(
             &mut self,
             topic: &str,
             replication_factor: i32,
             timeout_ms: i32,
         ) -> Result<(), SubstrateError> {
+            self.record_create(topic, replication_factor, timeout_ms);
+            Ok(())
+        }
+    }
+
+    impl FakeTopicAdmin {
+        fn record_create(&mut self, topic: &str, replication_factor: i32, timeout_ms: i32) {
             self.creates += 1;
             self.existing = true;
             self.created.push(topic.to_string());
             self.replication_factor = Some(replication_factor);
             self.timeout_ms = Some(timeout_ms);
-            Ok(())
         }
     }
 
@@ -314,6 +345,11 @@ mod tests {
         assert_eq!(
             policy.request_timeout(),
             std::time::Duration::from_millis(DEFAULT_WAL_ADMIN_REQUEST_TIMEOUT_MS)
+        );
+        assert_eq!(WAL_TOPIC_REPLICAS, DEFAULT_WAL_TOPIC_REPLICATION_FACTOR);
+        assert_eq!(
+            WAL_TOPIC_ENSURE_TIMEOUT_MS,
+            DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT_MS
         );
     }
 
@@ -339,6 +375,14 @@ mod tests {
             policy.request_timeout(),
             std::time::Duration::from_millis(44)
         );
+    }
+
+    #[test]
+    fn wal_admin_policy_accepts_max_wire_replication_factor_and_rejects_overflow() {
+        let policy = WalAdminPolicy::new(i32::from(i16::MAX), 2, 3, 4).expect("wire maximum");
+
+        assert_eq!(policy.replication_factor(), i32::from(i16::MAX));
+        assert!(WalAdminPolicy::new(i32::from(i16::MAX) + 1, 2, 3, 4).is_err());
     }
 
     #[test]
@@ -379,10 +423,7 @@ mod tests {
             admin.replication_factor,
             Some(DEFAULT_WAL_TOPIC_REPLICATION_FACTOR)
         );
-        assert_eq!(
-            admin.timeout_ms,
-            Some(DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT_MS)
-        );
+        assert_eq!(admin.timeout_ms, Some(DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT_MS));
     }
 
     #[tokio::test]
@@ -402,13 +443,13 @@ mod tests {
     #[tokio::test]
     async fn policy_aware_ensure_passes_replication_and_timeout() {
         let mut admin = FakeTopicAdmin::default();
-        let policy = WalAdminPolicy::new(7, 8, 9, 10).expect("valid policy");
+        let policy = WalAdminPolicy::new(i32::from(i16::MAX), 8, 9, 10).expect("valid policy");
 
         ensure_wal_topic_name_with_policy(&mut admin, "__gres_wal.t1.r0", policy)
             .await
             .expect("ensure");
 
-        assert_eq!(admin.replication_factor, Some(7));
+        assert_eq!(admin.replication_factor, Some(i32::from(i16::MAX)));
         assert_eq!(admin.timeout_ms, Some(8));
     }
 }

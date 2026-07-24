@@ -559,8 +559,199 @@ pub(crate) fn kafka_error_name(code: i16) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use bytes::{BufMut, BytesMut};
+    use crabka_client_core::security::{ClientSecurity, SaslCredentials};
+    use crabka_protocol::{
+        Encode,
+        owned::{
+            api_versions_request,
+            api_versions_response::{ApiVersion, ApiVersionsResponse},
+            metadata_request, sasl_authenticate_request,
+            sasl_authenticate_response::SaslAuthenticateResponse,
+            sasl_handshake_request,
+            sasl_handshake_response::SaslHandshakeResponse,
+        },
+    };
+    use crabka_security::ListenerProtocol;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
+    use tokio_util::sync::CancellationToken;
 
     use super::*;
+
+    struct ObservedAdminBroker {
+        addr: std::net::SocketAddr,
+        shutdown: CancellationToken,
+        connections: Arc<AtomicUsize>,
+        sasl_handshakes: Arc<AtomicUsize>,
+        client_ids: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl ObservedAdminBroker {
+        async fn start(api_versions_delay: Duration) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let shutdown = CancellationToken::new();
+            let connections = Arc::new(AtomicUsize::new(0));
+            let sasl_handshakes = Arc::new(AtomicUsize::new(0));
+            let client_ids = Arc::new(Mutex::new(Vec::new()));
+            let task_shutdown = shutdown.clone();
+            let task_connections = Arc::clone(&connections);
+            let task_sasl_handshakes = Arc::clone(&sasl_handshakes);
+            let task_client_ids = Arc::clone(&client_ids);
+
+            tokio::spawn(async move {
+                loop {
+                    let Ok((mut stream, _)) = listener.accept().await else {
+                        break;
+                    };
+                    if task_shutdown.is_cancelled() {
+                        break;
+                    }
+                    task_connections.fetch_add(1, Ordering::SeqCst);
+                    let conn_sasl_handshakes = Arc::clone(&task_sasl_handshakes);
+                    let conn_client_ids = Arc::clone(&task_client_ids);
+                    tokio::spawn(async move {
+                        while let Ok(frame_len) = stream.read_u32().await {
+                            let mut request = vec![0_u8; frame_len as usize];
+                            if stream.read_exact(&mut request).await.is_err() || request.len() < 10
+                            {
+                                break;
+                            }
+                            let api_key = i16::from_be_bytes([request[0], request[1]]);
+                            let correlation_id =
+                                i32::from_be_bytes(request[4..8].try_into().unwrap());
+                            let client_id_len =
+                                usize::from(u16::from_be_bytes([request[8], request[9]]));
+                            if request.len() < 10 + client_id_len {
+                                break;
+                            }
+                            conn_client_ids.lock().unwrap().push(
+                                String::from_utf8_lossy(&request[10..10 + client_id_len]).into(),
+                            );
+
+                            let (body, flexible_header) = match api_key {
+                                sasl_handshake_request::API_KEY => {
+                                    conn_sasl_handshakes.fetch_add(1, Ordering::SeqCst);
+                                    let mut body = BytesMut::new();
+                                    SaslHandshakeResponse {
+                                        error_code: 0,
+                                        ..Default::default()
+                                    }
+                                    .encode(&mut body, 1)
+                                    .unwrap();
+                                    (body, false)
+                                }
+                                sasl_authenticate_request::API_KEY => {
+                                    let mut body = BytesMut::new();
+                                    SaslAuthenticateResponse {
+                                        error_code: 0,
+                                        ..Default::default()
+                                    }
+                                    .encode(&mut body, 2)
+                                    .unwrap();
+                                    (body, true)
+                                }
+                                api_versions_request::API_KEY => {
+                                    tokio::time::sleep(api_versions_delay).await;
+                                    let mut body = BytesMut::new();
+                                    ApiVersionsResponse {
+                                        error_code: 0,
+                                        api_keys: vec![
+                                            ApiVersion {
+                                                api_key: api_versions_request::API_KEY,
+                                                min_version: 0,
+                                                max_version: 3,
+                                                ..Default::default()
+                                            },
+                                            ApiVersion {
+                                                api_key: metadata_request::API_KEY,
+                                                min_version: 0,
+                                                max_version: 12,
+                                                ..Default::default()
+                                            },
+                                        ],
+                                        ..Default::default()
+                                    }
+                                    .encode(&mut body, 0)
+                                    .unwrap();
+                                    (body, false)
+                                }
+                                _ => continue,
+                            };
+                            let mut response = BytesMut::new();
+                            response.put_i32(correlation_id);
+                            if flexible_header {
+                                response.put_u8(0);
+                            }
+                            response.extend_from_slice(&body);
+                            if stream
+                                .write_u32(u32::try_from(response.len()).unwrap())
+                                .await
+                                .is_err()
+                                || stream.write_all(&response).await.is_err()
+                            {
+                                break;
+                            }
+                        }
+                    });
+                }
+            });
+
+            Self {
+                addr,
+                shutdown,
+                connections,
+                sasl_handshakes,
+                client_ids,
+            }
+        }
+
+        fn observed_custom_security_and_id(&self) -> bool {
+            self.sasl_handshakes.load(Ordering::SeqCst) > 0
+                && self
+                    .client_ids
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|client_id| client_id == "custom-admin")
+        }
+
+        fn stop(self) {
+            self.shutdown.cancel();
+        }
+    }
+
+    fn custom_admin_options() -> ConnectionOptions {
+        ConnectionOptions {
+            client_id: "custom-admin".into(),
+            connect_timeout: Duration::from_millis(100),
+            request_timeout: Duration::from_millis(25),
+            security: Some(Box::new(ClientSecurity {
+                protocol: ListenerProtocol::SaslPlaintext,
+                tls: None,
+                sasl: Some(SaslCredentials::Plain {
+                    username: "u".into(),
+                    password: "p".into(),
+                }),
+                sasl_host: Some("broker.example".into()),
+            })),
+        }
+    }
+
+    async fn metadata_times_out_with_custom_request_timeout(admin: &mut AdminClient) {
+        let result = tokio::time::timeout(Duration::from_millis(500), admin.metadata(&[]))
+            .await
+            .expect("custom request timeout fires");
+        assert2::assert!(result.is_err());
+    }
 
     #[test]
     fn kafka_error_name_known_codes() {
@@ -642,62 +833,80 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connect_with_options_retains_the_full_template() {
-        use bytes::BytesMut;
-        use crabka_client_core::{MockBroker, security::ClientSecurity};
-        use crabka_protocol::{
-            Encode,
-            owned::{
-                api_versions_request,
-                api_versions_response::{ApiVersion, ApiVersionsResponse},
-            },
-        };
-        use crabka_security::ListenerProtocol;
+    async fn custom_options_are_observable_on_initial_dial() {
+        let live = ObservedAdminBroker::start(Duration::ZERO).await;
+        let mut admin =
+            AdminClient::connect_with_options(&[live.addr.to_string()], custom_admin_options())
+                .await
+                .unwrap();
 
-        let mock = MockBroker::start(|api_key, _version, _correlation_id, _body| {
-            assert2::assert!(api_key == api_versions_request::API_KEY);
-            let response = ApiVersionsResponse {
-                error_code: 0,
-                api_keys: vec![ApiVersion {
-                    api_key: api_versions_request::API_KEY,
-                    min_version: 0,
-                    max_version: 3,
-                    ..Default::default()
-                }],
-                ..Default::default()
-            };
-            let mut encoded = BytesMut::new();
-            response.encode(&mut encoded, 0).unwrap();
-            Some(encoded.to_vec())
-        })
-        .await;
-        let options = ConnectionOptions {
-            client_id: "custom-admin".into(),
-            connect_timeout: Duration::from_millis(123),
-            request_timeout: Duration::from_millis(456),
-            security: Some(Box::new(ClientSecurity {
-                protocol: ListenerProtocol::Plaintext,
-                tls: None,
-                sasl: None,
-                sasl_host: Some("broker.example".into()),
-            })),
-        };
+        assert2::assert!(live.observed_custom_security_and_id());
+        metadata_times_out_with_custom_request_timeout(&mut admin).await;
 
-        let admin = AdminClient::connect_with_options(&[mock.addr.to_string()], options)
+        let slow = ObservedAdminBroker::start(Duration::from_millis(300)).await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            AdminClient::connect_with_options(&[slow.addr.to_string()], custom_admin_options()),
+        )
+        .await
+        .expect("custom connect timeout fires");
+        assert2::assert!(result.is_err());
+
+        live.stop();
+        slow.stop();
+    }
+
+    #[tokio::test]
+    async fn custom_options_are_observable_on_controller_reconnect() {
+        let bootstrap = ObservedAdminBroker::start(Duration::ZERO).await;
+        let controller = ObservedAdminBroker::start(Duration::ZERO).await;
+        let slow = ObservedAdminBroker::start(Duration::from_millis(300)).await;
+        let mut admin = AdminClient::connect_with_options(
+            &[bootstrap.addr.to_string()],
+            custom_admin_options(),
+        )
+        .await
+        .unwrap();
+
+        admin.reconnect(&controller.addr.to_string()).await.unwrap();
+        assert2::assert!(controller.observed_custom_security_and_id());
+        metadata_times_out_with_custom_request_timeout(&mut admin).await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            admin.reconnect(&slow.addr.to_string()),
+        )
+        .await
+        .expect("custom reconnect timeout fires");
+        assert2::assert!(result.is_err());
+
+        bootstrap.stop();
+        controller.stop();
+        slow.stop();
+    }
+
+    #[tokio::test]
+    async fn custom_options_are_observable_on_bootstrap_reconnect() {
+        let slow = ObservedAdminBroker::start(Duration::from_millis(300)).await;
+        let live = ObservedAdminBroker::start(Duration::ZERO).await;
+        let bootstrap = [slow.addr.to_string(), live.addr.to_string()];
+        let mut admin = tokio::time::timeout(
+            Duration::from_secs(1),
+            AdminClient::connect_with_options(&bootstrap, custom_admin_options()),
+        )
+        .await
+        .expect("custom initial timeout advances to next bootstrap")
+        .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), admin.reconnect_bootstrap())
             .await
+            .expect("custom reconnect timeout advances to next bootstrap")
             .unwrap();
+        assert2::assert!(live.connections.load(Ordering::SeqCst) == 2);
+        assert2::assert!(live.observed_custom_security_and_id());
+        metadata_times_out_with_custom_request_timeout(&mut admin).await;
 
-        assert2::assert!(admin.options.client_id == "custom-admin");
-        assert2::assert!(admin.options.connect_timeout == Duration::from_millis(123));
-        assert2::assert!(admin.options.request_timeout == Duration::from_millis(456));
-        assert2::assert!(
-            admin
-                .options
-                .security
-                .as_ref()
-                .is_some_and(|security| security.sasl_host.as_deref() == Some("broker.example"))
-        );
-        mock.stop();
+        slow.stop();
+        live.stop();
     }
 
     #[test]
