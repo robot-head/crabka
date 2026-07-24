@@ -52,20 +52,19 @@ defaults remain configurable even when the scanner reports the default constant.
   `TAIL_READ_MAX_BYTES`.
 - Broker maintenance: `LIVENESS_TICK_INTERVAL`, `GAUGE_POLL_INTERVAL`,
   `ISR_SCAN_INTERVAL`, `DEFAULT_COMPACTION_INTERVAL`,
-  `DEFAULT_TIERING_INTERVAL`, `MOVE_READ_CHUNK_BYTES`, and
+  `DEFAULT_TIERING_INTERVAL` (the default for the existing
+  `remote_log_manager_interval` setting), `MOVE_READ_CHUNK_BYTES`, and
   `MOVE_RETRY_BACKOFF`.
 - Client metrics: `CLIENT_METRICS_EVICTION_TICK`,
   `CLIENT_METRICS_STALE_PUSH_INTERVALS`, `CLIENT_METRICS_STALE_FLOOR`,
   `DEFAULT_INTERVAL_MS`, `DEFAULT_TELEMETRY_MAX_BYTES`, and
-  `PROM_SNAPSHOT_TTL`.
+  `PROM_SNAPSHOT_TTL`; and the OTLP forwarding queue capacity.
 - Remote log metadata: `RLMM_RECONCILE_TICK`,
   `RLMM_BOOTSTRAP_BACKOFF_INITIAL`, and `RLMM_BOOTSTRAP_BACKOFF_MAX`.
 - Network and authorization: `CONNECTION_CREATION_THROTTLE_MAX`,
   `OPA_HTTP_TIMEOUT`, the JWKS HTTP timeout in `oauth_jwks.rs`,
   `MAX_FRAME_BYTES`, `SENDFILE_MIN_BYTES`, `SOCKET_BUF_BYTES`,
-  `MAX_PRINCIPAL_LEN`,
-  `MAX_RESOURCE_NAME_LEN`, `MIN_ITERATIONS`, `MAX_ITERATIONS`, and
-  `INTER_BROKER_SNI`.
+  `MAX_PRINCIPAL_LEN`, `MAX_RESOURCE_NAME_LEN`, and `INTER_BROKER_SNI`.
 - Telemetry resource protection: `MAX_DECOMPRESSION_RATIO`,
   `DECOMPRESSED_OUTPUT_FLOOR`, and `DECOMPRESSED_OUTPUT_CEILING`.
 - Auto-join and replication: `RETRY_BACKOFF`, `FETCH_MAX_BYTES`,
@@ -79,22 +78,24 @@ defaults remain configurable even when the scanner reports the default constant.
   `DEFAULT_MAX_SESSION_TIMEOUT`, `DEFAULT_MIN_HEARTBEAT_INTERVAL`,
   `DEFAULT_MAX_HEARTBEAT_INTERVAL`, `DEFAULT_MAX_GROUP_SIZE`,
   `DEFAULT_SESSION_TIMEOUT_MS`, `DEFAULT_REBALANCE_TIMEOUT_MS`,
-  `INITIAL_REBALANCE_DELAY`, `FOLLOWER_WAIT`, and the three fallback timeout
-  values in `coordinator/unified/actor.rs` as derived consumers of those
-  settings rather than independent knobs. This includes the naked
+  `INITIAL_REBALANCE_DELAY`, and `FOLLOWER_WAIT`. This includes the naked
   `mpsc::channel(64)` mailbox capacities in the Share and Streams actors.
-- Share and Streams group policy: every field default in
+- Share and Streams group policy: every behaviorally consumed field default in
   `coordinator/unified/share/config.rs` and
-  `coordinator/unified/streams/config.rs`. The 100 ms lock-sweeper floor is
-  fixed separately below.
+  `coordinator/unified/streams/config.rs`; and the
+  `share_session_cache_max_when_unlimited` fallback of 10,000 sessions in
+  `share_partition/manager.rs`. The Streams `enable`, `max_groups`, and
+  `max_size` fields and the 100 ms Share lock-sweeper floor are fixed
+  separately below.
 - Recovery and quota policy: `AGGRESSIVE_DEADLINE`, `BALANCED_DEADLINE`,
   `OPERATOR_RECOVERY_DEADLINE`, the maximum quota throttle delay, and
   `RECOVERY_READ_MAX_BYTES`; and the
   `mpsc::channel::<RecoveryJob>(256)` unclean-recovery queue capacity.
-- Produce policy: `PRODUCER_ID_EXPIRATION_MS`, `MAX_PRODUCE_GROUP`,
-  `PARTITION_WRITER_QUEUE_DEPTH`, and `DEFAULT_MIN_INSYNC_REPLICAS`.
-- Internal-topic sizing: `OFFSETS_NUM_PARTITIONS` and each
-  `NUM_PARTITIONS` in `share_coordinator/bootstrap.rs` and
+- Produce policy: `PRODUCER_ID_EXPIRATION_MS`, its expiration scan interval,
+  `MAX_PRODUCE_GROUP`, `PARTITION_WRITER_QUEUE_DEPTH`, and
+  `DEFAULT_MIN_INSYNC_REPLICAS`.
+- Internal-topic sizing: each `NUM_PARTITIONS` in
+  `share_coordinator/bootstrap.rs` and
   `txn/bootstrap.rs`. Internal topic names and fixed partition sentinels remain
   fixed.
 - Transaction policy: `MIN_TXN_TIMEOUT_MS` and `MAX_TXN_TIMEOUT_MS`.
@@ -155,6 +156,8 @@ defaults remain configurable even when the scanner reports the default constant.
   `ACCEPTED_COMPRESSION_TYPES` in `client_metrics/manager.rs`: KIP-714
   validation and wire compatibility. The default interval and byte limit are
   configurable above.
+- `MIN_ITERATIONS` and `MAX_ITERATIONS` in
+  `handlers/alter_user_scram_credentials.rs`: Kafka SCRAM validation bounds.
 - `GSSAPI_MAX_RECV_SIZE` and `SASL_AUTHENTICATION_FAILED`: SASL/GSSAPI wire
   limits and error codes.
 - The `mpsc::channel::<()>(1)` JWKS refresh signal capacity in
@@ -179,6 +182,8 @@ defaults remain configurable even when the scanner reports the default constant.
   persisted-state or probe identifiers.
 - `CLUSTER_METADATA_TOPIC`, `CLUSTER_RESOURCE_NAME`, and the fixed offsets
   partition number: Kafka metadata/resource identity.
+- `OFFSETS_NUM_PARTITIONS`: routing and storage currently hardcode offsets
+  partition zero, so changing the count alone would violate that invariant.
 - `ACKS_ALL`, accepted transaction-state arrays, share delivery-state flags,
   topology error states, and fixed collection dimensions derived from those
   protocol shapes: protocol invariants.
@@ -190,14 +195,47 @@ defaults remain configurable even when the scanner reports the default constant.
   minimum of 100 ms, and fallback rebalance deadlines derived from configured
   group timeouts: algorithmic safety bounds or derived values, not independent
   tuning controls.
+- The 100 ms startup-leader watch wake and 10 ms audit-partition registry poll:
+  internal observation quanta bounded by their configured deadlines, not
+  independent tuning controls.
+- `FALLBACK_SESSION_TIMEOUT_MS`, `FALLBACK_SESSION_TIMEOUT_MS_I32`,
+  `FALLBACK_REBALANCE_TIMEOUT_MS`, `FALLBACK_REBALANCE_TIMEOUT_MS_I32`, and
+  `FALLBACK_HEARTBEAT_INTERVAL_MS`: classic coordinator conversion fallbacks
+  derived from configured policy, not independent settings.
+- Streams `enable`, `max_groups`, and `max_size`: staged fields with no
+  production behavior. Exposing overrides now would create no-op
+  configuration; reclassify them when the Streams coordinator consumes them.
 - Model-checking constants, generated model inputs, and values in files matched
   by `*_model.rs`: verification inputs excluded directly by the scanner.
 
 ## Audit Snapshot
 
-On 2026-07-23 the scanner reports 5,270 matches across all crates, including
-1,013 broker matches. Of the broker matches, 565 are after the first test-only
-boundary in their source file and the remaining 448 are
-production candidates or test-support items declared before that boundary.
-The semantic rules above, rather than line position, are authoritative for
-mixed files.
+On 2026-07-24 the scanner reports 5,503 matches across all crates, including
+1,246 broker matches across 148 files. Of the broker matches, 428 are named
+constant declarations and 818 are other literal, capacity, or duration
+expressions. The positional first-`#[cfg(test)]` heuristic yields 501 matches
+before and 745 after the boundary. That split is not semantic because mixed
+files contain test-gated items before later production items. The semantic
+rules above are authoritative, and every broker match has been classified.
+
+## Broker Slice Completion Evidence
+
+The broker slice passed these gates on 2026-07-24:
+
+- `tools/audit-runtime-values.sh`: 5,503 repository matches; the broker subset
+  contains 1,246 matches across 148 files, with no unclassified production
+  policy.
+- `cargo +nightly fmt --all -- --check`: passed.
+- `cargo clippy -p crabka-broker -p crabka-operator --all-targets -- -D warnings`:
+  passed.
+- `cargo nextest run -p crabka-broker -p crabka-operator --test-threads 1`:
+  3,085 passed, 71 skipped, and no failures.
+- `cargo run -p crabka-broker -- --help`: exposes cleaner-interval,
+  OPA HTTP timeout, and replication-fetch settings.
+- `cargo run -p crabka-operator -- gen-crds <temporary-directory>` followed by
+  `diff -ru deploy/crds <temporary-directory>`: all nine generated CRDs match
+  the checked-in manifests.
+- `git diff --check`: passed.
+
+This evidence closes only the broker slice. Every crate listed as pending in
+Coverage Status still requires its own semantic audit and verification.
