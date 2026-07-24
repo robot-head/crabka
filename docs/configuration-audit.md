@@ -415,3 +415,88 @@ The gRPC Gateway slice passed these gates on 2026-07-24:
 
 This evidence closes only the gRPC Gateway slice. Every crate listed as pending
 in Coverage Status still requires its own semantic audit and verification.
+
+## Gres Activator
+
+### Configurable
+
+The direct activator process exposes every activator-owned deployment input
+through both Clap and environment variables:
+
+- listen address and Kafka bootstrap through
+  `CRABKA_GRES_ACTIVATOR_LISTEN` and
+  `CRABKA_GRES_ACTIVATOR_BOOTSTRAP`;
+- registry replication factor, readiness poll interval, and cold-start timeout
+  through their `CRABKA_GRES_ACTIVATOR_*` variables; and
+- backend endpoint template through
+  `CRABKA_GRES_ACTIVATOR_BACKEND_ENDPOINT_TEMPLATE`.
+
+The non-empty strings, positive millisecond values, and registry replication
+factor are validated boundary types backed by `refined_type`. Registry
+replication is restricted to `1..=32767`, Kafka's signed-16-bit wire domain.
+
+Operator-managed deployments expose image, replicas, registry replication,
+registry polling, cold-start timeout, and readiness-probe period under typed
+`Gres.spec.activator` fields. Present values fail before child API writes. The
+operator also supports its existing global
+`--default-gres-activator-image`/`DEFAULT_GRES_ACTIVATOR_IMAGE` fallback and
+renders the effective policy as explicit process arguments. The configured
+cold-start timeout drives a checked PgDog connection budget so the front door
+does not expire first.
+
+### Fixed
+
+- The one-partition compacted tenant-registry topic supplies total ordering.
+- The operator-derived listen address, Kafka bootstrap address, backend
+  service template, internal port, Kubernetes object names and labels, TCP
+  protocol, and non-root user/group IDs are topology or security invariants.
+- PostgreSQL error code `57P03`, SSL/GSS refusal byte `N`, startup-frame
+  lengths, maximum imported startup-frame size, parameter framing, and parser
+  values are PostgreSQL compatibility invariants.
+- Endpoint substitution and PgDog timeout arithmetic are derived from
+  configured values. Collection capacities are exact input-size
+  preallocation, not limits.
+- All 12 scanner matches under `crates/gres-activator` are test inputs: 11
+  readiness timing fixtures in `src/lib.rs` and one six-variable environment
+  fixture declaration in `src/main.rs`.
+
+### Adjacent Pending Policy
+
+The semantic audit followed the activator into `Registry::ensure_topic`, its
+background reader, `PgdogTimeouts`, and the Gres controller. The following
+shared policy is intentionally not misclassified as activator-owned:
+
+- the registry topic-create timeout, reader fetch wait/byte limit, and reader
+  retry backoff in `gres-control`;
+- PgDog idle timeout, server lifetime, connection-attempt count, and related
+  pool policy in `gres-control`; and
+- Gres-controller reconcile, reload, PgDog admin, and credential-transition
+  retry/timing policy.
+
+Those values remain work for the Gres-control/front-door slice. No other
+activator-owned hardcoded deployment policy was found in `main`, `lib`,
+`config_value`, `hold`, `peek`, or `pipe`, or in the operator's activator
+Service, Deployment, and fail-fast validation path.
+
+### Gres Activator Sub-slice Evidence
+
+On 2026-07-24 the scanner reported 5,896 matches across the repository and
+exactly 12 `crates/gres-activator` matches across two files, classified above.
+The activator-owned sub-slice passed:
+
+- `cargo nextest run -p crabka-gres-activator -p crabka-gres-control
+  -p crabka-operator --no-fail-fast`: 975 passed, 0 skipped, and no failures.
+- `cargo clippy -p crabka-gres-activator -p crabka-gres-control
+  -p crabka-operator --all-targets -- -D warnings`: passed.
+- `cargo run -p crabka-gres-activator -- --help`: displayed all six direct
+  settings and their `CRABKA_GRES_ACTIVATOR_*` environment bindings.
+- `cargo +nightly fmt --all -- --check`: passed.
+- `cargo run -p crabka-operator -- gen-crds <temporary-directory>` followed by
+  `diff -ru deploy/crds <temporary-directory>`: all nine generated CRDs
+  matched exactly.
+- `tools/audit-runtime-values.sh` and `git diff --check`: passed.
+
+This closes only the activator-owned sub-slice. `gres-activator`,
+`gres-control`, `gres`, and broader Gres crates remain Pending in the
+crate-level coverage list until the shared runtime policy above and their
+other owned policy are exposed and audited.
