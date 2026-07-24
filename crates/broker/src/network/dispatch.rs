@@ -400,13 +400,19 @@ where
         .record_unsupported_api_request(parsed.api_key);
     let mut body = BytesMut::with_capacity(2);
     body.put_i16(codes::UNSUPPORTED_VERSION);
-    let response = encode_response(
+    let response = match encode_response(
         parsed.api_key,
         parsed.correlation_id,
         parsed.body_flexible,
         &body.freeze(),
         broker.config.socket_request_max_bytes,
-    );
+    ) {
+        Ok(response) => response,
+        Err(error) => {
+            tracing::warn!(%error, "response exceeds configured frame maximum, closing");
+            return false;
+        }
+    };
     let response = maybe_apply_request_quota(broker, response, parsed, auth, started).await;
     if let Err(error) = framed.send(response).await {
         tracing::warn!(%error, "framed.send error, closing");
@@ -781,7 +787,7 @@ async fn handle_sasl_frame(
         parsed.body_flexible,
         &resp_body,
         broker.config.socket_request_max_bytes,
-    );
+    )?;
     Ok(SaslFrameOutcome {
         response_bytes,
         close_after,
@@ -857,21 +863,13 @@ async fn handle_fetch_frame_from_parsed(
         // Legacy down-conversion path: encode the whole body the old way and
         // wrap it (plus the response header) as a single inline op.
         let body_bytes = crate::handlers::fetch::encode_fetch_response(resp, version)?;
-        if crate::network::response_header_len(parsed.api_key, parsed.body_flexible)
-            + body_bytes.len()
-            >= broker.config.socket_request_max_bytes
-        {
-            return Err(BrokerError::Io(std::io::Error::other(
-                "fetch response exceeds max frame size",
-            )));
-        }
         let framed = encode_response(
             parsed.api_key,
             parsed.correlation_id,
             parsed.body_flexible,
             &body_bytes,
             broker.config.socket_request_max_bytes,
-        );
+        )?;
         // Prepend the 4-byte frame length so the writer path is uniform.
         let mut framed_with_len = BytesMut::with_capacity(4 + framed.len());
         framed_with_len.put_u32(u32::try_from(framed.len()).map_err(|_| {
@@ -1038,7 +1036,7 @@ fn encode_dispatch_result(
     max_frame_bytes: usize,
     result: Result<Bytes, BrokerError>,
 ) -> Result<Bytes, BrokerError> {
-    result.map(|body| {
+    result.and_then(|body| {
         encode_response(
             parsed.api_key,
             parsed.correlation_id,
@@ -1065,13 +1063,14 @@ async fn dispatch_registry_response(
                     parsed.body,
                 )
                 .await?;
-                Ok(Some(encode_response(
+                encode_response(
                     parsed.api_key,
                     parsed.correlation_id,
                     parsed.body_flexible,
                     &body,
                     broker.config.socket_request_max_bytes,
-                )))
+                )
+                .map(Some)
             }
             crate::handlers::DispatchKind::Fetch | crate::handlers::DispatchKind::SaslMetadata => {
                 Ok(None)
@@ -1190,16 +1189,16 @@ fn encode_response(
     body_flexible: bool,
     body: &[u8],
     max_frame_bytes: usize,
-) -> Bytes {
+) -> Result<Bytes, BrokerError> {
     let header_len = crate::network::response_header_len(api_key, body_flexible);
-    debug_assert!(header_len + body.len() < max_frame_bytes);
+    codec::validate_frame_length(header_len + body.len(), max_frame_bytes)?;
     let mut buf = BytesMut::with_capacity(header_len + body.len());
     buf.put_i32(correlation_id);
     if crate::network::response_header_v1(api_key, body_flexible) {
         buf.put_u8(0); // empty tagged fields
     }
     buf.put_slice(body);
-    buf.freeze()
+    Ok(buf.freeze())
 }
 
 /// KIP-219 (throttle-then-respond): `true` when `api_key`'s response carries
@@ -1380,7 +1379,8 @@ mod tests {
         // ApiVersions response is always header v0 (no tagged byte) even
         // for flexible body versions.
         let body = [0u8, 0u8]; // error_code=0
-        let out = encode_response(API_VERSIONS_KEY, 7, true, &body, DEFAULT_MAX_FRAME_BYTES);
+        let out = encode_response(API_VERSIONS_KEY, 7, true, &body, DEFAULT_MAX_FRAME_BYTES)
+            .expect("encode response");
         // 4 byte corr_id + body, no tagged byte.
         assert!(out.len() == 4 + body.len());
     }
@@ -1419,7 +1419,8 @@ mod tests {
         // header = 5 bytes (corr_id + tagged byte); throttle int32 at offset 5.
         let mut body = BytesMut::new();
         body.put_i32(0); // ThrottleTimeMs = 0
-        let resp = encode_response(68, 7, true, &body, DEFAULT_MAX_FRAME_BYTES);
+        let resp =
+            encode_response(68, 7, true, &body, DEFAULT_MAX_FRAME_BYTES).expect("encode response");
         let patched = patch_leading_throttle(resp, 68, true, 250);
         assert!(read(&patched, 5) == 250);
         assert!(read(&patched, 0) == 7); // corr_id preserved
@@ -1427,7 +1428,8 @@ mod tests {
         // Non-flexible response header (Metadata v3): header = 4 bytes.
         let mut body = BytesMut::new();
         body.put_i32(10); // existing throttle 10 < 250
-        let resp = encode_response(3, 9, false, &body, DEFAULT_MAX_FRAME_BYTES);
+        let resp =
+            encode_response(3, 9, false, &body, DEFAULT_MAX_FRAME_BYTES).expect("encode response");
         let patched = patch_leading_throttle(resp, 3, false, 250);
         assert!(read(&patched, 4) == 250);
         assert!(read(&patched, 0) == 9);
@@ -1438,7 +1440,8 @@ mod tests {
         // max(existing, delay): an already-larger throttle is not lowered.
         let mut body = BytesMut::new();
         body.put_i32(500);
-        let resp = encode_response(3, 1, false, &body, DEFAULT_MAX_FRAME_BYTES);
+        let resp =
+            encode_response(3, 1, false, &body, DEFAULT_MAX_FRAME_BYTES).expect("encode response");
         let patched = patch_leading_throttle(resp, 3, false, 100);
         let v = i32::from_be_bytes([patched[4], patched[5], patched[6], patched[7]]);
         assert!(v == 500);
@@ -1463,9 +1466,17 @@ mod tests {
     #[test]
     fn encode_response_other_flexible_inserts_tagged_byte() {
         let body = [0u8, 0u8];
-        let out = encode_response(3, 7, true, &body, DEFAULT_MAX_FRAME_BYTES);
+        let out =
+            encode_response(3, 7, true, &body, DEFAULT_MAX_FRAME_BYTES).expect("encode response");
         assert!(out.len() == 5 + body.len());
         assert!(out[4] == 0); // tagged byte
+    }
+
+    #[test]
+    fn encode_response_enforces_max_frame_at_runtime() {
+        let body = [0u8; 4];
+        assert!(encode_response(3, 7, false, &body, 8).is_ok());
+        assert!(encode_response(3, 7, false, &body, 7).is_err());
     }
 
     /// KIP-853 RPCs (80/81/82) route through the registry path and are

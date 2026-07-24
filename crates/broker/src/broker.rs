@@ -5244,21 +5244,20 @@ protocol = "Plaintext"
         let sock = socket2::SockRef::from(&server);
         server.set_nodelay(false).expect("clear TCP_NODELAY");
         sock.set_send_buffer_size(4096).expect("shrink send buffer");
-        sock.set_recv_buffer_size(4096).expect("shrink recv buffer");
+        sock.set_recv_buffer_size(8192).expect("shrink recv buffer");
         let send_before = sock.send_buffer_size().expect("read baseline send buffer");
         let recv_before = sock.recv_buffer_size().expect("read baseline recv buffer");
 
-        tune_accepted_socket(&server, 65_536, 4_096);
+        tune_accepted_socket(&server, 65_536, 131_072);
 
-        check!(server.nodelay().expect("read TCP_NODELAY"));
+        assert!(server.nodelay().expect("read TCP_NODELAY"));
         // Kernels clamp and may double requested sizes, so compare the distinct
         // configured buffers instead of asserting host-dependent exact values.
-        check!(sock.send_buffer_size().expect("read send buffer") > send_before);
-        check!(sock.recv_buffer_size().expect("read recv buffer") >= recv_before);
-        check!(
-            sock.send_buffer_size().expect("read send buffer")
-                > sock.recv_buffer_size().expect("read recv buffer")
-        );
+        let send_after = sock.send_buffer_size().expect("read send buffer");
+        let recv_after = sock.recv_buffer_size().expect("read recv buffer");
+        assert!(send_after > send_before);
+        assert!(recv_after > recv_before);
+        assert!(recv_after > send_after);
         drop(client);
     }
 

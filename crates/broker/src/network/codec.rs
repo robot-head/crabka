@@ -6,6 +6,18 @@
 use tokio::net::TcpStream;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
+pub(crate) fn validate_frame_length(
+    frame_body_len: usize,
+    max_frame_bytes: usize,
+) -> std::io::Result<()> {
+    if frame_body_len > max_frame_bytes {
+        return Err(std::io::Error::other(
+            "frame exceeds configured maximum size",
+        ));
+    }
+    Ok(())
+}
+
 /// Build a [`LengthDelimitedCodec`] configured for Kafka's wire framing.
 #[must_use]
 pub fn codec(max_frame_bytes: usize) -> LengthDelimitedCodec {
@@ -88,6 +100,16 @@ mod tests {
 
     #[test]
     fn codec_honors_nondefault_max_frame_length() {
+        let mut exact = BytesMut::with_capacity(12);
+        exact.put_u32(8);
+        exact.resize(12, 0xA5);
+        assert!(
+            codec(8)
+                .decode(&mut exact)
+                .expect("decode exact maximum")
+                .is_some()
+        );
+
         let mut bytes = BytesMut::with_capacity(4);
         bytes.put_u32(9);
 
@@ -95,6 +117,9 @@ mod tests {
         assert!(err.to_string().contains("frame size too big"));
 
         let mut encoded = BytesMut::new();
+        codec(8)
+            .encode(Bytes::from_static(b"12345678"), &mut encoded)
+            .expect("encode exact maximum");
         let err = codec(8)
             .encode(Bytes::from_static(b"123456789"), &mut encoded)
             .expect_err("oversized response");
