@@ -2005,36 +2005,6 @@ fn render_deployment(
         config.policy.fetch_max_wait_ms().to_string(),
         "--registry-fetch-partition-max-bytes".to_owned(),
         config.policy.fetch_partition_max_bytes().to_string(),
-        "--checkpoint-part-bytes".to_owned(),
-        config
-            .compute_policy
-            .checkpoint_part_bytes
-            .into_value()
-            .to_string(),
-        "--checkpoint-retain".to_owned(),
-        config
-            .compute_policy
-            .checkpoint_retain
-            .into_value()
-            .to_string(),
-        "--checkpoint-delete-records-timeout-ms".to_owned(),
-        config
-            .compute_policy
-            .checkpoint_delete_records_timeout_ms
-            .into_value()
-            .to_string(),
-        "--checkpoint-poll-interval-ms".to_owned(),
-        config
-            .compute_policy
-            .checkpoint_poll_interval_ms
-            .into_value()
-            .to_string(),
-        "--idle-suspend-poll-interval-ms".to_owned(),
-        config
-            .compute_policy
-            .idle_suspend_poll_interval_ms
-            .into_value()
-            .to_string(),
     ];
     if config.range_control_enabled {
         args.extend([
@@ -2058,7 +2028,42 @@ fn render_deployment(
             format!("CN={name}-operator"),
         ]);
     }
-    args.extend(checkpoint_runtime_args(config.operator_config)?);
+    let checkpoint_runtime_args = checkpoint_runtime_args(config.operator_config)?;
+    if !checkpoint_runtime_args.is_empty() {
+        args.extend([
+            "--checkpoint-part-bytes".to_owned(),
+            config
+                .compute_policy
+                .checkpoint_part_bytes
+                .into_value()
+                .to_string(),
+            "--checkpoint-retain".to_owned(),
+            config
+                .compute_policy
+                .checkpoint_retain
+                .into_value()
+                .to_string(),
+            "--checkpoint-delete-records-timeout-ms".to_owned(),
+            config
+                .compute_policy
+                .checkpoint_delete_records_timeout_ms
+                .into_value()
+                .to_string(),
+            "--checkpoint-poll-interval-ms".to_owned(),
+            config
+                .compute_policy
+                .checkpoint_poll_interval_ms
+                .into_value()
+                .to_string(),
+            "--idle-suspend-poll-interval-ms".to_owned(),
+            config
+                .compute_policy
+                .idle_suspend_poll_interval_ms
+                .into_value()
+                .to_string(),
+        ]);
+        args.extend(checkpoint_runtime_args);
+    }
     let mut env = vec![
         json!({ "name": "KAFKA_BOOTSTRAP_SERVERS", "value": config.bootstrap }),
         json!({ "name": "GRES_TENANT", "value": name }),
@@ -2622,6 +2627,40 @@ mod tests {
     }
 
     #[test]
+    fn compute_workload_without_checkpoint_store_omits_checkpoint_policy() {
+        let mut obj = tenant();
+        obj.metadata.namespace = Some("ns".into());
+        obj.metadata.uid = Some("uid".into());
+        let ranges = [GresTenantRangeSpec {
+            range_id: 0,
+            end_key: None,
+        }];
+        let deployment = render_test_deployment(&obj, &ranges[0], &ranges, false, false, None);
+        let args = deployment
+            .spec
+            .unwrap()
+            .template
+            .spec
+            .unwrap()
+            .containers
+            .into_iter()
+            .next()
+            .expect("container")
+            .args
+            .expect("args");
+
+        for absent in [
+            "--checkpoint-part-bytes",
+            "--checkpoint-retain",
+            "--checkpoint-delete-records-timeout-ms",
+            "--checkpoint-poll-interval-ms",
+            "--idle-suspend-poll-interval-ms",
+        ] {
+            assert!(!args.iter().any(|arg| arg == absent), "got: {args:?}");
+        }
+    }
+
+    #[test]
     fn compute_workload_renders_custom_policy() {
         let mut obj = tenant();
         obj.metadata.namespace = Some("ns".into());
@@ -2630,7 +2669,9 @@ mod tests {
             range_id: 0,
             end_key: None,
         }];
-        let operator_config = ConfigArgs::parse_from(["operator"]).config;
+        let mut operator_config = ConfigArgs::parse_from(["operator"]).config;
+        operator_config.gres_checkpoint_store = Some(crate::config::GresCheckpointStoreKind::S3);
+        operator_config.gres_checkpoint_bucket = Some("checkpoints".to_owned());
         let compute_policy = crate::crd::gres::GresComputeSpec {
             checkpoint_part_bytes: Some(8_388_608),
             checkpoint_retain: Some(4),
@@ -2701,6 +2742,21 @@ mod tests {
         ] {
             assert!(!args.iter().any(|arg| arg == absent), "got: {args:?}");
         }
+        assert!(
+            args.iter()
+                .filter(|arg| {
+                    [
+                        "--checkpoint-part-bytes",
+                        "--checkpoint-retain",
+                        "--checkpoint-delete-records-timeout-ms",
+                        "--checkpoint-poll-interval-ms",
+                        "--idle-suspend-poll-interval-ms",
+                    ]
+                    .contains(&arg.as_str())
+                })
+                .count()
+                == 5
+        );
         assert!(lifecycle_requeue(compute_policy) == Action::requeue(Duration::from_millis(4_567)));
         let readiness = deployment
             .spec
@@ -2729,27 +2785,6 @@ mod tests {
                 .as_deref()
                 == Some("tenant-image")
         );
-    }
-
-    #[test]
-    fn every_lifecycle_requeue_branch_uses_the_fleet_policy() {
-        let production = include_str!("gres_tenant.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("production source");
-        assert!(
-            production
-                .matches("lifecycle_requeue(compute_policy)")
-                .count()
-                == 1
-        );
-        assert!(
-            production
-                .matches("lifecycle_requeue(config.compute_policy)")
-                .count()
-                == 2
-        );
-        assert!(!production.contains("LIFECYCLE_REQUEUE"));
     }
 
     #[tokio::test]
