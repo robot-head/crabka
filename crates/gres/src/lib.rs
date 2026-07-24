@@ -2261,32 +2261,55 @@ mod vacuum_pacing_tests {
 
     use super::*;
 
-    fn default_policy() -> LocalVacuumPolicy {
-        local_vacuum_policy(
-            &Cli::try_parse_from(["crabka-gres"])
-                .expect("defaults")
-                .serve,
-        )
-        .expect("valid defaults")
-        .expect("local policy")
+    const fn default_policy() -> LocalVacuumPolicy {
+        LocalVacuumPolicy {
+            idle_interval: Duration::from_secs(2),
+            backoff_floor: Duration::from_millis(25),
+            hot_debt: VACUUM_STEP_KEY_BUDGET as u64,
+            key_budget: VACUUM_STEP_KEY_BUDGET,
+            max_key_budget: VACUUM_STEP_KEY_BUDGET * 4,
+            step_fast: Duration::from_millis(3),
+            step_slow: Duration::from_millis(12),
+            idle_after: Duration::from_secs(1),
+        }
     }
 
     #[test]
     fn effective_defaults_pin_local_vacuum_policy() {
-        let base = VACUUM_STEP_KEY_BUDGET;
+        const CHILD: &str = "CRABKA_TEST_GRES_LOCAL_VACUUM_DEFAULTS_CHILD";
+        const VARIABLES: [&str; 8] = [
+            "CRABKA_GRES_LOCAL_VACUUM_IDLE_INTERVAL_MS",
+            "CRABKA_GRES_LOCAL_VACUUM_BACKOFF_FLOOR_MS",
+            "CRABKA_GRES_LOCAL_VACUUM_HOT_DEBT",
+            "CRABKA_GRES_LOCAL_VACUUM_KEY_BUDGET",
+            "CRABKA_GRES_LOCAL_VACUUM_MAX_KEY_BUDGET",
+            "CRABKA_GRES_LOCAL_VACUUM_STEP_FAST_MS",
+            "CRABKA_GRES_LOCAL_VACUUM_STEP_SLOW_MS",
+            "CRABKA_GRES_LOCAL_VACUUM_IDLE_AFTER_MS",
+        ];
+        if std::env::var_os(CHILD).is_none() {
+            let mut child = std::process::Command::new(std::env::current_exe().expect("test exe"));
+            child
+                .args([
+                    "--exact",
+                    "vacuum_pacing_tests::effective_defaults_pin_local_vacuum_policy",
+                ])
+                .env(CHILD, "1");
+            for variable in VARIABLES {
+                child.env_remove(variable);
+            }
+            assert!(child.status().expect("defaults child test").success());
+            return;
+        }
 
         assert_eq!(
-            default_policy(),
-            LocalVacuumPolicy {
-                idle_interval: Duration::from_secs(2),
-                backoff_floor: Duration::from_millis(25),
-                hot_debt: u64::try_from(base).expect("base budget fits debt"),
-                key_budget: base,
-                max_key_budget: base.checked_mul(4).expect("default maximum"),
-                step_fast: Duration::from_millis(3),
-                step_slow: Duration::from_millis(12),
-                idle_after: Duration::from_secs(1),
-            }
+            local_vacuum_policy(
+                &Cli::try_parse_from(["crabka-gres"])
+                    .expect("defaults")
+                    .serve,
+            )
+            .expect("valid defaults"),
+            Some(default_policy())
         );
     }
 
