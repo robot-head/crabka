@@ -2,7 +2,10 @@
 //! cluster. Tenant CRs point at a `Gres` fleet by name; the controller that
 //! renders `PgDog` is added in a later batch.
 
-use crabka_gres_control::{PgdogConnectAttempts, PgdogPoolerMode, PositiveMillis};
+use crabka_gres_control::{
+    CheckpointPartBytes, PgdogConnectAttempts, PgdogPoolerMode, PositiveI32, PositiveMillis,
+    PositiveUsize,
+};
 use kube::CustomResource;
 use refined_type::rule::GreaterI32;
 use schemars::JsonSchema;
@@ -87,6 +90,47 @@ pub struct GresComputeSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
     pub readiness_probe_period_seconds: Option<i32>,
+
+    /// Maximum checkpoint object part size in bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 8))]
+    pub checkpoint_part_bytes: Option<usize>,
+
+    /// Number of checkpoint manifests to retain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub checkpoint_retain: Option<usize>,
+
+    /// Kafka `DeleteRecords` timeout in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 2_147_483_647))]
+    pub checkpoint_delete_records_timeout_ms: Option<i32>,
+
+    /// Checkpoint threshold polling interval in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub checkpoint_poll_interval_ms: Option<u64>,
+
+    /// Idle-suspend polling interval in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub idle_suspend_poll_interval_ms: Option<u64>,
+
+    /// Tenant lifecycle reconciliation interval in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub lifecycle_requeue_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct EffectiveGresComputePolicy {
+    pub(crate) readiness_probe_period_seconds: i32,
+    pub(crate) checkpoint_part_bytes: CheckpointPartBytes,
+    pub(crate) checkpoint_retain: PositiveUsize,
+    pub(crate) checkpoint_delete_records_timeout_ms: PositiveI32,
+    pub(crate) checkpoint_poll_interval_ms: PositiveMillis,
+    pub(crate) idle_suspend_poll_interval_ms: PositiveMillis,
+    pub(crate) lifecycle_requeue_ms: PositiveMillis,
 }
 
 impl GresComputeSpec {
@@ -94,6 +138,34 @@ impl GresComputeSpec {
         GreaterI32::<0>::new(self.readiness_probe_period_seconds.unwrap_or(5))
             .map_err(|error| format!("spec.compute.readinessProbePeriodSeconds: {error}"))
             .map(refined_type::Refined::into_value)
+    }
+
+    pub(crate) fn effective_policy(&self) -> Result<EffectiveGresComputePolicy, String> {
+        Ok(EffectiveGresComputePolicy {
+            readiness_probe_period_seconds: self.effective_readiness_probe_period_seconds()?,
+            checkpoint_part_bytes: CheckpointPartBytes::new(
+                self.checkpoint_part_bytes.unwrap_or(67_108_864),
+            )
+            .map_err(|error| format!("spec.compute.checkpointPartBytes: {error}"))?,
+            checkpoint_retain: PositiveUsize::new(self.checkpoint_retain.unwrap_or(2))
+                .map_err(|error| format!("spec.compute.checkpointRetain: {error}"))?,
+            checkpoint_delete_records_timeout_ms: PositiveI32::new(
+                self.checkpoint_delete_records_timeout_ms.unwrap_or(30_000),
+            )
+            .map_err(|error| format!("spec.compute.checkpointDeleteRecordsTimeoutMs: {error}"))?,
+            checkpoint_poll_interval_ms: PositiveMillis::new(
+                self.checkpoint_poll_interval_ms.unwrap_or(1_000),
+            )
+            .map_err(|error| format!("spec.compute.checkpointPollIntervalMs: {error}"))?,
+            idle_suspend_poll_interval_ms: PositiveMillis::new(
+                self.idle_suspend_poll_interval_ms.unwrap_or(1_000),
+            )
+            .map_err(|error| format!("spec.compute.idleSuspendPollIntervalMs: {error}"))?,
+            lifecycle_requeue_ms: PositiveMillis::new(self.lifecycle_requeue_ms.unwrap_or(5_000))
+                .map_err(|error| {
+                format!("spec.compute.lifecycleRequeueMs: {error}")
+            })?,
+        })
     }
 }
 
@@ -518,6 +590,7 @@ mod tests {
             }),
             compute: Some(GresComputeSpec {
                 readiness_probe_period_seconds: Some(11),
+                ..GresComputeSpec::default()
             }),
             defaults: Some(TenantDefaults {
                 wal_replication: Some(3),
@@ -581,6 +654,7 @@ mod tests {
     fn compute_readiness_policy_round_trips_and_requires_positive_values() {
         let policy = GresComputeSpec {
             readiness_probe_period_seconds: Some(7),
+            ..GresComputeSpec::default()
         };
         let json = serde_json::to_string(&policy).expect("serialize compute policy");
         assert!(
@@ -607,6 +681,7 @@ mod tests {
         );
         let error = GresComputeSpec {
             readiness_probe_period_seconds: Some(0),
+            ..GresComputeSpec::default()
         }
         .effective_readiness_probe_period_seconds()
         .expect_err("zero readiness must fail");
@@ -614,6 +689,106 @@ mod tests {
             error.contains("spec.compute.readinessProbePeriodSeconds"),
             "got: {error}"
         );
+    }
+
+    #[test]
+    fn compute_checkpoint_lifecycle_policy_round_trips_and_has_exact_schema_bounds() {
+        let policy = GresComputeSpec {
+            checkpoint_part_bytes: Some(8),
+            checkpoint_retain: Some(1),
+            checkpoint_delete_records_timeout_ms: Some(i32::MAX),
+            checkpoint_poll_interval_ms: Some(1),
+            idle_suspend_poll_interval_ms: Some(1),
+            lifecycle_requeue_ms: Some(1),
+            ..GresComputeSpec::default()
+        };
+        let json = serde_json::to_string(&policy).expect("serialize compute policy");
+        assert!(serde_json::from_str::<GresComputeSpec>(&json).unwrap() == policy);
+
+        let crd = serde_json::to_value(Gres::crd()).expect("serialize Gres CRD");
+        let properties = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
+            ["properties"]["compute"]["properties"];
+        assert!(
+            properties["checkpointPartBytes"]["minimum"].as_f64() == Some(8.0),
+            "got: {properties}"
+        );
+        for field in [
+            "checkpointRetain",
+            "checkpointDeleteRecordsTimeoutMs",
+            "checkpointPollIntervalMs",
+            "idleSuspendPollIntervalMs",
+            "lifecycleRequeueMs",
+        ] {
+            assert!(
+                properties[field]["minimum"].as_f64() == Some(1.0),
+                "missing minimum for {field}: {properties}"
+            );
+        }
+        assert!(
+            properties["checkpointDeleteRecordsTimeoutMs"]["maximum"].as_f64()
+                == Some(f64::from(i32::MAX))
+        );
+    }
+
+    #[test]
+    fn compute_checkpoint_lifecycle_policy_uses_exact_defaults_and_rejects_boundaries() {
+        let defaults = GresComputeSpec::default()
+            .effective_policy()
+            .expect("default compute policy");
+        assert!(defaults.checkpoint_part_bytes.into_value() == 67_108_864);
+        assert!(defaults.checkpoint_retain.into_value() == 2);
+        assert!(defaults.checkpoint_delete_records_timeout_ms.into_value() == 30_000);
+        assert!(defaults.checkpoint_poll_interval_ms.into_value() == 1_000);
+        assert!(defaults.idle_suspend_poll_interval_ms.into_value() == 1_000);
+        assert!(defaults.lifecycle_requeue_ms.into_value() == 5_000);
+
+        for (policy, path) in [
+            (
+                GresComputeSpec {
+                    checkpoint_part_bytes: Some(7),
+                    ..GresComputeSpec::default()
+                },
+                "spec.compute.checkpointPartBytes",
+            ),
+            (
+                GresComputeSpec {
+                    checkpoint_retain: Some(0),
+                    ..GresComputeSpec::default()
+                },
+                "spec.compute.checkpointRetain",
+            ),
+            (
+                GresComputeSpec {
+                    checkpoint_delete_records_timeout_ms: Some(0),
+                    ..GresComputeSpec::default()
+                },
+                "spec.compute.checkpointDeleteRecordsTimeoutMs",
+            ),
+            (
+                GresComputeSpec {
+                    checkpoint_poll_interval_ms: Some(0),
+                    ..GresComputeSpec::default()
+                },
+                "spec.compute.checkpointPollIntervalMs",
+            ),
+            (
+                GresComputeSpec {
+                    idle_suspend_poll_interval_ms: Some(0),
+                    ..GresComputeSpec::default()
+                },
+                "spec.compute.idleSuspendPollIntervalMs",
+            ),
+            (
+                GresComputeSpec {
+                    lifecycle_requeue_ms: Some(0),
+                    ..GresComputeSpec::default()
+                },
+                "spec.compute.lifecycleRequeueMs",
+            ),
+        ] {
+            let error = policy.effective_policy().expect_err("boundary must fail");
+            assert!(error.contains(path), "got: {error}");
+        }
     }
 
     #[test]

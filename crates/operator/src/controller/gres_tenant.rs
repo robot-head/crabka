@@ -52,7 +52,7 @@ use crate::{
     },
     crd::{
         Gres, GresTenant, GresTenantRangeKey, GresTenantRangeSpec, Kafka, SecretKeyRef,
-        TenantDefaults,
+        TenantDefaults, gres::EffectiveGresComputePolicy,
     },
 };
 
@@ -64,7 +64,8 @@ const RANGE_PORT: i32 = 7432;
 const RANGE_TLS_DIR: &str = "/etc/crabka/range-tls";
 const RANGE_TLS_IDENTITY_ANNOTATION: &str = "crabka.io/range-tls-identity";
 const RANGE_TLS_HASH_ANNOTATION: &str = "crabka.io/range-tls-hash";
-const LIFECYCLE_REQUEUE: Duration = Duration::from_secs(5);
+const DEFAULT_CHECKPOINT_FRAMES: u64 = 10_000;
+const DEFAULT_CHECKPOINT_BYTES: u64 = 67_108_864;
 
 /// Run the controller forever.
 /// # Errors
@@ -120,7 +121,7 @@ struct ReadyTenant {
     policy: crabka_gres_control::RegistryPolicy,
     defaults: EffectiveDefaults,
     compute_image: String,
-    compute_readiness_probe_period_seconds: i32,
+    compute_policy: EffectiveGresComputePolicy,
     direct_bootstrap_grace_ms: u64,
     kafka_sasl: bool,
 }
@@ -202,19 +203,16 @@ async fn prepare_tenant(
         .pgdog
         .effective_policy()
         .map_err(ReconcileError::Malformed)?;
-    let compute_image = effective_compute_image(obj, &ctx.config)?;
-    let compute_readiness_probe_period_seconds = gres
+    let compute_policy = gres
         .spec
         .compute
         .as_ref()
         .map_or_else(
-            || {
-                crate::crd::gres::GresComputeSpec::default()
-                    .effective_readiness_probe_period_seconds()
-            },
-            crate::crd::gres::GresComputeSpec::effective_readiness_probe_period_seconds,
+            || crate::crd::gres::GresComputeSpec::default().effective_policy(),
+            crate::crd::gres::GresComputeSpec::effective_policy,
         )
         .map_err(ReconcileError::Malformed)?;
+    let compute_image = effective_compute_image(obj, &ctx.config)?;
     let cluster = gres.spec.kafka_cluster.clone();
     let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &namespace);
     let Some(kafka) = kafka_api.get_opt(&cluster).await? else {
@@ -266,7 +264,7 @@ async fn prepare_tenant(
         policy,
         defaults: effective_defaults(gres.spec.defaults.as_ref(), obj.spec.overrides.as_ref()),
         compute_image,
-        compute_readiness_probe_period_seconds,
+        compute_policy,
         direct_bootstrap_grace_ms: pgdog_policy.direct_bootstrap_grace.into_value(),
         kafka_sasl: kafka_internal_listener_requires_sasl(&kafka),
     })))
@@ -312,7 +310,7 @@ async fn reconcile_inner(
         policy,
         defaults,
         compute_image,
-        compute_readiness_probe_period_seconds,
+        compute_policy,
         direct_bootstrap_grace_ms,
         kafka_sasl,
     } = *ready;
@@ -409,7 +407,7 @@ async fn reconcile_inner(
                     config_topic: &cfg_topic,
                     policy: &policy,
                     image: &compute_image,
-                    readiness_probe_period_seconds: compute_readiness_probe_period_seconds,
+                    compute_policy,
                     lifecycle_state: record.state,
                     kafka_sasl,
                     range_control_enabled,
@@ -417,7 +415,7 @@ async fn reconcile_inner(
                 },
             )
             .await?;
-            return Ok(Action::requeue(LIFECYCLE_REQUEUE));
+            return Ok(lifecycle_requeue(compute_policy));
         }
         if matches!(
             lifecycle_state,
@@ -462,7 +460,7 @@ async fn reconcile_inner(
             config_topic: &cfg_topic,
             policy: &policy,
             image: &compute_image,
-            readiness_probe_period_seconds: compute_readiness_probe_period_seconds,
+            compute_policy,
             record: &record,
             direct_bootstrap_grace_ms,
             kafka_sasl,
@@ -669,7 +667,7 @@ struct ComputeStatusConfig<'a> {
     config_topic: &'a str,
     policy: &'a crabka_gres_control::RegistryPolicy,
     image: &'a str,
-    readiness_probe_period_seconds: i32,
+    compute_policy: EffectiveGresComputePolicy,
     record: &'a TenantRecord,
     direct_bootstrap_grace_ms: u64,
     kafka_sasl: bool,
@@ -691,7 +689,7 @@ async fn reconcile_compute_and_status(
             config_topic: config.config_topic,
             policy: config.policy,
             image: config.image,
-            readiness_probe_period_seconds: config.readiness_probe_period_seconds,
+            compute_policy: config.compute_policy,
             lifecycle_state: config.record.state,
             kafka_sasl: config.kafka_sasl,
             range_control_enabled: config.range_control_enabled,
@@ -714,7 +712,7 @@ async fn reconcile_compute_and_status(
                 .await
                 .map_err(|error| ReconcileError::Malformed(error.to_string()))?;
         }
-        return Ok(Action::requeue(LIFECYCLE_REQUEUE));
+        return Ok(lifecycle_requeue(config.compute_policy));
     }
 
     let policy_api: Api<NetworkPolicy> =
@@ -750,7 +748,13 @@ async fn reconcile_compute_and_status(
         },
     )
     .await?;
-    Ok(Action::requeue(LIFECYCLE_REQUEUE))
+    Ok(lifecycle_requeue(config.compute_policy))
+}
+
+fn lifecycle_requeue(policy: EffectiveGresComputePolicy) -> Action {
+    Action::requeue(Duration::from_millis(
+        policy.lifecycle_requeue_ms.into_value(),
+    ))
 }
 
 async fn reconcile_range_tls_secret(
@@ -804,7 +808,7 @@ struct ComputeDeploymentConfig<'a> {
     config_topic: &'a str,
     policy: &'a crabka_gres_control::RegistryPolicy,
     image: &'a str,
-    readiness_probe_period_seconds: i32,
+    compute_policy: EffectiveGresComputePolicy,
     lifecycle_state: TenantState,
     kafka_sasl: bool,
     range_control_enabled: bool,
@@ -827,11 +831,14 @@ async fn reconcile_compute_deployments(
             &DeploymentRenderConfig {
                 all_ranges: config.ranges,
                 image: config.image,
-                readiness_probe_period_seconds: config.readiness_probe_period_seconds,
+                readiness_probe_period_seconds: config
+                    .compute_policy
+                    .readiness_probe_period_seconds,
                 bootstrap: config.bootstrap,
                 wal_topic: config.wal_topic,
                 config_topic: config.config_topic,
                 policy: config.policy,
+                compute_policy: config.compute_policy,
                 replicas: compute_replicas(config.lifecycle_state),
                 operator_config: &ctx.config,
                 kafka_sasl: config.kafka_sasl,
@@ -1239,10 +1246,12 @@ fn effective_defaults(
             .unwrap_or(1),
         checkpoint_frames: override_
             .and_then(|d| d.checkpoint_frames)
-            .or_else(|| base.and_then(|d| d.checkpoint_frames)),
+            .or_else(|| base.and_then(|d| d.checkpoint_frames))
+            .or(Some(DEFAULT_CHECKPOINT_FRAMES)),
         checkpoint_bytes: override_
             .and_then(|d| d.checkpoint_bytes)
-            .or_else(|| base.and_then(|d| d.checkpoint_bytes)),
+            .or_else(|| base.and_then(|d| d.checkpoint_bytes))
+            .or(Some(DEFAULT_CHECKPOINT_BYTES)),
         suspend_max_checkpoint_bytes: override_
             .and_then(|d| d.suspend_max_checkpoint_bytes)
             .or_else(|| base.and_then(|d| d.suspend_max_checkpoint_bytes)),
@@ -1962,6 +1971,7 @@ struct DeploymentRenderConfig<'a> {
     wal_topic: &'a str,
     config_topic: &'a str,
     policy: &'a crabka_gres_control::RegistryPolicy,
+    compute_policy: EffectiveGresComputePolicy,
     replicas: i32,
     operator_config: &'a crate::config::OperatorConfig,
     kafka_sasl: bool,
@@ -1995,6 +2005,36 @@ fn render_deployment(
         config.policy.fetch_max_wait_ms().to_string(),
         "--registry-fetch-partition-max-bytes".to_owned(),
         config.policy.fetch_partition_max_bytes().to_string(),
+        "--checkpoint-part-bytes".to_owned(),
+        config
+            .compute_policy
+            .checkpoint_part_bytes
+            .into_value()
+            .to_string(),
+        "--checkpoint-retain".to_owned(),
+        config
+            .compute_policy
+            .checkpoint_retain
+            .into_value()
+            .to_string(),
+        "--checkpoint-delete-records-timeout-ms".to_owned(),
+        config
+            .compute_policy
+            .checkpoint_delete_records_timeout_ms
+            .into_value()
+            .to_string(),
+        "--checkpoint-poll-interval-ms".to_owned(),
+        config
+            .compute_policy
+            .checkpoint_poll_interval_ms
+            .into_value()
+            .to_string(),
+        "--idle-suspend-poll-interval-ms".to_owned(),
+        config
+            .compute_policy
+            .idle_suspend_poll_interval_ms
+            .into_value()
+            .to_string(),
     ];
     if config.range_control_enabled {
         args.extend([
@@ -2429,6 +2469,9 @@ mod tests {
         range_tls_hash: Option<&str>,
     ) -> Deployment {
         let operator_config = ConfigArgs::parse_from(["operator"]).config;
+        let compute_policy = crate::crd::gres::GresComputeSpec::default()
+            .effective_policy()
+            .expect("compute policy");
         let wal_topic = format!("__gres_wal.tenant-a.r{}", range.range_id);
         render_deployment(
             obj,
@@ -2441,6 +2484,7 @@ mod tests {
                 wal_topic: &wal_topic,
                 config_topic: "__gres_cfg.tenant-a",
                 policy: &crabka_gres_control::RegistryPolicy::default(),
+                compute_policy,
                 replicas: 1,
                 operator_config: &operator_config,
                 kafka_sasl,
@@ -2449,6 +2493,38 @@ mod tests {
             },
         )
         .expect("render deployment")
+    }
+
+    #[test]
+    fn checkpoint_thresholds_use_override_then_fleet_then_compiled_fallback() {
+        let defaults = |frames, bytes| TenantDefaults {
+            wal_replication: None,
+            checkpoint_frames: frames,
+            checkpoint_bytes: bytes,
+            suspend_max_checkpoint_bytes: None,
+            idle_seconds: None,
+        };
+        for (base, override_, expected_frames, expected_bytes) in [
+            (None, None, 10_000, 67_108_864),
+            (Some(defaults(Some(11), None)), None, 11, 67_108_864),
+            (Some(defaults(None, Some(12))), None, 10_000, 12),
+            (
+                Some(defaults(Some(11), Some(12))),
+                Some(defaults(Some(21), None)),
+                21,
+                12,
+            ),
+            (
+                Some(defaults(Some(11), Some(12))),
+                Some(defaults(None, Some(22))),
+                11,
+                22,
+            ),
+        ] {
+            let effective = effective_defaults(base.as_ref(), override_.as_ref());
+            assert!(effective.checkpoint_frames == Some(expected_frames));
+            assert!(effective.checkpoint_bytes == Some(expected_bytes));
+        }
     }
 
     #[test]
@@ -2559,6 +2635,17 @@ mod tests {
             end_key: None,
         }];
         let operator_config = ConfigArgs::parse_from(["operator"]).config;
+        let compute_policy = crate::crd::gres::GresComputeSpec {
+            checkpoint_part_bytes: Some(8_388_608),
+            checkpoint_retain: Some(4),
+            checkpoint_delete_records_timeout_ms: Some(12_345),
+            checkpoint_poll_interval_ms: Some(2_345),
+            idle_suspend_poll_interval_ms: Some(3_456),
+            lifecycle_requeue_ms: Some(4_567),
+            ..crate::crd::gres::GresComputeSpec::default()
+        }
+        .effective_policy()
+        .expect("compute policy");
         let policy = crabka_gres_control::RegistryPolicy::new(2, 15_001, 251, 501, 1_048_577)
             .expect("policy");
         let deployment = render_deployment(
@@ -2572,6 +2659,7 @@ mod tests {
                 wal_topic: "__gres_wal.tenant-a.r0",
                 config_topic: "__gres_cfg.tenant-a",
                 policy: &policy,
+                compute_policy,
                 replicas: 1,
                 operator_config: &operator_config,
                 kafka_sasl: false,
@@ -2599,12 +2687,25 @@ mod tests {
             ["--registry-reader-retry-backoff-ms", "251"],
             ["--registry-fetch-max-wait-ms", "501"],
             ["--registry-fetch-partition-max-bytes", "1048577"],
+            ["--checkpoint-part-bytes", "8388608"],
+            ["--checkpoint-retain", "4"],
+            ["--checkpoint-delete-records-timeout-ms", "12345"],
+            ["--checkpoint-poll-interval-ms", "2345"],
+            ["--idle-suspend-poll-interval-ms", "3456"],
         ] {
             assert!(
                 args.windows(2).any(|window| window == pair),
                 "missing {pair:?}: {args:?}"
             );
         }
+        for absent in [
+            "--checkpoint-frames",
+            "--checkpoint-bytes",
+            "--lifecycle-requeue-ms",
+        ] {
+            assert!(!args.iter().any(|arg| arg == absent), "got: {args:?}");
+        }
+        assert!(lifecycle_requeue(compute_policy) == Action::requeue(Duration::from_millis(4_567)));
         let readiness = deployment
             .spec
             .as_ref()
@@ -2632,6 +2733,87 @@ mod tests {
                 .as_deref()
                 == Some("tenant-image")
         );
+    }
+
+    #[test]
+    fn every_lifecycle_requeue_branch_uses_the_fleet_policy() {
+        let production = include_str!("gres_tenant.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source");
+        assert!(
+            production
+                .matches("lifecycle_requeue(compute_policy)")
+                .count()
+                == 1
+        );
+        assert!(
+            production
+                .matches("lifecycle_requeue(config.compute_policy)")
+                .count()
+                == 2
+        );
+        assert!(!production.contains("LIFECYCLE_REQUEUE"));
+    }
+
+    #[tokio::test]
+    async fn invalid_compute_policy_is_rejected_before_kafka_or_resource_io() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use tower::service_fn;
+
+        let requests = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&requests);
+        let client = kube::Client::new(
+            service_fn(move |_request| {
+                let observed = Arc::clone(&observed);
+                async move {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    let body = serde_json::to_vec(&json!({
+                        "apiVersion": "crabka.io/v1alpha1",
+                        "kind": "Gres",
+                        "metadata": {"name": "fleet", "namespace": "default"},
+                        "spec": {
+                            "kafkaCluster": "demo",
+                            "pgdog": {
+                                "replicas": 1,
+                                "listenPort": 6432,
+                                "adminSecretRef": {"name": "admin", "key": "password"}
+                            },
+                            "compute": {"checkpointPartBytes": 7}
+                        }
+                    }))
+                    .expect("serialize Gres");
+                    Ok::<_, std::convert::Infallible>(
+                        http::Response::builder()
+                            .status(200)
+                            .header(http::header::CONTENT_TYPE, "application/json")
+                            .body(kube::client::Body::from(body))
+                            .expect("response"),
+                    )
+                }
+            }),
+            "default",
+        );
+        let (registry, metrics) = crate::telemetry::new_registry_with_metrics();
+        let ctx = Context::new(
+            client,
+            ConfigArgs::parse_from(["operator"]).config,
+            Arc::new(tokio::sync::Mutex::new(registry)),
+            metrics,
+        );
+
+        let Err(error) = prepare_tenant(&tenant(), &ctx).await else {
+            panic!("invalid compute policy must fail");
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("spec.compute.checkpointPartBytes"),
+            "got: {error}"
+        );
+        assert!(requests.load(Ordering::SeqCst) == 1);
     }
 
     #[test]

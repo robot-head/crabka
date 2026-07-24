@@ -279,6 +279,8 @@ fn tenant_record(state: TenantState, generation: u64) -> TenantRecord {
         1,
     )
     .unwrap();
+    record.checkpoint_frames = Some(10_000);
+    record.checkpoint_bytes = Some(67_108_864);
     record.wal_generation = generation;
     record.ranges = vec![RangeLayoutEntry {
         range_id: 0,
@@ -778,6 +780,8 @@ async fn reconciles_topics_scram_acls_records_workload_and_status() {
     assert!(upserts.len() == 1);
     assert!(!upserts[0].scram_verifier.contains("hunter2"));
     assert!(upserts[0].record_version == 1);
+    assert!(upserts[0].checkpoint_frames == Some(10_000));
+    assert!(upserts[0].checkpoint_bytes == Some(67_108_864));
     drop(upserts);
     let observed = state.take_observed();
     let deployment = observed
