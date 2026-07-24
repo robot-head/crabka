@@ -26,13 +26,6 @@ use crate::{
     replica_state::ReplicaState,
 };
 
-/// Inactivity window after which an idempotent / transactional producer's
-/// in-memory entry is considered expired and excluded from the
-/// `RETAIN_EMPTY` active-producer snapshot fed to compaction. Mirrors
-/// Kafka's `producer.id.expiration.ms` default (24h). Hard-coded for now;
-/// can be wired to a broker config (`producer.id.expiration.ms`) later.
-const PRODUCER_ID_EXPIRATION_MS: i64 = 86_400_000;
-
 /// Upper bound on how many queued `Produce` jobs the writer folds into a single
 /// group commit (one lock acquisition + one `spawn_blocking`). Caps worst-case
 /// memory and per-group latency if a producer floods faster than the writer
@@ -316,10 +309,26 @@ async fn handle_produce(
     }
 }
 
+async fn active_producers_for_compaction(
+    producer_state: &ProducerState,
+    topic: &str,
+    partition: PartitionIndex,
+    now_ms: i64,
+    producer_id_expiration_ms: i64,
+) -> std::collections::HashMap<crabka_log::ProducerId, Offset> {
+    producer_state
+        .active_snapshot(topic, partition, now_ms, producer_id_expiration_ms)
+        .await
+        .into_iter()
+        .map(|(producer_id, offset)| (crabka_log::ProducerId(producer_id), Offset(offset)))
+        .collect()
+}
+
 async fn handle_compact(
     identity: (&str, PartitionIndex),
     storage: (&Arc<Mutex<Log>>, &Arc<ArcSwap<PathBuf>>, &LogDirRegistry),
     producer_state: &ProducerState,
+    producer_id_expiration_ms: i64,
     ack: tokio::sync::oneshot::Sender<Result<(), crate::error::BrokerError>>,
 ) {
     let (topic, partition) = identity;
@@ -330,12 +339,14 @@ async fn handle_compact(
         .map_or(0, |duration| {
             i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
         });
-    let active_producers = producer_state
-        .active_snapshot(topic, partition, now_ms, PRODUCER_ID_EXPIRATION_MS)
-        .await
-        .into_iter()
-        .map(|(producer_id, offset)| (crabka_log::ProducerId(producer_id), Offset(offset)))
-        .collect();
+    let active_producers = active_producers_for_compaction(
+        producer_state,
+        topic,
+        partition,
+        now_ms,
+        producer_id_expiration_ms,
+    )
+    .await;
     let context = crabka_log::CompactionContext {
         now,
         active_producers,
@@ -494,7 +505,16 @@ pub async fn run(
         Option<crate::wal::SharedWal>,
     ),
 ) {
-    run_with_sequencer(identity, storage, rx, signals, services, None).await;
+    run_with_sequencer(
+        identity,
+        storage,
+        rx,
+        signals,
+        services,
+        crate::config::BrokerConfig::default().producer_id_expiration_ms,
+        None,
+    )
+    .await;
 }
 
 pub async fn run_with_sequencer(
@@ -511,6 +531,7 @@ pub async fn run_with_sequencer(
         Arc<ProducerState>,
         Option<crate::wal::SharedWal>,
     ),
+    producer_id_expiration_ms: i64,
     sequencer: Option<Arc<dyn crate::wal::OffsetSequencer>>,
 ) {
     let (topic, partition) = identity;
@@ -578,6 +599,7 @@ pub async fn run_with_sequencer(
                     (&topic, partition),
                     (&log, &log_dir, &log_dir_status),
                     &producer_state,
+                    producer_id_expiration_ms,
                     ack,
                 )
                 .await;
@@ -810,6 +832,42 @@ mod tests {
         log
     }
 
+    #[tokio::test]
+    async fn nondefault_ttl_controls_producer_compaction_snapshot() {
+        let state = ProducerState::new();
+        state
+            .commit("t", PartitionIndex(0), (7, 0), (0, 0), (12, 0))
+            .await;
+        let last_activity_ms = state.snapshot("t", PartitionIndex(0)).await[0]
+            .1
+            .last_activity_ms;
+
+        let expired = active_producers_for_compaction(
+            &state,
+            "t",
+            PartitionIndex(0),
+            last_activity_ms + 2,
+            1,
+        )
+        .await;
+        let active = active_producers_for_compaction(
+            &state,
+            "t",
+            PartitionIndex(0),
+            last_activity_ms + 2,
+            2,
+        )
+        .await;
+
+        assert!(expired.is_empty());
+        assert!(
+            active
+                == [(crabka_log::ProducerId(7), Offset(12))]
+                    .into_iter()
+                    .collect()
+        );
+    }
+
     #[test]
     fn flag_storage_failure_marks_io_errors_offline() {
         let dir = tempdir().expect("tempdir");
@@ -934,6 +992,7 @@ mod tests {
                 Arc::new(ProducerState::new()),
                 wal,
             ),
+            crate::config::BrokerConfig::default().producer_id_expiration_ms,
             Some(test_sequencer()),
         ));
 
@@ -1010,6 +1069,7 @@ mod tests {
                     Arc::new(ProducerState::new()),
                     wal,
                 ),
+                crate::config::BrokerConfig::default().producer_id_expiration_ms,
                 Some(test_sequencer()),
             ));
 

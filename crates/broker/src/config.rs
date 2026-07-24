@@ -242,6 +242,8 @@ pub struct BrokerConfig {
     pub inter_broker_server_name: String,
     /// Producer-id inactivity period before state expires.
     pub producer_id_expiration_ms: i64,
+    /// Producer-state expiry scan cadence.
+    pub producer_id_expiration_scan_interval: Duration,
     /// Maximum produce requests combined into one append group.
     pub max_produce_group: usize,
     /// Capacity of each partition-writer request queue.
@@ -933,6 +935,7 @@ impl BrokerConfig {
             telemetry_decompressed_output_ceiling_bytes: 1_073_741_824,
             inter_broker_server_name: "localhost".to_string(),
             producer_id_expiration_ms: 86_400_000,
+            producer_id_expiration_scan_interval: Duration::from_millis(600_000),
             max_produce_group: 1_024,
             partition_writer_queue_depth: 64,
             default_min_insync_replicas: 1,
@@ -1456,6 +1459,10 @@ impl BrokerConfig {
                 "remote_log_manager_interval",
                 self.remote_log_manager_interval,
             ),
+            (
+                "producer_id_expiration_scan_interval",
+                self.producer_id_expiration_scan_interval,
+            ),
         ] {
             if value.is_zero() {
                 return Err(BrokerError::InvalidRuntimeConfig(format!(
@@ -1777,6 +1784,7 @@ impl Default for BrokerConfig {
             telemetry_decompressed_output_ceiling_bytes: 1_073_741_824,
             inter_broker_server_name: "localhost".to_string(),
             producer_id_expiration_ms: 86_400_000,
+            producer_id_expiration_scan_interval: Duration::from_millis(600_000),
             max_produce_group: 1_024,
             partition_writer_queue_depth: 64,
             default_min_insync_replicas: 1,
@@ -2033,7 +2041,7 @@ mod tests {
         );
     }
 
-    fn additional_policy_snapshot(config: BrokerConfig) -> [String; 30] {
+    fn additional_policy_snapshot(config: BrokerConfig) -> [String; 31] {
         [
             config.self_registration_max_attempts.to_string(),
             config.observer_fetch_max_bytes.to_string(),
@@ -2062,6 +2070,10 @@ mod tests {
                 .to_string(),
             config.inter_broker_server_name,
             config.producer_id_expiration_ms.to_string(),
+            config
+                .producer_id_expiration_scan_interval
+                .as_millis()
+                .to_string(),
             config.max_produce_group.to_string(),
             config.partition_writer_queue_depth.to_string(),
             config.default_min_insync_replicas.to_string(),
@@ -2104,6 +2116,7 @@ mod tests {
                     "1073741824",
                     "localhost",
                     "86400000",
+                    "600000",
                     "1024",
                     "64",
                     "1",
@@ -2315,6 +2328,10 @@ mod tests {
             ("producer_id_expiration_ms must be positive", |c| {
                 c.producer_id_expiration_ms = 0;
             }),
+            (
+                "producer_id_expiration_scan_interval must be positive",
+                |c| c.producer_id_expiration_scan_interval = Duration::ZERO,
+            ),
             ("max_produce_group must be positive", |c| {
                 c.max_produce_group = 0;
             }),
