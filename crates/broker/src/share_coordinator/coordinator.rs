@@ -67,10 +67,6 @@ pub(crate) type ShareStateSummary = (StateEpoch, LeaderEpoch, Offset, i32);
 /// share-partition leader to initialize delivery from scratch (KIP-932).
 pub(crate) const UNINITIALIZED_START_OFFSET: i64 = -1;
 
-/// Read-chunk budget in bytes per `read_log` call while replaying
-/// `__share_group_state` partitions during recovery.
-const RECOVERY_READ_MAX_BYTES: usize = 1 << 20;
-
 /// Per-broker share-state coordinator. Constructed in `Broker::start` and
 /// shared via `Arc` with the share-state wire handlers.
 pub(crate) struct ShareCoordinator {
@@ -122,10 +118,15 @@ impl ShareCoordinator {
     #[cfg(test)]
     pub(crate) async fn lead_all_partitions_for_test(&self) {
         let mut set = HashSet::new();
-        for p in 0..bootstrap::NUM_PARTITIONS {
+        for p in 0..self.config.state_topic_num_partitions {
             set.insert(PartitionIndex(p));
         }
         *self.leader_partitions.write().await = set;
+    }
+
+    #[must_use]
+    pub(crate) fn state_topic_num_partitions(&self) -> i32 {
+        self.config.state_topic_num_partitions
     }
 
     /// Returns the `__share_group_state` partition index responsible for the
@@ -469,7 +470,7 @@ impl ShareCoordinator {
 
             let mut offset = part.log_start_offset();
             loop {
-                let out = match part.read_log(offset, RECOVERY_READ_MAX_BYTES) {
+                let out = match self.read_recovery_chunk(&part, offset) {
                     Ok(o) => o,
                     Err(e) => {
                         warn!(
@@ -516,6 +517,14 @@ impl ShareCoordinator {
                 }
             }
         }
+    }
+
+    fn read_recovery_chunk(
+        &self,
+        partition: &crate::partition::Partition,
+        offset: Offset,
+    ) -> Result<crabka_log::ReadOutput, BrokerError> {
+        partition.read_log(offset, self.config.recovery_read_max_bytes)
     }
 
     /// Fold one replayed record value into the in-memory state map. Snapshot
@@ -611,7 +620,7 @@ mod tests {
     /// 50 `__share_group_state` partitions opened locally.
     fn coordinator(dir: &Path) -> (ShareCoordinator, Arc<PartitionRegistry>) {
         let reg = Arc::new(PartitionRegistry::new());
-        for p in 0..bootstrap::NUM_PARTITIONS {
+        for p in 0..ShareCoordinatorConfig::default().state_topic_num_partitions {
             open_state_partition(&reg, dir, p);
         }
         let coord = ShareCoordinator::new(
@@ -624,10 +633,57 @@ mod tests {
 
     async fn lead_all(coord: &ShareCoordinator) {
         let mut set = HashSet::new();
-        for p in 0..bootstrap::NUM_PARTITIONS {
+        for p in 0..coord.config.state_topic_num_partitions {
             set.insert(PartitionIndex(p));
         }
         *coord.leader_partitions.write().await = set;
+    }
+
+    #[tokio::test]
+    async fn nondefault_partition_count_bounds_test_leadership() {
+        let config = ShareCoordinatorConfig {
+            state_topic_num_partitions: 7,
+            ..ShareCoordinatorConfig::default()
+        };
+        let coord = ShareCoordinator::new(
+            crabka_audit::NodeId(1),
+            Arc::new(PartitionRegistry::new()),
+            config,
+        );
+
+        coord.lead_all_partitions_for_test().await;
+
+        assert!(coord.is_leader(PartitionIndex(6)).await);
+        assert!(!coord.is_leader(PartitionIndex(7)).await);
+    }
+
+    #[tokio::test]
+    async fn nondefault_recovery_bytes_bound_one_read_chunk() {
+        let dir = tempdir().unwrap();
+        let registry = Arc::new(PartitionRegistry::new());
+        open_state_partition(&registry, dir.path(), 0);
+        let config = ShareCoordinatorConfig {
+            recovery_read_max_bytes: 700,
+            ..ShareCoordinatorConfig::default()
+        };
+        let coord = ShareCoordinator::new(crabka_audit::NodeId(1), Arc::clone(&registry), config);
+        let partition = registry
+            .get(bootstrap::TOPIC, PartitionIndex(0))
+            .expect("state partition open");
+        for _ in 0..2 {
+            let mut batch = RecordBatch::default();
+            batch.records.push(Record {
+                value: Some(Bytes::from(vec![0; 512])),
+                ..Record::default()
+            });
+            partition.produce_batch(batch).await.unwrap();
+        }
+
+        let output = coord
+            .read_recovery_chunk(&partition, Offset(0))
+            .expect("recovery read");
+
+        assert!(output.batches.len() == 1);
     }
 
     #[tokio::test]
@@ -736,7 +792,7 @@ mod tests {
     async fn snapshot_fold_after_threshold_resets_counter() {
         let dir = tempdir().unwrap();
         let reg = Arc::new(PartitionRegistry::new());
-        for p in 0..bootstrap::NUM_PARTITIONS {
+        for p in 0..ShareCoordinatorConfig::default().state_topic_num_partitions {
             open_state_partition(&reg, dir.path(), p);
         }
         // Small threshold so a few writes trigger a fold.
@@ -775,7 +831,7 @@ mod tests {
     async fn write_persists_and_recovers() {
         let dir = tempdir().unwrap();
         let reg = Arc::new(PartitionRegistry::new());
-        for p in 0..bootstrap::NUM_PARTITIONS {
+        for p in 0..ShareCoordinatorConfig::default().state_topic_num_partitions {
             open_state_partition(&reg, dir.path(), p);
         }
         let tid = uuid::Uuid::from_bytes([10; 16]);
@@ -1002,7 +1058,7 @@ mod tests {
     async fn snapshot_fold_prunes_log_prefix() {
         let dir = tempdir().unwrap();
         let reg = Arc::new(PartitionRegistry::new());
-        for p in 0..bootstrap::NUM_PARTITIONS {
+        for p in 0..ShareCoordinatorConfig::default().state_topic_num_partitions {
             open_state_partition(&reg, dir.path(), p);
         }
         // Fold after 2 updates so a snapshot lands a few records in.

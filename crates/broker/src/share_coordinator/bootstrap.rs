@@ -8,13 +8,13 @@ use crabka_raft::RaftError;
 use uuid::Uuid;
 
 pub const TOPIC: &str = "__share_group_state";
-pub const NUM_PARTITIONS: i32 = 50;
 
 /// Ensure `__share_group_state` exists in the controller's metadata.
 /// No-op if it already does. Tolerate `TopicExists` in case a concurrent
 /// `FindCoordinator(SHARE)` already created it.
 pub(crate) async fn ensure_topic(
     controller: &Arc<dyn crate::metadata_source::MetadataSource>,
+    num_partitions: i32,
 ) -> Result<(), crate::error::BrokerError> {
     let image = controller.current_image();
     if image.topic(TOPIC).is_some() {
@@ -42,11 +42,11 @@ pub(crate) async fn ensure_topic(
     records.push(MetadataRecord::V1Topic(TopicRecord {
         name: TOPIC.to_string(),
         topic_id,
-        partitions: NUM_PARTITIONS,
+        partitions: num_partitions,
         replication_factor: rf,
     }));
 
-    for p in 0..NUM_PARTITIONS {
+    for p in 0..num_partitions {
         let mut replicas = Vec::with_capacity(rf_usize);
         // p >= 0 (i32 literal range), k >= 1; safe to cast.
         let base = usize::try_from(p).expect("partition index fits in usize");

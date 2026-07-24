@@ -63,20 +63,21 @@ pub(crate) mod test_support {
         );
     }
 
-    pub(crate) fn open_all_state_partitions(registry: &PartitionRegistry, log_dir: &Path) {
-        for partition in 0..bootstrap::NUM_PARTITIONS {
+    pub(crate) fn open_all_state_partitions(
+        registry: &PartitionRegistry,
+        log_dir: &Path,
+        num_partitions: i32,
+    ) {
+        for partition in 0..num_partitions {
             open_state_partition(registry, log_dir, partition);
         }
     }
 
     pub(crate) fn coordinator(log_dir: &Path) -> Arc<ShareCoordinator> {
         let registry = Arc::new(PartitionRegistry::new());
-        open_all_state_partitions(&registry, log_dir);
-        Arc::new(ShareCoordinator::new(
-            NodeId(1),
-            registry,
-            ShareCoordinatorConfig::default(),
-        ))
+        let config = ShareCoordinatorConfig::default();
+        open_all_state_partitions(&registry, log_dir, config.state_topic_num_partitions);
+        Arc::new(ShareCoordinator::new(NodeId(1), registry, config))
     }
 
     pub(crate) async fn broker(dir: &Path) -> (BrokerHandle, Arc<crate::broker::Broker>) {
@@ -91,7 +92,11 @@ pub(crate) mod test_support {
         dir: &Path,
     ) -> (BrokerHandle, Arc<crate::broker::Broker>) {
         let (handle, broker) = broker(dir).await;
-        open_all_state_partitions(&broker.partitions, dir);
+        open_all_state_partitions(
+            &broker.partitions,
+            dir,
+            broker.config.share_coordinator.state_topic_num_partitions,
+        );
         broker
             .share_coordinator
             .lead_all_partitions_for_test()
