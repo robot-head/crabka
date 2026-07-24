@@ -160,6 +160,8 @@ pub struct BrokerConfig {
     pub client_metrics_stale_floor: Duration,
     /// Default client telemetry subscription interval.
     pub client_metrics_default_interval_ms: i32,
+    /// Capacity of the client-metrics OTLP forwarding queue.
+    pub client_metrics_otlp_queue_capacity: usize,
     /// Maximum accepted client telemetry payload size.
     pub client_metrics_telemetry_max_bytes: i32,
     /// Prometheus client-metrics snapshot lifetime.
@@ -890,6 +892,7 @@ impl BrokerConfig {
             client_metrics_eviction_tick: Duration::from_mins(1),
             client_metrics_stale_floor: Duration::from_mins(10),
             client_metrics_default_interval_ms: 300_000,
+            client_metrics_otlp_queue_capacity: 256,
             client_metrics_telemetry_max_bytes: 1_048_576,
             client_metrics_prom_snapshot_ttl: Duration::from_mins(5),
             rlmm_reconcile_tick: Duration::from_secs(30),
@@ -1559,6 +1562,10 @@ impl BrokerConfig {
         }
         for (name, value) in [
             (
+                "client_metrics_otlp_queue_capacity",
+                self.client_metrics_otlp_queue_capacity,
+            ),
+            (
                 "audit_event_queue_capacity",
                 self.audit_event_queue_capacity,
             ),
@@ -1729,6 +1736,7 @@ impl Default for BrokerConfig {
             client_metrics_eviction_tick: Duration::from_mins(1),
             client_metrics_stale_floor: Duration::from_mins(10),
             client_metrics_default_interval_ms: 300_000,
+            client_metrics_otlp_queue_capacity: 256,
             client_metrics_telemetry_max_bytes: 1_048_576,
             client_metrics_prom_snapshot_ttl: Duration::from_mins(5),
             rlmm_reconcile_tick: Duration::from_secs(30),
@@ -1963,6 +1971,7 @@ mod tests {
         assert!(
             (
                 config.client_metrics_default_interval_ms,
+                config.client_metrics_otlp_queue_capacity,
                 config.client_metrics_telemetry_max_bytes,
                 config.client_metrics_prom_snapshot_ttl,
                 config.rlmm_reconcile_tick,
@@ -1974,6 +1983,7 @@ mod tests {
                 config.auto_join_retry_backoff,
             ) == (
                 300_000,
+                256,
                 1_048_576,
                 std::time::Duration::from_mins(5),
                 std::time::Duration::from_secs(30),
@@ -2165,7 +2175,7 @@ mod tests {
 
     #[test]
     fn rejects_non_positive_runtime_scalars() {
-        let cases: [(&str, fn(&mut BrokerConfig)); 18] = [
+        let cases: [(&str, fn(&mut BrokerConfig)); 19] = [
             ("startup_leader_wait_timeout", |c| {
                 c.startup_leader_wait_timeout = Duration::ZERO;
             }),
@@ -2177,6 +2187,9 @@ mod tests {
             }),
             ("client_metrics_telemetry_max_bytes", |c| {
                 c.client_metrics_telemetry_max_bytes = 0;
+            }),
+            ("client_metrics_otlp_queue_capacity", |c| {
+                c.client_metrics_otlp_queue_capacity = 0;
             }),
             ("replication.fetch_max_bytes", |c| {
                 c.replication.fetch_max_bytes = 0;

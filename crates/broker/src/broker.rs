@@ -1057,7 +1057,9 @@ async fn start_observability(
     };
     let client_metrics = Arc::new(crate::client_metrics::ClientMetrics::new(
         config.client_metrics_telemetry_max_bytes,
+        config.client_metrics_default_interval_ms,
         config.client_metrics_otlp_endpoint.clone(),
+        config.client_metrics_otlp_queue_capacity,
         config.client_metrics_prom_snapshot_ttl,
     ));
     metrics.registry.lock().await.register_collector(Box::new(
