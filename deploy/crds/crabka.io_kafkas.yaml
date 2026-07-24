@@ -109,6 +109,12 @@ spec:
                     minimum: 1.0
                     nullable: true
                     type: integer
+                  autoJoinVoterRequestTimeoutMs:
+                    format: uint64
+                    maximum: 2147483647.0
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
                   classicGroupInitialRebalanceDelayMs:
                     format: uint64
                     minimum: 1.0
@@ -531,6 +537,12 @@ spec:
                     minimum: 1.0
                     nullable: true
                     type: integer
+                  shareStateReplicationFactor:
+                    format: int16
+                    maximum: 32767.0
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
                   socketReceiveBufferBytes:
                     format: uint
                     minimum: 1.0
@@ -623,6 +635,12 @@ spec:
                     type: integer
                   transactionStateNumPartitions:
                     format: int32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  transactionStateReplicationFactor:
+                    format: int16
+                    maximum: 32767.0
                     minimum: 1.0
                     nullable: true
                     type: integer

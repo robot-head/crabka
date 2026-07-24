@@ -235,6 +235,7 @@ define_broker_tuning! {
     refined #[schemars(range(min = 1))] opa_http_timeout_ms: u64 => refined_type::rule::GreaterU64<0>;
     refined #[schemars(range(min = 1))] oauth_jwks_http_timeout_ms: u64 => refined_type::rule::GreaterU64<0>;
     refined #[schemars(range(min = 1))] auto_join_retry_backoff_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1, max = 2_147_483_647))] auto_join_voter_request_timeout_ms: u64 => refined_type::rule::MinMaxU64<1, 2_147_483_647>;
     refined #[schemars(range(min = 1))] replication_fetch_max_bytes: i32 => refined_type::rule::GreaterI32<0>;
     refined #[schemars(range(min = 1))] replication_fetch_max_wait_ms: i32 => refined_type::rule::GreaterI32<0>;
     refined #[schemars(range(min = 1))] replication_fetch_min_bytes: i32 => refined_type::rule::GreaterI32<0>;
@@ -289,7 +290,9 @@ define_broker_tuning! {
     refined #[schemars(range(min = 1))] default_min_insync_replicas: i32 => refined_type::rule::GreaterI32<0>;
     refined #[schemars(range(min = 1))] future_log_move_read_chunk_bytes: usize => refined_type::rule::GreaterUsize<0>;
     refined #[schemars(range(min = 1))] share_state_num_partitions: i32 => refined_type::rule::GreaterI32<0>;
+    refined #[schemars(range(min = 1))] share_state_replication_factor: i16 => refined_type::rule::GreaterI16<0>;
     refined #[schemars(range(min = 1))] transaction_state_num_partitions: i32 => refined_type::rule::GreaterI32<0>;
+    refined #[schemars(range(min = 1))] transaction_state_replication_factor: i16 => refined_type::rule::GreaterI16<0>;
     refined #[schemars(range(min = 1))] transaction_min_timeout_ms: i32 => refined_type::rule::GreaterI32<0>;
     refined #[schemars(range(min = 1, max = 2_147_483_646))] transaction_max_timeout_ms: i32 => refined_type::rule::MinMaxI32<1, 2_147_483_646>;
     plain partition_disk_scan_interval_secs: u64 => ();

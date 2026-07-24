@@ -129,6 +129,10 @@ impl ShareCoordinator {
         self.config.state_topic_num_partitions
     }
 
+    pub(crate) fn state_topic_replication_factor(&self) -> i16 {
+        self.config.state_topic_replication_factor
+    }
+
     /// Returns the `__share_group_state` partition index responsible for the
     /// share key `(group, topic_id, partition)`.
     #[must_use]

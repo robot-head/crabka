@@ -18,8 +18,10 @@ use crabka_broker::{
     BootstrapMode, Broker, BrokerConfig,
     config::DEFAULT_CONTROLLED_SHUTDOWN_DRAIN_TIMEOUT_MS,
     config_value::{
-        Percentage, PositiveCount, PositiveI32, PositiveI64, PositiveMillis, parse_percentage,
-        parse_positive_count, parse_positive_i32, parse_positive_i64, parse_positive_millis,
+        Percentage, PositiveCount, PositiveI16, PositiveI32, PositiveI64, PositiveMillis,
+        VoterRequestTimeoutMillis, parse_percentage, parse_positive_count, parse_positive_i16,
+        parse_positive_i32, parse_positive_i64, parse_positive_millis,
+        parse_voter_request_timeout_millis,
     },
 };
 use crabka_log::LogConfig;
@@ -112,6 +114,8 @@ struct RuntimeArgs {
     oauth_jwks_http_timeout_ms: Option<PositiveMillis>,
     #[arg(long, env = "CRABKA_AUTO_JOIN_RETRY_BACKOFF_MS", value_parser = parse_positive_millis)]
     auto_join_retry_backoff_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_AUTO_JOIN_VOTER_REQUEST_TIMEOUT_MS", value_parser = parse_voter_request_timeout_millis)]
+    auto_join_voter_request_timeout_ms: Option<VoterRequestTimeoutMillis>,
     #[arg(long, env = "CRABKA_REPLICATION_FETCH_MAX_BYTES", value_parser = parse_positive_i32)]
     replication_fetch_max_bytes: Option<PositiveI32>,
     #[arg(long, env = "CRABKA_REPLICATION_FETCH_MAX_WAIT_MS", value_parser = parse_positive_i32)]
@@ -220,8 +224,12 @@ struct RuntimeArgs {
     future_log_move_read_chunk_bytes: Option<PositiveCount>,
     #[arg(long, env = "CRABKA_SHARE_STATE_NUM_PARTITIONS", value_parser = parse_positive_i32)]
     share_state_num_partitions: Option<PositiveI32>,
+    #[arg(long, env = "CRABKA_SHARE_STATE_REPLICATION_FACTOR", value_parser = parse_positive_i16)]
+    share_state_replication_factor: Option<PositiveI16>,
     #[arg(long, env = "CRABKA_TRANSACTION_STATE_NUM_PARTITIONS", value_parser = parse_positive_i32)]
     transaction_state_num_partitions: Option<PositiveI32>,
+    #[arg(long, env = "CRABKA_TRANSACTION_STATE_REPLICATION_FACTOR", value_parser = parse_positive_i16)]
+    transaction_state_replication_factor: Option<PositiveI16>,
     #[arg(long, env = "CRABKA_TRANSACTION_MIN_TIMEOUT_MS", value_parser = parse_positive_i32)]
     transaction_min_timeout_ms: Option<PositiveI32>,
     #[arg(long, env = "CRABKA_TRANSACTION_MAX_TIMEOUT_MS", value_parser = parse_positive_i32)]
@@ -299,6 +307,7 @@ impl RuntimeArgs {
             opa_http_timeout_ms,
             oauth_jwks_http_timeout_ms,
             auto_join_retry_backoff_ms,
+            auto_join_voter_request_timeout_ms,
         );
         copy_plain_runtime!(
             self,
@@ -358,6 +367,7 @@ impl RuntimeArgs {
             share_recovery_read_max_bytes,
             share_session_cache_max_when_unlimited,
             share_state_num_partitions,
+            share_state_replication_factor,
         );
     }
 
@@ -381,6 +391,7 @@ impl RuntimeArgs {
             default_min_insync_replicas,
             future_log_move_read_chunk_bytes,
             transaction_state_num_partitions,
+            transaction_state_replication_factor,
             transaction_min_timeout_ms,
             transaction_max_timeout_ms,
         );
@@ -1213,6 +1224,13 @@ mod tests {
             (vec!["crabka-broker", "--cleaner-interval-ms=0"], false),
             (vec!["crabka-broker", "--cleaner-interval-ms=1"], true),
             (
+                vec![
+                    "crabka-broker",
+                    "--auto-join-voter-request-timeout-ms=2147483648",
+                ],
+                false,
+            ),
+            (
                 vec!["crabka-broker", "--replication-fetch-min-bytes=0"],
                 false,
             ),
@@ -1263,6 +1281,9 @@ mod tests {
             [runtime]
             cleaner_interval_ms = 7000
             controlled_shutdown_drain_timeout_ms = 9000
+            auto_join_voter_request_timeout_ms = 9000
+            share_state_replication_factor = 2
+            transaction_state_replication_factor = 2
             ",
         )
         .expect("parse runtime file config")
@@ -1274,6 +1295,9 @@ mod tests {
             "crabka-broker",
             "--cleaner-interval-ms=30000",
             "--controlled-shutdown-drain-timeout-ms=20000",
+            "--auto-join-voter-request-timeout-ms=30000",
+            "--share-state-replication-factor=3",
+            "--transaction-state-replication-factor=3",
         ])
         .expect("parse explicit CLI defaults");
         let mut config = BrokerConfig::default();
@@ -1289,7 +1313,19 @@ mod tests {
             .expect("overlay CLI runtime");
 
         assert!(
-            (config.cleaner_interval, shutdown_ms) == (std::time::Duration::from_secs(30), 20_000)
+            (
+                config.cleaner_interval,
+                shutdown_ms,
+                config.auto_join_voter_request_timeout,
+                config.share_coordinator.state_topic_replication_factor,
+                config.transaction_state_replication_factor,
+            ) == (
+                std::time::Duration::from_secs(30),
+                20_000,
+                std::time::Duration::from_secs(30),
+                3,
+                3,
+            )
         );
     }
 
@@ -1302,6 +1338,9 @@ mod tests {
             [
                 ("CRABKA_CLEANER_INTERVAL_MS", Some("30000")),
                 ("CRABKA_CONTROLLED_SHUTDOWN_DRAIN_TIMEOUT_MS", Some("20000")),
+                ("CRABKA_AUTO_JOIN_VOTER_REQUEST_TIMEOUT_MS", Some("30000")),
+                ("CRABKA_SHARE_STATE_REPLICATION_FACTOR", Some("3")),
+                ("CRABKA_TRANSACTION_STATE_REPLICATION_FACTOR", Some("3")),
             ],
             || {
                 let args = Args::try_parse_from(["crabka-broker"]).expect("parse env defaults");
@@ -1318,8 +1357,19 @@ mod tests {
                     .expect("overlay env runtime");
 
                 assert!(
-                    (config.cleaner_interval, shutdown_ms)
-                        == (std::time::Duration::from_secs(30), 20_000)
+                    (
+                        config.cleaner_interval,
+                        shutdown_ms,
+                        config.auto_join_voter_request_timeout,
+                        config.share_coordinator.state_topic_replication_factor,
+                        config.transaction_state_replication_factor,
+                    ) == (
+                        std::time::Duration::from_secs(30),
+                        20_000,
+                        std::time::Duration::from_secs(30),
+                        3,
+                        3,
+                    )
                 );
             },
         );

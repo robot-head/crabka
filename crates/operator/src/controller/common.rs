@@ -1002,7 +1002,7 @@ mod config_hash_tests {
         assert!(empty == absent, "empty tuning must preserve hash collapse");
 
         spec.broker_tuning = Some(BrokerTuning {
-            cleaner_interval_ms: Some(7_000),
+            auto_join_voter_request_timeout_ms: Some(7_000),
             ..BrokerTuning::default()
         });
         let nonempty = combined_config_hash(&spec, None, None, None);

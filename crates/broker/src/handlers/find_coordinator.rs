@@ -141,6 +141,7 @@ pub(crate) async fn handle(
                 if let Err(e) = crate::txn::bootstrap::ensure_topic(
                     &controller,
                     broker.config.transaction_state_num_partitions,
+                    broker.config.transaction_state_replication_factor,
                 )
                 .await
                 {
@@ -165,6 +166,10 @@ pub(crate) async fn handle(
                 if let Err(e) = crate::share_coordinator::bootstrap::ensure_topic(
                     &controller,
                     broker.config.share_coordinator.state_topic_num_partitions,
+                    broker
+                        .config
+                        .share_coordinator
+                        .state_topic_replication_factor,
                 )
                 .await
                 {
@@ -532,6 +537,7 @@ mod tests {
         let (broker_handle, _dir) = start_broker_with(|config| {
             config.audit_enabled = false;
             config.transaction_state_num_partitions = 7;
+            config.transaction_state_replication_factor = 1;
         })
         .await;
         let broker = broker_handle.broker_arc_for_test();
@@ -563,6 +569,7 @@ mod tests {
             .topic(crate::txn::bootstrap::TOPIC)
             .expect("transaction-state topic");
         assert!(topic.partitions == 7);
+        assert!(topic.replication_factor == 1);
         assert!(image.partitions_of(crate::txn::bootstrap::TOPIC).count() == 7);
         assert!(response.coordinators.len() == 1);
         assert!(response.coordinators[0].error_code == codes::NONE);
