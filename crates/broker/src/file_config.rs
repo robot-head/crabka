@@ -48,8 +48,8 @@ pub enum FileConfigError {
 /// than refuse to start.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema, PartialEq)]
 pub struct FileConfig {
-    /// Operational runtime policy. Absent values retain the effective CLI
-    /// setting or the broker default.
+    /// Operational runtime policy. Present values replace the current broker
+    /// value; absent values retain it.
     #[serde(default)]
     pub runtime: Option<RuntimeFileConfig>,
     pub broker_id: Option<i32>,
@@ -1495,626 +1495,616 @@ fn percentage(name: &str, value: u32) -> Result<u32, FileConfigError> {
         .map_err(|error| invalid_runtime_value(name, error))
 }
 
-macro_rules! apply_runtime_fields {
-    ($runtime:ident, $cfg:ident, $defaults:ident) => {{
-        let runtime = $runtime;
-        let cfg = $cfg;
-        let defaults = $defaults;
-        macro_rules! set_duration {
-            ($field:ident, $target:expr, $default:expr) => {
-                if let Some(value) = runtime.$field {
-                    let value = positive_u64(stringify!($field), value)?;
-                    if $target == $default {
-                        $target = std::time::Duration::from_millis(value);
-                    }
-                }
-            };
+macro_rules! set_runtime_duration {
+    ($runtime:ident, $field:ident, $target:expr) => {
+        if let Some(value) = $runtime.$field {
+            let value = positive_u64(stringify!($field), value)?;
+            $target = std::time::Duration::from_millis(value);
         }
-        macro_rules! set_i32 {
-            ($field:ident, $target:expr, $default:expr) => {
-                if let Some(value) = runtime.$field {
-                    let value = positive_i32(stringify!($field), value)?;
-                    if $target == $default {
-                        $target = value;
-                    }
-                }
-            };
-        }
-        macro_rules! set_i64 {
-            ($field:ident, $target:expr, $default:expr) => {
-                if let Some(value) = runtime.$field {
-                    let value = positive_i64(stringify!($field), value)?;
-                    if $target == $default {
-                        $target = value;
-                    }
-                }
-            };
-        }
-        macro_rules! set_usize {
-            ($field:ident, $target:expr, $default:expr) => {
-                if let Some(value) = runtime.$field {
-                    let value = positive_usize(stringify!($field), value)?;
-                    if $target == $default {
-                        $target = value;
-                    }
-                }
-            };
-        }
-        macro_rules! set_u32 {
-            ($field:ident, $target:expr, $default:expr) => {
-                if let Some(value) = runtime.$field {
-                    let value = positive_u32(stringify!($field), value)?;
-                    if $target == $default {
-                        $target = value;
-                    }
-                }
-            };
-        }
-        macro_rules! set_positive_u64 {
-            ($field:ident, $target:expr, $default:expr) => {
-                if let Some(value) = runtime.$field {
-                    let value = positive_u64(stringify!($field), value)?;
-                    if $target == $default {
-                        $target = value;
-                    }
-                }
-            };
-        }
-        macro_rules! set_plain {
-            ($field:ident, $target:expr, $default:expr) => {
-                if let Some(value) = runtime.$field
-                    && $target == $default
-                {
-                    $target = value;
-                }
-            };
-        }
+    };
+}
 
-        set_duration!(
+macro_rules! set_runtime_validated {
+    ($runtime:ident, $field:ident, $target:expr, $validator:ident) => {
+        if let Some(value) = $runtime.$field {
+            $target = $validator(stringify!($field), value)?;
+        }
+    };
+}
+
+macro_rules! set_runtime_i32 {
+    ($runtime:ident, $field:ident, $target:expr) => {
+        set_runtime_validated!($runtime, $field, $target, positive_i32);
+    };
+}
+
+macro_rules! set_runtime_i64 {
+    ($runtime:ident, $field:ident, $target:expr) => {
+        set_runtime_validated!($runtime, $field, $target, positive_i64);
+    };
+}
+
+macro_rules! set_runtime_usize {
+    ($runtime:ident, $field:ident, $target:expr) => {
+        set_runtime_validated!($runtime, $field, $target, positive_usize);
+    };
+}
+
+macro_rules! set_runtime_u32 {
+    ($runtime:ident, $field:ident, $target:expr) => {
+        set_runtime_validated!($runtime, $field, $target, positive_u32);
+    };
+}
+
+macro_rules! set_runtime_positive_u64 {
+    ($runtime:ident, $field:ident, $target:expr) => {
+        set_runtime_validated!($runtime, $field, $target, positive_u64);
+    };
+}
+
+macro_rules! set_runtime_plain {
+    ($runtime:ident, $field:ident, $target:expr) => {
+        if let Some(value) = $runtime.$field {
+            $target = value;
+        }
+    };
+}
+
+impl RuntimeFileConfig {
+    /// Apply every present runtime value, validating scalar boundaries.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FileConfigError::InvalidConfig`] for an invalid value.
+    pub fn apply_to(
+        mut self,
+        cfg: &mut crate::config::BrokerConfig,
+    ) -> Result<(), FileConfigError> {
+        self.apply_core(cfg)?;
+        self.apply_replication(cfg)?;
+        self.apply_coordinators(cfg)?;
+        self.apply_recovery_and_queues(cfg)?;
+        self.apply_network_limits(cfg)?;
+        self.apply_transactions(cfg)?;
+        self.apply_broker_policy(cfg)?;
+        self.apply_share_group(cfg)?;
+        self.apply_streams_group(cfg)
+    }
+
+    fn apply_core(&mut self, cfg: &mut crate::config::BrokerConfig) -> Result<(), FileConfigError> {
+        let runtime = self;
+
+        set_runtime_duration!(
+            runtime,
             startup_leader_wait_timeout_ms,
-            cfg.startup_leader_wait_timeout,
-            defaults.startup_leader_wait_timeout
+            cfg.startup_leader_wait_timeout
         );
-        set_duration!(
+        set_runtime_duration!(
+            runtime,
             self_registration_backoff_min_ms,
-            cfg.self_registration_backoff_min,
-            defaults.self_registration_backoff_min
+            cfg.self_registration_backoff_min
         );
-        set_duration!(
+        set_runtime_duration!(
+            runtime,
             self_registration_backoff_max_ms,
-            cfg.self_registration_backoff_max,
-            defaults.self_registration_backoff_max
+            cfg.self_registration_backoff_max
         );
-        set_duration!(
+        set_runtime_duration!(
+            runtime,
             observer_poll_interval_ms,
-            cfg.observer_poll_interval,
-            defaults.observer_poll_interval
+            cfg.observer_poll_interval
         );
-        set_duration!(
+        set_runtime_duration!(
+            runtime,
             audit_spool_replay_interval_ms,
-            cfg.audit_spool_replay_interval,
-            defaults.audit_spool_replay_interval
+            cfg.audit_spool_replay_interval
         );
-        set_duration!(
+        set_runtime_duration!(
+            runtime,
             audit_stats_poll_interval_ms,
-            cfg.audit_stats_poll_interval,
-            defaults.audit_stats_poll_interval
+            cfg.audit_stats_poll_interval
         );
-        set_duration!(
+        set_runtime_duration!(
+            runtime,
             audit_partition_wait_timeout_ms,
-            cfg.audit_partition_wait_timeout,
-            defaults.audit_partition_wait_timeout
+            cfg.audit_partition_wait_timeout
         );
-        set_duration!(
+        set_runtime_duration!(
+            runtime,
             liveness_tick_interval_ms,
-            cfg.liveness_tick_interval,
-            defaults.liveness_tick_interval
+            cfg.liveness_tick_interval
         );
-        set_duration!(
-            gauge_poll_interval_ms,
-            cfg.gauge_poll_interval,
-            defaults.gauge_poll_interval
-        );
-        set_duration!(
-            isr_scan_interval_ms,
-            cfg.isr_scan_interval,
-            defaults.isr_scan_interval
-        );
-        set_duration!(
-            cleaner_interval_ms,
-            cfg.cleaner_interval,
-            defaults.cleaner_interval
-        );
-        set_duration!(
+        set_runtime_duration!(runtime, gauge_poll_interval_ms, cfg.gauge_poll_interval);
+        set_runtime_duration!(runtime, isr_scan_interval_ms, cfg.isr_scan_interval);
+        set_runtime_duration!(runtime, cleaner_interval_ms, cfg.cleaner_interval);
+        set_runtime_duration!(
+            runtime,
             future_log_move_retry_backoff_ms,
-            cfg.future_log_move_retry_backoff,
-            defaults.future_log_move_retry_backoff
+            cfg.future_log_move_retry_backoff
         );
-        set_duration!(
+        set_runtime_duration!(
+            runtime,
             client_metrics_eviction_tick_ms,
-            cfg.client_metrics_eviction_tick,
-            defaults.client_metrics_eviction_tick
+            cfg.client_metrics_eviction_tick
         );
-        set_duration!(
+        set_runtime_duration!(
+            runtime,
             client_metrics_stale_floor_ms,
-            cfg.client_metrics_stale_floor,
-            defaults.client_metrics_stale_floor
+            cfg.client_metrics_stale_floor
         );
-        set_i32!(
+        set_runtime_i32!(
+            runtime,
             client_metrics_default_interval_ms,
-            cfg.client_metrics_default_interval_ms,
-            defaults.client_metrics_default_interval_ms
+            cfg.client_metrics_default_interval_ms
         );
-        set_i32!(
+        set_runtime_i32!(
+            runtime,
             client_metrics_telemetry_max_bytes,
-            cfg.client_metrics_telemetry_max_bytes,
-            defaults.client_metrics_telemetry_max_bytes
+            cfg.client_metrics_telemetry_max_bytes
         );
-        set_duration!(
+        set_runtime_duration!(
+            runtime,
             client_metrics_prom_snapshot_ttl_ms,
-            cfg.client_metrics_prom_snapshot_ttl,
-            defaults.client_metrics_prom_snapshot_ttl
+            cfg.client_metrics_prom_snapshot_ttl
         );
-        set_duration!(
-            rlmm_reconcile_tick_ms,
-            cfg.rlmm_reconcile_tick,
-            defaults.rlmm_reconcile_tick
-        );
-        set_duration!(
+        set_runtime_duration!(runtime, rlmm_reconcile_tick_ms, cfg.rlmm_reconcile_tick);
+        set_runtime_duration!(
+            runtime,
             rlmm_bootstrap_backoff_initial_ms,
-            cfg.rlmm_bootstrap_backoff_initial,
-            defaults.rlmm_bootstrap_backoff_initial
+            cfg.rlmm_bootstrap_backoff_initial
         );
-        set_duration!(
+        set_runtime_duration!(
+            runtime,
             rlmm_bootstrap_backoff_max_ms,
-            cfg.rlmm_bootstrap_backoff_max,
-            defaults.rlmm_bootstrap_backoff_max
+            cfg.rlmm_bootstrap_backoff_max
         );
-        set_duration!(
+        set_runtime_duration!(
+            runtime,
             connection_creation_throttle_max_ms,
-            cfg.connection_creation_throttle_max,
-            defaults.connection_creation_throttle_max
+            cfg.connection_creation_throttle_max
         );
-        set_duration!(
-            opa_http_timeout_ms,
-            cfg.opa_http_timeout,
-            defaults.opa_http_timeout
-        );
-        set_duration!(
+        set_runtime_duration!(runtime, opa_http_timeout_ms, cfg.opa_http_timeout);
+        set_runtime_duration!(
+            runtime,
             oauth_jwks_http_timeout_ms,
-            cfg.oauth_jwks_http_timeout,
-            defaults.oauth_jwks_http_timeout
+            cfg.oauth_jwks_http_timeout
         );
-        set_duration!(
+        set_runtime_duration!(
+            runtime,
             auto_join_retry_backoff_ms,
-            cfg.auto_join_retry_backoff,
-            defaults.auto_join_retry_backoff
+            cfg.auto_join_retry_backoff
         );
-        set_i32!(
-            replication_fetch_max_bytes,
-            cfg.replication.fetch_max_bytes,
-            defaults.replication.fetch_max_bytes
-        );
-        set_i32!(
-            replication_fetch_max_wait_ms,
-            cfg.replication.fetch_max_wait_ms,
-            defaults.replication.fetch_max_wait_ms
-        );
-        set_i32!(
-            replication_fetch_min_bytes,
-            cfg.replication.fetch_min_bytes,
-            defaults.replication.fetch_min_bytes
-        );
-        set_duration!(
-            replication_throttle_exhausted_backoff_ms,
-            cfg.replication.throttle_exhausted_backoff,
-            defaults.replication.throttle_exhausted_backoff
-        );
-        set_duration!(
-            replication_send_error_backoff_ms,
-            cfg.replication.send_error_backoff,
-            defaults.replication.send_error_backoff
-        );
-        set_duration!(
-            replication_unknown_topic_retry_delay_ms,
-            cfg.replication.unknown_topic_retry_delay,
-            defaults.replication.unknown_topic_retry_delay
-        );
-        set_duration!(
-            replication_epoch_fence_backoff_ms,
-            cfg.replication.epoch_fence_backoff,
-            defaults.replication.epoch_fence_backoff
-        );
-        set_duration!(
-            replication_unexpected_error_backoff_ms,
-            cfg.replication.unexpected_error_backoff,
-            defaults.replication.unexpected_error_backoff
-        );
-        set_duration!(
-            replication_reconnect_initial_delay_ms,
-            cfg.replication.reconnect_initial_delay,
-            defaults.replication.reconnect_initial_delay
-        );
-        set_duration!(
-            replication_reconnect_delay_cap_ms,
-            cfg.replication.reconnect_delay_cap,
-            defaults.replication.reconnect_delay_cap
-        );
-        set_duration!(
-            coordinator_session_expiry_tick_ms,
-            cfg.coordinator_session_expiry_tick,
-            defaults.coordinator_session_expiry_tick
-        );
-        set_duration!(
-            coordinator_shutdown_ack_timeout_ms,
-            cfg.coordinator_shutdown_ack_timeout,
-            defaults.coordinator_shutdown_ack_timeout
-        );
-        set_duration!(
-            consumer_group_session_timeout_ms,
-            cfg.next_gen_consumer_group.session_timeout,
-            defaults.next_gen_consumer_group.session_timeout
-        );
-        set_duration!(
-            consumer_group_heartbeat_interval_ms,
-            cfg.next_gen_consumer_group.heartbeat_interval,
-            defaults.next_gen_consumer_group.heartbeat_interval
-        );
-        set_duration!(
-            consumer_group_min_session_timeout_ms,
-            cfg.next_gen_consumer_group.min_session_timeout,
-            defaults.next_gen_consumer_group.min_session_timeout
-        );
-        set_duration!(
-            consumer_group_max_session_timeout_ms,
-            cfg.next_gen_consumer_group.max_session_timeout,
-            defaults.next_gen_consumer_group.max_session_timeout
-        );
-        set_duration!(
-            consumer_group_min_heartbeat_interval_ms,
-            cfg.next_gen_consumer_group.min_heartbeat_interval,
-            defaults.next_gen_consumer_group.min_heartbeat_interval
-        );
-        set_duration!(
-            consumer_group_max_heartbeat_interval_ms,
-            cfg.next_gen_consumer_group.max_heartbeat_interval,
-            defaults.next_gen_consumer_group.max_heartbeat_interval
-        );
-        set_usize!(
-            consumer_group_max_size,
-            cfg.next_gen_consumer_group.max_size,
-            defaults.next_gen_consumer_group.max_size
-        );
-        set_duration!(
-            classic_group_initial_rebalance_delay_ms,
-            cfg.classic_group_initial_rebalance_delay,
-            defaults.classic_group_initial_rebalance_delay
-        );
-        set_duration!(
-            sync_group_follower_wait_ms,
-            cfg.sync_group_follower_wait,
-            defaults.sync_group_follower_wait
-        );
-        set_duration!(
-            unclean_recovery_aggressive_deadline_ms,
-            cfg.unclean_recovery_aggressive_deadline,
-            defaults.unclean_recovery_aggressive_deadline
-        );
-        set_duration!(
-            unclean_recovery_balanced_deadline_ms,
-            cfg.unclean_recovery_balanced_deadline,
-            defaults.unclean_recovery_balanced_deadline
-        );
-        set_duration!(
-            operator_recovery_deadline_ms,
-            cfg.operator_recovery_deadline,
-            defaults.operator_recovery_deadline
-        );
-        set_duration!(
-            quota_throttle_max_ms,
-            cfg.quota_throttle_max,
-            defaults.quota_throttle_max
-        );
-        set_u32!(
-            self_registration_max_attempts,
-            cfg.self_registration_max_attempts,
-            defaults.self_registration_max_attempts
-        );
-        set_u32!(
-            observer_fetch_max_bytes,
-            cfg.observer_fetch_max_bytes,
-            defaults.observer_fetch_max_bytes
-        );
-        set_usize!(
-            audit_event_queue_capacity,
-            cfg.audit_event_queue_capacity,
-            defaults.audit_event_queue_capacity
-        );
-        set_i64!(
-            audit_tail_window_offsets,
-            cfg.audit_tail_window_offsets,
-            defaults.audit_tail_window_offsets
-        );
-        set_usize!(
-            audit_tail_read_max_bytes,
-            cfg.audit_tail_read_max_bytes,
-            defaults.audit_tail_read_max_bytes
-        );
-        set_duration!(
-            offsets_topic_metadata_wait_timeout_ms,
-            cfg.offsets_topic_metadata_wait_timeout,
-            defaults.offsets_topic_metadata_wait_timeout
-        );
-        set_u32!(
-            client_metrics_stale_push_intervals,
-            cfg.client_metrics_stale_push_intervals,
-            defaults.client_metrics_stale_push_intervals
-        );
-        set_usize!(
-            client_metrics_otlp_queue_capacity,
-            cfg.client_metrics_otlp_queue_capacity,
-            defaults.client_metrics_otlp_queue_capacity
-        );
-        set_usize!(
-            coordinator_actor_mailbox_capacity,
-            cfg.coordinator_actor_mailbox_capacity,
-            defaults.coordinator_actor_mailbox_capacity
-        );
-        set_usize!(
-            unclean_recovery_queue_capacity,
-            cfg.unclean_recovery_queue_capacity,
-            defaults.unclean_recovery_queue_capacity
-        );
-        set_usize!(
-            share_recovery_read_max_bytes,
-            cfg.share_recovery_read_max_bytes,
-            defaults.share_recovery_read_max_bytes
-        );
-        set_usize!(
-            share_session_cache_max_when_unlimited,
-            cfg.share_session_cache_max_when_unlimited,
-            defaults.share_session_cache_max_when_unlimited
-        );
-        set_usize!(
-            socket_request_max_bytes,
-            cfg.socket_request_max_bytes,
-            defaults.socket_request_max_bytes
-        );
-        set_usize!(
-            sendfile_min_bytes,
-            cfg.sendfile_min_bytes,
-            defaults.sendfile_min_bytes
-        );
-        set_usize!(
-            socket_send_buffer_bytes,
-            cfg.socket_send_buffer_bytes,
-            defaults.socket_send_buffer_bytes
-        );
-        set_usize!(
-            socket_receive_buffer_bytes,
-            cfg.socket_receive_buffer_bytes,
-            defaults.socket_receive_buffer_bytes
-        );
-        set_usize!(
-            acl_max_principal_bytes,
-            cfg.acl_max_principal_bytes,
-            defaults.acl_max_principal_bytes
-        );
-        set_usize!(
-            acl_max_resource_name_bytes,
-            cfg.acl_max_resource_name_bytes,
-            defaults.acl_max_resource_name_bytes
-        );
-        set_usize!(
-            telemetry_max_decompression_ratio,
-            cfg.telemetry_max_decompression_ratio,
-            defaults.telemetry_max_decompression_ratio
-        );
-        set_usize!(
-            telemetry_decompressed_output_floor_bytes,
-            cfg.telemetry_decompressed_output_floor_bytes,
-            defaults.telemetry_decompressed_output_floor_bytes
-        );
-        set_usize!(
-            telemetry_decompressed_output_ceiling_bytes,
-            cfg.telemetry_decompressed_output_ceiling_bytes,
-            defaults.telemetry_decompressed_output_ceiling_bytes
-        );
-        set_i64!(
-            producer_id_expiration_ms,
-            cfg.producer_id_expiration_ms,
-            defaults.producer_id_expiration_ms
-        );
-        set_duration!(
-            producer_id_expiration_scan_interval_ms,
-            cfg.producer_id_expiration_scan_interval,
-            defaults.producer_id_expiration_scan_interval
-        );
-        set_usize!(
-            max_produce_group,
-            cfg.max_produce_group,
-            defaults.max_produce_group
-        );
-        set_usize!(
-            partition_writer_queue_depth,
-            cfg.partition_writer_queue_depth,
-            defaults.partition_writer_queue_depth
-        );
-        set_i32!(
-            default_min_insync_replicas,
-            cfg.default_min_insync_replicas,
-            defaults.default_min_insync_replicas
-        );
-        set_usize!(
-            future_log_move_read_chunk_bytes,
-            cfg.future_log_move_read_chunk_bytes,
-            defaults.future_log_move_read_chunk_bytes
-        );
-        set_i32!(
-            share_state_num_partitions,
-            cfg.share_coordinator.state_topic_num_partitions,
-            defaults.share_coordinator.state_topic_num_partitions
-        );
-        set_i32!(
-            transaction_state_num_partitions,
-            cfg.transaction_state_num_partitions,
-            defaults.transaction_state_num_partitions
-        );
-        set_i32!(
-            transaction_min_timeout_ms,
-            cfg.transaction_min_timeout_ms,
-            defaults.transaction_min_timeout_ms
-        );
-        set_i32!(
-            transaction_max_timeout_ms,
-            cfg.transaction_max_timeout_ms,
-            defaults.transaction_max_timeout_ms
-        );
+        Ok(())
+    }
 
-        set_plain!(
+    fn apply_replication(
+        &mut self,
+        cfg: &mut crate::config::BrokerConfig,
+    ) -> Result<(), FileConfigError> {
+        let runtime = self;
+        set_runtime_i32!(
+            runtime,
+            replication_fetch_max_bytes,
+            cfg.replication.fetch_max_bytes
+        );
+        set_runtime_i32!(
+            runtime,
+            replication_fetch_max_wait_ms,
+            cfg.replication.fetch_max_wait_ms
+        );
+        set_runtime_i32!(
+            runtime,
+            replication_fetch_min_bytes,
+            cfg.replication.fetch_min_bytes
+        );
+        set_runtime_duration!(
+            runtime,
+            replication_throttle_exhausted_backoff_ms,
+            cfg.replication.throttle_exhausted_backoff
+        );
+        set_runtime_duration!(
+            runtime,
+            replication_send_error_backoff_ms,
+            cfg.replication.send_error_backoff
+        );
+        set_runtime_duration!(
+            runtime,
+            replication_unknown_topic_retry_delay_ms,
+            cfg.replication.unknown_topic_retry_delay
+        );
+        set_runtime_duration!(
+            runtime,
+            replication_epoch_fence_backoff_ms,
+            cfg.replication.epoch_fence_backoff
+        );
+        set_runtime_duration!(
+            runtime,
+            replication_unexpected_error_backoff_ms,
+            cfg.replication.unexpected_error_backoff
+        );
+        set_runtime_duration!(
+            runtime,
+            replication_reconnect_initial_delay_ms,
+            cfg.replication.reconnect_initial_delay
+        );
+        set_runtime_duration!(
+            runtime,
+            replication_reconnect_delay_cap_ms,
+            cfg.replication.reconnect_delay_cap
+        );
+        Ok(())
+    }
+
+    fn apply_coordinators(
+        &mut self,
+        cfg: &mut crate::config::BrokerConfig,
+    ) -> Result<(), FileConfigError> {
+        let runtime = self;
+        set_runtime_duration!(
+            runtime,
+            coordinator_session_expiry_tick_ms,
+            cfg.coordinator_session_expiry_tick
+        );
+        set_runtime_duration!(
+            runtime,
+            coordinator_shutdown_ack_timeout_ms,
+            cfg.coordinator_shutdown_ack_timeout
+        );
+        set_runtime_duration!(
+            runtime,
+            consumer_group_session_timeout_ms,
+            cfg.next_gen_consumer_group.session_timeout
+        );
+        set_runtime_duration!(
+            runtime,
+            consumer_group_heartbeat_interval_ms,
+            cfg.next_gen_consumer_group.heartbeat_interval
+        );
+        set_runtime_duration!(
+            runtime,
+            consumer_group_min_session_timeout_ms,
+            cfg.next_gen_consumer_group.min_session_timeout
+        );
+        set_runtime_duration!(
+            runtime,
+            consumer_group_max_session_timeout_ms,
+            cfg.next_gen_consumer_group.max_session_timeout
+        );
+        set_runtime_duration!(
+            runtime,
+            consumer_group_min_heartbeat_interval_ms,
+            cfg.next_gen_consumer_group.min_heartbeat_interval
+        );
+        set_runtime_duration!(
+            runtime,
+            consumer_group_max_heartbeat_interval_ms,
+            cfg.next_gen_consumer_group.max_heartbeat_interval
+        );
+        set_runtime_usize!(
+            runtime,
+            consumer_group_max_size,
+            cfg.next_gen_consumer_group.max_size
+        );
+        set_runtime_duration!(
+            runtime,
+            classic_group_initial_rebalance_delay_ms,
+            cfg.classic_group_initial_rebalance_delay
+        );
+        set_runtime_duration!(
+            runtime,
+            sync_group_follower_wait_ms,
+            cfg.sync_group_follower_wait
+        );
+        Ok(())
+    }
+
+    fn apply_recovery_and_queues(
+        &mut self,
+        cfg: &mut crate::config::BrokerConfig,
+    ) -> Result<(), FileConfigError> {
+        let runtime = self;
+        set_runtime_duration!(
+            runtime,
+            unclean_recovery_aggressive_deadline_ms,
+            cfg.unclean_recovery_aggressive_deadline
+        );
+        set_runtime_duration!(
+            runtime,
+            unclean_recovery_balanced_deadline_ms,
+            cfg.unclean_recovery_balanced_deadline
+        );
+        set_runtime_duration!(
+            runtime,
+            operator_recovery_deadline_ms,
+            cfg.operator_recovery_deadline
+        );
+        set_runtime_duration!(runtime, quota_throttle_max_ms, cfg.quota_throttle_max);
+        set_runtime_u32!(
+            runtime,
+            self_registration_max_attempts,
+            cfg.self_registration_max_attempts
+        );
+        set_runtime_u32!(
+            runtime,
+            observer_fetch_max_bytes,
+            cfg.observer_fetch_max_bytes
+        );
+        set_runtime_usize!(
+            runtime,
+            audit_event_queue_capacity,
+            cfg.audit_event_queue_capacity
+        );
+        set_runtime_i64!(
+            runtime,
+            audit_tail_window_offsets,
+            cfg.audit_tail_window_offsets
+        );
+        set_runtime_usize!(
+            runtime,
+            audit_tail_read_max_bytes,
+            cfg.audit_tail_read_max_bytes
+        );
+        set_runtime_duration!(
+            runtime,
+            offsets_topic_metadata_wait_timeout_ms,
+            cfg.offsets_topic_metadata_wait_timeout
+        );
+        set_runtime_u32!(
+            runtime,
+            client_metrics_stale_push_intervals,
+            cfg.client_metrics_stale_push_intervals
+        );
+        set_runtime_usize!(
+            runtime,
+            client_metrics_otlp_queue_capacity,
+            cfg.client_metrics_otlp_queue_capacity
+        );
+        set_runtime_usize!(
+            runtime,
+            coordinator_actor_mailbox_capacity,
+            cfg.coordinator_actor_mailbox_capacity
+        );
+        set_runtime_usize!(
+            runtime,
+            unclean_recovery_queue_capacity,
+            cfg.unclean_recovery_queue_capacity
+        );
+        set_runtime_usize!(
+            runtime,
+            share_recovery_read_max_bytes,
+            cfg.share_recovery_read_max_bytes
+        );
+        set_runtime_usize!(
+            runtime,
+            share_session_cache_max_when_unlimited,
+            cfg.share_session_cache_max_when_unlimited
+        );
+        Ok(())
+    }
+
+    fn apply_network_limits(
+        &mut self,
+        cfg: &mut crate::config::BrokerConfig,
+    ) -> Result<(), FileConfigError> {
+        let runtime = self;
+        set_runtime_usize!(
+            runtime,
+            socket_request_max_bytes,
+            cfg.socket_request_max_bytes
+        );
+        set_runtime_usize!(runtime, sendfile_min_bytes, cfg.sendfile_min_bytes);
+        set_runtime_usize!(
+            runtime,
+            socket_send_buffer_bytes,
+            cfg.socket_send_buffer_bytes
+        );
+        set_runtime_usize!(
+            runtime,
+            socket_receive_buffer_bytes,
+            cfg.socket_receive_buffer_bytes
+        );
+        set_runtime_usize!(
+            runtime,
+            acl_max_principal_bytes,
+            cfg.acl_max_principal_bytes
+        );
+        set_runtime_usize!(
+            runtime,
+            acl_max_resource_name_bytes,
+            cfg.acl_max_resource_name_bytes
+        );
+        set_runtime_usize!(
+            runtime,
+            telemetry_max_decompression_ratio,
+            cfg.telemetry_max_decompression_ratio
+        );
+        set_runtime_usize!(
+            runtime,
+            telemetry_decompressed_output_floor_bytes,
+            cfg.telemetry_decompressed_output_floor_bytes
+        );
+        set_runtime_usize!(
+            runtime,
+            telemetry_decompressed_output_ceiling_bytes,
+            cfg.telemetry_decompressed_output_ceiling_bytes
+        );
+        Ok(())
+    }
+
+    fn apply_transactions(
+        &mut self,
+        cfg: &mut crate::config::BrokerConfig,
+    ) -> Result<(), FileConfigError> {
+        let runtime = self;
+        set_runtime_i64!(
+            runtime,
+            producer_id_expiration_ms,
+            cfg.producer_id_expiration_ms
+        );
+        set_runtime_duration!(
+            runtime,
+            producer_id_expiration_scan_interval_ms,
+            cfg.producer_id_expiration_scan_interval
+        );
+        set_runtime_usize!(runtime, max_produce_group, cfg.max_produce_group);
+        set_runtime_usize!(
+            runtime,
+            partition_writer_queue_depth,
+            cfg.partition_writer_queue_depth
+        );
+        set_runtime_i32!(
+            runtime,
+            default_min_insync_replicas,
+            cfg.default_min_insync_replicas
+        );
+        set_runtime_usize!(
+            runtime,
+            future_log_move_read_chunk_bytes,
+            cfg.future_log_move_read_chunk_bytes
+        );
+        set_runtime_i32!(
+            runtime,
+            share_state_num_partitions,
+            cfg.share_coordinator.state_topic_num_partitions
+        );
+        set_runtime_i32!(
+            runtime,
+            transaction_state_num_partitions,
+            cfg.transaction_state_num_partitions
+        );
+        set_runtime_i32!(
+            runtime,
+            transaction_min_timeout_ms,
+            cfg.transaction_min_timeout_ms
+        );
+        set_runtime_i32!(
+            runtime,
+            transaction_max_timeout_ms,
+            cfg.transaction_max_timeout_ms
+        );
+        Ok(())
+    }
+
+    fn apply_broker_policy(
+        &mut self,
+        cfg: &mut crate::config::BrokerConfig,
+    ) -> Result<(), FileConfigError> {
+        let runtime = self;
+        set_runtime_plain!(
+            runtime,
             partition_disk_scan_interval_secs,
-            cfg.partition_disk_scan_interval_secs,
-            defaults.partition_disk_scan_interval_secs
+            cfg.partition_disk_scan_interval_secs
         );
-        set_plain!(
-            observer_lag_bound,
-            cfg.observer_lag_bound,
-            defaults.observer_lag_bound
-        );
-        set_positive_u64!(
-            heartbeat_interval_ms,
-            cfg.heartbeat_interval_ms,
-            defaults.heartbeat_interval_ms
-        );
-        set_positive_u64!(
-            heartbeat_timeout_ms,
-            cfg.heartbeat_timeout_ms,
-            defaults.heartbeat_timeout_ms
-        );
-        set_positive_u64!(
+        set_runtime_plain!(runtime, observer_lag_bound, cfg.observer_lag_bound);
+        set_runtime_positive_u64!(runtime, heartbeat_interval_ms, cfg.heartbeat_interval_ms);
+        set_runtime_positive_u64!(runtime, heartbeat_timeout_ms, cfg.heartbeat_timeout_ms);
+        set_runtime_positive_u64!(
+            runtime,
             replica_lag_time_max_ms,
-            cfg.replica_lag_time_max_ms,
-            defaults.replica_lag_time_max_ms
+            cfg.replica_lag_time_max_ms
         );
-        set_duration!(
+        set_runtime_duration!(
+            runtime,
             controller_election_timeout_ms,
-            cfg.controller_election_timeout,
-            defaults.controller_election_timeout
+            cfg.controller_election_timeout
         );
-        set_duration!(
+        set_runtime_duration!(
+            runtime,
             controller_heartbeat_interval_ms,
-            cfg.controller_heartbeat_interval,
-            defaults.controller_heartbeat_interval
+            cfg.controller_heartbeat_interval
         );
         if let Some(value) = runtime.controlled_shutdown_drain_timeout_ms {
             positive_u64("controlled_shutdown_drain_timeout_ms", value)?;
         }
-        set_positive_u64!(
+        set_runtime_positive_u64!(
+            runtime,
             metadata_max_bytes_between_snapshots,
-            cfg.metadata_max_bytes_between_snapshots,
-            defaults.metadata_max_bytes_between_snapshots
+            cfg.metadata_max_bytes_between_snapshots
         );
-        if let Some(value) = runtime.metadata_max_snapshot_interval_ms
-            && cfg.metadata_max_snapshot_interval == defaults.metadata_max_snapshot_interval
-        {
+        if let Some(value) = runtime.metadata_max_snapshot_interval_ms {
             cfg.metadata_max_snapshot_interval = std::time::Duration::from_millis(value);
         }
-        set_positive_u64!(
+        set_runtime_positive_u64!(
+            runtime,
             metadata_snapshot_interval_records,
-            cfg.metadata_snapshot_interval_records,
-            defaults.metadata_snapshot_interval_records
+            cfg.metadata_snapshot_interval_records
         );
-        if let Some(value) = runtime.txn_abort_cleanup_interval_ms
-            && cfg.txn_abort_cleanup_interval == defaults.txn_abort_cleanup_interval
-        {
+        if let Some(value) = runtime.txn_abort_cleanup_interval_ms {
             cfg.txn_abort_cleanup_interval = std::time::Duration::from_millis(value);
         }
-        set_positive_u64!(
+        set_runtime_positive_u64!(
+            runtime,
             leader_imbalance_check_interval_secs,
-            cfg.leader_imbalance_check_interval_secs,
-            defaults.leader_imbalance_check_interval_secs
+            cfg.leader_imbalance_check_interval_secs
         );
         if let Some(value) = runtime.leader_imbalance_per_broker_percentage {
             let value = percentage("leader_imbalance_per_broker_percentage", value)?;
-            if cfg.leader_imbalance_per_broker_percentage
-                == defaults.leader_imbalance_per_broker_percentage
-            {
-                cfg.leader_imbalance_per_broker_percentage = value;
-            }
+            cfg.leader_imbalance_per_broker_percentage = value;
         }
-        if let Some(value) = runtime.tls_reload_interval_ms
-            && cfg.tls_reload_interval == defaults.tls_reload_interval
-        {
+        if let Some(value) = runtime.tls_reload_interval_ms {
             cfg.tls_reload_interval = std::time::Duration::from_millis(value);
         }
-        set_plain!(
+        set_runtime_plain!(
+            runtime,
             max_incremental_fetch_session_cache_slots,
-            cfg.max_incremental_fetch_session_cache_slots,
-            defaults.max_incremental_fetch_session_cache_slots
+            cfg.max_incremental_fetch_session_cache_slots
         );
-        set_plain!(
-            max_connections,
-            cfg.max_connections,
-            defaults.max_connections
-        );
-        set_plain!(
-            max_connections_per_ip,
-            cfg.max_connections_per_ip,
-            defaults.max_connections_per_ip
-        );
-        set_i64!(
+        set_runtime_plain!(runtime, max_connections, cfg.max_connections);
+        set_runtime_plain!(runtime, max_connections_per_ip, cfg.max_connections_per_ip);
+        set_runtime_i64!(
+            runtime,
             delegation_token_max_lifetime_ms,
-            cfg.delegation_token_max_lifetime_ms,
-            defaults.delegation_token_max_lifetime_ms
+            cfg.delegation_token_max_lifetime_ms
         );
-        set_i64!(
+        set_runtime_i64!(
+            runtime,
             delegation_token_expiry_check_interval_ms,
-            cfg.delegation_token_expiry_check_interval_ms,
-            defaults.delegation_token_expiry_check_interval_ms
+            cfg.delegation_token_expiry_check_interval_ms
         );
-        set_i64!(
+        set_runtime_i64!(
+            runtime,
             delegation_token_default_renew_period_ms,
-            cfg.delegation_token_default_renew_period_ms,
-            defaults.delegation_token_default_renew_period_ms
+            cfg.delegation_token_default_renew_period_ms
         );
-        set_duration!(
+        set_runtime_duration!(
+            runtime,
             remote_log_manager_interval_ms,
-            cfg.remote_log_manager_interval,
-            defaults.remote_log_manager_interval
+            cfg.remote_log_manager_interval
         );
+        Ok(())
+    }
 
-        set_plain!(
-            share_group_enable,
-            cfg.share_group.enable,
-            defaults.share_group.enable
-        );
-        set_duration!(
+    fn apply_share_group(
+        &mut self,
+        cfg: &mut crate::config::BrokerConfig,
+    ) -> Result<(), FileConfigError> {
+        let runtime = self;
+        set_runtime_plain!(runtime, share_group_enable, cfg.share_group.enable);
+        set_runtime_duration!(
+            runtime,
             share_group_session_timeout_ms,
-            cfg.share_group.session_timeout,
-            defaults.share_group.session_timeout
+            cfg.share_group.session_timeout
         );
-        set_duration!(
+        set_runtime_duration!(
+            runtime,
             share_group_heartbeat_interval_ms,
-            cfg.share_group.heartbeat_interval,
-            defaults.share_group.heartbeat_interval
+            cfg.share_group.heartbeat_interval
         );
-        set_duration!(
+        set_runtime_duration!(
+            runtime,
             share_group_record_lock_duration_ms,
-            cfg.share_group.record_lock_duration,
-            defaults.share_group.record_lock_duration
+            cfg.share_group.record_lock_duration
         );
         if let Some(value) = runtime.share_group_max_delivery_attempts {
             let value = positive_i16("share_group_max_delivery_attempts", value)?;
-            if cfg.share_group.max_delivery_attempts == defaults.share_group.max_delivery_attempts {
-                cfg.share_group.max_delivery_attempts = value;
-            }
+            cfg.share_group.max_delivery_attempts = value;
         }
-        set_i32!(
+        set_runtime_i32!(
+            runtime,
             share_group_max_inflight_records,
-            cfg.share_group.max_inflight_records,
-            defaults.share_group.max_inflight_records
+            cfg.share_group.max_inflight_records
         );
-        if let Some(value) = runtime.share_group_isolation_level {
+        if let Some(value) = runtime.share_group_isolation_level.take() {
             use crate::coordinator::unified::share::config::ShareIsolationLevel;
             let value = match value.as_str() {
                 "read-uncommitted" => ShareIsolationLevel::ReadUncommitted,
@@ -2126,19 +2116,25 @@ macro_rules! apply_runtime_fields {
                     ));
                 }
             };
-            if cfg.share_group.isolation_level == defaults.share_group.isolation_level {
-                cfg.share_group.isolation_level = value;
-            }
+            cfg.share_group.isolation_level = value;
         }
-        set_duration!(
+        Ok(())
+    }
+
+    fn apply_streams_group(
+        &mut self,
+        cfg: &mut crate::config::BrokerConfig,
+    ) -> Result<(), FileConfigError> {
+        let runtime = self;
+        set_runtime_duration!(
+            runtime,
             streams_group_session_timeout_ms,
-            cfg.streams_group.session_timeout,
-            defaults.streams_group.session_timeout
+            cfg.streams_group.session_timeout
         );
-        set_duration!(
+        set_runtime_duration!(
+            runtime,
             streams_group_heartbeat_interval_ms,
-            cfg.streams_group.heartbeat_interval,
-            defaults.streams_group.heartbeat_interval
+            cfg.streams_group.heartbeat_interval
         );
         if let Some(value) = runtime.streams_group_num_standby_replicas {
             if value < 0 {
@@ -2147,10 +2143,7 @@ macro_rules! apply_runtime_fields {
                     "must be nonnegative",
                 ));
             }
-            if cfg.streams_group.num_standby_replicas == defaults.streams_group.num_standby_replicas
-            {
-                cfg.streams_group.num_standby_replicas = value;
-            }
+            cfg.streams_group.num_standby_replicas = value;
         }
         if let Some(value) = runtime.streams_group_num_warmup_replicas {
             if value < 0 {
@@ -2159,9 +2152,7 @@ macro_rules! apply_runtime_fields {
                     "must be nonnegative",
                 ));
             }
-            if cfg.streams_group.num_warmup_replicas == defaults.streams_group.num_warmup_replicas {
-                cfg.streams_group.num_warmup_replicas = value;
-            }
+            cfg.streams_group.num_warmup_replicas = value;
         }
         if let Some(value) = runtime.streams_group_acceptable_recovery_lag {
             if value < 0 {
@@ -2170,18 +2161,14 @@ macro_rules! apply_runtime_fields {
                     "must be nonnegative",
                 ));
             }
-            if cfg.streams_group.acceptable_recovery_lag
-                == defaults.streams_group.acceptable_recovery_lag
-            {
-                cfg.streams_group.acceptable_recovery_lag = value;
-            }
+            cfg.streams_group.acceptable_recovery_lag = value;
         }
-        set_duration!(
+        set_runtime_duration!(
+            runtime,
             streams_group_task_offset_interval_ms,
-            cfg.streams_group.task_offset_interval,
-            defaults.streams_group.task_offset_interval
+            cfg.streams_group.task_offset_interval
         );
-        if let Some(value) = runtime.streams_group_assignor {
+        if let Some(value) = runtime.streams_group_assignor.take() {
             use crate::coordinator::unified::streams::config::StreamsAssignorKind;
             let value = match value.as_str() {
                 "auto" => StreamsAssignorKind::Auto,
@@ -2194,37 +2181,23 @@ macro_rules! apply_runtime_fields {
                     ));
                 }
             };
-            if cfg.streams_group.assignor == defaults.streams_group.assignor {
-                cfg.streams_group.assignor = value;
-            }
+            cfg.streams_group.assignor = value;
         }
 
-        if let Some(value) = runtime.inter_broker_server_name
-            && cfg.inter_broker_server_name == defaults.inter_broker_server_name
-        {
+        if let Some(value) = runtime.inter_broker_server_name.take() {
             cfg.inter_broker_server_name = value;
         }
         Ok(())
-    }};
-}
-
-fn apply_runtime(
-    runtime: RuntimeFileConfig,
-    cfg: &mut crate::config::BrokerConfig,
-    defaults: &crate::config::BrokerConfig,
-) -> Result<(), FileConfigError> {
-    apply_runtime_fields!(runtime, cfg, defaults)
+    }
 }
 
 impl FileConfig {
-    /// Apply this file-config to a `BrokerConfig` that already holds
-    /// CLI-derived values. The file fills in unset values and provides
-    /// `listeners` + `inter_broker_listener_name` wholesale when those
-    /// are at their respective "empty" defaults.
+    /// Apply this file-config to a `BrokerConfig`. Present `[runtime]` values
+    /// replace current runtime values; other file sections retain their
+    /// established fill-or-replace semantics.
     ///
-    /// CLI values always win — the binary's `main()` constructs the
-    /// `BrokerConfig` from CLI args first, then calls `apply_to`. The
-    /// file never overrides what was explicitly set on the CLI.
+    /// The broker binary uses [`Self::apply_before_runtime_overlay`] and then
+    /// applies explicit CLI/environment values so those inputs win.
     ///
     /// **Caller contract:** when `--config-file` is used, the caller
     /// must NOT pass `--listen-addr` or `--advertised-listener`. The
@@ -2242,10 +2215,33 @@ impl FileConfig {
     /// # Errors
     /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
     pub fn apply_to(self, cfg: &mut crate::config::BrokerConfig) -> Result<(), FileConfigError> {
+        self.apply_to_inner(cfg, true)
+    }
+
+    /// Apply file values before a higher-precedence runtime overlay.
+    ///
+    /// Runtime relational validation is deferred until the caller applies the
+    /// final overlay and validates the resolved [`crate::config::BrokerConfig`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any individual file value is invalid.
+    pub fn apply_before_runtime_overlay(
+        self,
+        cfg: &mut crate::config::BrokerConfig,
+    ) -> Result<(), FileConfigError> {
+        self.apply_to_inner(cfg, false)
+    }
+
+    fn apply_to_inner(
+        self,
+        cfg: &mut crate::config::BrokerConfig,
+        validate_runtime: bool,
+    ) -> Result<(), FileConfigError> {
         let defaults = crate::config::BrokerConfig::default();
         let has_runtime = self.runtime.is_some();
         if let Some(runtime) = self.runtime {
-            apply_runtime(runtime, cfg, &defaults)?;
+            runtime.apply_to(cfg)?;
         }
         if let Some(id) = self.broker_id
             && cfg.broker_id == defaults.broker_id
@@ -2359,7 +2355,7 @@ impl FileConfig {
             cfg,
         )?;
 
-        if has_runtime {
+        if has_runtime && validate_runtime {
             cfg.validate()
                 .map_err(|error| FileConfigError::InvalidConfig(error.to_string()))?;
         }
