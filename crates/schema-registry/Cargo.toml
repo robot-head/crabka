@@ -7,6 +7,7 @@ license.workspace = true
 authors.workspace = true
 rust-version.workspace = true
 description = "Confluent Schema Registry-compatible REST service for Crabka (binary: crabka-schema-registry)"
+default-run = "crabka-schema-registry"
 repository = "https://github.com/robot-head/crabka"
 homepage = "https://github.com/robot-head/crabka"
 documentation = "https://docs.rs/crabka-schema-registry"
