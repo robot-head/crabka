@@ -44,11 +44,6 @@ use crate::{
 /// in-sync replica has it.
 const ACKS_ALL: i16 = -1;
 
-/// Kafka's default `min.insync.replicas` — every partition always has at
-/// least its leader in the ISR, so `1` preserves the legacy
-/// "any-ISR-counts" behavior.
-const DEFAULT_MIN_INSYNC_REPLICAS: i32 = 1;
-
 /// Wire sentinel: "no offset assigned" (`ProduceResponse.INVALID_OFFSET`).
 /// Stamped on partition rows that failed before any append happened.
 const INVALID_OFFSET: i64 = -1;
@@ -58,17 +53,19 @@ const INVALID_OFFSET: i64 = -1;
 const NO_LEADER_ID: i32 = -1;
 
 /// Resolve `min.insync.replicas` for a topic from the metadata image.
-/// Defaults to `1` (Kafka's default — every cluster has at least the
-/// leader in ISR), and silently falls back to the default on malformed
-/// values (the `AlterConfigs` validator already rejected invalid values,
-/// so any non-parseable string here is a corrupt metadata image — safer
-/// to err toward the permissive default than to wedge produce).
-fn topic_min_insync_replicas(image: &crabka_metadata::MetadataImage, topic: &str) -> i32 {
+/// Silently falls back to the broker default on malformed values (the
+/// `AlterConfigs` validator already rejected invalid values, so any
+/// non-parseable string here is a corrupt metadata image).
+fn topic_min_insync_replicas(
+    image: &crabka_metadata::MetadataImage,
+    topic: &str,
+    default_min_insync_replicas: i32,
+) -> i32 {
     image
         .topic_config(topic)
         .and_then(|m| m.get(MIN_INSYNC_REPLICAS))
         .and_then(|v| v.parse::<i32>().ok())
-        .unwrap_or(DEFAULT_MIN_INSYNC_REPLICAS)
+        .unwrap_or(default_min_insync_replicas)
 }
 
 #[tracing::instrument(
@@ -232,6 +229,7 @@ pub(crate) async fn handle(
                         log_dir_status: &log_dir_status,
                         image: &image,
                         this_node_id: broker.config.node_id,
+                        default_min_insync_replicas: broker.config.default_min_insync_replicas,
                         metrics: &broker.metrics,
                     },
                 ))
@@ -440,6 +438,7 @@ struct PartitionServices<'a> {
     log_dir_status: &'a crate::log_dir_status::LogDirRegistry,
     image: &'a Arc<crabka_metadata::MetadataImage>,
     this_node_id: crabka_metadata::NodeId,
+    default_min_insync_replicas: i32,
     metrics: &'a crate::metrics::BrokerMetrics,
 }
 
@@ -464,6 +463,7 @@ async fn process_partition(
         log_dir_status,
         image,
         this_node_id,
+        default_min_insync_replicas,
         metrics,
     } = services;
     let idx = part_data.index;
@@ -532,7 +532,7 @@ async fn process_partition(
         partitions,
         log_dir_status,
         image,
-        this_node_id,
+        (this_node_id, default_min_insync_replicas),
     ) {
         Ok(ready) => ready,
         Err(error) => {
@@ -712,8 +712,9 @@ fn validate_partition_gate(
     partitions: &PartitionRegistry,
     log_dir_status: &crate::log_dir_status::LogDirRegistry,
     image: &crabka_metadata::MetadataImage,
-    this_node_id: crabka_metadata::NodeId,
+    broker_policy: (crabka_metadata::NodeId, i32),
 ) -> Result<(Arc<crate::partition::Partition>, i32), PartitionGateError> {
+    let (this_node_id, default_min_insync_replicas) = broker_policy;
     let Some(record) = image
         .partition(topic_name, partition_index)
         .filter(|_| !topic_name.is_empty())
@@ -749,7 +750,7 @@ fn validate_partition_gate(
     }
     if acks == ACKS_ALL
         && i32::try_from(record.isr.len()).unwrap_or(i32::MAX)
-            < topic_min_insync_replicas(image, topic_name)
+            < topic_min_insync_replicas(image, topic_name, default_min_insync_replicas)
     {
         return Err(PartitionGateError {
             code: codes::NOT_ENOUGH_REPLICAS,
@@ -1410,21 +1411,35 @@ mod tests {
     #[test]
     fn topic_min_isr_defaults_to_one_when_unset() {
         let img = image_with_topic("t", &[1, 2, 3]);
-        assert!(topic_min_insync_replicas(&img, "t") == 1);
+        assert!(topic_min_insync_replicas(&img, "t", 1) == 1);
     }
 
     #[test]
     fn topic_min_isr_reads_override_when_set() {
         let mut img = image_with_topic("t", &[1, 2, 3]);
         set_min_isr(&mut img, "t", 3);
-        assert!(topic_min_insync_replicas(&img, "t") == 3);
+        assert!(topic_min_insync_replicas(&img, "t", 1) == 3);
+    }
+
+    #[test]
+    fn topic_min_isr_uses_broker_fallback_unless_valid_override_exists() {
+        let cases = [(None, 2), (Some(3), 3)];
+
+        for (override_value, expected) in cases {
+            let mut img = image_with_topic("t", &[1, 2, 3]);
+            if let Some(value) = override_value {
+                set_min_isr(&mut img, "t", value);
+            }
+
+            assert!(topic_min_insync_replicas(&img, "t", 2) == expected);
+        }
     }
 
     #[test]
     fn topic_min_isr_default_one_on_unknown_topic() {
         let img = MetadataImage::new(Uuid::nil());
         assert!(
-            topic_min_insync_replicas(&img, "ghost") == 1,
+            topic_min_insync_replicas(&img, "ghost", 1) == 1,
             "missing topic_config must default to 1, not crash"
         );
     }
@@ -1439,7 +1454,7 @@ mod tests {
             overrides: o,
         }));
         assert!(
-            topic_min_insync_replicas(&img, "t") == 1,
+            topic_min_insync_replicas(&img, "t", 1) == 1,
             "unparseable value must fall back to permissive default 1"
         );
     }
@@ -1455,7 +1470,7 @@ mod tests {
             topic: "t".into(),
             overrides: o,
         }));
-        assert!(topic_min_insync_replicas(&img, "t") == 1);
+        assert!(topic_min_insync_replicas(&img, "t", 1) == 1);
     }
 
     #[test]
@@ -1661,6 +1676,7 @@ mod tests {
                 log_dir_status: &log_dir_status,
                 image: &image,
                 this_node_id: crabka_audit::NodeId(1),
+                default_min_insync_replicas: 1,
                 metrics: &metrics,
             },
         )
@@ -1748,6 +1764,7 @@ mod tests {
                 image: &image,
                 // We are the leader (node 2), but hold no local replica.
                 this_node_id: crabka_audit::NodeId(2),
+                default_min_insync_replicas: 1,
                 metrics: &metrics,
             },
         )
@@ -1881,6 +1898,7 @@ mod tests {
                 log_dir_status: &log_dir_status,
                 image: &image,
                 this_node_id: crabka_audit::NodeId(1),
+                default_min_insync_replicas: 1,
                 metrics: &metrics,
             },
         )
