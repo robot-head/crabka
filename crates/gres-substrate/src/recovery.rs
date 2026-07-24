@@ -1,6 +1,6 @@
 //! Barrier-based recovery primitives.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use crabka_client_admin::AdminClient;
 use crabka_client_core::{
@@ -17,7 +17,7 @@ use crabka_protocol::{
     },
     primitives::uuid::Uuid as WireUuid,
 };
-use refined_type::rule::{GreaterI32, GreaterUsize};
+use refined_type::rule::{GreaterI32, GreaterU64, GreaterUsize};
 use tokio::sync::Mutex;
 
 use crate::{
@@ -44,6 +44,10 @@ pub const DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES: i32 =
     crabka_client_core::DEFAULT_FETCH_RESPONSE_MAX_BYTES;
 /// Default consecutive empty-fetch retries after the initial empty fetch.
 pub const DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES: usize = 100;
+/// Default timeout for establishing a raw committed-WAL connection.
+pub const DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT_MS: u64 = 10_000;
+/// Default timeout for requests on a raw committed-WAL connection.
+pub const DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT_MS: u64 = 30_000;
 /// Committed-end sample fetches must return immediately when the cursor is
 /// already at the stable end; a positive wait would park every barrier call
 /// on the broker's long-poll timer.
@@ -57,6 +61,8 @@ pub struct RecoveryReadPolicy {
     fetch_partition_max_bytes: i32,
     fetch_response_max_bytes: i32,
     empty_fetch_retries: usize,
+    connect_timeout: Duration,
+    request_timeout: Duration,
 }
 
 impl RecoveryReadPolicy {
@@ -84,7 +90,24 @@ impl RecoveryReadPolicy {
             empty_fetch_retries: GreaterUsize::<0>::new(empty_fetch_retries)
                 .map_err(|error| error.to_string())?
                 .into_value(),
+            connect_timeout: validated_timeout(DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT_MS)?,
+            request_timeout: validated_timeout(DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT_MS)?,
         })
+    }
+
+    /// Replace the raw WAL connection timeouts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when either timeout is zero.
+    pub fn with_timeouts(
+        mut self,
+        connect_timeout_ms: u64,
+        request_timeout_ms: u64,
+    ) -> Result<Self, String> {
+        self.connect_timeout = validated_timeout(connect_timeout_ms)?;
+        self.request_timeout = validated_timeout(request_timeout_ms)?;
+        Ok(self)
     }
 
     /// Return the broker long-poll wait in milliseconds.
@@ -110,6 +133,24 @@ impl RecoveryReadPolicy {
     pub const fn empty_fetch_retries(self) -> usize {
         self.empty_fetch_retries
     }
+
+    /// Return the raw WAL connection establishment timeout.
+    #[must_use]
+    pub const fn connect_timeout(self) -> Duration {
+        self.connect_timeout
+    }
+
+    /// Return the timeout for requests on a raw WAL connection.
+    #[must_use]
+    pub const fn request_timeout(self) -> Duration {
+        self.request_timeout
+    }
+}
+
+fn validated_timeout(milliseconds: u64) -> Result<Duration, String> {
+    GreaterU64::<0>::new(milliseconds)
+        .map(|value| Duration::from_millis(value.into_value()))
+        .map_err(|error| error.to_string())
 }
 
 impl Default for RecoveryReadPolicy {
@@ -426,6 +467,7 @@ impl CommittedEndDialer for LiveEndDialer {
             &bootstrap_addrs,
             self.config.security.clone(),
             "crabka-gres-substrate-end-sample",
+            self.config.read_policy,
         )
         .await?;
         Ok(Box::new(LiveEndConnection {
@@ -808,8 +850,22 @@ impl KafkaCommittedWalReader {
             &self.bootstrap_addrs,
             self.security.clone(),
             "crabka-gres-substrate-replay",
+            self.read_policy,
         )
         .await
+    }
+}
+
+fn wal_connection_options(
+    client_id: &str,
+    security: Option<ClientSecurity>,
+    read_policy: RecoveryReadPolicy,
+) -> ConnectionOptions {
+    ConnectionOptions {
+        client_id: client_id.to_string(),
+        connect_timeout: read_policy.connect_timeout(),
+        request_timeout: read_policy.request_timeout(),
+        security: security.map(Box::new),
     }
 }
 
@@ -818,6 +874,7 @@ async fn open_wal_connection(
     bootstrap_addrs: &[String],
     security: Option<ClientSecurity>,
     client_id: &str,
+    read_policy: RecoveryReadPolicy,
 ) -> Result<Connection, SubstrateError> {
     let host_port = bootstrap_addrs.first().ok_or_else(|| {
         SubstrateError::Unavailable("substrate bootstrap address list is empty".into())
@@ -830,12 +887,7 @@ async fn open_wal_connection(
         .ok_or_else(|| SubstrateError::Unavailable(format!("no addresses for {host_port}")))?;
     Connection::connect_with_options(
         addr,
-        ConnectionOptions {
-            client_id: client_id.to_string(),
-            connect_timeout: std::time::Duration::from_secs(10),
-            request_timeout: std::time::Duration::from_secs(30),
-            security: security.map(Box::new),
-        },
+        wal_connection_options(client_id, security, read_policy),
     )
     .await
     .map_err(|error| SubstrateError::Unavailable(format!("connect to {host_port}: {error}")))
@@ -1455,6 +1507,14 @@ mod tests {
             policy.empty_fetch_retries(),
             DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES
         );
+        assert_eq!(
+            policy.connect_timeout(),
+            std::time::Duration::from_millis(DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT_MS)
+        );
+        assert_eq!(
+            policy.request_timeout(),
+            std::time::Duration::from_millis(DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT_MS)
+        );
     }
 
     #[test]
@@ -1473,6 +1533,65 @@ mod tests {
         assert_eq!(policy.fetch_partition_max_bytes(), 22);
         assert_eq!(policy.fetch_response_max_bytes(), 33);
         assert_eq!(policy.empty_fetch_retries(), 44);
+    }
+
+    #[test]
+    fn recovery_read_policy_rejects_zero_timeouts() {
+        let policy = RecoveryReadPolicy::default();
+
+        assert!(policy.with_timeouts(0, 2).is_err());
+        assert!(policy.with_timeouts(1, 0).is_err());
+    }
+
+    #[test]
+    fn recovery_read_policy_replaces_timeouts_without_changing_fetch_limits() {
+        let policy = RecoveryReadPolicy::new(11, 22, 33, 44)
+            .expect("valid policy")
+            .with_timeouts(55, 66)
+            .expect("valid timeouts");
+
+        assert_eq!(policy.fetch_max_wait_ms(), 11);
+        assert_eq!(policy.fetch_partition_max_bytes(), 22);
+        assert_eq!(policy.fetch_response_max_bytes(), 33);
+        assert_eq!(policy.empty_fetch_retries(), 44);
+        assert_eq!(
+            policy.connect_timeout(),
+            std::time::Duration::from_millis(55)
+        );
+        assert_eq!(
+            policy.request_timeout(),
+            std::time::Duration::from_millis(66)
+        );
+    }
+
+    #[test]
+    fn recovery_read_policy_builds_exact_wal_connection_options() {
+        let security = ClientSecurity {
+            protocol: crabka_security::ListenerProtocol::Plaintext,
+            tls: None,
+            sasl: None,
+            sasl_host: Some("broker.internal".into()),
+        };
+        let policy = RecoveryReadPolicy::default()
+            .with_timeouts(77, 88)
+            .expect("valid timeouts");
+        let options = wal_connection_options("replay-client", Some(security), policy);
+
+        assert_eq!(options.client_id, "replay-client");
+        assert_eq!(
+            options.connect_timeout,
+            std::time::Duration::from_millis(77)
+        );
+        assert_eq!(
+            options.request_timeout,
+            std::time::Duration::from_millis(88)
+        );
+        let security = options.security.expect("security");
+        assert_eq!(
+            security.protocol,
+            crabka_security::ListenerProtocol::Plaintext
+        );
+        assert_eq!(security.sasl_host.as_deref(), Some("broker.internal"));
     }
 
     #[test]
