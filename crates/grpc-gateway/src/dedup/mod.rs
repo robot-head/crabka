@@ -15,6 +15,7 @@ pub mod topic;
 #[must_use]
 pub fn partition_for(key: &str, partitions: u32) -> u32 {
     assert2::assert!(partitions > 0);
+    assert2::assert!(i32::try_from(partitions).is_ok());
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for b in key.as_bytes() {
         hash ^= u64::from(*b);
@@ -71,6 +72,7 @@ impl DedupEngine {
         security: Option<crabka_client_core::security::ClientSecurity>,
     ) -> Self {
         assert2::assert!(partitions > 0);
+        assert2::assert!(i32::try_from(partitions).is_ok());
         let slots = (0..partitions).map(|_| Mutex::new(None)).collect();
         Self {
             bootstrap: bootstrap.to_string(),
@@ -100,6 +102,8 @@ impl DedupEngine {
     /// the partition's transactional producer and writes the data record +
     /// claim atomically, then updates the local map.
     #[tracing::instrument(skip_all)]
+    /// # Panics
+    /// Panics if the validated partition count cannot be represented locally.
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn dedup_produce(
@@ -128,7 +132,9 @@ impl DedupEngine {
             });
         }
 
-        let mut slot = self.slots[usize::try_from(p).unwrap_or(0)].lock().await;
+        let mut slot = self.slots[usize::try_from(p).expect("u32 partition fits usize")]
+            .lock()
+            .await;
 
         // Re-check under the lock (another task may have just claimed it).
         if let Some(c) = self.store.get(key) {
@@ -207,7 +213,7 @@ impl DedupEngine {
             };
             let claim_rec = ProducerRecord {
                 topic: self.dedup_topic.clone(),
-                partition: Some(i32::try_from(p).unwrap_or(0)),
+                partition: Some(i32::try_from(p).expect("validated partition fits i32")),
                 key: Some(Bytes::from(key.as_bytes().to_vec())),
                 value: Some(Bytes::from(serde_json::to_vec(&claim)?)),
                 headers: vec![],
@@ -259,6 +265,16 @@ mod tests {
     #[test]
     fn partition_for_rejects_zero_partitions() {
         assert!(std::panic::catch_unwind(|| partition_for("key", 0)).is_err());
+    }
+
+    #[test]
+    fn partition_for_rejects_counts_kafka_cannot_represent() {
+        assert!(
+            std::panic::catch_unwind(|| {
+                let _ = partition_for("key", i32::MAX.cast_unsigned() + 1);
+            })
+            .is_err()
+        );
     }
 
     #[test]

@@ -55,6 +55,8 @@ impl DedupStore {
 
     #[must_use]
     pub fn new_with_policy(partitions: u32, runtime: &GatewayRuntimeConfig) -> Self {
+        assert2::assert!(partitions > 0);
+        assert2::assert!(i32::try_from(partitions).is_ok());
         Self {
             map: DashMap::new(),
             partitions,
@@ -166,7 +168,7 @@ impl DedupStore {
                 self.warm.store(false, Ordering::SeqCst);
                 empty_polls = 0;
                 crate::metrics::metrics()
-                    .set_owned_partitions(i64::try_from(current.len()).unwrap_or(0));
+                    .set_owned_partitions(i64::try_from(current.len()).expect("count fits i64"));
                 if let Some(publisher) = self.membership.get()
                     && let Err(e) = publisher.publish(&current).await
                 {
@@ -215,6 +217,8 @@ impl DedupStore {
 
     /// Test/helper writer: produce a single claim record (compacted topic key
     /// = idempotency key, value = JSON `ClaimValue`) to its hashed partition.
+    /// # Panics
+    /// Panics if the validated partition count cannot be represented by Kafka.
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn write_claim(
@@ -234,8 +238,8 @@ impl DedupStore {
             .maybe_security(security)
             .build()
             .await?;
-        let partition =
-            i32::try_from(crate::dedup::partition_for(key, self.partitions)).unwrap_or(0);
+        let partition = i32::try_from(crate::dedup::partition_for(key, self.partitions))
+            .expect("validated partition fits i32");
         let prec = ProducerRecord {
             topic: dedup_topic.to_string(),
             partition: Some(partition),
