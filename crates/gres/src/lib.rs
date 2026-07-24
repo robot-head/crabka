@@ -108,6 +108,38 @@ pub struct ServeArgs {
     )]
     pub range0_follower_poll_interval_ms: Option<PositiveMillis>,
 
+    /// Broker long-poll wait for committed-WAL recovery fetches.
+    #[arg(
+        long = "wal-recovery-fetch-max-wait-ms",
+        env = "CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT_MS",
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_recovery_fetch_max_wait_ms: Option<PositiveI32>,
+
+    /// Per-partition byte limit for committed-WAL recovery fetches.
+    #[arg(
+        long = "wal-recovery-fetch-partition-max-bytes",
+        env = "CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES",
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_recovery_fetch_partition_max_bytes: Option<PositiveI32>,
+
+    /// Whole-response byte limit for committed-WAL recovery fetches.
+    #[arg(
+        long = "wal-recovery-fetch-response-max-bytes",
+        env = "CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES",
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_recovery_fetch_response_max_bytes: Option<PositiveI32>,
+
+    /// Consecutive empty-fetch retries after the initial recovery fetch.
+    #[arg(
+        long = "wal-recovery-empty-fetch-retries",
+        env = "CRABKA_GRES_WAL_RECOVERY_EMPTY_FETCH_RETRIES",
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_recovery_empty_fetch_retries: Option<PositiveUsize>,
+
     /// Substrate mode: comma-separated hosted range ids, for example r0,r2.
     #[arg(long = "host-ranges", requires = "ranges")]
     pub host_ranges: Option<String>,
@@ -389,6 +421,18 @@ fn validate_range0_follower_poll_interval(args: &ServeArgs) -> std::io::Result<(
     Ok(())
 }
 
+fn validate_wal_recovery_read_policy(args: &ServeArgs) -> std::io::Result<()> {
+    if (args.wal_recovery_fetch_max_wait_ms.is_some()
+        || args.wal_recovery_fetch_partition_max_bytes.is_some()
+        || args.wal_recovery_fetch_response_max_bytes.is_some()
+        || args.wal_recovery_empty_fetch_retries.is_some())
+        && args.substrate_bootstrap.is_none()
+    {
+        return invalid_input("WAL recovery options require --substrate-bootstrap");
+    }
+    Ok(())
+}
+
 /// Validated Gres registry options shared by compute registry clients.
 #[derive(clap::Args, Debug, Clone)]
 pub struct RegistryOptions {
@@ -494,6 +538,8 @@ pub struct SubstrateRuntimeConfig {
     pub ranges: Option<String>,
     /// Periodic refresh cadence for a remote range-0 follower.
     pub range0_follower_poll_interval: Duration,
+    /// Committed-WAL recovery read limits.
+    pub recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy,
     /// Optional range-compute placement for distributed mode. Range 0 is always hosted.
     pub host_ranges: Option<Vec<crabka_gres_ranges::RangeId>>,
     /// mTLS client configuration required for remote range routing.
@@ -588,6 +634,7 @@ impl SubstrateRuntimeConfig {
         use std::io::{Error, ErrorKind};
 
         validate_range0_follower_poll_interval(args)?;
+        validate_wal_recovery_read_policy(args)?;
 
         let Some(bootstrap) = args.substrate_bootstrap.as_deref() else {
             if checkpointing_was_requested(args) {
@@ -637,6 +684,25 @@ impl SubstrateRuntimeConfig {
                     PositiveMillis::into_value,
                 ),
             ),
+            recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::new(
+                args.wal_recovery_fetch_max_wait_ms.map_or(
+                    crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT_MS,
+                    PositiveI32::into_value,
+                ),
+                args.wal_recovery_fetch_partition_max_bytes.map_or(
+                    crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES,
+                    PositiveI32::into_value,
+                ),
+                args.wal_recovery_fetch_response_max_bytes.map_or(
+                    crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES,
+                    PositiveI32::into_value,
+                ),
+                args.wal_recovery_empty_fetch_retries.map_or(
+                    crabka_gres_substrate::DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES,
+                    PositiveUsize::into_value,
+                ),
+            )
+            .map_err(|error| Error::new(ErrorKind::InvalidInput, error))?,
             host_ranges: parse_host_ranges(args.host_ranges.as_deref())?,
             range_rpc: RangeRpcRuntimeConfig::from_args(args)?,
             advertised_endpoint: args.range_listen.clone(),
@@ -648,6 +714,20 @@ impl SubstrateRuntimeConfig {
 
     fn is_in_memory_bootstrap(&self) -> bool {
         is_in_memory_bootstrap(&self.bootstrap)
+    }
+
+    fn live_recovery_config(
+        &self,
+        tenant: crabka_gres_ranges::TenantName,
+        range: crabka_gres_ranges::RangeId,
+    ) -> crabka_gres_substrate::LiveRecoveryConfig {
+        crabka_gres_substrate::LiveRecoveryConfig::new(
+            self.bootstrap.clone(),
+            tenant,
+            range,
+            self.kafka_security.clone(),
+        )
+        .with_read_policy(self.recovery_read_policy)
     }
 }
 
@@ -1853,6 +1933,7 @@ pub fn tls_acceptor(
 /// Returns an error when the requested operation cannot be completed.
 pub async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     validate_range0_follower_poll_interval(&args)?;
+    validate_wal_recovery_read_policy(&args)?;
     local_vacuum_policy(&args)?;
     let listener = TcpListener::bind(&args.listen).await?;
     tracing::info!(listen = %listener.local_addr()?, "crabka-gres listening");
@@ -1882,6 +1963,7 @@ pub async fn serve_listener_with_tenant_config_loader(
     tenant_config_loader: &impl TenantConfigLoader,
 ) -> std::io::Result<()> {
     validate_range0_follower_poll_interval(&args)?;
+    validate_wal_recovery_read_policy(&args)?;
     let local_vacuum_policy = local_vacuum_policy(&args)?;
     let sql_addr = listener.local_addr()?;
     let tls = match (&args.tls_cert, &args.tls_key) {
@@ -3652,11 +3734,9 @@ async fn attach_range0_read_barrier(
     tenant_config: crabka_gres_ranges::MultiRangeTenantConfig,
     checkpoint_store: Option<&dyn crabka_gres_substrate::checkpoint::CheckpointStore>,
 ) -> std::io::Result<crabka_gres_ranges::MultiRangeTenantConfig> {
-    let follower_config = crabka_gres_substrate::LiveRecoveryConfig::new(
-        config.bootstrap.clone(),
+    let follower_config = config.live_recovery_config(
         tenant_config.tenant.clone(),
         crabka_gres_ranges::RangeId::COORDINATOR,
-        config.kafka_security.clone(),
     );
     let follower_store: Arc<dyn RestoreKv> = match config.cache_dir.as_deref() {
         Some(parent) => {
@@ -4181,20 +4261,16 @@ fn live_multirange_recovery_configs(
                     .is_none_or(|ranges| ranges.contains(&spec.range_id))
         })
         .map(|spec| {
-            crabka_gres_substrate::LiveRecoveryConfig::new(
-                config.bootstrap.clone(),
-                tenant_config.tenant.clone(),
-                spec.range_id,
-                config.kafka_security.clone(),
-            )
-            .with_wal_generation(
-                activation
-                    .and_then(|discovery| {
-                        discovery.recovery_generations.get(&spec.range_id).copied()
-                    })
-                    .unwrap_or(0),
-            )
-            .with_optional_advertised_endpoint(config.advertised_endpoint.clone())
+            config
+                .live_recovery_config(tenant_config.tenant.clone(), spec.range_id)
+                .with_wal_generation(
+                    activation
+                        .and_then(|discovery| {
+                            discovery.recovery_generations.get(&spec.range_id).copied()
+                        })
+                        .unwrap_or(0),
+                )
+                .with_optional_advertised_endpoint(config.advertised_endpoint.clone())
         })
         .collect::<Vec<_>>();
     // Recover range 0 ahead of its siblings so the timestamp oracle can start
@@ -4227,14 +4303,10 @@ fn single_range_live_wal_selection(
             .find(|range| range.range_id == crabka_gres_ranges::RangeId::COORDINATOR.as_u32())
             .map_or(record.wal_generation, |range| range.wal_generation)
     });
-    let recovery_config = crabka_gres_substrate::LiveRecoveryConfig::new(
-        config.bootstrap.clone(),
-        tenant,
-        crabka_gres_ranges::RangeId::COORDINATOR,
-        config.kafka_security.clone(),
-    )
-    .with_wal_generation(wal_generation)
-    .with_optional_advertised_endpoint(config.advertised_endpoint.clone());
+    let recovery_config = config
+        .live_recovery_config(tenant, crabka_gres_ranges::RangeId::COORDINATOR)
+        .with_wal_generation(wal_generation)
+        .with_optional_advertised_endpoint(config.advertised_endpoint.clone());
     let topic = recovery_config.wal_topic();
     Ok(SingleRangeLiveWalSelection {
         checkpoint_namespace: recovery_config.checkpoint_namespace(),
@@ -6178,15 +6250,15 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
                         range_id: request.target_range,
                         reason: format!("open empty successor cache: {error}"),
                     })?;
-                let target_recovery = crabka_gres_substrate::LiveRecoveryConfig::new(
-                    self.config.bootstrap.clone(),
-                    source.recovery_config.tenant.clone(),
-                    request.target_range,
-                    self.config.kafka_security.clone(),
-                )
-                .with_wal_generation(request.wal_generation)
-                .with_optional_advertised_endpoint(self.config.advertised_endpoint.clone())
-                .with_checkpoints(Arc::clone(&source_checkpoint.store));
+                let target_recovery = self
+                    .config
+                    .live_recovery_config(
+                        source.recovery_config.tenant.clone(),
+                        request.target_range,
+                    )
+                    .with_wal_generation(request.wal_generation)
+                    .with_optional_advertised_endpoint(self.config.advertised_endpoint.clone())
+                    .with_checkpoints(Arc::clone(&source_checkpoint.store));
                 crabka_gres_substrate::ensure_live_wal_topic(&target_recovery)
                     .await
                     .map_err(|error| crabka_gres_ranges::RangeTransferError::Runtime {
@@ -8078,6 +8150,10 @@ mod tests {
             cache_dir: None,
             ranges: None,
             range0_follower_poll_interval_ms: None,
+            wal_recovery_fetch_max_wait_ms: None,
+            wal_recovery_fetch_partition_max_bytes: None,
+            wal_recovery_fetch_response_max_bytes: None,
+            wal_recovery_empty_fetch_retries: None,
             host_ranges: None,
             timestamp_source: TimestampSourceKind::LogicalTso,
             hlc_max_offset_ms: 250,
@@ -8838,6 +8914,171 @@ mod tests {
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     }
 
+    #[test]
+    fn wal_recovery_read_policy_uses_defaults_environment_and_cli_precedence() {
+        const CHILD: &str = "CRABKA_TEST_GRES_WAL_RECOVERY_READ_POLICY_CHILD";
+        const VARS: [&str; 4] = [
+            "CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT_MS",
+            "CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES",
+            "CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES",
+            "CRABKA_GRES_WAL_RECOVERY_EMPTY_FETCH_RETRIES",
+        ];
+        if std::env::var_os(CHILD).is_none() {
+            for mode in ["defaults", "environment"] {
+                let mut child =
+                    std::process::Command::new(std::env::current_exe().expect("test exe"));
+                child
+                    .args([
+                        "--exact",
+                        "tests::wal_recovery_read_policy_uses_defaults_environment_and_cli_precedence",
+                    ])
+                    .env(CHILD, mode);
+                for variable in VARS {
+                    child.env_remove(variable);
+                }
+                if mode == "environment" {
+                    for (variable, value) in VARS.into_iter().zip(["17", "18", "19", "20"]) {
+                        child.env(variable, value);
+                    }
+                }
+                assert!(child.status().expect("child test").success());
+            }
+            return;
+        }
+
+        let base = [
+            "crabka-gres",
+            "--substrate-bootstrap=memory://",
+            "--tenant=tenant-a",
+        ];
+        let expected = if std::env::var(CHILD).as_deref() == Ok("environment") {
+            (17, 18, 19, 20)
+        } else {
+            (
+                crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT_MS,
+                crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES,
+                crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES,
+                crabka_gres_substrate::DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES,
+            )
+        };
+        let config =
+            SubstrateRuntimeConfig::from_args(&Cli::try_parse_from(base).expect("policy").serve)
+                .expect("valid config")
+                .expect("substrate config");
+        let policy = config.recovery_read_policy;
+        assert_eq!(policy.fetch_max_wait_ms(), expected.0);
+        assert_eq!(policy.fetch_partition_max_bytes(), expected.1);
+        assert_eq!(policy.fetch_response_max_bytes(), expected.2);
+        assert_eq!(policy.empty_fetch_retries(), expected.3);
+
+        let cli = Cli::try_parse_from(base.into_iter().chain([
+            "--wal-recovery-fetch-max-wait-ms=27",
+            "--wal-recovery-fetch-partition-max-bytes=28",
+            "--wal-recovery-fetch-response-max-bytes=29",
+            "--wal-recovery-empty-fetch-retries=30",
+        ]))
+        .expect("CLI policy");
+        let policy = SubstrateRuntimeConfig::from_args(&cli.serve)
+            .expect("valid config")
+            .expect("substrate config")
+            .recovery_read_policy;
+        assert_eq!(policy.fetch_max_wait_ms(), 27);
+        assert_eq!(policy.fetch_partition_max_bytes(), 28);
+        assert_eq!(policy.fetch_response_max_bytes(), 29);
+        assert_eq!(policy.empty_fetch_retries(), 30);
+    }
+
+    #[test]
+    fn wal_recovery_read_policy_rejects_zero_and_inert_use() {
+        for option in [
+            "--wal-recovery-fetch-max-wait-ms=0",
+            "--wal-recovery-fetch-partition-max-bytes=0",
+            "--wal-recovery-fetch-response-max-bytes=0",
+            "--wal-recovery-empty-fetch-retries=0",
+        ] {
+            assert!(
+                Cli::try_parse_from([
+                    "crabka-gres",
+                    "--substrate-bootstrap=memory://",
+                    "--tenant=tenant-a",
+                    option,
+                ])
+                .is_err()
+            );
+        }
+        assert!(
+            Cli::try_parse_from(["crabka-gres", "--wal-recovery-fetch-max-wait-ms=1"]).is_err()
+        );
+
+        let mut programmatic = serve_args(Some("trust"), Vec::new());
+        programmatic.wal_recovery_fetch_max_wait_ms = Some(PositiveI32::new(1).expect("positive"));
+        let error =
+            SubstrateRuntimeConfig::from_args(&programmatic).expect_err("inert recovery policy");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[tokio::test]
+    async fn wal_recovery_read_policy_validation_precedes_listener_bind() {
+        const CHILD: &str = "CRABKA_TEST_GRES_WAL_RECOVERY_BIND_CHILD";
+        const VARS: [&str; 4] = [
+            "CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT_MS",
+            "CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES",
+            "CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES",
+            "CRABKA_GRES_WAL_RECOVERY_EMPTY_FETCH_RETRIES",
+        ];
+        if std::env::var_os(CHILD).is_none() {
+            let mut child = std::process::Command::new(std::env::current_exe().expect("test exe"));
+            child
+                .args([
+                    "--exact",
+                    "tests::wal_recovery_read_policy_validation_precedes_listener_bind",
+                ])
+                .env(CHILD, "1");
+            for variable in VARS {
+                child.env_remove(variable);
+            }
+            assert!(child.status().expect("child test").success());
+            return;
+        }
+
+        let occupied = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+        let mut args = serve_args(Some("trust"), Vec::new());
+        args.listen = occupied.local_addr().expect("address").to_string();
+        args.wal_recovery_empty_fetch_retries = Some(PositiveUsize::new(1).expect("positive"));
+        let error = run_serve(args).await.expect_err("invalid recovery policy");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn wal_recovery_read_policy_reaches_shared_recovery_config_helper() {
+        let policy = crabka_gres_substrate::RecoveryReadPolicy::new(31, 32, 33, 34)
+            .expect("distinctive policy");
+        let mut config = SubstrateRuntimeConfig::from_args(&substrate_args())
+            .expect("config")
+            .expect("substrate config");
+        config.recovery_read_policy = policy;
+        let tenant = crabka_gres_ranges::TenantName::parse("tenant-a".to_string()).expect("tenant");
+
+        let recovery = config.live_recovery_config(tenant, crabka_gres_ranges::RangeId::new(7));
+
+        assert_eq!(recovery.read_policy(), policy);
+        assert_eq!(
+            include_str!("lib.rs")
+                .split_once("\n#[cfg(test)]")
+                .expect("test module boundary")
+                .0
+                .matches("LiveRecoveryConfig::new(")
+                .count(),
+            1
+        );
+        assert_eq!(
+            include_str!("split_activation.rs")
+                .matches("LiveRecoveryConfig::new(")
+                .count(),
+            0
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn configured_range0_follower_poll_and_poke_control_refresh() {
         let poke = Arc::new(tokio::sync::Notify::new());
@@ -9154,6 +9395,7 @@ mod tests {
             range0_follower_poll_interval: Duration::from_millis(
                 DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
             ),
+            recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
             host_ranges: None,
             range_rpc: None,
             advertised_endpoint: None,
@@ -9230,6 +9472,7 @@ mod tests {
             range0_follower_poll_interval: Duration::from_millis(
                 DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
             ),
+            recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
             host_ranges: None,
             range_rpc: None,
             advertised_endpoint: None,
@@ -9587,6 +9830,7 @@ mod tests {
             range0_follower_poll_interval: Duration::from_millis(
                 DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
             ),
+            recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
             host_ranges: None,
             range_rpc: None,
             advertised_endpoint: None,
@@ -9672,6 +9916,7 @@ mod tests {
             range0_follower_poll_interval: Duration::from_millis(
                 DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
             ),
+            recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
             host_ranges: None,
             range_rpc: None,
             advertised_endpoint: None,
