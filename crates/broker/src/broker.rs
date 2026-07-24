@@ -4359,9 +4359,10 @@ impl Drop for ConnectionGuard {
 /// for `ip` entities.
 const CONNECTION_CREATION_RATE_QUOTA_KEY: &str = "connection_creation_rate";
 
-/// Upper bound on the KIP-612 accept-throttle delay, so a very low configured
-/// rate cannot stall the accept loop for more than this per connection.
-const CONNECTION_CREATION_THROTTLE_MAX: std::time::Duration = std::time::Duration::from_secs(1);
+fn connection_creation_delay(rate: f64, maximum: std::time::Duration) -> std::time::Duration {
+    let delay_micros = crate::quota::positive_f64_to_u64((1.0_f64 / rate) * 1_000_000.0);
+    std::time::Duration::from_micros(delay_micros).min(maximum)
+}
 
 async fn accept_loop(
     broker: Arc<Broker>,
@@ -4380,7 +4381,11 @@ async fn accept_loop(
                     Ok((stream, peer)) => {
                         tracing::debug!(%peer, name = %spec.name, "accepted connection");
                         let peer_ip = peer.ip();
-                        tune_accepted_socket(&stream);
+                        tune_accepted_socket(
+                            &stream,
+                            broker.config.socket_send_buffer_bytes,
+                            broker.config.socket_receive_buffer_bytes,
+                        );
 
                         // `max.connections` / `max.connections.per.ip` caps.
                         // Reserve a slot before doing any work; on rejection
@@ -4417,12 +4422,10 @@ async fn accept_loop(
                                 initial_rate,
                             );
                             if bucket.try_consume(1) == 0 {
-                                let delay_micros = crate::quota::positive_f64_to_u64(
-                                    (1.0_f64 / rate) * 1_000_000.0,
+                                let delay = connection_creation_delay(
+                                    rate,
+                                    broker.config.connection_creation_throttle_max,
                                 );
-                                let delay =
-                                    std::time::Duration::from_micros(delay_micros)
-                                        .min(CONNECTION_CREATION_THROTTLE_MAX);
                                 tokio::time::sleep(delay).await;
                             }
                         }
@@ -4460,24 +4463,24 @@ async fn accept_loop(
 ///   stalled up to ~40 ms by delayed ACKs. Apache Kafka sets this on its
 ///   broker sockets; without it small-request latency and the header+records
 ///   write coalescing (once fetch uses `sendfile`) suffer.
-/// - `SO_SNDBUF`/`SO_RCVBUF` (1 MiB): widen the kernel buffers so a single
-///   large fetch/produce isn't throttled by a small in-flight window — the
-///   send buffer in particular keeps a `sendfile`'d large fetch from stalling.
+/// - `SO_SNDBUF`/`SO_RCVBUF`: apply the configured, independently tunable
+///   buffers so large fetches and produces retain enough in-flight headroom.
 ///
 /// All failures are non-fatal (logged at debug): a connection that can't be
 /// tuned still serves correctly, just less optimally.
-fn tune_accepted_socket(stream: &tokio::net::TcpStream) {
-    // 1 MiB send/recv. Kafka's defaults are 100 KiB but it commonly tunes to
-    // 1 MiB+; large fetches/produces want the headroom.
-    const SOCKET_BUF_BYTES: usize = 1 << 20;
+fn tune_accepted_socket(
+    stream: &tokio::net::TcpStream,
+    send_buffer_bytes: usize,
+    receive_buffer_bytes: usize,
+) {
     if let Err(e) = stream.set_nodelay(true) {
         tracing::debug!(error = %e, "TCP_NODELAY set failed on accepted socket");
     }
     let sock = socket2::SockRef::from(stream);
-    if let Err(e) = sock.set_send_buffer_size(SOCKET_BUF_BYTES) {
+    if let Err(e) = sock.set_send_buffer_size(send_buffer_bytes) {
         tracing::debug!(error = %e, "SO_SNDBUF set failed on accepted socket");
     }
-    if let Err(e) = sock.set_recv_buffer_size(SOCKET_BUF_BYTES) {
+    if let Err(e) = sock.set_recv_buffer_size(receive_buffer_bytes) {
         tracing::debug!(error = %e, "SO_RCVBUF set failed on accepted socket");
     }
 }
@@ -5245,16 +5248,26 @@ protocol = "Plaintext"
         let send_before = sock.send_buffer_size().expect("read baseline send buffer");
         let recv_before = sock.recv_buffer_size().expect("read baseline recv buffer");
 
-        tune_accepted_socket(&server);
+        tune_accepted_socket(&server, 65_536, 4_096);
 
         check!(server.nodelay().expect("read TCP_NODELAY"));
-        // Kernels and containers clamp socket buffers differently (and Linux
-        // reports doubled values), so assert the portable invariant: tuning grows
-        // each buffer above the explicit tiny baseline instead of pinning a host
-        // sysctl-dependent absolute size.
+        // Kernels clamp and may double requested sizes, so compare the distinct
+        // configured buffers instead of asserting host-dependent exact values.
         check!(sock.send_buffer_size().expect("read send buffer") > send_before);
-        check!(sock.recv_buffer_size().expect("read recv buffer") > recv_before);
+        check!(sock.recv_buffer_size().expect("read recv buffer") >= recv_before);
+        check!(
+            sock.send_buffer_size().expect("read send buffer")
+                > sock.recv_buffer_size().expect("read recv buffer")
+        );
         drop(client);
+    }
+
+    #[test]
+    fn connection_creation_delay_honors_nondefault_cap() {
+        assert!(
+            connection_creation_delay(0.1, std::time::Duration::from_millis(17))
+                == std::time::Duration::from_millis(17)
+        );
     }
 
     #[test]

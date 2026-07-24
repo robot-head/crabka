@@ -634,6 +634,7 @@ async fn apply_consumer_fetch_quota(
         &context.principal.name,
         context.client_id,
         sum_response_bytes(responses),
+        broker.config.quota_throttle_max,
     );
     let elapsed_micros = u64::try_from(
         handler_start
@@ -742,6 +743,7 @@ async fn execute_pending_reads(
                 read_committed: read.read_committed,
                 is_follower_fetch: read.is_follower_fetch,
                 sendfile_capable,
+                sendfile_min_bytes: broker.config.sendfile_min_bytes,
             },
             &mut read.out,
         )
@@ -1050,6 +1052,7 @@ struct ReadRequest {
     read_committed: bool,
     is_follower_fetch: bool,
     sendfile_capable: bool,
+    sendfile_min_bytes: usize,
 }
 
 async fn do_read(
@@ -1065,6 +1068,7 @@ async fn do_read(
         read_committed,
         is_follower_fetch,
         sendfile_capable,
+        sendfile_min_bytes,
     } = request;
     let hw = part.high_watermark().await;
     let (log_start, w, plan) = plan_read(
@@ -1145,9 +1149,11 @@ async fn do_read(
                     // with HW/LSO but no decoded batches.
                     if sendfile_capable && !read_committed_aborts {
                         let desc = log.read_raw_desc(fetch_offset, limit_offset, read_max)?;
-                        if desc.total >= crate::network::fetch_writer::SENDFILE_MIN_BYTES
-                            && !desc.regions.is_empty()
-                        {
+                        if should_use_sendfile(
+                            desc.total,
+                            !desc.regions.is_empty(),
+                            sendfile_min_bytes,
+                        ) {
                             chosen = Some(RecordsPayload::FileRegions(desc.regions));
                         }
                     }
@@ -1486,6 +1492,7 @@ async fn long_poll_then_reread(
                 read_committed: p.read_committed,
                 is_follower_fetch: p.is_follower_fetch,
                 sendfile_capable,
+                sendfile_min_bytes: broker.config.sendfile_min_bytes,
             },
             &mut p.out,
         )
@@ -1548,6 +1555,7 @@ fn consume_consumer_quota(
     principal: &str,
     client_id: &str,
     bytes: u64,
+    maximum: Duration,
 ) -> Duration {
     let Some((entity_key, rate)) =
         crate::quota::lookup_quota_with_key(image, principal, client_id, "consumer_byte_rate")
@@ -1568,7 +1576,11 @@ fn consume_consumer_quota(
     }
     let overage = bytes - granted;
     let delay_secs = overage.to_f64().unwrap_or(f64::MAX) / rate;
-    Duration::from_secs_f64(delay_secs.min(1.0))
+    Duration::from_secs_f64(delay_secs.min(maximum.as_secs_f64()))
+}
+
+fn should_use_sendfile(total_bytes: usize, has_regions: bool, minimum_bytes: usize) -> bool {
+    total_bytes >= minimum_bytes && has_regions
 }
 
 /// Group resolved `PendingRead`s back into per-topic response entries,
@@ -1651,17 +1663,38 @@ mod tests {
             config_value: Some(1024.0),
         }));
         let buckets = crate::quota::QuotaBuckets::new();
-        let delay_match = super::consume_consumer_quota(&img, &buckets, "alice", "app-x", 4096);
+        let delay_match = super::consume_consumer_quota(
+            &img,
+            &buckets,
+            "alice",
+            "app-x",
+            4096,
+            std::time::Duration::from_millis(25),
+        );
         assert!(
-            delay_match > std::time::Duration::ZERO,
-            "tuple quota match should throttle on overage; got {delay_match:?}"
+            delay_match == std::time::Duration::from_millis(25),
+            "tuple quota match should honor the configured cap; got {delay_match:?}"
         );
         let buckets2 = crate::quota::QuotaBuckets::new();
-        let delay_other = super::consume_consumer_quota(&img, &buckets2, "alice", "other", 4096);
+        let delay_other = super::consume_consumer_quota(
+            &img,
+            &buckets2,
+            "alice",
+            "other",
+            4096,
+            std::time::Duration::from_millis(25),
+        );
         assert!(
             delay_other == std::time::Duration::ZERO,
             "non-matching client_id should not throttle; got {delay_other:?}"
         );
+    }
+
+    #[test]
+    fn sendfile_eligibility_honors_nondefault_threshold() {
+        assert!(super::should_use_sendfile(64, true, 64));
+        assert!(!super::should_use_sendfile(63, true, 64));
+        assert!(!super::should_use_sendfile(64, false, 64));
     }
 }
 

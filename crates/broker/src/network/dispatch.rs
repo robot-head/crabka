@@ -29,7 +29,7 @@ use crate::{
     codes,
     error::BrokerError,
     handlers::{ApiKeyCode, ApiVersion, CorrelationId},
-    network::codec::{self, MAX_FRAME_BYTES},
+    network::codec,
 };
 
 /// `ApiVersions` wire `api_key`. Named separately because it is the one API
@@ -405,6 +405,7 @@ where
         parsed.correlation_id,
         parsed.body_flexible,
         &body.freeze(),
+        broker.config.socket_request_max_bytes,
     );
     let response = maybe_apply_request_quota(broker, response, parsed, auth, started).await;
     if let Err(error) = framed.send(response).await {
@@ -512,7 +513,8 @@ async fn serve_connection_stream<S>(
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static + crate::network::fetch_writer::SendfileSink,
 {
-    let mut framed: Framed<S, _> = Framed::new(stream, codec::codec());
+    let mut framed: Framed<S, _> =
+        Framed::new(stream, codec::codec(broker.config.socket_request_max_bytes));
     let is_sasl_listener = spec.protocol.requires_sasl();
     let sasl_mechanisms = crate::network::listener::resolve_sasl_mechanisms_for_listener(
         &spec,
@@ -778,6 +780,7 @@ async fn handle_sasl_frame(
         parsed.correlation_id,
         parsed.body_flexible,
         &resp_body,
+        broker.config.socket_request_max_bytes,
     );
     Ok(SaslFrameOutcome {
         response_bytes,
@@ -854,11 +857,20 @@ async fn handle_fetch_frame_from_parsed(
         // Legacy down-conversion path: encode the whole body the old way and
         // wrap it (plus the response header) as a single inline op.
         let body_bytes = crate::handlers::fetch::encode_fetch_response(resp, version)?;
+        if crate::network::response_header_len(parsed.api_key, parsed.body_flexible)
+            + body_bytes.len()
+            >= broker.config.socket_request_max_bytes
+        {
+            return Err(BrokerError::Io(std::io::Error::other(
+                "fetch response exceeds max frame size",
+            )));
+        }
         let framed = encode_response(
             parsed.api_key,
             parsed.correlation_id,
             parsed.body_flexible,
             &body_bytes,
+            broker.config.socket_request_max_bytes,
         );
         // Prepend the 4-byte frame length so the writer path is uniform.
         let mut framed_with_len = BytesMut::with_capacity(4 + framed.len());
@@ -892,6 +904,7 @@ async fn handle_fetch_frame_from_parsed(
                 version,
                 parsed.correlation_id,
                 parsed.body_flexible,
+                broker.config.socket_request_max_bytes,
                 crate::network::fetch_writer::resolve_records_sendfile,
             );
         }
@@ -902,6 +915,7 @@ async fn handle_fetch_frame_from_parsed(
         version,
         parsed.correlation_id,
         parsed.body_flexible,
+        broker.config.socket_request_max_bytes,
         crate::network::fetch_writer::resolve_records_inline,
     )
 }
@@ -945,6 +959,7 @@ async fn dispatch_registered_bytes(
             );
             Some(encode_dispatch_result(
                 parsed,
+                broker.config.socket_request_max_bytes,
                 handler(
                     broker,
                     parsed.api_version,
@@ -957,6 +972,7 @@ async fn dispatch_registered_bytes(
         }
         crate::handlers::DispatchKind::Auth(handler) => Some(encode_dispatch_result(
             parsed,
+            broker.config.socket_request_max_bytes,
             handler(
                 broker,
                 parsed.api_version,
@@ -979,6 +995,7 @@ async fn dispatch_registered_bytes(
             let body_bytes = frame.slice(body_offset..);
             Some(encode_dispatch_result(
                 parsed,
+                broker.config.socket_request_max_bytes,
                 handler(
                     broker,
                     parsed.api_version,
@@ -999,6 +1016,7 @@ async fn dispatch_registered_bytes(
             );
             Some(encode_dispatch_result(
                 parsed,
+                broker.config.socket_request_max_bytes,
                 handler(
                     broker,
                     parsed.api_version,
@@ -1017,6 +1035,7 @@ async fn dispatch_registered_bytes(
 
 fn encode_dispatch_result(
     parsed: &crate::network::request::ParsedRequest<'_>,
+    max_frame_bytes: usize,
     result: Result<Bytes, BrokerError>,
 ) -> Result<Bytes, BrokerError> {
     result.map(|body| {
@@ -1025,6 +1044,7 @@ fn encode_dispatch_result(
             parsed.correlation_id,
             parsed.body_flexible,
             &body,
+            max_frame_bytes,
         )
     })
 }
@@ -1050,6 +1070,7 @@ async fn dispatch_registry_response(
                     parsed.correlation_id,
                     parsed.body_flexible,
                     &body,
+                    broker.config.socket_request_max_bytes,
                 )))
             }
             crate::handlers::DispatchKind::Fetch | crate::handlers::DispatchKind::SaslMetadata => {
@@ -1168,9 +1189,10 @@ fn encode_response(
     correlation_id: CorrelationId,
     body_flexible: bool,
     body: &[u8],
+    max_frame_bytes: usize,
 ) -> Bytes {
     let header_len = crate::network::response_header_len(api_key, body_flexible);
-    debug_assert!(body.len() < MAX_FRAME_BYTES);
+    debug_assert!(header_len + body.len() < max_frame_bytes);
     let mut buf = BytesMut::with_capacity(header_len + body.len());
     buf.put_i32(correlation_id);
     if crate::network::response_header_v1(api_key, body_flexible) {
@@ -1243,6 +1265,8 @@ mod tests {
     use assert2::{assert, check};
 
     use super::*;
+
+    const DEFAULT_MAX_FRAME_BYTES: usize = 100 * 1024 * 1024;
 
     fn request_frame(
         api_key: i16,
@@ -1356,7 +1380,7 @@ mod tests {
         // ApiVersions response is always header v0 (no tagged byte) even
         // for flexible body versions.
         let body = [0u8, 0u8]; // error_code=0
-        let out = encode_response(API_VERSIONS_KEY, 7, true, &body);
+        let out = encode_response(API_VERSIONS_KEY, 7, true, &body, DEFAULT_MAX_FRAME_BYTES);
         // 4 byte corr_id + body, no tagged byte.
         assert!(out.len() == 4 + body.len());
     }
@@ -1395,7 +1419,7 @@ mod tests {
         // header = 5 bytes (corr_id + tagged byte); throttle int32 at offset 5.
         let mut body = BytesMut::new();
         body.put_i32(0); // ThrottleTimeMs = 0
-        let resp = encode_response(68, 7, true, &body);
+        let resp = encode_response(68, 7, true, &body, DEFAULT_MAX_FRAME_BYTES);
         let patched = patch_leading_throttle(resp, 68, true, 250);
         assert!(read(&patched, 5) == 250);
         assert!(read(&patched, 0) == 7); // corr_id preserved
@@ -1403,7 +1427,7 @@ mod tests {
         // Non-flexible response header (Metadata v3): header = 4 bytes.
         let mut body = BytesMut::new();
         body.put_i32(10); // existing throttle 10 < 250
-        let resp = encode_response(3, 9, false, &body);
+        let resp = encode_response(3, 9, false, &body, DEFAULT_MAX_FRAME_BYTES);
         let patched = patch_leading_throttle(resp, 3, false, 250);
         assert!(read(&patched, 4) == 250);
         assert!(read(&patched, 0) == 9);
@@ -1414,7 +1438,7 @@ mod tests {
         // max(existing, delay): an already-larger throttle is not lowered.
         let mut body = BytesMut::new();
         body.put_i32(500);
-        let resp = encode_response(3, 1, false, &body);
+        let resp = encode_response(3, 1, false, &body, DEFAULT_MAX_FRAME_BYTES);
         let patched = patch_leading_throttle(resp, 3, false, 100);
         let v = i32::from_be_bytes([patched[4], patched[5], patched[6], patched[7]]);
         assert!(v == 500);
@@ -1439,7 +1463,7 @@ mod tests {
     #[test]
     fn encode_response_other_flexible_inserts_tagged_byte() {
         let body = [0u8, 0u8];
-        let out = encode_response(3, 7, true, &body);
+        let out = encode_response(3, 7, true, &body, DEFAULT_MAX_FRAME_BYTES);
         assert!(out.len() == 5 + body.len());
         assert!(out[4] == 0); // tagged byte
     }
@@ -1532,7 +1556,7 @@ mod tests {
         });
 
         let client = TcpStream::connect(addr).await.expect("connect");
-        let mut framed = codec::frame(client);
+        let mut framed = codec::frame(client, DEFAULT_MAX_FRAME_BYTES);
 
         let add_body = encode_default::<add_req::AddRaftVoterRequest>(add_req::MAX_VERSION);
         let raw = round_trip(&mut framed, 80, add_req::MAX_VERSION, &add_body).await;
