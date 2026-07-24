@@ -35,42 +35,6 @@ mod live_range_control;
 mod split_activation;
 use split_activation::{PendingLiveTopology, PreparedLiveTopology, StagedLiveRangeSuccessor};
 
-/// Relaxed cadence of the LOCAL (mem / --data-dir) vacuum loop: one bounded
-/// `SqlEngine::vacuum_step` this often while the sweep is keeping up with the
-/// write rate. Write paths prune the rows they touch opportunistically; the
-/// stepped sweep catches cold garbage (aborted inserts,
-/// deleted-then-never-touched rows). Each step examines a budgeted slice of
-/// one table and resumes from a cursor; under backlog or foreground idleness
-/// the [`VacuumPacer`] shortens this interval down to zero (consecutive
-/// bounded steps) so the sweep cursor can lap the keyspace at sustained load
-/// instead of falling permanently behind.
-const LOCAL_VACUUM_IDLE_INTERVAL: Duration = Duration::from_secs(2);
-/// Shortest non-zero sleep the pacer backs off to after running hot; the
-/// interval doubles from here toward [`LOCAL_VACUUM_IDLE_INTERVAL`] while
-/// steps keep finding nothing to do.
-const LOCAL_VACUUM_BACKOFF_FLOOR: Duration = Duration::from_millis(25);
-/// Outstanding settle-work units (committed version Puts the sweep has not
-/// yet retired) above which the loop runs steps back-to-back. One default
-/// step budget (`VACUUM_STEP_KEY_BUDGET`): sustained write load trips it
-/// within a couple of steps, while a settled store's trickle never does.
-const LOCAL_VACUUM_HOT_DEBT: u64 = 8_192;
-/// Upper bound for the adaptive per-step key budget (4x the pgexec default).
-/// Budgets grow toward this only while back-to-back steps stay fast, so one
-/// step never grows into a foreground stall.
-const LOCAL_VACUUM_MAX_KEY_BUDGET: usize = 4 * crabka_pgexec::VACUUM_STEP_KEY_BUDGET;
-/// A hot step faster than this doubles the next step's key budget (the
-/// per-step fixed costs — catalog listing, horizon computation — dominate,
-/// so bigger steps reclaim more per unit of time).
-const LOCAL_VACUUM_STEP_FAST: Duration = Duration::from_millis(3);
-/// A hot step slower than this halves the next step's key budget back toward
-/// the default, keeping every step at low-single-digit milliseconds.
-const LOCAL_VACUUM_STEP_SLOW: Duration = Duration::from_millis(12);
-/// The foreground counts as idle for vacuum pacing once no session has run a
-/// statement for this long (and no write committed since the last step);
-/// idle drain then runs steps back-to-back until a full cycle proves the
-/// store clean.
-const LOCAL_VACUUM_IDLE_AFTER: Duration = Duration::from_secs(1);
-
 trait SubstrateKv: SnapshotKv + RestoreKv {}
 
 impl<T> SubstrateKv for T where T: SnapshotKv + RestoreKv {}
@@ -90,6 +54,10 @@ pub struct ServeArgs {
     /// Shared Gres registry policy.
     #[command(flatten)]
     pub registry: RegistryOptions,
+
+    /// Local-engine vacuum pacing policy.
+    #[command(flatten)]
+    pub local_vacuum: LocalVacuumOptions,
 
     /// Address to listen on.
     #[arg(long, default_value = "127.0.0.1:5433")]
@@ -266,6 +234,143 @@ pub struct ServeArgs {
         env = "CRABKA_GRES_IDLE_SUSPEND_POLL_INTERVAL_MS"
     )]
     pub idle_suspend_poll_interval_ms: Option<PositiveMillis>,
+}
+
+/// Optional local-engine vacuum pacing overrides.
+#[derive(clap::Args, Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub struct LocalVacuumOptions {
+    #[arg(
+        long = "local-vacuum-idle-interval-ms",
+        env = "CRABKA_GRES_LOCAL_VACUUM_IDLE_INTERVAL_MS"
+    )]
+    idle_interval_ms: Option<PositiveMillis>,
+    #[arg(
+        long = "local-vacuum-backoff-floor-ms",
+        env = "CRABKA_GRES_LOCAL_VACUUM_BACKOFF_FLOOR_MS"
+    )]
+    backoff_floor_ms: Option<PositiveMillis>,
+    #[arg(
+        long = "local-vacuum-hot-debt",
+        env = "CRABKA_GRES_LOCAL_VACUUM_HOT_DEBT"
+    )]
+    hot_debt: Option<NonZeroU64>,
+    #[arg(
+        long = "local-vacuum-key-budget",
+        env = "CRABKA_GRES_LOCAL_VACUUM_KEY_BUDGET"
+    )]
+    key_budget: Option<PositiveUsize>,
+    #[arg(
+        long = "local-vacuum-max-key-budget",
+        env = "CRABKA_GRES_LOCAL_VACUUM_MAX_KEY_BUDGET"
+    )]
+    max_key_budget: Option<PositiveUsize>,
+    #[arg(
+        long = "local-vacuum-step-fast-ms",
+        env = "CRABKA_GRES_LOCAL_VACUUM_STEP_FAST_MS"
+    )]
+    step_fast_ms: Option<PositiveMillis>,
+    #[arg(
+        long = "local-vacuum-step-slow-ms",
+        env = "CRABKA_GRES_LOCAL_VACUUM_STEP_SLOW_MS"
+    )]
+    step_slow_ms: Option<PositiveMillis>,
+    #[arg(
+        long = "local-vacuum-idle-after-ms",
+        env = "CRABKA_GRES_LOCAL_VACUUM_IDLE_AFTER_MS"
+    )]
+    idle_after_ms: Option<PositiveMillis>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LocalVacuumPolicy {
+    idle_interval: Duration,
+    backoff_floor: Duration,
+    hot_debt: u64,
+    key_budget: usize,
+    max_key_budget: usize,
+    step_fast: Duration,
+    step_slow: Duration,
+    idle_after: Duration,
+}
+
+const DEFAULT_LOCAL_VACUUM_IDLE_INTERVAL_MS: u64 = 2_000;
+const DEFAULT_LOCAL_VACUUM_BACKOFF_FLOOR_MS: u64 = 25;
+const DEFAULT_LOCAL_VACUUM_STEP_FAST_MS: u64 = 3;
+const DEFAULT_LOCAL_VACUUM_STEP_SLOW_MS: u64 = 12;
+const DEFAULT_LOCAL_VACUUM_IDLE_AFTER_MS: u64 = 1_000;
+
+fn local_vacuum_policy(args: &ServeArgs) -> std::io::Result<Option<LocalVacuumPolicy>> {
+    let options = args.local_vacuum;
+    let requested = options != LocalVacuumOptions::default();
+    if args.substrate_bootstrap.is_some() {
+        return if requested {
+            invalid_input("local vacuum options are incompatible with --substrate-bootstrap")
+        } else {
+            Ok(None)
+        };
+    }
+
+    let key_budget = options.key_budget.map_or(
+        crabka_pgexec::VACUUM_STEP_KEY_BUDGET,
+        PositiveUsize::into_value,
+    );
+    let max_key_budget = match options.max_key_budget {
+        Some(value) => value.into_value(),
+        None => key_budget.checked_mul(4).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "local vacuum default maximum key budget overflows usize",
+            )
+        })?,
+    };
+    let hot_debt = match options.hot_debt {
+        Some(value) => value.get(),
+        None => u64::try_from(key_budget).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "local vacuum key budget does not fit u64 debt accounting",
+            )
+        })?,
+    };
+    let idle_interval = Duration::from_millis(options.idle_interval_ms.map_or(
+        DEFAULT_LOCAL_VACUUM_IDLE_INTERVAL_MS,
+        PositiveMillis::into_value,
+    ));
+    let backoff_floor = Duration::from_millis(options.backoff_floor_ms.map_or(
+        DEFAULT_LOCAL_VACUUM_BACKOFF_FLOOR_MS,
+        PositiveMillis::into_value,
+    ));
+    let step_fast = Duration::from_millis(options.step_fast_ms.map_or(
+        DEFAULT_LOCAL_VACUUM_STEP_FAST_MS,
+        PositiveMillis::into_value,
+    ));
+    let step_slow = Duration::from_millis(options.step_slow_ms.map_or(
+        DEFAULT_LOCAL_VACUUM_STEP_SLOW_MS,
+        PositiveMillis::into_value,
+    ));
+    let idle_after = Duration::from_millis(options.idle_after_ms.map_or(
+        DEFAULT_LOCAL_VACUUM_IDLE_AFTER_MS,
+        PositiveMillis::into_value,
+    ));
+    if backoff_floor > idle_interval {
+        return invalid_input("local vacuum backoff floor exceeds idle interval");
+    }
+    if key_budget > max_key_budget {
+        return invalid_input("local vacuum key budget exceeds maximum key budget");
+    }
+    if step_fast >= step_slow {
+        return invalid_input("local vacuum fast threshold must be below slow threshold");
+    }
+    Ok(Some(LocalVacuumPolicy {
+        idle_interval,
+        backoff_floor,
+        hot_debt,
+        key_budget,
+        max_key_budget,
+        step_fast,
+        step_slow,
+        idle_after,
+    }))
 }
 
 /// Validated Gres registry options shared by compute registry clients.
@@ -1748,6 +1853,7 @@ pub async fn serve_listener_with_tenant_config_loader(
     args: ServeArgs,
     tenant_config_loader: &impl TenantConfigLoader,
 ) -> std::io::Result<()> {
+    let local_vacuum_policy = local_vacuum_policy(&args)?;
     let sql_addr = listener.local_addr()?;
     let tls = match (&args.tls_cert, &args.tls_key) {
         (Some(cert), Some(key)) => Some(tls_acceptor(cert, key)?),
@@ -1809,12 +1915,14 @@ pub async fn serve_listener_with_tenant_config_loader(
     // releases its engine handle (and with it a --data-dir store lock).
     let _vacuum_guard = if let RuntimeEngine::Single(sql_engine) = &engine
         && sql_engine.supports_local_vacuum()
+        && let Some(policy) = local_vacuum_policy
     {
         let vacuum_token = shutdown.child_token();
         tokio::spawn(run_local_vacuum_loop(
             sql_engine.clone_handle(),
             Arc::clone(&activity),
             vacuum_token.clone(),
+            policy,
         ));
         Some(vacuum_token.drop_guard())
     } else {
@@ -1910,10 +2018,10 @@ struct VacuumPace {
 
 impl VacuumPace {
     /// The relaxed cadence: one default-budget step every couple of seconds.
-    const fn idle() -> Self {
+    const fn idle(policy: LocalVacuumPolicy) -> Self {
         Self {
-            interval: LOCAL_VACUUM_IDLE_INTERVAL,
-            key_budget: crabka_pgexec::VACUUM_STEP_KEY_BUDGET,
+            interval: policy.idle_interval,
+            key_budget: policy.key_budget,
         }
     }
 }
@@ -1935,7 +2043,7 @@ struct VacuumStepObservation {
     cycle_completed: bool,
     /// Whether the foreground looked idle across this step: no write
     /// committed since the previous step and no session ran any statement
-    /// within [`LOCAL_VACUUM_IDLE_AFTER`].
+    /// within [`LocalVacuumPolicy::idle_after`].
     foreground_idle: bool,
     /// Wall-clock duration of the step itself (excluding the sleep).
     step_elapsed: Duration,
@@ -1945,9 +2053,9 @@ struct VacuumStepObservation {
 ///
 /// The controller keeps a debt ledger in settle-work units: committed
 /// version Puts add debt, retired sweep work repays it. Debt above
-/// [`LOCAL_VACUUM_HOT_DEBT`] means the sweep is behind the write rate, so
+/// [`LocalVacuumPolicy::hot_debt`] means the sweep is behind the write rate, so
 /// steps run back-to-back (zero interval) until it catches up; once caught
-/// up, the interval doubles from [`LOCAL_VACUUM_BACKOFF_FLOOR`] toward the
+/// up, the interval doubles from [`LocalVacuumPolicy::backoff_floor`] toward the
 /// idle cadence. A completed cycle that swept nothing proves the whole
 /// keyspace clean, which zeroes leftover debt — writes whose garbage the
 /// write path already pruned, or pinned work a later cycle retires — so
@@ -1955,10 +2063,11 @@ struct VacuumStepObservation {
 /// foreground goes idle before the store is proven clean, steps run
 /// back-to-back regardless of debt: reclaim capacity is spent while it is
 /// free instead of after throughput has already decayed. Step budgets grow
-/// toward [`LOCAL_VACUUM_MAX_KEY_BUDGET`] only while hot steps stay fast and
+/// toward [`LocalVacuumPolicy::max_key_budget`] only while hot steps stay fast and
 /// shrink as soon as they slow, so an individual step never becomes a
 /// foreground stall.
 struct VacuumPacer {
+    policy: LocalVacuumPolicy,
     /// Outstanding settle-work units (saturating at zero).
     debt: u64,
     /// Whether the in-progress sweep cycle has physically changed anything.
@@ -1973,12 +2082,13 @@ impl VacuumPacer {
     /// Start at the relaxed cadence with the store not yet proven clean, so
     /// a store recovered with pre-existing garbage drains on the first idle
     /// window instead of waiting for a write to trip the debt ledger.
-    const fn new() -> Self {
+    const fn new(policy: LocalVacuumPolicy) -> Self {
         Self {
+            policy,
             debt: 0,
             cycle_dirty: false,
             store_settled: false,
-            pace: VacuumPace::idle(),
+            pace: VacuumPace::idle(policy),
         }
     }
 
@@ -2006,27 +2116,30 @@ impl VacuumPacer {
         let hot = if observation.foreground_idle {
             !self.store_settled
         } else {
-            self.debt > LOCAL_VACUUM_HOT_DEBT
+            self.debt > self.policy.hot_debt
         };
         let interval = if hot {
             Duration::ZERO
         } else if self.store_settled {
             // Proven clean: park at the idle cadence outright instead of
             // ramping — there is nothing left the ramp could discover.
-            LOCAL_VACUUM_IDLE_INTERVAL
+            self.policy.idle_interval
         } else {
-            (self.pace.interval * 2).clamp(LOCAL_VACUUM_BACKOFF_FLOOR, LOCAL_VACUUM_IDLE_INTERVAL)
+            (self.pace.interval * 2).clamp(self.policy.backoff_floor, self.policy.idle_interval)
         };
         let key_budget = if hot {
-            if observation.step_elapsed <= LOCAL_VACUUM_STEP_FAST {
-                (self.pace.key_budget * 2).min(LOCAL_VACUUM_MAX_KEY_BUDGET)
-            } else if observation.step_elapsed >= LOCAL_VACUUM_STEP_SLOW {
-                (self.pace.key_budget / 2).max(crabka_pgexec::VACUUM_STEP_KEY_BUDGET)
+            if observation.step_elapsed <= self.policy.step_fast {
+                self.pace
+                    .key_budget
+                    .saturating_mul(2)
+                    .min(self.policy.max_key_budget)
+            } else if observation.step_elapsed >= self.policy.step_slow {
+                (self.pace.key_budget / 2).max(self.policy.key_budget)
             } else {
                 self.pace.key_budget
             }
         } else {
-            crabka_pgexec::VACUUM_STEP_KEY_BUDGET
+            self.policy.key_budget
         };
         self.pace = VacuumPace {
             interval,
@@ -2046,8 +2159,9 @@ async fn run_local_vacuum_loop(
     engine: SqlEngine,
     activity: Arc<crabka_pgwire::server::ActivityTracker>,
     shutdown: CancellationToken,
+    policy: LocalVacuumPolicy,
 ) {
-    let mut pacer = VacuumPacer::new();
+    let mut pacer = VacuumPacer::new(policy);
     let mut last_version_puts = engine.committed_version_puts();
     let mut last_maintain = std::time::Instant::now();
     loop {
@@ -2071,10 +2185,7 @@ async fn run_local_vacuum_loop(
                 let writes_since_step = version_puts.saturating_sub(last_version_puts);
                 last_version_puts = version_puts;
                 let foreground_idle = writes_since_step == 0
-                    && idle_window_elapsed(
-                        activity.last_activity_unix_millis(),
-                        LOCAL_VACUUM_IDLE_AFTER,
-                    );
+                    && idle_window_elapsed(activity.last_activity_unix_millis(), policy.idle_after);
                 let next = pacer.observe(&VacuumStepObservation {
                     writes_since_step,
                     versions_settled: stats.versions_pruned
@@ -2095,7 +2206,7 @@ async fn run_local_vacuum_loop(
                 // nothing found) never rotate.
                 if swept_anything
                     && (next.interval > Duration::ZERO
-                        || last_maintain.elapsed() >= LOCAL_VACUUM_IDLE_INTERVAL)
+                        || last_maintain.elapsed() >= policy.idle_interval)
                 {
                     last_maintain = std::time::Instant::now();
                     if let Err(error) = engine.kv_handle().maintain() {
@@ -2125,9 +2236,20 @@ async fn run_local_vacuum_loop(
 #[cfg(test)]
 mod vacuum_pacing_tests {
     use assert2::assert;
+    use clap::Parser as _;
     use crabka_pgexec::VACUUM_STEP_KEY_BUDGET;
 
     use super::*;
+
+    fn default_policy() -> LocalVacuumPolicy {
+        local_vacuum_policy(
+            &Cli::try_parse_from(["crabka-gres"])
+                .expect("defaults")
+                .serve,
+        )
+        .expect("valid defaults")
+        .expect("local policy")
+    }
 
     /// Observation template: a busy, fast, mid-cycle step that swept nothing.
     const fn quiet_busy_step() -> VacuumStepObservation {
@@ -2142,8 +2264,71 @@ mod vacuum_pacing_tests {
     }
 
     #[test]
+    fn custom_policy_controls_every_local_vacuum_decision() {
+        let policy = LocalVacuumPolicy {
+            idle_interval: Duration::from_millis(90),
+            backoff_floor: Duration::from_millis(7),
+            hot_debt: 20,
+            key_budget: 10,
+            max_key_budget: 40,
+            step_fast: Duration::from_millis(2),
+            step_slow: Duration::from_millis(8),
+            idle_after: Duration::from_millis(30),
+        };
+        let mut pacer = VacuumPacer::new(policy);
+        assert_eq!(
+            pacer.pace(),
+            VacuumPace {
+                interval: policy.idle_interval,
+                key_budget: 10
+            }
+        );
+
+        let hot_fast = VacuumStepObservation {
+            writes_since_step: 21,
+            step_elapsed: Duration::from_millis(2),
+            ..quiet_busy_step()
+        };
+        assert_eq!(pacer.observe(&hot_fast).key_budget, 20);
+        pacer.pace.key_budget = 40;
+        assert_eq!(pacer.observe(&hot_fast).key_budget, 40);
+
+        let hot_slow = VacuumStepObservation {
+            step_elapsed: Duration::from_millis(8),
+            ..hot_fast
+        };
+        assert_eq!(pacer.observe(&hot_slow).key_budget, 20);
+
+        let caught_up = VacuumStepObservation {
+            writes_since_step: 0,
+            versions_settled: 100,
+            step_elapsed: Duration::from_millis(4),
+            ..quiet_busy_step()
+        };
+        assert_eq!(pacer.observe(&caught_up).interval, policy.backoff_floor);
+        let mut previous = policy.backoff_floor;
+        loop {
+            let pace = pacer.observe(&quiet_busy_step());
+            assert_eq!(pace.interval, (previous * 2).min(policy.idle_interval));
+            previous = pace.interval;
+            if pace.interval == policy.idle_interval {
+                break;
+            }
+        }
+
+        let now = current_unix_millis().expect("system clock");
+        let last_activity = now.saturating_sub(20);
+        assert!(idle_window_elapsed(
+            last_activity,
+            Duration::from_millis(10)
+        ));
+        assert!(!idle_window_elapsed(last_activity, policy.idle_after));
+    }
+
+    #[test]
     fn write_backlog_drives_the_interval_to_zero_and_repayment_backs_off() {
-        let mut pacer = VacuumPacer::new();
+        let policy = default_policy();
+        let mut pacer = VacuumPacer::new(policy);
         // Writes outpace sweeping: once outstanding work passes the hot
         // threshold the loop stops sleeping entirely.
         let behind = VacuumStepObservation {
@@ -2152,8 +2337,8 @@ mod vacuum_pacing_tests {
             swept_anything: true,
             ..quiet_busy_step()
         };
-        assert!(pacer.observe(&behind).interval == LOCAL_VACUUM_IDLE_INTERVAL); // debt 3 500
-        assert!(pacer.observe(&behind).interval == LOCAL_VACUUM_IDLE_INTERVAL); // debt 7 000
+        assert!(pacer.observe(&behind).interval == policy.idle_interval); // debt 3 500
+        assert!(pacer.observe(&behind).interval == policy.idle_interval); // debt 7 000
         assert!(pacer.observe(&behind).interval == Duration::ZERO); // debt 10 500
         // Sweeping catches up: the interval backs off multiplicatively toward
         // the idle cadence instead of snapping straight to it.
@@ -2164,14 +2349,14 @@ mod vacuum_pacing_tests {
             ..quiet_busy_step()
         };
         let caught_up = pacer.observe(&repaying);
-        assert!(caught_up.interval == LOCAL_VACUUM_BACKOFF_FLOOR);
+        assert!(caught_up.interval == policy.backoff_floor);
         assert!(caught_up.key_budget == VACUUM_STEP_KEY_BUDGET);
         let mut previous = caught_up.interval;
         loop {
             let pace = pacer.observe(&quiet_busy_step());
-            assert!(pace.interval == (previous * 2).min(LOCAL_VACUUM_IDLE_INTERVAL));
+            assert!(pace.interval == (previous * 2).min(policy.idle_interval));
             previous = pace.interval;
-            if pace.interval == LOCAL_VACUUM_IDLE_INTERVAL {
+            if pace.interval == policy.idle_interval {
                 break;
             }
         }
@@ -2179,19 +2364,20 @@ mod vacuum_pacing_tests {
 
     #[test]
     fn hot_step_budgets_track_step_latency_within_bounds() {
+        let policy = default_policy();
         // (previous budget, observed step latency) → next hot step's budget.
         let cases = [
             // Fast steps double the budget…
             (
                 VACUUM_STEP_KEY_BUDGET,
-                LOCAL_VACUUM_STEP_FAST,
+                policy.step_fast,
                 2 * VACUUM_STEP_KEY_BUDGET,
             ),
             // …but never past the cap…
             (
-                LOCAL_VACUUM_MAX_KEY_BUDGET,
+                policy.max_key_budget,
                 Duration::from_millis(1),
-                LOCAL_VACUUM_MAX_KEY_BUDGET,
+                policy.max_key_budget,
             ),
             // …mid-range latency keeps the budget…
             (
@@ -2202,7 +2388,7 @@ mod vacuum_pacing_tests {
             // …slow steps halve it…
             (
                 2 * VACUUM_STEP_KEY_BUDGET,
-                LOCAL_VACUUM_STEP_SLOW,
+                policy.step_slow,
                 VACUUM_STEP_KEY_BUDGET,
             ),
             // …but never below the pgexec default.
@@ -2213,8 +2399,8 @@ mod vacuum_pacing_tests {
             ),
         ];
         for (previous_budget, step_elapsed, expected) in cases {
-            let mut pacer = VacuumPacer::new();
-            pacer.debt = 2 * LOCAL_VACUUM_HOT_DEBT;
+            let mut pacer = VacuumPacer::new(policy);
+            pacer.debt = 2 * policy.hot_debt;
             pacer.pace.key_budget = previous_budget;
             let pace = pacer.observe(&VacuumStepObservation {
                 step_elapsed,
@@ -2230,7 +2416,8 @@ mod vacuum_pacing_tests {
 
     #[test]
     fn idle_foreground_drains_until_a_clean_cycle_proves_the_store_settled() {
-        let mut pacer = VacuumPacer::new();
+        let policy = default_policy();
+        let mut pacer = VacuumPacer::new(policy);
         let idle_dirty = VacuumStepObservation {
             writes_since_step: 0,
             versions_settled: 300,
@@ -2256,13 +2443,14 @@ mod vacuum_pacing_tests {
             cycle_completed: true,
             ..idle_dirty
         };
-        assert!(pacer.observe(&clean_lap) == VacuumPace::idle());
-        assert!(pacer.observe(&clean_lap) == VacuumPace::idle());
+        assert!(pacer.observe(&clean_lap) == VacuumPace::idle(policy));
+        assert!(pacer.observe(&clean_lap) == VacuumPace::idle(policy));
     }
 
     #[test]
     fn a_clean_cycle_zeroes_debt_the_write_path_already_repaid() {
-        let mut pacer = VacuumPacer::new();
+        let policy = default_policy();
+        let mut pacer = VacuumPacer::new(policy);
         // Load whose garbage the write path prunes itself: debt builds even
         // though sweeps find nothing.
         let phantom = VacuumStepObservation {
@@ -2277,13 +2465,14 @@ mod vacuum_pacing_tests {
             cycle_completed: true,
             ..quiet_busy_step()
         };
-        assert!(pacer.observe(&clean_lap).interval == LOCAL_VACUUM_BACKOFF_FLOOR);
+        assert!(pacer.observe(&clean_lap).interval == policy.backoff_floor);
         assert!(pacer.debt == 0);
     }
 
     #[test]
     fn a_write_after_settling_reopens_idle_drain() {
-        let mut pacer = VacuumPacer::new();
+        let policy = default_policy();
+        let mut pacer = VacuumPacer::new(policy);
         let clean_idle_lap = VacuumStepObservation {
             writes_since_step: 0,
             versions_settled: 0,
@@ -2292,14 +2481,14 @@ mod vacuum_pacing_tests {
             foreground_idle: true,
             step_elapsed: Duration::from_millis(1),
         };
-        assert!(pacer.observe(&clean_idle_lap).interval == LOCAL_VACUUM_IDLE_INTERVAL);
+        assert!(pacer.observe(&clean_idle_lap).interval == policy.idle_interval);
         // A small write lands: the store is no longer proven clean, so the
         // next idle window drains again even though debt stays tiny.
         let small_write = VacuumStepObservation {
             writes_since_step: 5,
             ..quiet_busy_step()
         };
-        assert!(pacer.observe(&small_write).interval == LOCAL_VACUUM_IDLE_INTERVAL);
+        assert!(pacer.observe(&small_write).interval == policy.idle_interval);
         let idle_unproven = VacuumStepObservation {
             cycle_completed: false,
             ..clean_idle_lap
@@ -6863,6 +7052,177 @@ mod tests {
     }
 
     #[test]
+    fn local_vacuum_options_are_absent_by_default_and_cli_overrides_environment() {
+        const CHILD: &str = "CRABKA_TEST_GRES_LOCAL_VACUUM_ENV_CHILD";
+        let variables = [
+            ("CRABKA_GRES_LOCAL_VACUUM_IDLE_INTERVAL_MS", "11"),
+            ("CRABKA_GRES_LOCAL_VACUUM_BACKOFF_FLOOR_MS", "12"),
+            ("CRABKA_GRES_LOCAL_VACUUM_HOT_DEBT", "13"),
+            ("CRABKA_GRES_LOCAL_VACUUM_KEY_BUDGET", "14"),
+            ("CRABKA_GRES_LOCAL_VACUUM_MAX_KEY_BUDGET", "15"),
+            ("CRABKA_GRES_LOCAL_VACUUM_STEP_FAST_MS", "16"),
+            ("CRABKA_GRES_LOCAL_VACUUM_STEP_SLOW_MS", "17"),
+            ("CRABKA_GRES_LOCAL_VACUUM_IDLE_AFTER_MS", "18"),
+        ];
+        if std::env::var_os(CHILD).is_none() {
+            let defaults = Cli::try_parse_from(["crabka-gres"])
+                .expect("defaults")
+                .serve;
+            assert_eq!(defaults.local_vacuum, LocalVacuumOptions::default());
+            let status = std::process::Command::new(std::env::current_exe().expect("test exe"))
+                .args([
+                    "--exact",
+                    "tests::local_vacuum_options_are_absent_by_default_and_cli_overrides_environment",
+                ])
+                .env(CHILD, "1")
+                .envs(variables)
+                .status()
+                .expect("child test");
+            assert!(status.success());
+            return;
+        }
+
+        let environment = Cli::try_parse_from(["crabka-gres"])
+            .expect("environment policy")
+            .serve
+            .local_vacuum;
+        assert_eq!(
+            environment.idle_interval_ms.map(PositiveMillis::into_value),
+            Some(11)
+        );
+        assert_eq!(
+            environment.backoff_floor_ms.map(PositiveMillis::into_value),
+            Some(12)
+        );
+        assert_eq!(environment.hot_debt.map(NonZeroU64::get), Some(13));
+        assert_eq!(
+            environment.key_budget.map(PositiveUsize::into_value),
+            Some(14)
+        );
+        assert_eq!(
+            environment.max_key_budget.map(PositiveUsize::into_value),
+            Some(15)
+        );
+        assert_eq!(
+            environment.step_fast_ms.map(PositiveMillis::into_value),
+            Some(16)
+        );
+        assert_eq!(
+            environment.step_slow_ms.map(PositiveMillis::into_value),
+            Some(17)
+        );
+        assert_eq!(
+            environment.idle_after_ms.map(PositiveMillis::into_value),
+            Some(18)
+        );
+
+        let cli = Cli::try_parse_from([
+            "crabka-gres",
+            "--local-vacuum-idle-interval-ms",
+            "21",
+            "--local-vacuum-backoff-floor-ms",
+            "22",
+            "--local-vacuum-hot-debt",
+            "23",
+            "--local-vacuum-key-budget",
+            "24",
+            "--local-vacuum-max-key-budget",
+            "25",
+            "--local-vacuum-step-fast-ms",
+            "26",
+            "--local-vacuum-step-slow-ms",
+            "27",
+            "--local-vacuum-idle-after-ms",
+            "28",
+        ])
+        .expect("CLI policy")
+        .serve
+        .local_vacuum;
+        assert_eq!(
+            cli.idle_interval_ms.map(PositiveMillis::into_value),
+            Some(21)
+        );
+        assert_eq!(
+            cli.backoff_floor_ms.map(PositiveMillis::into_value),
+            Some(22)
+        );
+        assert_eq!(cli.hot_debt.map(NonZeroU64::get), Some(23));
+        assert_eq!(cli.key_budget.map(PositiveUsize::into_value), Some(24));
+        assert_eq!(cli.max_key_budget.map(PositiveUsize::into_value), Some(25));
+        assert_eq!(cli.step_fast_ms.map(PositiveMillis::into_value), Some(26));
+        assert_eq!(cli.step_slow_ms.map(PositiveMillis::into_value), Some(27));
+        assert_eq!(cli.idle_after_ms.map(PositiveMillis::into_value), Some(28));
+    }
+
+    #[test]
+    fn local_vacuum_policy_rejects_invalid_relationships_and_substrate_noops() {
+        for option in [
+            "--local-vacuum-idle-interval-ms=0",
+            "--local-vacuum-backoff-floor-ms=0",
+            "--local-vacuum-hot-debt=0",
+            "--local-vacuum-key-budget=0",
+            "--local-vacuum-max-key-budget=0",
+            "--local-vacuum-step-fast-ms=0",
+            "--local-vacuum-step-slow-ms=0",
+            "--local-vacuum-idle-after-ms=0",
+        ] {
+            assert!(Cli::try_parse_from(["crabka-gres", option]).is_err());
+        }
+
+        for arguments in [
+            [
+                "--local-vacuum-idle-interval-ms",
+                "10",
+                "--local-vacuum-backoff-floor-ms",
+                "11",
+            ]
+            .as_slice(),
+            [
+                "--local-vacuum-key-budget",
+                "10",
+                "--local-vacuum-max-key-budget",
+                "9",
+            ]
+            .as_slice(),
+            [
+                "--local-vacuum-step-fast-ms",
+                "10",
+                "--local-vacuum-step-slow-ms",
+                "10",
+            ]
+            .as_slice(),
+        ] {
+            let args = Cli::try_parse_from(
+                std::iter::once("crabka-gres").chain(arguments.iter().copied()),
+            )
+            .expect("scalar-valid arguments")
+            .serve;
+            assert!(local_vacuum_policy(&args).is_err());
+        }
+
+        for option in [
+            "--local-vacuum-idle-interval-ms=1",
+            "--local-vacuum-backoff-floor-ms=1",
+            "--local-vacuum-hot-debt=1",
+            "--local-vacuum-key-budget=1",
+            "--local-vacuum-max-key-budget=1",
+            "--local-vacuum-step-fast-ms=1",
+            "--local-vacuum-step-slow-ms=1",
+            "--local-vacuum-idle-after-ms=1",
+        ] {
+            let args = Cli::try_parse_from([
+                "crabka-gres",
+                "--substrate-bootstrap=memory://",
+                "--tenant=tenant-a",
+                option,
+            ])
+            .expect("scalar-valid arguments")
+            .serve;
+            assert!(local_vacuum_policy(&args).is_err());
+        }
+    }
+
+    #[test]
     fn checkpoint_lifecycle_options_use_validated_defaults() {
         let args = Cli::try_parse_from(["crabka-gres"])
             .expect("defaults")
@@ -7485,6 +7845,7 @@ mod tests {
                 fetch_max_wait_ms: PositiveI32::new(500).expect("default"),
                 fetch_partition_max_bytes: PositiveI32::new(1_048_576).expect("default"),
             },
+            local_vacuum: LocalVacuumOptions::default(),
             listen: "127.0.0.1:0".to_string(),
             tls_cert: None,
             tls_key: None,

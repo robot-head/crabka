@@ -184,6 +184,7 @@ fn binary_help_exposes_only_single_node_serve_surface() {
 fn test_args(listen: String, data_dir: Option<std::path::PathBuf>) -> crabka_gres::ServeArgs {
     crabka_gres::ServeArgs {
         registry: crabka_gres::Cli::parse_from(["crabka-gres"]).serve.registry,
+        local_vacuum: crabka_gres::LocalVacuumOptions::default(),
         listen,
         tls_cert: None,
         tls_key: None,
