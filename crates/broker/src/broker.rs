@@ -526,6 +526,8 @@ async fn recover_storage_and_groups(
                 log,
                 log_dir_status: log_dir_status.clone(),
                 producer_state: Arc::clone(&producer_state),
+                producer_id_expiration_ms: config.producer_id_expiration_ms,
+                partition_writer_queue_depth: config.partition_writer_queue_depth,
                 diskless,
                 hot_tail: Some(Arc::clone(&diskless_runtime.hot_tail)),
                 wal_shards: Some(Arc::clone(&diskless_runtime.wal_shards)),
@@ -1160,16 +1162,18 @@ fn spawn_storage_security_maintenance(
 
 fn spawn_producer_expiry(
     producer_state: Arc<crate::producer_state::ProducerState>,
+    scan_interval: std::time::Duration,
+    expiration_ms: i64,
     shutdown: CancellationToken,
 ) {
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(std::time::Duration::from_mins(10));
+        let mut tick = tokio::time::interval(scan_interval);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
                 _ = tick.tick() => {
                     producer_state
-                        .expire_older_than(crate::time_util::now_ms(), 86_400_000)
+                        .expire_older_than(crate::time_util::now_ms(), expiration_ms)
                         .await;
                 }
                 () = shutdown.cancelled() => return,
@@ -1227,7 +1231,12 @@ fn spawn_cluster_data_maintenance(
         Arc::clone(liveness),
         shutdown.child_token(),
     ));
-    spawn_producer_expiry(Arc::clone(producer_state), shutdown.child_token());
+    spawn_producer_expiry(
+        Arc::clone(producer_state),
+        config.producer_id_expiration_scan_interval,
+        config.producer_id_expiration_ms,
+        shutdown.child_token(),
+    );
     tokio::spawn(crate::cleaner::run(
         Arc::clone(partitions),
         config.node_id,
@@ -1796,6 +1805,8 @@ fn spawn_replicator_supervisor(
             throttle_state: Arc::clone(runtime.1),
             log_dir_status: storage.log_dir_status.clone(),
             producer_state: Arc::clone(storage.producer_state),
+            producer_id_expiration_ms: config.producer_id_expiration_ms,
+            partition_writer_queue_depth: config.partition_writer_queue_depth,
             metrics: runtime.2.clone(),
             log_dir_ids: storage.log_dir_ids.clone(),
             hot_tail: Arc::clone(&storage.diskless.hot_tail),
@@ -4043,6 +4054,7 @@ pub(crate) fn spawn_partition(
     producer_state: Arc<crate::producer_state::ProducerState>,
     diskless: bool,
 ) -> Arc<Partition> {
+    let broker_config = BrokerConfig::default();
     try_spawn_partition_with_sequencer(PartitionSpawnConfig {
         topic,
         topic_id: None,
@@ -4051,6 +4063,8 @@ pub(crate) fn spawn_partition(
         log,
         log_dir_status,
         producer_state,
+        producer_id_expiration_ms: broker_config.producer_id_expiration_ms,
+        partition_writer_queue_depth: broker_config.partition_writer_queue_depth,
         diskless,
         hot_tail: None,
         wal_shards: None,
@@ -4067,6 +4081,8 @@ pub(crate) struct PartitionSpawnConfig {
     pub log: crabka_log::Log,
     pub log_dir_status: crate::log_dir_status::LogDirRegistry,
     pub producer_state: Arc<crate::producer_state::ProducerState>,
+    pub producer_id_expiration_ms: i64,
+    pub partition_writer_queue_depth: usize,
     pub diskless: bool,
     pub hot_tail: Option<Arc<crate::diskless::hot_tail::HotTailCache>>,
     pub wal_shards: Option<Arc<crate::wal::quorum::registry::WalShardRegistry>>,
@@ -4076,10 +4092,6 @@ pub(crate) struct PartitionSpawnConfig {
 pub(crate) fn try_spawn_partition_with_sequencer(
     config: PartitionSpawnConfig,
 ) -> Result<Arc<Partition>, BrokerError> {
-    /// Depth of the per-partition writer mpsc queue: bounds how many
-    /// produce/replication appends may be in flight to one partition before
-    /// senders back-pressure.
-    const PARTITION_WRITER_QUEUE_DEPTH: usize = 64;
     let PartitionSpawnConfig {
         topic,
         topic_id,
@@ -4088,6 +4100,8 @@ pub(crate) fn try_spawn_partition_with_sequencer(
         log,
         log_dir_status,
         producer_state,
+        producer_id_expiration_ms,
+        partition_writer_queue_depth,
         diskless,
         hot_tail,
         wal_shards,
@@ -4102,7 +4116,7 @@ pub(crate) fn try_spawn_partition_with_sequencer(
         hot_tail,
         wal_shards,
     )?;
-    let (tx, rx) = tokio::sync::mpsc::channel::<WriterMessage>(PARTITION_WRITER_QUEUE_DEPTH);
+    let (tx, rx) = tokio::sync::mpsc::channel::<WriterMessage>(partition_writer_queue_depth);
     let notify = Arc::new(tokio::sync::Notify::new());
     let replica_state = Arc::new(tokio::sync::Mutex::new(
         crate::replica_state::ReplicaState::new(),
@@ -4121,6 +4135,7 @@ pub(crate) fn try_spawn_partition_with_sequencer(
             hw_advance_notify.clone(),
         ),
         (log_dir_status, producer_state, wal),
+        producer_id_expiration_ms,
         sequencer,
     ));
     Ok(Arc::new(Partition {
@@ -4667,6 +4682,45 @@ mod tests {
                 .expect("append records");
         }
         part
+    }
+
+    #[tokio::test]
+    async fn nondefault_partition_writer_queue_depth_backpressures_at_bound() {
+        let dir = tempdir().expect("tempdir");
+        let partition = try_spawn_partition_with_sequencer(PartitionSpawnConfig {
+            topic: "queue-bound".to_string(),
+            topic_id: None,
+            partition_id: PartitionIndex(0),
+            log_dir: dir.path().to_path_buf(),
+            log: crabka_log::Log::open(dir.path(), crabka_log::LogConfig::default())
+                .expect("open log"),
+            log_dir_status: crate::log_dir_status::LogDirRegistry::default(),
+            producer_state: Arc::new(crate::producer_state::ProducerState::new()),
+            producer_id_expiration_ms: 1,
+            partition_writer_queue_depth: 2,
+            diskless: false,
+            hot_tail: None,
+            wal_shards: None,
+            sequencer: None,
+        })
+        .expect("spawn partition");
+
+        for _ in 0..2 {
+            let (ack, _ack_rx) = tokio::sync::oneshot::channel();
+            assert!(
+                partition
+                    .writer_tx
+                    .try_send(WriterMessage::Compact { ack })
+                    .is_ok()
+            );
+        }
+        let (ack, _ack_rx) = tokio::sync::oneshot::channel();
+        assert!(matches!(
+            partition.writer_tx.try_send(WriterMessage::Compact { ack }),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_))
+        ));
+
+        partition.writer_handle.abort();
     }
 
     #[test]
