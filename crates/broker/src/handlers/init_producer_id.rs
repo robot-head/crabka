@@ -332,7 +332,10 @@ mod tests {
     use crabka_log::{Log, LogConfig, ProducerId};
 
     use super::*;
-    use crate::txn::state::{TopicPartition, TxnEntry};
+    use crate::{
+        test_support::{peer, principal, start_broker_with},
+        txn::state::{TopicPartition, TxnEntry},
+    };
 
     /// `dispatch_abort_markers` appends an abort control-marker batch to each
     /// locally-led partition in the entry's partition set — advancing that
@@ -404,5 +407,80 @@ mod tests {
         dispatch_abort_markers(&coord, &entry)
             .await
             .expect("skip non-local partition without error");
+    }
+
+    #[tokio::test]
+    async fn handler_persists_configured_timeout_bounds_and_2pc_sentinel() {
+        let (broker_handle, _dir) = start_broker_with(|config| {
+            config.audit_enabled = false;
+            config.transaction_state_num_partitions = 7;
+            config.transaction_min_timeout_ms = 2_000;
+            config.transaction_max_timeout_ms = 8_000;
+            config.features.transaction_two_phase_commit_enable = true;
+        })
+        .await;
+        let broker = broker_handle.broker_arc_for_test();
+        let principal = principal("admin");
+        let peer = peer();
+        let context = crate::test_support::request_context(&principal, &peer, "txn-client");
+        let tids = ["txn-below-min", "txn-above-max", "txn-2pc"];
+
+        let find_version = crabka_protocol::owned::find_coordinator_response::MAX_VERSION;
+        let find_request =
+            crabka_protocol::owned::find_coordinator_request::FindCoordinatorRequest {
+                key_type: 1,
+                coordinator_keys: tids.iter().map(ToString::to_string).collect(),
+                ..Default::default()
+            };
+        let find_response = crate::handlers::find_coordinator::handle(
+            &broker,
+            find_version,
+            1,
+            &crate::test_support::encode_request(&find_request, find_version),
+            &context,
+        )
+        .await
+        .expect("find transaction coordinators");
+        let find_response: crabka_protocol::owned::find_coordinator_response::FindCoordinatorResponse =
+            crate::test_support::decode_response(&find_response, find_version);
+        assert!(
+            find_response
+                .coordinators
+                .iter()
+                .all(|coordinator| coordinator.error_code == codes::NONE)
+        );
+
+        let version = crabka_protocol::owned::init_producer_id_response::MAX_VERSION;
+        for (tid, requested_ms, enable_2pc, expected_ms) in [
+            (tids[0], 500, false, 2_000),
+            (tids[1], 10_000, false, 8_000),
+            (tids[2], 500, true, i32::MAX),
+        ] {
+            let request = InitProducerIdRequest {
+                transactional_id: Some(tid.to_string()),
+                transaction_timeout_ms: requested_ms,
+                enable2_pc: enable_2pc,
+                ..Default::default()
+            };
+            let response = handle(
+                &broker,
+                version,
+                2,
+                &crate::test_support::encode_request(&request, version),
+                &context,
+            )
+            .await
+            .expect("initialize transactional producer");
+            let response: InitProducerIdResponse =
+                crate::test_support::decode_response(&response, version);
+            assert!(response.error_code == codes::NONE, "{tid}: {response:?}");
+
+            let entry = broker
+                .txn_coordinator
+                .get(tid)
+                .expect("persisted transaction entry");
+            assert!(entry.lock().await.txn_timeout_ms == expected_ms, "{tid}");
+        }
+        broker_handle.shutdown().await;
     }
 }
