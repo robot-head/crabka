@@ -337,8 +337,8 @@ fn idx_to_usize(idx: i16) -> usize {
 pub struct InternalTopicSpec {
     pub name: String,
     pub partitions: i32,
-    /// Replication factor as requested by the client; `0` means "fall back to
-    /// the cluster default" (chosen at creation time as `min(brokers, 3)`).
+    /// Replication factor as requested by the client; `0` uses the configured
+    /// cluster default capped by the number of available brokers.
     pub replication_factor: i16,
     pub configs: BTreeMap<String, String>,
 }
