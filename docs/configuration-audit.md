@@ -333,9 +333,10 @@ report: internal-topic replication, fallback, segment and compaction ratio;
 Schema Registry cache and framing; dedup sizing, retention and ownership;
 TLS reload; ACL refresh; bearer clock skew; membership topic; webhook replay,
 body and schema settings; outbound delivery retry, timeout, group and decoding
-settings; the generic HTTP produce body cap; and Kubernetes
-readiness/liveness probe timing. Direct-process and operator defaults
-intentionally remain distinct where they were distinct before this work.
+settings; the generic HTTP produce and internal forwarding body caps; and
+Kubernetes readiness/liveness probe timing. Direct-process and operator
+defaults intentionally remain distinct where they were distinct before this
+work.
 
 ### Fixed
 
@@ -359,16 +360,16 @@ intentionally remain distinct where they were distinct before this work.
   attempt values.
 - Histogram buckets are the exported metric schema and remain fixed for
   time-series continuity.
-- The remaining 36 scanner matches are test inputs: 3 bearer tokens, 10
-  CLI/default fixtures, 2 internal-topic policy fixtures, 5 forwarding
+- The remaining 37 scanner matches are test inputs: 3 bearer tokens, 10
+  CLI/default fixtures, 2 internal-topic policy fixtures, 6 forwarding
   fixtures/sentinels, 9 outbound retry/validation fixtures, 2 Schema Registry
   cache timings, 4 schema fixtures, and 1 TLS reload boundary.
 
 ### Audit Snapshot
 
-On 2026-07-24 the scanner reports 5,889 matches across all crates. The gRPC
-Gateway subset contains exactly 45 matches across 14 files: 4 configured
-production defaults, 5 fixed production values, and 36 test inputs. Five
+On 2026-07-24 the scanner reports 5,890 matches across all crates. The gRPC
+Gateway subset contains exactly 46 matches across 14 files: 4 configured
+production defaults, 5 fixed production values, and 37 test inputs. Six
 production gaps found by the adjacent semantic review were remediated:
 
 - Kafka-unrepresentable partition counts are rejected instead of coerced to
@@ -381,24 +382,33 @@ production gaps found by the adjacent semantic review were remediated:
 - Generic HTTP produce collects request bodies with its validated
   `produce_max_body_bytes` runtime/CRD cap, defaulting to the prior 2 MiB
   behavior instead of inheriting Axum's fixed extractor limit.
+- Internal forwarding collects and deserializes request bodies with its
+  validated `forward_max_body_bytes` runtime/CRD cap, also defaulting to the
+  prior 2 MiB behavior.
 - Gateway readiness and liveness initial delays and periods are typed
   `healthChecks` CRD fields, validated before child rendering.
+
+An exhaustive review of production Axum body extraction found no remaining
+implicit caps: named webhooks, generic produce, and internal forwarding now use
+explicit bounded collection. Authentication middleware passes `Request`
+bodies through untouched, Connect RPC owns its protocol extraction, and no
+`DefaultBodyLimit` or request-body-limit layer is installed.
 
 ### gRPC Gateway Slice Completion Evidence
 
 The gRPC Gateway slice passed these gates on 2026-07-24:
 
-- `tools/audit-runtime-values.sh`: 5,889 repository matches and exactly 45
+- `tools/audit-runtime-values.sh`: 5,890 repository matches and exactly 46
   gateway matches across 14 files, with every result classified above.
 - `cargo +nightly fmt --all -- --check`: passed.
 - `cargo clippy -p crabka-grpc-gateway -p crabka-operator --all-targets -- -D warnings`:
   passed.
-- `cargo nextest run -p crabka-grpc-gateway -p crabka-operator`: 1,039 passed,
+- `cargo nextest run -p crabka-grpc-gateway -p crabka-operator`: 1,040 passed,
   1 skipped, and no failures.
 - `cargo run -p crabka-grpc-gateway -- --help`: exposes internal-topic,
   consumer-poll, ownership-warmup, Schema Registry cache, and bearer skew
-  settings plus the generic produce body cap with `CRABKA_GATEWAY_*`
-  environment bindings.
+  settings plus the generic produce and internal forwarding body caps with
+  `CRABKA_GATEWAY_*` environment bindings.
 - `cargo run -p crabka-operator -- gen-crds <temporary-directory>` followed by
   an exact diff of the generated `KafkaGrpcGateway` CRD: passed.
 - `git diff --check`: passed.
