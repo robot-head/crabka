@@ -174,6 +174,9 @@ struct Args {
     ownership_warmup_empty_polls: Option<PositiveU32>,
     #[arg(long, env = "CRABKA_GATEWAY_READINESS_POLL_INTERVAL_MS")]
     readiness_poll_interval_ms: Option<PositiveU64>,
+    /// Maximum accepted body size for generic HTTP produce requests.
+    #[arg(long, env = "CRABKA_GATEWAY_PRODUCE_MAX_BODY_BYTES")]
+    produce_max_body_bytes: Option<PositiveU64>,
     #[arg(long, env = "CRABKA_GATEWAY_SCHEMA_REGISTRY_LATEST_CACHE_TTL_MS")]
     schema_registry_latest_cache_ttl_ms: Option<PositiveU64>,
     #[arg(long, env = "CRABKA_GATEWAY_SCHEMA_REGISTRY_FRAME_RAW")]
@@ -293,7 +296,7 @@ async fn main() -> anyhow::Result<()> {
         webhooks,
         outbound,
         schema_registry_url: args.schema_registry_url.clone(),
-        runtime: args.runtime_config(),
+        runtime: args.runtime_config()?,
     };
 
     let bearer = build_bearer(&args)?;
@@ -426,7 +429,7 @@ impl Args {
             .unwrap_or_else(|| format!("{}-dedup-owners", self.client_id))
     }
 
-    fn runtime_config(&self) -> GatewayRuntimeConfig {
+    fn runtime_config(&self) -> anyhow::Result<GatewayRuntimeConfig> {
         let mut runtime = GatewayRuntimeConfig::default();
         if let Some(value) = self.internal_topic_replication_factor {
             runtime.internal_topic_replication_factor = value.into_value();
@@ -452,13 +455,17 @@ impl Args {
         if let Some(value) = self.readiness_poll_interval_ms {
             runtime.readiness_poll_interval_ms = value.into_value();
         }
+        if let Some(value) = self.produce_max_body_bytes {
+            runtime.produce_max_body_bytes = usize::try_from(value.into_value())
+                .context("--produce-max-body-bytes exceeds this platform's usize")?;
+        }
         if let Some(value) = self.schema_registry_latest_cache_ttl_ms {
             runtime.schema_registry_latest_cache_ttl_ms = value.into_value();
         }
         if let Some(value) = self.schema_registry_frame_raw {
             runtime.schema_registry_frame_raw = value;
         }
-        runtime
+        Ok(runtime)
     }
 }
 
@@ -849,6 +856,7 @@ mod tests {
             "--consumer-poll-timeout-ms=0",
             "--ownership-warmup-empty-polls=0",
             "--readiness-poll-interval-ms=0",
+            "--produce-max-body-bytes=0",
             "--schema-registry-latest-cache-ttl-ms=0",
             "--bearer-allowable-clock-skew-ms=-1",
         ] {
@@ -875,6 +883,7 @@ mod tests {
             "--consumer-poll-timeout-ms=501",
             "--ownership-warmup-empty-polls=3",
             "--readiness-poll-interval-ms=251",
+            "--produce-max-body-bytes=3145728",
             "--schema-registry-latest-cache-ttl-ms=5001",
             "--schema-registry-frame-raw=true",
             "--bearer-allowable-clock-skew-ms=0",
@@ -882,7 +891,7 @@ mod tests {
         ])
         .expect("parse explicit runtime values");
         assert!(
-            explicit.runtime_config()
+            explicit.runtime_config().unwrap()
                 == GatewayRuntimeConfig {
                     internal_topic_replication_factor: 2,
                     internal_topic_allow_replication_fallback: false,
@@ -892,6 +901,7 @@ mod tests {
                     consumer_poll_timeout_ms: 501,
                     ownership_warmup_empty_polls: 3,
                     readiness_poll_interval_ms: 251,
+                    produce_max_body_bytes: 3_145_728,
                     schema_registry_latest_cache_ttl_ms: 5_001,
                     schema_registry_frame_raw: true,
                 }
@@ -902,6 +912,7 @@ mod tests {
         temp_env::with_vars(
             [
                 ("CRABKA_GATEWAY_CONSUMER_POLL_TIMEOUT_MS", None::<&str>),
+                ("CRABKA_GATEWAY_PRODUCE_MAX_BODY_BYTES", None::<&str>),
                 ("CRABKA_GATEWAY_SCHEMA_REGISTRY_FRAME_RAW", None::<&str>),
             ],
             || {
@@ -911,12 +922,14 @@ mod tests {
                     "--advertised-addr=localhost:9500",
                 ])
                 .expect("parse defaults");
-                assert!(defaults.runtime_config() == GatewayRuntimeConfig::default());
+                assert!(defaults.runtime_config().unwrap() == GatewayRuntimeConfig::default());
                 assert!(defaults.bearer_allowable_clock_skew_ms.into_value() == 30_000);
 
-                temp_env::with_var(
-                    "CRABKA_GATEWAY_CONSUMER_POLL_TIMEOUT_MS",
-                    Some("701"),
+                temp_env::with_vars(
+                    [
+                        ("CRABKA_GATEWAY_CONSUMER_POLL_TIMEOUT_MS", Some("701")),
+                        ("CRABKA_GATEWAY_PRODUCE_MAX_BODY_BYTES", Some("3145729")),
+                    ],
                     || {
                         let from_env = Args::try_parse_from([
                             "crabka-grpc-gateway",
@@ -924,16 +937,21 @@ mod tests {
                             "--advertised-addr=localhost:9500",
                         ])
                         .expect("parse environment");
-                        assert!(from_env.runtime_config().consumer_poll_timeout_ms == 701);
+                        let from_env = from_env.runtime_config().unwrap();
+                        assert!(from_env.consumer_poll_timeout_ms == 701);
+                        assert!(from_env.produce_max_body_bytes == 3_145_729);
 
                         let from_cli = Args::try_parse_from([
                             "crabka-grpc-gateway",
                             "--bootstrap-servers=localhost:9092",
                             "--advertised-addr=localhost:9500",
                             "--consumer-poll-timeout-ms=702",
+                            "--produce-max-body-bytes=3145730",
                         ])
                         .expect("parse CLI over environment");
-                        assert!(from_cli.runtime_config().consumer_poll_timeout_ms == 702);
+                        let from_cli = from_cli.runtime_config().unwrap();
+                        assert!(from_cli.consumer_poll_timeout_ms == 702);
+                        assert!(from_cli.produce_max_body_bytes == 3_145_730);
                     },
                 );
             },
@@ -998,7 +1016,7 @@ mod tests {
                     webhooks: std::collections::HashMap::new(),
                     outbound: Vec::new(),
                     schema_registry_url: None,
-                    runtime: args.runtime_config(),
+                    runtime: args.runtime_config().unwrap(),
                 };
                 let (_, _, _, group) = ownership_consumer_inputs(&config);
                 assert!(group == expected);

@@ -445,6 +445,7 @@ fn gateway_args(
         push!(consumer_poll_timeout_ms);
         push!(ownership_warmup_empty_polls);
         push!(readiness_poll_interval_ms);
+        push!(produce_max_body_bytes);
     }
     if let Some(registry) = &gateway.spec.schema_registry {
         if let Some(value) = registry.url.as_deref() {
@@ -1036,6 +1037,7 @@ fn validate_config(spec: &crate::crd::grpc_gateway::KafkaGrpcGatewaySpec) -> Res
             refined_type::rule::GreaterU64<0>,
             "spec.tuning.readinessPollIntervalMs"
         );
+        validate_produce_max_body_bytes(tuning.produce_max_body_bytes)?;
     }
     if let Some(registry) = &spec.schema_registry {
         nonempty!(registry.url.as_deref(), "spec.schemaRegistry.url");
@@ -1172,6 +1174,14 @@ fn validate_config(spec: &crate::crd::grpc_gateway::KafkaGrpcGatewaySpec) -> Res
         {
             return Err("spec.telemetry.sampleRatio must be finite and between 0 and 1".into());
         }
+    }
+    Ok(())
+}
+
+fn validate_produce_max_body_bytes(value: Option<u64>) -> Result<(), String> {
+    if let Some(value) = value {
+        refined_type::rule::GreaterU64::<0>::new(value)
+            .map_err(|error| format!("spec.tuning.produceMaxBodyBytes: {error}"))?;
     }
     Ok(())
 }
@@ -2178,6 +2188,7 @@ mod tests {
             consumer_poll_timeout_ms: Some(501),
             ownership_warmup_empty_polls: Some(3),
             readiness_poll_interval_ms: Some(251),
+            produce_max_body_bytes: Some(3_145_728),
         });
         gw.spec.schema_registry = Some(GatewaySchemaRegistrySpec {
             url: Some("http://registry:8081".into()),
@@ -2242,6 +2253,7 @@ mod tests {
             "--consumer-poll-timeout-ms=501",
             "--ownership-warmup-empty-polls=3",
             "--readiness-poll-interval-ms=251",
+            "--produce-max-body-bytes=3145728",
             "--schema-registry-url=http://registry:8081",
             "--schema-registry-latest-cache-ttl-ms=5001",
             "--schema-registry-frame-raw=true",
@@ -2276,6 +2288,7 @@ mod tests {
             serde_json::json!({"tuning": {"internalTopicReplicationFactor": 0}}),
             serde_json::json!({"tuning": {"internalTopicMinCleanableDirtyRatioBasisPoints": 10001}}),
             serde_json::json!({"schemaRegistry": {"latestCacheTtlMs": 0}}),
+            serde_json::json!({"tuning": {"produceMaxBodyBytes": 0}}),
             serde_json::json!({"healthChecks": {"readinessInitialDelaySeconds": -1}}),
             serde_json::json!({"healthChecks": {"livenessPeriodSeconds": 0}}),
             serde_json::json!({"dedup": {"partitions": 0}}),

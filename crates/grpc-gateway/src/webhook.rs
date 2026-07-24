@@ -23,7 +23,7 @@ use axum::{
     Extension, Json, Router,
     body::Bytes,
     extract::{Path, Request},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::{IntoResponse, Response},
     routing::post,
 };
@@ -221,9 +221,9 @@ pub async fn webhook_handler(
 
 /// `POST /v1/produce/{topic}` — generic produce-by-topic endpoint.
 ///
-/// No HMAC or body-size enforcement; respects an optional `Idempotency-Key`
-/// header; uses the injected caller [`Principal`] (from mTLS / bearer auth) or
-/// falls back to ANONYMOUS.
+/// No HMAC; enforces the configured generic-produce body cap, respects an
+/// optional `Idempotency-Key` header, and uses the injected caller
+/// [`Principal`] (from mTLS / bearer auth) or falls back to ANONYMOUS.
 // HTTP request entry (info): one span per generic produce-by-topic call,
 // tagged with the target topic. RED signals recorded via the drop-guard under
 // method="produce_http".
@@ -232,11 +232,16 @@ pub async fn produce_handler(
     Extension(state): Extension<Arc<AppState>>,
     Path(topic): Path<String>,
     peer: Option<Extension<SocketAddr>>,
-    headers: HeaderMap,
     principal: Option<Extension<Principal>>,
-    body: Bytes,
+    request: Request,
 ) -> Response {
     let _req = metrics().begin_request("produce_http");
+    let (parts, body) = request.into_parts();
+    let headers = parts.headers;
+    let Ok(body) = axum::body::to_bytes(body, state.config.runtime.produce_max_body_bytes).await
+    else {
+        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+    };
     // Idempotency key from the standard header if present.
     let idempotency_key: Option<String> = headers
         .get("Idempotency-Key")
@@ -702,9 +707,22 @@ mod tests {
     // -----------------------------------------------------------------------
     // produce_handler
     // -----------------------------------------------------------------------
-    // NOTE: produce_handler tests that call produce require a real broker.
-    // They are covered by integration tests. The needs_json and signature
-    // tests above cover the guard logic without a broker.
+
+    #[tokio::test]
+    async fn generic_produce_honors_configured_body_limit_above_axum_default() {
+        let codec = Arc::new(FailingEncodeCodec(CodecError::Validate));
+        let mut state = state_with_webhooks_codec(HashMap::new(), codec).await;
+        let state_mut = Arc::get_mut(&mut state).unwrap();
+        let mut config = (*state_mut.config).clone();
+        config.runtime.produce_max_body_bytes = 3 * 1024 * 1024;
+        state_mut.config = Arc::new(config);
+        let app = webhook_router(state);
+        let req = Request::post("/v1/produce/orders")
+            .body(Body::from(vec![b'x'; 2 * 1024 * 1024 + 1]))
+            .unwrap();
+        let resp = oneshot(app, req).await;
+        assert2::assert!(resp.status() == StatusCode::BAD_REQUEST);
+    }
 
     // -----------------------------------------------------------------------
     // needs_json helper

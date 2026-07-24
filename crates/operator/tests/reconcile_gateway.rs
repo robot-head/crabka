@@ -86,7 +86,8 @@ fn runtime_crd_surface_round_trips() {
                 "internalTopicMinCleanableDirtyRatioBasisPoints": 250,
                 "consumerPollTimeoutMs": 501,
                 "ownershipWarmupEmptyPolls": 3,
-                "readinessPollIntervalMs": 251
+                "readinessPollIntervalMs": 251,
+                "produceMaxBodyBytes": 3_145_728
             },
             "schemaRegistry": {
                 "url": "http://registry:8081",
@@ -125,6 +126,7 @@ fn runtime_crd_surface_round_trips() {
     for pointer in [
         "/membershipTopic",
         "/tuning/internalTopicReplicationFactor",
+        "/tuning/produceMaxBodyBytes",
         "/schemaRegistry/latestCacheTtlMs",
         "/healthChecks/readinessPeriodSeconds",
         "/dedup/ownershipGroup",
@@ -145,6 +147,7 @@ fn runtime_crd_surface_round_trips() {
 async fn runtime_invalid_values_stop_before_child_rendering() {
     for invalid in [
         serde_json::json!({"tuning": {"consumerPollTimeoutMs": 0}}),
+        serde_json::json!({"tuning": {"produceMaxBodyBytes": 0}}),
         serde_json::json!({
             "tuning": {"internalTopicMinCleanableDirtyRatioBasisPoints": 10001}
         }),
