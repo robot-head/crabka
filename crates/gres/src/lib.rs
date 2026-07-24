@@ -2539,11 +2539,12 @@ struct LiveSplitIntentAuthority {
 pub fn live_split_intent_authority(
     bootstrap: String,
     tenant: crabka_gres_control::TenantName,
+    policy: RegistryPolicy,
 ) -> Arc<dyn crabka_gres_ranges::control::SplitIntentAuthority> {
     Arc::new(LiveSplitIntentAuthority {
         bootstrap,
         tenant,
-        policy: RegistryPolicy::default(),
+        policy,
     })
 }
 

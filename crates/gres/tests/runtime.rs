@@ -1197,9 +1197,12 @@ async fn live_authority_allows_exact_target_status_at_activated_before_layout_cu
         )
         .await;
     }
+    let registry_policy =
+        crabka_gres_control::RegistryPolicy::new(2, 15_001, 251, 1, 2_000_000).unwrap();
     let authority = crabka_gres::live_split_intent_authority(
         bootstrap,
         crabka_gres_control::TenantName::try_from(tenant).unwrap(),
+        registry_policy,
     );
     let exact = RangeControlReq {
         tenant: tenant.into(),
