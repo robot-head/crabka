@@ -63,6 +63,8 @@ impl Cli {
             "wal_recovery_fetch_partition_max_bytes",
             "wal_recovery_fetch_response_max_bytes",
             "wal_recovery_empty_fetch_retries",
+            "wal_recovery_connect_timeout_ms",
+            "wal_recovery_request_timeout_ms",
         ] {
             command = command.mut_arg(argument, |arg| arg.env(None::<&str>));
         }
@@ -161,6 +163,22 @@ pub struct ServeArgs {
         requires = "substrate_bootstrap"
     )]
     pub wal_recovery_empty_fetch_retries: Option<PositiveUsize>,
+
+    /// Timeout for establishing raw WAL recovery broker connections.
+    #[arg(
+        long = "wal-recovery-connect-timeout-ms",
+        env = "CRABKA_GRES_WAL_RECOVERY_CONNECT_TIMEOUT_MS",
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_recovery_connect_timeout_ms: Option<PositiveMillis>,
+
+    /// Timeout for raw WAL recovery broker requests.
+    #[arg(
+        long = "wal-recovery-request-timeout-ms",
+        env = "CRABKA_GRES_WAL_RECOVERY_REQUEST_TIMEOUT_MS",
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_recovery_request_timeout_ms: Option<PositiveMillis>,
 
     /// Substrate mode: comma-separated hosted range ids, for example r0,r2.
     #[arg(long = "host-ranges", requires = "ranges")]
@@ -447,7 +465,9 @@ fn validate_wal_recovery_read_policy(args: &ServeArgs) -> std::io::Result<()> {
     if (args.wal_recovery_fetch_max_wait_ms.is_some()
         || args.wal_recovery_fetch_partition_max_bytes.is_some()
         || args.wal_recovery_fetch_response_max_bytes.is_some()
-        || args.wal_recovery_empty_fetch_retries.is_some())
+        || args.wal_recovery_empty_fetch_retries.is_some()
+        || args.wal_recovery_connect_timeout_ms.is_some()
+        || args.wal_recovery_request_timeout_ms.is_some())
         && args.substrate_bootstrap.is_none()
     {
         return invalid_input("WAL recovery options require --substrate-bootstrap");
@@ -724,6 +744,18 @@ impl SubstrateRuntimeConfig {
                     PositiveUsize::into_value,
                 ),
             )
+            .and_then(|policy| {
+                policy.with_timeouts(
+                    args.wal_recovery_connect_timeout_ms.map_or(
+                        crabka_gres_substrate::DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT_MS,
+                        PositiveMillis::into_value,
+                    ),
+                    args.wal_recovery_request_timeout_ms.map_or(
+                        crabka_gres_substrate::DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT_MS,
+                        PositiveMillis::into_value,
+                    ),
+                )
+            })
             .map_err(|error| Error::new(ErrorKind::InvalidInput, error))?,
             host_ranges: parse_host_ranges(args.host_ranges.as_deref())?,
             range_rpc: RangeRpcRuntimeConfig::from_args(args)?,
@@ -8130,6 +8162,8 @@ mod tests {
             wal_recovery_fetch_partition_max_bytes: None,
             wal_recovery_fetch_response_max_bytes: None,
             wal_recovery_empty_fetch_retries: None,
+            wal_recovery_connect_timeout_ms: None,
+            wal_recovery_request_timeout_ms: None,
             host_ranges: None,
             timestamp_source: TimestampSourceKind::LogicalTso,
             hlc_max_offset_ms: 250,
@@ -8893,11 +8927,13 @@ mod tests {
     #[test]
     fn wal_recovery_read_policy_uses_defaults_environment_and_cli_precedence() {
         const CHILD: &str = "CRABKA_TEST_GRES_WAL_RECOVERY_READ_POLICY_CHILD";
-        const VARS: [&str; 4] = [
+        const VARS: [&str; 6] = [
             "CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT_MS",
             "CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES",
             "CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES",
             "CRABKA_GRES_WAL_RECOVERY_EMPTY_FETCH_RETRIES",
+            "CRABKA_GRES_WAL_RECOVERY_CONNECT_TIMEOUT_MS",
+            "CRABKA_GRES_WAL_RECOVERY_REQUEST_TIMEOUT_MS",
         ];
         if std::env::var_os(CHILD).is_none() {
             for mode in ["defaults", "environment"] {
@@ -8913,7 +8949,9 @@ mod tests {
                     child.env_remove(variable);
                 }
                 if mode == "environment" {
-                    for (variable, value) in VARS.into_iter().zip(["17", "18", "19", "20"]) {
+                    for (variable, value) in
+                        VARS.into_iter().zip(["17", "18", "19", "20", "21", "22"])
+                    {
                         child.env(variable, value);
                     }
                 }
@@ -8928,13 +8966,15 @@ mod tests {
             "--tenant=tenant-a",
         ];
         let expected = if std::env::var(CHILD).as_deref() == Ok("environment") {
-            (17, 18, 19, 20)
+            (17, 18, 19, 20, 21, 22)
         } else {
             (
                 crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT_MS,
                 crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES,
                 crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES,
                 crabka_gres_substrate::DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES,
+                crabka_gres_substrate::DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT_MS,
+                crabka_gres_substrate::DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT_MS,
             )
         };
         let config = SubstrateRuntimeConfig::from_args(
@@ -8949,12 +8989,16 @@ mod tests {
         assert_eq!(policy.fetch_partition_max_bytes(), expected.1);
         assert_eq!(policy.fetch_response_max_bytes(), expected.2);
         assert_eq!(policy.empty_fetch_retries(), expected.3);
+        assert_eq!(policy.connect_timeout(), Duration::from_millis(expected.4));
+        assert_eq!(policy.request_timeout(), Duration::from_millis(expected.5));
 
         let cli = <Cli as clap::Parser>::try_parse_from(base.into_iter().chain([
             "--wal-recovery-fetch-max-wait-ms=27",
             "--wal-recovery-fetch-partition-max-bytes=28",
             "--wal-recovery-fetch-response-max-bytes=29",
             "--wal-recovery-empty-fetch-retries=30",
+            "--wal-recovery-connect-timeout-ms=31",
+            "--wal-recovery-request-timeout-ms=32",
         ]))
         .expect("CLI policy");
         let policy = SubstrateRuntimeConfig::from_args(&cli.serve)
@@ -8965,6 +9009,8 @@ mod tests {
         assert_eq!(policy.fetch_partition_max_bytes(), 28);
         assert_eq!(policy.fetch_response_max_bytes(), 29);
         assert_eq!(policy.empty_fetch_retries(), 30);
+        assert_eq!(policy.connect_timeout(), Duration::from_millis(31));
+        assert_eq!(policy.request_timeout(), Duration::from_millis(32));
     }
 
     #[test]
@@ -8978,6 +9024,8 @@ mod tests {
             .env("CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES", "18")
             .env("CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES", "19")
             .env("CRABKA_GRES_WAL_RECOVERY_EMPTY_FETCH_RETRIES", "20")
+            .env("CRABKA_GRES_WAL_RECOVERY_CONNECT_TIMEOUT_MS", "21")
+            .env("CRABKA_GRES_WAL_RECOVERY_REQUEST_TIMEOUT_MS", "22")
             .status()
             .expect("child test");
 
@@ -8991,6 +9039,8 @@ mod tests {
             "--wal-recovery-fetch-partition-max-bytes=0",
             "--wal-recovery-fetch-response-max-bytes=0",
             "--wal-recovery-empty-fetch-retries=0",
+            "--wal-recovery-connect-timeout-ms=0",
+            "--wal-recovery-request-timeout-ms=0",
         ] {
             assert!(
                 Cli::try_parse_from([
@@ -9002,25 +9052,38 @@ mod tests {
                 .is_err()
             );
         }
-        assert!(
-            Cli::try_parse_from(["crabka-gres", "--wal-recovery-fetch-max-wait-ms=1"]).is_err()
-        );
+        for option in [
+            "--wal-recovery-connect-timeout-ms=1",
+            "--wal-recovery-request-timeout-ms=1",
+        ] {
+            assert!(Cli::try_parse_from(["crabka-gres", option]).is_err());
+        }
 
-        let mut programmatic = serve_args(Some("trust"), Vec::new());
-        programmatic.wal_recovery_fetch_max_wait_ms = Some(PositiveI32::new(1).expect("positive"));
-        let error =
-            SubstrateRuntimeConfig::from_args(&programmatic).expect_err("inert recovery policy");
-        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        for request_timeout in [false, true] {
+            let mut programmatic = serve_args(Some("trust"), Vec::new());
+            if request_timeout {
+                programmatic.wal_recovery_request_timeout_ms =
+                    Some(PositiveMillis::new(1).expect("positive"));
+            } else {
+                programmatic.wal_recovery_connect_timeout_ms =
+                    Some(PositiveMillis::new(1).expect("positive"));
+            }
+            let error = SubstrateRuntimeConfig::from_args(&programmatic)
+                .expect_err("inert recovery policy");
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        }
     }
 
     #[tokio::test]
     async fn wal_recovery_read_policy_validation_precedes_listener_bind() {
         const CHILD: &str = "CRABKA_TEST_GRES_WAL_RECOVERY_BIND_CHILD";
-        const VARS: [&str; 4] = [
+        const VARS: [&str; 6] = [
             "CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT_MS",
             "CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES",
             "CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES",
             "CRABKA_GRES_WAL_RECOVERY_EMPTY_FETCH_RETRIES",
+            "CRABKA_GRES_WAL_RECOVERY_CONNECT_TIMEOUT_MS",
+            "CRABKA_GRES_WAL_RECOVERY_REQUEST_TIMEOUT_MS",
         ];
         if std::env::var_os(CHILD).is_none() {
             let mut child = std::process::Command::new(std::env::current_exe().expect("test exe"));
@@ -9038,17 +9101,27 @@ mod tests {
         }
 
         let occupied = TcpListener::bind("127.0.0.1:0").await.expect("listener");
-        let mut args = serve_args(Some("trust"), Vec::new());
-        args.listen = occupied.local_addr().expect("address").to_string();
-        args.wal_recovery_empty_fetch_retries = Some(PositiveUsize::new(1).expect("positive"));
-        let error = run_serve(args).await.expect_err("invalid recovery policy");
-        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        for request_timeout in [false, true] {
+            let mut args = serve_args(Some("trust"), Vec::new());
+            args.listen = occupied.local_addr().expect("address").to_string();
+            if request_timeout {
+                args.wal_recovery_request_timeout_ms =
+                    Some(PositiveMillis::new(1).expect("positive"));
+            } else {
+                args.wal_recovery_connect_timeout_ms =
+                    Some(PositiveMillis::new(1).expect("positive"));
+            }
+            let error = run_serve(args).await.expect_err("invalid recovery policy");
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        }
     }
 
     #[test]
     fn wal_recovery_read_policy_reaches_shared_recovery_config_helper() {
         let policy = crabka_gres_substrate::RecoveryReadPolicy::new(31, 32, 33, 34)
-            .expect("distinctive policy");
+            .expect("distinctive policy")
+            .with_timeouts(35, 36)
+            .expect("distinctive timeouts");
         let mut config = SubstrateRuntimeConfig::from_args(&substrate_args())
             .expect("config")
             .expect("substrate config");
