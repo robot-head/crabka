@@ -241,7 +241,7 @@ async fn main() -> anyhow::Result<()> {
     )?;
 
     let args = Args::parse();
-    crabka_telemetry::profiling::serve_admin_from_env(&args.admin_listen_addr.to_string()).await?;
+    crabka_telemetry::profiling::serve_admin(args.admin_listen_addr, axum::Router::new()).await?;
 
     let crabka_schema_registry::cli::SecurityOutput {
         config: security,
@@ -544,6 +544,29 @@ mod tests {
         ("SCHEMA_REGISTRY_DEFAULT_COMPATIBILITY_LEVEL", None),
         ("SCHEMA_REGISTRY_DEFAULT_MODE", None),
     ];
+
+    #[test]
+    fn admin_address_cli_overrides_valid_and_invalid_environment() {
+        let _guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("environment lock");
+
+        for environment in ["127.0.0.1:9500", "not-an-address"] {
+            temp_env::with_var("CRABKA_ADMIN_LISTEN_ADDR", Some(environment), || {
+                let args = Args::try_parse_from([
+                    "crabka-schema-registry",
+                    "--bootstrap-servers=localhost:9092",
+                    "--admin-listen-addr=127.0.0.1:9600",
+                ])
+                .expect("valid CLI address overrides environment");
+                assert!(
+                    args.admin_listen_addr
+                        == "127.0.0.1:9600".parse().expect("parse expected address")
+                );
+            });
+        }
+    }
 
     #[test]
     fn runtime_cli_boundaries_precedence_and_defaults() {
