@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use axum::{
     Extension, Json, Router,
+    extract::Request,
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::post,
@@ -288,8 +289,20 @@ pub fn forward_router(state: Arc<AppState>) -> Router {
 async fn forward_handler(
     Extension(state): Extension<Arc<AppState>>,
     principal: Option<Extension<crabka_security::Principal>>,
-    Json(req): Json<ForwardRecord>,
+    request: Request,
 ) -> Response {
+    let Ok(body) = axum::body::to_bytes(
+        request.into_body(),
+        state.config.runtime.forward_max_body_bytes,
+    )
+    .await
+    else {
+        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+    };
+    let Ok(req) = serde_json::from_slice::<ForwardRecord>(&body) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+
     // When TLS is configured, the internal forward endpoint only accepts a
     // cert-authenticated peer (an mTLS principal must be present). Plaintext
     // mode (no TLS) skips this so existing non-TLS forwarding still works.
@@ -502,6 +515,53 @@ mod tests {
             .unwrap();
         let result: ForwardResult = serde_json::from_slice(&bytes).unwrap();
         (status, result)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn forward_handler_honors_configured_body_limit_above_axum_default() {
+        const DEDUP: &str = "__crabka_grpc_dedup_fh_body_limit";
+        let dir = TempDir::new().unwrap();
+        let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+            .await
+            .unwrap();
+        let bootstrap = broker.listen_addr().to_string();
+        let mut state = build_state(&bootstrap, DEDUP, None, Arc::new(DenyAllAuthorizer)).await;
+        let state_mut = Arc::get_mut(&mut state).unwrap();
+        let mut config = (*state_mut.config).clone();
+        config.runtime.forward_max_body_bytes = 4 * 1024 * 1024;
+        state_mut.config = Arc::new(config);
+
+        let mut record = forward_record("orders");
+        record.value = vec![255; 600_000];
+        let body = serde_json::to_vec(&record).unwrap();
+        assert2::assert!(body.len() > 2 * 1024 * 1024);
+        assert2::assert!(body.len() < 4 * 1024 * 1024);
+
+        let app = forward_router(state);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/internal/v1/forward")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert2::assert!(response.status() == StatusCode::FORBIDDEN);
+
+        let limited_state = build_state(&bootstrap, DEDUP, None, Arc::new(DenyAllAuthorizer)).await;
+        let response = forward_router(limited_state)
+            .oneshot(
+                Request::post("/internal/v1/forward")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert2::assert!(response.status() == StatusCode::PAYLOAD_TOO_LARGE);
+        broker.shutdown().await;
     }
 
     /// The TLS-required 403 gate reports the `(-1, -1)` sentinel coordinates —

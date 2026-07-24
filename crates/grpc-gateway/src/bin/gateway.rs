@@ -177,6 +177,9 @@ struct Args {
     /// Maximum accepted body size for generic HTTP produce requests.
     #[arg(long, env = "CRABKA_GATEWAY_PRODUCE_MAX_BODY_BYTES")]
     produce_max_body_bytes: Option<PositiveU64>,
+    /// Maximum accepted body size for internal forwarding requests.
+    #[arg(long, env = "CRABKA_GATEWAY_FORWARD_MAX_BODY_BYTES")]
+    forward_max_body_bytes: Option<PositiveU64>,
     #[arg(long, env = "CRABKA_GATEWAY_SCHEMA_REGISTRY_LATEST_CACHE_TTL_MS")]
     schema_registry_latest_cache_ttl_ms: Option<PositiveU64>,
     #[arg(long, env = "CRABKA_GATEWAY_SCHEMA_REGISTRY_FRAME_RAW")]
@@ -458,6 +461,10 @@ impl Args {
         if let Some(value) = self.produce_max_body_bytes {
             runtime.produce_max_body_bytes = usize::try_from(value.into_value())
                 .context("--produce-max-body-bytes exceeds this platform's usize")?;
+        }
+        if let Some(value) = self.forward_max_body_bytes {
+            runtime.forward_max_body_bytes = usize::try_from(value.into_value())
+                .context("--forward-max-body-bytes exceeds this platform's usize")?;
         }
         if let Some(value) = self.schema_registry_latest_cache_ttl_ms {
             runtime.schema_registry_latest_cache_ttl_ms = value.into_value();
@@ -857,6 +864,7 @@ mod tests {
             "--ownership-warmup-empty-polls=0",
             "--readiness-poll-interval-ms=0",
             "--produce-max-body-bytes=0",
+            "--forward-max-body-bytes=0",
             "--schema-registry-latest-cache-ttl-ms=0",
             "--bearer-allowable-clock-skew-ms=-1",
         ] {
@@ -884,6 +892,7 @@ mod tests {
             "--ownership-warmup-empty-polls=3",
             "--readiness-poll-interval-ms=251",
             "--produce-max-body-bytes=3145728",
+            "--forward-max-body-bytes=3145727",
             "--schema-registry-latest-cache-ttl-ms=5001",
             "--schema-registry-frame-raw=true",
             "--bearer-allowable-clock-skew-ms=0",
@@ -902,6 +911,7 @@ mod tests {
                     ownership_warmup_empty_polls: 3,
                     readiness_poll_interval_ms: 251,
                     produce_max_body_bytes: 3_145_728,
+                    forward_max_body_bytes: 3_145_727,
                     schema_registry_latest_cache_ttl_ms: 5_001,
                     schema_registry_frame_raw: true,
                 }
@@ -913,6 +923,7 @@ mod tests {
             [
                 ("CRABKA_GATEWAY_CONSUMER_POLL_TIMEOUT_MS", None::<&str>),
                 ("CRABKA_GATEWAY_PRODUCE_MAX_BODY_BYTES", None::<&str>),
+                ("CRABKA_GATEWAY_FORWARD_MAX_BODY_BYTES", None::<&str>),
                 ("CRABKA_GATEWAY_SCHEMA_REGISTRY_FRAME_RAW", None::<&str>),
             ],
             || {
@@ -929,6 +940,7 @@ mod tests {
                     [
                         ("CRABKA_GATEWAY_CONSUMER_POLL_TIMEOUT_MS", Some("701")),
                         ("CRABKA_GATEWAY_PRODUCE_MAX_BODY_BYTES", Some("3145729")),
+                        ("CRABKA_GATEWAY_FORWARD_MAX_BODY_BYTES", Some("3145728")),
                     ],
                     || {
                         let from_env = Args::try_parse_from([
@@ -940,6 +952,7 @@ mod tests {
                         let from_env = from_env.runtime_config().unwrap();
                         assert!(from_env.consumer_poll_timeout_ms == 701);
                         assert!(from_env.produce_max_body_bytes == 3_145_729);
+                        assert!(from_env.forward_max_body_bytes == 3_145_728);
 
                         let from_cli = Args::try_parse_from([
                             "crabka-grpc-gateway",
@@ -947,11 +960,13 @@ mod tests {
                             "--advertised-addr=localhost:9500",
                             "--consumer-poll-timeout-ms=702",
                             "--produce-max-body-bytes=3145730",
+                            "--forward-max-body-bytes=3145729",
                         ])
                         .expect("parse CLI over environment");
                         let from_cli = from_cli.runtime_config().unwrap();
                         assert!(from_cli.consumer_poll_timeout_ms == 702);
                         assert!(from_cli.produce_max_body_bytes == 3_145_730);
+                        assert!(from_cli.forward_max_body_bytes == 3_145_729);
                     },
                 );
             },

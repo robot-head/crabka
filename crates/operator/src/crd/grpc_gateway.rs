@@ -157,6 +157,9 @@ pub struct GatewayTuning {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
     pub produce_max_body_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub forward_max_body_bytes: Option<u64>,
 }
 
 /// Schema Registry settings for structured records.

@@ -112,6 +112,7 @@ pub struct GatewayRuntimeConfig {
     pub ownership_warmup_empty_polls: u32,
     pub readiness_poll_interval_ms: u64,
     pub produce_max_body_bytes: usize,
+    pub forward_max_body_bytes: usize,
     pub schema_registry_latest_cache_ttl_ms: u64,
     pub schema_registry_frame_raw: bool,
 }
@@ -128,6 +129,7 @@ impl Default for GatewayRuntimeConfig {
             ownership_warmup_empty_polls: 2,
             readiness_poll_interval_ms: 250,
             produce_max_body_bytes: 2_097_152,
+            forward_max_body_bytes: 2_097_152,
             schema_registry_latest_cache_ttl_ms: 5_000,
             schema_registry_frame_raw: false,
         }
@@ -202,6 +204,7 @@ mod tests {
                     ownership_warmup_empty_polls: 2,
                     readiness_poll_interval_ms: 250,
                     produce_max_body_bytes: 2_097_152,
+                    forward_max_body_bytes: 2_097_152,
                     schema_registry_latest_cache_ttl_ms: 5_000,
                     schema_registry_frame_raw: false,
                 }
