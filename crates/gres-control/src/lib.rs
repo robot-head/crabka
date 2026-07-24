@@ -20,4 +20,7 @@ pub use record::{
     decode_tenant_config_record, encode_registry_record, encode_tenant_config_record,
     tenant_config_topic, tenant_registry_key,
 };
-pub use registry::{InMemoryRegistryStore, Registry, TenantRegistryStore, fold};
+pub use registry::{
+    InMemoryRegistryStore, PositiveI32, PositiveMillis, Registry, RegistryPolicy,
+    RegistryReplicationFactor, TenantRegistryStore, fold,
+};
