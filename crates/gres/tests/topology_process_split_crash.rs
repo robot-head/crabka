@@ -2101,7 +2101,7 @@ async fn register_hash_split_layout(system: &ProcessHarness) {
     let mut registry = Registry::connect(system.bootstrap())
         .await
         .expect("hash layout registry");
-    registry.ensure_topic(1).await.expect("registry topic");
+    registry.ensure_topic().await.expect("registry topic");
     let mut tenant = registry
         .get(system.tenant())
         .await
@@ -4825,7 +4825,7 @@ async fn restart_split_source(input: RestartSplitSource<'_>) -> RestartSplitOutc
     let mut fresh = Registry::connect(input.system.bootstrap())
         .await
         .expect("registry restart");
-    fresh.ensure_topic(1).await.expect("registry topic restart");
+    fresh.ensure_topic().await.expect("registry topic restart");
     *input.control = Arc::new(BrokerControl {
         registry: Mutex::new(fresh),
         faults: Arc::clone(input.faults),
@@ -4870,7 +4870,7 @@ async fn prepare_split_control(
     let mut registry = Registry::connect(system.bootstrap())
         .await
         .expect("registry");
-    registry.ensure_topic(1).await.expect("registry topic");
+    registry.ensure_topic().await.expect("registry topic");
     let faults = Arc::new(OneShotControlFaults::default());
     let control: GresControlHandle = Arc::new(BrokerControl {
         registry: Mutex::new(registry),
