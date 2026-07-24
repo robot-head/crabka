@@ -315,12 +315,13 @@ fn next_pgdog_transition_requeue(
     direct_bootstrap_grace_ms: u64,
     fallback_ms: u64,
 ) -> Duration {
+    let fallback = Duration::from_millis(fallback_ms);
     grace_deadlines
         .flat_map(|deadline| [deadline, deadline.saturating_add(direct_bootstrap_grace_ms)])
         .filter(|deadline| *deadline > now)
         .map(|deadline| Duration::from_millis(deadline.saturating_sub(now).max(1)))
         .min()
-        .unwrap_or(Duration::from_millis(fallback_ms))
+        .map_or(fallback, |boundary| boundary.min(fallback))
 }
 
 fn pgdog_transition_requeue_for_tenants(
@@ -1497,6 +1498,14 @@ mod tests {
         assert!(
             next_pgdog_transition_requeue([].into_iter(), 1_000, 7_000, 1_234)
                 == Duration::from_millis(1_234)
+        );
+    }
+
+    #[test]
+    fn pgdog_requeue_polls_before_a_later_grace_boundary() {
+        assert!(
+            next_pgdog_transition_requeue([601_000].into_iter(), 1_000, 7_000, 1_000)
+                == Duration::from_secs(1)
         );
     }
 

@@ -239,13 +239,35 @@ mod tests {
             return;
         }
 
-        let parsed = Wrap::parse_from(["bin", "--pgdog-reload-attempts", "10"]);
+        let environment = Wrap::parse_from(["bin"]);
+        assert!(environment.cfg.pgdog_reload_attempts.into_value() == 4);
+        assert!(environment.cfg.pgdog_reload_backoff_ms.into_value() == 5);
+        assert!(environment.cfg.pgdog_reload_requeue_ms.into_value() == 6);
+        assert!(environment.cfg.pgdog_admin_timeout_ms.into_value() == 7);
+        assert!(environment.cfg.pgdog_transition_poll_ms.into_value() == 8);
+        assert!(environment.cfg.controller_error_requeue_ms.into_value() == 9);
+
+        let parsed = Wrap::parse_from([
+            "bin",
+            "--pgdog-reload-attempts",
+            "10",
+            "--pgdog-reload-backoff-ms",
+            "11",
+            "--pgdog-reload-requeue-ms",
+            "12",
+            "--pgdog-admin-timeout-ms",
+            "13",
+            "--pgdog-transition-poll-ms",
+            "14",
+            "--controller-error-requeue-ms",
+            "15",
+        ]);
         assert!(parsed.cfg.pgdog_reload_attempts.into_value() == 10);
-        assert!(parsed.cfg.pgdog_reload_backoff_ms.into_value() == 5);
-        assert!(parsed.cfg.pgdog_reload_requeue_ms.into_value() == 6);
-        assert!(parsed.cfg.pgdog_admin_timeout_ms.into_value() == 7);
-        assert!(parsed.cfg.pgdog_transition_poll_ms.into_value() == 8);
-        assert!(parsed.cfg.controller_error_requeue_ms.into_value() == 9);
+        assert!(parsed.cfg.pgdog_reload_backoff_ms.into_value() == 11);
+        assert!(parsed.cfg.pgdog_reload_requeue_ms.into_value() == 12);
+        assert!(parsed.cfg.pgdog_admin_timeout_ms.into_value() == 13);
+        assert!(parsed.cfg.pgdog_transition_poll_ms.into_value() == 14);
+        assert!(parsed.cfg.controller_error_requeue_ms.into_value() == 15);
     }
 
     #[test]

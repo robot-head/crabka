@@ -1,7 +1,7 @@
 use std::{
     net::IpAddr,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use assert2::assert;
@@ -27,6 +27,7 @@ use shared::{MockRule, MockState, fixture_ctx, json_response, mock_client};
 
 #[derive(Debug)]
 struct FakePgdogAdmin {
+    call_times: Mutex<Vec<Instant>>,
     delay: Duration,
     outcomes: Mutex<Vec<bool>>,
     requests: Mutex<Vec<Vec<PgdogReloadRequest>>>,
@@ -35,6 +36,7 @@ struct FakePgdogAdmin {
 impl FakePgdogAdmin {
     fn new(outcomes: Vec<bool>) -> Arc<Self> {
         Arc::new(Self {
+            call_times: Mutex::new(Vec::new()),
             delay: Duration::ZERO,
             outcomes: Mutex::new(outcomes),
             requests: Mutex::new(Vec::new()),
@@ -43,6 +45,7 @@ impl FakePgdogAdmin {
 
     fn with_delay(outcomes: Vec<bool>, delay: Duration) -> Arc<Self> {
         Arc::new(Self {
+            call_times: Mutex::new(Vec::new()),
             delay,
             outcomes: Mutex::new(outcomes),
             requests: Mutex::new(Vec::new()),
@@ -52,6 +55,10 @@ impl FakePgdogAdmin {
     fn requests(&self) -> Vec<Vec<PgdogReloadRequest>> {
         self.requests.lock().unwrap().clone()
     }
+
+    fn call_times(&self) -> Vec<Instant> {
+        self.call_times.lock().unwrap().clone()
+    }
 }
 
 #[async_trait::async_trait]
@@ -60,6 +67,7 @@ impl PgdogAdminLike for FakePgdogAdmin {
         &self,
         requests: &[PgdogReloadRequest],
     ) -> Result<bool, PgdogAdminError> {
+        self.call_times.lock().unwrap().push(Instant::now());
         tokio::time::sleep(self.delay).await;
         self.requests.lock().unwrap().push(requests.to_vec());
         Ok(self.outcomes.lock().unwrap().remove(0))
@@ -1182,7 +1190,7 @@ async fn stale_pgdog_admin_view_requeues_without_confirming_hash() {
         fixture_ctx(mock_client(&state, "ns"), "ns").with_pgdog_admin_for_test(admin.clone());
     let config = Arc::get_mut(&mut context.config).expect("unique config");
     config.pgdog_reload_attempts = "2".parse().expect("positive attempts");
-    config.pgdog_reload_backoff_ms = "1".parse().expect("positive backoff");
+    config.pgdog_reload_backoff_ms = "150".parse().expect("positive backoff");
     config.pgdog_reload_requeue_ms = "1234".parse().expect("positive requeue");
     let ctx = Arc::new(context);
 
@@ -1193,6 +1201,10 @@ async fn stale_pgdog_admin_view_requeues_without_confirming_hash() {
             == kube::runtime::controller::Action::requeue(std::time::Duration::from_millis(1_234))
     );
     assert!(admin.requests().len() == 2);
+    let call_times = admin.call_times();
+    let retry_delay = call_times[1].duration_since(call_times[0]);
+    assert!(retry_delay >= Duration::from_millis(150));
+    assert!(retry_delay < Duration::from_secs(1));
     assert!(state.remaining_rules() == 0);
     let observed = state.take_observed();
     assert!(
