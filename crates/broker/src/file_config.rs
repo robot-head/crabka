@@ -9,7 +9,7 @@ use std::{net::SocketAddr, sync::Arc};
 
 use crabka_security::ListenerProtocol;
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::config::ListenerSpec;
 
@@ -48,6 +48,10 @@ pub enum FileConfigError {
 /// than refuse to start.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema, PartialEq)]
 pub struct FileConfig {
+    /// Operational runtime policy. Absent values retain the effective CLI
+    /// setting or the broker default.
+    #[serde(default)]
+    pub runtime: Option<RuntimeFileConfig>,
     pub broker_id: Option<i32>,
     pub log_dir: Option<String>,
     /// Additional JBOD data directories (KIP-113). Maps to
@@ -190,6 +194,130 @@ pub struct FileConfig {
     /// Absent → secure default (enabled, standard internal topic name).
     #[serde(default)]
     pub audit: Option<FileAuditConfig>,
+}
+
+/// Validated operational policy loaded from `[runtime]`.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeFileConfig {
+    pub startup_leader_wait_timeout_ms: Option<u64>,
+    pub self_registration_backoff_min_ms: Option<u64>,
+    pub self_registration_backoff_max_ms: Option<u64>,
+    pub observer_poll_interval_ms: Option<u64>,
+    pub audit_spool_replay_interval_ms: Option<u64>,
+    pub audit_stats_poll_interval_ms: Option<u64>,
+    pub audit_partition_wait_timeout_ms: Option<u64>,
+    pub liveness_tick_interval_ms: Option<u64>,
+    pub gauge_poll_interval_ms: Option<u64>,
+    pub isr_scan_interval_ms: Option<u64>,
+    pub cleaner_interval_ms: Option<u64>,
+    pub future_log_move_retry_backoff_ms: Option<u64>,
+    pub client_metrics_eviction_tick_ms: Option<u64>,
+    pub client_metrics_stale_floor_ms: Option<u64>,
+    pub client_metrics_default_interval_ms: Option<i32>,
+    pub client_metrics_telemetry_max_bytes: Option<i32>,
+    pub client_metrics_prom_snapshot_ttl_ms: Option<u64>,
+    pub rlmm_reconcile_tick_ms: Option<u64>,
+    pub rlmm_bootstrap_backoff_initial_ms: Option<u64>,
+    pub rlmm_bootstrap_backoff_max_ms: Option<u64>,
+    pub connection_creation_throttle_max_ms: Option<u64>,
+    pub opa_http_timeout_ms: Option<u64>,
+    pub oauth_jwks_http_timeout_ms: Option<u64>,
+    pub auto_join_retry_backoff_ms: Option<u64>,
+    pub replication_fetch_max_bytes: Option<i32>,
+    pub replication_fetch_max_wait_ms: Option<i32>,
+    pub replication_fetch_min_bytes: Option<i32>,
+    pub replication_throttle_exhausted_backoff_ms: Option<u64>,
+    pub replication_send_error_backoff_ms: Option<u64>,
+    pub replication_unknown_topic_retry_delay_ms: Option<u64>,
+    pub replication_epoch_fence_backoff_ms: Option<u64>,
+    pub replication_unexpected_error_backoff_ms: Option<u64>,
+    pub replication_reconnect_initial_delay_ms: Option<u64>,
+    pub replication_reconnect_delay_cap_ms: Option<u64>,
+    pub coordinator_session_expiry_tick_ms: Option<u64>,
+    pub coordinator_shutdown_ack_timeout_ms: Option<u64>,
+    pub consumer_group_session_timeout_ms: Option<u64>,
+    pub consumer_group_heartbeat_interval_ms: Option<u64>,
+    pub consumer_group_min_session_timeout_ms: Option<u64>,
+    pub consumer_group_max_session_timeout_ms: Option<u64>,
+    pub consumer_group_min_heartbeat_interval_ms: Option<u64>,
+    pub consumer_group_max_heartbeat_interval_ms: Option<u64>,
+    pub consumer_group_max_size: Option<usize>,
+    pub classic_group_initial_rebalance_delay_ms: Option<u64>,
+    pub sync_group_follower_wait_ms: Option<u64>,
+    pub unclean_recovery_aggressive_deadline_ms: Option<u64>,
+    pub unclean_recovery_balanced_deadline_ms: Option<u64>,
+    pub operator_recovery_deadline_ms: Option<u64>,
+    pub quota_throttle_max_ms: Option<u64>,
+    pub self_registration_max_attempts: Option<u32>,
+    pub observer_fetch_max_bytes: Option<u32>,
+    pub audit_event_queue_capacity: Option<usize>,
+    pub audit_tail_window_offsets: Option<i64>,
+    pub audit_tail_read_max_bytes: Option<usize>,
+    pub offsets_topic_metadata_wait_timeout_ms: Option<u64>,
+    pub client_metrics_stale_push_intervals: Option<u32>,
+    pub client_metrics_otlp_queue_capacity: Option<usize>,
+    pub coordinator_actor_mailbox_capacity: Option<usize>,
+    pub unclean_recovery_queue_capacity: Option<usize>,
+    pub share_recovery_read_max_bytes: Option<usize>,
+    pub share_session_cache_max_when_unlimited: Option<usize>,
+    pub socket_request_max_bytes: Option<usize>,
+    pub sendfile_min_bytes: Option<usize>,
+    pub socket_send_buffer_bytes: Option<usize>,
+    pub socket_receive_buffer_bytes: Option<usize>,
+    pub acl_max_principal_bytes: Option<usize>,
+    pub acl_max_resource_name_bytes: Option<usize>,
+    pub telemetry_max_decompression_ratio: Option<usize>,
+    pub telemetry_decompressed_output_floor_bytes: Option<usize>,
+    pub telemetry_decompressed_output_ceiling_bytes: Option<usize>,
+    pub inter_broker_server_name: Option<String>,
+    pub producer_id_expiration_ms: Option<i64>,
+    pub producer_id_expiration_scan_interval_ms: Option<u64>,
+    pub max_produce_group: Option<usize>,
+    pub partition_writer_queue_depth: Option<usize>,
+    pub default_min_insync_replicas: Option<i32>,
+    pub future_log_move_read_chunk_bytes: Option<usize>,
+    pub share_state_num_partitions: Option<i32>,
+    pub transaction_state_num_partitions: Option<i32>,
+    pub transaction_min_timeout_ms: Option<i32>,
+    pub transaction_max_timeout_ms: Option<i32>,
+    pub partition_disk_scan_interval_secs: Option<u64>,
+    pub observer_lag_bound: Option<u64>,
+    pub heartbeat_interval_ms: Option<u64>,
+    pub heartbeat_timeout_ms: Option<u64>,
+    pub replica_lag_time_max_ms: Option<u64>,
+    pub controller_election_timeout_ms: Option<u64>,
+    pub controller_heartbeat_interval_ms: Option<u64>,
+    pub controlled_shutdown_drain_timeout_ms: Option<u64>,
+    pub metadata_max_bytes_between_snapshots: Option<u64>,
+    pub metadata_max_snapshot_interval_ms: Option<u64>,
+    pub metadata_snapshot_interval_records: Option<u64>,
+    pub txn_abort_cleanup_interval_ms: Option<u64>,
+    pub leader_imbalance_check_interval_secs: Option<u64>,
+    pub leader_imbalance_per_broker_percentage: Option<u32>,
+    pub tls_reload_interval_ms: Option<u64>,
+    pub max_incremental_fetch_session_cache_slots: Option<usize>,
+    pub max_connections: Option<usize>,
+    pub max_connections_per_ip: Option<usize>,
+    pub delegation_token_max_lifetime_ms: Option<i64>,
+    pub delegation_token_expiry_check_interval_ms: Option<i64>,
+    pub delegation_token_default_renew_period_ms: Option<i64>,
+    pub remote_log_manager_interval_ms: Option<u64>,
+
+    pub share_group_enable: Option<bool>,
+    pub share_group_session_timeout_ms: Option<u64>,
+    pub share_group_heartbeat_interval_ms: Option<u64>,
+    pub share_group_record_lock_duration_ms: Option<u64>,
+    pub share_group_max_delivery_attempts: Option<i16>,
+    pub share_group_max_inflight_records: Option<i32>,
+    pub share_group_isolation_level: Option<String>,
+    pub streams_group_session_timeout_ms: Option<u64>,
+    pub streams_group_heartbeat_interval_ms: Option<u64>,
+    pub streams_group_num_standby_replicas: Option<i32>,
+    pub streams_group_num_warmup_replicas: Option<i32>,
+    pub streams_group_acceptable_recovery_lag: Option<i64>,
+    pub streams_group_task_offset_interval_ms: Option<u64>,
+    pub streams_group_assignor: Option<String>,
 }
 
 /// TOML shape of `[remote_storage]`. Maps to
@@ -1192,9 +1320,9 @@ fn apply_listener_settings(
 fn apply_delegation_tokens(
     delegation: Option<&FileDelegationTokenConfig>,
     cfg: &mut crate::config::BrokerConfig,
-) {
+) -> Result<(), FileConfigError> {
     let Some(delegation) = delegation else {
-        return;
+        return Ok(());
     };
     if cfg.delegation_token_secret_key.is_none()
         && let Some(key) = delegation.secret_key.clone()
@@ -1202,14 +1330,18 @@ fn apply_delegation_tokens(
         cfg.delegation_token_secret_key = Some(crabka_security::SecretBytes::new(key.into_bytes()));
     }
     if let Some(milliseconds) = delegation.max_lifetime_ms {
-        cfg.delegation_token_max_lifetime_ms = milliseconds;
+        cfg.delegation_token_max_lifetime_ms =
+            positive_i64("delegation_token.max_lifetime_ms", milliseconds)?;
     }
     if let Some(milliseconds) = delegation.expiry_check_interval_ms {
-        cfg.delegation_token_expiry_check_interval_ms = milliseconds;
+        cfg.delegation_token_expiry_check_interval_ms =
+            positive_i64("delegation_token.expiry_check_interval_ms", milliseconds)?;
     }
     if let Some(milliseconds) = delegation.default_renew_period_ms {
-        cfg.delegation_token_default_renew_period_ms = milliseconds;
+        cfg.delegation_token_default_renew_period_ms =
+            positive_i64("delegation_token.default_renew_period_ms", milliseconds)?;
     }
+    Ok(())
 }
 
 fn apply_config_tail(
@@ -1318,6 +1450,772 @@ fn apply_config_tail(
     Ok(())
 }
 
+fn invalid_runtime_value(name: &str, error: impl std::fmt::Display) -> FileConfigError {
+    FileConfigError::InvalidConfig(format!("{name}: {error}"))
+}
+
+fn positive_u64(name: &str, value: u64) -> Result<u64, FileConfigError> {
+    crate::config_value::PositiveMillis::new(value)
+        .map(crate::config_value::PositiveMillis::into_value)
+        .map_err(|error| invalid_runtime_value(name, error))
+}
+
+fn positive_i32(name: &str, value: i32) -> Result<i32, FileConfigError> {
+    crate::config_value::PositiveI32::new(value)
+        .map(crate::config_value::PositiveI32::into_value)
+        .map_err(|error| invalid_runtime_value(name, error))
+}
+
+fn positive_i64(name: &str, value: i64) -> Result<i64, FileConfigError> {
+    crate::config_value::PositiveI64::new(value)
+        .map(crate::config_value::PositiveI64::into_value)
+        .map_err(|error| invalid_runtime_value(name, error))
+}
+
+fn positive_usize(name: &str, value: usize) -> Result<usize, FileConfigError> {
+    crate::config_value::PositiveCount::new(value)
+        .map(crate::config_value::PositiveCount::into_value)
+        .map_err(|error| invalid_runtime_value(name, error))
+}
+
+fn positive_u32(name: &str, value: u32) -> Result<u32, FileConfigError> {
+    let count = usize::try_from(value).map_err(|error| invalid_runtime_value(name, error))?;
+    positive_usize(name, count)?;
+    Ok(value)
+}
+
+fn positive_i16(name: &str, value: i16) -> Result<i16, FileConfigError> {
+    positive_i32(name, i32::from(value))?;
+    Ok(value)
+}
+
+fn percentage(name: &str, value: u32) -> Result<u32, FileConfigError> {
+    crate::config_value::Percentage::new(value)
+        .map(crate::config_value::Percentage::into_value)
+        .map_err(|error| invalid_runtime_value(name, error))
+}
+
+macro_rules! apply_runtime_fields {
+    ($runtime:ident, $cfg:ident, $defaults:ident) => {{
+        let runtime = $runtime;
+        let cfg = $cfg;
+        let defaults = $defaults;
+        macro_rules! set_duration {
+            ($field:ident, $target:expr, $default:expr) => {
+                if let Some(value) = runtime.$field {
+                    let value = positive_u64(stringify!($field), value)?;
+                    if $target == $default {
+                        $target = std::time::Duration::from_millis(value);
+                    }
+                }
+            };
+        }
+        macro_rules! set_i32 {
+            ($field:ident, $target:expr, $default:expr) => {
+                if let Some(value) = runtime.$field {
+                    let value = positive_i32(stringify!($field), value)?;
+                    if $target == $default {
+                        $target = value;
+                    }
+                }
+            };
+        }
+        macro_rules! set_i64 {
+            ($field:ident, $target:expr, $default:expr) => {
+                if let Some(value) = runtime.$field {
+                    let value = positive_i64(stringify!($field), value)?;
+                    if $target == $default {
+                        $target = value;
+                    }
+                }
+            };
+        }
+        macro_rules! set_usize {
+            ($field:ident, $target:expr, $default:expr) => {
+                if let Some(value) = runtime.$field {
+                    let value = positive_usize(stringify!($field), value)?;
+                    if $target == $default {
+                        $target = value;
+                    }
+                }
+            };
+        }
+        macro_rules! set_u32 {
+            ($field:ident, $target:expr, $default:expr) => {
+                if let Some(value) = runtime.$field {
+                    let value = positive_u32(stringify!($field), value)?;
+                    if $target == $default {
+                        $target = value;
+                    }
+                }
+            };
+        }
+        macro_rules! set_positive_u64 {
+            ($field:ident, $target:expr, $default:expr) => {
+                if let Some(value) = runtime.$field {
+                    let value = positive_u64(stringify!($field), value)?;
+                    if $target == $default {
+                        $target = value;
+                    }
+                }
+            };
+        }
+        macro_rules! set_plain {
+            ($field:ident, $target:expr, $default:expr) => {
+                if let Some(value) = runtime.$field
+                    && $target == $default
+                {
+                    $target = value;
+                }
+            };
+        }
+
+        set_duration!(
+            startup_leader_wait_timeout_ms,
+            cfg.startup_leader_wait_timeout,
+            defaults.startup_leader_wait_timeout
+        );
+        set_duration!(
+            self_registration_backoff_min_ms,
+            cfg.self_registration_backoff_min,
+            defaults.self_registration_backoff_min
+        );
+        set_duration!(
+            self_registration_backoff_max_ms,
+            cfg.self_registration_backoff_max,
+            defaults.self_registration_backoff_max
+        );
+        set_duration!(
+            observer_poll_interval_ms,
+            cfg.observer_poll_interval,
+            defaults.observer_poll_interval
+        );
+        set_duration!(
+            audit_spool_replay_interval_ms,
+            cfg.audit_spool_replay_interval,
+            defaults.audit_spool_replay_interval
+        );
+        set_duration!(
+            audit_stats_poll_interval_ms,
+            cfg.audit_stats_poll_interval,
+            defaults.audit_stats_poll_interval
+        );
+        set_duration!(
+            audit_partition_wait_timeout_ms,
+            cfg.audit_partition_wait_timeout,
+            defaults.audit_partition_wait_timeout
+        );
+        set_duration!(
+            liveness_tick_interval_ms,
+            cfg.liveness_tick_interval,
+            defaults.liveness_tick_interval
+        );
+        set_duration!(
+            gauge_poll_interval_ms,
+            cfg.gauge_poll_interval,
+            defaults.gauge_poll_interval
+        );
+        set_duration!(
+            isr_scan_interval_ms,
+            cfg.isr_scan_interval,
+            defaults.isr_scan_interval
+        );
+        set_duration!(
+            cleaner_interval_ms,
+            cfg.cleaner_interval,
+            defaults.cleaner_interval
+        );
+        set_duration!(
+            future_log_move_retry_backoff_ms,
+            cfg.future_log_move_retry_backoff,
+            defaults.future_log_move_retry_backoff
+        );
+        set_duration!(
+            client_metrics_eviction_tick_ms,
+            cfg.client_metrics_eviction_tick,
+            defaults.client_metrics_eviction_tick
+        );
+        set_duration!(
+            client_metrics_stale_floor_ms,
+            cfg.client_metrics_stale_floor,
+            defaults.client_metrics_stale_floor
+        );
+        set_i32!(
+            client_metrics_default_interval_ms,
+            cfg.client_metrics_default_interval_ms,
+            defaults.client_metrics_default_interval_ms
+        );
+        set_i32!(
+            client_metrics_telemetry_max_bytes,
+            cfg.client_metrics_telemetry_max_bytes,
+            defaults.client_metrics_telemetry_max_bytes
+        );
+        set_duration!(
+            client_metrics_prom_snapshot_ttl_ms,
+            cfg.client_metrics_prom_snapshot_ttl,
+            defaults.client_metrics_prom_snapshot_ttl
+        );
+        set_duration!(
+            rlmm_reconcile_tick_ms,
+            cfg.rlmm_reconcile_tick,
+            defaults.rlmm_reconcile_tick
+        );
+        set_duration!(
+            rlmm_bootstrap_backoff_initial_ms,
+            cfg.rlmm_bootstrap_backoff_initial,
+            defaults.rlmm_bootstrap_backoff_initial
+        );
+        set_duration!(
+            rlmm_bootstrap_backoff_max_ms,
+            cfg.rlmm_bootstrap_backoff_max,
+            defaults.rlmm_bootstrap_backoff_max
+        );
+        set_duration!(
+            connection_creation_throttle_max_ms,
+            cfg.connection_creation_throttle_max,
+            defaults.connection_creation_throttle_max
+        );
+        set_duration!(
+            opa_http_timeout_ms,
+            cfg.opa_http_timeout,
+            defaults.opa_http_timeout
+        );
+        set_duration!(
+            oauth_jwks_http_timeout_ms,
+            cfg.oauth_jwks_http_timeout,
+            defaults.oauth_jwks_http_timeout
+        );
+        set_duration!(
+            auto_join_retry_backoff_ms,
+            cfg.auto_join_retry_backoff,
+            defaults.auto_join_retry_backoff
+        );
+        set_i32!(
+            replication_fetch_max_bytes,
+            cfg.replication.fetch_max_bytes,
+            defaults.replication.fetch_max_bytes
+        );
+        set_i32!(
+            replication_fetch_max_wait_ms,
+            cfg.replication.fetch_max_wait_ms,
+            defaults.replication.fetch_max_wait_ms
+        );
+        set_i32!(
+            replication_fetch_min_bytes,
+            cfg.replication.fetch_min_bytes,
+            defaults.replication.fetch_min_bytes
+        );
+        set_duration!(
+            replication_throttle_exhausted_backoff_ms,
+            cfg.replication.throttle_exhausted_backoff,
+            defaults.replication.throttle_exhausted_backoff
+        );
+        set_duration!(
+            replication_send_error_backoff_ms,
+            cfg.replication.send_error_backoff,
+            defaults.replication.send_error_backoff
+        );
+        set_duration!(
+            replication_unknown_topic_retry_delay_ms,
+            cfg.replication.unknown_topic_retry_delay,
+            defaults.replication.unknown_topic_retry_delay
+        );
+        set_duration!(
+            replication_epoch_fence_backoff_ms,
+            cfg.replication.epoch_fence_backoff,
+            defaults.replication.epoch_fence_backoff
+        );
+        set_duration!(
+            replication_unexpected_error_backoff_ms,
+            cfg.replication.unexpected_error_backoff,
+            defaults.replication.unexpected_error_backoff
+        );
+        set_duration!(
+            replication_reconnect_initial_delay_ms,
+            cfg.replication.reconnect_initial_delay,
+            defaults.replication.reconnect_initial_delay
+        );
+        set_duration!(
+            replication_reconnect_delay_cap_ms,
+            cfg.replication.reconnect_delay_cap,
+            defaults.replication.reconnect_delay_cap
+        );
+        set_duration!(
+            coordinator_session_expiry_tick_ms,
+            cfg.coordinator_session_expiry_tick,
+            defaults.coordinator_session_expiry_tick
+        );
+        set_duration!(
+            coordinator_shutdown_ack_timeout_ms,
+            cfg.coordinator_shutdown_ack_timeout,
+            defaults.coordinator_shutdown_ack_timeout
+        );
+        set_duration!(
+            consumer_group_session_timeout_ms,
+            cfg.next_gen_consumer_group.session_timeout,
+            defaults.next_gen_consumer_group.session_timeout
+        );
+        set_duration!(
+            consumer_group_heartbeat_interval_ms,
+            cfg.next_gen_consumer_group.heartbeat_interval,
+            defaults.next_gen_consumer_group.heartbeat_interval
+        );
+        set_duration!(
+            consumer_group_min_session_timeout_ms,
+            cfg.next_gen_consumer_group.min_session_timeout,
+            defaults.next_gen_consumer_group.min_session_timeout
+        );
+        set_duration!(
+            consumer_group_max_session_timeout_ms,
+            cfg.next_gen_consumer_group.max_session_timeout,
+            defaults.next_gen_consumer_group.max_session_timeout
+        );
+        set_duration!(
+            consumer_group_min_heartbeat_interval_ms,
+            cfg.next_gen_consumer_group.min_heartbeat_interval,
+            defaults.next_gen_consumer_group.min_heartbeat_interval
+        );
+        set_duration!(
+            consumer_group_max_heartbeat_interval_ms,
+            cfg.next_gen_consumer_group.max_heartbeat_interval,
+            defaults.next_gen_consumer_group.max_heartbeat_interval
+        );
+        set_usize!(
+            consumer_group_max_size,
+            cfg.next_gen_consumer_group.max_size,
+            defaults.next_gen_consumer_group.max_size
+        );
+        set_duration!(
+            classic_group_initial_rebalance_delay_ms,
+            cfg.classic_group_initial_rebalance_delay,
+            defaults.classic_group_initial_rebalance_delay
+        );
+        set_duration!(
+            sync_group_follower_wait_ms,
+            cfg.sync_group_follower_wait,
+            defaults.sync_group_follower_wait
+        );
+        set_duration!(
+            unclean_recovery_aggressive_deadline_ms,
+            cfg.unclean_recovery_aggressive_deadline,
+            defaults.unclean_recovery_aggressive_deadline
+        );
+        set_duration!(
+            unclean_recovery_balanced_deadline_ms,
+            cfg.unclean_recovery_balanced_deadline,
+            defaults.unclean_recovery_balanced_deadline
+        );
+        set_duration!(
+            operator_recovery_deadline_ms,
+            cfg.operator_recovery_deadline,
+            defaults.operator_recovery_deadline
+        );
+        set_duration!(
+            quota_throttle_max_ms,
+            cfg.quota_throttle_max,
+            defaults.quota_throttle_max
+        );
+        set_u32!(
+            self_registration_max_attempts,
+            cfg.self_registration_max_attempts,
+            defaults.self_registration_max_attempts
+        );
+        set_u32!(
+            observer_fetch_max_bytes,
+            cfg.observer_fetch_max_bytes,
+            defaults.observer_fetch_max_bytes
+        );
+        set_usize!(
+            audit_event_queue_capacity,
+            cfg.audit_event_queue_capacity,
+            defaults.audit_event_queue_capacity
+        );
+        set_i64!(
+            audit_tail_window_offsets,
+            cfg.audit_tail_window_offsets,
+            defaults.audit_tail_window_offsets
+        );
+        set_usize!(
+            audit_tail_read_max_bytes,
+            cfg.audit_tail_read_max_bytes,
+            defaults.audit_tail_read_max_bytes
+        );
+        set_duration!(
+            offsets_topic_metadata_wait_timeout_ms,
+            cfg.offsets_topic_metadata_wait_timeout,
+            defaults.offsets_topic_metadata_wait_timeout
+        );
+        set_u32!(
+            client_metrics_stale_push_intervals,
+            cfg.client_metrics_stale_push_intervals,
+            defaults.client_metrics_stale_push_intervals
+        );
+        set_usize!(
+            client_metrics_otlp_queue_capacity,
+            cfg.client_metrics_otlp_queue_capacity,
+            defaults.client_metrics_otlp_queue_capacity
+        );
+        set_usize!(
+            coordinator_actor_mailbox_capacity,
+            cfg.coordinator_actor_mailbox_capacity,
+            defaults.coordinator_actor_mailbox_capacity
+        );
+        set_usize!(
+            unclean_recovery_queue_capacity,
+            cfg.unclean_recovery_queue_capacity,
+            defaults.unclean_recovery_queue_capacity
+        );
+        set_usize!(
+            share_recovery_read_max_bytes,
+            cfg.share_recovery_read_max_bytes,
+            defaults.share_recovery_read_max_bytes
+        );
+        set_usize!(
+            share_session_cache_max_when_unlimited,
+            cfg.share_session_cache_max_when_unlimited,
+            defaults.share_session_cache_max_when_unlimited
+        );
+        set_usize!(
+            socket_request_max_bytes,
+            cfg.socket_request_max_bytes,
+            defaults.socket_request_max_bytes
+        );
+        set_usize!(
+            sendfile_min_bytes,
+            cfg.sendfile_min_bytes,
+            defaults.sendfile_min_bytes
+        );
+        set_usize!(
+            socket_send_buffer_bytes,
+            cfg.socket_send_buffer_bytes,
+            defaults.socket_send_buffer_bytes
+        );
+        set_usize!(
+            socket_receive_buffer_bytes,
+            cfg.socket_receive_buffer_bytes,
+            defaults.socket_receive_buffer_bytes
+        );
+        set_usize!(
+            acl_max_principal_bytes,
+            cfg.acl_max_principal_bytes,
+            defaults.acl_max_principal_bytes
+        );
+        set_usize!(
+            acl_max_resource_name_bytes,
+            cfg.acl_max_resource_name_bytes,
+            defaults.acl_max_resource_name_bytes
+        );
+        set_usize!(
+            telemetry_max_decompression_ratio,
+            cfg.telemetry_max_decompression_ratio,
+            defaults.telemetry_max_decompression_ratio
+        );
+        set_usize!(
+            telemetry_decompressed_output_floor_bytes,
+            cfg.telemetry_decompressed_output_floor_bytes,
+            defaults.telemetry_decompressed_output_floor_bytes
+        );
+        set_usize!(
+            telemetry_decompressed_output_ceiling_bytes,
+            cfg.telemetry_decompressed_output_ceiling_bytes,
+            defaults.telemetry_decompressed_output_ceiling_bytes
+        );
+        set_i64!(
+            producer_id_expiration_ms,
+            cfg.producer_id_expiration_ms,
+            defaults.producer_id_expiration_ms
+        );
+        set_duration!(
+            producer_id_expiration_scan_interval_ms,
+            cfg.producer_id_expiration_scan_interval,
+            defaults.producer_id_expiration_scan_interval
+        );
+        set_usize!(
+            max_produce_group,
+            cfg.max_produce_group,
+            defaults.max_produce_group
+        );
+        set_usize!(
+            partition_writer_queue_depth,
+            cfg.partition_writer_queue_depth,
+            defaults.partition_writer_queue_depth
+        );
+        set_i32!(
+            default_min_insync_replicas,
+            cfg.default_min_insync_replicas,
+            defaults.default_min_insync_replicas
+        );
+        set_usize!(
+            future_log_move_read_chunk_bytes,
+            cfg.future_log_move_read_chunk_bytes,
+            defaults.future_log_move_read_chunk_bytes
+        );
+        set_i32!(
+            share_state_num_partitions,
+            cfg.share_coordinator.state_topic_num_partitions,
+            defaults.share_coordinator.state_topic_num_partitions
+        );
+        set_i32!(
+            transaction_state_num_partitions,
+            cfg.transaction_state_num_partitions,
+            defaults.transaction_state_num_partitions
+        );
+        set_i32!(
+            transaction_min_timeout_ms,
+            cfg.transaction_min_timeout_ms,
+            defaults.transaction_min_timeout_ms
+        );
+        set_i32!(
+            transaction_max_timeout_ms,
+            cfg.transaction_max_timeout_ms,
+            defaults.transaction_max_timeout_ms
+        );
+
+        set_plain!(
+            partition_disk_scan_interval_secs,
+            cfg.partition_disk_scan_interval_secs,
+            defaults.partition_disk_scan_interval_secs
+        );
+        set_plain!(
+            observer_lag_bound,
+            cfg.observer_lag_bound,
+            defaults.observer_lag_bound
+        );
+        set_positive_u64!(
+            heartbeat_interval_ms,
+            cfg.heartbeat_interval_ms,
+            defaults.heartbeat_interval_ms
+        );
+        set_positive_u64!(
+            heartbeat_timeout_ms,
+            cfg.heartbeat_timeout_ms,
+            defaults.heartbeat_timeout_ms
+        );
+        set_positive_u64!(
+            replica_lag_time_max_ms,
+            cfg.replica_lag_time_max_ms,
+            defaults.replica_lag_time_max_ms
+        );
+        set_duration!(
+            controller_election_timeout_ms,
+            cfg.controller_election_timeout,
+            defaults.controller_election_timeout
+        );
+        set_duration!(
+            controller_heartbeat_interval_ms,
+            cfg.controller_heartbeat_interval,
+            defaults.controller_heartbeat_interval
+        );
+        if let Some(value) = runtime.controlled_shutdown_drain_timeout_ms {
+            positive_u64("controlled_shutdown_drain_timeout_ms", value)?;
+        }
+        set_positive_u64!(
+            metadata_max_bytes_between_snapshots,
+            cfg.metadata_max_bytes_between_snapshots,
+            defaults.metadata_max_bytes_between_snapshots
+        );
+        if let Some(value) = runtime.metadata_max_snapshot_interval_ms
+            && cfg.metadata_max_snapshot_interval == defaults.metadata_max_snapshot_interval
+        {
+            cfg.metadata_max_snapshot_interval = std::time::Duration::from_millis(value);
+        }
+        set_positive_u64!(
+            metadata_snapshot_interval_records,
+            cfg.metadata_snapshot_interval_records,
+            defaults.metadata_snapshot_interval_records
+        );
+        if let Some(value) = runtime.txn_abort_cleanup_interval_ms
+            && cfg.txn_abort_cleanup_interval == defaults.txn_abort_cleanup_interval
+        {
+            cfg.txn_abort_cleanup_interval = std::time::Duration::from_millis(value);
+        }
+        set_positive_u64!(
+            leader_imbalance_check_interval_secs,
+            cfg.leader_imbalance_check_interval_secs,
+            defaults.leader_imbalance_check_interval_secs
+        );
+        if let Some(value) = runtime.leader_imbalance_per_broker_percentage {
+            let value = percentage("leader_imbalance_per_broker_percentage", value)?;
+            if cfg.leader_imbalance_per_broker_percentage
+                == defaults.leader_imbalance_per_broker_percentage
+            {
+                cfg.leader_imbalance_per_broker_percentage = value;
+            }
+        }
+        if let Some(value) = runtime.tls_reload_interval_ms
+            && cfg.tls_reload_interval == defaults.tls_reload_interval
+        {
+            cfg.tls_reload_interval = std::time::Duration::from_millis(value);
+        }
+        set_plain!(
+            max_incremental_fetch_session_cache_slots,
+            cfg.max_incremental_fetch_session_cache_slots,
+            defaults.max_incremental_fetch_session_cache_slots
+        );
+        set_plain!(
+            max_connections,
+            cfg.max_connections,
+            defaults.max_connections
+        );
+        set_plain!(
+            max_connections_per_ip,
+            cfg.max_connections_per_ip,
+            defaults.max_connections_per_ip
+        );
+        set_i64!(
+            delegation_token_max_lifetime_ms,
+            cfg.delegation_token_max_lifetime_ms,
+            defaults.delegation_token_max_lifetime_ms
+        );
+        set_i64!(
+            delegation_token_expiry_check_interval_ms,
+            cfg.delegation_token_expiry_check_interval_ms,
+            defaults.delegation_token_expiry_check_interval_ms
+        );
+        set_i64!(
+            delegation_token_default_renew_period_ms,
+            cfg.delegation_token_default_renew_period_ms,
+            defaults.delegation_token_default_renew_period_ms
+        );
+        set_duration!(
+            remote_log_manager_interval_ms,
+            cfg.remote_log_manager_interval,
+            defaults.remote_log_manager_interval
+        );
+
+        set_plain!(
+            share_group_enable,
+            cfg.share_group.enable,
+            defaults.share_group.enable
+        );
+        set_duration!(
+            share_group_session_timeout_ms,
+            cfg.share_group.session_timeout,
+            defaults.share_group.session_timeout
+        );
+        set_duration!(
+            share_group_heartbeat_interval_ms,
+            cfg.share_group.heartbeat_interval,
+            defaults.share_group.heartbeat_interval
+        );
+        set_duration!(
+            share_group_record_lock_duration_ms,
+            cfg.share_group.record_lock_duration,
+            defaults.share_group.record_lock_duration
+        );
+        if let Some(value) = runtime.share_group_max_delivery_attempts {
+            let value = positive_i16("share_group_max_delivery_attempts", value)?;
+            if cfg.share_group.max_delivery_attempts == defaults.share_group.max_delivery_attempts {
+                cfg.share_group.max_delivery_attempts = value;
+            }
+        }
+        set_i32!(
+            share_group_max_inflight_records,
+            cfg.share_group.max_inflight_records,
+            defaults.share_group.max_inflight_records
+        );
+        if let Some(value) = runtime.share_group_isolation_level {
+            use crate::coordinator::unified::share::config::ShareIsolationLevel;
+            let value = match value.as_str() {
+                "read-uncommitted" => ShareIsolationLevel::ReadUncommitted,
+                "read-committed" => ShareIsolationLevel::ReadCommitted,
+                _ => {
+                    return Err(invalid_runtime_value(
+                        "share_group_isolation_level",
+                        "expected `read-uncommitted` or `read-committed`",
+                    ));
+                }
+            };
+            if cfg.share_group.isolation_level == defaults.share_group.isolation_level {
+                cfg.share_group.isolation_level = value;
+            }
+        }
+        set_duration!(
+            streams_group_session_timeout_ms,
+            cfg.streams_group.session_timeout,
+            defaults.streams_group.session_timeout
+        );
+        set_duration!(
+            streams_group_heartbeat_interval_ms,
+            cfg.streams_group.heartbeat_interval,
+            defaults.streams_group.heartbeat_interval
+        );
+        if let Some(value) = runtime.streams_group_num_standby_replicas {
+            if value < 0 {
+                return Err(invalid_runtime_value(
+                    "streams_group_num_standby_replicas",
+                    "must be nonnegative",
+                ));
+            }
+            if cfg.streams_group.num_standby_replicas == defaults.streams_group.num_standby_replicas
+            {
+                cfg.streams_group.num_standby_replicas = value;
+            }
+        }
+        if let Some(value) = runtime.streams_group_num_warmup_replicas {
+            if value < 0 {
+                return Err(invalid_runtime_value(
+                    "streams_group_num_warmup_replicas",
+                    "must be nonnegative",
+                ));
+            }
+            if cfg.streams_group.num_warmup_replicas == defaults.streams_group.num_warmup_replicas {
+                cfg.streams_group.num_warmup_replicas = value;
+            }
+        }
+        if let Some(value) = runtime.streams_group_acceptable_recovery_lag {
+            if value < 0 {
+                return Err(invalid_runtime_value(
+                    "streams_group_acceptable_recovery_lag",
+                    "must be nonnegative",
+                ));
+            }
+            if cfg.streams_group.acceptable_recovery_lag
+                == defaults.streams_group.acceptable_recovery_lag
+            {
+                cfg.streams_group.acceptable_recovery_lag = value;
+            }
+        }
+        set_duration!(
+            streams_group_task_offset_interval_ms,
+            cfg.streams_group.task_offset_interval,
+            defaults.streams_group.task_offset_interval
+        );
+        if let Some(value) = runtime.streams_group_assignor {
+            use crate::coordinator::unified::streams::config::StreamsAssignorKind;
+            let value = match value.as_str() {
+                "auto" => StreamsAssignorKind::Auto,
+                "sticky" => StreamsAssignorKind::Sticky,
+                "highly-available" => StreamsAssignorKind::HighlyAvailable,
+                _ => {
+                    return Err(invalid_runtime_value(
+                        "streams_group_assignor",
+                        "expected `auto`, `sticky`, or `highly-available`",
+                    ));
+                }
+            };
+            if cfg.streams_group.assignor == defaults.streams_group.assignor {
+                cfg.streams_group.assignor = value;
+            }
+        }
+
+        if let Some(value) = runtime.inter_broker_server_name
+            && cfg.inter_broker_server_name == defaults.inter_broker_server_name
+        {
+            cfg.inter_broker_server_name = value;
+        }
+        Ok(())
+    }};
+}
+
+fn apply_runtime(
+    runtime: RuntimeFileConfig,
+    cfg: &mut crate::config::BrokerConfig,
+    defaults: &crate::config::BrokerConfig,
+) -> Result<(), FileConfigError> {
+    apply_runtime_fields!(runtime, cfg, defaults)
+}
+
 impl FileConfig {
     /// Apply this file-config to a `BrokerConfig` that already holds
     /// CLI-derived values. The file fills in unset values and provides
@@ -1345,6 +2243,10 @@ impl FileConfig {
     /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
     pub fn apply_to(self, cfg: &mut crate::config::BrokerConfig) -> Result<(), FileConfigError> {
         let defaults = crate::config::BrokerConfig::default();
+        let has_runtime = self.runtime.is_some();
+        if let Some(runtime) = self.runtime {
+            apply_runtime(runtime, cfg, &defaults)?;
+        }
         if let Some(id) = self.broker_id
             && cfg.broker_id == defaults.broker_id
         {
@@ -1364,27 +2266,33 @@ impl FileConfig {
         if let Some(ms) = self.heartbeat_interval_ms
             && cfg.heartbeat_interval_ms == defaults.heartbeat_interval_ms
         {
-            cfg.heartbeat_interval_ms = ms;
+            cfg.heartbeat_interval_ms = positive_u64("heartbeat_interval_ms", ms)?;
         }
         if let Some(ms) = self.heartbeat_timeout_ms
             && cfg.heartbeat_timeout_ms == defaults.heartbeat_timeout_ms
         {
-            cfg.heartbeat_timeout_ms = ms;
+            cfg.heartbeat_timeout_ms = positive_u64("heartbeat_timeout_ms", ms)?;
         }
         if let Some(ms) = self.replica_lag_time_max_ms
             && cfg.replica_lag_time_max_ms == defaults.replica_lag_time_max_ms
         {
-            cfg.replica_lag_time_max_ms = ms;
+            cfg.replica_lag_time_max_ms = positive_u64("replica_lag_time_max_ms", ms)?;
         }
         if let Some(ms) = self.controller_election_timeout_ms
             && cfg.controller_election_timeout == defaults.controller_election_timeout
         {
-            cfg.controller_election_timeout = std::time::Duration::from_millis(ms);
+            cfg.controller_election_timeout = std::time::Duration::from_millis(positive_u64(
+                "controller_election_timeout_ms",
+                ms,
+            )?);
         }
         if let Some(ms) = self.controller_heartbeat_interval_ms
             && cfg.controller_heartbeat_interval == defaults.controller_heartbeat_interval
         {
-            cfg.controller_heartbeat_interval = std::time::Duration::from_millis(ms);
+            cfg.controller_heartbeat_interval = std::time::Duration::from_millis(positive_u64(
+                "controller_heartbeat_interval_ms",
+                ms,
+            )?);
         }
         if let Some(ld) = self.log_dir
             && cfg.log_dir == defaults.log_dir
@@ -1413,7 +2321,7 @@ impl FileConfig {
         );
         apply_oauthbearer(self.oauthbearer, cfg);
 
-        apply_delegation_tokens(self.delegation_token.as_ref(), cfg);
+        apply_delegation_tokens(self.delegation_token.as_ref(), cfg)?;
 
         // Merge the TOML super-user list into the broker's
         // set (initially empty). `extend` over `clone_from` because a
@@ -1451,6 +2359,10 @@ impl FileConfig {
             cfg,
         )?;
 
+        if has_runtime {
+            cfg.validate()
+                .map_err(|error| FileConfigError::InvalidConfig(error.to_string()))?;
+        }
         Ok(())
     }
 
@@ -1685,6 +2597,7 @@ protocol = "Plaintext"
 "#;
         let cfg: FileConfig = toml::from_str(src).unwrap();
         let expected = FileConfig {
+            runtime: None,
             broker_id: Some(0),
             log_dir: Some("/var/lib/crabka/data".to_string()),
             extra_log_dirs: vec![],
@@ -3306,5 +4219,96 @@ in_memory = true
         fc2.apply_to(&mut cfg2).expect("apply");
         assert2::check!(cfg2.audit_spool_dir == std::path::PathBuf::from("audit-spool"));
         assert2::check!(cfg2.audit_spool_max_bytes == 1_073_741_824);
+    }
+
+    #[test]
+    fn runtime_file_config_applies_representative_values() {
+        let file: FileConfig = toml::from_str(
+            r#"
+[runtime]
+cleaner_interval_ms = 7000
+isr_scan_interval_ms = 800
+opa_http_timeout_ms = 2500
+replication_fetch_max_bytes = 2097152
+replication_fetch_max_wait_ms = 750
+replication_fetch_min_bytes = 2
+"#,
+        )
+        .expect("parse runtime config");
+        let mut cfg = crate::config::BrokerConfig::default();
+
+        file.apply_to(&mut cfg).expect("apply runtime config");
+
+        assert!(
+            (
+                cfg.cleaner_interval,
+                cfg.isr_scan_interval,
+                cfg.opa_http_timeout,
+                cfg.replication.fetch_max_bytes,
+                cfg.replication.fetch_max_wait_ms,
+                cfg.replication.fetch_min_bytes,
+            ) == (
+                std::time::Duration::from_secs(7),
+                std::time::Duration::from_millis(800),
+                std::time::Duration::from_millis(2_500),
+                2_097_152,
+                750,
+                2,
+            )
+        );
+    }
+
+    #[test]
+    fn runtime_file_config_rejects_zero_and_names_field() {
+        let file: FileConfig =
+            toml::from_str("[runtime]\ncleaner_interval_ms = 0\n").expect("parse runtime config");
+        let mut cfg = crate::config::BrokerConfig::default();
+
+        let error = file
+            .apply_to(&mut cfg)
+            .expect_err("zero cleaner interval must fail");
+
+        assert!(error.to_string().contains("cleaner_interval_ms"));
+    }
+
+    #[test]
+    fn existing_file_inputs_reject_invalid_refined_values() {
+        let cases = [
+            ("heartbeat_interval_ms = 0\n", "heartbeat_interval_ms"),
+            (
+                "[delegation_token]\nmax_lifetime_ms = 0\n",
+                "max_lifetime_ms",
+            ),
+        ];
+
+        for (source, field) in cases {
+            let file: FileConfig = toml::from_str(source).expect("parse config");
+            let mut cfg = crate::config::BrokerConfig::default();
+            let error = file.apply_to(&mut cfg).expect_err("zero must fail");
+            assert!(error.to_string().contains(field));
+        }
+    }
+
+    #[test]
+    fn runtime_file_config_rejects_relational_conflicts() {
+        let cases = [
+            (
+                "[runtime]\nreplication_fetch_min_bytes = 3\nreplication_fetch_max_bytes = 2\n",
+                "replication fetch minimum",
+            ),
+            (
+                "[runtime]\ntransaction_min_timeout_ms = 2000\ntransaction_max_timeout_ms = 1000\n",
+                "transaction minimum timeout",
+            ),
+        ];
+
+        for (source, message) in cases {
+            let file: FileConfig = toml::from_str(source).expect("parse runtime config");
+            let mut cfg = crate::config::BrokerConfig::default();
+            let error = file
+                .apply_to(&mut cfg)
+                .expect_err("relational conflict must fail");
+            assert!(error.to_string().contains(message));
+        }
     }
 }
