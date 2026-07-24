@@ -84,8 +84,6 @@ impl FromStr for PgdogConnectAttempts {
 pub struct PgdogTimeouts {
     /// Backend connection attempt timeout.
     pub connect_timeout: Duration,
-    /// Number of backend connection attempts.
-    pub connect_attempts: PgdogConnectAttempts,
     /// Time a client may wait for a pooled server connection.
     pub checkout_timeout: Duration,
 }
@@ -124,15 +122,18 @@ impl PgdogTimeouts {
 
         Self {
             connect_timeout,
-            connect_attempts,
             checkout_timeout,
         }
     }
 
-    fn ensure_covers_cold_start(self, cold_start_ceiling: Duration) -> Result<Self, ControlError> {
+    fn ensure_covers_cold_start(
+        self,
+        cold_start_ceiling: Duration,
+        connect_attempts: PgdogConnectAttempts,
+    ) -> Result<Self, ControlError> {
         let Some(connect_budget) = self
             .connect_timeout
-            .checked_mul(u32::from(self.connect_attempts.into_value()))
+            .checked_mul(u32::from(connect_attempts.into_value()))
         else {
             return Err(ControlError::invalid_field(
                 "connect_timeout",
@@ -278,7 +279,10 @@ impl<'a> PgdogConfig<'a> {
                     input.general.connect_attempts,
                 )
             })
-            .ensure_covers_cold_start(input.general.cold_start_ceiling)?;
+            .ensure_covers_cold_start(
+                input.general.cold_start_ceiling,
+                input.general.connect_attempts,
+            )?;
 
         let general = RenderGeneral::from_settings(&input.general, timeouts);
         let databases = render_databases(input)?;
@@ -322,7 +326,7 @@ impl<'a> RenderGeneral<'a> {
                 "disabled"
             },
             connect_timeout: milliseconds_rounded_up(timeouts.connect_timeout),
-            connect_attempts: timeouts.connect_attempts.into_value(),
+            connect_attempts: general.connect_attempts.into_value(),
             checkout_timeout: milliseconds_rounded_up(timeouts.checkout_timeout),
             idle_timeout: milliseconds_rounded_up(general.idle_timeout),
             server_lifetime: milliseconds_rounded_up(general.server_lifetime),
@@ -469,8 +473,12 @@ fn push_database<'a>(
 }
 
 fn divide_rounding_up(duration: Duration, divisor: u32) -> Duration {
-    let nanos = duration.as_nanos().div_ceil(u128::from(divisor));
-    Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
+    let quotient = duration / divisor;
+    if quotient.checked_mul(divisor) == Some(duration) {
+        quotient
+    } else {
+        quotient + Duration::from_nanos(1)
+    }
 }
 
 fn milliseconds_rounded_up(duration: Duration) -> u64 {
@@ -655,9 +663,9 @@ mod tests {
     fn rejects_timeout_budget_below_cold_start_ceiling() {
         let general = PgdogGeneral {
             cold_start_ceiling: Duration::from_secs(30),
+            connect_attempts: PgdogConnectAttempts::new(2).expect("positive attempts"),
             timeouts: Some(PgdogTimeouts {
                 connect_timeout: Duration::from_secs(3),
-                connect_attempts: PgdogConnectAttempts::new(2).expect("positive attempts"),
                 checkout_timeout: Duration::from_secs(5),
             }),
             ..PgdogGeneral::default()
@@ -695,18 +703,24 @@ mod tests {
         let minimum = PgdogTimeouts::for_cold_start_ceiling(Duration::from_millis(1), attempts);
 
         assert!(rounded.connect_timeout == Duration::from_millis(2_500));
-        assert!(rounded.connect_attempts == attempts);
         assert!(rounded.checkout_timeout == Duration::from_secs(10));
         assert!(minimum.connect_timeout == Duration::from_secs(1));
         assert!(minimum.checkout_timeout == Duration::from_secs(1));
     }
 
     #[test]
+    fn derived_timeout_division_preserves_full_duration_range() {
+        let actual = divide_rounding_up(Duration::from_secs(u64::MAX), 2);
+
+        assert!(actual == Duration::new(u64::MAX / 2, 500_000_000));
+    }
+
+    #[test]
     fn rejects_overflowing_explicit_timeout_budget() {
         let general = PgdogGeneral {
+            connect_attempts: PgdogConnectAttempts::new(2).expect("positive attempts"),
             timeouts: Some(PgdogTimeouts {
                 connect_timeout: Duration::MAX,
-                connect_attempts: PgdogConnectAttempts::new(2).expect("positive attempts"),
                 checkout_timeout: Duration::from_secs(1),
             }),
             ..PgdogGeneral::default()

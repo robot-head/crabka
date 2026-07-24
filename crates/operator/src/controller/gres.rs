@@ -3,8 +3,8 @@
 use std::{collections::BTreeMap, fmt::Write as _, sync::Arc, time::Duration};
 
 use crabka_gres_control::{
-    PgdogGeneral, PgdogRenderInput, PgdogTimeouts, PgdogUser, TenantEndpoint, TenantName,
-    TenantState, render_pgdog_toml, render_users_toml,
+    PgdogConnectAttempts, PgdogGeneral, PgdogRenderInput, PgdogTimeouts, PgdogUser, TenantEndpoint,
+    TenantName, TenantState, render_pgdog_toml, render_users_toml,
 };
 use futures::StreamExt as _;
 use k8s_openapi::{
@@ -98,6 +98,7 @@ async fn reconcile_inner(obj: Arc<Gres>, ctx: Arc<Context>) -> Result<Action, Re
         .unwrap_or(DEFAULT_ACTIVATOR_COLD_START_TIMEOUT_MS);
     let cold_start_ceiling = PgdogTimeouts::cold_start_ceiling_for_attempt_timeout(
         Duration::from_millis(activator_cold_start_timeout_ms),
+        PgdogConnectAttempts::new(3).expect("the current PgDog connect attempt count is positive"),
     )
     .map_err(|error| {
         ReconcileError::Malformed(format!("spec.activator.coldStartTimeoutMs: {error}"))
