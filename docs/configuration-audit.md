@@ -850,3 +850,75 @@ in pgexec. No local-vacuum candidate remains unclassified.
   default-policy tests inherited the host environment. Commits `3be7294e` and
   `18404ed1` moved validation before binding and isolated every default-policy
   test; final hostile-environment re-review returned PASS with no findings.
+
+## Gres Range-0 Follower Poll Policy
+
+The periodic range-0 follower refresh cadence has one shared compiled default,
+`DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS = 100`, owned by `gres-control`.
+Standalone Gres exposes the optional
+`--range0-follower-poll-interval-ms` /
+`CRABKA_GRES_RANGE0_FOLLOWER_POLL_INTERVAL_MS` pair, with CLI taking
+precedence over the environment. The fleet surface is the optional
+`spec.compute.range0FollowerPollIntervalMs` field. Clap's `PositiveMillis`,
+the CRD's `minimum: 1`, and the effective-policy conversion all reject zero;
+both Clap requirements and programmatic validation reject explicitly setting
+the value without `--ranges`.
+
+The complete live consumer path is:
+
+```text
+GresComputeSpec
+  -> EffectiveGresComputePolicy
+  -> multi-range render_deployment argument
+  -> ServeArgs
+  -> SubstrateRuntimeConfig
+  -> attach_range0_read_barrier
+  -> wait_for_range0_follower_refresh
+```
+
+The operator renders the argument only in the existing range-control branch
+that also renders `--ranges`; single-range Deployments omit both. Gres resolves
+the optional parser value once into a `Duration`. A process whose hosted-range
+set excludes the coordinator attaches the range-0 read barrier and passes that
+duration to the follower loop.
+
+The loop still selects between `Notify::notified()` and the configured timer.
+The notification is the immediate catalog-barrier wake path, not an
+independent cadence, so configuring the periodic fallback does not change its
+semantics. Coordinator range identity, hosted-range membership, committed-end
+and applied-offset comparisons, follower bootstrap, and WAL offset handling
+remain fixed topology/protocol behavior rather than deployment policy. The
+three remaining `Duration::from_millis(100)` occurrences are process-test
+settling/retry waits, not production follower sleeps.
+
+### Adjacent Pending Policy
+
+This closes the range-0 follower poll cadence only. The next coherent owner is
+generic WAL recovery fetch/retry policy, beginning with `FETCH_MAX_WAIT_MS` and
+`EMPTY_FETCH_RETRIES` in `crates/gres-substrate/src/recovery.rs`.
+
+### Gres Range-0 Follower Poll Evidence
+
+On 2026-07-24 `tools/audit-runtime-values.sh` reported 5,938 repository
+matches. The exact focused search reported 85 references: six shared-default
+owner/import/fallback references, 23 live configured parser/schema/render/
+runtime-consumer references, five fixed range-0 topology/bootstrap references,
+51 test/harness references, and no next-owner reference in the focused path
+set. The four exact 100 ms literals in that result are one shared production
+default and three test/harness waits; there is no unexplained fixed production
+100 ms follower sleep.
+
+- `cargo test -p crabka-gres-control --no-fail-fast`: 80 passed.
+- `cargo test -p crabka-gres --no-fail-fast`: 196 top-level tests passed; the
+  parser tests also ran ten successful child-process invocations.
+- `cargo test -p crabka-operator --no-fail-fast`: 931 test and doc-test
+  results passed.
+- Strict all-target/all-feature Clippy with `-D warnings`, `cargo fmt --check`,
+  and `git diff --check` passed.
+- Gres help displayed the exact CLI/environment pair.
+- Fresh operator generation produced nine CRDs, and `diff -ru` against
+  `deploy/crds` was empty.
+- Focused tests proved CLI-over-environment precedence, default selection,
+  zero and explicit non-multirange rejection, configured timer wake,
+  notification wake preservation, multi-range argument rendering, and
+  single-range omission.
