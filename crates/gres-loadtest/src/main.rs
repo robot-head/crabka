@@ -408,25 +408,6 @@ mod tests {
             panic!("run");
         };
         assert!(registry.policy() == crabka_gres_control::RegistryPolicy::default());
-        let custom = Cli::try_parse_from([
-            "loadtest",
-            "run",
-            "--scenario=test.yaml",
-            "--registry-replication-factor=3",
-            "--registry-topic-create-timeout-ms=15002",
-            "--registry-reader-retry-backoff-ms=252",
-            "--registry-fetch-max-wait-ms=502",
-            "--registry-fetch-partition-max-bytes=1048578",
-        ])
-        .expect("custom");
-        let CliCommand::Run { registry, .. } = custom.command else {
-            panic!("run");
-        };
-        assert!(
-            registry.policy()
-                == crabka_gres_control::RegistryPolicy::new(3, 15_002, 252, 502, 1_048_578)
-                    .expect("policy")
-        );
         for option in [
             "--registry-replication-factor=0",
             "--registry-replication-factor=32768",
@@ -442,7 +423,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_policy_options_read_exact_environment_names() {
+    fn registry_policy_options_read_environment_and_prefer_cli() {
         const CHILD: &str = "CRABKA_TEST_LOADTEST_REGISTRY_ENV_CHILD";
         let vars = [
             ("CRABKA_GRES_REGISTRY_REPLICATION_FACTOR", "2"),
@@ -455,7 +436,7 @@ mod tests {
             let status = std::process::Command::new(std::env::current_exe().expect("test exe"))
                 .args([
                     "--exact",
-                    "tests::registry_policy_options_read_exact_environment_names",
+                    "tests::registry_policy_options_read_environment_and_prefer_cli",
                 ])
                 .env(CHILD, "1")
                 .envs(vars)
@@ -464,14 +445,33 @@ mod tests {
             assert!(status.success());
             return;
         }
-        let cli =
+        let environment =
             Cli::try_parse_from(["loadtest", "run", "--scenario=test.yaml"]).expect("environment");
-        let CliCommand::Run { registry, .. } = cli.command else {
+        let CliCommand::Run { registry, .. } = environment.command else {
             panic!("run");
         };
         assert!(
             registry.policy()
                 == crabka_gres_control::RegistryPolicy::new(2, 15_001, 251, 501, 1_048_577)
+                    .expect("policy")
+        );
+        let cli = Cli::try_parse_from([
+            "loadtest",
+            "run",
+            "--scenario=test.yaml",
+            "--registry-replication-factor=3",
+            "--registry-topic-create-timeout-ms=15002",
+            "--registry-reader-retry-backoff-ms=252",
+            "--registry-fetch-max-wait-ms=502",
+            "--registry-fetch-partition-max-bytes=1048578",
+        ])
+        .expect("CLI over environment");
+        let CliCommand::Run { registry, .. } = cli.command else {
+            panic!("run");
+        };
+        assert!(
+            registry.policy()
+                == crabka_gres_control::RegistryPolicy::new(3, 15_002, 252, 502, 1_048_578)
                     .expect("policy")
         );
     }

@@ -274,12 +274,13 @@ impl Cluster {
         let tls = write_tls_fixture(&work_dir)?;
         let range_endpoints: Vec<SocketAddr> = range_proxies.iter().map(ChaosProxy::addr).collect();
         let sql_password = generate_sql_password();
+        let (provisioning_policy, node_policy) = registry_policy_consumers(&registry_policy);
         provision_tenant(
             &kafka_bootstrap,
             topology.ranges,
             &range_endpoints,
             &sql_password,
-            &registry_policy,
+            provisioning_policy,
         )
         .await?;
         tracing::info!(
@@ -296,7 +297,7 @@ impl Cluster {
             log_dir: &log_dir,
             tls: &tls,
             cpu_allocation: allocation.as_ref(),
-            registry_policy: &registry_policy,
+            registry_policy: node_policy,
         };
         let node_specs: Vec<NodeSpec> = (0..topology.nodes)
             .map(|node| node_spec(node, &context))
@@ -509,6 +510,10 @@ impl Cluster {
         }
         self.sql_proxies[usize::from(node)].set_backend(process.sql_addr);
     }
+}
+
+fn registry_policy_consumers(policy: &RegistryPolicy) -> (&RegistryPolicy, &RegistryPolicy) {
+    (policy, policy)
 }
 
 /// The broker child process.
@@ -1536,6 +1541,9 @@ mod tests {
             broker_cpus: None,
         };
         let tls = test_tls();
+        let policy = RegistryPolicy::new(3, 15_002, 252, 502, 1_048_578).expect("policy");
+        let (provisioning_policy, node_policy) = registry_policy_consumers(&policy);
+        assert!(provisioning_policy == node_policy);
         let context = SpecContext {
             topology: &topology,
             mode: ModeSpec::LogicalTso,
@@ -1544,7 +1552,7 @@ mod tests {
             log_dir: Path::new("/work/logs"),
             tls: &tls,
             cpu_allocation: None,
-            registry_policy: &RegistryPolicy::new(3, 15_002, 252, 502, 1_048_578).expect("policy"),
+            registry_policy: node_policy,
         };
         let node0 = node_spec(0, &context);
         let mut spawned_args = node0.args.clone();
