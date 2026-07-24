@@ -941,3 +941,96 @@ production 100 ms follower sleep.
   configured timer wake, notification wake preservation, multi-range argument
   rendering, and single-range omission. The hostile-environment range-0
   follower filter passed 4/4.
+
+## Gres WAL Recovery Read Policy
+
+Normal committed-WAL recovery now resolves one validated
+`RecoveryReadPolicy` with four substrate-owned defaults:
+
+- `DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT_MS = 100`;
+- `DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES = 1_048_576`;
+- `DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES`, which reuses
+  `client-core`'s named 50 MiB default;
+- `DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES = 100`.
+
+Standalone Gres exposes one optional CLI/environment pair per value. Explicit
+values require substrate mode, and `PositiveI32`/`PositiveUsize` plus
+`RecoveryReadPolicy` reject zero. The fleet surface adds four optional
+`spec.compute.walRecovery*` fields with schema minimum one; the operator
+validates omitted values through the shared defaults and renders all four
+effective arguments for both single-range and multi-range computes.
+
+The complete live path is:
+
+```text
+GresComputeSpec
+  -> EffectiveGresComputePolicy
+  -> render_deployment
+  -> ServeArgs
+  -> SubstrateRuntimeConfig::recovery_read_policy
+  -> SubstrateRuntimeConfig::live_recovery_config
+  -> LiveRecoveryConfig::with_read_policy
+  -> KafkaCommittedWalReader
+  -> recovery_fetch / build_fetch_request / empty_fetch_decision
+```
+
+There is exactly one production `LiveRecoveryConfig::new` in Gres, inside the
+shared helper. Its six production call sites cover the range-0 follower,
+multi-range recovery map, single-range recovery, activation discovery,
+successor recovery, and staged transfer recovery. Every one therefore receives
+the configured policy.
+
+The old `FETCH_MAX_WAIT_MS`, `FETCH_MAX_BYTES`, and `EMPTY_FETCH_RETRIES`
+identifiers have no repository matches. Normal recovery reads wait and apply
+both configured byte limits; retry exhaustion uses the configured consecutive
+empty-fetch limit and resets after cursor progress. The sole production
+recovery zero-wait path is `END_SAMPLE_MAX_WAIT_MS`, used by the committed-end
+sampler so a stable-end probe returns immediately.
+
+All nine repository `IsolatedFetch` literals explicitly choose `max_bytes`.
+Recovery uses the configured response limit; positional and unrelated
+client-streams, registry, FDW, and Gres registry-fetch callers retain the named
+client-core default. Partition zero, read-committed isolation, the one-byte
+minimum, offset-out-of-range handling, and offset arithmetic remain fixed
+protocol or algorithm behavior.
+
+### Adjacent Pending Policy
+
+This closes only normal WAL recovery read wait, byte, and empty-retry policy.
+The next coherent owner is the recovery connection policy in
+`crates/gres-substrate/src/recovery.rs`: the fixed 10-second connect timeout
+and 30-second request timeout. DNS behavior, topic creation, and writer policy
+remain separate owners.
+
+### Gres WAL Recovery Read Evidence
+
+On 2026-07-24 `tools/audit-runtime-values.sh` reported 5,949 repository
+matches. The exact policy-focused search reported 267 references: 22
+shared-default production references, 115 configured production
+type/parser/validation/schema/render/runtime references, two fixed
+committed-end zero-wait references, and 128 test/harness references. The
+separate protocol-invariant search reported 28 references: 24 production and
+four tests. The deferred timeout search reported exactly two production
+references. No focused candidate remains unclassified.
+
+The exact `100`, `1_048_576`, and `50 * 1024 * 1024` search in client fetch and
+substrate recovery reported eight references: four named production defaults
+and four client-core test values. There is no fixed normal-recovery fetch wait,
+byte limit, or empty-retry value outside the shared defaults.
+
+- The affected six-package test command reported 1,521 passing test and
+  doc-test results, zero failures, and four ignored Docker-only tests.
+- The strict all-target/all-feature Clippy command is blocked by the unchanged
+  267-line `kafka_fdw_roundtrip_avro_and_raw_fallback` test in
+  `crates/gres-fdw/tests/roundtrip.rs`, which violates the repository's
+  200-line `clippy::too_many_lines` limit. The file is unchanged across this
+  slice. Strict Clippy passed for every other affected package and target;
+  the full FDW target set passed with only that one pre-existing lint allowed.
+- Gres help displayed all four exact CLI/environment pairs.
+- Fresh operator generation produced nine CRDs, and `diff -ru` against
+  `deploy/crds` was empty.
+- `cargo fmt --all -- --check` and `git diff --check` passed.
+- Focused tests cover defaults, zero rejection, CLI-over-environment
+  precedence, hostile-environment isolation, pre-I/O inert-use rejection,
+  request wiring, retry boundaries and reset, shared-helper propagation,
+  single/multi-range rendering, schema minima, and the fixed sampler zero wait.
