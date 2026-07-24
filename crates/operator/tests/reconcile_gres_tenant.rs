@@ -215,6 +215,7 @@ fn tenant() -> GresTenant {
         "tenant-a",
         GresTenantSpec {
             gres: "fleet".into(),
+            image: None,
             user: "alice".into(),
             password_secret_ref: SecretKeyRef {
                 name: "pw".into(),

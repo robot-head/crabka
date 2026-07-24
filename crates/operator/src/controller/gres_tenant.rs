@@ -119,6 +119,8 @@ struct ReadyTenant {
     bootstrap: String,
     policy: crabka_gres_control::RegistryPolicy,
     defaults: EffectiveDefaults,
+    compute_image: String,
+    compute_readiness_probe_period_seconds: i32,
     direct_bootstrap_grace_ms: u64,
     kafka_sasl: bool,
 }
@@ -126,6 +128,22 @@ struct ReadyTenant {
 enum TenantPreparation {
     Ready(Box<ReadyTenant>),
     Requeue(Action),
+}
+
+fn effective_compute_image(
+    obj: &GresTenant,
+    config: &crate::config::OperatorConfig,
+) -> Result<String, ReconcileError> {
+    let (image, path) = if let Some(image) = &obj.spec.image {
+        (image.clone(), "spec.image")
+    } else if let Some(image) = &config.default_gres_image {
+        (image.clone(), "DEFAULT_GRES_IMAGE")
+    } else {
+        (DEFAULT_IMAGE.to_owned(), "compiled default Gres image")
+    };
+    refined_type::rule::NonEmptyString::new(image)
+        .map(refined_type::Refined::into_value)
+        .map_err(|error| ReconcileError::Malformed(format!("{path}: {error}")))
 }
 
 async fn prepare_tenant(
@@ -184,6 +202,19 @@ async fn prepare_tenant(
         .pgdog
         .effective_policy()
         .map_err(ReconcileError::Malformed)?;
+    let compute_image = effective_compute_image(obj, &ctx.config)?;
+    let compute_readiness_probe_period_seconds = gres
+        .spec
+        .compute
+        .as_ref()
+        .map_or_else(
+            || {
+                crate::crd::gres::GresComputeSpec::default()
+                    .effective_readiness_probe_period_seconds()
+            },
+            crate::crd::gres::GresComputeSpec::effective_readiness_probe_period_seconds,
+        )
+        .map_err(ReconcileError::Malformed)?;
     let cluster = gres.spec.kafka_cluster.clone();
     let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &namespace);
     let Some(kafka) = kafka_api.get_opt(&cluster).await? else {
@@ -234,6 +265,8 @@ async fn prepare_tenant(
         bootstrap,
         policy,
         defaults: effective_defaults(gres.spec.defaults.as_ref(), obj.spec.overrides.as_ref()),
+        compute_image,
+        compute_readiness_probe_period_seconds,
         direct_bootstrap_grace_ms: pgdog_policy.direct_bootstrap_grace.into_value(),
         kafka_sasl: kafka_internal_listener_requires_sasl(&kafka),
     })))
@@ -278,6 +311,8 @@ async fn reconcile_inner(
         bootstrap,
         policy,
         defaults,
+        compute_image,
+        compute_readiness_probe_period_seconds,
         direct_bootstrap_grace_ms,
         kafka_sasl,
     } = *ready;
@@ -287,22 +322,8 @@ async fn reconcile_inner(
     let current_record = control.get_tenant(&tenant_name).await?;
     let split_operations = active_operations(control.list_split_operations(&tenant_name).await?);
     let active_split = split_operations.first().cloned();
-    let tenant_ranges = active_split
-        .as_ref()
-        .filter(|operation| successors_may_be_deployed(operation))
-        .and_then(|operation| operation.plan.as_ref())
-        .map_or_else(
-            || reconcile_ranges(current_record.as_ref(), &spec_ranges),
-            |plan| {
-                plan.target_layout
-                    .iter()
-                    .map(|range| GresTenantRangeSpec {
-                        range_id: range.range_id,
-                        end_key: range.end_key.map(range_key_from_boundary),
-                    })
-                    .collect()
-            },
-        );
+    let tenant_ranges =
+        reconcile_tenant_ranges(current_record.as_ref(), &spec_ranges, active_split.as_ref());
     let lifecycle_state = current_record
         .as_ref()
         .map_or_else(|| requested_state(&obj), |record| record.state);
@@ -387,6 +408,8 @@ async fn reconcile_inner(
                     wal_topic: &wal_topic,
                     config_topic: &cfg_topic,
                     policy: &policy,
+                    image: &compute_image,
+                    readiness_probe_period_seconds: compute_readiness_probe_period_seconds,
                     lifecycle_state: record.state,
                     kafka_sasl,
                     range_control_enabled,
@@ -438,6 +461,8 @@ async fn reconcile_inner(
             wal_topic: &wal_topic,
             config_topic: &cfg_topic,
             policy: &policy,
+            image: &compute_image,
+            readiness_probe_period_seconds: compute_readiness_probe_period_seconds,
             record: &record,
             direct_bootstrap_grace_ms,
             kafka_sasl,
@@ -463,6 +488,28 @@ async fn reconcile_inner(
             Err(error)
         }
     }
+}
+
+fn reconcile_tenant_ranges(
+    current_record: Option<&TenantRecord>,
+    spec_ranges: &[GresTenantRangeSpec],
+    active_split: Option<&crabka_gres_control::SplitOperationRecord>,
+) -> Vec<GresTenantRangeSpec> {
+    active_split
+        .filter(|operation| successors_may_be_deployed(operation))
+        .and_then(|operation| operation.plan.as_ref())
+        .map_or_else(
+            || reconcile_ranges(current_record, spec_ranges),
+            |plan| {
+                plan.target_layout
+                    .iter()
+                    .map(|range| GresTenantRangeSpec {
+                        range_id: range.range_id,
+                        end_key: range.end_key.map(range_key_from_boundary),
+                    })
+                    .collect()
+            },
+        )
 }
 
 async fn patch_reconcile_failed(
@@ -621,6 +668,8 @@ struct ComputeStatusConfig<'a> {
     wal_topic: &'a str,
     config_topic: &'a str,
     policy: &'a crabka_gres_control::RegistryPolicy,
+    image: &'a str,
+    readiness_probe_period_seconds: i32,
     record: &'a TenantRecord,
     direct_bootstrap_grace_ms: u64,
     kafka_sasl: bool,
@@ -641,6 +690,8 @@ async fn reconcile_compute_and_status(
             wal_topic: config.wal_topic,
             config_topic: config.config_topic,
             policy: config.policy,
+            image: config.image,
+            readiness_probe_period_seconds: config.readiness_probe_period_seconds,
             lifecycle_state: config.record.state,
             kafka_sasl: config.kafka_sasl,
             range_control_enabled: config.range_control_enabled,
@@ -752,6 +803,8 @@ struct ComputeDeploymentConfig<'a> {
     wal_topic: &'a str,
     config_topic: &'a str,
     policy: &'a crabka_gres_control::RegistryPolicy,
+    image: &'a str,
+    readiness_probe_period_seconds: i32,
     lifecycle_state: TenantState,
     kafka_sasl: bool,
     range_control_enabled: bool,
@@ -765,11 +818,6 @@ async fn reconcile_compute_deployments(
     config: &ComputeDeploymentConfig<'_>,
 ) -> Result<bool, ReconcileError> {
     let dep_api: Api<Deployment> = Api::namespaced(ctx.client.clone(), namespace);
-    let image = ctx
-        .config
-        .default_gres_image
-        .clone()
-        .unwrap_or_else(|| DEFAULT_IMAGE.to_string());
     let tenant_name = obj.name_any();
     let mut all_ready = true;
     for range in config.ranges {
@@ -778,7 +826,8 @@ async fn reconcile_compute_deployments(
             range,
             &DeploymentRenderConfig {
                 all_ranges: config.ranges,
-                image: &image,
+                image: config.image,
+                readiness_probe_period_seconds: config.readiness_probe_period_seconds,
                 bootstrap: config.bootstrap,
                 wal_topic: config.wal_topic,
                 config_topic: config.config_topic,
@@ -1908,6 +1957,7 @@ fn render_range_service(obj: &GresTenant, range_id: u32) -> Result<Service, Reco
 struct DeploymentRenderConfig<'a> {
     all_ranges: &'a [GresTenantRangeSpec],
     image: &'a str,
+    readiness_probe_period_seconds: i32,
     bootstrap: &'a str,
     wal_topic: &'a str,
     config_topic: &'a str,
@@ -2024,7 +2074,7 @@ fn render_deployment(
                         "env": env,
                         "ports": ports,
                         "volumeMounts": range_tls_mounts,
-                        "readinessProbe": { "tcpSocket": { "port": COMPUTE_PORT }, "periodSeconds": 5 },
+                        "readinessProbe": { "tcpSocket": { "port": COMPUTE_PORT }, "periodSeconds": config.readiness_probe_period_seconds },
                         "resources": obj.spec.resources.clone().unwrap_or_default()
                     }],
                     "volumes": range_tls_volumes
@@ -2352,6 +2402,7 @@ mod tests {
             "tenant-a",
             GresTenantSpec {
                 gres: "fleet".into(),
+                image: None,
                 user: "alice".into(),
                 password_secret_ref: SecretKeyRef {
                     name: "pw".into(),
@@ -2381,6 +2432,7 @@ mod tests {
             &DeploymentRenderConfig {
                 all_ranges,
                 image: "image",
+                readiness_probe_period_seconds: 5,
                 bootstrap: "k:9092",
                 wal_topic: &wal_topic,
                 config_topic: "__gres_cfg.tenant-a",
@@ -2510,7 +2562,8 @@ mod tests {
             &ranges[0],
             &DeploymentRenderConfig {
                 all_ranges: &ranges,
-                image: "image",
+                image: "tenant-image",
+                readiness_probe_period_seconds: 7,
                 bootstrap: "k:9092",
                 wal_topic: "__gres_wal.tenant-a.r0",
                 config_topic: "__gres_cfg.tenant-a",
@@ -2548,6 +2601,67 @@ mod tests {
                 "missing {pair:?}: {args:?}"
             );
         }
+        let readiness = deployment
+            .spec
+            .as_ref()
+            .expect("deployment spec")
+            .template
+            .spec
+            .as_ref()
+            .expect("pod spec")
+            .containers[0]
+            .readiness_probe
+            .as_ref()
+            .expect("readiness probe");
+        assert!(readiness.period_seconds == Some(7));
+        assert!(
+            deployment
+                .spec
+                .as_ref()
+                .expect("deployment spec")
+                .template
+                .spec
+                .as_ref()
+                .expect("pod spec")
+                .containers[0]
+                .image
+                .as_deref()
+                == Some("tenant-image")
+        );
+    }
+
+    #[test]
+    fn compute_image_precedence_is_tenant_then_operator_then_compiled_default() {
+        let mut obj = tenant();
+        let mut operator_config = ConfigArgs::parse_from(["operator"]).config;
+        operator_config.default_gres_image = Some("operator-image".into());
+
+        obj.spec.image = Some("tenant-image".into());
+        assert!(
+            effective_compute_image(&obj, &operator_config).expect("tenant image")
+                == "tenant-image"
+        );
+        obj.spec.image = None;
+        assert!(
+            effective_compute_image(&obj, &operator_config).expect("operator image")
+                == "operator-image"
+        );
+        operator_config.default_gres_image = None;
+        assert!(
+            effective_compute_image(&obj, &operator_config).expect("compiled image")
+                == DEFAULT_IMAGE
+        );
+    }
+
+    #[test]
+    fn empty_effective_compute_image_is_rejected_without_fallback() {
+        let mut obj = tenant();
+        let operator_config = ConfigArgs::parse_from(["operator"]).config;
+        obj.spec.image = Some(String::new());
+
+        let error =
+            effective_compute_image(&obj, &operator_config).expect_err("empty image must fail");
+        assert!(error.to_string().contains("spec.image"), "got: {error}");
     }
 
     #[test]

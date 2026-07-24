@@ -33,6 +33,10 @@ pub struct GresSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activator: Option<GresActivatorSpec>,
 
+    /// Tenant compute workload policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compute: Option<GresComputeSpec>,
+
     /// Default tenant runtime settings inherited by `GresTenant`s unless
     /// they set `spec.overrides`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -73,6 +77,24 @@ pub struct GresActivatorSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
     pub readiness_probe_period_seconds: Option<i32>,
+}
+
+/// Tenant compute workload policy.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GresComputeSpec {
+    /// Compute readiness probe period in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub readiness_probe_period_seconds: Option<i32>,
+}
+
+impl GresComputeSpec {
+    pub(crate) fn effective_readiness_probe_period_seconds(&self) -> Result<i32, String> {
+        GreaterI32::<0>::new(self.readiness_probe_period_seconds.unwrap_or(5))
+            .map_err(|error| format!("spec.compute.readinessProbePeriodSeconds: {error}"))
+            .map(refined_type::Refined::into_value)
+    }
 }
 
 /// Dry-run balancer integration settings for a Gres fleet.
@@ -494,6 +516,9 @@ mod tests {
                 cold_start_timeout_ms: Some(45_000),
                 readiness_probe_period_seconds: Some(7),
             }),
+            compute: Some(GresComputeSpec {
+                readiness_probe_period_seconds: Some(11),
+            }),
             defaults: Some(TenantDefaults {
                 wal_replication: Some(3),
                 checkpoint_frames: Some(10_000),
@@ -550,6 +575,45 @@ mod tests {
             );
         }
         assert!(activator["properties"]["registryReplicationFactor"].is_null());
+    }
+
+    #[test]
+    fn compute_readiness_policy_round_trips_and_requires_positive_values() {
+        let policy = GresComputeSpec {
+            readiness_probe_period_seconds: Some(7),
+        };
+        let json = serde_json::to_string(&policy).expect("serialize compute policy");
+        assert!(
+            json.contains("\"readinessProbePeriodSeconds\":7"),
+            "got: {json}"
+        );
+        assert!(serde_json::from_str::<GresComputeSpec>(&json).unwrap() == policy);
+
+        let crd = serde_json::to_value(Gres::crd()).expect("serialize Gres CRD");
+        let compute = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
+            ["properties"]["compute"];
+        assert!(
+            compute["properties"]["readinessProbePeriodSeconds"]["minimum"].as_f64() == Some(1.0)
+        );
+    }
+
+    #[test]
+    fn compute_readiness_policy_uses_validated_default_and_rejects_zero() {
+        assert!(
+            GresComputeSpec::default()
+                .effective_readiness_probe_period_seconds()
+                .expect("default readiness")
+                == 5
+        );
+        let error = GresComputeSpec {
+            readiness_probe_period_seconds: Some(0),
+        }
+        .effective_readiness_probe_period_seconds()
+        .expect_err("zero readiness must fail");
+        assert!(
+            error.contains("spec.compute.readinessProbePeriodSeconds"),
+            "got: {error}"
+        );
     }
 
     #[test]

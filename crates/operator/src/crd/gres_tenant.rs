@@ -26,6 +26,12 @@ pub struct GresTenantSpec {
     /// Name of the `Gres` fleet this tenant belongs to.
     pub gres: String,
 
+    /// Compute container image override. When absent the operator uses its
+    /// global Gres image override or compiled default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1))]
+    pub image: Option<String>,
+
     /// SQL user exposed through `PgDog` and enforced by the tenant compute.
     pub user: String,
 
@@ -147,6 +153,7 @@ mod tests {
     fn spec_round_trips_through_json() {
         let spec = GresTenantSpec {
             gres: "analytics".into(),
+            image: Some("example.test/gres:v2".into()),
             user: "alice".into(),
             password_secret_ref: SecretKeyRef {
                 name: "alice-db-password".into(),
@@ -167,6 +174,10 @@ mod tests {
             }),
         };
         let json = serde_json::to_string(&spec).unwrap();
+        assert!(
+            json.contains("\"image\":\"example.test/gres:v2\""),
+            "got: {json}"
+        );
         assert!(json.contains("\"passwordSecretRef\""), "got: {json}");
         assert!(
             json.contains("\"checkpointBytes\":134217728"),
@@ -174,6 +185,14 @@ mod tests {
         );
         let back: GresTenantSpec = serde_json::from_str(&json).unwrap();
         assert!(back == spec);
+    }
+
+    #[test]
+    fn image_schema_requires_a_nonempty_value() {
+        let crd = serde_json::to_value(GresTenant::crd()).expect("serialize GresTenant CRD");
+        let image = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
+            ["properties"]["image"];
+        assert!(image["minLength"].as_u64() == Some(1), "got: {image}");
     }
 
     #[test]
