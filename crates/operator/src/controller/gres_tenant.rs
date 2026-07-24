@@ -2449,7 +2449,7 @@ mod tests {
         let password = fixture_password();
         let defaults = EffectiveDefaults {
             wal_replication: 1,
-            checkpoint_frames: None,
+            checkpoint_frames: Some(37),
             checkpoint_bytes: None,
             suspend_max_checkpoint_bytes: None,
             idle_seconds: None,
@@ -2469,6 +2469,7 @@ mod tests {
         .unwrap();
         assert!(record.scram_verifier.starts_with("SCRAM-SHA-256$"));
         assert!(!record.scram_verifier.contains(&password));
+        assert!(record.checkpoint_frames == Some(37));
     }
 
     #[test]
@@ -2866,6 +2867,7 @@ mod tests {
                 .any(|pair| pair == ["--checkpoint-bucket", "gres-checkpoints"])
         );
         assert!(args.contains(&"--checkpoint-allow-http".to_string()));
+        assert!(!args.iter().any(|arg| arg == "--checkpoint-frames"));
         assert!(!args.iter().any(|arg| arg == "secret"));
         // Checkpointing is enabled by `--checkpoint-store`; the periodic
         // thresholds stay at the runtime defaults.
