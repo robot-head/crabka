@@ -266,6 +266,11 @@ spec:
                     minimum: 1.0
                     nullable: true
                     type: integer
+                  forwardMaxBodyBytes:
+                    format: int32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
                   schemasTopicCreateTimeoutMs:
                     format: int32
                     minimum: 1.0

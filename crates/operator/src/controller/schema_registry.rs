@@ -345,6 +345,11 @@ fn validate_config(spec: &SchemaRegistrySpec) -> Result<(), String> {
             refined_type::rule::GreaterI32<0>,
             "spec.runtime.schemasTopicCreateTimeoutMs"
         );
+        validate!(
+            runtime.forward_max_body_bytes,
+            refined_type::rule::GreaterI32<0>,
+            "spec.runtime.forwardMaxBodyBytes"
+        );
 
         let session = runtime
             .election_session_timeout_ms
@@ -626,6 +631,7 @@ fn build_args_and_mounts(
         push_runtime!(store_reader_fetch_max_wait_ms);
         push_runtime!(store_reader_fetch_max_bytes);
         push_runtime!(schemas_topic_create_timeout_ms);
+        push_runtime!(forward_max_body_bytes);
         push_runtime!(default_compatibility_level);
         push_runtime!(default_mode);
     }

@@ -113,6 +113,9 @@ pub struct SchemaRegistryRuntime {
     #[schemars(range(min = 1))]
     pub schemas_topic_create_timeout_ms: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub forward_max_body_bytes: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_compatibility_level: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_mode: Option<String>,

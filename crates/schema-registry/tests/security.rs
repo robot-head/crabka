@@ -178,6 +178,7 @@ async fn start_secure_node(bootstrap: &str) -> Node {
         primary: primary.clone(),
         http: reqwest::Client::new(),
         node_id: cfg.advertised_url.clone(),
+        forward_max_body_bytes: usize::try_from(cfg.runtime.forward_max_body_bytes).unwrap(),
     };
     let app: Router = rest::router_with_security(
         AppState {
@@ -371,6 +372,7 @@ async fn start_mtls_node(bootstrap: &str, tls: TlsConfig, forward_http: reqwest:
         primary: primary.clone(),
         http: forward_http,
         node_id: cfg.advertised_url.clone(),
+        forward_max_body_bytes: usize::try_from(cfg.runtime.forward_max_body_bytes).unwrap(),
     };
     let app: Router = rest::router_with_security(
         AppState {
@@ -511,6 +513,7 @@ async fn https_round_trip_enforces_auth_over_tls() {
         primary: primary.clone(),
         http: reqwest::Client::new(),
         node_id: cfg.advertised_url.clone(),
+        forward_max_body_bytes: usize::try_from(cfg.runtime.forward_max_body_bytes).unwrap(),
     };
     let app: Router = rest::router_with_security(
         AppState {
@@ -814,6 +817,7 @@ async fn start_jwks_node(
         primary: primary.clone(),
         http: reqwest::Client::new(),
         node_id: cfg.advertised_url.clone(),
+        forward_max_body_bytes: usize::try_from(cfg.runtime.forward_max_body_bytes).unwrap(),
     };
     let app: Router = rest::router_with_security(
         AppState {

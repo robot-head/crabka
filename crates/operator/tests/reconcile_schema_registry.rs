@@ -109,6 +109,7 @@ fn valid_runtime() -> SchemaRegistryRuntime {
         store_reader_fetch_max_wait_ms: Some(777),
         store_reader_fetch_max_bytes: Some(2_097_152),
         schemas_topic_create_timeout_ms: Some(22_000),
+        forward_max_body_bytes: Some(3_145_728),
         default_compatibility_level: Some("FULL".into()),
         default_mode: Some("IMPORT".into()),
     }
@@ -153,6 +154,7 @@ async fn runtime_policy_renders_exact_flags_and_probe_timings() {
                 "--store-reader-fetch-max-wait-ms=777",
                 "--store-reader-fetch-max-bytes=2097152",
                 "--schemas-topic-create-timeout-ms=22000",
+                "--forward-max-body-bytes=3145728",
                 "--default-compatibility-level=FULL",
                 "--default-mode=IMPORT",
                 "--client-id=registry-production",
@@ -202,11 +204,10 @@ async fn assert_schema_registry_config_invalid(cr: SchemaRegistry) {
         ReconcileError::SchemaRegistryConfigInvalid(_)
     ));
     let observed = state.take_observed();
-    assert!(
-        !observed
-            .iter()
-            .any(|request| request.uri().to_string().contains("/deployments/"))
-    );
+    assert!(!observed.iter().any(|request| {
+        let uri = request.uri().to_string();
+        uri.contains("/deployments/") || uri.contains("/services/")
+    }));
     let status = observed
         .iter()
         .find(|request| {
@@ -237,6 +238,7 @@ async fn runtime_invalid_policy_is_rejected_before_deployment() {
         "storeReaderFetchMaxWaitMs",
         "storeReaderFetchMaxBytes",
         "schemasTopicCreateTimeoutMs",
+        "forwardMaxBodyBytes",
     ] {
         let mut cr = sr("sr1", Some(CLUSTER));
         cr.spec.bootstrap_servers = Some("ext:9092".into());

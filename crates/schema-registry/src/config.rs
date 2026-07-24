@@ -42,6 +42,7 @@ pub struct RegistryRuntimeConfig {
     pub store_reader_fetch_max_wait_ms: i32,
     pub store_reader_fetch_max_bytes: i32,
     pub schemas_topic_create_timeout_ms: i32,
+    pub forward_max_body_bytes: i32,
     pub default_compatibility_level: String,
     pub default_mode: String,
 }
@@ -86,6 +87,7 @@ impl Default for RegistryRuntimeConfig {
             store_reader_fetch_max_wait_ms: 500,
             store_reader_fetch_max_bytes: 1_048_576,
             schemas_topic_create_timeout_ms: 15_000,
+            forward_max_body_bytes: 16_777_216,
             default_compatibility_level: "BACKWARD".into(),
             default_mode: "READWRITE".into(),
         }
@@ -169,6 +171,7 @@ mod tests {
                     store_reader_fetch_max_wait_ms: 500,
                     store_reader_fetch_max_bytes: 1_048_576,
                     schemas_topic_create_timeout_ms: 15_000,
+                    forward_max_body_bytes: 16_777_216,
                     default_compatibility_level: "BACKWARD".into(),
                     default_mode: "READWRITE".into(),
                 }
