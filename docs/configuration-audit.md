@@ -17,13 +17,13 @@ applicable rule below:
 
 ## Coverage Status
 
-- Complete: `broker`, `schema-registry`.
+- Complete: `broker`, `schema-registry`, `grpc-gateway`.
 - Pending: `admin-ui`, `audit`, `authz`, `bench-driver`, `blockstore`, `cli`,
   `client-admin`, `client-consumer`, `client-core`, `client-producer`,
   `client-streams`, `compression`, `connect`, `connect-derive`,
   `connect-postgres`, `docgen`, `gres`, `gres-activator`, `gres-balancer`,
   `gres-conformance`, `gres-control`, `gres-fdw`, `gres-loadtest`,
-  `gres-ranges`, `gres-substrate`, `grpc-gateway`, `ids`,
+  `gres-ranges`, `gres-substrate`, `ids`,
   `integration-tests`, `kafka-tap`, `kraft-core`, `log`, `log-iobench`,
   `logfmt`, `logql`, `metadata`, `metrics`, `metrics-service`,
   `object-store`, `observability`, `observability-demo-app`, `operator`,
@@ -317,3 +317,87 @@ The Schema Registry slice passed these gates on 2026-07-24:
 This evidence closes only the Schema Registry slice. Every crate listed as
 pending in Coverage Status still requires its own semantic audit and
 verification.
+
+## gRPC Gateway
+
+### Configurable
+
+The scanner reports four production deployment-policy defaults:
+`internal_topic_create_timeout_ms`, `consumer_poll_timeout_ms`,
+`ownership_warmup_empty_polls`, and `readiness_poll_interval_ms`. They are
+members of `GatewayRuntimeConfig` and flow through checked CLI/environment
+inputs and typed `KafkaGrpcGateway` CRD fields.
+
+The same validated paths own the adjacent policy that the scanner does not
+report: internal-topic replication, fallback, segment and compaction ratio;
+Schema Registry cache and framing; dedup sizing, retention and ownership;
+TLS reload; ACL refresh; bearer clock skew; membership topic; webhook replay,
+body and schema settings; outbound delivery retry, timeout, group and decoding
+settings; and Kubernetes readiness/liveness probe timing. Direct-process and
+operator defaults intentionally remain distinct where they were distinct
+before this work.
+
+### Fixed
+
+- Two scanner matches are Kafka protocol error codes:
+  `INVALID_REPLICATION_FACTOR` and `TOPIC_ALREADY_EXISTS`.
+- Three scanner matches initialize or reset the ownership warmup empty-poll
+  counter. The threshold is configured; zero is the state-machine reset value.
+- The membership topic partition count of one supplies total ordering.
+  `cleanup.policy=compact` for membership and `compact,delete` plus configured
+  retention for dedup are storage semantics, not independent tuning.
+- gRPC and HTTP error codes, Kafka isolation/acks/offset modes, schema and
+  protocol identifiers, and negative error coordinates are compatibility or
+  state-machine invariants.
+- Confluent framing bytes, header sizes, Protobuf varint masks and shift width,
+  FNV-1a hash constants, and capacities derived from encoded payload length are
+  wire or hashing invariants.
+- Empty/unknown identities, clock-anomaly bounds, absent schema id zero, and
+  error partition/offset `-1` are sentinels.
+- Exponential-backoff doubling, half-window jitter, attempt indexing, and
+  saturating arithmetic are retry math driven by configured base, cap and
+  attempt values.
+- Histogram buckets are the exported metric schema and remain fixed for
+  time-series continuity.
+- The remaining 36 scanner matches are test inputs: 3 bearer tokens, 10
+  CLI/default fixtures, 2 internal-topic policy fixtures, 5 forwarding
+  fixtures/sentinels, 9 outbound retry/validation fixtures, 2 Schema Registry
+  cache timings, 4 schema fixtures, and 1 TLS reload boundary.
+
+### Audit Snapshot
+
+On 2026-07-24 the scanner reports 5,889 matches across all crates. The gRPC
+Gateway subset contains exactly 45 matches across 14 files: 4 configured
+production defaults, 5 fixed production values, and 36 test inputs. Four
+production gaps found by the adjacent semantic review were remediated:
+
+- Kafka-unrepresentable partition counts are rejected instead of coerced to
+  `i32::MAX` or partition zero; derived conversions now rely on an explicit
+  checked partition-domain invariant.
+- Direct webhook TOML rejects negative timestamp tolerance and zero body caps
+  with `refined_type`, matching the CRD trust boundary.
+- Named webhooks collect request bodies with their configured per-endpoint cap
+  instead of Axum's unrelated fixed 2 MiB extractor default.
+- Gateway readiness and liveness initial delays and periods are typed
+  `healthChecks` CRD fields, validated before child rendering.
+
+### gRPC Gateway Slice Completion Evidence
+
+The gRPC Gateway slice passed these gates on 2026-07-24:
+
+- `tools/audit-runtime-values.sh`: 5,889 repository matches and exactly 45
+  gateway matches across 14 files, with every result classified above.
+- `cargo +nightly fmt --all -- --check`: passed.
+- `cargo clippy -p crabka-grpc-gateway -p crabka-operator --all-targets -- -D warnings`:
+  passed.
+- `cargo nextest run -p crabka-grpc-gateway -p crabka-operator`: 1,038 passed,
+  1 skipped, and no failures.
+- `cargo run -p crabka-grpc-gateway -- --help`: exposes internal-topic,
+  consumer-poll, ownership-warmup, Schema Registry cache, and bearer skew
+  settings with `CRABKA_GATEWAY_*` environment bindings.
+- `cargo run -p crabka-operator -- gen-crds <temporary-directory>` followed by
+  an exact diff of the generated `KafkaGrpcGateway` CRD: passed.
+- `git diff --check`: passed.
+
+This evidence closes only the gRPC Gateway slice. Every crate listed as pending
+in Coverage Status still requires its own semantic audit and verification.
