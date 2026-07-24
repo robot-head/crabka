@@ -1644,6 +1644,7 @@ mod tests {
             crabka_audit::NodeId(1),
             Arc::clone(&partitions),
             Arc::new(crate::producer_id_manager::ProducerIdManager::new()),
+            50,
         ));
         let producer_state = Arc::new(crate::producer_state::ProducerState::new());
         let log_dir_status = crate::log_dir_status::LogDirRegistry::default();
@@ -1731,6 +1732,7 @@ mod tests {
             crabka_audit::NodeId(2),
             Arc::clone(&partitions),
             Arc::new(crate::producer_id_manager::ProducerIdManager::new()),
+            50,
         ));
         let producer_state = Arc::new(crate::producer_state::ProducerState::new());
         let log_dir_status = crate::log_dir_status::LogDirRegistry::default();
@@ -1807,6 +1809,7 @@ mod tests {
             crabka_audit::NodeId(1),
             Arc::clone(&partitions),
             Arc::new(crate::producer_id_manager::ProducerIdManager::new()),
+            50,
         ));
         let producer_state = Arc::new(crate::producer_state::ProducerState::new());
         let log_dir_status = crate::log_dir_status::LogDirRegistry::default();

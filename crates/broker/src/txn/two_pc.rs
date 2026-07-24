@@ -25,15 +25,6 @@
 
 use super::state::TxnState;
 
-/// Smallest transaction timeout a non-2PC producer may request, in ms
-/// (Kafka clamps below this). 1 second.
-pub(crate) const MIN_TXN_TIMEOUT_MS: i32 = 1_000;
-
-/// Largest transaction timeout a non-2PC producer may request, in ms
-/// (Kafka's `transaction.max.timeout.ms`, default 15 minutes). A larger
-/// requested value is clamped down.
-pub(crate) const MAX_TXN_TIMEOUT_MS: i32 = 15 * 60 * 1_000;
-
 /// Sentinel `TransactionTimeoutMs` marking a 2PC transaction: it is never
 /// auto-aborted by the coordinator's idle-transaction reaper. Mirrors Apache
 /// Kafka's `Integer.MAX_VALUE` 2PC marker (`isDistributedTwoPhaseCommitTxn`).
@@ -46,13 +37,18 @@ pub(crate) const NO_TIMEOUT_MS: i32 = i32::MAX;
 ///   client-requested timeout is ignored (it is irrelevant under 2PC, and
 ///   Kafka's `transaction.max.timeout.ms` cap does not apply).
 /// * otherwise → the client-requested timeout clamped to
-///   `[MIN_TXN_TIMEOUT_MS, MAX_TXN_TIMEOUT_MS]`, the classic KIP-98 behaviour.
+///   `[min_timeout_ms, max_timeout_ms]`, the classic KIP-98 behaviour.
 #[must_use]
-pub(crate) fn resolve_txn_timeout(enable_2pc: bool, requested_ms: i32) -> i32 {
+pub(crate) fn resolve_txn_timeout(
+    enable_2pc: bool,
+    requested_ms: i32,
+    min_timeout_ms: i32,
+    max_timeout_ms: i32,
+) -> i32 {
     if enable_2pc {
         NO_TIMEOUT_MS
     } else {
-        requested_ms.clamp(MIN_TXN_TIMEOUT_MS, MAX_TXN_TIMEOUT_MS)
+        requested_ms.clamp(min_timeout_ms, max_timeout_ms)
     }
 }
 
@@ -111,23 +107,26 @@ mod tests {
         // Even an out-of-range request (-5) is ignored under 2PC.
         for requested in [30_000, 0, i32::MAX, -5] {
             assert!(
-                resolve_txn_timeout(true, requested) == NO_TIMEOUT_MS,
+                resolve_txn_timeout(true, requested, 2_000, 8_000) == NO_TIMEOUT_MS,
                 "{requested}"
             );
         }
     }
 
     #[test]
-    fn resolve_timeout_non_2pc_clamps_to_kafka_bounds() {
+    fn resolve_timeout_non_2pc_clamps_to_configured_bounds() {
         // Below the floor clamps up; above the ceiling clamps down.
         for (requested, want) in [
-            (30_000, 30_000),
-            (0, MIN_TXN_TIMEOUT_MS),
-            (-1, MIN_TXN_TIMEOUT_MS),
-            (i32::MAX, MAX_TXN_TIMEOUT_MS),
-            (MAX_TXN_TIMEOUT_MS + 1, MAX_TXN_TIMEOUT_MS),
+            (5_000, 5_000),
+            (0, 2_000),
+            (-1, 2_000),
+            (i32::MAX, 8_000),
+            (8_001, 8_000),
         ] {
-            assert!(resolve_txn_timeout(false, requested) == want, "{requested}");
+            assert!(
+                resolve_txn_timeout(false, requested, 2_000, 8_000) == want,
+                "{requested}"
+            );
         }
     }
 
@@ -136,9 +135,16 @@ mod tests {
         use assert2::check;
         // The clamp ceiling is far below i32::MAX, so a non-2PC transaction can
         // never accidentally look like a 2PC one.
-        check!(resolve_txn_timeout(false, i32::MAX) != NO_TIMEOUT_MS);
-        check!(!is_two_phase_commit(resolve_txn_timeout(false, i32::MAX)));
-        check!(is_two_phase_commit(resolve_txn_timeout(true, 1)));
+        check!(resolve_txn_timeout(false, i32::MAX, 2_000, 8_000) != NO_TIMEOUT_MS);
+        check!(!is_two_phase_commit(resolve_txn_timeout(
+            false,
+            i32::MAX,
+            2_000,
+            8_000
+        )));
+        check!(is_two_phase_commit(resolve_txn_timeout(
+            true, 1, 2_000, 8_000
+        )));
     }
 
     #[test]
