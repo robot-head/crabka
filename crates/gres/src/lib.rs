@@ -2852,9 +2852,13 @@ fn apply_tenant_runtime_defaults(
     mut args: ServeArgs,
     tenant_record: Option<&TenantRecord>,
 ) -> std::io::Result<ServeArgs> {
+    let checkpointing_requested = checkpointing_was_requested(&args);
     let Some(record) = tenant_record else {
         return Ok(args);
     };
+    if !checkpointing_requested {
+        return Ok(args);
+    }
     if args.checkpoint_prefix.is_none() {
         args.checkpoint_prefix.clone_from(&record.bucket_prefix);
     }
@@ -7856,6 +7860,27 @@ mod tests {
         assert_eq!(applied.checkpoint_prefix.as_deref(), Some("cli"));
         assert_eq!(applied.checkpoint_frames.map(NonZeroU64::get), Some(7));
         assert_eq!(applied.checkpoint_bytes.map(NonZeroU64::get), Some(8));
+    }
+
+    #[test]
+    fn tenant_checkpoint_fields_do_not_activate_checkpointing() {
+        let mut record = tenant_record();
+        record.bucket_prefix = Some("from-record".to_string());
+        record.checkpoint_frames = Some(77);
+        record.checkpoint_bytes = Some(88);
+        let applied =
+            apply_tenant_runtime_defaults(substrate_args(), Some(&record)).expect("defaults");
+
+        assert!(applied.checkpoint_prefix.is_none());
+        assert!(applied.checkpoint_frames.is_none());
+        assert!(applied.checkpoint_bytes.is_none());
+        assert!(
+            SubstrateRuntimeConfig::from_args(&applied)
+                .expect("substrate config")
+                .expect("substrate config")
+                .checkpoints
+                .is_none()
+        );
     }
 
     #[test]

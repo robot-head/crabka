@@ -199,6 +199,16 @@ fn gres_body(name: &str, namespace: &str) -> serde_json::Value {
     })
 }
 
+fn set_lifecycle_requeue(rules: &mut [MockRule], millis: u64) {
+    let mut gres = gres_body("fleet", "ns");
+    gres["spec"]["compute"] = serde_json::json!({"lifecycleRequeueMs": millis});
+    rules
+        .iter_mut()
+        .find(|rule| rule.path_substr == "/greses/fleet")
+        .expect("Gres rule")
+        .response = json_response(200, &gres);
+}
+
 fn secret_body(name: &str, namespace: &str, password: &str) -> serde_json::Value {
     use base64::Engine as _;
     serde_json::json!({
@@ -420,6 +430,7 @@ async fn fake_gres_control_matches_canonical_replace_and_retry_semantics() {
 #[tokio::test]
 async fn multi_range_tenant_publishes_range_services_and_becomes_ready_after_all_deployments() {
     let mut rules = multi_range_reconcile_rules();
+    set_lifecycle_requeue(&mut rules, 1_234);
     rules.extend(multi_range_reconcile_rules());
     let state = MockState::new(rules);
     let client = mock_client(&state, "ns");
@@ -435,7 +446,7 @@ async fn multi_range_tenant_publishes_range_services_and_becomes_ready_after_all
         .await
         .unwrap();
 
-    assert!(action == Action::requeue(Duration::from_secs(5)));
+    assert!(action == Action::requeue(Duration::from_millis(1_234)));
     let records = control.upserts.lock().await;
     assert!(records.len() == 1);
     assert!(records[0].ranges.len() == 3);
@@ -1016,6 +1027,7 @@ async fn range_parking_deletes_only_predecessor_generation_and_keeps_tenant_acti
 #[tokio::test]
 async fn parking_waits_for_wal_metadata_to_confirm_asynchronous_deletion() {
     let mut rules = tenant_reconcile_rules();
+    set_lifecycle_requeue(&mut rules, 1_234);
     rules.extend(tenant_reconcile_rules());
     let state = MockState::new(rules);
     let client = mock_client(&state, "ns");
@@ -1049,7 +1061,7 @@ async fn parking_waits_for_wal_metadata_to_confirm_asynchronous_deletion() {
         .await
         .expect("DeleteTopics acknowledgement is accepted");
 
-    assert!(action == Action::requeue(Duration::from_secs(5)));
+    assert!(action == Action::requeue(Duration::from_millis(1_234)));
     assert!(control.current.lock().await.as_ref().unwrap().state == TenantState::Parking);
     let calls = admin.lock().await.calls();
     assert!(!calls.iter().any(|call| matches!(call, RecordedCall::CreateTopics(specs) if specs.iter().any(|spec| spec.name == "__gres_wal.tenant-a.r0.g0000000004"))));
@@ -1216,7 +1228,9 @@ async fn failed_wal_deletion_keeps_parking_intent_and_retry_converges() {
 
 #[tokio::test]
 async fn resume_request_starts_current_generation_without_deleting_previous_generation() {
-    let state = MockState::new(tenant_reconcile_rules());
+    let mut rules = tenant_reconcile_rules();
+    set_lifecycle_requeue(&mut rules, 1_234);
+    let state = MockState::new(rules);
     let client = mock_client(&state, "ns");
     let ctx = fixture_ctx(client, "ns");
     let admin = Arc::new(tokio::sync::Mutex::new(FakeAdminClient::new()));
@@ -1242,7 +1256,7 @@ async fn resume_request_starts_current_generation_without_deleting_previous_gene
         .await
         .expect("resume request remains fenced while the WAL topic remains in metadata");
 
-    assert!(action == Action::requeue(Duration::from_secs(5)));
+    assert!(action == Action::requeue(Duration::from_millis(1_234)));
     assert!(control.current.lock().await.as_ref() == Some(&resume_requested));
     assert!(control.upserts.lock().await.is_empty());
     assert!(
