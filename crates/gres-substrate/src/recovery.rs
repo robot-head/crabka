@@ -114,12 +114,13 @@ impl RecoveryReadPolicy {
 
 impl Default for RecoveryReadPolicy {
     fn default() -> Self {
-        Self {
-            fetch_max_wait_ms: DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT_MS,
-            fetch_partition_max_bytes: DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES,
-            fetch_response_max_bytes: DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES,
-            empty_fetch_retries: DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES,
-        }
+        Self::new(
+            DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT_MS,
+            DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES,
+            DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES,
+            DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES,
+        )
+        .expect("default recovery read policy is valid")
     }
 }
 
@@ -796,17 +797,20 @@ impl CommittedWalReader for KafkaCommittedWalReader {
         let conn = self.open_connection().await?;
         let mut items = Vec::new();
         let mut next_offset = start_offset;
-        let mut empty_fetches = 0_usize;
+        let mut empty_fetch_retries = None;
         loop {
             let fetched = self.fetch_partition(&conn, next_offset).await?;
-            empty_fetches = next_empty_fetch_count(empty_fetches, next_offset, &fetched);
-
-            if fetched.records.is_empty() {
-                if fetched.next_offset > next_offset {
-                    next_offset = fetched.next_offset;
-                    continue;
+            match empty_fetch_decision(
+                empty_fetch_retries,
+                next_offset,
+                &fetched,
+                self.read_policy.empty_fetch_retries(),
+            ) {
+                EmptyFetchDecision::Reset => empty_fetch_retries = None,
+                EmptyFetchDecision::Continue { retries_used } => {
+                    empty_fetch_retries = Some(retries_used);
                 }
-                if empty_fetches > self.read_policy.empty_fetch_retries() {
+                EmptyFetchDecision::Exhausted => {
                     return Err(SubstrateError::Unavailable(format!(
                         "replay could not read recovery barrier {} for {} (topic id {:?}, next offset {}, log start {}, high watermark {}, last stable offset {}, decoded batches {}) before retry limit",
                         self.barrier_offset,
@@ -818,6 +822,13 @@ impl CommittedWalReader for KafkaCommittedWalReader {
                         fetched.last_stable_offset,
                         fetched.decoded_batches,
                     )));
+                }
+            }
+
+            if fetched.records.is_empty() {
+                if fetched.next_offset > next_offset {
+                    next_offset = fetched.next_offset;
+                    continue;
                 }
                 continue;
             }
@@ -842,15 +853,28 @@ impl CommittedWalReader for KafkaCommittedWalReader {
     }
 }
 
-const fn next_empty_fetch_count(
-    current: usize,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EmptyFetchDecision {
+    Reset,
+    Continue { retries_used: usize },
+    Exhausted,
+}
+
+const fn empty_fetch_decision(
+    retries_used: Option<usize>,
     fetch_offset: i64,
     fetched: &FetchedWalPartition,
-) -> usize {
+    retry_limit: usize,
+) -> EmptyFetchDecision {
     if !fetched.records.is_empty() || fetched.next_offset > fetch_offset {
-        0
-    } else {
-        current.saturating_add(1)
+        return EmptyFetchDecision::Reset;
+    }
+    match retries_used {
+        None => EmptyFetchDecision::Continue { retries_used: 0 },
+        Some(retries_used) if retries_used < retry_limit => EmptyFetchDecision::Continue {
+            retries_used: retries_used + 1,
+        },
+        Some(_) => EmptyFetchDecision::Exhausted,
     }
 }
 
@@ -1441,7 +1465,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_read_policy_retry_count_crosses_limit_after_retries() {
+    fn recovery_read_policy_retry_decision_handles_one_and_usize_max() {
         let stalled = FetchedWalPartition {
             log_start_offset: 0,
             high_watermark: 1,
@@ -1451,12 +1475,28 @@ mod tests {
             records: Vec::new(),
         };
 
-        let initial_empty = next_empty_fetch_count(0, 0, &stalled);
-        let retry_empty = next_empty_fetch_count(initial_empty, 0, &stalled);
-
-        assert_eq!(initial_empty, 1);
-        assert_eq!(retry_empty, 2);
-        assert!(initial_empty <= 1 && retry_empty > 1);
+        assert_eq!(
+            empty_fetch_decision(None, 0, &stalled, 1),
+            EmptyFetchDecision::Continue { retries_used: 0 }
+        );
+        assert_eq!(
+            empty_fetch_decision(Some(0), 0, &stalled, 1),
+            EmptyFetchDecision::Continue { retries_used: 1 }
+        );
+        assert_eq!(
+            empty_fetch_decision(Some(1), 0, &stalled, 1),
+            EmptyFetchDecision::Exhausted
+        );
+        assert_eq!(
+            empty_fetch_decision(Some(usize::MAX - 1), 0, &stalled, usize::MAX),
+            EmptyFetchDecision::Continue {
+                retries_used: usize::MAX
+            }
+        );
+        assert_eq!(
+            empty_fetch_decision(Some(usize::MAX), 0, &stalled, usize::MAX),
+            EmptyFetchDecision::Exhausted
+        );
     }
 
     #[test]
@@ -1478,8 +1518,14 @@ mod tests {
             ..progressed.clone()
         };
 
-        assert_eq!(next_empty_fetch_count(44, 0, &progressed), 0);
-        assert_eq!(next_empty_fetch_count(44, 0, &records), 0);
+        assert_eq!(
+            empty_fetch_decision(Some(44), 0, &progressed, usize::MAX),
+            EmptyFetchDecision::Reset
+        );
+        assert_eq!(
+            empty_fetch_decision(Some(44), 0, &records, usize::MAX),
+            EmptyFetchDecision::Reset
+        );
     }
 
     #[test]
