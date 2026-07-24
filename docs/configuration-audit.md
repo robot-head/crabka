@@ -795,3 +795,55 @@ No focused candidate remains unclassified.
 - Independent reviews found and verified remediation of terminal pin cleanup,
   explicit no-op lifecycle inputs, no-store checkpoint activation, behavioral
   lifecycle coverage, and duplicate default ownership.
+
+## Gres Local Vacuum Policy
+
+Local-engine vacuum pacing and debt policy is complete. Eight optional
+CLI/environment inputs feed one validated effective policy: idle interval,
+backoff floor, hot-debt threshold, base and maximum key budgets, fast and slow
+step thresholds, and foreground idle-after duration. Explicit inputs reject
+with substrate mode, and default substrate mode constructs no local policy.
+
+All eight values reach live local-only consumers: relaxed and maintenance
+cadence, backoff clamping, hot-debt selection, per-step scan budget, maximum
+budget growth, fast/slow latency adaptation, and foreground-idle
+classification. The loop is additionally gated by
+`SqlEngine::supports_local_vacuum`; replicated/substrate engines return no-op
+vacuum results because out-of-WAL local deletion would diverge replicas.
+Accordingly, there is intentionally no operator or CRD surface.
+
+### Fixed
+
+Zero-delay hot mode, doubling/halving and the derived four-times maximum,
+vacuum cursor interval geometry, sparse-scan minimum cost, cooperative yield
+quantum, and the engine's nonzero budget normalization are state-machine,
+derived arithmetic, scan-geometry, or safety invariants rather than
+independent deployment policy.
+
+### Adjacent Pending Policy
+
+This closes local-vacuum pacing and debt policy. The next coherent Gres-owned
+runtime slice is range-0 follower retry/poll policy in
+`crates/gres/src/lib.rs`. Durable-inspection limits and operator
+dependency-discovery retries remain later adjacent owner-specific reviews.
+
+### Gres Local Vacuum Evidence
+
+On 2026-07-24 `tools/audit-runtime-values.sh` reported 5,921 repository
+matches. The direct local-vacuum scanner subset contains 11 candidates: five
+effective configuration defaults, one test/harness marker, and five fixed
+engine/state-machine values. The exact focused textual search reports 110
+references: 46 production parser/default/live-wiring references in Gres, 50
+test/harness references in Gres, and 14 fixed engine/state-machine references
+in pgexec. No local-vacuum candidate remains unclassified.
+
+- The full Gres suite passed: 116 library, 25 runtime, 17 topology
+  process-nemesis, and 30 topology split-crash tests, with no failures.
+- Strict all-target/all-feature Clippy, formatting, and `git diff --check`
+  passed.
+- Gres help exposes all eight local-vacuum flags.
+- `git diff -- deploy/crds` is empty, and focused operator/CRD searches found
+  no local-vacuum surface.
+- Independent review traced all eight consumers, scalar and relationship
+  validation, local-only spawn, substrate rejection, tests, and diff scope,
+  and returned PASS with no remediation required.
