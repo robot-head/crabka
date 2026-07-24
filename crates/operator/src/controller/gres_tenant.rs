@@ -119,6 +119,7 @@ struct ReadyTenant {
     bootstrap: String,
     policy: crabka_gres_control::RegistryPolicy,
     defaults: EffectiveDefaults,
+    direct_bootstrap_grace_ms: u64,
     kafka_sasl: bool,
 }
 
@@ -148,6 +149,7 @@ async fn prepare_tenant(
                     registry_version: None,
                     lifecycle_phase: preserved_lifecycle_state(obj),
                     advance_generation: false,
+                    direct_bootstrap_grace_ms: None,
                 },
             )
             .await?;
@@ -169,6 +171,7 @@ async fn prepare_tenant(
                 registry_version: None,
                 lifecycle_phase: preserved_lifecycle_state(obj),
                 advance_generation: false,
+                direct_bootstrap_grace_ms: None,
             },
         )
         .await?;
@@ -176,6 +179,11 @@ async fn prepare_tenant(
             Duration::from_secs(30),
         )));
     };
+    let pgdog_policy = gres
+        .spec
+        .pgdog
+        .effective_policy()
+        .map_err(ReconcileError::Malformed)?;
     let cluster = gres.spec.kafka_cluster.clone();
     let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &namespace);
     let Some(kafka) = kafka_api.get_opt(&cluster).await? else {
@@ -226,6 +234,7 @@ async fn prepare_tenant(
         bootstrap,
         policy,
         defaults: effective_defaults(gres.spec.defaults.as_ref(), obj.spec.overrides.as_ref()),
+        direct_bootstrap_grace_ms: pgdog_policy.direct_bootstrap_grace.into_value(),
         kafka_sasl: kafka_internal_listener_requires_sasl(&kafka),
     })))
 }
@@ -246,6 +255,7 @@ async fn patch_cluster_not_ready(
             registry_version: None,
             lifecycle_phase: preserved_lifecycle_state(obj),
             advance_generation: false,
+            direct_bootstrap_grace_ms: None,
         },
     )
     .await
@@ -268,6 +278,7 @@ async fn reconcile_inner(
         bootstrap,
         policy,
         defaults,
+        direct_bootstrap_grace_ms,
         kafka_sasl,
     } = *ready;
     let (wal_topic, cfg_topic) = (wal_topic(&tenant_name), tenant_config_topic(&tenant_name));
@@ -428,6 +439,7 @@ async fn reconcile_inner(
             config_topic: &cfg_topic,
             policy: &policy,
             record: &record,
+            direct_bootstrap_grace_ms,
             kafka_sasl,
             range_control_enabled,
             range_tls_hash: range_tls_hash.as_deref(),
@@ -438,23 +450,45 @@ async fn reconcile_inner(
     match reconcile_result {
         Ok(action) => Ok(action),
         Err(error) => {
-            patch_status(
+            patch_reconcile_failed(
                 &tenant_api,
                 &name,
                 &obj,
-                &TenantStatusUpdate {
-                    status: "False",
-                    reason: "ReconcileFailed",
-                    message: &error.to_string(),
-                    registry_version,
-                    lifecycle_phase: lifecycle_state,
-                    advance_generation: false,
-                },
+                &error,
+                registry_version,
+                lifecycle_state,
+                direct_bootstrap_grace_ms,
             )
             .await?;
             Err(error)
         }
     }
+}
+
+async fn patch_reconcile_failed(
+    tenant_api: &Api<GresTenant>,
+    name: &str,
+    obj: &GresTenant,
+    error: &ReconcileError,
+    registry_version: Option<u64>,
+    lifecycle_phase: TenantState,
+    direct_bootstrap_grace_ms: u64,
+) -> Result<(), ReconcileError> {
+    patch_status(
+        tenant_api,
+        name,
+        obj,
+        &TenantStatusUpdate {
+            status: "False",
+            reason: "ReconcileFailed",
+            message: &error.to_string(),
+            registry_version,
+            lifecycle_phase,
+            advance_generation: false,
+            direct_bootstrap_grace_ms: Some(direct_bootstrap_grace_ms),
+        },
+    )
+    .await
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -588,6 +622,7 @@ struct ComputeStatusConfig<'a> {
     config_topic: &'a str,
     policy: &'a crabka_gres_control::RegistryPolicy,
     record: &'a TenantRecord,
+    direct_bootstrap_grace_ms: u64,
     kafka_sasl: bool,
     range_control_enabled: bool,
     range_tls_hash: Option<&'a str>,
@@ -660,6 +695,7 @@ async fn reconcile_compute_and_status(
             registry_version: Some(config.record.record_version),
             lifecycle_phase: config.record.state,
             advance_generation: endpoint_ready,
+            direct_bootstrap_grace_ms: Some(config.direct_bootstrap_grace_ms),
         },
     )
     .await?;
@@ -2158,6 +2194,7 @@ struct TenantStatusUpdate<'a> {
     registry_version: Option<u64>,
     lifecycle_phase: TenantState,
     advance_generation: bool,
+    direct_bootstrap_grace_ms: Option<u64>,
 }
 
 async fn patch_status(
@@ -2166,7 +2203,6 @@ async fn patch_status(
     obj: &GresTenant,
     update: &TenantStatusUpdate<'_>,
 ) -> Result<(), ReconcileError> {
-    const PGDOG_ACTIVE_GRACE_MS: u64 = 4_000;
     let observed_generation = if update.advance_generation {
         obj.meta().generation
     } else {
@@ -2181,23 +2217,17 @@ async fn patch_status(
         .status
         .as_ref()
         .and_then(|status| status.pgdog_credential_grace_until_unix_ms);
-    let pgdog_grace = if update.lifecycle_phase == TenantState::Active {
-        if previous_phase == Some("active") {
-            existing_grace
-        } else {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_err(|error| ReconcileError::Malformed(format!("system clock: {error}")))?
-                .as_millis();
-            Some(
-                u64::try_from(now)
-                    .unwrap_or(u64::MAX)
-                    .saturating_add(PGDOG_ACTIVE_GRACE_MS),
-            )
-        }
-    } else {
-        None
-    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| ReconcileError::Malformed(format!("system clock: {error}")))?
+        .as_millis();
+    let pgdog_grace = pgdog_grace_deadline(
+        previous_phase,
+        existing_grace,
+        update.lifecycle_phase,
+        u64::try_from(now).unwrap_or(u64::MAX),
+        update.direct_bootstrap_grace_ms,
+    );
     let body = json!({
         "status": {
             "conditions": [condition("Ready", update.status, update.reason, update.message)],
@@ -2221,6 +2251,22 @@ async fn patch_status(
     Ok(())
 }
 
+fn pgdog_grace_deadline(
+    previous_phase: Option<&str>,
+    existing_grace: Option<u64>,
+    lifecycle_phase: TenantState,
+    now: u64,
+    direct_bootstrap_grace_ms: Option<u64>,
+) -> Option<u64> {
+    if lifecycle_phase != TenantState::Active {
+        return None;
+    }
+    if previous_phase == Some("active") {
+        return existing_grace;
+    }
+    direct_bootstrap_grace_ms.map(|grace| now.saturating_add(grace))
+}
+
 fn preserved_lifecycle_state(obj: &GresTenant) -> TenantState {
     match obj
         .status
@@ -2241,6 +2287,37 @@ mod tests {
     use clap::Parser as _;
 
     use super::*;
+
+    #[test]
+    fn configured_pgdog_grace_drives_active_transition_deadline() {
+        assert!(
+            pgdog_grace_deadline(
+                Some("suspended"),
+                None,
+                TenantState::Active,
+                10_000,
+                Some(7_000)
+            ) == Some(17_000)
+        );
+        assert!(
+            pgdog_grace_deadline(
+                Some("suspended"),
+                None,
+                TenantState::Active,
+                u64::MAX - 1,
+                Some(7_000)
+            ) == Some(u64::MAX)
+        );
+        assert!(
+            pgdog_grace_deadline(
+                Some("active"),
+                Some(12_000),
+                TenantState::Active,
+                20_000,
+                Some(7_000)
+            ) == Some(12_000)
+        );
+    }
     use crate::crd::{GresTenantSpec, SecretKeyRef};
 
     fn fixture_password() -> String {

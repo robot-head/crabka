@@ -230,6 +230,25 @@ spec:
                     - key
                     - name
                     type: object
+                  connectAttempts:
+                    description: Number of backend connection attempts.
+                    format: uint16
+                    maximum: 65535.0
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  directBootstrapGraceMs:
+                    description: Direct-route credential retention grace in milliseconds.
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  idleTimeoutMs:
+                    description: Idle pooled-server disconnect window in milliseconds.
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
                   image:
                     description: |-
                       Container image override. When absent the operator uses
@@ -242,11 +261,36 @@ spec:
                     maximum: 65535.0
                     minimum: 1.0
                     type: integer
+                  poolerMode:
+                    description: Pooling modes accepted by the Gres CRD.
+                    enum:
+                    - transaction
+                    - session
+                    nullable: true
+                    type: string
+                  readinessProbePeriodSeconds:
+                    description: '`PgDog` readiness probe period in seconds.'
+                    format: int32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
                   replicas:
                     description: Number of `PgDog` replicas.
                     format: int32
                     maximum: 1000.0
                     minimum: 0.0
+                    type: integer
+                  serverLifetimeMs:
+                    description: Maximum lifetime for pooled backend connections in milliseconds.
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  suspensionIdleTimeoutMs:
+                    description: Idle timeout used while at least one tenant can suspend.
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
                     type: integer
                   tlsSecretRef:
                     description: Optional TLS Secret mounted by the future `PgDog` controller.

@@ -10,8 +10,8 @@ use crabka_operator::{
     crd::{
         Gres, GresActivatorSpec, GresBalancerGoal, GresBalancerGoals, GresBalancerOperationKind,
         GresBalancerPlanSnapshot, GresBalancerRegistryLayout, GresBalancerSpec,
-        GresBalancerThresholds, GresSpec, GresTenant, GresTenantSpec, PgdogSpec, SecretKeyRef,
-        SecretRef,
+        GresBalancerThresholds, GresSpec, GresTenant, GresTenantSpec, PgdogPoolerModeSpec,
+        PgdogSpec, SecretKeyRef, SecretRef, TenantDefaults,
     },
 };
 use http::Method;
@@ -65,6 +65,13 @@ fn gres() -> Gres {
                     name: "admin".into(),
                     key: "password".into(),
                 },
+                pooler_mode: None,
+                connect_attempts: None,
+                idle_timeout_ms: None,
+                suspension_idle_timeout_ms: None,
+                server_lifetime_ms: None,
+                readiness_probe_period_seconds: None,
+                direct_bootstrap_grace_ms: None,
             },
             activator: None,
             defaults: None,
@@ -267,6 +274,37 @@ async fn renders_pgdog_config_secret_and_status_hash() {
     let secret_body: serde_json::Value = serde_json::from_slice(secret_patch.body()).unwrap();
     assert!(secret_body["data"]["pgdog.toml"].is_string());
     assert!(secret_body["data"]["users.toml"].is_string());
+    let pgdog_toml = {
+        use base64::Engine as _;
+        let encoded = secret_body["data"]["pgdog.toml"]
+            .as_str()
+            .expect("pgdog.toml base64");
+        String::from_utf8(
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .expect("decode pgdog.toml"),
+        )
+        .expect("pgdog.toml UTF-8")
+    };
+    for expected in [
+        "pooler_mode = \"transaction\"",
+        "connect_timeout = 30000",
+        "connect_attempts = 3",
+        "checkout_timeout = 90000",
+        "idle_timeout = 60000",
+        "server_lifetime = 300000",
+    ] {
+        assert!(
+            pgdog_toml.contains(expected),
+            "missing {expected}: {pgdog_toml}"
+        );
+    }
+    assert!(
+        pgdog_toml.contains(
+            "[[databases]]\nname = \"tenant-a\"\nhost = \"tenant-a-gres.ns.svc.cluster.local\"\nport = 5432\npooler_mode = \"transaction\""
+        ),
+        "got: {pgdog_toml}"
+    );
     let users_toml = {
         use base64::Engine as _;
         let encoded = secret_body["data"]["users.toml"]
@@ -309,6 +347,10 @@ async fn renders_pgdog_config_secret_and_status_hash() {
                     }
                 }
             })
+    );
+    assert!(
+        deployment_body["spec"]["template"]["spec"]["containers"][0]["readinessProbe"]["periodSeconds"]
+            == 5
     );
     assert!(observed.iter().any(|request| {
         request
@@ -435,6 +477,12 @@ async fn custom_activator_policy_renders_workload_and_pgdog_timeout_budget() {
         cold_start_timeout_ms: Some(40_000),
         readiness_probe_period_seconds: Some(9),
     });
+    obj.spec.pgdog.pooler_mode = Some(PgdogPoolerModeSpec::Session);
+    obj.spec.pgdog.connect_attempts = Some(4);
+    obj.spec.pgdog.idle_timeout_ms = Some(61_000);
+    obj.spec.pgdog.suspension_idle_timeout_ms = Some(1_500);
+    obj.spec.pgdog.server_lifetime_ms = Some(301_000);
+    obj.spec.pgdog.readiness_probe_period_seconds = Some(6);
 
     reconcile(Arc::new(obj), ctx).await.unwrap();
 
@@ -508,9 +556,304 @@ async fn custom_activator_policy_renders_workload_and_pgdog_timeout_budget() {
         )
         .expect("pgdog.toml UTF-8")
     };
+    assert!(pgdog_toml.contains("pooler_mode = \"session\""));
     assert!(pgdog_toml.contains("connect_timeout = 40000"));
-    assert!(pgdog_toml.contains("connect_attempts = 3"));
-    assert!(pgdog_toml.contains("checkout_timeout = 120000"));
+    assert!(pgdog_toml.contains("connect_attempts = 4"));
+    assert!(pgdog_toml.contains("checkout_timeout = 160000"));
+    assert!(pgdog_toml.contains("idle_timeout = 61000"));
+    assert!(pgdog_toml.contains("server_lifetime = 301000"));
+    assert!(
+        pgdog_toml.contains(
+            "[[databases]]\nname = \"tenant-a\"\nhost = \"tenant-a-gres.ns.svc.cluster.local\"\nport = 5432\npooler_mode = \"session\""
+        ),
+        "got: {pgdog_toml}"
+    );
+    let pgdog_deployment = observed
+        .iter()
+        .find(|request| {
+            request
+                .uri()
+                .to_string()
+                .contains("/deployments/fleet-pgdog")
+        })
+        .expect("PgDog deployment patch captured");
+    let pgdog_deployment: serde_json::Value =
+        serde_json::from_slice(pgdog_deployment.body()).expect("PgDog deployment JSON");
+    assert!(
+        pgdog_deployment["spec"]["template"]["spec"]["containers"][0]["readinessProbe"]["periodSeconds"]
+            == 6
+    );
+}
+
+#[tokio::test]
+async fn matching_effective_idle_policy_selects_suspension_timeout() {
+    let admin = FakePgdogAdmin::new(vec![true]);
+    let mut rules = reconcile_rules(true);
+    rules
+        .iter_mut()
+        .find(|rule| rule.path_substr == "/grestenants")
+        .expect("tenant list rule")
+        .response = json_response(
+        200,
+        &serde_json::json!({
+            "apiVersion": "crabka.io/v1alpha1",
+            "kind": "GresTenantList",
+            "items": [
+                {
+                    "apiVersion": "crabka.io/v1alpha1",
+                    "kind": "GresTenant",
+                    "metadata": { "name": "tenant-a", "namespace": "ns" },
+                    "spec": {
+                        "gres": "fleet",
+                        "user": "alice",
+                        "passwordSecretRef": { "name": "pw", "key": "password" },
+                        "overrides": { "idleSeconds": 2 }
+                    }
+                },
+                {
+                    "apiVersion": "crabka.io/v1alpha1",
+                    "kind": "GresTenant",
+                    "metadata": { "name": "tenant-b", "namespace": "ns" },
+                    "spec": {
+                        "gres": "other",
+                        "user": "bob",
+                        "passwordSecretRef": { "name": "pw", "key": "password" },
+                        "overrides": { "idleSeconds": 9 }
+                    }
+                }
+            ]
+        }),
+    );
+    let state = MockState::new(rules);
+    let ctx =
+        Arc::new(fixture_ctx(mock_client(&state, "ns"), "ns").with_pgdog_admin_for_test(admin));
+    let mut obj = gres();
+    obj.spec.pgdog.idle_timeout_ms = Some(61_000);
+    obj.spec.pgdog.suspension_idle_timeout_ms = Some(1_500);
+
+    reconcile(Arc::new(obj), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let secret = observed
+        .iter()
+        .find(|request| request.uri().path().contains("/secrets/fleet-pgdog-config"))
+        .expect("config Secret patch");
+    let body: serde_json::Value = serde_json::from_slice(secret.body()).unwrap();
+    let pgdog_toml = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        body["data"]["pgdog.toml"].as_str().unwrap(),
+    )
+    .unwrap();
+    let pgdog_toml = String::from_utf8(pgdog_toml).unwrap();
+    assert!(
+        pgdog_toml.contains("idle_timeout = 1500"),
+        "got: {pgdog_toml}"
+    );
+}
+
+#[tokio::test]
+async fn zero_override_and_unrelated_fleet_do_not_select_suspension_timeout() {
+    let admin = FakePgdogAdmin::new(vec![true]);
+    let mut rules = reconcile_rules(true);
+    rules
+        .iter_mut()
+        .find(|rule| rule.path_substr == "/grestenants")
+        .expect("tenant list rule")
+        .response = json_response(
+        200,
+        &serde_json::json!({
+            "apiVersion": "crabka.io/v1alpha1",
+            "kind": "GresTenantList",
+            "items": [
+                {
+                    "apiVersion": "crabka.io/v1alpha1",
+                    "kind": "GresTenant",
+                    "metadata": { "name": "tenant-a", "namespace": "ns" },
+                    "spec": {
+                        "gres": "fleet",
+                        "user": "alice",
+                        "passwordSecretRef": { "name": "pw", "key": "password" },
+                        "overrides": { "idleSeconds": 0 }
+                    }
+                },
+                {
+                    "apiVersion": "crabka.io/v1alpha1",
+                    "kind": "GresTenant",
+                    "metadata": { "name": "tenant-b", "namespace": "ns" },
+                    "spec": {
+                        "gres": "other",
+                        "user": "bob",
+                        "passwordSecretRef": { "name": "pw", "key": "password" },
+                        "overrides": { "idleSeconds": 9 }
+                    }
+                }
+            ]
+        }),
+    );
+    let state = MockState::new(rules);
+    let ctx =
+        Arc::new(fixture_ctx(mock_client(&state, "ns"), "ns").with_pgdog_admin_for_test(admin));
+    let mut obj = gres();
+    obj.spec.defaults = Some(TenantDefaults {
+        idle_seconds: Some(8),
+        wal_replication: None,
+        checkpoint_frames: None,
+        checkpoint_bytes: None,
+        suspend_max_checkpoint_bytes: None,
+    });
+    obj.spec.pgdog.idle_timeout_ms = Some(61_000);
+    obj.spec.pgdog.suspension_idle_timeout_ms = Some(1_500);
+
+    reconcile(Arc::new(obj), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let secret = observed
+        .iter()
+        .find(|request| request.uri().path().contains("/secrets/fleet-pgdog-config"))
+        .expect("config Secret patch");
+    let body: serde_json::Value = serde_json::from_slice(secret.body()).unwrap();
+    let pgdog_toml = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        body["data"]["pgdog.toml"].as_str().unwrap(),
+    )
+    .unwrap();
+    let pgdog_toml = String::from_utf8(pgdog_toml).unwrap();
+    assert!(
+        pgdog_toml.contains("idle_timeout = 61000"),
+        "got: {pgdog_toml}"
+    );
+}
+
+#[tokio::test]
+async fn invalid_pgdog_policy_fails_before_kubernetes_io() {
+    let cases = [
+        (
+            "spec.pgdog.listenPort",
+            -1,
+            Some(3),
+            Some(60_000),
+            Some(1_000),
+            Some(300_000),
+            Some(5),
+            Some(4_000),
+            30_000,
+        ),
+        (
+            "spec.pgdog.connectAttempts",
+            6_432,
+            Some(0),
+            Some(60_000),
+            Some(1_000),
+            Some(300_000),
+            Some(5),
+            Some(4_000),
+            30_000,
+        ),
+        (
+            "spec.pgdog.idleTimeoutMs",
+            6_432,
+            Some(3),
+            Some(0),
+            Some(1_000),
+            Some(300_000),
+            Some(5),
+            Some(4_000),
+            30_000,
+        ),
+        (
+            "spec.pgdog.suspensionIdleTimeoutMs",
+            6_432,
+            Some(3),
+            Some(60_000),
+            Some(0),
+            Some(300_000),
+            Some(5),
+            Some(4_000),
+            30_000,
+        ),
+        (
+            "spec.pgdog.serverLifetimeMs",
+            6_432,
+            Some(3),
+            Some(60_000),
+            Some(1_000),
+            Some(0),
+            Some(5),
+            Some(4_000),
+            30_000,
+        ),
+        (
+            "spec.pgdog.readinessProbePeriodSeconds",
+            6_432,
+            Some(3),
+            Some(60_000),
+            Some(1_000),
+            Some(300_000),
+            Some(0),
+            Some(4_000),
+            30_000,
+        ),
+        (
+            "spec.pgdog.directBootstrapGraceMs",
+            6_432,
+            Some(3),
+            Some(60_000),
+            Some(1_000),
+            Some(300_000),
+            Some(5),
+            Some(0),
+            30_000,
+        ),
+        (
+            "spec.activator.coldStartTimeoutMs",
+            6_432,
+            Some(65_535),
+            Some(60_000),
+            Some(1_000),
+            Some(300_000),
+            Some(5),
+            Some(4_000),
+            u64::MAX,
+        ),
+    ];
+
+    for (
+        path,
+        listen_port,
+        attempts,
+        idle,
+        suspension_idle,
+        lifetime,
+        readiness,
+        grace,
+        attempt_timeout,
+    ) in cases
+    {
+        let state = MockState::new(Vec::new());
+        let ctx = Arc::new(fixture_ctx(mock_client(&state, "ns"), "ns"));
+        let mut obj = gres();
+        obj.spec.pgdog.listen_port = listen_port;
+        obj.spec.pgdog.connect_attempts = attempts;
+        obj.spec.pgdog.idle_timeout_ms = idle;
+        obj.spec.pgdog.suspension_idle_timeout_ms = suspension_idle;
+        obj.spec.pgdog.server_lifetime_ms = lifetime;
+        obj.spec.pgdog.readiness_probe_period_seconds = readiness;
+        obj.spec.pgdog.direct_bootstrap_grace_ms = grace;
+        obj.spec.activator = Some(GresActivatorSpec {
+            cold_start_timeout_ms: Some(attempt_timeout),
+            ..Default::default()
+        });
+
+        let error = reconcile(Arc::new(obj), ctx)
+            .await
+            .expect_err("invalid PgDog policy must fail");
+
+        assert!(error.to_string().contains(path), "got: {error}");
+        assert!(
+            state.take_observed().is_empty(),
+            "Kubernetes I/O for {path}"
+        );
+    }
 }
 
 #[tokio::test]
