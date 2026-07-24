@@ -101,9 +101,19 @@ async fn webhook_state(
     let token = CancellationToken::new();
 
     let (produce, store) = if with_dedup {
-        ensure_dedup_topic(bootstrap, DEDUP_TOPIC, N, 3_600_000, 1, None)
-            .await
-            .unwrap();
+        ensure_dedup_topic(
+            bootstrap,
+            DEDUP_TOPIC,
+            N,
+            3_600_000,
+            &crabka_grpc_gateway::dedup::topic::InternalTopicPolicy {
+                replication_factor: 1,
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
 
         let store = Arc::new(DedupStore::new(N));
         {

@@ -179,14 +179,6 @@ pub struct GatewayConfig {
     pub runtime: GatewayRuntimeConfig,
 }
 
-impl GatewayConfig {
-    /// Replication factor requested for the dedup topic at create time.
-    /// Kept here so `bin` and tests agree; broker may downgrade.
-    pub const DEDUP_TOPIC_REPLICATION: i16 = 3;
-    /// Replication factor requested for the membership topic at create time.
-    pub const MEMBERSHIP_TOPIC_REPLICATION: i16 = 3;
-}
-
 #[cfg(test)]
 mod tests {
     use assert2::{assert, check};

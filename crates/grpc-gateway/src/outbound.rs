@@ -60,9 +60,13 @@ pub async fn run_subscription(
     client_id: String,
     producer: Arc<Producer>,
     shutdown: CancellationToken,
-    security: Option<crabka_client_core::security::ClientSecurity>,
+    consumer_policy: (
+        Option<crabka_client_core::security::ClientSecurity>,
+        Duration,
+    ),
     codec: Arc<dyn RecordCodec>,
 ) -> Result<(), GatewayError> {
+    let (security, poll_timeout) = consumer_policy;
     let http = reqwest::Client::builder()
         .timeout(Duration::from_millis(sub.request_timeout_ms))
         .build()
@@ -88,7 +92,7 @@ pub async fn run_subscription(
     loop {
         let batch = tokio::select! {
             () = shutdown.cancelled() => break,
-            b = consumer.poll(Duration::from_millis(500)) => match b {
+            b = consumer.poll(poll_timeout) => match b {
                 Ok(b) => b,
                 Err(e) => {
                     poll_err = Some(e.into());

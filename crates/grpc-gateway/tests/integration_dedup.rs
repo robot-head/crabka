@@ -39,9 +39,19 @@ async fn duplicate_idempotency_key_produces_once() {
     use tokio_util::sync::CancellationToken;
     let (broker, bootstrap, _dir) = boot().await;
     let dedup_topic = "__crabka_grpc_dedup";
-    ensure_dedup_topic(&bootstrap, dedup_topic, 4, 3_600_000, 1, None)
-        .await
-        .unwrap();
+    ensure_dedup_topic(
+        &bootstrap,
+        dedup_topic,
+        4,
+        3_600_000,
+        &crabka_grpc_gateway::dedup::topic::InternalTopicPolicy {
+            replication_factor: 1,
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+    .unwrap();
     let mut admin = AdminClient::connect(std::slice::from_ref(&bootstrap))
         .await
         .unwrap();
@@ -142,9 +152,19 @@ async fn run_ownership_rebuilds_map_and_owns_all_as_sole_member() {
 
     let (broker, bootstrap, _dir) = boot().await;
     let topic = "__crabka_grpc_dedup";
-    ensure_dedup_topic(&bootstrap, topic, 4, 3_600_000, 1, None)
-        .await
-        .unwrap();
+    ensure_dedup_topic(
+        &bootstrap,
+        topic,
+        4,
+        3_600_000,
+        &crabka_grpc_gateway::dedup::topic::InternalTopicPolicy {
+            replication_factor: 1,
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+    .unwrap();
 
     let writer = Arc::new(DedupStore::new(4));
     writer
@@ -212,9 +232,19 @@ async fn concurrent_duplicates_produce_once() {
 
     let (broker, bootstrap, _dir) = boot().await;
     let dedup_topic = "__crabka_grpc_dedup";
-    ensure_dedup_topic(&bootstrap, dedup_topic, 4, 3_600_000, 1, None)
-        .await
-        .unwrap();
+    ensure_dedup_topic(
+        &bootstrap,
+        dedup_topic,
+        4,
+        3_600_000,
+        &crabka_grpc_gateway::dedup::topic::InternalTopicPolicy {
+            replication_factor: 1,
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+    .unwrap();
     let mut admin = AdminClient::connect(std::slice::from_ref(&bootstrap))
         .await
         .unwrap();

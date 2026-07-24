@@ -403,12 +403,30 @@ async fn bearer_token_resolves_principal() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn forwarding_owner_reauthorizes_caller() {
     let (broker, bootstrap, _dir) = boot().await;
-    ensure_dedup_topic(&bootstrap, DEDUP, N, 3_600_000, 1, None)
-        .await
-        .unwrap();
-    ensure_membership_topic(&bootstrap, MEMBERSHIP, 1, None)
-        .await
-        .unwrap();
+    ensure_dedup_topic(
+        &bootstrap,
+        DEDUP,
+        N,
+        3_600_000,
+        &crabka_grpc_gateway::dedup::topic::InternalTopicPolicy {
+            replication_factor: 1,
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    ensure_membership_topic(
+        &bootstrap,
+        MEMBERSHIP,
+        &crabka_grpc_gateway::dedup::topic::InternalTopicPolicy {
+            replication_factor: 1,
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+    .unwrap();
     create_topic(&bootstrap, "t").await;
 
     // Grant alice Write Topic:t (mallory gets nothing).

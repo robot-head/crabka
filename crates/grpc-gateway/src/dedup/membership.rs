@@ -23,7 +23,7 @@ use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
 use crabka_client_producer::{Acks, Producer, ProducerRecord};
 use serde::{Deserialize, Serialize};
 
-use crate::error::GatewayError;
+use crate::{config::GatewayRuntimeConfig, error::GatewayError};
 
 /// One replica's published membership (value; key = `node_id`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,14 +43,21 @@ struct NodeEntry {
 pub struct MembershipStore {
     nodes: RwLock<HashMap<String, NodeEntry>>,
     routing: RwLock<HashMap<u32, String>>,
+    poll_timeout: Duration,
 }
 
 impl MembershipStore {
     #[must_use]
     pub fn new() -> Self {
+        Self::new_with_policy(&GatewayRuntimeConfig::default())
+    }
+
+    #[must_use]
+    pub fn new_with_policy(runtime: &GatewayRuntimeConfig) -> Self {
         Self {
             nodes: RwLock::new(HashMap::new()),
             routing: RwLock::new(HashMap::new()),
+            poll_timeout: Duration::from_millis(runtime.consumer_poll_timeout_ms),
         }
     }
 
@@ -125,7 +132,7 @@ impl MembershipStore {
         loop {
             let batch = tokio::select! {
                 () = shutdown.cancelled() => break,
-                b = consumer.poll(Duration::from_millis(500)) => match b {
+                b = consumer.poll(self.poll_timeout) => match b {
                     Ok(batch) => batch,
                     Err(e) => { poll_err = Some(e.into()); break; }
                 },
