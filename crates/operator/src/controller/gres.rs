@@ -259,13 +259,9 @@ async fn reconcile_inner(obj: Arc<Gres>, ctx: Arc<Context>) -> Result<Action, Re
     let balancer_status = balancer_status(&obj);
     patch_status(&gres_api, &name, &obj, &hash, &balancer_status).await?;
     let now = current_unix_millis();
-    let requeue = next_pgdog_transition_requeue(
-        tenants.items.iter().filter_map(|tenant| {
-            tenant
-                .status
-                .as_ref()
-                .and_then(|status| status.pgdog_credential_grace_until_unix_ms)
-        }),
+    let requeue = pgdog_transition_requeue_for_tenants(
+        &tenants.items,
+        &name,
         now,
         pgdog_policy.direct_bootstrap_grace.into_value(),
     );
@@ -323,6 +319,27 @@ fn next_pgdog_transition_requeue(
         .map(|deadline| Duration::from_millis(deadline.saturating_sub(now).max(1)))
         .min()
         .unwrap_or(Duration::from_mins(1))
+}
+
+fn pgdog_transition_requeue_for_tenants(
+    tenants: &[GresTenant],
+    gres_name: &str,
+    now: u64,
+    direct_bootstrap_grace_ms: u64,
+) -> Duration {
+    next_pgdog_transition_requeue(
+        tenants
+            .iter()
+            .filter(|tenant| tenant.spec.gres == gres_name)
+            .filter_map(|tenant| {
+                tenant
+                    .status
+                    .as_ref()
+                    .and_then(|status| status.pgdog_credential_grace_until_unix_ms)
+            }),
+        now,
+        direct_bootstrap_grace_ms,
+    )
 }
 
 fn needs_bootstrap_credential(
@@ -1450,6 +1467,18 @@ mod tests {
         assert!(
             next_pgdog_transition_requeue([grace_deadline].into_iter(), now, 7_000)
                 == Duration::from_secs(6)
+        );
+    }
+
+    #[test]
+    fn pgdog_requeue_ignores_unrelated_fleet_deadlines() {
+        let matching = tenant_with_phase("active", Some(11_000));
+        let mut unrelated = tenant_with_phase("active", Some(2_000));
+        unrelated.spec.gres = "other".into();
+
+        assert!(
+            pgdog_transition_requeue_for_tenants(&[matching, unrelated], "fleet", 1_000, 7_000)
+                == Duration::from_secs(10)
         );
     }
 

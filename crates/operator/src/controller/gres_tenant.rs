@@ -2260,7 +2260,7 @@ fn pgdog_grace_deadline(
     if lifecycle_phase != TenantState::Active {
         return None;
     }
-    if previous_phase == Some("active") {
+    if previous_phase == Some("active") && existing_grace.is_some() {
         return existing_grace;
     }
     direct_bootstrap_grace_ms.map(|grace| now.saturating_add(grace))
@@ -2315,6 +2315,27 @@ mod tests {
                 20_000,
                 Some(7_000)
             ) == Some(12_000)
+        );
+        assert!(
+            pgdog_grace_deadline(
+                Some("active"),
+                None,
+                TenantState::Active,
+                20_000,
+                Some(7_000)
+            ) == Some(27_000)
+        );
+        assert!(
+            pgdog_grace_deadline(
+                Some("active"),
+                None,
+                TenantState::Active,
+                u64::MAX - 1,
+                Some(7_000)
+            ) == Some(u64::MAX)
+        );
+        assert!(
+            pgdog_grace_deadline(Some("active"), None, TenantState::Active, 20_000, None).is_none()
         );
     }
     use crate::crd::{GresTenantSpec, SecretKeyRef};
