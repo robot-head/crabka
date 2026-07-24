@@ -9,9 +9,10 @@ use crabka_gres_control::{
     PositiveMillis, PositiveUsize,
 };
 use crabka_gres_substrate::{
-    DEFAULT_CHECKPOINT_RETAIN, DEFAULT_PART_MAX_BYTES, DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES,
-    DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT_MS, DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES,
-    DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES,
+    DEFAULT_CHECKPOINT_RETAIN, DEFAULT_PART_MAX_BYTES, DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT_MS,
+    DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES, DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT_MS,
+    DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES,
+    DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES, DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT_MS,
 };
 use kube::CustomResource;
 use refined_type::rule::GreaterI32;
@@ -150,6 +151,16 @@ pub struct GresComputeSpec {
     #[schemars(range(min = 1))]
     pub wal_recovery_empty_fetch_retries: Option<usize>,
 
+    /// Timeout for opening committed-WAL recovery broker connections.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub wal_recovery_connect_timeout_ms: Option<u64>,
+
+    /// Timeout for committed-WAL recovery broker requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub wal_recovery_request_timeout_ms: Option<u64>,
+
     /// Tenant lifecycle reconciliation interval in milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
@@ -169,6 +180,8 @@ pub(crate) struct EffectiveGresComputePolicy {
     pub(crate) wal_recovery_fetch_partition_max_bytes: PositiveI32,
     pub(crate) wal_recovery_fetch_response_max_bytes: PositiveI32,
     pub(crate) wal_recovery_empty_fetch_retries: PositiveUsize,
+    pub(crate) wal_recovery_connect_timeout_ms: PositiveMillis,
+    pub(crate) wal_recovery_request_timeout_ms: PositiveMillis,
     pub(crate) lifecycle_requeue_ms: PositiveMillis,
 }
 
@@ -230,6 +243,16 @@ impl GresComputeSpec {
                     .unwrap_or(DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES),
             )
             .map_err(|error| format!("spec.compute.walRecoveryEmptyFetchRetries: {error}"))?,
+            wal_recovery_connect_timeout_ms: PositiveMillis::new(
+                self.wal_recovery_connect_timeout_ms
+                    .unwrap_or(DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT_MS),
+            )
+            .map_err(|error| format!("spec.compute.walRecoveryConnectTimeoutMs: {error}"))?,
+            wal_recovery_request_timeout_ms: PositiveMillis::new(
+                self.wal_recovery_request_timeout_ms
+                    .unwrap_or(DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT_MS),
+            )
+            .map_err(|error| format!("spec.compute.walRecoveryRequestTimeoutMs: {error}"))?,
             lifecycle_requeue_ms: PositiveMillis::new(
                 self.lifecycle_requeue_ms
                     .unwrap_or(DEFAULT_LIFECYCLE_REQUEUE_MS),
@@ -890,6 +913,8 @@ mod tests {
             wal_recovery_fetch_partition_max_bytes: Some(22),
             wal_recovery_fetch_response_max_bytes: Some(33),
             wal_recovery_empty_fetch_retries: Some(44),
+            wal_recovery_connect_timeout_ms: Some(55),
+            wal_recovery_request_timeout_ms: Some(66),
             ..GresComputeSpec::default()
         };
         let json = serde_json::to_string(&policy).expect("serialize compute policy");
@@ -905,6 +930,8 @@ mod tests {
             "walRecoveryFetchPartitionMaxBytes",
             "walRecoveryFetchResponseMaxBytes",
             "walRecoveryEmptyFetchRetries",
+            "walRecoveryConnectTimeoutMs",
+            "walRecoveryRequestTimeoutMs",
         ] {
             assert!(
                 properties[field]["minimum"].as_f64() == Some(1.0),
@@ -930,6 +957,14 @@ mod tests {
         assert!(
             defaults.wal_recovery_empty_fetch_retries.into_value()
                 == DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES
+        );
+        assert!(
+            defaults.wal_recovery_connect_timeout_ms.into_value()
+                == DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT_MS
+        );
+        assert!(
+            defaults.wal_recovery_request_timeout_ms.into_value()
+                == DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT_MS
         );
 
         for (policy, path) in [
@@ -960,6 +995,20 @@ mod tests {
                     ..GresComputeSpec::default()
                 },
                 "spec.compute.walRecoveryEmptyFetchRetries",
+            ),
+            (
+                GresComputeSpec {
+                    wal_recovery_connect_timeout_ms: Some(0),
+                    ..GresComputeSpec::default()
+                },
+                "spec.compute.walRecoveryConnectTimeoutMs",
+            ),
+            (
+                GresComputeSpec {
+                    wal_recovery_request_timeout_ms: Some(0),
+                    ..GresComputeSpec::default()
+                },
+                "spec.compute.walRecoveryRequestTimeoutMs",
             ),
         ] {
             let error = policy.effective_policy().expect_err("zero must fail");

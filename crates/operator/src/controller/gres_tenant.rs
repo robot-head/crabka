@@ -2027,6 +2027,18 @@ fn render_deployment(
             .wal_recovery_empty_fetch_retries
             .into_value()
             .to_string(),
+        "--wal-recovery-connect-timeout-ms".to_owned(),
+        config
+            .compute_policy
+            .wal_recovery_connect_timeout_ms
+            .into_value()
+            .to_string(),
+        "--wal-recovery-request-timeout-ms".to_owned(),
+        config
+            .compute_policy
+            .wal_recovery_request_timeout_ms
+            .into_value()
+            .to_string(),
     ];
     if config.range_control_enabled {
         args.extend([
@@ -2711,7 +2723,7 @@ mod tests {
                 .any(|arg| arg == "--range0-follower-poll-interval-ms")
         );
         assert!(
-            args.windows(8).any(|window| {
+            args.windows(12).any(|window| {
                 window
                     == [
                         "--wal-recovery-fetch-max-wait-ms",
@@ -2722,6 +2734,10 @@ mod tests {
                         "52428800",
                         "--wal-recovery-empty-fetch-retries",
                         "100",
+                        "--wal-recovery-connect-timeout-ms",
+                        "10000",
+                        "--wal-recovery-request-timeout-ms",
+                        "30000",
                     ]
             }),
             "got: {args:?}"
@@ -2738,56 +2754,69 @@ mod tests {
             end_key: None,
         }];
         let operator_config = ConfigArgs::parse_from(["operator"]).config;
-        let compute_policy = crate::crd::gres::GresComputeSpec {
-            wal_recovery_fetch_max_wait_ms: Some(11),
-            wal_recovery_fetch_partition_max_bytes: Some(22),
-            wal_recovery_fetch_response_max_bytes: Some(33),
-            wal_recovery_empty_fetch_retries: Some(44),
-            ..crate::crd::gres::GresComputeSpec::default()
-        }
-        .effective_policy()
-        .expect("compute policy");
-        for range_control_enabled in [false, true] {
-            let deployment = render_deployment(
-                &obj,
-                &ranges[0],
-                &DeploymentRenderConfig {
-                    all_ranges: &ranges,
-                    image: "image",
-                    readiness_probe_period_seconds: 5,
-                    bootstrap: "k:9092",
-                    wal_topic: "__gres_wal.tenant-a.r0",
-                    config_topic: "__gres_cfg.tenant-a",
-                    policy: &crabka_gres_control::RegistryPolicy::default(),
-                    compute_policy,
-                    replicas: 1,
-                    operator_config: &operator_config,
-                    kafka_sasl: false,
-                    range_control_enabled,
-                    range_tls_hash: None,
+        for (spec, expected) in [
+            (
+                crate::crd::gres::GresComputeSpec::default(),
+                ["100", "1048576", "52428800", "100", "10000", "30000"],
+            ),
+            (
+                crate::crd::gres::GresComputeSpec {
+                    wal_recovery_fetch_max_wait_ms: Some(11),
+                    wal_recovery_fetch_partition_max_bytes: Some(22),
+                    wal_recovery_fetch_response_max_bytes: Some(33),
+                    wal_recovery_empty_fetch_retries: Some(44),
+                    wal_recovery_connect_timeout_ms: Some(55),
+                    wal_recovery_request_timeout_ms: Some(66),
+                    ..crate::crd::gres::GresComputeSpec::default()
                 },
-            )
-            .expect("render deployment");
-            let args = deployment.spec.unwrap().template.spec.unwrap().containers[0]
-                .args
-                .clone()
-                .unwrap();
-            assert!(
-                args.windows(8).any(|window| {
-                    window
-                        == [
-                            "--wal-recovery-fetch-max-wait-ms",
-                            "11",
-                            "--wal-recovery-fetch-partition-max-bytes",
-                            "22",
-                            "--wal-recovery-fetch-response-max-bytes",
-                            "33",
-                            "--wal-recovery-empty-fetch-retries",
-                            "44",
-                        ]
-                }),
-                "got: {args:?}"
-            );
+                ["11", "22", "33", "44", "55", "66"],
+            ),
+        ] {
+            let compute_policy = spec.effective_policy().expect("compute policy");
+            for range_control_enabled in [false, true] {
+                let deployment = render_deployment(
+                    &obj,
+                    &ranges[0],
+                    &DeploymentRenderConfig {
+                        all_ranges: &ranges,
+                        image: "image",
+                        readiness_probe_period_seconds: 5,
+                        bootstrap: "k:9092",
+                        wal_topic: "__gres_wal.tenant-a.r0",
+                        config_topic: "__gres_cfg.tenant-a",
+                        policy: &crabka_gres_control::RegistryPolicy::default(),
+                        compute_policy,
+                        replicas: 1,
+                        operator_config: &operator_config,
+                        kafka_sasl: false,
+                        range_control_enabled,
+                        range_tls_hash: None,
+                    },
+                )
+                .expect("render deployment");
+                let args = deployment.spec.unwrap().template.spec.unwrap().containers[0]
+                    .args
+                    .clone()
+                    .unwrap();
+                let expected = [
+                    "--wal-recovery-fetch-max-wait-ms",
+                    expected[0],
+                    "--wal-recovery-fetch-partition-max-bytes",
+                    expected[1],
+                    "--wal-recovery-fetch-response-max-bytes",
+                    expected[2],
+                    "--wal-recovery-empty-fetch-retries",
+                    expected[3],
+                    "--wal-recovery-connect-timeout-ms",
+                    expected[4],
+                    "--wal-recovery-request-timeout-ms",
+                    expected[5],
+                ];
+                assert!(
+                    args.windows(expected.len()).any(|window| window == expected),
+                    "got: {args:?}"
+                );
+            }
         }
     }
 
