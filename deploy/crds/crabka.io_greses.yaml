@@ -175,6 +175,17 @@ spec:
                     - splitStrideRows
                     type: object
                 type: object
+              compute:
+                description: Tenant compute workload policy.
+                nullable: true
+                properties:
+                  readinessProbePeriodSeconds:
+                    description: Compute readiness probe period in seconds.
+                    format: int32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                type: object
               defaults:
                 description: |-
                   Default tenant runtime settings inherited by `GresTenant`s unless

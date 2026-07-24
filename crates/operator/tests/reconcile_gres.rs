@@ -97,6 +97,7 @@ fn gres() -> Gres {
                 direct_bootstrap_grace_ms: None,
             },
             activator: None,
+            compute: None,
             defaults: None,
             balancer: Some(GresBalancerSpec {
                 enabled: true,
@@ -174,6 +175,7 @@ fn gres_tenant(name: &str, gres_name: &str) -> GresTenant {
         name,
         GresTenantSpec {
             gres: gres_name.into(),
+            image: None,
             user: "alice".into(),
             password_secret_ref: SecretKeyRef {
                 name: "pw".into(),

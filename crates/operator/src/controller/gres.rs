@@ -1166,6 +1166,7 @@ mod tests {
                     direct_bootstrap_grace_ms: None,
                 },
                 activator: None,
+                compute: None,
                 defaults: None,
                 balancer: None,
             },
@@ -1180,6 +1181,7 @@ mod tests {
             "tenant-a",
             GresTenantSpec {
                 gres: "fleet".into(),
+                image: None,
                 user: "alice".into(),
                 password_secret_ref: SecretKeyRef {
                     name: "tenant-a-password".into(),

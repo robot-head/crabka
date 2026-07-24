@@ -23,6 +23,13 @@ spec:
               gres:
                 description: Name of the `Gres` fleet this tenant belongs to.
                 type: string
+              image:
+                description: |-
+                  Compute container image override. When absent the operator uses its
+                  global Gres image override or compiled default.
+                minLength: 1
+                nullable: true
+                type: string
               overrides:
                 description: Tenant-specific overrides for fleet defaults.
                 nullable: true
