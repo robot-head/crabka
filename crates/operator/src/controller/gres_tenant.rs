@@ -2809,7 +2809,8 @@ mod tests {
                     expected[5],
                 ];
                 assert!(
-                    args.windows(expected.len()).any(|window| window == expected),
+                    args.windows(expected.len())
+                        .any(|window| window == expected),
                     "got: {args:?}"
                 );
             }
