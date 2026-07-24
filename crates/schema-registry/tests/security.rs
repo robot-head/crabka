@@ -72,6 +72,7 @@ fn secure_cfg_with_scheme(
         advertised_url: format!("{scheme}://127.0.0.1:{port}"),
         group_id: "schema-registry".into(),
         leader_eligibility: true,
+        runtime: crabka_schema_registry::config::RegistryRuntimeConfig::default(),
         security: SecurityConfig {
             require_auth: true,
             realm: "test".into(),
@@ -795,6 +796,7 @@ async fn start_jwks_node(
         advertised_url: format!("http://127.0.0.1:{port}"),
         group_id: "schema-registry".into(),
         leader_eligibility: true,
+        runtime: crabka_schema_registry::config::RegistryRuntimeConfig::default(),
         security: out.config,
     };
     let cancel = CancellationToken::new();
