@@ -35,6 +35,9 @@ use split_activation::{PendingLiveTopology, PreparedLiveTopology, StagedLiveRang
 
 const DEFAULT_CHECKPOINT_FRAMES_THRESHOLD: u64 = 10_000;
 const DEFAULT_CHECKPOINT_BYTES_THRESHOLD: u64 = 64 * 1024 * 1024;
+const DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS: i32 = 30_000;
+const DEFAULT_CHECKPOINT_POLL_INTERVAL_MS: u64 = 1_000;
+const DEFAULT_IDLE_SUSPEND_POLL_INTERVAL_MS: u64 = 1_000;
 /// Relaxed cadence of the LOCAL (mem / --data-dir) vacuum loop: one bounded
 /// `SqlEngine::vacuum_step` this often while the sweep is keeping up with the
 /// write rate. Write paths prune the rows they touch opportunistically; the
@@ -249,26 +252,23 @@ pub struct ServeArgs {
     /// Kafka `DeleteRecords` timeout used after a durable checkpoint.
     #[arg(
         long = "checkpoint-delete-records-timeout-ms",
-        env = "CRABKA_GRES_CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS",
-        default_value = "30000"
+        env = "CRABKA_GRES_CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS"
     )]
-    pub checkpoint_delete_records_timeout_ms: PositiveI32,
+    pub checkpoint_delete_records_timeout_ms: Option<PositiveI32>,
 
     /// Background checkpoint threshold polling interval.
     #[arg(
         long = "checkpoint-poll-interval-ms",
-        env = "CRABKA_GRES_CHECKPOINT_POLL_INTERVAL_MS",
-        default_value = "1000"
+        env = "CRABKA_GRES_CHECKPOINT_POLL_INTERVAL_MS"
     )]
-    pub checkpoint_poll_interval_ms: PositiveMillis,
+    pub checkpoint_poll_interval_ms: Option<PositiveMillis>,
 
     /// Idle-tenant suspension polling interval.
     #[arg(
         long = "idle-suspend-poll-interval-ms",
-        env = "CRABKA_GRES_IDLE_SUSPEND_POLL_INTERVAL_MS",
-        default_value = "1000"
+        env = "CRABKA_GRES_IDLE_SUSPEND_POLL_INTERVAL_MS"
     )]
-    pub idle_suspend_poll_interval_ms: PositiveMillis,
+    pub idle_suspend_poll_interval_ms: Option<PositiveMillis>,
 }
 
 /// Validated Gres registry options shared by compute registry clients.
@@ -639,8 +639,14 @@ impl CheckpointRuntimeConfig {
                 crabka_gres_substrate::DEFAULT_CHECKPOINT_RETAIN,
                 PositiveUsize::into_value,
             ),
-            delete_records_timeout_ms: args.checkpoint_delete_records_timeout_ms.into_value(),
-            poll_interval: Duration::from_millis(args.checkpoint_poll_interval_ms.into_value()),
+            delete_records_timeout_ms: args.checkpoint_delete_records_timeout_ms.map_or(
+                DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS,
+                PositiveI32::into_value,
+            ),
+            poll_interval: Duration::from_millis(args.checkpoint_poll_interval_ms.map_or(
+                DEFAULT_CHECKPOINT_POLL_INTERVAL_MS,
+                PositiveMillis::into_value,
+            )),
         }))
     }
 }
@@ -1543,6 +1549,9 @@ fn checkpointing_was_requested(args: &ServeArgs) -> bool {
         || args.checkpoint_bytes.is_some()
         || args.checkpoint_part_bytes.is_some()
         || args.checkpoint_retain.is_some()
+        || args.checkpoint_delete_records_timeout_ms.is_some()
+        || args.checkpoint_poll_interval_ms.is_some()
+        || args.idle_suspend_poll_interval_ms.is_some()
 }
 
 fn infer_checkpoint_store_kind(args: &ServeArgs) -> std::io::Result<CheckpointStoreKind> {
@@ -1876,7 +1885,12 @@ pub async fn serve_listener_with_tenant_config_loader(
                 checkpointer,
                 registry,
                 shutdown,
-                Duration::from_millis(effective_args.idle_suspend_poll_interval_ms.into_value()),
+                Duration::from_millis(
+                    effective_args.idle_suspend_poll_interval_ms.map_or(
+                        DEFAULT_IDLE_SUSPEND_POLL_INTERVAL_MS,
+                        PositiveMillis::into_value,
+                    ),
+                ),
             ) => result,
         }
     } else {
@@ -6857,9 +6871,9 @@ mod tests {
         assert!(args.checkpoint_bytes.is_none());
         assert!(args.checkpoint_part_bytes.is_none());
         assert!(args.checkpoint_retain.is_none());
-        assert!(args.checkpoint_delete_records_timeout_ms.into_value() == 30_000);
-        assert!(args.checkpoint_poll_interval_ms.into_value() == 1_000);
-        assert!(args.idle_suspend_poll_interval_ms.into_value() == 1_000);
+        assert!(args.checkpoint_delete_records_timeout_ms.is_none());
+        assert!(args.checkpoint_poll_interval_ms.is_none());
+        assert!(args.idle_suspend_poll_interval_ms.is_none());
         assert!(
             SubstrateRuntimeConfig::from_args(&args)
                 .expect("standalone defaults")
@@ -6919,11 +6933,21 @@ mod tests {
         assert!(
             environment
                 .checkpoint_delete_records_timeout_ms
-                .into_value()
-                == 15
+                .map(PositiveI32::into_value)
+                == Some(15)
         );
-        assert!(environment.checkpoint_poll_interval_ms.into_value() == 16);
-        assert!(environment.idle_suspend_poll_interval_ms.into_value() == 17);
+        assert!(
+            environment
+                .checkpoint_poll_interval_ms
+                .map(PositiveMillis::into_value)
+                == Some(16)
+        );
+        assert!(
+            environment
+                .idle_suspend_poll_interval_ms
+                .map(PositiveMillis::into_value)
+                == Some(17)
+        );
 
         let cli = Cli::try_parse_from([
             "crabka-gres",
@@ -6945,9 +6969,21 @@ mod tests {
                 == Some(23)
         );
         assert!(cli.checkpoint_retain.map(PositiveUsize::into_value) == Some(24));
-        assert!(cli.checkpoint_delete_records_timeout_ms.into_value() == 25);
-        assert!(cli.checkpoint_poll_interval_ms.into_value() == 26);
-        assert!(cli.idle_suspend_poll_interval_ms.into_value() == 27);
+        assert!(
+            cli.checkpoint_delete_records_timeout_ms
+                .map(PositiveI32::into_value)
+                == Some(25)
+        );
+        assert!(
+            cli.checkpoint_poll_interval_ms
+                .map(PositiveMillis::into_value)
+                == Some(26)
+        );
+        assert!(
+            cli.idle_suspend_poll_interval_ms
+                .map(PositiveMillis::into_value)
+                == Some(27)
+        );
     }
 
     #[tokio::test]
@@ -7485,9 +7521,9 @@ mod tests {
             checkpoint_bytes: None,
             checkpoint_part_bytes: None,
             checkpoint_retain: None,
-            checkpoint_delete_records_timeout_ms: PositiveI32::new(30_000).expect("default"),
-            checkpoint_poll_interval_ms: PositiveMillis::new(1_000).expect("default"),
-            idle_suspend_poll_interval_ms: PositiveMillis::new(1_000).expect("default"),
+            checkpoint_delete_records_timeout_ms: None,
+            checkpoint_poll_interval_ms: None,
+            idle_suspend_poll_interval_ms: None,
         }
     }
 
@@ -7868,6 +7904,8 @@ mod tests {
             .expect("checkpoint config");
         assert!(defaults.frames_threshold == 10_000);
         assert!(defaults.bytes_threshold == 67_108_864);
+        assert!(defaults.delete_records_timeout_ms == 30_000);
+        assert!(defaults.poll_interval == Duration::from_secs(1));
 
         let mut record = tenant_record();
         record.checkpoint_frames = Some(77);
@@ -8111,13 +8149,25 @@ mod tests {
 
     #[test]
     fn checkpoint_options_without_object_store_are_rejected() {
-        let mut args = substrate_args();
-        args.checkpoint_frames = Some(NonZeroU64::new(10).expect("nonzero"));
+        for option in [
+            "--checkpoint-frames=10",
+            "--checkpoint-delete-records-timeout-ms=25",
+            "--checkpoint-poll-interval-ms=26",
+            "--idle-suspend-poll-interval-ms=27",
+        ] {
+            let args = Cli::try_parse_from([
+                "crabka-gres",
+                "--substrate-bootstrap=memory://",
+                "--tenant=tenant-a",
+                option,
+            ])
+            .expect("checkpoint option")
+            .serve;
+            let error = SubstrateRuntimeConfig::from_args(&args).expect_err("missing object store");
 
-        let error = SubstrateRuntimeConfig::from_args(&args).expect_err("missing object store");
-
-        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-        assert!(error.to_string().contains("checkpoint thresholds require"));
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+            assert!(error.to_string().contains("checkpoint thresholds require"));
+        }
     }
 
     #[test]
@@ -8145,6 +8195,70 @@ mod tests {
             config.to_string(),
             "checkpoint options require --substrate-bootstrap"
         );
+    }
+
+    #[test]
+    fn checkpoint_lifecycle_cli_options_require_substrate_mode() {
+        for option in [
+            "--checkpoint-delete-records-timeout-ms=25",
+            "--checkpoint-poll-interval-ms=26",
+            "--idle-suspend-poll-interval-ms=27",
+        ] {
+            let args = Cli::try_parse_from(["crabka-gres", option])
+                .expect("checkpoint lifecycle option")
+                .serve;
+            let error = SubstrateRuntimeConfig::from_args(&args).expect_err("substrate required");
+
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+            assert_eq!(
+                error.to_string(),
+                "checkpoint options require --substrate-bootstrap"
+            );
+        }
+    }
+
+    #[test]
+    fn checkpoint_lifecycle_environment_options_require_substrate_mode() {
+        const CHILD: &str = "CRABKA_TEST_GRES_CHECKPOINT_REQUIRED_ENV_CHILD";
+        const VARIABLES: [&str; 3] = [
+            "CRABKA_GRES_CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS",
+            "CRABKA_GRES_CHECKPOINT_POLL_INTERVAL_MS",
+            "CRABKA_GRES_IDLE_SUSPEND_POLL_INTERVAL_MS",
+        ];
+
+        if let Ok(variable) = std::env::var(CHILD) {
+            let args = Cli::try_parse_from(["crabka-gres"])
+                .expect("checkpoint lifecycle environment option")
+                .serve;
+            let error = SubstrateRuntimeConfig::from_args(&args).expect_err("substrate required");
+
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput, "{variable}");
+            assert_eq!(
+                error.to_string(),
+                "checkpoint options require --substrate-bootstrap",
+                "{variable}"
+            );
+            return;
+        }
+
+        for variable in VARIABLES {
+            let mut command =
+                std::process::Command::new(std::env::current_exe().expect("test executable"));
+            command
+                .args([
+                    "--exact",
+                    "tests::checkpoint_lifecycle_environment_options_require_substrate_mode",
+                ])
+                .env(CHILD, variable);
+            for other in VARIABLES {
+                command.env_remove(other);
+            }
+            command.env(variable, "25");
+            assert!(
+                command.status().expect("child test").success(),
+                "{variable}"
+            );
+        }
     }
 
     #[test]
