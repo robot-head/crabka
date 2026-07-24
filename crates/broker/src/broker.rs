@@ -813,9 +813,11 @@ fn spawn_broker_gauge_updater(
     liveness: Arc<crate::heartbeat::controller_state::ControllerLivenessState>,
     node_id: crabka_metadata::NodeId,
     metrics: crate::metrics::BrokerMetrics,
-    poll_interval: std::time::Duration,
+    config: &BrokerConfig,
     shutdown: CancellationToken,
 ) {
+    let poll_interval = config.gauge_poll_interval;
+    let default_min_insync_replicas = config.default_min_insync_replicas;
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(poll_interval);
         loop {
@@ -841,14 +843,14 @@ fn spawn_broker_gauge_updater(
                 .set(i64::try_from(partitions.len()).unwrap_or(i64::MAX));
             let image = controller.current_image();
             let alive = liveness.alive_snapshot().await;
-            let minimum_isr: std::collections::HashMap<&str, usize> = image
+            let minimum_isr: std::collections::HashMap<&str, i32> = image
                 .topics()
                 .map(|topic| {
                     let minimum = image
                         .topic_config(&topic.name)
                         .and_then(|config| config.get(crate::config_keys::MIN_INSYNC_REPLICAS))
                         .and_then(|value| value.parse().ok())
-                        .unwrap_or(1);
+                        .unwrap_or(default_min_insync_replicas);
                     (topic.name.as_str(), minimum)
                 })
                 .collect();
@@ -859,8 +861,10 @@ fn spawn_broker_gauge_updater(
                     let minimum = minimum_isr
                         .get(partition.topic.as_str())
                         .copied()
-                        .unwrap_or(1);
-                    health.1 += usize::from(partition.isr.len() < minimum);
+                        .unwrap_or(default_min_insync_replicas);
+                    health.1 += usize::from(
+                        i32::try_from(partition.isr.len()).unwrap_or(i32::MAX) < minimum,
+                    );
                 }
                 health.2 += usize::from(
                     partition.replicas.contains(&node_id) && !alive.contains(&partition.leader.0),
@@ -1917,7 +1921,7 @@ async fn start_broker_runtime(
         Arc::clone(&liveness),
         config.node_id,
         metrics.clone(),
-        config.gauge_poll_interval,
+        config,
         supervisor_shutdown.child_token(),
     );
     let disk_scanner_handle = spawn_storage_security_maintenance(
@@ -4624,6 +4628,63 @@ mod tests {
         }
 
         async fn cancel(&self) {}
+    }
+
+    #[tokio::test]
+    async fn broker_gauge_uses_configured_default_min_isr() {
+        let node_id = crabka_metadata::NodeId(1);
+        let mut image = crabka_metadata::MetadataImage::new(uuid::Uuid::nil());
+        image.apply(&crabka_metadata::MetadataRecord::V1Topic(
+            crabka_metadata::TopicRecord {
+                name: "gauge-topic".into(),
+                topic_id: uuid::Uuid::nil(),
+                partitions: 1,
+                replication_factor: 1,
+            },
+        ));
+        image.apply(&crabka_metadata::MetadataRecord::V1Partition(
+            crabka_metadata::PartitionRecord {
+                topic: "gauge-topic".into(),
+                partition: 0,
+                leader: node_id,
+                replicas: vec![node_id],
+                isr: vec![node_id],
+                leader_epoch: crabka_metadata::LeaderEpoch(0),
+                adding_replicas: Vec::new(),
+                removing_replicas: Vec::new(),
+                directories: Vec::new(),
+                partition_epoch: 0,
+            },
+        ));
+        let metrics = crate::metrics::BrokerMetrics::new();
+        let mut config = BrokerConfig::for_tests(std::path::PathBuf::new());
+        config.gauge_poll_interval = std::time::Duration::from_millis(1);
+        config.default_min_insync_replicas = 2;
+        let shutdown = CancellationToken::new();
+        spawn_broker_gauge_updater(
+            Arc::new(PartitionRegistry::new()),
+            Arc::new(MockMetadataSource::new(image, None)),
+            Arc::new(
+                crate::heartbeat::controller_state::ControllerLivenessState::new(
+                    std::time::Duration::from_secs(10),
+                ),
+            ),
+            node_id,
+            metrics.clone(),
+            &config,
+            shutdown.child_token(),
+        );
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while metrics.under_min_isr_partition_count.get() != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("gauge observes configured minimum ISR");
+
+        assert!(metrics.under_min_isr_partition_count.get() == 1);
+        shutdown.cancel();
     }
 
     async fn assert_listener_stops_accepting(addr: SocketAddr) {
