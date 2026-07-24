@@ -395,9 +395,9 @@ pub(crate) fn kafka_error_if(code: i16, message: Option<String>) -> Option<Kafka
 pub struct AdminClient {
     pub(crate) conn: Connection,
     bootstrap_addrs: Vec<String>,
-    /// Client security carried forward to `reconnect` so a
-    /// `NOT_CONTROLLER` retry re-dials the new controller the same way.
-    security: Option<crabka_client_core::security::ClientSecurity>,
+    /// Full connection template carried forward so reconnects preserve
+    /// caller-supplied identity, security, and timeouts.
+    options: ConnectionOptions,
 }
 
 impl AdminClient {
@@ -422,14 +422,25 @@ impl AdminClient {
         bootstrap_addrs: &[String],
         security: Option<crabka_client_core::security::ClientSecurity>,
     ) -> Result<Self, AdminError> {
-        let opts = Self::opts(security.clone());
+        Self::connect_with_options(bootstrap_addrs, Self::opts(security)).await
+    }
+
+    /// Connect using a complete connection-options template.
+    ///
+    /// # Errors
+    /// Returns `AdminError::Connect { tried }` if no bootstrap address
+    /// accepted the connection.
+    pub async fn connect_with_options(
+        bootstrap_addrs: &[String],
+        options: ConnectionOptions,
+    ) -> Result<Self, AdminError> {
         for host_port in bootstrap_addrs {
-            match Self::connect_one(host_port, opts.clone()).await {
+            match Self::connect_one(host_port, options.clone()).await {
                 Ok(conn) => {
                     return Ok(Self {
                         conn,
                         bootstrap_addrs: bootstrap_addrs.to_vec(),
-                        security,
+                        options,
                     });
                 }
                 Err(e) => {
@@ -475,13 +486,13 @@ impl AdminClient {
     /// Replace the underlying connection. Used internally by the
     /// `NOT_CONTROLLER` retry path to reconnect to the current controller.
     pub(crate) async fn reconnect(&mut self, host_port: &str) -> Result<(), AdminError> {
-        let opts = Self::opts(self.security.clone());
+        let opts = Self::reconnect_options(&self.options);
         self.conn = Self::connect_one(host_port, opts).await?;
         Ok(())
     }
 
     pub(crate) async fn reconnect_bootstrap(&mut self) -> Result<(), AdminError> {
-        let opts = Self::opts(self.security.clone());
+        let opts = Self::reconnect_options(&self.options);
         for host_port in &self.bootstrap_addrs {
             match Self::connect_one(host_port, opts.clone()).await {
                 Ok(conn) => {
@@ -501,6 +512,10 @@ impl AdminClient {
         Err(AdminError::Connect {
             tried: self.bootstrap_addrs.len(),
         })
+    }
+
+    fn reconnect_options(options: &ConnectionOptions) -> ConnectionOptions {
+        options.clone()
     }
 
     pub(crate) fn is_retriable_transport_error(error: &ClientError) -> bool {
@@ -628,5 +643,60 @@ mod tests {
         // proving the security arg is threaded (not a type error).
         let res = AdminClient::connect_secured(&["127.0.0.1:1".to_string()], Some(security)).await;
         assert2::assert!(res.is_err());
+    }
+
+    #[test]
+    fn reconnect_options_preserve_the_full_template() {
+        use crabka_client_core::security::ClientSecurity;
+        use crabka_security::ListenerProtocol;
+
+        let options = ConnectionOptions {
+            client_id: "custom-admin".into(),
+            connect_timeout: Duration::from_millis(123),
+            request_timeout: Duration::from_millis(456),
+            security: Some(Box::new(ClientSecurity {
+                protocol: ListenerProtocol::Ssl,
+                tls: None,
+                sasl: None,
+                sasl_host: Some("broker.example".into()),
+            })),
+        };
+
+        let reconnect = AdminClient::reconnect_options(&options);
+
+        assert2::assert!(reconnect.client_id == "custom-admin");
+        assert2::assert!(reconnect.connect_timeout == Duration::from_millis(123));
+        assert2::assert!(reconnect.request_timeout == Duration::from_millis(456));
+        assert2::assert!(
+            reconnect
+                .security
+                .as_ref()
+                .is_some_and(|security| security.sasl_host.as_deref() == Some("broker.example"))
+        );
+    }
+
+    #[test]
+    fn existing_connectors_keep_admin_defaults() {
+        let options = AdminClient::opts(None);
+
+        assert2::assert!(options.client_id == "crabka-operator");
+        assert2::assert!(options.connect_timeout == Duration::from_secs(5));
+        assert2::assert!(options.request_timeout == Duration::from_secs(30));
+        assert2::assert!(options.security.is_none());
+    }
+
+    #[tokio::test]
+    async fn connect_with_options_accepts_a_complete_template() {
+        let options = ConnectionOptions {
+            client_id: "custom-admin".into(),
+            connect_timeout: Duration::from_millis(1),
+            request_timeout: Duration::from_millis(2),
+            security: None,
+        };
+
+        let result =
+            AdminClient::connect_with_options(&["127.0.0.1:1".to_string()], options).await;
+
+        assert2::assert!(result.is_err());
     }
 }
