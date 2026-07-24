@@ -49,6 +49,27 @@ pub struct Cli {
     pub serve: ServeArgs,
 }
 
+#[cfg(test)]
+impl Cli {
+    fn try_parse_from<I, T>(itr: I) -> Result<Self, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
+    {
+        let mut command = <Self as clap::CommandFactory>::command();
+        for argument in [
+            "wal_recovery_fetch_max_wait_ms",
+            "wal_recovery_fetch_partition_max_bytes",
+            "wal_recovery_fetch_response_max_bytes",
+            "wal_recovery_empty_fetch_retries",
+        ] {
+            command = command.mut_arg(argument, |arg| arg.env(None::<&str>));
+        }
+        let matches = command.try_get_matches_from(itr)?;
+        <Self as clap::FromArgMatches>::from_arg_matches(&matches)
+    }
+}
+
 /// Arguments for the default serve mode (no subcommand).
 #[derive(clap::Args, Debug, Clone)]
 pub struct ServeArgs {
@@ -2366,7 +2387,6 @@ async fn run_local_vacuum_loop(
 #[cfg(test)]
 mod vacuum_pacing_tests {
     use assert2::assert;
-    use clap::Parser as _;
     use crabka_pgexec::VACUUM_STEP_KEY_BUDGET;
 
     use super::*;
@@ -7194,7 +7214,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
     use assert2::assert;
-    use clap::{CommandFactory as _, Parser as _};
+    use clap::CommandFactory as _;
 
     use super::*;
 
@@ -8961,10 +8981,13 @@ mod tests {
                 crabka_gres_substrate::DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES,
             )
         };
-        let config =
-            SubstrateRuntimeConfig::from_args(&Cli::try_parse_from(base).expect("policy").serve)
-                .expect("valid config")
-                .expect("substrate config");
+        let config = SubstrateRuntimeConfig::from_args(
+            &<Cli as clap::Parser>::try_parse_from(base)
+                .expect("policy")
+                .serve,
+        )
+        .expect("valid config")
+        .expect("substrate config");
         let policy = config.recovery_read_policy;
         assert_eq!(policy.fetch_max_wait_ms(), expected.0);
         assert_eq!(policy.fetch_partition_max_bytes(), expected.1);
@@ -8986,6 +9009,23 @@ mod tests {
         assert_eq!(policy.fetch_partition_max_bytes(), 28);
         assert_eq!(policy.fetch_response_max_bytes(), 29);
         assert_eq!(policy.empty_fetch_retries(), 30);
+    }
+
+    #[test]
+    fn wal_recovery_hostile_environment_does_not_leak_into_parser_tests() {
+        let status = std::process::Command::new(std::env::current_exe().expect("test exe"))
+            .args([
+                "--exact",
+                "tests::registry_policy_options_use_validated_defaults",
+            ])
+            .env("CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT_MS", "17")
+            .env("CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES", "18")
+            .env("CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES", "19")
+            .env("CRABKA_GRES_WAL_RECOVERY_EMPTY_FETCH_RETRIES", "20")
+            .status()
+            .expect("child test");
+
+        assert!(status.success());
     }
 
     #[test]
@@ -9064,7 +9104,7 @@ mod tests {
         assert_eq!(recovery.read_policy(), policy);
         assert_eq!(
             include_str!("lib.rs")
-                .split_once("\n#[cfg(test)]")
+                .split_once("\n#[cfg(test)]\nmod vacuum_pacing_tests {")
                 .expect("test module boundary")
                 .0
                 .matches("LiveRecoveryConfig::new(")

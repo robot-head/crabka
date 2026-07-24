@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-use clap::Parser as _;
+use clap::{CommandFactory as _, FromArgMatches as _};
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_core::Client;
 use crabka_client_producer::{Acks, Producer, ProducerRecord};
@@ -182,8 +182,25 @@ fn binary_help_exposes_only_single_node_serve_surface() {
 }
 
 fn test_args(listen: String, data_dir: Option<std::path::PathBuf>) -> crabka_gres::ServeArgs {
+    let mut command = crabka_gres::Cli::command();
+    for argument in [
+        "wal_recovery_fetch_max_wait_ms",
+        "wal_recovery_fetch_partition_max_bytes",
+        "wal_recovery_fetch_response_max_bytes",
+        "wal_recovery_empty_fetch_retries",
+    ] {
+        command = command.mut_arg(argument, |arg| arg.env(None::<&str>));
+    }
+    let registry = crabka_gres::Cli::from_arg_matches(
+        &command
+            .try_get_matches_from(["crabka-gres"])
+            .expect("registry defaults"),
+    )
+    .expect("registry defaults")
+    .serve
+    .registry;
     crabka_gres::ServeArgs {
-        registry: crabka_gres::Cli::parse_from(["crabka-gres"]).serve.registry,
+        registry,
         local_vacuum: crabka_gres::LocalVacuumOptions::default(),
         listen,
         tls_cert: None,
