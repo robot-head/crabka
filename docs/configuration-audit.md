@@ -426,8 +426,10 @@ through both Clap and environment variables:
 - listen address and Kafka bootstrap through
   `CRABKA_GRES_ACTIVATOR_LISTEN` and
   `CRABKA_GRES_ACTIVATOR_BOOTSTRAP`;
-- registry replication factor, readiness poll interval, and cold-start timeout
-  through their `CRABKA_GRES_ACTIVATOR_*` variables; and
+- readiness poll interval and cold-start timeout through their
+  `CRABKA_GRES_ACTIVATOR_*` variables;
+- the shared registry policy through the five `CRABKA_GRES_REGISTRY_*`
+  variables documented in the Gres Registry section below; and
 - backend endpoint template through
   `CRABKA_GRES_ACTIVATOR_BACKEND_ENDPOINT_TEMPLATE`.
 
@@ -435,10 +437,11 @@ The non-empty strings, positive millisecond values, and registry replication
 factor are validated boundary types backed by `refined_type`. Registry
 replication is restricted to `1..=32767`, Kafka's signed-16-bit wire domain.
 
-Operator-managed deployments expose image, replicas, registry replication,
-registry polling, cold-start timeout, and readiness-probe period under typed
-`Gres.spec.activator` fields. Present values fail before child API writes. The
-operator also supports its existing global
+Operator-managed deployments expose image, replicas, registry polling,
+cold-start timeout, and readiness-probe period under typed
+`Gres.spec.activator` fields. Shared registry policy belongs to
+`Kafka.spec.gresRegistry`, not the activator. Present values fail before child
+API writes. The operator also supports its existing global
 `--default-gres-activator-image`/`DEFAULT_GRES_ACTIVATOR_IMAGE` fallback and
 renders the effective policy as explicit process arguments. The configured
 cold-start timeout drives a checked PgDog connection budget so the front door
@@ -457,22 +460,17 @@ does not expire first.
   configured values. Collection capacities are exact input-size
   preallocation, not limits.
 - All 12 scanner matches under `crates/gres-activator` are test inputs: 11
-  readiness timing fixtures in `src/lib.rs` and one six-variable environment
+  readiness timing fixtures in `src/lib.rs` and one ten-variable environment
   fixture declaration in `src/main.rs`.
 
 ### Adjacent Pending Policy
 
 The semantic audit followed the activator into `Registry::ensure_topic`, its
-background reader, `PgdogTimeouts`, and the Gres controller. The following
-shared policy is intentionally not misclassified as activator-owned:
+background reader, `PgdogTimeouts`, and the Gres controller. The shared
+registry policy is now closed in the Gres Registry section below. The
+following adjacent policy is intentionally not misclassified as
+activator-owned:
 
-- the registry topic-create timeout, reader fetch wait/byte limit, and reader
-  retry backoff in `gres-control`;
-- the operator's shared Gres-control creation path in
-  `crates/operator/src/context.rs`, which still calls
-  `Registry::ensure_topic(1)` and may create the registry topic before the
-  activator; therefore `spec.activator.registryReplicationFactor` is not
-  guaranteed end-to-end until that shared path is wired;
 - PgDog idle timeout, server lifetime, connection-attempt count, and related
   pool policy in `gres-control`; and
 - Gres-controller reconcile, reload, PgDog admin, and credential-transition
@@ -503,5 +501,98 @@ The activator-owned sub-slice passed:
 
 This closes only the activator-owned sub-slice. `gres-activator`,
 `gres-control`, `gres`, and broader Gres crates remain Pending in the
-crate-level coverage list until the shared runtime policy above and their
-other owned policy are exposed and audited.
+crate-level coverage list until their other owned policy is exposed and
+audited.
+
+## Gres Registry
+
+### Configurable
+
+`RegistryPolicy` owns the shared `__gres_tenants` topic and reader policy:
+replication factor, topic-create timeout, reader retry backoff, fetch maximum
+wait, and fetch partition maximum bytes. Its constructor validates positive
+values and Kafka's `1..=32767` replication domain with `refined_type`-backed
+boundary types. `Registry::connect_with_policy` stores the validated policy;
+argument-free `ensure_topic()` applies it to topic creation and every
+foreground/background reader path.
+
+For operator-managed workloads, `Kafka.spec.gresRegistry` is the single
+cluster-wide source. Gres reconciliation requires the referenced Kafka before
+writing any child, then renders all five effective values into the activator.
+GresTenant reconciliation loads the same Kafka policy for compute
+Deployments, cleanup, and the cached control handle. Cache identity includes
+namespace and Kafka name, and an entry is reused only when bootstrap and
+policy are equal; replacement construction does not hold the cache mutex
+across Kafka I/O.
+
+Standalone activator, compute, `crabka gres`, and loadtest `run`/`compare`
+surfaces expose the exact common variables:
+
+- `CRABKA_GRES_REGISTRY_REPLICATION_FACTOR`;
+- `CRABKA_GRES_REGISTRY_TOPIC_CREATE_TIMEOUT_MS`;
+- `CRABKA_GRES_REGISTRY_READER_RETRY_BACKOFF_MS`;
+- `CRABKA_GRES_REGISTRY_FETCH_MAX_WAIT_MS`; and
+- `CRABKA_GRES_REGISTRY_FETCH_PARTITION_MAX_BYTES`.
+
+CLI values take precedence over environment values. Loadtest carries one
+policy through provisioning and every spawned compute. No production caller
+uses `Registry::connect`, the compatibility shorthand that chooses defaults.
+All production creators use `connect_with_policy`, and `ensure_topic` accepts
+no replication argument.
+
+Existing-topic metadata is checked after both successful creation and
+topic-already-exists responses. A nonzero observed replication factor that
+differs from policy returns an explicit immutable-policy mismatch. Tenant WAL
+replication remains a separate input to per-tenant config-topic creation and
+cannot affect `__gres_tenants`.
+
+### Fixed
+
+- `__gres_tenants`, its compacted cleanup policy, one partition, partition
+  zero, and read-committed isolation are persisted ordering/visibility
+  invariants.
+- Kafka error code 36 is `TOPIC_ALREADY_EXISTS`; producer client and
+  transactional IDs, idempotence, and `Acks::All` are protocol/integrity
+  invariants.
+- Replication is checked before narrowing to Kafka's signed-16-bit wire
+  domain. Metadata's zero replication value remains the protocol's unknown
+  sentinel and is not treated as a mismatch.
+- `SPLIT_OPERATION_KEY_PREFIX` is a persisted record-key discriminator.
+- Of the nine scanner matches in `crates/gres-control/src/registry.rs`, four
+  are the fixed production constants above and five are test-only timing or
+  policy fixtures.
+
+### Adjacent Pending Policy
+
+This closes only the shared registry sub-slice. PgDog pool policy and
+Gres-controller reconcile, reload, admin, and credential-transition timing
+remain Pending. The crate-level Coverage Status stays unchanged until those
+and the remaining Gres-owned runtime values are audited.
+
+### Gres Registry Sub-slice Evidence
+
+On 2026-07-24 `tools/audit-runtime-values.sh` reported exactly 5,896
+repository matches. Relevant crate totals were 33 for `gres-control`, 12 for
+`gres-activator`, 40 for `gres`, 19 for `cli`, 88 for `gres-loadtest`, and
+181 for `operator`; the registry implementation itself contributed the nine
+fully classified matches above.
+
+- `cargo nextest run -p crabka-gres-control -p crabka-gres-activator
+  -p crabka-gres -p crabka-cli -p crabka-gres-loadtest -p crabka-operator
+  --no-fail-fast`: 1,309 passed, 1 skipped, and no failures.
+- `cargo clippy -p crabka-gres-control -p crabka-gres-activator
+  -p crabka-gres -p crabka-cli -p crabka-gres-loadtest -p crabka-operator
+  --all-targets --all-features -- -D warnings`: passed.
+- The five standalone help surfaces each displayed all five
+  `--registry-*` settings and exact `CRABKA_GRES_REGISTRY_*` bindings:
+  `crabka-gres-activator --help`, `crabka-gres --help`,
+  `crabka gres --help`, `crabka-gres-loadtest run --help`, and
+  `crabka-gres-loadtest compare --help`.
+- `cargo +nightly fmt --all -- --check`: passed.
+- `cargo run -p crabka-operator -- gen-crds <temporary-directory>` followed
+  by `diff -ru deploy/crds <temporary-directory>`: all nine CRDs matched
+  exactly.
+- Focused `rg` audits found zero production `Registry::connect` calls, zero
+  public `ensure_topic` replication parameters, and explicit policy flow
+  through every required creator.
+- `git diff --check`: passed.
