@@ -1841,6 +1841,7 @@ pub fn tls_acceptor(
 ///
 /// Returns an error when the requested operation cannot be completed.
 pub async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
+    local_vacuum_policy(&args)?;
     let listener = TcpListener::bind(&args.listen).await?;
     tracing::info!(listen = %listener.local_addr()?, "crabka-gres listening");
     Box::pin(serve_listener(listener, args)).await
@@ -1929,8 +1930,8 @@ pub async fn serve_listener_with_tenant_config_loader(
     // stack: whether serving returns or is aborted, the sweep task stops and
     // releases its engine handle (and with it a --data-dir store lock).
     let _vacuum_guard = if let RuntimeEngine::Single(sql_engine) = &engine
-        && sql_engine.supports_local_vacuum()
-        && let Some(policy) = local_vacuum_policy
+        && let Some(policy) =
+            local_vacuum_spawn_policy(local_vacuum_policy, sql_engine.supports_local_vacuum())
     {
         let vacuum_token = shutdown.child_token();
         tokio::spawn(run_local_vacuum_loop(
@@ -2021,6 +2022,13 @@ pub async fn serve_listener_with_tenant_config_loader(
         let _ = server.await;
     }
     serve_result
+}
+
+fn local_vacuum_spawn_policy(
+    policy: Option<LocalVacuumPolicy>,
+    supports_local_vacuum: bool,
+) -> Option<LocalVacuumPolicy> {
+    policy.filter(|_| supports_local_vacuum)
 }
 
 /// One pacing decision for the local vacuum loop: how long to sleep before
@@ -2164,6 +2172,16 @@ impl VacuumPacer {
     }
 }
 
+fn local_vacuum_maintenance_due(
+    swept_anything: bool,
+    next_interval: Duration,
+    elapsed_since_maintain: Duration,
+    policy: LocalVacuumPolicy,
+) -> bool {
+    swept_anything
+        && (next_interval > Duration::ZERO || elapsed_since_maintain >= policy.idle_interval)
+}
+
 /// Run bounded dead-MVCC-version sweep steps on the LOCAL serving engine
 /// until `shutdown` fires, paced by a [`VacuumPacer`]. The write paths
 /// already prune the rows they touch; the stepped sweep catches cold garbage
@@ -2220,10 +2238,12 @@ async fn run_local_vacuum_loop(
                 // the burst's final step) so fast consecutive steps do not
                 // spray tiny sstables. Idle steps (settled tables skipped,
                 // nothing found) never rotate.
-                if swept_anything
-                    && (next.interval > Duration::ZERO
-                        || last_maintain.elapsed() >= policy.idle_interval)
-                {
+                if local_vacuum_maintenance_due(
+                    swept_anything,
+                    next.interval,
+                    last_maintain.elapsed(),
+                    policy,
+                ) {
                     last_maintain = std::time::Instant::now();
                     if let Err(error) = engine.kv_handle().maintain() {
                         tracing::warn!(?error, "post-vacuum store maintenance failed");
@@ -2265,6 +2285,74 @@ mod vacuum_pacing_tests {
         )
         .expect("valid defaults")
         .expect("local policy")
+    }
+
+    #[test]
+    fn effective_defaults_pin_local_vacuum_policy() {
+        let base = VACUUM_STEP_KEY_BUDGET;
+
+        assert_eq!(
+            default_policy(),
+            LocalVacuumPolicy {
+                idle_interval: Duration::from_secs(2),
+                backoff_floor: Duration::from_millis(25),
+                hot_debt: u64::try_from(base).expect("base budget fits debt"),
+                key_budget: base,
+                max_key_budget: base.checked_mul(4).expect("default maximum"),
+                step_fast: Duration::from_millis(3),
+                step_slow: Duration::from_millis(12),
+                idle_after: Duration::from_secs(1),
+            }
+        );
+    }
+
+    #[test]
+    fn derived_maximum_key_budget_rejects_overflow() {
+        let args = Cli::try_parse_from([
+            "crabka-gres",
+            "--local-vacuum-key-budget",
+            &usize::MAX.to_string(),
+        ])
+        .expect("scalar-valid arguments")
+        .serve;
+
+        let error = local_vacuum_policy(&args).expect_err("derived maximum overflow");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(
+            error.to_string(),
+            "local vacuum default maximum key budget overflows usize"
+        );
+    }
+
+    #[test]
+    fn runtime_spawn_decision_requires_local_policy_and_engine_support() {
+        let policy = default_policy();
+
+        assert_eq!(local_vacuum_spawn_policy(Some(policy), true), Some(policy));
+        assert_eq!(local_vacuum_spawn_policy(Some(policy), false), None);
+        assert_eq!(local_vacuum_spawn_policy(None, true), None);
+    }
+
+    #[test]
+    fn custom_idle_interval_controls_maintenance_rotation() {
+        let policy = LocalVacuumPolicy {
+            idle_interval: Duration::from_millis(40),
+            ..default_policy()
+        };
+
+        assert!(!local_vacuum_maintenance_due(
+            true,
+            Duration::ZERO,
+            Duration::from_millis(39),
+            policy,
+        ));
+        assert!(local_vacuum_maintenance_due(
+            true,
+            Duration::ZERO,
+            Duration::from_millis(40),
+            policy,
+        ));
     }
 
     /// Observation template: a busy, fast, mid-cycle step that swept nothing.
@@ -7061,20 +7149,37 @@ mod tests {
             ("CRABKA_GRES_LOCAL_VACUUM_IDLE_AFTER_MS", "18"),
         ];
         if std::env::var_os(CHILD).is_none() {
-            let defaults = Cli::try_parse_from(["crabka-gres"])
-                .expect("defaults")
-                .serve;
-            assert_eq!(defaults.local_vacuum, LocalVacuumOptions::default());
+            let mut defaults =
+                std::process::Command::new(std::env::current_exe().expect("test exe"));
+            defaults
+                .args([
+                    "--exact",
+                    "tests::local_vacuum_options_are_absent_by_default_and_cli_overrides_environment",
+                ])
+                .env(CHILD, "absent");
+            for (name, _) in variables {
+                defaults.env_remove(name);
+            }
+            assert!(defaults.status().expect("defaults child test").success());
+
             let status = std::process::Command::new(std::env::current_exe().expect("test exe"))
                 .args([
                     "--exact",
                     "tests::local_vacuum_options_are_absent_by_default_and_cli_overrides_environment",
                 ])
-                .env(CHILD, "1")
+                .env(CHILD, "configured")
                 .envs(variables)
                 .status()
                 .expect("child test");
             assert!(status.success());
+            return;
+        }
+
+        if std::env::var(CHILD).as_deref() == Ok("absent") {
+            let defaults = Cli::try_parse_from(["crabka-gres"])
+                .expect("defaults")
+                .serve;
+            assert_eq!(defaults.local_vacuum, LocalVacuumOptions::default());
             return;
         }
 
@@ -7216,6 +7321,28 @@ mod tests {
             .serve;
             assert!(local_vacuum_policy(&args).is_err());
         }
+    }
+
+    #[tokio::test]
+    async fn local_vacuum_validation_precedes_listener_bind() {
+        let occupied = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+        let mut args = Cli::try_parse_from([
+            "crabka-gres",
+            "--substrate-bootstrap=memory://",
+            "--tenant=tenant-a",
+            "--local-vacuum-hot-debt=1",
+        ])
+        .expect("scalar-valid arguments")
+        .serve;
+        args.listen = occupied.local_addr().expect("address").to_string();
+
+        let error = run_serve(args).await.expect_err("invalid local policy");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(
+            error.to_string(),
+            "local vacuum options are incompatible with --substrate-bootstrap"
+        );
     }
 
     #[test]
