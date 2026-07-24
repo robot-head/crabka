@@ -52,6 +52,7 @@ fn kafka_cr(name: &str, namespace: &str) -> Kafka {
             inter_broker_kerberos: None,
             krb5_conf_secret_ref: None,
             tracing: None,
+            broker_tuning: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());
@@ -84,6 +85,7 @@ fn kafka_cr_byo(name: &str, namespace: &str) -> Kafka {
             inter_broker_kerberos: None,
             krb5_conf_secret_ref: None,
             tracing: None,
+            broker_tuning: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());
