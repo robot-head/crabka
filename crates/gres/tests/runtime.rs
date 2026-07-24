@@ -195,6 +195,7 @@ fn test_args(listen: String, data_dir: Option<std::path::PathBuf>) -> crabka_gre
         tenant: None,
         cache_dir: None,
         ranges: None,
+        range0_follower_poll_interval_ms: None,
         host_ranges: None,
         timestamp_source: crabka_gres::TimestampSourceKind::LogicalTso,
         hlc_max_offset_ms: 250,
@@ -349,6 +350,9 @@ async fn live_multirange_substrate_default_fdw_server_reads_own_broker() {
         checkpoints: None,
         kafka_security: None,
         ranges: Some("0,5".to_string()),
+        range0_follower_poll_interval: std::time::Duration::from_millis(
+            crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
+        ),
         host_ranges: None,
         range_rpc: None,
         advertised_endpoint: None,
@@ -409,6 +413,9 @@ async fn live_multirange_substrate_hlc_mode_commits_and_mints_wall_anchored_stam
         checkpoints: None,
         kafka_security: None,
         ranges: Some("0,5".to_string()),
+        range0_follower_poll_interval: std::time::Duration::from_millis(
+            crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
+        ),
         host_ranges: None,
         range_rpc: None,
         advertised_endpoint: None,
@@ -567,6 +574,9 @@ async fn live_multirange_transfer_stages_populated_successor_without_publishing_
         }),
         kafka_security: None,
         ranges: Some("0,5".to_string()),
+        range0_follower_poll_interval: std::time::Duration::from_millis(
+            crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
+        ),
         host_ranges: None,
         range_rpc: None,
         advertised_endpoint: Some("127.0.0.1:7443".into()),
@@ -933,6 +943,9 @@ fn activation_crash_config(
         }),
         kafka_security: None,
         ranges: Some("0,5".to_owned()),
+        range0_follower_poll_interval: std::time::Duration::from_millis(
+            crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
+        ),
         host_ranges: None,
         range_rpc: None,
         advertised_endpoint: Some("127.0.0.1:7443".into()),
@@ -2471,6 +2484,9 @@ async fn live_populated_hash_split_partitions_physical_rows_and_sequence() {
         }),
         kafka_security: None,
         ranges: Some("0,5".to_string()),
+        range0_follower_poll_interval: std::time::Duration::from_millis(
+            crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
+        ),
         host_ranges: None,
         range_rpc: None,
         advertised_endpoint: Some("127.0.0.1:7443".into()),
@@ -2639,6 +2655,9 @@ async fn live_multirange_transfer_rejects_concurrent_pause_without_waiting() {
         }),
         kafka_security: None,
         ranges: Some("0,200".to_string()),
+        range0_follower_poll_interval: std::time::Duration::from_millis(
+            crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
+        ),
         host_ranges: None,
         range_rpc: None,
         advertised_endpoint: None,
@@ -2703,6 +2722,9 @@ async fn non_live_runtimes_do_not_expose_range_transfer_capability() {
         checkpoints: None,
         kafka_security: None,
         ranges: None,
+        range0_follower_poll_interval: std::time::Duration::from_millis(
+            crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
+        ),
         host_ranges: None,
         range_rpc: None,
         advertised_endpoint: None,
@@ -2721,6 +2743,9 @@ async fn non_live_runtimes_do_not_expose_range_transfer_capability() {
             checkpoints: None,
             kafka_security: None,
             ranges: None,
+            range0_follower_poll_interval: std::time::Duration::from_millis(
+                crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
+            ),
             host_ranges: None,
             range_rpc: None,
             advertised_endpoint: None,

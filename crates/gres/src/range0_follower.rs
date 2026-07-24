@@ -19,9 +19,6 @@ use crabka_gres_substrate::{
 };
 use crabka_pgkv::{FjallKv, MemKv, RestoreKv};
 
-/// Idle cadence of the tail poll. A read barrier pokes the loop awake, so this
-/// only bounds how stale an unpoked follower gets.
-const POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// Delay before a rebuild that immediately follows another one. A trim landing
 /// between two rebuilds is legitimate; a tight rebuild loop is not.
 const REBUILD_BACKOFF_FLOOR: Duration = Duration::from_millis(250);
@@ -100,6 +97,7 @@ pub(crate) struct Range0FollowerTail {
     end_sampler: Arc<LiveCommittedEndSampler>,
     checkpoints: Option<Arc<dyn CheckpointStore>>,
     cache_dir: Option<PathBuf>,
+    poll_interval: Duration,
     refresh_poke: Arc<tokio::sync::Notify>,
     store_generation: u64,
     rebuilds: u64,
@@ -113,6 +111,7 @@ impl Range0FollowerTail {
         end_sampler: Arc<LiveCommittedEndSampler>,
         checkpoints: Option<Arc<dyn CheckpointStore>>,
         cache_dir: Option<PathBuf>,
+        poll_interval: Duration,
         refresh_poke: Arc<tokio::sync::Notify>,
     ) -> Self {
         Self {
@@ -121,6 +120,7 @@ impl Range0FollowerTail {
             end_sampler,
             checkpoints,
             cache_dir,
+            poll_interval,
             refresh_poke,
             store_generation: 0,
             rebuilds: 0,
@@ -134,10 +134,7 @@ impl Range0FollowerTail {
             self.poll_once().await;
             // A catalog barrier pokes the refresh so waiters catch up
             // immediately instead of on the next periodic tick.
-            tokio::select! {
-                () = self.refresh_poke.notified() => {}
-                () = tokio::time::sleep(POLL_INTERVAL) => {}
-            }
+            wait_for_refresh(&self.refresh_poke, self.poll_interval).await;
         }
     }
 
@@ -252,6 +249,13 @@ impl Range0FollowerTail {
                 );
             }
         }
+    }
+}
+
+pub(crate) async fn wait_for_refresh(refresh_poke: &tokio::sync::Notify, poll_interval: Duration) {
+    tokio::select! {
+        () = refresh_poke.notified() => {}
+        () = tokio::time::sleep(poll_interval) => {}
     }
 }
 

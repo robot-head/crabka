@@ -11,9 +11,10 @@ use crabka_client_core::security::{ClientSecurity, SaslCredentials};
 use crabka_gres_control::{
     CheckpointPartBytes, DEFAULT_CHECKPOINT_BYTES, DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS,
     DEFAULT_CHECKPOINT_FRAMES, DEFAULT_CHECKPOINT_POLL_INTERVAL_MS,
-    DEFAULT_IDLE_SUSPEND_POLL_INTERVAL_MS, FinalCheckpoint, PositiveI32, PositiveMillis,
-    PositiveUsize, RegistryPolicy, RegistryReplicationFactor, TenantName, TenantRecord,
-    decode_tenant_config_record, tenant_config_topic,
+    DEFAULT_IDLE_SUSPEND_POLL_INTERVAL_MS, DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
+    FinalCheckpoint, PositiveI32, PositiveMillis, PositiveUsize, RegistryPolicy,
+    RegistryReplicationFactor, TenantName, TenantRecord, decode_tenant_config_record,
+    tenant_config_topic,
 };
 use crabka_pgexec::SqlEngine;
 use crabka_pgkv::{FjallKv, Kv, KvScan, MemKv, RestoreKv, SnapshotKv};
@@ -99,6 +100,14 @@ pub struct ServeArgs {
     /// In-process memory:// substrate dev/test mode: comma-separated table-start range boundaries, for example 0,100,200.
     #[arg(long, requires = "substrate_bootstrap")]
     pub ranges: Option<String>,
+
+    /// Periodic range-0 follower refresh cadence in multi-range substrate mode.
+    #[arg(
+        long = "range0-follower-poll-interval-ms",
+        env = "CRABKA_GRES_RANGE0_FOLLOWER_POLL_INTERVAL_MS",
+        requires = "ranges"
+    )]
+    pub range0_follower_poll_interval_ms: Option<PositiveMillis>,
 
     /// Substrate mode: comma-separated hosted range ids, for example r0,r2.
     #[arg(long = "host-ranges", requires = "ranges")]
@@ -477,6 +486,8 @@ pub struct SubstrateRuntimeConfig {
     pub kafka_security: Option<ClientSecurity>,
     /// Optional in-process multi-range table-start boundaries.
     pub ranges: Option<String>,
+    /// Periodic refresh cadence for a remote range-0 follower.
+    pub range0_follower_poll_interval: Duration,
     /// Optional range-compute placement for distributed mode. Range 0 is always hosted.
     pub host_ranges: Option<Vec<crabka_gres_ranges::RangeId>>,
     /// mTLS client configuration required for remote range routing.
@@ -570,6 +581,10 @@ impl SubstrateRuntimeConfig {
     pub fn from_args(args: &ServeArgs) -> std::io::Result<Option<Self>> {
         use std::io::{Error, ErrorKind};
 
+        if args.range0_follower_poll_interval_ms.is_some() && args.ranges.is_none() {
+            return invalid_input("--range0-follower-poll-interval-ms requires --ranges");
+        }
+
         let Some(bootstrap) = args.substrate_bootstrap.as_deref() else {
             if checkpointing_was_requested(args) {
                 return Err(Error::new(
@@ -612,6 +627,12 @@ impl SubstrateRuntimeConfig {
             checkpoints: CheckpointRuntimeConfig::from_args(args)?,
             kafka_security: tenant_kafka_security_from_env(tenant),
             ranges,
+            range0_follower_poll_interval: Duration::from_millis(
+                args.range0_follower_poll_interval_ms.map_or(
+                    DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
+                    PositiveMillis::into_value,
+                ),
+            ),
             host_ranges: parse_host_ranges(args.host_ranges.as_deref())?,
             range_rpc: RangeRpcRuntimeConfig::from_args(args)?,
             advertised_endpoint: args.range_listen.clone(),
@@ -3701,6 +3722,7 @@ async fn attach_range0_read_barrier(
             end_sampler,
             checkpoint_store,
             config.cache_dir.clone(),
+            config.range0_follower_poll_interval,
             catalog_refresh_poke,
         )
         .run(),
@@ -7969,6 +7991,7 @@ mod tests {
             tenant: None,
             cache_dir: None,
             ranges: None,
+            range0_follower_poll_interval_ms: None,
             host_ranges: None,
             timestamp_source: TimestampSourceKind::LogicalTso,
             hlc_max_offset_ms: 250,
@@ -8600,6 +8623,122 @@ mod tests {
     }
 
     #[test]
+    fn range0_follower_poll_interval_uses_default_environment_and_cli_precedence() {
+        const CHILD: &str = "CRABKA_TEST_GRES_RANGE0_FOLLOWER_POLL_CHILD";
+        const ENV: &str = "CRABKA_GRES_RANGE0_FOLLOWER_POLL_INTERVAL_MS";
+        let base = [
+            "crabka-gres",
+            "--substrate-bootstrap=memory://",
+            "--tenant=tenant-a",
+            "--ranges=0,10",
+        ];
+        if std::env::var_os(CHILD).is_none() {
+            for (mode, value) in [("default", None), ("environment", Some("17"))] {
+                let mut child =
+                    std::process::Command::new(std::env::current_exe().expect("test exe"));
+                child
+                    .args([
+                        "--exact",
+                        "tests::range0_follower_poll_interval_uses_default_environment_and_cli_precedence",
+                    ])
+                    .env(CHILD, mode);
+                match value {
+                    Some(value) => {
+                        child.env(ENV, value);
+                    }
+                    None => {
+                        child.env_remove(ENV);
+                    }
+                }
+                assert!(child.status().expect("child test").success());
+            }
+            return;
+        }
+
+        let expected = if std::env::var(CHILD).as_deref() == Ok("environment") {
+            17
+        } else {
+            DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS
+        };
+        let parsed = Cli::try_parse_from(base).expect("policy").serve;
+        assert_eq!(
+            SubstrateRuntimeConfig::from_args(&parsed)
+                .expect("valid config")
+                .expect("substrate config")
+                .range0_follower_poll_interval,
+            Duration::from_millis(expected)
+        );
+
+        let cli = Cli::try_parse_from(
+            base.into_iter()
+                .chain(["--range0-follower-poll-interval-ms=19"]),
+        )
+        .expect("CLI policy")
+        .serve;
+        assert_eq!(
+            SubstrateRuntimeConfig::from_args(&cli)
+                .expect("valid config")
+                .expect("substrate config")
+                .range0_follower_poll_interval,
+            Duration::from_millis(19)
+        );
+    }
+
+    #[test]
+    fn range0_follower_poll_interval_rejects_zero_and_non_multirange_use() {
+        assert!(
+            Cli::try_parse_from([
+                "crabka-gres",
+                "--substrate-bootstrap=memory://",
+                "--tenant=tenant-a",
+                "--ranges=0,10",
+                "--range0-follower-poll-interval-ms=0",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "crabka-gres",
+                "--substrate-bootstrap=memory://",
+                "--tenant=tenant-a",
+                "--range0-follower-poll-interval-ms=1",
+            ])
+            .is_err()
+        );
+
+        let mut programmatic = Cli::try_parse_from(["crabka-gres"])
+            .expect("defaults")
+            .serve;
+        programmatic.range0_follower_poll_interval_ms =
+            Some(PositiveMillis::new(1).expect("positive"));
+        let error = SubstrateRuntimeConfig::from_args(&programmatic)
+            .expect_err("programmatic non-multirange configuration");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn configured_range0_follower_poll_and_poke_control_refresh() {
+        let poke = Arc::new(tokio::sync::Notify::new());
+        let periodic_poke = Arc::clone(&poke);
+        let periodic = tokio::spawn(async move {
+            range0_follower::wait_for_refresh(&periodic_poke, Duration::from_millis(7)).await;
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(6)).await;
+        assert!(!periodic.is_finished());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        periodic.await.expect("periodic wake");
+
+        let notified_poke = Arc::clone(&poke);
+        let notified = tokio::spawn(async move {
+            range0_follower::wait_for_refresh(&notified_poke, Duration::from_mins(1)).await;
+        });
+        tokio::task::yield_now().await;
+        poke.notify_one();
+        notified.await.expect("notification wake");
+    }
+
+    #[test]
     fn cli_parse_accepts_checkpoint_s3_options() {
         let cli = Cli::try_parse_from([
             "crabka-gres",
@@ -8890,6 +9029,9 @@ mod tests {
             checkpoints: None,
             kafka_security: None,
             ranges: Some("0,100,200".to_string()),
+            range0_follower_poll_interval: Duration::from_millis(
+                DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
+            ),
             host_ranges: None,
             range_rpc: None,
             advertised_endpoint: None,
@@ -8963,6 +9105,9 @@ mod tests {
             }),
             kafka_security: None,
             ranges: None,
+            range0_follower_poll_interval: Duration::from_millis(
+                DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
+            ),
             host_ranges: None,
             range_rpc: None,
             advertised_endpoint: None,
@@ -9317,6 +9462,9 @@ mod tests {
             checkpoints: None,
             kafka_security: None,
             ranges: None,
+            range0_follower_poll_interval: Duration::from_millis(
+                DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
+            ),
             host_ranges: None,
             range_rpc: None,
             advertised_endpoint: None,
@@ -9399,6 +9547,9 @@ mod tests {
             checkpoints: None,
             kafka_security: None,
             ranges: None,
+            range0_follower_poll_interval: Duration::from_millis(
+                DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
+            ),
             host_ranges: None,
             range_rpc: None,
             advertised_endpoint: None,
