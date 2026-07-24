@@ -21,13 +21,14 @@ use crate::{
     handlers::context::TelemetryContext,
 };
 
-/// Max allowed decompressed:compressed expansion ratio for a client-metrics
-/// payload (decompression-bomb guard).
-const MAX_DECOMPRESSION_RATIO: usize = 100;
-/// Floor on the decompressed-output bound, so tiny pushes still decompress.
-const DECOMPRESSED_OUTPUT_FLOOR: usize = 16 * 1024 * 1024;
-/// Hard ceiling on decompressed client-metrics output.
-const DECOMPRESSED_OUTPUT_CEILING: usize = 1024 * 1024 * 1024;
+fn decompressed_output_bound(
+    compressed_len: usize,
+    ratio: usize,
+    floor: usize,
+    ceiling: usize,
+) -> usize {
+    compressed_len.saturating_mul(ratio).clamp(floor, ceiling)
+}
 
 #[tracing::instrument(
     name = "handle_push_telemetry",
@@ -74,11 +75,12 @@ pub(crate) fn handle(
             let ct = codec.expect("authorize_push guarantees a supported codec on Accept");
             // Bound decompressed output to guard against a decompression bomb
             // in the client-metrics payload.
-            let max_output = req
-                .metrics
-                .len()
-                .saturating_mul(MAX_DECOMPRESSION_RATIO)
-                .clamp(DECOMPRESSED_OUTPUT_FLOOR, DECOMPRESSED_OUTPUT_CEILING);
+            let max_output = decompressed_output_bound(
+                req.metrics.len(),
+                broker.config.telemetry_max_decompression_ratio,
+                broker.config.telemetry_decompressed_output_floor_bytes,
+                broker.config.telemetry_decompressed_output_ceiling_bytes,
+            );
             match crabka_compression::decompress(ct, &req.metrics, max_output) {
                 Ok(raw) => match otlp::decode_metrics(&raw) {
                     Ok(md) => {
@@ -219,6 +221,30 @@ mod tests {
 
     async fn start_broker() -> (crate::broker::BrokerHandle, tempfile::TempDir) {
         crate::test_support::start_broker_with(|_cfg| {}).await
+    }
+
+    #[test]
+    fn decompressed_output_bound_uses_runtime_policy() {
+        let cases = [
+            ("ratio", 10, 7, 1, 1_000, 70),
+            ("floor", 10, 2, 50, 1_000, 50),
+            ("ceiling", 10, 100, 1, 500, 500),
+            (
+                "saturating multiplication",
+                usize::MAX,
+                2,
+                1,
+                usize::MAX,
+                usize::MAX,
+            ),
+        ];
+
+        for (name, compressed_len, ratio, floor, ceiling, expected) in cases {
+            assert!(
+                decompressed_output_bound(compressed_len, ratio, floor, ceiling) == expected,
+                "{name}"
+            );
+        }
     }
 
     #[tokio::test]
