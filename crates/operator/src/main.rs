@@ -88,4 +88,20 @@ mod tests {
             _ => panic!("expected CaRenewalCheck variant"),
         }
     }
+
+    #[test]
+    fn run_help_lists_controller_timing_options() {
+        let error = Cli::try_parse_from(["bin", "run", "--help"]).expect_err("display help");
+        let help = error.to_string();
+        for option in [
+            "--pgdog-reload-attempts",
+            "--pgdog-reload-backoff-ms",
+            "--pgdog-reload-requeue-ms",
+            "--pgdog-admin-timeout-ms",
+            "--pgdog-transition-poll-ms",
+            "--controller-error-requeue-ms",
+        ] {
+            assert!(help.contains(option), "missing {option} in:\n{help}");
+        }
+    }
 }

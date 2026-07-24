@@ -1,12 +1,16 @@
 use std::{
     net::IpAddr,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use assert2::assert;
 use crabka_operator::{
     context::{PgdogAdminError, PgdogAdminLike, PgdogExpectedRoute, PgdogReloadRequest},
-    controller::gres::{reconcile, tenant_endpoint, tenant_to_gres_refs},
+    controller::{
+        common::ReconcileError,
+        gres::{error_policy, reconcile, tenant_endpoint, tenant_to_gres_refs},
+    },
     crd::{
         Gres, GresActivatorSpec, GresBalancerGoal, GresBalancerGoals, GresBalancerOperationKind,
         GresBalancerPlanSnapshot, GresBalancerRegistryLayout, GresBalancerSpec,
@@ -23,6 +27,7 @@ use shared::{MockRule, MockState, fixture_ctx, json_response, mock_client};
 
 #[derive(Debug)]
 struct FakePgdogAdmin {
+    delay: Duration,
     outcomes: Mutex<Vec<bool>>,
     requests: Mutex<Vec<Vec<PgdogReloadRequest>>>,
 }
@@ -30,6 +35,15 @@ struct FakePgdogAdmin {
 impl FakePgdogAdmin {
     fn new(outcomes: Vec<bool>) -> Arc<Self> {
         Arc::new(Self {
+            delay: Duration::ZERO,
+            outcomes: Mutex::new(outcomes),
+            requests: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn with_delay(outcomes: Vec<bool>, delay: Duration) -> Arc<Self> {
+        Arc::new(Self {
+            delay,
             outcomes: Mutex::new(outcomes),
             requests: Mutex::new(Vec::new()),
         })
@@ -46,6 +60,7 @@ impl PgdogAdminLike for FakePgdogAdmin {
         &self,
         requests: &[PgdogReloadRequest],
     ) -> Result<bool, PgdogAdminError> {
+        tokio::time::sleep(self.delay).await;
         self.requests.lock().unwrap().push(requests.to_vec());
         Ok(self.outcomes.lock().unwrap().remove(0))
     }
@@ -1161,24 +1176,72 @@ async fn reconciled_balancer_plan_with_protocol_reports_physical_operations_unav
 
 #[tokio::test]
 async fn stale_pgdog_admin_view_requeues_without_confirming_hash() {
-    let admin = FakePgdogAdmin::new(vec![false, false, false]);
+    let admin = FakePgdogAdmin::new(vec![false, false]);
     let state = MockState::new(reconcile_rules(false));
-    let ctx = Arc::new(
-        fixture_ctx(mock_client(&state, "ns"), "ns").with_pgdog_admin_for_test(admin.clone()),
-    );
+    let mut context =
+        fixture_ctx(mock_client(&state, "ns"), "ns").with_pgdog_admin_for_test(admin.clone());
+    let config = Arc::get_mut(&mut context.config).expect("unique config");
+    config.pgdog_reload_attempts = "2".parse().expect("positive attempts");
+    config.pgdog_reload_backoff_ms = "1".parse().expect("positive backoff");
+    config.pgdog_reload_requeue_ms = "1234".parse().expect("positive requeue");
+    let ctx = Arc::new(context);
 
     let action = reconcile(Arc::new(gres()), ctx).await.unwrap();
 
     assert!(
-        action == kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15))
+        action
+            == kube::runtime::controller::Action::requeue(std::time::Duration::from_millis(1_234))
     );
-    assert!(admin.requests().len() == 3);
+    assert!(admin.requests().len() == 2);
     assert!(state.remaining_rules() == 0);
     let observed = state.take_observed();
     assert!(
         !observed
             .iter()
             .any(|request| request.uri().to_string().contains("/greses/fleet/status"))
+    );
+}
+
+#[tokio::test]
+async fn gres_error_policy_uses_configured_requeue() {
+    let state = MockState::new(Vec::new());
+    let mut context = fixture_ctx(mock_client(&state, "ns"), "ns");
+    Arc::get_mut(&mut context.config)
+        .expect("unique config")
+        .controller_error_requeue_ms = "4321".parse().expect("positive error requeue");
+
+    let action = error_policy(
+        Arc::new(gres()),
+        &ReconcileError::Malformed("test".into()),
+        Arc::new(context),
+    );
+
+    assert!(
+        action
+            == kube::runtime::controller::Action::requeue(std::time::Duration::from_millis(4_321))
+    );
+}
+
+#[tokio::test]
+async fn pgdog_admin_reload_uses_configured_timeout() {
+    let admin = FakePgdogAdmin::with_delay(vec![true], Duration::from_millis(20));
+    let state = MockState::new(reconcile_rules(false));
+    let mut context = fixture_ctx(mock_client(&state, "ns"), "ns").with_pgdog_admin_for_test(admin);
+    Arc::get_mut(&mut context.config)
+        .expect("unique config")
+        .pgdog_admin_timeout_ms = "1".parse().expect("positive timeout");
+
+    let error = reconcile(Arc::new(gres()), Arc::new(context))
+        .await
+        .expect_err("admin reload should time out");
+
+    assert!(
+        matches!(
+            error,
+            ReconcileError::PgdogAdmin(PgdogAdminError::Fleet(ref message))
+                if message.contains("1ms")
+        ),
+        "unexpected error: {error}"
     );
 }
 

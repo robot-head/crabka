@@ -1988,9 +1988,9 @@ async fn adopt_pools<'a>(
     Ok(())
 }
 
-pub fn error_policy(_obj: Arc<Kafka>, err: &ReconcileError, _ctx: Arc<Context>) -> Action {
+pub fn error_policy(_obj: Arc<Kafka>, err: &ReconcileError, ctx: Arc<Context>) -> Action {
     tracing::warn!(error = %err, "reconcile error, requeueing");
-    Action::requeue(Duration::from_secs(15))
+    common::error_requeue(ctx)
 }
 
 /// Emit a `Warning` Kubernetes Event on the `Kafka` object for a listener

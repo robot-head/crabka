@@ -1560,10 +1560,10 @@ async fn reconcile_inner(
 pub fn error_policy(
     _obj: Arc<KafkaGrpcGateway>,
     err: &ReconcileError,
-    _ctx: Arc<Context>,
+    ctx: Arc<Context>,
 ) -> Action {
     tracing::warn!(error = %err, "gateway reconcile error, requeueing");
-    Action::requeue(Duration::from_secs(15))
+    common::error_requeue(ctx)
 }
 
 /// Run the `KafkaGrpcGateway` controller forever. Owns the Deployment, Service,

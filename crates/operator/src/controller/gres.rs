@@ -48,9 +48,6 @@ const ACTIVATOR_PORT_U16: u16 = 6543;
 const DEFAULT_ACTIVATOR_REGISTRY_POLL_MS: u64 = 250;
 const DEFAULT_ACTIVATOR_COLD_START_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_ACTIVATOR_READINESS_PERIOD_SECONDS: i32 = 5;
-const RELOAD_RETRY_LIMIT: usize = 3;
-const RELOAD_REQUEUE: Duration = Duration::from_secs(15);
-const PGDOG_ADMIN_OPERATION_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Run the controller forever.
 /// # Errors
@@ -74,9 +71,9 @@ pub async fn run(ctx: Context) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn error_policy(_obj: Arc<Gres>, err: &ReconcileError, _ctx: Arc<Context>) -> Action {
+pub fn error_policy(_obj: Arc<Gres>, err: &ReconcileError, ctx: Arc<Context>) -> Action {
     tracing::warn!(error = %err, "gres fleet reconcile error, requeueing");
-    Action::requeue(Duration::from_secs(15))
+    common::error_requeue(ctx)
 }
 
 #[tracing::instrument(level = "info", skip_all, fields(kind = "Gres", name = %obj.name_any()))]
@@ -240,19 +237,22 @@ async fn reconcile_inner(obj: Arc<Gres>, ctx: Arc<Context>) -> Result<Action, Re
         .and_then(|status| status.confirmed_pgdog_config_hash.as_deref())
         != Some(hash.as_str())
     {
+        let admin_timeout = ctx.config.pgdog_admin_timeout_ms.duration();
         let verified = tokio::time::timeout(
-            PGDOG_ADMIN_OPERATION_TIMEOUT,
+            admin_timeout,
             verify_pgdog_reload(&obj, &ctx, &endpoints, &rollout_hash),
         )
         .await
         .map_err(|_| {
             ReconcileError::PgdogAdmin(crate::context::PgdogAdminError::Fleet(format!(
-                "admin reload verification exceeded {PGDOG_ADMIN_OPERATION_TIMEOUT:?}"
+                "admin reload verification exceeded {admin_timeout:?}"
             )))
         })??;
         if !verified {
             tracing::warn!(gres = %name, config_hash = %hash, "pgdog admin view is stale after reload attempts");
-            return Ok(Action::requeue(RELOAD_REQUEUE));
+            return Ok(Action::requeue(
+                ctx.config.pgdog_reload_requeue_ms.duration(),
+            ));
         }
     }
 
@@ -264,6 +264,7 @@ async fn reconcile_inner(obj: Arc<Gres>, ctx: Arc<Context>) -> Result<Action, Re
         &name,
         now,
         pgdog_policy.direct_bootstrap_grace.into_value(),
+        ctx.config.pgdog_transition_poll_ms.into_value(),
     );
     Ok(Action::requeue(requeue))
 }
@@ -312,13 +313,14 @@ fn next_pgdog_transition_requeue(
     grace_deadlines: impl Iterator<Item = u64>,
     now: u64,
     direct_bootstrap_grace_ms: u64,
+    fallback_ms: u64,
 ) -> Duration {
     grace_deadlines
         .flat_map(|deadline| [deadline, deadline.saturating_add(direct_bootstrap_grace_ms)])
         .filter(|deadline| *deadline > now)
         .map(|deadline| Duration::from_millis(deadline.saturating_sub(now).max(1)))
         .min()
-        .unwrap_or(Duration::from_mins(1))
+        .unwrap_or(Duration::from_millis(fallback_ms))
 }
 
 fn pgdog_transition_requeue_for_tenants(
@@ -326,6 +328,7 @@ fn pgdog_transition_requeue_for_tenants(
     gres_name: &str,
     now: u64,
     direct_bootstrap_grace_ms: u64,
+    fallback_ms: u64,
 ) -> Duration {
     next_pgdog_transition_requeue(
         tenants
@@ -339,6 +342,7 @@ fn pgdog_transition_requeue_for_tenants(
             }),
         now,
         direct_bootstrap_grace_ms,
+        fallback_ms,
     )
 }
 
@@ -538,7 +542,8 @@ async fn verify_pgdog_reload(
         })
         .collect::<Vec<_>>();
 
-    for attempt in 1..=RELOAD_RETRY_LIMIT {
+    let reload_attempts = ctx.config.pgdog_reload_attempts.into_value();
+    for attempt in 1..=reload_attempts {
         if ctx
             .pgdog_admin
             .reload_and_database_views_match(&requests)
@@ -546,8 +551,8 @@ async fn verify_pgdog_reload(
         {
             return Ok(true);
         }
-        if attempt < RELOAD_RETRY_LIMIT {
-            tokio::time::sleep(Duration::from_millis(100)).await;
+        if attempt < reload_attempts {
+            tokio::time::sleep(ctx.config.pgdog_reload_backoff_ms.duration()).await;
         }
     }
     Ok(false)
@@ -1465,7 +1470,7 @@ mod tests {
         let now = grace_deadline + 1_000;
 
         assert!(
-            next_pgdog_transition_requeue([grace_deadline].into_iter(), now, 7_000)
+            next_pgdog_transition_requeue([grace_deadline].into_iter(), now, 7_000, 60_000)
                 == Duration::from_secs(6)
         );
     }
@@ -1477,8 +1482,21 @@ mod tests {
         unrelated.spec.gres = "other".into();
 
         assert!(
-            pgdog_transition_requeue_for_tenants(&[matching, unrelated], "fleet", 1_000, 7_000)
-                == Duration::from_secs(10)
+            pgdog_transition_requeue_for_tenants(
+                &[matching, unrelated],
+                "fleet",
+                1_000,
+                7_000,
+                60_000,
+            ) == Duration::from_secs(10)
+        );
+    }
+
+    #[test]
+    fn pgdog_requeue_uses_configured_fallback_without_future_deadlines() {
+        assert!(
+            next_pgdog_transition_requeue([].into_iter(), 1_000, 7_000, 1_234)
+                == Duration::from_millis(1_234)
         );
     }
 

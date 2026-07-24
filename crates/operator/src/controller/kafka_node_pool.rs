@@ -1629,9 +1629,9 @@ async fn reconcile_inner(
     Ok(Action::requeue(Duration::from_secs(30)))
 }
 
-pub fn error_policy(_obj: Arc<KafkaNodePool>, err: &ReconcileError, _ctx: Arc<Context>) -> Action {
+pub fn error_policy(_obj: Arc<KafkaNodePool>, err: &ReconcileError, ctx: Arc<Context>) -> Action {
     tracing::warn!(error = %err, "pool reconcile error, requeueing");
-    Action::requeue(Duration::from_secs(15))
+    common::error_requeue(ctx)
 }
 
 #[cfg(test)]

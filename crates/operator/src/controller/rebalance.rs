@@ -44,6 +44,8 @@ const REBALANCER_PORT: u16 = 9300;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(10);
 const IDLE_INTERVAL: Duration = Duration::from_mins(5);
+// Transport recovery is protocol-specific and intentionally independent of
+// the common controller error-policy requeue.
 const TRANSPORT_RETRY: Duration = Duration::from_secs(15);
 
 /// The rebalance lifecycle state. Surfaced as the active condition's
@@ -677,6 +679,11 @@ mod tests {
         ids::{LeaderMovementCount, MaxLeadersCount, MaxReplicasCount, ReplicaMovementCount},
         rebalancer_client::ProposalSummary,
     };
+
+    #[test]
+    fn transport_retry_remains_protocol_specific() {
+        assert!(TRANSPORT_RETRY == Duration::from_secs(15));
+    }
 
     fn cr(name: &str) -> KafkaRebalance {
         let mut k = KafkaRebalance::new(name, KafkaRebalanceSpec::default());
