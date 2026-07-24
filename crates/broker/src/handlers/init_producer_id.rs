@@ -171,7 +171,7 @@ pub(crate) async fn handle(
                 // uses `DashMap::entry()` to atomically check-and-insert,
                 // so two concurrent InitProducerId calls for the same
                 // partition cannot both spawn independent writer tasks.
-                let txn_partition = crate::txn::coordinator::TxnCoordinator::partition_for(tid);
+                let txn_partition = coord.partition_for(tid);
                 materialize_partition(crate::replicator_supervisor::MaterializePartitionConfig {
                     partitions: &coord.partitions,
                     topic: crate::txn::bootstrap::TOPIC,
@@ -190,7 +190,13 @@ pub(crate) async fn handle(
                     sequencer: None,
                 })
                 .map_err(BrokerError::Txn)?;
-                handle_transactional(&coord, tid, &req, txnv, req.enable2_pc).await?
+                let txn_timeout = crate::txn::two_pc::resolve_txn_timeout(
+                    req.enable2_pc,
+                    req.transaction_timeout_ms,
+                    broker.config.transaction_min_timeout_ms,
+                    broker.config.transaction_max_timeout_ms,
+                );
+                handle_transactional(&coord, tid, txnv, txn_timeout).await?
             } else {
                 InitProducerIdResponse {
                     error_code: codes::NOT_COORDINATOR,
@@ -220,15 +226,10 @@ fn encode_err(version: i16, error_code: i16) -> Result<Bytes, BrokerError> {
 async fn handle_transactional(
     coord: &Arc<TxnCoordinator>,
     tid: &str,
-    req: &InitProducerIdRequest,
     txnv: crate::txn::version::TxnVersion,
-    enable_2pc: bool,
+    txn_timeout: i32,
 ) -> Result<InitProducerIdResponse, BrokerError> {
     let now_ms = now_millis();
-    // KIP-939: a 2PC producer's transaction never times out — persist the
-    // sentinel timeout. Otherwise clamp the client's request to Kafka's bounds.
-    let txn_timeout =
-        crate::txn::two_pc::resolve_txn_timeout(enable_2pc, req.transaction_timeout_ms);
 
     match coord.get(tid) {
         None => {
@@ -345,6 +346,7 @@ mod tests {
             crabka_audit::NodeId(1),
             Arc::clone(&partitions),
             Arc::new(crate::producer_id_manager::ProducerIdManager::new()),
+            50,
         );
 
         // Materialize a local partition for `__transaction_state`-style data.
@@ -391,6 +393,7 @@ mod tests {
             crabka_audit::NodeId(1),
             partitions,
             Arc::new(crate::producer_id_manager::ProducerIdManager::new()),
+            50,
         );
         let mut entry = TxnEntry::new_empty("tx-2".to_string(), ProducerId(2000), 0, 60_000, 0);
         entry.partitions.insert(TopicPartition {

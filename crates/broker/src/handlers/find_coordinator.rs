@@ -138,7 +138,12 @@ pub(crate) async fn handle(
             KEY_TYPE_TRANSACTION => {
                 // Ensure __transaction_state topic exists before we try to
                 // look up partitions in it.
-                if let Err(e) = crate::txn::bootstrap::ensure_topic(&controller).await {
+                if let Err(e) = crate::txn::bootstrap::ensure_topic(
+                    &controller,
+                    broker.config.transaction_state_num_partitions,
+                )
+                .await
+                {
                     tracing::warn!(
                         error = %e,
                         "txn bootstrap failed; replying COORDINATOR_NOT_AVAILABLE"
@@ -255,10 +260,7 @@ fn resolve_transaction_keys(
 ) -> Vec<Coordinator> {
     keys.into_iter()
         .map(|key| {
-            let partition = crate::txn::partitioner::partition_for_tid(
-                &key,
-                crate::txn::bootstrap::NUM_PARTITIONS,
-            );
+            let partition = broker.txn_coordinator.partition_for(&key).get();
             resolve_partition_coordinator(
                 broker,
                 &broker.controller.current_image(),

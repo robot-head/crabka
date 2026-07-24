@@ -173,6 +173,7 @@ pub(crate) struct TxnCoordinator {
     pub(crate) node_id: crabka_metadata::NodeId,
     pub(crate) partitions: Arc<PartitionRegistry>,
     pub(crate) producer_ids: Arc<crate::producer_id_manager::ProducerIdManager>,
+    num_partitions: i32,
     /// Live in-memory state: `transactional_id` → locked `TxnEntry`.
     state: DashMap<String, Arc<Mutex<TxnEntry>>>,
     /// Set of `__transaction_state` partition indices this broker leads.
@@ -198,11 +199,13 @@ impl TxnCoordinator {
         node_id: crabka_metadata::NodeId,
         partitions: Arc<PartitionRegistry>,
         producer_ids: Arc<crate::producer_id_manager::ProducerIdManager>,
+        num_partitions: i32,
     ) -> Self {
         Self {
             node_id,
             partitions,
             producer_ids,
+            num_partitions,
             state: DashMap::new(),
             leader_partitions: RwLock::new(HashSet::new()),
             pid_to_tid: DashMap::new(),
@@ -260,13 +263,13 @@ impl TxnCoordinator {
     }
 
     /// Returns the `__transaction_state` partition index responsible for `tid`.
-    pub(crate) fn partition_for(tid: &str) -> PartitionIndex {
-        PartitionIndex(partition_for_tid(tid, bootstrap::NUM_PARTITIONS))
+    pub(crate) fn partition_for(&self, tid: &str) -> PartitionIndex {
+        PartitionIndex(partition_for_tid(tid, self.num_partitions))
     }
 
     /// Returns `true` if this broker is the transaction coordinator for `tid`.
     pub(crate) async fn is_coordinator_for(&self, tid: &str) -> bool {
-        let p = Self::partition_for(tid);
+        let p = self.partition_for(tid);
         self.leader_partitions.read().await.contains(&p)
     }
 
@@ -339,7 +342,7 @@ impl TxnCoordinator {
         txnv: crate::txn::version::TxnVersion,
     ) -> Result<(), BrokerError> {
         let tid = entry.transactional_id.clone();
-        let p = Self::partition_for(&tid);
+        let p = self.partition_for(&tid);
         let part = self
             .partitions
             .get(bootstrap::TOPIC, p)
@@ -516,7 +519,7 @@ impl ReaperBackend for TxnCoordinator {
     // cargo-mutants: thin adapter over inherent method / live lock state
     #[cfg_attr(test, mutants::skip)]
     async fn is_coordinator_for(&self, tid: &str) -> bool {
-        let p = Self::partition_for(tid);
+        let p = self.partition_for(tid);
         self.leader_partitions.read().await.contains(&p)
     }
 
@@ -608,27 +611,35 @@ mod tests {
     use super::*;
 
     fn test_coordinator() -> TxnCoordinator {
+        test_coordinator_with_partitions(50)
+    }
+
+    fn test_coordinator_with_partitions(num_partitions: i32) -> TxnCoordinator {
         TxnCoordinator::new(
             crabka_metadata::NodeId(1),
             Arc::new(PartitionRegistry::new()),
             Arc::new(crate::producer_id_manager::ProducerIdManager::new()),
+            num_partitions,
         )
     }
 
     #[test]
     fn partition_for_maps_tid_via_murmur2_over_num_partitions() {
-        // Canonical JVM murmur2 vectors (see `partitioner` tests) with N=50,
-        // which is `bootstrap::NUM_PARTITIONS`. Pins the real mapping so a
+        // Canonical JVM murmur2 vectors (see `partitioner` tests) with N=50.
+        // Pins the real mapping so a
         // constant `PartitionIndex(0)` (the Default) is caught: none of these
         // hash to 0.
-        assert_eq!(TxnCoordinator::partition_for("my-tid"), PartitionIndex(43));
-        assert_eq!(
-            TxnCoordinator::partition_for("producer-1"),
-            PartitionIndex(45)
-        );
-        assert_eq!(
-            TxnCoordinator::partition_for("tx-orders-prod"),
-            PartitionIndex(26)
+        let coordinator = test_coordinator();
+        assert!(coordinator.partition_for("my-tid") == PartitionIndex(43));
+        assert!(coordinator.partition_for("producer-1") == PartitionIndex(45));
+        assert!(coordinator.partition_for("tx-orders-prod") == PartitionIndex(26));
+    }
+
+    #[test]
+    fn nondefault_partition_count_changes_coordinator_routing() {
+        let coordinator = test_coordinator_with_partitions(7);
+        assert!(
+            coordinator.partition_for("my-tid") == PartitionIndex(partition_for_tid("my-tid", 7))
         );
     }
 
