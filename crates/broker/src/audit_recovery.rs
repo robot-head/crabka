@@ -233,6 +233,19 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn recover_honors_configured_tail_read_max_bytes() {
+        let (partition, _td) = test_partition();
+        let value = b"chained";
+        append_records(&partition, vec![chained_record(7, &GENESIS_HEAD, value)]);
+
+        assert!(recover_from_partition_tail(&partition, 1, 1).is_none());
+        assert!(
+            recover_from_partition_tail(&partition, 1, 1_024)
+                == Some((8, chain_hash(&GENESIS_HEAD, 7, value)))
+        );
+    }
+
     #[test]
     fn header_bytes_matches_requested_key_and_preserves_value() {
         let rec = Record {
