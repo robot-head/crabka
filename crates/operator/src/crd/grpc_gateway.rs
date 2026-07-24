@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 pub struct KafkaGrpcGatewaySpec {
     /// Number of gateway replicas. Defaults to 1 when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
     pub replicas: Option<i32>,
 
     /// Container image override. When absent the operator uses its
@@ -40,9 +41,21 @@ pub struct KafkaGrpcGatewaySpec {
     pub resources: Option<ResourceRequirements>,
 
     /// Configuration for the deduplication topic that backs idempotent
-    /// produce (exactly-once delivery). When absent, dedup is disabled.
+    /// produce (exactly-once delivery). When absent, controller defaults apply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dedup: Option<DedupSpec>,
+
+    /// Internal membership / owner-routing topic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub membership_topic: Option<String>,
+
+    /// Gateway runtime policy overrides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tuning: Option<GatewayTuning>,
+
+    /// Schema Registry integration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_registry: Option<GatewaySchemaRegistrySpec>,
 
     /// TLS serving configuration. When absent, TLS defaults apply
     /// (`clientAuth: required`, `validityDays: 365`).
@@ -90,17 +103,66 @@ pub struct DedupSpec {
 
     /// Number of partitions for the dedup topic. Default 8.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 2_147_483_647))]
     pub partitions: Option<u32>,
 
     /// Dedup window in milliseconds. Records with the same idempotency
     /// key within this window are dropped. Default `86_400_000` (24 h).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
     pub window_ms: Option<i64>,
 
     /// Prefix for transactional producer IDs. Defaults to the gateway
     /// name. The full `transactional.id` is `<prefix>-<partition>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub txn_id_prefix: Option<String>,
+
+    /// Consumer group used to divide dedup ownership between replicas.
+    /// Defaults to a value derived from the gateway name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ownership_group: Option<String>,
+}
+
+/// Runtime policy passed to the gateway process.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayTuning {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub internal_topic_replication_factor: Option<i16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub internal_topic_allow_replication_fallback: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub internal_topic_create_timeout_ms: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub internal_topic_segment_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0, max = 10_000))]
+    pub internal_topic_min_cleanable_dirty_ratio_basis_points: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub consumer_poll_timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub ownership_warmup_empty_polls: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub readiness_poll_interval_ms: Option<u64>,
+}
+
+/// Schema Registry settings for structured records.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewaySchemaRegistrySpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub latest_cache_ttl_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_raw: Option<bool>,
 }
 
 /// TLS serving configuration for the gateway's gRPC / webhook / metrics
@@ -116,7 +178,13 @@ pub struct GatewayTlsSpec {
 
     /// Serving-cert lifetime in days. Default 365.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
     pub validity_days: Option<u32>,
+
+    /// Cert hot-reload poll interval in seconds. Default 30.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub reload_interval_secs: Option<u64>,
 }
 
 /// Authorization configuration for the gateway.
@@ -135,6 +203,7 @@ pub struct GatewayAuthzSpec {
     /// How often the gateway refreshes its ACL cache from the broker,
     /// in seconds. Default 60.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
     pub acl_refresh_secs: Option<u64>,
 
     /// Bearer-token authentication configuration. When absent,
@@ -154,6 +223,11 @@ pub struct GatewayBearerSpec {
     /// JWT claim used as the Kafka principal. Default `sub`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub principal_claim: Option<String>,
+
+    /// Allowable clock skew for bearer-token timestamps in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0))]
+    pub allowable_clock_skew_ms: Option<i64>,
 }
 
 /// One inbound HTTP-webhook endpoint. Records a produce call against
@@ -194,6 +268,7 @@ pub struct InboundWebhookSpec {
     /// Maximum age of a request timestamp in seconds before it is
     /// rejected as a replay. Default 300 (5 minutes).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0))]
     pub timestamp_tolerance_secs: Option<i64>,
 
     /// How to derive the idempotency key for deduplication. E.g.
@@ -208,7 +283,16 @@ pub struct InboundWebhookSpec {
 
     /// Maximum accepted request body size in bytes. Default 1 MiB.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
     pub max_body_bytes: Option<u64>,
+
+    /// Optional Schema Registry subject for structured request bodies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_subject: Option<String>,
+
+    /// Structured payload format: `avro`, `json`, or `protobuf`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_format: Option<String>,
 
     /// Kubernetes Secret key reference for the HMAC signing secret.
     /// The controller resolves this at render time and injects the
@@ -240,21 +324,33 @@ pub struct OutboundSubscriptionSpec {
     pub dead_letter_topic: Option<String>,
 
     /// Maximum number of delivery attempts before moving the record to
-    /// the dead-letter topic. Default 3.
+    /// the dead-letter topic. Default 5.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
     pub max_attempts: Option<u32>,
 
-    /// Initial backoff in milliseconds for exponential retry. Default 1000.
+    /// Initial backoff in milliseconds for exponential retry. Default 500.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
     pub base_backoff_ms: Option<u64>,
 
     /// Maximum backoff cap in milliseconds. Default 30000.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
     pub max_backoff_ms: Option<u64>,
 
     /// HTTP request timeout in milliseconds. Default 10000.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
     pub request_timeout_ms: Option<u64>,
+
+    /// Consumer group override for this subscription.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
+
+    /// Decode Schema Registry framed values to JSON before delivery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decode_to_json: Option<bool>,
 
     /// CEL expression evaluated against the record to decide whether to
     /// deliver it. An absent or empty filter delivers all records.
@@ -310,6 +406,7 @@ pub struct TelemetrySpec {
     /// Fraction of traces to sample in the range `[0.0, 1.0]`.
     /// Default 1.0 (sample everything).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0.0, max = 1.0))]
     pub sample_ratio: Option<f64>,
 }
 
@@ -366,6 +463,9 @@ mod tests {
                 image: None,
                 resources: None,
                 dedup: None,
+                membership_topic: None,
+                tuning: None,
+                schema_registry: None,
                 tls: None,
                 authz: None,
                 webhooks: vec![],
@@ -389,10 +489,15 @@ mod tests {
                     partitions: Some(16),
                     window_ms: Some(86_400_000),
                     txn_id_prefix: Some("gw".into()),
+                    ownership_group: None,
                 }),
+                membership_topic: None,
+                tuning: None,
+                schema_registry: None,
                 tls: Some(GatewayTlsSpec {
                     client_auth: Some("required".into()),
                     validity_days: Some(365),
+                    reload_interval_secs: None,
                 }),
                 authz: Some(GatewayAuthzSpec {
                     mode: Some("simple".into()),
@@ -401,6 +506,7 @@ mod tests {
                     bearer: Some(GatewayBearerSpec {
                         mode: Some("off".into()),
                         principal_claim: None,
+                        allowable_clock_skew_ms: None,
                     }),
                 }),
                 webhooks: vec![InboundWebhookSpec {
@@ -415,6 +521,8 @@ mod tests {
                     idempotency_source: Some("header:X-Idempotency-Key".into()),
                     key_source: None,
                     max_body_bytes: Some(1_048_576),
+                    schema_subject: None,
+                    schema_format: None,
                     secret_ref: Some(SecretKeyRef {
                         name: "orders-webhook-secret".into(),
                         key: "hmac-key".into(),
@@ -429,6 +537,8 @@ mod tests {
                     base_backoff_ms: Some(1000),
                     max_backoff_ms: Some(30_000),
                     request_timeout_ms: Some(10_000),
+                    group_id: None,
+                    decode_to_json: None,
                     filter: None,
                     headers: BTreeMap::from([(
                         "Authorization".to_string(),
@@ -467,6 +577,9 @@ mod tests {
             image: None,
             resources: None,
             dedup: None,
+            membership_topic: None,
+            tuning: None,
+            schema_registry: None,
             tls: None,
             authz: None,
             webhooks: vec![],
@@ -505,6 +618,8 @@ mod tests {
             base_backoff_ms: None,
             max_backoff_ms: None,
             request_timeout_ms: None,
+            group_id: None,
+            decode_to_json: None,
             filter: None,
             headers: BTreeMap::from([
                 ("X-Tenant".to_string(), "acme".to_string()),

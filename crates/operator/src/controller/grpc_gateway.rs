@@ -342,6 +342,15 @@ fn gateway_args(
                 .and_then(|value| value.txn_id_prefix.as_deref())
                 .unwrap_or(gateway_name)
         ),
+        format!(
+            "--dedup-ownership-group={}",
+            gateway
+                .spec
+                .dedup
+                .as_ref()
+                .and_then(|value| value.ownership_group.as_deref())
+                .map_or_else(|| format!("{gateway_name}-dedup-owners"), ToOwned::to_owned)
+        ),
         format!("--tls-cert={SERVING_DIR}/tls.crt"),
         format!("--tls-key={SERVING_DIR}/tls.key"),
         format!("--tls-client-ca={CLIENTS_CA_DIR}/ca.crt"),
@@ -390,6 +399,51 @@ fn gateway_args(
         format!("--webhooks-config={CONFIG_DIR}/webhooks.toml"),
         format!("--outbound-webhooks-config={CONFIG_DIR}/outbound.toml"),
     ];
+    if let Some(value) = gateway.spec.membership_topic.as_deref() {
+        args.push(format!("--membership-topic={value}"));
+    }
+    if let Some(value) = gateway
+        .spec
+        .tls
+        .as_ref()
+        .and_then(|tls| tls.reload_interval_secs)
+    {
+        args.push(format!("--tls-reload-secs={value}"));
+    }
+    if let Some(value) = bearer.and_then(|bearer| bearer.allowable_clock_skew_ms) {
+        args.push(format!("--bearer-allowable-clock-skew-ms={value}"));
+    }
+    if let Some(tuning) = &gateway.spec.tuning {
+        macro_rules! push {
+            ($field:ident) => {
+                if let Some(value) = tuning.$field {
+                    args.push(format!(
+                        "--{}={value}",
+                        stringify!($field).replace('_', "-")
+                    ));
+                }
+            };
+        }
+        push!(internal_topic_replication_factor);
+        push!(internal_topic_allow_replication_fallback);
+        push!(internal_topic_create_timeout_ms);
+        push!(internal_topic_segment_ms);
+        push!(internal_topic_min_cleanable_dirty_ratio_basis_points);
+        push!(consumer_poll_timeout_ms);
+        push!(ownership_warmup_empty_polls);
+        push!(readiness_poll_interval_ms);
+    }
+    if let Some(registry) = &gateway.spec.schema_registry {
+        if let Some(value) = registry.url.as_deref() {
+            args.push(format!("--schema-registry-url={value}"));
+        }
+        if let Some(value) = registry.latest_cache_ttl_ms {
+            args.push(format!("--schema-registry-latest-cache-ttl-ms={value}"));
+        }
+        if let Some(value) = registry.frame_raw {
+            args.push(format!("--schema-registry-frame-raw={value}"));
+        }
+    }
     args.sort_unstable();
     args
 }
@@ -517,6 +571,12 @@ fn render_webhooks_toml(
             if let Some(v) = w.max_body_bytes {
                 e.insert("max_body_bytes".into(), json!(v));
             }
+            if let Some(v) = &w.schema_subject {
+                e.insert("schema_subject".into(), json!(v));
+            }
+            if let Some(v) = &w.schema_format {
+                e.insert("schema_format".into(), json!(v));
+            }
             serde_json::Value::Object(e)
         })
         .collect();
@@ -556,6 +616,12 @@ fn render_outbound_toml(
             }
             if let Some(v) = s.request_timeout_ms {
                 e.insert("request_timeout_ms".into(), json!(v));
+            }
+            if let Some(v) = &s.group_id {
+                e.insert("group_id".into(), json!(v));
+            }
+            if let Some(v) = s.decode_to_json {
+                e.insert("decode_to_json".into(), json!(v));
             }
             if let Some(v) = &s.filter {
                 e.insert("filter".into(), json!(v));
@@ -913,6 +979,255 @@ fn resolve_broker_endpoint(parent: &Kafka, namespace: &str) -> Option<(String, S
 // Status helpers
 // ---------------------------------------------------------------------------
 
+fn validate_config(spec: &crate::crd::grpc_gateway::KafkaGrpcGatewaySpec) -> Result<(), String> {
+    macro_rules! validate {
+        ($value:expr, $rule:ty, $path:literal) => {
+            if let Some(value) = $value {
+                <$rule>::new(value).map_err(|error| format!("{}: {error}", $path))?;
+            }
+        };
+    }
+    macro_rules! nonempty {
+        ($value:expr, $path:literal) => {
+            if let Some(value) = $value {
+                refined_type::rule::NonEmptyString::new(value.to_owned())
+                    .map_err(|error| format!("{}: {error}", $path))?;
+            }
+        };
+    }
+
+    validate!(
+        spec.replicas,
+        refined_type::rule::GreaterI32<0>,
+        "spec.replicas"
+    );
+    nonempty!(spec.image.as_deref(), "spec.image");
+    nonempty!(spec.membership_topic.as_deref(), "spec.membershipTopic");
+
+    if let Some(tuning) = &spec.tuning {
+        validate!(
+            tuning.internal_topic_replication_factor,
+            refined_type::rule::GreaterI16<0>,
+            "spec.tuning.internalTopicReplicationFactor"
+        );
+        validate!(
+            tuning.internal_topic_create_timeout_ms,
+            refined_type::rule::GreaterI32<0>,
+            "spec.tuning.internalTopicCreateTimeoutMs"
+        );
+        validate!(
+            tuning.internal_topic_segment_ms,
+            refined_type::rule::GreaterI64<0>,
+            "spec.tuning.internalTopicSegmentMs"
+        );
+        validate!(
+            tuning.internal_topic_min_cleanable_dirty_ratio_basis_points,
+            refined_type::rule::MinMaxU32<0, 10_000>,
+            "spec.tuning.internalTopicMinCleanableDirtyRatioBasisPoints"
+        );
+        validate!(
+            tuning.consumer_poll_timeout_ms,
+            refined_type::rule::GreaterU64<0>,
+            "spec.tuning.consumerPollTimeoutMs"
+        );
+        validate!(
+            tuning.ownership_warmup_empty_polls,
+            refined_type::rule::GreaterU32<0>,
+            "spec.tuning.ownershipWarmupEmptyPolls"
+        );
+        validate!(
+            tuning.readiness_poll_interval_ms,
+            refined_type::rule::GreaterU64<0>,
+            "spec.tuning.readinessPollIntervalMs"
+        );
+    }
+    if let Some(registry) = &spec.schema_registry {
+        nonempty!(registry.url.as_deref(), "spec.schemaRegistry.url");
+        validate!(
+            registry.latest_cache_ttl_ms,
+            refined_type::rule::GreaterU64<0>,
+            "spec.schemaRegistry.latestCacheTtlMs"
+        );
+    }
+    if let Some(dedup) = &spec.dedup {
+        nonempty!(dedup.topic.as_deref(), "spec.dedup.topic");
+        validate!(
+            dedup.partitions,
+            refined_type::rule::MinMaxU32<1, 2_147_483_647>,
+            "spec.dedup.partitions"
+        );
+        validate!(
+            dedup.window_ms,
+            refined_type::rule::GreaterI64<0>,
+            "spec.dedup.windowMs"
+        );
+        nonempty!(dedup.txn_id_prefix.as_deref(), "spec.dedup.txnIdPrefix");
+        nonempty!(
+            dedup.ownership_group.as_deref(),
+            "spec.dedup.ownershipGroup"
+        );
+    }
+    if let Some(tls) = &spec.tls {
+        if let Some(mode) = tls.client_auth.as_deref()
+            && !matches!(mode, "disabled" | "optional" | "required")
+        {
+            return Err("spec.tls.clientAuth must be disabled, optional, or required".into());
+        }
+        validate!(
+            tls.validity_days,
+            refined_type::rule::GreaterU32<0>,
+            "spec.tls.validityDays"
+        );
+        validate!(
+            tls.reload_interval_secs,
+            refined_type::rule::GreaterU64<0>,
+            "spec.tls.reloadIntervalSecs"
+        );
+    }
+    if let Some(authz) = &spec.authz {
+        if let Some(mode) = authz.mode.as_deref()
+            && !matches!(mode, "off" | "simple")
+        {
+            return Err("spec.authz.mode must be off or simple".into());
+        }
+        validate!(
+            authz.acl_refresh_secs,
+            refined_type::rule::GreaterU64<0>,
+            "spec.authz.aclRefreshSecs"
+        );
+        for user in &authz.super_users {
+            refined_type::rule::NonEmptyString::new(user.clone())
+                .map_err(|error| format!("spec.authz.superUsers: {error}"))?;
+        }
+        if let Some(bearer) = &authz.bearer {
+            if let Some(mode) = bearer.mode.as_deref()
+                && !matches!(mode, "off" | "unsecured")
+            {
+                return Err("spec.authz.bearer.mode must be off or unsecured".into());
+            }
+            nonempty!(
+                bearer.principal_claim.as_deref(),
+                "spec.authz.bearer.principalClaim"
+            );
+            validate!(
+                bearer.allowable_clock_skew_ms,
+                refined_type::rule::GreaterEqualI64<0>,
+                "spec.authz.bearer.allowableClockSkewMs"
+            );
+        }
+    }
+    for webhook in &spec.webhooks {
+        refined_type::rule::NonEmptyString::new(webhook.name.clone())
+            .map_err(|error| format!("spec.webhooks.name: {error}"))?;
+        refined_type::rule::NonEmptyString::new(webhook.target_topic.clone())
+            .map_err(|error| format!("spec.webhooks.targetTopic: {error}"))?;
+        if let Some(encoding) = webhook.signature_encoding.as_deref()
+            && !matches!(encoding, "hex" | "base64")
+        {
+            return Err("spec.webhooks.signatureEncoding must be hex or base64".into());
+        }
+        validate!(
+            webhook.timestamp_tolerance_secs,
+            refined_type::rule::GreaterEqualI64<0>,
+            "spec.webhooks.timestampToleranceSecs"
+        );
+        validate!(
+            webhook.max_body_bytes,
+            refined_type::rule::GreaterU64<0>,
+            "spec.webhooks.maxBodyBytes"
+        );
+        nonempty!(
+            webhook.schema_subject.as_deref(),
+            "spec.webhooks.schemaSubject"
+        );
+        if let Some(format) = webhook.schema_format.as_deref()
+            && !matches!(format, "avro" | "json" | "protobuf")
+        {
+            return Err("spec.webhooks.schemaFormat must be avro, json, or protobuf".into());
+        }
+    }
+    validate_outbound_config(spec)?;
+    if let Some(telemetry) = &spec.telemetry {
+        nonempty!(
+            telemetry.otlp_endpoint.as_deref(),
+            "spec.telemetry.otlpEndpoint"
+        );
+        if let Some(protocol) = telemetry.otlp_protocol.as_deref()
+            && !matches!(protocol, "grpc" | "http")
+        {
+            return Err("spec.telemetry.otlpProtocol must be grpc or http".into());
+        }
+        if let Some(ratio) = telemetry.sample_ratio
+            && (!ratio.is_finite() || !(0.0..=1.0).contains(&ratio))
+        {
+            return Err("spec.telemetry.sampleRatio must be finite and between 0 and 1".into());
+        }
+    }
+    Ok(())
+}
+
+fn validate_outbound_config(
+    spec: &crate::crd::grpc_gateway::KafkaGrpcGatewaySpec,
+) -> Result<(), String> {
+    macro_rules! validate {
+        ($value:expr, $rule:ty, $path:literal) => {
+            if let Some(value) = $value {
+                <$rule>::new(value).map_err(|error| format!("{}: {error}", $path))?;
+            }
+        };
+    }
+
+    for subscription in &spec.outbound_subscriptions {
+        refined_type::rule::NonEmptyString::new(subscription.name.clone())
+            .map_err(|error| format!("spec.outboundSubscriptions.name: {error}"))?;
+        refined_type::rule::NonEmptyString::new(subscription.target_url.clone())
+            .map_err(|error| format!("spec.outboundSubscriptions.targetUrl: {error}"))?;
+        for topic in &subscription.source_topics {
+            refined_type::rule::NonEmptyString::new(topic.clone())
+                .map_err(|error| format!("spec.outboundSubscriptions.sourceTopics: {error}"))?;
+        }
+        validate!(
+            subscription.max_attempts,
+            refined_type::rule::GreaterU32<0>,
+            "spec.outboundSubscriptions.maxAttempts"
+        );
+        validate!(
+            subscription.base_backoff_ms,
+            refined_type::rule::GreaterU64<0>,
+            "spec.outboundSubscriptions.baseBackoffMs"
+        );
+        validate!(
+            subscription.max_backoff_ms,
+            refined_type::rule::GreaterU64<0>,
+            "spec.outboundSubscriptions.maxBackoffMs"
+        );
+        validate!(
+            subscription.request_timeout_ms,
+            refined_type::rule::GreaterU64<0>,
+            "spec.outboundSubscriptions.requestTimeoutMs"
+        );
+        if let Some(group_id) = &subscription.group_id {
+            refined_type::rule::NonEmptyString::new(group_id.clone())
+                .map_err(|error| format!("spec.outboundSubscriptions.groupId: {error}"))?;
+        }
+        if subscription.max_backoff_ms.unwrap_or(30_000)
+            < subscription.base_backoff_ms.unwrap_or(500)
+        {
+            return Err(
+                "spec.outboundSubscriptions.maxBackoffMs must be at least baseBackoffMs".into(),
+            );
+        }
+    }
+    for target in &spec.allowed_targets {
+        if !matches!(target.scheme.as_str(), "http" | "https") {
+            return Err("spec.allowedTargets.scheme must be http or https".into());
+        }
+        refined_type::rule::NonEmptyString::new(target.host.clone())
+            .map_err(|error| format!("spec.allowedTargets.host: {error}"))?;
+    }
+    Ok(())
+}
+
 /// Patch a single-condition status onto the gateway (preserving the
 /// observed-generation echo).
 #[tracing::instrument(level = "info", skip_all, fields(name = %name, conditions = conditions.len()), err)]
@@ -974,6 +1289,12 @@ async fn reconcile_inner(
 
     let gw_api: Api<KafkaGrpcGateway> = Api::namespaced(ctx.client.clone(), &ns);
     let secret_api: Api<Secret> = Api::namespaced(ctx.client.clone(), &ns);
+
+    if let Err(why) = validate_config(&gw.spec) {
+        let ready = condition("Ready", "False", "GatewayConfigInvalid", &why);
+        patch_conditions(&gw_api, &name, observed_generation, vec![ready]).await?;
+        return Err(ReconcileError::GatewayConfigInvalid(why));
+    }
 
     // (1) Parse the `crabka.io/cluster` label → fetch the parent Kafka.
     let Some(parent_name) = gw
@@ -1198,9 +1519,9 @@ mod tests {
 
     use super::*;
     use crate::crd::grpc_gateway::{
-        AllowedTargetSpec, DedupSpec, GatewayAuthzSpec, GatewayBearerSpec, GatewayTlsSpec,
-        InboundWebhookSpec, KafkaGrpcGatewaySpec, OutboundSubscriptionSpec, SecretKeyRef,
-        TelemetrySpec,
+        AllowedTargetSpec, DedupSpec, GatewayAuthzSpec, GatewayBearerSpec,
+        GatewaySchemaRegistrySpec, GatewayTlsSpec, GatewayTuning, InboundWebhookSpec,
+        KafkaGrpcGatewaySpec, OutboundSubscriptionSpec, SecretKeyRef, TelemetrySpec,
     };
 
     fn empty_spec() -> KafkaGrpcGatewaySpec {
@@ -1209,6 +1530,9 @@ mod tests {
             image: None,
             resources: None,
             dedup: None,
+            membership_topic: None,
+            tuning: None,
+            schema_registry: None,
             tls: None,
             authz: None,
             webhooks: vec![],
@@ -1499,6 +1823,8 @@ mod tests {
             idempotency_source: Some("header:X-Idempotency-Key".into()),
             key_source: None,
             max_body_bytes: None,
+            schema_subject: None,
+            schema_format: None,
             secret_ref: Some(SecretKeyRef {
                 name: "orders-secret".into(),
                 key: "hmac".into(),
@@ -1513,6 +1839,8 @@ mod tests {
             base_backoff_ms: None,
             max_backoff_ms: None,
             request_timeout_ms: None,
+            group_id: None,
+            decode_to_json: None,
             filter: Some("json:$.type".into()),
             headers: BTreeMap::from([("X-Tenant".to_string(), "acme".to_string())]),
             signing_secret_ref: Some(SecretKeyRef {
@@ -1577,6 +1905,8 @@ mod tests {
             base_backoff_ms: None,
             max_backoff_ms: None,
             request_timeout_ms: None,
+            group_id: None,
+            decode_to_json: None,
             filter: None,
             headers: BTreeMap::new(),
             signing_secret_ref: None,
@@ -1606,6 +1936,8 @@ mod tests {
             base_backoff_ms: None,
             max_backoff_ms: None,
             request_timeout_ms: None,
+            group_id: None,
+            decode_to_json: None,
             filter: None,
             headers: BTreeMap::new(),
             signing_secret_ref: None,
@@ -1690,6 +2022,7 @@ mod tests {
             bearer: Some(GatewayBearerSpec {
                 mode: Some("unsecured".into()),
                 principal_claim: Some("email".into()),
+                allowable_clock_skew_ms: None,
             }),
         });
         gw.spec.dedup = Some(DedupSpec {
@@ -1697,10 +2030,12 @@ mod tests {
             partitions: Some(16),
             window_ms: Some(123),
             txn_id_prefix: Some("pfx".into()),
+            ownership_group: None,
         });
         gw.spec.tls = Some(GatewayTlsSpec {
             client_auth: Some("optional".into()),
             validity_days: Some(90),
+            reload_interval_secs: None,
         });
         let dep = deployment(&gw, "demo", "img:1", "boot:9092", "sni").unwrap();
         let args = dep
@@ -1728,6 +2063,153 @@ mod tests {
         ] {
             assert!(joined.contains(want), "missing {want}; args: {joined}");
         }
+    }
+
+    #[test]
+    fn omitted_runtime_fields_preserve_operator_defaults() {
+        let gw = gateway_fixture("gw", "demo");
+        let args = gateway_args(&gw, "gw", "boot:9092", "sni");
+        for want in [
+            "--dedup-window-ms=86400000",
+            "--acl-refresh-secs=60",
+            "--dedup-ownership-group=gw-dedup-owners",
+        ] {
+            assert!(
+                args.iter().any(|arg| arg == want),
+                "missing {want}: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_values_render_to_flags_and_existing_toml_paths() {
+        let mut gw = gateway_fixture("gw", "demo");
+        gw.spec.membership_topic = Some("members-custom".into());
+        gw.spec.tuning = Some(GatewayTuning {
+            internal_topic_replication_factor: Some(2),
+            internal_topic_allow_replication_fallback: Some(false),
+            internal_topic_create_timeout_ms: Some(7_001),
+            internal_topic_segment_ms: Some(22_001),
+            internal_topic_min_cleanable_dirty_ratio_basis_points: Some(250),
+            consumer_poll_timeout_ms: Some(501),
+            ownership_warmup_empty_polls: Some(3),
+            readiness_poll_interval_ms: Some(251),
+        });
+        gw.spec.schema_registry = Some(GatewaySchemaRegistrySpec {
+            url: Some("http://registry:8081".into()),
+            latest_cache_ttl_ms: Some(5_001),
+            frame_raw: Some(true),
+        });
+        gw.spec.dedup = Some(DedupSpec {
+            ownership_group: Some("owners-custom".into()),
+            ..Default::default()
+        });
+        gw.spec.tls = Some(GatewayTlsSpec {
+            reload_interval_secs: Some(31),
+            ..Default::default()
+        });
+        gw.spec.authz = Some(GatewayAuthzSpec {
+            bearer: Some(GatewayBearerSpec {
+                allowable_clock_skew_ms: Some(31_001),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        gw.spec.webhooks = vec![InboundWebhookSpec {
+            name: "orders".into(),
+            target_topic: "orders".into(),
+            principal: None,
+            signature_header: None,
+            signature_encoding: None,
+            signature_prefix: None,
+            timestamp_header: None,
+            timestamp_tolerance_secs: None,
+            idempotency_source: None,
+            key_source: None,
+            max_body_bytes: None,
+            schema_subject: Some("orders-value".into()),
+            schema_format: Some("avro".into()),
+            secret_ref: None,
+        }];
+        gw.spec.outbound_subscriptions = vec![OutboundSubscriptionSpec {
+            name: "deliver".into(),
+            source_topics: vec!["orders".into()],
+            target_url: "https://example.com/hook".into(),
+            dead_letter_topic: None,
+            max_attempts: None,
+            base_backoff_ms: None,
+            max_backoff_ms: None,
+            request_timeout_ms: None,
+            group_id: Some("deliver-custom".into()),
+            decode_to_json: Some(true),
+            filter: None,
+            headers: BTreeMap::new(),
+            signing_secret_ref: None,
+        }];
+
+        let args = gateway_args(&gw, "gw", "boot:9092", "sni");
+        for want in [
+            "--membership-topic=members-custom",
+            "--internal-topic-replication-factor=2",
+            "--internal-topic-allow-replication-fallback=false",
+            "--internal-topic-create-timeout-ms=7001",
+            "--internal-topic-segment-ms=22001",
+            "--internal-topic-min-cleanable-dirty-ratio-basis-points=250",
+            "--consumer-poll-timeout-ms=501",
+            "--ownership-warmup-empty-polls=3",
+            "--readiness-poll-interval-ms=251",
+            "--schema-registry-url=http://registry:8081",
+            "--schema-registry-latest-cache-ttl-ms=5001",
+            "--schema-registry-frame-raw=true",
+            "--dedup-ownership-group=owners-custom",
+            "--tls-reload-secs=31",
+            "--bearer-allowable-clock-skew-ms=31001",
+        ] {
+            assert!(
+                args.iter().any(|arg| arg == want),
+                "missing {want}: {args:?}"
+            );
+        }
+        assert!(
+            args.windows(2).all(|pair| pair[0] <= pair[1]),
+            "args must remain sorted: {args:?}"
+        );
+
+        let secret = config_secret(&gw, &BTreeMap::new(), &BTreeMap::new()).unwrap();
+        let data = secret.data.unwrap();
+        let webhooks = String::from_utf8(data["webhooks.toml"].0.clone()).unwrap();
+        assert!(webhooks.contains("schema_subject = \"orders-value\""));
+        assert!(webhooks.contains("schema_format = \"avro\""));
+        let outbound = String::from_utf8(data["outbound.toml"].0.clone()).unwrap();
+        assert!(outbound.contains("group_id = \"deliver-custom\""));
+        assert!(outbound.contains("decode_to_json = true"));
+    }
+
+    #[test]
+    fn runtime_validation_rejects_scalar_domain_and_relation_errors() {
+        let cases = [
+            serde_json::json!({"replicas": 0}),
+            serde_json::json!({"tuning": {"internalTopicReplicationFactor": 0}}),
+            serde_json::json!({"tuning": {"internalTopicMinCleanableDirtyRatioBasisPoints": 10001}}),
+            serde_json::json!({"schemaRegistry": {"latestCacheTtlMs": 0}}),
+            serde_json::json!({"dedup": {"partitions": 0}}),
+            serde_json::json!({"tls": {"clientAuth": "sometimes"}}),
+            serde_json::json!({"authz": {"mode": "maybe"}}),
+            serde_json::json!({"outboundSubscriptions": [{
+                "name": "s", "sourceTopics": ["t"], "targetUrl": "https://example.com",
+                "baseBackoffMs": 2, "maxBackoffMs": 1
+            }]}),
+        ];
+        for value in cases {
+            let spec: KafkaGrpcGatewaySpec = serde_json::from_value(value.clone()).unwrap();
+            assert!(validate_config(&spec).is_err(), "accepted invalid {value}");
+        }
+        let mut spec = empty_spec();
+        spec.telemetry = Some(TelemetrySpec {
+            sample_ratio: Some(f64::NAN),
+            ..Default::default()
+        });
+        assert!(validate_config(&spec).is_err());
     }
 
     // ── resolve_broker_endpoint ───────────────────────────────

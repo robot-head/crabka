@@ -49,6 +49,9 @@ fn gw_cr(name: &str) -> KafkaGrpcGateway {
             image: None,
             resources: None,
             dedup: None,
+            membership_topic: None,
+            tuning: None,
+            schema_registry: None,
             tls: None,
             authz: None,
             webhooks: vec![],
@@ -64,6 +67,118 @@ fn gw_cr(name: &str) -> KafkaGrpcGateway {
     labels.insert("crabka.io/cluster".into(), KAFKA.into());
     gw.metadata.labels = Some(labels);
     gw
+}
+
+#[test]
+fn runtime_crd_surface_round_trips() {
+    let gw: KafkaGrpcGateway = serde_json::from_value(serde_json::json!({
+        "apiVersion": "crabka.io/v1alpha1",
+        "kind": "KafkaGrpcGateway",
+        "metadata": { "name": GW, "namespace": NS },
+        "spec": {
+            "membershipTopic": "members-custom",
+            "tuning": {
+                "internalTopicReplicationFactor": 2,
+                "internalTopicAllowReplicationFallback": false,
+                "internalTopicCreateTimeoutMs": 7001,
+                "internalTopicSegmentMs": 22001,
+                "internalTopicMinCleanableDirtyRatioBasisPoints": 250,
+                "consumerPollTimeoutMs": 501,
+                "ownershipWarmupEmptyPolls": 3,
+                "readinessPollIntervalMs": 251
+            },
+            "schemaRegistry": {
+                "url": "http://registry:8081",
+                "latestCacheTtlMs": 5001,
+                "frameRaw": true
+            },
+            "dedup": { "ownershipGroup": "owners-custom" },
+            "tls": { "reloadIntervalSecs": 31 },
+            "authz": {
+                "bearer": { "allowableClockSkewMs": 31001 }
+            },
+            "webhooks": [{
+                "name": "orders",
+                "targetTopic": "orders",
+                "schemaSubject": "orders-value",
+                "schemaFormat": "avro"
+            }],
+            "outboundSubscriptions": [{
+                "name": "deliver",
+                "sourceTopics": ["orders"],
+                "targetUrl": "https://example.com/hook",
+                "groupId": "deliver-custom",
+                "decodeToJson": true
+            }]
+        }
+    }))
+    .expect("gateway CRD shape");
+
+    let spec = serde_json::to_value(&gw.spec).expect("serialize spec");
+    for pointer in [
+        "/membershipTopic",
+        "/tuning/internalTopicReplicationFactor",
+        "/schemaRegistry/latestCacheTtlMs",
+        "/dedup/ownershipGroup",
+        "/tls/reloadIntervalSecs",
+        "/authz/bearer/allowableClockSkewMs",
+        "/webhooks/0/schemaSubject",
+        "/outboundSubscriptions/0/groupId",
+        "/outboundSubscriptions/0/decodeToJson",
+    ] {
+        assert!(
+            spec.pointer(pointer).is_some(),
+            "missing {pointer} from {spec}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn runtime_invalid_values_stop_before_child_rendering() {
+    for invalid in [
+        serde_json::json!({"tuning": {"consumerPollTimeoutMs": 0}}),
+        serde_json::json!({
+            "tuning": {"internalTopicMinCleanableDirtyRatioBasisPoints": 10001}
+        }),
+        serde_json::json!({"outboundSubscriptions": [{
+            "name": "s",
+            "sourceTopics": ["t"],
+            "targetUrl": "https://example.com",
+            "baseBackoffMs": 2,
+            "maxBackoffMs": 1
+        }]}),
+    ] {
+        let mut gw = gw_cr(GW);
+        gw.spec = serde_json::from_value(invalid.clone()).expect("gateway spec");
+        let rules = vec![MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/kafkagrpcgateways/{GW}/status"),
+            response: json_response(200, &fake_gateway_body(GW, NS, KAFKA)),
+        }];
+        let (ctx, state) = build_ctx(NS, rules);
+
+        let result = reconcile(Arc::new(gw), ctx).await;
+        assert!(result.is_err(), "accepted invalid {invalid}");
+
+        let observed = state.take_observed();
+        assert!(
+            observed.len() == 1,
+            "validation must happen before child reads/renders for {invalid}: {observed:?}"
+        );
+        let body: serde_json::Value =
+            serde_json::from_slice(observed[0].body()).expect("status patch body");
+        let ready = body["status"]["conditions"]
+            .as_array()
+            .and_then(|conditions| {
+                conditions
+                    .iter()
+                    .find(|condition| condition["type"] == "Ready")
+            })
+            .expect("Ready condition");
+        assert!(ready["status"] == "False", "body: {body}");
+        assert!(ready["reason"] == "GatewayConfigInvalid", "body: {body}");
+        assert!(state.remaining_rules() == 0);
+    }
 }
 
 // ---------------------------------------------------------------------------

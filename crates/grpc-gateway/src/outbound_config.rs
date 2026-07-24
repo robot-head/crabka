@@ -33,6 +33,8 @@ pub struct OutboundSubscription {
     /// Unique name; used as the consumer-group suffix
     /// (`__crabka_grpc_wh_{name}`).
     pub name: String,
+    /// Consumer group override. Defaults to `__crabka_grpc_wh_{name}`.
+    pub group_id: Option<String>,
     /// Topics this subscription tails.
     pub source_topics: Vec<String>,
     /// URL to POST each record to. Must match an entry in `allowed_targets`.
@@ -95,6 +97,7 @@ fn default_timeout_ms() -> u64 {
 #[derive(Debug, Clone)]
 pub struct CompiledSubscription {
     pub name: String,
+    pub group_id: String,
     pub source_topics: Vec<String>,
     /// Validated (parseable, scheme+host allowed) target URL string.
     pub target_url: String,
@@ -134,6 +137,12 @@ impl OutboundFile {
         let mut out = Vec::new();
         for s in &self.subscriptions {
             let ctx = format!("[outbound {}]", s.name);
+            let group_id = match &s.group_id {
+                Some(value) => refined_type::rule::NonEmptyString::new(value.clone())
+                    .map_err(|error| format!("{ctx}: group_id: {error}"))?
+                    .into_value(),
+                None => format!("__crabka_grpc_wh_{}", s.name),
+            };
             let max_attempts = PositiveU32::new(s.max_attempts)
                 .map_err(|error| format!("{ctx}: max_attempts: {error}"))?
                 .into_value();
@@ -184,6 +193,7 @@ impl OutboundFile {
 
             out.push(CompiledSubscription {
                 name: s.name.clone(),
+                group_id,
                 source_topics: s.source_topics.clone(),
                 target_url: s.target_url.clone(),
                 signing_secret: s.signing_secret.as_ref().map(|x| x.clone().into_bytes()),
@@ -233,6 +243,7 @@ filter         = "json:$.type"
         let sub = &compiled[0];
         assert2::assert!(compiled.len() == 1);
         assert2::assert!(sub.name.as_str() == "my-sub");
+        assert2::assert!(sub.group_id.as_str() == "__crabka_grpc_wh_my-sub");
         assert2::assert!(
             sub.source_topics
                 .iter()
@@ -250,6 +261,28 @@ filter         = "json:$.type"
         assert2::assert!(sub.request_timeout_ms == 10_000);
         assert2::assert!(sub.headers.is_empty());
         assert2::assert!(!sub.decode_to_json);
+    }
+
+    #[test]
+    fn configured_group_id_reaches_compiled_subscription() {
+        let input = VALID_TOML.replace(
+            "name          = \"my-sub\"",
+            "name          = \"my-sub\"\ngroup_id      = \"deliver-custom\"",
+        );
+        let file: OutboundFile = toml::from_str(&input).expect("parse TOML");
+        let compiled = file.compile().expect("compile");
+        assert2::assert!(compiled[0].group_id.as_str() == "deliver-custom");
+    }
+
+    #[test]
+    fn explicitly_empty_group_id_is_rejected() {
+        let input = VALID_TOML.replace(
+            "name          = \"my-sub\"",
+            "name          = \"my-sub\"\ngroup_id      = \"\"",
+        );
+        let file: OutboundFile = toml::from_str(&input).expect("parse TOML");
+        let error = file.compile().expect_err("empty group_id");
+        assert2::assert!(error.contains("group_id"));
     }
 
     #[test]

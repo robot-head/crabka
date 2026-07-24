@@ -175,6 +175,7 @@ fn sub(
 ) -> CompiledSubscription {
     CompiledSubscription {
         name: name.into(),
+        group_id: format!("__crabka_grpc_wh_{name}"),
         source_topics: vec![source_topic.into()],
         target_url: format!("http://{addr}/hook"),
         signing_secret,
