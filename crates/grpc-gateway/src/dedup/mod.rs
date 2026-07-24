@@ -7,16 +7,21 @@ pub mod topic;
 /// Deterministic FNV-1a-64 over the key, modulo partition count. Stable
 /// across processes/restarts (unlike `DefaultHasher`'s per-run state), so a
 /// given key always maps to the same dedup partition.
+///
+/// # Panics
+///
+/// Panics when `partitions` is zero. Process configuration validates this
+/// invariant before constructing the engine.
 #[must_use]
 pub fn partition_for(key: &str, partitions: u32) -> u32 {
+    assert2::assert!(partitions > 0);
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for b in key.as_bytes() {
         hash ^= u64::from(*b);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    // `hash % partitions` is < `partitions` (a u32), so it always fits in
-    // u32; the `unwrap_or` fallback is unreachable.
-    u32::try_from(hash % u64::from(partitions.max(1))).unwrap_or(0)
+    // `hash % partitions` is < `partitions` (a u32), so it always fits in u32.
+    u32::try_from(hash % u64::from(partitions)).expect("partition modulo fits in u32")
 }
 
 use std::sync::Arc;
@@ -50,6 +55,11 @@ pub struct DedupEngine {
 }
 
 impl DedupEngine {
+    /// Construct a dedup engine for a validated non-zero partition count.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `partitions` is zero.
     #[must_use]
     pub fn new(
         bootstrap: &str,
@@ -60,13 +70,14 @@ impl DedupEngine {
         store: Arc<DedupStore>,
         security: Option<crabka_client_core::security::ClientSecurity>,
     ) -> Self {
-        let slots = (0..partitions.max(1)).map(|_| Mutex::new(None)).collect();
+        assert2::assert!(partitions > 0);
+        let slots = (0..partitions).map(|_| Mutex::new(None)).collect();
         Self {
             bootstrap: bootstrap.to_string(),
             client_id: client_id.to_string(),
             txn_id_prefix: txn_id_prefix.to_string(),
             dedup_topic,
-            partitions: partitions.max(1),
+            partitions,
             slots,
             store,
             security,
@@ -234,5 +245,37 @@ impl DedupEngine {
             offset: Offset(meta.offset),
             deduplicated: false,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use assert2::assert;
+
+    use super::{DedupEngine, partition_for, store::DedupStore};
+
+    #[test]
+    fn partition_for_rejects_zero_partitions() {
+        assert!(std::panic::catch_unwind(|| partition_for("key", 0)).is_err());
+    }
+
+    #[test]
+    fn dedup_engine_rejects_zero_partitions() {
+        assert!(
+            std::panic::catch_unwind(|| {
+                DedupEngine::new(
+                    "localhost:9092",
+                    "test",
+                    "test-txn",
+                    "dedup".into(),
+                    0,
+                    Arc::new(DedupStore::new(1)),
+                    None,
+                )
+            })
+            .is_err()
+        );
     }
 }
