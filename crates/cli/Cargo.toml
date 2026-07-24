@@ -23,7 +23,7 @@ workspace = true
 
 [dependencies]
 assert2 = { workspace = true }
-clap = { workspace = true }
+clap = { workspace = true, features = ["env"] }
 crabka-security = { workspace = true }
 crabka-client-core = { version = "0.3.9", path = "../client-core" }
 crabka-client-admin = { version = "0.3.9", path = "../client-admin" }

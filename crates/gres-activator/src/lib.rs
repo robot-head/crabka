@@ -9,7 +9,7 @@ use std::{collections::BTreeSet, net::SocketAddr, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use bytes::BytesMut;
-pub use config_value::{NonEmptyValue, PositiveMillis, ReplicationFactor};
+pub use config_value::{NonEmptyValue, PositiveMillis};
 use crabka_gres_control::{Registry, TenantName, TenantState};
 use crabka_pgwire::{error::PgError, messages::backend};
 pub use hold::{BackendEndpoint, Readiness, WaitForReadyConfig, wait_for_ready};
