@@ -8,7 +8,7 @@ use crabka_operator::{
     context::{PgdogAdminError, PgdogAdminLike, PgdogExpectedRoute, PgdogReloadRequest},
     controller::gres::{reconcile, tenant_endpoint, tenant_to_gres_refs},
     crd::{
-        Gres, GresBalancerGoal, GresBalancerGoals, GresBalancerOperationKind,
+        Gres, GresActivatorSpec, GresBalancerGoal, GresBalancerGoals, GresBalancerOperationKind,
         GresBalancerPlanSnapshot, GresBalancerRegistryLayout, GresBalancerSpec,
         GresBalancerThresholds, GresSpec, GresTenant, GresTenantSpec, PgdogSpec, SecretKeyRef,
         SecretRef,
@@ -66,6 +66,7 @@ fn gres() -> Gres {
                     key: "password".into(),
                 },
             },
+            activator: None,
             defaults: None,
             balancer: Some(GresBalancerSpec {
                 enabled: true,
@@ -310,6 +311,28 @@ async fn renders_pgdog_config_secret_and_status_hash() {
             .as_str()
             .is_some_and(|image| image.starts_with("ghcr.io/robot-head/crabka-gres-activator:"))
     );
+    assert!(activator_body["spec"]["replicas"] == 1);
+    assert!(
+        activator_body["spec"]["template"]["spec"]["containers"][0]["args"]
+            == serde_json::json!([
+                "--listen",
+                "0.0.0.0:6543",
+                "--bootstrap",
+                "demo-plain-bootstrap.ns.svc:9092",
+                "--registry-poll-ms",
+                "250",
+                "--cold-start-timeout-ms",
+                "30000",
+                "--registry-replication-factor",
+                "1",
+                "--backend-endpoint-template",
+                "{tenant}-gres.ns.svc:5432"
+            ])
+    );
+    assert!(
+        activator_body["spec"]["template"]["spec"]["containers"][0]["readinessProbe"]["periodSeconds"]
+            == 5
+    );
 
     let status_patch = observed
         .iter()
@@ -355,6 +378,151 @@ async fn renders_pgdog_config_secret_and_status_hash() {
             .as_str()
             .is_some_and(|message| message.contains("no dry-run planner snapshot"))
     );
+}
+
+#[tokio::test]
+async fn custom_activator_policy_renders_workload_and_pgdog_timeout_budget() {
+    let admin = FakePgdogAdmin::new(vec![true]);
+    let state = MockState::new(reconcile_rules(true));
+    let ctx =
+        Arc::new(fixture_ctx(mock_client(&state, "ns"), "ns").with_pgdog_admin_for_test(admin));
+    let mut obj = gres();
+    obj.spec.activator = Some(GresActivatorSpec {
+        replicas: Some(4),
+        registry_poll_ms: Some(600),
+        cold_start_timeout_ms: Some(40_000),
+        readiness_probe_period_seconds: Some(9),
+        registry_replication_factor: Some(32_767),
+    });
+
+    reconcile(Arc::new(obj), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let activator_patch = observed
+        .iter()
+        .find(|request| {
+            request
+                .uri()
+                .to_string()
+                .contains("/deployments/fleet-gres-activator")
+        })
+        .expect("activator deployment patch captured");
+    let activator: serde_json::Value =
+        serde_json::from_slice(activator_patch.body()).expect("activator deployment JSON");
+    assert!(activator["spec"]["replicas"] == 4);
+    assert!(
+        activator["spec"]["template"]["spec"]["containers"][0]["args"]
+            == serde_json::json!([
+                "--listen",
+                "0.0.0.0:6543",
+                "--bootstrap",
+                "demo-plain-bootstrap.ns.svc:9092",
+                "--registry-poll-ms",
+                "600",
+                "--cold-start-timeout-ms",
+                "40000",
+                "--registry-replication-factor",
+                "32767",
+                "--backend-endpoint-template",
+                "{tenant}-gres.ns.svc:5432"
+            ])
+    );
+    assert!(
+        activator["spec"]["template"]["spec"]["containers"][0]["readinessProbe"]["periodSeconds"]
+            == 9
+    );
+
+    let secret_patch = observed
+        .iter()
+        .find(|request| {
+            request
+                .uri()
+                .to_string()
+                .contains("/secrets/fleet-pgdog-config")
+        })
+        .expect("config Secret patch captured");
+    let secret: serde_json::Value =
+        serde_json::from_slice(secret_patch.body()).expect("config Secret JSON");
+    let pgdog_toml = {
+        use base64::Engine as _;
+        let encoded = secret["data"]["pgdog.toml"]
+            .as_str()
+            .expect("pgdog.toml base64");
+        String::from_utf8(
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .expect("decode pgdog.toml"),
+        )
+        .expect("pgdog.toml UTF-8")
+    };
+    assert!(pgdog_toml.contains("connect_timeout = 40000"));
+    assert!(pgdog_toml.contains("connect_attempts = 3"));
+    assert!(pgdog_toml.contains("checkout_timeout = 120000"));
+}
+
+#[tokio::test]
+async fn invalid_activator_values_fail_before_kubernetes_io() {
+    let cases = [
+        (
+            "spec.activator.replicas",
+            GresActivatorSpec {
+                replicas: Some(0),
+                ..Default::default()
+            },
+        ),
+        (
+            "spec.activator.registryPollMs",
+            GresActivatorSpec {
+                registry_poll_ms: Some(0),
+                ..Default::default()
+            },
+        ),
+        (
+            "spec.activator.coldStartTimeoutMs",
+            GresActivatorSpec {
+                cold_start_timeout_ms: Some(0),
+                ..Default::default()
+            },
+        ),
+        (
+            "spec.activator.readinessProbePeriodSeconds",
+            GresActivatorSpec {
+                readiness_probe_period_seconds: Some(0),
+                ..Default::default()
+            },
+        ),
+        (
+            "spec.activator.registryReplicationFactor",
+            GresActivatorSpec {
+                registry_replication_factor: Some(0),
+                ..Default::default()
+            },
+        ),
+        (
+            "spec.activator.registryReplicationFactor",
+            GresActivatorSpec {
+                registry_replication_factor: Some(32_768),
+                ..Default::default()
+            },
+        ),
+    ];
+
+    for (path, activator) in cases {
+        let state = MockState::new(Vec::new());
+        let ctx = Arc::new(fixture_ctx(mock_client(&state, "ns"), "ns"));
+        let mut obj = gres();
+        obj.spec.activator = Some(activator);
+
+        let error = reconcile(Arc::new(obj), ctx)
+            .await
+            .expect_err("invalid activator policy must fail");
+
+        assert!(error.to_string().contains(path), "got: {error}");
+        assert!(
+            state.take_observed().is_empty(),
+            "Kubernetes I/O for {path}"
+        );
+    }
 }
 
 #[tokio::test]

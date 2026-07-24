@@ -3,8 +3,8 @@
 use std::{collections::BTreeMap, fmt::Write as _, sync::Arc, time::Duration};
 
 use crabka_gres_control::{
-    PgdogGeneral, PgdogRenderInput, PgdogUser, TenantEndpoint, TenantName, TenantState,
-    render_pgdog_toml, render_users_toml,
+    PgdogGeneral, PgdogRenderInput, PgdogTimeouts, PgdogUser, TenantEndpoint, TenantName,
+    TenantState, render_pgdog_toml, render_users_toml,
 };
 use futures::StreamExt as _;
 use k8s_openapi::{
@@ -45,6 +45,10 @@ const DEFAULT_ACTIVATOR_IMAGE: &str = concat!(
 );
 const ACTIVATOR_PORT: i32 = 6543;
 const ACTIVATOR_PORT_U16: u16 = 6543;
+const DEFAULT_ACTIVATOR_REGISTRY_POLL_MS: u64 = 250;
+const DEFAULT_ACTIVATOR_COLD_START_TIMEOUT_MS: u64 = 30_000;
+const DEFAULT_ACTIVATOR_READINESS_PERIOD_SECONDS: i32 = 5;
+const DEFAULT_ACTIVATOR_REGISTRY_REPLICATION_FACTOR: i32 = 1;
 const RELOAD_RETRY_LIMIT: usize = 3;
 const RELOAD_REQUEUE: Duration = Duration::from_secs(15);
 const PGDOG_ADMIN_OPERATION_TIMEOUT: Duration = Duration::from_secs(20);
@@ -86,6 +90,19 @@ pub async fn reconcile(obj: Arc<Gres>, ctx: Arc<Context>) -> Result<Action, Reco
 }
 
 async fn reconcile_inner(obj: Arc<Gres>, ctx: Arc<Context>) -> Result<Action, ReconcileError> {
+    validate_activator_config(&obj.spec)?;
+    let activator_cold_start_timeout_ms = obj
+        .spec
+        .activator
+        .as_ref()
+        .and_then(|activator| activator.cold_start_timeout_ms)
+        .unwrap_or(DEFAULT_ACTIVATOR_COLD_START_TIMEOUT_MS);
+    let cold_start_ceiling = PgdogTimeouts::cold_start_ceiling_for_attempt_timeout(
+        Duration::from_millis(activator_cold_start_timeout_ms),
+    )
+    .map_err(|error| {
+        ReconcileError::Malformed(format!("spec.activator.coldStartTimeoutMs: {error}"))
+    })?;
     let ns = obj.namespace().unwrap_or_else(|| "default".into());
     let name = obj.name_any();
     let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &ns);
@@ -188,11 +205,7 @@ async fn reconcile_inner(obj: Arc<Gres>, ctx: Arc<Context>) -> Result<Action, Re
             } else {
                 PgdogGeneral::default().idle_timeout
             },
-            // A suspended route terminates its backend connect only after the
-            // activator has restored compute. Give each derived PgDog connect
-            // attempt the activator's full 30-second wait window instead of
-            // the default 10-second third of the ceiling.
-            cold_start_ceiling: Duration::from_secs(90),
+            cold_start_ceiling,
             users,
             ..Default::default()
         },
@@ -267,6 +280,46 @@ async fn reconcile_inner(obj: Arc<Gres>, ctx: Arc<Context>) -> Result<Action, Re
         now,
     );
     Ok(Action::requeue(requeue))
+}
+
+fn validate_activator_config(spec: &crate::crd::GresSpec) -> Result<(), ReconcileError> {
+    macro_rules! validate {
+        ($value:expr, $rule:ty, $path:literal) => {
+            if let Some(value) = $value {
+                <$rule>::new(value)
+                    .map_err(|error| ReconcileError::Malformed(format!("{}: {error}", $path)))?;
+            }
+        };
+    }
+
+    if let Some(activator) = &spec.activator {
+        validate!(
+            activator.replicas,
+            refined_type::rule::GreaterI32<0>,
+            "spec.activator.replicas"
+        );
+        validate!(
+            activator.registry_poll_ms,
+            refined_type::rule::GreaterU64<0>,
+            "spec.activator.registryPollMs"
+        );
+        validate!(
+            activator.cold_start_timeout_ms,
+            refined_type::rule::GreaterU64<0>,
+            "spec.activator.coldStartTimeoutMs"
+        );
+        validate!(
+            activator.readiness_probe_period_seconds,
+            refined_type::rule::GreaterI32<0>,
+            "spec.activator.readinessProbePeriodSeconds"
+        );
+        validate!(
+            activator.registry_replication_factor,
+            refined_type::rule::MinMaxI32<1, 32_767>,
+            "spec.activator.registryReplicationFactor"
+        );
+    }
+    Ok(())
 }
 
 fn next_pgdog_transition_requeue(grace_deadlines: impl Iterator<Item = u64>, now: u64) -> Duration {
@@ -726,10 +779,26 @@ fn render_activator_deployment(
 ) -> Result<Deployment, ReconcileError> {
     let selector = activator_selector_labels(obj);
     let name = obj.name_any();
+    let activator = obj.spec.activator.as_ref();
+    let replicas = activator
+        .and_then(|activator| activator.replicas)
+        .unwrap_or_else(|| obj.spec.pgdog.replicas.max(1));
+    let registry_poll_ms = activator
+        .and_then(|activator| activator.registry_poll_ms)
+        .unwrap_or(DEFAULT_ACTIVATOR_REGISTRY_POLL_MS);
+    let cold_start_timeout_ms = activator
+        .and_then(|activator| activator.cold_start_timeout_ms)
+        .unwrap_or(DEFAULT_ACTIVATOR_COLD_START_TIMEOUT_MS);
+    let readiness_period_seconds = activator
+        .and_then(|activator| activator.readiness_probe_period_seconds)
+        .unwrap_or(DEFAULT_ACTIVATOR_READINESS_PERIOD_SECONDS);
+    let registry_replication_factor = activator
+        .and_then(|activator| activator.registry_replication_factor)
+        .unwrap_or(DEFAULT_ACTIVATOR_REGISTRY_REPLICATION_FACTOR);
     Ok(serde_json::from_value(json!({
         "metadata": { "name": activator_deployment_name(&name), "namespace": obj.namespace(), "labels": activator_meta_labels(obj), "ownerReferences": [owner_ref::<Gres>(obj)?] },
         "spec": {
-            "replicas": obj.spec.pgdog.replicas.max(1),
+            "replicas": replicas,
             "selector": { "matchLabels": selector },
             "template": {
                 "metadata": { "labels": selector },
@@ -741,10 +810,13 @@ fn render_activator_deployment(
                         "args": [
                             "--listen", format!("0.0.0.0:{ACTIVATOR_PORT}"),
                             "--bootstrap", bootstrap,
+                            "--registry-poll-ms", registry_poll_ms.to_string(),
+                            "--cold-start-timeout-ms", cold_start_timeout_ms.to_string(),
+                            "--registry-replication-factor", registry_replication_factor.to_string(),
                             "--backend-endpoint-template", format!("{{tenant}}-gres.{namespace}.svc:{COMPUTE_PORT}", namespace = obj.namespace().unwrap_or_else(|| "default".into()))
                         ],
                         "ports": [{ "name": "postgres", "containerPort": ACTIVATOR_PORT, "protocol": "TCP" }],
-                        "readinessProbe": { "tcpSocket": { "port": ACTIVATOR_PORT }, "periodSeconds": 5 }
+                        "readinessProbe": { "tcpSocket": { "port": ACTIVATOR_PORT }, "periodSeconds": readiness_period_seconds }
                     }]
                 }
             }
@@ -968,7 +1040,9 @@ mod tests {
     use assert2::assert;
 
     use super::*;
-    use crate::crd::{GresSpec, GresTenantSpec, GresTenantStatus, PgdogSpec, SecretKeyRef};
+    use crate::crd::{
+        GresActivatorSpec, GresSpec, GresTenantSpec, GresTenantStatus, PgdogSpec, SecretKeyRef,
+    };
 
     fn gres() -> Gres {
         let mut obj = Gres::new(
@@ -985,6 +1059,7 @@ mod tests {
                         key: "password".into(),
                     },
                 },
+                activator: None,
                 defaults: None,
                 balancer: None,
             },
@@ -1138,9 +1213,59 @@ mod tests {
                 "0.0.0.0:6543",
                 "--bootstrap",
                 "registry.demo.svc:9092",
+                "--registry-poll-ms",
+                "250",
+                "--cold-start-timeout-ms",
+                "30000",
+                "--registry-replication-factor",
+                "1",
                 "--backend-endpoint-template",
                 "{tenant}-gres.ns.svc:5432",
             ]
+        );
+    }
+
+    #[test]
+    fn activator_workload_renders_custom_policy() {
+        let mut obj = gres();
+        obj.spec.activator = Some(GresActivatorSpec {
+            replicas: Some(4),
+            registry_poll_ms: Some(600),
+            cold_start_timeout_ms: Some(40_000),
+            readiness_probe_period_seconds: Some(9),
+            registry_replication_factor: Some(2),
+        });
+
+        let deployment =
+            render_activator_deployment(&obj, "registry.demo.svc:9092", "activator:test")
+                .expect("render activator deployment");
+        let spec = deployment.spec.expect("deployment spec");
+        let container = &spec.template.spec.expect("pod spec").containers[0];
+
+        assert!(spec.replicas == Some(4));
+        assert!(
+            container.args.as_ref().expect("activator args")
+                == &[
+                    "--listen",
+                    "0.0.0.0:6543",
+                    "--bootstrap",
+                    "registry.demo.svc:9092",
+                    "--registry-poll-ms",
+                    "600",
+                    "--cold-start-timeout-ms",
+                    "40000",
+                    "--registry-replication-factor",
+                    "2",
+                    "--backend-endpoint-template",
+                    "{tenant}-gres.ns.svc:5432",
+                ]
+        );
+        assert!(
+            container
+                .readiness_probe
+                .as_ref()
+                .and_then(|probe| probe.period_seconds)
+                == Some(9)
         );
     }
 
