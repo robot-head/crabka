@@ -572,7 +572,13 @@ async fn reconcile(
     // 3. Materialize required internal topics; any still-missing → status.
     let specs = topology::required_internal_topics(&topology, &derived.num_tasks);
     if !specs.is_empty() {
-        match topology::ensure_internal_topics(source, &specs).await {
+        match topology::ensure_internal_topics(
+            source,
+            &specs,
+            config.internal_topic_replication_factor,
+        )
+        .await
+        {
             Ok(still_missing) => {
                 if !still_missing.is_empty() {
                     status.push((

@@ -34,8 +34,7 @@ pub(crate) async fn ensure_topic(
     sorted.sort_unstable();
 
     let k = sorted.len();
-    let desired = usize::try_from(replication_factor).expect("replication factor is positive");
-    let rf_usize = k.min(desired);
+    let rf_usize = crate::bootstrap::internal_topic_replication_factor(replication_factor, k);
     let rf = i16::try_from(rf_usize).expect("bounded by configured i16 replication factor");
 
     let mut records: Vec<MetadataRecord> = Vec::new();

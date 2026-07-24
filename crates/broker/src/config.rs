@@ -1546,10 +1546,8 @@ impl BrokerConfig {
     }
 
     fn validate_additional_runtime_scalars(&self) -> Result<(), BrokerError> {
-        if self.auto_join_voter_request_timeout.is_zero()
-            || self.auto_join_voter_request_timeout.as_millis()
-                > u128::from(i32::MAX.cast_unsigned())
-        {
+        let voter_request_timeout_ms = self.auto_join_voter_request_timeout.as_millis();
+        if !(1..=u128::from(i32::MAX.cast_unsigned())).contains(&voter_request_timeout_ms) {
             return Err(BrokerError::InvalidRuntimeConfig(
                 "auto_join_voter_request_timeout must be within 1..=i32::MAX milliseconds".into(),
             ));
@@ -1693,6 +1691,10 @@ impl BrokerConfig {
             (
                 "transaction_state_replication_factor",
                 self.transaction_state_replication_factor,
+            ),
+            (
+                "streams_internal_topic_replication_factor",
+                self.streams_group.internal_topic_replication_factor,
             ),
         ] {
             if value <= 0 {
@@ -2372,6 +2374,12 @@ mod tests {
                     c.auto_join_voter_request_timeout = Duration::ZERO;
                 },
             ),
+            (
+                "auto_join_voter_request_timeout must be within 1..=i32::MAX milliseconds",
+                |c| {
+                    c.auto_join_voter_request_timeout = Duration::from_nanos(1);
+                },
+            ),
             ("max_produce_group must be positive", |c| {
                 c.max_produce_group = 0;
             }),
@@ -2396,6 +2404,10 @@ mod tests {
             (
                 "transaction_state_replication_factor must be positive",
                 |c| c.transaction_state_replication_factor = 0,
+            ),
+            (
+                "streams_internal_topic_replication_factor must be positive",
+                |c| c.streams_group.internal_topic_replication_factor = 0,
             ),
             ("transaction_min_timeout_ms must be positive", |c| {
                 c.transaction_min_timeout_ms = 0;
