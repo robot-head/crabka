@@ -233,7 +233,7 @@ The broker slice passed these gates on 2026-07-24:
 - `cargo clippy -p crabka-broker -p crabka-operator --all-targets -- -D warnings`:
   passed.
 - `cargo nextest run -p crabka-broker -p crabka-operator --test-threads 1`:
-  completed with exit status zero.
+  3,091 passed, 71 skipped, and no failures.
 - `cargo run -p crabka-broker -- --help`: exposes cleaner-interval,
   OPA HTTP timeout, replication-fetch, auto-join voter timeout, and Share and
   transaction and Streams internal-topic replication-factor settings.
