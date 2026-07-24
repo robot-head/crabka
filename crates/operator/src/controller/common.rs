@@ -134,6 +134,8 @@ pub enum ReconcileError {
     KafkaConfigInvalid(String),
     #[error("schema registry tuning: {0}")]
     SchemaRegistryConfigInvalid(String),
+    #[error("gateway tuning: {0}")]
+    GatewayConfigInvalid(String),
     #[error("gres control: {0}")]
     GresControl(#[from] crabka_gres_control::ControlError),
     #[error("producer error: {0}")]

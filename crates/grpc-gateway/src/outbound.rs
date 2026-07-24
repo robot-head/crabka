@@ -72,11 +72,10 @@ pub async fn run_subscription(
         .build()
         .map_err(|e| GatewayError::Other(format!("build outbound http client: {e}")))?;
 
-    let group = format!("__crabka_grpc_wh_{}", sub.name);
     let mut consumer = Consumer::builder()
         .bootstrap(bootstrap)
         .client_id(client_id)
-        .group_id(group)
+        .group_id(sub.group_id.clone())
         .subscribe(sub.source_topics.clone())
         .isolation_level(IsolationLevel::ReadCommitted)
         .auto_offset_reset(AutoOffsetReset::Earliest)
@@ -475,6 +474,7 @@ mod tests {
     fn sub_with_decode(decode_to_json: bool) -> CompiledSubscription {
         CompiledSubscription {
             name: "dec".into(),
+            group_id: "__crabka_grpc_wh_dec".into(),
             source_topics: vec!["events".into()],
             target_url: "https://hooks.example.com/x".into(),
             signing_secret: None,

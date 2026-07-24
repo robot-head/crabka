@@ -51,7 +51,7 @@ spec:
                       How often the gateway refreshes its ACL cache from the broker,
                       in seconds. Default 60.
                     format: uint64
-                    minimum: 0.0
+                    minimum: 1.0
                     nullable: true
                     type: integer
                   bearer:
@@ -60,6 +60,12 @@ spec:
                       bearer auth is disabled.
                     nullable: true
                     properties:
+                      allowableClockSkewMs:
+                        description: Allowable clock skew for bearer-token timestamps in milliseconds.
+                        format: int64
+                        minimum: 0.0
+                        nullable: true
+                        type: integer
                       mode:
                         description: Bearer auth mode. One of `off` or `unsecured`. Default `off`.
                         nullable: true
@@ -84,13 +90,20 @@ spec:
               dedup:
                 description: |-
                   Configuration for the deduplication topic that backs idempotent
-                  produce (exactly-once delivery). When absent, dedup is disabled.
+                  produce (exactly-once delivery). When absent, controller defaults apply.
                 nullable: true
                 properties:
+                  ownershipGroup:
+                    description: |-
+                      Consumer group used to divide dedup ownership between replicas.
+                      Defaults to a value derived from the gateway name.
+                    nullable: true
+                    type: string
                   partitions:
                     description: Number of partitions for the dedup topic. Default 8.
                     format: uint32
-                    minimum: 0.0
+                    maximum: 2147483647.0
+                    minimum: 1.0
                     nullable: true
                     type: integer
                   topic:
@@ -110,6 +123,7 @@ spec:
                       Dedup window in milliseconds. Records with the same idempotency
                       key within this window are dropped. Default `86_400_000` (24 h).
                     format: int64
+                    minimum: 1.0
                     nullable: true
                     type: integer
                 type: object
@@ -117,6 +131,10 @@ spec:
                 description: |-
                   Container image override. When absent the operator uses its
                   `--default-gateway-image` flag.
+                nullable: true
+                type: string
+              membershipTopic:
+                description: Internal membership / owner-routing topic.
                 nullable: true
                 type: string
               outboundSubscriptions:
@@ -129,9 +147,9 @@ spec:
                     HTTP-POSTs each record to `targetUrl`.
                   properties:
                     baseBackoffMs:
-                      description: Initial backoff in milliseconds for exponential retry. Default 1000.
+                      description: Initial backoff in milliseconds for exponential retry. Default 500.
                       format: uint64
-                      minimum: 0.0
+                      minimum: 1.0
                       nullable: true
                       type: integer
                     deadLetterTopic:
@@ -140,10 +158,18 @@ spec:
                         When absent, failed records are logged and discarded.
                       nullable: true
                       type: string
+                    decodeToJson:
+                      description: Decode Schema Registry framed values to JSON before delivery.
+                      nullable: true
+                      type: boolean
                     filter:
                       description: |-
                         CEL expression evaluated against the record to decide whether to
                         deliver it. An absent or empty filter delivers all records.
+                      nullable: true
+                      type: string
+                    groupId:
+                      description: Consumer group override for this subscription.
                       nullable: true
                       type: string
                     headers:
@@ -154,15 +180,15 @@ spec:
                     maxAttempts:
                       description: |-
                         Maximum number of delivery attempts before moving the record to
-                        the dead-letter topic. Default 3.
+                        the dead-letter topic. Default 5.
                       format: uint32
-                      minimum: 0.0
+                      minimum: 1.0
                       nullable: true
                       type: integer
                     maxBackoffMs:
                       description: Maximum backoff cap in milliseconds. Default 30000.
                       format: uint64
-                      minimum: 0.0
+                      minimum: 1.0
                       nullable: true
                       type: integer
                     name:
@@ -173,7 +199,7 @@ spec:
                     requestTimeoutMs:
                       description: HTTP request timeout in milliseconds. Default 10000.
                       format: uint64
-                      minimum: 0.0
+                      minimum: 1.0
                       nullable: true
                       type: integer
                     signingSecretRef:
@@ -208,6 +234,7 @@ spec:
               replicas:
                 description: Number of gateway replicas. Defaults to 1 when absent.
                 format: int32
+                minimum: 1.0
                 nullable: true
                 type: integer
               resources:
@@ -247,6 +274,22 @@ spec:
                     description: 'Requests describes the minimum amount of compute resources required. If Requests is omitted for a container, it defaults to Limits if that is explicitly specified, otherwise to an implementation-defined value. Requests cannot exceed Limits. More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/'
                     type: object
                 type: object
+              schemaRegistry:
+                description: Schema Registry integration.
+                nullable: true
+                properties:
+                  frameRaw:
+                    nullable: true
+                    type: boolean
+                  latestCacheTtlMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  url:
+                    nullable: true
+                    type: string
+                type: object
               telemetry:
                 description: |-
                   OpenTelemetry / observability configuration. When absent,
@@ -268,6 +311,8 @@ spec:
                       Fraction of traces to sample in the range `[0.0, 1.0]`.
                       Default 1.0 (sample everything).
                     format: double
+                    maximum: 1.0
+                    minimum: 0.0
                     nullable: true
                     type: number
                 type: object
@@ -283,10 +328,61 @@ spec:
                       One of `disabled`, `optional`, `required`. Default `required`.
                     nullable: true
                     type: string
+                  reloadIntervalSecs:
+                    description: Cert hot-reload poll interval in seconds. Default 30.
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
                   validityDays:
                     description: Serving-cert lifetime in days. Default 365.
                     format: uint32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                type: object
+              tuning:
+                description: Gateway runtime policy overrides.
+                nullable: true
+                properties:
+                  consumerPollTimeoutMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  internalTopicAllowReplicationFallback:
+                    nullable: true
+                    type: boolean
+                  internalTopicCreateTimeoutMs:
+                    format: int32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  internalTopicMinCleanableDirtyRatioBasisPoints:
+                    format: uint32
+                    maximum: 10000.0
                     minimum: 0.0
+                    nullable: true
+                    type: integer
+                  internalTopicReplicationFactor:
+                    format: int16
+                    maximum: 32767.0
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  internalTopicSegmentMs:
+                    format: int64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  ownershipWarmupEmptyPolls:
+                    format: uint32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  readinessPollIntervalMs:
+                    format: uint64
+                    minimum: 1.0
                     nullable: true
                     type: integer
                 type: object
@@ -315,7 +411,7 @@ spec:
                     maxBodyBytes:
                       description: Maximum accepted request body size in bytes. Default 1 MiB.
                       format: uint64
-                      minimum: 0.0
+                      minimum: 1.0
                       nullable: true
                       type: integer
                     name:
@@ -325,6 +421,14 @@ spec:
                       description: |-
                         Kafka principal for ACL checks on produce to `targetTopic`.
                         Defaults to the gateway service account principal when absent.
+                      nullable: true
+                      type: string
+                    schemaFormat:
+                      description: 'Structured payload format: `avro`, `json`, or `protobuf`.'
+                      nullable: true
+                      type: string
+                    schemaSubject:
+                      description: Optional Schema Registry subject for structured request bodies.
                       nullable: true
                       type: string
                     secretRef:
@@ -375,6 +479,7 @@ spec:
                         Maximum age of a request timestamp in seconds before it is
                         rejected as a replay. Default 300 (5 minutes).
                       format: int64
+                      minimum: 0.0
                       nullable: true
                       type: integer
                   required:
