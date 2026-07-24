@@ -110,15 +110,21 @@ fn peer_principal(tls: &tokio_rustls::server::TlsStream<TcpStream>) -> Option<Pr
 ///
 /// # Errors
 /// Propagates `crabka_security::TlsError` if the initial config fails to build.
+///
+/// # Panics
+///
+/// Panics when `reload_interval_secs` is zero. Process configuration validates
+/// this invariant before building the listener.
 pub fn build_and_watch_tls(
     cfg: TlsConfig,
     reload_interval_secs: u64,
     shutdown: CancellationToken,
 ) -> Result<Arc<DynamicServerConfig>, crabka_security::TlsError> {
+    let reload_interval = reload_interval(reload_interval_secs);
     let dynamic = DynamicServerConfig::from_tls_config(&cfg)?;
     let watch = dynamic.clone();
     tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(Duration::from_secs(reload_interval_secs.max(1)));
+        let mut ticker = tokio::time::interval(reload_interval);
         ticker.tick().await; // skip the immediate first tick (already loaded)
         loop {
             tokio::select! {
@@ -131,4 +137,21 @@ pub fn build_and_watch_tls(
         }
     });
     Ok(dynamic)
+}
+
+fn reload_interval(reload_interval_secs: u64) -> Duration {
+    assert2::assert!(reload_interval_secs > 0);
+    Duration::from_secs(reload_interval_secs)
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use assert2::assert;
+
+    use super::reload_interval;
+
+    #[test]
+    fn reload_interval_rejects_zero() {
+        assert!(std::panic::catch_unwind(|| reload_interval(0)).is_err());
+    }
 }

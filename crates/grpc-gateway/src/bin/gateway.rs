@@ -275,10 +275,7 @@ async fn main() -> anyhow::Result<()> {
     let webhooks = load_webhooks(&args)?;
     let outbound = load_outbound(&args)?;
 
-    let dedup_ownership_group = args
-        .dedup_ownership_group
-        .clone()
-        .unwrap_or_else(|| format!("{}-dedup-owners", args.client_id));
+    let dedup_ownership_group = args.resolved_dedup_ownership_group();
     let config = GatewayConfig {
         bootstrap: args.bootstrap_servers.clone(),
         listen_addr: args.listen_addr,
@@ -423,6 +420,12 @@ fn build_bearer(
 }
 
 impl Args {
+    fn resolved_dedup_ownership_group(&self) -> String {
+        self.dedup_ownership_group
+            .clone()
+            .unwrap_or_else(|| format!("{}-dedup-owners", self.client_id))
+    }
+
     fn runtime_config(&self) -> GatewayRuntimeConfig {
         let mut runtime = GatewayRuntimeConfig::default();
         if let Some(value) = self.internal_topic_replication_factor {
@@ -661,9 +664,7 @@ fn spawn_ownership_consumer(
     shutdown: &CancellationToken,
 ) {
     let store = store.clone();
-    let bootstrap = config.bootstrap.clone();
-    let client_id = format!("{}-dedup-owner", config.client_id);
-    let dedup_topic = config.dedup_topic.clone();
+    let (bootstrap, client_id, dedup_topic, ownership_group) = ownership_consumer_inputs(config);
     let shutdown = shutdown.clone();
     let security = config.broker_security.clone();
     tokio::spawn(async move {
@@ -672,7 +673,7 @@ fn spawn_ownership_consumer(
                 bootstrap,
                 client_id,
                 dedup_topic,
-                "__crabka_grpc_gateway_dedup_owners".to_string(),
+                ownership_group,
                 shutdown,
                 security,
             )
@@ -681,6 +682,15 @@ fn spawn_ownership_consumer(
             tracing::error!(error = %e, "dedup ownership task exited with error");
         }
     });
+}
+
+fn ownership_consumer_inputs(config: &GatewayConfig) -> (String, String, String, String) {
+    (
+        config.bootstrap.clone(),
+        format!("{}-dedup-owner", config.client_id),
+        config.dedup_topic.clone(),
+        config.dedup_ownership_group.clone(),
+    )
 }
 
 fn spawn_readiness_watcher(store: Arc<DedupStore>, readiness: Readiness) {
@@ -909,5 +919,58 @@ mod tests {
                 );
             },
         );
+    }
+
+    #[test]
+    fn resolved_ownership_group_reaches_consumer_handoff() {
+        let _guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("environment lock");
+
+        temp_env::with_var("CRABKA_GATEWAY_DEDUP_OWNERSHIP_GROUP", None::<&str>, || {
+            let defaults = Args::try_parse_from([
+                "crabka-grpc-gateway",
+                "--bootstrap-servers=localhost:9092",
+                "--advertised-addr=localhost:9500",
+                "--client-id=gateway-a",
+            ])
+            .expect("parse defaults");
+            let custom = Args::try_parse_from([
+                "crabka-grpc-gateway",
+                "--bootstrap-servers=localhost:9092",
+                "--advertised-addr=localhost:9500",
+                "--client-id=gateway-a",
+                "--dedup-ownership-group=custom-owners",
+            ])
+            .expect("parse custom ownership group");
+
+            for (args, expected) in [
+                (defaults, "gateway-a-dedup-owners"),
+                (custom, "custom-owners"),
+            ] {
+                let config = GatewayConfig {
+                    bootstrap: args.bootstrap_servers.clone(),
+                    listen_addr: args.listen_addr,
+                    client_id: args.client_id.clone(),
+                    dedup_topic: args.dedup_topic.clone(),
+                    dedup_partitions: args.dedup_partitions.into_value(),
+                    dedup_window_ms: args.dedup_window_ms.into_value(),
+                    dedup_ownership_group: args.resolved_dedup_ownership_group(),
+                    dedup_txn_id_prefix: args.dedup_txn_id_prefix.clone(),
+                    advertised_addr: args.advertised_addr.clone(),
+                    membership_topic: args.membership_topic.clone(),
+                    tls: None,
+                    broker_security: None,
+                    authz: None,
+                    webhooks: std::collections::HashMap::new(),
+                    outbound: Vec::new(),
+                    schema_registry_url: None,
+                    runtime: args.runtime_config(),
+                };
+                let (_, _, _, group) = ownership_consumer_inputs(&config);
+                assert!(group == expected);
+            }
+        });
     }
 }
