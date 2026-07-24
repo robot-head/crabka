@@ -174,7 +174,7 @@ impl DedupStore {
                 }
             }
 
-            // Warm heuristic: two consecutive empty polls since the last
+            // Warm heuristic: the configured empty-poll count since the last
             // assignment change ⇒ owned partitions drained to the tail, safe to
             // serve. Assumes a low-traffic, bursty claim topic (it is: tiny
             // compacted claims that replay then idle); a continuously-saturated
