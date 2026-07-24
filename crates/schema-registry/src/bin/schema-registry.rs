@@ -92,6 +92,8 @@ struct Args {
     store_reader_fetch_max_bytes: Option<PositiveI32>,
     #[arg(long, env = "SCHEMA_REGISTRY_SCHEMAS_TOPIC_CREATE_TIMEOUT_MS")]
     schemas_topic_create_timeout_ms: Option<PositiveI32>,
+    #[arg(long, env = "CRABKA_SCHEMA_REGISTRY_FORWARD_MAX_BODY_BYTES")]
+    forward_max_body_bytes: Option<PositiveI32>,
     #[arg(
         long,
         env = "SCHEMA_REGISTRY_DEFAULT_COMPATIBILITY_LEVEL",
@@ -327,6 +329,7 @@ async fn main() -> anyhow::Result<()> {
         primary,
         http: reqwest::Client::new(),
         node_id: cfg.advertised_url.clone(),
+        forward_max_body_bytes: usize::try_from(cfg.runtime.forward_max_body_bytes)?,
     };
     let layers = SecurityLayers {
         auth,
@@ -391,6 +394,9 @@ impl Args {
                 defaults.schemas_topic_create_timeout_ms,
                 PositiveI32::into_value,
             ),
+            forward_max_body_bytes: self
+                .forward_max_body_bytes
+                .map_or(defaults.forward_max_body_bytes, PositiveI32::into_value),
             default_compatibility_level: self
                 .default_compatibility_level
                 .clone()
@@ -528,7 +534,7 @@ mod tests {
 
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
-    const CLEAN_RUNTIME_ENV: [(&str, Option<&str>); 14] = [
+    const CLEAN_RUNTIME_ENV: [(&str, Option<&str>); 15] = [
         ("CRABKA_ADMIN_LISTEN_ADDR", None),
         ("SCHEMA_REGISTRY_SCHEMAS_TOPIC_RF", None),
         ("SCHEMA_REGISTRY_BEARER_JWKS_REFRESH_MS", None),
@@ -541,6 +547,7 @@ mod tests {
         ("SCHEMA_REGISTRY_STORE_READER_FETCH_MAX_WAIT_MS", None),
         ("SCHEMA_REGISTRY_STORE_READER_FETCH_MAX_BYTES", None),
         ("SCHEMA_REGISTRY_SCHEMAS_TOPIC_CREATE_TIMEOUT_MS", None),
+        ("CRABKA_SCHEMA_REGISTRY_FORWARD_MAX_BODY_BYTES", None),
         ("SCHEMA_REGISTRY_DEFAULT_COMPATIBILITY_LEVEL", None),
         ("SCHEMA_REGISTRY_DEFAULT_MODE", None),
     ];
@@ -587,6 +594,7 @@ mod tests {
             "--store-reader-fetch-max-wait-ms=0",
             "--store-reader-fetch-max-bytes=0",
             "--schemas-topic-create-timeout-ms=0",
+            "--forward-max-body-bytes=0",
         ];
         for value in zero_cases {
             assert!(
@@ -613,6 +621,7 @@ mod tests {
             "--store-reader-fetch-max-wait-ms=501",
             "--store-reader-fetch-max-bytes=1048577",
             "--schemas-topic-create-timeout-ms=15001",
+            "--forward-max-body-bytes=16777217",
             "--default-compatibility-level=FULL",
             "--default-mode=IMPORT",
         ])
@@ -628,6 +637,7 @@ mod tests {
                     store_reader_fetch_max_wait_ms: 501,
                     store_reader_fetch_max_bytes: 1_048_577,
                     schemas_topic_create_timeout_ms: 15_001,
+                    forward_max_body_bytes: 16_777_217,
                     default_compatibility_level: "FULL".into(),
                     default_mode: "IMPORT".into(),
                 }
@@ -684,6 +694,38 @@ mod tests {
                             .expect("validate CLI")
                             .election_session_timeout_ms
                             == 13_000
+                    );
+                },
+            );
+            temp_env::with_var(
+                "CRABKA_SCHEMA_REGISTRY_FORWARD_MAX_BODY_BYTES",
+                Some("20000000"),
+                || {
+                    let from_env = Args::try_parse_from([
+                        "crabka-schema-registry",
+                        "--bootstrap-servers=localhost:9092",
+                    ])
+                    .expect("parse forwarding limit environment");
+                    assert!(
+                        from_env
+                            .runtime_config()
+                            .expect("validate forwarding limit environment")
+                            .forward_max_body_bytes
+                            == 20_000_000
+                    );
+
+                    let from_cli = Args::try_parse_from([
+                        "crabka-schema-registry",
+                        "--bootstrap-servers=localhost:9092",
+                        "--forward-max-body-bytes=21000000",
+                    ])
+                    .expect("parse forwarding limit CLI over environment");
+                    assert!(
+                        from_cli
+                            .runtime_config()
+                            .expect("validate forwarding limit CLI")
+                            .forward_max_body_bytes
+                            == 21_000_000
                     );
                 },
             );
