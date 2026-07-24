@@ -19,6 +19,9 @@ use crabka_protocol::{
 
 use crate::{connection::Connection, error::ClientError};
 
+/// Default whole-response byte limit for single-partition fetch helpers.
+pub const DEFAULT_FETCH_RESPONSE_MAX_BYTES: i32 = 50 * 1024 * 1024;
+
 /// The single live-IO dependency [`fetch_partition_with_isolation`] needs: send
 /// a typed [`FetchRequest`] and get the decoded [`FetchResponse`] back.
 ///
@@ -67,6 +70,7 @@ pub struct IsolatedFetch<'a> {
     pub partition: i32,
     pub fetch_offset: i64,
     pub max_wait_ms: i32,
+    pub max_bytes: i32,
     pub partition_max_bytes: i32,
     pub isolation_level: i8,
 }
@@ -152,6 +156,7 @@ async fn fetch_partition_on<T: FetchTransport + ?Sized>(
             partition,
             fetch_offset,
             max_wait_ms,
+            max_bytes: DEFAULT_FETCH_RESPONSE_MAX_BYTES,
             partition_max_bytes,
             isolation_level: 0,
         },
@@ -236,7 +241,7 @@ fn build_fetch_request(fetch: IsolatedFetch<'_>) -> FetchRequest {
     FetchRequest {
         max_wait_ms: fetch.max_wait_ms,
         min_bytes: 1,
-        max_bytes: 50 * 1024 * 1024,
+        max_bytes: fetch.max_bytes,
         isolation_level: fetch.isolation_level,
         topics: vec![FetchTopic {
             topic: fetch.topic.to_string(),
@@ -561,6 +566,7 @@ mod tests {
             partition: 3,
             fetch_offset: 123,
             max_wait_ms: 250,
+            max_bytes: 96 * 1024,
             partition_max_bytes: 64 * 1024,
             isolation_level: 1,
         });
@@ -570,7 +576,7 @@ mod tests {
                 replica_id: -1,
                 max_wait_ms: 250,
                 min_bytes: 1,
-                max_bytes: 50 * 1024 * 1024,
+                max_bytes: 96 * 1024,
                 isolation_level: 1,
                 session_id: 0,
                 session_epoch: -1,
@@ -734,7 +740,7 @@ mod tests {
         let mut transport = MockFetchTransport::new();
         transport
             .expect_fetch()
-            .withf(|req: &FetchRequest| req.isolation_level == 1)
+            .withf(|req: &FetchRequest| req.isolation_level == 1 && req.max_bytes == 2048)
             .returning(|_req| Ok(FetchResponse::default()));
 
         let got = super::fetch_partition_with_isolation_on(
@@ -745,6 +751,7 @@ mod tests {
                 partition: 0,
                 fetch_offset: 0,
                 max_wait_ms: 100,
+                max_bytes: 2048,
                 partition_max_bytes: 1024,
                 isolation_level: 1,
             },

@@ -11,7 +11,8 @@ use std::{
 use bytes::Bytes;
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
 use crabka_client_core::{
-    Connection, ConnectionOptions, IsolatedFetch, fetch_partition_with_isolation_progress,
+    Connection, ConnectionOptions, DEFAULT_FETCH_RESPONSE_MAX_BYTES, IsolatedFetch,
+    fetch_partition_with_isolation_progress,
 };
 use crabka_client_producer::{Acks, Producer, ProducerError, ProducerRecord, Transaction};
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
@@ -1618,6 +1619,7 @@ fn registry_fetch(
         partition: 0,
         fetch_offset,
         max_wait_ms: policy.fetch_max_wait_ms,
+        max_bytes: DEFAULT_FETCH_RESPONSE_MAX_BYTES,
         partition_max_bytes: policy.fetch_partition_max_bytes,
         isolation_level: READ_COMMITTED,
     }

@@ -18,7 +18,8 @@ use std::{collections::HashMap, sync::Arc};
 
 use bytes::Bytes;
 use crabka_client_core::{
-    Client, Connection, ConnectionOptions, IsolatedFetch, fetch_partition_with_isolation,
+    Client, Connection, ConnectionOptions, DEFAULT_FETCH_RESPONSE_MAX_BYTES, IsolatedFetch,
+    fetch_partition_with_isolation,
 };
 use crabka_client_producer::{Acks, Producer, ProducerError, ProducerRecord, RecordMetadata};
 use crabka_protocol::{
@@ -90,6 +91,7 @@ impl RecordFetcher for BrokerFetcher {
                 partition,
                 fetch_offset: offset,
                 max_wait_ms: self.max_wait_ms,
+                max_bytes: DEFAULT_FETCH_RESPONSE_MAX_BYTES,
                 partition_max_bytes: self.partition_max_bytes,
                 isolation_level,
             },

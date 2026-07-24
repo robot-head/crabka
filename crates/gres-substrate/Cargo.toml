@@ -41,6 +41,7 @@ async-trait = { workspace = true }
 bytes = { workspace = true }
 hex = { workspace = true }
 object_store = { workspace = true }
+refined_type = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
