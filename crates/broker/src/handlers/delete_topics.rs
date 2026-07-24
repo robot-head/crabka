@@ -242,6 +242,7 @@ pub(crate) async fn handle(
         ctx.principal.name.as_str(),
         ctx.client_id,
         mutation_count,
+        broker.config.quota_throttle_max,
     );
     let throttle_time_ms = i32::try_from(delay.as_millis()).unwrap_or(i32::MAX);
     if should_wait_for_quota_delay(delay) {

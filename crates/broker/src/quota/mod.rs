@@ -34,6 +34,7 @@ fn consume_configured_quota(
     bucket_entity_key: impl FnOnce(&mut EntityKey),
     initial_rate: impl FnOnce(f64) -> Option<u64>,
     delay_for_overage: impl FnOnce(u64, f64, u64) -> Duration,
+    maximum_delay: Duration,
 ) -> Duration {
     if request.amount == 0 {
         return Duration::ZERO;
@@ -60,7 +61,7 @@ fn consume_configured_quota(
     if granted >= request.amount {
         return Duration::ZERO;
     }
-    delay_for_overage(request.amount - granted, rate, initial_rate).min(Duration::from_secs(1))
+    delay_for_overage(request.amount - granted, rate, initial_rate).min(maximum_delay)
 }
 
 pub(crate) fn positive_f64_to_u64(value: f64) -> u64 {
@@ -171,6 +172,7 @@ mod tests {
                     Duration::from_secs(1)
                 }
             },
+            Duration::from_secs(1),
         );
 
         check!(delay == Duration::ZERO);
@@ -205,6 +207,7 @@ mod tests {
                     }
                 },
                 |_, _, _| Duration::from_secs(1),
+                Duration::from_secs(1),
             );
 
             check!(delay == Duration::ZERO);
@@ -234,6 +237,7 @@ mod tests {
             |_| {},
             |_| None,
             |_, _, _| Duration::from_secs(1),
+            Duration::from_secs(1),
         );
 
         check!(delay == Duration::ZERO);
@@ -262,6 +266,7 @@ mod tests {
                 check!(initial_rate == 1);
                 Duration::from_secs(10)
             },
+            Duration::from_secs(1),
         );
 
         check!(delay == Duration::from_secs(1));

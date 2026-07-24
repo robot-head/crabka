@@ -13,7 +13,7 @@ use super::{
 /// Consume `mutations` from the `controller_mutation_rate` bucket for
 /// `(principal, client_id)`. Returns the throttle delay to apply
 /// before sending the response. `Duration::ZERO` if no quota
-/// configured, no overage, or `mutations == 0`. Capped at 1 second.
+/// configured, no overage, or `mutations == 0`. Capped at `maximum_delay`.
 #[must_use]
 pub fn consume_controller_mutation_quota(
     image: &MetadataImage,
@@ -21,6 +21,7 @@ pub fn consume_controller_mutation_quota(
     principal: &str,
     client_id: &str,
     mutations: u64,
+    maximum_delay: Duration,
 ) -> Duration {
     consume_configured_quota(
         QuotaConsumption {
@@ -34,6 +35,7 @@ pub fn consume_controller_mutation_quota(
         |_| {},
         |rate| Some(positive_f64_to_u64(rate)),
         |overage, rate, _| Duration::from_secs_f64(u64_to_f64(overage) / rate),
+        maximum_delay,
     )
 }
 
@@ -52,7 +54,14 @@ mod tests {
     fn zero_mutations_returns_zero_delay() {
         let img = img_with_quota(vec![("user", Some("alice"))], 1.0);
         let buckets = QuotaBuckets::new();
-        let delay = consume_controller_mutation_quota(&img, &buckets, "alice", "", 0);
+        let delay = consume_controller_mutation_quota(
+            &img,
+            &buckets,
+            "alice",
+            "",
+            0,
+            Duration::from_secs(1),
+        );
         assert!(delay == Duration::ZERO);
     }
 
@@ -62,7 +71,14 @@ mod tests {
         // 5 mutations consumed → bucket has 5 left → no overage.
         let img = img_with_quota(vec![("user", Some("alice"))], 10.0);
         let buckets = QuotaBuckets::new();
-        let delay = consume_controller_mutation_quota(&img, &buckets, "alice", "", 5);
+        let delay = consume_controller_mutation_quota(
+            &img,
+            &buckets,
+            "alice",
+            "",
+            5,
+            Duration::from_secs(1),
+        );
         assert!(delay == Duration::ZERO);
     }
 
@@ -72,7 +88,31 @@ mod tests {
         // → capped at 1s.
         let img = img_with_quota(vec![("user", Some("alice"))], 1.0);
         let buckets = QuotaBuckets::new();
-        let delay = consume_controller_mutation_quota(&img, &buckets, "alice", "", 100);
+        let delay = consume_controller_mutation_quota(
+            &img,
+            &buckets,
+            "alice",
+            "",
+            100,
+            Duration::from_secs(1),
+        );
         assert!(delay == Duration::from_secs(1));
+    }
+
+    #[test]
+    fn overage_uses_configured_maximum_delay() {
+        let img = img_with_quota(vec![("user", Some("alice"))], 1.0);
+        let buckets = QuotaBuckets::new();
+
+        let delay = consume_controller_mutation_quota(
+            &img,
+            &buckets,
+            "alice",
+            "",
+            100,
+            Duration::from_millis(25),
+        );
+
+        assert!(delay == Duration::from_millis(25));
     }
 }

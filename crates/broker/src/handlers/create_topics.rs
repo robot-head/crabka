@@ -330,6 +330,7 @@ async fn finish_response(
         &context.principal.name,
         context.client_id,
         mutation_count,
+        broker.config.quota_throttle_max,
     );
     let response = create_topics_response(
         results,
@@ -545,7 +546,12 @@ mod replica_assignment_tests {
         for (client_id, want_throttle) in cases {
             let buckets = crate::quota::QuotaBuckets::new();
             let delay = crate::quota::consume_controller_mutation_quota(
-                &img, &buckets, "alice", client_id, 10,
+                &img,
+                &buckets,
+                "alice",
+                client_id,
+                10,
+                std::time::Duration::from_secs(1),
             );
             assert!(
                 (delay > std::time::Duration::ZERO) == want_throttle,
