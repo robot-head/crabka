@@ -1234,6 +1234,7 @@ fn apply_config_tail(
                         opa.allow_on_error,
                         opa.maximum_cache_size,
                         opa.expire_after_ms,
+                        cfg.opa_http_timeout,
                     )
                     .map_err(|error| FileConfigError::OpaConfig(format!("{error:?}")))?,
                 )
@@ -2946,6 +2947,7 @@ expire_after_ms = 60000
                 opa.allow_on_error,
                 opa.maximum_cache_size,
                 opa.expire_after_ms,
+                crate::config::BrokerConfig::default().opa_http_timeout,
             )
             .unwrap();
             let img = MetadataImage::new(uuid::Uuid::nil());

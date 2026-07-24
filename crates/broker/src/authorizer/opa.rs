@@ -27,12 +27,6 @@ use crabka_metadata::{AclOperation, ResourceType};
 use lru::LruCache;
 use serde::{Deserialize, Serialize};
 
-/// HTTP request timeout for a single OPA decision call. Conservative —
-/// OPA in-policy evaluation should be sub-millisecond; this catches
-/// network-level pathology (DNS, TCP RTT spikes) without holding the
-/// caller's tokio worker for arbitrary durations.
-const OPA_HTTP_TIMEOUT: Duration = Duration::from_secs(5);
-
 /// HTTP-backed pluggable authorizer. Owns its `super_users` bypass set,
 /// HTTP client, decision cache, and a captured `tokio::runtime::Handle`
 /// so the synchronous [`Authorizer::authorize`] entry point can call
@@ -153,6 +147,7 @@ impl OpaAuthorizer {
         allow_on_error: bool,
         max_cache_size: usize,
         expire_after_ms: i64,
+        http_timeout: Duration,
     ) -> Result<Self, OpaConfigError> {
         Self::with_clock(
             super_users,
@@ -160,6 +155,7 @@ impl OpaAuthorizer {
             allow_on_error,
             max_cache_size,
             expire_after_ms,
+            http_timeout,
             Arc::new(qubit_clock::SystemClock::new()),
         )
     }
@@ -180,10 +176,11 @@ impl OpaAuthorizer {
         allow_on_error: bool,
         max_cache_size: usize,
         expire_after_ms: i64,
+        http_timeout: Duration,
         clock: Arc<dyn qubit_clock::Clock>,
     ) -> Result<Self, OpaConfigError> {
         let http_client = reqwest::Client::builder()
-            .timeout(OPA_HTTP_TIMEOUT)
+            .timeout(http_timeout)
             .build()
             .map_err(|e| OpaConfigError::Http(e.to_string()))?;
         let capacity = NonZeroUsize::new(max_cache_size).ok_or(OpaConfigError::ZeroCache)?;
@@ -427,8 +424,15 @@ mod tests {
             .mount(&mock)
             .await;
 
-        let auth =
-            OpaAuthorizer::new(supers(&["admin"]), opa_url(&mock), false, 100, 60_000).unwrap();
+        let auth = OpaAuthorizer::new(
+            supers(&["admin"]),
+            opa_url(&mock),
+            false,
+            100,
+            60_000,
+            Duration::from_secs(5),
+        )
+        .unwrap();
         let image = img();
         let p = test_principal("admin");
         let h = host();
@@ -446,7 +450,15 @@ mod tests {
             .mount(&mock)
             .await;
 
-        let auth = OpaAuthorizer::new(HashSet::new(), opa_url(&mock), false, 100, 60_000).unwrap();
+        let auth = OpaAuthorizer::new(
+            HashSet::new(),
+            opa_url(&mock),
+            false,
+            100,
+            60_000,
+            Duration::from_secs(5),
+        )
+        .unwrap();
         let image = img();
         let p = test_principal("alice");
         let h = host();
@@ -465,7 +477,15 @@ mod tests {
             .mount(&mock)
             .await;
 
-        let auth = OpaAuthorizer::new(HashSet::new(), opa_url(&mock), false, 100, 60_000).unwrap();
+        let auth = OpaAuthorizer::new(
+            HashSet::new(),
+            opa_url(&mock),
+            false,
+            100,
+            60_000,
+            Duration::from_secs(5),
+        )
+        .unwrap();
         let image = img();
         let p = test_principal("alice");
         let h = host();
@@ -495,6 +515,7 @@ mod tests {
             false,
             100,
             10,
+            Duration::from_secs(5),
             clock.clone(),
         )
         .unwrap();
@@ -518,7 +539,15 @@ mod tests {
             .await;
 
         // allow_on_error=true → 500 maps to Allow.
-        let auth = OpaAuthorizer::new(HashSet::new(), opa_url(&mock), true, 100, 60_000).unwrap();
+        let auth = OpaAuthorizer::new(
+            HashSet::new(),
+            opa_url(&mock),
+            true,
+            100,
+            60_000,
+            Duration::from_secs(5),
+        )
+        .unwrap();
         let image = img();
         let p = test_principal("alice");
         let h = host();
@@ -533,10 +562,46 @@ mod tests {
             .mount(&mock)
             .await;
 
-        let auth = OpaAuthorizer::new(HashSet::new(), opa_url(&mock), false, 100, 60_000).unwrap();
+        let auth = OpaAuthorizer::new(
+            HashSet::new(),
+            opa_url(&mock),
+            false,
+            100,
+            60_000,
+            Duration::from_secs(5),
+        )
+        .unwrap();
         let image = img();
         let p = test_principal("alice");
         let h = host();
+        assert!(auth.authorize(&image, &req(&p, &h, "t")) == AuthorizationResult::Deny);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn configured_http_timeout_fails_closed() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(250))
+                    .set_body_json(serde_json::json!({"result": true})),
+            )
+            .mount(&mock)
+            .await;
+
+        let auth = OpaAuthorizer::new(
+            HashSet::new(),
+            opa_url(&mock),
+            false,
+            100,
+            60_000,
+            Duration::from_millis(25),
+        )
+        .unwrap();
+        let image = img();
+        let p = test_principal("alice");
+        let h = host();
+
         assert!(auth.authorize(&image, &req(&p, &h, "t")) == AuthorizationResult::Deny);
     }
 
@@ -555,12 +620,26 @@ mod tests {
         let h = host();
         let image = img();
 
-        let auth_open =
-            OpaAuthorizer::new(HashSet::new(), opa_url(&mock), true, 100, 60_000).unwrap();
+        let auth_open = OpaAuthorizer::new(
+            HashSet::new(),
+            opa_url(&mock),
+            true,
+            100,
+            60_000,
+            Duration::from_secs(5),
+        )
+        .unwrap();
         assert!(auth_open.authorize(&image, &req(&p, &h, "t")) == AuthorizationResult::Allow);
 
-        let auth_closed =
-            OpaAuthorizer::new(HashSet::new(), opa_url(&mock), false, 100, 60_000).unwrap();
+        let auth_closed = OpaAuthorizer::new(
+            HashSet::new(),
+            opa_url(&mock),
+            false,
+            100,
+            60_000,
+            Duration::from_secs(5),
+        )
+        .unwrap();
         assert!(auth_closed.authorize(&image, &req(&p, &h, "t")) == AuthorizationResult::Deny);
     }
 }
