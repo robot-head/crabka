@@ -100,27 +100,14 @@ pub fn report_paths(out_dir: &Path, scenario: &str, slug: &str) -> ReportPaths {
 /// when a cluster was involved. Workload errors caused by injected faults
 /// are part of the report, not an error.
 pub async fn run_scenario(config: RunConfig) -> anyhow::Result<RunReport> {
-    let RunConfig {
-        scenario,
-        mode_override,
-        out_dir,
-        binaries,
-        keep_work_dir,
-        registry_policy,
-    } = config;
-    let scenario = effective_scenario(scenario, mode_override).context("apply mode override")?;
+    let scenario = effective_scenario(config.scenario.clone(), config.mode_override)
+        .context("apply mode override")?;
     let mode = scenario.mode;
-    std::fs::create_dir_all(&out_dir)
-        .with_context(|| format!("create out dir {}", out_dir.display()))?;
-    let work_dir = prepare_work_dir(&out_dir, &scenario.name, mode, keep_work_dir)?;
+    std::fs::create_dir_all(&config.out_dir)
+        .with_context(|| format!("create out dir {}", config.out_dir.display()))?;
+    let work_dir = prepare_work_dir(&config.out_dir, &scenario.name, mode, config.keep_work_dir)?;
 
-    let options = ClusterOptions {
-        topology: scenario.topology.clone(),
-        mode,
-        work_dir: work_dir.path().to_path_buf(),
-        binaries,
-        registry_policy,
-    };
+    let options = cluster_options_for_run(&config, &scenario, mode, work_dir.path().to_path_buf());
     let mut cluster = match Cluster::launch(options).await {
         Ok(cluster) => cluster,
         Err(error) => {
@@ -177,8 +164,23 @@ pub async fn run_scenario(config: RunConfig) -> anyhow::Result<RunReport> {
     drop(work_dir);
 
     let report = assemble_report(&scenario, &mode.to_string(), driven);
-    write_reports(&report, &out_dir, &scenario.name, &mode_slug(mode))?;
+    write_reports(&report, &config.out_dir, &scenario.name, &mode_slug(mode))?;
     Ok(report)
+}
+
+fn cluster_options_for_run(
+    config: &RunConfig,
+    scenario: &Scenario,
+    mode: ModeSpec,
+    work_dir: PathBuf,
+) -> ClusterOptions {
+    ClusterOptions {
+        topology: scenario.topology.clone(),
+        mode,
+        work_dir,
+        binaries: config.binaries.clone(),
+        registry_policy: config.registry_policy.clone(),
+    }
 }
 
 /// Configuration for one external-cluster scenario run.
@@ -561,6 +563,30 @@ mod tests {
             };
             assert!(paths == expected, "slug {slug}");
         }
+    }
+
+    #[test]
+    fn run_config_builds_cluster_options_with_the_same_registry_policy() {
+        let policy = RegistryPolicy::new(3, 15_002, 252, 502, 1_048_578).expect("policy");
+        let config = RunConfig {
+            scenario: test_scenario(ModeSpec::LogicalTso, &[]),
+            mode_override: None,
+            out_dir: PathBuf::from("/out"),
+            binaries: Binaries {
+                gres: PathBuf::from("/bin/gres"),
+                broker: PathBuf::from("/bin/broker"),
+                crabka_cli: PathBuf::from("/bin/crabka"),
+            },
+            keep_work_dir: false,
+            registry_policy: policy.clone(),
+        };
+        let options = cluster_options_for_run(
+            &config,
+            &config.scenario,
+            ModeSpec::LogicalTso,
+            PathBuf::from("/work"),
+        );
+        assert!(options.registry_policy == policy);
     }
 
     #[test]

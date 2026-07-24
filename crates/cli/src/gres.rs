@@ -1207,22 +1207,6 @@ mod tests {
         let defaults =
             TestCli::try_parse_from(["test", "list", "--bootstrap=broker:9092"]).expect("defaults");
         assert!(defaults.gres.registry.policy() == crabka_gres_control::RegistryPolicy::default());
-        let custom = TestCli::try_parse_from([
-            "test",
-            "--registry-replication-factor=3",
-            "--registry-topic-create-timeout-ms=15002",
-            "--registry-reader-retry-backoff-ms=252",
-            "--registry-fetch-max-wait-ms=502",
-            "--registry-fetch-partition-max-bytes=1048578",
-            "list",
-            "--bootstrap=broker:9092",
-        ])
-        .expect("custom");
-        assert!(
-            custom.gres.registry.policy()
-                == crabka_gres_control::RegistryPolicy::new(3, 15_002, 252, 502, 1_048_578)
-                    .expect("policy")
-        );
         for option in [
             "--registry-replication-factor=0",
             "--registry-replication-factor=32768",
@@ -1239,7 +1223,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_policy_options_read_exact_environment_names() {
+    fn registry_policy_options_read_environment_and_prefer_cli() {
         const CHILD: &str = "CRABKA_TEST_CLI_REGISTRY_ENV_CHILD";
         let vars = [
             ("CRABKA_GRES_REGISTRY_REPLICATION_FACTOR", "2"),
@@ -1252,7 +1236,7 @@ mod tests {
             let status = std::process::Command::new(std::env::current_exe().expect("test exe"))
                 .args([
                     "--exact",
-                    "gres::tests::registry_policy_options_read_exact_environment_names",
+                    "gres::tests::registry_policy_options_read_environment_and_prefer_cli",
                 ])
                 .env(CHILD, "1")
                 .envs(vars)
@@ -1261,11 +1245,27 @@ mod tests {
             assert!(status.success());
             return;
         }
-        let cli =
+        let environment =
             TestCli::try_parse_from(["test", "list", "--bootstrap=broker:9092"]).expect("env");
         assert!(
-            cli.gres.registry.policy()
+            environment.gres.registry.policy()
                 == crabka_gres_control::RegistryPolicy::new(2, 15_001, 251, 501, 1_048_577)
+                    .expect("policy")
+        );
+        let cli = TestCli::try_parse_from([
+            "test",
+            "--registry-replication-factor=3",
+            "--registry-topic-create-timeout-ms=15002",
+            "--registry-reader-retry-backoff-ms=252",
+            "--registry-fetch-max-wait-ms=502",
+            "--registry-fetch-partition-max-bytes=1048578",
+            "list",
+            "--bootstrap=broker:9092",
+        ])
+        .expect("CLI over environment");
+        assert!(
+            cli.gres.registry.policy()
+                == crabka_gres_control::RegistryPolicy::new(3, 15_002, 252, 502, 1_048_578)
                     .expect("policy")
         );
     }
