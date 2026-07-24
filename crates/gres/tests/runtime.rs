@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    os::unix::fs::PermissionsExt as _,
     path::PathBuf,
     sync::{Arc, OnceLock},
 };
@@ -1457,6 +1458,7 @@ async fn drive_live_control_split(
     operation_id: &str,
     state_path: &std::path::Path,
     initial_mutation: Option<crabka_gres_ranges::SplitState>,
+    fail_pin_cleanup_once: bool,
 ) {
     use crabka_gres_ranges::transport::{RangeControlOperation as Operation, RangeControlResp};
     let ControlSplitDriverState {
@@ -1631,21 +1633,15 @@ async fn drive_live_control_split(
         None,
     )
     .await;
-    let retire = control_request(
+    complete_live_control_retirement(
         runtime,
         tenant,
         operation_id,
         &split,
-        Operation::RetirePredecessor,
+        state_path,
+        fail_pin_cleanup_once,
     )
     .await;
-    assert!(
-        matches!(
-            retire,
-            RangeControlResp::Applied | RangeControlResp::AlreadyApplied
-        ),
-        "retire: {retire:?}"
-    );
     advance_control_operation(
         bootstrap,
         tenant,
@@ -1654,6 +1650,77 @@ async fn drive_live_control_split(
         None,
     )
     .await;
+}
+
+async fn complete_live_control_retirement(
+    runtime: &crabka_gres::GresRuntime,
+    tenant: &str,
+    operation_id: &str,
+    split: &crabka_gres_ranges::SplitState,
+    state_path: &std::path::Path,
+    fail_pin_cleanup_once: bool,
+) {
+    use crabka_gres_ranges::transport::{RangeControlOperation as Operation, RangeControlResp};
+
+    let pin_dir = state_path.parent().expect("checkpoint root").join(format!(
+        "gres/{tenant}/r{}/pins",
+        split.predecessor.as_u32()
+    ));
+    if fail_pin_cleanup_once {
+        std::fs::set_permissions(&pin_dir, std::fs::Permissions::from_mode(0o500))
+            .expect("make pin directory read-only");
+    }
+    let retire = control_request(
+        runtime,
+        tenant,
+        operation_id,
+        split,
+        Operation::RetirePredecessor,
+    )
+    .await;
+    if fail_pin_cleanup_once {
+        std::fs::set_permissions(&pin_dir, std::fs::Permissions::from_mode(0o700))
+            .expect("restore pin directory permissions");
+        assert!(
+            matches!(
+                retire,
+                RangeControlResp::Rejected { ref code, .. } if code == "completion_cleanup"
+            ),
+            "pin-delete failure must remain visible: {retire:?}"
+        );
+    } else {
+        assert!(
+            matches!(
+                retire,
+                RangeControlResp::Applied | RangeControlResp::AlreadyApplied
+            ),
+            "retire: {retire:?}"
+        );
+    }
+    let replay = control_request(
+        runtime,
+        tenant,
+        operation_id,
+        split,
+        Operation::RetirePredecessor,
+    )
+    .await;
+    assert!(
+        replay == RangeControlResp::AlreadyApplied,
+        "completed retire replay: {replay:?}"
+    );
+    let replay_after_cleanup = control_request(
+        runtime,
+        tenant,
+        operation_id,
+        split,
+        Operation::RetirePredecessor,
+    )
+    .await;
+    assert!(
+        replay_after_cleanup == RangeControlResp::AlreadyApplied,
+        "completed retire replay after resource removal: {replay_after_cleanup:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1717,6 +1784,7 @@ async fn live_control_move_stages_claims_and_publishes_one_distinct_endpoint_suc
         "live-control-move",
         &checkpoint_root.path().join("move-driver.json"),
         Some(mutation),
+        true,
     )
     .await;
 
@@ -1759,6 +1827,7 @@ async fn control_executor_crash_child() {
         "control-crash",
         &checkpoint_root.join("control-driver.json"),
         None,
+        false,
     )
     .await;
     panic!("control crash failpoint returned");
@@ -1820,6 +1889,7 @@ async fn control_executor_hard_crash_matrix_reconciles_and_replays() {
             "control-crash",
             &checkpoint_root.join("control-driver.json"),
             None,
+            false,
         )
         .await;
         let recovery_elapsed = started.elapsed();
