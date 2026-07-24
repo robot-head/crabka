@@ -24,15 +24,17 @@ impl ClientMetrics {
     /// `otlp_endpoint` is `None` when OTLP forwarding is disabled.
     pub(crate) fn new(
         telemetry_max_bytes: i32,
+        default_interval_ms: i32,
         otlp_endpoint: Option<String>,
+        otlp_queue_capacity: usize,
         prometheus_snapshot_ttl: Duration,
     ) -> Self {
         let otlp = match otlp_endpoint {
-            Some(ep) => OtlpForwarder::spawn(ep, 256),
+            Some(ep) => OtlpForwarder::spawn(ep, otlp_queue_capacity),
             None => OtlpForwarder::disabled(),
         };
         Self {
-            manager: ClientMetricsManager::new(telemetry_max_bytes),
+            manager: ClientMetricsManager::new(telemetry_max_bytes, default_interval_ms),
             prometheus: Arc::new(ClientMetricsCollector::new(prometheus_snapshot_ttl)),
             otlp,
         }

@@ -63,6 +63,7 @@ pub(crate) enum PushDecision {
 
 pub(crate) struct ClientMetricsManager {
     instances: Mutex<HashMap<Uuid, ClientInstance>>,
+    default_interval_ms: i32,
     telemetry_max_bytes: i32,
 }
 
@@ -71,9 +72,10 @@ pub(crate) struct ClientMetricsManager {
 pub(crate) const ACCEPTED_COMPRESSION_TYPES: [i8; 4] = [4, 3, 1, 2];
 
 impl ClientMetricsManager {
-    pub(crate) fn new(telemetry_max_bytes: i32) -> Self {
+    pub(crate) fn new(telemetry_max_bytes: i32, default_interval_ms: i32) -> Self {
         Self {
             instances: Mutex::new(HashMap::new()),
+            default_interval_ms,
             telemetry_max_bytes,
         }
     }
@@ -87,7 +89,7 @@ impl ClientMetricsManager {
         image: &MetadataImage,
         attrs: &ClientAttributes,
     ) -> SubscriptionAssignment {
-        let computed = compute_subscription(image, attrs);
+        let computed = compute_subscription(image, attrs, self.default_interval_ms);
         let sub_id = subscription_id(&computed, attrs.client_instance_id);
         let now = Instant::now();
         let mut guard = self
@@ -224,6 +226,7 @@ impl ClientMetricsManager {
 pub(crate) fn compute_subscription(
     image: &MetadataImage,
     attrs: &ClientAttributes,
+    default_interval_ms: i32,
 ) -> ComputedSubscription {
     let mut matched_metrics: Vec<String> = Vec::new();
     let mut min_interval: Option<i32> = None;
@@ -254,7 +257,7 @@ pub(crate) fn compute_subscription(
                 matched_metrics.push(m);
             }
         }
-        let interval = config::effective_interval_ms(configs);
+        let interval = config::effective_interval_ms(configs, default_interval_ms);
         min_interval = Some(min_interval.map_or(interval, |cur| cur.min(interval)));
     }
 
@@ -265,7 +268,7 @@ pub(crate) fn compute_subscription(
     };
     ComputedSubscription {
         metrics,
-        push_interval_ms: min_interval.unwrap_or(config::DEFAULT_INTERVAL_MS),
+        push_interval_ms: min_interval.unwrap_or(default_interval_ms),
     }
 }
 
@@ -350,15 +353,15 @@ mod tests {
     #[test]
     fn no_subscription_means_no_metrics() {
         let img = MetadataImage::new(Uuid::nil());
-        let m = compute_subscription(&img, &attrs());
+        let m = compute_subscription(&img, &attrs(), 12_345);
         assert!(m.metrics.is_empty());
-        assert_eq!(m.push_interval_ms, 300_000);
+        assert!(m.push_interval_ms == 12_345);
     }
 
     #[test]
     fn match_all_empty_match_applies() {
         let img = img_with("all", &[("metrics", "*"), ("interval.ms", "60000")]);
-        let m = compute_subscription(&img, &attrs());
+        let m = compute_subscription(&img, &attrs(), 300_000);
         assert_eq!(m.metrics, vec!["*".to_string()]);
         assert_eq!(m.push_interval_ms, 60_000);
     }
@@ -372,7 +375,7 @@ mod tests {
                 ("match", "client_software_name=apache-kafka-java"),
             ],
         );
-        let m = compute_subscription(&img, &attrs());
+        let m = compute_subscription(&img, &attrs(), 300_000);
         assert_eq!(m.metrics, vec!["a.".to_string()]);
 
         let img2 = img_with(
@@ -382,7 +385,7 @@ mod tests {
                 ("match", "client_software_name=kafka-python"),
             ],
         );
-        let m2 = compute_subscription(&img2, &attrs());
+        let m2 = compute_subscription(&img2, &attrs(), 300_000);
         assert!(
             m2.metrics.is_empty(),
             "java client must not match python selector"
@@ -403,7 +406,7 @@ mod tests {
                 },
             },
         ));
-        let m = compute_subscription(&img, &attrs());
+        let m = compute_subscription(&img, &attrs(), 300_000);
         let mut got = m.metrics.clone();
         got.sort();
         assert_eq!(got, vec!["a.".to_string(), "b.".to_string()]);
@@ -423,7 +426,7 @@ mod tests {
                 },
             },
         ));
-        let m = compute_subscription(&img, &attrs());
+        let m = compute_subscription(&img, &attrs(), 300_000);
         assert_eq!(m.metrics, vec!["*".to_string()]);
     }
 
@@ -454,7 +457,7 @@ mod tests {
 
     #[test]
     fn push_throttle_ladder() {
-        let m = ClientMetricsManager::new(1024);
+        let m = ClientMetricsManager::new(1024, 300_000);
         let id = Uuid::from_u128(7);
         let img = img_with("all", &[("metrics", "*"), ("interval.ms", "60000")]);
         let attrs = ClientAttributes {
