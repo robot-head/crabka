@@ -100,6 +100,38 @@ pub struct AuthzSettings {
     pub acl_refresh_secs: u64,
 }
 
+/// Deployment policy shared by gateway runtime components.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GatewayRuntimeConfig {
+    pub internal_topic_replication_factor: i16,
+    pub internal_topic_allow_replication_fallback: bool,
+    pub internal_topic_create_timeout_ms: i32,
+    pub internal_topic_segment_ms: i64,
+    pub internal_topic_min_cleanable_dirty_ratio_basis_points: u32,
+    pub consumer_poll_timeout_ms: u64,
+    pub ownership_warmup_empty_polls: u32,
+    pub readiness_poll_interval_ms: u64,
+    pub schema_registry_latest_cache_ttl_ms: u64,
+    pub schema_registry_frame_raw: bool,
+}
+
+impl Default for GatewayRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            internal_topic_replication_factor: 3,
+            internal_topic_allow_replication_fallback: true,
+            internal_topic_create_timeout_ms: 10_000,
+            internal_topic_segment_ms: 60_000,
+            internal_topic_min_cleanable_dirty_ratio_basis_points: 100,
+            consumer_poll_timeout_ms: 500,
+            ownership_warmup_empty_polls: 2,
+            readiness_poll_interval_ms: 250,
+            schema_registry_latest_cache_ttl_ms: 5_000,
+            schema_registry_frame_raw: false,
+        }
+    }
+}
+
 /// Runtime configuration for the gateway process.
 #[derive(Debug, Clone)]
 pub struct GatewayConfig {
@@ -115,6 +147,8 @@ pub struct GatewayConfig {
     pub dedup_partitions: u32,
     /// Dedup window: claim-topic `retention.ms` and the dedup guarantee horizon.
     pub dedup_window_ms: i64,
+    /// Consumer group used to divide dedup-topic ownership between replicas.
+    pub dedup_ownership_group: String,
     /// `transactional.id` prefix; the per-partition id is `{prefix}-{p}`.
     pub dedup_txn_id_prefix: String,
     /// Address other replicas reach THIS gateway at (host:port of `listen_addr`,
@@ -141,6 +175,8 @@ pub struct GatewayConfig {
     /// produce and consume paths. When absent, `RawCodec` (the identity
     /// pass-through) is used — existing behaviour is unchanged.
     pub schema_registry_url: Option<String>,
+    /// Common deployment policy for runtime components.
+    pub runtime: GatewayRuntimeConfig,
 }
 
 impl GatewayConfig {
@@ -149,4 +185,35 @@ impl GatewayConfig {
     pub const DEDUP_TOPIC_REPLICATION: i16 = 3;
     /// Replication factor requested for the membership topic at create time.
     pub const MEMBERSHIP_TOPIC_REPLICATION: i16 = 3;
+}
+
+#[cfg(test)]
+mod tests {
+    use assert2::{assert, check};
+
+    use super::GatewayRuntimeConfig;
+    use crate::config_value::{DirtyRatioBasisPoints, PositiveU64};
+
+    #[test]
+    fn runtime_defaults_and_boundaries() {
+        assert!(
+            GatewayRuntimeConfig::default()
+                == GatewayRuntimeConfig {
+                    internal_topic_replication_factor: 3,
+                    internal_topic_allow_replication_fallback: true,
+                    internal_topic_create_timeout_ms: 10_000,
+                    internal_topic_segment_ms: 60_000,
+                    internal_topic_min_cleanable_dirty_ratio_basis_points: 100,
+                    consumer_poll_timeout_ms: 500,
+                    ownership_warmup_empty_polls: 2,
+                    readiness_poll_interval_ms: 250,
+                    schema_registry_latest_cache_ttl_ms: 5_000,
+                    schema_registry_frame_raw: false,
+                }
+        );
+        check!(PositiveU64::new(0).is_err());
+        check!(PositiveU64::new(1).is_ok());
+        check!(DirtyRatioBasisPoints::new(10_001).is_err());
+        check!(DirtyRatioBasisPoints::new(10_000).is_ok());
+    }
 }

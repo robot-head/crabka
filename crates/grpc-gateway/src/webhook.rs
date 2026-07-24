@@ -465,6 +465,7 @@ mod tests {
                 dedup_topic: "__wh_dedup".into(),
                 dedup_partitions: 4,
                 dedup_window_ms: 3_600_000,
+                dedup_ownership_group: "__crabka_grpc_gateway_dedup_owners".into(),
                 dedup_txn_id_prefix: "wh-dedup".into(),
                 advertised_addr: "127.0.0.1:0".into(),
                 membership_topic: "__wh_membership".into(),
@@ -474,6 +475,7 @@ mod tests {
                 webhooks,
                 outbound: Vec::new(),
                 schema_registry_url: None,
+                runtime: crate::config::GatewayRuntimeConfig::default(),
             }),
             authz: Arc::new(GatewayAuthz::new(Arc::new(
                 crabka_authz::AllowAllAuthorizer,

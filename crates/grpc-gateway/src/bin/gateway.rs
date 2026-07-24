@@ -9,7 +9,11 @@ use anyhow::Context as _;
 use clap::Parser;
 use crabka_grpc_gateway::{
     codec::{RawCodec, RecordCodec},
-    config::{AuthzSettings, BearerSettings, GatewayConfig, TlsSettings},
+    config::{AuthzSettings, BearerSettings, GatewayConfig, GatewayRuntimeConfig, TlsSettings},
+    config_value::{
+        DirtyRatioBasisPoints, NonNegativeI64, PartitionCount, PositiveI16, PositiveI32,
+        PositiveI64, PositiveU32, PositiveU64,
+    },
     dedup::{
         DedupEngine,
         membership::{MembershipPublisher, MembershipStore},
@@ -63,16 +67,20 @@ struct Args {
     dedup_topic: String,
 
     /// Dedup topic partition count.
-    #[arg(long, env = "CRABKA_GATEWAY_DEDUP_PARTITIONS", default_value_t = 8)]
-    dedup_partitions: u32,
+    #[arg(long, env = "CRABKA_GATEWAY_DEDUP_PARTITIONS", default_value = "8")]
+    dedup_partitions: PartitionCount,
 
     /// Dedup window (ms).
     #[arg(
         long,
         env = "CRABKA_GATEWAY_DEDUP_WINDOW_MS",
-        default_value_t = 3_600_000
+        default_value = "3600000"
     )]
-    dedup_window_ms: i64,
+    dedup_window_ms: PositiveI64,
+
+    /// Consumer group used to divide dedup-topic ownership between replicas.
+    #[arg(long, env = "CRABKA_GATEWAY_DEDUP_OWNERSHIP_GROUP")]
+    dedup_ownership_group: Option<String>,
 
     /// Transactional id prefix for the dedup path.
     #[arg(
@@ -115,8 +123,8 @@ struct Args {
     #[arg(long, env = "CRABKA_GATEWAY_TLS_TRUST_ROOTS")]
     tls_trust_roots: Option<std::path::PathBuf>,
     /// Cert hot-reload poll interval (seconds).
-    #[arg(long, env = "CRABKA_GATEWAY_TLS_RELOAD_SECS", default_value_t = 30)]
-    tls_reload_secs: u64,
+    #[arg(long, env = "CRABKA_GATEWAY_TLS_RELOAD_SECS", default_value = "30")]
+    tls_reload_secs: PositiveU64,
 
     /// Authorizer mode: off | simple.
     #[arg(long, env = "CRABKA_GATEWAY_AUTHZ", default_value = "off")]
@@ -125,8 +133,8 @@ struct Args {
     #[arg(long, env = "CRABKA_GATEWAY_AUTHZ_SUPER_USERS", default_value = "")]
     authz_super_users: String,
     /// ACL-cache refresh interval (seconds).
-    #[arg(long, env = "CRABKA_GATEWAY_ACL_REFRESH_SECS", default_value_t = 30)]
-    acl_refresh_secs: u64,
+    #[arg(long, env = "CRABKA_GATEWAY_ACL_REFRESH_SECS", default_value = "30")]
+    acl_refresh_secs: PositiveU64,
 
     /// Bearer-token mode: off | unsecured.
     #[arg(long, env = "CRABKA_GATEWAY_BEARER", default_value = "off")]
@@ -138,6 +146,38 @@ struct Args {
         default_value = "sub"
     )]
     bearer_principal_claim: String,
+    /// Allowable clock skew for bearer token timestamps.
+    #[arg(
+        long,
+        env = "CRABKA_GATEWAY_BEARER_ALLOWABLE_CLOCK_SKEW_MS",
+        default_value = "30000"
+    )]
+    bearer_allowable_clock_skew_ms: NonNegativeI64,
+
+    // ── Runtime policy ──────────────────────────────────────────────────────
+    #[arg(long, env = "CRABKA_GATEWAY_INTERNAL_TOPIC_REPLICATION_FACTOR")]
+    internal_topic_replication_factor: Option<PositiveI16>,
+    #[arg(long, env = "CRABKA_GATEWAY_INTERNAL_TOPIC_ALLOW_REPLICATION_FALLBACK")]
+    internal_topic_allow_replication_fallback: Option<bool>,
+    #[arg(long, env = "CRABKA_GATEWAY_INTERNAL_TOPIC_CREATE_TIMEOUT_MS")]
+    internal_topic_create_timeout_ms: Option<PositiveI32>,
+    #[arg(long, env = "CRABKA_GATEWAY_INTERNAL_TOPIC_SEGMENT_MS")]
+    internal_topic_segment_ms: Option<PositiveI64>,
+    #[arg(
+        long,
+        env = "CRABKA_GATEWAY_INTERNAL_TOPIC_MIN_CLEANABLE_DIRTY_RATIO_BASIS_POINTS"
+    )]
+    internal_topic_min_cleanable_dirty_ratio_basis_points: Option<DirtyRatioBasisPoints>,
+    #[arg(long, env = "CRABKA_GATEWAY_CONSUMER_POLL_TIMEOUT_MS")]
+    consumer_poll_timeout_ms: Option<PositiveU64>,
+    #[arg(long, env = "CRABKA_GATEWAY_OWNERSHIP_WARMUP_EMPTY_POLLS")]
+    ownership_warmup_empty_polls: Option<PositiveU32>,
+    #[arg(long, env = "CRABKA_GATEWAY_READINESS_POLL_INTERVAL_MS")]
+    readiness_poll_interval_ms: Option<PositiveU64>,
+    #[arg(long, env = "CRABKA_GATEWAY_SCHEMA_REGISTRY_LATEST_CACHE_TTL_MS")]
+    schema_registry_latest_cache_ttl_ms: Option<PositiveU64>,
+    #[arg(long, env = "CRABKA_GATEWAY_SCHEMA_REGISTRY_FRAME_RAW")]
+    schema_registry_frame_raw: Option<bool>,
 
     /// CA cert (PEM) the gateway trusts when connecting to the broker over TLS.
     #[arg(long, env = "CRABKA_GATEWAY_BROKER_TLS_CA")]
@@ -218,7 +258,7 @@ async fn main() -> anyhow::Result<()> {
                     .or_else(|| args.tls_client_ca.clone()),
                 client_ca_path: args.tls_client_ca.clone(),
                 client_auth,
-                reload_interval_secs: args.tls_reload_secs,
+                reload_interval_secs: args.tls_reload_secs.into_value(),
             })
         }
         (None, None) => None,
@@ -235,13 +275,18 @@ async fn main() -> anyhow::Result<()> {
     let webhooks = load_webhooks(&args)?;
     let outbound = load_outbound(&args)?;
 
+    let dedup_ownership_group = args
+        .dedup_ownership_group
+        .clone()
+        .unwrap_or_else(|| format!("{}-dedup-owners", args.client_id));
     let config = GatewayConfig {
         bootstrap: args.bootstrap_servers.clone(),
         listen_addr: args.listen_addr,
         client_id: args.client_id.clone(),
         dedup_topic: args.dedup_topic.clone(),
-        dedup_partitions: args.dedup_partitions,
-        dedup_window_ms: args.dedup_window_ms,
+        dedup_partitions: args.dedup_partitions.into_value(),
+        dedup_window_ms: args.dedup_window_ms.into_value(),
+        dedup_ownership_group,
         dedup_txn_id_prefix: args.dedup_txn_id_prefix.clone(),
         advertised_addr: args.advertised_addr.clone(),
         membership_topic: args.membership_topic.clone(),
@@ -251,6 +296,7 @@ async fn main() -> anyhow::Result<()> {
         webhooks,
         outbound,
         schema_registry_url: args.schema_registry_url.clone(),
+        runtime: args.runtime_config(),
     };
 
     let bearer = build_bearer(&args)?;
@@ -274,7 +320,7 @@ fn build_authz_settings(args: &Args) -> anyhow::Result<Option<AuthzSettings>> {
                 .collect();
             Ok(Some(AuthzSettings {
                 super_users,
-                acl_refresh_secs: args.acl_refresh_secs,
+                acl_refresh_secs: args.acl_refresh_secs.into_value(),
             }))
         }
         other => anyhow::bail!("invalid --authz: {other}"),
@@ -364,7 +410,7 @@ fn build_bearer(
         "unsecured" => {
             let v = BearerSettings {
                 principal_claim_name: args.bearer_principal_claim.clone(),
-                ..Default::default()
+                allowable_clock_skew_ms: args.bearer_allowable_clock_skew_ms.into_value(),
             }
             .build()
             .map_err(|e| anyhow::anyhow!("bearer: {e}"))?;
@@ -373,6 +419,43 @@ fn build_bearer(
             ))
         }
         other => anyhow::bail!("invalid --bearer: {other}"),
+    }
+}
+
+impl Args {
+    fn runtime_config(&self) -> GatewayRuntimeConfig {
+        let mut runtime = GatewayRuntimeConfig::default();
+        if let Some(value) = self.internal_topic_replication_factor {
+            runtime.internal_topic_replication_factor = value.into_value();
+        }
+        if let Some(value) = self.internal_topic_allow_replication_fallback {
+            runtime.internal_topic_allow_replication_fallback = value;
+        }
+        if let Some(value) = self.internal_topic_create_timeout_ms {
+            runtime.internal_topic_create_timeout_ms = value.into_value();
+        }
+        if let Some(value) = self.internal_topic_segment_ms {
+            runtime.internal_topic_segment_ms = value.into_value();
+        }
+        if let Some(value) = self.internal_topic_min_cleanable_dirty_ratio_basis_points {
+            runtime.internal_topic_min_cleanable_dirty_ratio_basis_points = value.into_value();
+        }
+        if let Some(value) = self.consumer_poll_timeout_ms {
+            runtime.consumer_poll_timeout_ms = value.into_value();
+        }
+        if let Some(value) = self.ownership_warmup_empty_polls {
+            runtime.ownership_warmup_empty_polls = value.into_value();
+        }
+        if let Some(value) = self.readiness_poll_interval_ms {
+            runtime.readiness_poll_interval_ms = value.into_value();
+        }
+        if let Some(value) = self.schema_registry_latest_cache_ttl_ms {
+            runtime.schema_registry_latest_cache_ttl_ms = value.into_value();
+        }
+        if let Some(value) = self.schema_registry_frame_raw {
+            runtime.schema_registry_frame_raw = value;
+        }
+        runtime
     }
 }
 
@@ -672,9 +755,15 @@ fn spawn_outbound_delivery(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Mutex, OnceLock};
+
+    use assert2::assert;
+    use clap::Parser;
     use crabka_security::ListenerProtocol;
 
     use super::*;
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     #[test]
     fn build_broker_security_some_with_cert_and_key_and_sni() {
@@ -709,5 +798,116 @@ mod tests {
         ] {
             assert2::assert!(build_broker_security(cert, key, None, None).is_err());
         }
+    }
+
+    #[test]
+    fn runtime_cli_boundaries_precedence_and_defaults() {
+        let _guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("environment lock");
+
+        for value in [
+            "--dedup-partitions=0",
+            "--dedup-partitions=2147483648",
+            "--dedup-window-ms=0",
+            "--tls-reload-secs=0",
+            "--acl-refresh-secs=0",
+            "--internal-topic-replication-factor=0",
+            "--internal-topic-create-timeout-ms=0",
+            "--internal-topic-segment-ms=0",
+            "--internal-topic-min-cleanable-dirty-ratio-basis-points=10001",
+            "--consumer-poll-timeout-ms=0",
+            "--ownership-warmup-empty-polls=0",
+            "--readiness-poll-interval-ms=0",
+            "--schema-registry-latest-cache-ttl-ms=0",
+            "--bearer-allowable-clock-skew-ms=-1",
+        ] {
+            assert!(
+                Args::try_parse_from([
+                    "crabka-grpc-gateway",
+                    "--bootstrap-servers=localhost:9092",
+                    "--advertised-addr=localhost:9500",
+                    value,
+                ])
+                .is_err()
+            );
+        }
+
+        let explicit = Args::try_parse_from([
+            "crabka-grpc-gateway",
+            "--bootstrap-servers=localhost:9092",
+            "--advertised-addr=localhost:9500",
+            "--internal-topic-replication-factor=2",
+            "--internal-topic-allow-replication-fallback=false",
+            "--internal-topic-create-timeout-ms=10001",
+            "--internal-topic-segment-ms=60001",
+            "--internal-topic-min-cleanable-dirty-ratio-basis-points=101",
+            "--consumer-poll-timeout-ms=501",
+            "--ownership-warmup-empty-polls=3",
+            "--readiness-poll-interval-ms=251",
+            "--schema-registry-latest-cache-ttl-ms=5001",
+            "--schema-registry-frame-raw=true",
+            "--bearer-allowable-clock-skew-ms=0",
+            "--dedup-ownership-group=custom-owners",
+        ])
+        .expect("parse explicit runtime values");
+        assert!(
+            explicit.runtime_config()
+                == GatewayRuntimeConfig {
+                    internal_topic_replication_factor: 2,
+                    internal_topic_allow_replication_fallback: false,
+                    internal_topic_create_timeout_ms: 10_001,
+                    internal_topic_segment_ms: 60_001,
+                    internal_topic_min_cleanable_dirty_ratio_basis_points: 101,
+                    consumer_poll_timeout_ms: 501,
+                    ownership_warmup_empty_polls: 3,
+                    readiness_poll_interval_ms: 251,
+                    schema_registry_latest_cache_ttl_ms: 5_001,
+                    schema_registry_frame_raw: true,
+                }
+        );
+        assert!(explicit.bearer_allowable_clock_skew_ms.into_value() == 0);
+        assert!(explicit.dedup_ownership_group.as_deref() == Some("custom-owners"));
+
+        temp_env::with_vars(
+            [
+                ("CRABKA_GATEWAY_CONSUMER_POLL_TIMEOUT_MS", None::<&str>),
+                ("CRABKA_GATEWAY_SCHEMA_REGISTRY_FRAME_RAW", None::<&str>),
+            ],
+            || {
+                let defaults = Args::try_parse_from([
+                    "crabka-grpc-gateway",
+                    "--bootstrap-servers=localhost:9092",
+                    "--advertised-addr=localhost:9500",
+                ])
+                .expect("parse defaults");
+                assert!(defaults.runtime_config() == GatewayRuntimeConfig::default());
+                assert!(defaults.bearer_allowable_clock_skew_ms.into_value() == 30_000);
+
+                temp_env::with_var(
+                    "CRABKA_GATEWAY_CONSUMER_POLL_TIMEOUT_MS",
+                    Some("701"),
+                    || {
+                        let from_env = Args::try_parse_from([
+                            "crabka-grpc-gateway",
+                            "--bootstrap-servers=localhost:9092",
+                            "--advertised-addr=localhost:9500",
+                        ])
+                        .expect("parse environment");
+                        assert!(from_env.runtime_config().consumer_poll_timeout_ms == 701);
+
+                        let from_cli = Args::try_parse_from([
+                            "crabka-grpc-gateway",
+                            "--bootstrap-servers=localhost:9092",
+                            "--advertised-addr=localhost:9500",
+                            "--consumer-poll-timeout-ms=702",
+                        ])
+                        .expect("parse CLI over environment");
+                        assert!(from_cli.runtime_config().consumer_poll_timeout_ms == 702);
+                    },
+                );
+            },
+        );
     }
 }

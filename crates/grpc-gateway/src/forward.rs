@@ -425,6 +425,7 @@ mod tests {
             dedup_topic: dedup.into(),
             dedup_partitions: N,
             dedup_window_ms: 3_600_000,
+            dedup_ownership_group: "__crabka_grpc_gateway_dedup_owners".into(),
             dedup_txn_id_prefix: "fh-dedup".into(),
             advertised_addr: "127.0.0.1:0".into(),
             membership_topic: "__crabka_grpc_gateway_membership_fh".into(),
@@ -434,6 +435,7 @@ mod tests {
             webhooks: std::collections::HashMap::new(),
             outbound: Vec::new(),
             schema_registry_url: None,
+            runtime: crate::config::GatewayRuntimeConfig::default(),
         }
     }
 

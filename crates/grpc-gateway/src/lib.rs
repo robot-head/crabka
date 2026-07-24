@@ -23,6 +23,7 @@
 pub mod authz;
 pub mod codec;
 pub mod config;
+pub mod config_value;
 pub mod consume;
 pub mod dedup;
 pub mod error;

@@ -175,6 +175,7 @@ async fn forward_handler_error_arm_returns_retriable() {
             dedup_topic: DEDUP.into(),
             dedup_partitions: N,
             dedup_window_ms: 3_600_000,
+            dedup_ownership_group: "__crabka_grpc_gateway_dedup_owners".into(),
             dedup_txn_id_prefix: "fh-dedup".into(),
             advertised_addr: "127.0.0.1:0".into(),
             membership_topic: "__crabka_grpc_gateway_membership_fh".into(),
@@ -184,6 +185,7 @@ async fn forward_handler_error_arm_returns_retriable() {
             webhooks: std::collections::HashMap::new(),
             outbound: Vec::new(),
             schema_registry_url: None,
+            runtime: crabka_grpc_gateway::config::GatewayRuntimeConfig::default(),
         }),
         authz: Arc::new(crabka_grpc_gateway::authz::GatewayAuthz::new(Arc::new(
             crabka_authz::AllowAllAuthorizer,
@@ -287,6 +289,7 @@ async fn forward_handler_rejects_anonymous_when_tls_enabled() {
             dedup_topic: DEDUP.into(),
             dedup_partitions: N,
             dedup_window_ms: 3_600_000,
+            dedup_ownership_group: "__crabka_grpc_gateway_dedup_owners".into(),
             dedup_txn_id_prefix: "fh-tls-dedup".into(),
             advertised_addr: "127.0.0.1:0".into(),
             membership_topic: "__crabka_grpc_gateway_membership_fh_tls".into(),
@@ -296,6 +299,7 @@ async fn forward_handler_rejects_anonymous_when_tls_enabled() {
             webhooks: std::collections::HashMap::new(),
             outbound: Vec::new(),
             schema_registry_url: None,
+            runtime: crabka_grpc_gateway::config::GatewayRuntimeConfig::default(),
         }),
         authz: Arc::new(crabka_grpc_gateway::authz::GatewayAuthz::new(Arc::new(
             crabka_authz::AllowAllAuthorizer,
