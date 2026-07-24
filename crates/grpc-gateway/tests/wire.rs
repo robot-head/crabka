@@ -133,6 +133,7 @@ async fn send_handler_ok_and_error_arms() {
             dedup_topic: "__crabka_grpc_dedup".into(),
             dedup_partitions: 4,
             dedup_window_ms: 3_600_000,
+            dedup_ownership_group: "__crabka_grpc_gateway_dedup_owners".into(),
             dedup_txn_id_prefix: "wire-dedup".into(),
             advertised_addr: "127.0.0.1:0".into(),
             membership_topic: "__crabka_grpc_gateway_membership".into(),
@@ -142,6 +143,7 @@ async fn send_handler_ok_and_error_arms() {
             webhooks: std::collections::HashMap::new(),
             outbound: Vec::new(),
             schema_registry_url: None,
+            runtime: crabka_grpc_gateway::config::GatewayRuntimeConfig::default(),
         }),
         authz: Arc::new(crabka_grpc_gateway::authz::GatewayAuthz::new(Arc::new(
             crabka_authz::AllowAllAuthorizer,

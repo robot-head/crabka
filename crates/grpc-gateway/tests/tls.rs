@@ -205,6 +205,7 @@ async fn spawn_gateway_tls(bootstrap: &str, client: &str, settings: TlsSettings)
             dedup_topic: DEDUP.into(),
             dedup_partitions: N,
             dedup_window_ms: 3_600_000,
+            dedup_ownership_group: OWNERS_GROUP.into(),
             dedup_txn_id_prefix: format!("crabka-grpc-dedup-{client}"),
             advertised_addr: addr.clone(),
             membership_topic: MEMBERSHIP.into(),
@@ -215,6 +216,7 @@ async fn spawn_gateway_tls(bootstrap: &str, client: &str, settings: TlsSettings)
             webhooks: std::collections::HashMap::new(),
             outbound: Vec::new(),
             schema_registry_url: None,
+            runtime: crabka_grpc_gateway::config::GatewayRuntimeConfig::default(),
         }),
         authz: Arc::new(crabka_grpc_gateway::authz::GatewayAuthz::new(Arc::new(
             crabka_authz::AllowAllAuthorizer,
