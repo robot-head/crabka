@@ -2818,6 +2818,7 @@ dependencies = [
  "crabka-client-producer",
  "crabka-protocol",
  "proptest",
+ "refined_type",
  "serde",
  "serde_json",
  "static_assertions",
