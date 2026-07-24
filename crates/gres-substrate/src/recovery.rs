@@ -870,7 +870,7 @@ const fn empty_fetch_decision(
         return EmptyFetchDecision::Reset;
     }
     match retries_used {
-        None => EmptyFetchDecision::Continue { retries_used: 0 },
+        None => EmptyFetchDecision::Continue { retries_used: 1 },
         Some(retries_used) if retries_used < retry_limit => EmptyFetchDecision::Continue {
             retries_used: retries_used + 1,
         },
@@ -1477,10 +1477,6 @@ mod tests {
 
         assert_eq!(
             empty_fetch_decision(None, 0, &stalled, 1),
-            EmptyFetchDecision::Continue { retries_used: 0 }
-        );
-        assert_eq!(
-            empty_fetch_decision(Some(0), 0, &stalled, 1),
             EmptyFetchDecision::Continue { retries_used: 1 }
         );
         assert_eq!(
