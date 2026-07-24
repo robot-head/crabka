@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, HashMap},
     net::{SocketAddr, ToSocketAddrs},
-    num::{NonZeroU64, NonZeroUsize},
+    num::NonZeroU64,
     path::PathBuf,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -9,8 +9,9 @@ use std::{
 
 use crabka_client_core::security::{ClientSecurity, SaslCredentials};
 use crabka_gres_control::{
-    FinalCheckpoint, PositiveI32, PositiveMillis, RegistryPolicy, RegistryReplicationFactor,
-    TenantName, TenantRecord, decode_tenant_config_record, tenant_config_topic,
+    CheckpointPartBytes, FinalCheckpoint, PositiveI32, PositiveMillis, PositiveUsize,
+    RegistryPolicy, RegistryReplicationFactor, TenantName, TenantRecord,
+    decode_tenant_config_record, tenant_config_topic,
 };
 use crabka_pgexec::SqlEngine;
 use crabka_pgkv::{FjallKv, Kv, KvScan, MemKv, RestoreKv, SnapshotKv};
@@ -35,9 +36,6 @@ use split_activation::{PendingLiveTopology, PreparedLiveTopology, StagedLiveRang
 
 const DEFAULT_CHECKPOINT_FRAMES_THRESHOLD: u64 = 10_000;
 const DEFAULT_CHECKPOINT_BYTES_THRESHOLD: u64 = 64 * 1024 * 1024;
-const DEFAULT_CHECKPOINT_RETAIN_NEWEST: usize = 2;
-const CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS: i32 = 30_000;
-const IDLE_MONITOR_POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// Relaxed cadence of the LOCAL (mem / --data-dir) vacuum loop: one bounded
 /// `SqlEngine::vacuum_step` this often while the sweep is keeping up with the
 /// write rate. Write paths prune the rows they touch opportunistically; the
@@ -231,20 +229,47 @@ pub struct ServeArgs {
     pub checkpoint_gcs_application_credentials_path: Option<String>,
 
     /// Checkpoint after at least this many WAL frames since the previous manifest.
-    #[arg(long = "checkpoint-frames")]
+    #[arg(long = "checkpoint-frames", env = "CRABKA_GRES_CHECKPOINT_FRAMES")]
     pub checkpoint_frames: Option<NonZeroU64>,
 
     /// Checkpoint after at least this many WAL bytes since the previous manifest.
-    #[arg(long = "checkpoint-bytes")]
+    #[arg(long = "checkpoint-bytes", env = "CRABKA_GRES_CHECKPOINT_BYTES")]
     pub checkpoint_bytes: Option<NonZeroU64>,
 
     /// Target maximum bytes per checkpoint part object.
-    #[arg(long = "checkpoint-part-bytes")]
-    pub checkpoint_part_bytes: Option<NonZeroUsize>,
+    #[arg(
+        long = "checkpoint-part-bytes",
+        env = "CRABKA_GRES_CHECKPOINT_PART_BYTES"
+    )]
+    pub checkpoint_part_bytes: Option<CheckpointPartBytes>,
 
     /// Number of newest checkpoint directories to retain after pruning.
-    #[arg(long = "checkpoint-retain")]
-    pub checkpoint_retain: Option<NonZeroUsize>,
+    #[arg(long = "checkpoint-retain", env = "CRABKA_GRES_CHECKPOINT_RETAIN")]
+    pub checkpoint_retain: Option<PositiveUsize>,
+
+    /// Kafka `DeleteRecords` timeout used after a durable checkpoint.
+    #[arg(
+        long = "checkpoint-delete-records-timeout-ms",
+        env = "CRABKA_GRES_CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS",
+        default_value = "30000"
+    )]
+    pub checkpoint_delete_records_timeout_ms: PositiveI32,
+
+    /// Background checkpoint threshold polling interval.
+    #[arg(
+        long = "checkpoint-poll-interval-ms",
+        env = "CRABKA_GRES_CHECKPOINT_POLL_INTERVAL_MS",
+        default_value = "1000"
+    )]
+    pub checkpoint_poll_interval_ms: PositiveMillis,
+
+    /// Idle-tenant suspension polling interval.
+    #[arg(
+        long = "idle-suspend-poll-interval-ms",
+        env = "CRABKA_GRES_IDLE_SUSPEND_POLL_INTERVAL_MS",
+        default_value = "1000"
+    )]
+    pub idle_suspend_poll_interval_ms: PositiveMillis,
 }
 
 /// Validated Gres registry options shared by compute registry clients.
@@ -386,6 +411,10 @@ pub struct CheckpointRuntimeConfig {
     pub part_max_bytes: usize,
     /// Number of newest checkpoint directories retained after prune planning.
     pub retain_newest: usize,
+    /// Kafka `DeleteRecords` timeout after a durable manifest.
+    pub delete_records_timeout_ms: i32,
+    /// Background checkpoint threshold polling interval.
+    pub poll_interval: Duration,
 }
 
 /// Validated object-store settings used by checkpointing.
@@ -596,11 +625,8 @@ impl CheckpointRuntimeConfig {
         let object_store = CheckpointObjectStoreConfig::from_args(args)?;
         let part_max_bytes = args.checkpoint_part_bytes.map_or(
             crabka_gres_substrate::DEFAULT_PART_MAX_BYTES,
-            NonZeroUsize::get,
+            CheckpointPartBytes::into_value,
         );
-        if part_max_bytes < 8 {
-            return invalid_input("--checkpoint-part-bytes must be at least 8");
-        }
         Ok(Some(Self {
             object_store,
             frames_threshold: args
@@ -610,9 +636,12 @@ impl CheckpointRuntimeConfig {
                 .checkpoint_bytes
                 .map_or(DEFAULT_CHECKPOINT_BYTES_THRESHOLD, NonZeroU64::get),
             part_max_bytes,
-            retain_newest: args
-                .checkpoint_retain
-                .map_or(DEFAULT_CHECKPOINT_RETAIN_NEWEST, NonZeroUsize::get),
+            retain_newest: args.checkpoint_retain.map_or(
+                crabka_gres_substrate::DEFAULT_CHECKPOINT_RETAIN,
+                PositiveUsize::into_value,
+            ),
+            delete_records_timeout_ms: args.checkpoint_delete_records_timeout_ms.into_value(),
+            poll_interval: Duration::from_millis(args.checkpoint_poll_interval_ms.into_value()),
         }))
     }
 }
@@ -1432,6 +1461,7 @@ fn current_unix_millis() -> Option<u64> {
 struct GresCheckpointWalPruner {
     bootstrap: CheckpointPruneBackend,
     security: Option<ClientSecurity>,
+    delete_records_timeout_ms: i32,
 }
 
 enum CheckpointPruneBackend {
@@ -1440,14 +1470,19 @@ enum CheckpointPruneBackend {
 }
 
 impl GresCheckpointWalPruner {
-    fn in_memory() -> Self {
+    fn in_memory(delete_records_timeout_ms: i32) -> Self {
         Self {
             bootstrap: CheckpointPruneBackend::InMemory,
             security: None,
+            delete_records_timeout_ms,
         }
     }
 
-    fn kafka(bootstrap: &str, security: Option<ClientSecurity>) -> std::io::Result<Self> {
+    fn kafka(
+        bootstrap: &str,
+        security: Option<ClientSecurity>,
+        delete_records_timeout_ms: i32,
+    ) -> std::io::Result<Self> {
         let bootstrap_addrs: Vec<_> = bootstrap
             .split(',')
             .map(str::trim)
@@ -1460,6 +1495,7 @@ impl GresCheckpointWalPruner {
         Ok(Self {
             bootstrap: CheckpointPruneBackend::Kafka { bootstrap_addrs },
             security,
+            delete_records_timeout_ms,
         })
     }
 }
@@ -1488,7 +1524,7 @@ impl crabka_gres_substrate::CheckpointWalPruner for GresCheckpointWalPruner {
             ))
         })?;
         let outcomes = admin
-            .delete_records(ops, CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS)
+            .delete_records(ops, self.delete_records_timeout_ms)
             .await
             .map_err(|error| {
                 crabka_gres_substrate::SubstrateError::Unavailable(format!(
@@ -1849,7 +1885,14 @@ pub async fn serve_listener_with_tenant_config_loader(
     let serve_result = if let Some((policy, registry, checkpointer)) = suspend {
         tokio::select! {
             result = serve => result,
-            result = run_suspend_monitor(policy, activity, checkpointer, registry, shutdown) => result,
+            result = run_suspend_monitor(
+                policy,
+                activity,
+                checkpointer,
+                registry,
+                shutdown,
+                Duration::from_millis(effective_args.idle_suspend_poll_interval_ms.into_value()),
+            ) => result,
         }
     } else {
         serve.await
@@ -2389,9 +2432,10 @@ async fn run_suspend_monitor(
     checkpointer: Box<dyn FinalCheckpointer>,
     mut registry: Box<dyn SuspendRegistry>,
     shutdown: CancellationToken,
+    poll_interval: Duration,
 ) -> std::io::Result<()> {
     loop {
-        tokio::time::sleep(IDLE_MONITOR_POLL_INTERVAL).await;
+        tokio::time::sleep(poll_interval).await;
         match try_suspend_idle_tenant(
             &policy,
             activity.as_ref(),
@@ -3147,7 +3191,7 @@ async fn open_substrate_runtime_with_tenant_record(
         crabka_gres_substrate::wal_topic(&config.tenant),
         format!("{}/r0", config.tenant),
         None,
-        || Ok(GresCheckpointWalPruner::in_memory()),
+        |timeout_ms| Ok(GresCheckpointWalPruner::in_memory(timeout_ms)),
     )?;
     if let Some(checkpoint) = &checkpoint {
         seed_checkpoint_planner_stats(checkpoint).await?;
@@ -6230,7 +6274,7 @@ fn build_checkpoint_runtime(
     wal_topic: String,
     checkpoint_namespace: String,
     checkpoint_store: Option<Arc<dyn crabka_gres_substrate::checkpoint::CheckpointStore>>,
-    pruner: impl FnOnce() -> std::io::Result<GresCheckpointWalPruner>,
+    pruner: impl FnOnce(i32) -> std::io::Result<GresCheckpointWalPruner>,
 ) -> std::io::Result<Option<StartedCheckpointRuntime>> {
     let Some(checkpoint_config) = &config.checkpoints else {
         return Ok(None);
@@ -6239,22 +6283,14 @@ fn build_checkpoint_runtime(
         Some(store) => store,
         None => build_checkpoint_store(checkpoint_config)?,
     };
-    let service_config = crabka_gres_substrate::CheckpointConfig::new(
-        checkpoint_namespace.clone(),
-        wal_topic,
-        checkpoint_config.frames_threshold,
-        checkpoint_config.bytes_threshold,
-        checkpoint_config.part_max_bytes,
-        checkpoint_config.retain_newest,
-        Duration::from_secs(1),
-    )
-    .map_err(|error| std::io::Error::other(format!("checkpoint config: {error}")))?;
+    let service_config =
+        checkpoint_service_config(checkpoint_config, checkpoint_namespace.clone(), wal_topic)?;
     let stats = Arc::new(crabka_gres_substrate::CheckpointStats::default());
     let service = crabka_gres_substrate::CheckpointService::new(
         service_config,
         store,
         Arc::clone(&checkpoint_store),
-        Arc::new(pruner()?),
+        Arc::new(pruner(checkpoint_config.delete_records_timeout_ms)?),
         Arc::clone(&stats),
     )
     .map_err(|error| std::io::Error::other(format!("checkpoint service: {error}")))?;
@@ -6291,16 +6327,8 @@ fn build_range_checkpoint_runtime(
     // CheckpointService derives object paths from this identity.  Encoding the range as a
     // path component yields `gres/<tenant>/r<range>/ckpt/`, never a shared tenant manifest set.
     let namespace = format!("{}/r{}", config.tenant, range_id.as_u32());
-    let service_config = crabka_gres_substrate::CheckpointConfig::new(
-        namespace.clone(),
-        wal_topic,
-        checkpoint_config.frames_threshold,
-        checkpoint_config.bytes_threshold,
-        checkpoint_config.part_max_bytes,
-        checkpoint_config.retain_newest,
-        Duration::from_secs(1),
-    )
-    .map_err(|error| std::io::Error::other(format!("checkpoint config: {error}")))?;
+    let service_config =
+        checkpoint_service_config(checkpoint_config, namespace.clone(), wal_topic)?;
     let stats = Arc::new(crabka_gres_substrate::CheckpointStats::default());
     let service = crabka_gres_substrate::CheckpointService::new(
         service_config,
@@ -6309,6 +6337,7 @@ fn build_range_checkpoint_runtime(
         Arc::new(GresCheckpointWalPruner::kafka(
             &config.bootstrap,
             config.kafka_security.clone(),
+            checkpoint_config.delete_records_timeout_ms,
         )?),
         Arc::clone(&stats),
     )
@@ -6326,6 +6355,23 @@ fn build_range_checkpoint_runtime(
         tenant: namespace,
         latest_checkpoint_bytes: std::sync::atomic::AtomicU64::new(0),
     }))
+}
+
+fn checkpoint_service_config(
+    config: &CheckpointRuntimeConfig,
+    checkpoint_namespace: String,
+    wal_topic: String,
+) -> std::io::Result<crabka_gres_substrate::CheckpointConfig> {
+    crabka_gres_substrate::CheckpointConfig::new(
+        checkpoint_namespace,
+        wal_topic,
+        config.frames_threshold,
+        config.bytes_threshold,
+        config.part_max_bytes,
+        config.retain_newest,
+        config.poll_interval,
+    )
+    .map_err(|error| std::io::Error::other(format!("checkpoint config: {error}")))
 }
 
 async fn open_live_substrate_runtime(
@@ -6366,7 +6412,13 @@ async fn open_live_substrate_runtime(
         wal_selection.checkpoint_topic,
         wal_selection.checkpoint_namespace,
         checkpoint_store,
-        || GresCheckpointWalPruner::kafka(&config.bootstrap, config.kafka_security.clone()),
+        |timeout_ms| {
+            GresCheckpointWalPruner::kafka(
+                &config.bootstrap,
+                config.kafka_security.clone(),
+                timeout_ms,
+            )
+        },
     )?;
     if let Some(checkpoint) = &checkpoint {
         seed_checkpoint_planner_stats(checkpoint).await?;
@@ -6789,6 +6841,109 @@ mod tests {
                 == crabka_gres_control::RegistryPolicy::new(3, 15_002, 252, 502, 1_048_578)
                     .expect("policy")
         );
+    }
+
+    #[test]
+    fn checkpoint_lifecycle_options_use_validated_defaults() {
+        let args = Cli::try_parse_from(["crabka-gres"])
+            .expect("defaults")
+            .serve;
+
+        assert!(args.checkpoint_frames.is_none());
+        assert!(args.checkpoint_bytes.is_none());
+        assert!(args.checkpoint_part_bytes.is_none());
+        assert!(args.checkpoint_retain.is_none());
+        assert!(args.checkpoint_delete_records_timeout_ms.into_value() == 30_000);
+        assert!(args.checkpoint_poll_interval_ms.into_value() == 1_000);
+        assert!(args.idle_suspend_poll_interval_ms.into_value() == 1_000);
+        assert!(
+            SubstrateRuntimeConfig::from_args(&args)
+                .expect("standalone defaults")
+                .is_none()
+        );
+
+        for option in [
+            "--checkpoint-part-bytes=7",
+            "--checkpoint-retain=0",
+            "--checkpoint-delete-records-timeout-ms=0",
+            "--checkpoint-delete-records-timeout-ms=2147483648",
+            "--checkpoint-poll-interval-ms=0",
+            "--idle-suspend-poll-interval-ms=0",
+        ] {
+            assert!(Cli::try_parse_from(["crabka-gres", option]).is_err());
+        }
+    }
+
+    #[test]
+    fn checkpoint_lifecycle_options_read_environment_and_prefer_cli() {
+        const CHILD: &str = "CRABKA_TEST_GRES_CHECKPOINT_ENV_CHILD";
+        let vars = [
+            ("CRABKA_GRES_CHECKPOINT_FRAMES", "11"),
+            ("CRABKA_GRES_CHECKPOINT_BYTES", "12"),
+            ("CRABKA_GRES_CHECKPOINT_PART_BYTES", "13"),
+            ("CRABKA_GRES_CHECKPOINT_RETAIN", "14"),
+            ("CRABKA_GRES_CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS", "15"),
+            ("CRABKA_GRES_CHECKPOINT_POLL_INTERVAL_MS", "16"),
+            ("CRABKA_GRES_IDLE_SUSPEND_POLL_INTERVAL_MS", "17"),
+        ];
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().expect("test exe"))
+                .args([
+                    "--exact",
+                    "tests::checkpoint_lifecycle_options_read_environment_and_prefer_cli",
+                ])
+                .env(CHILD, "1")
+                .envs(vars)
+                .status()
+                .expect("child test");
+            assert!(status.success());
+            return;
+        }
+
+        let environment = Cli::try_parse_from(["crabka-gres"])
+            .expect("environment checkpoint policy")
+            .serve;
+        assert!(environment.checkpoint_frames.map(NonZeroU64::get) == Some(11));
+        assert!(environment.checkpoint_bytes.map(NonZeroU64::get) == Some(12));
+        assert!(
+            environment
+                .checkpoint_part_bytes
+                .map(CheckpointPartBytes::into_value)
+                == Some(13)
+        );
+        assert!(environment.checkpoint_retain.map(PositiveUsize::into_value) == Some(14));
+        assert!(
+            environment
+                .checkpoint_delete_records_timeout_ms
+                .into_value()
+                == 15
+        );
+        assert!(environment.checkpoint_poll_interval_ms.into_value() == 16);
+        assert!(environment.idle_suspend_poll_interval_ms.into_value() == 17);
+
+        let cli = Cli::try_parse_from([
+            "crabka-gres",
+            "--checkpoint-frames=21",
+            "--checkpoint-bytes=22",
+            "--checkpoint-part-bytes=23",
+            "--checkpoint-retain=24",
+            "--checkpoint-delete-records-timeout-ms=25",
+            "--checkpoint-poll-interval-ms=26",
+            "--idle-suspend-poll-interval-ms=27",
+        ])
+        .expect("CLI checkpoint policy")
+        .serve;
+        assert!(cli.checkpoint_frames.map(NonZeroU64::get) == Some(21));
+        assert!(cli.checkpoint_bytes.map(NonZeroU64::get) == Some(22));
+        assert!(
+            cli.checkpoint_part_bytes
+                .map(CheckpointPartBytes::into_value)
+                == Some(23)
+        );
+        assert!(cli.checkpoint_retain.map(PositiveUsize::into_value) == Some(24));
+        assert!(cli.checkpoint_delete_records_timeout_ms.into_value() == 25);
+        assert!(cli.checkpoint_poll_interval_ms.into_value() == 26);
+        assert!(cli.idle_suspend_poll_interval_ms.into_value() == 27);
     }
 
     #[tokio::test]
@@ -7293,6 +7448,9 @@ mod tests {
             checkpoint_bytes: None,
             checkpoint_part_bytes: None,
             checkpoint_retain: None,
+            checkpoint_delete_records_timeout_ms: PositiveI32::new(30_000).expect("default"),
+            checkpoint_poll_interval_ms: PositiveMillis::new(1_000).expect("default"),
+            idle_suspend_poll_interval_ms: PositiveMillis::new(1_000).expect("default"),
         }
     }
 
@@ -7665,6 +7823,66 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_threshold_defaults_apply_only_after_tenant_hydration() {
+        let mut args = substrate_args();
+        args.checkpoint_store = Some(CheckpointStoreKind::InMemory);
+        let defaults = CheckpointRuntimeConfig::from_args(&args)
+            .expect("checkpoint defaults")
+            .expect("checkpoint config");
+        assert!(defaults.frames_threshold == 10_000);
+        assert!(defaults.bytes_threshold == 67_108_864);
+
+        let mut record = tenant_record();
+        record.checkpoint_frames = Some(77);
+        record.checkpoint_bytes = Some(88);
+        let hydrated = apply_tenant_runtime_defaults(args.clone(), Some(&record))
+            .expect("tenant checkpoint policy");
+        let from_record = CheckpointRuntimeConfig::from_args(&hydrated)
+            .expect("record checkpoint policy")
+            .expect("checkpoint config");
+        assert!(from_record.frames_threshold == 77);
+        assert!(from_record.bytes_threshold == 88);
+
+        args.checkpoint_frames = Some(NonZeroU64::new(7).expect("nonzero"));
+        args.checkpoint_bytes = Some(NonZeroU64::new(8).expect("nonzero"));
+        let explicit =
+            apply_tenant_runtime_defaults(args, Some(&record)).expect("explicit checkpoint policy");
+        let from_explicit = CheckpointRuntimeConfig::from_args(&explicit)
+            .expect("explicit checkpoint policy")
+            .expect("checkpoint config");
+        assert!(from_explicit.frames_threshold == 7);
+        assert!(from_explicit.bytes_threshold == 8);
+    }
+
+    #[test]
+    fn checkpoint_runtime_policy_reaches_service_and_pruner_consumers() {
+        let args = Cli::try_parse_from([
+            "crabka-gres",
+            "--substrate-bootstrap=memory://",
+            "--tenant=tenant-a",
+            "--checkpoint-store=in-memory",
+            "--checkpoint-delete-records-timeout-ms=1234",
+            "--checkpoint-poll-interval-ms=5678",
+        ])
+        .expect("checkpoint policy")
+        .serve;
+        let runtime = SubstrateRuntimeConfig::from_args(&args)
+            .expect("substrate config")
+            .expect("substrate config");
+        let checkpoint = runtime.checkpoints.expect("checkpoint config");
+        let service = checkpoint_service_config(
+            &checkpoint,
+            "tenant-a/r0".to_owned(),
+            "__gres_wal.tenant-a.r0".to_owned(),
+        )
+        .expect("service config");
+        let pruner = GresCheckpointWalPruner::in_memory(checkpoint.delete_records_timeout_ms);
+
+        assert!(service.poll_interval == Duration::from_millis(5_678));
+        assert!(pruner.delete_records_timeout_ms == 1_234);
+    }
+
+    #[test]
     fn cli_help_exposes_only_single_node_serve_surface() {
         use assert2::assert;
 
@@ -7953,21 +8171,6 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_part_bytes_rejects_too_small_values() {
-        let mut args = substrate_args();
-        args.checkpoint_store = Some(CheckpointStoreKind::InMemory);
-        args.checkpoint_part_bytes = Some(NonZeroUsize::new(7).expect("nonzero"));
-
-        let error = SubstrateRuntimeConfig::from_args(&args).expect_err("part too small");
-
-        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-        assert_eq!(
-            error.to_string(),
-            "--checkpoint-part-bytes must be at least 8"
-        );
-    }
-
-    #[test]
     fn cli_parse_requires_tenant_for_substrate_mode() {
         let error = Cli::try_parse_from(["crabka-gres", "--substrate-bootstrap", "memory://"])
             .expect_err("tenant is required");
@@ -8106,6 +8309,8 @@ mod tests {
                 bytes_threshold: 1,
                 part_max_bytes: crabka_gres_substrate::DEFAULT_PART_MAX_BYTES,
                 retain_newest: 2,
+                delete_records_timeout_ms: 30_000,
+                poll_interval: Duration::from_secs(1),
             }),
             kafka_security: None,
             ranges: None,
@@ -8136,7 +8341,7 @@ mod tests {
             wal_selection.checkpoint_topic,
             wal_selection.checkpoint_namespace,
             Some(Arc::clone(&checkpoint_store)),
-            || Ok(GresCheckpointWalPruner::in_memory()),
+            |timeout_ms| Ok(GresCheckpointWalPruner::in_memory(timeout_ms)),
         )
         .expect("checkpoint runtime")
         .expect("checkpoint runtime enabled");
