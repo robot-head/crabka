@@ -186,17 +186,14 @@ mod tests {
     #[test]
     fn parse_match_rules_roundtrip() {
         let rules = parse_match_rules("client_id=svc-.*,client_software_name=java").unwrap();
-        assert_eq!(rules.len(), 2);
+        check!(rules.len() == 2);
         assert!(rules.iter().any(|r| r.selector == MatchSelector::Id));
     }
 
     #[test]
     fn parse_metrics_collapses_star() {
-        assert_eq!(parse_metrics("*"), vec!["*".to_string()]);
-        assert_eq!(parse_metrics(""), Vec::<String>::new());
-        assert_eq!(
-            parse_metrics("a.,b."),
-            vec!["a.".to_string(), "b.".to_string()]
-        );
+        check!(parse_metrics("*") == vec!["*".to_string()]);
+        check!(parse_metrics("") == Vec::<String>::new());
+        check!(parse_metrics("a.,b.") == vec!["a.".to_string(), "b.".to_string()]);
     }
 }
