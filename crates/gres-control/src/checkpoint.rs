@@ -4,6 +4,17 @@ use std::str::FromStr;
 
 use refined_type::rule::{GreaterEqualUsize, GreaterUsize};
 
+/// Default checkpoint trigger threshold in committed WAL frames.
+pub const DEFAULT_CHECKPOINT_FRAMES: u64 = 10_000;
+/// Default checkpoint trigger threshold in committed WAL bytes.
+pub const DEFAULT_CHECKPOINT_BYTES: u64 = 67_108_864;
+/// Default Kafka `DeleteRecords` timeout in milliseconds.
+pub const DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS: i32 = 30_000;
+/// Default checkpoint threshold polling interval in milliseconds.
+pub const DEFAULT_CHECKPOINT_POLL_INTERVAL_MS: u64 = 1_000;
+/// Default idle-suspend polling interval in milliseconds.
+pub const DEFAULT_IDLE_SUSPEND_POLL_INTERVAL_MS: u64 = 1_000;
+
 /// Checkpoint part size large enough to contain the fixed part header.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CheckpointPartBytes(usize);
@@ -69,5 +80,19 @@ impl FromStr for PositiveUsize {
             .parse()
             .map_err(|error: std::num::ParseIntError| error.to_string())
             .and_then(Self::new)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn owns_cross_layer_checkpoint_defaults() {
+        assert_eq!(DEFAULT_CHECKPOINT_FRAMES, 10_000);
+        assert_eq!(DEFAULT_CHECKPOINT_BYTES, 67_108_864);
+        assert_eq!(DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS, 30_000);
+        assert_eq!(DEFAULT_CHECKPOINT_POLL_INTERVAL_MS, 1_000);
+        assert_eq!(DEFAULT_IDLE_SUSPEND_POLL_INTERVAL_MS, 1_000);
     }
 }

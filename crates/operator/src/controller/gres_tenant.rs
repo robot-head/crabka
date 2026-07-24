@@ -7,8 +7,8 @@ use crabka_client_admin::{
     PermissionType, ResourceType, ScramDeletion, ScramUpsertion,
 };
 use crabka_gres_control::{
-    RangeBoundary, RangeLayoutEntry, SqlUser, TenantId, TenantName, TenantRecord, TenantState,
-    tenant_config_topic,
+    DEFAULT_CHECKPOINT_BYTES, DEFAULT_CHECKPOINT_FRAMES, RangeBoundary, RangeLayoutEntry, SqlUser,
+    TenantId, TenantName, TenantRecord, TenantState, tenant_config_topic,
 };
 use crabka_security::{
     ca::{SubjectAltName, generate_cluster_ca, issue_broker_cert},
@@ -64,8 +64,6 @@ const RANGE_PORT: i32 = 7432;
 const RANGE_TLS_DIR: &str = "/etc/crabka/range-tls";
 const RANGE_TLS_IDENTITY_ANNOTATION: &str = "crabka.io/range-tls-identity";
 const RANGE_TLS_HASH_ANNOTATION: &str = "crabka.io/range-tls-hash";
-const DEFAULT_CHECKPOINT_FRAMES: u64 = 10_000;
-const DEFAULT_CHECKPOINT_BYTES: u64 = 67_108_864;
 
 /// Run the controller forever.
 /// # Errors
@@ -2506,9 +2504,24 @@ mod tests {
             idle_seconds: None,
         };
         for (base, override_, expected_frames, expected_bytes) in [
-            (None, None, 10_000, 67_108_864),
-            (Some(defaults(Some(11), None)), None, 11, 67_108_864),
-            (Some(defaults(None, Some(12))), None, 10_000, 12),
+            (
+                None,
+                None,
+                DEFAULT_CHECKPOINT_FRAMES,
+                DEFAULT_CHECKPOINT_BYTES,
+            ),
+            (
+                Some(defaults(Some(11), None)),
+                None,
+                11,
+                DEFAULT_CHECKPOINT_BYTES,
+            ),
+            (
+                Some(defaults(None, Some(12))),
+                None,
+                DEFAULT_CHECKPOINT_FRAMES,
+                12,
+            ),
             (
                 Some(defaults(Some(11), Some(12))),
                 Some(defaults(Some(21), None)),
