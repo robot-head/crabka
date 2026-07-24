@@ -481,6 +481,56 @@ async fn multi_range_tenant_publishes_range_services_and_becomes_ready_after_all
 }
 
 #[tokio::test]
+async fn configured_pgdog_grace_reaches_active_tenant_status() {
+    let mut rules = multi_range_reconcile_rules();
+    let mut gres = gres_body("fleet", "ns");
+    gres["spec"]["pgdog"]["directBootstrapGraceMs"] = serde_json::json!(7_000);
+    rules
+        .iter_mut()
+        .find(|rule| rule.path_substr == "/greses/fleet")
+        .expect("Gres rule")
+        .response = json_response(200, &gres);
+    let state = MockState::new(rules);
+    let ctx = fixture_ctx(mock_client(&state, "ns"), "ns");
+    ctx.insert_admin_client_for_test(
+        "demo",
+        Arc::new(tokio::sync::Mutex::new(FakeAdminClient::new())),
+    )
+    .await;
+    ctx.insert_gres_control_for_test("ns", "demo", Arc::new(FakeGresControl::default()))
+        .await;
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+
+    reconcile(Arc::new(multi_range_tenant()), Arc::new(ctx))
+        .await
+        .unwrap();
+
+    let after = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let observed = state.take_observed();
+    let status = observed
+        .iter()
+        .find(|request| {
+            request
+                .uri()
+                .path()
+                .contains("/grestenants/tenant-a/status")
+        })
+        .expect("status patch");
+    let body: serde_json::Value = serde_json::from_slice(status.body()).unwrap();
+    let grace = body["status"]["pgdogCredentialGraceUntilUnixMs"]
+        .as_u64()
+        .expect("grace deadline");
+    assert!(u128::from(grace) >= before + 7_000);
+    assert!(u128::from(grace) <= after + 7_000);
+}
+
+#[tokio::test]
 async fn deleting_multi_range_tenant_cleans_up_and_removes_its_finalizer() {
     let mut deleting_tenant = multi_range_tenant();
     deleting_tenant.metadata.deletion_timestamp = Some(Time(

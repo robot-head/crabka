@@ -21,8 +21,8 @@ pub use ca::{CertificateAuthority, CertificateAuthorityStatus};
 pub use gres::{
     Gres, GresActivatorSpec, GresBalancerGoal, GresBalancerGoals, GresBalancerOperationKind,
     GresBalancerPlanSnapshot, GresBalancerRegistryLayout, GresBalancerSpec, GresBalancerStatus,
-    GresBalancerThresholds, GresSpec, GresStatus, PgdogSpec, SecretKeyRef, SecretRef,
-    TenantDefaults,
+    GresBalancerThresholds, GresSpec, GresStatus, PgdogPoolerModeSpec, PgdogSpec, SecretKeyRef,
+    SecretRef, TenantDefaults,
 };
 pub use gres_tenant::{
     GresTenant, GresTenantRangeKey, GresTenantRangeSpec, GresTenantSpec, GresTenantStatus,

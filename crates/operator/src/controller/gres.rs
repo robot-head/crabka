@@ -3,8 +3,8 @@
 use std::{collections::BTreeMap, fmt::Write as _, sync::Arc, time::Duration};
 
 use crabka_gres_control::{
-    PgdogConnectAttempts, PgdogGeneral, PgdogRenderInput, PgdogTimeouts, PgdogUser, TenantEndpoint,
-    TenantName, TenantState, render_pgdog_toml, render_users_toml,
+    PgdogGeneral, PgdogRenderInput, PgdogTimeouts, PgdogUser, TenantEndpoint, TenantName,
+    TenantState, render_pgdog_toml, render_users_toml,
 };
 use futures::StreamExt as _;
 use k8s_openapi::{
@@ -33,7 +33,7 @@ use crate::{
         gres_tenant::COMPUTE_PORT,
         topic::internal_listener_bootstrap,
     },
-    crd::{Gres, GresTenant, Kafka},
+    crd::{Gres, GresTenant, Kafka, gres::EffectivePgdogPolicy},
 };
 
 const APP_NAME: &str = "crabka-pgdog";
@@ -51,7 +51,6 @@ const DEFAULT_ACTIVATOR_READINESS_PERIOD_SECONDS: i32 = 5;
 const RELOAD_RETRY_LIMIT: usize = 3;
 const RELOAD_REQUEUE: Duration = Duration::from_secs(15);
 const PGDOG_ADMIN_OPERATION_TIMEOUT: Duration = Duration::from_secs(20);
-const PGDOG_DIRECT_BOOTSTRAP_MS: u64 = 4_000;
 
 /// Run the controller forever.
 /// # Errors
@@ -89,6 +88,11 @@ pub async fn reconcile(obj: Arc<Gres>, ctx: Arc<Context>) -> Result<Action, Reco
 }
 
 async fn reconcile_inner(obj: Arc<Gres>, ctx: Arc<Context>) -> Result<Action, ReconcileError> {
+    let pgdog_policy = obj
+        .spec
+        .pgdog
+        .effective_policy()
+        .map_err(ReconcileError::Malformed)?;
     validate_activator_config(&obj.spec)?;
     let activator_cold_start_timeout_ms = obj
         .spec
@@ -98,7 +102,7 @@ async fn reconcile_inner(obj: Arc<Gres>, ctx: Arc<Context>) -> Result<Action, Re
         .unwrap_or(DEFAULT_ACTIVATOR_COLD_START_TIMEOUT_MS);
     let cold_start_ceiling = PgdogTimeouts::cold_start_ceiling_for_attempt_timeout(
         Duration::from_millis(activator_cold_start_timeout_ms),
-        PgdogConnectAttempts::new(3).expect("the current PgDog connect attempt count is positive"),
+        pgdog_policy.connect_attempts,
     )
     .map_err(|error| {
         ReconcileError::Malformed(format!("spec.activator.coldStartTimeoutMs: {error}"))
@@ -154,9 +158,12 @@ async fn reconcile_inner(obj: Arc<Gres>, ctx: Arc<Context>) -> Result<Action, Re
             .as_ref()
             .and_then(|status| status.pgdog_credential_grace_until_unix_ms);
         let now = current_unix_millis();
-        let needs_bootstrap_credential = endpoint.state != TenantState::Active
-            || grace_deadline
-                .is_some_and(|deadline| now < deadline.saturating_add(PGDOG_DIRECT_BOOTSTRAP_MS));
+        let needs_bootstrap_credential = needs_bootstrap_credential(
+            endpoint.state,
+            grace_deadline,
+            now,
+            pgdog_policy.direct_bootstrap_grace.into_value(),
+        );
         let password = if needs_bootstrap_credential {
             let reference = &tenant.spec.password_secret_ref;
             let secret = secret_api.get(&reference.name).await?;
@@ -186,47 +193,14 @@ async fn reconcile_inner(obj: Arc<Gres>, ctx: Arc<Context>) -> Result<Action, Re
         });
     }
 
-    let render_input = PgdogRenderInput {
-        tenants: &endpoints,
-        activator: Some((activator_service_host(&name, &ns), ACTIVATOR_PORT_U16)),
-        general: PgdogGeneral {
-            listen_port: u16::try_from(obj.spec.pgdog.listen_port).unwrap_or(6_432),
-            tls_cert_path: obj
-                .spec
-                .pgdog
-                .tls_secret_ref
-                .as_ref()
-                .map(|_| "/etc/pgdog/tls/tls.crt".into()),
-            tls_key_path: obj
-                .spec
-                .pgdog
-                .tls_secret_ref
-                .as_ref()
-                .map(|_| "/etc/pgdog/tls/tls.key".into()),
-            tls_client_ca_path: obj
-                .spec
-                .pgdog
-                .tls_secret_ref
-                .as_ref()
-                .map(|_| "/etc/pgdog/tls/ca.crt".into()),
-            idle_timeout: if obj
-                .spec
-                .defaults
-                .as_ref()
-                .and_then(|defaults| defaults.idle_seconds)
-                .is_some()
-            {
-                Duration::from_secs(1)
-            } else {
-                PgdogGeneral::default().idle_timeout
-            },
-            cold_start_ceiling,
-            users,
-            ..Default::default()
-        },
-    };
-    let pgdog_toml = render_pgdog_toml(&render_input)?;
-    let users_toml = render_users_toml(&render_input)?;
+    let (pgdog_toml, users_toml) = render_pgdog_files(
+        &obj,
+        &pgdog_policy,
+        &tenants.items,
+        &endpoints,
+        cold_start_ceiling,
+        users,
+    )?;
     let hash = config_hash(&pgdog_toml, &users_toml);
     let rollout_hash = config_hash(&pgdog_toml, "");
 
@@ -256,7 +230,7 @@ async fn reconcile_inner(obj: Arc<Gres>, ctx: Arc<Context>) -> Result<Action, Re
     apply_object(
         &deployment_api,
         &deployment_name(&name),
-        &render_deployment(&obj, &image, &rollout_hash)?,
+        &render_deployment(&obj, &image, &rollout_hash, &pgdog_policy)?,
     )
     .await?;
 
@@ -293,6 +267,7 @@ async fn reconcile_inner(obj: Arc<Gres>, ctx: Arc<Context>) -> Result<Action, Re
                 .and_then(|status| status.pgdog_credential_grace_until_unix_ms)
         }),
         now,
+        pgdog_policy.direct_bootstrap_grace.into_value(),
     );
     Ok(Action::requeue(requeue))
 }
@@ -337,13 +312,90 @@ fn validate_activator_config(spec: &crate::crd::GresSpec) -> Result<(), Reconcil
     Ok(())
 }
 
-fn next_pgdog_transition_requeue(grace_deadlines: impl Iterator<Item = u64>, now: u64) -> Duration {
+fn next_pgdog_transition_requeue(
+    grace_deadlines: impl Iterator<Item = u64>,
+    now: u64,
+    direct_bootstrap_grace_ms: u64,
+) -> Duration {
     grace_deadlines
-        .flat_map(|deadline| [deadline, deadline.saturating_add(PGDOG_DIRECT_BOOTSTRAP_MS)])
+        .flat_map(|deadline| [deadline, deadline.saturating_add(direct_bootstrap_grace_ms)])
         .filter(|deadline| *deadline > now)
         .map(|deadline| Duration::from_millis(deadline.saturating_sub(now).max(1)))
         .min()
         .unwrap_or(Duration::from_mins(1))
+}
+
+fn needs_bootstrap_credential(
+    state: TenantState,
+    grace_deadline: Option<u64>,
+    now: u64,
+    direct_bootstrap_grace_ms: u64,
+) -> bool {
+    state != TenantState::Active
+        || grace_deadline
+            .is_some_and(|deadline| now < deadline.saturating_add(direct_bootstrap_grace_ms))
+}
+
+fn uses_suspension_idle_timeout(
+    tenants: &[GresTenant],
+    gres_name: &str,
+    defaults: Option<&crate::crd::TenantDefaults>,
+) -> bool {
+    tenants
+        .iter()
+        .filter(|tenant| tenant.spec.gres == gres_name)
+        .any(|tenant| {
+            tenant
+                .spec
+                .overrides
+                .as_ref()
+                .and_then(|overrides| overrides.idle_seconds)
+                .or_else(|| defaults.and_then(|defaults| defaults.idle_seconds))
+                .is_some_and(|idle_seconds| idle_seconds > 0)
+        })
+}
+
+fn render_pgdog_files(
+    obj: &Gres,
+    policy: &EffectivePgdogPolicy,
+    tenants: &[GresTenant],
+    endpoints: &[TenantEndpoint],
+    cold_start_ceiling: Duration,
+    users: Vec<PgdogUser>,
+) -> Result<(String, String), ReconcileError> {
+    let tls = obj.spec.pgdog.tls_secret_ref.as_ref();
+    let input = PgdogRenderInput {
+        tenants: endpoints,
+        activator: Some((
+            activator_service_host(
+                &obj.name_any(),
+                &obj.namespace().unwrap_or_else(|| "default".into()),
+            ),
+            ACTIVATOR_PORT_U16,
+        )),
+        general: PgdogGeneral {
+            listen_port: policy.listen_port,
+            tls_cert_path: tls.map(|_| "/etc/pgdog/tls/tls.crt".into()),
+            tls_key_path: tls.map(|_| "/etc/pgdog/tls/tls.key".into()),
+            tls_client_ca_path: tls.map(|_| "/etc/pgdog/tls/ca.crt".into()),
+            pooler_mode: policy.pooler_mode,
+            connect_attempts: policy.connect_attempts,
+            idle_timeout: if uses_suspension_idle_timeout(
+                tenants,
+                &obj.name_any(),
+                obj.spec.defaults.as_ref(),
+            ) {
+                Duration::from_millis(policy.suspension_idle_timeout.into_value())
+            } else {
+                Duration::from_millis(policy.idle_timeout.into_value())
+            },
+            server_lifetime: Duration::from_millis(policy.server_lifetime.into_value()),
+            cold_start_ceiling,
+            users,
+            ..Default::default()
+        },
+    };
+    Ok((render_pgdog_toml(&input)?, render_users_toml(&input)?))
 }
 
 fn current_unix_millis() -> u64 {
@@ -746,7 +798,12 @@ fn render_activator_service(obj: &Gres) -> Result<Service, ReconcileError> {
     }))?)
 }
 
-fn render_deployment(obj: &Gres, image: &str, hash: &str) -> Result<Deployment, ReconcileError> {
+fn render_deployment(
+    obj: &Gres,
+    image: &str,
+    hash: &str,
+    pgdog_policy: &EffectivePgdogPolicy,
+) -> Result<Deployment, ReconcileError> {
     let selector = selector_labels(obj);
     let name = obj.name_any();
     let mut volumes = vec![
@@ -781,7 +838,7 @@ fn render_deployment(obj: &Gres, image: &str, hash: &str) -> Result<Deployment, 
                         }],
                         "ports": [{ "name": "postgres", "containerPort": obj.spec.pgdog.listen_port, "protocol": "TCP" }],
                         "volumeMounts": mounts,
-                        "readinessProbe": { "tcpSocket": { "port": obj.spec.pgdog.listen_port }, "periodSeconds": 5 }
+                        "readinessProbe": { "tcpSocket": { "port": obj.spec.pgdog.listen_port }, "periodSeconds": pgdog_policy.readiness_probe_period_seconds }
                     }]
                 }
             }
@@ -1077,6 +1134,13 @@ mod tests {
                         name: "admin".into(),
                         key: "password".into(),
                     },
+                    pooler_mode: None,
+                    connect_attempts: None,
+                    idle_timeout_ms: None,
+                    suspension_idle_timeout_ms: None,
+                    server_lifetime_ms: None,
+                    readiness_probe_period_seconds: None,
+                    direct_bootstrap_grace_ms: None,
                 },
                 activator: None,
                 defaults: None,
@@ -1178,7 +1242,9 @@ mod tests {
 
     #[test]
     fn pgdog_workload_invokes_the_pinned_image_binary_and_run_subcommand() {
-        let deployment = render_deployment(&gres(), "ghcr.io/pgdogdev/pgdog:0.1.47", "hash")
+        let obj = gres();
+        let policy = obj.spec.pgdog.effective_policy().expect("PgDog policy");
+        let deployment = render_deployment(&obj, "ghcr.io/pgdogdev/pgdog:0.1.47", "hash", &policy)
             .expect("render PgDog deployment");
         let container = &deployment
             .spec
@@ -1381,9 +1447,33 @@ mod tests {
         let grace_deadline = 10_000;
         let now = grace_deadline + 1_000;
 
-        assert_eq!(
-            next_pgdog_transition_requeue([grace_deadline].into_iter(), now),
-            Duration::from_millis(PGDOG_DIRECT_BOOTSTRAP_MS - 1_000)
+        assert!(
+            next_pgdog_transition_requeue([grace_deadline].into_iter(), now, 7_000)
+                == Duration::from_secs(6)
         );
+    }
+
+    #[test]
+    fn configured_pgdog_grace_drives_credential_retention_and_expiry() {
+        let deadline = Some(10_000);
+
+        assert!(needs_bootstrap_credential(
+            TenantState::Active,
+            deadline,
+            16_999,
+            7_000
+        ));
+        assert!(!needs_bootstrap_credential(
+            TenantState::Active,
+            deadline,
+            17_000,
+            7_000
+        ));
+        assert!(needs_bootstrap_credential(
+            TenantState::Suspended,
+            None,
+            17_000,
+            7_000
+        ));
     }
 }

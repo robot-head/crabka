@@ -2,7 +2,9 @@
 //! cluster. Tenant CRs point at a `Gres` fleet by name; the controller that
 //! renders `PgDog` is added in a later batch.
 
+use crabka_gres_control::{PgdogConnectAttempts, PgdogPoolerMode, PositiveMillis};
 use kube::CustomResource;
+use refined_type::rule::GreaterI32;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -233,6 +235,101 @@ pub struct PgdogSpec {
 
     /// Secret key reference for `PgDog` admin credentials.
     pub admin_secret_ref: SecretKeyRef,
+
+    /// Fleet-wide pooling mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pooler_mode: Option<PgdogPoolerModeSpec>,
+
+    /// Number of backend connection attempts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 65_535))]
+    pub connect_attempts: Option<u16>,
+
+    /// Idle pooled-server disconnect window in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub idle_timeout_ms: Option<u64>,
+
+    /// Idle timeout used while at least one tenant can suspend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub suspension_idle_timeout_ms: Option<u64>,
+
+    /// Maximum lifetime for pooled backend connections in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub server_lifetime_ms: Option<u64>,
+
+    /// `PgDog` readiness probe period in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub readiness_probe_period_seconds: Option<i32>,
+
+    /// Direct-route credential retention grace in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub direct_bootstrap_grace_ms: Option<u64>,
+}
+
+/// Pooling modes accepted by the Gres CRD.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PgdogPoolerModeSpec {
+    /// Reuse backend connections across transaction boundaries.
+    Transaction,
+    /// Bind one backend connection to one client session.
+    Session,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct EffectivePgdogPolicy {
+    pub(crate) listen_port: u16,
+    pub(crate) pooler_mode: PgdogPoolerMode,
+    pub(crate) connect_attempts: PgdogConnectAttempts,
+    pub(crate) idle_timeout: PositiveMillis,
+    pub(crate) suspension_idle_timeout: PositiveMillis,
+    pub(crate) server_lifetime: PositiveMillis,
+    pub(crate) readiness_probe_period_seconds: i32,
+    pub(crate) direct_bootstrap_grace: PositiveMillis,
+}
+
+impl PgdogSpec {
+    pub(crate) fn effective_policy(&self) -> Result<EffectivePgdogPolicy, String> {
+        let listen_port = u16::try_from(self.listen_port)
+            .ok()
+            .filter(|port| *port > 0)
+            .ok_or_else(|| "spec.pgdog.listenPort: must be in 1..=65535".to_string())?;
+        let pooler_mode = match self.pooler_mode.unwrap_or(PgdogPoolerModeSpec::Transaction) {
+            PgdogPoolerModeSpec::Transaction => PgdogPoolerMode::Transaction,
+            PgdogPoolerModeSpec::Session => PgdogPoolerMode::Session,
+        };
+        let connect_attempts = PgdogConnectAttempts::new(self.connect_attempts.unwrap_or(3))
+            .map_err(|error| format!("spec.pgdog.connectAttempts: {error}"))?;
+        let idle_timeout = PositiveMillis::new(self.idle_timeout_ms.unwrap_or(60_000))
+            .map_err(|error| format!("spec.pgdog.idleTimeoutMs: {error}"))?;
+        let suspension_idle_timeout =
+            PositiveMillis::new(self.suspension_idle_timeout_ms.unwrap_or(1_000))
+                .map_err(|error| format!("spec.pgdog.suspensionIdleTimeoutMs: {error}"))?;
+        let server_lifetime = PositiveMillis::new(self.server_lifetime_ms.unwrap_or(300_000))
+            .map_err(|error| format!("spec.pgdog.serverLifetimeMs: {error}"))?;
+        let readiness_probe_period_seconds =
+            GreaterI32::<0>::new(self.readiness_probe_period_seconds.unwrap_or(5))
+                .map_err(|error| format!("spec.pgdog.readinessProbePeriodSeconds: {error}"))?
+                .into_value();
+        let direct_bootstrap_grace =
+            PositiveMillis::new(self.direct_bootstrap_grace_ms.unwrap_or(4_000))
+                .map_err(|error| format!("spec.pgdog.directBootstrapGraceMs: {error}"))?;
+        Ok(EffectivePgdogPolicy {
+            listen_port,
+            pooler_mode,
+            connect_attempts,
+            idle_timeout,
+            suspension_idle_timeout,
+            server_lifetime,
+            readiness_probe_period_seconds,
+            direct_bootstrap_grace,
+        })
+    }
 }
 
 /// Reference to a Kubernetes Secret in the same namespace.
@@ -382,6 +479,13 @@ mod tests {
                     name: "pgdog-admin".into(),
                     key: "password".into(),
                 },
+                pooler_mode: None,
+                connect_attempts: None,
+                idle_timeout_ms: None,
+                suspension_idle_timeout_ms: None,
+                server_lifetime_ms: None,
+                readiness_probe_period_seconds: None,
+                direct_bootstrap_grace_ms: None,
             },
             activator: Some(GresActivatorSpec {
                 image: Some("example.test/activator:v2".into()),
@@ -446,6 +550,90 @@ mod tests {
             );
         }
         assert!(activator["properties"]["registryReplicationFactor"].is_null());
+    }
+
+    #[test]
+    fn pgdog_runtime_policy_round_trips_through_json_and_yaml() {
+        let policy = PgdogSpec {
+            image: None,
+            replicas: 2,
+            listen_port: 6_432,
+            tls_secret_ref: None,
+            admin_secret_ref: SecretKeyRef {
+                name: "pgdog-admin".into(),
+                key: "password".into(),
+            },
+            pooler_mode: Some(PgdogPoolerModeSpec::Session),
+            connect_attempts: Some(7),
+            idle_timeout_ms: Some(61_000),
+            suspension_idle_timeout_ms: Some(1_500),
+            server_lifetime_ms: Some(301_000),
+            readiness_probe_period_seconds: Some(6),
+            direct_bootstrap_grace_ms: Some(4_500),
+        };
+
+        let json = serde_json::to_string(&policy).expect("serialize JSON");
+        let yaml = serde_yaml::to_string(&policy).expect("serialize YAML");
+
+        assert!(json.contains("\"poolerMode\":\"session\""), "got: {json}");
+        assert!(json.contains("\"connectAttempts\":7"), "got: {json}");
+        assert!(yaml.contains("directBootstrapGraceMs: 4500"), "got: {yaml}");
+        assert!(serde_json::from_str::<PgdogSpec>(&json).expect("parse JSON") == policy);
+        assert!(serde_yaml::from_str::<PgdogSpec>(&yaml).expect("parse YAML") == policy);
+    }
+
+    #[test]
+    fn absent_pgdog_runtime_policy_uses_exact_defaults() {
+        let policy = PgdogSpec {
+            image: None,
+            replicas: 1,
+            listen_port: 6_432,
+            tls_secret_ref: None,
+            admin_secret_ref: SecretKeyRef {
+                name: "pgdog-admin".into(),
+                key: "password".into(),
+            },
+            pooler_mode: None,
+            connect_attempts: None,
+            idle_timeout_ms: None,
+            suspension_idle_timeout_ms: None,
+            server_lifetime_ms: None,
+            readiness_probe_period_seconds: None,
+            direct_bootstrap_grace_ms: None,
+        }
+        .effective_policy()
+        .expect("default policy");
+
+        assert!(policy.pooler_mode == crabka_gres_control::PgdogPoolerMode::Transaction);
+        assert!(policy.connect_attempts.into_value() == 3);
+        assert!(policy.idle_timeout.into_value() == 60_000);
+        assert!(policy.suspension_idle_timeout.into_value() == 1_000);
+        assert!(policy.server_lifetime.into_value() == 300_000);
+        assert!(policy.readiness_probe_period_seconds == 5);
+        assert!(policy.direct_bootstrap_grace.into_value() == 4_000);
+    }
+
+    #[test]
+    fn pgdog_runtime_policy_schema_has_exact_bounds_and_enum() {
+        let crd = serde_json::to_value(Gres::crd()).expect("serialize Gres CRD");
+        let pgdog = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
+            ["properties"]["pgdog"]["properties"];
+
+        assert!(pgdog["poolerMode"]["enum"] == serde_json::json!(["transaction", "session"]));
+        assert!(pgdog["connectAttempts"]["minimum"].as_f64() == Some(1.0));
+        assert!(pgdog["connectAttempts"]["maximum"].as_f64() == Some(65_535.0));
+        for field in [
+            "idleTimeoutMs",
+            "suspensionIdleTimeoutMs",
+            "serverLifetimeMs",
+            "readinessProbePeriodSeconds",
+            "directBootstrapGraceMs",
+        ] {
+            assert!(
+                pgdog[field]["minimum"].as_f64() == Some(1.0),
+                "missing minimum for {field}: {pgdog}"
+            );
+        }
     }
 
     #[test]
