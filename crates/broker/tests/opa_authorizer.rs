@@ -26,7 +26,7 @@
 //! tests (the listener bring-up works on Windows, but keeping the gate
 //! uniform avoids one-off CI matrix surprises).
 
-use std::{io, net::SocketAddr};
+use std::{io, net::SocketAddr, time::Duration};
 
 use assert2::assert;
 use bytes::{Buf, BufMut, BytesMut};
@@ -131,6 +131,7 @@ fn start_broker_with_opa_authorizer(
         // cache miss after `tokio::time::sleep(Duration::from_millis(5))`.
         /* expire_after_ms */
         1,
+        Duration::from_secs(5),
     )
     .expect("OpaAuthorizer::new must succeed inside a tokio runtime");
     cfg.authorizer = std::sync::Arc::new(opa);
