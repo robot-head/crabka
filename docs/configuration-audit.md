@@ -864,6 +864,15 @@ the CRD's `minimum: 1`, and the effective-policy conversion all reject zero;
 both Clap requirements and programmatic validation reject explicitly setting
 the value without `--ranges`.
 
+Final review found that the programmatic guard originally ran only while
+constructing `SubstrateRuntimeConfig`, after the normal serve path had bound
+its listener and after the injected-listener path could begin tenant/network
+work. Remediation commit `e9e4e07c` extracted
+`validate_range0_follower_poll_interval` and calls it before I/O in both serve
+entry points as well as in `SubstrateRuntimeConfig::from_args`. Its rejection
+test now scrubs the host environment in child processes and separately proves
+that an environment value without `--ranges` is rejected.
+
 The complete live consumer path is:
 
 ```text
@@ -899,26 +908,31 @@ generic WAL recovery fetch/retry policy, beginning with `FETCH_MAX_WAIT_MS` and
 
 ### Gres Range-0 Follower Poll Evidence
 
-On 2026-07-24 `tools/audit-runtime-values.sh` reported 5,938 repository
-matches. The exact focused search reported 85 references: six shared-default
-owner/import/fallback references, 23 live configured parser/schema/render/
-runtime-consumer references, five fixed range-0 topology/bootstrap references,
-51 test/harness references, and no next-owner reference in the focused path
-set. The four exact 100 ms literals in that result are one shared production
-default and three test/harness waits; there is no unexplained fixed production
-100 ms follower sleep.
+On 2026-07-24 `tools/audit-runtime-values.sh` reported 5,940 repository
+matches. The exact focused search reported 95 references: six shared-default
+owner/import/fallback references, 27 live configured parser/validation/schema/
+render/runtime-consumer references, five fixed range-0 topology/bootstrap
+references, 57 test/harness references, and no next-owner reference in the
+focused path set. The four exact 100 ms literals in that result are one shared
+production default and three test/harness waits; there is no unexplained fixed
+production 100 ms follower sleep.
 
 - `cargo test -p crabka-gres-control --no-fail-fast`: 80 passed.
-- `cargo test -p crabka-gres --no-fail-fast`: 196 top-level tests passed; the
-  parser tests also ran ten successful child-process invocations.
+- After final-review remediation,
+  `cargo test -p crabka-gres --no-fail-fast`: 125 library, 25 runtime, 17
+  topology process-nemesis, and 30 topology split-crash tests passed, for 197
+  top-level tests with no failures.
 - `cargo test -p crabka-operator --no-fail-fast`: 931 test and doc-test
   results passed.
+- Combined control, Gres, and operator evidence is 1,208 top-level test and
+  doc-test results passed.
 - Strict all-target/all-feature Clippy with `-D warnings`, `cargo fmt --check`,
   and `git diff --check` passed.
 - Gres help displayed the exact CLI/environment pair.
 - Fresh operator generation produced nine CRDs, and `diff -ru` against
   `deploy/crds` was empty.
 - Focused tests proved CLI-over-environment precedence, default selection,
-  zero and explicit non-multirange rejection, configured timer wake,
-  notification wake preservation, multi-range argument rendering, and
-  single-range omission.
+  zero and explicit non-multirange rejection, pre-I/O validation,
+  environment-hermetic rejection including environment-without-ranges,
+  configured timer wake, notification wake preservation, multi-range argument
+  rendering, and single-range omission.
