@@ -57,6 +57,10 @@ pub struct KafkaGrpcGatewaySpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_registry: Option<GatewaySchemaRegistrySpec>,
 
+    /// Kubernetes readiness and liveness probe timing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health_checks: Option<GatewayHealthChecks>,
+
     /// TLS serving configuration. When absent, TLS defaults apply
     /// (`clientAuth: required`, `validityDays: 365`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -163,6 +167,24 @@ pub struct GatewaySchemaRegistrySpec {
     pub latest_cache_ttl_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frame_raw: Option<bool>,
+}
+
+/// Kubernetes readiness and liveness probe timing.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GatewayHealthChecks {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0))]
+    pub readiness_initial_delay_seconds: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub readiness_period_seconds: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0))]
+    pub liveness_initial_delay_seconds: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub liveness_period_seconds: Option<i32>,
 }
 
 /// TLS serving configuration for the gateway's gRPC / webhook / metrics
@@ -466,6 +488,7 @@ mod tests {
                 membership_topic: None,
                 tuning: None,
                 schema_registry: None,
+                health_checks: None,
                 tls: None,
                 authz: None,
                 webhooks: vec![],
@@ -494,6 +517,12 @@ mod tests {
                 membership_topic: None,
                 tuning: None,
                 schema_registry: None,
+                health_checks: Some(GatewayHealthChecks {
+                    readiness_initial_delay_seconds: Some(3),
+                    readiness_period_seconds: Some(6),
+                    liveness_initial_delay_seconds: Some(11),
+                    liveness_period_seconds: Some(12),
+                }),
                 tls: Some(GatewayTlsSpec {
                     client_auth: Some("required".into()),
                     validity_days: Some(365),
@@ -580,6 +609,7 @@ mod tests {
             membership_topic: None,
             tuning: None,
             schema_registry: None,
+            health_checks: None,
             tls: None,
             authz: None,
             webhooks: vec![],

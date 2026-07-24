@@ -52,6 +52,7 @@ fn gw_cr(name: &str) -> KafkaGrpcGateway {
             membership_topic: None,
             tuning: None,
             schema_registry: None,
+            health_checks: None,
             tls: None,
             authz: None,
             webhooks: vec![],
@@ -92,6 +93,12 @@ fn runtime_crd_surface_round_trips() {
                 "latestCacheTtlMs": 5001,
                 "frameRaw": true
             },
+            "healthChecks": {
+                "readinessInitialDelaySeconds": 3,
+                "readinessPeriodSeconds": 6,
+                "livenessInitialDelaySeconds": 11,
+                "livenessPeriodSeconds": 12
+            },
             "dedup": { "ownershipGroup": "owners-custom" },
             "tls": { "reloadIntervalSecs": 31 },
             "authz": {
@@ -119,6 +126,7 @@ fn runtime_crd_surface_round_trips() {
         "/membershipTopic",
         "/tuning/internalTopicReplicationFactor",
         "/schemaRegistry/latestCacheTtlMs",
+        "/healthChecks/readinessPeriodSeconds",
         "/dedup/ownershipGroup",
         "/tls/reloadIntervalSecs",
         "/authz/bearer/allowableClockSkewMs",
@@ -148,6 +156,8 @@ async fn runtime_invalid_values_stop_before_child_rendering() {
             "maxBackoffMs": 1
         }]}),
         serde_json::json!({"schemaRegistry": {"url": "not a URL"}}),
+        serde_json::json!({"healthChecks": {"readinessInitialDelaySeconds": -1}}),
+        serde_json::json!({"healthChecks": {"livenessPeriodSeconds": 0}}),
         serde_json::json!({"webhooks": [{
             "name": "w",
             "targetTopic": "t",
