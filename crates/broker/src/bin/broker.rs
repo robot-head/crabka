@@ -16,13 +16,7 @@ use std::{
 use clap::Parser;
 use crabka_broker::{
     BootstrapMode, Broker, BrokerConfig,
-    config::{
-        DEFAULT_CONTROLLED_SHUTDOWN_DRAIN_TIMEOUT_MS, DEFAULT_LEADER_IMBALANCE_CHECK_INTERVAL_SECS,
-        DEFAULT_MAX_INCREMENTAL_FETCH_SESSION_CACHE_SLOTS,
-        DEFAULT_METADATA_MAX_BYTES_BETWEEN_SNAPSHOTS, DEFAULT_METADATA_MAX_SNAPSHOT_INTERVAL_MS,
-        DEFAULT_METADATA_SNAPSHOT_INTERVAL_RECORDS, DEFAULT_OBSERVER_LAG_BOUND,
-        DEFAULT_TLS_RELOAD_INTERVAL_MS, DEFAULT_TXN_ABORT_CLEANUP_INTERVAL_MS,
-    },
+    config::DEFAULT_CONTROLLED_SHUTDOWN_DRAIN_TIMEOUT_MS,
     config_value::{
         Percentage, PositiveCount, PositiveI32, PositiveI64, PositiveMillis, parse_percentage,
         parse_positive_count, parse_positive_i32, parse_positive_i64, parse_positive_millis,
@@ -70,203 +64,398 @@ fn parse_streams_assignor(
 
 #[derive(Debug, clap::Args)]
 struct RuntimeArgs {
-    #[arg(long, env = "CRABKA_STARTUP_LEADER_WAIT_TIMEOUT_MS", default_value = "120000", value_parser = parse_positive_millis)]
-    startup_leader_wait_timeout_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_SELF_REGISTRATION_BACKOFF_MIN_MS", default_value = "100", value_parser = parse_positive_millis)]
-    self_registration_backoff_min_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_SELF_REGISTRATION_BACKOFF_MAX_MS", default_value = "5000", value_parser = parse_positive_millis)]
-    self_registration_backoff_max_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_OBSERVER_POLL_INTERVAL_MS", default_value = "100", value_parser = parse_positive_millis)]
-    observer_poll_interval_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_AUDIT_SPOOL_REPLAY_INTERVAL_MS", default_value = "2000", value_parser = parse_positive_millis)]
-    audit_spool_replay_interval_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_AUDIT_STATS_POLL_INTERVAL_MS", default_value = "1000", value_parser = parse_positive_millis)]
-    audit_stats_poll_interval_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_AUDIT_PARTITION_WAIT_TIMEOUT_MS", default_value = "10000", value_parser = parse_positive_millis)]
-    audit_partition_wait_timeout_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_LIVENESS_TICK_INTERVAL_MS", default_value = "1000", value_parser = parse_positive_millis)]
-    liveness_tick_interval_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_GAUGE_POLL_INTERVAL_MS", default_value = "1000", value_parser = parse_positive_millis)]
-    gauge_poll_interval_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_ISR_SCAN_INTERVAL_MS", default_value = "1000", value_parser = parse_positive_millis)]
-    isr_scan_interval_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_CLEANER_INTERVAL_MS", default_value = "30000", value_parser = parse_positive_millis)]
-    cleaner_interval_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_FUTURE_LOG_MOVE_RETRY_BACKOFF_MS", default_value = "50", value_parser = parse_positive_millis)]
-    future_log_move_retry_backoff_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_CLIENT_METRICS_EVICTION_TICK_MS", default_value = "60000", value_parser = parse_positive_millis)]
-    client_metrics_eviction_tick_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_CLIENT_METRICS_STALE_FLOOR_MS", default_value = "600000", value_parser = parse_positive_millis)]
-    client_metrics_stale_floor_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_CLIENT_METRICS_DEFAULT_INTERVAL_MS", default_value = "300000", value_parser = parse_positive_i32)]
-    client_metrics_default_interval_ms: PositiveI32,
-    #[arg(long, env = "CRABKA_CLIENT_METRICS_TELEMETRY_MAX_BYTES", default_value = "1048576", value_parser = parse_positive_i32)]
-    client_metrics_telemetry_max_bytes: PositiveI32,
-    #[arg(long, env = "CRABKA_CLIENT_METRICS_PROM_SNAPSHOT_TTL_MS", default_value = "300000", value_parser = parse_positive_millis)]
-    client_metrics_prom_snapshot_ttl_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_RLMM_RECONCILE_TICK_MS", default_value = "30000", value_parser = parse_positive_millis)]
-    rlmm_reconcile_tick_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_RLMM_BOOTSTRAP_BACKOFF_INITIAL_MS", default_value = "250", value_parser = parse_positive_millis)]
-    rlmm_bootstrap_backoff_initial_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_RLMM_BOOTSTRAP_BACKOFF_MAX_MS", default_value = "10000", value_parser = parse_positive_millis)]
-    rlmm_bootstrap_backoff_max_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_CONNECTION_CREATION_THROTTLE_MAX_MS", default_value = "1000", value_parser = parse_positive_millis)]
-    connection_creation_throttle_max_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_OPA_HTTP_TIMEOUT_MS", default_value = "5000", value_parser = parse_positive_millis)]
-    opa_http_timeout_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_OAUTH_JWKS_HTTP_TIMEOUT_MS", default_value = "10000", value_parser = parse_positive_millis)]
-    oauth_jwks_http_timeout_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_AUTO_JOIN_RETRY_BACKOFF_MS", default_value = "500", value_parser = parse_positive_millis)]
-    auto_join_retry_backoff_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_REPLICATION_FETCH_MAX_BYTES", default_value = "1048576", value_parser = parse_positive_i32)]
-    replication_fetch_max_bytes: PositiveI32,
-    #[arg(long, env = "CRABKA_REPLICATION_FETCH_MAX_WAIT_MS", default_value = "500", value_parser = parse_positive_i32)]
-    replication_fetch_max_wait_ms: PositiveI32,
-    #[arg(long, env = "CRABKA_REPLICATION_FETCH_MIN_BYTES", default_value = "1", value_parser = parse_positive_i32)]
-    replication_fetch_min_bytes: PositiveI32,
-    #[arg(long, env = "CRABKA_REPLICATION_THROTTLE_EXHAUSTED_BACKOFF_MS", default_value = "100", value_parser = parse_positive_millis)]
-    replication_throttle_exhausted_backoff_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_REPLICATION_SEND_ERROR_BACKOFF_MS", default_value = "1000", value_parser = parse_positive_millis)]
-    replication_send_error_backoff_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_REPLICATION_UNKNOWN_TOPIC_RETRY_DELAY_MS", default_value = "100", value_parser = parse_positive_millis)]
-    replication_unknown_topic_retry_delay_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_REPLICATION_EPOCH_FENCE_BACKOFF_MS", default_value = "200", value_parser = parse_positive_millis)]
-    replication_epoch_fence_backoff_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_REPLICATION_UNEXPECTED_ERROR_BACKOFF_MS", default_value = "500", value_parser = parse_positive_millis)]
-    replication_unexpected_error_backoff_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_REPLICATION_RECONNECT_INITIAL_DELAY_MS", default_value = "100", value_parser = parse_positive_millis)]
-    replication_reconnect_initial_delay_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_REPLICATION_RECONNECT_DELAY_CAP_MS", default_value = "5000", value_parser = parse_positive_millis)]
-    replication_reconnect_delay_cap_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_COORDINATOR_SESSION_EXPIRY_TICK_MS", default_value = "1000", value_parser = parse_positive_millis)]
-    coordinator_session_expiry_tick_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_COORDINATOR_SHUTDOWN_ACK_TIMEOUT_MS", default_value = "5000", value_parser = parse_positive_millis)]
-    coordinator_shutdown_ack_timeout_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_CONSUMER_GROUP_SESSION_TIMEOUT_MS", default_value = "45000", value_parser = parse_positive_millis)]
-    consumer_group_session_timeout_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_CONSUMER_GROUP_HEARTBEAT_INTERVAL_MS", default_value = "5000", value_parser = parse_positive_millis)]
-    consumer_group_heartbeat_interval_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_CONSUMER_GROUP_MIN_SESSION_TIMEOUT_MS", default_value = "45000", value_parser = parse_positive_millis)]
-    consumer_group_min_session_timeout_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_CONSUMER_GROUP_MAX_SESSION_TIMEOUT_MS", default_value = "60000", value_parser = parse_positive_millis)]
-    consumer_group_max_session_timeout_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_CONSUMER_GROUP_MIN_HEARTBEAT_INTERVAL_MS", default_value = "5000", value_parser = parse_positive_millis)]
-    consumer_group_min_heartbeat_interval_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_CONSUMER_GROUP_MAX_HEARTBEAT_INTERVAL_MS", default_value = "15000", value_parser = parse_positive_millis)]
-    consumer_group_max_heartbeat_interval_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_CONSUMER_GROUP_MAX_SIZE", default_value = "200", value_parser = parse_positive_count)]
-    consumer_group_max_size: PositiveCount,
-    #[arg(long, env = "CRABKA_CLASSIC_GROUP_INITIAL_REBALANCE_DELAY_MS", default_value = "3000", value_parser = parse_positive_millis)]
-    classic_group_initial_rebalance_delay_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_SYNC_GROUP_FOLLOWER_WAIT_MS", default_value = "30000", value_parser = parse_positive_millis)]
-    sync_group_follower_wait_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_UNCLEAN_RECOVERY_AGGRESSIVE_DEADLINE_MS", default_value = "2000", value_parser = parse_positive_millis)]
-    unclean_recovery_aggressive_deadline_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_UNCLEAN_RECOVERY_BALANCED_DEADLINE_MS", default_value = "30000", value_parser = parse_positive_millis)]
-    unclean_recovery_balanced_deadline_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_OPERATOR_RECOVERY_DEADLINE_MS", default_value = "25000", value_parser = parse_positive_millis)]
-    operator_recovery_deadline_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_QUOTA_THROTTLE_MAX_MS", default_value = "1000", value_parser = parse_positive_millis)]
-    quota_throttle_max_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_SELF_REGISTRATION_MAX_ATTEMPTS", default_value_t = 8, value_parser = clap::value_parser!(u32).range(1..))]
-    self_registration_max_attempts: u32,
-    #[arg(long, env = "CRABKA_OBSERVER_FETCH_MAX_BYTES", default_value_t = 1_048_576, value_parser = clap::value_parser!(u32).range(1..))]
-    observer_fetch_max_bytes: u32,
-    #[arg(long, env = "CRABKA_AUDIT_EVENT_QUEUE_CAPACITY", default_value = "8192", value_parser = parse_positive_count)]
-    audit_event_queue_capacity: PositiveCount,
-    #[arg(long, env = "CRABKA_AUDIT_TAIL_WINDOW_OFFSETS", default_value = "4096", value_parser = parse_positive_i64)]
-    audit_tail_window_offsets: PositiveI64,
-    #[arg(long, env = "CRABKA_AUDIT_TAIL_READ_MAX_BYTES", default_value = "1048576", value_parser = parse_positive_count)]
-    audit_tail_read_max_bytes: PositiveCount,
-    #[arg(long, env = "CRABKA_OFFSETS_TOPIC_METADATA_WAIT_TIMEOUT_MS", default_value = "30000", value_parser = parse_positive_millis)]
-    offsets_topic_metadata_wait_timeout_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_CLIENT_METRICS_STALE_PUSH_INTERVALS", default_value_t = 3, value_parser = clap::value_parser!(u32).range(1..))]
-    client_metrics_stale_push_intervals: u32,
-    #[arg(long, env = "CRABKA_CLIENT_METRICS_OTLP_QUEUE_CAPACITY", default_value = "256", value_parser = parse_positive_count)]
-    client_metrics_otlp_queue_capacity: PositiveCount,
-    #[arg(long, env = "CRABKA_COORDINATOR_ACTOR_MAILBOX_CAPACITY", default_value = "64", value_parser = parse_positive_count)]
-    coordinator_actor_mailbox_capacity: PositiveCount,
-    #[arg(long, env = "CRABKA_UNCLEAN_RECOVERY_QUEUE_CAPACITY", default_value = "256", value_parser = parse_positive_count)]
-    unclean_recovery_queue_capacity: PositiveCount,
-    #[arg(long, env = "CRABKA_SHARE_RECOVERY_READ_MAX_BYTES", default_value = "1048576", value_parser = parse_positive_count)]
-    share_recovery_read_max_bytes: PositiveCount,
-    #[arg(long, env = "CRABKA_SHARE_SESSION_CACHE_MAX_WHEN_UNLIMITED", default_value = "10000", value_parser = parse_positive_count)]
-    share_session_cache_max_when_unlimited: PositiveCount,
-    #[arg(long, env = "CRABKA_SOCKET_REQUEST_MAX_BYTES", default_value = "104857600", value_parser = parse_positive_count)]
-    socket_request_max_bytes: PositiveCount,
-    #[arg(long, env = "CRABKA_SENDFILE_MIN_BYTES", default_value = "32768", value_parser = parse_positive_count)]
-    sendfile_min_bytes: PositiveCount,
-    #[arg(long, env = "CRABKA_SOCKET_SEND_BUFFER_BYTES", default_value = "1048576", value_parser = parse_positive_count)]
-    socket_send_buffer_bytes: PositiveCount,
-    #[arg(long, env = "CRABKA_SOCKET_RECEIVE_BUFFER_BYTES", default_value = "1048576", value_parser = parse_positive_count)]
-    socket_receive_buffer_bytes: PositiveCount,
-    #[arg(long, env = "CRABKA_ACL_MAX_PRINCIPAL_BYTES", default_value = "256", value_parser = parse_positive_count)]
-    acl_max_principal_bytes: PositiveCount,
-    #[arg(long, env = "CRABKA_ACL_MAX_RESOURCE_NAME_BYTES", default_value = "256", value_parser = parse_positive_count)]
-    acl_max_resource_name_bytes: PositiveCount,
-    #[arg(long, env = "CRABKA_TELEMETRY_MAX_DECOMPRESSION_RATIO", default_value = "100", value_parser = parse_positive_count)]
-    telemetry_max_decompression_ratio: PositiveCount,
-    #[arg(long, env = "CRABKA_TELEMETRY_DECOMPRESSED_OUTPUT_FLOOR_BYTES", default_value = "16777216", value_parser = parse_positive_count)]
-    telemetry_decompressed_output_floor_bytes: PositiveCount,
-    #[arg(long, env = "CRABKA_TELEMETRY_DECOMPRESSED_OUTPUT_CEILING_BYTES", default_value = "1073741824", value_parser = parse_positive_count)]
-    telemetry_decompressed_output_ceiling_bytes: PositiveCount,
-    #[arg(
-        long,
-        env = "CRABKA_INTER_BROKER_SERVER_NAME",
-        default_value = "localhost"
-    )]
-    inter_broker_server_name: String,
-    #[arg(long, env = "CRABKA_PRODUCER_ID_EXPIRATION_MS", default_value = "86400000", value_parser = parse_positive_i64)]
-    producer_id_expiration_ms: PositiveI64,
-    #[arg(long, env = "CRABKA_PRODUCER_ID_EXPIRATION_SCAN_INTERVAL_MS", default_value = "600000", value_parser = parse_positive_millis)]
-    producer_id_expiration_scan_interval_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_MAX_PRODUCE_GROUP", default_value = "1024", value_parser = parse_positive_count)]
-    max_produce_group: PositiveCount,
-    #[arg(long, env = "CRABKA_PARTITION_WRITER_QUEUE_DEPTH", default_value = "64", value_parser = parse_positive_count)]
-    partition_writer_queue_depth: PositiveCount,
-    #[arg(long, env = "CRABKA_DEFAULT_MIN_INSYNC_REPLICAS", default_value = "1", value_parser = parse_positive_i32)]
-    default_min_insync_replicas: PositiveI32,
-    #[arg(long, env = "CRABKA_FUTURE_LOG_MOVE_READ_CHUNK_BYTES", default_value = "1048576", value_parser = parse_positive_count)]
-    future_log_move_read_chunk_bytes: PositiveCount,
-    #[arg(long, env = "CRABKA_SHARE_STATE_NUM_PARTITIONS", default_value = "50", value_parser = parse_positive_i32)]
-    share_state_num_partitions: PositiveI32,
-    #[arg(long, env = "CRABKA_TRANSACTION_STATE_NUM_PARTITIONS", default_value = "50", value_parser = parse_positive_i32)]
-    transaction_state_num_partitions: PositiveI32,
-    #[arg(long, env = "CRABKA_TRANSACTION_MIN_TIMEOUT_MS", default_value = "1000", value_parser = parse_positive_i32)]
-    transaction_min_timeout_ms: PositiveI32,
-    #[arg(long, env = "CRABKA_TRANSACTION_MAX_TIMEOUT_MS", default_value = "900000", value_parser = parse_positive_i32)]
-    transaction_max_timeout_ms: PositiveI32,
+    #[arg(long, env = "CRABKA_STARTUP_LEADER_WAIT_TIMEOUT_MS", value_parser = parse_positive_millis)]
+    startup_leader_wait_timeout_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_SELF_REGISTRATION_BACKOFF_MIN_MS", value_parser = parse_positive_millis)]
+    self_registration_backoff_min_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_SELF_REGISTRATION_BACKOFF_MAX_MS", value_parser = parse_positive_millis)]
+    self_registration_backoff_max_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_OBSERVER_POLL_INTERVAL_MS", value_parser = parse_positive_millis)]
+    observer_poll_interval_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_AUDIT_SPOOL_REPLAY_INTERVAL_MS", value_parser = parse_positive_millis)]
+    audit_spool_replay_interval_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_AUDIT_STATS_POLL_INTERVAL_MS", value_parser = parse_positive_millis)]
+    audit_stats_poll_interval_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_AUDIT_PARTITION_WAIT_TIMEOUT_MS", value_parser = parse_positive_millis)]
+    audit_partition_wait_timeout_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_LIVENESS_TICK_INTERVAL_MS", value_parser = parse_positive_millis)]
+    liveness_tick_interval_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_GAUGE_POLL_INTERVAL_MS", value_parser = parse_positive_millis)]
+    gauge_poll_interval_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_ISR_SCAN_INTERVAL_MS", value_parser = parse_positive_millis)]
+    isr_scan_interval_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_CLEANER_INTERVAL_MS", value_parser = parse_positive_millis)]
+    cleaner_interval_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_FUTURE_LOG_MOVE_RETRY_BACKOFF_MS", value_parser = parse_positive_millis)]
+    future_log_move_retry_backoff_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_CLIENT_METRICS_EVICTION_TICK_MS", value_parser = parse_positive_millis)]
+    client_metrics_eviction_tick_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_CLIENT_METRICS_STALE_FLOOR_MS", value_parser = parse_positive_millis)]
+    client_metrics_stale_floor_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_CLIENT_METRICS_DEFAULT_INTERVAL_MS", value_parser = parse_positive_i32)]
+    client_metrics_default_interval_ms: Option<PositiveI32>,
+    #[arg(long, env = "CRABKA_CLIENT_METRICS_TELEMETRY_MAX_BYTES", value_parser = parse_positive_i32)]
+    client_metrics_telemetry_max_bytes: Option<PositiveI32>,
+    #[arg(long, env = "CRABKA_CLIENT_METRICS_PROM_SNAPSHOT_TTL_MS", value_parser = parse_positive_millis)]
+    client_metrics_prom_snapshot_ttl_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_RLMM_RECONCILE_TICK_MS", value_parser = parse_positive_millis)]
+    rlmm_reconcile_tick_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_RLMM_BOOTSTRAP_BACKOFF_INITIAL_MS", value_parser = parse_positive_millis)]
+    rlmm_bootstrap_backoff_initial_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_RLMM_BOOTSTRAP_BACKOFF_MAX_MS", value_parser = parse_positive_millis)]
+    rlmm_bootstrap_backoff_max_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_CONNECTION_CREATION_THROTTLE_MAX_MS", value_parser = parse_positive_millis)]
+    connection_creation_throttle_max_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_OPA_HTTP_TIMEOUT_MS", value_parser = parse_positive_millis)]
+    opa_http_timeout_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_OAUTH_JWKS_HTTP_TIMEOUT_MS", value_parser = parse_positive_millis)]
+    oauth_jwks_http_timeout_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_AUTO_JOIN_RETRY_BACKOFF_MS", value_parser = parse_positive_millis)]
+    auto_join_retry_backoff_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_REPLICATION_FETCH_MAX_BYTES", value_parser = parse_positive_i32)]
+    replication_fetch_max_bytes: Option<PositiveI32>,
+    #[arg(long, env = "CRABKA_REPLICATION_FETCH_MAX_WAIT_MS", value_parser = parse_positive_i32)]
+    replication_fetch_max_wait_ms: Option<PositiveI32>,
+    #[arg(long, env = "CRABKA_REPLICATION_FETCH_MIN_BYTES", value_parser = parse_positive_i32)]
+    replication_fetch_min_bytes: Option<PositiveI32>,
+    #[arg(long, env = "CRABKA_REPLICATION_THROTTLE_EXHAUSTED_BACKOFF_MS", value_parser = parse_positive_millis)]
+    replication_throttle_exhausted_backoff_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_REPLICATION_SEND_ERROR_BACKOFF_MS", value_parser = parse_positive_millis)]
+    replication_send_error_backoff_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_REPLICATION_UNKNOWN_TOPIC_RETRY_DELAY_MS", value_parser = parse_positive_millis)]
+    replication_unknown_topic_retry_delay_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_REPLICATION_EPOCH_FENCE_BACKOFF_MS", value_parser = parse_positive_millis)]
+    replication_epoch_fence_backoff_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_REPLICATION_UNEXPECTED_ERROR_BACKOFF_MS", value_parser = parse_positive_millis)]
+    replication_unexpected_error_backoff_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_REPLICATION_RECONNECT_INITIAL_DELAY_MS", value_parser = parse_positive_millis)]
+    replication_reconnect_initial_delay_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_REPLICATION_RECONNECT_DELAY_CAP_MS", value_parser = parse_positive_millis)]
+    replication_reconnect_delay_cap_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_COORDINATOR_SESSION_EXPIRY_TICK_MS", value_parser = parse_positive_millis)]
+    coordinator_session_expiry_tick_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_COORDINATOR_SHUTDOWN_ACK_TIMEOUT_MS", value_parser = parse_positive_millis)]
+    coordinator_shutdown_ack_timeout_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_CONSUMER_GROUP_SESSION_TIMEOUT_MS", value_parser = parse_positive_millis)]
+    consumer_group_session_timeout_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_CONSUMER_GROUP_HEARTBEAT_INTERVAL_MS", value_parser = parse_positive_millis)]
+    consumer_group_heartbeat_interval_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_CONSUMER_GROUP_MIN_SESSION_TIMEOUT_MS", value_parser = parse_positive_millis)]
+    consumer_group_min_session_timeout_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_CONSUMER_GROUP_MAX_SESSION_TIMEOUT_MS", value_parser = parse_positive_millis)]
+    consumer_group_max_session_timeout_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_CONSUMER_GROUP_MIN_HEARTBEAT_INTERVAL_MS", value_parser = parse_positive_millis)]
+    consumer_group_min_heartbeat_interval_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_CONSUMER_GROUP_MAX_HEARTBEAT_INTERVAL_MS", value_parser = parse_positive_millis)]
+    consumer_group_max_heartbeat_interval_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_CONSUMER_GROUP_MAX_SIZE", value_parser = parse_positive_count)]
+    consumer_group_max_size: Option<PositiveCount>,
+    #[arg(long, env = "CRABKA_CLASSIC_GROUP_INITIAL_REBALANCE_DELAY_MS", value_parser = parse_positive_millis)]
+    classic_group_initial_rebalance_delay_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_SYNC_GROUP_FOLLOWER_WAIT_MS", value_parser = parse_positive_millis)]
+    sync_group_follower_wait_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_UNCLEAN_RECOVERY_AGGRESSIVE_DEADLINE_MS", value_parser = parse_positive_millis)]
+    unclean_recovery_aggressive_deadline_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_UNCLEAN_RECOVERY_BALANCED_DEADLINE_MS", value_parser = parse_positive_millis)]
+    unclean_recovery_balanced_deadline_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_OPERATOR_RECOVERY_DEADLINE_MS", value_parser = parse_positive_millis)]
+    operator_recovery_deadline_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_QUOTA_THROTTLE_MAX_MS", value_parser = parse_positive_millis)]
+    quota_throttle_max_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_SELF_REGISTRATION_MAX_ATTEMPTS", value_parser = clap::value_parser!(u32).range(1..))]
+    self_registration_max_attempts: Option<u32>,
+    #[arg(long, env = "CRABKA_OBSERVER_FETCH_MAX_BYTES", value_parser = clap::value_parser!(u32).range(1..))]
+    observer_fetch_max_bytes: Option<u32>,
+    #[arg(long, env = "CRABKA_AUDIT_EVENT_QUEUE_CAPACITY", value_parser = parse_positive_count)]
+    audit_event_queue_capacity: Option<PositiveCount>,
+    #[arg(long, env = "CRABKA_AUDIT_TAIL_WINDOW_OFFSETS", value_parser = parse_positive_i64)]
+    audit_tail_window_offsets: Option<PositiveI64>,
+    #[arg(long, env = "CRABKA_AUDIT_TAIL_READ_MAX_BYTES", value_parser = parse_positive_count)]
+    audit_tail_read_max_bytes: Option<PositiveCount>,
+    #[arg(long, env = "CRABKA_OFFSETS_TOPIC_METADATA_WAIT_TIMEOUT_MS", value_parser = parse_positive_millis)]
+    offsets_topic_metadata_wait_timeout_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_CLIENT_METRICS_STALE_PUSH_INTERVALS", value_parser = clap::value_parser!(u32).range(1..))]
+    client_metrics_stale_push_intervals: Option<u32>,
+    #[arg(long, env = "CRABKA_CLIENT_METRICS_OTLP_QUEUE_CAPACITY", value_parser = parse_positive_count)]
+    client_metrics_otlp_queue_capacity: Option<PositiveCount>,
+    #[arg(long, env = "CRABKA_COORDINATOR_ACTOR_MAILBOX_CAPACITY", value_parser = parse_positive_count)]
+    coordinator_actor_mailbox_capacity: Option<PositiveCount>,
+    #[arg(long, env = "CRABKA_UNCLEAN_RECOVERY_QUEUE_CAPACITY", value_parser = parse_positive_count)]
+    unclean_recovery_queue_capacity: Option<PositiveCount>,
+    #[arg(long, env = "CRABKA_SHARE_RECOVERY_READ_MAX_BYTES", value_parser = parse_positive_count)]
+    share_recovery_read_max_bytes: Option<PositiveCount>,
+    #[arg(long, env = "CRABKA_SHARE_SESSION_CACHE_MAX_WHEN_UNLIMITED", value_parser = parse_positive_count)]
+    share_session_cache_max_when_unlimited: Option<PositiveCount>,
+    #[arg(long, env = "CRABKA_SOCKET_REQUEST_MAX_BYTES", value_parser = parse_positive_count)]
+    socket_request_max_bytes: Option<PositiveCount>,
+    #[arg(long, env = "CRABKA_SENDFILE_MIN_BYTES", value_parser = parse_positive_count)]
+    sendfile_min_bytes: Option<PositiveCount>,
+    #[arg(long, env = "CRABKA_SOCKET_SEND_BUFFER_BYTES", value_parser = parse_positive_count)]
+    socket_send_buffer_bytes: Option<PositiveCount>,
+    #[arg(long, env = "CRABKA_SOCKET_RECEIVE_BUFFER_BYTES", value_parser = parse_positive_count)]
+    socket_receive_buffer_bytes: Option<PositiveCount>,
+    #[arg(long, env = "CRABKA_ACL_MAX_PRINCIPAL_BYTES", value_parser = parse_positive_count)]
+    acl_max_principal_bytes: Option<PositiveCount>,
+    #[arg(long, env = "CRABKA_ACL_MAX_RESOURCE_NAME_BYTES", value_parser = parse_positive_count)]
+    acl_max_resource_name_bytes: Option<PositiveCount>,
+    #[arg(long, env = "CRABKA_TELEMETRY_MAX_DECOMPRESSION_RATIO", value_parser = parse_positive_count)]
+    telemetry_max_decompression_ratio: Option<PositiveCount>,
+    #[arg(long, env = "CRABKA_TELEMETRY_DECOMPRESSED_OUTPUT_FLOOR_BYTES", value_parser = parse_positive_count)]
+    telemetry_decompressed_output_floor_bytes: Option<PositiveCount>,
+    #[arg(long, env = "CRABKA_TELEMETRY_DECOMPRESSED_OUTPUT_CEILING_BYTES", value_parser = parse_positive_count)]
+    telemetry_decompressed_output_ceiling_bytes: Option<PositiveCount>,
+    #[arg(long, env = "CRABKA_INTER_BROKER_SERVER_NAME")]
+    inter_broker_server_name: Option<String>,
+    #[arg(long, env = "CRABKA_PRODUCER_ID_EXPIRATION_MS", value_parser = parse_positive_i64)]
+    producer_id_expiration_ms: Option<PositiveI64>,
+    #[arg(long, env = "CRABKA_PRODUCER_ID_EXPIRATION_SCAN_INTERVAL_MS", value_parser = parse_positive_millis)]
+    producer_id_expiration_scan_interval_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_MAX_PRODUCE_GROUP", value_parser = parse_positive_count)]
+    max_produce_group: Option<PositiveCount>,
+    #[arg(long, env = "CRABKA_PARTITION_WRITER_QUEUE_DEPTH", value_parser = parse_positive_count)]
+    partition_writer_queue_depth: Option<PositiveCount>,
+    #[arg(long, env = "CRABKA_DEFAULT_MIN_INSYNC_REPLICAS", value_parser = parse_positive_i32)]
+    default_min_insync_replicas: Option<PositiveI32>,
+    #[arg(long, env = "CRABKA_FUTURE_LOG_MOVE_READ_CHUNK_BYTES", value_parser = parse_positive_count)]
+    future_log_move_read_chunk_bytes: Option<PositiveCount>,
+    #[arg(long, env = "CRABKA_SHARE_STATE_NUM_PARTITIONS", value_parser = parse_positive_i32)]
+    share_state_num_partitions: Option<PositiveI32>,
+    #[arg(long, env = "CRABKA_TRANSACTION_STATE_NUM_PARTITIONS", value_parser = parse_positive_i32)]
+    transaction_state_num_partitions: Option<PositiveI32>,
+    #[arg(long, env = "CRABKA_TRANSACTION_MIN_TIMEOUT_MS", value_parser = parse_positive_i32)]
+    transaction_min_timeout_ms: Option<PositiveI32>,
+    #[arg(long, env = "CRABKA_TRANSACTION_MAX_TIMEOUT_MS", value_parser = parse_positive_i32)]
+    transaction_max_timeout_ms: Option<PositiveI32>,
 
-    #[arg(long, env = "CRABKA_SHARE_GROUP_ENABLE", default_value_t = true, action = clap::ArgAction::Set)]
-    share_group_enable: bool,
-    #[arg(long, env = "CRABKA_SHARE_GROUP_SESSION_TIMEOUT_MS", default_value = "45000", value_parser = parse_positive_millis)]
-    share_group_session_timeout_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_SHARE_GROUP_HEARTBEAT_INTERVAL_MS", default_value = "5000", value_parser = parse_positive_millis)]
-    share_group_heartbeat_interval_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_SHARE_GROUP_RECORD_LOCK_DURATION_MS", default_value = "30000", value_parser = parse_positive_millis)]
-    share_group_record_lock_duration_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_SHARE_GROUP_MAX_DELIVERY_ATTEMPTS", default_value_t = 5, value_parser = clap::value_parser!(i16).range(1..))]
-    share_group_max_delivery_attempts: i16,
-    #[arg(long, env = "CRABKA_SHARE_GROUP_MAX_INFLIGHT_RECORDS", default_value = "200", value_parser = parse_positive_i32)]
-    share_group_max_inflight_records: PositiveI32,
-    #[arg(long, env = "CRABKA_SHARE_GROUP_ISOLATION_LEVEL", default_value = "read-uncommitted", value_parser = parse_share_isolation)]
+    #[arg(long, env = "CRABKA_SHARE_GROUP_ENABLE", action = clap::ArgAction::Set)]
+    share_group_enable: Option<bool>,
+    #[arg(long, env = "CRABKA_SHARE_GROUP_SESSION_TIMEOUT_MS", value_parser = parse_positive_millis)]
+    share_group_session_timeout_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_SHARE_GROUP_HEARTBEAT_INTERVAL_MS", value_parser = parse_positive_millis)]
+    share_group_heartbeat_interval_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_SHARE_GROUP_RECORD_LOCK_DURATION_MS", value_parser = parse_positive_millis)]
+    share_group_record_lock_duration_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_SHARE_GROUP_MAX_DELIVERY_ATTEMPTS", value_parser = clap::value_parser!(i16).range(1..))]
+    share_group_max_delivery_attempts: Option<i16>,
+    #[arg(long, env = "CRABKA_SHARE_GROUP_MAX_INFLIGHT_RECORDS", value_parser = parse_positive_i32)]
+    share_group_max_inflight_records: Option<PositiveI32>,
+    #[arg(long, env = "CRABKA_SHARE_GROUP_ISOLATION_LEVEL", value_parser = parse_share_isolation)]
     share_group_isolation_level:
-        crabka_broker::coordinator::unified::share::config::ShareIsolationLevel,
-    #[arg(long, env = "CRABKA_STREAMS_GROUP_SESSION_TIMEOUT_MS", default_value = "45000", value_parser = parse_positive_millis)]
-    streams_group_session_timeout_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_STREAMS_GROUP_HEARTBEAT_INTERVAL_MS", default_value = "5000", value_parser = parse_positive_millis)]
-    streams_group_heartbeat_interval_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_STREAMS_GROUP_NUM_STANDBY_REPLICAS", default_value_t = 0, value_parser = clap::value_parser!(i32).range(0..))]
-    streams_group_num_standby_replicas: i32,
-    #[arg(long, env = "CRABKA_STREAMS_GROUP_NUM_WARMUP_REPLICAS", default_value_t = 2, value_parser = clap::value_parser!(i32).range(0..))]
-    streams_group_num_warmup_replicas: i32,
-    #[arg(long, env = "CRABKA_STREAMS_GROUP_ACCEPTABLE_RECOVERY_LAG", default_value_t = 10_000, value_parser = clap::value_parser!(i64).range(0..))]
-    streams_group_acceptable_recovery_lag: i64,
-    #[arg(long, env = "CRABKA_STREAMS_GROUP_TASK_OFFSET_INTERVAL_MS", default_value = "30000", value_parser = parse_positive_millis)]
-    streams_group_task_offset_interval_ms: PositiveMillis,
-    #[arg(long, env = "CRABKA_STREAMS_GROUP_ASSIGNOR", default_value = "auto", value_parser = parse_streams_assignor)]
+        Option<crabka_broker::coordinator::unified::share::config::ShareIsolationLevel>,
+    #[arg(long, env = "CRABKA_STREAMS_GROUP_SESSION_TIMEOUT_MS", value_parser = parse_positive_millis)]
+    streams_group_session_timeout_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_STREAMS_GROUP_HEARTBEAT_INTERVAL_MS", value_parser = parse_positive_millis)]
+    streams_group_heartbeat_interval_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_STREAMS_GROUP_NUM_STANDBY_REPLICAS", value_parser = clap::value_parser!(i32).range(0..))]
+    streams_group_num_standby_replicas: Option<i32>,
+    #[arg(long, env = "CRABKA_STREAMS_GROUP_NUM_WARMUP_REPLICAS", value_parser = clap::value_parser!(i32).range(0..))]
+    streams_group_num_warmup_replicas: Option<i32>,
+    #[arg(long, env = "CRABKA_STREAMS_GROUP_ACCEPTABLE_RECOVERY_LAG", value_parser = clap::value_parser!(i64).range(0..))]
+    streams_group_acceptable_recovery_lag: Option<i64>,
+    #[arg(long, env = "CRABKA_STREAMS_GROUP_TASK_OFFSET_INTERVAL_MS", value_parser = parse_positive_millis)]
+    streams_group_task_offset_interval_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_STREAMS_GROUP_ASSIGNOR", value_parser = parse_streams_assignor)]
     streams_group_assignor:
-        crabka_broker::coordinator::unified::streams::config::StreamsAssignorKind,
+        Option<crabka_broker::coordinator::unified::streams::config::StreamsAssignorKind>,
+}
+
+macro_rules! copy_refined_runtime {
+    ($source:ident, $target:ident, $($field:ident),+ $(,)?) => {
+        $(
+            $target.$field = $source.$field.map(|value| value.into_value());
+        )+
+    };
+}
+
+macro_rules! copy_plain_runtime {
+    ($source:ident, $target:ident, $($field:ident),+ $(,)?) => {
+        $(
+            $target.$field = $source.$field;
+        )+
+    };
+}
+
+impl RuntimeArgs {
+    fn copy_core(&self, runtime: &mut crabka_broker::file_config::RuntimeFileConfig) {
+        copy_refined_runtime!(
+            self,
+            runtime,
+            startup_leader_wait_timeout_ms,
+            self_registration_backoff_min_ms,
+            self_registration_backoff_max_ms,
+            observer_poll_interval_ms,
+            audit_spool_replay_interval_ms,
+            audit_stats_poll_interval_ms,
+            audit_partition_wait_timeout_ms,
+            liveness_tick_interval_ms,
+            gauge_poll_interval_ms,
+            isr_scan_interval_ms,
+            cleaner_interval_ms,
+            future_log_move_retry_backoff_ms,
+            rlmm_reconcile_tick_ms,
+            rlmm_bootstrap_backoff_initial_ms,
+            rlmm_bootstrap_backoff_max_ms,
+            connection_creation_throttle_max_ms,
+            opa_http_timeout_ms,
+            oauth_jwks_http_timeout_ms,
+            auto_join_retry_backoff_ms,
+        );
+        copy_plain_runtime!(
+            self,
+            runtime,
+            self_registration_max_attempts,
+            observer_fetch_max_bytes,
+        );
+    }
+
+    fn copy_client_metrics(&self, runtime: &mut crabka_broker::file_config::RuntimeFileConfig) {
+        copy_refined_runtime!(
+            self,
+            runtime,
+            client_metrics_eviction_tick_ms,
+            client_metrics_stale_floor_ms,
+            client_metrics_default_interval_ms,
+            client_metrics_telemetry_max_bytes,
+            client_metrics_prom_snapshot_ttl_ms,
+            client_metrics_otlp_queue_capacity,
+        );
+        copy_plain_runtime!(self, runtime, client_metrics_stale_push_intervals);
+    }
+
+    fn copy_replication(&self, runtime: &mut crabka_broker::file_config::RuntimeFileConfig) {
+        copy_refined_runtime!(
+            self,
+            runtime,
+            replication_fetch_max_bytes,
+            replication_fetch_max_wait_ms,
+            replication_fetch_min_bytes,
+            replication_throttle_exhausted_backoff_ms,
+            replication_send_error_backoff_ms,
+            replication_unknown_topic_retry_delay_ms,
+            replication_epoch_fence_backoff_ms,
+            replication_unexpected_error_backoff_ms,
+            replication_reconnect_initial_delay_ms,
+            replication_reconnect_delay_cap_ms,
+        );
+    }
+
+    fn copy_coordinators(&self, runtime: &mut crabka_broker::file_config::RuntimeFileConfig) {
+        copy_refined_runtime!(
+            self,
+            runtime,
+            coordinator_session_expiry_tick_ms,
+            coordinator_shutdown_ack_timeout_ms,
+            consumer_group_session_timeout_ms,
+            consumer_group_heartbeat_interval_ms,
+            consumer_group_min_session_timeout_ms,
+            consumer_group_max_session_timeout_ms,
+            consumer_group_min_heartbeat_interval_ms,
+            consumer_group_max_heartbeat_interval_ms,
+            consumer_group_max_size,
+            classic_group_initial_rebalance_delay_ms,
+            sync_group_follower_wait_ms,
+            coordinator_actor_mailbox_capacity,
+            share_recovery_read_max_bytes,
+            share_session_cache_max_when_unlimited,
+            share_state_num_partitions,
+        );
+    }
+
+    fn copy_storage_and_queues(&self, runtime: &mut crabka_broker::file_config::RuntimeFileConfig) {
+        copy_refined_runtime!(
+            self,
+            runtime,
+            unclean_recovery_aggressive_deadline_ms,
+            unclean_recovery_balanced_deadline_ms,
+            operator_recovery_deadline_ms,
+            quota_throttle_max_ms,
+            audit_event_queue_capacity,
+            audit_tail_window_offsets,
+            audit_tail_read_max_bytes,
+            offsets_topic_metadata_wait_timeout_ms,
+            unclean_recovery_queue_capacity,
+            producer_id_expiration_ms,
+            producer_id_expiration_scan_interval_ms,
+            max_produce_group,
+            partition_writer_queue_depth,
+            default_min_insync_replicas,
+            future_log_move_read_chunk_bytes,
+            transaction_state_num_partitions,
+            transaction_min_timeout_ms,
+            transaction_max_timeout_ms,
+        );
+    }
+
+    fn copy_network_and_limits(&self, runtime: &mut crabka_broker::file_config::RuntimeFileConfig) {
+        copy_refined_runtime!(
+            self,
+            runtime,
+            socket_request_max_bytes,
+            sendfile_min_bytes,
+            socket_send_buffer_bytes,
+            socket_receive_buffer_bytes,
+            acl_max_principal_bytes,
+            acl_max_resource_name_bytes,
+            telemetry_max_decompression_ratio,
+            telemetry_decompressed_output_floor_bytes,
+            telemetry_decompressed_output_ceiling_bytes,
+        );
+        runtime
+            .inter_broker_server_name
+            .clone_from(&self.inter_broker_server_name);
+    }
+
+    fn copy_group_protocols(&self, runtime: &mut crabka_broker::file_config::RuntimeFileConfig) {
+        copy_refined_runtime!(
+            self,
+            runtime,
+            share_group_session_timeout_ms,
+            share_group_heartbeat_interval_ms,
+            share_group_record_lock_duration_ms,
+            share_group_max_inflight_records,
+            streams_group_session_timeout_ms,
+            streams_group_heartbeat_interval_ms,
+            streams_group_task_offset_interval_ms,
+        );
+        copy_plain_runtime!(
+            self,
+            runtime,
+            share_group_enable,
+            share_group_max_delivery_attempts,
+            streams_group_num_standby_replicas,
+            streams_group_num_warmup_replicas,
+            streams_group_acceptable_recovery_lag,
+        );
+        runtime.share_group_isolation_level = self.share_group_isolation_level.map(|value| {
+            use crabka_broker::coordinator::unified::share::config::ShareIsolationLevel;
+            match value {
+                ShareIsolationLevel::ReadUncommitted => "read-uncommitted",
+                ShareIsolationLevel::ReadCommitted => "read-committed",
+            }
+            .to_owned()
+        });
+        runtime.streams_group_assignor = self.streams_group_assignor.map(|value| {
+            use crabka_broker::coordinator::unified::streams::config::StreamsAssignorKind;
+            match value {
+                StreamsAssignorKind::Auto => "auto",
+                StreamsAssignorKind::Sticky => "sticky",
+                StreamsAssignorKind::HighlyAvailable => "highly-available",
+            }
+            .to_owned()
+        });
+    }
+
+    fn as_file_runtime(&self) -> crabka_broker::file_config::RuntimeFileConfig {
+        let mut runtime = crabka_broker::file_config::RuntimeFileConfig::default();
+        self.copy_core(&mut runtime);
+        self.copy_client_metrics(&mut runtime);
+        self.copy_replication(&mut runtime);
+        self.copy_coordinators(&mut runtime);
+        self.copy_storage_and_queues(&mut runtime);
+        self.copy_network_and_limits(&mut runtime);
+        self.copy_group_protocols(&mut runtime);
+        runtime
+    }
 }
 
 #[derive(Debug, Parser)]
@@ -352,12 +541,8 @@ struct Args {
     /// Partition disk-usage scan cadence, in seconds. `0`
     /// disables the scanner entirely. The rebalancer's usage scraper
     /// reads the `partition_disk_bytes` gauge this populates.
-    #[arg(
-        long,
-        env = "CRABKA_PARTITION_DISK_SCAN_INTERVAL_SECS",
-        default_value_t = 60
-    )]
-    partition_disk_scan_interval_secs: u64,
+    #[arg(long, env = "CRABKA_PARTITION_DISK_SCAN_INTERVAL_SECS")]
+    partition_disk_scan_interval_secs: Option<u64>,
 
     /// KIP-853: controller endpoints to discover the quorum leader at cold
     /// start, comma-separated `host:port`. Used by joiner nodes (those
@@ -377,174 +562,144 @@ struct Args {
     controller_auto_join: bool,
 
     /// KIP-853 observer promotion lag bound.
-    #[arg(
-        long,
-        env = "CRABKA_OBSERVER_LAG_BOUND",
-        default_value_t = DEFAULT_OBSERVER_LAG_BOUND
-    )]
-    observer_lag_bound: u64,
+    #[arg(long, env = "CRABKA_OBSERVER_LAG_BOUND")]
+    observer_lag_bound: Option<u64>,
 
     /// Broker heartbeat interval in milliseconds.
     #[arg(
         long,
         env = "CRABKA_HEARTBEAT_INTERVAL_MS",
-        default_value = "3000",
         value_parser = parse_positive_millis
     )]
-    heartbeat_interval_ms: PositiveMillis,
+    heartbeat_interval_ms: Option<PositiveMillis>,
 
     /// Broker heartbeat timeout in milliseconds.
     #[arg(
         long,
         env = "CRABKA_HEARTBEAT_TIMEOUT_MS",
-        default_value = "9000",
         value_parser = parse_positive_millis
     )]
-    heartbeat_timeout_ms: PositiveMillis,
+    heartbeat_timeout_ms: Option<PositiveMillis>,
 
     /// Follower lag timeout in milliseconds before ISR shrink.
     #[arg(
         long,
         env = "CRABKA_REPLICA_LAG_TIME_MAX_MS",
-        default_value = "30000",
         value_parser = parse_positive_millis
     )]
-    replica_lag_time_max_ms: PositiveMillis,
+    replica_lag_time_max_ms: Option<PositiveMillis>,
 
     /// Controller election timeout in milliseconds.
     #[arg(
         long,
         env = "CRABKA_CONTROLLER_ELECTION_TIMEOUT_MS",
-        default_value = "5000",
         value_parser = parse_positive_millis
     )]
-    controller_election_timeout_ms: PositiveMillis,
+    controller_election_timeout_ms: Option<PositiveMillis>,
 
     /// Controller heartbeat interval in milliseconds.
     #[arg(
         long,
         env = "CRABKA_CONTROLLER_HEARTBEAT_INTERVAL_MS",
-        default_value = "500",
         value_parser = parse_positive_millis
     )]
-    controller_heartbeat_interval_ms: PositiveMillis,
+    controller_heartbeat_interval_ms: Option<PositiveMillis>,
 
     /// Controlled-shutdown leadership drain timeout in milliseconds.
     #[arg(
         long,
         env = "CRABKA_CONTROLLED_SHUTDOWN_DRAIN_TIMEOUT_MS",
-        default_value = "20000",
         value_parser = parse_positive_millis
     )]
-    controlled_shutdown_drain_timeout_ms: PositiveMillis,
+    controlled_shutdown_drain_timeout_ms: Option<PositiveMillis>,
 
     /// Maximum bytes between metadata-log snapshots.
     #[arg(
         long,
         env = "CRABKA_METADATA_MAX_BYTES_BETWEEN_SNAPSHOTS",
-        default_value_t = DEFAULT_METADATA_MAX_BYTES_BETWEEN_SNAPSHOTS,
         value_parser = clap::value_parser!(u64).range(1..)
     )]
-    metadata_max_bytes_between_snapshots: u64,
+    metadata_max_bytes_between_snapshots: Option<u64>,
 
     /// Maximum milliseconds between metadata-log snapshots; `0` disables the interval cap.
-    #[arg(
-        long,
-        env = "CRABKA_METADATA_MAX_SNAPSHOT_INTERVAL_MS",
-        default_value_t = DEFAULT_METADATA_MAX_SNAPSHOT_INTERVAL_MS
-    )]
-    metadata_max_snapshot_interval_ms: u64,
+    #[arg(long, env = "CRABKA_METADATA_MAX_SNAPSHOT_INTERVAL_MS")]
+    metadata_max_snapshot_interval_ms: Option<u64>,
 
     /// Committed-record gap between metadata-log snapshots.
     #[arg(
         long,
         env = "CRABKA_METADATA_SNAPSHOT_INTERVAL_RECORDS",
-        default_value_t = DEFAULT_METADATA_SNAPSHOT_INTERVAL_RECORDS,
         value_parser = clap::value_parser!(u64).range(1..)
     )]
-    metadata_snapshot_interval_records: u64,
+    metadata_snapshot_interval_records: Option<u64>,
 
     /// Idle-transaction abort cleanup interval in milliseconds; `0` disables the reaper.
-    #[arg(
-        long,
-        env = "CRABKA_TXN_ABORT_CLEANUP_INTERVAL_MS",
-        default_value_t = DEFAULT_TXN_ABORT_CLEANUP_INTERVAL_MS
-    )]
-    txn_abort_cleanup_interval_ms: u64,
+    #[arg(long, env = "CRABKA_TXN_ABORT_CLEANUP_INTERVAL_MS")]
+    txn_abort_cleanup_interval_ms: Option<u64>,
 
     /// Auto preferred-replica election scan cadence, in seconds.
     #[arg(
         long,
         env = "CRABKA_LEADER_IMBALANCE_CHECK_INTERVAL_SECS",
-        default_value_t = DEFAULT_LEADER_IMBALANCE_CHECK_INTERVAL_SECS,
         value_parser = clap::value_parser!(u64).range(1..)
     )]
-    leader_imbalance_check_interval_secs: u64,
+    leader_imbalance_check_interval_secs: Option<u64>,
 
     /// Minimum per-broker leader imbalance percentage before auto-rebalance acts.
     #[arg(
         long,
         env = "CRABKA_LEADER_IMBALANCE_PER_BROKER_PERCENTAGE",
-        default_value = "10",
         value_parser = parse_percentage
     )]
-    leader_imbalance_per_broker_percentage: Percentage,
+    leader_imbalance_per_broker_percentage: Option<Percentage>,
 
     /// TLS cert/key reload polling interval in milliseconds; `0` disables the watcher.
-    #[arg(long, env = "CRABKA_TLS_RELOAD_INTERVAL_MS", default_value_t = DEFAULT_TLS_RELOAD_INTERVAL_MS)]
-    tls_reload_interval_ms: u64,
+    #[arg(long, env = "CRABKA_TLS_RELOAD_INTERVAL_MS")]
+    tls_reload_interval_ms: Option<u64>,
 
     /// Maximum incremental fetch-session cache slots.
-    #[arg(
-        long,
-        env = "CRABKA_MAX_INCREMENTAL_FETCH_SESSION_CACHE_SLOTS",
-        default_value_t = DEFAULT_MAX_INCREMENTAL_FETCH_SESSION_CACHE_SLOTS
-    )]
-    max_incremental_fetch_session_cache_slots: usize,
+    #[arg(long, env = "CRABKA_MAX_INCREMENTAL_FETCH_SESSION_CACHE_SLOTS")]
+    max_incremental_fetch_session_cache_slots: Option<usize>,
 
     /// Maximum live broker connections across all listeners.
-    #[arg(long, env = "CRABKA_MAX_CONNECTIONS", default_value_t = usize::MAX)]
-    max_connections: usize,
+    #[arg(long, env = "CRABKA_MAX_CONNECTIONS")]
+    max_connections: Option<usize>,
 
     /// Maximum live broker connections from any single client IP.
-    #[arg(long, env = "CRABKA_MAX_CONNECTIONS_PER_IP", default_value_t = usize::MAX)]
-    max_connections_per_ip: usize,
+    #[arg(long, env = "CRABKA_MAX_CONNECTIONS_PER_IP")]
+    max_connections_per_ip: Option<usize>,
 
     /// Delegation-token maximum lifetime in milliseconds.
     #[arg(
         long,
         env = "CRABKA_DELEGATION_TOKEN_MAX_LIFETIME_MS",
-        default_value = "604800000",
         value_parser = parse_positive_i64
     )]
-    delegation_token_max_lifetime_ms: PositiveI64,
+    delegation_token_max_lifetime_ms: Option<PositiveI64>,
 
     /// Delegation-token expiry sweep interval in milliseconds.
     #[arg(
         long,
         env = "CRABKA_DELEGATION_TOKEN_EXPIRY_CHECK_INTERVAL_MS",
-        default_value = "3600000",
         value_parser = parse_positive_i64
     )]
-    delegation_token_expiry_check_interval_ms: PositiveI64,
+    delegation_token_expiry_check_interval_ms: Option<PositiveI64>,
 
     /// Delegation-token default renew period in milliseconds.
     #[arg(
         long,
         env = "CRABKA_DELEGATION_TOKEN_RENEW_PERIOD_MS",
-        default_value = "86400000",
         value_parser = parse_positive_i64
     )]
-    delegation_token_default_renew_period_ms: PositiveI64,
+    delegation_token_default_renew_period_ms: Option<PositiveI64>,
 
     /// `RemoteLogManager` copy/retention cadence in milliseconds.
     #[arg(
         long,
         env = "CRABKA_REMOTE_LOG_MANAGER_INTERVAL_MS",
-        default_value = "30000",
         value_parser = parse_positive_millis
     )]
-    remote_log_manager_interval_ms: PositiveMillis,
+    remote_log_manager_interval_ms: Option<PositiveMillis>,
 
     /// Delegation-token HMAC master key. Prefer secrets managers over shell history.
     #[arg(
@@ -608,6 +763,91 @@ struct Args {
 }
 
 impl Args {
+    fn runtime_overlay(&self) -> crabka_broker::file_config::RuntimeFileConfig {
+        let mut runtime = self.runtime.as_file_runtime();
+        copy_plain_runtime!(
+            self,
+            runtime,
+            partition_disk_scan_interval_secs,
+            observer_lag_bound,
+            metadata_max_bytes_between_snapshots,
+            metadata_max_snapshot_interval_ms,
+            metadata_snapshot_interval_records,
+            txn_abort_cleanup_interval_ms,
+            leader_imbalance_check_interval_secs,
+            tls_reload_interval_ms,
+            max_incremental_fetch_session_cache_slots,
+            max_connections,
+            max_connections_per_ip,
+        );
+        copy_refined_runtime!(
+            self,
+            runtime,
+            heartbeat_interval_ms,
+            heartbeat_timeout_ms,
+            replica_lag_time_max_ms,
+            controller_election_timeout_ms,
+            controller_heartbeat_interval_ms,
+            controlled_shutdown_drain_timeout_ms,
+            leader_imbalance_per_broker_percentage,
+            delegation_token_max_lifetime_ms,
+            delegation_token_expiry_check_interval_ms,
+            delegation_token_default_renew_period_ms,
+            remote_log_manager_interval_ms,
+        );
+        runtime
+    }
+
+    fn apply_runtime_to(
+        &self,
+        cfg: &mut BrokerConfig,
+        file_shutdown_ms: Option<u64>,
+    ) -> Result<u64, String> {
+        let runtime = self.runtime_overlay();
+        let cli_shutdown_ms = runtime.controlled_shutdown_drain_timeout_ms;
+        runtime.apply_to(cfg).map_err(|error| error.to_string())?;
+        cfg.validate().map_err(|error| error.to_string())?;
+        Ok(cli_shutdown_ms
+            .or(file_shutdown_ms)
+            .unwrap_or(DEFAULT_CONTROLLED_SHUTDOWN_DRAIN_TIMEOUT_MS))
+    }
+
+    fn base_broker_config(
+        &mut self,
+        advertised_listener: String,
+        controller_listen_addr: SocketAddr,
+        node_id: u64,
+        metrics_listen_addr: Option<SocketAddr>,
+        client_metrics_otlp_endpoint: Option<String>,
+    ) -> BrokerConfig {
+        BrokerConfig {
+            broker_id: self.broker_id,
+            listen_addr: self.listen_addr,
+            advertised_listener,
+            log_dir: std::mem::take(&mut self.log_dir),
+            extra_log_dirs: std::mem::take(&mut self.extra_log_dirs),
+            log_config: LogConfig::default(),
+            node_id: crabka_broker::NodeId(node_id),
+            controller_listen_addr,
+            controller_quorum_voters: vec![(
+                crabka_broker::NodeId(node_id),
+                controller_listen_addr.to_string(),
+            )],
+            bootstrap_servers: std::mem::take(&mut self.controller_bootstrap_servers),
+            directory_id: uuid::Uuid::nil(),
+            auto_join: self.controller_auto_join,
+            bootstrap_mode: BootstrapMode::Bootstrap,
+            cluster_id: self.cluster_id.take(),
+            metrics_listen_addr,
+            client_metrics_otlp_endpoint,
+            delegation_token_secret_key: self
+                .delegation_token_secret_key
+                .take()
+                .map(|key| crabka_security::SecretBytes::new(key.into_bytes())),
+            ..BrokerConfig::default()
+        }
+    }
+
     fn telemetry_value(&self, key: &str) -> Option<String> {
         match key {
             "OTEL_SDK_DISABLED" => self.otel_sdk_disabled.clone(),
@@ -628,381 +868,6 @@ impl Args {
             _ => None,
         }
     }
-}
-
-macro_rules! build_broker_config {
-    ($source_args:ident, $source_advertised:ident, $source_controller_addr:ident, $source_node_id:ident, $source_metrics_addr:ident, $source_client_metrics_endpoint:ident) => {{
-        let args = $source_args;
-        let advertised = $source_advertised;
-        let controller_addr = $source_controller_addr;
-        let node_id = $source_node_id;
-        let metrics_listen_addr = $source_metrics_addr;
-        let client_metrics_otlp_endpoint = $source_client_metrics_endpoint;
-        BrokerConfig {
-            startup_leader_wait_timeout: std::time::Duration::from_millis(
-                args.runtime.startup_leader_wait_timeout_ms.into_value(),
-            ),
-            self_registration_backoff_min: std::time::Duration::from_millis(
-                args.runtime.self_registration_backoff_min_ms.into_value(),
-            ),
-            self_registration_backoff_max: std::time::Duration::from_millis(
-                args.runtime.self_registration_backoff_max_ms.into_value(),
-            ),
-            observer_poll_interval: std::time::Duration::from_millis(
-                args.runtime.observer_poll_interval_ms.into_value(),
-            ),
-            audit_spool_replay_interval: std::time::Duration::from_millis(
-                args.runtime.audit_spool_replay_interval_ms.into_value(),
-            ),
-            audit_stats_poll_interval: std::time::Duration::from_millis(
-                args.runtime.audit_stats_poll_interval_ms.into_value(),
-            ),
-            audit_partition_wait_timeout: std::time::Duration::from_millis(
-                args.runtime.audit_partition_wait_timeout_ms.into_value(),
-            ),
-            liveness_tick_interval: std::time::Duration::from_millis(
-                args.runtime.liveness_tick_interval_ms.into_value(),
-            ),
-            gauge_poll_interval: std::time::Duration::from_millis(
-                args.runtime.gauge_poll_interval_ms.into_value(),
-            ),
-            isr_scan_interval: std::time::Duration::from_millis(
-                args.runtime.isr_scan_interval_ms.into_value(),
-            ),
-            cleaner_interval: std::time::Duration::from_millis(
-                args.runtime.cleaner_interval_ms.into_value(),
-            ),
-            future_log_move_retry_backoff: std::time::Duration::from_millis(
-                args.runtime.future_log_move_retry_backoff_ms.into_value(),
-            ),
-            client_metrics_eviction_tick: std::time::Duration::from_millis(
-                args.runtime.client_metrics_eviction_tick_ms.into_value(),
-            ),
-            client_metrics_stale_floor: std::time::Duration::from_millis(
-                args.runtime.client_metrics_stale_floor_ms.into_value(),
-            ),
-            client_metrics_default_interval_ms: args
-                .runtime
-                .client_metrics_default_interval_ms
-                .into_value(),
-            client_metrics_otlp_queue_capacity: args
-                .runtime
-                .client_metrics_otlp_queue_capacity
-                .into_value(),
-            client_metrics_telemetry_max_bytes: args
-                .runtime
-                .client_metrics_telemetry_max_bytes
-                .into_value(),
-            client_metrics_prom_snapshot_ttl: std::time::Duration::from_millis(
-                args.runtime
-                    .client_metrics_prom_snapshot_ttl_ms
-                    .into_value(),
-            ),
-            rlmm_reconcile_tick: std::time::Duration::from_millis(
-                args.runtime.rlmm_reconcile_tick_ms.into_value(),
-            ),
-            rlmm_bootstrap_backoff_initial: std::time::Duration::from_millis(
-                args.runtime.rlmm_bootstrap_backoff_initial_ms.into_value(),
-            ),
-            rlmm_bootstrap_backoff_max: std::time::Duration::from_millis(
-                args.runtime.rlmm_bootstrap_backoff_max_ms.into_value(),
-            ),
-            connection_creation_throttle_max: std::time::Duration::from_millis(
-                args.runtime
-                    .connection_creation_throttle_max_ms
-                    .into_value(),
-            ),
-            opa_http_timeout: std::time::Duration::from_millis(
-                args.runtime.opa_http_timeout_ms.into_value(),
-            ),
-            oauth_jwks_http_timeout: std::time::Duration::from_millis(
-                args.runtime.oauth_jwks_http_timeout_ms.into_value(),
-            ),
-            auto_join_retry_backoff: std::time::Duration::from_millis(
-                args.runtime.auto_join_retry_backoff_ms.into_value(),
-            ),
-            replication: crabka_broker::config::ReplicationRuntimeConfig {
-                fetch_max_bytes: args.runtime.replication_fetch_max_bytes.into_value(),
-                fetch_max_wait_ms: args.runtime.replication_fetch_max_wait_ms.into_value(),
-                fetch_min_bytes: args.runtime.replication_fetch_min_bytes.into_value(),
-                throttle_exhausted_backoff: std::time::Duration::from_millis(
-                    args.runtime
-                        .replication_throttle_exhausted_backoff_ms
-                        .into_value(),
-                ),
-                send_error_backoff: std::time::Duration::from_millis(
-                    args.runtime.replication_send_error_backoff_ms.into_value(),
-                ),
-                unknown_topic_retry_delay: std::time::Duration::from_millis(
-                    args.runtime
-                        .replication_unknown_topic_retry_delay_ms
-                        .into_value(),
-                ),
-                epoch_fence_backoff: std::time::Duration::from_millis(
-                    args.runtime.replication_epoch_fence_backoff_ms.into_value(),
-                ),
-                unexpected_error_backoff: std::time::Duration::from_millis(
-                    args.runtime
-                        .replication_unexpected_error_backoff_ms
-                        .into_value(),
-                ),
-                reconnect_initial_delay: std::time::Duration::from_millis(
-                    args.runtime
-                        .replication_reconnect_initial_delay_ms
-                        .into_value(),
-                ),
-                reconnect_delay_cap: std::time::Duration::from_millis(
-                    args.runtime.replication_reconnect_delay_cap_ms.into_value(),
-                ),
-            },
-            coordinator_session_expiry_tick: std::time::Duration::from_millis(
-                args.runtime.coordinator_session_expiry_tick_ms.into_value(),
-            ),
-            coordinator_shutdown_ack_timeout: std::time::Duration::from_millis(
-                args.runtime
-                    .coordinator_shutdown_ack_timeout_ms
-                    .into_value(),
-            ),
-            classic_group_initial_rebalance_delay: std::time::Duration::from_millis(
-                args.runtime
-                    .classic_group_initial_rebalance_delay_ms
-                    .into_value(),
-            ),
-            sync_group_follower_wait: std::time::Duration::from_millis(
-                args.runtime.sync_group_follower_wait_ms.into_value(),
-            ),
-            unclean_recovery_aggressive_deadline: std::time::Duration::from_millis(
-                args.runtime
-                    .unclean_recovery_aggressive_deadline_ms
-                    .into_value(),
-            ),
-            unclean_recovery_balanced_deadline: std::time::Duration::from_millis(
-                args.runtime
-                    .unclean_recovery_balanced_deadline_ms
-                    .into_value(),
-            ),
-            operator_recovery_deadline: std::time::Duration::from_millis(
-                args.runtime.operator_recovery_deadline_ms.into_value(),
-            ),
-            quota_throttle_max: std::time::Duration::from_millis(
-                args.runtime.quota_throttle_max_ms.into_value(),
-            ),
-            self_registration_max_attempts: args.runtime.self_registration_max_attempts,
-            observer_fetch_max_bytes: args.runtime.observer_fetch_max_bytes,
-            audit_event_queue_capacity: args.runtime.audit_event_queue_capacity.into_value(),
-            audit_tail_window_offsets: args.runtime.audit_tail_window_offsets.into_value(),
-            audit_tail_read_max_bytes: args.runtime.audit_tail_read_max_bytes.into_value(),
-            offsets_topic_metadata_wait_timeout: std::time::Duration::from_millis(
-                args.runtime
-                    .offsets_topic_metadata_wait_timeout_ms
-                    .into_value(),
-            ),
-            client_metrics_stale_push_intervals: args.runtime.client_metrics_stale_push_intervals,
-            coordinator_actor_mailbox_capacity: args
-                .runtime
-                .coordinator_actor_mailbox_capacity
-                .into_value(),
-            unclean_recovery_queue_capacity: args
-                .runtime
-                .unclean_recovery_queue_capacity
-                .into_value(),
-            share_recovery_read_max_bytes: args.runtime.share_recovery_read_max_bytes.into_value(),
-            share_session_cache_max_when_unlimited: args
-                .runtime
-                .share_session_cache_max_when_unlimited
-                .into_value(),
-            socket_request_max_bytes: args.runtime.socket_request_max_bytes.into_value(),
-            sendfile_min_bytes: args.runtime.sendfile_min_bytes.into_value(),
-            socket_send_buffer_bytes: args.runtime.socket_send_buffer_bytes.into_value(),
-            socket_receive_buffer_bytes: args.runtime.socket_receive_buffer_bytes.into_value(),
-            acl_max_principal_bytes: args.runtime.acl_max_principal_bytes.into_value(),
-            acl_max_resource_name_bytes: args.runtime.acl_max_resource_name_bytes.into_value(),
-            telemetry_max_decompression_ratio: args
-                .runtime
-                .telemetry_max_decompression_ratio
-                .into_value(),
-            telemetry_decompressed_output_floor_bytes: args
-                .runtime
-                .telemetry_decompressed_output_floor_bytes
-                .into_value(),
-            telemetry_decompressed_output_ceiling_bytes: args
-                .runtime
-                .telemetry_decompressed_output_ceiling_bytes
-                .into_value(),
-            inter_broker_server_name: args.runtime.inter_broker_server_name.clone(),
-            producer_id_expiration_ms: args.runtime.producer_id_expiration_ms.into_value(),
-            producer_id_expiration_scan_interval: std::time::Duration::from_millis(
-                args.runtime
-                    .producer_id_expiration_scan_interval_ms
-                    .into_value(),
-            ),
-            max_produce_group: args.runtime.max_produce_group.into_value(),
-            partition_writer_queue_depth: args.runtime.partition_writer_queue_depth.into_value(),
-            default_min_insync_replicas: args.runtime.default_min_insync_replicas.into_value(),
-            future_log_move_read_chunk_bytes: args
-                .runtime
-                .future_log_move_read_chunk_bytes
-                .into_value(),
-            transaction_state_num_partitions: args
-                .runtime
-                .transaction_state_num_partitions
-                .into_value(),
-            transaction_min_timeout_ms: args.runtime.transaction_min_timeout_ms.into_value(),
-            transaction_max_timeout_ms: args.runtime.transaction_max_timeout_ms.into_value(),
-            broker_id: args.broker_id,
-            listen_addr: args.listen_addr,
-            advertised_listener: advertised,
-            log_dir: args.log_dir,
-            extra_log_dirs: args.extra_log_dirs,
-            log_config: LogConfig::default(),
-            node_id: crabka_broker::NodeId(node_id),
-            controller_listen_addr: controller_addr,
-            controller_quorum_voters: vec![(
-                crabka_broker::NodeId(node_id),
-                controller_addr.to_string(),
-            )],
-            bootstrap_servers: args.controller_bootstrap_servers,
-            // Placeholder — replaced from `meta.properties.json` (written by
-            // `crabka format`) once `log_dir` is resolved against the TOML.
-            directory_id: uuid::Uuid::nil(),
-            auto_join: args.controller_auto_join,
-            observer_lag_bound: args.observer_lag_bound,
-            heartbeat_interval_ms: args.heartbeat_interval_ms.into_value(),
-            heartbeat_timeout_ms: args.heartbeat_timeout_ms.into_value(),
-            replica_lag_time_max_ms: args.replica_lag_time_max_ms.into_value(),
-            controller_election_timeout: std::time::Duration::from_millis(
-                args.controller_election_timeout_ms.into_value(),
-            ),
-            controller_heartbeat_interval: std::time::Duration::from_millis(
-                args.controller_heartbeat_interval_ms.into_value(),
-            ),
-            metadata_max_bytes_between_snapshots: args.metadata_max_bytes_between_snapshots,
-            metadata_max_snapshot_interval: std::time::Duration::from_millis(
-                args.metadata_max_snapshot_interval_ms,
-            ),
-            metadata_snapshot_interval_records: args.metadata_snapshot_interval_records,
-            txn_abort_cleanup_interval: std::time::Duration::from_millis(
-                args.txn_abort_cleanup_interval_ms,
-            ),
-            leader_imbalance_check_interval_secs: args.leader_imbalance_check_interval_secs,
-            leader_imbalance_per_broker_percentage: args
-                .leader_imbalance_per_broker_percentage
-                .into_value(),
-            tls_reload_interval: std::time::Duration::from_millis(args.tls_reload_interval_ms),
-            max_incremental_fetch_session_cache_slots: args
-                .max_incremental_fetch_session_cache_slots,
-            max_connections: args.max_connections,
-            max_connections_per_ip: args.max_connections_per_ip,
-            delegation_token_max_lifetime_ms: args.delegation_token_max_lifetime_ms.into_value(),
-            delegation_token_expiry_check_interval_ms: args
-                .delegation_token_expiry_check_interval_ms
-                .into_value(),
-            delegation_token_default_renew_period_ms: args
-                .delegation_token_default_renew_period_ms
-                .into_value(),
-            remote_log_manager_interval: std::time::Duration::from_millis(
-                args.remote_log_manager_interval_ms.into_value(),
-            ),
-            next_gen_consumer_group: Box::new(
-                crabka_broker::coordinator::unified::config::NextGenConfig {
-                    session_timeout: std::time::Duration::from_millis(
-                        args.runtime.consumer_group_session_timeout_ms.into_value(),
-                    ),
-                    heartbeat_interval: std::time::Duration::from_millis(
-                        args.runtime
-                            .consumer_group_heartbeat_interval_ms
-                            .into_value(),
-                    ),
-                    min_session_timeout: std::time::Duration::from_millis(
-                        args.runtime
-                            .consumer_group_min_session_timeout_ms
-                            .into_value(),
-                    ),
-                    max_session_timeout: std::time::Duration::from_millis(
-                        args.runtime
-                            .consumer_group_max_session_timeout_ms
-                            .into_value(),
-                    ),
-                    min_heartbeat_interval: std::time::Duration::from_millis(
-                        args.runtime
-                            .consumer_group_min_heartbeat_interval_ms
-                            .into_value(),
-                    ),
-                    max_heartbeat_interval: std::time::Duration::from_millis(
-                        args.runtime
-                            .consumer_group_max_heartbeat_interval_ms
-                            .into_value(),
-                    ),
-                    max_size: args.runtime.consumer_group_max_size.into_value(),
-                    ..Default::default()
-                },
-            ),
-            share_group: Box::new(
-                crabka_broker::coordinator::unified::share::config::ShareGroupConfig {
-                    enable: args.runtime.share_group_enable,
-                    session_timeout: std::time::Duration::from_millis(
-                        args.runtime.share_group_session_timeout_ms.into_value(),
-                    ),
-                    heartbeat_interval: std::time::Duration::from_millis(
-                        args.runtime.share_group_heartbeat_interval_ms.into_value(),
-                    ),
-                    record_lock_duration: std::time::Duration::from_millis(
-                        args.runtime
-                            .share_group_record_lock_duration_ms
-                            .into_value(),
-                    ),
-                    max_delivery_attempts: args.runtime.share_group_max_delivery_attempts,
-                    max_inflight_records: args
-                        .runtime
-                        .share_group_max_inflight_records
-                        .into_value(),
-                    isolation_level: args.runtime.share_group_isolation_level,
-                    ..Default::default()
-                },
-            ),
-            streams_group: Box::new(
-                crabka_broker::coordinator::unified::streams::config::StreamsGroupConfig {
-                    session_timeout: std::time::Duration::from_millis(
-                        args.runtime.streams_group_session_timeout_ms.into_value(),
-                    ),
-                    heartbeat_interval: std::time::Duration::from_millis(
-                        args.runtime
-                            .streams_group_heartbeat_interval_ms
-                            .into_value(),
-                    ),
-                    num_standby_replicas: args.runtime.streams_group_num_standby_replicas,
-                    num_warmup_replicas: args.runtime.streams_group_num_warmup_replicas,
-                    acceptable_recovery_lag: args.runtime.streams_group_acceptable_recovery_lag,
-                    task_offset_interval: std::time::Duration::from_millis(
-                        args.runtime
-                            .streams_group_task_offset_interval_ms
-                            .into_value(),
-                    ),
-                    assignor: args.runtime.streams_group_assignor,
-                    ..Default::default()
-                },
-            ),
-            share_coordinator: Box::new(
-                crabka_broker::share_coordinator::config::ShareCoordinatorConfig {
-                    state_topic_num_partitions: args
-                        .runtime
-                        .share_state_num_partitions
-                        .into_value(),
-                    ..Default::default()
-                },
-            ),
-            // Placeholder — overwritten after `apply_to` against the final `log_dir`.
-            bootstrap_mode: BootstrapMode::Bootstrap,
-            cluster_id: args.cluster_id,
-            metrics_listen_addr,
-            client_metrics_otlp_endpoint,
-            partition_disk_scan_interval_secs: args.partition_disk_scan_interval_secs,
-            delegation_token_secret_key: args
-                .delegation_token_secret_key
-                .map(|key| crabka_security::SecretBytes::new(key.into_bytes())),
-            ..BrokerConfig::default()
-        }
-    }};
 }
 
 #[tokio::main]
@@ -1039,23 +904,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             None => None,
         };
-    let cli_shutdown_timeout_ms = args.controlled_shutdown_drain_timeout_ms.into_value();
-    let controlled_shutdown_drain_timeout_ms =
-        if cli_shutdown_timeout_ms == DEFAULT_CONTROLLED_SHUTDOWN_DRAIN_TIMEOUT_MS {
-            file_config
-                .as_ref()
-                .and_then(|file| file.runtime.as_ref())
-                .and_then(|runtime| runtime.controlled_shutdown_drain_timeout_ms)
-                .map(|value| {
-                    PositiveMillis::new(value)
-                        .map(PositiveMillis::into_value)
-                        .map_err(|error| format!("controlled_shutdown_drain_timeout_ms: {error}"))
-                })
-                .transpose()?
-                .unwrap_or(cli_shutdown_timeout_ms)
-        } else {
-            cli_shutdown_timeout_ms
-        };
+    let file_shutdown_timeout_ms = file_config
+        .as_ref()
+        .and_then(|file| file.runtime.as_ref())
+        .and_then(|runtime| runtime.controlled_shutdown_drain_timeout_ms);
     let advertised = args
         .advertised_listener
         .take()
@@ -1083,20 +935,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         Some(parse_roles_arg(&args.process_roles)?)
     };
-    let mut config = build_broker_config!(
-        args,
+    let mut config = args.base_broker_config(
         advertised,
         controller_addr,
         node_id,
         metrics_listen_addr,
-        client_metrics_otlp_endpoint
+        client_metrics_otlp_endpoint,
     );
     if let Some(roles) = roles {
         config.roles = roles;
     }
     if let Some(fc) = file_config {
-        fc.apply_to(&mut config)?;
+        fc.apply_before_runtime_overlay(&mut config)?;
     }
+    let controlled_shutdown_drain_timeout_ms =
+        args.apply_runtime_to(&mut config, file_shutdown_timeout_ms)?;
     // Detect against the *resolved* log_dir so a TOML override picks up
     // its on-disk state rather than the CLI-default empty path. This is
     // the difference between a fresh-pod Bootstrap and a rolled-pod
@@ -1395,7 +1248,81 @@ mod tests {
 
         temp_env::with_var("CRABKA_CLEANER_INTERVAL_MS", Some("17"), || {
             let args = Args::try_parse_from(["crabka-broker"]).expect("parse environment");
-            assert!(args.runtime.cleaner_interval_ms.into_value() == 17);
+            assert!(
+                args.runtime
+                    .cleaner_interval_ms
+                    .map(PositiveMillis::into_value)
+                    == Some(17)
+            );
         });
+    }
+
+    fn file_runtime_with_nondefault_values() -> crabka_broker::file_config::FileConfig {
+        toml::from_str(
+            r#"
+            [runtime]
+            cleaner_interval_ms = 7000
+            controlled_shutdown_drain_timeout_ms = 9000
+            "#,
+        )
+        .expect("parse runtime file config")
+    }
+
+    #[test]
+    fn explicit_cli_default_runtime_values_override_file() {
+        let args = Args::try_parse_from([
+            "crabka-broker",
+            "--cleaner-interval-ms=30000",
+            "--controlled-shutdown-drain-timeout-ms=20000",
+        ])
+        .expect("parse explicit CLI defaults");
+        let mut config = BrokerConfig::default();
+        let file = file_runtime_with_nondefault_values();
+        let file_shutdown_ms = file
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.controlled_shutdown_drain_timeout_ms);
+        file.apply_to(&mut config).expect("apply file runtime");
+
+        let shutdown_ms = args
+            .apply_runtime_to(&mut config, file_shutdown_ms)
+            .expect("overlay CLI runtime");
+
+        assert!(
+            (config.cleaner_interval, shutdown_ms)
+                == (std::time::Duration::from_millis(30_000), 20_000)
+        );
+    }
+
+    #[test]
+    fn explicit_env_default_runtime_values_override_file() {
+        let lock = ENV_LOCK.get_or_init(|| Mutex::new(()));
+        let _guard = lock.lock().expect("environment lock");
+
+        temp_env::with_vars(
+            [
+                ("CRABKA_CLEANER_INTERVAL_MS", Some("30000")),
+                ("CRABKA_CONTROLLED_SHUTDOWN_DRAIN_TIMEOUT_MS", Some("20000")),
+            ],
+            || {
+                let args = Args::try_parse_from(["crabka-broker"]).expect("parse env defaults");
+                let mut config = BrokerConfig::default();
+                let file = file_runtime_with_nondefault_values();
+                let file_shutdown_ms = file
+                    .runtime
+                    .as_ref()
+                    .and_then(|runtime| runtime.controlled_shutdown_drain_timeout_ms);
+                file.apply_to(&mut config).expect("apply file runtime");
+
+                let shutdown_ms = args
+                    .apply_runtime_to(&mut config, file_shutdown_ms)
+                    .expect("overlay env runtime");
+
+                assert!(
+                    (config.cleaner_interval, shutdown_ms)
+                        == (std::time::Duration::from_millis(30_000), 20_000)
+                );
+            },
+        );
     }
 }
