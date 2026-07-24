@@ -4506,7 +4506,7 @@ mod tests {
             stats,
             log.clone(),
             crate::metrics::BrokerMetrics::new(),
-            std::time::Duration::from_secs(60),
+            std::time::Duration::from_mins(1),
             shutdown.child_token(),
         );
         drop(log);

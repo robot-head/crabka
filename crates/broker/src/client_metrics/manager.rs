@@ -319,6 +319,7 @@ fn uuid_hashcode(id: Uuid) -> i32 {
 mod tests {
     use std::collections::BTreeMap;
 
+    use assert2::{assert, check};
     use crabka_metadata::{ClientMetricsConfigRecord, MetadataImage, MetadataRecord};
     use uuid::Uuid;
 
@@ -355,7 +356,7 @@ mod tests {
         let img = MetadataImage::new(Uuid::nil());
         let m = compute_subscription(&img, &attrs(), 12_345);
         assert!(m.metrics.is_empty());
-        assert!(m.push_interval_ms == 12_345);
+        check!(m.push_interval_ms == 12_345);
     }
 
     #[test]

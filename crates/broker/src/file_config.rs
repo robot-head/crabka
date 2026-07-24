@@ -4220,7 +4220,7 @@ in_memory = true
     #[test]
     fn runtime_file_config_applies_representative_values() {
         let file: FileConfig = toml::from_str(
-            r#"
+            r"
 [runtime]
 cleaner_interval_ms = 7000
 isr_scan_interval_ms = 800
@@ -4228,7 +4228,7 @@ opa_http_timeout_ms = 2500
 replication_fetch_max_bytes = 2097152
 replication_fetch_max_wait_ms = 750
 replication_fetch_min_bytes = 2
-"#,
+",
         )
         .expect("parse runtime config");
         let mut cfg = crate::config::BrokerConfig::default();

@@ -608,6 +608,8 @@ impl ReaperBackend for TxnCoordinator {
 
 #[cfg(test)]
 mod tests {
+    use assert2::check;
+
     use super::*;
 
     fn test_coordinator() -> TxnCoordinator {
@@ -630,15 +632,15 @@ mod tests {
         // constant `PartitionIndex(0)` (the Default) is caught: none of these
         // hash to 0.
         let coordinator = test_coordinator();
-        assert!(coordinator.partition_for("my-tid") == PartitionIndex(43));
-        assert!(coordinator.partition_for("producer-1") == PartitionIndex(45));
-        assert!(coordinator.partition_for("tx-orders-prod") == PartitionIndex(26));
+        check!(coordinator.partition_for("my-tid") == PartitionIndex(43));
+        check!(coordinator.partition_for("producer-1") == PartitionIndex(45));
+        check!(coordinator.partition_for("tx-orders-prod") == PartitionIndex(26));
     }
 
     #[test]
     fn nondefault_partition_count_changes_coordinator_routing() {
         let coordinator = test_coordinator_with_partitions(7);
-        assert!(
+        check!(
             coordinator.partition_for("my-tid") == PartitionIndex(partition_for_tid("my-tid", 7))
         );
     }
