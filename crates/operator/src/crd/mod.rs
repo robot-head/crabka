@@ -19,9 +19,10 @@ pub mod user;
 
 pub use ca::{CertificateAuthority, CertificateAuthorityStatus};
 pub use gres::{
-    Gres, GresBalancerGoal, GresBalancerGoals, GresBalancerOperationKind, GresBalancerPlanSnapshot,
-    GresBalancerRegistryLayout, GresBalancerSpec, GresBalancerStatus, GresBalancerThresholds,
-    GresSpec, GresStatus, PgdogSpec, SecretKeyRef, SecretRef, TenantDefaults,
+    Gres, GresActivatorSpec, GresBalancerGoal, GresBalancerGoals, GresBalancerOperationKind,
+    GresBalancerPlanSnapshot, GresBalancerRegistryLayout, GresBalancerSpec, GresBalancerStatus,
+    GresBalancerThresholds, GresSpec, GresStatus, PgdogSpec, SecretKeyRef, SecretRef,
+    TenantDefaults,
 };
 pub use gres_tenant::{
     GresTenant, GresTenantRangeKey, GresTenantRangeSpec, GresTenantSpec, GresTenantStatus,

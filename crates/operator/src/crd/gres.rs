@@ -27,6 +27,10 @@ pub struct GresSpec {
     /// `PgDog` front-door deployment settings.
     pub pgdog: PgdogSpec,
 
+    /// Wake activator deployment and runtime policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activator: Option<GresActivatorSpec>,
+
     /// Default tenant runtime settings inherited by `GresTenant`s unless
     /// they set `spec.overrides`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -36,6 +40,36 @@ pub struct GresSpec {
     /// not performed by the operator yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub balancer: Option<GresBalancerSpec>,
+}
+
+/// Wake activator deployment and runtime policy.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GresActivatorSpec {
+    /// Number of activator replicas.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub replicas: Option<i32>,
+
+    /// Registry readiness polling interval in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub registry_poll_ms: Option<u64>,
+
+    /// Maximum duration to hold one cold-starting connection in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub cold_start_timeout_ms: Option<u64>,
+
+    /// Activator readiness probe period in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub readiness_probe_period_seconds: Option<i32>,
+
+    /// Replication factor for the tenant registry topic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 32_767))]
+    pub registry_replication_factor: Option<i32>,
 }
 
 /// Dry-run balancer integration settings for a Gres fleet.
@@ -348,6 +382,13 @@ mod tests {
                     key: "password".into(),
                 },
             },
+            activator: Some(GresActivatorSpec {
+                replicas: Some(3),
+                registry_poll_ms: Some(500),
+                cold_start_timeout_ms: Some(45_000),
+                readiness_probe_period_seconds: Some(7),
+                registry_replication_factor: Some(32_767),
+            }),
             defaults: Some(TenantDefaults {
                 wal_replication: Some(3),
                 checkpoint_frames: Some(10_000),
@@ -371,11 +412,42 @@ mod tests {
         assert!(json.contains("\"kafkaCluster\":\"demo\""), "got: {json}");
         assert!(json.contains("\"listenPort\":6432"), "got: {json}");
         assert!(
+            json.contains(
+                "\"activator\":{\"replicas\":3,\"registryPollMs\":500,\"coldStartTimeoutMs\":45000,\"readinessProbePeriodSeconds\":7,\"registryReplicationFactor\":32767}"
+            ),
+            "got: {json}"
+        );
+        assert!(
             json.contains("\"disabledGoals\":[\"load_skew\"]"),
             "got: {json}"
         );
         let back: GresSpec = serde_json::from_str(&json).unwrap();
         assert!(back == spec);
+    }
+
+    #[test]
+    fn activator_schema_requires_positive_values() {
+        let crd = serde_json::to_value(Gres::crd()).expect("serialize Gres CRD");
+        let activator = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
+            ["properties"]["activator"];
+
+        assert!(activator["type"] == "object");
+        for field in [
+            "replicas",
+            "registryPollMs",
+            "coldStartTimeoutMs",
+            "readinessProbePeriodSeconds",
+            "registryReplicationFactor",
+        ] {
+            assert!(
+                activator["properties"][field]["minimum"].as_f64() == Some(1.0),
+                "missing minimum for {field}: {activator}"
+            );
+        }
+        assert!(
+            activator["properties"]["registryReplicationFactor"]["maximum"].as_f64()
+                == Some(32_767.0)
+        );
     }
 
     #[test]

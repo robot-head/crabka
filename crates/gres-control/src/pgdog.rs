@@ -57,6 +57,25 @@ pub struct PgdogTimeouts {
 }
 
 impl PgdogTimeouts {
+    /// Derive the total cold-start ceiling from one connection-attempt timeout.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when multiplying by `PgDog`'s default attempt count
+    /// overflows [`Duration`].
+    pub fn cold_start_ceiling_for_attempt_timeout(
+        attempt_timeout: Duration,
+    ) -> Result<Duration, ControlError> {
+        attempt_timeout
+            .checked_mul(u32::from(DEFAULT_CONNECT_ATTEMPTS))
+            .ok_or_else(|| {
+                ControlError::invalid_field(
+                    "cold_start_timeout",
+                    "default connection attempt budget overflowed",
+                )
+            })
+    }
+
     /// Build timeout values that can cover the supplied cold-start ceiling.
     #[must_use]
     pub fn for_cold_start_ceiling(cold_start_ceiling: Duration) -> Self {
@@ -586,6 +605,16 @@ mod tests {
         let error = render_pgdog_toml(&input).expect_err("insufficient budget fails");
 
         assert!(error.to_string().contains("cold-start ceiling"));
+    }
+
+    #[test]
+    fn cold_start_ceiling_covers_default_attempt_count_and_rejects_overflow() {
+        let ceiling =
+            PgdogTimeouts::cold_start_ceiling_for_attempt_timeout(Duration::from_secs(30))
+                .expect("default timeout must fit");
+
+        assert!(ceiling == Duration::from_secs(90));
+        assert!(PgdogTimeouts::cold_start_ceiling_for_attempt_timeout(Duration::MAX).is_err());
     }
 
     #[test]
