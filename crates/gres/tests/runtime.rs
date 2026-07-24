@@ -121,6 +121,7 @@ impl crabka_gres::TenantConfigLoader for FakeTenantConfigLoader {
         _bootstrap: &str,
         _tenant: &crabka_gres_control::TenantName,
         _security: Option<crabka_client_core::security::ClientSecurity>,
+        _policy: &crabka_gres_control::RegistryPolicy,
     ) -> std::io::Result<Option<crabka_gres_control::TenantRecord>> {
         Ok(Some(self.record.clone()))
     }

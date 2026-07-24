@@ -36,8 +36,6 @@ const DEFAULT_CHECKPOINT_FRAMES_THRESHOLD: u64 = 10_000;
 const DEFAULT_CHECKPOINT_BYTES_THRESHOLD: u64 = 64 * 1024 * 1024;
 const DEFAULT_CHECKPOINT_RETAIN_NEWEST: usize = 2;
 const CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS: i32 = 30_000;
-const TENANT_CONFIG_FETCH_MAX_WAIT_MS: i32 = 500;
-const TENANT_CONFIG_FETCH_PARTITION_MAX_BYTES: i32 = 1 << 20;
 const IDLE_MONITOR_POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// Relaxed cadence of the LOCAL (mem / --data-dir) vacuum loop: one bounded
 /// `SqlEngine::vacuum_step` this often while the sweep is keeping up with the
@@ -2475,6 +2473,7 @@ pub trait TenantConfigLoader: Sync {
         bootstrap: &str,
         tenant: &TenantName,
         security: Option<ClientSecurity>,
+        policy: &RegistryPolicy,
     ) -> std::io::Result<Option<TenantRecord>>;
 }
 
@@ -2492,8 +2491,9 @@ impl TenantConfigLoader for LiveTenantConfigLoader {
         bootstrap: &str,
         tenant: &TenantName,
         security: Option<ClientSecurity>,
+        policy: &RegistryPolicy,
     ) -> std::io::Result<Option<TenantRecord>> {
-        load_live_tenant_config(bootstrap, tenant, security).await
+        load_live_tenant_config(bootstrap, tenant, security, policy).await
     }
 }
 
@@ -2501,6 +2501,7 @@ struct LiveRangeRegistrySource {
     bootstrap: String,
     tenant: TenantName,
     security: Option<ClientSecurity>,
+    policy: RegistryPolicy,
 }
 
 struct MustActivateRangeRegistrySource {
@@ -2673,15 +2674,20 @@ impl crabka_gres_ranges::control::SplitIntentAuthority for LiveSplitIntentAuthor
 #[async_trait::async_trait]
 impl crabka_gres_ranges::registry::RangeRegistrySource for LiveRangeRegistrySource {
     async fn load_current(&self) -> Result<TenantRecord, crabka_gres_ranges::RegistryError> {
-        load_live_tenant_config(&self.bootstrap, &self.tenant, self.security.clone())
-            .await
-            .map_err(|error| crabka_gres_ranges::RegistryError::Authoritative(error.to_string()))?
-            .ok_or_else(|| {
-                crabka_gres_ranges::RegistryError::Authoritative(format!(
-                    "tenant {} is absent from the control registry",
-                    self.tenant
-                ))
-            })
+        load_live_tenant_config(
+            &self.bootstrap,
+            &self.tenant,
+            self.security.clone(),
+            &self.policy,
+        )
+        .await
+        .map_err(|error| crabka_gres_ranges::RegistryError::Authoritative(error.to_string()))?
+        .ok_or_else(|| {
+            crabka_gres_ranges::RegistryError::Authoritative(format!(
+                "tenant {} is absent from the control registry",
+                self.tenant
+            ))
+        })
     }
 }
 
@@ -2742,8 +2748,9 @@ async fn load_substrate_tenant_record(
     let tenant = TenantName::try_from(tenant)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
     let security = tenant_kafka_security_from_env(tenant.as_str());
+    let policy = args.registry.policy();
     let record = tenant_config_loader
-        .load_tenant_config(bootstrap, &tenant, security)
+        .load_tenant_config(bootstrap, &tenant, security, &policy)
         .await?;
     let Some(record) = record else {
         // In-memory bootstraps carry no tenant record; the runtime serves
@@ -2803,6 +2810,7 @@ async fn load_live_tenant_config(
     bootstrap: &str,
     tenant: &TenantName,
     security: Option<ClientSecurity>,
+    policy: &RegistryPolicy,
 ) -> std::io::Result<Option<TenantRecord>> {
     // The in-process substrate seam has no broker to dial and no config
     // topic to read; startup falls back to CLI-provided defaults.
@@ -2855,8 +2863,8 @@ async fn load_live_tenant_config(
             topic_id,
             0,
             next_offset,
-            TENANT_CONFIG_FETCH_MAX_WAIT_MS,
-            TENANT_CONFIG_FETCH_PARTITION_MAX_BYTES,
+            policy.fetch_max_wait_ms(),
+            policy.fetch_partition_max_bytes(),
         )
         .await
         .map_err(|error| std::io::Error::other(format!("tenant config fetch: {error}")))?;
@@ -2886,6 +2894,7 @@ async fn load_live_split_operation(
     tenant: &str,
     operation_id: &str,
     security: Option<ClientSecurity>,
+    policy: &RegistryPolicy,
 ) -> std::io::Result<Option<crabka_gres_control::SplitOperationRecord>> {
     const TOPIC: &str = crabka_gres_control::TENANT_REGISTRY_TOPIC;
     const KEY_PREFIX: &[u8] = b"\0gres-split-operation\0";
@@ -2931,15 +2940,7 @@ async fn load_live_split_operation(
     loop {
         let result = crabka_client_core::fetch_partition_with_isolation_progress(
             &conn,
-            crabka_client_core::IsolatedFetch {
-                topic: TOPIC,
-                topic_id,
-                partition: 0,
-                fetch_offset: next_offset,
-                max_wait_ms: TENANT_CONFIG_FETCH_MAX_WAIT_MS,
-                partition_max_bytes: TENANT_CONFIG_FETCH_PARTITION_MAX_BYTES,
-                isolation_level: 1,
-            },
+            live_split_operation_fetch(policy, TOPIC, topic_id, next_offset),
         )
         .await
         .map_err(|error| std::io::Error::other(format!("activation registry fetch: {error}")))?;
@@ -2959,6 +2960,23 @@ async fn load_live_split_operation(
             return Ok(latest);
         };
         next_offset = progress;
+    }
+}
+
+fn live_split_operation_fetch<'a>(
+    policy: &RegistryPolicy,
+    topic: &'a str,
+    topic_id: crabka_protocol::primitives::uuid::Uuid,
+    fetch_offset: i64,
+) -> crabka_client_core::IsolatedFetch<'a> {
+    crabka_client_core::IsolatedFetch {
+        topic,
+        topic_id,
+        partition: 0,
+        fetch_offset,
+        max_wait_ms: policy.fetch_max_wait_ms(),
+        partition_max_bytes: policy.fetch_partition_max_bytes(),
+        isolation_level: 1,
     }
 }
 
@@ -3222,6 +3240,7 @@ fn multirange_tenant_config(
                     |error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error),
                 )?,
                 security: config.kafka_security.clone(),
+                policy: config.registry_policy.clone(),
             }));
         }
         if let Some(range_rpc) = &config.range_rpc {
@@ -3367,6 +3386,7 @@ async fn open_multirange_runtime(
             &discovery.receipt.tenant,
             &discovery.receipt.operation_id,
             config.kafka_security.clone(),
+            &config.registry_policy,
         )
         .await?
         .ok_or_else(|| std::io::Error::other("activation operation is absent"))?;
@@ -3536,6 +3556,7 @@ fn must_activate_range_registry(
                             std::io::Error::new(std::io::ErrorKind::InvalidInput, error)
                         })?,
                     security: config.kafka_security.clone(),
+                    policy: config.registry_policy.clone(),
                 },
                 current_layout,
                 source_record_version,
@@ -7306,6 +7327,7 @@ mod tests {
             _bootstrap: &str,
             _tenant: &TenantName,
             _security: Option<ClientSecurity>,
+            _policy: &RegistryPolicy,
         ) -> std::io::Result<Option<TenantRecord>> {
             Ok(None)
         }
@@ -7314,6 +7336,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingTenantConfigLoader {
         calls: AtomicUsize,
+        policy: std::sync::Mutex<Option<RegistryPolicy>>,
     }
 
     #[async_trait::async_trait]
@@ -7323,8 +7346,10 @@ mod tests {
             _bootstrap: &str,
             _tenant: &TenantName,
             _security: Option<ClientSecurity>,
+            policy: &RegistryPolicy,
         ) -> std::io::Result<Option<TenantRecord>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            *self.policy.lock().expect("policy lock") = Some(policy.clone());
             Ok(None)
         }
     }
@@ -7397,7 +7422,15 @@ mod tests {
     async fn memory_substrate_missing_tenant_config_is_tolerated() {
         use assert2::assert;
 
-        let args = substrate_args();
+        let mut args = substrate_args();
+        args.registry = RegistryOptions {
+            replication_factor: RegistryReplicationFactor::new(2).expect("replication factor"),
+            topic_create_timeout_ms: PositiveI32::new(15_001).expect("create timeout"),
+            reader_retry_backoff_ms: PositiveMillis::new(251).expect("retry backoff"),
+            fetch_max_wait_ms: PositiveI32::new(777).expect("fetch wait"),
+            fetch_partition_max_bytes: PositiveI32::new(2_000_000).expect("fetch bytes"),
+        };
+        let expected_policy = args.registry.policy();
         let loader = RecordingTenantConfigLoader::default();
 
         let record = load_substrate_tenant_record(&args, &loader)
@@ -7405,7 +7438,25 @@ mod tests {
             .expect("in-memory bootstrap tolerates a missing tenant record");
 
         assert!(loader.calls.load(Ordering::SeqCst) == 1);
+        assert!(
+            loader.policy.lock().expect("policy lock").as_ref() == Some(&expected_policy),
+            "serve registry policy must reach the tenant config loader"
+        );
         assert!(record.is_none());
+    }
+
+    #[test]
+    fn split_operation_fetch_uses_registry_policy_limits() {
+        let policy = RegistryPolicy::new(2, 15_001, 251, 777, 2_000_000).expect("registry policy");
+        let fetch = live_split_operation_fetch(
+            &policy,
+            "topic",
+            crabka_protocol::primitives::uuid::Uuid([0; 16]),
+            42,
+        );
+
+        assert!(fetch.max_wait_ms == 777);
+        assert!(fetch.partition_max_bytes == 2_000_000);
     }
 
     #[tokio::test]
@@ -7415,7 +7466,7 @@ mod tests {
         let tenant = TenantName::try_from("tenant-a").expect("tenant name");
         for bootstrap in ["memory://", "in-memory://"] {
             let record = LiveTenantConfigLoader
-                .load_tenant_config(bootstrap, &tenant, None)
+                .load_tenant_config(bootstrap, &tenant, None, &RegistryPolicy::default())
                 .await
                 .expect("in-memory bootstrap must not dial a broker");
             assert!(
