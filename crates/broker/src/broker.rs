@@ -684,12 +684,16 @@ fn spawn_audit_metrics(
     log: Arc<crabka_audit::AuditLog>,
     metrics: crate::metrics::BrokerMetrics,
     poll_interval: std::time::Duration,
+    shutdown: CancellationToken,
 ) {
     tokio::spawn(async move {
         let mut previous = (0, 0, 0);
         let mut tick = tokio::time::interval(poll_interval);
         loop {
-            tick.tick().await;
+            tokio::select! {
+                _ = tick.tick() => {}
+                () = shutdown.cancelled() => return,
+            }
             let current = (
                 stats.spooled(),
                 stats.replayed(),
@@ -720,6 +724,7 @@ fn start_audit_pipeline(
     controller: &dyn crate::metadata_source::MetadataSource,
     partitions: &Arc<PartitionRegistry>,
     metrics: &crate::metrics::BrokerMetrics,
+    supervisor_shutdown: &CancellationToken,
 ) -> (Option<PartitionIndex>, Arc<crabka_audit::AuditLog>) {
     if !config.audit_enabled {
         return (None, crabka_audit::AuditLog::disabled());
@@ -749,7 +754,11 @@ fn start_audit_pipeline(
                 partitions
                     .get(&config.audit_topic, partition_index)
                     .and_then(|partition| {
-                        crate::audit_recovery::recover_from_partition_tail(&partition)
+                        crate::audit_recovery::recover_from_partition_tail(
+                            &partition,
+                            config.audit_tail_window_offsets,
+                            config.audit_tail_read_max_bytes,
+                        )
                     })
             });
         let chain = resume.map_or_else(crabka_audit::ChainState::new, |(sequence, head)| {
@@ -779,6 +788,7 @@ fn start_audit_pipeline(
             log.clone(),
             metrics.clone(),
             config.audit_stats_poll_interval,
+            supervisor_shutdown.child_token(),
         );
     } else {
         tracing::warn!("no audit partition led by this broker; audit records will drop");
@@ -1845,8 +1855,13 @@ async fn start_broker_runtime(
             listener.protocol
         });
     let metrics = crate::metrics::BrokerMetrics::new();
-    let (audit_led_partition, audit_log) =
-        start_audit_pipeline(config, &**controller, storage.0, &metrics);
+    let (audit_led_partition, audit_log) = start_audit_pipeline(
+        config,
+        &**controller,
+        storage.0,
+        &metrics,
+        &supervisor_shutdown,
+    );
     let supervisor_handle = spawn_replicator_supervisor(
         config,
         controller,
@@ -4453,6 +4468,33 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[tokio::test]
+    async fn audit_metrics_cancellation_releases_log_before_next_poll() {
+        let stats = Arc::new(crabka_audit::AuditStats::new());
+        let (log, _receiver) = crabka_audit::AuditLog::new(1);
+        let weak_log = Arc::downgrade(&log);
+        let shutdown = CancellationToken::new();
+        spawn_audit_metrics(
+            stats,
+            log.clone(),
+            crate::metrics::BrokerMetrics::new(),
+            std::time::Duration::from_secs(60),
+            shutdown.child_token(),
+        );
+        drop(log);
+
+        shutdown.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while weak_log.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("audit metrics task releases log after cancellation");
+
+        assert!(weak_log.upgrade().is_none());
+    }
 
     struct MockMetadataSource {
         image: Arc<crabka_metadata::MetadataImage>,
