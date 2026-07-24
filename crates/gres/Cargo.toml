@@ -63,5 +63,5 @@ crabka-pgmvcc = { path = "../pgmvcc" }
 crabka-pgtypes = { path = "../pgtypes" }
 crabka-security = { path = "../security" }
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["full"] }
+tokio = { workspace = true, features = ["full", "test-util"] }
 tokio-postgres = { workspace = true }
