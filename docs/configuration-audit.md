@@ -727,3 +727,71 @@ and found no code remediation.
   KafkaRebalance transport retry, one production grace default/source, no
   listen-port fallback/clamp, and no duplicate hardcoded front-door timing.
 - `git diff --check`: passed.
+
+## Gres Checkpoint and Lifecycle Policy
+
+Periodic checkpoint execution, standalone checkpoint/suspend inputs, and fleet
+compute/lifecycle policy are complete. The shared compiled defaults have one
+numeric owner:
+
+- `gres-control` owns checkpoint frames, bytes, delete-records timeout,
+  checkpoint polling, and idle-suspend polling.
+- `gres-substrate` owns checkpoint part size and retained-manifest count.
+- The operator owns its lifecycle requeue cadence.
+
+Explicit Gres CLI/environment values override hydrated tenant thresholds, which
+override the shared compiled frame/byte defaults. Tenant-record defaults alone
+do not activate checkpointing. The operator emits exactly the five compute
+checkpoint policy flags only when a checkpoint store is configured; it never
+emits frame/byte threshold or lifecycle-requeue flags.
+
+Every configurable value has a traced live consumer:
+
+- frame/byte thresholds reach the periodic checkpoint trigger;
+- part size reaches checkpoint object splitting;
+- retention reaches manifest/object/WAL pruning;
+- delete-records timeout reaches Kafka Admin deletion;
+- checkpoint polling reaches the delayed checkpoint interval;
+- idle-suspend polling reaches the suspend monitor;
+- lifecycle requeue reaches all three tenant lifecycle progress branches.
+
+### Fixed
+
+Partition 0, offset arithmetic, manifest version/layout and manifest-last
+durability, Kafka protocol codes, registry/pin/object key prefixes, generation
+fencing, the eight-byte checkpoint format minimum, nonzero manifest-size
+normalization, and the serialized checkpoint command queue capacity are
+protocol, format, safety, or internal serialization invariants. They are not
+deployment tuning.
+
+### Adjacent Pending Policy
+
+This closes only checkpoint and lifecycle policy. The next coherent Gres-owned
+runtime slice is local-vacuum pacing and debt policy in
+`crates/gres/src/lib.rs`: idle interval, backoff floor, hot-debt threshold,
+maximum key budget, fast/slow step cadence, and idle-after duration. The
+range-0 follower retry, durable-inspection limits, and operator
+dependency-discovery retries are classified adjacent candidates for later
+owner-specific review.
+
+### Gres Checkpoint/Lifecycle Evidence
+
+On 2026-07-24 `tools/audit-runtime-values.sh` reported 5,913 repository
+matches. The focused checkpoint/lifecycle source set contained 81 matches:
+34 inline test/harness values, 25 fixed protocol/format/topology/derived
+values, eight single-owned policy defaults, and 14 adjacent runtime candidates.
+No focused candidate remains unclassified.
+
+- Full affected Gres-control, Gres-substrate, Gres, and operator suites passed,
+  including the Gres hard-crash/process matrices and all operator integration
+  tests.
+- Strict all-target/all-feature Clippy with `-D warnings`, formatting, and
+  `git diff --check` passed.
+- Fresh generation of all nine CRDs matched `deploy/crds` exactly.
+- Focused behavior tests proved threshold precedence, default mapping,
+  store-gated flag rendering, no-store startup, live consumer wiring, and
+  configured lifecycle cadence through the ready, WAL-deletion-pending, and
+  resume-fenced branches.
+- Independent reviews found and verified remediation of terminal pin cleanup,
+  explicit no-op lifecycle inputs, no-store checkpoint activation, behavioral
+  lifecycle coverage, and duplicate default ownership.
