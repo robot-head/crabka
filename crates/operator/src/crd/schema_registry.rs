@@ -50,6 +50,19 @@ pub struct SchemaRegistrySpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_id: Option<String>,
 
+    /// Schema Registry runtime policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<SchemaRegistryRuntime>,
+
+    /// Kafka client id used by the registry. Default `crabka-schema-registry`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1))]
+    pub client_id: Option<String>,
+
+    /// Kubernetes probe timing overrides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health_checks: Option<SchemaRegistryHealthChecks>,
+
     /// SR → broker client security (SASL / TLS). Maps to `--kafka-*` flags.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kafka_client: Option<SchemaRegistryKafkaClient>,
@@ -69,6 +82,58 @@ pub struct SchemaRegistrySpec {
     /// Pod resource requirements.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<k8s_openapi::api::core::v1::ResourceRequirements>,
+}
+
+/// Schema Registry broker interaction and store-default policy.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SchemaRegistryRuntime {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub election_session_timeout_ms: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub election_rebalance_timeout_ms: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub election_heartbeat_interval_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub election_reconnect_backoff_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub store_reader_retry_backoff_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub store_reader_fetch_max_wait_ms: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub store_reader_fetch_max_bytes: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub schemas_topic_create_timeout_ms: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_compatibility_level: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_mode: Option<String>,
+}
+
+/// Kubernetes readiness and liveness probe timing.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SchemaRegistryHealthChecks {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0))]
+    pub readiness_initial_delay_seconds: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub readiness_period_seconds: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0))]
+    pub liveness_initial_delay_seconds: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub liveness_period_seconds: Option<i32>,
 }
 
 /// Reference to a cert-manager `Issuer` or `ClusterIssuer`.
