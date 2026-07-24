@@ -30,7 +30,7 @@ use crabka_protocol::owned::{
     metadata_request::MetadataRequest,
 };
 use crabka_schema_registry::{
-    config::{RegistryConfig, SecurityConfig},
+    config::{RegistryConfig, RegistryRuntimeConfig, SecurityConfig},
     format::SchemaType,
     kafkastore::{KafkaStore, RegisterSchema, record::SchemaReference},
     rest::{self, AppState},
@@ -93,6 +93,7 @@ impl KafkaStack {
             group_id: "schema-registry".into(),
             leader_eligibility: true,
             security: SecurityConfig::default(),
+            runtime: RegistryRuntimeConfig::default(),
         };
         let store = KafkaStore::start(&cfg, cancel.clone())
             .await
