@@ -53,6 +53,7 @@ fn kafka_cr_with_authorization(
             krb5_conf_secret_ref: None,
             tracing: None,
             broker_tuning: None,
+            gres_registry: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());

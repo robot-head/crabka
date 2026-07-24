@@ -2101,6 +2101,7 @@ mod tests {
                 krb5_conf_secret_ref: None,
                 tracing: None,
                 broker_tuning: None,
+                gres_registry: None,
             },
         );
         parent.metadata.namespace = Some("default".into());
@@ -2356,6 +2357,7 @@ mod tests {
                 krb5_conf_secret_ref: None,
                 tracing: None,
                 broker_tuning: None,
+                gres_registry: None,
             },
         );
         parent.metadata.namespace = Some("default".into());

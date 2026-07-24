@@ -29,8 +29,8 @@ pub use gres_tenant::{
 };
 pub use grpc_gateway::{KafkaGrpcGateway, KafkaGrpcGatewaySpec, KafkaGrpcGatewayStatus};
 pub use kafka::{
-    Authorization, BrokerTuning, InterBrokerKerberos, Kafka, KafkaCondition, KafkaSpec,
-    KafkaStatus, Krb5ConfSecretRef, OpaAuthorization, SimpleAuthorization,
+    Authorization, BrokerTuning, GresRegistrySpec, InterBrokerKerberos, Kafka, KafkaCondition,
+    KafkaSpec, KafkaStatus, Krb5ConfSecretRef, OpaAuthorization, SimpleAuthorization,
 };
 pub use kafka_node_pool::{
     JbodSpec, JbodVolume, KafkaNodePool, KafkaNodePoolSpec, KafkaNodePoolStatus, MetadataTemplate,

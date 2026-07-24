@@ -129,6 +129,52 @@ pub struct KafkaSpec {
     /// Validated broker operational policy rendered into `[runtime]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub broker_tuning: Option<BrokerTuning>,
+    /// Shared creation and reader policy for the Gres tenant registry topic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gres_registry: Option<GresRegistrySpec>,
+}
+
+/// Kafka-owned Gres tenant registry policy.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GresRegistrySpec {
+    /// Registry topic replication factor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 32_767))]
+    pub replication_factor: Option<i32>,
+    /// Kafka topic creation timeout in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub topic_create_timeout_ms: Option<i32>,
+    /// Registry reader retry delay in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub reader_retry_backoff_ms: Option<u64>,
+    /// Maximum time a registry fetch waits for data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub fetch_max_wait_ms: Option<i32>,
+    /// Maximum bytes fetched from the registry partition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub fetch_partition_max_bytes: Option<i32>,
+}
+
+impl GresRegistrySpec {
+    /// Convert the CRD values to the validated runtime policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any configured value is outside its supported range.
+    pub fn policy(&self) -> Result<crabka_gres_control::RegistryPolicy, String> {
+        crabka_gres_control::RegistryPolicy::new(
+            self.replication_factor.unwrap_or(1),
+            self.topic_create_timeout_ms.unwrap_or(15_000),
+            self.reader_retry_backoff_ms.unwrap_or(250),
+            self.fetch_max_wait_ms.unwrap_or(500),
+            self.fetch_partition_max_bytes.unwrap_or(1_048_576),
+        )
+    }
 }
 
 macro_rules! validate_tuning_field {
@@ -1298,6 +1344,104 @@ mod tests {
     }
 
     #[test]
+    fn gres_registry_round_trips_and_defaults() {
+        let custom: KafkaSpec = serde_json::from_str(
+            r#"{
+                "kafkaVersion":"0.1.1",
+                "gresRegistry":{
+                    "replicationFactor":2,
+                    "topicCreateTimeoutMs":15001,
+                    "readerRetryBackoffMs":251,
+                    "fetchMaxWaitMs":501,
+                    "fetchPartitionMaxBytes":1048577
+                }
+            }"#,
+        )
+        .expect("custom registry policy");
+        assert!(
+            custom
+                .gres_registry
+                .as_ref()
+                .expect("gresRegistry")
+                .policy()
+                .expect("valid policy")
+                == crabka_gres_control::RegistryPolicy::new(2, 15_001, 251, 501, 1_048_577)
+                    .expect("expected policy")
+        );
+        let json = serde_json::to_string(&custom).expect("serialize Kafka spec");
+        let round_trip: KafkaSpec = serde_json::from_str(&json).expect("round trip");
+        assert!(round_trip == custom);
+
+        let defaults: KafkaSpec =
+            serde_json::from_str(r#"{"kafkaVersion":"0.1.1"}"#).expect("default policy");
+        assert!(
+            defaults
+                .gres_registry
+                .as_ref()
+                .map_or_else(
+                    || Ok(crabka_gres_control::RegistryPolicy::default()),
+                    GresRegistrySpec::policy,
+                )
+                .expect("valid defaults")
+                == crabka_gres_control::RegistryPolicy::default()
+        );
+    }
+
+    #[test]
+    fn gres_registry_schema_has_runtime_bounds() {
+        let crd = serde_json::to_value(Kafka::crd()).expect("serialize Kafka CRD");
+        let registry = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
+            ["properties"]["gresRegistry"];
+        for field in [
+            "replicationFactor",
+            "topicCreateTimeoutMs",
+            "readerRetryBackoffMs",
+            "fetchMaxWaitMs",
+            "fetchPartitionMaxBytes",
+        ] {
+            assert!(
+                registry["properties"][field]["minimum"].as_f64() == Some(1.0),
+                "missing minimum for {field}: {registry}"
+            );
+        }
+        assert!(registry["properties"]["replicationFactor"]["maximum"].as_f64() == Some(32_767.0));
+    }
+
+    #[test]
+    fn gres_registry_rejects_zero_and_replication_overflow() {
+        let cases = [
+            GresRegistrySpec {
+                replication_factor: Some(0),
+                ..Default::default()
+            },
+            GresRegistrySpec {
+                replication_factor: Some(32_768),
+                ..Default::default()
+            },
+            GresRegistrySpec {
+                topic_create_timeout_ms: Some(0),
+                ..Default::default()
+            },
+            GresRegistrySpec {
+                reader_retry_backoff_ms: Some(0),
+                ..Default::default()
+            },
+            GresRegistrySpec {
+                fetch_max_wait_ms: Some(0),
+                ..Default::default()
+            },
+            GresRegistrySpec {
+                fetch_partition_max_bytes: Some(0),
+                ..Default::default()
+            },
+        ];
+
+        for spec in cases {
+            assert!(spec.policy().is_err(), "accepted invalid policy: {spec:?}");
+        }
+    }
+
+    #[test]
     fn round_trips_through_json() {
         let k = Kafka::new(
             "demo",
@@ -1319,6 +1463,7 @@ mod tests {
                 krb5_conf_secret_ref: None,
                 tracing: None,
                 broker_tuning: None,
+                gres_registry: None,
             },
         );
         let json = serde_json::to_string(&k).unwrap();
@@ -1352,6 +1497,7 @@ mod tests {
                 krb5_conf_secret_ref: None,
                 tracing: None,
                 broker_tuning: None,
+                gres_registry: None,
             },
         );
         let j = serde_json::to_string(&k.spec).unwrap();
@@ -1474,6 +1620,7 @@ mod tests {
                 krb5_conf_secret_ref: None,
                 tracing: None,
                 broker_tuning: None,
+                gres_registry: None,
             },
         );
         let j = serde_json::to_string(&k.spec).unwrap();
@@ -1515,6 +1662,7 @@ mod tests {
                 krb5_conf_secret_ref: None,
                 tracing: None,
                 broker_tuning: None,
+                gres_registry: None,
             },
         );
         let j = serde_json::to_string(&k.spec).unwrap();
