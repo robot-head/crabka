@@ -405,6 +405,11 @@ spec:
                     minimum: 1.0
                     nullable: true
                     type: integer
+                  produceMaxBodyBytes:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
                   readinessPollIntervalMs:
                     format: uint64
                     minimum: 1.0
