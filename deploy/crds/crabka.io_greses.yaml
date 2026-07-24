@@ -228,6 +228,12 @@ spec:
                     minimum: 1.0
                     nullable: true
                     type: integer
+                  walRecoveryConnectTimeoutMs:
+                    description: Timeout for opening committed-WAL recovery broker connections.
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
                   walRecoveryEmptyFetchRetries:
                     description: Consecutive empty-fetch retries after the first empty recovery fetch.
                     format: uint
@@ -249,6 +255,12 @@ spec:
                   walRecoveryFetchResponseMaxBytes:
                     description: Whole-response byte limit for committed-WAL recovery fetches.
                     format: int32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  walRecoveryRequestTimeoutMs:
+                    description: Timeout for committed-WAL recovery broker requests.
+                    format: uint64
                     minimum: 1.0
                     nullable: true
                     type: integer
