@@ -57,12 +57,13 @@ impl SharePartitionLeaderManager {
         controller: Arc<dyn MetadataSource>,
         persister: Arc<SharePersister>,
         config: Arc<ShareGroupConfig>,
+        unlimited_session_fallback: usize,
     ) -> Self {
         // The share-session cache is capped at the same per-broker session
         // ceiling as classic fetch sessions; `max_groups` of 0 means
-        // "unbounded" in `ShareGroupConfig`, so fall back to a generous cap.
+        // "unbounded" in `ShareGroupConfig`, so use the broker fallback.
         let session_max = if config.max_groups == 0 {
-            10_000
+            unlimited_session_fallback
         } else {
             config.max_groups.saturating_mul(config.max_size.max(1))
         };
@@ -396,29 +397,9 @@ mod tests {
     }
 
     fn manager() -> Arc<SharePartitionLeaderManager> {
-        let reg = Arc::new(PartitionRegistry::new());
-        let controller: Arc<dyn MetadataSource> = Arc::new(MockSource::new());
-        let coord = Arc::new(ShareCoordinator::new(
-            crabka_audit::NodeId(1),
-            reg.clone(),
-            ShareCoordinatorConfig::default(),
-        ));
-        let client = Arc::new(InterBrokerClient::new(None, None));
-        let persister = Arc::new(SharePersister::new(
-            crabka_audit::NodeId(1),
-            coord,
-            controller.clone(),
-            client,
-            ListenerProtocol::Plaintext,
-            "INTERNAL".to_string(),
-        ));
-        Arc::new(SharePartitionLeaderManager::new(
-            crabka_audit::NodeId(1),
-            reg,
-            controller,
-            persister,
-            Arc::new(ShareGroupConfig::default()),
-        ))
+        manager_with_unlimited_fallback(
+            crate::config::BrokerConfig::default().share_session_cache_max_when_unlimited,
+        )
     }
 
     /// A manager whose controller serves `image` (so `current_leader_of` and
@@ -446,7 +427,47 @@ mod tests {
             controller,
             persister,
             Arc::new(ShareGroupConfig::default()),
+            crate::config::BrokerConfig::default().share_session_cache_max_when_unlimited,
         ))
+    }
+
+    fn manager_with_unlimited_fallback(fallback: usize) -> Arc<SharePartitionLeaderManager> {
+        let reg = Arc::new(PartitionRegistry::new());
+        let controller: Arc<dyn MetadataSource> = Arc::new(MockSource::new());
+        let coord = Arc::new(ShareCoordinator::new(
+            crabka_audit::NodeId(1),
+            reg.clone(),
+            ShareCoordinatorConfig::default(),
+        ));
+        let client = Arc::new(InterBrokerClient::new(None, None));
+        let persister = Arc::new(SharePersister::new(
+            crabka_audit::NodeId(1),
+            coord,
+            controller.clone(),
+            client,
+            ListenerProtocol::Plaintext,
+            "INTERNAL".to_string(),
+        ));
+        Arc::new(SharePartitionLeaderManager::new(
+            crabka_audit::NodeId(1),
+            reg,
+            controller,
+            persister,
+            Arc::new(ShareGroupConfig::default()),
+            fallback,
+        ))
+    }
+
+    #[test]
+    fn nondefault_unlimited_fallback_bounds_sessions() {
+        let manager = manager_with_unlimited_fallback(2);
+
+        assert!(manager.validate_session("g", "m1", 0) == Ok(()));
+        assert!(manager.validate_session("g", "m2", 0) == Ok(()));
+        assert!(
+            manager.validate_session("g", "m3", 0)
+                == Err(crate::codes::SHARE_SESSION_LIMIT_REACHED)
+        );
     }
 
     #[tokio::test]

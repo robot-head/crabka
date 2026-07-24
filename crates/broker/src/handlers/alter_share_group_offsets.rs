@@ -427,6 +427,7 @@ mod tests {
         crate::share_coordinator::handlers::test_support::open_all_state_partitions(
             &broker.partitions,
             dir.path(),
+            broker.config.share_coordinator.state_topic_num_partitions,
         );
         broker
             .share_coordinator

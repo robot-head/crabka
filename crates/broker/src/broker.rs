@@ -606,11 +606,13 @@ async fn start_coordinators(
     if let Err(error) = txn_coordinator.recover(&controller.current_image()).await {
         tracing::warn!(%error, "transaction coordinator recovery error");
     }
+    let mut share_coordinator_config = (*config.share_coordinator).clone();
+    share_coordinator_config.recovery_read_max_bytes = config.share_recovery_read_max_bytes;
     let share_coordinator = Arc::new(
         crate::share_coordinator::coordinator::ShareCoordinator::new(
             config.node_id,
             Arc::clone(partitions),
-            (*config.share_coordinator).clone(),
+            share_coordinator_config,
         ),
     );
     if let Err(error) = share_coordinator.recover(&controller.current_image()).await {
@@ -642,6 +644,7 @@ async fn start_coordinators(
             Arc::clone(controller),
             Arc::clone(&share_persister),
             Arc::new((*config.share_group).clone()),
+            config.share_session_cache_max_when_unlimited,
         ),
     );
     share_partition_leaders.spawn_lock_sweeper();

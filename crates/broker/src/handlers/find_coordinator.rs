@@ -157,7 +157,11 @@ pub(crate) async fn handle(
             KEY_TYPE_SHARE => {
                 // Ensure __share_group_state exists before resolving its
                 // partitions' leaders.
-                if let Err(e) = crate::share_coordinator::bootstrap::ensure_topic(&controller).await
+                if let Err(e) = crate::share_coordinator::bootstrap::ensure_topic(
+                    &controller,
+                    broker.config.share_coordinator.state_topic_num_partitions,
+                )
+                .await
                 {
                     tracing::warn!(
                         error = %e,
@@ -195,7 +199,7 @@ pub(crate) async fn handle(
                         group,
                         &topic_uuid,
                         partition,
-                        crate::share_coordinator::bootstrap::NUM_PARTITIONS,
+                        broker.config.share_coordinator.state_topic_num_partitions,
                     );
                     let image = controller.current_image();
                     result.push(resolve_partition_coordinator(

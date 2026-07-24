@@ -6,6 +6,7 @@ pub struct ShareCoordinatorConfig {
     pub state_topic_replication_factor: i16,
     pub state_topic_min_isr: i32,
     pub snapshot_update_records_per_snapshot: u32,
+    pub recovery_read_max_bytes: usize,
 }
 
 impl Default for ShareCoordinatorConfig {
@@ -15,6 +16,7 @@ impl Default for ShareCoordinatorConfig {
             state_topic_replication_factor: 3,
             state_topic_min_isr: 1,
             snapshot_update_records_per_snapshot: 50,
+            recovery_read_max_bytes: 1_048_576,
         }
     }
 }
@@ -32,6 +34,7 @@ mod tests {
             state_topic_replication_factor: 3,
             state_topic_min_isr: 1,
             snapshot_update_records_per_snapshot: 50,
+            recovery_read_max_bytes: 1_048_576,
         };
         assert!(ShareCoordinatorConfig::default() == expected);
     }

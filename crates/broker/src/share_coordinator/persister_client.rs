@@ -204,7 +204,11 @@ impl SharePersister {
     /// — tolerates an existing topic); the leadership refresh picks up any
     /// partitions already materialized locally by the replicator supervisor.
     async fn ensure_topic_and_refresh(&self) -> Result<(), BrokerError> {
-        bootstrap::ensure_topic(&self.controller).await?;
+        bootstrap::ensure_topic(
+            &self.controller,
+            self.share_coordinator.state_topic_num_partitions(),
+        )
+        .await?;
         self.share_coordinator
             .refresh_leader_partitions(&self.controller.current_image())
             .await;
