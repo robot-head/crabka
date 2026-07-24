@@ -40,6 +40,7 @@ base64 = { workspace = true }
 bytes = { workspace = true }
 derive_more = { workspace = true }
 futures = { workspace = true }
+jsonpath-rust = { workspace = true }
 ring = { workspace = true }
 k8s-openapi = { workspace = true, features = ["schemars"] }
 kube = { workspace = true }

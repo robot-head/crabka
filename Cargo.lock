@@ -3344,6 +3344,7 @@ dependencies = [
  "http",
  "http-body-util",
  "hyper",
+ "jsonpath-rust",
  "k8s-openapi",
  "kube",
  "mutants",

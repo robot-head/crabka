@@ -652,8 +652,10 @@ fn derive_allowed_targets(gw: &KafkaGrpcGateway) -> Vec<serde_json::Value> {
         }
     };
     for s in &gw.spec.outbound_subscriptions {
-        if let Ok(url) = reqwest_url_parse(&s.target_url) {
-            push(url.0, url.1);
+        if let Ok(url) = reqwest::Url::parse(&s.target_url)
+            && let Some(host) = url.host_str()
+        {
+            push(url.scheme().to_ascii_lowercase(), host.to_string());
         }
     }
     for a in &gw.spec.allowed_targets {
@@ -662,25 +664,6 @@ fn derive_allowed_targets(gw: &KafkaGrpcGateway) -> Vec<serde_json::Value> {
     out.into_iter()
         .map(|(scheme, host)| json!({ "scheme": scheme, "host": host }))
         .collect()
-}
-
-/// Minimal `scheme`/`host` extraction from a target URL, without pulling in the
-/// `reqwest`/`url` crate (not an operator dependency). Returns
-/// `(scheme, host)`; the host excludes any port (the gateway's SSRF check
-/// matches host only).
-fn reqwest_url_parse(target: &str) -> Result<(String, String), ()> {
-    let (scheme, rest) = target.split_once("://").ok_or(())?;
-    if scheme.is_empty() {
-        return Err(());
-    }
-    // Strip path/query, then any userinfo, then any port.
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
-    let host = host_port.rsplit_once(':').map_or(host_port, |(h, _)| h);
-    if host.is_empty() {
-        return Err(());
-    }
-    Ok((scheme.to_ascii_lowercase(), host.to_string()))
 }
 
 /// Render the child `KafkaUser` (`<gw>-broker`): `authentication: tls`, broad
@@ -1043,6 +1026,10 @@ fn validate_config(spec: &crate::crd::grpc_gateway::KafkaGrpcGatewaySpec) -> Res
     }
     if let Some(registry) = &spec.schema_registry {
         nonempty!(registry.url.as_deref(), "spec.schemaRegistry.url");
+        if let Some(url) = registry.url.as_deref() {
+            reqwest::Url::parse(url)
+                .map_err(|error| format!("spec.schemaRegistry.url: {error}"))?;
+        }
         validate!(
             registry.latest_cache_ttl_ms,
             refined_type::rule::GreaterU64<0>,
@@ -1126,6 +1113,15 @@ fn validate_config(spec: &crate::crd::grpc_gateway::KafkaGrpcGatewaySpec) -> Res
         {
             return Err("spec.webhooks.signatureEncoding must be hex or base64".into());
         }
+        if webhook.secret_ref.is_some() != webhook.signature_header.is_some() {
+            return Err("spec.webhooks.secretRef and signatureHeader must be set together".into());
+        }
+        if let Some(value) = webhook.idempotency_source.as_deref() {
+            validate_webhook_source(value, "spec.webhooks.idempotencySource")?;
+        }
+        if let Some(value) = webhook.key_source.as_deref() {
+            validate_webhook_source(value, "spec.webhooks.keySource")?;
+        }
         validate!(
             webhook.timestamp_tolerance_secs,
             refined_type::rule::GreaterEqualI64<0>,
@@ -1166,6 +1162,18 @@ fn validate_config(spec: &crate::crd::grpc_gateway::KafkaGrpcGatewaySpec) -> Res
     Ok(())
 }
 
+fn validate_webhook_source(value: &str, path: &str) -> Result<(), String> {
+    if value.strip_prefix("header:").is_some() {
+        return Ok(());
+    }
+    let Some(json_path) = value.strip_prefix("json:") else {
+        return Err(format!("{path}: must start with 'header:' or 'json:'"));
+    };
+    jsonpath_rust::parser::parse_json_path(json_path)
+        .map(|_| ())
+        .map_err(|error| format!("{path}: invalid JSONPath {json_path:?}: {error}"))
+}
+
 fn validate_outbound_config(
     spec: &crate::crd::grpc_gateway::KafkaGrpcGatewaySpec,
 ) -> Result<(), String> {
@@ -1182,6 +1190,11 @@ fn validate_outbound_config(
             .map_err(|error| format!("spec.outboundSubscriptions.name: {error}"))?;
         refined_type::rule::NonEmptyString::new(subscription.target_url.clone())
             .map_err(|error| format!("spec.outboundSubscriptions.targetUrl: {error}"))?;
+        let url = reqwest::Url::parse(&subscription.target_url).map_err(|error| {
+            format!("spec.outboundSubscriptions.targetUrl: invalid URL: {error}")
+        })?;
+        url.host_str()
+            .ok_or_else(|| "spec.outboundSubscriptions.targetUrl: URL has no host".to_string())?;
         for topic in &subscription.source_topics {
             refined_type::rule::NonEmptyString::new(topic.clone())
                 .map_err(|error| format!("spec.outboundSubscriptions.sourceTopics: {error}"))?;
@@ -1216,6 +1229,14 @@ fn validate_outbound_config(
             return Err(
                 "spec.outboundSubscriptions.maxBackoffMs must be at least baseBackoffMs".into(),
             );
+        }
+        if let Some(filter) = subscription.filter.as_deref() {
+            let Some(json_path) = filter.strip_prefix("json:") else {
+                return Err("spec.outboundSubscriptions.filter must start with 'json:'".into());
+            };
+            jsonpath_rust::parser::parse_json_path(json_path).map_err(|error| {
+                format!("spec.outboundSubscriptions.filter: invalid JSONPath: {error}")
+            })?;
         }
     }
     for target in &spec.allowed_targets {
@@ -1954,25 +1975,6 @@ mod tests {
         // Port stripped from the subscription host.
         assert!(hosts.contains("a.example.com"), "{hosts:?}");
         assert!(hosts.contains("b.example.com"), "{hosts:?}");
-    }
-
-    #[test]
-    fn reqwest_url_parse_strips_port_and_path() {
-        for (input, scheme, host) in [
-            (
-                "https://h.example.com:8443/a/b?x=1",
-                "https",
-                "h.example.com",
-            ),
-            ("http://h.example.com", "http", "h.example.com"),
-            ("https://user@h.example.com/x", "https", "h.example.com"),
-        ] {
-            assert!(
-                reqwest_url_parse(input) == Ok((scheme.into(), host.into())),
-                "case {input}"
-            );
-        }
-        assert!(reqwest_url_parse("not-a-url").is_err());
     }
 
     #[test]

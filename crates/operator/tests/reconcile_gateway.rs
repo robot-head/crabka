@@ -147,6 +147,49 @@ async fn runtime_invalid_values_stop_before_child_rendering() {
             "baseBackoffMs": 2,
             "maxBackoffMs": 1
         }]}),
+        serde_json::json!({"schemaRegistry": {"url": "not a URL"}}),
+        serde_json::json!({"webhooks": [{
+            "name": "w",
+            "targetTopic": "t",
+            "secretRef": {"name": "secret", "key": "hmac"}
+        }]}),
+        serde_json::json!({"webhooks": [{
+            "name": "w",
+            "targetTopic": "t",
+            "signatureHeader": "X-Signature"
+        }]}),
+        serde_json::json!({"webhooks": [{
+            "name": "w",
+            "targetTopic": "t",
+            "idempotencySource": "cookie:id",
+        }]}),
+        serde_json::json!({"webhooks": [{
+            "name": "w",
+            "targetTopic": "t",
+            "keySource": "json:$[",
+        }]}),
+        serde_json::json!({"outboundSubscriptions": [{
+            "name": "s",
+            "sourceTopics": ["t"],
+            "targetUrl": "not a URL"
+        }]}),
+        serde_json::json!({"outboundSubscriptions": [{
+            "name": "s",
+            "sourceTopics": ["t"],
+            "targetUrl": "mailto:user@example.com"
+        }]}),
+        serde_json::json!({"outboundSubscriptions": [{
+            "name": "s",
+            "sourceTopics": ["t"],
+            "targetUrl": "https://example.com",
+            "filter": "header:X-Tenant"
+        }]}),
+        serde_json::json!({"outboundSubscriptions": [{
+            "name": "s",
+            "sourceTopics": ["t"],
+            "targetUrl": "https://example.com",
+            "filter": "json:$["
+        }]}),
     ] {
         let mut gw = gw_cr(GW);
         gw.spec = serde_json::from_value(invalid.clone()).expect("gateway spec");
