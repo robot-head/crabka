@@ -7,8 +7,8 @@ pub mod registry;
 
 pub use error::ControlError;
 pub use pgdog::{
-    PgdogGeneral, PgdogPoolerMode, PgdogRenderInput, PgdogTimeouts, PgdogUser, TenantEndpoint,
-    render_pgdog_toml, render_users_toml,
+    PgdogConnectAttempts, PgdogGeneral, PgdogPoolerMode, PgdogRenderInput, PgdogTimeouts,
+    PgdogUser, TenantEndpoint, render_pgdog_toml, render_users_toml,
 };
 pub use record::{
     FinalCheckpoint, HashPlacement, MoveRangeState, RangeBoundary, RangeLayoutEntry,

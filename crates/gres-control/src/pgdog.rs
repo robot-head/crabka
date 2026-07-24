@@ -4,8 +4,9 @@
 //! assembling text by hand. When the pinned `PgDog` image changes, re-run the G-4
 //! front-door e2e leg against these goldens before accepting any output change.
 
-use std::{collections::HashSet, time::Duration};
+use std::{collections::HashSet, str::FromStr, time::Duration};
 
+use refined_type::rule::GreaterU16;
 use serde::Serialize;
 
 use crate::{ControlError, TenantState};
@@ -13,7 +14,6 @@ use crate::{ControlError, TenantState};
 const DEFAULT_LISTEN_PORT: u16 = 6_432;
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_mins(1);
 const DEFAULT_SERVER_LIFETIME: Duration = Duration::from_mins(5);
-const DEFAULT_CONNECT_ATTEMPTS: u16 = 3;
 // PgDog's documented way to disable proactive database healthchecks. This is
 // required for scale-to-zero routes: an ephemeral idle healthcheck must not
 // become the event that wakes a suspended tenant.
@@ -45,13 +45,47 @@ pub enum PgdogPoolerMode {
     Session,
 }
 
+/// A positive number of backend connection attempts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PgdogConnectAttempts(u16);
+
+impl PgdogConnectAttempts {
+    /// Validate a backend connection attempt count.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `value` is zero.
+    pub fn new(value: u16) -> Result<Self, String> {
+        GreaterU16::<0>::new(value)
+            .map(|value| Self(value.into_value()))
+            .map_err(|error| error.to_string())
+    }
+
+    /// Return the validated value.
+    #[must_use]
+    pub const fn into_value(self) -> u16 {
+        self.0
+    }
+}
+
+impl FromStr for PgdogConnectAttempts {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value
+            .parse()
+            .map_err(|error: std::num::ParseIntError| error.to_string())
+            .and_then(Self::new)
+    }
+}
+
 /// Explicit timeout overrides for a `PgDog` render.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PgdogTimeouts {
     /// Backend connection attempt timeout.
     pub connect_timeout: Duration,
     /// Number of backend connection attempts.
-    pub connect_attempts: u16,
+    pub connect_attempts: PgdogConnectAttempts,
     /// Time a client may wait for a pooled server connection.
     pub checkout_timeout: Duration,
 }
@@ -61,26 +95,29 @@ impl PgdogTimeouts {
     ///
     /// # Errors
     ///
-    /// Returns an error when multiplying by `PgDog`'s default attempt count
-    /// overflows [`Duration`].
+    /// Returns an error when multiplying by the attempt count overflows
+    /// [`Duration`].
     pub fn cold_start_ceiling_for_attempt_timeout(
         attempt_timeout: Duration,
+        connect_attempts: PgdogConnectAttempts,
     ) -> Result<Duration, ControlError> {
         attempt_timeout
-            .checked_mul(u32::from(DEFAULT_CONNECT_ATTEMPTS))
+            .checked_mul(u32::from(connect_attempts.into_value()))
             .ok_or_else(|| {
                 ControlError::invalid_field(
                     "cold_start_timeout",
-                    "default connection attempt budget overflowed",
+                    "connection attempt budget overflowed",
                 )
             })
     }
 
     /// Build timeout values that can cover the supplied cold-start ceiling.
     #[must_use]
-    pub fn for_cold_start_ceiling(cold_start_ceiling: Duration) -> Self {
-        let connect_attempts = DEFAULT_CONNECT_ATTEMPTS;
-        let attempt_count = u32::from(connect_attempts);
+    pub fn for_cold_start_ceiling(
+        cold_start_ceiling: Duration,
+        connect_attempts: PgdogConnectAttempts,
+    ) -> Self {
+        let attempt_count = u32::from(connect_attempts.into_value());
         let connect_timeout =
             divide_rounding_up(cold_start_ceiling, attempt_count).max(Duration::from_secs(1));
         let checkout_timeout = cold_start_ceiling.max(Duration::from_secs(1));
@@ -93,16 +130,9 @@ impl PgdogTimeouts {
     }
 
     fn ensure_covers_cold_start(self, cold_start_ceiling: Duration) -> Result<Self, ControlError> {
-        if self.connect_attempts == 0 {
-            return Err(ControlError::invalid_field(
-                "connect_attempts",
-                "must be greater than zero",
-            ));
-        }
-
         let Some(connect_budget) = self
             .connect_timeout
-            .checked_mul(u32::from(self.connect_attempts))
+            .checked_mul(u32::from(self.connect_attempts.into_value()))
         else {
             return Err(ControlError::invalid_field(
                 "connect_timeout",
@@ -155,6 +185,8 @@ pub struct PgdogGeneral {
     pub pooler_mode: PgdogPoolerMode,
     /// Maximum acceptable tenant wake latency.
     pub cold_start_ceiling: Duration,
+    /// Number of backend connection attempts.
+    pub connect_attempts: PgdogConnectAttempts,
     /// Optional explicit timeout knobs. Omitted values are derived from the ceiling.
     pub timeouts: Option<PgdogTimeouts>,
     /// Idle pooled-server disconnect window.
@@ -175,6 +207,8 @@ impl Default for PgdogGeneral {
             passthrough_auth: true,
             pooler_mode: PgdogPoolerMode::Transaction,
             cold_start_ceiling: Duration::from_secs(30),
+            connect_attempts: PgdogConnectAttempts::new(3)
+                .expect("the default PgDog connect attempt count is positive"),
             timeouts: None,
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
             server_lifetime: DEFAULT_SERVER_LIFETIME,
@@ -239,7 +273,10 @@ impl<'a> PgdogConfig<'a> {
             .general
             .timeouts
             .unwrap_or_else(|| {
-                PgdogTimeouts::for_cold_start_ceiling(input.general.cold_start_ceiling)
+                PgdogTimeouts::for_cold_start_ceiling(
+                    input.general.cold_start_ceiling,
+                    input.general.connect_attempts,
+                )
             })
             .ensure_covers_cold_start(input.general.cold_start_ceiling)?;
 
@@ -285,7 +322,7 @@ impl<'a> RenderGeneral<'a> {
                 "disabled"
             },
             connect_timeout: milliseconds_rounded_up(timeouts.connect_timeout),
-            connect_attempts: timeouts.connect_attempts,
+            connect_attempts: timeouts.connect_attempts.into_value(),
             checkout_timeout: milliseconds_rounded_up(timeouts.checkout_timeout),
             idle_timeout: milliseconds_rounded_up(general.idle_timeout),
             server_lifetime: milliseconds_rounded_up(general.server_lifetime),
@@ -382,10 +419,17 @@ fn render_databases<'a>(
                 tenant,
                 &tenant.backend_host,
                 tenant.backend_port,
+                input.general.pooler_mode,
             )?,
             TenantState::Parking | TenantState::Suspended | TenantState::ResumeRequested => {
                 if let Some((activator_host, activator_port)) = &input.activator {
-                    push_database(&mut databases, tenant, activator_host, *activator_port)?;
+                    push_database(
+                        &mut databases,
+                        tenant,
+                        activator_host,
+                        *activator_port,
+                        input.general.pooler_mode,
+                    )?;
                 }
             }
         }
@@ -399,6 +443,7 @@ fn push_database<'a>(
     tenant: &'a TenantEndpoint,
     host: &'a str,
     port: u16,
+    fleet_pooler_mode: PgdogPoolerMode,
 ) -> Result<(), ControlError> {
     if host.is_empty() {
         return Err(ControlError::invalid_field(
@@ -417,7 +462,7 @@ fn push_database<'a>(
         name: tenant.name.as_str(),
         host,
         port,
-        pooler_mode: tenant.pooler_mode.unwrap_or_default(),
+        pooler_mode: tenant.pooler_mode.unwrap_or(fleet_pooler_mode),
     });
 
     Ok(())
@@ -442,8 +487,30 @@ mod tests {
 
     use super::*;
 
+    const EXPECTED_DEFAULT_PGDOG: &str = include_str!("../tests/golden/pgdog-default.toml");
     const EXPECTED_PGDOG: &str = include_str!("../tests/golden/pgdog.toml");
     const EXPECTED_USERS: &str = include_str!("../tests/golden/users.toml");
+
+    #[test]
+    fn connect_attempts_accept_positive_u16_boundaries() {
+        assert!("1".parse::<PgdogConnectAttempts>().is_ok());
+        assert!("65535".parse::<PgdogConnectAttempts>().is_ok());
+        assert!("0".parse::<PgdogConnectAttempts>().is_err());
+    }
+
+    #[test]
+    fn renders_exact_default_pgdog_toml() {
+        let tenants = vec![active_tenant("blue", "blue-0.gres.svc", 5432)];
+        let input = PgdogRenderInput {
+            tenants: &tenants,
+            activator: None,
+            general: PgdogGeneral::default(),
+        };
+
+        let rendered = render_pgdog_toml(&input).expect("default PgDog render succeeds");
+
+        assert!(rendered == EXPECTED_DEFAULT_PGDOG);
+    }
 
     #[test]
     fn renders_pgdog_toml_from_typed_config() {
@@ -590,7 +657,7 @@ mod tests {
             cold_start_ceiling: Duration::from_secs(30),
             timeouts: Some(PgdogTimeouts {
                 connect_timeout: Duration::from_secs(3),
-                connect_attempts: 2,
+                connect_attempts: PgdogConnectAttempts::new(2).expect("positive attempts"),
                 checkout_timeout: Duration::from_secs(5),
             }),
             ..PgdogGeneral::default()
@@ -608,13 +675,77 @@ mod tests {
     }
 
     #[test]
-    fn cold_start_ceiling_covers_default_attempt_count_and_rejects_overflow() {
+    fn cold_start_ceiling_uses_attempt_count_and_rejects_overflow() {
+        let three = PgdogConnectAttempts::new(3).expect("positive attempts");
         let ceiling =
-            PgdogTimeouts::cold_start_ceiling_for_attempt_timeout(Duration::from_secs(30))
-                .expect("default timeout must fit");
+            PgdogTimeouts::cold_start_ceiling_for_attempt_timeout(Duration::from_secs(30), three)
+                .expect("timeout must fit");
 
         assert!(ceiling == Duration::from_secs(90));
-        assert!(PgdogTimeouts::cold_start_ceiling_for_attempt_timeout(Duration::MAX).is_err());
+        assert!(
+            PgdogTimeouts::cold_start_ceiling_for_attempt_timeout(Duration::MAX, three).is_err()
+        );
+    }
+
+    #[test]
+    fn derived_timeouts_use_attempt_count_and_keep_one_second_minimum() {
+        let attempts = PgdogConnectAttempts::new(4).expect("positive attempts");
+
+        let rounded = PgdogTimeouts::for_cold_start_ceiling(Duration::from_secs(10), attempts);
+        let minimum = PgdogTimeouts::for_cold_start_ceiling(Duration::from_millis(1), attempts);
+
+        assert!(rounded.connect_timeout == Duration::from_millis(2_500));
+        assert!(rounded.connect_attempts == attempts);
+        assert!(rounded.checkout_timeout == Duration::from_secs(10));
+        assert!(minimum.connect_timeout == Duration::from_secs(1));
+        assert!(minimum.checkout_timeout == Duration::from_secs(1));
+    }
+
+    #[test]
+    fn rejects_overflowing_explicit_timeout_budget() {
+        let general = PgdogGeneral {
+            timeouts: Some(PgdogTimeouts {
+                connect_timeout: Duration::MAX,
+                connect_attempts: PgdogConnectAttempts::new(2).expect("positive attempts"),
+                checkout_timeout: Duration::from_secs(1),
+            }),
+            ..PgdogGeneral::default()
+        };
+        let tenants = vec![active_tenant("blue", "blue-0.gres.svc", 5432)];
+        let input = PgdogRenderInput {
+            tenants: &tenants,
+            activator: None,
+            general,
+        };
+
+        let error = render_pgdog_toml(&input).expect_err("overflowing budget fails");
+
+        assert!(error.to_string().contains("connection budget overflowed"));
+    }
+
+    #[test]
+    fn tenant_pooler_mode_overrides_fleet_mode() {
+        let general = PgdogGeneral {
+            pooler_mode: PgdogPoolerMode::Session,
+            ..PgdogGeneral::default()
+        };
+        let mut overridden = active_tenant("blue", "blue-0.gres.svc", 5432);
+        overridden.pooler_mode = Some(PgdogPoolerMode::Transaction);
+        let tenants = vec![overridden, active_tenant("green", "green-0.gres.svc", 5432)];
+        let input = PgdogRenderInput {
+            tenants: &tenants,
+            activator: None,
+            general,
+        };
+
+        let rendered = render_pgdog_toml(&input).expect("PgDog render succeeds");
+
+        assert!(rendered.contains(
+            "name = \"blue\"\nhost = \"blue-0.gres.svc\"\nport = 5432\npooler_mode = \"transaction\""
+        ));
+        assert!(rendered.contains(
+            "name = \"green\"\nhost = \"green-0.gres.svc\"\nport = 5432\npooler_mode = \"session\""
+        ));
     }
 
     #[test]
@@ -675,7 +806,9 @@ mod tests {
             tls_cert_path: Some("/etc/pgdog/tls/tls.crt".to_owned()),
             tls_key_path: Some("/etc/pgdog/tls/tls.key".to_owned()),
             tls_client_ca_path: Some("/etc/pgdog/tls/ca.crt".to_owned()),
+            pooler_mode: PgdogPoolerMode::Session,
             cold_start_ceiling: Duration::from_secs(30),
+            connect_attempts: PgdogConnectAttempts::new(5).expect("positive attempts"),
             idle_timeout: Duration::from_secs(45),
             server_lifetime: Duration::from_mins(4),
             users: vec![PgdogUser {
@@ -688,10 +821,9 @@ mod tests {
     }
 
     fn test_tenants() -> Vec<TenantEndpoint> {
-        vec![
-            active_tenant("blue", "blue-0.gres.svc", 5432),
-            active_tenant("green", "green-0.gres.svc", 5432),
-        ]
+        let mut blue = active_tenant("blue", "blue-0.gres.svc", 5432);
+        blue.pooler_mode = Some(PgdogPoolerMode::Transaction);
+        vec![blue, active_tenant("green", "green-0.gres.svc", 5432)]
     }
 
     fn active_tenant(name: &str, host: &str, port: u16) -> TenantEndpoint {
