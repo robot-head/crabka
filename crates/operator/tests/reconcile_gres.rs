@@ -384,10 +384,14 @@ async fn renders_pgdog_config_secret_and_status_hash() {
 async fn custom_activator_policy_renders_workload_and_pgdog_timeout_budget() {
     let admin = FakePgdogAdmin::new(vec![true]);
     let state = MockState::new(reconcile_rules(true));
-    let ctx =
-        Arc::new(fixture_ctx(mock_client(&state, "ns"), "ns").with_pgdog_admin_for_test(admin));
+    let mut context = fixture_ctx(mock_client(&state, "ns"), "ns");
+    Arc::get_mut(&mut context.config)
+        .expect("fixture config is uniquely owned")
+        .default_gres_activator_image = Some("example.test/global-activator:v1".into());
+    let ctx = Arc::new(context.with_pgdog_admin_for_test(admin));
     let mut obj = gres();
     obj.spec.activator = Some(GresActivatorSpec {
+        image: Some("example.test/activator:v2".into()),
         replicas: Some(4),
         registry_poll_ms: Some(600),
         cold_start_timeout_ms: Some(40_000),
@@ -409,6 +413,10 @@ async fn custom_activator_policy_renders_workload_and_pgdog_timeout_budget() {
         .expect("activator deployment patch captured");
     let activator: serde_json::Value =
         serde_json::from_slice(activator_patch.body()).expect("activator deployment JSON");
+    assert!(
+        activator["spec"]["template"]["spec"]["containers"][0]["image"]
+            == "example.test/activator:v2"
+    );
     assert!(activator["spec"]["replicas"] == 4);
     assert!(
         activator["spec"]["template"]["spec"]["containers"][0]["args"]
@@ -461,8 +469,46 @@ async fn custom_activator_policy_renders_workload_and_pgdog_timeout_budget() {
 }
 
 #[tokio::test]
+async fn global_activator_image_is_used_when_crd_omits_image() {
+    let admin = FakePgdogAdmin::new(vec![true]);
+    let state = MockState::new(reconcile_rules(true));
+    let mut context = fixture_ctx(mock_client(&state, "ns"), "ns");
+    Arc::get_mut(&mut context.config)
+        .expect("fixture config is uniquely owned")
+        .default_gres_activator_image = Some("example.test/global-activator:v1".into());
+    let ctx = Arc::new(context.with_pgdog_admin_for_test(admin));
+
+    reconcile(Arc::new(gres()), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let activator_patch = observed
+        .iter()
+        .find(|request| {
+            request
+                .uri()
+                .to_string()
+                .contains("/deployments/fleet-gres-activator")
+        })
+        .expect("activator deployment patch captured");
+    let activator: serde_json::Value =
+        serde_json::from_slice(activator_patch.body()).expect("activator deployment JSON");
+
+    assert!(
+        activator["spec"]["template"]["spec"]["containers"][0]["image"]
+            == "example.test/global-activator:v1"
+    );
+}
+
+#[tokio::test]
 async fn invalid_activator_values_fail_before_kubernetes_io() {
     let cases = [
+        (
+            "spec.activator.image",
+            GresActivatorSpec {
+                image: Some(String::new()),
+                ..Default::default()
+            },
+        ),
         (
             "spec.activator.replicas",
             GresActivatorSpec {

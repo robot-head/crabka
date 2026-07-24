@@ -231,7 +231,7 @@ async fn reconcile_inner(obj: Arc<Gres>, ctx: Arc<Context>) -> Result<Action, Re
     apply_object(&service_api, &service_name(&name), &render_service(&obj)?).await?;
     let deployment_api: Api<Deployment> = Api::namespaced(ctx.client.clone(), &ns);
     let image = pgdog_image(&obj, &ctx);
-    let activator_image = activator_image(&ctx);
+    let activator_image = activator_image(&obj, &ctx);
     apply_object(
         &deployment_api,
         &activator_deployment_name(&name),
@@ -293,6 +293,11 @@ fn validate_activator_config(spec: &crate::crd::GresSpec) -> Result<(), Reconcil
     }
 
     if let Some(activator) = &spec.activator {
+        if let Some(image) = &activator.image {
+            refined_type::rule::NonEmptyString::new(image.clone()).map_err(|error| {
+                ReconcileError::Malformed(format!("spec.activator.image: {error}"))
+            })?;
+        }
         validate!(
             activator.replicas,
             refined_type::rule::GreaterI32<0>,
@@ -357,10 +362,12 @@ fn pgdog_image(obj: &Gres, ctx: &Context) -> String {
         .unwrap_or_else(|| DEFAULT_IMAGE.to_string())
 }
 
-fn activator_image(ctx: &Context) -> String {
-    ctx.config
-        .default_gres_activator_image
-        .clone()
+fn activator_image(obj: &Gres, ctx: &Context) -> String {
+    obj.spec
+        .activator
+        .as_ref()
+        .and_then(|activator| activator.image.clone())
+        .or_else(|| ctx.config.default_gres_activator_image.clone())
         .unwrap_or_else(|| DEFAULT_ACTIVATOR_IMAGE.to_string())
 }
 
@@ -1229,6 +1236,7 @@ mod tests {
     fn activator_workload_renders_custom_policy() {
         let mut obj = gres();
         obj.spec.activator = Some(GresActivatorSpec {
+            image: Some("example.test/activator:v2".into()),
             replicas: Some(4),
             registry_poll_ms: Some(600),
             cold_start_timeout_ms: Some(40_000),

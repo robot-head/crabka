@@ -30,6 +30,13 @@ spec:
                     minimum: 1.0
                     nullable: true
                     type: integer
+                  image:
+                    description: |-
+                      Container image override. When absent the operator uses its global
+                      activator image override or compiled default.
+                    minLength: 1
+                    nullable: true
+                    type: string
                   readinessProbePeriodSeconds:
                     description: Activator readiness probe period in seconds.
                     format: int32
