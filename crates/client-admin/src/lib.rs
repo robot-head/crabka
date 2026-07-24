@@ -753,6 +753,10 @@ mod tests {
         assert2::assert!(result.is_err());
     }
 
+    fn assert_custom_connect_timeout_is_stored(admin: &AdminClient) {
+        assert2::assert!(admin.options.connect_timeout == Duration::from_millis(100));
+    }
+
     #[test]
     fn kafka_error_name_known_codes() {
         for (_name, code, want) in [
@@ -841,6 +845,7 @@ mod tests {
                 .unwrap();
 
         assert2::assert!(live.observed_custom_security_and_id());
+        assert_custom_connect_timeout_is_stored(&admin);
         metadata_times_out_with_custom_request_timeout(&mut admin).await;
 
         let slow = ObservedAdminBroker::start(Duration::from_millis(300)).await;
@@ -849,7 +854,7 @@ mod tests {
             AdminClient::connect_with_options(&[slow.addr.to_string()], custom_admin_options()),
         )
         .await
-        .expect("custom connect timeout fires");
+        .expect("ApiVersions obeys the stored connect timeout");
         assert2::assert!(result.is_err());
 
         live.stop();
@@ -870,13 +875,14 @@ mod tests {
 
         admin.reconnect(&controller.addr.to_string()).await.unwrap();
         assert2::assert!(controller.observed_custom_security_and_id());
+        assert_custom_connect_timeout_is_stored(&admin);
         metadata_times_out_with_custom_request_timeout(&mut admin).await;
         let result = tokio::time::timeout(
             Duration::from_secs(1),
             admin.reconnect(&slow.addr.to_string()),
         )
         .await
-        .expect("custom reconnect timeout fires");
+        .expect("reconnected ApiVersions obeys the stored connect timeout");
         assert2::assert!(result.is_err());
 
         bootstrap.stop();
@@ -903,6 +909,7 @@ mod tests {
             .unwrap();
         assert2::assert!(live.connections.load(Ordering::SeqCst) == 2);
         assert2::assert!(live.observed_custom_security_and_id());
+        assert_custom_connect_timeout_is_stored(&admin);
         metadata_times_out_with_custom_request_timeout(&mut admin).await;
 
         slow.stop();
