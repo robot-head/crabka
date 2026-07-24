@@ -17,7 +17,7 @@ applicable rule below:
 
 ## Coverage Status
 
-- Complete: `broker`.
+- Complete: `broker`, `schema-registry`.
 - Pending: `admin-ui`, `audit`, `authz`, `bench-driver`, `blockstore`, `cli`,
   `client-admin`, `client-consumer`, `client-core`, `client-producer`,
   `client-streams`, `compression`, `connect`, `connect-derive`,
@@ -31,7 +31,7 @@ applicable rule below:
   `playground`, `pprof`, `profiles`, `promql`, `protocol`,
   `protocol-codegen`, `raft`, `rebalancer`, `records-legacy`,
   `remote-storage`, `remote-storage-topic`, `replicator`,
-  `schema-registry`, `schema-serde`, `security`, `telemetry`, `throttle`,
+  `schema-serde`, `security`, `telemetry`, `throttle`,
   `traceql`, `traces`, `verified`, and `voters`.
 
 ## Broker
@@ -213,14 +213,15 @@ defaults remain configurable even when the scanner reports the default constant.
 
 ## Audit Snapshot
 
-On 2026-07-24 the scanner reports 5,849 matches across all crates, including
-1,293 broker matches across 149 files. Of the broker matches, 428 are named
-constant declarations and 865 are other literal, capacity, or duration
-expressions. The positional first-`#[cfg(test)]` heuristic yields 514 matches
-before and 779 after the boundary. That split is not semantic because mixed
-files contain test-gated items before later production items. The semantic
-rules above are authoritative. Independent review and the strengthened scan
-found four production-policy omissions; all four were remediated and rechecked.
+At the broker closure checkpoint on 2026-07-24 the scanner reported 5,849
+matches across all crates, including 1,293 broker matches across 149 files. Of
+the broker matches, 428 are named constant declarations and 865 are other
+literal, capacity, or duration expressions. The positional first-`#[cfg(test)]`
+heuristic yields 514 matches before and 779 after the boundary. That split is
+not semantic because mixed files contain test-gated items before later
+production items. The semantic rules above are authoritative. Independent
+review and the strengthened scan found four production-policy omissions; all
+four were remediated and rechecked.
 
 ## Broker Slice Completion Evidence
 
@@ -244,3 +245,69 @@ The broker slice passed these gates on 2026-07-24:
 
 This evidence closes only the broker slice. Every crate listed as pending in
 Coverage Status still requires its own semantic audit and verification.
+
+## Schema Registry
+
+### Configurable
+
+The scanner reports eight production deployment-policy defaults. All eight are
+already wired through validated CLI/environment inputs, and through typed
+`SchemaRegistry` CRD fields where the operator owns the process:
+
+- The seven reported `RegistryRuntimeConfig` scalar defaults: election session,
+  rebalance, heartbeat, and reconnect policy; store-reader retry and fetch-byte
+  policy; and `_schemas` creation timeout. The scanner does not report the
+  adjacent configured fetch-wait default because its field name is outside the
+  scanner's intentionally narrow name pattern.
+- The ACL refresh interval in `AuthzConfig`.
+
+The same runtime path also owns the configured initial compatibility and mode,
+`_schemas` replication factor, JWKS refresh interval, client id, and
+service-specific health checks. The direct-only admin listen address remains a
+CLI/environment input because the operator has no admin Service.
+
+### Fixed
+
+- Nine Kafka error codes: the eight group-coordinator response codes in
+  `election/client.rs` and `TOPIC_ALREADY_EXISTS` in `kafkastore/topic.rs`.
+- Eight Kafka or Schema Registry compatibility identifiers: the Kafka cluster
+  ACL resource name; Schema Registry election protocol type, name, and version;
+  REST content type and forwarding header; and the accepted mode and
+  compatibility enums.
+- The `_schemas` single-partition ordering, partition-zero reader, and compacted
+  log semantics are persistence invariants. Producer idempotence and `acks=all`
+  are durability requirements. These adjacent literals are intentionally fixed
+  even though the scanner does not report them.
+- All 38 remaining matches are inputs inside `#[cfg(test)]` modules: fixture
+  constants, alternate configured values, invalid relationship values,
+  durations, and error cases.
+
+### Audit Snapshot
+
+On 2026-07-24 the scanner reports 5,881 matches across all crates. The Schema
+Registry subset contains exactly 63 matches across 15 files: 8 configured
+production defaults, 17 fixed production compatibility values, and 38 test
+inputs. Every candidate is covered by one of those classifications, and the
+adjacent `_schemas` storage and writer invariants were reviewed explicitly.
+
+### Schema Registry Slice Completion Evidence
+
+The Schema Registry slice passed these gates on 2026-07-24:
+
+- `tools/audit-runtime-values.sh`: 5,881 repository matches and exactly 63
+  Schema Registry matches across 15 files, with no unclassified production
+  policy.
+- `cargo +nightly fmt --all -- --check`: passed.
+- `cargo clippy -p crabka-schema-registry -p crabka-operator --all-targets -- -D warnings`:
+  passed.
+- `cargo nextest run -p crabka-schema-registry -p crabka-operator`: passed.
+- `cargo run -p crabka-schema-registry -- --help`: exposes election-session,
+  store-reader, schemas-topic-create, default-compatibility, and admin-listen
+  settings.
+- `cargo run -p crabka-operator -- gen-crds <temporary-directory>` followed by
+  an exact diff of the generated `SchemaRegistry` CRD: passed.
+- `git diff --check`: passed.
+
+This evidence closes only the Schema Registry slice. Every crate listed as
+pending in Coverage Status still requires its own semantic audit and
+verification.
