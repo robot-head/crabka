@@ -375,6 +375,11 @@ spec:
                     minimum: 1.0
                     nullable: true
                     type: integer
+                  forwardMaxBodyBytes:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
                   internalTopicAllowReplicationFallback:
                     nullable: true
                     type: boolean
