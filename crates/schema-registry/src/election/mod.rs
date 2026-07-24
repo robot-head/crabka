@@ -41,6 +41,7 @@ impl Election {
                 identity,
                 tx,
                 security: cfg.security.client.clone(),
+                runtime: cfg.runtime.clone(),
             };
             tokio::spawn(client.run(cancel));
             Ok(rx)

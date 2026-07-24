@@ -16,12 +16,31 @@ use parking_lot::RwLock;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use crate::{config::RegistryConfig, kafkastore::record::SchemaRecord, store::StoreState};
+use crate::{
+    config::{RegistryConfig, RegistryRuntimeConfig},
+    kafkastore::record::SchemaRecord,
+    store::StoreState,
+};
 
 /// Shared state + offset watch returned by [`spawn`].
 pub struct StoreReader {
     pub store: Arc<RwLock<StoreState>>,
     pub applied_rx: watch::Receiver<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReaderPolicy {
+    retry_backoff: Duration,
+    fetch_max_wait_ms: i32,
+    fetch_max_bytes: i32,
+}
+
+fn reader_policy(runtime: &RegistryRuntimeConfig) -> ReaderPolicy {
+    ReaderPolicy {
+        retry_backoff: Duration::from_millis(runtime.store_reader_retry_backoff_ms),
+        fetch_max_wait_ms: runtime.store_reader_fetch_max_wait_ms,
+        fetch_max_bytes: runtime.store_reader_fetch_max_bytes,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,15 +128,17 @@ pub fn apply_record(store: &RwLock<StoreState>, rec: SchemaRecord) {
 pub fn spawn(
     cfg: &RegistryConfig,
     topic_id: WireUuid,
+    initial_state: StoreState,
     security: Option<ClientSecurity>,
     cancel: CancellationToken,
 ) -> StoreReader {
-    let store = Arc::new(RwLock::new(StoreState::default()));
+    let store = Arc::new(RwLock::new(initial_state));
     let (applied_tx, applied_rx) = watch::channel(-1_i64);
     let topic = cfg.schemas_topic.clone();
     let bootstrap = cfg.bootstrap.clone();
     let client_id = format!("{}-reader", cfg.client_id);
     let store_bg = store.clone();
+    let policy = reader_policy(&cfg.runtime);
 
     tokio::spawn(async move {
         let opts = ConnectionOptions {
@@ -129,7 +150,7 @@ pub fn spawn(
         loop {
             let Some(addr) = resolve_bootstrap_addr(&bootstrap) else {
                 tracing::error!(%bootstrap, "store reader: bad bootstrap addr; backing off");
-                if sleep_or_cancel(&cancel, Duration::from_millis(250)).await {
+                if sleep_or_cancel(&cancel, policy.retry_backoff).await {
                     return;
                 }
                 continue;
@@ -138,7 +159,7 @@ pub fn spawn(
                 Ok(c) => c,
                 Err(e) => {
                     tracing::warn!(error = %e, "store reader: connect failed; backing off");
-                    if sleep_or_cancel(&cancel, Duration::from_millis(250)).await {
+                    if sleep_or_cancel(&cancel, policy.retry_backoff).await {
                         return;
                     }
                     continue;
@@ -152,7 +173,15 @@ pub fn spawn(
                         conn.close();
                         return;
                     }
-                    res = fetch_partition(&conn, &topic, topic_id, 0, next, 500, 1 << 20) => {
+                    res = fetch_partition(
+                        &conn,
+                        &topic,
+                        topic_id,
+                        0,
+                        next,
+                        policy.fetch_max_wait_ms,
+                        policy.fetch_max_bytes,
+                    ) => {
                         match res {
                             Ok(records) => {
                                 for r in records {
@@ -177,12 +206,12 @@ pub fn spawn(
                                 );
                                 if action == FetchErrorAction::Reconnect {
                                     conn.close();
-                                    if sleep_or_cancel(&cancel, Duration::from_millis(250)).await {
+                                    if sleep_or_cancel(&cancel, policy.retry_backoff).await {
                                         return;
                                     }
                                     break;
                                 }
-                                if sleep_or_cancel(&cancel, Duration::from_millis(250)).await {
+                                if sleep_or_cancel(&cancel, policy.retry_backoff).await {
                                     return;
                                 }
                             }
@@ -204,9 +233,29 @@ mod tests {
 
     use super::*;
     use crate::{
+        config::RegistryRuntimeConfig,
         ids::{SchemaId, SchemaVersion},
         kafkastore::record::{SchemaKey, SchemaValue},
     };
+
+    #[test]
+    fn reader_policy_uses_configured_runtime() {
+        let runtime = RegistryRuntimeConfig {
+            store_reader_retry_backoff_ms: 333,
+            store_reader_fetch_max_wait_ms: 777,
+            store_reader_fetch_max_bytes: 2_097_152,
+            ..RegistryRuntimeConfig::default()
+        };
+
+        assert2::assert!(
+            reader_policy(&runtime)
+                == ReaderPolicy {
+                    retry_backoff: Duration::from_millis(333),
+                    fetch_max_wait_ms: 777,
+                    fetch_max_bytes: 2_097_152,
+                }
+        );
+    }
 
     #[test]
     fn apply_record_folds_schema_and_ignores_noop() {

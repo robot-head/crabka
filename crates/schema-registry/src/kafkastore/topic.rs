@@ -11,6 +11,18 @@ use crate::config::RegistryConfig;
 
 const TOPIC_ALREADY_EXISTS: i16 = 36;
 
+fn schemas_topic_spec(cfg: &RegistryConfig) -> (CreateTopicSpec, i32) {
+    (
+        CreateTopicSpec {
+            name: cfg.schemas_topic.clone(),
+            partitions: 1,
+            replicas: cfg.schemas_topic_rf,
+            configs: BTreeMap::from([("cleanup.policy".to_string(), "compact".to_string())]),
+        },
+        cfg.runtime.schemas_topic_create_timeout_ms,
+    )
+}
+
 /// Create `_schemas` (1 partition, cleanup.policy=compact) if absent and return
 /// its `topic_id`. Idempotent.
 #[tracing::instrument(
@@ -33,13 +45,8 @@ pub async fn ensure_schemas_topic(
         .collect();
     let mut admin = AdminClient::connect_secured(&bootstrap, security).await?;
 
-    let spec = CreateTopicSpec {
-        name: cfg.schemas_topic.clone(),
-        partitions: 1,
-        replicas: cfg.schemas_topic_rf,
-        configs: BTreeMap::from([("cleanup.policy".to_string(), "compact".to_string())]),
-    };
-    let outcomes = admin.create_topics(&[spec], 15_000).await?;
+    let (spec, timeout_ms) = schemas_topic_spec(cfg);
+    let outcomes = admin.create_topics(&[spec], timeout_ms).await?;
     if let Some(o) = outcomes.into_iter().next() {
         match o.error {
             None => {
@@ -67,7 +74,28 @@ fn to_wire_uuid(id: uuid::Uuid) -> WireUuid {
 
 #[cfg(test)]
 mod tests {
-    use super::to_wire_uuid;
+    use super::{schemas_topic_spec, to_wire_uuid};
+    use crate::config::{RegistryConfig, RegistryRuntimeConfig, SecurityConfig};
+
+    #[test]
+    fn schemas_topic_spec_uses_configured_timeout() {
+        let cfg = RegistryConfig {
+            bootstrap: "127.0.0.1:9092".into(),
+            schemas_topic: "_schemas".into(),
+            schemas_topic_rf: 3,
+            client_id: "schema-registry".into(),
+            advertised_url: "http://127.0.0.1:8081".into(),
+            group_id: "schema-registry".into(),
+            leader_eligibility: true,
+            runtime: RegistryRuntimeConfig {
+                schemas_topic_create_timeout_ms: 22_000,
+                ..RegistryRuntimeConfig::default()
+            },
+            security: SecurityConfig::default(),
+        };
+
+        assert2::assert!(schemas_topic_spec(&cfg).1 == 22_000);
+    }
 
     #[test]
     fn uuid_bytes_preserved() {
