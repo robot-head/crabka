@@ -3389,6 +3389,13 @@ async fn open_multirange_runtime(
         split_activation::discover_activation_receipt(config, checkpoint_store.as_deref())
             .await
             .map_err(|error| std::io::Error::other(format!("substrate recovery: {error}")))?;
+    reconcile_startup_checkpoint_pins(
+        config,
+        &tenant_config,
+        checkpoint_store.as_deref(),
+        activation_receipt.as_ref(),
+    )
+    .await?;
     let timestamp_primary_aliases = activation_receipt
         .as_ref()
         .map(split_activation::ActivationDiscovery::timestamp_primary_aliases)
@@ -3497,6 +3504,77 @@ async fn open_multirange_runtime(
         early_service,
     )
     .await
+}
+
+async fn reconcile_startup_checkpoint_pins(
+    config: &SubstrateRuntimeConfig,
+    tenant_config: &crabka_gres_ranges::MultiRangeTenantConfig,
+    store: Option<&dyn crabka_gres_substrate::checkpoint::CheckpointStore>,
+    activation: Option<&split_activation::ActivationDiscovery>,
+) -> std::io::Result<()> {
+    let Some(store) = store else {
+        return Ok(());
+    };
+    let mut ranges = tenant_config
+        .range_map
+        .ranges()
+        .iter()
+        .map(|range| range.range_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    if let Some(activation) = activation {
+        ranges.extend(
+            activation
+                .receipt
+                .split
+                .current_map
+                .ranges()
+                .iter()
+                .map(|range| range.range_id),
+        );
+        ranges.extend(
+            activation
+                .receipt
+                .split
+                .target_map
+                .ranges()
+                .iter()
+                .map(|range| range.range_id),
+        );
+    }
+    for range_id in ranges {
+        let namespace = format!("{}/r{}", config.tenant, range_id.as_u32());
+        let active = activation.and_then(|activation| {
+            if !activation_requires_source_checkpoint_pin(activation.receipt.phase) {
+                return None;
+            }
+            let checkpoint = activation.receipt.source_checkpoint.as_ref()?;
+            (checkpoint.range_id == range_id).then_some((
+                activation.receipt.operation_id.as_str(),
+                checkpoint.manifest_key.as_str(),
+                checkpoint.covered_offset,
+            ))
+        });
+        crabka_gres_substrate::reconcile_checkpoint_pins(store, &namespace, active)
+            .await
+            .map_err(|error| {
+                std::io::Error::other(format!(
+                    "reconcile checkpoint pins for r{range_id}: {error}"
+                ))
+            })?;
+    }
+    Ok(())
+}
+
+const fn activation_requires_source_checkpoint_pin(
+    phase: crabka_gres_ranges::control::TopologyActivationPhase,
+) -> bool {
+    matches!(
+        phase,
+        crabka_gres_ranges::control::TopologyActivationPhase::SourceCheckpoint
+            | crabka_gres_ranges::control::TopologyActivationPhase::MustActivate
+            | crabka_gres_ranges::control::TopologyActivationPhase::WriterActivated
+            | crabka_gres_ranges::control::TopologyActivationPhase::CheckpointDurable
+    )
 }
 
 fn range_map_from_tenant_layout(
@@ -7223,6 +7301,27 @@ mod tests {
             substrate_bootstrap: Some("memory://".to_string()),
             tenant: Some("tenant-a".to_string()),
             ..serve_args(Some("trust"), Vec::new())
+        }
+    }
+
+    #[test]
+    fn source_checkpoint_pin_is_kept_only_while_activation_needs_it() {
+        use crabka_gres_ranges::control::TopologyActivationPhase;
+
+        for phase in [
+            TopologyActivationPhase::Prepared,
+            TopologyActivationPhase::TopologyCommitted,
+            TopologyActivationPhase::Aborted,
+        ] {
+            assert!(!activation_requires_source_checkpoint_pin(phase));
+        }
+        for phase in [
+            TopologyActivationPhase::SourceCheckpoint,
+            TopologyActivationPhase::MustActivate,
+            TopologyActivationPhase::WriterActivated,
+            TopologyActivationPhase::CheckpointDurable,
+        ] {
+            assert!(activation_requires_source_checkpoint_pin(phase));
         }
     }
 

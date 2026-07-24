@@ -1746,6 +1746,11 @@ mod tests {
                 .await
                 .is_err()
         );
+        let latest = Manifest::new("t".to_string(), 7, 8, 1, 0, Vec::new());
+        let released_plan = plan_prune(objects.as_ref(), "t", "__gres_wal.t", &latest, 0)
+            .await
+            .expect("terminal pin release advances prune horizon");
+        assert!(released_plan.delete_records[0].offset == 8);
     }
 
     #[tokio::test]

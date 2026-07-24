@@ -668,6 +668,15 @@ impl RangeControlExecutor for LiveRangeControlExecutor {
         let transfer = self
             .transfer()
             .map_err(|response| format!("{response:?}"))?;
+        if request.operation == RangeControlOperation::RetirePredecessor
+            && !transfer
+                .retired
+                .lock()
+                .map_err(|_| "retired range lock poisoned".to_owned())?
+                .contains_key(&request.range_id)
+        {
+            return Ok(());
+        }
         transfer
             .release_checkpoint_pin(&request.operation_id, request.range_id)
             .await
