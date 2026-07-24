@@ -398,6 +398,15 @@ pub trait RangeControlExecutor: Send + Sync {
     ) -> RangeControlResp {
         self.reconcile(request, intent).await
     }
+
+    /// Finish cleanup that is safe only after the successful response is durable.
+    async fn after_durable_completion(
+        &self,
+        _request: &RangeControlReq,
+        _response: &RangeControlResp,
+    ) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -572,22 +581,30 @@ impl GenerationFencedRangeControl {
             Ok(existing) => existing,
             Err(message) => return rejected("receipt_store", message),
         };
-        let completed_exact_retire_replay = existing.as_ref().is_some_and(|receipt| {
-            receipt.request == request
-                && receipt.request_digest == digest
-                && matches!(
-                    receipt.result,
-                    Some(RangeControlResp::Applied | RangeControlResp::AlreadyApplied)
+        let completed_exact_retire_replay = existing
+            .as_ref()
+            .filter(|receipt| {
+                receipt.request == request
+                    && receipt.request_digest == digest
+                    && request.operation == RangeControlOperation::RetirePredecessor
+            })
+            .and_then(|receipt| receipt.result.as_ref())
+            .filter(|response| {
+                matches!(
+                    response,
+                    RangeControlResp::Applied | RangeControlResp::AlreadyApplied
                 )
-                && request.operation == RangeControlOperation::RetirePredecessor
-        });
+            });
         if expected_generations.is_none()
             && !matches!(request.operation, RangeControlOperation::Status)
-            && !completed_exact_retire_replay
+            && completed_exact_retire_replay.is_none()
         {
             return rejected("wrong_range", "range is not hosted by this compute");
         }
-        if completed_exact_retire_replay {
+        if let Some(response) = completed_exact_retire_replay {
+            if let Err(response) = self.completion_cleanup(&request, response).await {
+                return response;
+            }
             return RangeControlResp::AlreadyApplied;
         }
         let authorization_context = match existing
@@ -704,11 +721,17 @@ impl GenerationFencedRangeControl {
                         );
                     }
                     if &reconciled == response {
+                        if let Err(response) = self.completion_cleanup(&request, response).await {
+                            return response;
+                        }
                         return replayed(response);
                     }
                     return self
                         .replace_completed_receipt(&receipt_key, receipt, reconciled)
                         .await;
+                }
+                if let Err(response) = self.completion_cleanup(&request, response).await {
+                    return response;
                 }
                 return replayed(response);
             }
@@ -737,6 +760,17 @@ impl GenerationFencedRangeControl {
         self.complete_receipt(&receipt_key, intent, response).await
     }
 
+    async fn completion_cleanup(
+        &self,
+        request: &RangeControlReq,
+        response: &RangeControlResp,
+    ) -> Result<(), RangeControlResp> {
+        self.executor
+            .after_durable_completion(request, response)
+            .await
+            .map_err(|message| rejected("completion_cleanup", message))
+    }
+
     async fn complete_receipt(
         &self,
         key: &str,
@@ -756,7 +790,16 @@ impl GenerationFencedRangeControl {
             .await
         {
             Ok(true) => match self.receipts.load(key).await {
-                Ok(Some(actual)) if actual == completed => response,
+                Ok(Some(actual)) if actual == completed => {
+                    match self
+                        .executor
+                        .after_durable_completion(&completed.request, &response)
+                        .await
+                    {
+                        Ok(()) => response,
+                        Err(message) => rejected("completion_cleanup", message),
+                    }
+                }
                 Ok(actual) => rejected(
                     "receipt_store",
                     format!("completed control receipt failed read-after-write: {actual:?}"),
@@ -780,12 +823,22 @@ impl GenerationFencedRangeControl {
             None => return rejected("receipt_revision", "control receipt revision overflow"),
         };
         receipt.result = Some(response.clone());
+        let request = receipt.request.clone();
         match self
             .receipts
             .compare_and_swap(key, Some(expected), receipt)
             .await
         {
-            Ok(true) => response,
+            Ok(true) => {
+                match self
+                    .executor
+                    .after_durable_completion(&request, &response)
+                    .await
+                {
+                    Ok(()) => response,
+                    Err(message) => rejected("completion_cleanup", message),
+                }
+            }
             Ok(false) => rejected(
                 "receipt_race",
                 "control reconciliation raced another writer",
@@ -1362,6 +1415,36 @@ mod tests {
         reconcile: RangeControlResp,
     }
 
+    struct CleanupExecutor {
+        effects: Arc<AtomicUsize>,
+        cleanups: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl RangeControlExecutor for CleanupExecutor {
+        async fn execute(
+            &self,
+            _request: &RangeControlReq,
+            _intent: &AuthorizedSplitIntent,
+        ) -> RangeControlResp {
+            self.effects.fetch_add(1, Ordering::SeqCst);
+            RangeControlResp::Applied
+        }
+
+        async fn after_durable_completion(
+            &self,
+            _request: &RangeControlReq,
+            _response: &RangeControlResp,
+        ) -> Result<(), String> {
+            let attempt = self.cleanups.fetch_add(1, Ordering::SeqCst);
+            if attempt == 0 {
+                Err("injected cleanup failure".into())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
     #[async_trait]
     impl RangeControlExecutor for WideningExecutor {
         async fn execute(
@@ -1591,6 +1674,34 @@ mod tests {
             ));
         }
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn durable_completion_retries_cleanup_without_repeating_the_terminal_effect() {
+        let effects = Arc::new(AtomicUsize::new(0));
+        let cleanups = Arc::new(AtomicUsize::new(0));
+        let control = GenerationFencedRangeControl::new(
+            "tenant-a",
+            RangeId::new(1),
+            7,
+            Box::new(CleanupExecutor {
+                effects: Arc::clone(&effects),
+                cleanups: Arc::clone(&cleanups),
+            }),
+            allow_authority(),
+        );
+        let request = request("tenant-a", 7, "cleanup-retry");
+
+        assert!(matches!(
+            control.handle(request.clone()).await,
+            RangeControlResp::Rejected { code, .. } if code == "completion_cleanup"
+        ));
+        assert_eq!(
+            control.handle(request).await,
+            RangeControlResp::AlreadyApplied
+        );
+        assert_eq!(effects.load(Ordering::SeqCst), 1);
+        assert_eq!(cleanups.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

@@ -916,13 +916,22 @@ impl MultiRangeTenant {
         transfer.validate_successors(&plan)?;
         transfer.record_topology_activation_intent(&state).await?;
         let checkpoint = transfer
-            .force_checkpoint(transfer_table.predecessor)
+            .force_checkpoint(&state.operation_id, transfer_table.predecessor)
             .await?;
-        transfer
+        if let Err(error) = transfer
             .record_topology_activation_checkpoint(&state.operation_id, &checkpoint)
-            .await?;
+            .await
+        {
+            if let Err(cleanup_error) = transfer
+                .release_checkpoint_pin(&state.operation_id, transfer_table.predecessor)
+                .await
+            {
+                tracing::error!(%cleanup_error, "release checkpoint pin after receipt failure");
+            }
+            return Err(error.into());
+        }
         let barrier = transfer.pause_at_checkpoint(&checkpoint).await?;
-        let pause = TransferPauseGuard::new(transfer, barrier);
+        let pause = TransferPauseGuard::new(transfer, state.operation_id.clone(), barrier);
         self.stage_and_publish_successors(transfer, &serving, &state, &plan, &checkpoint, barrier)
             .await?;
         pause.resume().await?;
@@ -2499,16 +2508,19 @@ struct PopulatedTransferTable {
 /// Owns a successful source pause until the transfer either resumes it or is dropped.
 struct TransferPauseGuard<'a> {
     transfer: &'a dyn RangeTransferCapability,
+    operation_id: String,
     barrier: Option<crate::RangeTransferBarrier>,
 }
 
 impl<'a> TransferPauseGuard<'a> {
     fn new(
         transfer: &'a dyn RangeTransferCapability,
+        operation_id: String,
         barrier: crate::RangeTransferBarrier,
     ) -> Self {
         Self {
             transfer,
+            operation_id,
             barrier: Some(barrier),
         }
     }
@@ -2517,8 +2529,15 @@ impl<'a> TransferPauseGuard<'a> {
         let barrier = self
             .barrier
             .expect("transfer pause guard must hold a barrier");
-        self.transfer.resume(barrier).await?;
+        self.transfer.resume(&self.operation_id, barrier).await?;
         self.barrier = None;
+        if let Err(error) = self
+            .transfer
+            .release_checkpoint_pin(&self.operation_id, barrier.range_id)
+            .await
+        {
+            tracing::error!(%error, "release checkpoint pin after successful transfer resume");
+        }
         Ok(())
     }
 }
@@ -2526,7 +2545,7 @@ impl<'a> TransferPauseGuard<'a> {
 impl Drop for TransferPauseGuard<'_> {
     fn drop(&mut self) {
         if let Some(barrier) = self.barrier {
-            self.transfer.resume_after_drop(barrier);
+            self.transfer.resume_after_drop(&self.operation_id, barrier);
         }
     }
 }

@@ -249,6 +249,7 @@ impl RawKvSplitRuntime {
                 0,
                 1024,
                 2,
+                std::time::Duration::from_secs(1),
             )
             .map_err(split_hook_error)?,
             kv as Arc<dyn SnapshotKv>,

@@ -33,7 +33,7 @@ pub use self::{
         CheckpointTrigger, CheckpointWalPruner, DEFAULT_CHECKPOINT_RETAIN, DEFAULT_PART_MAX_BYTES,
         MANIFEST_FORMAT_VERSION, Manifest, ManifestValidation, PartEntry, PartPayload, RestoreTail,
         RewriteDecision, ckpt_dir, ckpt_dir_for_range, ckpt_prefix, ckpt_prefix_for_range,
-        latest_checkpoint_metadata, manifest_key, part_key,
+        latest_checkpoint_metadata, manifest_key, part_key, reconcile_checkpoint_pins,
         restore_filtered_from_manifest_and_replay_tail, restore_latest_filtered,
         restore_latest_filtered_and_replay_tail, restore_latest_table_transfer,
         restore_latest_table_transfer_and_replay_tail,

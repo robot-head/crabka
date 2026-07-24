@@ -393,13 +393,18 @@ impl LiveRangeControlExecutor {
                     .await
                     .map_err(|error| transfer_error(&error))?;
                 let checkpoint = transfer
-                    .force_checkpoint(request.range_id)
+                    .force_checkpoint(&request.operation_id, request.range_id)
                     .await
                     .map_err(|error| transfer_error(&error))?;
-                transfer
+                if let Err(error) = transfer
                     .record_topology_activation_checkpoint(&request.operation_id, &checkpoint)
                     .await
-                    .map_err(|error| transfer_error(&error))?;
+                {
+                    let _ignored = transfer
+                        .release_checkpoint_pin(&request.operation_id, request.range_id)
+                        .await;
+                    return Err(transfer_error(&error));
+                }
                 self.operations
                     .lock()
                     .await
@@ -529,23 +534,27 @@ impl LiveRangeControlExecutor {
                         "predecessor cannot resume after successor publication",
                     ));
                 }
-                let barrier = self
+                let (barrier, resumed) = self
                     .operations
                     .lock()
                     .await
                     .get(&request.operation_id)
-                    .and_then(|runtime| runtime.barrier)
+                    .map(|runtime| (runtime.barrier, runtime.resumed))
+                    .ok_or_else(|| rejected("missing_pause", "operation has no runtime state"))?;
+                let barrier = barrier
                     .ok_or_else(|| rejected("missing_pause", "operation has no pause barrier"))?;
-                transfer
-                    .resume(barrier)
-                    .await
-                    .map_err(|error| transfer_error(&error))?;
-                let mut operations = self.operations.lock().await;
-                let runtime = operations
-                    .get_mut(&request.operation_id)
-                    .expect("operation remains present");
-                runtime.resumed = true;
-                runtime.release_topology_fence();
+                if !resumed {
+                    transfer
+                        .resume(&request.operation_id, barrier)
+                        .await
+                        .map_err(|error| transfer_error(&error))?;
+                    let mut operations = self.operations.lock().await;
+                    let runtime = operations
+                        .get_mut(&request.operation_id)
+                        .expect("operation remains present");
+                    runtime.resumed = true;
+                    runtime.release_topology_fence();
+                }
                 Ok(RangeControlResp::Applied)
             }
         }
@@ -643,6 +652,42 @@ impl RangeControlExecutor for LiveRangeControlExecutor {
         }
         self.reconcile(request, intent).await
     }
+
+    async fn after_durable_completion(
+        &self,
+        request: &RangeControlReq,
+        response: &RangeControlResp,
+    ) -> Result<(), String> {
+        if !matches!(
+            request.operation,
+            RangeControlOperation::Resume | RangeControlOperation::RetirePredecessor
+        ) || !terminal_step_succeeded(response)
+        {
+            return Ok(());
+        }
+        let transfer = self
+            .transfer()
+            .map_err(|response| format!("{response:?}"))?;
+        transfer
+            .release_checkpoint_pin(&request.operation_id, request.range_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        if request.operation == RangeControlOperation::RetirePredecessor {
+            transfer
+                .retired
+                .lock()
+                .map_err(|_| "retired range lock poisoned".to_owned())?
+                .remove(&request.range_id);
+        }
+        Ok(())
+    }
+}
+
+fn terminal_step_succeeded(response: &RangeControlResp) -> bool {
+    matches!(
+        response,
+        RangeControlResp::Applied | RangeControlResp::AlreadyApplied
+    )
 }
 
 fn transfer_error(error: &crabka_gres_ranges::RangeTransferError) -> RangeControlResp {
@@ -831,8 +876,8 @@ mod tests {
     use crabka_pgkv::WriteOp;
 
     use super::{
-        OperationRuntime, marker_digest, recovery_extension_is_structural, verify_marker_partition,
-        wire_marker,
+        OperationRuntime, marker_digest, recovery_extension_is_structural, terminal_step_succeeded,
+        verify_marker_partition, wire_marker,
     };
 
     async fn assert_runtime_fence_blocks_topology(
@@ -906,6 +951,16 @@ mod tests {
                 .unwrap_or_else(|_| panic!("{terminal_step} did not release fence"))
                 .expect("publication task");
         }
+    }
+
+    #[test]
+    fn rejected_terminal_response_cannot_trigger_completion_cleanup() {
+        assert!(!terminal_step_succeeded(&RangeControlResp::Rejected {
+            code: "failed".into(),
+            message: "terminal effect did not complete".into(),
+        }));
+        assert!(terminal_step_succeeded(&RangeControlResp::Applied));
+        assert!(terminal_step_succeeded(&RangeControlResp::AlreadyApplied));
     }
 
     fn tail_record(offset: i64, ops: Vec<WriteOp>) -> crabka_gres_ranges::CommittedTailRecord {

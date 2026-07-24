@@ -20,7 +20,7 @@ use crabka_protocol::{
 use tokio::sync::Mutex;
 
 use crate::{
-    checkpoint::{CheckpointStore, CheckpointWalPruner, restore_latest},
+    checkpoint::{CheckpointStore, CheckpointWalPruner, restore_latest_at_or_before},
     error::SubstrateError,
     follower::{CommittedEndConnection, CommittedEndDialer, LiveCommittedEndSampler},
     frame::{BARRIER_SEQ, WalFrame},
@@ -403,7 +403,8 @@ pub async fn bootstrap_live_range0_follower(
         end,
         config.security.clone(),
     );
-    crate::follower::ReadOnlyRange0Follower::bootstrap(config, store, &reader, checkpoints).await
+    crate::follower::ReadOnlyRange0Follower::bootstrap(config, store, &reader, checkpoints, end)
+        .await
 }
 
 async fn recover_live_for_range_inner(
@@ -505,12 +506,13 @@ async fn recover_store_after_barrier_with_seed(
         SubstrateError::Unavailable("checkpoint restore requires a restore-capable KV store".into())
     })?;
     let log_start = reader.log_start_offset().await?;
-    let restored = restore_latest(
+    let restored = restore_latest_at_or_before(
         checkpoints.store.as_ref(),
         tenant,
         restore_kv,
         barrier.generation.0,
         log_start,
+        barrier.offset.saturating_sub(1),
     )
     .await?;
     if let (None, Some(log_start)) = (restored, log_start)
@@ -1470,6 +1472,72 @@ mod tests {
         assert!(outcome.next_journal_seq == 4);
         assert!(reader.requested_start() == 2);
         assert!(restored.get(b"base").expect("get") == Some(b"checkpoint".to_vec()));
+        assert!(restored.get(b"tail").expect("get") == Some(b"yes".to_vec()));
+        assert!(restored.get(b"next-tail").expect("get") == Some(b"also".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_recovery_skips_snapshot_newer_than_recovery_barrier() {
+        let checkpoints = InMemoryCheckpointStore::shared();
+        let older = MemKv::default();
+        older
+            .put(b"base".to_vec(), b"older-checkpoint".to_vec())
+            .expect("older base put");
+        write_checkpoint(
+            checkpoints.as_ref(),
+            "tenant-a",
+            &older,
+            checkpoint_snapshot(1, 2),
+            DEFAULT_PART_MAX_BYTES,
+        )
+        .await
+        .expect("older checkpoint");
+        let newer = MemKv::default();
+        newer
+            .put(b"base".to_vec(), b"unsafe-checkpoint".to_vec())
+            .expect("newer base put");
+        write_checkpoint(
+            checkpoints.as_ref(),
+            "tenant-a",
+            &newer,
+            checkpoint_snapshot(5, 7),
+            DEFAULT_PART_MAX_BYTES,
+        )
+        .await
+        .expect("newer checkpoint");
+        let reader = TrackingReader::new(
+            vec![
+                replay_item(2, &frame(2, b"tail", b"yes")),
+                replay_item(3, &frame(3, b"next-tail", b"also")),
+                replay_item(
+                    4,
+                    &WalFrame {
+                        journal_seq: BARRIER_SEQ,
+                        ops: Vec::new(),
+                    },
+                ),
+            ],
+            None,
+        );
+        let restored = MemKv::default();
+
+        let outcome = recover_store_after_barrier(
+            &restored,
+            Some(&restored),
+            Some(&LiveRecoveryCheckpoints { store: checkpoints }),
+            "tenant-a",
+            &reader,
+            &RecoveryBarrier {
+                generation: WriterGeneration(0),
+                offset: 4,
+            },
+        )
+        .await
+        .expect("recover from checkpoint before barrier");
+
+        assert!(outcome.next_journal_seq == 4);
+        assert!(reader.requested_start() == 2);
+        assert!(restored.get(b"base").expect("get") == Some(b"older-checkpoint".to_vec()));
         assert!(restored.get(b"tail").expect("get") == Some(b"yes".to_vec()));
         assert!(restored.get(b"next-tail").expect("get") == Some(b"also".to_vec()));
     }

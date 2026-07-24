@@ -3273,7 +3273,7 @@ async fn attach_range0_read_barrier(
     let follower_store: Arc<dyn RestoreKv> = match config.cache_dir.as_deref() {
         Some(parent) => {
             let dir = parent.join("r0-follower");
-            std::fs::create_dir_all(&dir)?;
+            reset_disposable_cache_dir(&dir, local_checkpoint_root(config))?;
             Arc::new(FjallKv::open_cache(&dir).map_err(|error| {
                 std::io::Error::other(format!("range-0 follower cache: {error:?}"))
             })?)
@@ -3375,6 +3375,13 @@ async fn open_multirange_runtime(
         split_activation::discover_activation_receipt(config, checkpoint_store.as_deref())
             .await
             .map_err(|error| std::io::Error::other(format!("substrate recovery: {error}")))?;
+    reconcile_startup_checkpoint_pins(
+        config,
+        &tenant_config,
+        checkpoint_store.as_deref(),
+        activation_receipt.as_ref(),
+    )
+    .await?;
     let timestamp_primary_aliases = activation_receipt
         .as_ref()
         .map(split_activation::ActivationDiscovery::timestamp_primary_aliases)
@@ -3483,6 +3490,67 @@ async fn open_multirange_runtime(
         early_service,
     )
     .await
+}
+
+async fn reconcile_startup_checkpoint_pins(
+    config: &SubstrateRuntimeConfig,
+    tenant_config: &crabka_gres_ranges::MultiRangeTenantConfig,
+    store: Option<&dyn crabka_gres_substrate::checkpoint::CheckpointStore>,
+    activation: Option<&split_activation::ActivationDiscovery>,
+) -> std::io::Result<()> {
+    let Some(store) = store else {
+        return Ok(());
+    };
+    let mut ranges = tenant_config
+        .range_map
+        .ranges()
+        .iter()
+        .map(|range| range.range_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    if let Some(activation) = activation {
+        ranges.extend(
+            activation
+                .receipt
+                .split
+                .current_map
+                .ranges()
+                .iter()
+                .map(|range| range.range_id),
+        );
+        ranges.extend(
+            activation
+                .receipt
+                .split
+                .target_map
+                .ranges()
+                .iter()
+                .map(|range| range.range_id),
+        );
+    }
+    for range_id in ranges {
+        let namespace = format!("{}/r{}", config.tenant, range_id.as_u32());
+        let active = activation.and_then(|activation| {
+            if activation.receipt.phase
+                == crabka_gres_ranges::control::TopologyActivationPhase::Aborted
+            {
+                return None;
+            }
+            let checkpoint = activation.receipt.source_checkpoint.as_ref()?;
+            (checkpoint.range_id == range_id).then_some((
+                activation.receipt.operation_id.as_str(),
+                checkpoint.manifest_key.as_str(),
+                checkpoint.covered_offset,
+            ))
+        });
+        crabka_gres_substrate::reconcile_checkpoint_pins(store, &namespace, active)
+            .await
+            .map_err(|error| {
+                std::io::Error::other(format!(
+                    "reconcile checkpoint pins for r{range_id}: {error}"
+                ))
+            })?;
+    }
+    Ok(())
 }
 
 fn range_map_from_tenant_layout(
@@ -3999,6 +4067,7 @@ enum RangePauseState {
     Idle,
     Pausing,
     Paused(crabka_gres_substrate::PausedWalWriter),
+    Retired,
 }
 
 struct PauseReservation {
@@ -4946,6 +5015,34 @@ impl LiveMultiRangeTransfer {
         }
     }
 
+    async fn release_checkpoint_pin(
+        &self,
+        operation_id: &str,
+        range_id: crabka_gres_ranges::RangeId,
+    ) -> Result<(), crabka_gres_ranges::RangeTransferError> {
+        let resources = self
+            .retired
+            .lock()
+            .map_err(|_| range_pause_lock_error(range_id))?
+            .get(&range_id)
+            .cloned()
+            .map_or_else(|| self.range(range_id), Ok)?;
+        let checkpoint = resources.checkpoint.ok_or_else(|| {
+            crabka_gres_ranges::RangeTransferError::Unavailable {
+                range_id,
+                reason: "checkpoint runtime is unavailable for pin release".into(),
+            }
+        })?;
+        checkpoint
+            .handle
+            .release_pin(operation_id.to_owned())
+            .await
+            .map_err(|error| crabka_gres_ranges::RangeTransferError::Runtime {
+                range_id,
+                reason: format!("release checkpoint pin: {error}"),
+            })
+    }
+
     async fn retire_predecessor(
         &self,
         operation_id: &str,
@@ -4963,7 +5060,8 @@ impl LiveMultiRangeTransfer {
             .retired
             .lock()
             .map_err(|_| range_pause_lock_error(range_id))?
-            .remove(&range_id);
+            .get(&range_id)
+            .cloned();
         let Some(resources) = resources else {
             use crabka_gres_ranges::control::{
                 RangeZeroTopologyActivationStore, TopologyActivationPhase,
@@ -5018,20 +5116,21 @@ impl LiveMultiRangeTransfer {
                 .pause
                 .lock()
                 .map_err(|_| range_pause_lock_error(range_id))?;
-            let RangePauseState::Paused(_) = &*state else {
-                return Err(crabka_gres_ranges::RangeTransferError::Boundary {
-                    range_id,
-                    reason: "retired predecessor does not hold its pause fence".into(),
-                });
-            };
-            let RangePauseState::Paused(paused) =
-                std::mem::replace(&mut *state, RangePauseState::Pausing)
-            else {
-                unreachable!()
-            };
-            paused
+            match std::mem::replace(&mut *state, RangePauseState::Retired) {
+                RangePauseState::Paused(paused) => Some(paused),
+                RangePauseState::Retired => None,
+                prior => {
+                    *state = prior;
+                    return Err(crabka_gres_ranges::RangeTransferError::Boundary {
+                        range_id,
+                        reason: "retired predecessor does not hold its pause fence".into(),
+                    });
+                }
+            }
         };
-        paused.retire();
+        if let Some(paused) = paused {
+            paused.retire();
+        }
         Ok(())
     }
 
@@ -5384,6 +5483,7 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
 
     async fn force_checkpoint(
         &self,
+        operation_id: &str,
         range_id: crabka_gres_ranges::RangeId,
     ) -> Result<crabka_gres_ranges::CheckpointManifest, crabka_gres_ranges::RangeTransferError>
     {
@@ -5396,9 +5496,10 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
         })?;
         let run = checkpoint
             .handle
-            .checkpoint_from_source(
+            .checkpoint_from_source_pinned(
                 Arc::clone(&checkpoint.snapshot_source),
                 crabka_gres_substrate::CheckpointTrigger::Manual,
+                operation_id.to_owned(),
             )
             .await
             .map_err(|error| crabka_gres_ranges::RangeTransferError::Runtime {
@@ -5495,12 +5596,25 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
 
     async fn resume(
         &self,
+        _operation_id: &str,
         barrier: crabka_gres_ranges::RangeTransferBarrier,
     ) -> Result<(), crabka_gres_ranges::RangeTransferError> {
         self.release_pause(barrier)
     }
 
-    fn resume_after_drop(&self, barrier: crabka_gres_ranges::RangeTransferBarrier) {
+    async fn release_checkpoint_pin(
+        &self,
+        operation_id: &str,
+        range_id: crabka_gres_ranges::RangeId,
+    ) -> Result<(), crabka_gres_ranges::RangeTransferError> {
+        LiveMultiRangeTransfer::release_checkpoint_pin(self, operation_id, range_id).await
+    }
+
+    fn resume_after_drop(
+        &self,
+        operation_id: &str,
+        barrier: crabka_gres_ranges::RangeTransferBarrier,
+    ) {
         let irreversible_operation = self
             .pending
             .lock()
@@ -5519,8 +5633,22 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
             );
             return;
         }
+        let checkpoint = self
+            .retired
+            .lock()
+            .ok()
+            .and_then(|retired| retired.get(&barrier.range_id).cloned())
+            .or_else(|| self.range(barrier.range_id).ok())
+            .and_then(|resources| resources.checkpoint);
         if let Err(error) = self.release_pause(barrier) {
             tracing::error!(%error, range_id = barrier.range_id.as_u32(), "resume dropped range transfer pause");
+        } else if let Some(checkpoint) = checkpoint {
+            let operation_id = operation_id.to_owned();
+            tokio::spawn(async move {
+                if let Err(error) = checkpoint.handle.release_pin(operation_id).await {
+                    tracing::error!(%error, "release dropped range transfer checkpoint pin");
+                }
+            });
         }
     }
 
@@ -6111,6 +6239,7 @@ fn build_checkpoint_runtime(
         checkpoint_config.bytes_threshold,
         checkpoint_config.part_max_bytes,
         checkpoint_config.retain_newest,
+        Duration::from_secs(1),
     )
     .map_err(|error| std::io::Error::other(format!("checkpoint config: {error}")))?;
     let stats = Arc::new(crabka_gres_substrate::CheckpointStats::default());
@@ -6124,7 +6253,7 @@ fn build_checkpoint_runtime(
     .map_err(|error| std::io::Error::other(format!("checkpoint service: {error}")))?;
     let planner_stats = service.planner_stats();
     Ok(Some(StartedCheckpointRuntime {
-        handle: Arc::new(service).spawn(),
+        handle: Arc::new(service).spawn_periodic(Arc::clone(&snapshot_source)),
         stats,
         planner_stats,
         snapshot_source,
@@ -6159,6 +6288,7 @@ fn build_range_checkpoint_runtime(
         checkpoint_config.bytes_threshold,
         checkpoint_config.part_max_bytes,
         checkpoint_config.retain_newest,
+        Duration::from_secs(1),
     )
     .map_err(|error| std::io::Error::other(format!("checkpoint config: {error}")))?;
     let stats = Arc::new(crabka_gres_substrate::CheckpointStats::default());
@@ -6175,7 +6305,7 @@ fn build_range_checkpoint_runtime(
     .map_err(|error| std::io::Error::other(format!("checkpoint service: {error}")))?;
     let planner_stats = service.planner_stats();
     Ok(Some(StartedCheckpointRuntime {
-        handle: Arc::new(service).spawn(),
+        handle: Arc::new(service).spawn_periodic(Arc::clone(&snapshot_source)),
         stats,
         planner_stats,
         snapshot_source,
@@ -6370,25 +6500,32 @@ fn reset_substrate_range_cache(
         return Ok(());
     };
     let range_dir = base.join(format!("r{}", range_id.as_u32()));
+    reset_disposable_cache_dir(&range_dir, protected_checkpoint_root)
+}
+
+fn reset_disposable_cache_dir(
+    cache_dir: &std::path::Path,
+    protected_checkpoint_root: Option<&std::path::Path>,
+) -> std::io::Result<()> {
     if let Some(protected) = protected_checkpoint_root {
-        let resolved_range = resolve_path_through_existing_ancestor(&range_dir)?;
+        let resolved_cache = resolve_path_through_existing_ancestor(cache_dir)?;
         let resolved_protected = resolve_path_through_existing_ancestor(protected)?;
-        if resolved_range.starts_with(&resolved_protected)
-            || resolved_protected.starts_with(&resolved_range)
+        if resolved_cache.starts_with(&resolved_protected)
+            || resolved_protected.starts_with(&resolved_cache)
         {
             return invalid_input(format!(
                 "disposable range cache {} overlaps local checkpoint root {}",
-                resolved_range.display(),
+                resolved_cache.display(),
                 resolved_protected.display()
             ));
         }
     }
-    match std::fs::remove_dir_all(&range_dir) {
+    match std::fs::remove_dir_all(cache_dir) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
-    std::fs::create_dir_all(range_dir)
+    std::fs::create_dir_all(cache_dir)
 }
 
 fn resolve_path_through_existing_ancestor(path: &std::path::Path) -> std::io::Result<PathBuf> {
@@ -6699,6 +6836,39 @@ mod tests {
                 .next()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn startup_reset_removes_nonempty_range_zero_follower_cache() {
+        let root = tempfile::tempdir().expect("cache root");
+        let follower = root.path().join("r0-follower");
+        std::fs::create_dir_all(&follower).expect("follower cache");
+        std::fs::write(follower.join("stale"), b"cache").expect("stale follower value");
+
+        reset_disposable_cache_dir(&follower, None).expect("reset follower cache");
+
+        assert!(follower.is_dir());
+        assert!(
+            follower
+                .read_dir()
+                .expect("empty follower cache")
+                .next()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn startup_reset_rejects_range_zero_follower_checkpoint_overlap() {
+        let root = tempfile::tempdir().expect("cache root");
+        let follower = root.path().join("r0-follower");
+        let protected = follower.join("checkpoints");
+        std::fs::create_dir_all(&protected).expect("protected checkpoint");
+
+        let error = reset_disposable_cache_dir(&follower, Some(&protected))
+            .expect_err("overlap must fail closed");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(protected.exists(), "overlap rejection cannot delete cache");
     }
 
     #[test]

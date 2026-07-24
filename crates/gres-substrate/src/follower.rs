@@ -8,7 +8,7 @@ use tokio::sync::Mutex;
 
 use crate::{
     ReplayItem, WalFrame,
-    checkpoint::{CheckpointStore, restore_latest},
+    checkpoint::{CheckpointStore, restore_latest_at_or_before},
     error::SubstrateError,
     recovery::{CommittedWalReader, FetchedWalPartition, LiveEndDialer, LiveRecoveryConfig},
 };
@@ -216,16 +216,21 @@ impl ReadOnlyRange0Follower {
         store: Arc<dyn RestoreKv>,
         reader: &dyn CommittedWalReader,
         checkpoints: Option<&dyn CheckpointStore>,
+        committed_end: i64,
     ) -> Result<Self, SubstrateError> {
         let log_start = reader.log_start_offset().await?;
+        let effective_committed_end = log_start.map_or(committed_end, |offset| {
+            committed_end.max(offset.saturating_sub(1))
+        });
         let restored = match checkpoints {
             Some(checkpoints) => {
-                restore_latest(
+                restore_latest_at_or_before(
                     checkpoints,
                     &config.checkpoint_namespace(),
                     store.as_ref(),
                     0,
                     log_start,
+                    effective_committed_end,
                 )
                 .await?
             }
@@ -233,8 +238,8 @@ impl ReadOnlyRange0Follower {
         };
         if restored.is_none() && log_start.is_some_and(|offset| offset > 0) {
             return Err(SubstrateError::Checkpoint(format!(
-                "no valid checkpoint covers retained WAL starting at {}",
-                log_start.expect("checked above")
+                "no valid checkpoint covers retained WAL starting at {} through committed end {committed_end} (effective end {effective_committed_end})",
+                log_start.expect("checked above"),
             )));
         }
         let applied_offset = restored.map_or(-1, |checkpoint| checkpoint.covered_offset);
@@ -242,6 +247,9 @@ impl ReadOnlyRange0Follower {
         let follower = Self {
             tail: Range0Tail::from_checkpoint(kv, applied_offset),
         };
+        if applied_offset == effective_committed_end {
+            return Ok(follower);
+        }
         let start = applied_offset.checked_add(1).ok_or_else(|| {
             SubstrateError::Unavailable("range-0 follower replay offset overflowed".into())
         })?;
@@ -365,6 +373,7 @@ mod tests {
             store.clone(),
             log.as_ref(),
             Some(checkpoints.as_ref()),
+            1,
         )
         .await
         .expect("bootstrap follower");
@@ -379,6 +388,161 @@ mod tests {
         assert!(kv.get(b"catalog/aborted").expect("aborted").is_none());
         assert!(follower.tail().applied_offset() == 1);
         assert!(log.current_generation().await == WriterGeneration(0));
+    }
+
+    #[tokio::test]
+    async fn bootstrap_ignores_checkpoint_ahead_of_committed_end() {
+        let log = InMemoryWalLog::shared();
+        log.commit_group(crate::GroupCommitRequest {
+            generation: WriterGeneration(0),
+            frames: vec![WalFrame {
+                journal_seq: 0,
+                ops: vec![WriteOp::Put {
+                    key: b"catalog/base".to_vec(),
+                    value: b"older".to_vec(),
+                }],
+            }],
+        })
+        .await
+        .expect("commit checkpoint-covered frame");
+        log.commit_group(crate::GroupCommitRequest {
+            generation: WriterGeneration(0),
+            frames: vec![WalFrame {
+                journal_seq: 1,
+                ops: vec![WriteOp::Put {
+                    key: b"catalog/tail".to_vec(),
+                    value: b"committed".to_vec(),
+                }],
+            }],
+        })
+        .await
+        .expect("commit tail frame");
+
+        let checkpoints = InMemoryCheckpointStore::shared();
+        let older = MemKv::default();
+        older
+            .put(b"catalog/base".to_vec(), b"older".to_vec())
+            .expect("seed older checkpoint");
+        write_checkpoint(
+            checkpoints.as_ref(),
+            "replica/r0",
+            &older,
+            CheckpointSnapshot {
+                covered_offset: 0,
+                journal_seq: 1,
+                producer_epoch: 0,
+                wal_generation: 0,
+                garbage_horizon_xid: 0,
+            },
+            DEFAULT_PART_MAX_BYTES,
+        )
+        .await
+        .expect("write older checkpoint");
+        let ahead = MemKv::default();
+        ahead
+            .put(b"catalog/unsafe".to_vec(), b"uncommitted".to_vec())
+            .expect("seed ahead checkpoint");
+        write_checkpoint(
+            checkpoints.as_ref(),
+            "replica/r0",
+            &ahead,
+            CheckpointSnapshot {
+                covered_offset: 5,
+                journal_seq: 6,
+                producer_epoch: 0,
+                wal_generation: 0,
+                garbage_horizon_xid: 0,
+            },
+            DEFAULT_PART_MAX_BYTES,
+        )
+        .await
+        .expect("write ahead checkpoint");
+        let store: Arc<dyn RestoreKv> = Arc::new(MemKv::default());
+        let config = LiveRecoveryConfig::new(
+            "unused",
+            TenantName::parse("replica").expect("tenant"),
+            RangeId::COORDINATOR,
+            None,
+        );
+
+        let follower = ReadOnlyRange0Follower::bootstrap(
+            &config,
+            store.clone(),
+            log.as_ref(),
+            Some(checkpoints.as_ref()),
+            1,
+        )
+        .await
+        .expect("bootstrap follower");
+
+        let kv: Arc<dyn Kv> = store;
+        assert!(kv.get(b"catalog/base").expect("base") == Some(b"older".to_vec()));
+        assert!(kv.get(b"catalog/tail").expect("tail") == Some(b"committed".to_vec()));
+        assert!(kv.get(b"catalog/unsafe").expect("unsafe").is_none());
+        assert!(follower.tail().applied_offset() == 1);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_uses_checkpoint_at_fully_pruned_committed_end_without_replay() {
+        struct NoReplayReader;
+
+        #[async_trait::async_trait]
+        impl CommittedWalReader for NoReplayReader {
+            async fn committed_from(
+                &self,
+                _start_offset: i64,
+            ) -> Result<Vec<ReplayItem>, SubstrateError> {
+                Err(SubstrateError::Unavailable(
+                    "reader must not be called when checkpoint is caught up".into(),
+                ))
+            }
+
+            async fn log_start_offset(&self) -> Result<Option<i64>, SubstrateError> {
+                Ok(Some(4))
+            }
+        }
+
+        let checkpoints = InMemoryCheckpointStore::shared();
+        let checkpoint_store = MemKv::default();
+        checkpoint_store
+            .put(b"catalog/caught-up".to_vec(), b"yes".to_vec())
+            .expect("seed checkpoint");
+        write_checkpoint(
+            checkpoints.as_ref(),
+            "replica/r0",
+            &checkpoint_store,
+            CheckpointSnapshot {
+                covered_offset: 3,
+                journal_seq: 4,
+                producer_epoch: 0,
+                wal_generation: 0,
+                garbage_horizon_xid: 0,
+            },
+            DEFAULT_PART_MAX_BYTES,
+        )
+        .await
+        .expect("write checkpoint");
+        let store: Arc<dyn RestoreKv> = Arc::new(MemKv::default());
+        let config = LiveRecoveryConfig::new(
+            "unused",
+            TenantName::parse("replica").expect("tenant"),
+            RangeId::COORDINATOR,
+            None,
+        );
+
+        let follower = ReadOnlyRange0Follower::bootstrap(
+            &config,
+            store.clone(),
+            &NoReplayReader,
+            Some(checkpoints.as_ref()),
+            -1,
+        )
+        .await
+        .expect("checkpoint is already caught up");
+
+        let kv: Arc<dyn Kv> = store;
+        assert!(kv.get(b"catalog/caught-up").expect("caught up") == Some(b"yes".to_vec()));
+        assert!(follower.tail().applied_offset() == 3);
     }
 
     // ── persistent committed-end sampler ─────────────────────────────────────

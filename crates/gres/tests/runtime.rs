@@ -645,7 +645,7 @@ async fn live_multirange_transfer_stages_populated_successor_without_publishing_
         .expect("inspect source checkpoint state");
 
     let manifest = transfer
-        .force_checkpoint(range)
+        .force_checkpoint("runtime-transfer", range)
         .await
         .expect("force checkpoint");
     assert_eq!(manifest.range_id, range);
@@ -714,7 +714,10 @@ async fn live_multirange_transfer_stages_populated_successor_without_publishing_
             interval: RangeSpec::for_interval(target_range, split_at, predecessor.end),
         },
     };
-    transfer.resume(barrier).await.expect("resume writer");
+    transfer
+        .resume("runtime-transfer", barrier)
+        .await
+        .expect("resume writer");
     session
         .simple_query("INSERT INTO t1 VALUES (10)")
         .await
@@ -780,7 +783,7 @@ async fn live_multirange_transfer_stages_populated_successor_without_publishing_
         .expect("replacement r0 durable receipt write/read/reopen");
     let mut post_split = runtime.engine.connect();
     let replacement_checkpoint = transfer
-        .force_checkpoint(RangeId::COORDINATOR)
+        .force_checkpoint("replacement-checkpoint", RangeId::COORDINATOR)
         .await
         .expect("checkpoint replacement r0");
     post_split
@@ -805,7 +808,7 @@ async fn live_multirange_transfer_stages_populated_successor_without_publishing_
         "replacement r0 tail reaches its barrier"
     );
     transfer
-        .resume(replacement_barrier)
+        .resume("replacement-checkpoint", replacement_barrier)
         .await
         .expect("resume replacement r0");
     post_split
@@ -2560,7 +2563,7 @@ async fn live_multirange_transfer_rejects_concurrent_pause_without_waiting() {
         .await
         .expect("write source range");
     let manifest = transfer
-        .force_checkpoint(range)
+        .force_checkpoint("concurrent-pause", range)
         .await
         .expect("force checkpoint");
 
@@ -2582,7 +2585,7 @@ async fn live_multirange_transfer_rejects_concurrent_pause_without_waiting() {
     ));
 
     transfer
-        .resume(barrier)
+        .resume("concurrent-pause", barrier)
         .await
         .expect("resume winning pause");
     session

@@ -676,17 +676,13 @@ fn spawn_node(
         "CN=process-range",
         "--operator-control-principal",
         "CN=process-range",
+        "--checkpoint-store",
+        "local",
+        "--checkpoint-local-root",
+        checkpoint_dir.to_str().expect("checkpoint path"),
+        "--checkpoint-frames",
+        "1",
     ]);
-    if range == 0 {
-        command.args([
-            "--checkpoint-store",
-            "local",
-            "--checkpoint-local-root",
-            checkpoint_dir.to_str().expect("checkpoint path"),
-            "--checkpoint-frames",
-            "1",
-        ]);
-    }
     if let Some(fault) = commit_fault {
         command.env("CRABKA_GRES_TEST_COMMIT_FAULT", fault);
     }
