@@ -153,9 +153,7 @@ pub trait TopicAdmin: Send {
         replication_factor: i32,
         timeout_ms: i32,
     ) -> Result<(), SubstrateError> {
-        if replication_factor != WAL_TOPIC_REPLICAS
-            || timeout_ms != WAL_TOPIC_ENSURE_TIMEOUT_MS
-        {
+        if replication_factor != WAL_TOPIC_REPLICAS || timeout_ms != WAL_TOPIC_ENSURE_TIMEOUT_MS {
             return Err(SubstrateError::Topic(format!(
                 "unsupported WAL topic policy for legacy admin: replicas={replication_factor}, timeout_ms={timeout_ms}"
             )));
@@ -496,10 +494,9 @@ mod tests {
         let mut admin = LegacyTopicAdmin::default();
         let policy = WalAdminPolicy::new(2, WAL_TOPIC_ENSURE_TIMEOUT_MS, 3, 4).expect("policy");
 
-        let error =
-            ensure_wal_topic_name_with_policy(&mut admin, "__gres_wal.t1.r0", policy)
-                .await
-                .expect_err("custom policy unsupported");
+        let error = ensure_wal_topic_name_with_policy(&mut admin, "__gres_wal.t1.r0", policy)
+            .await
+            .expect_err("custom policy unsupported");
 
         assert!(error.to_string().contains("unsupported WAL topic policy"));
         assert_eq!(admin.creates, 0);
