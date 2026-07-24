@@ -7399,6 +7399,21 @@ mod tests {
 
     #[tokio::test]
     async fn range0_follower_poll_validation_precedes_listener_bind() {
+        const CHILD: &str = "CRABKA_TEST_GRES_RANGE0_FOLLOWER_POLL_BIND_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().expect("test exe"))
+                .args([
+                    "--exact",
+                    "tests::range0_follower_poll_validation_precedes_listener_bind",
+                ])
+                .env(CHILD, "1")
+                .env_remove("CRABKA_GRES_RANGE0_FOLLOWER_POLL_INTERVAL_MS")
+                .status()
+                .expect("child test");
+            assert!(status.success());
+            return;
+        }
+
         let occupied = TcpListener::bind("127.0.0.1:0").await.expect("listener");
         let mut args = Cli::try_parse_from(["crabka-gres"])
             .expect("defaults")
