@@ -127,7 +127,7 @@ impl StreamsGroupActorHandle {
         metadata_source: Option<Arc<dyn MetadataSource>>,
         coordinator: Arc<super::super::GroupCoordinator>,
     ) -> Self {
-        let (tx, rx) = mpsc::channel(64);
+        let (tx, rx) = mpsc::channel(config.actor_mailbox_capacity);
         let task = tokio::spawn(actor_loop(
             group_id,
             config,

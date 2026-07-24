@@ -58,13 +58,23 @@ use crate::{
     network::client::InterBrokerClient,
 };
 
-/// Aggressive recovery takes whatever responses arrive within this short
-/// window — it does not wait for slow/unreachable replicas.
-const AGGRESSIVE_DEADLINE: Duration = Duration::from_secs(2);
-/// Balanced recovery waits longer, hoping to gather every replica's log
-/// state before electing, but still caps the wait so a single hung replica
-/// can't stall recovery forever.
-const BALANCED_DEADLINE: Duration = Duration::from_secs(30);
+#[derive(Debug, Clone)]
+pub(crate) struct RecoveryPolicy {
+    pub aggressive_deadline: Duration,
+    pub balanced_deadline: Duration,
+    pub queue_capacity: usize,
+    pub listener_protocol: crabka_security::ListenerProtocol,
+    pub inter_broker_server_name: String,
+}
+
+impl RecoveryPolicy {
+    fn deadline(&self, strategy: RecoveryStrategy) -> Duration {
+        match strategy {
+            RecoveryStrategy::Aggressive | RecoveryStrategy::None => self.aggressive_deadline,
+            RecoveryStrategy::Balanced => self.balanced_deadline,
+        }
+    }
+}
 
 /// A request to (possibly) run unclean recovery for one partition. Enqueued
 /// by the failover path and the `ElectLeaders` handler; serviced by the URM.
@@ -124,6 +134,7 @@ pub(crate) struct UncleanRecoveryManager {
     inter_broker_client: Arc<InterBrokerClient>,
     listener_protocol: crabka_security::ListenerProtocol,
     metrics: crate::metrics::BrokerMetrics,
+    policy: RecoveryPolicy,
     in_flight: Arc<Mutex<HashSet<(String, i32)>>>,
 }
 
@@ -136,18 +147,19 @@ impl UncleanRecoveryManager {
         liveness: Arc<ControllerLivenessState>,
         node_id: NodeId,
         inter_broker_client: Arc<InterBrokerClient>,
-        listener_protocol: crabka_security::ListenerProtocol,
         metrics: crate::metrics::BrokerMetrics,
+        policy: RecoveryPolicy,
         shutdown: tokio_util::sync::CancellationToken,
     ) -> UncleanRecoveryHandle {
-        let (tx, mut rx) = mpsc::channel::<RecoveryJob>(256);
+        let (tx, mut rx) = mpsc::channel::<RecoveryJob>(policy.queue_capacity);
         let mgr = Arc::new(Self {
             controller,
             liveness,
             node_id,
             inter_broker_client,
-            listener_protocol,
+            listener_protocol: policy.listener_protocol,
             metrics,
+            policy,
             in_flight: Arc::new(Mutex::new(HashSet::new())),
         });
         tokio::spawn(async move {
@@ -231,6 +243,7 @@ impl UncleanRecoveryManager {
             let client = self.inter_broker_client.clone();
             let proto = self.listener_protocol;
             let partition = job.partition;
+            let server_name = self.policy.inter_broker_server_name.clone();
             let my_id = i32::try_from(self.node_id.0).unwrap_or(-1);
             futs.push(
                 async move {
@@ -244,6 +257,7 @@ impl UncleanRecoveryManager {
                             topic_id,
                             partition,
                             replica: r,
+                            server_name,
                         },
                     )
                     .await
@@ -252,10 +266,7 @@ impl UncleanRecoveryManager {
             );
         }
 
-        let deadline = match job.strategy {
-            RecoveryStrategy::Aggressive | RecoveryStrategy::None => AGGRESSIVE_DEADLINE,
-            RecoveryStrategy::Balanced => BALANCED_DEADLINE,
-        };
+        let deadline = self.policy.deadline(job.strategy);
         let collected: Vec<ReplicaLogInfo> = gather_responses(futs, deadline).await;
 
         if has_newer_leader(&collected, known_epoch.0) {
@@ -329,6 +340,7 @@ struct ReplicaQuery {
     topic_id: WireUuid,
     partition: i32,
     replica: NodeId,
+    server_name: String,
 }
 
 async fn query_replica(client: &InterBrokerClient, query: ReplicaQuery) -> Option<ReplicaLogInfo> {
@@ -340,7 +352,13 @@ async fn query_replica(client: &InterBrokerClient, query: ReplicaQuery) -> Optio
         ..crabka_client_core::ConnectionOptions::default()
     };
     let conn = client
-        .connect_as_connection(&query.host, query.port, query.proto, "localhost", opts)
+        .connect_as_connection(
+            &query.host,
+            query.port,
+            query.proto,
+            &query.server_name,
+            opts,
+        )
         .await
         .ok()?;
     let req = GetReplicaLogInfoRequest {
@@ -434,6 +452,23 @@ mod tests {
     #[test]
     fn empty_input_returns_none() {
         assert!(select_best_replica(&[]) == None);
+    }
+
+    #[test]
+    fn recovery_policy_selects_configured_deadlines() {
+        let policy = RecoveryPolicy {
+            aggressive_deadline: Duration::from_millis(7),
+            balanced_deadline: Duration::from_millis(19),
+            queue_capacity: 3,
+            listener_protocol: crabka_security::ListenerProtocol::Ssl,
+            inter_broker_server_name: "broker.internal".to_string(),
+        };
+
+        assert!(policy.deadline(RecoveryStrategy::Aggressive) == Duration::from_millis(7));
+        assert!(policy.deadline(RecoveryStrategy::Balanced) == Duration::from_millis(19));
+        assert!(policy.queue_capacity == 3);
+        assert!(policy.listener_protocol == crabka_security::ListenerProtocol::Ssl);
+        assert!(policy.inter_broker_server_name == "broker.internal");
     }
 
     #[test]
@@ -649,6 +684,13 @@ mod run_recovery_tests {
             inter_broker_client: Arc::new(InterBrokerClient::new(None, None)),
             listener_protocol: crabka_security::ListenerProtocol::Plaintext,
             metrics: crate::metrics::BrokerMetrics::new(),
+            policy: RecoveryPolicy {
+                aggressive_deadline: Duration::from_secs(2),
+                balanced_deadline: Duration::from_secs(30),
+                queue_capacity: 256,
+                listener_protocol: crabka_security::ListenerProtocol::Plaintext,
+                inter_broker_server_name: "localhost".to_string(),
+            },
             in_flight: Arc::new(Mutex::new(HashSet::new())),
         }
     }

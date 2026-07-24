@@ -27,6 +27,7 @@ pub struct ShareGroupConfig {
     pub max_delivery_attempts: i16,
     pub max_inflight_records: i32,
     pub isolation_level: ShareIsolationLevel,
+    pub actor_mailbox_capacity: usize,
 }
 
 impl Default for ShareGroupConfig {
@@ -45,6 +46,7 @@ impl Default for ShareGroupConfig {
             max_delivery_attempts: 5,
             max_inflight_records: 200,
             isolation_level: ShareIsolationLevel::ReadUncommitted,
+            actor_mailbox_capacity: 64,
         }
     }
 }

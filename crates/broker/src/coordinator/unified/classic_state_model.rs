@@ -282,7 +282,7 @@ impl Model for ClassicModel {
             }
             Act::ExpireTick => {
                 s.clock += 1;
-                let dropped = s.g.expire_dead_members(at(s.clock));
+                let dropped = s.g.expire_dead_members(at(s.clock), Duration::from_secs(3));
                 for id in &dropped {
                     assert!(
                         !last.g.members.get(id).is_some_and(Member::is_static),
@@ -381,6 +381,8 @@ fn classic_wide() {
 
 #[cfg(test)]
 mod fuzz {
+    use std::time::Duration;
+
     use bytes::Bytes;
     use proptest::prelude::*;
 
@@ -484,7 +486,8 @@ mod fuzz {
                             .filter(|(_, m)| m.is_static())
                             .map(|(id, _)| id.clone())
                             .collect();
-                        let dropped = g.expire_dead_members(at(clock));
+                        let dropped =
+                            g.expire_dead_members(at(clock), Duration::from_secs(3));
                         for id in &dropped {
                             prop_assert!(!static_before.contains(id), "static member was expired");
                         }

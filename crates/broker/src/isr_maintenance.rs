@@ -17,10 +17,6 @@ use tracing::{debug, warn};
 
 use crate::{partition::Partition, partition_registry::PartitionRegistry};
 
-/// Cadence of the ISR maintenance scan: every leader partition's follower
-/// lag is re-evaluated once per tick.
-const ISR_SCAN_INTERVAL: Duration = Duration::from_secs(1);
-
 /// KIP-903 sentinel for an unknown broker epoch. Stamped when the metadata
 /// image has no epoch for a broker; tells the controller to skip the
 /// stale-replica epoch fence for that entry.
@@ -28,6 +24,7 @@ const UNKNOWN_BROKER_EPOCH: i64 = -1;
 
 pub(crate) struct Config {
     pub node_id: NodeId,
+    pub scan_interval: Duration,
     pub partitions: Arc<PartitionRegistry>,
     pub controller: Arc<dyn crate::metadata_source::MetadataSource>,
     pub replica_lag_time_max: Duration,
@@ -38,7 +35,7 @@ pub(crate) struct Config {
 }
 
 pub(crate) async fn run(cfg: Config) {
-    let mut tick = tokio::time::interval(ISR_SCAN_INTERVAL);
+    let mut tick = tokio::time::interval(cfg.scan_interval);
     // Reused across ticks to avoid re-allocating the snapshot Vec each second.
     // Holds cheap `Arc<Partition>` clones (no String allocation, no second
     // registry lookup). Cleared and refilled each tick.
@@ -631,6 +628,7 @@ mod tests {
         let shutdown = CancellationToken::new();
         let task = tokio::spawn(run(Config {
             node_id: NodeId(1),
+            scan_interval: Duration::from_millis(7),
             partitions,
             controller,
             replica_lag_time_max: Duration::from_secs(5),

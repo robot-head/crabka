@@ -54,15 +54,6 @@ use crate::{
 /// fields. The values live in [`crate::codes`].
 pub type ErrorCode = i16;
 
-/// Capacity of a group actor's mpsc mailbox. Senders back-pressure (await)
-/// once this many messages are queued unprocessed.
-const ACTOR_MAILBOX_CAPACITY: usize = 64;
-
-/// Cadence of the kind-agnostic session-expiry tick inside `actor_loop`.
-/// Expiry compares `last_seen` against each member's session timeout, so the
-/// tick rate only bounds detection latency, never the outcome.
-const SESSION_EXPIRY_TICK_INTERVAL: Duration = Duration::from_secs(1);
-
 /// Fallback session timeout (30 s, in ms) used when a persisted or requested
 /// classic `session_timeout_ms` can't be represented in the target type.
 const FALLBACK_SESSION_TIMEOUT_MS: u64 = 30_000;
@@ -338,7 +329,7 @@ impl GroupActorHandle {
         offsets_log: Arc<dyn OffsetsLog>,
         coordinator: Arc<super::GroupCoordinator>,
     ) -> Self {
-        let (tx, rx) = mpsc::channel(ACTOR_MAILBOX_CAPACITY);
+        let (tx, rx) = mpsc::channel(config.actor_mailbox_capacity);
         let task = tokio::spawn(actor_loop(
             group_id,
             kind,
@@ -473,7 +464,12 @@ async fn handle_classic_join_message(
     reply: oneshot::Sender<JoinResult>,
 ) -> bool {
     if let Some(state) = group.as_classic_mut() {
-        match classic_ops::handle_join(state, &request, client_host) {
+        match classic_ops::handle_join(
+            state,
+            &request,
+            client_host,
+            services.config.classic_initial_rebalance_delay,
+        ) {
             classic_ops::JoinAction::Immediate(result) => {
                 let _ = reply.send(result);
             }
@@ -577,7 +573,10 @@ async fn handle_actor_tick(
             return false;
         }
     } else if let Some(state) = group.as_classic_mut() {
-        let dropped = state.expire_dead_members(Instant::now());
+        let dropped = state.expire_dead_members(
+            Instant::now(),
+            services.config.classic_initial_rebalance_delay,
+        );
         if !dropped.is_empty() {
             tracing::info!(group = %group_id, ?dropped, "expired members; waking joiners");
             drain_removed_classic_waiters(&dropped, &mut parked.joiners, &mut parked.followers);
@@ -772,17 +771,16 @@ async fn actor_loop(
         GroupKindTag::Consumer => CoordinatorGroup::new_consumer(group_id),
     };
     let mut parked = ParkedWaiters::default();
-    // A single 1-second session-expiry tick, kind-agnostic. The tick arm
+    // A single configured session-expiry tick, kind-agnostic. The tick arm
     // dispatches on the live `group.kind`, so the cadence must not depend on
     // the spawn-time kind. Expiry is a
-    // `last_seen`-vs-`session_timeout` comparison, so ticking once a second
-    // (rather than on the heartbeat interval for consumer groups) only changes
+    // `last_seen`-vs-`session_timeout` comparison, so its cadence only changes
     // how often we check, never the outcome.
     //
     // Driven through the injected `AsyncSleeper` (production: real time; tests:
     // a controlled mock timeline). A zero-duration first sleep reproduces
     // `tokio::time::interval`'s immediate t=0 tick; each subsequent sleep is
-    // re-armed to `SESSION_EXPIRY_TICK_INTERVAL` only after the tick body runs
+    // re-armed to the configured interval only after the tick body runs
     // (`MissedTickBehavior::Delay` semantics — a slow tick never bursts). The
     // future is held across loop iterations so an inbound-message stream never
     // resets the tick schedule (matching the persistent `Interval`).
@@ -813,7 +811,7 @@ async fn actor_loop(
                 if !handle_actor_tick(&mut group, &mut parked, services).await {
                     break;
                 }
-                tick = sleeper.sleep_for_async(SESSION_EXPIRY_TICK_INTERVAL);
+                tick = sleeper.sleep_for_async(config.session_expiry_tick);
             }
             () = opt_sleep(deadline) => {
                 // Classic rebalance deadline fired: complete with whoever is here.
@@ -2919,9 +2917,11 @@ mod tests {
         let sleeper = MockSleeper::new();
         let timeline = sleeper.timeline();
         let log = Arc::new(InMemoryOffsetsLog::default());
+        let tick_interval = Duration::from_millis(37);
         let coord = Arc::new(GroupCoordinator::new(
             NextGenConfig {
                 sleeper: Arc::new(sleeper),
+                session_expiry_tick: tick_interval,
                 ..NextGenConfig::default()
             },
             crate::coordinator::unified::share::config::ShareGroupConfig::default(),
@@ -2962,7 +2962,7 @@ mod tests {
         .unwrap();
         assert!(parked, "actor should park on the session-expiry tick sleep");
 
-        timeline.advance(SESSION_EXPIRY_TICK_INTERVAL);
+        timeline.advance(tick_interval);
 
         let tl = timeline.clone();
         let reparked = tokio::task::spawn_blocking(move || {

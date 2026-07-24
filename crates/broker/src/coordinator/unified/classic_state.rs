@@ -185,7 +185,7 @@ pub struct ClassicGroup {
     pub rebalance_deadline: Option<Instant>,
     /// Members whose `JoinGroup` has arrived since the last transition into
     /// `PreparingRebalance`. The `JoinGroup` handler runs the rebalance early
-    /// — without waiting out `INITIAL_REBALANCE_DELAY` — once every member
+    /// — without waiting out the configured initial delay — once every member
     /// still in `members` shows up here, which avoids the leader running
     /// the assignor on a stale-metadata snapshot when a slow member misses
     /// the wait window under load (the assignor's cooperative-sticky
@@ -195,7 +195,7 @@ pub struct ClassicGroup {
     /// `true` while the current `PreparingRebalance` round opened from an
     /// `Empty` group — a brand-new group or one whose members had all left
     /// (e.g. after a warm-up consumer joins and leaves). Such a round honors
-    /// the full `INITIAL_REBALANCE_DELAY` batching window — mirroring Apache
+    /// the full configured batching window — mirroring Apache
     /// Kafka's `InitialDelayedJoin` — instead of eager-completing the moment
     /// the first member shows up, so a herd of consumers starting together
     /// lands in a single generation. Eager-completing a from-`Empty` round
@@ -304,7 +304,7 @@ impl ClassicGroup {
             self.state = GroupState::PreparingRebalance;
             self.joined_this_round.clear();
             // A round that opens from `Empty` batches the startup herd over
-            // `INITIAL_REBALANCE_DELAY` (see `rebalance_from_empty`); one that
+            // the configured initial delay (see `rebalance_from_empty`); one that
             // opens from `Stable` is a live-membership change and
             // eager-completes once every still-live member rejoins.
             self.rebalance_from_empty = was_empty;
@@ -400,7 +400,11 @@ impl ClassicGroup {
     /// **skipped** — their slot is preserved across the session timeout
     /// so a restarting client reclaims its assignment on rejoin without
     /// kicking the rest of the group into a rebalance.
-    pub fn expire_dead_members(&mut self, now: Instant) -> Vec<String> {
+    pub fn expire_dead_members(
+        &mut self,
+        now: Instant,
+        initial_rebalance_delay: Duration,
+    ) -> Vec<String> {
         // Expire members in all active states (PreparingRebalance,
         // CompletingRebalance, Stable). Empty and Dead have no members to
         // expire. Importantly, expiring in CompletingRebalance lets the broker
@@ -411,7 +415,7 @@ impl ClassicGroup {
         // The original Stable-only guard existed to prevent a race where a
         // member with a very small session_timeout could self-evict before its
         // JoinGroup returned (last_heartbeat = add_member time, session_timeout
-        // = 3s = INITIAL_REBALANCE_DELAY). With the default session_timeout of
+        // equal to the initial rebalance delay). With the default session timeout
         // 45s and a 3s rebalance delay this race is impossible in practice, and
         // real Kafka expires members regardless of group state.
         if matches!(self.state, GroupState::Empty | GroupState::Dead) {
@@ -455,7 +459,7 @@ impl ClassicGroup {
                 // parked joiners/followers wake up via the actor's opt_sleep path
                 // rather than waiting indefinitely for a rejoin that never comes.
                 if self.rebalance_deadline.is_none() {
-                    self.rebalance_deadline = Some(Instant::now() + Duration::from_secs(3));
+                    self.rebalance_deadline = Some(now + initial_rebalance_delay);
                 }
             }
         }
@@ -583,7 +587,7 @@ mod tests {
         g.complete_rebalance("range");
         g.state = GroupState::Stable;
 
-        let dropped = g.expire_dead_members(Instant::now());
+        let dropped = g.expire_dead_members(Instant::now(), Duration::from_secs(3));
         check!(dropped.is_empty(), "static member must NOT be expired");
         check!(g.state == GroupState::Stable);
         check!(g.members.contains_key("m1"));
@@ -602,10 +606,31 @@ mod tests {
         g.complete_rebalance("range");
         g.state = GroupState::Stable;
 
-        let dropped = g.expire_dead_members(Instant::now());
+        let dropped = g.expire_dead_members(Instant::now(), Duration::from_secs(3));
         check!(dropped == vec!["dyn-1".to_string()]);
         check!(g.state == GroupState::PreparingRebalance);
         check!(g.members.contains_key("static-1"));
+    }
+
+    #[test]
+    fn completing_rebalance_expiry_uses_configured_initial_delay() {
+        let mut g = ClassicGroup::new("g");
+        let mut stale = sample_member("stale");
+        stale.session_timeout = Duration::from_millis(1);
+        stale.last_heartbeat = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
+        g.add_member(stale);
+        g.add_member(sample_member("survivor"));
+        g.complete_rebalance("range");
+        check!(g.state == GroupState::CompletingRebalance);
+        check!(g.rebalance_deadline.is_none());
+
+        let delay = Duration::from_millis(19);
+        let now = Instant::now();
+        let dropped = g.expire_dead_members(now, delay);
+
+        check!(dropped == vec!["stale".to_string()]);
+        check!(g.state == GroupState::PreparingRebalance);
+        assert!(g.rebalance_deadline == Some(now + delay));
     }
 
     #[test]
@@ -720,7 +745,7 @@ mod tests {
         g.add_member(m);
         g.complete_rebalance("range");
         g.state = GroupState::Stable;
-        let dropped = g.expire_dead_members(Instant::now());
+        let dropped = g.expire_dead_members(Instant::now(), Duration::from_secs(3));
         assert!(dropped == vec!["m1".to_string()]);
         assert!(g.state == GroupState::Empty);
     }
@@ -736,7 +761,7 @@ mod tests {
         g.rebalance_from_empty = true;
         assert!(g.joined_this_round.contains("m1"));
 
-        let dropped = g.expire_dead_members(Instant::now());
+        let dropped = g.expire_dead_members(Instant::now(), Duration::from_secs(3));
 
         check!(dropped == vec!["m1".to_string()]);
         check!(g.state == GroupState::Empty);

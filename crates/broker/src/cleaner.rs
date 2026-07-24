@@ -20,9 +20,6 @@ use tracing::{debug, warn};
 
 use crate::{metrics::BrokerMetrics, partition::Partition, partition_registry::PartitionRegistry};
 
-/// Default cadence of the broker-wide compaction sweep.
-const DEFAULT_COMPACTION_INTERVAL: Duration = Duration::from_secs(30);
-
 /// Tunables for [`run`].
 #[derive(Clone)]
 pub(crate) struct CleanerConfig {
@@ -34,10 +31,10 @@ pub(crate) struct CleanerConfig {
     pub sleeper: Arc<dyn AsyncSleeper>,
 }
 
-impl Default for CleanerConfig {
-    fn default() -> Self {
+impl CleanerConfig {
+    pub(crate) fn system(interval: Duration) -> Self {
         Self {
-            interval: DEFAULT_COMPACTION_INTERVAL,
+            interval,
             sleeper: Arc::new(SystemSleeper::new()),
         }
     }

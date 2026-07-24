@@ -11,6 +11,7 @@ use std::{
 
 use crabka_ids::PartitionIndex;
 use dashmap::DashMap;
+use futures_util::future::BoxFuture;
 use tokio::{net::TcpListener, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
@@ -22,63 +23,6 @@ use crate::{
     partition::{Partition, WriterMessage},
     partition_registry::PartitionRegistry,
 };
-
-/// Startup deadline for the controller quorum to elect a leader before
-/// `Broker::start` fails with a `Startup` error.
-const STARTUP_LEADER_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(2);
-
-/// Maximum broker self-registration submit attempts before `Broker::start`
-/// gives up and fails startup.
-const SELF_REGISTRATION_MAX_ATTEMPTS: u32 = 8;
-
-/// First delay of the exponential self-registration retry backoff.
-const SELF_REGISTRATION_BACKOFF_MIN: std::time::Duration = std::time::Duration::from_millis(100);
-
-/// Ceiling of the exponential self-registration retry backoff.
-const SELF_REGISTRATION_BACKOFF_MAX: std::time::Duration = std::time::Duration::from_secs(5);
-
-/// Max bytes per `__cluster_metadata` fetch issued by a broker-only node's
-/// metadata observer (1 MiB).
-const OBSERVER_FETCH_MAX_BYTES: u32 = 1_048_576;
-
-/// How often a broker-only node's metadata observer polls the controller
-/// quorum for new `__cluster_metadata` records.
-const OBSERVER_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
-
-/// Capacity of the bounded audit-event channel between `AuditLog::emit`
-/// callers and the `AuditWriter` drain task; events past this depth drop.
-const AUDIT_EVENT_QUEUE_CAPACITY: usize = 8192;
-
-/// Cadence at which the `AuditWriter` replays spooled audit records back
-/// into the audit topic.
-const AUDIT_SPOOL_REPLAY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
-
-/// Cadence at which audit spool stats are polled into Prometheus gauges.
-const AUDIT_STATS_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
-
-/// Startup wait for this broker's led audit partition to materialise before
-/// emitting the `BrokerStarted` lifecycle event (best-effort; on timeout the
-/// event is emitted anyway and may drop).
-const AUDIT_PARTITION_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-
-/// Cadence of the controller-side liveness scan that fires leader-election
-/// callbacks on broker alive/dead transitions.
-const LIVENESS_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
-
-/// Cadence of the background poll refreshing the partition/controller health
-/// gauges (`partitions_led`, URP, under-min-ISR, offline, `active_controller`).
-const GAUGE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
-
-/// Cadence of the KIP-714 client-metrics stale-entry eviction sweep.
-const CLIENT_METRICS_EVICTION_TICK: std::time::Duration = std::time::Duration::from_mins(1);
-
-/// KIP-714 eviction: a client-metrics entry is stale once this many push
-/// intervals have elapsed without a push.
-const CLIENT_METRICS_STALE_PUSH_INTERVALS: u32 = 3;
-
-/// KIP-714 eviction: floor on the staleness window, so clients on very short
-/// push intervals are not evicted between pushes.
-const CLIENT_METRICS_STALE_FLOOR: std::time::Duration = std::time::Duration::from_mins(10);
 
 fn self_registration_record(config: &BrokerConfig) -> crabka_metadata::BrokerRegistrationRecord {
     let (host, port) = parse_advertised_host_port(&config.advertised_listener);
@@ -412,8 +356,8 @@ async fn start_metadata_source(
             dialer: Arc::clone(&dialer),
             client_id: format!("crabka-broker-{}-observer", config.broker_id),
             cluster_id: config.cluster_id.unwrap_or_else(uuid::Uuid::nil),
-            max_bytes: OBSERVER_FETCH_MAX_BYTES,
-            poll_interval: OBSERVER_POLL_INTERVAL,
+            max_bytes: config.observer_fetch_max_bytes,
+            poll_interval: config.observer_poll_interval,
             sleeper: Arc::new(qubit_clock::sleep::SystemSleeper::new()),
         },
     );
@@ -446,11 +390,13 @@ fn spawn_auto_join(
         });
     tokio::spawn(crate::auto_join::run(crate::auto_join::AutoJoinParams {
         auto_join: config.auto_join,
+        retry_backoff: config.auto_join_retry_backoff,
         node_id: config.node_id,
         directory_id: config.directory_id,
         cluster_id: config.cluster_id,
         bootstrap_servers: config.bootstrap_servers.clone(),
         listener_protocol,
+        inter_broker_server_name: config.inter_broker_server_name.clone(),
         controller: Arc::clone(controller),
         inter_broker_client: Arc::clone(inter_broker_client),
     }));
@@ -458,13 +404,14 @@ fn spawn_auto_join(
 
 async fn wait_for_metadata_leader(
     controller: &dyn crate::metadata_source::MetadataSource,
+    timeout: std::time::Duration,
 ) -> Result<(), BrokerError> {
     let mut leaders = controller.watch_leader();
-    let deadline = std::time::Instant::now() + STARTUP_LEADER_WAIT_TIMEOUT;
+    let deadline = std::time::Instant::now() + timeout;
     while leaders.borrow().is_none() {
         if std::time::Instant::now() > deadline {
             return Err(BrokerError::Startup(format!(
-                "no leader elected within {STARTUP_LEADER_WAIT_TIMEOUT:?}"
+                "no leader elected within {timeout:?}"
             )));
         }
         let _ =
@@ -484,9 +431,9 @@ async fn register_broker(
     let registration =
         crabka_metadata::MetadataRecord::V1BrokerRegistration(self_registration_record(config));
     let backoff = exponential_backoff::Backoff::new(
-        SELF_REGISTRATION_MAX_ATTEMPTS,
-        SELF_REGISTRATION_BACKOFF_MIN,
-        Some(SELF_REGISTRATION_BACKOFF_MAX),
+        config.self_registration_max_attempts,
+        config.self_registration_backoff_min,
+        Some(config.self_registration_backoff_max),
     );
     for (attempt_index, delay) in backoff.into_iter().enumerate() {
         match controller.submit_change(vec![registration.clone()]).await {
@@ -595,14 +542,23 @@ async fn recover_storage_and_groups(
             &partitions,
         )),
     );
+    let mut consumer_group = config.next_gen_consumer_group.as_ref().clone();
+    consumer_group.session_expiry_tick = config.coordinator_session_expiry_tick;
+    consumer_group.actor_mailbox_capacity = config.coordinator_actor_mailbox_capacity;
+    consumer_group.shutdown_ack_timeout = config.coordinator_shutdown_ack_timeout;
+    consumer_group.classic_initial_rebalance_delay = config.classic_group_initial_rebalance_delay;
+    let mut share_group = config.share_group.as_ref().clone();
+    share_group.actor_mailbox_capacity = config.coordinator_actor_mailbox_capacity;
+    let mut streams_group = config.streams_group.as_ref().clone();
+    streams_group.actor_mailbox_capacity = config.coordinator_actor_mailbox_capacity;
     let group_coordinator = Arc::new(crate::coordinator::GroupCoordinator::new(
-        config.next_gen_consumer_group.as_ref().clone(),
-        config.share_group.as_ref().clone(),
+        consumer_group,
+        share_group,
         Arc::new(crate::coordinator::unified::ImageMetadataProvider {
             controller: Arc::clone(controller),
         }),
         offsets_log,
-        config.streams_group.as_ref().clone(),
+        streams_group,
     ));
     let producer_ids = Arc::new(crate::producer_id_manager::ProducerIdManager::new());
     crate::coordinator::bootstrap::bootstrap(
@@ -727,10 +683,11 @@ fn spawn_audit_metrics(
     stats: Arc<crabka_audit::AuditStats>,
     log: Arc<crabka_audit::AuditLog>,
     metrics: crate::metrics::BrokerMetrics,
+    poll_interval: std::time::Duration,
 ) {
     tokio::spawn(async move {
         let mut previous = (0, 0, 0);
-        let mut tick = tokio::time::interval(AUDIT_STATS_POLL_INTERVAL);
+        let mut tick = tokio::time::interval(poll_interval);
         loop {
             tick.tick().await;
             let current = (
@@ -776,7 +733,7 @@ fn start_audit_pipeline(
         })
         .find(|(_, record)| record.leader == config.node_id)
         .map(|(index, _)| PartitionIndex(index));
-    let (log, receiver) = crabka_audit::AuditLog::new(AUDIT_EVENT_QUEUE_CAPACITY);
+    let (log, receiver) = crabka_audit::AuditLog::new(config.audit_event_queue_capacity);
     if let Some(partition_index) = led_partition {
         let sink = Arc::new(crate::audit_sink::KafkaTopicAuditSink::new(
             Arc::clone(partitions),
@@ -812,12 +769,17 @@ fn start_audit_pipeline(
                 chain,
                 spool,
                 stats: Arc::clone(&stats),
-                replay_every: AUDIT_SPOOL_REPLAY_INTERVAL,
+                replay_every: config.audit_spool_replay_interval,
                 sleeper: Arc::new(qubit_clock::sleep::SystemSleeper::new()),
             },
         );
         tokio::spawn(writer.run());
-        spawn_audit_metrics(stats, log.clone(), metrics.clone());
+        spawn_audit_metrics(
+            stats,
+            log.clone(),
+            metrics.clone(),
+            config.audit_stats_poll_interval,
+        );
     } else {
         tracing::warn!("no audit partition led by this broker; audit records will drop");
     }
@@ -834,10 +796,11 @@ fn spawn_broker_gauge_updater(
     liveness: Arc<crate::heartbeat::controller_state::ControllerLivenessState>,
     node_id: crabka_metadata::NodeId,
     metrics: crate::metrics::BrokerMetrics,
+    poll_interval: std::time::Duration,
     shutdown: CancellationToken,
 ) {
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(GAUGE_POLL_INTERVAL);
+        let mut tick = tokio::time::interval(poll_interval);
         loop {
             tokio::select! {
                 _ = tick.tick() => {}
@@ -912,10 +875,11 @@ fn spawn_liveness_ticker(
     node_id: crabka_metadata::NodeId,
     metrics: crate::metrics::BrokerMetrics,
     recovery: crate::unclean_recovery::UncleanRecoveryHandle,
+    tick_interval: std::time::Duration,
     shutdown: CancellationToken,
 ) {
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(LIVENESS_TICK_INTERVAL);
+        let mut tick = tokio::time::interval(tick_interval);
         loop {
             tokio::select! {
                 _ = tick.tick() => {}
@@ -1034,8 +998,14 @@ fn start_liveness_services(
         Arc::clone(&liveness),
         config.node_id,
         Arc::clone(inter_broker_client),
-        listener_protocol,
         metrics.clone(),
+        crate::unclean_recovery::RecoveryPolicy {
+            aggressive_deadline: config.unclean_recovery_aggressive_deadline,
+            balanced_deadline: config.unclean_recovery_balanced_deadline,
+            queue_capacity: config.unclean_recovery_queue_capacity,
+            listener_protocol,
+            inter_broker_server_name: config.inter_broker_server_name.clone(),
+        },
         shutdown.child_token(),
     );
     spawn_liveness_ticker(
@@ -1044,6 +1014,7 @@ fn start_liveness_services(
         config.node_id,
         metrics.clone(),
         unclean_recovery.clone(),
+        config.liveness_tick_interval,
         shutdown.child_token(),
     );
     spawn_leadership_watcher(
@@ -1085,8 +1056,9 @@ async fn start_observability(
         None
     };
     let client_metrics = Arc::new(crate::client_metrics::ClientMetrics::new(
-        crate::client_metrics::DEFAULT_TELEMETRY_MAX_BYTES,
+        config.client_metrics_telemetry_max_bytes,
         config.client_metrics_otlp_endpoint.clone(),
+        config.client_metrics_prom_snapshot_ttl,
     ));
     metrics.registry.lock().await.register_collector(Box::new(
         crate::client_metrics::prometheus_sink::SharedClientMetricsCollector(
@@ -1095,14 +1067,17 @@ async fn start_observability(
     ));
     let eviction_metrics = Arc::clone(&client_metrics);
     let eviction_shutdown = shutdown.child_token();
+    let eviction_tick = config.client_metrics_eviction_tick;
+    let stale_push_intervals = config.client_metrics_stale_push_intervals;
+    let stale_floor = config.client_metrics_stale_floor;
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(CLIENT_METRICS_EVICTION_TICK);
+        let mut tick = tokio::time::interval(eviction_tick);
         loop {
             tokio::select! {
                 () = eviction_shutdown.cancelled() => return,
                 _ = tick.tick() => eviction_metrics.manager.evict_stale(
-                    CLIENT_METRICS_STALE_PUSH_INTERVALS,
-                    CLIENT_METRICS_STALE_FLOOR,
+                    stale_push_intervals,
+                    stale_floor,
                 ),
             }
         }
@@ -1126,6 +1101,7 @@ fn spawn_storage_security_maintenance(
             partitions: Arc::clone(partitions),
             controller: Arc::clone(controller),
             replica_lag_time_max: std::time::Duration::from_millis(config.replica_lag_time_max_ms),
+            scan_interval: config.isr_scan_interval,
             broker_id: config.broker_id,
             shutdown: shutdown.child_token(),
             metrics: metrics.clone(),
@@ -1157,6 +1133,7 @@ fn spawn_storage_security_maintenance(
             tls_trust: config.oauthbearer_idp_tls_trust.clone(),
             signal_rx,
             min_on_demand_pause: config.oauthbearer_jwks_min_on_demand_pause,
+            http_timeout: config.oauth_jwks_http_timeout,
             last_successful_fetch_ms: Arc::clone(&config.oauthbearer_jwks_last_successful_fetch_ms),
             last_on_demand_refresh_ms: Arc::clone(
                 &config.oauthbearer_jwks_last_on_demand_refresh_ms,
@@ -1190,19 +1167,14 @@ fn spawn_producer_expiry(
 }
 
 fn cleaner_config(config: &BrokerConfig) -> crate::cleaner::CleanerConfig {
-    let default = crate::cleaner::CleanerConfig::default();
+    let interval = config.cleaner_interval;
     #[cfg(any(test, feature = "test-helpers"))]
     {
-        let mut configured = default;
-        if let Some(interval) = config.cleaner_interval_override {
-            configured.interval = interval;
-        }
-        configured
+        crate::cleaner::CleanerConfig::system(config.cleaner_interval_override.unwrap_or(interval))
     }
     #[cfg(not(any(test, feature = "test-helpers")))]
     {
-        let _ = config;
-        default
+        crate::cleaner::CleanerConfig::system(interval)
     }
 }
 
@@ -1313,6 +1285,9 @@ fn kafka_swap_kickoff(config: &BrokerConfig) -> Option<KafkaSwapKickoff> {
             security,
         },
         broker_id: config.broker_id,
+        bootstrap_backoff_initial: config.rlmm_bootstrap_backoff_initial,
+        bootstrap_backoff_max: config.rlmm_bootstrap_backoff_max,
+        reconcile_tick: config.rlmm_reconcile_tick,
     })
 }
 
@@ -1539,6 +1514,10 @@ async fn bind_listeners_and_recover_moves(
                 &config.log_config,
                 &topic,
                 partition,
+                crate::future_log::MovePolicy {
+                    retry_backoff: config.future_log_move_retry_backoff,
+                    read_chunk_bytes: config.future_log_move_read_chunk_bytes,
+                },
             ) {
                 tracing::warn!(%topic, partition = partition_id, ?error,
                     "failed to resume interrupted log-dir move");
@@ -1577,7 +1556,7 @@ async fn emit_broker_started(broker: &Broker, audit_partition: Option<PartitionI
     };
     let topic = broker.config.audit_topic.clone();
     let partitions = Arc::clone(&broker.partitions);
-    let _ = tokio::time::timeout(AUDIT_PARTITION_WAIT_TIMEOUT, async move {
+    let _ = tokio::time::timeout(broker.config.audit_partition_wait_timeout, async move {
         while !partitions.contains(&topic, partition_index) {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
@@ -1651,7 +1630,7 @@ async fn start_metadata_phase(
     )
     .await?;
     spawn_auto_join(config, &controller, inter_broker_client);
-    wait_for_metadata_leader(&*controller).await?;
+    wait_for_metadata_leader(&*controller, config.startup_leader_wait_timeout).await?;
     register_broker(config, &*controller).await?;
     submit_bootstrap_records(config, &*controller, bootstrap_records).await?;
     Ok(controller)
@@ -1799,7 +1778,9 @@ fn spawn_replicator_supervisor(
             share_coordinator: Some(Arc::clone(coordinators.1)),
             inter_broker_client: Arc::clone(inter_broker_client),
             inter_broker_listener_protocol: protocol,
+            inter_broker_server_name: config.inter_broker_server_name.clone(),
             inter_broker_listener_name: config.inter_broker_listener_name.clone(),
+            replication: config.replication.clone(),
             throttle_state: Arc::clone(runtime.1),
             log_dir_status: storage.log_dir_status.clone(),
             producer_state: Arc::clone(storage.producer_state),
@@ -1902,6 +1883,7 @@ async fn start_broker_runtime(
         Arc::clone(&liveness),
         config.node_id,
         metrics.clone(),
+        config.gauge_poll_interval,
         supervisor_shutdown.child_token(),
     );
     let disk_scanner_handle = spawn_storage_security_maintenance(
@@ -3500,8 +3482,8 @@ impl Broker {
     /// return the handle.
     /// # Errors
     /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
-    pub async fn start(config: BrokerConfig) -> Result<BrokerHandle, BrokerError> {
-        Self::start_with_listeners(config, None, None).await
+    pub fn start(config: BrokerConfig) -> BoxFuture<'static, Result<BrokerHandle, BrokerError>> {
+        Self::start_with_listeners(config, None, None)
     }
 
     /// Like [`Self::start`], but adopts a caller-supplied, already-bound
@@ -3512,11 +3494,11 @@ impl Broker {
     /// See that method for the full handoff contract.
     /// # Errors
     /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
-    pub async fn start_with_controller_listener(
+    pub fn start_with_controller_listener(
         config: BrokerConfig,
         controller_listener: Option<tokio::net::TcpListener>,
-    ) -> Result<BrokerHandle, BrokerError> {
-        Self::start_with_listeners(config, controller_listener, None).await
+    ) -> BoxFuture<'static, Result<BrokerHandle, BrokerError>> {
+        Self::start_with_listeners(config, controller_listener, None)
     }
 
     /// Like [`Self::start`], but adopts caller-supplied, already-bound
@@ -3546,7 +3528,19 @@ impl Broker {
     #[cfg_attr(test, mutants::skip)]
     /// # Errors
     /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
-    pub async fn start_with_listeners(
+    pub fn start_with_listeners(
+        config: BrokerConfig,
+        controller_listener: Option<tokio::net::TcpListener>,
+        data_plane_listener: Option<tokio::net::TcpListener>,
+    ) -> BoxFuture<'static, Result<BrokerHandle, BrokerError>> {
+        Box::pin(Self::start_with_listeners_inner(
+            config,
+            controller_listener,
+            data_plane_listener,
+        ))
+    }
+
+    async fn start_with_listeners_inner(
         mut config: BrokerConfig,
         controller_listener: Option<tokio::net::TcpListener>,
         data_plane_listener: Option<tokio::net::TcpListener>,
@@ -3688,6 +3682,9 @@ impl Broker {
 struct KafkaSwapKickoff {
     cfg: crate::config::KafkaRlmmConfig,
     broker_id: i32,
+    bootstrap_backoff_initial: std::time::Duration,
+    bootstrap_backoff_max: std::time::Duration,
+    reconcile_tick: std::time::Duration,
 }
 
 /// The sorted, deduped set of `__remote_log_metadata` partitions this broker
@@ -3714,19 +3711,6 @@ fn needed_metadata_partitions(
     crabka_remote_storage_topic::metadata_partitions_for(tps.iter(), partition_count)
 }
 
-/// Cadence at which the metadata-partition reconciler re-applies the
-/// current assigned set even when the metadata image is unchanged. Drives
-/// recovery of partitions parked at the `HWM_UNKNOWN` sentinel after a
-/// transient `high_water_marks` failure at assignment time.
-const RLMM_RECONCILE_TICK: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// Maximum backoff between successive topic-backed RLMM bootstrap attempts.
-const RLMM_BOOTSTRAP_BACKOFF_MAX: std::time::Duration = std::time::Duration::from_secs(10);
-
-/// First backoff after a failed topic-backed RLMM bootstrap attempt; doubles
-/// per failure up to [`RLMM_BOOTSTRAP_BACKOFF_MAX`].
-const RLMM_BOOTSTRAP_BACKOFF_INITIAL: std::time::Duration = std::time::Duration::from_millis(250);
-
 /// Next backoff after a failed RLMM bootstrap attempt: double, capped.
 fn next_rlmm_backoff(cur: std::time::Duration, max: std::time::Duration) -> std::time::Duration {
     (cur * 2).min(max)
@@ -3751,6 +3735,7 @@ fn loopback_bootstrap(listen: std::net::SocketAddr) -> String {
 /// fired during the sleep so the caller can abort the bootstrap.
 async fn rlmm_bootstrap_backoff(
     backoff: &mut std::time::Duration,
+    max_backoff: std::time::Duration,
     shutdown: &CancellationToken,
 ) -> bool {
     tokio::select! {
@@ -3759,7 +3744,7 @@ async fn rlmm_bootstrap_backoff(
             false
         }
         () = tokio::time::sleep(*backoff) => {
-            *backoff = next_rlmm_backoff(*backoff, RLMM_BOOTSTRAP_BACKOFF_MAX);
+            *backoff = next_rlmm_backoff(*backoff, max_backoff);
             true
         }
     }
@@ -3792,7 +3777,7 @@ async fn bootstrap_topic_rlmm(
     // Retry the topic-backed bootstrap with bounded backoff until it succeeds
     // or the broker shuts down. Until then the SwappableRlmm stays on the
     // fail-closed NotReadyRlmm placeholder.
-    let mut backoff = RLMM_BOOTSTRAP_BACKOFF_INITIAL;
+    let mut backoff = cfg.bootstrap_backoff_initial;
     let manager = loop {
         metrics.tiered_storage_rlmm_bootstrap_attempts.inc();
         // Race the attempt against shutdown: `KafkaMetadataEventLog::start`
@@ -3817,7 +3802,8 @@ async fn bootstrap_topic_rlmm(
             Err(e) => {
                 tracing::warn!(error = %e, backoff_ms = backoff.as_millis(),
                     "topic-backed RLMM log start failed; retrying");
-                if !rlmm_bootstrap_backoff(&mut backoff, &shutdown).await {
+                if !rlmm_bootstrap_backoff(&mut backoff, cfg.bootstrap_backoff_max, &shutdown).await
+                {
                     return;
                 }
                 continue;
@@ -3833,7 +3819,8 @@ async fn bootstrap_topic_rlmm(
             Err(e) => {
                 tracing::warn!(error = %e, backoff_ms = backoff.as_millis(),
                     "topic-backed RLMM manager start failed; retrying");
-                if !rlmm_bootstrap_backoff(&mut backoff, &shutdown).await {
+                if !rlmm_bootstrap_backoff(&mut backoff, cfg.bootstrap_backoff_max, &shutdown).await
+                {
                     return;
                 }
                 continue;
@@ -3863,7 +3850,7 @@ async fn bootstrap_topic_rlmm(
     // them before the Tokio runtime drops.
     let image_watcher =
         watch_rlmm_needed_partitions(image_rx, set_tx, node_id, partition_count, shutdown.clone());
-    let reconciler = run_rlmm_reconciler(manager, set_rx, shutdown);
+    let reconciler = run_rlmm_reconciler(manager, set_rx, cfg.reconcile_tick, shutdown);
     tokio::join!(image_watcher, reconciler);
 }
 
@@ -3880,7 +3867,7 @@ async fn bootstrap_diskless_index_log(
         client_id: format!("crabka-diskless-index-broker-{}", config.broker_id),
         security: config.cfg.security.map(|security| *security),
     };
-    let mut backoff = RLMM_BOOTSTRAP_BACKOFF_INITIAL;
+    let mut backoff = config.bootstrap_backoff_initial;
     loop {
         let started = tokio::select! {
             biased;
@@ -3902,7 +3889,9 @@ async fn bootstrap_diskless_index_log(
             Err(error) => {
                 tracing::warn!(%error, backoff_ms = backoff.as_millis(),
                     "diskless WAL index log start failed; retrying");
-                if !rlmm_bootstrap_backoff(&mut backoff, &shutdown).await {
+                if !rlmm_bootstrap_backoff(&mut backoff, config.bootstrap_backoff_max, &shutdown)
+                    .await
+                {
                     return;
                 }
             }
@@ -3943,7 +3932,7 @@ async fn watch_rlmm_needed_partitions(
 }
 
 /// Run the metadata-partition reconciler on the initial value, every change,
-/// and a fixed [`RLMM_RECONCILE_TICK`] cadence.
+/// and the configured reconciliation cadence.
 ///
 /// The periodic tick is what makes a partition parked at the
 /// `HWM_UNKNOWN` sentinel (after a transient assignment-time
@@ -3954,11 +3943,12 @@ async fn watch_rlmm_needed_partitions(
 async fn run_rlmm_reconciler(
     manager: Arc<crabka_remote_storage_topic::TopicBasedRemoteLogMetadataManager>,
     mut set_rx: tokio::sync::watch::Receiver<Vec<i32>>,
+    reconcile_tick: std::time::Duration,
     shutdown: CancellationToken,
 ) {
     let set = set_rx.borrow_and_update().clone();
     manager.reconcile_assignment(&set).await;
-    let mut tick = tokio::time::interval(RLMM_RECONCILE_TICK);
+    let mut tick = tokio::time::interval(reconcile_tick);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
@@ -5318,7 +5308,10 @@ protocol = "Plaintext"
         shutdown.cancel();
         let mut backoff = std::time::Duration::from_mins(1);
 
-        assert!(!rlmm_bootstrap_backoff(&mut backoff, &shutdown).await);
+        assert!(
+            !rlmm_bootstrap_backoff(&mut backoff, std::time::Duration::from_mins(2), &shutdown,)
+                .await
+        );
         assert!(backoff == std::time::Duration::from_mins(1));
     }
 
@@ -5328,7 +5321,12 @@ protocol = "Plaintext"
         let shutdown = CancellationToken::new();
         let task = tokio::spawn(async move {
             let mut backoff = std::time::Duration::from_millis(250);
-            let ok = rlmm_bootstrap_backoff(&mut backoff, &shutdown).await;
+            let ok = rlmm_bootstrap_backoff(
+                &mut backoff,
+                std::time::Duration::from_millis(500),
+                &shutdown,
+            )
+            .await;
             (ok, backoff)
         });
 
@@ -5356,6 +5354,7 @@ protocol = "Plaintext"
         let reconciler = tokio::spawn(run_rlmm_reconciler(
             manager.clone(),
             set_rx,
+            std::time::Duration::from_secs(1),
             shutdown.clone(),
         ));
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
@@ -6318,6 +6317,9 @@ protocol = "Plaintext"
                 security: None,
             },
             broker_id: 1,
+            bootstrap_backoff_initial: std::time::Duration::from_millis(10),
+            bootstrap_backoff_max: std::time::Duration::from_secs(1),
+            reconcile_tick: std::time::Duration::from_secs(1),
         };
         let metrics = crate::metrics::BrokerMetrics::new();
         let (_image_tx, image_rx) = tokio::sync::watch::channel(Arc::new(

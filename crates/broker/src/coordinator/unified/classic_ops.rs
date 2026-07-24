@@ -25,11 +25,6 @@ use crate::codes;
 
 const DEFAULT_SESSION_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_REBALANCE_TIMEOUT_MS: u64 = 60_000;
-/// Mirror of Apache Kafka's `group.initial.rebalance.delay.ms` default. Used
-/// as the rebalance-completion deadline so a single-member group completes
-/// quickly instead of holding the full client-supplied `rebalance_timeout_ms`.
-pub(super) const INITIAL_REBALANCE_DELAY: Duration = Duration::from_secs(3);
-
 // ── JoinGroup ───────────────────────────────────────────────────────────────
 
 /// What the actor should do with a `ClassicJoin`.
@@ -52,6 +47,7 @@ pub(super) fn handle_join(
     state: &mut ClassicState,
     req: &JoinGroupRequest,
     client_host: &str,
+    initial_rebalance_delay: Duration,
 ) -> JoinAction {
     // 1. Empty member_id on first join → broker generates one (KIP-394).
     //    KIP-345: derive the bootstrap id from the instance id, and return the
@@ -148,11 +144,11 @@ pub(super) fn handle_join(
         && matches!(pre_state, GroupState::Stable);
     // Open the rebalance window: the deadline drives completion in the actor,
     // anchored at the first join. Use the SHORTER of the client's
-    // rebalance_timeout and INITIAL_REBALANCE_DELAY (the effective wait the
+    // rebalance_timeout and the configured initial delay (the effective wait the
     // old per-handler `tokio::time::timeout` used).
     if !static_rejoin_to_stable && state.rebalance_deadline.is_none() {
         state.rebalance_deadline =
-            Some(Instant::now() + rebalance_timeout.min(INITIAL_REBALANCE_DELAY));
+            Some(Instant::now() + rebalance_timeout.min(initial_rebalance_delay));
     }
 
     // 5. Static rejoin into a `Stable` group: skip the rebalance entirely.
@@ -164,7 +160,7 @@ pub(super) fn handle_join(
     //    but only for a rebalance triggered by a membership change in a group
     //    that still had members. A round that opened from `Empty` (a fresh
     //    group, or one whose members all left — e.g. after a warm-up consumer
-    //    joins and leaves) burns the full INITIAL_REBALANCE_DELAY so a herd of
+    //    joins and leaves) burns the full initial delay so a herd of
     //    consumers starting together batches into one generation, mirroring
     //    Kafka's `InitialDelayedJoin`. Eager-completing a from-`Empty` round
     //    strands the first joiner in a solo generation and forces an immediate
@@ -478,6 +474,14 @@ mod tests {
 
     use super::*;
 
+    fn handle_join(
+        state: &mut ClassicState,
+        req: &JoinGroupRequest,
+        client_host: &str,
+    ) -> JoinAction {
+        super::handle_join(state, req, client_host, Duration::from_secs(3))
+    }
+
     fn join_req(member_id: &str, instance: Option<&str>) -> JoinGroupRequest {
         JoinGroupRequest {
             group_id: "g".into(),
@@ -557,6 +561,24 @@ mod tests {
     }
 
     #[test]
+    fn join_uses_configured_initial_rebalance_delay() {
+        let mut g = ClassicState::new("g");
+        let before = Instant::now();
+        let action = super::handle_join(
+            &mut g,
+            &join_req("m1", None),
+            "h",
+            Duration::from_millis(17),
+        );
+        let after = Instant::now();
+
+        assert!(matches!(action, JoinAction::Park));
+        let deadline = g.rebalance_deadline.expect("rebalance deadline");
+        assert!(deadline >= before + Duration::from_millis(17));
+        assert!(deadline <= after + Duration::from_millis(17));
+    }
+
+    #[test]
     fn join_static_rejoin_to_stable_is_immediate_success() {
         let mut g = ClassicState::new("g");
         let _ = handle_join(&mut g, &join_req("m1", Some("inst-a")), "h");
@@ -603,7 +625,7 @@ mod tests {
         // A group that has rebalanced before (gen > 0) and then went `Empty`
         // — e.g. a warm-up consumer joined and left — must NOT eager-complete
         // a solo generation when the first new member rejoins. It parks for
-        // the INITIAL_REBALANCE_DELAY window so a herd of consumers starting
+        // the configured initial-delay window so a herd of consumers starting
         // together batches into one generation. Regression test for the
         // produce+consume throughput collapse triggered by re-joining a group
         // a prior consumer had already used.
