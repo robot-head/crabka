@@ -333,9 +333,9 @@ report: internal-topic replication, fallback, segment and compaction ratio;
 Schema Registry cache and framing; dedup sizing, retention and ownership;
 TLS reload; ACL refresh; bearer clock skew; membership topic; webhook replay,
 body and schema settings; outbound delivery retry, timeout, group and decoding
-settings; and Kubernetes readiness/liveness probe timing. Direct-process and
-operator defaults intentionally remain distinct where they were distinct
-before this work.
+settings; the generic HTTP produce body cap; and Kubernetes
+readiness/liveness probe timing. Direct-process and operator defaults
+intentionally remain distinct where they were distinct before this work.
 
 ### Fixed
 
@@ -368,7 +368,7 @@ before this work.
 
 On 2026-07-24 the scanner reports 5,889 matches across all crates. The gRPC
 Gateway subset contains exactly 45 matches across 14 files: 4 configured
-production defaults, 5 fixed production values, and 36 test inputs. Four
+production defaults, 5 fixed production values, and 36 test inputs. Five
 production gaps found by the adjacent semantic review were remediated:
 
 - Kafka-unrepresentable partition counts are rejected instead of coerced to
@@ -378,6 +378,9 @@ production gaps found by the adjacent semantic review were remediated:
   with `refined_type`, matching the CRD trust boundary.
 - Named webhooks collect request bodies with their configured per-endpoint cap
   instead of Axum's unrelated fixed 2 MiB extractor default.
+- Generic HTTP produce collects request bodies with its validated
+  `produce_max_body_bytes` runtime/CRD cap, defaulting to the prior 2 MiB
+  behavior instead of inheriting Axum's fixed extractor limit.
 - Gateway readiness and liveness initial delays and periods are typed
   `healthChecks` CRD fields, validated before child rendering.
 
@@ -390,11 +393,12 @@ The gRPC Gateway slice passed these gates on 2026-07-24:
 - `cargo +nightly fmt --all -- --check`: passed.
 - `cargo clippy -p crabka-grpc-gateway -p crabka-operator --all-targets -- -D warnings`:
   passed.
-- `cargo nextest run -p crabka-grpc-gateway -p crabka-operator`: 1,038 passed,
+- `cargo nextest run -p crabka-grpc-gateway -p crabka-operator`: 1,039 passed,
   1 skipped, and no failures.
 - `cargo run -p crabka-grpc-gateway -- --help`: exposes internal-topic,
   consumer-poll, ownership-warmup, Schema Registry cache, and bearer skew
-  settings with `CRABKA_GATEWAY_*` environment bindings.
+  settings plus the generic produce body cap with `CRABKA_GATEWAY_*`
+  environment bindings.
 - `cargo run -p crabka-operator -- gen-crds <temporary-directory>` followed by
   an exact diff of the generated `KafkaGrpcGateway` CRD: passed.
 - `git diff --check`: passed.
