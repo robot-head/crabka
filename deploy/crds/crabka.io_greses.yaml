@@ -179,6 +179,43 @@ spec:
                 description: Tenant compute workload policy.
                 nullable: true
                 properties:
+                  checkpointDeleteRecordsTimeoutMs:
+                    description: Kafka `DeleteRecords` timeout in milliseconds.
+                    format: int32
+                    maximum: 2147483647.0
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  checkpointPartBytes:
+                    description: Maximum checkpoint object part size in bytes.
+                    format: uint
+                    minimum: 8.0
+                    nullable: true
+                    type: integer
+                  checkpointPollIntervalMs:
+                    description: Checkpoint threshold polling interval in milliseconds.
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  checkpointRetain:
+                    description: Number of checkpoint manifests to retain.
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  idleSuspendPollIntervalMs:
+                    description: Idle-suspend polling interval in milliseconds.
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  lifecycleRequeueMs:
+                    description: Tenant lifecycle reconciliation interval in milliseconds.
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
                   readinessProbePeriodSeconds:
                     description: Compute readiness probe period in seconds.
                     format: int32
