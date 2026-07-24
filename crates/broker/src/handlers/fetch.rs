@@ -649,6 +649,7 @@ async fn apply_consumer_fetch_quota(
         &context.principal.name,
         context.client_id,
         elapsed_micros,
+        broker.config.quota_throttle_max,
     );
     let delay = data_delay.max(request_delay);
     if delay == Duration::ZERO {

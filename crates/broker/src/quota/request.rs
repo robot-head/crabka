@@ -17,7 +17,7 @@ use super::{
 /// `request_percentage` bucket for `(principal, client_id)`. Returns the
 /// throttle delay to apply before sending the response. `Duration::ZERO`
 /// if no quota is configured, the rate is non-positive, or there was no
-/// overage. Capped at 1 second.
+/// overage. Capped at `maximum_delay`.
 ///
 /// `request_percentage` is expressed as a percentage of one thread-second:
 /// `100.0` ⇒ a 1 000 000 µs/sec budget. The bucket therefore meters in
@@ -29,6 +29,7 @@ pub fn consume_request_quota(
     principal: &str,
     client_id: &str,
     elapsed_micros: u64,
+    maximum_delay: Duration,
 ) -> Duration {
     consume_configured_quota(
         QuotaConsumption {
@@ -47,6 +48,7 @@ pub fn consume_request_quota(
         |overage_micros, _, rate_micros_per_sec| {
             Duration::from_micros(overage_micros.saturating_mul(1_000_000) / rate_micros_per_sec)
         },
+        maximum_delay,
     )
 }
 
@@ -65,14 +67,20 @@ mod tests {
     fn zero_elapsed_returns_zero_delay() {
         let img = img_with_quota(vec![("user", Some("alice"))], 100.0);
         let buckets = QuotaBuckets::new();
-        assert!(consume_request_quota(&img, &buckets, "alice", "", 0) == Duration::ZERO);
+        assert!(
+            consume_request_quota(&img, &buckets, "alice", "", 0, Duration::from_secs(1))
+                == Duration::ZERO
+        );
     }
 
     #[test]
     fn no_quota_returns_zero_delay() {
         let img = MetadataImage::new(uuid::Uuid::nil());
         let buckets = QuotaBuckets::new();
-        assert!(consume_request_quota(&img, &buckets, "alice", "", 5_000) == Duration::ZERO);
+        assert!(
+            consume_request_quota(&img, &buckets, "alice", "", 5_000, Duration::from_secs(1))
+                == Duration::ZERO
+        );
     }
 
     #[test]
@@ -81,7 +89,10 @@ mod tests {
         // second of capacity → no overage.
         let img = img_with_quota(vec![("user", Some("alice"))], 100.0);
         let buckets = QuotaBuckets::new();
-        assert!(consume_request_quota(&img, &buckets, "alice", "", 5_000) == Duration::ZERO);
+        assert!(
+            consume_request_quota(&img, &buckets, "alice", "", 5_000, Duration::from_secs(1))
+                == Duration::ZERO
+        );
     }
 
     #[test]
@@ -90,8 +101,32 @@ mod tests {
         // overage → multi-day delay → capped at 1s.
         let img = img_with_quota(vec![("user", Some("alice"))], 0.001);
         let buckets = QuotaBuckets::new();
-        let delay = consume_request_quota(&img, &buckets, "alice", "", 1_000_000);
+        let delay = consume_request_quota(
+            &img,
+            &buckets,
+            "alice",
+            "",
+            1_000_000,
+            Duration::from_secs(1),
+        );
         assert!(delay == Duration::from_secs(1));
+    }
+
+    #[test]
+    fn overage_uses_configured_maximum_delay() {
+        let img = img_with_quota(vec![("user", Some("alice"))], 0.001);
+        let buckets = QuotaBuckets::new();
+
+        let delay = consume_request_quota(
+            &img,
+            &buckets,
+            "alice",
+            "",
+            1_000_000,
+            Duration::from_millis(25),
+        );
+
+        assert!(delay == Duration::from_millis(25));
     }
 
     #[test]
@@ -101,7 +136,14 @@ mod tests {
         let img = img_with_quota(vec![("user", Some("alice"))], 100.0);
         let buckets = QuotaBuckets::new();
 
-        let delay = consume_request_quota(&img, &buckets, "alice", "", 1_500_000);
+        let delay = consume_request_quota(
+            &img,
+            &buckets,
+            "alice",
+            "",
+            1_500_000,
+            Duration::from_secs(1),
+        );
 
         assert!(delay == Duration::from_millis(500));
     }

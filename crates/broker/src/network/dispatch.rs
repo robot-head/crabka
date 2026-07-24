@@ -1100,6 +1100,7 @@ async fn maybe_apply_request_quota(
             &principal.name,
             parsed.client_id.unwrap_or(""),
             elapsed_micros,
+            broker.config.quota_throttle_max,
         );
         if delay > std::time::Duration::ZERO {
             if throttle_is_leading_field(parsed.api_key, parsed.api_version) {

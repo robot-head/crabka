@@ -449,6 +449,7 @@ async fn finish_response(
         context.principal.name.as_str(),
         context.client_id,
         mutation_count,
+        broker.config.quota_throttle_max,
     );
     let resp = create_partitions_response(
         results,
