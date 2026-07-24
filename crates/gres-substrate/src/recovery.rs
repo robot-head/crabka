@@ -529,12 +529,8 @@ impl CommittedEndConnection for LiveEndConnection {
 pub async fn ensure_live_wal_topic(config: &LiveRecoveryConfig) -> Result<String, SubstrateError> {
     let bootstrap_addrs = parse_bootstrap_addrs(&config.bootstrap)?;
     let mut admin = connect_wal_admin(config, &bootstrap_addrs).await?;
-    ensure_wal_topic_name_with_policy(
-        &mut admin,
-        &config.wal_topic(),
-        config.wal_admin_policy,
-    )
-    .await
+    ensure_wal_topic_name_with_policy(&mut admin, &config.wal_topic(), config.wal_admin_policy)
+        .await
 }
 
 /// Restore and catch up a read-only range-zero follower without fencing a writer.
@@ -620,12 +616,9 @@ async fn recover_live_for_range_inner(
 ) -> Result<LiveRecovered, SubstrateError> {
     let bootstrap_addrs = parse_bootstrap_addrs(&config.bootstrap)?;
     let mut admin = connect_wal_admin(&config, &bootstrap_addrs).await?;
-    let topic = ensure_wal_topic_name_with_policy(
-        &mut admin,
-        &config.wal_topic(),
-        config.wal_admin_policy,
-    )
-    .await?;
+    let topic =
+        ensure_wal_topic_name_with_policy(&mut admin, &config.wal_topic(), config.wal_admin_policy)
+            .await?;
 
     let producer = Arc::new(
         Producer::builder()
@@ -1646,9 +1639,7 @@ mod tests {
 
         let replacement = WalAdminPolicy::new(11, 22, 33, 44).expect("valid policy");
         assert_eq!(
-            config
-                .with_wal_admin_policy(replacement)
-                .wal_admin_policy(),
+            config.with_wal_admin_policy(replacement).wal_admin_policy(),
             replacement
         );
     }
@@ -1670,8 +1661,14 @@ mod tests {
         let options = wal_admin_connection_options(&config);
 
         assert_eq!(options.client_id, "crabka-gres-tenant-a-r7");
-        assert_eq!(options.connect_timeout, std::time::Duration::from_millis(33));
-        assert_eq!(options.request_timeout, std::time::Duration::from_millis(44));
+        assert_eq!(
+            options.connect_timeout,
+            std::time::Duration::from_millis(33)
+        );
+        assert_eq!(
+            options.request_timeout,
+            std::time::Duration::from_millis(44)
+        );
         assert_eq!(
             options.security.expect("security").sasl_host.as_deref(),
             Some("broker.internal")
