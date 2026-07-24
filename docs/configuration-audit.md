@@ -468,6 +468,11 @@ shared policy is intentionally not misclassified as activator-owned:
 
 - the registry topic-create timeout, reader fetch wait/byte limit, and reader
   retry backoff in `gres-control`;
+- the operator's shared Gres-control creation path in
+  `crates/operator/src/context.rs`, which still calls
+  `Registry::ensure_topic(1)` and may create the registry topic before the
+  activator; therefore `spec.activator.registryReplicationFactor` is not
+  guaranteed end-to-end until that shared path is wired;
 - PgDog idle timeout, server lifetime, connection-attempt count, and related
   pool policy in `gres-control`; and
 - Gres-controller reconcile, reload, PgDog admin, and credential-transition
