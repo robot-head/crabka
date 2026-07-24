@@ -47,7 +47,7 @@ use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 use crate::{
     error::BrokerError,
-    network::{response_header_len, response_header_v1},
+    network::{codec, response_header_len, response_header_v1},
 };
 
 /// One ordered segment of the fetch response wire frame.
@@ -339,11 +339,7 @@ where
     let proto_plan = fetch_response_write_plan(resp, version)?;
     let body_len: usize = proto_plan.iter().map(FetchWriteOp::len).sum();
     let frame_body_len = header_len + body_len;
-    if frame_body_len >= max_frame_bytes {
-        return Err(BrokerError::Io(std::io::Error::other(
-            "fetch response exceeds max frame size",
-        )));
-    }
+    codec::validate_frame_length(frame_body_len, max_frame_bytes)?;
 
     let mut ops: Vec<WriteOp> = Vec::with_capacity(proto_plan.len() + 1);
 
@@ -975,13 +971,36 @@ mod tests {
 
     #[test]
     fn build_fetch_plan_honors_nondefault_max_frame_length() {
-        let error = build_fetch_plan(&sample_response(12), 12, 1, true, 8, resolve_records_inline)
-            .expect_err("response exceeds configured frame maximum");
+        let response = sample_response(12);
+        let unconstrained =
+            build_fetch_plan(&response, 12, 1, true, usize::MAX, resolve_records_inline)
+                .expect("unconstrained plan");
+        let head = inline_bytes(&unconstrained[0]);
+        let frame_body_len = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as usize;
 
         assert!(
-            error
-                .to_string()
-                .contains("fetch response exceeds max frame size")
+            build_fetch_plan(
+                &response,
+                12,
+                1,
+                true,
+                frame_body_len,
+                resolve_records_inline,
+            )
+            .is_ok(),
+            "a frame equal to the configured maximum must be accepted"
+        );
+        assert!(
+            build_fetch_plan(
+                &response,
+                12,
+                1,
+                true,
+                frame_body_len - 1,
+                resolve_records_inline,
+            )
+            .is_err(),
+            "a frame above the configured maximum must be rejected"
         );
     }
 

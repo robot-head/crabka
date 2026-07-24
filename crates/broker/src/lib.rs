@@ -126,10 +126,11 @@
 /// `pread`s + `write_all`s there and `WriteOp` carries only the `Inline` variant.
 ///
 /// One macro per crate keeps the predicate identical across every sendfile-gated
-/// item (`SENDFILE_MIN_BYTES`, the `WriteOp::File` drain helpers, the
-/// `tcp_for_sendfile` trait method, the sendfile resolver, etc.), so the cfg set
-/// can't drift. The single per-OS syscall *inside* `sendfile_region` is gated
-/// separately (Linux `rustix` vs Apple/BSD `nix`), not by this macro.
+/// item (the `WriteOp::File` drain helpers, the `tcp_for_sendfile` trait method,
+/// the sendfile resolver, etc.), so the cfg set can't drift. File-region
+/// eligibility uses the broker's configured `sendfile_min_bytes` threshold.
+/// The single per-OS syscall *inside* `sendfile_region` is gated separately
+/// (Linux `rustix` vs Apple/BSD `nix`), not by this macro.
 macro_rules! sendfile_cfg {
     ($($item:item)*) => {
         $(
