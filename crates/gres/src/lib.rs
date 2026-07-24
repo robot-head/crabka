@@ -511,7 +511,32 @@ fn validate_wal_recovery_read_policy(args: &ServeArgs) -> std::io::Result<()> {
     {
         return invalid_input("WAL recovery options require --substrate-bootstrap");
     }
+    effective_wal_admin_policy(args)?;
     Ok(())
+}
+
+fn effective_wal_admin_policy(
+    args: &ServeArgs,
+) -> std::io::Result<crabka_gres_substrate::WalAdminPolicy> {
+    crabka_gres_substrate::WalAdminPolicy::new(
+        args.wal_topic_replication_factor.map_or(
+            crabka_gres_substrate::DEFAULT_WAL_TOPIC_REPLICATION_FACTOR,
+            PositiveI32::into_value,
+        ),
+        args.wal_topic_ensure_timeout_ms.map_or(
+            crabka_gres_substrate::DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT_MS,
+            PositiveI32::into_value,
+        ),
+        args.wal_admin_connect_timeout_ms.map_or(
+            crabka_gres_substrate::DEFAULT_WAL_ADMIN_CONNECT_TIMEOUT_MS,
+            PositiveMillis::into_value,
+        ),
+        args.wal_admin_request_timeout_ms.map_or(
+            crabka_gres_substrate::DEFAULT_WAL_ADMIN_REQUEST_TIMEOUT_MS,
+            PositiveMillis::into_value,
+        ),
+    )
+    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
 }
 
 /// Validated Gres registry options shared by compute registry clients.
@@ -798,25 +823,7 @@ impl SubstrateRuntimeConfig {
                 )
             })
             .map_err(|error| Error::new(ErrorKind::InvalidInput, error))?,
-            wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::new(
-                args.wal_topic_replication_factor.map_or(
-                    crabka_gres_substrate::DEFAULT_WAL_TOPIC_REPLICATION_FACTOR,
-                    PositiveI32::into_value,
-                ),
-                args.wal_topic_ensure_timeout_ms.map_or(
-                    crabka_gres_substrate::DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT_MS,
-                    PositiveI32::into_value,
-                ),
-                args.wal_admin_connect_timeout_ms.map_or(
-                    crabka_gres_substrate::DEFAULT_WAL_ADMIN_CONNECT_TIMEOUT_MS,
-                    PositiveMillis::into_value,
-                ),
-                args.wal_admin_request_timeout_ms.map_or(
-                    crabka_gres_substrate::DEFAULT_WAL_ADMIN_REQUEST_TIMEOUT_MS,
-                    PositiveMillis::into_value,
-                ),
-            )
-            .map_err(|error| Error::new(ErrorKind::InvalidInput, error))?,
+            wal_admin_policy: effective_wal_admin_policy(args)?,
             host_ranges: parse_host_ranges(args.host_ranges.as_deref())?,
             range_rpc: RangeRpcRuntimeConfig::from_args(args)?,
             advertised_endpoint: args.range_listen.clone(),
@@ -9261,6 +9268,15 @@ mod tests {
             let error = run_serve(args).await.expect_err("invalid recovery policy");
             assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
         }
+
+        let mut args = substrate_args();
+        args.listen = occupied.local_addr().expect("address").to_string();
+        args.wal_topic_replication_factor =
+            Some(PositiveI32::new(32_768).expect("positive parser value"));
+        let error = run_serve(args)
+            .await
+            .expect_err("invalid replication factor before bind");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     }
 
     fn set_wal_policy_option(args: &mut ServeArgs, option: usize) {
