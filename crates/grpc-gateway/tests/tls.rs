@@ -301,12 +301,30 @@ async fn count_in_user_topic(bootstrap: &str, key_filter: &str) -> usize {
 async fn server_tls_handshake_and_health() {
     install_provider();
     let (broker, bootstrap, _dir) = boot().await;
-    ensure_dedup_topic(&bootstrap, DEDUP, N, 3_600_000, 1, None)
-        .await
-        .unwrap();
-    ensure_membership_topic(&bootstrap, MEMBERSHIP, 1, None)
-        .await
-        .unwrap();
+    ensure_dedup_topic(
+        &bootstrap,
+        DEDUP,
+        N,
+        3_600_000,
+        &crabka_grpc_gateway::dedup::topic::InternalTopicPolicy {
+            replication_factor: 1,
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    ensure_membership_topic(
+        &bootstrap,
+        MEMBERSHIP,
+        &crabka_grpc_gateway::dedup::topic::InternalTopicPolicy {
+            replication_factor: 1,
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+    .unwrap();
 
     let certs_dir = TempDir::new().unwrap();
     let certs = gen_certs(certs_dir.path());
@@ -345,12 +363,30 @@ async fn server_tls_handshake_and_health() {
 async fn mtls_required_rejects_no_client_cert() {
     install_provider();
     let (broker, bootstrap, _dir) = boot().await;
-    ensure_dedup_topic(&bootstrap, DEDUP, N, 3_600_000, 1, None)
-        .await
-        .unwrap();
-    ensure_membership_topic(&bootstrap, MEMBERSHIP, 1, None)
-        .await
-        .unwrap();
+    ensure_dedup_topic(
+        &bootstrap,
+        DEDUP,
+        N,
+        3_600_000,
+        &crabka_grpc_gateway::dedup::topic::InternalTopicPolicy {
+            replication_factor: 1,
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    ensure_membership_topic(
+        &bootstrap,
+        MEMBERSHIP,
+        &crabka_grpc_gateway::dedup::topic::InternalTopicPolicy {
+            replication_factor: 1,
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+    .unwrap();
 
     let certs_dir = TempDir::new().unwrap();
     let certs = gen_certs(certs_dir.path());
@@ -390,12 +426,30 @@ async fn mtls_required_rejects_no_client_cert() {
 async fn tls_forward_between_two_gateways() {
     install_provider();
     let (broker, bootstrap, _dir) = boot().await;
-    ensure_dedup_topic(&bootstrap, DEDUP, N, 3_600_000, 1, None)
-        .await
-        .unwrap();
-    ensure_membership_topic(&bootstrap, MEMBERSHIP, 1, None)
-        .await
-        .unwrap();
+    ensure_dedup_topic(
+        &bootstrap,
+        DEDUP,
+        N,
+        3_600_000,
+        &crabka_grpc_gateway::dedup::topic::InternalTopicPolicy {
+            replication_factor: 1,
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    ensure_membership_topic(
+        &bootstrap,
+        MEMBERSHIP,
+        &crabka_grpc_gateway::dedup::topic::InternalTopicPolicy {
+            replication_factor: 1,
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+    .unwrap();
     let mut admin = AdminClient::connect(std::slice::from_ref(&bootstrap))
         .await
         .unwrap();

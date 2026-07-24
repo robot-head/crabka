@@ -348,7 +348,7 @@ async fn delivers_2xx() {
         "test-out".into(),
         dlq_producer,
         token.clone(),
-        None,
+        (None, Duration::from_millis(500)),
         Arc::new(RawCodec),
     ));
 
@@ -430,7 +430,7 @@ async fn retries_then_succeeds() {
         "test-out".into(),
         dlq_producer,
         token.clone(),
-        None,
+        (None, Duration::from_millis(500)),
         Arc::new(RawCodec),
     ));
 
@@ -491,7 +491,7 @@ async fn dead_letters_on_exhaustion() {
         "test-out".into(),
         dlq_producer,
         token.clone(),
-        None,
+        (None, Duration::from_millis(500)),
         Arc::new(RawCodec),
     ));
 
@@ -548,7 +548,7 @@ async fn ordering_within_partition() {
         "test-out".into(),
         dlq_producer,
         token.clone(),
-        None,
+        (None, Duration::from_millis(500)),
         Arc::new(RawCodec),
     ));
 
@@ -594,7 +594,7 @@ async fn filter_skips_nonmatching() {
         "test-out".into(),
         dlq_producer,
         token.clone(),
-        None,
+        (None, Duration::from_millis(500)),
         Arc::new(RawCodec),
     ));
 

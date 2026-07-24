@@ -34,9 +34,19 @@ async fn boot() -> (BrokerHandle, String, TempDir) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ownership_split_non_owner_is_unavailable() {
     let (broker, bootstrap, _dir) = boot().await;
-    ensure_dedup_topic(&bootstrap, DEDUP, N, 3_600_000, 1, None)
-        .await
-        .unwrap();
+    ensure_dedup_topic(
+        &bootstrap,
+        DEDUP,
+        N,
+        3_600_000,
+        &crabka_grpc_gateway::dedup::topic::InternalTopicPolicy {
+            replication_factor: 1,
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+    .unwrap();
     let mut admin = AdminClient::connect(std::slice::from_ref(&bootstrap))
         .await
         .unwrap();

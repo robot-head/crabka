@@ -18,6 +18,7 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    config::GatewayRuntimeConfig,
     error::GatewayError,
     ids::{Offset, PartitionIndex},
 };
@@ -42,11 +43,18 @@ pub struct DedupStore {
     /// Optional membership publisher; set by the binary before `run_ownership`
     /// starts. `None` in single-owner/unit contexts means no publishing.
     membership: OnceLock<Arc<crate::dedup::membership::MembershipPublisher>>,
+    poll_timeout: Duration,
+    warmup_empty_polls: u32,
 }
 
 impl DedupStore {
     #[must_use]
     pub fn new(partitions: u32) -> Self {
+        Self::new_with_policy(partitions, &GatewayRuntimeConfig::default())
+    }
+
+    #[must_use]
+    pub fn new_with_policy(partitions: u32, runtime: &GatewayRuntimeConfig) -> Self {
         Self {
             map: DashMap::new(),
             partitions,
@@ -54,6 +62,8 @@ impl DedupStore {
             warm: AtomicBool::new(false),
             warmed_once: AtomicBool::new(false),
             membership: OnceLock::new(),
+            poll_timeout: Duration::from_millis(runtime.consumer_poll_timeout_ms),
+            warmup_empty_polls: runtime.ownership_warmup_empty_polls,
         }
     }
 
@@ -130,7 +140,7 @@ impl DedupStore {
         loop {
             let batch = tokio::select! {
                 () = shutdown.cancelled() => break,
-                b = consumer.poll(Duration::from_millis(500)) => match b {
+                b = consumer.poll(self.poll_timeout) => match b {
                     Ok(batch) => batch,
                     Err(e) => { poll_err = Some(e.into()); break; }
                 },
@@ -171,8 +181,8 @@ impl DedupStore {
             // owned partition would defer warmth until it next idles. A future
             // HWM-precise gate (spec §2) removes that theoretical caveat.
             if batch.is_empty() {
-                empty_polls += 1;
-                if empty_polls >= 2 {
+                empty_polls = empty_polls.saturating_add(1);
+                if ownership_is_warm(empty_polls, self.warmup_empty_polls) {
                     self.warm.store(true, Ordering::SeqCst);
                     self.warmed_once.store(true, Ordering::SeqCst);
                 }
@@ -242,5 +252,23 @@ impl DedupStore {
         meta.map_err(GatewayError::Producer)?;
         self.apply(key.to_string(), value.clone());
         Ok(())
+    }
+}
+
+#[must_use]
+fn ownership_is_warm(empty_polls: u32, warmup_empty_polls: u32) -> bool {
+    empty_polls >= warmup_empty_polls
+}
+
+#[cfg(test)]
+mod tests {
+    use assert2::assert;
+
+    use super::ownership_is_warm;
+
+    #[test]
+    fn ownership_warmup_uses_configured_empty_poll_threshold() {
+        assert!(!ownership_is_warm(2, 3));
+        assert!(ownership_is_warm(3, 3));
     }
 }

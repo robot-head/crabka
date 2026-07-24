@@ -3,7 +3,7 @@
 //! Parses CLI flags, builds the Connect-RPC router and a minimal health
 //! router, then serves both on the configured listen address.
 
-use std::{net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::Context as _;
 use clap::Parser;
@@ -18,7 +18,7 @@ use crabka_grpc_gateway::{
         DedupEngine,
         membership::{MembershipPublisher, MembershipStore},
         store::DedupStore,
-        topic::{ensure_dedup_topic, ensure_membership_topic},
+        topic::{ensure_dedup_topic, ensure_membership_topic, internal_topic_policy},
     },
     forward::{self, Forwarder},
     health::{self, Readiness},
@@ -467,31 +467,35 @@ async fn run(
     bearer: Option<crabka_grpc_gateway::authz::auth_layer::BearerValidator>,
 ) -> anyhow::Result<()> {
     // Ensure internal topics exist before opening any producer/consumer.
+    let topic_policy = internal_topic_policy(&config.runtime);
     ensure_dedup_topic(
         &config.bootstrap,
         &config.dedup_topic,
         config.dedup_partitions,
         config.dedup_window_ms,
-        GatewayConfig::DEDUP_TOPIC_REPLICATION,
+        &topic_policy,
         config.broker_security.clone(),
     )
     .await?;
     ensure_membership_topic(
         &config.bootstrap,
         &config.membership_topic,
-        GatewayConfig::MEMBERSHIP_TOPIC_REPLICATION,
+        &topic_policy,
         config.broker_security.clone(),
     )
     .await?;
 
     let node_id = uuid::Uuid::new_v4().to_string();
-    let store = Arc::new(DedupStore::new(config.dedup_partitions));
+    let store = Arc::new(DedupStore::new_with_policy(
+        config.dedup_partitions,
+        &config.runtime,
+    ));
     let readiness = Readiness::new();
     let shutdown = CancellationToken::new();
 
     // Membership: tail the routing table, and install the publisher BEFORE the
     // ownership consumer starts so its first assignment is published.
-    let membership = Arc::new(MembershipStore::new());
+    let membership = Arc::new(MembershipStore::new_with_policy(&config.runtime));
     spawn_membership_reader(&config, &membership, &node_id, &shutdown);
     let publisher = Arc::new(
         MembershipPublisher::new(
@@ -507,7 +511,11 @@ async fn run(
     store.set_membership(publisher);
 
     spawn_ownership_consumer(&config, &store, &shutdown);
-    spawn_readiness_watcher(store.clone(), readiness.clone());
+    spawn_readiness_watcher(
+        store.clone(),
+        readiness.clone(),
+        Duration::from_millis(config.runtime.readiness_poll_interval_ms),
+    );
 
     let engine = Arc::new(DedupEngine::new(
         &config.bootstrap,
@@ -534,14 +542,10 @@ async fn run(
     // Build the shared codec once: SchemaRegistryCodec when a URL is set,
     // RawCodec (identity pass-through) otherwise.
     let codec: Arc<dyn RecordCodec> = match &config.schema_registry_url {
-        Some(url) => {
-            let client = SchemaRegistryClient::new(url)
-                .map_err(|e| anyhow::anyhow!("schema registry client: {e}"))?;
-            Arc::new(SchemaRegistryCodec {
-                client: Arc::new(client),
-                frame_raw: false,
-            })
-        }
+        Some(url) => Arc::new(
+            build_schema_registry_codec(url, &config.runtime)
+                .map_err(|e| anyhow::anyhow!("schema registry client: {e}"))?,
+        ),
         None => Arc::new(RawCodec),
     };
 
@@ -607,6 +611,20 @@ async fn run(
     info!(addr = %listener.local_addr()?, tls = tls_dynamic.is_some(), "gateway listening");
     crabka_grpc_gateway::serve::serve(listener, app, tls_dynamic, shutdown).await?;
     Ok(())
+}
+
+fn build_schema_registry_codec(
+    url: &str,
+    runtime: &GatewayRuntimeConfig,
+) -> Result<SchemaRegistryCodec, crabka_grpc_gateway::codec::CodecError> {
+    let client = SchemaRegistryClient::new_with_policy(
+        url,
+        Duration::from_millis(runtime.schema_registry_latest_cache_ttl_ms),
+    )?;
+    Ok(SchemaRegistryCodec::new(
+        Arc::new(client),
+        runtime.schema_registry_frame_raw,
+    ))
 }
 
 /// Build the [`GatewayAuthz`] and, when `config.authz` is present, spawn the
@@ -693,14 +711,14 @@ fn ownership_consumer_inputs(config: &GatewayConfig) -> (String, String, String,
     )
 }
 
-fn spawn_readiness_watcher(store: Arc<DedupStore>, readiness: Readiness) {
+fn spawn_readiness_watcher(store: Arc<DedupStore>, readiness: Readiness, poll_interval: Duration) {
     tokio::spawn(async move {
         loop {
             if store.has_warmed_once() {
                 readiness.set_ready();
                 break;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            tokio::time::sleep(poll_interval).await;
         }
     });
 }
@@ -744,6 +762,7 @@ fn spawn_outbound_delivery(
     let client_id = format!("{}-outbound-{}", config.client_id, sub.name);
     let shutdown = shutdown.clone();
     let security = config.broker_security.clone();
+    let poll_timeout = Duration::from_millis(config.runtime.consumer_poll_timeout_ms);
     tokio::spawn(async move {
         if let Err(e) = crabka_grpc_gateway::outbound::run_subscription(
             sub,
@@ -751,7 +770,7 @@ fn spawn_outbound_delivery(
             client_id,
             dlq_producer,
             shutdown,
-            security,
+            (security, poll_timeout),
             codec,
         )
         .await
@@ -919,6 +938,19 @@ mod tests {
                 );
             },
         );
+    }
+
+    #[test]
+    fn schema_registry_codec_uses_configured_frame_raw() {
+        let runtime = GatewayRuntimeConfig {
+            schema_registry_frame_raw: true,
+            ..GatewayRuntimeConfig::default()
+        };
+
+        let codec =
+            build_schema_registry_codec("http://localhost:8081", &runtime).expect("valid URL");
+
+        assert!(codec.frame_raw);
     }
 
     #[test]

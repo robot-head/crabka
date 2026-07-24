@@ -306,7 +306,7 @@ pub fn subscribe_inner(
                         None => stop = true,
                     }
                 }
-                batch = session.poll(std::time::Duration::from_millis(500)) => {
+                batch = session.poll(std::time::Duration::from_millis(state.config.runtime.consumer_poll_timeout_ms)) => {
                     match batch {
                         Ok(records) => {
                             for r in records {

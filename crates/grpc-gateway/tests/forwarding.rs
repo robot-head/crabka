@@ -195,12 +195,30 @@ async fn count_in_user_topic(bootstrap: &str, key_filter: &str) -> usize {
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn keyed_record_forwards_to_owner_and_dedups() {
     let (broker, bootstrap, _dir) = boot().await;
-    ensure_dedup_topic(&bootstrap, DEDUP, N, 3_600_000, 1, None)
-        .await
-        .unwrap();
-    ensure_membership_topic(&bootstrap, MEMBERSHIP, 1, None)
-        .await
-        .unwrap();
+    ensure_dedup_topic(
+        &bootstrap,
+        DEDUP,
+        N,
+        3_600_000,
+        &crabka_grpc_gateway::dedup::topic::InternalTopicPolicy {
+            replication_factor: 1,
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    ensure_membership_topic(
+        &bootstrap,
+        MEMBERSHIP,
+        &crabka_grpc_gateway::dedup::topic::InternalTopicPolicy {
+            replication_factor: 1,
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+    .unwrap();
     let mut admin = AdminClient::connect(std::slice::from_ref(&bootstrap))
         .await
         .unwrap();

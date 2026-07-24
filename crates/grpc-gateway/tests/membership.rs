@@ -7,12 +7,9 @@ use std::{sync::Arc, time::Duration};
 use bytes::Bytes;
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_producer::{Acks, Producer, ProducerRecord};
-use crabka_grpc_gateway::{
-    config::GatewayConfig,
-    dedup::{
-        membership::{MembershipStore, NodeInfo},
-        topic::ensure_membership_topic,
-    },
+use crabka_grpc_gateway::dedup::{
+    membership::{MembershipStore, NodeInfo},
+    topic::ensure_membership_topic,
 };
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
@@ -43,9 +40,17 @@ async fn publish(producer: &Producer, node_id: &str, info: &NodeInfo) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn run_membership_builds_routing_with_offset_tiebreak() {
     let (broker, bootstrap, _dir) = boot().await;
-    ensure_membership_topic(&bootstrap, TOPIC, 1, None)
-        .await
-        .unwrap();
+    ensure_membership_topic(
+        &bootstrap,
+        TOPIC,
+        &crabka_grpc_gateway::dedup::topic::InternalTopicPolicy {
+            replication_factor: 1,
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+    .unwrap();
 
     let producer = Producer::builder()
         .bootstrap(bootstrap.clone())
@@ -117,8 +122,6 @@ async fn run_membership_builds_routing_with_offset_tiebreak() {
 
     // Sanity: an unclaimed partition has no owner.
     assert2::assert!(store.owner_of(7) == None);
-    let _ = GatewayConfig::DEDUP_TOPIC_REPLICATION; // touch the type (lint hygiene)
-
     token.cancel();
     let _ = h.await;
     broker.shutdown().await;
@@ -131,9 +134,17 @@ async fn run_membership_tombstone_and_malformed_skip() {
     use tokio_util::sync::CancellationToken;
 
     let (broker, bootstrap, _dir) = boot().await;
-    ensure_membership_topic(&bootstrap, TOPIC, 1, None)
-        .await
-        .unwrap();
+    ensure_membership_topic(
+        &bootstrap,
+        TOPIC,
+        &crabka_grpc_gateway::dedup::topic::InternalTopicPolicy {
+            replication_factor: 1,
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+    .unwrap();
 
     let producer = Producer::builder()
         .bootstrap(bootstrap.clone())
