@@ -837,13 +837,16 @@ references: 46 production parser/default/live-wiring references in Gres, 50
 test/harness references in Gres, and 14 fixed engine/state-machine references
 in pgexec. No local-vacuum candidate remains unclassified.
 
-- The full Gres suite passed: 116 library, 25 runtime, 17 topology
+- The full Gres suite passed: 121 library, 25 runtime, 17 topology
   process-nemesis, and 30 topology split-crash tests, with no failures.
 - Strict all-target/all-feature Clippy, formatting, and `git diff --check`
   passed.
 - Gres help exposes all eight local-vacuum flags.
 - `git diff -- deploy/crds` is empty, and focused operator/CRD searches found
   no local-vacuum surface.
-- Independent review traced all eight consumers, scalar and relationship
-  validation, local-only spawn, substrate rejection, tests, and diff scope,
-  and returned PASS with no remediation required.
+- Independent audit traced all eight consumers, scalar and relationship
+  validation, local-only spawn, substrate rejection, tests, and diff scope.
+  Broader review then found validation occurred after listener binding and
+  default-policy tests inherited the host environment. Commits `3be7294e` and
+  `18404ed1` moved validation before binding and isolated every default-policy
+  test; final hostile-environment re-review returned PASS with no findings.
