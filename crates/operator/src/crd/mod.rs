@@ -42,8 +42,9 @@ pub use network_policy::{NetworkPolicyPeer, NetworkPolicySpec};
 pub use rebalance::{KafkaRebalance, KafkaRebalanceSpec, KafkaRebalanceStatus, OptimizationResult};
 pub use schema_registry::{
     BasicAuthn, BearerAuthn, BearerMode, CertManagerIssuerRef, KafkaClientSasl, KafkaClientTls,
-    SchemaRegistry, SchemaRegistryAuthn, SchemaRegistryAuthz, SchemaRegistryKafkaClient,
-    SchemaRegistrySpec, SchemaRegistryStatus, SchemaRegistryTls, TlsClientAuth,
+    SchemaRegistry, SchemaRegistryAuthn, SchemaRegistryAuthz, SchemaRegistryHealthChecks,
+    SchemaRegistryKafkaClient, SchemaRegistryRuntime, SchemaRegistrySpec, SchemaRegistryStatus,
+    SchemaRegistryTls, TlsClientAuth,
 };
 pub use topic::{KafkaTopic, KafkaTopicSpec, KafkaTopicStatus};
 // The cluster-level `Authorization` / `SimpleAuthorization` on

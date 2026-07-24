@@ -132,6 +132,8 @@ pub enum ReconcileError {
     TracingInvalid(String),
     #[error("broker tuning: {0}")]
     KafkaConfigInvalid(String),
+    #[error("schema registry tuning: {0}")]
+    SchemaRegistryConfigInvalid(String),
     #[error("gres control: {0}")]
     GresControl(#[from] crabka_gres_control::ControlError),
     #[error("producer error: {0}")]

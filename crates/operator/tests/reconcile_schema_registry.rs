@@ -8,8 +8,11 @@ use std::sync::Arc;
 
 use assert2::assert;
 use crabka_operator::{
-    controller::schema_registry::reconcile,
-    crd::{SchemaRegistry, SchemaRegistrySpec},
+    controller::{common::ReconcileError, schema_registry::reconcile},
+    crd::{
+        BearerAuthn, BearerMode, SchemaRegistry, SchemaRegistryAuthn, SchemaRegistryAuthz,
+        SchemaRegistryHealthChecks, SchemaRegistryRuntime, SchemaRegistrySpec,
+    },
 };
 use http::Method;
 
@@ -30,6 +33,9 @@ fn sr(name: &str, cluster: Option<&str>) -> SchemaRegistry {
             schemas_topic: None,
             schemas_topic_replication_factor: Some(1),
             group_id: None,
+            runtime: None,
+            client_id: None,
+            health_checks: None,
             kafka_client: None,
             tls: None,
             authentication: None,
@@ -44,6 +50,281 @@ fn sr(name: &str, cluster: Option<&str>) -> SchemaRegistry {
         cr.metadata.labels = Some([("crabka.io/cluster".to_string(), c.to_string())].into());
     }
     cr
+}
+
+fn schema_registry_apply_rules() -> Vec<MockRule> {
+    vec![
+        MockRule {
+            method: Method::PATCH,
+            path_substr: "/services/sr1-sr-headless".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({"kind":"Service","metadata":{"name":"sr1-sr-headless"}}),
+            ),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: "/services/sr1-sr".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({"kind":"Service","metadata":{"name":"sr1-sr"}}),
+            ),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: "/deployments/sr1-sr".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({"kind":"Deployment","metadata":{"name":"sr1-sr"},
+                "status":{"replicas":1,"readyReplicas":1}}),
+            ),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: "/deployments/sr1-sr".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({"kind":"Deployment","metadata":{"name":"sr1-sr"},
+                "status":{"replicas":1,"readyReplicas":1}}),
+            ),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: "/schemaregistries/sr1/status".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({"kind":"SchemaRegistry","metadata":{"name":"sr1"},"spec":{"replicas":1}}),
+            ),
+        },
+    ]
+}
+
+fn valid_runtime() -> SchemaRegistryRuntime {
+    SchemaRegistryRuntime {
+        election_session_timeout_ms: Some(12_000),
+        election_rebalance_timeout_ms: Some(40_000),
+        election_heartbeat_interval_ms: Some(2_000),
+        election_reconnect_backoff_ms: Some(750),
+        store_reader_retry_backoff_ms: Some(333),
+        store_reader_fetch_max_wait_ms: Some(777),
+        store_reader_fetch_max_bytes: Some(2_097_152),
+        schemas_topic_create_timeout_ms: Some(22_000),
+        default_compatibility_level: Some("FULL".into()),
+        default_mode: Some("IMPORT".into()),
+    }
+}
+
+#[tokio::test]
+async fn runtime_policy_renders_exact_flags_and_probe_timings() {
+    let mut cr = sr("sr1", Some(CLUSTER));
+    cr.spec.bootstrap_servers = Some("ext:9092".into());
+    cr.spec.runtime = Some(valid_runtime());
+    cr.spec.client_id = Some("registry-production".into());
+    cr.spec.health_checks = Some(SchemaRegistryHealthChecks {
+        readiness_initial_delay_seconds: Some(3),
+        readiness_period_seconds: Some(7),
+        liveness_initial_delay_seconds: Some(9),
+        liveness_period_seconds: Some(11),
+    });
+    let state = MockState::new(schema_registry_apply_rules());
+    let client = mock_client(&state, NS);
+    let ctx = Arc::new(fixture_ctx(client, NS));
+
+    reconcile(Arc::new(cr), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let deployment = observed
+        .iter()
+        .find(|request| request.uri().to_string().contains("/deployments/sr1-sr"))
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(deployment.body()).unwrap();
+    let container = &body["spec"]["template"]["spec"]["containers"][0];
+    assert!(
+        container["args"]
+            == serde_json::json!([
+                "--bootstrap-servers=ext:9092",
+                "--listen-addr=0.0.0.0:8081",
+                "--schemas-topic-rf=1",
+                "--election-session-timeout-ms=12000",
+                "--election-rebalance-timeout-ms=40000",
+                "--election-heartbeat-interval-ms=2000",
+                "--election-reconnect-backoff-ms=750",
+                "--store-reader-retry-backoff-ms=333",
+                "--store-reader-fetch-max-wait-ms=777",
+                "--store-reader-fetch-max-bytes=2097152",
+                "--schemas-topic-create-timeout-ms=22000",
+                "--default-compatibility-level=FULL",
+                "--default-mode=IMPORT",
+                "--client-id=registry-production",
+            ])
+    );
+    assert!(
+        container["readinessProbe"]
+            == serde_json::json!({
+                "tcpSocket": { "port": 8081 },
+                "initialDelaySeconds": 3,
+                "periodSeconds": 7,
+            })
+    );
+    assert!(
+        container["livenessProbe"]
+            == serde_json::json!({
+                "tcpSocket": { "port": 8081 },
+                "initialDelaySeconds": 9,
+                "periodSeconds": 11,
+            })
+    );
+}
+
+fn runtime_with(field: &str, value: serde_json::Value) -> SchemaRegistryRuntime {
+    let mut runtime = serde_json::to_value(valid_runtime()).unwrap();
+    runtime[field] = value;
+    serde_json::from_value(runtime).unwrap()
+}
+
+async fn assert_schema_registry_config_invalid(cr: SchemaRegistry) {
+    let rules = vec![MockRule {
+        method: Method::PATCH,
+        path_substr: "/schemaregistries/sr1/status".into(),
+        response: json_response(
+            200,
+            &serde_json::json!({"kind":"SchemaRegistry","metadata":{"name":"sr1"},"spec":{"replicas":1}}),
+        ),
+    }];
+    let state = MockState::new(rules);
+    let client = mock_client(&state, NS);
+    let ctx = Arc::new(fixture_ctx(client, NS));
+
+    let error = reconcile(Arc::new(cr), ctx).await.unwrap_err();
+
+    assert!(matches!(
+        error,
+        ReconcileError::SchemaRegistryConfigInvalid(_)
+    ));
+    let observed = state.take_observed();
+    assert!(
+        !observed
+            .iter()
+            .any(|request| request.uri().to_string().contains("/deployments/"))
+    );
+    let status = observed
+        .iter()
+        .find(|request| {
+            request
+                .uri()
+                .to_string()
+                .contains("/schemaregistries/sr1/status")
+        })
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(status.body()).unwrap();
+    let ready = body["status"]["conditions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|condition| condition["type"] == "Ready")
+        .unwrap();
+    assert!(ready["reason"] == "SchemaRegistryConfigInvalid");
+}
+
+#[tokio::test]
+async fn runtime_invalid_policy_is_rejected_before_deployment() {
+    for field in [
+        "electionSessionTimeoutMs",
+        "electionRebalanceTimeoutMs",
+        "electionHeartbeatIntervalMs",
+        "electionReconnectBackoffMs",
+        "storeReaderRetryBackoffMs",
+        "storeReaderFetchMaxWaitMs",
+        "storeReaderFetchMaxBytes",
+        "schemasTopicCreateTimeoutMs",
+    ] {
+        let mut cr = sr("sr1", Some(CLUSTER));
+        cr.spec.bootstrap_servers = Some("ext:9092".into());
+        cr.spec.runtime = Some(runtime_with(field, serde_json::json!(0)));
+        assert_schema_registry_config_invalid(cr).await;
+    }
+
+    for runtime in [
+        runtime_with("electionHeartbeatIntervalMs", serde_json::json!(12_000)),
+        runtime_with("electionSessionTimeoutMs", serde_json::json!(40_001)),
+        runtime_with("defaultCompatibilityLevel", serde_json::json!("INVALID")),
+        runtime_with("defaultMode", serde_json::json!("INVALID")),
+    ] {
+        let mut cr = sr("sr1", Some(CLUSTER));
+        cr.spec.bootstrap_servers = Some("ext:9092".into());
+        cr.spec.runtime = Some(runtime);
+        assert_schema_registry_config_invalid(cr).await;
+    }
+
+    let mut empty_client = sr("sr1", Some(CLUSTER));
+    empty_client.spec.bootstrap_servers = Some("ext:9092".into());
+    empty_client.spec.client_id = Some(String::new());
+    assert_schema_registry_config_invalid(empty_client).await;
+
+    for health_checks in [
+        SchemaRegistryHealthChecks {
+            readiness_initial_delay_seconds: Some(-1),
+            readiness_period_seconds: None,
+            liveness_initial_delay_seconds: None,
+            liveness_period_seconds: None,
+        },
+        SchemaRegistryHealthChecks {
+            readiness_initial_delay_seconds: None,
+            readiness_period_seconds: Some(0),
+            liveness_initial_delay_seconds: None,
+            liveness_period_seconds: None,
+        },
+        SchemaRegistryHealthChecks {
+            readiness_initial_delay_seconds: None,
+            readiness_period_seconds: None,
+            liveness_initial_delay_seconds: Some(-1),
+            liveness_period_seconds: None,
+        },
+        SchemaRegistryHealthChecks {
+            readiness_initial_delay_seconds: None,
+            readiness_period_seconds: None,
+            liveness_initial_delay_seconds: None,
+            liveness_period_seconds: Some(0),
+        },
+    ] {
+        let mut cr = sr("sr1", Some(CLUSTER));
+        cr.spec.bootstrap_servers = Some("ext:9092".into());
+        cr.spec.health_checks = Some(health_checks);
+        assert_schema_registry_config_invalid(cr).await;
+    }
+
+    let mut invalid_rf = sr("sr1", Some(CLUSTER));
+    invalid_rf.spec.bootstrap_servers = Some("ext:9092".into());
+    invalid_rf.spec.schemas_topic_replication_factor = Some(0);
+    assert_schema_registry_config_invalid(invalid_rf).await;
+
+    let mut invalid_jwks = sr("sr1", Some(CLUSTER));
+    invalid_jwks.spec.bootstrap_servers = Some("ext:9092".into());
+    invalid_jwks.spec.authentication = Some(SchemaRegistryAuthn {
+        require_auth: false,
+        realm: None,
+        basic: None,
+        bearer: Some(BearerAuthn {
+            mode: BearerMode::Jwks,
+            principal_claim: None,
+            jwks_endpoint_uri: None,
+            jwks_valid_issuer: None,
+            jwks_expected_audience: None,
+            jwks_tls_secret_name: None,
+            jwks_principal_claim: None,
+            jwks_refresh_ms: Some(0),
+        }),
+    });
+    assert_schema_registry_config_invalid(invalid_jwks).await;
+
+    let mut invalid_acl = sr("sr1", Some(CLUSTER));
+    invalid_acl.spec.bootstrap_servers = Some("ext:9092".into());
+    invalid_acl.spec.authorization = Some(SchemaRegistryAuthz {
+        enabled: true,
+        super_users: Vec::new(),
+        acl_refresh_seconds: Some(0),
+    });
+    assert_schema_registry_config_invalid(invalid_acl).await;
 }
 
 /// A Ready Kafka body whose internal listener exposes a bootstrap address.

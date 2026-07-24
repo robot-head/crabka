@@ -117,10 +117,40 @@ spec:
                   enhancement; the managed/label path is the secured one.)
                 nullable: true
                 type: string
+              clientId:
+                description: Kafka client id used by the registry. Default `crabka-schema-registry`.
+                minLength: 1
+                nullable: true
+                type: string
               groupId:
                 description: Election group id. Default `schema-registry`.
                 nullable: true
                 type: string
+              healthChecks:
+                description: Kubernetes probe timing overrides.
+                nullable: true
+                properties:
+                  livenessInitialDelaySeconds:
+                    format: int32
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  livenessPeriodSeconds:
+                    format: int32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  readinessInitialDelaySeconds:
+                    format: int32
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  readinessPeriodSeconds:
+                    format: int32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                type: object
               image:
                 description: |-
                   Container image. Defaults to the operator's
@@ -205,6 +235,57 @@ spec:
                       x-kubernetes-int-or-string: true
                     description: 'Requests describes the minimum amount of compute resources required. If Requests is omitted for a container, it defaults to Limits if that is explicitly specified, otherwise to an implementation-defined value. Requests cannot exceed Limits. More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/'
                     type: object
+                type: object
+              runtime:
+                description: Schema Registry runtime policy.
+                nullable: true
+                properties:
+                  defaultCompatibilityLevel:
+                    nullable: true
+                    type: string
+                  defaultMode:
+                    nullable: true
+                    type: string
+                  electionHeartbeatIntervalMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  electionRebalanceTimeoutMs:
+                    format: int32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  electionReconnectBackoffMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  electionSessionTimeoutMs:
+                    format: int32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  schemasTopicCreateTimeoutMs:
+                    format: int32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  storeReaderFetchMaxBytes:
+                    format: int32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  storeReaderFetchMaxWaitMs:
+                    format: int32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  storeReaderRetryBackoffMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
                 type: object
               schemasTopic:
                 description: Backing compacted topic. Default `_schemas`.

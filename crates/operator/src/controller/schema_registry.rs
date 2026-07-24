@@ -30,13 +30,16 @@ use crate::{
         topic::internal_listener_bootstrap,
     },
     crd::{
-        BearerMode, CertManagerIssuerRef, Kafka, SchemaRegistry, SchemaRegistryStatus,
-        TlsClientAuth,
+        BearerMode, CertManagerIssuerRef, Kafka, SchemaRegistry, SchemaRegistrySpec,
+        SchemaRegistryStatus, TlsClientAuth,
     },
 };
 
 const APP_NAME: &str = "crabka-schema-registry";
 const SR_PORT: i32 = 8081;
+const DEFAULT_ELECTION_SESSION_TIMEOUT_MS: i32 = 10_000;
+const DEFAULT_ELECTION_REBALANCE_TIMEOUT_MS: i32 = 30_000;
+const DEFAULT_ELECTION_HEARTBEAT_INTERVAL_MS: u64 = 3_000;
 const DEFAULT_IMAGE: &str = concat!(
     "ghcr.io/robot-head/crabka-schema-registry:",
     env!("CARGO_PKG_VERSION")
@@ -100,6 +103,20 @@ async fn reconcile_inner(
     let ns = obj.namespace().unwrap_or_else(|| "default".into());
     let name = obj.name_any();
     let sr_api: Api<SchemaRegistry> = Api::namespaced(ctx.client.clone(), &ns);
+
+    if let Err(why) = validate_config(&obj.spec) {
+        set_status(
+            &sr_api,
+            &name,
+            &obj,
+            "SchemaRegistryConfigInvalid",
+            &why,
+            None,
+            None,
+        )
+        .await?;
+        return Err(ReconcileError::SchemaRegistryConfigInvalid(why));
+    }
 
     // 1. Cluster label (unless an explicit bootstrap override is set)
     let cluster = obj
@@ -269,6 +286,149 @@ fn headless_name(n: &str) -> String {
     format!("{n}-sr-headless")
 }
 
+fn validate_config(spec: &SchemaRegistrySpec) -> Result<(), String> {
+    macro_rules! validate {
+        ($value:expr, $rule:ty, $path:literal) => {
+            if let Some(value) = $value {
+                <$rule>::new(value).map_err(|error| format!("{}: {error}", $path))?;
+            }
+        };
+    }
+
+    validate!(
+        spec.schemas_topic_replication_factor,
+        refined_type::rule::GreaterI32<0>,
+        "spec.schemasTopicReplicationFactor"
+    );
+    if let Some(client_id) = &spec.client_id {
+        refined_type::rule::NonEmptyString::new(client_id.clone())
+            .map_err(|error| format!("spec.clientId: {error}"))?;
+    }
+    if let Some(runtime) = &spec.runtime {
+        validate!(
+            runtime.election_session_timeout_ms,
+            refined_type::rule::GreaterI32<0>,
+            "spec.runtime.electionSessionTimeoutMs"
+        );
+        validate!(
+            runtime.election_rebalance_timeout_ms,
+            refined_type::rule::GreaterI32<0>,
+            "spec.runtime.electionRebalanceTimeoutMs"
+        );
+        validate!(
+            runtime.election_heartbeat_interval_ms,
+            refined_type::rule::GreaterU64<0>,
+            "spec.runtime.electionHeartbeatIntervalMs"
+        );
+        validate!(
+            runtime.election_reconnect_backoff_ms,
+            refined_type::rule::GreaterU64<0>,
+            "spec.runtime.electionReconnectBackoffMs"
+        );
+        validate!(
+            runtime.store_reader_retry_backoff_ms,
+            refined_type::rule::GreaterU64<0>,
+            "spec.runtime.storeReaderRetryBackoffMs"
+        );
+        validate!(
+            runtime.store_reader_fetch_max_wait_ms,
+            refined_type::rule::GreaterI32<0>,
+            "spec.runtime.storeReaderFetchMaxWaitMs"
+        );
+        validate!(
+            runtime.store_reader_fetch_max_bytes,
+            refined_type::rule::GreaterI32<0>,
+            "spec.runtime.storeReaderFetchMaxBytes"
+        );
+        validate!(
+            runtime.schemas_topic_create_timeout_ms,
+            refined_type::rule::GreaterI32<0>,
+            "spec.runtime.schemasTopicCreateTimeoutMs"
+        );
+
+        let session = runtime
+            .election_session_timeout_ms
+            .unwrap_or(DEFAULT_ELECTION_SESSION_TIMEOUT_MS);
+        let rebalance = runtime
+            .election_rebalance_timeout_ms
+            .unwrap_or(DEFAULT_ELECTION_REBALANCE_TIMEOUT_MS);
+        let heartbeat = runtime
+            .election_heartbeat_interval_ms
+            .unwrap_or(DEFAULT_ELECTION_HEARTBEAT_INTERVAL_MS);
+        if heartbeat >= u64::try_from(session).unwrap_or(0) {
+            return Err(
+                "spec.runtime.electionHeartbeatIntervalMs must be below electionSessionTimeoutMs"
+                    .into(),
+            );
+        }
+        if session > rebalance {
+            return Err(
+                "spec.runtime.electionSessionTimeoutMs must not exceed electionRebalanceTimeoutMs"
+                    .into(),
+            );
+        }
+        if let Some(level) = &runtime.default_compatibility_level
+            && !matches!(
+                level.as_str(),
+                "NONE"
+                    | "BACKWARD"
+                    | "BACKWARD_TRANSITIVE"
+                    | "FORWARD"
+                    | "FORWARD_TRANSITIVE"
+                    | "FULL"
+                    | "FULL_TRANSITIVE"
+            )
+        {
+            return Err("spec.runtime.defaultCompatibilityLevel is invalid".into());
+        }
+        if let Some(mode) = &runtime.default_mode
+            && !matches!(mode.as_str(), "READWRITE" | "READONLY" | "IMPORT")
+        {
+            return Err("spec.runtime.defaultMode is invalid".into());
+        }
+    }
+    if let Some(health) = &spec.health_checks {
+        validate!(
+            health.readiness_initial_delay_seconds,
+            refined_type::rule::GreaterEqualI32<0>,
+            "spec.healthChecks.readinessInitialDelaySeconds"
+        );
+        validate!(
+            health.readiness_period_seconds,
+            refined_type::rule::GreaterI32<0>,
+            "spec.healthChecks.readinessPeriodSeconds"
+        );
+        validate!(
+            health.liveness_initial_delay_seconds,
+            refined_type::rule::GreaterEqualI32<0>,
+            "spec.healthChecks.livenessInitialDelaySeconds"
+        );
+        validate!(
+            health.liveness_period_seconds,
+            refined_type::rule::GreaterI32<0>,
+            "spec.healthChecks.livenessPeriodSeconds"
+        );
+    }
+    if let Some(refresh_ms) = spec
+        .authentication
+        .as_ref()
+        .and_then(|authn| authn.bearer.as_ref())
+        .and_then(|bearer| bearer.jwks_refresh_ms)
+    {
+        refined_type::rule::GreaterI64::<0>::new(refresh_ms)
+            .map_err(|error| format!("spec.authentication.bearer.jwksRefreshMs: {error}"))?;
+    }
+    if let Some(refresh_seconds) = spec
+        .authorization
+        .as_ref()
+        .and_then(|authz| authz.acl_refresh_seconds)
+    {
+        refined_type::rule::GreaterI64::<0>::new(refresh_seconds)
+            .map_err(|error| format!("spec.authorization.aclRefreshSeconds: {error}"))?;
+    }
+    Ok(())
+}
+
 /// Stable label set used for Deployment `selector.matchLabels`, the pod
 /// template labels, and BOTH Services' `spec.selector`. Deployment
 /// selectors are immutable, so this map must NOT carry the version label
@@ -360,6 +520,19 @@ fn render_deployment(
         headless_name(&name),
         ns
     );
+    let health = obj.spec.health_checks.as_ref();
+    let readiness_initial_delay_seconds = health
+        .and_then(|checks| checks.readiness_initial_delay_seconds)
+        .unwrap_or(2);
+    let readiness_period_seconds = health
+        .and_then(|checks| checks.readiness_period_seconds)
+        .unwrap_or(5);
+    let liveness_initial_delay_seconds = health
+        .and_then(|checks| checks.liveness_initial_delay_seconds)
+        .unwrap_or(5);
+    let liveness_period_seconds = health
+        .and_then(|checks| checks.liveness_period_seconds)
+        .unwrap_or(10);
     let mut env = vec![
         json!({ "name": "POD_NAME", "valueFrom": { "fieldRef": { "fieldPath": "metadata.name" } } }),
         json!({ "name": "SCHEMA_REGISTRY_ADVERTISED_URL", "value": advertised }),
@@ -387,8 +560,16 @@ fn render_deployment(
                         "env": env,
                         "ports": [{ "name": "rest", "containerPort": SR_PORT, "protocol": "TCP" }],
                         "volumeMounts": mounts,
-                        "readinessProbe": { "tcpSocket": { "port": SR_PORT }, "initialDelaySeconds": 2, "periodSeconds": 5 },
-                        "livenessProbe": { "tcpSocket": { "port": SR_PORT }, "initialDelaySeconds": 5, "periodSeconds": 10 },
+                        "readinessProbe": {
+                            "tcpSocket": { "port": SR_PORT },
+                            "initialDelaySeconds": readiness_initial_delay_seconds,
+                            "periodSeconds": readiness_period_seconds,
+                        },
+                        "livenessProbe": {
+                            "tcpSocket": { "port": SR_PORT },
+                            "initialDelaySeconds": liveness_initial_delay_seconds,
+                            "periodSeconds": liveness_period_seconds,
+                        },
                         "resources": obj.spec.resources.clone().unwrap_or_default(),
                     }],
                 }
@@ -425,6 +606,31 @@ fn build_args_and_mounts(
     }
     if let Some(g) = &s.group_id {
         a.push(format!("--group-id={g}"));
+    }
+    if let Some(runtime) = &s.runtime {
+        macro_rules! push_runtime {
+            ($field:ident) => {
+                if let Some(value) = &runtime.$field {
+                    a.push(format!(
+                        "--{}={value}",
+                        stringify!($field).replace('_', "-")
+                    ));
+                }
+            };
+        }
+        push_runtime!(election_session_timeout_ms);
+        push_runtime!(election_rebalance_timeout_ms);
+        push_runtime!(election_heartbeat_interval_ms);
+        push_runtime!(election_reconnect_backoff_ms);
+        push_runtime!(store_reader_retry_backoff_ms);
+        push_runtime!(store_reader_fetch_max_wait_ms);
+        push_runtime!(store_reader_fetch_max_bytes);
+        push_runtime!(schemas_topic_create_timeout_ms);
+        push_runtime!(default_compatibility_level);
+        push_runtime!(default_mode);
+    }
+    if let Some(client_id) = &s.client_id {
+        a.push(format!("--client-id={client_id}"));
     }
 
     let mut volumes = Vec::new();
