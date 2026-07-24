@@ -26,7 +26,10 @@ use crate::{
     follower::{CommittedEndConnection, CommittedEndDialer, LiveCommittedEndSampler},
     frame::{BARRIER_SEQ, WalFrame},
     replay::{ReplayItem, ReplayOutcome, replay_committed_frames, replay_committed_frames_from},
-    topic::{ensure_wal_topic_name, transactional_id_for_range, wal_topic_for_generation},
+    topic::{
+        WalAdminPolicy, ensure_wal_topic_name_with_policy, transactional_id_for_range,
+        wal_topic_for_generation,
+    },
     writer::{
         FenceLease, GroupCommitAck, GroupCommitRequest, TransactionalWalWriter, WalAppendAck,
         WriterGeneration,
@@ -195,6 +198,7 @@ pub struct LiveRecoveryConfig {
     /// Authenticated local range-control endpoint advertised by this compute.
     pub advertised_endpoint: Option<String>,
     read_policy: RecoveryReadPolicy,
+    wal_admin_policy: WalAdminPolicy,
     /// Noncanonical identity used while a recovered range is staged and must not fence serving.
     staging_identity: Option<String>,
     replay_seed: Option<(i64, u64)>,
@@ -232,6 +236,7 @@ impl LiveRecoveryConfig {
             wal_generation: 0,
             advertised_endpoint: None,
             read_policy: RecoveryReadPolicy::default(),
+            wal_admin_policy: WalAdminPolicy::default(),
             staging_identity: None,
             replay_seed: None,
         }
@@ -248,6 +253,19 @@ impl LiveRecoveryConfig {
     #[must_use]
     pub const fn read_policy(&self) -> RecoveryReadPolicy {
         self.read_policy
+    }
+
+    /// Override WAL topic and admin connection settings.
+    #[must_use]
+    pub fn with_wal_admin_policy(mut self, wal_admin_policy: WalAdminPolicy) -> Self {
+        self.wal_admin_policy = wal_admin_policy;
+        self
+    }
+
+    /// Return WAL topic and admin connection settings.
+    #[must_use]
+    pub const fn wal_admin_policy(&self) -> WalAdminPolicy {
+        self.wal_admin_policy
     }
 
     /// Use checkpoint restore before committed WAL tail replay.
@@ -391,9 +409,7 @@ pub async fn read_live_committed_tail(
     }
     let bootstrap_addrs = parse_bootstrap_addrs(&config.bootstrap)?;
     let topic = config.wal_topic();
-    let mut admin = AdminClient::connect_secured(&bootstrap_addrs, config.security.clone())
-        .await
-        .map_err(|error| SubstrateError::Unavailable(format!("admin connect: {error}")))?;
+    let mut admin = connect_wal_admin(config, &bootstrap_addrs).await?;
     let topic_uuid = resolve_topic_uuid(&mut admin, &topic).await?;
     let reader = KafkaCommittedWalReader::new(
         bootstrap_addrs,
@@ -416,9 +432,7 @@ pub async fn read_live_retained_committed(
 ) -> Result<Vec<ReplayItem>, SubstrateError> {
     let bootstrap_addrs = parse_bootstrap_addrs(&config.bootstrap)?;
     let topic = config.wal_topic();
-    let mut admin = AdminClient::connect_secured(&bootstrap_addrs, config.security.clone())
-        .await
-        .map_err(|error| SubstrateError::Unavailable(format!("admin connect: {error}")))?;
+    let mut admin = connect_wal_admin(config, &bootstrap_addrs).await?;
     let topic_uuid = resolve_topic_uuid(&mut admin, &topic).await?;
     let reader = KafkaCommittedWalReader::new(
         bootstrap_addrs,
@@ -458,10 +472,7 @@ impl CommittedEndDialer for LiveEndDialer {
     async fn dial(&self) -> Result<Box<dyn CommittedEndConnection>, SubstrateError> {
         let bootstrap_addrs = parse_bootstrap_addrs(&self.config.bootstrap)?;
         let topic = self.config.wal_topic();
-        let mut admin =
-            AdminClient::connect_secured(&bootstrap_addrs, self.config.security.clone())
-                .await
-                .map_err(|error| SubstrateError::Unavailable(format!("admin connect: {error}")))?;
+        let mut admin = connect_wal_admin(&self.config, &bootstrap_addrs).await?;
         let topic_uuid = resolve_topic_uuid(&mut admin, &topic).await?;
         let connection = open_wal_connection(
             &bootstrap_addrs,
@@ -517,10 +528,13 @@ impl CommittedEndConnection for LiveEndConnection {
 /// Returns an error when the requested operation cannot be completed.
 pub async fn ensure_live_wal_topic(config: &LiveRecoveryConfig) -> Result<String, SubstrateError> {
     let bootstrap_addrs = parse_bootstrap_addrs(&config.bootstrap)?;
-    let mut admin = AdminClient::connect_secured(&bootstrap_addrs, config.security.clone())
-        .await
-        .map_err(|error| SubstrateError::Unavailable(format!("admin connect: {error}")))?;
-    ensure_wal_topic_name(&mut admin, &config.wal_topic()).await
+    let mut admin = connect_wal_admin(config, &bootstrap_addrs).await?;
+    ensure_wal_topic_name_with_policy(
+        &mut admin,
+        &config.wal_topic(),
+        config.wal_admin_policy,
+    )
+    .await
 }
 
 /// Restore and catch up a read-only range-zero follower without fencing a writer.
@@ -535,9 +549,7 @@ pub async fn bootstrap_live_range0_follower(
     let end = live_committed_end(config).await?;
     let bootstrap_addrs = parse_bootstrap_addrs(&config.bootstrap)?;
     let topic = config.wal_topic();
-    let mut admin = AdminClient::connect_secured(&bootstrap_addrs, config.security.clone())
-        .await
-        .map_err(|error| SubstrateError::Unavailable(format!("admin connect: {error}")))?;
+    let mut admin = connect_wal_admin(config, &bootstrap_addrs).await?;
     let topic_uuid = resolve_topic_uuid(&mut admin, &topic).await?;
     let reader = KafkaCommittedWalReader::new(
         bootstrap_addrs,
@@ -557,10 +569,13 @@ async fn recover_live_for_range_inner(
     restore_store: Option<&dyn RestoreKv>,
 ) -> Result<LiveRecovered, SubstrateError> {
     let bootstrap_addrs = parse_bootstrap_addrs(&config.bootstrap)?;
-    let mut admin = AdminClient::connect_secured(&bootstrap_addrs, config.security.clone())
-        .await
-        .map_err(|error| SubstrateError::Unavailable(format!("admin connect: {error}")))?;
-    let topic = ensure_wal_topic_name(&mut admin, &config.wal_topic()).await?;
+    let mut admin = connect_wal_admin(&config, &bootstrap_addrs).await?;
+    let topic = ensure_wal_topic_name_with_policy(
+        &mut admin,
+        &config.wal_topic(),
+        config.wal_admin_policy,
+    )
+    .await?;
 
     let producer = Arc::new(
         Producer::builder()
@@ -722,6 +737,24 @@ fn parse_bootstrap_addrs(bootstrap: &str) -> Result<Vec<String>, SubstrateError>
     Ok(addrs)
 }
 
+fn wal_admin_connection_options(config: &LiveRecoveryConfig) -> ConnectionOptions {
+    ConnectionOptions {
+        client_id: config.client_id(),
+        connect_timeout: config.wal_admin_policy.connect_timeout(),
+        request_timeout: config.wal_admin_policy.request_timeout(),
+        security: config.security.clone().map(Box::new),
+    }
+}
+
+async fn connect_wal_admin(
+    config: &LiveRecoveryConfig,
+    bootstrap_addrs: &[String],
+) -> Result<AdminClient, SubstrateError> {
+    AdminClient::connect_with_options(bootstrap_addrs, wal_admin_connection_options(config))
+        .await
+        .map_err(|error| SubstrateError::Unavailable(format!("admin connect: {error}")))
+}
+
 async fn resolve_topic_uuid(
     admin: &mut AdminClient,
     topic: &str,
@@ -762,9 +795,7 @@ pub(crate) async fn live_committed_reader(
 ) -> Result<impl CommittedWalReader + use<>, SubstrateError> {
     let bootstrap_addrs = parse_bootstrap_addrs(&config.bootstrap)?;
     let topic = config.wal_topic();
-    let mut admin = AdminClient::connect_secured(&bootstrap_addrs, config.security.clone())
-        .await
-        .map_err(|error| SubstrateError::Unavailable(format!("admin connect: {error}")))?;
+    let mut admin = connect_wal_admin(config, &bootstrap_addrs).await?;
     let topic_uuid = resolve_topic_uuid(&mut admin, &topic).await?;
     Ok(KafkaCommittedWalReader::new(
         bootstrap_addrs,
@@ -1554,6 +1585,46 @@ mod tests {
         assert_eq!(
             config.with_read_policy(replacement).read_policy(),
             replacement
+        );
+    }
+
+    #[test]
+    fn wal_admin_policy_defaults_and_replaces_in_live_config() {
+        let tenant = TenantName::parse("tenant-a").expect("tenant");
+        let config = LiveRecoveryConfig::new("localhost:9092", tenant, RangeId::COORDINATOR, None);
+        assert_eq!(config.wal_admin_policy(), WalAdminPolicy::default());
+
+        let replacement = WalAdminPolicy::new(11, 22, 33, 44).expect("valid policy");
+        assert_eq!(
+            config
+                .with_wal_admin_policy(replacement)
+                .wal_admin_policy(),
+            replacement
+        );
+    }
+
+    #[test]
+    fn wal_admin_policy_builds_exact_connection_options() {
+        let security = ClientSecurity {
+            protocol: crabka_security::ListenerProtocol::Plaintext,
+            tls: None,
+            sasl: None,
+            sasl_host: Some("broker.internal".into()),
+        };
+        let tenant = TenantName::parse("tenant-a").expect("tenant");
+        let policy = WalAdminPolicy::new(11, 22, 33, 44).expect("valid policy");
+        let config =
+            LiveRecoveryConfig::new("localhost:9092", tenant, RangeId::new(7), Some(security))
+                .with_wal_admin_policy(policy);
+
+        let options = wal_admin_connection_options(&config);
+
+        assert_eq!(options.client_id, "crabka-gres-tenant-a-r7");
+        assert_eq!(options.connect_timeout, std::time::Duration::from_millis(33));
+        assert_eq!(options.request_timeout, std::time::Duration::from_millis(44));
+        assert_eq!(
+            options.security.expect("security").sasl_host.as_deref(),
+            Some("broker.internal")
         );
     }
 

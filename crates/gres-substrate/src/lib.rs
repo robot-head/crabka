@@ -68,8 +68,11 @@ pub use self::{
     split_runtime::{InMemorySplitStateStore, RawKvSplitRuntime},
     stats::{InMemoryRangeStatsProvider, RangeStats, RangeStatsProvider, RangeStatsSnapshot},
     topic::{
-        TopicAdmin, ensure_wal_topic, ensure_wal_topic_for_range, ensure_wal_topic_name,
-        transactional_id_for_range, wal_topic, wal_topic_for_generation, wal_topic_for_range,
+        DEFAULT_WAL_ADMIN_CONNECT_TIMEOUT_MS, DEFAULT_WAL_ADMIN_REQUEST_TIMEOUT_MS,
+        DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT_MS, DEFAULT_WAL_TOPIC_REPLICATION_FACTOR, TopicAdmin,
+        WalAdminPolicy, ensure_wal_topic, ensure_wal_topic_for_range, ensure_wal_topic_name,
+        ensure_wal_topic_name_with_policy, transactional_id_for_range, wal_topic,
+        wal_topic_for_generation, wal_topic_for_range,
     },
     transfer::{
         TableTransferIdentity, TableTransferMaterialization, TableTransferSelector,

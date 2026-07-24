@@ -1,21 +1,102 @@
 //! WAL topic naming and ensure abstraction.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
 
 use crabka_client_admin::{AdminClientLike, CreateTopicSpec};
 use crabka_gres_ranges::{
     RangeId, TenantName, txn_id as range_txn_id, wal_topic as range_wal_topic,
 };
+use refined_type::rule::{GreaterI32, GreaterU64};
 
 use crate::error::SubstrateError;
 
 /// Partition count for each range WAL topic.
 pub const WAL_TOPIC_PARTITIONS: i32 = 1;
 /// Default replication factor requested for the WAL topic.
-pub const WAL_TOPIC_REPLICAS: i32 = 1;
+pub const DEFAULT_WAL_TOPIC_REPLICATION_FACTOR: i32 = 1;
 /// Timeout used by the admin ensure path.
-pub const WAL_TOPIC_ENSURE_TIMEOUT_MS: i32 = 30_000;
+pub const DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT_MS: i32 = 30_000;
+/// Default timeout for establishing a WAL admin connection.
+pub const DEFAULT_WAL_ADMIN_CONNECT_TIMEOUT_MS: u64 = 5_000;
+/// Default timeout for WAL admin requests.
+pub const DEFAULT_WAL_ADMIN_REQUEST_TIMEOUT_MS: u64 = 30_000;
 const TOPIC_ALREADY_EXISTS: i16 = 36;
+
+/// Validated topic creation and admin connection settings for WAL recovery.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WalAdminPolicy {
+    replication_factor: i32,
+    topic_ensure_timeout_ms: i32,
+    connect_timeout: Duration,
+    request_timeout: Duration,
+}
+
+impl WalAdminPolicy {
+    /// Validate WAL admin settings.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any value is not positive.
+    pub fn new(
+        replication_factor: i32,
+        topic_ensure_timeout_ms: i32,
+        connect_timeout_ms: u64,
+        request_timeout_ms: u64,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            replication_factor: GreaterI32::<0>::new(replication_factor)
+                .map_err(|error| error.to_string())?
+                .into_value(),
+            topic_ensure_timeout_ms: GreaterI32::<0>::new(topic_ensure_timeout_ms)
+                .map_err(|error| error.to_string())?
+                .into_value(),
+            connect_timeout: validated_timeout(connect_timeout_ms)?,
+            request_timeout: validated_timeout(request_timeout_ms)?,
+        })
+    }
+
+    /// Return the requested WAL topic replication factor.
+    #[must_use]
+    pub const fn replication_factor(self) -> i32 {
+        self.replication_factor
+    }
+
+    /// Return the topic ensure timeout in milliseconds.
+    #[must_use]
+    pub const fn topic_ensure_timeout_ms(self) -> i32 {
+        self.topic_ensure_timeout_ms
+    }
+
+    /// Return the WAL admin connection timeout.
+    #[must_use]
+    pub const fn connect_timeout(self) -> Duration {
+        self.connect_timeout
+    }
+
+    /// Return the WAL admin request timeout.
+    #[must_use]
+    pub const fn request_timeout(self) -> Duration {
+        self.request_timeout
+    }
+}
+
+fn validated_timeout(milliseconds: u64) -> Result<Duration, String> {
+    GreaterU64::<0>::new(milliseconds)
+        .map(|value| Duration::from_millis(value.into_value()))
+        .map_err(|error| error.to_string())
+}
+
+impl Default for WalAdminPolicy {
+    fn default() -> Self {
+        Self::new(
+            DEFAULT_WAL_TOPIC_REPLICATION_FACTOR,
+            DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT_MS,
+            DEFAULT_WAL_ADMIN_CONNECT_TIMEOUT_MS,
+            DEFAULT_WAL_ADMIN_REQUEST_TIMEOUT_MS,
+        )
+        .expect("default WAL admin policy is valid")
+    }
+}
 
 /// Return the legacy range-neutral WAL topic for a tenant.
 #[must_use]
@@ -59,7 +140,12 @@ pub trait TopicAdmin: Send {
     async fn topic_exists(&mut self, topic: &str) -> Result<bool, SubstrateError>;
 
     /// Create `topic` if the broker does not already have it.
-    async fn create_wal_topic(&mut self, topic: &str) -> Result<(), SubstrateError>;
+    async fn create_wal_topic(
+        &mut self,
+        topic: &str,
+        replication_factor: i32,
+        timeout_ms: i32,
+    ) -> Result<(), SubstrateError>;
 }
 
 #[async_trait::async_trait]
@@ -78,18 +164,23 @@ where
             .any(|entry| entry.name == topic && entry.error.is_none()))
     }
 
-    async fn create_wal_topic(&mut self, topic: &str) -> Result<(), SubstrateError> {
+    async fn create_wal_topic(
+        &mut self,
+        topic: &str,
+        replication_factor: i32,
+        timeout_ms: i32,
+    ) -> Result<(), SubstrateError> {
         let specs = [CreateTopicSpec {
             name: topic.to_string(),
             partitions: WAL_TOPIC_PARTITIONS,
-            replicas: WAL_TOPIC_REPLICAS,
+            replicas: replication_factor,
             configs: BTreeMap::from([
                 ("cleanup.policy".to_string(), "delete".to_string()),
                 ("retention.ms".to_string(), "-1".to_string()),
             ]),
         }];
         let outcomes = self
-            .create_topics(&specs, WAL_TOPIC_ENSURE_TIMEOUT_MS)
+            .create_topics(&specs, timeout_ms)
             .await
             .map_err(|error| SubstrateError::Topic(error.to_string()))?;
         let failed = outcomes.iter().find(|outcome| {
@@ -118,11 +209,7 @@ pub async fn ensure_wal_topic(
     tenant: &str,
 ) -> Result<String, SubstrateError> {
     let topic = wal_topic(tenant);
-    if admin.topic_exists(&topic).await? {
-        return Ok(topic);
-    }
-    admin.create_wal_topic(&topic).await?;
-    Ok(topic)
+    ensure_wal_topic_name_with_policy(admin, &topic, WalAdminPolicy::default()).await
 }
 
 /// Ensure a G-7 tenant-range WAL topic exists.
@@ -135,11 +222,7 @@ pub async fn ensure_wal_topic_for_range(
     range: RangeId,
 ) -> Result<String, SubstrateError> {
     let topic = wal_topic_for_range(tenant, range);
-    if admin.topic_exists(&topic).await? {
-        return Ok(topic);
-    }
-    admin.create_wal_topic(&topic).await?;
-    Ok(topic)
+    ensure_wal_topic_name_with_policy(admin, &topic, WalAdminPolicy::default()).await
 }
 
 /// Ensure an already-derived immutable physical WAL topic exists.
@@ -150,8 +233,26 @@ pub async fn ensure_wal_topic_name(
     admin: &mut dyn TopicAdmin,
     topic: &str,
 ) -> Result<String, SubstrateError> {
+    ensure_wal_topic_name_with_policy(admin, topic, WalAdminPolicy::default()).await
+}
+
+/// Ensure an already-derived immutable physical WAL topic exists using `policy`.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
+pub async fn ensure_wal_topic_name_with_policy(
+    admin: &mut dyn TopicAdmin,
+    topic: &str,
+    policy: WalAdminPolicy,
+) -> Result<String, SubstrateError> {
     if !admin.topic_exists(topic).await? {
-        admin.create_wal_topic(topic).await?;
+        admin
+            .create_wal_topic(
+                topic,
+                policy.replication_factor(),
+                policy.topic_ensure_timeout_ms(),
+            )
+            .await?;
     }
     Ok(topic.to_owned())
 }
@@ -168,6 +269,8 @@ mod tests {
         creates: usize,
         checked: Vec<String>,
         created: Vec<String>,
+        replication_factor: Option<i32>,
+        timeout_ms: Option<i32>,
     }
 
     #[async_trait::async_trait]
@@ -177,12 +280,65 @@ mod tests {
             Ok(self.existing)
         }
 
-        async fn create_wal_topic(&mut self, topic: &str) -> Result<(), SubstrateError> {
+        async fn create_wal_topic(
+            &mut self,
+            topic: &str,
+            replication_factor: i32,
+            timeout_ms: i32,
+        ) -> Result<(), SubstrateError> {
             self.creates += 1;
             self.existing = true;
             self.created.push(topic.to_string());
+            self.replication_factor = Some(replication_factor);
+            self.timeout_ms = Some(timeout_ms);
             Ok(())
         }
+    }
+
+    #[test]
+    fn wal_admin_policy_owns_defaults() {
+        let policy = WalAdminPolicy::default();
+
+        assert_eq!(
+            policy.replication_factor(),
+            DEFAULT_WAL_TOPIC_REPLICATION_FACTOR
+        );
+        assert_eq!(
+            policy.topic_ensure_timeout_ms(),
+            DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT_MS
+        );
+        assert_eq!(
+            policy.connect_timeout(),
+            std::time::Duration::from_millis(DEFAULT_WAL_ADMIN_CONNECT_TIMEOUT_MS)
+        );
+        assert_eq!(
+            policy.request_timeout(),
+            std::time::Duration::from_millis(DEFAULT_WAL_ADMIN_REQUEST_TIMEOUT_MS)
+        );
+    }
+
+    #[test]
+    fn wal_admin_policy_rejects_zero_values() {
+        assert!(WalAdminPolicy::new(0, 2, 3, 4).is_err());
+        assert!(WalAdminPolicy::new(1, 0, 3, 4).is_err());
+        assert!(WalAdminPolicy::new(1, 2, 0, 4).is_err());
+        assert!(WalAdminPolicy::new(1, 2, 3, 0).is_err());
+    }
+
+    #[test]
+    fn wal_admin_policy_preserves_distinct_values() {
+        let policy = WalAdminPolicy::new(11, 22, 33, 44).expect("valid policy");
+
+        assert_eq!(policy.replication_factor(), 11);
+        assert_eq!(policy.topic_ensure_timeout_ms(), 22);
+        assert_eq!(
+            policy.connect_timeout(),
+            std::time::Duration::from_millis(33)
+        );
+        assert_eq!(
+            policy.request_timeout(),
+            std::time::Duration::from_millis(44)
+        );
     }
 
     #[test]
@@ -219,6 +375,14 @@ mod tests {
 
         assert!(topic == "__gres_wal.t1");
         assert!(admin.creates == 1);
+        assert_eq!(
+            admin.replication_factor,
+            Some(DEFAULT_WAL_TOPIC_REPLICATION_FACTOR)
+        );
+        assert_eq!(
+            admin.timeout_ms,
+            Some(DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT_MS)
+        );
     }
 
     #[tokio::test]
@@ -233,5 +397,18 @@ mod tests {
         assert!(topic == "__gres_wal.t1.r3");
         assert!(admin.checked == vec!["__gres_wal.t1.r3".to_string()]);
         assert!(admin.created == vec!["__gres_wal.t1.r3".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn policy_aware_ensure_passes_replication_and_timeout() {
+        let mut admin = FakeTopicAdmin::default();
+        let policy = WalAdminPolicy::new(7, 8, 9, 10).expect("valid policy");
+
+        ensure_wal_topic_name_with_policy(&mut admin, "__gres_wal.t1.r0", policy)
+            .await
+            .expect("ensure");
+
+        assert_eq!(admin.replication_factor, Some(7));
+        assert_eq!(admin.timeout_ms, Some(8));
     }
 }
