@@ -65,6 +65,10 @@ impl Cli {
             "wal_recovery_empty_fetch_retries",
             "wal_recovery_connect_timeout_ms",
             "wal_recovery_request_timeout_ms",
+            "wal_topic_replication_factor",
+            "wal_topic_ensure_timeout_ms",
+            "wal_admin_connect_timeout_ms",
+            "wal_admin_request_timeout_ms",
         ] {
             command = command.mut_arg(argument, |arg| arg.env(None::<&str>));
         }
@@ -179,6 +183,38 @@ pub struct ServeArgs {
         requires = "substrate_bootstrap"
     )]
     pub wal_recovery_request_timeout_ms: Option<PositiveMillis>,
+
+    /// Replication factor requested when creating range WAL topics.
+    #[arg(
+        long = "wal-topic-replication-factor",
+        env = "CRABKA_GRES_WAL_TOPIC_REPLICATION_FACTOR",
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_topic_replication_factor: Option<PositiveI32>,
+
+    /// Timeout for ensuring range WAL topics.
+    #[arg(
+        long = "wal-topic-ensure-timeout-ms",
+        env = "CRABKA_GRES_WAL_TOPIC_ENSURE_TIMEOUT_MS",
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_topic_ensure_timeout_ms: Option<PositiveI32>,
+
+    /// Timeout for establishing WAL admin broker connections.
+    #[arg(
+        long = "wal-admin-connect-timeout-ms",
+        env = "CRABKA_GRES_WAL_ADMIN_CONNECT_TIMEOUT_MS",
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_admin_connect_timeout_ms: Option<PositiveMillis>,
+
+    /// Timeout for WAL admin broker requests.
+    #[arg(
+        long = "wal-admin-request-timeout-ms",
+        env = "CRABKA_GRES_WAL_ADMIN_REQUEST_TIMEOUT_MS",
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_admin_request_timeout_ms: Option<PositiveMillis>,
 
     /// Substrate mode: comma-separated hosted range ids, for example r0,r2.
     #[arg(long = "host-ranges", requires = "ranges")]
@@ -467,7 +503,11 @@ fn validate_wal_recovery_read_policy(args: &ServeArgs) -> std::io::Result<()> {
         || args.wal_recovery_fetch_response_max_bytes.is_some()
         || args.wal_recovery_empty_fetch_retries.is_some()
         || args.wal_recovery_connect_timeout_ms.is_some()
-        || args.wal_recovery_request_timeout_ms.is_some())
+        || args.wal_recovery_request_timeout_ms.is_some()
+        || args.wal_topic_replication_factor.is_some()
+        || args.wal_topic_ensure_timeout_ms.is_some()
+        || args.wal_admin_connect_timeout_ms.is_some()
+        || args.wal_admin_request_timeout_ms.is_some())
         && args.substrate_bootstrap.is_none()
     {
         return invalid_input("WAL recovery options require --substrate-bootstrap");
@@ -582,6 +622,8 @@ pub struct SubstrateRuntimeConfig {
     pub range0_follower_poll_interval: Duration,
     /// Committed-WAL recovery read limits.
     pub recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy,
+    /// WAL topic creation and admin connection settings.
+    pub wal_admin_policy: crabka_gres_substrate::WalAdminPolicy,
     /// Optional range-compute placement for distributed mode. Range 0 is always hosted.
     pub host_ranges: Option<Vec<crabka_gres_ranges::RangeId>>,
     /// mTLS client configuration required for remote range routing.
@@ -757,6 +799,25 @@ impl SubstrateRuntimeConfig {
                 )
             })
             .map_err(|error| Error::new(ErrorKind::InvalidInput, error))?,
+            wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::new(
+                args.wal_topic_replication_factor.map_or(
+                    crabka_gres_substrate::DEFAULT_WAL_TOPIC_REPLICATION_FACTOR,
+                    PositiveI32::into_value,
+                ),
+                args.wal_topic_ensure_timeout_ms.map_or(
+                    crabka_gres_substrate::DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT_MS,
+                    PositiveI32::into_value,
+                ),
+                args.wal_admin_connect_timeout_ms.map_or(
+                    crabka_gres_substrate::DEFAULT_WAL_ADMIN_CONNECT_TIMEOUT_MS,
+                    PositiveMillis::into_value,
+                ),
+                args.wal_admin_request_timeout_ms.map_or(
+                    crabka_gres_substrate::DEFAULT_WAL_ADMIN_REQUEST_TIMEOUT_MS,
+                    PositiveMillis::into_value,
+                ),
+            )
+            .map_err(|error| Error::new(ErrorKind::InvalidInput, error))?,
             host_ranges: parse_host_ranges(args.host_ranges.as_deref())?,
             range_rpc: RangeRpcRuntimeConfig::from_args(args)?,
             advertised_endpoint: args.range_listen.clone(),
@@ -782,6 +843,7 @@ impl SubstrateRuntimeConfig {
             self.kafka_security.clone(),
         )
         .with_read_policy(self.recovery_read_policy)
+        .with_wal_admin_policy(self.wal_admin_policy)
     }
 }
 
@@ -8164,6 +8226,10 @@ mod tests {
             wal_recovery_empty_fetch_retries: None,
             wal_recovery_connect_timeout_ms: None,
             wal_recovery_request_timeout_ms: None,
+            wal_topic_replication_factor: None,
+            wal_topic_ensure_timeout_ms: None,
+            wal_admin_connect_timeout_ms: None,
+            wal_admin_request_timeout_ms: None,
             host_ranges: None,
             timestamp_source: TimestampSourceKind::LogicalTso,
             hlc_max_offset_ms: 250,
@@ -8927,13 +8993,17 @@ mod tests {
     #[test]
     fn wal_recovery_read_policy_uses_defaults_environment_and_cli_precedence() {
         const CHILD: &str = "CRABKA_TEST_GRES_WAL_RECOVERY_READ_POLICY_CHILD";
-        const VARS: [&str; 6] = [
+        const VARS: [&str; 10] = [
             "CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT_MS",
             "CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES",
             "CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES",
             "CRABKA_GRES_WAL_RECOVERY_EMPTY_FETCH_RETRIES",
             "CRABKA_GRES_WAL_RECOVERY_CONNECT_TIMEOUT_MS",
             "CRABKA_GRES_WAL_RECOVERY_REQUEST_TIMEOUT_MS",
+            "CRABKA_GRES_WAL_TOPIC_REPLICATION_FACTOR",
+            "CRABKA_GRES_WAL_TOPIC_ENSURE_TIMEOUT_MS",
+            "CRABKA_GRES_WAL_ADMIN_CONNECT_TIMEOUT_MS",
+            "CRABKA_GRES_WAL_ADMIN_REQUEST_TIMEOUT_MS",
         ];
         if std::env::var_os(CHILD).is_none() {
             for mode in ["defaults", "environment"] {
@@ -8949,8 +9019,9 @@ mod tests {
                     child.env_remove(variable);
                 }
                 if mode == "environment" {
-                    for (variable, value) in
-                        VARS.into_iter().zip(["17", "18", "19", "20", "21", "22"])
+                    for (variable, value) in VARS
+                        .into_iter()
+                        .zip(["17", "18", "19", "20", "21", "22", "23", "24", "25", "26"])
                     {
                         child.env(variable, value);
                     }
@@ -8966,7 +9037,7 @@ mod tests {
             "--tenant=tenant-a",
         ];
         let expected = if std::env::var(CHILD).as_deref() == Ok("environment") {
-            (17, 18, 19, 20, 21, 22)
+            (17, 18, 19, 20, 21, 22, 23, 24, 25, 26)
         } else {
             (
                 crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT_MS,
@@ -8975,6 +9046,10 @@ mod tests {
                 crabka_gres_substrate::DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES,
                 crabka_gres_substrate::DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT_MS,
                 crabka_gres_substrate::DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT_MS,
+                crabka_gres_substrate::DEFAULT_WAL_TOPIC_REPLICATION_FACTOR,
+                crabka_gres_substrate::DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT_MS,
+                crabka_gres_substrate::DEFAULT_WAL_ADMIN_CONNECT_TIMEOUT_MS,
+                crabka_gres_substrate::DEFAULT_WAL_ADMIN_REQUEST_TIMEOUT_MS,
             )
         };
         let config = SubstrateRuntimeConfig::from_args(
@@ -8991,6 +9066,11 @@ mod tests {
         assert_eq!(policy.empty_fetch_retries(), expected.3);
         assert_eq!(policy.connect_timeout(), Duration::from_millis(expected.4));
         assert_eq!(policy.request_timeout(), Duration::from_millis(expected.5));
+        let admin = config.wal_admin_policy;
+        assert_eq!(admin.replication_factor(), expected.6);
+        assert_eq!(admin.topic_ensure_timeout_ms(), expected.7);
+        assert_eq!(admin.connect_timeout(), Duration::from_millis(expected.8));
+        assert_eq!(admin.request_timeout(), Duration::from_millis(expected.9));
 
         let cli = <Cli as clap::Parser>::try_parse_from(base.into_iter().chain([
             "--wal-recovery-fetch-max-wait-ms=27",
@@ -8999,18 +9079,27 @@ mod tests {
             "--wal-recovery-empty-fetch-retries=30",
             "--wal-recovery-connect-timeout-ms=31",
             "--wal-recovery-request-timeout-ms=32",
+            "--wal-topic-replication-factor=33",
+            "--wal-topic-ensure-timeout-ms=34",
+            "--wal-admin-connect-timeout-ms=35",
+            "--wal-admin-request-timeout-ms=36",
         ]))
         .expect("CLI policy");
-        let policy = SubstrateRuntimeConfig::from_args(&cli.serve)
+        let config = SubstrateRuntimeConfig::from_args(&cli.serve)
             .expect("valid config")
-            .expect("substrate config")
-            .recovery_read_policy;
+            .expect("substrate config");
+        let policy = config.recovery_read_policy;
         assert_eq!(policy.fetch_max_wait_ms(), 27);
         assert_eq!(policy.fetch_partition_max_bytes(), 28);
         assert_eq!(policy.fetch_response_max_bytes(), 29);
         assert_eq!(policy.empty_fetch_retries(), 30);
         assert_eq!(policy.connect_timeout(), Duration::from_millis(31));
         assert_eq!(policy.request_timeout(), Duration::from_millis(32));
+        let admin = config.wal_admin_policy;
+        assert_eq!(admin.replication_factor(), 33);
+        assert_eq!(admin.topic_ensure_timeout_ms(), 34);
+        assert_eq!(admin.connect_timeout(), Duration::from_millis(35));
+        assert_eq!(admin.request_timeout(), Duration::from_millis(36));
     }
 
     #[test]
@@ -9026,6 +9115,10 @@ mod tests {
             .env("CRABKA_GRES_WAL_RECOVERY_EMPTY_FETCH_RETRIES", "20")
             .env("CRABKA_GRES_WAL_RECOVERY_CONNECT_TIMEOUT_MS", "21")
             .env("CRABKA_GRES_WAL_RECOVERY_REQUEST_TIMEOUT_MS", "22")
+            .env("CRABKA_GRES_WAL_TOPIC_REPLICATION_FACTOR", "23")
+            .env("CRABKA_GRES_WAL_TOPIC_ENSURE_TIMEOUT_MS", "24")
+            .env("CRABKA_GRES_WAL_ADMIN_CONNECT_TIMEOUT_MS", "25")
+            .env("CRABKA_GRES_WAL_ADMIN_REQUEST_TIMEOUT_MS", "26")
             .status()
             .expect("child test");
 
@@ -9041,6 +9134,10 @@ mod tests {
             "--wal-recovery-empty-fetch-retries=0",
             "--wal-recovery-connect-timeout-ms=0",
             "--wal-recovery-request-timeout-ms=0",
+            "--wal-topic-replication-factor=0",
+            "--wal-topic-ensure-timeout-ms=0",
+            "--wal-admin-connect-timeout-ms=0",
+            "--wal-admin-request-timeout-ms=0",
         ] {
             assert!(
                 Cli::try_parse_from([
@@ -9055,19 +9152,27 @@ mod tests {
         for option in [
             "--wal-recovery-connect-timeout-ms=1",
             "--wal-recovery-request-timeout-ms=1",
+            "--wal-topic-replication-factor=1",
+            "--wal-topic-ensure-timeout-ms=1",
+            "--wal-admin-connect-timeout-ms=1",
+            "--wal-admin-request-timeout-ms=1",
         ] {
             assert!(Cli::try_parse_from(["crabka-gres", option]).is_err());
         }
+        let oversized_replication = <Cli as clap::Parser>::try_parse_from([
+            "crabka-gres",
+            "--substrate-bootstrap=memory://",
+            "--tenant=tenant-a",
+            "--wal-topic-replication-factor=32768",
+        ])
+        .expect("positive parser value");
+        let error = SubstrateRuntimeConfig::from_args(&oversized_replication.serve)
+            .expect_err("replication factor exceeds protocol maximum");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
 
-        for request_timeout in [false, true] {
+        for option in 0..10 {
             let mut programmatic = serve_args(Some("trust"), Vec::new());
-            if request_timeout {
-                programmatic.wal_recovery_request_timeout_ms =
-                    Some(PositiveMillis::new(1).expect("positive"));
-            } else {
-                programmatic.wal_recovery_connect_timeout_ms =
-                    Some(PositiveMillis::new(1).expect("positive"));
-            }
+            set_wal_policy_option(&mut programmatic, option);
             let error = SubstrateRuntimeConfig::from_args(&programmatic)
                 .expect_err("inert recovery policy");
             assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
@@ -9077,13 +9182,17 @@ mod tests {
     #[tokio::test]
     async fn wal_recovery_read_policy_validation_precedes_listener_bind() {
         const CHILD: &str = "CRABKA_TEST_GRES_WAL_RECOVERY_BIND_CHILD";
-        const VARS: [&str; 6] = [
+        const VARS: [&str; 10] = [
             "CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT_MS",
             "CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES",
             "CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES",
             "CRABKA_GRES_WAL_RECOVERY_EMPTY_FETCH_RETRIES",
             "CRABKA_GRES_WAL_RECOVERY_CONNECT_TIMEOUT_MS",
             "CRABKA_GRES_WAL_RECOVERY_REQUEST_TIMEOUT_MS",
+            "CRABKA_GRES_WAL_TOPIC_REPLICATION_FACTOR",
+            "CRABKA_GRES_WAL_TOPIC_ENSURE_TIMEOUT_MS",
+            "CRABKA_GRES_WAL_ADMIN_CONNECT_TIMEOUT_MS",
+            "CRABKA_GRES_WAL_ADMIN_REQUEST_TIMEOUT_MS",
         ];
         if std::env::var_os(CHILD).is_none() {
             let mut child = std::process::Command::new(std::env::current_exe().expect("test exe"));
@@ -9101,18 +9210,28 @@ mod tests {
         }
 
         let occupied = TcpListener::bind("127.0.0.1:0").await.expect("listener");
-        for request_timeout in [false, true] {
+        for option in 0..10 {
             let mut args = serve_args(Some("trust"), Vec::new());
             args.listen = occupied.local_addr().expect("address").to_string();
-            if request_timeout {
-                args.wal_recovery_request_timeout_ms =
-                    Some(PositiveMillis::new(1).expect("positive"));
-            } else {
-                args.wal_recovery_connect_timeout_ms =
-                    Some(PositiveMillis::new(1).expect("positive"));
-            }
+            set_wal_policy_option(&mut args, option);
             let error = run_serve(args).await.expect_err("invalid recovery policy");
             assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        }
+    }
+
+    fn set_wal_policy_option(args: &mut ServeArgs, option: usize) {
+        match option {
+            0 => args.wal_recovery_fetch_max_wait_ms = PositiveI32::new(1).ok(),
+            1 => args.wal_recovery_fetch_partition_max_bytes = PositiveI32::new(1).ok(),
+            2 => args.wal_recovery_fetch_response_max_bytes = PositiveI32::new(1).ok(),
+            3 => args.wal_recovery_empty_fetch_retries = PositiveUsize::new(1).ok(),
+            4 => args.wal_recovery_connect_timeout_ms = PositiveMillis::new(1).ok(),
+            5 => args.wal_recovery_request_timeout_ms = PositiveMillis::new(1).ok(),
+            6 => args.wal_topic_replication_factor = PositiveI32::new(1).ok(),
+            7 => args.wal_topic_ensure_timeout_ms = PositiveI32::new(1).ok(),
+            8 => args.wal_admin_connect_timeout_ms = PositiveMillis::new(1).ok(),
+            9 => args.wal_admin_request_timeout_ms = PositiveMillis::new(1).ok(),
+            _ => unreachable!("test policy option"),
         }
     }
 
@@ -9128,9 +9247,15 @@ mod tests {
         config.recovery_read_policy = policy;
         let tenant = crabka_gres_ranges::TenantName::parse("tenant-a".to_string()).expect("tenant");
 
-        let recovery = config.live_recovery_config(tenant, crabka_gres_ranges::RangeId::new(7));
+        let recovery =
+            config.live_recovery_config(tenant.clone(), crabka_gres_ranges::RangeId::new(7));
 
         assert_eq!(recovery.read_policy(), policy);
+        let admin =
+            crabka_gres_substrate::WalAdminPolicy::new(41, 42, 43, 44).expect("distinctive policy");
+        config.wal_admin_policy = admin;
+        let recovery = config.live_recovery_config(tenant, crabka_gres_ranges::RangeId::new(7));
+        assert_eq!(recovery.wal_admin_policy(), admin);
         assert_eq!(
             include_str!("lib.rs")
                 .split_once("\n#[cfg(test)]\nmod vacuum_pacing_tests {")
@@ -9465,6 +9590,7 @@ mod tests {
                 DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
             ),
             recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
+            wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
             host_ranges: None,
             range_rpc: None,
             advertised_endpoint: None,
@@ -9542,6 +9668,7 @@ mod tests {
                 DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
             ),
             recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
+            wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
             host_ranges: None,
             range_rpc: None,
             advertised_endpoint: None,
@@ -9900,6 +10027,7 @@ mod tests {
                 DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
             ),
             recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
+            wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
             host_ranges: None,
             range_rpc: None,
             advertised_endpoint: None,
@@ -9986,6 +10114,7 @@ mod tests {
                 DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
             ),
             recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
+            wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
             host_ranges: None,
             range_rpc: None,
             advertised_endpoint: None,

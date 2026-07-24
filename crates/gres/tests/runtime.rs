@@ -164,6 +164,10 @@ fn binary_help_exposes_only_single_node_serve_surface() {
     assert!(help.contains("--tenant"));
     assert!(help.contains("--cache-dir"));
     assert!(help.contains("--ranges"));
+    assert!(help.contains("--wal-topic-replication-factor"));
+    assert!(help.contains("--wal-topic-ensure-timeout-ms"));
+    assert!(help.contains("--wal-admin-connect-timeout-ms"));
+    assert!(help.contains("--wal-admin-request-timeout-ms"));
     assert!(help.contains("--host-ranges"));
     assert!(help.contains("--timestamp-source"));
     assert!(help.contains("--hlc-max-offset-ms"));
@@ -190,6 +194,10 @@ fn test_args(listen: String, data_dir: Option<std::path::PathBuf>) -> crabka_gre
         "wal_recovery_empty_fetch_retries",
         "wal_recovery_connect_timeout_ms",
         "wal_recovery_request_timeout_ms",
+        "wal_topic_replication_factor",
+        "wal_topic_ensure_timeout_ms",
+        "wal_admin_connect_timeout_ms",
+        "wal_admin_request_timeout_ms",
     ] {
         command = command.mut_arg(argument, |arg| arg.env(None::<&str>));
     }
@@ -221,6 +229,10 @@ fn test_args(listen: String, data_dir: Option<std::path::PathBuf>) -> crabka_gre
         wal_recovery_empty_fetch_retries: None,
         wal_recovery_connect_timeout_ms: None,
         wal_recovery_request_timeout_ms: None,
+        wal_topic_replication_factor: None,
+        wal_topic_ensure_timeout_ms: None,
+        wal_admin_connect_timeout_ms: None,
+        wal_admin_request_timeout_ms: None,
         host_ranges: None,
         timestamp_source: crabka_gres::TimestampSourceKind::LogicalTso,
         hlc_max_offset_ms: 250,
@@ -379,6 +391,7 @@ async fn live_multirange_substrate_default_fdw_server_reads_own_broker() {
             crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
         ),
         recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
+        wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
         host_ranges: None,
         range_rpc: None,
         advertised_endpoint: None,
@@ -443,6 +456,7 @@ async fn live_multirange_substrate_hlc_mode_commits_and_mints_wall_anchored_stam
             crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
         ),
         recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
+        wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
         host_ranges: None,
         range_rpc: None,
         advertised_endpoint: None,
@@ -605,6 +619,7 @@ async fn live_multirange_transfer_stages_populated_successor_without_publishing_
             crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
         ),
         recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
+        wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
         host_ranges: None,
         range_rpc: None,
         advertised_endpoint: Some("127.0.0.1:7443".into()),
@@ -975,6 +990,7 @@ fn activation_crash_config(
             crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
         ),
         recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
+        wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
         host_ranges: None,
         range_rpc: None,
         advertised_endpoint: Some("127.0.0.1:7443".into()),
@@ -2517,6 +2533,7 @@ async fn live_populated_hash_split_partitions_physical_rows_and_sequence() {
             crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
         ),
         recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
+        wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
         host_ranges: None,
         range_rpc: None,
         advertised_endpoint: Some("127.0.0.1:7443".into()),
@@ -2689,6 +2706,7 @@ async fn live_multirange_transfer_rejects_concurrent_pause_without_waiting() {
             crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
         ),
         recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
+        wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
         host_ranges: None,
         range_rpc: None,
         advertised_endpoint: None,
@@ -2757,6 +2775,7 @@ async fn non_live_runtimes_do_not_expose_range_transfer_capability() {
             crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
         ),
         recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
+        wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
         host_ranges: None,
         range_rpc: None,
         advertised_endpoint: None,
@@ -2779,6 +2798,7 @@ async fn non_live_runtimes_do_not_expose_range_transfer_capability() {
                 crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
             ),
             recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
+            wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
             host_ranges: None,
             range_rpc: None,
             advertised_endpoint: None,
