@@ -425,7 +425,7 @@ async fn multi_range_tenant_publishes_range_services_and_becomes_ready_after_all
     let control = Arc::new(FakeGresControl::default());
     ctx.insert_admin_client_for_test("demo", admin.clone())
         .await;
-    ctx.insert_gres_control_for_test("demo", control.clone())
+    ctx.insert_gres_control_for_test("ns", "demo", control.clone())
         .await;
 
     let action = reconcile(Arc::new(multi_range_tenant()), Arc::new(ctx))
@@ -488,6 +488,16 @@ async fn deleting_multi_range_tenant_cleans_up_and_removes_its_finalizer() {
             .parse()
             .expect("deletion timestamp parses"),
     ));
+    let registry_policy = crabka_gres_control::RegistryPolicy::new(2, 15_001, 251, 501, 1_048_577)
+        .expect("registry policy");
+    let mut kafka = ready_kafka_body("demo", "ns");
+    kafka["spec"]["gresRegistry"] = serde_json::json!({
+        "replicationFactor": 2,
+        "topicCreateTimeoutMs": 15001,
+        "readerRetryBackoffMs": 251,
+        "fetchMaxWaitMs": 501,
+        "fetchPartitionMaxBytes": 1_048_577
+    });
     let rules = vec![
         MockRule {
             method: Method::GET,
@@ -497,7 +507,7 @@ async fn deleting_multi_range_tenant_cleans_up_and_removes_its_finalizer() {
         MockRule {
             method: Method::GET,
             path_substr: "/kafkas/demo".into(),
-            response: json_response(200, &ready_kafka_body("demo", "ns")),
+            response: json_response(200, &kafka),
         },
         MockRule {
             method: Method::PATCH,
@@ -511,8 +521,14 @@ async fn deleting_multi_range_tenant_cleans_up_and_removes_its_finalizer() {
     let control = Arc::new(FakeGresControl::default());
     ctx.insert_admin_client_for_test("demo", admin.clone())
         .await;
-    ctx.insert_gres_control_for_test("demo", control.clone())
-        .await;
+    ctx.insert_gres_control_for_test_with_policy(
+        "ns",
+        "demo",
+        "demo-broker-headless.ns.svc.cluster.local:9092",
+        registry_policy,
+        control.clone(),
+    )
+    .await;
 
     let action = reconcile(Arc::new(deleting_tenant), Arc::new(ctx))
         .await
@@ -611,6 +627,7 @@ async fn successful_single_range_registry_read_allows_a_later_failure_to_replace
     )
     .await;
     ctx.insert_gres_control_for_test(
+        "ns",
         "demo",
         Arc::new(FakeGresControl {
             current: Mutex::new(Some(tenant_record(TenantState::Active, 0))),
@@ -696,14 +713,14 @@ async fn reconciles_topics_scram_acls_records_workload_and_status() {
     let control = Arc::new(FakeGresControl::default());
     ctx.insert_admin_client_for_test("demo", admin.clone())
         .await;
-    ctx.insert_gres_control_for_test("demo", control.clone())
+    ctx.insert_gres_control_for_test("ns", "demo", control.clone())
         .await;
 
     let action = reconcile(Arc::new(tenant()), Arc::new(ctx)).await.unwrap();
     assert!(action == Action::requeue(Duration::from_secs(5)));
 
     let calls = admin.lock().await.calls();
-    assert!(calls.iter().any(|call| matches!(call, RecordedCall::CreateTopics(specs) if specs.iter().any(|spec| spec.name == "__gres_wal.tenant-a.r0") && specs.iter().any(|spec| spec.name == "__gres_cfg.tenant-a"))));
+    assert!(calls.iter().any(|call| matches!(call, RecordedCall::CreateTopics(specs) if specs.iter().any(|spec| spec.name == "__gres_wal.tenant-a.r0") && specs.iter().any(|spec| spec.name == "__gres_cfg.tenant-a") && !specs.iter().any(|spec| spec.name == crabka_gres_control::TENANT_REGISTRY_TOPIC))));
     assert!(calls.iter().any(|call| matches!(call, RecordedCall::AlterUserScramCredentials { upsertions, .. } if upsertions.iter().any(|upsert| upsert.username == "gres-tenant-a"))));
     assert!(calls.iter().any(|call| matches!(call, RecordedCall::CreateAcls(acls) if acls.iter().any(|acl| acl.resource_name == "__gres_wal.tenant-a" && acl.pattern_type == crabka_client_admin::PatternType::Prefixed && acl.principal == "User:gres-tenant-a") && acls.iter().any(|acl| acl.resource_name == "__gres.tenant-a" && acl.pattern_type == crabka_client_admin::PatternType::Prefixed) && !acls.iter().any(|acl| acl.resource_name == "__gres_tenants"))));
     let upserts = control.upserts.lock().await;
@@ -712,6 +729,32 @@ async fn reconciles_topics_scram_acls_records_workload_and_status() {
     assert!(upserts[0].record_version == 1);
     drop(upserts);
     let observed = state.take_observed();
+    let deployment = observed
+        .iter()
+        .find(|request| {
+            request.method() == Method::PATCH
+                && request.uri().path().contains("/deployments/tenant-a-gres")
+        })
+        .expect("compute deployment patch");
+    let deployment: serde_json::Value =
+        serde_json::from_slice(deployment.body()).expect("deployment JSON");
+    let args = deployment["spec"]["template"]["spec"]["containers"][0]["args"]
+        .as_array()
+        .expect("compute args");
+    for pair in [
+        ["--registry-replication-factor", "1"],
+        ["--registry-topic-create-timeout-ms", "15000"],
+        ["--registry-reader-retry-backoff-ms", "250"],
+        ["--registry-fetch-max-wait-ms", "500"],
+        ["--registry-fetch-partition-max-bytes", "1048576"],
+    ] {
+        assert!(
+            args.windows(2).any(|window| {
+                window[0].as_str() == Some(pair[0]) && window[1].as_str() == Some(pair[1])
+            }),
+            "missing {pair:?}: {args:?}"
+        );
+    }
     let status = observed
         .iter()
         .find(|request| {
@@ -735,7 +778,7 @@ async fn repeated_reconcile_preserves_scram_and_does_not_replace_the_registry_re
     let admin = Arc::new(tokio::sync::Mutex::new(FakeAdminClient::new()));
     let control = Arc::new(FakeGresControl::default());
     ctx.insert_admin_client_for_test("demo", admin).await;
-    ctx.insert_gres_control_for_test("demo", control.clone())
+    ctx.insert_gres_control_for_test("ns", "demo", control.clone())
         .await;
 
     reconcile(Arc::new(tenant()), Arc::new(ctx.clone()))
@@ -781,7 +824,7 @@ async fn suspended_registry_state_parks_wal_and_scales_compute_to_zero() {
     });
     ctx.insert_admin_client_for_test("demo", admin.clone())
         .await;
-    ctx.insert_gres_control_for_test("demo", control.clone())
+    ctx.insert_gres_control_for_test("ns", "demo", control.clone())
         .await;
 
     reconcile(Arc::new(tenant()), Arc::new(ctx)).await.unwrap();
@@ -886,7 +929,7 @@ async fn range_parking_deletes_only_predecessor_generation_and_keeps_tenant_acti
     });
     ctx.insert_admin_client_for_test("demo", admin.clone())
         .await;
-    ctx.insert_gres_control_for_test("demo", control.clone())
+    ctx.insert_gres_control_for_test("ns", "demo", control.clone())
         .await;
 
     reconcile(Arc::new(multi_range_tenant()), Arc::new(ctx.clone()))
@@ -944,7 +987,7 @@ async fn parking_waits_for_wal_metadata_to_confirm_asynchronous_deletion() {
     });
     ctx.insert_admin_client_for_test("demo", admin.clone())
         .await;
-    ctx.insert_gres_control_for_test("demo", control.clone())
+    ctx.insert_gres_control_for_test("ns", "demo", control.clone())
         .await;
 
     let action = reconcile(Arc::new(tenant()), Arc::new(ctx.clone()))
@@ -1009,7 +1052,7 @@ async fn failed_parking_intent_replacement_keeps_wal_until_retry_then_converges_
     });
     ctx.insert_admin_client_for_test("demo", admin.clone())
         .await;
-    ctx.insert_gres_control_for_test("demo", control.clone())
+    ctx.insert_gres_control_for_test("ns", "demo", control.clone())
         .await;
 
     reconcile(Arc::new(tenant()), Arc::new(ctx.clone()))
@@ -1091,7 +1134,7 @@ async fn failed_wal_deletion_keeps_parking_intent_and_retry_converges() {
     });
     ctx.insert_admin_client_for_test("demo", admin.clone())
         .await;
-    ctx.insert_gres_control_for_test("demo", control.clone())
+    ctx.insert_gres_control_for_test("ns", "demo", control.clone())
         .await;
 
     reconcile(Arc::new(tenant()), Arc::new(ctx.clone()))
@@ -1137,7 +1180,7 @@ async fn resume_request_starts_current_generation_without_deleting_previous_gene
     });
     ctx.insert_admin_client_for_test("demo", admin.clone())
         .await;
-    ctx.insert_gres_control_for_test("demo", control.clone())
+    ctx.insert_gres_control_for_test("ns", "demo", control.clone())
         .await;
 
     let action = reconcile(Arc::new(tenant()), Arc::new(ctx))
@@ -1261,7 +1304,8 @@ async fn registry_suspension_is_preserved_when_a_later_dependency_fails() {
         Arc::new(tokio::sync::Mutex::new(FakeAdminClient::new())),
     )
     .await;
-    ctx.insert_gres_control_for_test("demo", control).await;
+    ctx.insert_gres_control_for_test("ns", "demo", control)
+        .await;
 
     reconcile(Arc::new(tenant()), Arc::new(ctx))
         .await
@@ -1303,7 +1347,7 @@ async fn missing_final_checkpoint_manifest_blocks_suspended_parking() {
     });
     ctx.insert_admin_client_for_test("demo", admin.clone())
         .await;
-    ctx.insert_gres_control_for_test("demo", control.clone())
+    ctx.insert_gres_control_for_test("ns", "demo", control.clone())
         .await;
 
     let error = reconcile(Arc::new(tenant()), Arc::new(ctx))
@@ -1346,7 +1390,7 @@ async fn parked_tenant_reconciles_again_without_revalidating_stale_checkpoint() 
     });
     ctx.insert_admin_client_for_test("demo", admin.clone())
         .await;
-    ctx.insert_gres_control_for_test("demo", control.clone())
+    ctx.insert_gres_control_for_test("ns", "demo", control.clone())
         .await;
 
     reconcile(Arc::new(tenant()), Arc::new(ctx.clone()))
@@ -1425,7 +1469,7 @@ async fn resume_requested_ensures_wal_and_scales_compute_to_one() {
     });
     ctx.insert_admin_client_for_test("demo", admin.clone())
         .await;
-    ctx.insert_gres_control_for_test("demo", control.clone())
+    ctx.insert_gres_control_for_test("ns", "demo", control.clone())
         .await;
 
     reconcile(Arc::new(tenant()), Arc::new(ctx)).await.unwrap();

@@ -48,7 +48,6 @@ const ACTIVATOR_PORT_U16: u16 = 6543;
 const DEFAULT_ACTIVATOR_REGISTRY_POLL_MS: u64 = 250;
 const DEFAULT_ACTIVATOR_COLD_START_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_ACTIVATOR_READINESS_PERIOD_SECONDS: i32 = 5;
-const DEFAULT_ACTIVATOR_REGISTRY_REPLICATION_FACTOR: i32 = 1;
 const RELOAD_RETRY_LIMIT: usize = 3;
 const RELOAD_REQUEUE: Duration = Duration::from_secs(15);
 const PGDOG_ADMIN_OPERATION_TIMEOUT: Duration = Duration::from_secs(20);
@@ -106,10 +105,25 @@ async fn reconcile_inner(obj: Arc<Gres>, ctx: Arc<Context>) -> Result<Action, Re
     let ns = obj.namespace().unwrap_or_else(|| "default".into());
     let name = obj.name_any();
     let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &ns);
-    let kafka = kafka_api.get_opt(&obj.spec.kafka_cluster).await?;
-    let bootstrap = kafka
+    let kafka = kafka_api
+        .get_opt(&obj.spec.kafka_cluster)
+        .await?
+        .ok_or_else(|| {
+            ReconcileError::Malformed(format!(
+                "referenced Kafka {} does not exist",
+                obj.spec.kafka_cluster
+            ))
+        })?;
+    let registry_policy = kafka
+        .spec
+        .gres_registry
         .as_ref()
-        .and_then(internal_listener_bootstrap)
+        .map_or_else(
+            || Ok(crabka_gres_control::RegistryPolicy::default()),
+            crate::crd::GresRegistrySpec::policy,
+        )
+        .map_err(|error| ReconcileError::Malformed(format!("spec.gresRegistry: {error}")))?;
+    let bootstrap = internal_listener_bootstrap(&kafka)
         .unwrap_or_else(|| format!("{}-plain-bootstrap.{ns}.svc:9092", obj.spec.kafka_cluster));
     let gres_api: Api<Gres> = Api::namespaced(ctx.client.clone(), &ns);
     let tenant_api: Api<GresTenant> = Api::namespaced(ctx.client.clone(), &ns);
@@ -235,7 +249,7 @@ async fn reconcile_inner(obj: Arc<Gres>, ctx: Arc<Context>) -> Result<Action, Re
     apply_object(
         &deployment_api,
         &activator_deployment_name(&name),
-        &render_activator_deployment(&obj, &bootstrap, &activator_image)?,
+        &render_activator_deployment(&obj, &bootstrap, &activator_image, &registry_policy)?,
     )
     .await?;
     apply_object(
@@ -317,11 +331,6 @@ fn validate_activator_config(spec: &crate::crd::GresSpec) -> Result<(), Reconcil
             activator.readiness_probe_period_seconds,
             refined_type::rule::GreaterI32<0>,
             "spec.activator.readinessProbePeriodSeconds"
-        );
-        validate!(
-            activator.registry_replication_factor,
-            refined_type::rule::MinMaxI32<1, 32_767>,
-            "spec.activator.registryReplicationFactor"
         );
     }
     Ok(())
@@ -783,6 +792,7 @@ fn render_activator_deployment(
     obj: &Gres,
     bootstrap: &str,
     image: &str,
+    registry_policy: &crabka_gres_control::RegistryPolicy,
 ) -> Result<Deployment, ReconcileError> {
     let selector = activator_selector_labels(obj);
     let name = obj.name_any();
@@ -799,9 +809,6 @@ fn render_activator_deployment(
     let readiness_period_seconds = activator
         .and_then(|activator| activator.readiness_probe_period_seconds)
         .unwrap_or(DEFAULT_ACTIVATOR_READINESS_PERIOD_SECONDS);
-    let registry_replication_factor = activator
-        .and_then(|activator| activator.registry_replication_factor)
-        .unwrap_or(DEFAULT_ACTIVATOR_REGISTRY_REPLICATION_FACTOR);
     Ok(serde_json::from_value(json!({
         "metadata": { "name": activator_deployment_name(&name), "namespace": obj.namespace(), "labels": activator_meta_labels(obj), "ownerReferences": [owner_ref::<Gres>(obj)?] },
         "spec": {
@@ -819,7 +826,11 @@ fn render_activator_deployment(
                             "--bootstrap", bootstrap,
                             "--registry-poll-ms", registry_poll_ms.to_string(),
                             "--cold-start-timeout-ms", cold_start_timeout_ms.to_string(),
-                            "--registry-replication-factor", registry_replication_factor.to_string(),
+                            "--registry-replication-factor", registry_policy.replication_factor().to_string(),
+                            "--registry-topic-create-timeout-ms", registry_policy.topic_create_timeout_ms().to_string(),
+                            "--registry-reader-retry-backoff-ms", registry_policy.reader_retry_backoff().as_millis().to_string(),
+                            "--registry-fetch-max-wait-ms", registry_policy.fetch_max_wait_ms().to_string(),
+                            "--registry-fetch-partition-max-bytes", registry_policy.fetch_partition_max_bytes().to_string(),
                             "--backend-endpoint-template", format!("{{tenant}}-gres.{namespace}.svc:{COMPUTE_PORT}", namespace = obj.namespace().unwrap_or_else(|| "default".into()))
                         ],
                         "ports": [{ "name": "postgres", "containerPort": ACTIVATOR_PORT, "protocol": "TCP" }],
@@ -1200,6 +1211,7 @@ mod tests {
             &gres(),
             "registry.demo.svc:9092",
             "crabka-gres-activator:e2e",
+            &crabka_gres_control::RegistryPolicy::default(),
         )
         .expect("render activator deployment");
         let args = deployment
@@ -1226,6 +1238,14 @@ mod tests {
                 "30000",
                 "--registry-replication-factor",
                 "1",
+                "--registry-topic-create-timeout-ms",
+                "15000",
+                "--registry-reader-retry-backoff-ms",
+                "250",
+                "--registry-fetch-max-wait-ms",
+                "500",
+                "--registry-fetch-partition-max-bytes",
+                "1048576",
                 "--backend-endpoint-template",
                 "{tenant}-gres.ns.svc:5432",
             ]
@@ -1241,11 +1261,12 @@ mod tests {
             registry_poll_ms: Some(600),
             cold_start_timeout_ms: Some(40_000),
             readiness_probe_period_seconds: Some(9),
-            registry_replication_factor: Some(2),
         });
 
+        let policy = crabka_gres_control::RegistryPolicy::new(2, 15_001, 251, 501, 1_048_577)
+            .expect("policy");
         let deployment =
-            render_activator_deployment(&obj, "registry.demo.svc:9092", "activator:test")
+            render_activator_deployment(&obj, "registry.demo.svc:9092", "activator:test", &policy)
                 .expect("render activator deployment");
         let spec = deployment.spec.expect("deployment spec");
         let container = &spec.template.spec.expect("pod spec").containers[0];
@@ -1264,6 +1285,14 @@ mod tests {
                     "40000",
                     "--registry-replication-factor",
                     "2",
+                    "--registry-topic-create-timeout-ms",
+                    "15001",
+                    "--registry-reader-retry-backoff-ms",
+                    "251",
+                    "--registry-fetch-max-wait-ms",
+                    "501",
+                    "--registry-fetch-partition-max-bytes",
+                    "1048577",
                     "--backend-endpoint-template",
                     "{tenant}-gres.ns.svc:5432",
                 ]

@@ -950,6 +950,7 @@ mod config_hash_tests {
             krb5_conf_secret_ref: None,
             tracing: None,
             broker_tuning: None,
+            gres_registry: None,
         };
         let h = combined_config_hash(&spec_a, None, None, None);
         let h_again = combined_config_hash(&spec_a, None, None, None);
@@ -998,6 +999,7 @@ mod config_hash_tests {
             krb5_conf_secret_ref: None,
             tracing: None,
             broker_tuning: None,
+            gres_registry: None,
         };
         let absent = combined_config_hash(&spec, None, None, None);
 
@@ -1038,6 +1040,7 @@ mod config_hash_tests {
             krb5_conf_secret_ref: None,
             tracing: None,
             broker_tuning: None,
+            gres_registry: None,
         };
         let h_off = combined_config_hash(&spec_off, None, None, None);
 
@@ -1088,6 +1091,7 @@ mod config_hash_tests {
             krb5_conf_secret_ref: None,
             tracing: None,
             broker_tuning: None,
+            gres_registry: None,
         };
         let h_none = combined_config_hash(&spec, None, None, None);
         let h_a = combined_config_hash(
@@ -1130,6 +1134,7 @@ mod config_hash_tests {
             krb5_conf_secret_ref: None,
             tracing: None,
             broker_tuning: None,
+            gres_registry: None,
         };
         let h1 = combined_config_hash(&spec, Some("ca-pem"), None, None);
         let h2 = combined_config_hash(&spec, Some("ca-pem"), None, None);
@@ -1163,6 +1168,7 @@ mod config_hash_tests {
                 krb5_conf_secret_ref: None,
                 tracing: None,
                 broker_tuning: None,
+                gres_registry: None,
             },
         );
         k.meta_mut().namespace = Some("default".into());
@@ -1221,6 +1227,7 @@ mod config_hash_tests {
             krb5_conf_secret_ref: None,
             tracing: None,
             broker_tuning: None,
+            gres_registry: None,
         };
         // No explicit pin => hash collapse preserved (== config_hash of
         // the empty config part).
@@ -1265,6 +1272,7 @@ mod config_hash_tests {
                 krb5_conf_secret_ref: None,
                 tracing: None,
                 broker_tuning: None,
+                gres_registry: None,
             },
         );
         k.meta_mut().namespace = Some("default".into());
@@ -1474,6 +1482,7 @@ mod cluster_object_tests {
                 krb5_conf_secret_ref: None,
                 tracing: None,
                 broker_tuning: None,
+                gres_registry: None,
             },
         );
         k.metadata.namespace = Some("default".into());

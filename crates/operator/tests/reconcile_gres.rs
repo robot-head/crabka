@@ -160,7 +160,28 @@ fn gres_tenant(name: &str, gres_name: &str) -> GresTenant {
 }
 
 fn reconcile_rules(include_status: bool) -> Vec<MockRule> {
+    reconcile_rules_with_registry(include_status, None)
+}
+
+fn reconcile_rules_with_registry(
+    include_status: bool,
+    gres_registry: Option<serde_json::Value>,
+) -> Vec<MockRule> {
+    let mut kafka = serde_json::json!({
+        "apiVersion": "crabka.io/v1alpha1",
+        "kind": "Kafka",
+        "metadata": { "name": "demo", "namespace": "ns" },
+        "spec": { "kafkaVersion": "0.1.1" }
+    });
+    if let Some(policy) = gres_registry {
+        kafka["spec"]["gresRegistry"] = policy;
+    }
     let mut rules = vec![
+        MockRule {
+            method: Method::GET,
+            path_substr: "/kafkas/demo".into(),
+            response: json_response(200, &kafka),
+        },
         MockRule {
             method: Method::GET,
             path_substr: "/grestenants".into(),
@@ -325,6 +346,14 @@ async fn renders_pgdog_config_secret_and_status_hash() {
                 "30000",
                 "--registry-replication-factor",
                 "1",
+                "--registry-topic-create-timeout-ms",
+                "15000",
+                "--registry-reader-retry-backoff-ms",
+                "250",
+                "--registry-fetch-max-wait-ms",
+                "500",
+                "--registry-fetch-partition-max-bytes",
+                "1048576",
                 "--backend-endpoint-template",
                 "{tenant}-gres.ns.svc:5432"
             ])
@@ -383,7 +412,16 @@ async fn renders_pgdog_config_secret_and_status_hash() {
 #[tokio::test]
 async fn custom_activator_policy_renders_workload_and_pgdog_timeout_budget() {
     let admin = FakePgdogAdmin::new(vec![true]);
-    let state = MockState::new(reconcile_rules(true));
+    let state = MockState::new(reconcile_rules_with_registry(
+        true,
+        Some(serde_json::json!({
+            "replicationFactor": 32767,
+            "topicCreateTimeoutMs": 15001,
+            "readerRetryBackoffMs": 251,
+            "fetchMaxWaitMs": 501,
+            "fetchPartitionMaxBytes": 1_048_577
+        })),
+    ));
     let mut context = fixture_ctx(mock_client(&state, "ns"), "ns");
     Arc::get_mut(&mut context.config)
         .expect("fixture config is uniquely owned")
@@ -396,7 +434,6 @@ async fn custom_activator_policy_renders_workload_and_pgdog_timeout_budget() {
         registry_poll_ms: Some(600),
         cold_start_timeout_ms: Some(40_000),
         readiness_probe_period_seconds: Some(9),
-        registry_replication_factor: Some(32_767),
     });
 
     reconcile(Arc::new(obj), ctx).await.unwrap();
@@ -431,6 +468,14 @@ async fn custom_activator_policy_renders_workload_and_pgdog_timeout_budget() {
                 "40000",
                 "--registry-replication-factor",
                 "32767",
+                "--registry-topic-create-timeout-ms",
+                "15001",
+                "--registry-reader-retry-backoff-ms",
+                "251",
+                "--registry-fetch-max-wait-ms",
+                "501",
+                "--registry-fetch-partition-max-bytes",
+                "1048577",
                 "--backend-endpoint-template",
                 "{tenant}-gres.ns.svc:5432"
             ])
@@ -537,20 +582,6 @@ async fn invalid_activator_values_fail_before_kubernetes_io() {
                 ..Default::default()
             },
         ),
-        (
-            "spec.activator.registryReplicationFactor",
-            GresActivatorSpec {
-                registry_replication_factor: Some(0),
-                ..Default::default()
-            },
-        ),
-        (
-            "spec.activator.registryReplicationFactor",
-            GresActivatorSpec {
-                registry_replication_factor: Some(32_768),
-                ..Default::default()
-            },
-        ),
     ];
 
     for (path, activator) in cases {
@@ -569,6 +600,54 @@ async fn invalid_activator_values_fail_before_kubernetes_io() {
             "Kubernetes I/O for {path}"
         );
     }
+}
+
+#[tokio::test]
+async fn missing_kafka_causes_no_child_writes() {
+    let state = MockState::new(Vec::new());
+    let ctx = Arc::new(fixture_ctx(mock_client(&state, "ns"), "ns"));
+
+    let error = reconcile(Arc::new(gres()), ctx)
+        .await
+        .expect_err("missing Kafka must fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("referenced Kafka demo does not exist")
+    );
+    let observed = state.take_observed();
+    assert!(observed.len() == 1);
+    assert!(observed[0].method() == Method::GET);
+    assert!(observed[0].uri().to_string().contains("/kafkas/demo"));
+}
+
+#[tokio::test]
+async fn invalid_kafka_registry_policy_causes_no_child_writes() {
+    let kafka = serde_json::json!({
+        "apiVersion": "crabka.io/v1alpha1",
+        "kind": "Kafka",
+        "metadata": { "name": "demo", "namespace": "ns" },
+        "spec": {
+            "kafkaVersion": "0.1.1",
+            "gresRegistry": { "replicationFactor": 32768 }
+        }
+    });
+    let state = MockState::new(vec![MockRule {
+        method: Method::GET,
+        path_substr: "/kafkas/demo".into(),
+        response: json_response(200, &kafka),
+    }]);
+    let ctx = Arc::new(fixture_ctx(mock_client(&state, "ns"), "ns"));
+
+    let error = reconcile(Arc::new(gres()), ctx)
+        .await
+        .expect_err("invalid Kafka registry policy must fail");
+
+    assert!(error.to_string().contains("spec.gresRegistry"));
+    let observed = state.take_observed();
+    assert!(observed.len() == 1);
+    assert!(observed[0].method() == Method::GET);
 }
 
 #[tokio::test]
@@ -765,7 +844,11 @@ async fn fleet_reconcile_excludes_unsupported_multi_range_tenants_from_pgdog_con
  {
     let admin = FakePgdogAdmin::new(vec![true]);
     let mut rules = reconcile_rules(true);
-    rules[0].response = json_response(200, &tenant_list_body_with_multi_range_tenant());
+    rules
+        .iter_mut()
+        .find(|rule| rule.path_substr == "/grestenants")
+        .expect("tenant list rule")
+        .response = json_response(200, &tenant_list_body_with_multi_range_tenant());
     let state = MockState::new(rules);
     let ctx = Arc::new(
         fixture_ctx(mock_client(&state, "ns"), "ns").with_pgdog_admin_for_test(admin.clone()),

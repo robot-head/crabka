@@ -7,8 +7,8 @@ use crabka_client_admin::{
     PermissionType, ResourceType, ScramDeletion, ScramUpsertion,
 };
 use crabka_gres_control::{
-    RangeBoundary, RangeLayoutEntry, SqlUser, TENANT_REGISTRY_TOPIC, TenantId, TenantName,
-    TenantRecord, TenantState, tenant_config_topic,
+    RangeBoundary, RangeLayoutEntry, SqlUser, TenantId, TenantName, TenantRecord, TenantState,
+    tenant_config_topic,
 };
 use crabka_security::{
     ca::{SubjectAltName, generate_cluster_ca, issue_broker_cert},
@@ -117,6 +117,7 @@ struct ReadyTenant {
     tenant_name: TenantName,
     cluster: String,
     bootstrap: String,
+    policy: crabka_gres_control::RegistryPolicy,
     defaults: EffectiveDefaults,
     kafka_sasl: bool,
 }
@@ -189,8 +190,26 @@ async fn prepare_tenant(
             Duration::from_secs(30),
         )));
     };
+    let policy = kafka
+        .spec
+        .gres_registry
+        .as_ref()
+        .map_or_else(
+            || Ok(crabka_gres_control::RegistryPolicy::default()),
+            crate::crd::GresRegistrySpec::policy,
+        )
+        .map_err(|error| ReconcileError::Malformed(format!("spec.gresRegistry: {error}")))?;
     if obj.meta().deletion_timestamp.is_some() {
-        cleanup_tenant(ctx, &cluster, &bootstrap, &tenant_name, &name).await;
+        cleanup_tenant(
+            ctx,
+            &namespace,
+            &cluster,
+            &bootstrap,
+            &policy,
+            &tenant_name,
+            &name,
+        )
+        .await;
         remove_finalizer(&tenant_api, &name).await?;
         return Ok(TenantPreparation::Requeue(Action::await_change()));
     }
@@ -205,6 +224,7 @@ async fn prepare_tenant(
         tenant_name,
         cluster,
         bootstrap,
+        policy,
         defaults: effective_defaults(gres.spec.defaults.as_ref(), obj.spec.overrides.as_ref()),
         kafka_sasl: kafka_internal_listener_requires_sasl(&kafka),
     })))
@@ -246,13 +266,13 @@ async fn reconcile_inner(
         tenant_name,
         cluster,
         bootstrap,
+        policy,
         defaults,
         kafka_sasl,
     } = *ready;
-    let wal_topic = wal_topic(&tenant_name);
+    let (wal_topic, cfg_topic) = (wal_topic(&tenant_name), tenant_config_topic(&tenant_name));
     let spec_ranges = effective_ranges(&obj.spec.ranges)?;
-    let cfg_topic = tenant_config_topic(&tenant_name);
-    let control = ctx.gres_control_for(&cluster, &bootstrap).await?;
+    let control = Context::gres_control_for(&ctx, &ns, &cluster, &bootstrap, &policy).await?;
     let current_record = control.get_tenant(&tenant_name).await?;
     let split_operations = active_operations(control.list_split_operations(&tenant_name).await?);
     let active_split = split_operations.first().cloned();
@@ -316,7 +336,6 @@ async fn reconcile_inner(
             current_record.as_ref(),
             &tenant_ranges,
         )?;
-
         let range_parking_progress = park_retiring_ranges(
             &control,
             &mut admin,
@@ -325,7 +344,6 @@ async fn reconcile_inner(
             current_record.as_ref(),
         )
         .await?;
-
         let parking_progress = if matches!(
             lifecycle_state,
             TenantState::Parking | TenantState::Suspended
@@ -357,6 +375,7 @@ async fn reconcile_inner(
                     bootstrap: &bootstrap,
                     wal_topic: &wal_topic,
                     config_topic: &cfg_topic,
+                    policy: &policy,
                     lifecycle_state: record.state,
                     kafka_sasl,
                     range_control_enabled,
@@ -374,7 +393,6 @@ async fn reconcile_inner(
             record.ensure_valid()?;
         }
         drop(admin);
-
         if parking_progress == ParkingProgress::Complete
             || range_parking_progress == ParkingProgress::Complete
         {
@@ -396,7 +414,6 @@ async fn reconcile_inner(
         } else if let Some(current) = current_record.as_ref() {
             record = current.clone();
         }
-
         reconcile_compute_and_status(&ComputeStatusConfig {
             ctx: &ctx,
             namespace: &ns,
@@ -409,6 +426,7 @@ async fn reconcile_inner(
             bootstrap: &bootstrap,
             wal_topic: &wal_topic,
             config_topic: &cfg_topic,
+            policy: &policy,
             record: &record,
             kafka_sasl,
             range_control_enabled,
@@ -417,7 +435,6 @@ async fn reconcile_inner(
         .await
     }
     .await;
-
     match reconcile_result {
         Ok(action) => Ok(action),
         Err(error) => {
@@ -464,21 +481,12 @@ async fn provision_tenant_resources(
     admin: &mut tokio::sync::MutexGuard<'_, dyn crabka_client_admin::AdminClientLike + Send>,
     config: &TenantResourceConfig<'_>,
 ) -> Result<String, ReconcileError> {
-    let compact = BTreeMap::from([("cleanup.policy".to_string(), "compact".to_string())]);
-    let mut topic_specs = vec![
-        CreateTopicSpec {
-            name: config.config_topic.to_owned(),
-            partitions: 1,
-            replicas: config.defaults.wal_replication,
-            configs: compact.clone(),
-        },
-        CreateTopicSpec {
-            name: TENANT_REGISTRY_TOPIC.to_string(),
-            partitions: 1,
-            replicas: config.defaults.wal_replication,
-            configs: compact,
-        },
-    ];
+    let mut topic_specs = vec![CreateTopicSpec {
+        name: config.config_topic.to_owned(),
+        partitions: 1,
+        replicas: config.defaults.wal_replication,
+        configs: BTreeMap::from([("cleanup.policy".to_string(), "compact".to_string())]),
+    }];
     if matches!(
         config.lifecycle_state,
         TenantState::Active | TenantState::ResumeRequested
@@ -578,6 +586,7 @@ struct ComputeStatusConfig<'a> {
     bootstrap: &'a str,
     wal_topic: &'a str,
     config_topic: &'a str,
+    policy: &'a crabka_gres_control::RegistryPolicy,
     record: &'a TenantRecord,
     kafka_sasl: bool,
     range_control_enabled: bool,
@@ -596,6 +605,7 @@ async fn reconcile_compute_and_status(
             bootstrap: config.bootstrap,
             wal_topic: config.wal_topic,
             config_topic: config.config_topic,
+            policy: config.policy,
             lifecycle_state: config.record.state,
             kafka_sasl: config.kafka_sasl,
             range_control_enabled: config.range_control_enabled,
@@ -705,6 +715,7 @@ struct ComputeDeploymentConfig<'a> {
     bootstrap: &'a str,
     wal_topic: &'a str,
     config_topic: &'a str,
+    policy: &'a crabka_gres_control::RegistryPolicy,
     lifecycle_state: TenantState,
     kafka_sasl: bool,
     range_control_enabled: bool,
@@ -735,6 +746,7 @@ async fn reconcile_compute_deployments(
                 bootstrap: config.bootstrap,
                 wal_topic: config.wal_topic,
                 config_topic: config.config_topic,
+                policy: config.policy,
                 replicas: compute_replicas(config.lifecycle_state),
                 operator_config: &ctx.config,
                 kafka_sasl: config.kafka_sasl,
@@ -1082,17 +1094,21 @@ where
 
 async fn cleanup_tenant(
     ctx: &Context,
-    cluster: &str,
+    namespace: &str,
+    kafka_name: &str,
     bootstrap: &str,
+    policy: &crabka_gres_control::RegistryPolicy,
     tenant: &TenantName,
     _tenant_name: &str,
 ) {
-    if let Ok(control) = ctx.gres_control_for(cluster, bootstrap).await
+    if let Ok(control) = ctx
+        .gres_control_for(namespace, kafka_name, bootstrap, policy)
+        .await
         && let Err(err) = control.delete_tenant(tenant).await
     {
         tracing::warn!(error = %err, tenant = %tenant, "gres tenant tombstone write failed");
     }
-    let Ok(admin_handle) = ctx.admin_client_for(cluster, bootstrap).await else {
+    let Ok(admin_handle) = ctx.admin_client_for(kafka_name, bootstrap).await else {
         return;
     };
     let mut admin = admin_handle.lock().await;
@@ -1859,6 +1875,7 @@ struct DeploymentRenderConfig<'a> {
     bootstrap: &'a str,
     wal_topic: &'a str,
     config_topic: &'a str,
+    policy: &'a crabka_gres_control::RegistryPolicy,
     replicas: i32,
     operator_config: &'a crate::config::OperatorConfig,
     kafka_sasl: bool,
@@ -1882,6 +1899,16 @@ fn render_deployment(
         config.bootstrap.to_owned(),
         "--tenant".to_owned(),
         name.clone(),
+        "--registry-replication-factor".to_owned(),
+        config.policy.replication_factor().to_string(),
+        "--registry-topic-create-timeout-ms".to_owned(),
+        config.policy.topic_create_timeout_ms().to_string(),
+        "--registry-reader-retry-backoff-ms".to_owned(),
+        config.policy.reader_retry_backoff().as_millis().to_string(),
+        "--registry-fetch-max-wait-ms".to_owned(),
+        config.policy.fetch_max_wait_ms().to_string(),
+        "--registry-fetch-partition-max-bytes".to_owned(),
+        config.policy.fetch_partition_max_bytes().to_string(),
     ];
     if config.range_control_enabled {
         args.extend([
@@ -2262,6 +2289,7 @@ mod tests {
                 bootstrap: "k:9092",
                 wal_topic: &wal_topic,
                 config_topic: "__gres_cfg.tenant-a",
+                policy: &crabka_gres_control::RegistryPolicy::default(),
                 replicas: 1,
                 operator_config: &operator_config,
                 kafka_sasl,
@@ -2285,12 +2313,9 @@ mod tests {
             acls.iter()
                 .any(|acl| acl.resource_name == "__gres_cfg.tenant-a")
         );
-        assert!(
-            !acls
-                .iter()
-                .any(|acl| acl.resource_name == TENANT_REGISTRY_TOPIC
-                    && acl.operation == AclOperation::Read)
-        );
+        assert!(!acls.iter().any(|acl| acl.resource_name
+            == crabka_gres_control::TENANT_REGISTRY_TOPIC
+            && acl.operation == AclOperation::Read));
         assert!(
             acls.iter()
                 .any(|acl| acl.resource_type == ResourceType::TransactionalId
@@ -2369,6 +2394,63 @@ mod tests {
                 .clone()
                 .unwrap();
             assert!(!args.iter().any(|arg| arg == "--ranges"));
+        }
+    }
+
+    #[test]
+    fn compute_workload_renders_custom_policy() {
+        let mut obj = tenant();
+        obj.metadata.namespace = Some("ns".into());
+        obj.metadata.uid = Some("uid".into());
+        let ranges = [GresTenantRangeSpec {
+            range_id: 0,
+            end_key: None,
+        }];
+        let operator_config = ConfigArgs::parse_from(["operator"]).config;
+        let policy = crabka_gres_control::RegistryPolicy::new(2, 15_001, 251, 501, 1_048_577)
+            .expect("policy");
+        let deployment = render_deployment(
+            &obj,
+            &ranges[0],
+            &DeploymentRenderConfig {
+                all_ranges: &ranges,
+                image: "image",
+                bootstrap: "k:9092",
+                wal_topic: "__gres_wal.tenant-a.r0",
+                config_topic: "__gres_cfg.tenant-a",
+                policy: &policy,
+                replicas: 1,
+                operator_config: &operator_config,
+                kafka_sasl: false,
+                range_control_enabled: false,
+                range_tls_hash: None,
+            },
+        )
+        .expect("render deployment");
+        let args = deployment
+            .spec
+            .as_ref()
+            .expect("spec")
+            .template
+            .spec
+            .as_ref()
+            .expect("pod spec")
+            .containers[0]
+            .args
+            .as_ref()
+            .expect("args");
+
+        for pair in [
+            ["--registry-replication-factor", "2"],
+            ["--registry-topic-create-timeout-ms", "15001"],
+            ["--registry-reader-retry-backoff-ms", "251"],
+            ["--registry-fetch-max-wait-ms", "501"],
+            ["--registry-fetch-partition-max-bytes", "1048577"],
+        ] {
+            assert!(
+                args.windows(2).any(|window| window == pair),
+                "missing {pair:?}: {args:?}"
+            );
         }
     }
 

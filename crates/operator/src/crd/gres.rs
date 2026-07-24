@@ -71,11 +71,6 @@ pub struct GresActivatorSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
     pub readiness_probe_period_seconds: Option<i32>,
-
-    /// Replication factor for the tenant registry topic.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1, max = 32_767))]
-    pub registry_replication_factor: Option<i32>,
 }
 
 /// Dry-run balancer integration settings for a Gres fleet.
@@ -394,7 +389,6 @@ mod tests {
                 registry_poll_ms: Some(500),
                 cold_start_timeout_ms: Some(45_000),
                 readiness_probe_period_seconds: Some(7),
-                registry_replication_factor: Some(32_767),
             }),
             defaults: Some(TenantDefaults {
                 wal_replication: Some(3),
@@ -420,7 +414,7 @@ mod tests {
         assert!(json.contains("\"listenPort\":6432"), "got: {json}");
         assert!(
             json.contains(
-                "\"activator\":{\"image\":\"example.test/activator:v2\",\"replicas\":3,\"registryPollMs\":500,\"coldStartTimeoutMs\":45000,\"readinessProbePeriodSeconds\":7,\"registryReplicationFactor\":32767}"
+                "\"activator\":{\"image\":\"example.test/activator:v2\",\"replicas\":3,\"registryPollMs\":500,\"coldStartTimeoutMs\":45000,\"readinessProbePeriodSeconds\":7}"
             ),
             "got: {json}"
         );
@@ -445,17 +439,13 @@ mod tests {
             "registryPollMs",
             "coldStartTimeoutMs",
             "readinessProbePeriodSeconds",
-            "registryReplicationFactor",
         ] {
             assert!(
                 activator["properties"][field]["minimum"].as_f64() == Some(1.0),
                 "missing minimum for {field}: {activator}"
             );
         }
-        assert!(
-            activator["properties"]["registryReplicationFactor"]["maximum"].as_f64()
-                == Some(32_767.0)
-        );
+        assert!(activator["properties"]["registryReplicationFactor"].is_null());
     }
 
     #[test]

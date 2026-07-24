@@ -64,6 +64,7 @@ fn kafka_cr(name: &str, namespace: &str) -> Kafka {
             krb5_conf_secret_ref: None,
             tracing: None,
             broker_tuning: None,
+            gres_registry: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());
@@ -93,6 +94,7 @@ fn kafka_cr_with_metrics(name: &str, namespace: &str, metrics: Option<MetricsCon
             krb5_conf_secret_ref: None,
             tracing: None,
             broker_tuning: None,
+            gres_registry: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());
@@ -126,6 +128,7 @@ fn kafka_cr_with_network_policy(
             krb5_conf_secret_ref: None,
             tracing: None,
             broker_tuning: None,
+            gres_registry: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());
@@ -161,6 +164,7 @@ fn kafka_cr_with_config(
             krb5_conf_secret_ref: None,
             tracing: None,
             broker_tuning: None,
+            gres_registry: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());
@@ -633,6 +637,7 @@ fn kafka_cr_with_versions(
             krb5_conf_secret_ref: None,
             tracing: None,
             broker_tuning: None,
+            gres_registry: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());
@@ -662,6 +667,7 @@ fn kafka_cr_with_logging(name: &str, namespace: &str, logging: Option<Logging>) 
             krb5_conf_secret_ref: None,
             tracing: None,
             broker_tuning: None,
+            gres_registry: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());

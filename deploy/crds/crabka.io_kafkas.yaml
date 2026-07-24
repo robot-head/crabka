@@ -773,6 +773,42 @@ spec:
                 required:
                 - secretKeyRef
                 type: object
+              gresRegistry:
+                description: Shared creation and reader policy for the Gres tenant registry topic.
+                nullable: true
+                properties:
+                  fetchMaxWaitMs:
+                    description: Maximum time a registry fetch waits for data.
+                    format: int32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  fetchPartitionMaxBytes:
+                    description: Maximum bytes fetched from the registry partition.
+                    format: int32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  readerRetryBackoffMs:
+                    description: Registry reader retry delay in milliseconds.
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  replicationFactor:
+                    description: Registry topic replication factor.
+                    format: int32
+                    maximum: 32767.0
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  topicCreateTimeoutMs:
+                    description: Kafka topic creation timeout in milliseconds.
+                    format: int32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                type: object
               interBrokerKerberos:
                 description: |-
                   Inter-broker Kerberos initiate config. Required when

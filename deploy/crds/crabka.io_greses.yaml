@@ -49,13 +49,6 @@ spec:
                     minimum: 1.0
                     nullable: true
                     type: integer
-                  registryReplicationFactor:
-                    description: Replication factor for the tenant registry topic.
-                    format: int32
-                    maximum: 32767.0
-                    minimum: 1.0
-                    nullable: true
-                    type: integer
                   replicas:
                     description: Number of activator replicas.
                     format: int32
