@@ -46,6 +46,12 @@ pub struct GresSpec {
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct GresActivatorSpec {
+    /// Container image override. When absent the operator uses its global
+    /// activator image override or compiled default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1))]
+    pub image: Option<String>,
+
     /// Number of activator replicas.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
@@ -383,6 +389,7 @@ mod tests {
                 },
             },
             activator: Some(GresActivatorSpec {
+                image: Some("example.test/activator:v2".into()),
                 replicas: Some(3),
                 registry_poll_ms: Some(500),
                 cold_start_timeout_ms: Some(45_000),
@@ -413,7 +420,7 @@ mod tests {
         assert!(json.contains("\"listenPort\":6432"), "got: {json}");
         assert!(
             json.contains(
-                "\"activator\":{\"replicas\":3,\"registryPollMs\":500,\"coldStartTimeoutMs\":45000,\"readinessProbePeriodSeconds\":7,\"registryReplicationFactor\":32767}"
+                "\"activator\":{\"image\":\"example.test/activator:v2\",\"replicas\":3,\"registryPollMs\":500,\"coldStartTimeoutMs\":45000,\"readinessProbePeriodSeconds\":7,\"registryReplicationFactor\":32767}"
             ),
             "got: {json}"
         );
@@ -432,6 +439,7 @@ mod tests {
             ["properties"]["activator"];
 
         assert!(activator["type"] == "object");
+        assert!(activator["properties"]["image"]["minLength"].as_u64() == Some(1));
         for field in [
             "replicas",
             "registryPollMs",
