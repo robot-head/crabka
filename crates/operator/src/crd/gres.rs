@@ -8,7 +8,11 @@ use crabka_gres_control::{
     DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS, PgdogConnectAttempts, PgdogPoolerMode, PositiveI32,
     PositiveMillis, PositiveUsize,
 };
-use crabka_gres_substrate::{DEFAULT_CHECKPOINT_RETAIN, DEFAULT_PART_MAX_BYTES};
+use crabka_gres_substrate::{
+    DEFAULT_CHECKPOINT_RETAIN, DEFAULT_PART_MAX_BYTES, DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES,
+    DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT_MS, DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES,
+    DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES,
+};
 use kube::CustomResource;
 use refined_type::rule::GreaterI32;
 use schemars::JsonSchema;
@@ -126,6 +130,26 @@ pub struct GresComputeSpec {
     #[schemars(range(min = 1))]
     pub range0_follower_poll_interval_ms: Option<u64>,
 
+    /// Kafka broker long-poll wait for committed-WAL recovery fetches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub wal_recovery_fetch_max_wait_ms: Option<i32>,
+
+    /// Per-partition byte limit for committed-WAL recovery fetches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub wal_recovery_fetch_partition_max_bytes: Option<i32>,
+
+    /// Whole-response byte limit for committed-WAL recovery fetches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub wal_recovery_fetch_response_max_bytes: Option<i32>,
+
+    /// Consecutive empty-fetch retries after the first empty recovery fetch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub wal_recovery_empty_fetch_retries: Option<usize>,
+
     /// Tenant lifecycle reconciliation interval in milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
@@ -141,6 +165,10 @@ pub(crate) struct EffectiveGresComputePolicy {
     pub(crate) checkpoint_poll_interval_ms: PositiveMillis,
     pub(crate) idle_suspend_poll_interval_ms: PositiveMillis,
     pub(crate) range0_follower_poll_interval_ms: PositiveMillis,
+    pub(crate) wal_recovery_fetch_max_wait_ms: PositiveI32,
+    pub(crate) wal_recovery_fetch_partition_max_bytes: PositiveI32,
+    pub(crate) wal_recovery_fetch_response_max_bytes: PositiveI32,
+    pub(crate) wal_recovery_empty_fetch_retries: PositiveUsize,
     pub(crate) lifecycle_requeue_ms: PositiveMillis,
 }
 
@@ -182,6 +210,26 @@ impl GresComputeSpec {
                     .unwrap_or(DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS),
             )
             .map_err(|error| format!("spec.compute.range0FollowerPollIntervalMs: {error}"))?,
+            wal_recovery_fetch_max_wait_ms: PositiveI32::new(
+                self.wal_recovery_fetch_max_wait_ms
+                    .unwrap_or(DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT_MS),
+            )
+            .map_err(|error| format!("spec.compute.walRecoveryFetchMaxWaitMs: {error}"))?,
+            wal_recovery_fetch_partition_max_bytes: PositiveI32::new(
+                self.wal_recovery_fetch_partition_max_bytes
+                    .unwrap_or(DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES),
+            )
+            .map_err(|error| format!("spec.compute.walRecoveryFetchPartitionMaxBytes: {error}"))?,
+            wal_recovery_fetch_response_max_bytes: PositiveI32::new(
+                self.wal_recovery_fetch_response_max_bytes
+                    .unwrap_or(DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES),
+            )
+            .map_err(|error| format!("spec.compute.walRecoveryFetchResponseMaxBytes: {error}"))?,
+            wal_recovery_empty_fetch_retries: PositiveUsize::new(
+                self.wal_recovery_empty_fetch_retries
+                    .unwrap_or(DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES),
+            )
+            .map_err(|error| format!("spec.compute.walRecoveryEmptyFetchRetries: {error}"))?,
             lifecycle_requeue_ms: PositiveMillis::new(
                 self.lifecycle_requeue_ms
                     .unwrap_or(DEFAULT_LIFECYCLE_REQUEUE_MS),
@@ -831,6 +879,90 @@ mod tests {
             ),
         ] {
             let error = policy.effective_policy().expect_err("boundary must fail");
+            assert!(error.contains(path), "got: {error}");
+        }
+    }
+
+    #[test]
+    fn compute_wal_recovery_policy_round_trips_validates_and_uses_substrate_defaults() {
+        let policy = GresComputeSpec {
+            wal_recovery_fetch_max_wait_ms: Some(11),
+            wal_recovery_fetch_partition_max_bytes: Some(22),
+            wal_recovery_fetch_response_max_bytes: Some(33),
+            wal_recovery_empty_fetch_retries: Some(44),
+            ..GresComputeSpec::default()
+        };
+        let json = serde_json::to_string(&policy).expect("serialize compute policy");
+        let yaml = serde_yaml::to_string(&policy).expect("serialize compute policy");
+        assert!(serde_json::from_str::<GresComputeSpec>(&json).unwrap() == policy);
+        assert!(serde_yaml::from_str::<GresComputeSpec>(&yaml).unwrap() == policy);
+
+        let crd = serde_json::to_value(Gres::crd()).expect("serialize Gres CRD");
+        let properties = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
+            ["properties"]["compute"]["properties"];
+        for field in [
+            "walRecoveryFetchMaxWaitMs",
+            "walRecoveryFetchPartitionMaxBytes",
+            "walRecoveryFetchResponseMaxBytes",
+            "walRecoveryEmptyFetchRetries",
+        ] {
+            assert!(
+                properties[field]["minimum"].as_f64() == Some(1.0),
+                "missing minimum for {field}: {properties}"
+            );
+        }
+
+        let defaults = GresComputeSpec::default()
+            .effective_policy()
+            .expect("default compute policy");
+        assert!(
+            defaults.wal_recovery_fetch_max_wait_ms.into_value()
+                == DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT_MS
+        );
+        assert!(
+            defaults.wal_recovery_fetch_partition_max_bytes.into_value()
+                == DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES
+        );
+        assert!(
+            defaults.wal_recovery_fetch_response_max_bytes.into_value()
+                == DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES
+        );
+        assert!(
+            defaults.wal_recovery_empty_fetch_retries.into_value()
+                == DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES
+        );
+
+        for (policy, path) in [
+            (
+                GresComputeSpec {
+                    wal_recovery_fetch_max_wait_ms: Some(0),
+                    ..GresComputeSpec::default()
+                },
+                "spec.compute.walRecoveryFetchMaxWaitMs",
+            ),
+            (
+                GresComputeSpec {
+                    wal_recovery_fetch_partition_max_bytes: Some(0),
+                    ..GresComputeSpec::default()
+                },
+                "spec.compute.walRecoveryFetchPartitionMaxBytes",
+            ),
+            (
+                GresComputeSpec {
+                    wal_recovery_fetch_response_max_bytes: Some(0),
+                    ..GresComputeSpec::default()
+                },
+                "spec.compute.walRecoveryFetchResponseMaxBytes",
+            ),
+            (
+                GresComputeSpec {
+                    wal_recovery_empty_fetch_retries: Some(0),
+                    ..GresComputeSpec::default()
+                },
+                "spec.compute.walRecoveryEmptyFetchRetries",
+            ),
+        ] {
+            let error = policy.effective_policy().expect_err("zero must fail");
             assert!(error.contains(path), "got: {error}");
         }
     }

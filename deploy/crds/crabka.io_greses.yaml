@@ -228,6 +228,30 @@ spec:
                     minimum: 1.0
                     nullable: true
                     type: integer
+                  walRecoveryEmptyFetchRetries:
+                    description: Consecutive empty-fetch retries after the first empty recovery fetch.
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  walRecoveryFetchMaxWaitMs:
+                    description: Kafka broker long-poll wait for committed-WAL recovery fetches.
+                    format: int32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  walRecoveryFetchPartitionMaxBytes:
+                    description: Per-partition byte limit for committed-WAL recovery fetches.
+                    format: int32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  walRecoveryFetchResponseMaxBytes:
+                    description: Whole-response byte limit for committed-WAL recovery fetches.
+                    format: int32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
                 type: object
               defaults:
                 description: |-

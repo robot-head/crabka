@@ -2003,6 +2003,30 @@ fn render_deployment(
         config.policy.fetch_max_wait_ms().to_string(),
         "--registry-fetch-partition-max-bytes".to_owned(),
         config.policy.fetch_partition_max_bytes().to_string(),
+        "--wal-recovery-fetch-max-wait-ms".to_owned(),
+        config
+            .compute_policy
+            .wal_recovery_fetch_max_wait_ms
+            .into_value()
+            .to_string(),
+        "--wal-recovery-fetch-partition-max-bytes".to_owned(),
+        config
+            .compute_policy
+            .wal_recovery_fetch_partition_max_bytes
+            .into_value()
+            .to_string(),
+        "--wal-recovery-fetch-response-max-bytes".to_owned(),
+        config
+            .compute_policy
+            .wal_recovery_fetch_response_max_bytes
+            .into_value()
+            .to_string(),
+        "--wal-recovery-empty-fetch-retries".to_owned(),
+        config
+            .compute_policy
+            .wal_recovery_empty_fetch_retries
+            .into_value()
+            .to_string(),
     ];
     if config.range_control_enabled {
         args.extend([
@@ -2686,6 +2710,85 @@ mod tests {
                 .iter()
                 .any(|arg| arg == "--range0-follower-poll-interval-ms")
         );
+        assert!(
+            args.windows(8).any(|window| {
+                window
+                    == [
+                        "--wal-recovery-fetch-max-wait-ms",
+                        "100",
+                        "--wal-recovery-fetch-partition-max-bytes",
+                        "1048576",
+                        "--wal-recovery-fetch-response-max-bytes",
+                        "52428800",
+                        "--wal-recovery-empty-fetch-retries",
+                        "100",
+                    ]
+            }),
+            "got: {args:?}"
+        );
+    }
+
+    #[test]
+    fn compute_wal_recovery_args_are_exact_in_single_and_multi_range_modes() {
+        let mut obj = tenant();
+        obj.metadata.namespace = Some("ns".into());
+        obj.metadata.uid = Some("uid".into());
+        let ranges = [GresTenantRangeSpec {
+            range_id: 0,
+            end_key: None,
+        }];
+        let operator_config = ConfigArgs::parse_from(["operator"]).config;
+        let compute_policy = crate::crd::gres::GresComputeSpec {
+            wal_recovery_fetch_max_wait_ms: Some(11),
+            wal_recovery_fetch_partition_max_bytes: Some(22),
+            wal_recovery_fetch_response_max_bytes: Some(33),
+            wal_recovery_empty_fetch_retries: Some(44),
+            ..crate::crd::gres::GresComputeSpec::default()
+        }
+        .effective_policy()
+        .expect("compute policy");
+        for range_control_enabled in [false, true] {
+            let deployment = render_deployment(
+                &obj,
+                &ranges[0],
+                &DeploymentRenderConfig {
+                    all_ranges: &ranges,
+                    image: "image",
+                    readiness_probe_period_seconds: 5,
+                    bootstrap: "k:9092",
+                    wal_topic: "__gres_wal.tenant-a.r0",
+                    config_topic: "__gres_cfg.tenant-a",
+                    policy: &crabka_gres_control::RegistryPolicy::default(),
+                    compute_policy,
+                    replicas: 1,
+                    operator_config: &operator_config,
+                    kafka_sasl: false,
+                    range_control_enabled,
+                    range_tls_hash: None,
+                },
+            )
+            .expect("render deployment");
+            let args = deployment.spec.unwrap().template.spec.unwrap().containers[0]
+                .args
+                .clone()
+                .unwrap();
+            assert!(
+                args.windows(8).any(|window| {
+                    window
+                        == [
+                            "--wal-recovery-fetch-max-wait-ms",
+                            "11",
+                            "--wal-recovery-fetch-partition-max-bytes",
+                            "22",
+                            "--wal-recovery-fetch-response-max-bytes",
+                            "33",
+                            "--wal-recovery-empty-fetch-retries",
+                            "44",
+                        ]
+                }),
+                "got: {args:?}"
+            );
+        }
     }
 
     #[test]
