@@ -1802,6 +1802,16 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_scalars_enforce_runtime_boundaries() {
+        use crate::{CheckpointPartBytes, PositiveUsize};
+
+        assert!("8".parse::<CheckpointPartBytes>().is_ok());
+        assert!("7".parse::<CheckpointPartBytes>().is_err());
+        assert!("1".parse::<PositiveUsize>().is_ok());
+        assert!("0".parse::<PositiveUsize>().is_err());
+    }
+
+    #[test]
     fn registry_policy_reaches_topic_and_fetch_requests() {
         let policy = RegistryPolicy::new(7, 12_345, 678, 901, 234_567).unwrap();
 

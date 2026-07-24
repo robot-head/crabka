@@ -1,10 +1,12 @@
 //! Control-plane tenant registry for Chapter Gres.
 
+mod checkpoint;
 pub mod error;
 pub mod pgdog;
 pub mod record;
 pub mod registry;
 
+pub use checkpoint::{CheckpointPartBytes, PositiveUsize};
 pub use error::ControlError;
 pub use pgdog::{
     PgdogConnectAttempts, PgdogGeneral, PgdogPoolerMode, PgdogRenderInput, PgdogTimeouts,

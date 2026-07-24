@@ -221,6 +221,12 @@ fn test_args(listen: String, data_dir: Option<std::path::PathBuf>) -> crabka_gre
         checkpoint_bytes: None,
         checkpoint_part_bytes: None,
         checkpoint_retain: None,
+        checkpoint_delete_records_timeout_ms: crabka_gres_control::PositiveI32::new(30_000)
+            .expect("default"),
+        checkpoint_poll_interval_ms: crabka_gres_control::PositiveMillis::new(1_000)
+            .expect("default"),
+        idle_suspend_poll_interval_ms: crabka_gres_control::PositiveMillis::new(1_000)
+            .expect("default"),
     }
 }
 
@@ -558,6 +564,8 @@ async fn live_multirange_transfer_stages_populated_successor_without_publishing_
             bytes_threshold: 1,
             part_max_bytes: crabka_gres_substrate::DEFAULT_PART_MAX_BYTES,
             retain_newest: 2,
+            delete_records_timeout_ms: 30_000,
+            poll_interval: std::time::Duration::from_secs(1),
         }),
         kafka_security: None,
         ranges: Some("0,5".to_string()),
@@ -911,6 +919,8 @@ fn activation_crash_config(
             bytes_threshold: 1,
             part_max_bytes: crabka_gres_substrate::DEFAULT_PART_MAX_BYTES,
             retain_newest: 16,
+            delete_records_timeout_ms: 30_000,
+            poll_interval: std::time::Duration::from_secs(1),
         }),
         kafka_security: None,
         ranges: Some("0,5".to_owned()),
@@ -2444,6 +2454,8 @@ async fn live_populated_hash_split_partitions_physical_rows_and_sequence() {
             bytes_threshold: 1,
             part_max_bytes: crabka_gres_substrate::DEFAULT_PART_MAX_BYTES,
             retain_newest: 2,
+            delete_records_timeout_ms: 30_000,
+            poll_interval: std::time::Duration::from_secs(1),
         }),
         kafka_security: None,
         ranges: Some("0,5".to_string()),
@@ -2607,6 +2619,8 @@ async fn live_multirange_transfer_rejects_concurrent_pause_without_waiting() {
             bytes_threshold: 1,
             part_max_bytes: crabka_gres_substrate::DEFAULT_PART_MAX_BYTES,
             retain_newest: 2,
+            delete_records_timeout_ms: 30_000,
+            poll_interval: std::time::Duration::from_secs(1),
         }),
         kafka_security: None,
         ranges: Some("0,200".to_string()),
