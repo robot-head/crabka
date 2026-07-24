@@ -62,10 +62,6 @@ const NO_PRODUCER_EPOCH: i16 = -1;
 /// tracking is not implemented yet, so every marker carries the initial epoch.
 const INITIAL_COORDINATOR_EPOCH: i32 = 0;
 
-/// TLS SNI server name used on inter-broker dials — matches the convention
-/// of the replicator / heartbeat / auto-join inter-broker clients.
-const INTER_BROKER_SNI: &str = "localhost";
-
 #[tracing::instrument(
     name = "handle_end_txn",
     level = "info",
@@ -331,6 +327,7 @@ async fn dispatch_transaction_markers(
             inter_broker_client: &broker.inter_broker_client,
             inter_broker_protocol: broker.inter_broker_listener_protocol,
             inter_broker_listener_name: &broker.config.inter_broker_listener_name,
+            inter_broker_server_name: &broker.config.inter_broker_server_name,
         },
         partitions,
         snapshot,
@@ -494,6 +491,7 @@ struct MarkerDispatchContext<'a> {
     inter_broker_client: &'a InterBrokerClient,
     inter_broker_protocol: ListenerProtocol,
     inter_broker_listener_name: &'a str,
+    inter_broker_server_name: &'a str,
 }
 
 async fn dispatch_markers(
@@ -578,6 +576,7 @@ async fn send_write_txn_markers(
         inter_broker_client,
         inter_broker_protocol,
         inter_broker_listener_name,
+        inter_broker_server_name,
     } = context;
     let Some(broker_info) = image.broker(leader_node) else {
         return Err(BrokerError::Txn(format!(
@@ -637,7 +636,13 @@ async fn send_write_txn_markers(
         ..crabka_client_core::ConnectionOptions::default()
     };
     let conn = inter_broker_client
-        .connect_as_connection(&host, port, inter_broker_protocol, INTER_BROKER_SNI, opts)
+        .connect_as_connection(
+            &host,
+            port,
+            inter_broker_protocol,
+            inter_broker_server_name,
+            opts,
+        )
         .await
         .map_err(|e| BrokerError::Txn(format!("EndTxn: connect to {host}:{port}: {e}")))?;
 
@@ -915,6 +920,7 @@ mod tests {
                 inter_broker_client: &client,
                 inter_broker_protocol: ListenerProtocol::Plaintext,
                 inter_broker_listener_name: listener_name,
+                inter_broker_server_name: "localhost",
             },
             leader,
             &entry,
@@ -1000,6 +1006,82 @@ mod tests {
         assert!(
             matches!(&err, BrokerError::Txn(m) if m.contains("connect to 127.0.0.1:9")),
             "expected fallback to top-level 127.0.0.1:9, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_marker_dispatch_dials_with_configured_server_name() {
+        use std::sync::Arc;
+
+        use tokio::net::TcpListener;
+        use tokio_rustls::{
+            LazyConfigAcceptor,
+            rustls::{ClientConfig, RootCertStore, server::Acceptor},
+        };
+
+        let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind TLS ClientHello capture listener");
+        let port = listener
+            .local_addr()
+            .expect("capture listener address")
+            .port();
+        let capture = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept marker dial");
+            let handshake = LazyConfigAcceptor::new(Acceptor::default(), stream)
+                .await
+                .expect("parse marker dial ClientHello");
+            handshake.client_hello().server_name().map(str::to_owned)
+        });
+
+        let mut image = MetadataImage::default();
+        image.apply(&MetadataRecord::V1BrokerRegistration(
+            BrokerRegistrationRecord {
+                node_id: NodeId(2),
+                broker_epoch: 0,
+                incarnation_id: uuid::Uuid::nil(),
+                host: "127.0.0.1".to_string(),
+                port,
+                rack: None,
+                endpoints: vec![BrokerEndpoint {
+                    name: "INTERNAL".to_string(),
+                    host: "127.0.0.1".to_string(),
+                    port,
+                    protocol: ListenerProtocol::Ssl,
+                }],
+            },
+        ));
+        let tls = ClientConfig::builder()
+            .with_root_certificates(RootCertStore::empty())
+            .with_no_client_auth();
+        let client =
+            InterBrokerClient::new(Some(tokio_rustls::TlsConnector::from(Arc::new(tls))), None);
+        let entry = marker_entry();
+        let partitions = tps();
+        let result = send_write_txn_markers(
+            MarkerDispatchContext {
+                node_id: NodeId(1),
+                image: &image,
+                inter_broker_client: &client,
+                inter_broker_protocol: ListenerProtocol::Ssl,
+                inter_broker_listener_name: "INTERNAL",
+                inter_broker_server_name: "broker.internal",
+            },
+            NodeId(2),
+            &entry,
+            MarkerType::Commit,
+            &partitions,
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "capture server intentionally stops after ClientHello"
+        );
+        assert!(
+            capture.await.expect("join ClientHello capture").as_deref() == Some("broker.internal")
         );
     }
 }
