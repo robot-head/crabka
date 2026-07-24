@@ -2,7 +2,9 @@
 
 use std::{
     io::Read as _,
+    num::NonZeroU16,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use clap::{ArgGroup, Args, Subcommand, ValueEnum};
@@ -15,11 +17,11 @@ use crabka_gres_balancer::{
     UnsupportedExecutor, execute_plan,
 };
 use crabka_gres_control::{
-    HashPlacement, PgdogGeneral, PgdogRenderInput, PgdogUser, PositiveI32, PositiveMillis,
-    RangeBoundary, RangeLayoutEntry, RangeLayoutSplit, RangeLifecycle, Registry, RegistryPolicy,
-    RegistryReplicationFactor, SplitOperationPlan, SplitOperationRecord, SqlUser, TenantEndpoint,
-    TenantId, TenantName, TenantRecord, TenantState, render_pgdog_toml, render_users_toml,
-    tenant_config_topic,
+    HashPlacement, PgdogConnectAttempts, PgdogGeneral, PgdogPoolerMode, PgdogRenderInput,
+    PgdogUser, PositiveI32, PositiveMillis, RangeBoundary, RangeLayoutEntry, RangeLayoutSplit,
+    RangeLifecycle, Registry, RegistryPolicy, RegistryReplicationFactor, SplitOperationPlan,
+    SplitOperationRecord, SqlUser, TenantEndpoint, TenantId, TenantName, TenantRecord, TenantState,
+    render_pgdog_toml, render_users_toml, tenant_config_topic,
 };
 use crabka_security::{ListenerProtocol, SaslMechanism, scram::PgScramVerifier};
 use serde::Serialize;
@@ -197,23 +199,81 @@ struct BootstrapArgs {
 #[derive(Args, Debug)]
 struct RenderPgdogArgs {
     /// Kafka bootstrap address used for the Gres registry.
-    #[arg(long)]
+    #[arg(long, env = "CRABKA_GRES_PGDOG_BOOTSTRAP")]
     bootstrap: String,
     /// Directory that will receive pgdog.toml and users.toml.
-    #[arg(long)]
+    #[arg(long, env = "CRABKA_GRES_PGDOG_OUT_DIR")]
     out_dir: PathBuf,
     /// Suspended-tenant activator route as host:port.
-    #[arg(long, value_parser = parse_activator)]
+    #[arg(
+        long,
+        env = "CRABKA_GRES_PGDOG_ACTIVATOR",
+        value_parser = parse_activator
+    )]
     activator: Option<(String, u16)>,
     /// Client-facing `PgDog` listen port.
-    #[arg(long, default_value_t = 6432)]
-    listen_port: u16,
+    #[arg(long, env = "CRABKA_GRES_PGDOG_LISTEN_PORT", default_value = "6432")]
+    listen_port: NonZeroU16,
     /// Client-facing TLS certificate path as visible inside the `PgDog` runtime.
-    #[arg(long, requires = "tls_private_key")]
+    #[arg(
+        long,
+        env = "CRABKA_GRES_PGDOG_TLS_CERTIFICATE",
+        requires = "tls_private_key"
+    )]
     tls_certificate: Option<PathBuf>,
     /// Client-facing TLS private-key path as visible inside the `PgDog` runtime.
-    #[arg(long, requires = "tls_certificate")]
+    #[arg(
+        long,
+        env = "CRABKA_GRES_PGDOG_TLS_PRIVATE_KEY",
+        requires = "tls_certificate"
+    )]
     tls_private_key: Option<PathBuf>,
+    /// Client CA path as visible inside the `PgDog` runtime.
+    #[arg(
+        long,
+        env = "CRABKA_GRES_PGDOG_TLS_CLIENT_CA_CERTIFICATE",
+        requires_all = ["tls_certificate", "tls_private_key"]
+    )]
+    tls_client_ca_certificate: Option<PathBuf>,
+    /// Fleet-wide backend connection pooling mode.
+    #[arg(
+        long,
+        env = "CRABKA_GRES_PGDOG_POOLER_MODE",
+        default_value = "transaction",
+        value_parser = parse_pgdog_pooler_mode
+    )]
+    pooler_mode: PgdogPoolerMode,
+    /// Number of backend connection attempts.
+    #[arg(long, env = "CRABKA_GRES_PGDOG_CONNECT_ATTEMPTS", default_value = "3")]
+    connect_attempts: PgdogConnectAttempts,
+    /// Maximum acceptable tenant wake latency in milliseconds.
+    #[arg(
+        long,
+        env = "CRABKA_GRES_PGDOG_COLD_START_CEILING_MS",
+        default_value = "30000"
+    )]
+    cold_start_ceiling_ms: PositiveMillis,
+    /// Normal pooled-server idle timeout in milliseconds.
+    #[arg(
+        long,
+        env = "CRABKA_GRES_PGDOG_IDLE_TIMEOUT_MS",
+        default_value = "60000"
+    )]
+    idle_timeout_ms: PositiveMillis,
+    /// Pooled-server idle timeout when at least one tenant may suspend.
+    #[arg(
+        long,
+        env = "CRABKA_GRES_PGDOG_SUSPENSION_IDLE_TIMEOUT_MS",
+        default_value = "1000"
+    )]
+    suspension_idle_timeout_ms: PositiveMillis,
+    /// Maximum pooled backend connection lifetime in milliseconds.
+    #[arg(
+        long,
+        env = "CRABKA_GRES_PGDOG_SERVER_LIFETIME_MS",
+        default_value = "300000"
+    )]
+    server_lifetime_ms: PositiveMillis,
 }
 
 #[derive(Args, Debug)]
@@ -889,14 +949,7 @@ async fn delete_tenant(args: TenantNameArgs, policy: &RegistryPolicy) -> Result<
 async fn render_pgdog(args: RenderPgdogArgs, policy: &RegistryPolicy) -> Result<(), String> {
     let mut registry = connect_registry(&args.bootstrap, policy).await?;
     let tenants = registry.list().await.map_err(|e| e.to_string())?;
-    render_pgdog_files(
-        &tenants,
-        args.activator,
-        &args.out_dir,
-        args.listen_port,
-        args.tls_certificate.as_deref(),
-        args.tls_private_key.as_deref(),
-    )
+    render_pgdog_files(&tenants, &args)
 }
 
 async fn connect_registry(bootstrap: &str, policy: &RegistryPolicy) -> Result<Registry, String> {
@@ -1102,15 +1155,8 @@ fn read_password(args: &CreateTenantArgs) -> Result<String, String> {
     Ok(password)
 }
 
-fn render_pgdog_files(
-    records: &[TenantRecord],
-    activator: Option<(String, u16)>,
-    out_dir: &Path,
-    listen_port: u16,
-    tls_certificate: Option<&Path>,
-    tls_private_key: Option<&Path>,
-) -> Result<(), String> {
-    std::fs::create_dir_all(out_dir).map_err(|e| format!("create output directory: {e}"))?;
+fn render_pgdog_files(records: &[TenantRecord], args: &RenderPgdogArgs) -> Result<(), String> {
+    std::fs::create_dir_all(&args.out_dir).map_err(|e| format!("create output directory: {e}"))?;
     let endpoints = records.iter().map(tenant_endpoint).collect::<Vec<_>>();
     let users = records
         .iter()
@@ -1120,22 +1166,46 @@ fn render_pgdog_files(
             password: None,
         })
         .collect();
+    let idle_timeout_ms = if records
+        .iter()
+        .any(|record| record.idle_seconds.is_some_and(|seconds| seconds > 0))
+    {
+        args.suspension_idle_timeout_ms
+    } else {
+        args.idle_timeout_ms
+    };
     let input = PgdogRenderInput {
         tenants: &endpoints,
-        activator,
+        activator: args.activator.clone(),
         general: PgdogGeneral {
-            listen_port,
-            tls_cert_path: tls_certificate.map(|path| path.to_string_lossy().into_owned()),
-            tls_key_path: tls_private_key.map(|path| path.to_string_lossy().into_owned()),
+            listen_port: args.listen_port.get(),
+            tls_cert_path: args
+                .tls_certificate
+                .as_deref()
+                .map(|path| path.to_string_lossy().into_owned()),
+            tls_key_path: args
+                .tls_private_key
+                .as_deref()
+                .map(|path| path.to_string_lossy().into_owned()),
+            tls_client_ca_path: args
+                .tls_client_ca_certificate
+                .as_deref()
+                .map(|path| path.to_string_lossy().into_owned()),
+            passthrough_auth: true,
+            pooler_mode: args.pooler_mode,
+            cold_start_ceiling: Duration::from_millis(args.cold_start_ceiling_ms.into_value()),
+            connect_attempts: args.connect_attempts,
+            timeouts: None,
+            idle_timeout: Duration::from_millis(idle_timeout_ms.into_value()),
+            server_lifetime: Duration::from_millis(args.server_lifetime_ms.into_value()),
             users,
-            ..PgdogGeneral::default()
         },
     };
     let pgdog = render_pgdog_toml(&input).map_err(|e| e.to_string())?;
     let users = render_users_toml(&input).map_err(|e| e.to_string())?;
-    std::fs::write(out_dir.join("pgdog.toml"), pgdog)
+    std::fs::write(args.out_dir.join("pgdog.toml"), pgdog)
         .map_err(|e| format!("write pgdog.toml: {e}"))?;
-    std::fs::write(out_dir.join("users.toml"), users)
+    std::fs::write(args.out_dir.join("users.toml"), users)
         .map_err(|e| format!("write users.toml: {e}"))?;
     Ok(())
 }
@@ -1197,6 +1267,14 @@ fn parse_activator(value: &str) -> Result<(String, u16), String> {
         return Err("activator port must be greater than zero".to_string());
     }
     Ok((host.to_string(), port))
+}
+
+fn parse_pgdog_pooler_mode(value: &str) -> Result<PgdogPoolerMode, String> {
+    match value {
+        "transaction" => Ok(PgdogPoolerMode::Transaction),
+        "session" => Ok(PgdogPoolerMode::Session),
+        _ => Err("pooler mode must be transaction or session".to_string()),
+    }
 }
 
 #[cfg(test)]
@@ -1278,6 +1356,168 @@ mod tests {
                 == crabka_gres_control::RegistryPolicy::new(3, 15_002, 252, 502, 1_048_578)
                     .expect("policy")
         );
+    }
+
+    #[test]
+    fn render_pgdog_options_use_exact_defaults() {
+        let args = render_pgdog_test_args([
+            "test",
+            "render-pgdog",
+            "--bootstrap=broker:9092",
+            "--out-dir=/tmp/pgdog",
+        ]);
+
+        assert!(args.bootstrap == "broker:9092");
+        assert!(args.out_dir == PathBuf::from("/tmp/pgdog"));
+        assert!(args.activator.is_none());
+        assert!(args.listen_port.get() == 6_432);
+        assert!(args.tls_certificate.is_none());
+        assert!(args.tls_private_key.is_none());
+        assert!(args.tls_client_ca_certificate.is_none());
+        assert!(args.pooler_mode == PgdogPoolerMode::Transaction);
+        assert!(args.connect_attempts.into_value() == 3);
+        assert!(args.cold_start_ceiling_ms.into_value() == 30_000);
+        assert!(args.idle_timeout_ms.into_value() == 60_000);
+        assert!(args.suspension_idle_timeout_ms.into_value() == 1_000);
+        assert!(args.server_lifetime_ms.into_value() == 300_000);
+    }
+
+    #[test]
+    fn render_pgdog_options_accept_exact_custom_surface() {
+        let parsed = TestCli::try_parse_from([
+            "test",
+            "render-pgdog",
+            "--bootstrap=cli:9092",
+            "--out-dir=/tmp/cli-pgdog",
+            "--activator=activator:7444",
+            "--listen-port=6543",
+            "--tls-certificate=/tls/cert.pem",
+            "--tls-private-key=/tls/key.pem",
+            "--tls-client-ca-certificate=/tls/ca.pem",
+            "--pooler-mode=session",
+            "--connect-attempts=4",
+            "--cold-start-ceiling-ms=10001",
+            "--idle-timeout-ms=60001",
+            "--suspension-idle-timeout-ms=1001",
+            "--server-lifetime-ms=300001",
+        ])
+        .expect("custom render-pgdog options");
+
+        let GresCommand::RenderPgdog(args) = parsed.gres.command else {
+            panic!("expected render-pgdog command");
+        };
+        assert!(args.bootstrap == "cli:9092");
+        assert!(args.out_dir == PathBuf::from("/tmp/cli-pgdog"));
+        assert!(args.activator == Some(("activator".to_string(), 7_444)));
+        assert!(args.listen_port.get() == 6_543);
+        assert!(args.tls_certificate == Some(PathBuf::from("/tls/cert.pem")));
+        assert!(args.tls_private_key == Some(PathBuf::from("/tls/key.pem")));
+        assert!(args.tls_client_ca_certificate == Some(PathBuf::from("/tls/ca.pem")));
+        assert!(args.pooler_mode == PgdogPoolerMode::Session);
+        assert!(args.connect_attempts.into_value() == 4);
+        assert!(args.cold_start_ceiling_ms.into_value() == 10_001);
+        assert!(args.idle_timeout_ms.into_value() == 60_001);
+        assert!(args.suspension_idle_timeout_ms.into_value() == 1_001);
+        assert!(args.server_lifetime_ms.into_value() == 300_001);
+    }
+
+    #[test]
+    fn render_pgdog_options_reject_invalid_values_and_tls_relationships() {
+        for options in [
+            &["--listen-port=0"][..],
+            &["--listen-port=65536"],
+            &["--connect-attempts=0"],
+            &["--connect-attempts=65536"],
+            &["--cold-start-ceiling-ms=0"],
+            &["--idle-timeout-ms=0"],
+            &["--suspension-idle-timeout-ms=0"],
+            &["--server-lifetime-ms=0"],
+            &["--cold-start-ceiling-ms=18446744073709551616"],
+            &["--pooler-mode=statement"],
+            &["--tls-certificate=/tls/cert.pem"],
+            &["--tls-private-key=/tls/key.pem"],
+            &["--tls-client-ca-certificate=/tls/ca.pem"],
+        ] {
+            let args = [
+                &[
+                    "test",
+                    "render-pgdog",
+                    "--bootstrap=broker:9092",
+                    "--out-dir=/tmp/pgdog",
+                ][..],
+                options,
+            ]
+            .concat();
+            assert!(TestCli::try_parse_from(args).is_err());
+        }
+    }
+
+    #[test]
+    fn render_pgdog_options_read_environment_and_prefer_cli() {
+        const CHILD: &str = "CRABKA_TEST_CLI_PGDOG_ENV_CHILD";
+        let vars = [
+            ("CRABKA_GRES_PGDOG_BOOTSTRAP", "env:9092"),
+            ("CRABKA_GRES_PGDOG_OUT_DIR", "/tmp/env-pgdog"),
+            ("CRABKA_GRES_PGDOG_ACTIVATOR", "env-activator:7443"),
+            ("CRABKA_GRES_PGDOG_LISTEN_PORT", "6542"),
+            ("CRABKA_GRES_PGDOG_TLS_CERTIFICATE", "/env/cert.pem"),
+            ("CRABKA_GRES_PGDOG_TLS_PRIVATE_KEY", "/env/key.pem"),
+            ("CRABKA_GRES_PGDOG_TLS_CLIENT_CA_CERTIFICATE", "/env/ca.pem"),
+            ("CRABKA_GRES_PGDOG_POOLER_MODE", "session"),
+            ("CRABKA_GRES_PGDOG_CONNECT_ATTEMPTS", "5"),
+            ("CRABKA_GRES_PGDOG_COLD_START_CEILING_MS", "30005"),
+            ("CRABKA_GRES_PGDOG_IDLE_TIMEOUT_MS", "60005"),
+            ("CRABKA_GRES_PGDOG_SUSPENSION_IDLE_TIMEOUT_MS", "1005"),
+            ("CRABKA_GRES_PGDOG_SERVER_LIFETIME_MS", "300005"),
+        ];
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().expect("test exe"))
+                .args([
+                    "--exact",
+                    "gres::tests::render_pgdog_options_read_environment_and_prefer_cli",
+                ])
+                .env(CHILD, "1")
+                .envs(vars)
+                .status()
+                .expect("child test");
+            assert!(status.success());
+            return;
+        }
+
+        let environment = TestCli::try_parse_from(["test", "render-pgdog"]).expect("environment");
+        let GresCommand::RenderPgdog(environment) = environment.gres.command else {
+            panic!("expected render-pgdog command");
+        };
+        assert!(environment.bootstrap == "env:9092");
+        assert!(environment.out_dir == PathBuf::from("/tmp/env-pgdog"));
+        assert!(environment.activator == Some(("env-activator".to_string(), 7_443)));
+        assert!(environment.listen_port.get() == 6_542);
+        assert!(environment.tls_certificate == Some(PathBuf::from("/env/cert.pem")));
+        assert!(environment.tls_private_key == Some(PathBuf::from("/env/key.pem")));
+        assert!(environment.tls_client_ca_certificate == Some(PathBuf::from("/env/ca.pem")));
+        assert!(environment.pooler_mode == PgdogPoolerMode::Session);
+        assert!(environment.connect_attempts.into_value() == 5);
+        assert!(environment.cold_start_ceiling_ms.into_value() == 30_005);
+        assert!(environment.idle_timeout_ms.into_value() == 60_005);
+        assert!(environment.suspension_idle_timeout_ms.into_value() == 1_005);
+        assert!(environment.server_lifetime_ms.into_value() == 300_005);
+
+        let cli = TestCli::try_parse_from([
+            "test",
+            "render-pgdog",
+            "--bootstrap=cli:9092",
+            "--out-dir=/tmp/cli-pgdog",
+            "--listen-port=6543",
+            "--connect-attempts=6",
+        ])
+        .expect("CLI over environment");
+        let GresCommand::RenderPgdog(cli) = cli.gres.command else {
+            panic!("expected render-pgdog command");
+        };
+        assert!(cli.bootstrap == "cli:9092");
+        assert!(cli.out_dir == PathBuf::from("/tmp/cli-pgdog"));
+        assert!(cli.listen_port.get() == 6_543);
+        assert!(cli.connect_attempts.into_value() == 6);
     }
 
     fn fixture_password() -> String {
@@ -1609,8 +1849,11 @@ mod tests {
     fn render_pgdog_writes_pgdog_and_users_files() {
         let dir = tempfile::tempdir().expect("tempdir");
         let records = vec![test_record("tenant-a", TenantState::Active)];
+        let out_dir = format!("--out-dir={}", dir.path().display());
+        let args =
+            render_pgdog_test_args(["test", "render-pgdog", "--bootstrap=broker:9092", &out_dir]);
 
-        render_pgdog_files(&records, None, dir.path(), 6432, None, None).expect("render succeeds");
+        render_pgdog_files(&records, &args).expect("render succeeds");
 
         let pgdog = std::fs::read_to_string(dir.path().join("pgdog.toml")).expect("pgdog file");
         let users = std::fs::read_to_string(dir.path().join("users.toml")).expect("users file");
@@ -1645,6 +1888,90 @@ mod tests {
                     "database = \"tenant-a\"\n",
                 )
         );
+    }
+
+    #[test]
+    fn render_pgdog_writes_exact_custom_configuration() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut record = test_record("tenant-a", TenantState::Active);
+        record.idle_seconds = Some(30);
+        let out_dir = format!("--out-dir={}", dir.path().display());
+        let args = render_pgdog_test_args([
+            "test",
+            "render-pgdog",
+            "--bootstrap=broker:9092",
+            &out_dir,
+            "--activator=activator:7444",
+            "--listen-port=6543",
+            "--tls-certificate=/tls/cert.pem",
+            "--tls-private-key=/tls/key.pem",
+            "--tls-client-ca-certificate=/tls/ca.pem",
+            "--pooler-mode=session",
+            "--connect-attempts=4",
+            "--cold-start-ceiling-ms=10001",
+            "--idle-timeout-ms=60001",
+            "--suspension-idle-timeout-ms=1001",
+            "--server-lifetime-ms=300001",
+        ]);
+
+        render_pgdog_files(&[record], &args).expect("render succeeds");
+
+        let pgdog = std::fs::read_to_string(dir.path().join("pgdog.toml")).expect("pgdog file");
+        assert!(
+            pgdog
+                == concat!(
+                    "[general]\n",
+                    "port = 6543\n",
+                    "min_pool_size = 0\n",
+                    "pooler_mode = \"session\"\n",
+                    "passthrough_auth = \"enabled\"\n",
+                    "connect_timeout = 2501\n",
+                    "connect_attempts = 4\n",
+                    "checkout_timeout = 10001\n",
+                    "idle_timeout = 1001\n",
+                    "server_lifetime = 300001\n",
+                    "idle_healthcheck_delay = 3155760000000\n",
+                    "tls_certificate = \"/tls/cert.pem\"\n",
+                    "tls_private_key = \"/tls/key.pem\"\n",
+                    "tls_client_ca_certificate = \"/tls/ca.pem\"\n",
+                    "tls_client_required = true\n",
+                    "\n",
+                    "[[databases]]\n",
+                    "name = \"tenant-a\"\n",
+                    "host = \"tenant-a.gres.svc\"\n",
+                    "port = 5432\n",
+                    "pooler_mode = \"session\"\n",
+                )
+        );
+    }
+
+    #[test]
+    fn render_pgdog_does_not_use_suspension_timeout_for_zero_idle_seconds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut record = test_record("tenant-a", TenantState::Active);
+        record.idle_seconds = Some(0);
+        let out_dir = format!("--out-dir={}", dir.path().display());
+        let args = render_pgdog_test_args([
+            "test",
+            "render-pgdog",
+            "--bootstrap=broker:9092",
+            &out_dir,
+            "--idle-timeout-ms=60001",
+            "--suspension-idle-timeout-ms=1001",
+        ]);
+
+        render_pgdog_files(&[record], &args).expect("render succeeds");
+
+        let pgdog = std::fs::read_to_string(dir.path().join("pgdog.toml")).expect("pgdog file");
+        assert!(pgdog.contains("idle_timeout = 60001\n"));
+    }
+
+    fn render_pgdog_test_args<const N: usize>(args: [&str; N]) -> RenderPgdogArgs {
+        let parsed = TestCli::try_parse_from(args).expect("render-pgdog args");
+        let GresCommand::RenderPgdog(args) = parsed.gres.command else {
+            panic!("expected render-pgdog command");
+        };
+        args
     }
 
     #[test]
