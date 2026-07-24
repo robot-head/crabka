@@ -221,12 +221,9 @@ fn test_args(listen: String, data_dir: Option<std::path::PathBuf>) -> crabka_gre
         checkpoint_bytes: None,
         checkpoint_part_bytes: None,
         checkpoint_retain: None,
-        checkpoint_delete_records_timeout_ms: crabka_gres_control::PositiveI32::new(30_000)
-            .expect("default"),
-        checkpoint_poll_interval_ms: crabka_gres_control::PositiveMillis::new(1_000)
-            .expect("default"),
-        idle_suspend_poll_interval_ms: crabka_gres_control::PositiveMillis::new(1_000)
-            .expect("default"),
+        checkpoint_delete_records_timeout_ms: None,
+        checkpoint_poll_interval_ms: None,
+        idle_suspend_poll_interval_ms: None,
     }
 }
 
