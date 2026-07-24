@@ -382,6 +382,13 @@ fn local_vacuum_policy(args: &ServeArgs) -> std::io::Result<Option<LocalVacuumPo
     }))
 }
 
+fn validate_range0_follower_poll_interval(args: &ServeArgs) -> std::io::Result<()> {
+    if args.range0_follower_poll_interval_ms.is_some() && args.ranges.is_none() {
+        return invalid_input("--range0-follower-poll-interval-ms requires --ranges");
+    }
+    Ok(())
+}
+
 /// Validated Gres registry options shared by compute registry clients.
 #[derive(clap::Args, Debug, Clone)]
 pub struct RegistryOptions {
@@ -580,9 +587,7 @@ impl SubstrateRuntimeConfig {
     pub fn from_args(args: &ServeArgs) -> std::io::Result<Option<Self>> {
         use std::io::{Error, ErrorKind};
 
-        if args.range0_follower_poll_interval_ms.is_some() && args.ranges.is_none() {
-            return invalid_input("--range0-follower-poll-interval-ms requires --ranges");
-        }
+        validate_range0_follower_poll_interval(args)?;
 
         let Some(bootstrap) = args.substrate_bootstrap.as_deref() else {
             if checkpointing_was_requested(args) {
@@ -1847,6 +1852,7 @@ pub fn tls_acceptor(
 ///
 /// Returns an error when the requested operation cannot be completed.
 pub async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
+    validate_range0_follower_poll_interval(&args)?;
     local_vacuum_policy(&args)?;
     let listener = TcpListener::bind(&args.listen).await?;
     tracing::info!(listen = %listener.local_addr()?, "crabka-gres listening");
@@ -1875,6 +1881,7 @@ pub async fn serve_listener_with_tenant_config_loader(
     args: ServeArgs,
     tenant_config_loader: &impl TenantConfigLoader,
 ) -> std::io::Result<()> {
+    validate_range0_follower_poll_interval(&args)?;
     let local_vacuum_policy = local_vacuum_policy(&args)?;
     let sql_addr = listener.local_addr()?;
     let tls = match (&args.tls_cert, &args.tls_key) {
@@ -7402,6 +7409,24 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn range0_follower_poll_validation_precedes_listener_bind() {
+        let occupied = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+        let mut args = Cli::try_parse_from(["crabka-gres"])
+            .expect("defaults")
+            .serve;
+        args.listen = occupied.local_addr().expect("address").to_string();
+        args.range0_follower_poll_interval_ms = Some(PositiveMillis::new(1).expect("positive"));
+
+        let error = run_serve(args).await.expect_err("invalid range-0 policy");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(
+            error.to_string(),
+            "--range0-follower-poll-interval-ms requires --ranges"
+        );
+    }
+
     #[test]
     fn checkpoint_lifecycle_options_use_validated_defaults() {
         let args = Cli::try_parse_from(["crabka-gres"])
@@ -8731,6 +8756,42 @@ mod tests {
 
     #[test]
     fn range0_follower_poll_interval_rejects_zero_and_non_multirange_use() {
+        const CHILD: &str = "CRABKA_TEST_GRES_RANGE0_FOLLOWER_POLL_REJECTION_CHILD";
+        const ENV: &str = "CRABKA_GRES_RANGE0_FOLLOWER_POLL_INTERVAL_MS";
+        if std::env::var_os(CHILD).is_none() {
+            for (mode, value) in [
+                ("scrubbed", None),
+                ("environment_without_ranges", Some("1")),
+            ] {
+                let mut child =
+                    std::process::Command::new(std::env::current_exe().expect("test exe"));
+                child
+                    .args([
+                        "--exact",
+                        "tests::range0_follower_poll_interval_rejects_zero_and_non_multirange_use",
+                    ])
+                    .env(CHILD, mode)
+                    .env_remove(ENV);
+                if let Some(value) = value {
+                    child.env(ENV, value);
+                }
+                assert!(child.status().expect("child test").success());
+            }
+            return;
+        }
+
+        if std::env::var(CHILD).as_deref() == Ok("environment_without_ranges") {
+            assert!(
+                Cli::try_parse_from([
+                    "crabka-gres",
+                    "--substrate-bootstrap=memory://",
+                    "--tenant=tenant-a",
+                ])
+                .is_err()
+            );
+            return;
+        }
+
         assert!(
             Cli::try_parse_from([
                 "crabka-gres",
