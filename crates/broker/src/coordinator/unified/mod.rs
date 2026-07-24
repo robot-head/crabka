@@ -795,15 +795,12 @@ impl GroupCoordinator {
     }
 
     pub async fn shutdown_all(&self) {
-        /// Per-actor grace period to await a `Shutdown` ack before moving on
-        /// to the next actor.
-        const SHUTDOWN_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
         let handles: Vec<Arc<GroupActorHandle>> =
             self.groups.iter().map(|e| e.value().clone()).collect();
         for h in handles {
             let (tx, rx) = oneshot::channel();
             if h.tx.send(GroupActorMessage::Shutdown(tx)).await.is_ok() {
-                let _ = tokio::time::timeout(SHUTDOWN_ACK_TIMEOUT, rx).await;
+                let _ = tokio::time::timeout(self.config.shutdown_ack_timeout, rx).await;
             }
         }
         let share_handles: Vec<Arc<ShareGroupActorHandle>> = self
@@ -818,7 +815,22 @@ impl GroupCoordinator {
                 .await
                 .is_ok()
             {
-                let _ = tokio::time::timeout(SHUTDOWN_ACK_TIMEOUT, rx).await;
+                let _ = tokio::time::timeout(self.config.shutdown_ack_timeout, rx).await;
+            }
+        }
+        let streams_handles: Vec<Arc<StreamsGroupActorHandle>> = self
+            .streams_groups
+            .iter()
+            .map(|e| e.value().clone())
+            .collect();
+        for h in streams_handles {
+            let (tx, rx) = oneshot::channel();
+            if h.tx
+                .send(StreamsGroupActorMessage::Shutdown(tx))
+                .await
+                .is_ok()
+            {
+                let _ = tokio::time::timeout(self.config.shutdown_ack_timeout, rx).await;
             }
         }
     }
@@ -1396,6 +1408,33 @@ mod tests {
         (coord, offsets_log)
     }
 
+    #[tokio::test]
+    async fn actor_mailboxes_use_component_configuration() {
+        use crate::coordinator::unified::offsets_log::fake::InMemoryOffsetsLog;
+
+        let metadata: Arc<dyn MetadataProvider> = Arc::new(ImageMetadatalessProvider);
+        let coord = Arc::new(GroupCoordinator::new(
+            NextGenConfig {
+                actor_mailbox_capacity: 3,
+                ..NextGenConfig::default()
+            },
+            ShareGroupConfig {
+                actor_mailbox_capacity: 5,
+                ..ShareGroupConfig::default()
+            },
+            metadata,
+            Arc::new(InMemoryOffsetsLog::default()),
+            StreamsGroupConfig {
+                actor_mailbox_capacity: 7,
+                ..StreamsGroupConfig::default()
+            },
+        ));
+
+        assert!(coord.get_or_create_classic("classic").tx.max_capacity() == 3);
+        assert!(coord.get_or_create_share("share").tx.max_capacity() == 5);
+        assert!(coord.get_or_create_streams("streams").tx.max_capacity() == 7);
+    }
+
     #[derive(Debug)]
     struct ImageMetadatalessProvider;
     impl MetadataProvider for ImageMetadatalessProvider {
@@ -1841,21 +1880,23 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn shutdown_all_closes_group_and_share_actors() {
+    async fn shutdown_all_closes_all_group_actors() {
         let coord = make_coord();
         let group = coord.get_or_create_classic("classic");
         let share = coord.get_or_create_share("share");
+        let streams = coord.get_or_create_streams("streams");
 
         coord.shutdown_all().await;
 
         // The ack can arrive a scheduler tick before the actor task exits
         // and drops its receiver — poll instead of racing it.
-        await_until("group and share actor channels closed", || {
-            group.tx.is_closed() && share.tx.is_closed()
+        await_until("all group actor channels closed", || {
+            group.tx.is_closed() && share.tx.is_closed() && streams.tx.is_closed()
         })
         .await;
         assert!(group.tx.is_closed());
         assert!(share.tx.is_closed());
+        assert!(streams.tx.is_closed());
     }
 
     #[test]

@@ -12,11 +12,6 @@ pub(crate) use manager::ClientMetricsManager;
 
 use self::{otlp_sink::OtlpForwarder, prometheus_sink::ClientMetricsCollector};
 
-/// Default `telemetry.max.bytes` (1 MiB), matching Kafka.
-pub(crate) const DEFAULT_TELEMETRY_MAX_BYTES: i32 = 1_048_576;
-/// Staleness TTL for the Prometheus snapshot.
-pub(crate) const PROM_SNAPSHOT_TTL: Duration = Duration::from_mins(5);
-
 /// Broker-held bundle: the manager (instance state + matching) plus the two
 /// sinks. The Prometheus collector is shared with the metrics registry.
 pub(crate) struct ClientMetrics {
@@ -27,14 +22,18 @@ pub(crate) struct ClientMetrics {
 
 impl ClientMetrics {
     /// `otlp_endpoint` is `None` when OTLP forwarding is disabled.
-    pub(crate) fn new(telemetry_max_bytes: i32, otlp_endpoint: Option<String>) -> Self {
+    pub(crate) fn new(
+        telemetry_max_bytes: i32,
+        otlp_endpoint: Option<String>,
+        prometheus_snapshot_ttl: Duration,
+    ) -> Self {
         let otlp = match otlp_endpoint {
             Some(ep) => OtlpForwarder::spawn(ep, 256),
             None => OtlpForwarder::disabled(),
         };
         Self {
             manager: ClientMetricsManager::new(telemetry_max_bytes),
-            prometheus: Arc::new(ClientMetricsCollector::new(PROM_SNAPSHOT_TTL)),
+            prometheus: Arc::new(ClientMetricsCollector::new(prometheus_snapshot_ttl)),
             otlp,
         }
     }

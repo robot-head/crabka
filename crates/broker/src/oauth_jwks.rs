@@ -33,8 +33,9 @@ pub(crate) enum FetchError {
     Parse,
 }
 
-/// Fetch and parse a JWKS document from `endpoint` (HTTP or HTTPS). A 10s
-/// timeout caps a hung identity provider; non-2xx responses are errors.
+/// Fetch and parse a JWKS document from `endpoint` (HTTP or HTTPS). The
+/// client's configured timeout caps a hung identity provider; non-2xx
+/// responses are errors.
 /// `ignore_key_use` threads through to the JWKS parser — when
 /// false, `use=enc` keys are filtered out.
 pub(crate) async fn fetch_jwks(
@@ -69,6 +70,8 @@ pub(crate) struct JwksRefresher {
     pub handle: JwksHandle,
     /// Re-fetch cadence (periodic).
     pub interval: Duration,
+    /// Timeout for each JWKS HTTP request.
+    pub http_timeout: Duration,
     /// Cancels the task on broker shutdown.
     pub shutdown: CancellationToken,
     /// Optional PEM path; when
@@ -116,7 +119,7 @@ impl JwksRefresher {
     /// `last_on_demand_refresh_ms` against `min_on_demand_pause` and drops
     /// the signal silently when within the window.
     pub(crate) async fn run(mut self) {
-        let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(10));
+        let mut builder = reqwest::Client::builder().timeout(self.http_timeout);
         if let Some(path) = &self.tls_trust {
             match crabka_security::build_client_config_from_pem(path) {
                 Ok(cfg) => {
@@ -299,6 +302,7 @@ mod tests {
             endpoint,
             handle,
             interval,
+            http_timeout: Duration::from_millis(37),
             shutdown,
             tls_trust,
             signal_rx: rx,
@@ -588,6 +592,7 @@ mod tests {
             endpoint,
             handle: handle.clone(),
             interval: Duration::from_hours(1),
+            http_timeout: Duration::from_millis(37),
             shutdown: shutdown.clone(),
             tls_trust: None,
             signal_rx,

@@ -227,7 +227,7 @@ pub async fn bootstrap(
             // correct — submitting a duplicate on timeout is what caused the
             // JVM fatal fault.
             let mut images = controller.watch_image();
-            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+            let deadline = tokio::time::Instant::now() + config.offsets_topic_metadata_wait_timeout;
             while controller.current_image().topic(OFFSETS_TOPIC).is_none() {
                 let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
                 if remaining.is_zero() {

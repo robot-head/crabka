@@ -46,6 +46,7 @@ pub struct StreamsGroupConfig {
     pub task_offset_interval: Duration,
     /// Server-side assignor selection.
     pub assignor: StreamsAssignorKind,
+    pub actor_mailbox_capacity: usize,
 }
 
 impl Default for StreamsGroupConfig {
@@ -67,6 +68,7 @@ impl Default for StreamsGroupConfig {
             acceptable_recovery_lag: 10_000,
             task_offset_interval: Duration::from_secs(30),
             assignor: StreamsAssignorKind::Auto,
+            actor_mailbox_capacity: 64,
         }
     }
 }
@@ -96,6 +98,7 @@ mod tests {
                     acceptable_recovery_lag: 10_000,
                     task_offset_interval: Duration::from_secs(30),
                     assignor: StreamsAssignorKind::Auto,
+                    actor_mailbox_capacity: 64,
                 }
         );
     }

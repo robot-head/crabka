@@ -70,6 +70,10 @@ pub struct NextGenConfig {
     pub max_session_timeout: Duration,
     pub min_heartbeat_interval: Duration,
     pub max_heartbeat_interval: Duration,
+    pub session_expiry_tick: Duration,
+    pub actor_mailbox_capacity: usize,
+    pub shutdown_ack_timeout: Duration,
+    pub classic_initial_rebalance_delay: Duration,
     /// Registered server-side assignors. The list IS the registry; the
     /// client's `server_assignor` field is matched against `Assignor::name()`
     /// by string equality. `Default` seeds the two built-ins
@@ -100,6 +104,13 @@ impl std::fmt::Debug for NextGenConfig {
             .field("max_session_timeout", &self.max_session_timeout)
             .field("min_heartbeat_interval", &self.min_heartbeat_interval)
             .field("max_heartbeat_interval", &self.max_heartbeat_interval)
+            .field("session_expiry_tick", &self.session_expiry_tick)
+            .field("actor_mailbox_capacity", &self.actor_mailbox_capacity)
+            .field("shutdown_ack_timeout", &self.shutdown_ack_timeout)
+            .field(
+                "classic_initial_rebalance_delay",
+                &self.classic_initial_rebalance_delay,
+            )
             .field("assignors", &self.assignors)
             .field("max_size", &self.max_size)
             .field("migration_policy", &self.migration_policy)
@@ -160,6 +171,10 @@ impl Default for NextGenConfig {
             max_session_timeout: DEFAULT_MAX_SESSION_TIMEOUT,
             min_heartbeat_interval: DEFAULT_MIN_HEARTBEAT_INTERVAL,
             max_heartbeat_interval: DEFAULT_MAX_HEARTBEAT_INTERVAL,
+            session_expiry_tick: Duration::from_secs(1),
+            actor_mailbox_capacity: 64,
+            shutdown_ack_timeout: Duration::from_secs(5),
+            classic_initial_rebalance_delay: Duration::from_secs(3),
             assignors: vec![Arc::new(UniformAssignor), Arc::new(RangeAssignor)],
             max_size: DEFAULT_MAX_GROUP_SIZE,
             migration_policy: ConsumerGroupMigrationPolicy::default(),
