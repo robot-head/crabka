@@ -1623,6 +1623,17 @@ fn registry_fetch(
     }
 }
 
+#[derive(Clone, Copy)]
+enum ReaderFailure {
+    ResolveBootstrap,
+    Connect,
+    Fetch,
+}
+
+const fn reader_retry_delay(policy: &RegistryPolicy, _failure: ReaderFailure) -> Duration {
+    policy.reader_retry_backoff
+}
+
 fn spawn_reader(
     bootstrap: String,
     topic_id: WireUuid,
@@ -1636,7 +1647,8 @@ fn spawn_reader(
         loop {
             let Some(addr) = resolve_bootstrap_addr(&bootstrap) else {
                 tracing::error!(%bootstrap, "gres control registry reader: bad bootstrap address");
-                tokio::time::sleep(policy.reader_retry_backoff).await;
+                tokio::time::sleep(reader_retry_delay(&policy, ReaderFailure::ResolveBootstrap))
+                    .await;
                 continue;
             };
             let opts = ConnectionOptions {
@@ -1647,7 +1659,7 @@ fn spawn_reader(
                 Ok(conn) => conn,
                 Err(error) => {
                     tracing::warn!(%error, "gres control registry reader: connect failed");
-                    tokio::time::sleep(policy.reader_retry_backoff).await;
+                    tokio::time::sleep(reader_retry_delay(&policy, ReaderFailure::Connect)).await;
                     continue;
                 }
             };
@@ -1687,7 +1699,7 @@ fn spawn_reader(
                     Err(error) => {
                         tracing::warn!(%error, "gres control registry reader: fetch failed");
                         conn.close();
-                        tokio::time::sleep(policy.reader_retry_backoff).await;
+                        tokio::time::sleep(reader_retry_delay(&policy, ReaderFailure::Fetch)).await;
                         break;
                     }
                 }
@@ -1795,14 +1807,28 @@ mod tests {
 
         let (registry_spec, timeout_ms) =
             compacted_topic_request(TENANT_REGISTRY_TOPIC, policy.replication_factor(), &policy);
-        let (tenant_spec, _) = compacted_topic_request("tenant-config", 3, &policy);
+        let (tenant_spec, tenant_timeout_ms) = compacted_topic_request("tenant-config", 3, &policy);
         assert!(registry_spec.replicas == 7);
         assert!(tenant_spec.replicas == 3);
         assert!(timeout_ms == 12_345);
+        assert!(tenant_timeout_ms == 12_345);
         let fetch = registry_fetch(42, WireUuid::ZERO, &policy);
         assert!(fetch.max_wait_ms == 901);
         assert!(fetch.partition_max_bytes == 234_567);
         assert!(policy.reader_retry_backoff == Duration::from_millis(678));
+    }
+
+    #[test]
+    fn registry_policy_reaches_every_reader_failure_backoff() {
+        let policy = RegistryPolicy::new(1, 15_000, 678, 500, 1_048_576).unwrap();
+
+        for failure in [
+            ReaderFailure::ResolveBootstrap,
+            ReaderFailure::Connect,
+            ReaderFailure::Fetch,
+        ] {
+            assert!(reader_retry_delay(&policy, failure) == Duration::from_millis(678));
+        }
     }
 
     #[test]
