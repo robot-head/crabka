@@ -608,7 +608,7 @@ impl ReaperBackend for TxnCoordinator {
 
 #[cfg(test)]
 mod tests {
-    use assert2::check;
+    use assert2::{assert, check};
 
     use super::*;
 
@@ -665,10 +665,7 @@ mod tests {
             map.get(&ProducerId(1000)).is_none(),
             "stale pre-roll pid must be evicted"
         );
-        assert_eq!(
-            map.get(&ProducerId(2000)).map(|e| e.value().clone()),
-            Some("tid-a".into())
-        );
+        check!(map.get(&ProducerId(2000)).map(|e| e.value().clone()) == Some("tid-a".into()));
     }
 
     #[test]
@@ -702,13 +699,12 @@ mod tests {
         e.state = TxnState::Ongoing;
         e.last_update_ms = 1;
         apply_prepare_abort(&mut e, 999);
-        assert_eq!(e.state, TxnState::PrepareAbort);
-        assert_eq!(e.last_update_ms, 999);
+        check!(e.state == TxnState::PrepareAbort);
+        check!(e.last_update_ms == 999);
     }
 
     #[test]
     fn apply_complete_abort_records_prev_only_on_a_pid_roll() {
-        use assert2::check;
         // No roll: same pid, epoch bumped → prev untouched.
         let mut e = entry(1000, -1);
         e.state = TxnState::PrepareAbort;
@@ -795,7 +791,7 @@ mod tests {
             TxnVersion::Verified,
         )
         .await;
-        assert_eq!(out, vec!["tid-a".to_owned()]);
+        check!(out == vec!["tid-a".to_owned()]);
     }
 
     #[tokio::test]
@@ -890,6 +886,6 @@ mod tests {
             TxnVersion::Verified,
         )
         .await;
-        assert_eq!(out, vec!["tid-a".to_owned()]);
+        check!(out == vec!["tid-a".to_owned()]);
     }
 }

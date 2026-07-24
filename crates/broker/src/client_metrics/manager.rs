@@ -363,8 +363,8 @@ mod tests {
     fn match_all_empty_match_applies() {
         let img = img_with("all", &[("metrics", "*"), ("interval.ms", "60000")]);
         let m = compute_subscription(&img, &attrs(), 300_000);
-        assert_eq!(m.metrics, vec!["*".to_string()]);
-        assert_eq!(m.push_interval_ms, 60_000);
+        check!(m.metrics == vec!["*".to_string()]);
+        check!(m.push_interval_ms == 60_000);
     }
 
     #[test]
@@ -377,7 +377,7 @@ mod tests {
             ],
         );
         let m = compute_subscription(&img, &attrs(), 300_000);
-        assert_eq!(m.metrics, vec!["a.".to_string()]);
+        check!(m.metrics == vec!["a.".to_string()]);
 
         let img2 = img_with(
             "py-only",
@@ -410,8 +410,8 @@ mod tests {
         let m = compute_subscription(&img, &attrs(), 300_000);
         let mut got = m.metrics.clone();
         got.sort();
-        assert_eq!(got, vec!["a.".to_string(), "b.".to_string()]);
-        assert_eq!(m.push_interval_ms, 30_000);
+        check!(got == vec!["a.".to_string(), "b.".to_string()]);
+        check!(m.push_interval_ms == 30_000);
     }
 
     #[test]
@@ -428,7 +428,7 @@ mod tests {
             },
         ));
         let m = compute_subscription(&img, &attrs(), 300_000);
-        assert_eq!(m.metrics, vec!["*".to_string()]);
+        check!(m.metrics == vec!["*".to_string()]);
     }
 
     #[test]
@@ -443,17 +443,17 @@ mod tests {
             metrics: vec!["b.".into(), "a.".into()],
             push_interval_ms: 60_000,
         };
-        assert_eq!(id1, subscription_id(&s1b, a.client_instance_id));
+        check!(id1 == subscription_id(&s1b, a.client_instance_id));
         let s2 = ComputedSubscription {
             metrics: vec!["a.".into(), "b.".into()],
             push_interval_ms: 30_000,
         };
-        assert_ne!(id1, subscription_id(&s2, a.client_instance_id));
+        check!(id1 != subscription_id(&s2, a.client_instance_id));
         let s3 = ComputedSubscription {
             metrics: vec!["a.".into()],
             push_interval_ms: 60_000,
         };
-        assert_ne!(id1, subscription_id(&s3, a.client_instance_id));
+        check!(id1 != subscription_id(&s3, a.client_instance_id));
     }
 
     #[test]
