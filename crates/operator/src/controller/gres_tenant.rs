@@ -2024,6 +2024,12 @@ fn render_deployment(
             format!("CN={name}-range"),
             "--operator-control-principal".to_owned(),
             format!("CN={name}-operator"),
+            "--range0-follower-poll-interval-ms".to_owned(),
+            config
+                .compute_policy
+                .range0_follower_poll_interval_ms
+                .into_value()
+                .to_string(),
         ]);
     }
     let checkpoint_runtime_args = checkpoint_runtime_args(config.operator_config)?;
@@ -2671,6 +2677,11 @@ mod tests {
         ] {
             assert!(!args.iter().any(|arg| arg == absent), "got: {args:?}");
         }
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg == "--range0-follower-poll-interval-ms")
+        );
     }
 
     #[test]
@@ -2678,10 +2689,20 @@ mod tests {
         let mut obj = tenant();
         obj.metadata.namespace = Some("ns".into());
         obj.metadata.uid = Some("uid".into());
-        let ranges = [GresTenantRangeSpec {
-            range_id: 0,
-            end_key: None,
-        }];
+        let ranges = [
+            GresTenantRangeSpec {
+                range_id: 0,
+                end_key: Some(GresTenantRangeKey {
+                    table_id: 10,
+                    bucket: None,
+                    rowid: 0,
+                }),
+            },
+            GresTenantRangeSpec {
+                range_id: 1,
+                end_key: None,
+            },
+        ];
         let mut operator_config = ConfigArgs::parse_from(["operator"]).config;
         operator_config.gres_checkpoint_store = Some(crate::config::GresCheckpointStoreKind::S3);
         operator_config.gres_checkpoint_bucket = Some("checkpoints".to_owned());
@@ -2691,6 +2712,7 @@ mod tests {
             checkpoint_delete_records_timeout_ms: Some(12_345),
             checkpoint_poll_interval_ms: Some(2_345),
             idle_suspend_poll_interval_ms: Some(3_456),
+            range0_follower_poll_interval_ms: Some(5_678),
             lifecycle_requeue_ms: Some(4_567),
             ..crate::crd::gres::GresComputeSpec::default()
         }
@@ -2713,7 +2735,7 @@ mod tests {
                 replicas: 1,
                 operator_config: &operator_config,
                 kafka_sasl: false,
-                range_control_enabled: false,
+                range_control_enabled: true,
                 range_tls_hash: None,
             },
         )
@@ -2742,6 +2764,7 @@ mod tests {
             ["--checkpoint-delete-records-timeout-ms", "12345"],
             ["--checkpoint-poll-interval-ms", "2345"],
             ["--idle-suspend-poll-interval-ms", "3456"],
+            ["--range0-follower-poll-interval-ms", "5678"],
         ] {
             assert!(
                 args.windows(2).any(|window| window == pair),
