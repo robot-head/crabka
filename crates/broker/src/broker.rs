@@ -391,6 +391,7 @@ fn spawn_auto_join(
     tokio::spawn(crate::auto_join::run(crate::auto_join::AutoJoinParams {
         auto_join: config.auto_join,
         retry_backoff: config.auto_join_retry_backoff,
+        voter_request_timeout: config.auto_join_voter_request_timeout,
         node_id: config.node_id,
         directory_id: config.directory_id,
         cluster_id: config.cluster_id,

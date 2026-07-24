@@ -41,6 +41,7 @@ use crate::codes;
 pub(crate) struct AutoJoinParams {
     pub auto_join: bool,
     pub retry_backoff: Duration,
+    pub voter_request_timeout: Duration,
     pub node_id: crabka_raft::NodeId,
     pub directory_id: uuid::Uuid,
     pub cluster_id: Option<uuid::Uuid>,
@@ -86,6 +87,14 @@ pub(crate) async fn run(params: AutoJoinParams) {
     let protocol = params.listener_protocol;
     let server_name = params.inter_broker_server_name;
     let retry_backoff = params.retry_backoff;
+    let Ok(voter_request_timeout_ms) = i32::try_from(params.voter_request_timeout.as_millis())
+    else {
+        tracing::error!(
+            timeout = ?params.voter_request_timeout,
+            "auto-join voter request timeout exceeds Kafka wire limit"
+        );
+        return;
+    };
     let client = params.inter_broker_client;
     let controller = params.controller;
     let cluster_id = params.cluster_id;
@@ -101,8 +110,13 @@ pub(crate) async fn run(params: AutoJoinParams) {
         let target = select_bootstrap_server(&bootstrap_servers, next_server);
         next_server = next_server.wrapping_add(1);
 
-        let req =
-            build_add_raft_voter_request(cluster_id, voter_id, directory_id, listener.clone());
+        let req = build_add_raft_voter_request(
+            cluster_id,
+            voter_id,
+            directory_id,
+            listener.clone(),
+            voter_request_timeout_ms,
+        );
 
         match send_add_raft_voter(&client, protocol, &server_name, target, &req).await {
             Ok(resp) => {
@@ -143,10 +157,11 @@ fn build_add_raft_voter_request(
     voter_id: i32,
     directory_id: crabka_protocol::primitives::uuid::Uuid,
     listener: Listener,
+    timeout_ms: i32,
 ) -> AddRaftVoterRequest {
     AddRaftVoterRequest {
         cluster_id: cluster_id.map(|u| u.to_string()),
-        timeout_ms: 30_000,
+        timeout_ms,
         voter_id,
         voter_directory_id: directory_id,
         listeners: vec![listener],
@@ -418,17 +433,24 @@ mod tests {
             7,
             crabka_protocol::primitives::uuid::Uuid(*dir.as_bytes()),
             listener,
+            1_234,
         );
 
         let cluster_id_string = cluster_id.to_string();
-        assert_eq!(req.cluster_id.as_deref(), Some(cluster_id_string.as_str()));
-        assert_eq!(req.timeout_ms, 30_000);
-        assert_eq!(req.voter_id, 7);
-        assert_eq!(req.voter_directory_id.0, *dir.as_bytes());
-        assert_eq!(req.listeners.len(), 1);
-        assert_eq!(req.listeners[0].name, "CONTROLLER");
-        assert_eq!(req.listeners[0].host, "127.0.0.1");
-        assert_eq!(req.listeners[0].port, 19093);
+        assert!(matches!(
+            (
+                req.cluster_id.as_deref(),
+                req.timeout_ms,
+                req.voter_id,
+                req.voter_directory_id.0,
+                req.listeners.len(),
+                req.listeners[0].name.as_str(),
+                req.listeners[0].host.as_str(),
+                req.listeners[0].port,
+            ),
+            (Some(id), 1_234, 7, directory_id, 1, "CONTROLLER", "127.0.0.1", 19093)
+                if id == cluster_id_string && directory_id == *dir.as_bytes()
+        ));
         assert!(req.ack_when_committed);
     }
 
@@ -440,6 +462,7 @@ mod tests {
             7,
             crabka_protocol::primitives::uuid::Uuid(*uuid::Uuid::from_u128(7).as_bytes()),
             listener,
+            30_000,
         );
         let version = add_raft_voter_request::MAX_VERSION;
         let mut bytes = BytesMut::new();
@@ -526,6 +549,7 @@ mod tests {
         let params = AutoJoinParams {
             auto_join: false,
             retry_backoff: Duration::from_millis(7),
+            voter_request_timeout: Duration::from_secs(30),
             node_id: crabka_raft::NodeId(999),
             directory_id: uuid::Uuid::from_u128(1),
             cluster_id: None,
@@ -554,6 +578,7 @@ mod tests {
         let params = AutoJoinParams {
             auto_join: true,
             retry_backoff: Duration::from_millis(7),
+            voter_request_timeout: Duration::from_secs(30),
             node_id: crabka_raft::NodeId(7),
             directory_id: uuid::Uuid::from_u128(7),
             cluster_id: None,

@@ -854,9 +854,12 @@ async fn broker_tuning_renders_numeric_runtime_toml_in_declaration_order() {
         cleaner_interval_ms: Some(7_000),
         isr_scan_interval_ms: Some(800),
         opa_http_timeout_ms: Some(2_500),
+        auto_join_voter_request_timeout_ms: Some(4_000),
         replication_fetch_max_bytes: Some(2_097_152),
         replication_fetch_max_wait_ms: Some(750),
         replication_fetch_min_bytes: Some(2),
+        share_state_replication_factor: Some(2),
+        transaction_state_replication_factor: Some(3),
         ..BrokerTuning::default()
     });
 
@@ -869,9 +872,12 @@ async fn broker_tuning_renders_numeric_runtime_toml_in_declaration_order() {
 cleaner_interval_ms = 7000\n\
 isr_scan_interval_ms = 800\n\
 opa_http_timeout_ms = 2500\n\
+auto_join_voter_request_timeout_ms = 4000\n\
 replication_fetch_max_bytes = 2097152\n\
 replication_fetch_max_wait_ms = 750\n\
-replication_fetch_min_bytes = 2\n";
+replication_fetch_min_bytes = 2\n\
+share_state_replication_factor = 2\n\
+transaction_state_replication_factor = 3\n";
     assert!(toml.contains(expected), "rendered TOML:\n{toml}");
     assert!(state.remaining_rules() == 0);
 }
@@ -901,6 +907,19 @@ fn broker_tuning_rejects_zero_with_camel_case_path() {
 
     let error = tuning.validate().expect_err("zero interval must fail");
     assert!(error.contains("spec.brokerTuning.cleanerIntervalMs"));
+}
+
+#[test]
+fn broker_tuning_rejects_voter_timeout_above_wire_limit() {
+    let tuning = BrokerTuning {
+        auto_join_voter_request_timeout_ms: Some(2_147_483_648),
+        ..BrokerTuning::default()
+    };
+
+    let error = tuning
+        .validate()
+        .expect_err("timeout above i32 wire limit must fail");
+    assert!(error.contains("spec.brokerTuning.autoJoinVoterRequestTimeoutMs"));
 }
 
 #[test]

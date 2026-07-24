@@ -207,6 +207,7 @@ impl SharePersister {
         bootstrap::ensure_topic(
             &self.controller,
             self.share_coordinator.state_topic_num_partitions(),
+            self.share_coordinator.state_topic_replication_factor(),
         )
         .await?;
         self.share_coordinator

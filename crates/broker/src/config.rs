@@ -180,6 +180,8 @@ pub struct BrokerConfig {
     pub oauth_jwks_http_timeout: Duration,
     /// Dynamic-quorum auto-join retry delay.
     pub auto_join_retry_backoff: Duration,
+    /// Timeout carried by dynamic-quorum `AddRaftVoter` requests.
+    pub auto_join_voter_request_timeout: Duration,
     /// Follower replication runtime policy.
     pub replication: ReplicationRuntimeConfig,
     /// Consumer-group session expiry scan cadence.
@@ -254,6 +256,8 @@ pub struct BrokerConfig {
     pub future_log_move_read_chunk_bytes: usize,
     /// Partition count for the transaction-state internal topic.
     pub transaction_state_num_partitions: i32,
+    /// Desired replication factor for the transaction-state internal topic.
+    pub transaction_state_replication_factor: i16,
     /// Minimum accepted transaction timeout.
     pub transaction_min_timeout_ms: i32,
     /// Maximum accepted transaction timeout.
@@ -904,6 +908,7 @@ impl BrokerConfig {
             opa_http_timeout: Duration::from_secs(5),
             oauth_jwks_http_timeout: Duration::from_secs(10),
             auto_join_retry_backoff: Duration::from_millis(500),
+            auto_join_voter_request_timeout: Duration::from_secs(30),
             replication: ReplicationRuntimeConfig::default(),
             coordinator_session_expiry_tick: Duration::from_secs(1),
             coordinator_shutdown_ack_timeout: Duration::from_secs(5),
@@ -941,6 +946,7 @@ impl BrokerConfig {
             default_min_insync_replicas: 1,
             future_log_move_read_chunk_bytes: 1_048_576,
             transaction_state_num_partitions: 50,
+            transaction_state_replication_factor: 3,
             transaction_min_timeout_ms: 1_000,
             transaction_max_timeout_ms: 900_000,
             broker_id: 1,
@@ -1540,6 +1546,14 @@ impl BrokerConfig {
     }
 
     fn validate_additional_runtime_scalars(&self) -> Result<(), BrokerError> {
+        if self.auto_join_voter_request_timeout.is_zero()
+            || self.auto_join_voter_request_timeout.as_millis()
+                > u128::from(i32::MAX.cast_unsigned())
+        {
+            return Err(BrokerError::InvalidRuntimeConfig(
+                "auto_join_voter_request_timeout must be within 1..=i32::MAX milliseconds".into(),
+            ));
+        }
         if self.offsets_topic_metadata_wait_timeout.is_zero() {
             return Err(BrokerError::InvalidRuntimeConfig(
                 "offsets_topic_metadata_wait_timeout must be positive".into(),
@@ -1671,6 +1685,22 @@ impl BrokerConfig {
                 )));
             }
         }
+        for (name, value) in [
+            (
+                "share_state_replication_factor",
+                self.share_coordinator.state_topic_replication_factor,
+            ),
+            (
+                "transaction_state_replication_factor",
+                self.transaction_state_replication_factor,
+            ),
+        ] {
+            if value <= 0 {
+                return Err(BrokerError::InvalidRuntimeConfig(format!(
+                    "{name} must be positive"
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -1753,6 +1783,7 @@ impl Default for BrokerConfig {
             opa_http_timeout: Duration::from_secs(5),
             oauth_jwks_http_timeout: Duration::from_secs(10),
             auto_join_retry_backoff: Duration::from_millis(500),
+            auto_join_voter_request_timeout: Duration::from_secs(30),
             replication: ReplicationRuntimeConfig::default(),
             coordinator_session_expiry_tick: Duration::from_secs(1),
             coordinator_shutdown_ack_timeout: Duration::from_secs(5),
@@ -1790,6 +1821,7 @@ impl Default for BrokerConfig {
             default_min_insync_replicas: 1,
             future_log_move_read_chunk_bytes: 1_048_576,
             transaction_state_num_partitions: 50,
+            transaction_state_replication_factor: 3,
             transaction_min_timeout_ms: 1_000,
             transaction_max_timeout_ms: 900_000,
             broker_id: 1,
@@ -2334,6 +2366,12 @@ mod tests {
                 "producer_id_expiration_scan_interval must be positive",
                 |c| c.producer_id_expiration_scan_interval = Duration::ZERO,
             ),
+            (
+                "auto_join_voter_request_timeout must be within 1..=i32::MAX milliseconds",
+                |c| {
+                    c.auto_join_voter_request_timeout = Duration::ZERO;
+                },
+            ),
             ("max_produce_group must be positive", |c| {
                 c.max_produce_group = 0;
             }),
@@ -2349,9 +2387,16 @@ mod tests {
             ("share_state_num_partitions must be positive", |c| {
                 c.share_coordinator.state_topic_num_partitions = 0;
             }),
+            ("share_state_replication_factor must be positive", |c| {
+                c.share_coordinator.state_topic_replication_factor = 0;
+            }),
             ("transaction_state_num_partitions must be positive", |c| {
                 c.transaction_state_num_partitions = 0;
             }),
+            (
+                "transaction_state_replication_factor must be positive",
+                |c| c.transaction_state_replication_factor = 0,
+            ),
             ("transaction_min_timeout_ms must be positive", |c| {
                 c.transaction_min_timeout_ms = 0;
             }),

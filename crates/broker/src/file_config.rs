@@ -224,6 +224,7 @@ pub struct RuntimeFileConfig {
     pub opa_http_timeout_ms: Option<u64>,
     pub oauth_jwks_http_timeout_ms: Option<u64>,
     pub auto_join_retry_backoff_ms: Option<u64>,
+    pub auto_join_voter_request_timeout_ms: Option<u64>,
     pub replication_fetch_max_bytes: Option<i32>,
     pub replication_fetch_max_wait_ms: Option<i32>,
     pub replication_fetch_min_bytes: Option<i32>,
@@ -278,7 +279,9 @@ pub struct RuntimeFileConfig {
     pub default_min_insync_replicas: Option<i32>,
     pub future_log_move_read_chunk_bytes: Option<usize>,
     pub share_state_num_partitions: Option<i32>,
+    pub share_state_replication_factor: Option<i16>,
     pub transaction_state_num_partitions: Option<i32>,
+    pub transaction_state_replication_factor: Option<i16>,
     pub transaction_min_timeout_ms: Option<i32>,
     pub transaction_max_timeout_ms: Option<i32>,
     pub partition_disk_scan_interval_secs: Option<u64>,
@@ -1674,6 +1677,14 @@ impl RuntimeFileConfig {
             auto_join_retry_backoff_ms,
             cfg.auto_join_retry_backoff
         );
+        if let Some(value) = runtime.auto_join_voter_request_timeout_ms {
+            let value = crate::config_value::VoterRequestTimeoutMillis::new(value)
+                .map_err(|error| {
+                    invalid_runtime_value("auto_join_voter_request_timeout_ms", error)
+                })?
+                .into_value();
+            cfg.auto_join_voter_request_timeout = std::time::Duration::from_millis(value);
+        }
         Ok(())
     }
 
@@ -1967,11 +1978,19 @@ impl RuntimeFileConfig {
             share_state_num_partitions,
             cfg.share_coordinator.state_topic_num_partitions
         );
+        if let Some(value) = runtime.share_state_replication_factor {
+            cfg.share_coordinator.state_topic_replication_factor =
+                positive_i16("share_state_replication_factor", value)?;
+        }
         set_runtime_i32!(
             runtime,
             transaction_state_num_partitions,
             cfg.transaction_state_num_partitions
         );
+        if let Some(value) = runtime.transaction_state_replication_factor {
+            cfg.transaction_state_replication_factor =
+                positive_i16("transaction_state_replication_factor", value)?;
+        }
         set_runtime_i32!(
             runtime,
             transaction_min_timeout_ms,
@@ -4265,6 +4284,24 @@ replication_fetch_min_bytes = 2
             .expect_err("zero cleaner interval must fail");
 
         assert!(error.to_string().contains("cleaner_interval_ms"));
+    }
+
+    #[test]
+    fn runtime_file_config_rejects_voter_timeout_above_wire_limit() {
+        let file: FileConfig =
+            toml::from_str("[runtime]\nauto_join_voter_request_timeout_ms = 2147483648\n")
+                .expect("parse runtime config");
+        let mut cfg = crate::config::BrokerConfig::default();
+
+        let error = file
+            .apply_to(&mut cfg)
+            .expect_err("timeout above i32 wire limit must fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("auto_join_voter_request_timeout_ms")
+        );
     }
 
     #[test]

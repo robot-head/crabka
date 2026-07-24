@@ -17,14 +17,14 @@ pub const TOPIC: &str = "__transaction_state";
 pub(crate) async fn ensure_topic(
     controller: &Arc<dyn crate::metadata_source::MetadataSource>,
     num_partitions: i32,
+    replication_factor: i16,
 ) -> Result<(), crate::error::BrokerError> {
     let image = controller.current_image();
     if image.topic(TOPIC).is_some() {
         return Ok(());
     }
 
-    // Collect registered brokers for round-robin replica assignment. The
-    // broker count drives the replication factor, capped at 3.
+    // Collect registered brokers for round-robin replica assignment.
     let mut sorted: Vec<NodeId> = image.brokers().map(|b| b.node_id).collect();
     if sorted.is_empty() {
         return Err(crate::error::BrokerError::Txn(
@@ -34,10 +34,9 @@ pub(crate) async fn ensure_topic(
     sorted.sort_unstable();
 
     let k = sorted.len();
-    // k is already capped at 3 so try_from cannot fail; use u8 as an
-    // intermediate to satisfy clippy without a silent truncation.
-    let rf_usize = k.min(3);
-    let rf = i16::try_from(rf_usize).expect("rf <= 3 always fits in i16");
+    let desired = usize::try_from(replication_factor).expect("replication factor is positive");
+    let rf_usize = k.min(desired);
+    let rf = i16::try_from(rf_usize).expect("bounded by configured i16 replication factor");
 
     let mut records: Vec<MetadataRecord> = Vec::new();
     let topic_id = Uuid::new_v4();
@@ -93,13 +92,14 @@ mod tests {
             .expect("start broker");
         let broker = handle.broker_arc_for_test();
 
-        ensure_topic(&broker.controller, 7)
+        ensure_topic(&broker.controller, 7, 3)
             .await
             .expect("create transaction-state topic");
 
         let image = handle.controller_image_for_test();
         let topic = image.topic(TOPIC).expect("transaction-state topic");
         assert!(topic.partitions == 7);
+        assert!(topic.replication_factor == 1);
         assert!(image.partitions_of(TOPIC).count() == 7);
         handle.shutdown().await;
     }
