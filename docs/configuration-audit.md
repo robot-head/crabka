@@ -262,8 +262,10 @@ already wired through validated CLI/environment inputs, and through typed
 - The ACL refresh interval in `AuthzConfig`.
 
 The same runtime path also owns the configured initial compatibility and mode,
-`_schemas` replication factor, JWKS refresh interval, client id, and
-service-specific health checks. The direct-only admin listen address remains a
+the forwarded-write body cap, `_schemas` replication factor, JWKS refresh
+interval, client id, and service-specific health checks. The forwarding cap is
+not reported because `forward_max_body_bytes` does not match the scanner's
+`max_bytes` field-name pattern. The direct-only admin listen address remains a
 CLI/environment input because the operator has no admin Service.
 
 ### Fixed
@@ -289,6 +291,9 @@ Registry subset contains exactly 63 matches across 15 files: 8 configured
 production defaults, 17 fixed production compatibility values, and 38 test
 inputs. Every candidate is covered by one of those classifications, and the
 adjacent `_schemas` storage and writer invariants were reviewed explicitly.
+Independent review found one operational literal outside the scanner's name
+pattern: the 16 MiB forwarded-write body cap. It is now configurable and
+rechecked through the direct and operator paths.
 
 ### Schema Registry Slice Completion Evidence
 
@@ -300,10 +305,11 @@ The Schema Registry slice passed these gates on 2026-07-24:
 - `cargo +nightly fmt --all -- --check`: passed.
 - `cargo clippy -p crabka-schema-registry -p crabka-operator --all-targets -- -D warnings`:
   passed.
-- `cargo nextest run -p crabka-schema-registry -p crabka-operator`: passed.
+- `cargo nextest run -p crabka-schema-registry -p crabka-operator`: 1,076
+  passed, 9 skipped, and no failures.
 - `cargo run -p crabka-schema-registry -- --help`: exposes election-session,
-  store-reader, schemas-topic-create, default-compatibility, and admin-listen
-  settings.
+  store-reader, schemas-topic-create, forwarded-body, default-compatibility,
+  and admin-listen settings.
 - `cargo run -p crabka-operator -- gen-crds <temporary-directory>` followed by
   an exact diff of the generated `SchemaRegistry` CRD: passed.
 - `git diff --check`: passed.
