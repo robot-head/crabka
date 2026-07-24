@@ -43,15 +43,22 @@ impl CompatibilityLevel {
     /// are not expected).
     #[must_use]
     pub fn parse(s: &str) -> Self {
-        match s {
+        Self::try_parse(s).unwrap_or(Self::Backward)
+    }
+
+    /// Parse a compatibility level without applying a fallback.
+    #[must_use]
+    pub fn try_parse(s: &str) -> Option<Self> {
+        Some(match s {
             "NONE" => Self::None,
+            "BACKWARD" => Self::Backward,
+            "BACKWARD_TRANSITIVE" => Self::BackwardTransitive,
             "FORWARD" => Self::Forward,
             "FORWARD_TRANSITIVE" => Self::ForwardTransitive,
             "FULL" => Self::Full,
             "FULL_TRANSITIVE" => Self::FullTransitive,
-            "BACKWARD_TRANSITIVE" => Self::BackwardTransitive,
-            _ => Self::Backward,
-        }
+            _ => return None,
+        })
     }
 
     #[must_use]

@@ -71,6 +71,7 @@ apache-avro = { workspace = true }
 protox-parse = "0.9"
 prost-reflect = { workspace = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+refined_type.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 tikv-jemallocator = { version = "0.7", optional = true, features = ["profiling", "unprefixed_malloc_on_supported_platforms"] }
@@ -81,6 +82,7 @@ crabka-client-consumer = { version = "0.3", path = "../client-consumer" }
 datatest-stable = { workspace = true }
 ring = { workspace = true }
 tempfile.workspace = true
+temp-env = "0.3"
 testcontainers.workspace = true
 testcontainers-modules = { workspace = true }
 

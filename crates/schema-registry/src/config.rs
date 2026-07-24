@@ -23,10 +23,73 @@ pub struct RegistryConfig {
     pub group_id: String,
     /// Whether this node may be elected primary.
     pub leader_eligibility: bool,
+    /// Service-owned runtime policy.
+    pub runtime: RegistryRuntimeConfig,
     /// Authentication / authorization / TLS / SR-to-broker client security.
     /// The [`Default`] is fully permissive (open HTTP, anonymous, plaintext
     /// broker client) — every field opts in independently.
     pub security: SecurityConfig,
+}
+
+/// Runtime policy for Schema Registry's broker interactions and defaults.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistryRuntimeConfig {
+    pub election_session_timeout_ms: i32,
+    pub election_rebalance_timeout_ms: i32,
+    pub election_heartbeat_interval_ms: u64,
+    pub election_reconnect_backoff_ms: u64,
+    pub store_reader_retry_backoff_ms: u64,
+    pub store_reader_fetch_max_wait_ms: i32,
+    pub store_reader_fetch_max_bytes: i32,
+    pub schemas_topic_create_timeout_ms: i32,
+    pub default_compatibility_level: String,
+    pub default_mode: String,
+}
+
+impl RegistryRuntimeConfig {
+    /// Validate relationships and string-valued runtime policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when timeouts conflict or a configured default is invalid.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.election_heartbeat_interval_ms
+            >= u64::try_from(self.election_session_timeout_ms).unwrap_or(0)
+        {
+            anyhow::bail!("election heartbeat interval must be below session timeout");
+        }
+        if self.election_session_timeout_ms > self.election_rebalance_timeout_ms {
+            anyhow::bail!("election session timeout exceeds rebalance timeout");
+        }
+        if crate::compat::CompatibilityLevel::try_parse(&self.default_compatibility_level).is_none()
+        {
+            anyhow::bail!("invalid default compatibility level");
+        }
+        if !matches!(
+            self.default_mode.as_str(),
+            "READWRITE" | "READONLY" | "IMPORT"
+        ) {
+            anyhow::bail!("invalid default mode");
+        }
+        Ok(())
+    }
+}
+
+impl Default for RegistryRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            election_session_timeout_ms: 10_000,
+            election_rebalance_timeout_ms: 30_000,
+            election_heartbeat_interval_ms: 3_000,
+            election_reconnect_backoff_ms: 500,
+            store_reader_retry_backoff_ms: 250,
+            store_reader_fetch_max_wait_ms: 500,
+            store_reader_fetch_max_bytes: 1_048_576,
+            schemas_topic_create_timeout_ms: 15_000,
+            default_compatibility_level: "BACKWARD".into(),
+            default_mode: "READWRITE".into(),
+        }
+    }
 }
 
 /// Opt-in security knobs. The [`Default`] (all `None`/`false`) reproduces the
@@ -86,7 +149,45 @@ impl Default for AuthzConfig {
 mod tests {
     use assert2::check;
 
-    use super::SecurityConfig;
+    use super::{RegistryRuntimeConfig, SecurityConfig};
+    use crate::config_value::{PositiveI32, PositiveMillis};
+
+    #[test]
+    fn runtime_scalar_boundaries_and_defaults() {
+        check!(PositiveMillis::new(0).is_err());
+        check!(PositiveMillis::new(1).is_ok());
+        check!(PositiveI32::new(0).is_err());
+        check!(PositiveI32::new(1).is_ok());
+        assert2::assert!(
+            RegistryRuntimeConfig::default()
+                == RegistryRuntimeConfig {
+                    election_session_timeout_ms: 10_000,
+                    election_rebalance_timeout_ms: 30_000,
+                    election_heartbeat_interval_ms: 3_000,
+                    election_reconnect_backoff_ms: 500,
+                    store_reader_retry_backoff_ms: 250,
+                    store_reader_fetch_max_wait_ms: 500,
+                    store_reader_fetch_max_bytes: 1_048_576,
+                    schemas_topic_create_timeout_ms: 15_000,
+                    default_compatibility_level: "BACKWARD".into(),
+                    default_mode: "READWRITE".into(),
+                }
+        );
+    }
+
+    #[test]
+    fn runtime_relations_are_rejected() {
+        let runtime = RegistryRuntimeConfig {
+            election_heartbeat_interval_ms: 10_000,
+            ..RegistryRuntimeConfig::default()
+        };
+        assert2::assert!(runtime.validate().is_err());
+        let runtime = RegistryRuntimeConfig {
+            election_rebalance_timeout_ms: 9_999,
+            ..RegistryRuntimeConfig::default()
+        };
+        assert2::assert!(runtime.validate().is_err());
+    }
 
     #[test]
     fn default_security_is_fully_open() {

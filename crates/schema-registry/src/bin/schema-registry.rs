@@ -18,7 +18,8 @@ use crabka_schema_registry::{
     auth::{AuthState, basic::BasicAuthStore},
     authz::SchemaRegistryAuthz,
     cli::SecurityCliInput,
-    config::RegistryConfig,
+    config::{RegistryConfig, RegistryRuntimeConfig},
+    config_value::{PositiveI32, PositiveMillis},
     kafkastore::KafkaStore,
     rest::{
         self, AppState, SecurityLayers,
@@ -43,14 +44,16 @@ struct Args {
         default_value = "0.0.0.0:8081"
     )]
     listen_addr: SocketAddr,
+    #[arg(long, env = "CRABKA_ADMIN_LISTEN_ADDR", default_value = "0.0.0.0:9404")]
+    admin_listen_addr: SocketAddr,
     #[arg(
         long,
         env = "SCHEMA_REGISTRY_SCHEMAS_TOPIC",
         default_value = "_schemas"
     )]
     schemas_topic: String,
-    #[arg(long, env = "SCHEMA_REGISTRY_SCHEMAS_TOPIC_RF", default_value_t = 3)]
-    schemas_topic_rf: i32,
+    #[arg(long, env = "SCHEMA_REGISTRY_SCHEMAS_TOPIC_RF", default_value = "3")]
+    schemas_topic_rf: PositiveI32,
     #[arg(
         long,
         env = "SCHEMA_REGISTRY_CLIENT_ID",
@@ -71,6 +74,36 @@ struct Args {
         default_value_t = true
     )]
     leader_eligibility: bool,
+
+    // ── Runtime policy ──────────────────────────────────────────────────────
+    #[arg(long, env = "SCHEMA_REGISTRY_ELECTION_SESSION_TIMEOUT_MS")]
+    election_session_timeout_ms: Option<PositiveI32>,
+    #[arg(long, env = "SCHEMA_REGISTRY_ELECTION_REBALANCE_TIMEOUT_MS")]
+    election_rebalance_timeout_ms: Option<PositiveI32>,
+    #[arg(long, env = "SCHEMA_REGISTRY_ELECTION_HEARTBEAT_INTERVAL_MS")]
+    election_heartbeat_interval_ms: Option<PositiveMillis>,
+    #[arg(long, env = "SCHEMA_REGISTRY_ELECTION_RECONNECT_BACKOFF_MS")]
+    election_reconnect_backoff_ms: Option<PositiveMillis>,
+    #[arg(long, env = "SCHEMA_REGISTRY_STORE_READER_RETRY_BACKOFF_MS")]
+    store_reader_retry_backoff_ms: Option<PositiveMillis>,
+    #[arg(long, env = "SCHEMA_REGISTRY_STORE_READER_FETCH_MAX_WAIT_MS")]
+    store_reader_fetch_max_wait_ms: Option<PositiveI32>,
+    #[arg(long, env = "SCHEMA_REGISTRY_STORE_READER_FETCH_MAX_BYTES")]
+    store_reader_fetch_max_bytes: Option<PositiveI32>,
+    #[arg(long, env = "SCHEMA_REGISTRY_SCHEMAS_TOPIC_CREATE_TIMEOUT_MS")]
+    schemas_topic_create_timeout_ms: Option<PositiveI32>,
+    #[arg(
+        long,
+        env = "SCHEMA_REGISTRY_DEFAULT_COMPATIBILITY_LEVEL",
+        value_parser = parse_compatibility_level
+    )]
+    default_compatibility_level: Option<String>,
+    #[arg(
+        long,
+        env = "SCHEMA_REGISTRY_DEFAULT_MODE",
+        value_parser = parse_mode
+    )]
+    default_mode: Option<String>,
 
     // ── Authentication ──────────────────────────────────────────────────────
     /// Reject unauthenticated (anonymous) requests with 401.
@@ -125,7 +158,7 @@ struct Args {
     bearer_jwks_principal_claim: Option<String>,
     /// JWKS refresh interval in milliseconds. Default 60 000.
     #[arg(long, env = "SCHEMA_REGISTRY_BEARER_JWKS_REFRESH_MS")]
-    bearer_jwks_refresh_ms: Option<u64>,
+    bearer_jwks_refresh_ms: Option<PositiveMillis>,
 
     // ── Server TLS / mTLS ───────────────────────────────────────────────────
     /// Server cert chain (PEM). Enables HTTPS when set together with --tls-key.
@@ -154,8 +187,8 @@ struct Args {
     #[arg(long = "super-user", value_name = "NAME")]
     super_users: Vec<String>,
     /// ACL-cache refresh interval (seconds).
-    #[arg(long, env = "SCHEMA_REGISTRY_ACL_REFRESH_SECS", default_value_t = 30)]
-    acl_refresh_secs: u64,
+    #[arg(long, env = "SCHEMA_REGISTRY_ACL_REFRESH_SECS", default_value = "30")]
+    acl_refresh_secs: PositiveMillis,
 
     // ── SR → broker client security ─────────────────────────────────────────
     /// Kafka client protocol to the broker: `PLAINTEXT` | `SSL` |
@@ -207,9 +240,9 @@ async fn main() -> anyhow::Result<()> {
         "crabka-schema-registry",
     )?;
 
-    crabka_telemetry::profiling::serve_admin_from_env("0.0.0.0:9404").await?;
-
     let args = Args::parse();
+    crabka_telemetry::profiling::serve_admin_from_env(&args.admin_listen_addr.to_string()).await?;
+
     let crabka_schema_registry::cli::SecurityOutput {
         config: security,
         jwks_handle,
@@ -217,7 +250,7 @@ async fn main() -> anyhow::Result<()> {
     let cfg = RegistryConfig {
         bootstrap: args.bootstrap_servers.clone(),
         schemas_topic: args.schemas_topic.clone(),
-        schemas_topic_rf: args.schemas_topic_rf,
+        schemas_topic_rf: args.schemas_topic_rf.into_value(),
         client_id: args.client_id.clone(),
         advertised_url: args
             .advertised_url
@@ -225,6 +258,7 @@ async fn main() -> anyhow::Result<()> {
             .unwrap_or_else(|| format!("http://{}", args.listen_addr)),
         group_id: args.group_id.clone(),
         leader_eligibility: args.leader_eligibility,
+        runtime: args.runtime_config()?,
         security,
     };
     info!(
@@ -322,6 +356,51 @@ async fn main() -> anyhow::Result<()> {
 }
 
 impl Args {
+    fn runtime_config(&self) -> anyhow::Result<RegistryRuntimeConfig> {
+        let defaults = RegistryRuntimeConfig::default();
+        let runtime = RegistryRuntimeConfig {
+            election_session_timeout_ms: self.election_session_timeout_ms.map_or(
+                defaults.election_session_timeout_ms,
+                PositiveI32::into_value,
+            ),
+            election_rebalance_timeout_ms: self.election_rebalance_timeout_ms.map_or(
+                defaults.election_rebalance_timeout_ms,
+                PositiveI32::into_value,
+            ),
+            election_heartbeat_interval_ms: self.election_heartbeat_interval_ms.map_or(
+                defaults.election_heartbeat_interval_ms,
+                PositiveMillis::into_value,
+            ),
+            election_reconnect_backoff_ms: self.election_reconnect_backoff_ms.map_or(
+                defaults.election_reconnect_backoff_ms,
+                PositiveMillis::into_value,
+            ),
+            store_reader_retry_backoff_ms: self.store_reader_retry_backoff_ms.map_or(
+                defaults.store_reader_retry_backoff_ms,
+                PositiveMillis::into_value,
+            ),
+            store_reader_fetch_max_wait_ms: self.store_reader_fetch_max_wait_ms.map_or(
+                defaults.store_reader_fetch_max_wait_ms,
+                PositiveI32::into_value,
+            ),
+            store_reader_fetch_max_bytes: self.store_reader_fetch_max_bytes.map_or(
+                defaults.store_reader_fetch_max_bytes,
+                PositiveI32::into_value,
+            ),
+            schemas_topic_create_timeout_ms: self.schemas_topic_create_timeout_ms.map_or(
+                defaults.schemas_topic_create_timeout_ms,
+                PositiveI32::into_value,
+            ),
+            default_compatibility_level: self
+                .default_compatibility_level
+                .clone()
+                .unwrap_or(defaults.default_compatibility_level),
+            default_mode: self.default_mode.clone().unwrap_or(defaults.default_mode),
+        };
+        runtime.validate()?;
+        Ok(runtime)
+    }
+
     /// Map the parsed clap flags into the clap-free [`SecurityCliInput`] the lib
     /// validates/assembles. Pure field-shuffling — the security semantics live
     /// in [`crabka_schema_registry::cli::build_security`].
@@ -338,14 +417,14 @@ impl Args {
             jwks_expected_audience: self.bearer_jwks_expected_audience.clone(),
             jwks_ca: self.bearer_jwks_ca.clone(),
             jwks_principal_claim: self.bearer_jwks_principal_claim.clone(),
-            jwks_refresh_ms: self.bearer_jwks_refresh_ms,
+            jwks_refresh_ms: self.bearer_jwks_refresh_ms.map(PositiveMillis::into_value),
             tls_cert: self.tls_cert.clone(),
             tls_key: self.tls_key.clone(),
             tls_client_ca: self.tls_client_ca.clone(),
             tls_client_auth: self.tls_client_auth.clone(),
             authz: self.authz,
             super_users: self.super_users.clone(),
-            acl_refresh_secs: self.acl_refresh_secs,
+            acl_refresh_secs: self.acl_refresh_secs.into_value(),
             kafka_security_protocol: self.kafka_security_protocol.clone(),
             kafka_sasl_mechanism: self.kafka_sasl_mechanism.clone(),
             kafka_sasl_username: self.kafka_sasl_username.clone(),
@@ -354,6 +433,18 @@ impl Args {
             kafka_tls_server_name: self.kafka_tls_server_name.clone(),
         }
     }
+}
+
+fn parse_compatibility_level(value: &str) -> Result<String, String> {
+    crabka_schema_registry::compat::CompatibilityLevel::try_parse(value)
+        .map(|_| value.to_owned())
+        .ok_or_else(|| "invalid compatibility level".to_owned())
+}
+
+fn parse_mode(value: &str) -> Result<String, String> {
+    matches!(value, "READWRITE" | "READONLY" | "IMPORT")
+        .then(|| value.to_owned())
+        .ok_or_else(|| "invalid mode".to_owned())
 }
 
 /// Split a comma-separated `host:port,host:port` bootstrap string into the
@@ -423,4 +514,156 @@ fn build_jwks_client(ca_path: Option<&std::path::PathBuf>) -> anyhow::Result<req
         .add_root_certificate(cert)
         .build()
         .map_err(|e| anyhow::anyhow!("build JWKS reqwest client: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Mutex, OnceLock};
+
+    use assert2::assert;
+    use clap::Parser;
+    use crabka_schema_registry::config::RegistryRuntimeConfig;
+
+    use super::Args;
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    const CLEAN_RUNTIME_ENV: [(&str, Option<&str>); 14] = [
+        ("CRABKA_ADMIN_LISTEN_ADDR", None),
+        ("SCHEMA_REGISTRY_SCHEMAS_TOPIC_RF", None),
+        ("SCHEMA_REGISTRY_BEARER_JWKS_REFRESH_MS", None),
+        ("SCHEMA_REGISTRY_ACL_REFRESH_SECS", None),
+        ("SCHEMA_REGISTRY_ELECTION_SESSION_TIMEOUT_MS", None),
+        ("SCHEMA_REGISTRY_ELECTION_REBALANCE_TIMEOUT_MS", None),
+        ("SCHEMA_REGISTRY_ELECTION_HEARTBEAT_INTERVAL_MS", None),
+        ("SCHEMA_REGISTRY_ELECTION_RECONNECT_BACKOFF_MS", None),
+        ("SCHEMA_REGISTRY_STORE_READER_RETRY_BACKOFF_MS", None),
+        ("SCHEMA_REGISTRY_STORE_READER_FETCH_MAX_WAIT_MS", None),
+        ("SCHEMA_REGISTRY_STORE_READER_FETCH_MAX_BYTES", None),
+        ("SCHEMA_REGISTRY_SCHEMAS_TOPIC_CREATE_TIMEOUT_MS", None),
+        ("SCHEMA_REGISTRY_DEFAULT_COMPATIBILITY_LEVEL", None),
+        ("SCHEMA_REGISTRY_DEFAULT_MODE", None),
+    ];
+
+    #[test]
+    fn runtime_cli_boundaries_precedence_and_defaults() {
+        let _guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("environment lock");
+
+        let zero_cases = [
+            "--schemas-topic-rf=0",
+            "--bearer-jwks-refresh-ms=0",
+            "--acl-refresh-secs=0",
+            "--election-session-timeout-ms=0",
+            "--election-rebalance-timeout-ms=0",
+            "--election-heartbeat-interval-ms=0",
+            "--election-reconnect-backoff-ms=0",
+            "--store-reader-retry-backoff-ms=0",
+            "--store-reader-fetch-max-wait-ms=0",
+            "--store-reader-fetch-max-bytes=0",
+            "--schemas-topic-create-timeout-ms=0",
+        ];
+        for value in zero_cases {
+            assert!(
+                Args::try_parse_from([
+                    "crabka-schema-registry",
+                    "--bootstrap-servers=localhost:9092",
+                    value,
+                ])
+                .is_err()
+            );
+        }
+
+        let args = Args::try_parse_from([
+            "crabka-schema-registry",
+            "--bootstrap-servers=localhost:9092",
+            "--schemas-topic-rf=4",
+            "--bearer-jwks-refresh-ms=60001",
+            "--acl-refresh-secs=31",
+            "--election-session-timeout-ms=11000",
+            "--election-rebalance-timeout-ms=32000",
+            "--election-heartbeat-interval-ms=3001",
+            "--election-reconnect-backoff-ms=501",
+            "--store-reader-retry-backoff-ms=251",
+            "--store-reader-fetch-max-wait-ms=501",
+            "--store-reader-fetch-max-bytes=1048577",
+            "--schemas-topic-create-timeout-ms=15001",
+            "--default-compatibility-level=FULL",
+            "--default-mode=IMPORT",
+        ])
+        .expect("parse explicit runtime values");
+        assert!(
+            args.runtime_config().expect("validate runtime")
+                == RegistryRuntimeConfig {
+                    election_session_timeout_ms: 11_000,
+                    election_rebalance_timeout_ms: 32_000,
+                    election_heartbeat_interval_ms: 3_001,
+                    election_reconnect_backoff_ms: 501,
+                    store_reader_retry_backoff_ms: 251,
+                    store_reader_fetch_max_wait_ms: 501,
+                    store_reader_fetch_max_bytes: 1_048_577,
+                    schemas_topic_create_timeout_ms: 15_001,
+                    default_compatibility_level: "FULL".into(),
+                    default_mode: "IMPORT".into(),
+                }
+        );
+
+        temp_env::with_vars(CLEAN_RUNTIME_ENV, || {
+            let defaults = Args::try_parse_from([
+                "crabka-schema-registry",
+                "--bootstrap-servers=localhost:9092",
+            ])
+            .expect("parse defaults");
+            assert!(
+                (
+                    defaults.runtime_config().expect("validate defaults"),
+                    defaults.schemas_topic_rf.into_value(),
+                    defaults.acl_refresh_secs.into_value(),
+                    defaults.bearer_jwks_refresh_ms,
+                    defaults.admin_listen_addr,
+                ) == (
+                    RegistryRuntimeConfig::default(),
+                    3,
+                    30,
+                    None,
+                    "0.0.0.0:9404".parse().expect("parse expected address"),
+                )
+            );
+
+            temp_env::with_var(
+                "SCHEMA_REGISTRY_ELECTION_SESSION_TIMEOUT_MS",
+                Some("12000"),
+                || {
+                    let from_env = Args::try_parse_from([
+                        "crabka-schema-registry",
+                        "--bootstrap-servers=localhost:9092",
+                    ])
+                    .expect("parse environment");
+                    assert!(
+                        from_env
+                            .runtime_config()
+                            .expect("validate environment")
+                            .election_session_timeout_ms
+                            == 12_000
+                    );
+
+                    let from_cli = Args::try_parse_from([
+                        "crabka-schema-registry",
+                        "--bootstrap-servers=localhost:9092",
+                        "--election-session-timeout-ms=13000",
+                    ])
+                    .expect("parse CLI over environment");
+                    assert!(
+                        from_cli
+                            .runtime_config()
+                            .expect("validate CLI")
+                            .election_session_timeout_ms
+                            == 13_000
+                    );
+                },
+            );
+        });
+    }
 }

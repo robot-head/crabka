@@ -51,6 +51,7 @@ async fn boot_registry(
         advertised_url: "http://127.0.0.1:0".into(),
         group_id: "schema-registry".into(),
         leader_eligibility: true,
+        runtime: crabka_schema_registry::config::RegistryRuntimeConfig::default(),
         security: SecurityConfig::default(),
     };
     let cancel = CancellationToken::new();

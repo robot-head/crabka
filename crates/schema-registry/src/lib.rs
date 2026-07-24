@@ -16,6 +16,7 @@
 //!     advertised_url: "http://schema-registry-1:8081".into(),
 //!     group_id: "schema-registry".into(),
 //!     leader_eligibility: true,
+//!     runtime: Default::default(),
 //!     security: SecurityConfig::default(),
 //! };
 //!
@@ -38,6 +39,7 @@ pub mod authz;
 pub mod cli;
 pub mod compat;
 pub mod config;
+pub mod config_value;
 pub mod election;
 pub mod error;
 pub mod format;
