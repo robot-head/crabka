@@ -74,3 +74,31 @@ pub(crate) async fn ensure_topic(
         ))),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use assert2::assert;
+    use tempfile::tempdir;
+
+    use super::*;
+    use crate::{broker::Broker, config::BrokerConfig};
+
+    #[tokio::test]
+    async fn nondefault_partition_count_controls_created_topic() {
+        let dir = tempdir().unwrap();
+        let handle = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+            .await
+            .expect("start broker");
+        let broker = handle.broker_arc_for_test();
+
+        ensure_topic(&broker.controller, 7)
+            .await
+            .expect("create share-state topic");
+
+        let image = handle.controller_image_for_test();
+        let topic = image.topic(TOPIC).expect("share-state topic");
+        assert!(topic.partitions == 7);
+        assert!(image.partitions_of(TOPIC).count() == 7);
+        handle.shutdown().await;
+    }
+}

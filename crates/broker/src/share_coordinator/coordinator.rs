@@ -470,7 +470,7 @@ impl ShareCoordinator {
 
             let mut offset = part.log_start_offset();
             loop {
-                let out = match self.read_recovery_chunk(&part, offset) {
+                let out = match part.read_log(offset, self.config.recovery_read_max_bytes) {
                     Ok(o) => o,
                     Err(e) => {
                         warn!(
@@ -517,14 +517,6 @@ impl ShareCoordinator {
                 }
             }
         }
-    }
-
-    fn read_recovery_chunk(
-        &self,
-        partition: &crate::partition::Partition,
-        offset: Offset,
-    ) -> Result<crabka_log::ReadOutput, BrokerError> {
-        partition.read_log(offset, self.config.recovery_read_max_bytes)
     }
 
     /// Fold one replayed record value into the in-memory state map. Snapshot
@@ -640,50 +632,85 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn nondefault_partition_count_bounds_test_leadership() {
-        let config = ShareCoordinatorConfig {
-            state_topic_num_partitions: 7,
-            ..ShareCoordinatorConfig::default()
-        };
-        let coord = ShareCoordinator::new(
-            crabka_audit::NodeId(1),
-            Arc::new(PartitionRegistry::new()),
-            config,
-        );
-
-        coord.lead_all_partitions_for_test().await;
-
-        assert!(coord.is_leader(PartitionIndex(6)).await);
-        assert!(!coord.is_leader(PartitionIndex(7)).await);
-    }
-
-    #[tokio::test]
-    async fn nondefault_recovery_bytes_bound_one_read_chunk() {
+    async fn recover_honors_nondefault_read_bound() {
         let dir = tempdir().unwrap();
         let registry = Arc::new(PartitionRegistry::new());
         open_state_partition(&registry, dir.path(), 0);
-        let config = ShareCoordinatorConfig {
-            recovery_read_max_bytes: 700,
-            ..ShareCoordinatorConfig::default()
-        };
-        let coord = ShareCoordinator::new(crabka_audit::NodeId(1), Arc::clone(&registry), config);
         let partition = registry
             .get(bootstrap::TOPIC, PartitionIndex(0))
             .expect("state partition open");
-        for _ in 0..2 {
-            let mut batch = RecordBatch::default();
-            batch.records.push(Record {
-                value: Some(Bytes::from(vec![0; 512])),
-                ..Record::default()
-            });
-            partition.produce_batch(batch).await.unwrap();
-        }
+        let topic_id = uuid::Uuid::from_bytes([42; 16]);
+        let key = ShareStateKey {
+            record_type: KEY_SHARE_SNAPSHOT,
+            group_id: "bounded".to_string(),
+            topic_id,
+            partition: 0,
+        };
+        let snapshot = ShareSnapshotValue {
+            snapshot_epoch: 0,
+            state_epoch: 3,
+            leader_epoch: 4,
+            start_offset: Offset(5),
+            delivery_complete_count: 6,
+            state_batches: vec![],
+        };
+        let mut batch = RecordBatch::default();
+        batch.records.push(Record {
+            key: Some(encode_state_key(&key)),
+            value: Some(snapshot.encode()),
+            ..Record::default()
+        });
+        batch.records.push(Record {
+            value: Some(Bytes::from(vec![0; 2_048])),
+            ..Record::default()
+        });
+        batch.last_offset_delta = 1;
+        partition.produce_batch(batch).await.unwrap();
 
-        let output = coord
-            .read_recovery_chunk(&partition, Offset(0))
-            .expect("recovery read");
+        let image = MetadataImage::from_records(
+            uuid::Uuid::nil(),
+            &[
+                crabka_metadata::MetadataRecord::V1Topic(crabka_metadata::TopicRecord {
+                    name: bootstrap::TOPIC.to_string(),
+                    topic_id: uuid::Uuid::from_bytes([43; 16]),
+                    partitions: 1,
+                    replication_factor: 1,
+                }),
+                crabka_metadata::MetadataRecord::V1Partition(crabka_metadata::PartitionRecord {
+                    topic: bootstrap::TOPIC.to_string(),
+                    partition: 0,
+                    leader: crabka_metadata::NodeId(1),
+                    replicas: vec![crabka_metadata::NodeId(1)],
+                    isr: vec![crabka_metadata::NodeId(1)],
+                    leader_epoch: crabka_metadata::LeaderEpoch(0),
+                    adding_replicas: vec![],
+                    removing_replicas: vec![],
+                    directories: vec![],
+                    partition_epoch: 0,
+                }),
+            ],
+        );
+        let bounded = ShareCoordinator::new(
+            crabka_audit::NodeId(1),
+            Arc::clone(&registry),
+            ShareCoordinatorConfig {
+                recovery_read_max_bytes: 700,
+                ..ShareCoordinatorConfig::default()
+            },
+        );
+        bounded.recover(&image).await.unwrap();
+        assert!(bounded.read("bounded", topic_id, 0).await.is_none());
 
-        assert!(output.batches.len() == 1);
+        let unbounded = ShareCoordinator::new(
+            crabka_audit::NodeId(1),
+            registry,
+            ShareCoordinatorConfig {
+                recovery_read_max_bytes: 4_096,
+                ..ShareCoordinatorConfig::default()
+            },
+        );
+        unbounded.recover(&image).await.unwrap();
+        assert!(unbounded.read_summary("bounded", topic_id, 0).await == Some((3, 4, Offset(5), 6)));
     }
 
     #[tokio::test]
