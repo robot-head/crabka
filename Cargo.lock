@@ -3348,6 +3348,7 @@ dependencies = [
  "object_store",
  "postgres-native-tls",
  "prometheus-client",
+ "refined_type",
  "reqwest 0.13.4",
  "ring",
  "rustls",

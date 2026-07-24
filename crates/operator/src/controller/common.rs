@@ -130,6 +130,8 @@ pub enum ReconcileError {
     /// so the broker pod never boots with broken OTLP env vars.
     #[error("tracing: {0}")]
     TracingInvalid(String),
+    #[error("broker tuning: {0}")]
+    KafkaConfigInvalid(String),
     #[error("gres control: {0}")]
     GresControl(#[from] crabka_gres_control::ControlError),
     #[error("producer error: {0}")]
@@ -436,7 +438,7 @@ pub(crate) fn render_configmap(
     let controller_server_name = format!("{name}-broker-headless.{ns}.svc.cluster.local");
     for (broker_id, addrs) in addresses_per_broker {
         let tls_for_broker = tls_per_broker.and_then(|m| m.get(broker_id));
-        let toml = crate::controller::listeners::render_broker_toml(
+        let mut toml = crate::controller::listeners::render_broker_toml(
             (*broker_id, listeners, addrs, inter_broker_listener_name),
             (&server_properties, tls_for_broker, clients_ca_path),
             (
@@ -447,6 +449,9 @@ pub(crate) fn render_configmap(
             tiered_storage,
             (&controller_quorum_voters, &controller_server_name),
         );
+        if let Some(tuning) = &owner.spec.broker_tuning {
+            toml.push_str(&tuning.render_runtime_toml());
+        }
         data.insert(format!("broker-{broker_id}.toml"), toml);
     }
 
@@ -927,6 +932,7 @@ mod config_hash_tests {
             inter_broker_kerberos: None,
             krb5_conf_secret_ref: None,
             tracing: None,
+            broker_tuning: None,
         };
         let h = combined_config_hash(&spec_a, None, None, None);
         let h_again = combined_config_hash(&spec_a, None, None, None);
@@ -974,6 +980,7 @@ mod config_hash_tests {
             inter_broker_kerberos: None,
             krb5_conf_secret_ref: None,
             tracing: None,
+            broker_tuning: None,
         };
         let h_off = combined_config_hash(&spec_off, None, None, None);
 
@@ -1023,6 +1030,7 @@ mod config_hash_tests {
             inter_broker_kerberos: None,
             krb5_conf_secret_ref: None,
             tracing: None,
+            broker_tuning: None,
         };
         let h_none = combined_config_hash(&spec, None, None, None);
         let h_a = combined_config_hash(
@@ -1064,6 +1072,7 @@ mod config_hash_tests {
             inter_broker_kerberos: None,
             krb5_conf_secret_ref: None,
             tracing: None,
+            broker_tuning: None,
         };
         let h1 = combined_config_hash(&spec, Some("ca-pem"), None, None);
         let h2 = combined_config_hash(&spec, Some("ca-pem"), None, None);
@@ -1096,6 +1105,7 @@ mod config_hash_tests {
                 inter_broker_kerberos: None,
                 krb5_conf_secret_ref: None,
                 tracing: None,
+                broker_tuning: None,
             },
         );
         k.meta_mut().namespace = Some("default".into());
@@ -1153,6 +1163,7 @@ mod config_hash_tests {
             inter_broker_kerberos: None,
             krb5_conf_secret_ref: None,
             tracing: None,
+            broker_tuning: None,
         };
         // No explicit pin => hash collapse preserved (== config_hash of
         // the empty config part).
@@ -1196,6 +1207,7 @@ mod config_hash_tests {
                 inter_broker_kerberos: None,
                 krb5_conf_secret_ref: None,
                 tracing: None,
+                broker_tuning: None,
             },
         );
         k.meta_mut().namespace = Some("default".into());
@@ -1404,6 +1416,7 @@ mod cluster_object_tests {
                 inter_broker_kerberos: None,
                 krb5_conf_secret_ref: None,
                 tracing: None,
+                broker_tuning: None,
             },
         );
         k.metadata.namespace = Some("default".into());

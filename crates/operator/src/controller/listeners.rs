@@ -1059,6 +1059,7 @@ mod service_rendering_tests {
                 inter_broker_kerberos: None,
                 krb5_conf_secret_ref: None,
                 tracing: None,
+                broker_tuning: None,
             },
         );
         k.meta_mut().namespace = Some("default".into());

@@ -126,6 +126,436 @@ pub struct KafkaSpec {
     /// default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tracing: Option<Tracing>,
+    /// Validated broker operational policy rendered into `[runtime]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broker_tuning: Option<BrokerTuning>,
+}
+
+macro_rules! validate_tuning_field {
+    (refined, $owner:ident, $field:ident, $rule:ty) => {
+        if let Some(value) = $owner.$field {
+            <$rule>::new(value)
+                .map_err(|error| BrokerTuning::invalid(stringify!($field), error))?;
+        }
+    };
+    (plain, $owner:ident, $field:ident, $rule:ty) => {};
+    (string, $owner:ident, $field:ident, $rule:ty) => {};
+}
+
+macro_rules! render_tuning_field {
+    (refined, $owner:ident, $out:ident, $field:ident) => {
+        if let Some(value) = $owner.$field {
+            use std::fmt::Write as _;
+            let _ = writeln!($out, "{} = {value}", stringify!($field));
+        }
+    };
+    (plain, $owner:ident, $out:ident, $field:ident) => {
+        if let Some(value) = $owner.$field {
+            use std::fmt::Write as _;
+            let _ = writeln!($out, "{} = {value}", stringify!($field));
+        }
+    };
+    (string, $owner:ident, $out:ident, $field:ident) => {
+        if let Some(value) = &$owner.$field {
+            use std::fmt::Write as _;
+            let _ = writeln!(
+                $out,
+                "{} = {}",
+                stringify!($field),
+                toml::Value::String(value.clone())
+            );
+        }
+    };
+}
+
+macro_rules! define_broker_tuning {
+    ($(
+        $kind:ident
+        $(#[$meta:meta])*
+        $field:ident: $ty:ty => $rule:ty;
+    )*) => {
+        /// Typed Kafka CRD surface for broker `[runtime]` policy.
+        #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        pub struct BrokerTuning {
+            $(
+                $(#[$meta])*
+                #[serde(default, skip_serializing_if = "Option::is_none")]
+                pub $field: Option<$ty>,
+            )*
+        }
+
+        impl BrokerTuning {
+            /// Validate scalar and relational runtime constraints.
+            ///
+            /// # Errors
+            ///
+            /// Returns the invalid camel-case CRD path.
+            pub fn validate(&self) -> Result<(), String> {
+                $(validate_tuning_field!($kind, self, $field, $rule);)*
+                self.validate_strings()?;
+                self.validate_relations()
+            }
+
+            pub(crate) fn render_runtime_toml(&self) -> String {
+                let mut values = String::new();
+                $(render_tuning_field!($kind, self, values, $field);)*
+                if values.is_empty() {
+                    String::new()
+                } else {
+                    format!("[runtime]\n{values}\n")
+                }
+            }
+        }
+    };
+}
+
+define_broker_tuning! {
+    refined #[schemars(range(min = 1))] startup_leader_wait_timeout_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] self_registration_backoff_min_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] self_registration_backoff_max_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] observer_poll_interval_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] audit_spool_replay_interval_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] audit_stats_poll_interval_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] audit_partition_wait_timeout_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] liveness_tick_interval_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] gauge_poll_interval_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] cleaner_interval_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] isr_scan_interval_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] future_log_move_retry_backoff_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] client_metrics_eviction_tick_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] client_metrics_stale_floor_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] client_metrics_default_interval_ms: i32 => refined_type::rule::GreaterI32<0>;
+    refined #[schemars(range(min = 1))] client_metrics_telemetry_max_bytes: i32 => refined_type::rule::GreaterI32<0>;
+    refined #[schemars(range(min = 1))] client_metrics_prom_snapshot_ttl_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] rlmm_reconcile_tick_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] rlmm_bootstrap_backoff_initial_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] rlmm_bootstrap_backoff_max_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] connection_creation_throttle_max_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] opa_http_timeout_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] oauth_jwks_http_timeout_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] auto_join_retry_backoff_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] replication_fetch_max_bytes: i32 => refined_type::rule::GreaterI32<0>;
+    refined #[schemars(range(min = 1))] replication_fetch_max_wait_ms: i32 => refined_type::rule::GreaterI32<0>;
+    refined #[schemars(range(min = 1))] replication_fetch_min_bytes: i32 => refined_type::rule::GreaterI32<0>;
+    refined #[schemars(range(min = 1))] replication_throttle_exhausted_backoff_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] replication_send_error_backoff_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] replication_unknown_topic_retry_delay_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] replication_epoch_fence_backoff_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] replication_unexpected_error_backoff_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] replication_reconnect_initial_delay_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] replication_reconnect_delay_cap_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] coordinator_session_expiry_tick_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] coordinator_shutdown_ack_timeout_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] consumer_group_session_timeout_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] consumer_group_heartbeat_interval_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] consumer_group_min_session_timeout_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] consumer_group_max_session_timeout_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] consumer_group_min_heartbeat_interval_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] consumer_group_max_heartbeat_interval_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] consumer_group_max_size: usize => refined_type::rule::GreaterUsize<0>;
+    refined #[schemars(range(min = 1))] classic_group_initial_rebalance_delay_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] sync_group_follower_wait_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] unclean_recovery_aggressive_deadline_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] unclean_recovery_balanced_deadline_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] operator_recovery_deadline_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] quota_throttle_max_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] self_registration_max_attempts: u32 => refined_type::rule::GreaterU32<0>;
+    refined #[schemars(range(min = 1))] observer_fetch_max_bytes: u32 => refined_type::rule::GreaterU32<0>;
+    refined #[schemars(range(min = 1))] audit_event_queue_capacity: usize => refined_type::rule::GreaterUsize<0>;
+    refined #[schemars(range(min = 1))] audit_tail_window_offsets: i64 => refined_type::rule::GreaterI64<0>;
+    refined #[schemars(range(min = 1))] audit_tail_read_max_bytes: usize => refined_type::rule::GreaterUsize<0>;
+    refined #[schemars(range(min = 1))] offsets_topic_metadata_wait_timeout_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] client_metrics_stale_push_intervals: u32 => refined_type::rule::GreaterU32<0>;
+    refined #[schemars(range(min = 1))] client_metrics_otlp_queue_capacity: usize => refined_type::rule::GreaterUsize<0>;
+    refined #[schemars(range(min = 1))] coordinator_actor_mailbox_capacity: usize => refined_type::rule::GreaterUsize<0>;
+    refined #[schemars(range(min = 1))] unclean_recovery_queue_capacity: usize => refined_type::rule::GreaterUsize<0>;
+    refined #[schemars(range(min = 1))] share_recovery_read_max_bytes: usize => refined_type::rule::GreaterUsize<0>;
+    refined #[schemars(range(min = 1))] share_session_cache_max_when_unlimited: usize => refined_type::rule::GreaterUsize<0>;
+    refined #[schemars(range(min = 1, max = 4_294_967_295_u64))] socket_request_max_bytes: usize => refined_type::rule::MinMaxUsize<1, 4_294_967_295>;
+    refined #[schemars(range(min = 1))] sendfile_min_bytes: usize => refined_type::rule::GreaterUsize<0>;
+    refined #[schemars(range(min = 1))] socket_send_buffer_bytes: usize => refined_type::rule::GreaterUsize<0>;
+    refined #[schemars(range(min = 1))] socket_receive_buffer_bytes: usize => refined_type::rule::GreaterUsize<0>;
+    refined #[schemars(range(min = 1))] acl_max_principal_bytes: usize => refined_type::rule::GreaterUsize<0>;
+    refined #[schemars(range(min = 1))] acl_max_resource_name_bytes: usize => refined_type::rule::GreaterUsize<0>;
+    refined #[schemars(range(min = 1))] telemetry_max_decompression_ratio: usize => refined_type::rule::GreaterUsize<0>;
+    refined #[schemars(range(min = 1))] telemetry_decompressed_output_floor_bytes: usize => refined_type::rule::GreaterUsize<0>;
+    refined #[schemars(range(min = 1))] telemetry_decompressed_output_ceiling_bytes: usize => refined_type::rule::GreaterUsize<0>;
+    string #[schemars(length(min = 1))] inter_broker_server_name: String => ();
+    refined #[schemars(range(min = 1))] producer_id_expiration_ms: i64 => refined_type::rule::GreaterI64<0>;
+    refined #[schemars(range(min = 1))] producer_id_expiration_scan_interval_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] max_produce_group: usize => refined_type::rule::GreaterUsize<0>;
+    refined #[schemars(range(min = 1))] partition_writer_queue_depth: usize => refined_type::rule::GreaterUsize<0>;
+    refined #[schemars(range(min = 1))] default_min_insync_replicas: i32 => refined_type::rule::GreaterI32<0>;
+    refined #[schemars(range(min = 1))] future_log_move_read_chunk_bytes: usize => refined_type::rule::GreaterUsize<0>;
+    refined #[schemars(range(min = 1))] share_state_num_partitions: i32 => refined_type::rule::GreaterI32<0>;
+    refined #[schemars(range(min = 1))] transaction_state_num_partitions: i32 => refined_type::rule::GreaterI32<0>;
+    refined #[schemars(range(min = 1))] transaction_min_timeout_ms: i32 => refined_type::rule::GreaterI32<0>;
+    refined #[schemars(range(min = 1, max = 2_147_483_646))] transaction_max_timeout_ms: i32 => refined_type::rule::MinMaxI32<1, 2_147_483_646>;
+    plain partition_disk_scan_interval_secs: u64 => ();
+    plain observer_lag_bound: u64 => ();
+    refined #[schemars(range(min = 1))] heartbeat_interval_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] heartbeat_timeout_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] replica_lag_time_max_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] controller_election_timeout_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] controller_heartbeat_interval_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] controlled_shutdown_drain_timeout_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] metadata_max_bytes_between_snapshots: u64 => refined_type::rule::GreaterU64<0>;
+    plain metadata_max_snapshot_interval_ms: u64 => ();
+    refined #[schemars(range(min = 1))] metadata_snapshot_interval_records: u64 => refined_type::rule::GreaterU64<0>;
+    plain txn_abort_cleanup_interval_ms: u64 => ();
+    refined #[schemars(range(min = 1))] leader_imbalance_check_interval_secs: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 0, max = 100))] leader_imbalance_per_broker_percentage: u32 => refined_type::rule::MinMaxU32<0, 100>;
+    plain tls_reload_interval_ms: u64 => ();
+    plain max_incremental_fetch_session_cache_slots: usize => ();
+    plain max_connections: usize => ();
+    plain max_connections_per_ip: usize => ();
+    refined #[schemars(range(min = 1))] delegation_token_max_lifetime_ms: i64 => refined_type::rule::GreaterI64<0>;
+    refined #[schemars(range(min = 1))] delegation_token_expiry_check_interval_ms: i64 => refined_type::rule::GreaterI64<0>;
+    refined #[schemars(range(min = 1))] delegation_token_default_renew_period_ms: i64 => refined_type::rule::GreaterI64<0>;
+    refined #[schemars(range(min = 1))] remote_log_manager_interval_ms: u64 => refined_type::rule::GreaterU64<0>;
+    plain share_group_enable: bool => ();
+    refined #[schemars(range(min = 1))] share_group_session_timeout_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] share_group_heartbeat_interval_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] share_group_record_lock_duration_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] share_group_max_delivery_attempts: i16 => refined_type::rule::GreaterI16<0>;
+    refined #[schemars(range(min = 1))] share_group_max_inflight_records: i32 => refined_type::rule::GreaterI32<0>;
+    string share_group_isolation_level: String => ();
+    refined #[schemars(range(min = 1))] streams_group_session_timeout_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] streams_group_heartbeat_interval_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 0))] streams_group_num_standby_replicas: i32 => refined_type::rule::GreaterEqualI32<0>;
+    refined #[schemars(range(min = 0))] streams_group_num_warmup_replicas: i32 => refined_type::rule::GreaterEqualI32<0>;
+    refined #[schemars(range(min = 0))] streams_group_acceptable_recovery_lag: i64 => refined_type::rule::GreaterEqualI64<0>;
+    refined #[schemars(range(min = 1))] streams_group_task_offset_interval_ms: u64 => refined_type::rule::GreaterU64<0>;
+    string streams_group_assignor: String => ();
+}
+
+impl BrokerTuning {
+    fn camel_case(field: &str) -> String {
+        let mut parts = field.split('_');
+        let mut result = parts.next().unwrap_or_default().to_owned();
+        for part in parts {
+            let mut chars = part.chars();
+            if let Some(first) = chars.next() {
+                result.push(first.to_ascii_uppercase());
+                result.extend(chars);
+            }
+        }
+        result
+    }
+
+    fn path(field: &str) -> String {
+        format!("spec.brokerTuning.{}", Self::camel_case(field))
+    }
+
+    fn invalid(field: &str, error: impl std::fmt::Display) -> String {
+        format!("{}: {error}", Self::path(field))
+    }
+
+    fn invalid_relation(left: &str, right: &str, message: &str) -> String {
+        format!("{} and {}: {message}", Self::path(left), Self::path(right))
+    }
+
+    fn validate_strings(&self) -> Result<(), String> {
+        if let Some(value) = &self.inter_broker_server_name {
+            refined_type::rule::NonEmptyString::new(value.clone())
+                .map_err(|error| Self::invalid("inter_broker_server_name", error))?;
+        }
+        if let Some(value) = &self.share_group_isolation_level
+            && !matches!(value.as_str(), "read-uncommitted" | "read-committed")
+        {
+            return Err(Self::invalid(
+                "share_group_isolation_level",
+                "expected `read-uncommitted` or `read-committed`",
+            ));
+        }
+        if let Some(value) = &self.streams_group_assignor
+            && !matches!(value.as_str(), "auto" | "sticky" | "highly-available")
+        {
+            return Err(Self::invalid(
+                "streams_group_assignor",
+                "expected `auto`, `sticky`, or `highly-available`",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_relations(&self) -> Result<(), String> {
+        macro_rules! ordered {
+            ($left:ident, $left_default:expr, <=, $right:ident, $right_default:expr) => {
+                if self.$left.unwrap_or($left_default) > self.$right.unwrap_or($right_default) {
+                    return Err(Self::invalid_relation(
+                        stringify!($left),
+                        stringify!($right),
+                        "minimum or initial value exceeds maximum",
+                    ));
+                }
+            };
+            ($left:ident, $left_default:expr, <, $right:ident, $right_default:expr) => {
+                if self.$left.unwrap_or($left_default) >= self.$right.unwrap_or($right_default) {
+                    return Err(Self::invalid_relation(
+                        stringify!($left),
+                        stringify!($right),
+                        "left value must be below right value",
+                    ));
+                }
+            };
+        }
+        macro_rules! bounded {
+            (
+                $value:ident, $value_default:expr,
+                $min:ident, $min_default:expr,
+                $max:ident, $max_default:expr
+            ) => {{
+                let value = self.$value.unwrap_or($value_default);
+                let min = self.$min.unwrap_or($min_default);
+                let max = self.$max.unwrap_or($max_default);
+                if !(min..=max).contains(&value) {
+                    return Err(format!(
+                        "{} must be within {} and {}",
+                        Self::path(stringify!($value)),
+                        Self::path(stringify!($min)),
+                        Self::path(stringify!($max))
+                    ));
+                }
+            }};
+        }
+
+        ordered!(
+            self_registration_backoff_min_ms,
+            100,
+            <=,
+            self_registration_backoff_max_ms,
+            5_000
+        );
+        ordered!(
+            rlmm_bootstrap_backoff_initial_ms,
+            250,
+            <=,
+            rlmm_bootstrap_backoff_max_ms,
+            10_000
+        );
+        ordered!(
+            replication_fetch_min_bytes,
+            1,
+            <=,
+            replication_fetch_max_bytes,
+            1_048_576
+        );
+        ordered!(
+            replication_reconnect_initial_delay_ms,
+            100,
+            <=,
+            replication_reconnect_delay_cap_ms,
+            5_000
+        );
+        ordered!(
+            heartbeat_interval_ms,
+            3_000,
+            <,
+            heartbeat_timeout_ms,
+            9_000
+        );
+        ordered!(
+            controller_heartbeat_interval_ms,
+            500,
+            <,
+            controller_election_timeout_ms,
+            5_000
+        );
+        ordered!(
+            delegation_token_default_renew_period_ms,
+            86_400_000,
+            <=,
+            delegation_token_max_lifetime_ms,
+            604_800_000
+        );
+        ordered!(
+            client_metrics_eviction_tick_ms,
+            60_000,
+            <=,
+            client_metrics_stale_floor_ms,
+            600_000
+        );
+        ordered!(
+            unclean_recovery_aggressive_deadline_ms,
+            2_000,
+            <=,
+            unclean_recovery_balanced_deadline_ms,
+            30_000
+        );
+        ordered!(
+            telemetry_decompressed_output_floor_bytes,
+            16_777_216,
+            <=,
+            telemetry_decompressed_output_ceiling_bytes,
+            1_073_741_824
+        );
+        ordered!(
+            transaction_min_timeout_ms,
+            1_000,
+            <,
+            transaction_max_timeout_ms,
+            900_000
+        );
+
+        ordered!(
+            consumer_group_min_session_timeout_ms,
+            45_000,
+            <=,
+            consumer_group_max_session_timeout_ms,
+            60_000
+        );
+        bounded!(
+            consumer_group_session_timeout_ms,
+            45_000,
+            consumer_group_min_session_timeout_ms,
+            45_000,
+            consumer_group_max_session_timeout_ms,
+            60_000
+        );
+        ordered!(
+            consumer_group_min_heartbeat_interval_ms,
+            5_000,
+            <=,
+            consumer_group_max_heartbeat_interval_ms,
+            15_000
+        );
+        bounded!(
+            consumer_group_heartbeat_interval_ms,
+            5_000,
+            consumer_group_min_heartbeat_interval_ms,
+            5_000,
+            consumer_group_max_heartbeat_interval_ms,
+            15_000
+        );
+
+        if !(45_000..=60_000).contains(&self.share_group_session_timeout_ms.unwrap_or(45_000)) {
+            return Err(Self::invalid(
+                "share_group_session_timeout_ms",
+                "must be within 45000..=60000",
+            ));
+        }
+        if !(5_000..=15_000).contains(&self.share_group_heartbeat_interval_ms.unwrap_or(5_000)) {
+            return Err(Self::invalid(
+                "share_group_heartbeat_interval_ms",
+                "must be within 5000..=15000",
+            ));
+        }
+        if !(45_000..=60_000).contains(&self.streams_group_session_timeout_ms.unwrap_or(45_000)) {
+            return Err(Self::invalid(
+                "streams_group_session_timeout_ms",
+                "must be within 45000..=60000",
+            ));
+        }
+        if !(5_000..=15_000).contains(&self.streams_group_heartbeat_interval_ms.unwrap_or(5_000)) {
+            return Err(Self::invalid(
+                "streams_group_heartbeat_interval_ms",
+                "must be within 5000..=15000",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Inter-broker GSSAPI initiate config. Single shared client principal
@@ -884,6 +1314,7 @@ mod tests {
                 inter_broker_kerberos: None,
                 krb5_conf_secret_ref: None,
                 tracing: None,
+                broker_tuning: None,
             },
         );
         let json = serde_json::to_string(&k).unwrap();
@@ -916,6 +1347,7 @@ mod tests {
                 inter_broker_kerberos: None,
                 krb5_conf_secret_ref: None,
                 tracing: None,
+                broker_tuning: None,
             },
         );
         let j = serde_json::to_string(&k.spec).unwrap();
@@ -1037,6 +1469,7 @@ mod tests {
                 inter_broker_kerberos: None,
                 krb5_conf_secret_ref: None,
                 tracing: None,
+                broker_tuning: None,
             },
         );
         let j = serde_json::to_string(&k.spec).unwrap();
@@ -1077,6 +1510,7 @@ mod tests {
                 inter_broker_kerberos: None,
                 krb5_conf_secret_ref: None,
                 tracing: None,
+                broker_tuning: None,
             },
         );
         let j = serde_json::to_string(&k.spec).unwrap();

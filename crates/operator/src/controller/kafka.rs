@@ -1694,6 +1694,15 @@ async fn reconcile_inner(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, R
 
     let cm_api: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), &ns);
 
+    if let Some(tuning) = &obj.spec.broker_tuning
+        && let Err(why) = tuning.validate()
+    {
+        let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &ns);
+        let cond = condition("KafkaConfigValid", "False", "KafkaConfigInvalid", &why);
+        patch_status_with_condition(&kafka_api, &name, cond).await?;
+        return Err(ReconcileError::KafkaConfigInvalid(why));
+    }
+
     let secret_api: Api<Secret> = Api::namespaced(ctx.client.clone(), &ns);
     let _cluster_id = ensure_cluster_id_secret(&secret_api, &obj).await?;
 
@@ -2300,6 +2309,7 @@ mod tests {
                 inter_broker_kerberos: None,
                 krb5_conf_secret_ref: None,
                 tracing: None,
+                broker_tuning: None,
             },
         );
         k.metadata.namespace = Some("ns".into());

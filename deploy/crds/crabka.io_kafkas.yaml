@@ -60,6 +60,593 @@ spec:
                 required:
                 - type
                 type: object
+              brokerTuning:
+                description: Validated broker operational policy rendered into `[runtime]`.
+                nullable: true
+                properties:
+                  aclMaxPrincipalBytes:
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  aclMaxResourceNameBytes:
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  auditEventQueueCapacity:
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  auditPartitionWaitTimeoutMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  auditSpoolReplayIntervalMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  auditStatsPollIntervalMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  auditTailReadMaxBytes:
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  auditTailWindowOffsets:
+                    format: int64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  autoJoinRetryBackoffMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  classicGroupInitialRebalanceDelayMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  cleanerIntervalMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  clientMetricsDefaultIntervalMs:
+                    format: int32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  clientMetricsEvictionTickMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  clientMetricsOtlpQueueCapacity:
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  clientMetricsPromSnapshotTtlMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  clientMetricsStaleFloorMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  clientMetricsStalePushIntervals:
+                    format: uint32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  clientMetricsTelemetryMaxBytes:
+                    format: int32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  connectionCreationThrottleMaxMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  consumerGroupHeartbeatIntervalMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  consumerGroupMaxHeartbeatIntervalMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  consumerGroupMaxSessionTimeoutMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  consumerGroupMaxSize:
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  consumerGroupMinHeartbeatIntervalMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  consumerGroupMinSessionTimeoutMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  consumerGroupSessionTimeoutMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  controlledShutdownDrainTimeoutMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  controllerElectionTimeoutMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  controllerHeartbeatIntervalMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  coordinatorActorMailboxCapacity:
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  coordinatorSessionExpiryTickMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  coordinatorShutdownAckTimeoutMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  defaultMinInsyncReplicas:
+                    format: int32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  delegationTokenDefaultRenewPeriodMs:
+                    format: int64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  delegationTokenExpiryCheckIntervalMs:
+                    format: int64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  delegationTokenMaxLifetimeMs:
+                    format: int64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  futureLogMoveReadChunkBytes:
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  futureLogMoveRetryBackoffMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  gaugePollIntervalMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  heartbeatIntervalMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  heartbeatTimeoutMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  interBrokerServerName:
+                    minLength: 1
+                    nullable: true
+                    type: string
+                  isrScanIntervalMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  leaderImbalanceCheckIntervalSecs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  leaderImbalancePerBrokerPercentage:
+                    format: uint32
+                    maximum: 100.0
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  livenessTickIntervalMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  maxConnections:
+                    format: uint
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  maxConnectionsPerIp:
+                    format: uint
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  maxIncrementalFetchSessionCacheSlots:
+                    format: uint
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  maxProduceGroup:
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  metadataMaxBytesBetweenSnapshots:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  metadataMaxSnapshotIntervalMs:
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  metadataSnapshotIntervalRecords:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  oauthJwksHttpTimeoutMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  observerFetchMaxBytes:
+                    format: uint32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  observerLagBound:
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  observerPollIntervalMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  offsetsTopicMetadataWaitTimeoutMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  opaHttpTimeoutMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  operatorRecoveryDeadlineMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  partitionDiskScanIntervalSecs:
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  partitionWriterQueueDepth:
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  producerIdExpirationMs:
+                    format: int64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  producerIdExpirationScanIntervalMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  quotaThrottleMaxMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  remoteLogManagerIntervalMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  replicaLagTimeMaxMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  replicationEpochFenceBackoffMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  replicationFetchMaxBytes:
+                    format: int32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  replicationFetchMaxWaitMs:
+                    format: int32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  replicationFetchMinBytes:
+                    format: int32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  replicationReconnectDelayCapMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  replicationReconnectInitialDelayMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  replicationSendErrorBackoffMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  replicationThrottleExhaustedBackoffMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  replicationUnexpectedErrorBackoffMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  replicationUnknownTopicRetryDelayMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  rlmmBootstrapBackoffInitialMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  rlmmBootstrapBackoffMaxMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  rlmmReconcileTickMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  selfRegistrationBackoffMaxMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  selfRegistrationBackoffMinMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  selfRegistrationMaxAttempts:
+                    format: uint32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  sendfileMinBytes:
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  shareGroupEnable:
+                    nullable: true
+                    type: boolean
+                  shareGroupHeartbeatIntervalMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  shareGroupIsolationLevel:
+                    nullable: true
+                    type: string
+                  shareGroupMaxDeliveryAttempts:
+                    format: int16
+                    maximum: 32767.0
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  shareGroupMaxInflightRecords:
+                    format: int32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  shareGroupRecordLockDurationMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  shareGroupSessionTimeoutMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  shareRecoveryReadMaxBytes:
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  shareSessionCacheMaxWhenUnlimited:
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  shareStateNumPartitions:
+                    format: int32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  socketReceiveBufferBytes:
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  socketRequestMaxBytes:
+                    format: uint
+                    maximum: 4294967295.0
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  socketSendBufferBytes:
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  startupLeaderWaitTimeoutMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  streamsGroupAcceptableRecoveryLag:
+                    format: int64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  streamsGroupAssignor:
+                    nullable: true
+                    type: string
+                  streamsGroupHeartbeatIntervalMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  streamsGroupNumStandbyReplicas:
+                    format: int32
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  streamsGroupNumWarmupReplicas:
+                    format: int32
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  streamsGroupSessionTimeoutMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  streamsGroupTaskOffsetIntervalMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  syncGroupFollowerWaitMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  telemetryDecompressedOutputCeilingBytes:
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  telemetryDecompressedOutputFloorBytes:
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  telemetryMaxDecompressionRatio:
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  tlsReloadIntervalMs:
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  transactionMaxTimeoutMs:
+                    format: int32
+                    maximum: 2147483646.0
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  transactionMinTimeoutMs:
+                    format: int32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  transactionStateNumPartitions:
+                    format: int32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  txnAbortCleanupIntervalMs:
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  uncleanRecoveryAggressiveDeadlineMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  uncleanRecoveryBalancedDeadlineMs:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  uncleanRecoveryQueueCapacity:
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                type: object
               clientsCa:
                 description: |-
                   Per-cluster CA used to sign `KafkaUser` TLS certs.
