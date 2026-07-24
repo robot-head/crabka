@@ -1166,10 +1166,10 @@ fn render_pgdog_files(records: &[TenantRecord], args: &RenderPgdogArgs) -> Resul
             password: None,
         })
         .collect();
-    let idle_timeout_ms = if records
-        .iter()
-        .any(|record| record.idle_seconds.is_some_and(|seconds| seconds > 0))
-    {
+    let idle_timeout_ms = if records.iter().any(|record| {
+        record.idle_seconds.is_some_and(|seconds| seconds > 0)
+            && (record.state == TenantState::Active || args.activator.is_some())
+    }) {
         args.suspension_idle_timeout_ms
     } else {
         args.idle_timeout_ms
@@ -1964,6 +1964,35 @@ mod tests {
 
         let pgdog = std::fs::read_to_string(dir.path().join("pgdog.toml")).expect("pgdog file");
         assert!(pgdog.contains("idle_timeout = 60001\n"));
+    }
+
+    #[test]
+    fn render_pgdog_uses_only_rendered_tenants_for_suspension_timeout() {
+        let normal_dir = tempfile::tempdir().expect("normal tempdir");
+        let suspension_dir = tempfile::tempdir().expect("suspension tempdir");
+        let mut record = test_record("tenant-a", TenantState::Suspended);
+        record.idle_seconds = Some(30);
+        let out_dir = format!("--out-dir={}", normal_dir.path().display());
+        let mut args = render_pgdog_test_args([
+            "test",
+            "render-pgdog",
+            "--bootstrap=broker:9092",
+            &out_dir,
+            "--idle-timeout-ms=60001",
+            "--suspension-idle-timeout-ms=1001",
+        ]);
+
+        render_pgdog_files(std::slice::from_ref(&record), &args).expect("normal render succeeds");
+        let pgdog =
+            std::fs::read_to_string(normal_dir.path().join("pgdog.toml")).expect("normal pgdog");
+        assert!(pgdog.contains("idle_timeout = 60001\n"));
+
+        args.activator = Some(("activator".to_string(), 7_444));
+        args.out_dir = suspension_dir.path().to_path_buf();
+        render_pgdog_files(&[record], &args).expect("suspension render succeeds");
+        let pgdog = std::fs::read_to_string(suspension_dir.path().join("pgdog.toml"))
+            .expect("suspension pgdog");
+        assert!(pgdog.contains("idle_timeout = 1001\n"));
     }
 
     fn render_pgdog_test_args<const N: usize>(args: [&str; N]) -> RenderPgdogArgs {
