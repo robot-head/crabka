@@ -1034,3 +1034,87 @@ byte limit, or empty-retry value outside the shared defaults.
   precedence, hostile-environment isolation, pre-I/O inert-use rejection,
   request wiring, retry boundaries and reset, shared-helper propagation,
   single/multi-range rendering, schema minima, and the fixed sampler zero wait.
+
+## Gres WAL Recovery Connection Timeouts
+
+The raw committed-WAL connection now receives its connect and request
+timeouts from the existing validated `RecoveryReadPolicy`. Substrate owns the
+10,000 ms and 30,000 ms defaults. `with_timeouts` validates both positive
+millisecond values with `refined_type`, and `wal_connection_options` applies
+them to `ConnectionOptions`.
+
+Both raw connection paths carry the same policy:
+
+```text
+LiveEndDialer::dial
+  -> open_wal_connection(read_policy)
+  -> wal_connection_options
+
+KafkaCommittedWalReader::open_connection
+  -> open_wal_connection(read_policy)
+  -> wal_connection_options
+```
+
+The former recovery-local `Duration::from_secs(10)` and
+`Duration::from_secs(30)` expressions have no matches in
+`crates/gres-substrate/src/recovery.rs`. The committed-end sampler retains its
+fixed zero fetch wait; this is an immediate-probe algorithm invariant, not a
+connection timeout.
+
+Standalone Gres exposes
+`--wal-recovery-connect-timeout-ms` /
+`CRABKA_GRES_WAL_RECOVERY_CONNECT_TIMEOUT_MS` and
+`--wal-recovery-request-timeout-ms` /
+`CRABKA_GRES_WAL_RECOVERY_REQUEST_TIMEOUT_MS`. Together with the four recovery
+read settings, all six CLI/environment settings resolve in the single
+`SubstrateRuntimeConfig::recovery_read_policy` helper. Explicit recovery
+settings still require substrate mode and are rejected before listener or
+network I/O.
+
+The fleet CRD adds optional positive
+`spec.compute.walRecoveryConnectTimeoutMs` and
+`spec.compute.walRecoveryRequestTimeoutMs` fields. The existing effective
+compute policy validates all six recovery values and renders all six effective
+arguments for both single-range and multi-range substrate Deployments.
+
+### Deferred Timeout Owners
+
+This slice changes only raw recovery `ConnectionOptions`. Seven recovery
+admin-client connections, the raw path's DNS lookup, the producer builder, and
+the WAL topic ensure timeout remain separate owners. Registry policy is
+already independently configured; generic client-library defaults serve other
+callers and are not recovery-local fallbacks. The next coherent review is the
+recovery admin/topic-operation policy, beginning with
+`WAL_TOPIC_ENSURE_TIMEOUT_MS` and the admin-client connection settings.
+
+### Gres WAL Recovery Timeout Evidence
+
+On 2026-07-24 `tools/audit-runtime-values.sh` reported 5,955 repository
+matches. The exact timeout-focused search plus the committed-end invariant
+reported 113 references: 10 shared-default production references, 41
+configured production parser/validation/schema/render/runtime references, two
+fixed committed-end sampler references, and 60 test/harness references. No
+focused candidate remains unclassified.
+
+- The full six-package test command reported 1,858 passing test and doc-test
+  results and one ignored timing benchmark. The only failure was
+  `real_range_partition_aborts_transfer_and_heal_restores_2pc`, whose
+  post-heal credit operation timed out after five seconds. An exact rerun
+  failed identically, and a detached pre-slice `65773fbc` worktree rebuilt with
+  its own Gres binary failed identically, so this is an unchanged baseline
+  process-nemesis failure.
+- Strict all-target/all-feature Clippy passed for every affected target except
+  the unchanged 267-line
+  `kafka_fdw_roundtrip_avro_and_raw_fallback` test, which exceeds the
+  repository's 200-line `clippy::too_many_lines` limit. The complete FDW target
+  set passed with only that pre-existing lint allowed.
+- Gres help displayed all six exact recovery CLI options.
+- Fresh operator generation produced nine CRDs, and `diff -ru` against
+  `deploy/crds` was empty.
+- `cargo fmt --all -- --check` and `git diff --check` passed.
+- Focused coverage pins compiled defaults, positive validation, distinctive
+  timeout replacement without fetch-policy mutation, exact
+  `ConnectionOptions` wiring, environment and CLI precedence, hostile
+  environment isolation, pre-I/O inert-use rejection, shared-helper
+  propagation, schema minima, and exact single-/multi-range Deployment
+  arguments.
