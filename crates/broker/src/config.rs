@@ -196,6 +196,64 @@ pub struct BrokerConfig {
     pub operator_recovery_deadline: Duration,
     /// Maximum quota throttle delay.
     pub quota_throttle_max: Duration,
+    /// Maximum self-registration attempts before startup fails.
+    pub self_registration_max_attempts: u32,
+    /// Maximum bytes fetched by a metadata observer request.
+    pub observer_fetch_max_bytes: u32,
+    /// Capacity of the asynchronous audit event queue.
+    pub audit_event_queue_capacity: usize,
+    /// Number of offsets included in an audit tail request.
+    pub audit_tail_window_offsets: i64,
+    /// Maximum bytes read by an audit tail request.
+    pub audit_tail_read_max_bytes: usize,
+    /// Maximum wait for offsets-topic metadata.
+    pub offsets_topic_metadata_wait_timeout: Duration,
+    /// Push intervals after which client metrics become stale.
+    pub client_metrics_stale_push_intervals: u32,
+    /// Capacity of each coordinator actor mailbox.
+    pub coordinator_actor_mailbox_capacity: usize,
+    /// Capacity of the unclean-recovery work queue.
+    pub unclean_recovery_queue_capacity: usize,
+    /// Maximum bytes read while recovering share state.
+    pub share_recovery_read_max_bytes: usize,
+    /// Share-session cache ceiling when group count is unlimited.
+    pub share_session_cache_max_when_unlimited: usize,
+    /// Maximum encoded request size accepted from a socket.
+    pub socket_request_max_bytes: usize,
+    /// Minimum response size eligible for `sendfile`.
+    pub sendfile_min_bytes: usize,
+    /// Broker socket send-buffer size.
+    pub socket_send_buffer_bytes: usize,
+    /// Broker socket receive-buffer size.
+    pub socket_receive_buffer_bytes: usize,
+    /// Maximum encoded ACL principal length.
+    pub acl_max_principal_bytes: usize,
+    /// Maximum encoded ACL resource-name length.
+    pub acl_max_resource_name_bytes: usize,
+    /// Maximum accepted telemetry decompression ratio.
+    pub telemetry_max_decompression_ratio: usize,
+    /// Minimum telemetry decompression output allowance.
+    pub telemetry_decompressed_output_floor_bytes: usize,
+    /// Maximum telemetry decompression output allowance.
+    pub telemetry_decompressed_output_ceiling_bytes: usize,
+    /// TLS server name used for outbound inter-broker connections.
+    pub inter_broker_server_name: String,
+    /// Producer-id inactivity period before state expires.
+    pub producer_id_expiration_ms: i64,
+    /// Maximum produce requests combined into one append group.
+    pub max_produce_group: usize,
+    /// Capacity of each partition-writer request queue.
+    pub partition_writer_queue_depth: usize,
+    /// Default minimum in-sync replica count.
+    pub default_min_insync_replicas: i32,
+    /// Bytes copied per future-log move read.
+    pub future_log_move_read_chunk_bytes: usize,
+    /// Partition count for the transaction-state internal topic.
+    pub transaction_state_num_partitions: i32,
+    /// Minimum accepted transaction timeout.
+    pub transaction_min_timeout_ms: i32,
+    /// Maximum accepted transaction timeout.
+    pub transaction_max_timeout_ms: i32,
 
     /// Broker id reported in `Metadata` responses. Default: 1.
     pub broker_id: i32,
@@ -850,6 +908,35 @@ impl BrokerConfig {
             unclean_recovery_balanced_deadline: Duration::from_secs(30),
             operator_recovery_deadline: Duration::from_secs(25),
             quota_throttle_max: Duration::from_secs(1),
+            self_registration_max_attempts: 8,
+            observer_fetch_max_bytes: 1_048_576,
+            audit_event_queue_capacity: 8_192,
+            audit_tail_window_offsets: 4_096,
+            audit_tail_read_max_bytes: 1_048_576,
+            offsets_topic_metadata_wait_timeout: Duration::from_secs(30),
+            client_metrics_stale_push_intervals: 3,
+            coordinator_actor_mailbox_capacity: 64,
+            unclean_recovery_queue_capacity: 256,
+            share_recovery_read_max_bytes: 1_048_576,
+            share_session_cache_max_when_unlimited: 10_000,
+            socket_request_max_bytes: 104_857_600,
+            sendfile_min_bytes: 32_768,
+            socket_send_buffer_bytes: 1_048_576,
+            socket_receive_buffer_bytes: 1_048_576,
+            acl_max_principal_bytes: 256,
+            acl_max_resource_name_bytes: 256,
+            telemetry_max_decompression_ratio: 100,
+            telemetry_decompressed_output_floor_bytes: 16_777_216,
+            telemetry_decompressed_output_ceiling_bytes: 1_073_741_824,
+            inter_broker_server_name: "localhost".to_string(),
+            producer_id_expiration_ms: 86_400_000,
+            max_produce_group: 1_024,
+            partition_writer_queue_depth: 64,
+            default_min_insync_replicas: 1,
+            future_log_move_read_chunk_bytes: 1_048_576,
+            transaction_state_num_partitions: 50,
+            transaction_min_timeout_ms: 1_000,
+            transaction_max_timeout_ms: 900_000,
             broker_id: 1,
             roles: vec![NodeRole::Controller, NodeRole::Broker],
             listen_addr,
@@ -1069,6 +1156,7 @@ impl BrokerConfig {
             });
         }
         self.validate_positive_runtime_scalars()?;
+        self.validate_additional_runtime_scalars()?;
 
         if self.self_registration_backoff_min > self.self_registration_backoff_max {
             return Err(BrokerError::InvalidRuntimeConfig(
@@ -1115,6 +1203,7 @@ impl BrokerConfig {
                 "unclean recovery aggressive deadline exceeds balanced deadline".into(),
             ));
         }
+        self.validate_additional_runtime_relations()?;
 
         let validate_group = |name: &str,
                               session_timeout: Duration,
@@ -1207,6 +1296,37 @@ impl BrokerConfig {
             return Err(BrokerError::InvalidLeaderRebalanceThreshold {
                 value: self.leader_imbalance_per_broker_percentage,
             });
+        }
+        Ok(())
+    }
+
+    fn validate_additional_runtime_relations(&self) -> Result<(), BrokerError> {
+        if self.socket_request_max_bytes > u32::MAX as usize {
+            return Err(BrokerError::InvalidRuntimeConfig(
+                "socket_request_max_bytes exceeds u32::MAX".into(),
+            ));
+        }
+        if self.telemetry_decompressed_output_floor_bytes
+            > self.telemetry_decompressed_output_ceiling_bytes
+        {
+            return Err(BrokerError::InvalidRuntimeConfig(
+                "telemetry decompressed output floor exceeds ceiling".into(),
+            ));
+        }
+        if self.inter_broker_server_name.is_empty() {
+            return Err(BrokerError::InvalidRuntimeConfig(
+                "inter_broker_server_name must be nonempty".into(),
+            ));
+        }
+        if self.transaction_min_timeout_ms >= self.transaction_max_timeout_ms {
+            return Err(BrokerError::InvalidRuntimeConfig(
+                "transaction minimum timeout must be below maximum".into(),
+            ));
+        }
+        if self.transaction_max_timeout_ms == i32::MAX {
+            return Err(BrokerError::InvalidRuntimeConfig(
+                "transaction maximum timeout must be below i32::MAX".into(),
+            ));
         }
         Ok(())
     }
@@ -1409,6 +1529,137 @@ impl BrokerConfig {
         Ok(())
     }
 
+    fn validate_additional_runtime_scalars(&self) -> Result<(), BrokerError> {
+        if self.offsets_topic_metadata_wait_timeout.is_zero() {
+            return Err(BrokerError::InvalidRuntimeConfig(
+                "offsets_topic_metadata_wait_timeout must be positive".into(),
+            ));
+        }
+        if self.offsets_topic_metadata_wait_timeout < Duration::from_millis(1) {
+            return Err(BrokerError::InvalidRuntimeConfig(
+                "offsets_topic_metadata_wait_timeout must be at least 1ms".into(),
+            ));
+        }
+        for (name, value) in [
+            (
+                "self_registration_max_attempts",
+                self.self_registration_max_attempts,
+            ),
+            ("observer_fetch_max_bytes", self.observer_fetch_max_bytes),
+            (
+                "client_metrics_stale_push_intervals",
+                self.client_metrics_stale_push_intervals,
+            ),
+        ] {
+            if value == 0 {
+                return Err(BrokerError::InvalidRuntimeConfig(format!(
+                    "{name} must be positive"
+                )));
+            }
+        }
+        for (name, value) in [
+            (
+                "audit_event_queue_capacity",
+                self.audit_event_queue_capacity,
+            ),
+            ("audit_tail_read_max_bytes", self.audit_tail_read_max_bytes),
+            (
+                "coordinator_actor_mailbox_capacity",
+                self.coordinator_actor_mailbox_capacity,
+            ),
+            (
+                "unclean_recovery_queue_capacity",
+                self.unclean_recovery_queue_capacity,
+            ),
+            (
+                "share_recovery_read_max_bytes",
+                self.share_recovery_read_max_bytes,
+            ),
+            (
+                "share_session_cache_max_when_unlimited",
+                self.share_session_cache_max_when_unlimited,
+            ),
+            ("socket_request_max_bytes", self.socket_request_max_bytes),
+            ("sendfile_min_bytes", self.sendfile_min_bytes),
+            ("socket_send_buffer_bytes", self.socket_send_buffer_bytes),
+            (
+                "socket_receive_buffer_bytes",
+                self.socket_receive_buffer_bytes,
+            ),
+            ("acl_max_principal_bytes", self.acl_max_principal_bytes),
+            (
+                "acl_max_resource_name_bytes",
+                self.acl_max_resource_name_bytes,
+            ),
+            (
+                "telemetry_max_decompression_ratio",
+                self.telemetry_max_decompression_ratio,
+            ),
+            (
+                "telemetry_decompressed_output_floor_bytes",
+                self.telemetry_decompressed_output_floor_bytes,
+            ),
+            (
+                "telemetry_decompressed_output_ceiling_bytes",
+                self.telemetry_decompressed_output_ceiling_bytes,
+            ),
+            ("max_produce_group", self.max_produce_group),
+            (
+                "partition_writer_queue_depth",
+                self.partition_writer_queue_depth,
+            ),
+            (
+                "future_log_move_read_chunk_bytes",
+                self.future_log_move_read_chunk_bytes,
+            ),
+        ] {
+            if value == 0 {
+                return Err(BrokerError::InvalidRuntimeConfig(format!(
+                    "{name} must be positive"
+                )));
+            }
+        }
+        for (name, value) in [
+            ("audit_tail_window_offsets", self.audit_tail_window_offsets),
+            ("producer_id_expiration_ms", self.producer_id_expiration_ms),
+        ] {
+            if value <= 0 {
+                return Err(BrokerError::InvalidRuntimeConfig(format!(
+                    "{name} must be positive"
+                )));
+            }
+        }
+        for (name, value) in [
+            (
+                "default_min_insync_replicas",
+                self.default_min_insync_replicas,
+            ),
+            (
+                "share_state_num_partitions",
+                self.share_coordinator.state_topic_num_partitions,
+            ),
+            (
+                "transaction_state_num_partitions",
+                self.transaction_state_num_partitions,
+            ),
+            (
+                "transaction_min_timeout_ms",
+                self.transaction_min_timeout_ms,
+            ),
+            (
+                "transaction_max_timeout_ms",
+                self.transaction_max_timeout_ms,
+            ),
+        ] {
+            if value <= 0 {
+                return Err(BrokerError::InvalidRuntimeConfig(format!(
+                    "{name} must be positive"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// All log directories this broker stores partition data in, primary
     /// first, de-duplicated. This is the placement + `DescribeLogDirs`
     /// surface (KIP-113). `__cluster_metadata` is excluded — it lives on
@@ -1496,6 +1747,35 @@ impl Default for BrokerConfig {
             unclean_recovery_balanced_deadline: Duration::from_secs(30),
             operator_recovery_deadline: Duration::from_secs(25),
             quota_throttle_max: Duration::from_secs(1),
+            self_registration_max_attempts: 8,
+            observer_fetch_max_bytes: 1_048_576,
+            audit_event_queue_capacity: 8_192,
+            audit_tail_window_offsets: 4_096,
+            audit_tail_read_max_bytes: 1_048_576,
+            offsets_topic_metadata_wait_timeout: Duration::from_secs(30),
+            client_metrics_stale_push_intervals: 3,
+            coordinator_actor_mailbox_capacity: 64,
+            unclean_recovery_queue_capacity: 256,
+            share_recovery_read_max_bytes: 1_048_576,
+            share_session_cache_max_when_unlimited: 10_000,
+            socket_request_max_bytes: 104_857_600,
+            sendfile_min_bytes: 32_768,
+            socket_send_buffer_bytes: 1_048_576,
+            socket_receive_buffer_bytes: 1_048_576,
+            acl_max_principal_bytes: 256,
+            acl_max_resource_name_bytes: 256,
+            telemetry_max_decompression_ratio: 100,
+            telemetry_decompressed_output_floor_bytes: 16_777_216,
+            telemetry_decompressed_output_ceiling_bytes: 1_073_741_824,
+            inter_broker_server_name: "localhost".to_string(),
+            producer_id_expiration_ms: 86_400_000,
+            max_produce_group: 1_024,
+            partition_writer_queue_depth: 64,
+            default_min_insync_replicas: 1,
+            future_log_move_read_chunk_bytes: 1_048_576,
+            transaction_state_num_partitions: 50,
+            transaction_min_timeout_ms: 1_000,
+            transaction_max_timeout_ms: 900_000,
             broker_id: 1,
             roles: vec![NodeRole::Controller, NodeRole::Broker],
             listen_addr: addr,
@@ -1743,6 +2023,90 @@ mod tests {
         );
     }
 
+    fn additional_policy_snapshot(config: BrokerConfig) -> [String; 30] {
+        [
+            config.self_registration_max_attempts.to_string(),
+            config.observer_fetch_max_bytes.to_string(),
+            config.audit_event_queue_capacity.to_string(),
+            config.audit_tail_window_offsets.to_string(),
+            config.audit_tail_read_max_bytes.to_string(),
+            config
+                .offsets_topic_metadata_wait_timeout
+                .as_millis()
+                .to_string(),
+            config.client_metrics_stale_push_intervals.to_string(),
+            config.coordinator_actor_mailbox_capacity.to_string(),
+            config.unclean_recovery_queue_capacity.to_string(),
+            config.share_recovery_read_max_bytes.to_string(),
+            config.share_session_cache_max_when_unlimited.to_string(),
+            config.socket_request_max_bytes.to_string(),
+            config.sendfile_min_bytes.to_string(),
+            config.socket_send_buffer_bytes.to_string(),
+            config.socket_receive_buffer_bytes.to_string(),
+            config.acl_max_principal_bytes.to_string(),
+            config.acl_max_resource_name_bytes.to_string(),
+            config.telemetry_max_decompression_ratio.to_string(),
+            config.telemetry_decompressed_output_floor_bytes.to_string(),
+            config
+                .telemetry_decompressed_output_ceiling_bytes
+                .to_string(),
+            config.inter_broker_server_name,
+            config.producer_id_expiration_ms.to_string(),
+            config.max_produce_group.to_string(),
+            config.partition_writer_queue_depth.to_string(),
+            config.default_min_insync_replicas.to_string(),
+            config.future_log_move_read_chunk_bytes.to_string(),
+            config
+                .share_coordinator
+                .state_topic_num_partitions
+                .to_string(),
+            config.transaction_state_num_partitions.to_string(),
+            config.transaction_min_timeout_ms.to_string(),
+            config.transaction_max_timeout_ms.to_string(),
+        ]
+    }
+
+    #[test]
+    fn additional_operational_policy_defaults_match_existing_behavior() {
+        let actual = additional_policy_snapshot(BrokerConfig::default());
+        assert!(
+            actual
+                == [
+                    "8",
+                    "1048576",
+                    "8192",
+                    "4096",
+                    "1048576",
+                    "30000",
+                    "3",
+                    "64",
+                    "256",
+                    "1048576",
+                    "10000",
+                    "104857600",
+                    "32768",
+                    "1048576",
+                    "1048576",
+                    "256",
+                    "256",
+                    "100",
+                    "16777216",
+                    "1073741824",
+                    "localhost",
+                    "86400000",
+                    "1024",
+                    "64",
+                    "1",
+                    "1048576",
+                    "50",
+                    "50",
+                    "1000",
+                    "900000",
+                ]
+        );
+        assert!(additional_policy_snapshot(BrokerConfig::for_tests(PathBuf::new())) == actual);
+    }
+
     fn assert_invalid_runtime(config: BrokerConfig, expected: &str) {
         let Err(BrokerError::InvalidRuntimeConfig(actual)) = config.validate() else {
             panic!("expected invalid runtime config");
@@ -1860,6 +2224,142 @@ mod tests {
             let mut config = BrokerConfig::default();
             invalidate(&mut config);
             assert_invalid_runtime(config, &format!("{name} must be positive"));
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_additional_runtime_scalars() {
+        let cases: &[(&str, fn(&mut BrokerConfig))] = &[
+            ("self_registration_max_attempts must be positive", |c| {
+                c.self_registration_max_attempts = 0;
+            }),
+            ("observer_fetch_max_bytes must be positive", |c| {
+                c.observer_fetch_max_bytes = 0;
+            }),
+            ("audit_event_queue_capacity must be positive", |c| {
+                c.audit_event_queue_capacity = 0;
+            }),
+            ("audit_tail_window_offsets must be positive", |c| {
+                c.audit_tail_window_offsets = 0;
+            }),
+            ("audit_tail_read_max_bytes must be positive", |c| {
+                c.audit_tail_read_max_bytes = 0;
+            }),
+            (
+                "offsets_topic_metadata_wait_timeout must be positive",
+                |c| c.offsets_topic_metadata_wait_timeout = Duration::ZERO,
+            ),
+            (
+                "offsets_topic_metadata_wait_timeout must be at least 1ms",
+                |c| c.offsets_topic_metadata_wait_timeout = Duration::from_nanos(1),
+            ),
+            (
+                "client_metrics_stale_push_intervals must be positive",
+                |c| c.client_metrics_stale_push_intervals = 0,
+            ),
+            ("coordinator_actor_mailbox_capacity must be positive", |c| {
+                c.coordinator_actor_mailbox_capacity = 0
+            }),
+            ("unclean_recovery_queue_capacity must be positive", |c| {
+                c.unclean_recovery_queue_capacity = 0
+            }),
+            ("share_recovery_read_max_bytes must be positive", |c| {
+                c.share_recovery_read_max_bytes = 0;
+            }),
+            (
+                "share_session_cache_max_when_unlimited must be positive",
+                |c| c.share_session_cache_max_when_unlimited = 0,
+            ),
+            ("socket_request_max_bytes must be positive", |c| {
+                c.socket_request_max_bytes = 0;
+            }),
+            ("sendfile_min_bytes must be positive", |c| {
+                c.sendfile_min_bytes = 0;
+            }),
+            ("socket_send_buffer_bytes must be positive", |c| {
+                c.socket_send_buffer_bytes = 0;
+            }),
+            ("socket_receive_buffer_bytes must be positive", |c| {
+                c.socket_receive_buffer_bytes = 0;
+            }),
+            ("acl_max_principal_bytes must be positive", |c| {
+                c.acl_max_principal_bytes = 0;
+            }),
+            ("acl_max_resource_name_bytes must be positive", |c| {
+                c.acl_max_resource_name_bytes = 0;
+            }),
+            ("telemetry_max_decompression_ratio must be positive", |c| {
+                c.telemetry_max_decompression_ratio = 0
+            }),
+            (
+                "telemetry_decompressed_output_floor_bytes must be positive",
+                |c| c.telemetry_decompressed_output_floor_bytes = 0,
+            ),
+            (
+                "telemetry_decompressed_output_ceiling_bytes must be positive",
+                |c| c.telemetry_decompressed_output_ceiling_bytes = 0,
+            ),
+            ("producer_id_expiration_ms must be positive", |c| {
+                c.producer_id_expiration_ms = 0;
+            }),
+            ("max_produce_group must be positive", |c| {
+                c.max_produce_group = 0;
+            }),
+            ("partition_writer_queue_depth must be positive", |c| {
+                c.partition_writer_queue_depth = 0;
+            }),
+            ("default_min_insync_replicas must be positive", |c| {
+                c.default_min_insync_replicas = 0;
+            }),
+            ("future_log_move_read_chunk_bytes must be positive", |c| {
+                c.future_log_move_read_chunk_bytes = 0
+            }),
+            ("share_state_num_partitions must be positive", |c| {
+                c.share_coordinator.state_topic_num_partitions = 0;
+            }),
+            ("transaction_state_num_partitions must be positive", |c| {
+                c.transaction_state_num_partitions = 0;
+            }),
+            ("transaction_min_timeout_ms must be positive", |c| {
+                c.transaction_min_timeout_ms = 0;
+            }),
+            ("transaction_max_timeout_ms must be positive", |c| {
+                c.transaction_max_timeout_ms = 0;
+            }),
+        ];
+
+        for (expected, invalidate) in cases {
+            let mut config = BrokerConfig::default();
+            invalidate(&mut config);
+            assert_invalid_runtime(config, expected);
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_additional_runtime_relations() {
+        let cases: &[(&str, fn(&mut BrokerConfig))] = &[
+            ("socket_request_max_bytes exceeds u32::MAX", |c| {
+                c.socket_request_max_bytes = usize::try_from(u64::from(u32::MAX) + 1).unwrap()
+            }),
+            ("telemetry decompressed output floor exceeds ceiling", |c| {
+                c.telemetry_decompressed_output_floor_bytes =
+                    c.telemetry_decompressed_output_ceiling_bytes + 1;
+            }),
+            ("inter_broker_server_name must be nonempty", |c| {
+                c.inter_broker_server_name.clear();
+            }),
+            ("transaction minimum timeout must be below maximum", |c| {
+                c.transaction_min_timeout_ms = c.transaction_max_timeout_ms
+            }),
+            ("transaction maximum timeout must be below i32::MAX", |c| {
+                c.transaction_max_timeout_ms = i32::MAX
+            }),
+        ];
+
+        for (expected, invalidate) in cases {
+            let mut config = BrokerConfig::default();
+            invalidate(&mut config);
+            assert_invalid_runtime(config, expected);
         }
     }
 
