@@ -9,7 +9,8 @@ use std::{
 
 use crabka_client_core::security::{ClientSecurity, SaslCredentials};
 use crabka_gres_control::{
-    FinalCheckpoint, TenantName, TenantRecord, decode_tenant_config_record, tenant_config_topic,
+    FinalCheckpoint, PositiveI32, PositiveMillis, RegistryPolicy, RegistryReplicationFactor,
+    TenantName, TenantRecord, decode_tenant_config_record, tenant_config_topic,
 };
 use crabka_pgexec::SqlEngine;
 use crabka_pgkv::{FjallKv, Kv, KvScan, MemKv, RestoreKv, SnapshotKv};
@@ -91,6 +92,10 @@ pub struct Cli {
 /// Arguments for the default serve mode (no subcommand).
 #[derive(clap::Args, Debug, Clone)]
 pub struct ServeArgs {
+    /// Shared Gres registry policy.
+    #[command(flatten)]
+    pub registry: RegistryOptions,
+
     /// Address to listen on.
     #[arg(long, default_value = "127.0.0.1:5433")]
     pub listen: String,
@@ -244,6 +249,54 @@ pub struct ServeArgs {
     pub checkpoint_retain: Option<NonZeroUsize>,
 }
 
+/// Validated Gres registry options shared by compute registry clients.
+#[derive(clap::Args, Debug, Clone)]
+pub struct RegistryOptions {
+    #[arg(
+        long = "registry-replication-factor",
+        env = "CRABKA_GRES_REGISTRY_REPLICATION_FACTOR",
+        default_value = "1"
+    )]
+    replication_factor: RegistryReplicationFactor,
+    #[arg(
+        long = "registry-topic-create-timeout-ms",
+        env = "CRABKA_GRES_REGISTRY_TOPIC_CREATE_TIMEOUT_MS",
+        default_value = "15000"
+    )]
+    topic_create_timeout_ms: PositiveI32,
+    #[arg(
+        long = "registry-reader-retry-backoff-ms",
+        env = "CRABKA_GRES_REGISTRY_READER_RETRY_BACKOFF_MS",
+        default_value = "250"
+    )]
+    reader_retry_backoff_ms: PositiveMillis,
+    #[arg(
+        long = "registry-fetch-max-wait-ms",
+        env = "CRABKA_GRES_REGISTRY_FETCH_MAX_WAIT_MS",
+        default_value = "500"
+    )]
+    fetch_max_wait_ms: PositiveI32,
+    #[arg(
+        long = "registry-fetch-partition-max-bytes",
+        env = "CRABKA_GRES_REGISTRY_FETCH_PARTITION_MAX_BYTES",
+        default_value = "1048576"
+    )]
+    fetch_partition_max_bytes: PositiveI32,
+}
+
+impl RegistryOptions {
+    fn policy(&self) -> RegistryPolicy {
+        RegistryPolicy::new(
+            self.replication_factor.into_value(),
+            self.topic_create_timeout_ms.into_value(),
+            self.reader_retry_backoff_ms.into_value(),
+            self.fetch_max_wait_ms.into_value(),
+            self.fetch_partition_max_bytes.into_value(),
+        )
+        .expect("validated registry options")
+    }
+}
+
 /// Timestamp-ordering source selected by `--timestamp-source`.
 ///
 /// The kind mirrors [`crabka_gres_ranges::TimestampSourceMode`] without the
@@ -309,6 +362,8 @@ pub struct SubstrateRuntimeConfig {
     pub timestamp_source_mode: crabka_gres_ranges::TimestampSourceMode,
     /// Testing-only signed HLC wall-clock skew in milliseconds for this node.
     pub hlc_wall_offset_ms: i64,
+    /// Shared Gres registry policy.
+    pub registry_policy: RegistryPolicy,
 }
 
 /// Validated TLS-only range RPC configuration.
@@ -433,6 +488,7 @@ impl SubstrateRuntimeConfig {
             advertised_endpoint: args.range_listen.clone(),
             timestamp_source_mode: args.timestamp_source.to_mode(args.hlc_max_offset_ms),
             hlc_wall_offset_ms: args.hlc_wall_offset_ms,
+            registry_policy: args.registry.policy(),
         }))
     }
 
@@ -1682,11 +1738,14 @@ pub async fn serve_listener_with_tenant_config_loader(
         tenant_record.as_ref(),
         lifecycle_registry_bootstrap(args.substrate_bootstrap.as_deref(), tenant_security_enabled),
     ) {
-        let mut registry = crabka_gres_control::Registry::connect(bootstrap)
-            .await
-            .map_err(|error| std::io::Error::other(format!("tenant registry connect: {error}")))?;
+        let mut registry =
+            crabka_gres_control::Registry::connect_with_policy(bootstrap, args.registry.policy())
+                .await
+                .map_err(|error| {
+                    std::io::Error::other(format!("tenant registry connect: {error}"))
+                })?;
         registry
-            .ensure_topic(1)
+            .ensure_topic()
             .await
             .map_err(|error| std::io::Error::other(format!("tenant registry ensure: {error}")))?;
         tenant_record = registry
@@ -2470,6 +2529,7 @@ struct MustActivateRangeRegistrySource {
 struct LiveSplitIntentAuthority {
     bootstrap: String,
     tenant: crabka_gres_control::TenantName,
+    policy: RegistryPolicy,
 }
 
 /// Build the production registry-backed split authority for integration verification.
@@ -2479,7 +2539,11 @@ pub fn live_split_intent_authority(
     bootstrap: String,
     tenant: crabka_gres_control::TenantName,
 ) -> Arc<dyn crabka_gres_ranges::control::SplitIntentAuthority> {
-    Arc::new(LiveSplitIntentAuthority { bootstrap, tenant })
+    Arc::new(LiveSplitIntentAuthority {
+        bootstrap,
+        tenant,
+        policy: RegistryPolicy::default(),
+    })
 }
 
 #[cfg(test)]
@@ -2564,9 +2628,12 @@ impl crabka_gres_ranges::control::SplitIntentAuthority for LiveSplitIntentAuthor
         if request.tenant != self.tenant.as_str() {
             return Ok(None);
         }
-        let mut registry = crabka_gres_control::Registry::connect(&self.bootstrap)
-            .await
-            .map_err(|error| format!("connect split intent registry: {error}"))?;
+        let mut registry = crabka_gres_control::Registry::connect_with_policy(
+            &self.bootstrap,
+            self.policy.clone(),
+        )
+        .await
+        .map_err(|error| format!("connect split intent registry: {error}"))?;
         let operation = registry
             .load_split_operation(self.tenant.as_str(), &request.operation_id)
             .await
@@ -4207,6 +4274,7 @@ async fn open_live_multirange_tenant(
         bootstrap: config.bootstrap.clone(),
         tenant: crabka_gres_control::TenantName::try_from(config.tenant.as_str())
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?,
+        policy: config.registry_policy.clone(),
     });
     let mut control = crabka_gres_ranges::control::GenerationFencedRangeControl::new(
         config.tenant.clone(),
@@ -6516,6 +6584,68 @@ mod tests {
         assert!(parse_test_commit_fault("unknown_timestamp_fault").is_err());
     }
 
+    #[test]
+    fn registry_policy_options_use_validated_defaults_and_cli_precedence() {
+        let defaults = Cli::try_parse_from(["crabka-gres"]).expect("defaults");
+        assert!(defaults.serve.registry.policy() == crabka_gres_control::RegistryPolicy::default());
+
+        let cli = Cli::try_parse_from([
+            "crabka-gres",
+            "--registry-replication-factor=3",
+            "--registry-topic-create-timeout-ms=15002",
+            "--registry-reader-retry-backoff-ms=252",
+            "--registry-fetch-max-wait-ms=502",
+            "--registry-fetch-partition-max-bytes=1048578",
+        ])
+        .expect("CLI policy");
+        assert!(
+            cli.serve.registry.policy()
+                == crabka_gres_control::RegistryPolicy::new(3, 15_002, 252, 502, 1_048_578)
+                    .expect("policy")
+        );
+        for option in [
+            "--registry-replication-factor=0",
+            "--registry-replication-factor=32768",
+            "--registry-topic-create-timeout-ms=0",
+            "--registry-reader-retry-backoff-ms=0",
+            "--registry-fetch-max-wait-ms=0",
+            "--registry-fetch-partition-max-bytes=0",
+        ] {
+            assert!(Cli::try_parse_from(["crabka-gres", option]).is_err());
+        }
+    }
+
+    #[test]
+    fn registry_policy_options_read_exact_environment_names() {
+        const CHILD: &str = "CRABKA_TEST_GRES_REGISTRY_ENV_CHILD";
+        let vars = [
+            ("CRABKA_GRES_REGISTRY_REPLICATION_FACTOR", "2"),
+            ("CRABKA_GRES_REGISTRY_TOPIC_CREATE_TIMEOUT_MS", "15001"),
+            ("CRABKA_GRES_REGISTRY_READER_RETRY_BACKOFF_MS", "251"),
+            ("CRABKA_GRES_REGISTRY_FETCH_MAX_WAIT_MS", "501"),
+            ("CRABKA_GRES_REGISTRY_FETCH_PARTITION_MAX_BYTES", "1048577"),
+        ];
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().expect("test exe"))
+                .args([
+                    "--exact",
+                    "tests::registry_policy_options_read_exact_environment_names",
+                ])
+                .env(CHILD, "1")
+                .envs(vars)
+                .status()
+                .expect("child test");
+            assert!(status.success());
+            return;
+        }
+        let cli = Cli::try_parse_from(["crabka-gres"]).expect("environment policy");
+        assert!(
+            cli.serve.registry.policy()
+                == crabka_gres_control::RegistryPolicy::new(2, 15_001, 251, 501, 1_048_577)
+                    .expect("policy")
+        );
+    }
+
     #[tokio::test]
     async fn two_successor_stages_start_together_and_cleanup_on_failure() {
         let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -6974,6 +7104,13 @@ mod tests {
 
     fn serve_args(auth: Option<&str>, user_creds: Vec<String>) -> ServeArgs {
         ServeArgs {
+            registry: RegistryOptions {
+                replication_factor: RegistryReplicationFactor::new(1).expect("default"),
+                topic_create_timeout_ms: PositiveI32::new(15_000).expect("default"),
+                reader_retry_backoff_ms: PositiveMillis::new(250).expect("default"),
+                fetch_max_wait_ms: PositiveI32::new(500).expect("default"),
+                fetch_partition_max_bytes: PositiveI32::new(1_048_576).expect("default"),
+            },
             listen: "127.0.0.1:0".to_string(),
             tls_cert: None,
             tls_key: None,
@@ -7710,6 +7847,7 @@ mod tests {
             advertised_endpoint: None,
             timestamp_source_mode: crabka_gres_ranges::TimestampSourceMode::LogicalTso,
             hlc_wall_offset_ms: 0,
+            registry_policy: RegistryPolicy::default(),
         };
 
         let Err(error) = open_substrate_runtime(&config).await else {
@@ -7780,6 +7918,7 @@ mod tests {
             advertised_endpoint: None,
             timestamp_source_mode: crabka_gres_ranges::TimestampSourceMode::LogicalTso,
             hlc_wall_offset_ms: 0,
+            registry_policy: RegistryPolicy::default(),
         };
         let wal_selection = single_range_live_wal_selection(&config, None).expect("wal selection");
         let kv = Arc::new(MemKv::default());
@@ -8133,6 +8272,7 @@ mod tests {
             advertised_endpoint: None,
             timestamp_source_mode: crabka_gres_ranges::TimestampSourceMode::LogicalTso,
             hlc_wall_offset_ms: 0,
+            registry_policy: RegistryPolicy::default(),
         };
 
         let wal_selection = single_range_live_wal_selection(&config, None).expect("wal selection");
@@ -8214,6 +8354,7 @@ mod tests {
             advertised_endpoint: None,
             timestamp_source_mode: crabka_gres_ranges::TimestampSourceMode::LogicalTso,
             hlc_wall_offset_ms: 0,
+            registry_policy: RegistryPolicy::default(),
         };
 
         let Err(error) = open_substrate_engine(&config).await else {

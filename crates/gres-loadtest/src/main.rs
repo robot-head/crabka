@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use clap::{Args, Parser, Subcommand};
+use crabka_gres_control::{PositiveI32, PositiveMillis, RegistryPolicy, RegistryReplicationFactor};
 use crabka_gres_loadtest::{
     cluster::Binaries,
     external::{self, ExternalTarget},
@@ -31,6 +32,8 @@ struct Cli {
 enum CliCommand {
     /// Run one scenario and write its JSON + Markdown report.
     Run {
+        #[command(flatten)]
+        registry: RegistryOptions,
         /// Path to the scenario YAML.
         #[arg(long)]
         scenario: PathBuf,
@@ -52,6 +55,8 @@ enum CliCommand {
     },
     /// Run one scenario under both timestamp modes and render a comparison.
     Compare {
+        #[command(flatten)]
+        registry: RegistryOptions,
         /// Path to the scenario YAML.
         #[arg(long)]
         scenario: PathBuf,
@@ -73,6 +78,53 @@ enum CliCommand {
         #[arg(long)]
         scenario: PathBuf,
     },
+}
+
+#[derive(Args)]
+struct RegistryOptions {
+    #[arg(
+        long = "registry-replication-factor",
+        env = "CRABKA_GRES_REGISTRY_REPLICATION_FACTOR",
+        default_value = "1"
+    )]
+    replication_factor: RegistryReplicationFactor,
+    #[arg(
+        long = "registry-topic-create-timeout-ms",
+        env = "CRABKA_GRES_REGISTRY_TOPIC_CREATE_TIMEOUT_MS",
+        default_value = "15000"
+    )]
+    topic_create_timeout_ms: PositiveI32,
+    #[arg(
+        long = "registry-reader-retry-backoff-ms",
+        env = "CRABKA_GRES_REGISTRY_READER_RETRY_BACKOFF_MS",
+        default_value = "250"
+    )]
+    reader_retry_backoff_ms: PositiveMillis,
+    #[arg(
+        long = "registry-fetch-max-wait-ms",
+        env = "CRABKA_GRES_REGISTRY_FETCH_MAX_WAIT_MS",
+        default_value = "500"
+    )]
+    fetch_max_wait_ms: PositiveI32,
+    #[arg(
+        long = "registry-fetch-partition-max-bytes",
+        env = "CRABKA_GRES_REGISTRY_FETCH_PARTITION_MAX_BYTES",
+        default_value = "1048576"
+    )]
+    fetch_partition_max_bytes: PositiveI32,
+}
+
+impl RegistryOptions {
+    fn policy(&self) -> RegistryPolicy {
+        RegistryPolicy::new(
+            self.replication_factor.into_value(),
+            self.topic_create_timeout_ms.into_value(),
+            self.reader_retry_backoff_ms.into_value(),
+            self.fetch_max_wait_ms.into_value(),
+            self.fetch_partition_max_bytes.into_value(),
+        )
+        .expect("validated registry options")
+    }
 }
 
 /// The `--external*` flag family: benchmark an existing pgwire-speaking SQL
@@ -150,6 +202,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
     match Cli::parse().command {
         CliCommand::Run {
+            registry,
             scenario,
             mode,
             hlc_max_offset_ms,
@@ -164,17 +217,19 @@ async fn main() -> anyhow::Result<()> {
                 &out,
                 keep_work_dir,
                 external,
+                registry.policy(),
             )
             .await
         }
         CliCommand::Compare {
+            registry,
             scenario,
             out,
             keep_work_dir,
             external,
         } => {
             ensure_compare_is_internal(external.as_deref())?;
-            compare(&scenario, &out, keep_work_dir).await
+            compare(&scenario, &out, keep_work_dir, registry.policy()).await
         }
         CliCommand::Validate { scenario } => validate(&scenario),
     }
@@ -189,6 +244,7 @@ async fn run(
     out: &Path,
     keep_work_dir: bool,
     external: ExternalFlags,
+    registry_policy: RegistryPolicy,
 ) -> anyhow::Result<()> {
     let scenario = load_scenario(scenario_path)?;
     if let Some(target) = external_target(external)? {
@@ -210,6 +266,7 @@ async fn run(
         out_dir: out.to_path_buf(),
         binaries,
         keep_work_dir,
+        registry_policy,
     })
     .await?;
     print_summary(&report, out, &runner::mode_slug(effective_mode));
@@ -218,7 +275,12 @@ async fn run(
 
 /// The `compare` subcommand: the same scenario under `logical-tso` then
 /// `hlc`, plus a side-by-side comparison report.
-async fn compare(scenario_path: &Path, out: &Path, keep_work_dir: bool) -> anyhow::Result<()> {
+async fn compare(
+    scenario_path: &Path,
+    out: &Path,
+    keep_work_dir: bool,
+    registry_policy: RegistryPolicy,
+) -> anyhow::Result<()> {
     let scenario = load_scenario(scenario_path)?;
     let binaries = Binaries::resolve()?;
     let hlc = match scenario.mode {
@@ -235,6 +297,7 @@ async fn compare(scenario_path: &Path, out: &Path, keep_work_dir: bool) -> anyho
             out_dir: out.to_path_buf(),
             binaries: binaries.clone(),
             keep_work_dir,
+            registry_policy: registry_policy.clone(),
         })
         .await
         .with_context(|| format!("run scenario {} under {mode}", scenario.name))?;
@@ -336,6 +399,82 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn registry_policy_options_use_exact_defaults_and_validation() {
+        let defaults =
+            Cli::try_parse_from(["loadtest", "run", "--scenario=test.yaml"]).expect("defaults");
+        let CliCommand::Run { registry, .. } = defaults.command else {
+            panic!("run");
+        };
+        assert!(registry.policy() == crabka_gres_control::RegistryPolicy::default());
+        let custom = Cli::try_parse_from([
+            "loadtest",
+            "run",
+            "--scenario=test.yaml",
+            "--registry-replication-factor=3",
+            "--registry-topic-create-timeout-ms=15002",
+            "--registry-reader-retry-backoff-ms=252",
+            "--registry-fetch-max-wait-ms=502",
+            "--registry-fetch-partition-max-bytes=1048578",
+        ])
+        .expect("custom");
+        let CliCommand::Run { registry, .. } = custom.command else {
+            panic!("run");
+        };
+        assert!(
+            registry.policy()
+                == crabka_gres_control::RegistryPolicy::new(3, 15_002, 252, 502, 1_048_578)
+                    .expect("policy")
+        );
+        for option in [
+            "--registry-replication-factor=0",
+            "--registry-replication-factor=32768",
+            "--registry-topic-create-timeout-ms=0",
+            "--registry-reader-retry-backoff-ms=0",
+            "--registry-fetch-max-wait-ms=0",
+            "--registry-fetch-partition-max-bytes=0",
+        ] {
+            assert!(
+                Cli::try_parse_from(["loadtest", "run", "--scenario=test.yaml", option]).is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn registry_policy_options_read_exact_environment_names() {
+        const CHILD: &str = "CRABKA_TEST_LOADTEST_REGISTRY_ENV_CHILD";
+        let vars = [
+            ("CRABKA_GRES_REGISTRY_REPLICATION_FACTOR", "2"),
+            ("CRABKA_GRES_REGISTRY_TOPIC_CREATE_TIMEOUT_MS", "15001"),
+            ("CRABKA_GRES_REGISTRY_READER_RETRY_BACKOFF_MS", "251"),
+            ("CRABKA_GRES_REGISTRY_FETCH_MAX_WAIT_MS", "501"),
+            ("CRABKA_GRES_REGISTRY_FETCH_PARTITION_MAX_BYTES", "1048577"),
+        ];
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().expect("test exe"))
+                .args([
+                    "--exact",
+                    "tests::registry_policy_options_read_exact_environment_names",
+                ])
+                .env(CHILD, "1")
+                .envs(vars)
+                .status()
+                .expect("child test");
+            assert!(status.success());
+            return;
+        }
+        let cli =
+            Cli::try_parse_from(["loadtest", "run", "--scenario=test.yaml"]).expect("environment");
+        let CliCommand::Run { registry, .. } = cli.command else {
+            panic!("run");
+        };
+        assert!(
+            registry.policy()
+                == crabka_gres_control::RegistryPolicy::new(2, 15_001, 251, 501, 1_048_577)
+                    .expect("policy")
+        );
+    }
 
     fn fixture(mode: &str, tps_mean: f64, classes: &[(&str, u64, f64)]) -> RunReport {
         RunReport {

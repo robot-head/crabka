@@ -20,6 +20,7 @@ use std::{
 };
 
 use anyhow::Context as _;
+use crabka_gres_control::RegistryPolicy;
 use tokio::time::Instant;
 
 use crate::{
@@ -56,6 +57,8 @@ pub struct RunConfig {
     pub binaries: Binaries,
     /// Keep the cluster work dir (data + logs) after a successful run.
     pub keep_work_dir: bool,
+    /// Shared registry policy used by provisioning and spawned computes.
+    pub registry_policy: RegistryPolicy,
 }
 
 /// Paths of the two report files one run writes.
@@ -103,6 +106,7 @@ pub async fn run_scenario(config: RunConfig) -> anyhow::Result<RunReport> {
         out_dir,
         binaries,
         keep_work_dir,
+        registry_policy,
     } = config;
     let scenario = effective_scenario(scenario, mode_override).context("apply mode override")?;
     let mode = scenario.mode;
@@ -115,6 +119,7 @@ pub async fn run_scenario(config: RunConfig) -> anyhow::Result<RunReport> {
         mode,
         work_dir: work_dir.path().to_path_buf(),
         binaries,
+        registry_policy,
     };
     let mut cluster = match Cluster::launch(options).await {
         Ok(cluster) => cluster,

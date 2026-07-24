@@ -41,8 +41,8 @@ use std::{
 use anyhow::{Context as _, anyhow, bail, ensure};
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
 use crabka_gres_control::{
-    RangeBoundary, RangeLayoutEntry, RangeLifecycle, Registry, SqlUser, TenantId, TenantName,
-    TenantRecord, TenantState,
+    RangeBoundary, RangeLayoutEntry, RangeLifecycle, Registry, RegistryPolicy, SqlUser, TenantId,
+    TenantName, TenantRecord, TenantState,
 };
 use tokio::{
     io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader},
@@ -138,6 +138,8 @@ pub struct ClusterOptions {
     pub work_dir: PathBuf,
     /// Binaries to launch.
     pub binaries: Binaries,
+    /// Shared registry policy used by provisioning and spawned computes.
+    pub registry_policy: RegistryPolicy,
 }
 
 /// Connection parameters for a node's SQL front door (via its chaos proxy).
@@ -218,6 +220,7 @@ impl Cluster {
             mode,
             work_dir,
             binaries,
+            registry_policy,
         } = options;
         ensure!(topology.nodes >= 1, "topology needs at least one node");
         ensure!(topology.ranges >= 1, "topology needs at least one range");
@@ -276,6 +279,7 @@ impl Cluster {
             topology.ranges,
             &range_endpoints,
             &sql_password,
+            &registry_policy,
         )
         .await?;
         tracing::info!(
@@ -292,6 +296,7 @@ impl Cluster {
             log_dir: &log_dir,
             tls: &tls,
             cpu_allocation: allocation.as_ref(),
+            registry_policy: &registry_policy,
         };
         let node_specs: Vec<NodeSpec> = (0..topology.nodes)
             .map(|node| node_spec(node, &context))
@@ -543,6 +548,7 @@ struct NodeSpec {
     /// `taskset -c` CPU list pinning this node, when the topology asks for
     /// fixed-capacity nodes.
     cpuset: Option<String>,
+    registry_policy: RegistryPolicy,
 }
 
 /// Default CPUs pinned to the broker when `cpus_per_node` pinning is
@@ -675,6 +681,7 @@ struct SpecContext<'a> {
     log_dir: &'a Path,
     tls: &'a TlsPaths,
     cpu_allocation: Option<&'a CpuAllocation>,
+    registry_policy: &'a RegistryPolicy,
 }
 
 /// The SQL endpoint clients use for a given listener address.
@@ -848,7 +855,23 @@ fn build_spec(
         cache_dir,
         log_path: context.log_dir.join(format!("{label}.log")),
         cpuset,
+        registry_policy: context.registry_policy.clone(),
     }
+}
+
+fn registry_policy_args(policy: &RegistryPolicy) -> [String; 10] {
+    [
+        "--registry-replication-factor".to_owned(),
+        policy.replication_factor().to_string(),
+        "--registry-topic-create-timeout-ms".to_owned(),
+        policy.topic_create_timeout_ms().to_string(),
+        "--registry-reader-retry-backoff-ms".to_owned(),
+        policy.reader_retry_backoff().as_millis().to_string(),
+        "--registry-fetch-max-wait-ms".to_owned(),
+        policy.fetch_max_wait_ms().to_string(),
+        "--registry-fetch-partition-max-bytes".to_owned(),
+        policy.fetch_partition_max_bytes().to_string(),
+    ]
 }
 
 /// Spawns one `crabka-gres` child in its own process group, capturing
@@ -859,6 +882,7 @@ fn spawn_node(gres_binary: &Path, spec: &NodeSpec) -> anyhow::Result<NodeProcess
     let mut command = pinned_command(gres_binary, spec.cpuset.as_deref());
     command
         .args(&spec.args)
+        .args(registry_policy_args(&spec.registry_policy))
         .stdout(Stdio::piped())
         .stderr(Stdio::from(stderr))
         .kill_on_drop(true);
@@ -1116,6 +1140,7 @@ async fn provision_tenant(
     ranges: u16,
     range_endpoints: &[SocketAddr],
     sql_password: &str,
+    registry_policy: &RegistryPolicy,
 ) -> anyhow::Result<()> {
     let mut admin = AdminClient::connect(&[bootstrap.to_owned()])
         .await
@@ -1137,10 +1162,10 @@ async fn provision_tenant(
         "WAL topic creation failed: {outcomes:?}"
     );
     let record = tenant_record(ranges, range_endpoints, sql_password)?;
-    let mut registry = Registry::connect(bootstrap)
+    let mut registry = Registry::connect_with_policy(bootstrap, registry_policy.clone())
         .await
         .context("connect registry")?;
-    registry.ensure_topic(1).await.context("registry topic")?;
+    registry.ensure_topic().await.context("registry topic")?;
     registry.upsert(&record).await.context("registry record")?;
     registry
         .upsert_tenant_config(&record, 1)
@@ -1486,6 +1511,7 @@ mod tests {
         };
         let allocation = cpu_allocation(2, 3, 2, 16).expect("fits");
         let tls = test_tls();
+        let registry_policy = RegistryPolicy::default();
         let context = SpecContext {
             topology: &topology,
             mode: ModeSpec::LogicalTso,
@@ -1494,6 +1520,7 @@ mod tests {
             log_dir: Path::new("/work/logs"),
             tls: &tls,
             cpu_allocation: Some(&allocation),
+            registry_policy: &registry_policy,
         };
         assert!(node_spec(0, &context).cpuset.as_deref() == Some("2-4"));
         assert!(node_spec(1, &context).cpuset.as_deref() == Some("5-7"));
@@ -1517,13 +1544,24 @@ mod tests {
             log_dir: Path::new("/work/logs"),
             tls: &tls,
             cpu_allocation: None,
+            registry_policy: &RegistryPolicy::new(3, 15_002, 252, 502, 1_048_578).expect("policy"),
         };
         let node0 = node_spec(0, &context);
+        let mut spawned_args = node0.args.clone();
+        spawned_args.extend(registry_policy_args(&node0.registry_policy));
+        assert!(node0.registry_policy == *context.registry_policy);
         assert!(node0.label == "node0");
         assert!(arg_value(&node0.args, "--ranges") == Some("0,1000000,2000000,3000000"));
         assert!(arg_value(&node0.args, "--host-ranges") == Some("r0,r3"));
         assert!(arg_value(&node0.args, "--tenant") == Some(TENANT));
         assert!(arg_value(&node0.args, "--substrate-bootstrap") == Some("127.0.0.1:19092"));
+        assert!(arg_value(&spawned_args, "--registry-replication-factor") == Some("3"));
+        assert!(arg_value(&spawned_args, "--registry-topic-create-timeout-ms") == Some("15002"));
+        assert!(arg_value(&spawned_args, "--registry-reader-retry-backoff-ms") == Some("252"));
+        assert!(arg_value(&spawned_args, "--registry-fetch-max-wait-ms") == Some("502"));
+        assert!(
+            arg_value(&spawned_args, "--registry-fetch-partition-max-bytes") == Some("1048578")
+        );
     }
 
     #[test]
@@ -1536,6 +1574,7 @@ mod tests {
             broker_cpus: None,
         };
         let tls = test_tls();
+        let registry_policy = RegistryPolicy::default();
         let context = SpecContext {
             topology: &topology,
             mode: ModeSpec::Hlc { max_offset_ms: 300 },
@@ -1544,6 +1583,7 @@ mod tests {
             log_dir: Path::new("/work/logs"),
             tls: &tls,
             cpu_allocation: None,
+            registry_policy: &registry_policy,
         };
         let node0 = node_spec(0, &context);
         assert!(arg_value(&node0.args, "--checkpoint-store") == Some("local"));
@@ -1707,6 +1747,7 @@ mod tests {
             mode: ModeSpec::LogicalTso,
             work_dir: work_dir.path().to_path_buf(),
             binaries,
+            registry_policy: RegistryPolicy::default(),
         };
         let mut cluster = Cluster::launch(options).await.expect("launch cluster");
         assert!(cluster.node_count() == 2);
