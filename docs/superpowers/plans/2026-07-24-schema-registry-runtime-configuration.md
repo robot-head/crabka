@@ -47,6 +47,7 @@ Direct-only existing setting: `admin_listen_addr`, default `0.0.0.0:9404`, gains
 - Modify: `crates/schema-registry/src/config.rs`
 - Modify: `crates/schema-registry/src/compat/mod.rs`
 - Modify: `crates/schema-registry/src/bin/schema-registry.rs`
+- Modify: every `RegistryConfig` fixture reported by `rg -l 'RegistryConfig \\{' crates/schema-registry`
 - Test: colocated modules in those files.
 
 **Interfaces:**
@@ -186,6 +187,8 @@ Build `RegistryRuntimeConfig` from parsed overrides and `Default`, call `validat
 
 Convert the existing `schemas_topic_rf`, `acl_refresh_secs`, and present `bearer_jwks_refresh_ms` through the same positive refined wrappers. Add one table-driven test proving zero rejection, valid explicit values, environment override, CLI-over-env precedence, and all defaults.
 
+Add `runtime: RegistryRuntimeConfig::default()` to every existing `RegistryConfig` fixture so the all-target gate compiles; do not change fixture behavior.
+
 - [ ] **Step 6: Run focused checks and commit**
 
 Run:
@@ -215,7 +218,6 @@ git commit -m "feat(schema-registry): add runtime inputs"
 - Modify: `crates/schema-registry/src/kafkastore/topic.rs`
 - Modify: `crates/schema-registry/src/kafkastore/mod.rs`
 - Modify: `crates/schema-registry/src/store/mod.rs`
-- Modify: every `RegistryConfig` fixture reported by `rg -l 'RegistryConfig \\{' crates/schema-registry`
 
 **Interfaces:**
 
@@ -277,9 +279,7 @@ pub fn with_defaults(compatibility: String, mode: String) -> Self;
 
 `global_compat()` and `global_mode()` return replayed values first and configured defaults second. `KafkaStore::start` initializes the state with `cfg.runtime` defaults before the reader begins. Tests must prove a configured initial value is returned and a replayed global record overrides it.
 
-- [ ] **Step 5: Update fixtures, run focused checks, and commit**
-
-Every existing `RegistryConfig` fixture gets `runtime: RegistryRuntimeConfig::default()`.
+- [ ] **Step 5: Run focused checks and commit**
 
 Run:
 
