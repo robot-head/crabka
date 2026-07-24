@@ -29,8 +29,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::{
-    partition_registry::PartitionRegistry, replicator, throttle::ThrottleState,
-    txn::coordinator::TxnCoordinator,
+    config::ReplicationRuntimeConfig, partition_registry::PartitionRegistry, replicator,
+    throttle::ThrottleState, txn::coordinator::TxnCoordinator,
 };
 
 /// A `(topic, partition)` pair — the key the supervisor tracks follower
@@ -269,6 +269,8 @@ pub(crate) struct ReplicatorSupervisor {
     /// Listener protocol used for inter-broker dials. Drives whether
     /// the dialer runs TLS / SASL.
     inter_broker_listener_protocol: crabka_security::ListenerProtocol,
+    inter_broker_server_name: String,
+    replication: ReplicationRuntimeConfig,
     /// Name of the listener whose endpoint we resolve from the
     /// metadata image when dialing peers.
     inter_broker_listener_name: String,
@@ -321,7 +323,9 @@ pub(crate) struct ReplicatorSupervisorConfig {
     pub share_coordinator: Option<Arc<crate::share_coordinator::coordinator::ShareCoordinator>>,
     pub inter_broker_client: Arc<crate::network::client::InterBrokerClient>,
     pub inter_broker_listener_protocol: crabka_security::ListenerProtocol,
+    pub inter_broker_server_name: String,
     pub inter_broker_listener_name: String,
+    pub replication: ReplicationRuntimeConfig,
     pub throttle_state: Arc<ThrottleState>,
     pub log_dir_status: crate::log_dir_status::LogDirRegistry,
     pub producer_state: Arc<crate::producer_state::ProducerState>,
@@ -346,7 +350,9 @@ impl ReplicatorSupervisor {
             share_coordinator,
             inter_broker_client,
             inter_broker_listener_protocol,
+            inter_broker_server_name,
             inter_broker_listener_name,
+            replication,
             throttle_state,
             log_dir_status,
             producer_state,
@@ -375,7 +381,9 @@ impl ReplicatorSupervisor {
             share_coordinator,
             inter_broker_client,
             inter_broker_listener_protocol,
+            inter_broker_server_name,
             inter_broker_listener_name,
+            replication,
             throttle_state,
             log_dir_status,
             producer_state,
@@ -386,6 +394,41 @@ impl ReplicatorSupervisor {
             reported_dirs: dashmap::DashMap::new(),
             known_topic_ids: Mutex::new(known_topic_ids),
             assign_dirs_reporter: Arc::new(NetworkAssignDirsReporter),
+        }
+    }
+
+    fn replicator_config(
+        &self,
+        key: TopicPartition,
+        topic: &crabka_metadata::TopicRecord,
+        partition: &crabka_metadata::PartitionRecord,
+        broker: &crabka_metadata::BrokerRegistrationRecord,
+        shutdown: CancellationToken,
+    ) -> replicator::Config {
+        let (leader_host, leader_port) =
+            resolve_leader_endpoint(broker, &self.inter_broker_listener_name);
+        replicator::Config {
+            node_id: self.node_id,
+            topic: key.0,
+            topic_id: crabka_protocol::primitives::uuid::Uuid(topic.topic_id.into_bytes()),
+            partition: crabka_ids::PartitionIndex(key.1),
+            leader_node_id: partition.leader,
+            leader_host,
+            leader_port,
+            partitions: self.partitions.clone(),
+            log_dirs: self.log_dirs.clone(),
+            log_settings: self.log_config.clone(),
+            client_id: self.client_id.clone(),
+            shutdown,
+            inter_broker_client: self.inter_broker_client.clone(),
+            inter_broker_listener_protocol: self.inter_broker_listener_protocol,
+            inter_broker_server_name: self.inter_broker_server_name.clone(),
+            replication: self.replication.clone(),
+            throttle_state: self.throttle_state.clone(),
+            controller: self.controller.clone(),
+            log_dir_status: self.log_dir_status.clone(),
+            producer_state: self.producer_state.clone(),
+            metrics: self.metrics.clone(),
         }
     }
 
@@ -473,34 +516,9 @@ impl ReplicatorSupervisor {
             self.tasks.insert(k.clone(), token.clone());
             self.task_targets
                 .insert(k.clone(), (leader, part.leader_epoch));
-            // Prefer the inter-broker listener's endpoint when the leader
-            // has projected it onto its registration record. Fall back to
-            // the legacy top-level host/port for brokers that haven't
-            // projected a per-listener endpoint yet (or PLAINTEXT-only
-            // deployments where the synthesized endpoint matches anyway).
-            let (leader_host, leader_port) =
-                resolve_leader_endpoint(&broker, &self.inter_broker_listener_name);
-            tokio::spawn(replicator::run(replicator::Config {
-                node_id: self.node_id,
-                topic: k.0,
-                topic_id: crabka_protocol::primitives::uuid::Uuid(topic_rec.topic_id.into_bytes()),
-                partition: crabka_ids::PartitionIndex(k.1),
-                leader_node_id: leader,
-                leader_host,
-                leader_port,
-                partitions: self.partitions.clone(),
-                log_dirs: self.log_dirs.clone(),
-                log_settings: self.log_config.clone(),
-                client_id: self.client_id.clone(),
-                shutdown: token,
-                inter_broker_client: self.inter_broker_client.clone(),
-                inter_broker_listener_protocol: self.inter_broker_listener_protocol,
-                throttle_state: self.throttle_state.clone(),
-                controller: self.controller.clone(),
-                log_dir_status: self.log_dir_status.clone(),
-                producer_state: self.producer_state.clone(),
-                metrics: self.metrics.clone(),
-            }));
+            tokio::spawn(replicator::run(
+                self.replicator_config(k, &topic_rec, &part, &broker, token),
+            ));
         }
 
         // 3. Refresh the txn coordinator's view of locally-led
@@ -926,7 +944,9 @@ mod tests {
                 None, None,
             )),
             inter_broker_listener_protocol: crabka_security::ListenerProtocol::Plaintext,
+            inter_broker_server_name: "localhost".into(),
             inter_broker_listener_name: "INTERNAL".into(),
+            replication: ReplicationRuntimeConfig::default(),
             throttle_state: Arc::new(ThrottleState::new()),
             log_dir_status: crate::log_dir_status::LogDirRegistry::default(),
             producer_state: Arc::new(crate::producer_state::ProducerState::new()),
@@ -1207,6 +1227,33 @@ mod tests {
         let broker = broker_record(NodeId(1));
         assert!(resolve_leader_endpoint(&broker, "INTERNAL") == ("internal-host".into(), 19092));
         assert!(resolve_leader_endpoint(&broker, "EXTERNAL") == ("legacy-host".into(), 9092));
+    }
+
+    #[test]
+    fn replicator_task_config_receives_runtime_policy_and_tls_server_name() {
+        let image = image_with(&[
+            topic_record("t", 1),
+            partition_record("t", 0, NodeId(1), vec![NodeId(1), NodeId(2)], 7),
+            MetadataRecord::V1BrokerRegistration(broker_record(NodeId(1))),
+        ]);
+        let (mut supervisor, _partitions, _reporter, _dir) = supervisor_fixture(image.clone());
+        supervisor.replication.fetch_max_bytes = 2_345_678;
+        supervisor.replication.send_error_backoff = std::time::Duration::from_millis(37);
+        supervisor.inter_broker_server_name = "broker.internal".into();
+        let broker = image.broker(NodeId(1)).expect("leader broker");
+        let topic = image.topic("t").expect("topic");
+
+        let config = supervisor.replicator_config(
+            ("t".into(), 0),
+            topic,
+            image.partition("t", 0).expect("partition"),
+            broker,
+            CancellationToken::new(),
+        );
+
+        assert!(config.replication.fetch_max_bytes == 2_345_678);
+        assert!(config.replication.send_error_backoff == std::time::Duration::from_millis(37));
+        assert!(config.inter_broker_server_name == "broker.internal");
     }
 
     #[tokio::test]
