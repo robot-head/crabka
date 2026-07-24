@@ -7,29 +7,24 @@ use crabka_audit::{
 
 use crate::partition::Partition;
 
-/// Recovery scans at most this many trailing offsets of the audit partition;
-/// it comfortably exceeds the worst-case run of consecutive checkpoint
-/// records between two chained records.
-const TAIL_WINDOW_OFFSETS: i64 = 4096;
-
-/// Byte cap (1 MiB) on the tail read so recovery stays cheap; audit records
-/// are small.
-const TAIL_READ_MAX_BYTES: usize = 1 << 20;
-
 /// Audit record-header key carrying the event class (e.g. `checkpoint`).
 const HEADER_EVENT_CLASS: &str = "event_class";
 
 /// Read the tail of `partition` and return `(next_seq, head)` implied by the
 /// last chained (non-checkpoint) record, or `None` if there are none.
 #[must_use]
-pub(crate) fn recover_from_partition_tail(partition: &Partition) -> Option<(u64, [u8; 32])> {
+pub(crate) fn recover_from_partition_tail(
+    partition: &Partition,
+    tail_window_offsets: i64,
+    tail_read_max_bytes: usize,
+) -> Option<(u64, [u8; 32])> {
     let leo = partition.log_end_offset();
     if leo <= crabka_log::Offset(0) {
         return None;
     }
     // Read a bounded tail window (audit records are small).
-    let start = tail_window_start(leo);
-    let out = partition.read_log(start, TAIL_READ_MAX_BYTES).ok()?;
+    let start = tail_window_start(leo, tail_window_offsets);
+    let out = partition.read_log(start, tail_read_max_bytes).ok()?;
     let mut last: Option<(u64, [u8; 32])> = None;
     for batch in &out.batches {
         for rec in &batch.records {
@@ -63,8 +58,11 @@ fn header_str<'a>(rec: &'a crabka_protocol::records::Record, key: &str) -> Optio
     header_bytes(rec, key).and_then(|v| std::str::from_utf8(v).ok())
 }
 
-fn tail_window_start(log_end_offset: crabka_log::Offset) -> crabka_log::Offset {
-    (log_end_offset - TAIL_WINDOW_OFFSETS).max(crabka_log::Offset(0))
+fn tail_window_start(
+    log_end_offset: crabka_log::Offset,
+    tail_window_offsets: i64,
+) -> crabka_log::Offset {
+    (log_end_offset - tail_window_offsets).max(crabka_log::Offset(0))
 }
 
 #[cfg(test)]
@@ -152,11 +150,11 @@ mod tests {
     }
 
     #[test]
-    fn tail_window_start_keeps_only_last_4096_offsets() {
+    fn tail_window_start_keeps_configured_offset_count() {
         let cases = [(0, 0), (4096, 0), (4097, 1), (8192, 4096)];
         for (log_end_offset, want) in cases {
             assert!(
-                tail_window_start(Offset(log_end_offset)) == want,
+                tail_window_start(Offset(log_end_offset), 4096) == want,
                 "log_end_offset {log_end_offset}"
             );
         }
@@ -166,7 +164,7 @@ mod tests {
     async fn recover_empty_partition_returns_none() {
         let (partition, _td) = test_partition();
 
-        assert!(recover_from_partition_tail(&partition).is_none());
+        assert!(recover_from_partition_tail(&partition, 4096, 1 << 20).is_none());
     }
 
     #[tokio::test]
@@ -176,7 +174,8 @@ mod tests {
         let value = b"tail-value";
         append_records(&partition, vec![chained_record(seq, &GENESIS_HEAD, value)]);
 
-        let recovered = recover_from_partition_tail(&partition).expect("tail record");
+        let recovered =
+            recover_from_partition_tail(&partition, 4096, 1 << 20).expect("tail record");
 
         assert!(recovered.0 == seq + 1);
         assert!(recovered.1 == chain_hash(&GENESIS_HEAD, seq, value));
@@ -191,7 +190,8 @@ mod tests {
         let last_head = chain_hash(&first_head, 9, b"last");
         append_records(&partition, vec![first, last]);
 
-        let recovered = recover_from_partition_tail(&partition).expect("last chained record");
+        let recovered =
+            recover_from_partition_tail(&partition, 4096, 1 << 20).expect("last chained record");
 
         assert!(recovered == (10, last_head));
     }
@@ -213,9 +213,24 @@ mod tests {
             vec![first, checkpoint_record(), malformed, second],
         );
 
-        let recovered = recover_from_partition_tail(&partition).expect("last chained record");
+        let recovered =
+            recover_from_partition_tail(&partition, 4096, 1 << 20).expect("last chained record");
 
         assert!(recovered == (2, second_head));
+    }
+
+    #[tokio::test]
+    async fn recover_honors_configured_tail_bounds() {
+        let (partition, _td) = test_partition();
+        let value = b"chained";
+        append_records(&partition, vec![chained_record(7, &GENESIS_HEAD, value)]);
+        append_records(&partition, vec![checkpoint_record()]);
+
+        assert!(recover_from_partition_tail(&partition, 1, 1_024).is_none());
+        assert!(
+            recover_from_partition_tail(&partition, 2, 1_024)
+                == Some((8, chain_hash(&GENESIS_HEAD, 7, value)))
+        );
     }
 
     #[test]
