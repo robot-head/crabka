@@ -1259,11 +1259,11 @@ mod tests {
 
     fn file_runtime_with_nondefault_values() -> crabka_broker::file_config::FileConfig {
         toml::from_str(
-            r#"
+            r"
             [runtime]
             cleaner_interval_ms = 7000
             controlled_shutdown_drain_timeout_ms = 9000
-            "#,
+            ",
         )
         .expect("parse runtime file config")
     }
@@ -1289,8 +1289,7 @@ mod tests {
             .expect("overlay CLI runtime");
 
         assert!(
-            (config.cleaner_interval, shutdown_ms)
-                == (std::time::Duration::from_millis(30_000), 20_000)
+            (config.cleaner_interval, shutdown_ms) == (std::time::Duration::from_secs(30), 20_000)
         );
     }
 
@@ -1320,7 +1319,7 @@ mod tests {
 
                 assert!(
                     (config.cleaner_interval, shutdown_ms)
-                        == (std::time::Duration::from_millis(30_000), 20_000)
+                        == (std::time::Duration::from_secs(30), 20_000)
                 );
             },
         );
