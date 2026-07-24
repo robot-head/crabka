@@ -122,6 +122,8 @@ pub(crate) fn parse_match_rules(value: &str) -> Result<Vec<MatchRule>, String> {
 
 #[cfg(test)]
 mod tests {
+    use assert2::{assert, check};
+
     use super::*;
 
     #[test]
@@ -176,9 +178,9 @@ mod tests {
     #[test]
     fn effective_interval_defaults_and_clamps() {
         let mut m = std::collections::BTreeMap::new();
-        assert!(effective_interval_ms(&m, 12_345) == 12_345);
+        check!(effective_interval_ms(&m, 12_345) == 12_345);
         m.insert("interval.ms".to_string(), "60000".to_string());
-        assert!(effective_interval_ms(&m, 12_345) == 60_000);
+        check!(effective_interval_ms(&m, 12_345) == 60_000);
     }
 
     #[test]

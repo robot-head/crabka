@@ -2130,7 +2130,9 @@ mod tests {
         assert!(additional_policy_snapshot(BrokerConfig::for_tests(PathBuf::new())) == actual);
     }
 
-    fn assert_invalid_runtime(config: BrokerConfig, expected: &str) {
+    type RuntimeInvalidator = (&'static str, fn(&mut BrokerConfig));
+
+    fn assert_invalid_runtime(config: &BrokerConfig, expected: &str) {
         let Err(BrokerError::InvalidRuntimeConfig(actual)) = config.validate() else {
             panic!("expected invalid runtime config");
         };
@@ -2141,28 +2143,28 @@ mod tests {
     fn rejects_invalid_runtime_relations() {
         let mut config = BrokerConfig::default();
         config.self_registration_backoff_min = config.self_registration_backoff_max * 2;
-        assert_invalid_runtime(config, "self registration minimum backoff exceeds maximum");
+        assert_invalid_runtime(&config, "self registration minimum backoff exceeds maximum");
 
         let mut config = BrokerConfig::default();
         config.rlmm_bootstrap_backoff_initial = config.rlmm_bootstrap_backoff_max * 2;
-        assert_invalid_runtime(config, "RLMM bootstrap initial backoff exceeds maximum");
+        assert_invalid_runtime(&config, "RLMM bootstrap initial backoff exceeds maximum");
 
         let mut config = BrokerConfig::default();
         config.replication.fetch_min_bytes = config.replication.fetch_max_bytes + 1;
-        assert_invalid_runtime(config, "replication fetch minimum bytes exceeds maximum");
+        assert_invalid_runtime(&config, "replication fetch minimum bytes exceeds maximum");
 
         let mut config = BrokerConfig::default();
         config.replication.reconnect_initial_delay = config.replication.reconnect_delay_cap * 2;
-        assert_invalid_runtime(config, "replication reconnect initial delay exceeds cap");
+        assert_invalid_runtime(&config, "replication reconnect initial delay exceeds cap");
 
         let mut config = BrokerConfig::default();
         config.heartbeat_interval_ms = config.heartbeat_timeout_ms;
-        assert_invalid_runtime(config, "broker heartbeat interval must be below timeout");
+        assert_invalid_runtime(&config, "broker heartbeat interval must be below timeout");
 
         let mut config = BrokerConfig::default();
         config.controller_heartbeat_interval = config.controller_election_timeout;
         assert_invalid_runtime(
-            config,
+            &config,
             "controller heartbeat interval must be below election timeout",
         );
 
@@ -2170,25 +2172,25 @@ mod tests {
         config.delegation_token_default_renew_period_ms =
             config.delegation_token_max_lifetime_ms + 1;
         assert_invalid_runtime(
-            config,
+            &config,
             "delegation token default renew period exceeds maximum lifetime",
         );
 
         let mut config = BrokerConfig::default();
         config.client_metrics_stale_floor = config.client_metrics_eviction_tick / 2;
-        assert_invalid_runtime(config, "client metrics stale floor is below eviction tick");
+        assert_invalid_runtime(&config, "client metrics stale floor is below eviction tick");
 
         let mut config = BrokerConfig::default();
         config.unclean_recovery_aggressive_deadline = config.unclean_recovery_balanced_deadline * 2;
         assert_invalid_runtime(
-            config,
+            &config,
             "unclean recovery aggressive deadline exceeds balanced deadline",
         );
     }
 
     #[test]
     fn rejects_non_positive_runtime_scalars() {
-        let cases: [(&str, fn(&mut BrokerConfig)); 19] = [
+        let cases: [RuntimeInvalidator; 19] = [
             ("startup_leader_wait_timeout", |c| {
                 c.startup_leader_wait_timeout = Duration::ZERO;
             }),
@@ -2249,13 +2251,13 @@ mod tests {
         for (name, invalidate) in cases {
             let mut config = BrokerConfig::default();
             invalidate(&mut config);
-            assert_invalid_runtime(config, &format!("{name} must be positive"));
+            assert_invalid_runtime(&config, &format!("{name} must be positive"));
         }
     }
 
     #[test]
     fn rejects_invalid_additional_runtime_scalars() {
-        let cases: &[(&str, fn(&mut BrokerConfig))] = &[
+        let cases: &[RuntimeInvalidator] = &[
             ("self_registration_max_attempts must be positive", |c| {
                 c.self_registration_max_attempts = 0;
             }),
@@ -2284,10 +2286,10 @@ mod tests {
                 |c| c.client_metrics_stale_push_intervals = 0,
             ),
             ("coordinator_actor_mailbox_capacity must be positive", |c| {
-                c.coordinator_actor_mailbox_capacity = 0
+                c.coordinator_actor_mailbox_capacity = 0;
             }),
             ("unclean_recovery_queue_capacity must be positive", |c| {
-                c.unclean_recovery_queue_capacity = 0
+                c.unclean_recovery_queue_capacity = 0;
             }),
             ("share_recovery_read_max_bytes must be positive", |c| {
                 c.share_recovery_read_max_bytes = 0;
@@ -2315,7 +2317,7 @@ mod tests {
                 c.acl_max_resource_name_bytes = 0;
             }),
             ("telemetry_max_decompression_ratio must be positive", |c| {
-                c.telemetry_max_decompression_ratio = 0
+                c.telemetry_max_decompression_ratio = 0;
             }),
             (
                 "telemetry_decompressed_output_floor_bytes must be positive",
@@ -2342,7 +2344,7 @@ mod tests {
                 c.default_min_insync_replicas = 0;
             }),
             ("future_log_move_read_chunk_bytes must be positive", |c| {
-                c.future_log_move_read_chunk_bytes = 0
+                c.future_log_move_read_chunk_bytes = 0;
             }),
             ("share_state_num_partitions must be positive", |c| {
                 c.share_coordinator.state_topic_num_partitions = 0;
@@ -2361,15 +2363,15 @@ mod tests {
         for (expected, invalidate) in cases {
             let mut config = BrokerConfig::default();
             invalidate(&mut config);
-            assert_invalid_runtime(config, expected);
+            assert_invalid_runtime(&config, expected);
         }
     }
 
     #[test]
     fn rejects_invalid_additional_runtime_relations() {
-        let cases: &[(&str, fn(&mut BrokerConfig))] = &[
+        let cases: &[RuntimeInvalidator] = &[
             ("socket_request_max_bytes exceeds u32::MAX", |c| {
-                c.socket_request_max_bytes = usize::try_from(u64::from(u32::MAX) + 1).unwrap()
+                c.socket_request_max_bytes = usize::try_from(u64::from(u32::MAX) + 1).unwrap();
             }),
             ("telemetry decompressed output floor exceeds ceiling", |c| {
                 c.telemetry_decompressed_output_floor_bytes =
@@ -2379,17 +2381,17 @@ mod tests {
                 c.inter_broker_server_name.clear();
             }),
             ("transaction minimum timeout must be below maximum", |c| {
-                c.transaction_min_timeout_ms = c.transaction_max_timeout_ms
+                c.transaction_min_timeout_ms = c.transaction_max_timeout_ms;
             }),
             ("transaction maximum timeout must be below i32::MAX", |c| {
-                c.transaction_max_timeout_ms = i32::MAX
+                c.transaction_max_timeout_ms = i32::MAX;
             }),
         ];
 
         for (expected, invalidate) in cases {
             let mut config = BrokerConfig::default();
             invalidate(&mut config);
-            assert_invalid_runtime(config, expected);
+            assert_invalid_runtime(&config, expected);
         }
     }
 
@@ -2399,7 +2401,7 @@ mod tests {
         config.next_gen_consumer_group.min_session_timeout =
             config.next_gen_consumer_group.max_session_timeout * 2;
         assert_invalid_runtime(
-            config,
+            &config,
             "consumer group minimum session timeout exceeds maximum",
         );
 
@@ -2407,21 +2409,21 @@ mod tests {
         config.next_gen_consumer_group.session_timeout =
             config.next_gen_consumer_group.max_session_timeout * 2;
         assert_invalid_runtime(
-            config,
+            &config,
             "consumer group session timeout is outside its bounds",
         );
 
         let mut config = BrokerConfig::default();
         config.share_group.min_heartbeat_interval = config.share_group.max_heartbeat_interval * 2;
         assert_invalid_runtime(
-            config,
+            &config,
             "share group minimum heartbeat interval exceeds maximum",
         );
 
         let mut config = BrokerConfig::default();
         config.share_group.heartbeat_interval = config.share_group.max_heartbeat_interval * 2;
         assert_invalid_runtime(
-            config,
+            &config,
             "share group heartbeat interval is outside its bounds",
         );
     }
