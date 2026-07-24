@@ -240,6 +240,19 @@ fn deployment(
                 "limits": { "cpu": "1000m", "memory": "512Mi" }
             })
         });
+    let health = gw.spec.health_checks.as_ref();
+    let readiness_initial_delay_seconds = health
+        .and_then(|checks| checks.readiness_initial_delay_seconds)
+        .unwrap_or(2);
+    let readiness_period_seconds = health
+        .and_then(|checks| checks.readiness_period_seconds)
+        .unwrap_or(5);
+    let liveness_initial_delay_seconds = health
+        .and_then(|checks| checks.liveness_initial_delay_seconds)
+        .unwrap_or(10);
+    let liveness_period_seconds = health
+        .and_then(|checks| checks.liveness_period_seconds)
+        .unwrap_or(10);
 
     let container = json!({
         "name": "gateway",
@@ -251,13 +264,13 @@ fn deployment(
         "volumeMounts": volume_mounts,
         "readinessProbe": {
             "httpGet": { "path": "/readyz", "port": GATEWAY_PORT },
-            "initialDelaySeconds": 2,
-            "periodSeconds": 5
+            "initialDelaySeconds": readiness_initial_delay_seconds,
+            "periodSeconds": readiness_period_seconds
         },
         "livenessProbe": {
             "httpGet": { "path": "/healthz", "port": GATEWAY_PORT },
-            "initialDelaySeconds": 10,
-            "periodSeconds": 10
+            "initialDelaySeconds": liveness_initial_delay_seconds,
+            "periodSeconds": liveness_period_seconds
         },
         "securityContext": {
             "allowPrivilegeEscalation": false,
@@ -1036,6 +1049,7 @@ fn validate_config(spec: &crate::crd::grpc_gateway::KafkaGrpcGatewaySpec) -> Res
             "spec.schemaRegistry.latestCacheTtlMs"
         );
     }
+    validate_health_checks(spec.health_checks.as_ref())?;
     if let Some(dedup) = &spec.dedup {
         nonempty!(dedup.topic.as_deref(), "spec.dedup.topic");
         validate!(
@@ -1157,6 +1171,47 @@ fn validate_config(spec: &crate::crd::grpc_gateway::KafkaGrpcGatewaySpec) -> Res
             && (!ratio.is_finite() || !(0.0..=1.0).contains(&ratio))
         {
             return Err("spec.telemetry.sampleRatio must be finite and between 0 and 1".into());
+        }
+    }
+    Ok(())
+}
+
+fn validate_health_checks(
+    health: Option<&crate::crd::grpc_gateway::GatewayHealthChecks>,
+) -> Result<(), String> {
+    let Some(health) = health else {
+        return Ok(());
+    };
+    for (value, path, permits_zero) in [
+        (
+            health.readiness_initial_delay_seconds,
+            "spec.healthChecks.readinessInitialDelaySeconds",
+            true,
+        ),
+        (
+            health.readiness_period_seconds,
+            "spec.healthChecks.readinessPeriodSeconds",
+            false,
+        ),
+        (
+            health.liveness_initial_delay_seconds,
+            "spec.healthChecks.livenessInitialDelaySeconds",
+            true,
+        ),
+        (
+            health.liveness_period_seconds,
+            "spec.healthChecks.livenessPeriodSeconds",
+            false,
+        ),
+    ] {
+        if let Some(value) = value {
+            if permits_zero {
+                refined_type::rule::GreaterEqualI32::<0>::new(value)
+                    .map_err(|error| format!("{path}: {error}"))?;
+            } else {
+                refined_type::rule::GreaterI32::<0>::new(value)
+                    .map_err(|error| format!("{path}: {error}"))?;
+            }
         }
     }
     Ok(())
@@ -1540,7 +1595,7 @@ mod tests {
 
     use super::*;
     use crate::crd::grpc_gateway::{
-        AllowedTargetSpec, DedupSpec, GatewayAuthzSpec, GatewayBearerSpec,
+        AllowedTargetSpec, DedupSpec, GatewayAuthzSpec, GatewayBearerSpec, GatewayHealthChecks,
         GatewaySchemaRegistrySpec, GatewayTlsSpec, GatewayTuning, InboundWebhookSpec,
         KafkaGrpcGatewaySpec, OutboundSubscriptionSpec, SecretKeyRef, TelemetrySpec,
     };
@@ -1554,6 +1609,7 @@ mod tests {
             membership_topic: None,
             tuning: None,
             schema_registry: None,
+            health_checks: None,
             tls: None,
             authz: None,
             webhooks: vec![],
@@ -1738,6 +1794,32 @@ mod tests {
         // containerPort 9500.
         let ports = container.ports.expect("ports");
         assert!(ports.iter().any(|p| p.container_port == 9500));
+    }
+
+    #[test]
+    fn deployment_probe_timing_uses_health_checks() {
+        let mut gw = gateway_fixture("gw", "demo");
+        gw.spec.health_checks = Some(GatewayHealthChecks {
+            readiness_initial_delay_seconds: Some(3),
+            readiness_period_seconds: Some(6),
+            liveness_initial_delay_seconds: Some(11),
+            liveness_period_seconds: Some(12),
+        });
+        let mut container = deployment(&gw, "demo", "img:1", "boot:9092", "sni")
+            .unwrap()
+            .spec
+            .unwrap()
+            .template
+            .spec
+            .unwrap()
+            .containers
+            .remove(0);
+        let readiness = container.readiness_probe.take().unwrap();
+        let liveness = container.liveness_probe.take().unwrap();
+        assert!(readiness.initial_delay_seconds == Some(3));
+        assert!(readiness.period_seconds == Some(6));
+        assert!(liveness.initial_delay_seconds == Some(11));
+        assert!(liveness.period_seconds == Some(12));
     }
 
     #[test]
@@ -2194,6 +2276,8 @@ mod tests {
             serde_json::json!({"tuning": {"internalTopicReplicationFactor": 0}}),
             serde_json::json!({"tuning": {"internalTopicMinCleanableDirtyRatioBasisPoints": 10001}}),
             serde_json::json!({"schemaRegistry": {"latestCacheTtlMs": 0}}),
+            serde_json::json!({"healthChecks": {"readinessInitialDelaySeconds": -1}}),
+            serde_json::json!({"healthChecks": {"livenessPeriodSeconds": 0}}),
             serde_json::json!({"dedup": {"partitions": 0}}),
             serde_json::json!({"tls": {"clientAuth": "sometimes"}}),
             serde_json::json!({"authz": {"mode": "maybe"}}),

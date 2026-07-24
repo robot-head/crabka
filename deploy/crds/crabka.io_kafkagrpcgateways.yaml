@@ -127,6 +127,31 @@ spec:
                     nullable: true
                     type: integer
                 type: object
+              healthChecks:
+                description: Kubernetes readiness and liveness probe timing.
+                nullable: true
+                properties:
+                  livenessInitialDelaySeconds:
+                    format: int32
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  livenessPeriodSeconds:
+                    format: int32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  readinessInitialDelaySeconds:
+                    format: int32
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  readinessPeriodSeconds:
+                    format: int32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                type: object
               image:
                 description: |-
                   Container image override. When absent the operator uses its
