@@ -301,6 +301,7 @@ mod tests {
         sync::atomic::{AtomicUsize, Ordering},
     };
 
+    use assert2::assert;
     use crabka_metadata::{
         KRaftVersionRange, MetadataImage, MetadataRecord, Voter, VoterEndpoint, VoterSet,
         VotersRecord,

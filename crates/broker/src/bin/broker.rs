@@ -254,6 +254,8 @@ struct RuntimeArgs {
     streams_group_session_timeout_ms: Option<PositiveMillis>,
     #[arg(long, env = "CRABKA_STREAMS_GROUP_HEARTBEAT_INTERVAL_MS", value_parser = parse_positive_millis)]
     streams_group_heartbeat_interval_ms: Option<PositiveMillis>,
+    #[arg(long, env = "CRABKA_STREAMS_INTERNAL_TOPIC_REPLICATION_FACTOR", value_parser = parse_positive_i16)]
+    streams_internal_topic_replication_factor: Option<PositiveI16>,
     #[arg(long, env = "CRABKA_STREAMS_GROUP_NUM_STANDBY_REPLICAS", value_parser = clap::value_parser!(i32).range(0..))]
     streams_group_num_standby_replicas: Option<i32>,
     #[arg(long, env = "CRABKA_STREAMS_GROUP_NUM_WARMUP_REPLICAS", value_parser = clap::value_parser!(i32).range(0..))]
@@ -426,6 +428,7 @@ impl RuntimeArgs {
             share_group_max_inflight_records,
             streams_group_session_timeout_ms,
             streams_group_heartbeat_interval_ms,
+            streams_internal_topic_replication_factor,
             streams_group_task_offset_interval_ms,
         );
         copy_plain_runtime!(
@@ -1226,6 +1229,20 @@ mod tests {
             (
                 vec![
                     "crabka-broker",
+                    "--streams-internal-topic-replication-factor=0",
+                ],
+                false,
+            ),
+            (
+                vec![
+                    "crabka-broker",
+                    "--streams-internal-topic-replication-factor=1",
+                ],
+                true,
+            ),
+            (
+                vec![
+                    "crabka-broker",
                     "--auto-join-voter-request-timeout-ms=2147483648",
                 ],
                 false,
@@ -1284,6 +1301,7 @@ mod tests {
             auto_join_voter_request_timeout_ms = 9000
             share_state_replication_factor = 2
             transaction_state_replication_factor = 2
+            streams_internal_topic_replication_factor = 2
             ",
         )
         .expect("parse runtime file config")
@@ -1298,6 +1316,7 @@ mod tests {
             "--auto-join-voter-request-timeout-ms=30000",
             "--share-state-replication-factor=3",
             "--transaction-state-replication-factor=3",
+            "--streams-internal-topic-replication-factor=3",
         ])
         .expect("parse explicit CLI defaults");
         let mut config = BrokerConfig::default();
@@ -1319,10 +1338,12 @@ mod tests {
                 config.auto_join_voter_request_timeout,
                 config.share_coordinator.state_topic_replication_factor,
                 config.transaction_state_replication_factor,
+                config.streams_group.internal_topic_replication_factor,
             ) == (
                 std::time::Duration::from_secs(30),
                 20_000,
                 std::time::Duration::from_secs(30),
+                3,
                 3,
                 3,
             )
@@ -1341,6 +1362,10 @@ mod tests {
                 ("CRABKA_AUTO_JOIN_VOTER_REQUEST_TIMEOUT_MS", Some("30000")),
                 ("CRABKA_SHARE_STATE_REPLICATION_FACTOR", Some("3")),
                 ("CRABKA_TRANSACTION_STATE_REPLICATION_FACTOR", Some("3")),
+                (
+                    "CRABKA_STREAMS_INTERNAL_TOPIC_REPLICATION_FACTOR",
+                    Some("3"),
+                ),
             ],
             || {
                 let args = Args::try_parse_from(["crabka-broker"]).expect("parse env defaults");
@@ -1363,10 +1388,12 @@ mod tests {
                         config.auto_join_voter_request_timeout,
                         config.share_coordinator.state_topic_replication_factor,
                         config.transaction_state_replication_factor,
+                        config.streams_group.internal_topic_replication_factor,
                     ) == (
                         std::time::Duration::from_secs(30),
                         20_000,
                         std::time::Duration::from_secs(30),
+                        3,
                         3,
                         3,
                     )

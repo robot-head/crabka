@@ -326,6 +326,7 @@ define_broker_tuning! {
     string share_group_isolation_level: String => ();
     refined #[schemars(range(min = 1))] streams_group_session_timeout_ms: u64 => refined_type::rule::GreaterU64<0>;
     refined #[schemars(range(min = 1))] streams_group_heartbeat_interval_ms: u64 => refined_type::rule::GreaterU64<0>;
+    refined #[schemars(range(min = 1))] streams_internal_topic_replication_factor: i16 => refined_type::rule::GreaterI16<0>;
     refined #[schemars(range(min = 0))] streams_group_num_standby_replicas: i32 => refined_type::rule::GreaterEqualI32<0>;
     refined #[schemars(range(min = 0))] streams_group_num_warmup_replicas: i32 => refined_type::rule::GreaterEqualI32<0>;
     refined #[schemars(range(min = 0))] streams_group_acceptable_recovery_lag: i64 => refined_type::rule::GreaterEqualI64<0>;

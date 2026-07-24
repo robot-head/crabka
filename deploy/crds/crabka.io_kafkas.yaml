@@ -597,6 +597,12 @@ spec:
                     minimum: 1.0
                     nullable: true
                     type: integer
+                  streamsInternalTopicReplicationFactor:
+                    format: int16
+                    maximum: 32767.0
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
                   syncGroupFollowerWaitMs:
                     format: uint64
                     minimum: 1.0

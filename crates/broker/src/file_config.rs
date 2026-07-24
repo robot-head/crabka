@@ -316,6 +316,7 @@ pub struct RuntimeFileConfig {
     pub share_group_isolation_level: Option<String>,
     pub streams_group_session_timeout_ms: Option<u64>,
     pub streams_group_heartbeat_interval_ms: Option<u64>,
+    pub streams_internal_topic_replication_factor: Option<i16>,
     pub streams_group_num_standby_replicas: Option<i32>,
     pub streams_group_num_warmup_replicas: Option<i32>,
     pub streams_group_acceptable_recovery_lag: Option<i64>,
@@ -2155,6 +2156,10 @@ impl RuntimeFileConfig {
             streams_group_heartbeat_interval_ms,
             cfg.streams_group.heartbeat_interval
         );
+        if let Some(value) = runtime.streams_internal_topic_replication_factor {
+            cfg.streams_group.internal_topic_replication_factor =
+                positive_i16("streams_internal_topic_replication_factor", value)?;
+        }
         if let Some(value) = runtime.streams_group_num_standby_replicas {
             if value < 0 {
                 return Err(invalid_runtime_value(
@@ -4308,6 +4313,10 @@ replication_fetch_min_bytes = 2
     fn existing_file_inputs_reject_invalid_refined_values() {
         let cases = [
             ("heartbeat_interval_ms = 0\n", "heartbeat_interval_ms"),
+            (
+                "[runtime]\nstreams_internal_topic_replication_factor = 0\n",
+                "streams_internal_topic_replication_factor",
+            ),
             (
                 "[delegation_token]\nmax_lifetime_ms = 0\n",
                 "max_lifetime_ms",

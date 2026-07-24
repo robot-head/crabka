@@ -860,6 +860,7 @@ async fn broker_tuning_renders_numeric_runtime_toml_in_declaration_order() {
         replication_fetch_min_bytes: Some(2),
         share_state_replication_factor: Some(2),
         transaction_state_replication_factor: Some(3),
+        streams_internal_topic_replication_factor: Some(2),
         ..BrokerTuning::default()
     });
 
@@ -877,7 +878,8 @@ replication_fetch_max_bytes = 2097152\n\
 replication_fetch_max_wait_ms = 750\n\
 replication_fetch_min_bytes = 2\n\
 share_state_replication_factor = 2\n\
-transaction_state_replication_factor = 3\n";
+transaction_state_replication_factor = 3\n\
+streams_internal_topic_replication_factor = 2\n";
     assert!(toml.contains(expected), "rendered TOML:\n{toml}");
     assert!(state.remaining_rules() == 0);
 }
@@ -920,6 +922,19 @@ fn broker_tuning_rejects_voter_timeout_above_wire_limit() {
         .validate()
         .expect_err("timeout above i32 wire limit must fail");
     assert!(error.contains("spec.brokerTuning.autoJoinVoterRequestTimeoutMs"));
+}
+
+#[test]
+fn broker_tuning_rejects_zero_streams_internal_topic_replication_factor() {
+    let tuning = BrokerTuning {
+        streams_internal_topic_replication_factor: Some(0),
+        ..BrokerTuning::default()
+    };
+
+    let error = tuning
+        .validate()
+        .expect_err("zero streams replication factor must fail");
+    assert!(error.contains("spec.brokerTuning.streamsInternalTopicReplicationFactor"));
 }
 
 #[test]
