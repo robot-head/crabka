@@ -1018,7 +1018,7 @@ substrate recovery reported eight references: four named production defaults
 and four client-core test values. There is no fixed normal-recovery fetch wait,
 byte limit, or empty-retry value outside the shared defaults.
 
-- The affected six-package test command reported 1,521 passing test and
+- The affected six-package test command reported 1,522 passing test and
   doc-test results, zero failures, and four ignored Docker-only tests.
 - The strict all-target/all-feature Clippy command is blocked by the unchanged
   267-line `kafka_fdw_roundtrip_avro_and_raw_fallback` test in
