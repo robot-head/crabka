@@ -8950,7 +8950,7 @@ mod tests {
         assert_eq!(policy.fetch_response_max_bytes(), expected.2);
         assert_eq!(policy.empty_fetch_retries(), expected.3);
 
-        let cli = Cli::try_parse_from(base.into_iter().chain([
+        let cli = <Cli as clap::Parser>::try_parse_from(base.into_iter().chain([
             "--wal-recovery-fetch-max-wait-ms=27",
             "--wal-recovery-fetch-partition-max-bytes=28",
             "--wal-recovery-fetch-response-max-bytes=29",
