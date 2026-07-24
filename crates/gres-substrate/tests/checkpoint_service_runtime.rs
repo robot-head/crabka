@@ -171,6 +171,7 @@ async fn live_broker_checkpoint_delete_records_and_recovery_replays_retained_tai
             0,
             DEFAULT_PART_MAX_BYTES,
             DEFAULT_CHECKPOINT_RETAIN,
+            std::time::Duration::from_secs(1),
         )
         .expect("checkpoint config"),
         serving_kv.clone() as Arc<dyn SnapshotKv>,
@@ -382,6 +383,7 @@ fn checkpoint_config() -> CheckpointConfig {
         0,
         DEFAULT_PART_MAX_BYTES,
         DEFAULT_CHECKPOINT_RETAIN,
+        std::time::Duration::from_secs(1),
     )
     .expect("checkpoint config")
 }

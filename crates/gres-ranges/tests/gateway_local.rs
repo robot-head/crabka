@@ -475,6 +475,7 @@ impl RangeTransferCapability for InProcessTransfer {
 
     async fn force_checkpoint(
         &self,
+        _operation_id: &str,
         range_id: RangeId,
     ) -> Result<CheckpointManifest, RangeTransferError> {
         Ok(CheckpointManifest {
@@ -511,14 +512,18 @@ impl RangeTransferCapability for InProcessTransfer {
         }])
     }
 
-    async fn resume(&self, barrier: RangeTransferBarrier) -> Result<(), RangeTransferError> {
+    async fn resume(
+        &self,
+        _operation_id: &str,
+        barrier: RangeTransferBarrier,
+    ) -> Result<(), RangeTransferError> {
         if !self.paused.swap(false, Ordering::AcqRel) {
             return Err(Self::error(barrier.range_id, "source was not paused"));
         }
         Ok(())
     }
 
-    fn resume_after_drop(&self, _barrier: RangeTransferBarrier) {
+    fn resume_after_drop(&self, _operation_id: &str, _barrier: RangeTransferBarrier) {
         self.paused.store(false, Ordering::Release);
     }
 

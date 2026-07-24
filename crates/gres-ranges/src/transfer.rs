@@ -397,6 +397,7 @@ pub trait RangeTransferCapability: Send + Sync {
     /// Force a durable checkpoint for one hosted source range.
     async fn force_checkpoint(
         &self,
+        operation_id: &str,
         range_id: RangeId,
     ) -> Result<CheckpointManifest, RangeTransferError>;
 
@@ -418,14 +419,27 @@ pub trait RangeTransferCapability: Send + Sync {
     ///
     /// Call this on every transfer error or cancellation path after
     /// [`Self::pause_at_checkpoint`] succeeds.
-    async fn resume(&self, barrier: RangeTransferBarrier) -> Result<(), RangeTransferError>;
+    async fn resume(
+        &self,
+        operation_id: &str,
+        barrier: RangeTransferBarrier,
+    ) -> Result<(), RangeTransferError>;
+
+    /// Release the durable checkpoint/WAL pin after resume or retirement succeeds.
+    async fn release_checkpoint_pin(
+        &self,
+        _operation_id: &str,
+        _range_id: RangeId,
+    ) -> Result<(), RangeTransferError> {
+        Ok(())
+    }
 
     /// Synchronously release a held source pause when its transfer future is dropped.
     ///
     /// This is the cancellation-safe counterpart to [`Self::resume`]. Implementations
     /// must make the source writable before returning; errors cannot be reported from
     /// [`Drop`](std::ops::Drop) and should be recorded by the implementation.
-    fn resume_after_drop(&self, barrier: RangeTransferBarrier);
+    fn resume_after_drop(&self, operation_id: &str, barrier: RangeTransferBarrier);
 
     /// Stage a checkpoint and bounded tail into an empty, unhosted target range.
     ///

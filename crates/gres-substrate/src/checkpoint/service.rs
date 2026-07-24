@@ -77,6 +77,7 @@ impl CheckpointConfig {
         bytes_threshold: u64,
         part_max_bytes: usize,
         retain_checkpoints: usize,
+        poll_interval: Duration,
     ) -> Result<Self, SubstrateError> {
         let config = Self {
             tenant,
@@ -85,7 +86,7 @@ impl CheckpointConfig {
             bytes_threshold,
             part_max_bytes,
             retain_checkpoints,
-            poll_interval: Duration::from_secs(1),
+            poll_interval,
         };
         config.validate()?;
         Ok(config)
@@ -120,6 +121,11 @@ impl CheckpointConfig {
         if self.retain_checkpoints == 0 {
             return Err(SubstrateError::Checkpoint(
                 "checkpoint retain_checkpoints must be greater than zero".into(),
+            ));
+        }
+        if self.poll_interval.is_zero() {
+            return Err(SubstrateError::Checkpoint(
+                "checkpoint poll_interval must be greater than zero".into(),
             ));
         }
         Ok(())
@@ -579,24 +585,8 @@ where
                 tokio::select! {
                     command = receiver.recv() => {
                         let Some(command) = command else { break };
-                        match command {
-                            CheckpointCommand::Run {
-                                snapshot,
-                                trigger,
-                                reply,
-                            } => {
-                                let result = self.checkpoint(snapshot, trigger).await;
-                                let _ignored = reply.send(result);
-                            }
-                            CheckpointCommand::RunFromSource {
-                                source,
-                                trigger,
-                                reply,
-                            } => {
-                                let result = self.checkpoint_from_source(&source, trigger).await;
-                                let _ignored = reply.send(result);
-                            }
-                            CheckpointCommand::Shutdown => break,
+                        if !self.run_command(command).await {
+                            break;
                         }
                     }
                     _instant = poll.tick(), if threshold_source.is_some() => {
@@ -618,6 +608,55 @@ where
             }
         });
         CheckpointHandle { commands, task }
+    }
+
+    async fn run_command(&self, command: CheckpointCommand) -> bool {
+        match command {
+            CheckpointCommand::Run {
+                snapshot,
+                trigger,
+                reply,
+            } => {
+                let result = self.checkpoint(snapshot, trigger).await;
+                let _ignored = reply.send(result);
+            }
+            CheckpointCommand::RunFromSource {
+                source,
+                trigger,
+                pin_operation,
+                reply,
+            } => {
+                let result = self.checkpoint_from_source(&source, trigger).await;
+                let result = match (result, pin_operation) {
+                    (Ok(run), Some(operation_id)) => super::runtime::pin_checkpoint(
+                        self.store.as_ref(),
+                        &self.config.tenant,
+                        &operation_id,
+                        &run.metadata.manifest_key,
+                        run.manifest.wal_generation,
+                        run.manifest.covered_offset,
+                    )
+                    .await
+                    .map(|()| run),
+                    (result, _) => result,
+                };
+                let _ignored = reply.send(result);
+            }
+            CheckpointCommand::ReleasePin {
+                operation_id,
+                reply,
+            } => {
+                let result = super::runtime::unpin_checkpoint(
+                    self.store.as_ref(),
+                    &self.config.tenant,
+                    &operation_id,
+                )
+                .await;
+                let _ignored = reply.send(result);
+            }
+            CheckpointCommand::Shutdown => return false,
+        }
+        true
     }
 }
 
@@ -646,7 +685,12 @@ enum CheckpointCommand {
     RunFromSource {
         source: Arc<CheckpointSnapshotSource>,
         trigger: CheckpointTrigger,
+        pin_operation: Option<String>,
         reply: oneshot::Sender<Result<CheckpointRun, SubstrateError>>,
+    },
+    ReleasePin {
+        operation_id: String,
+        reply: oneshot::Sender<Result<(), SubstrateError>>,
     },
     Shutdown,
 }
@@ -677,6 +721,50 @@ impl CheckpointHandle {
             .send(CheckpointCommand::RunFromSource {
                 source,
                 trigger,
+                pin_operation: None,
+                reply,
+            })
+            .await
+            .map_err(|_| SubstrateError::Checkpoint("checkpoint service stopped".into()))?;
+        wait.await
+            .map_err(|_| SubstrateError::Checkpoint("checkpoint service stopped".into()))?
+    }
+
+    /// Atomically checkpoint and durably pin its WAL/object boundary for an operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when checkpointing or writing the pin fails.
+    pub async fn checkpoint_from_source_pinned(
+        &self,
+        source: Arc<CheckpointSnapshotSource>,
+        trigger: CheckpointTrigger,
+        operation_id: String,
+    ) -> Result<CheckpointRun, SubstrateError> {
+        let (reply, wait) = oneshot::channel();
+        self.commands
+            .send(CheckpointCommand::RunFromSource {
+                source,
+                trigger,
+                pin_operation: Some(operation_id),
+                reply,
+            })
+            .await
+            .map_err(|_| SubstrateError::Checkpoint("checkpoint service stopped".into()))?;
+        wait.await
+            .map_err(|_| SubstrateError::Checkpoint("checkpoint service stopped".into()))?
+    }
+
+    /// Release an operation's durable checkpoint pin.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the service stopped or the marker cannot be deleted.
+    pub async fn release_pin(&self, operation_id: String) -> Result<(), SubstrateError> {
+        let (reply, wait) = oneshot::channel();
+        self.commands
+            .send(CheckpointCommand::ReleasePin {
+                operation_id,
                 reply,
             })
             .await
@@ -737,6 +825,7 @@ mod tests {
     #[derive(Default)]
     struct FakePruner {
         fail: AtomicBool,
+        attempted: Notify,
         calls: std::sync::Mutex<Vec<Vec<DeleteRecordsOp>>>,
         pruned: Notify,
     }
@@ -756,6 +845,7 @@ mod tests {
     #[async_trait::async_trait]
     impl CheckpointWalPruner for FakePruner {
         async fn delete_records(&self, ops: &[DeleteRecordsOp]) -> Result<(), SubstrateError> {
+            self.attempted.notify_one();
             if self.fail.load(Ordering::SeqCst) {
                 return Err(SubstrateError::Unavailable("delete records failed".into()));
             }
@@ -892,10 +982,26 @@ mod tests {
             0,
             DEFAULT_PART_MAX_BYTES,
             DEFAULT_CHECKPOINT_RETAIN,
+            Duration::from_secs(1),
         )
         .expect_err("both thresholds zero must be rejected");
 
         assert!(matches!(error, SubstrateError::Checkpoint(_)));
+    }
+
+    #[test]
+    fn checkpoint_config_rejects_zero_poll_interval() {
+        let result = CheckpointConfig::new(
+            "tenant".into(),
+            "topic".into(),
+            1,
+            0,
+            DEFAULT_PART_MAX_BYTES,
+            DEFAULT_CHECKPOINT_RETAIN,
+            Duration::ZERO,
+        );
+
+        assert!(result.is_err());
     }
 
     #[tokio::test]
@@ -989,6 +1095,52 @@ mod tests {
         // overlapping ones would double-subtract and wrap the unsigned counters.
         assert!(stats.snapshot() == (0, 0));
         assert!(service.threshold_trigger().is_none());
+    }
+
+    #[tokio::test]
+    async fn pinned_force_checkpoint_survives_more_than_retention_until_release() {
+        let kv: Arc<dyn SnapshotKv> = Arc::new(MemKv::default());
+        let store = InMemoryCheckpointStore::shared();
+        let pruner = Arc::new(FakePruner::default());
+        let stats = Arc::new(CheckpointStats::default());
+        let mut config = config(1, 0);
+        config.retain_checkpoints = 1;
+        let service = Arc::new(
+            CheckpointService::new(config, kv, store.clone(), pruner.clone(), stats)
+                .expect("service"),
+        );
+        let source = Arc::new(CheckpointSnapshotSource::new(
+            1,
+            2,
+            crate::writer::WriterGeneration(0),
+        ));
+        let handle = service.spawn();
+        let pinned = handle
+            .checkpoint_from_source_pinned(source, CheckpointTrigger::Manual, "split-a".to_owned())
+            .await
+            .expect("pinned checkpoint");
+
+        for offset in 2..=4 {
+            handle
+                .checkpoint(snapshot(offset), CheckpointTrigger::Manual)
+                .await
+                .expect("later checkpoint");
+        }
+
+        assert!(store.get(&pinned.metadata.manifest_key).await.is_ok());
+        assert!(pruner.calls.lock().expect("lock").last().expect("prune")[0].offset == 2);
+
+        handle
+            .release_pin("split-a".to_owned())
+            .await
+            .expect("release pin");
+        handle
+            .checkpoint(snapshot(5), CheckpointTrigger::Manual)
+            .await
+            .expect("checkpoint after release");
+        assert!(store.get(&pinned.metadata.manifest_key).await.is_err());
+        assert!(pruner.calls.lock().expect("lock").last().expect("prune")[0].offset == 6);
+        handle.shutdown().await.expect("shutdown");
     }
 
     #[tokio::test]
@@ -1152,6 +1304,7 @@ mod tests {
             bytes_threshold,
             DEFAULT_PART_MAX_BYTES,
             DEFAULT_CHECKPOINT_RETAIN,
+            Duration::from_secs(1),
         )
         .expect("config")
     }

@@ -261,7 +261,15 @@ fn live_service(
     hook: Option<CheckpointFailpoint>,
 ) -> Result<CheckpointService<LiveAdminPruner>, SubstrateError> {
     let mut service = CheckpointService::new(
-        CheckpointConfig::new(namespace.into(), topic.into(), 1, 0, 24, 2)?,
+        CheckpointConfig::new(
+            namespace.into(),
+            topic.into(),
+            1,
+            0,
+            24,
+            2,
+            std::time::Duration::from_secs(1),
+        )?,
         kv as Arc<dyn SnapshotKv>,
         objects,
         pruner,
@@ -391,8 +399,16 @@ async fn production_zombie_service_cannot_supersede_successor_manifest() {
             false
         });
         let old_service = CheckpointService::new(
-            CheckpointConfig::new("zombie-race".into(), "wal.g0".into(), 1, 0, 24, 2)
-                .expect("config"),
+            CheckpointConfig::new(
+                "zombie-race".into(),
+                "wal.g0".into(),
+                1,
+                0,
+                24,
+                2,
+                std::time::Duration::from_secs(1),
+            )
+            .expect("config"),
             old_kv as Arc<dyn SnapshotKv>,
             objects.clone(),
             pruner.clone(),
@@ -426,8 +442,16 @@ async fn production_zombie_service_cannot_supersede_successor_manifest() {
             .put(b"owner".to_vec(), b"successor".to_vec())
             .expect("successor state");
         let successor_service = CheckpointService::new(
-            CheckpointConfig::new("zombie-race".into(), "wal.g1".into(), 1, 0, 24, 2)
-                .expect("config"),
+            CheckpointConfig::new(
+                "zombie-race".into(),
+                "wal.g1".into(),
+                1,
+                0,
+                24,
+                2,
+                std::time::Duration::from_secs(1),
+            )
+            .expect("config"),
             successor_kv as Arc<dyn SnapshotKv>,
             objects.clone(),
             pruner.clone(),
@@ -557,6 +581,7 @@ impl ProductionCrashHarness {
             0,
             24,
             2,
+            std::time::Duration::from_secs(1),
         )?;
         let mut service = CheckpointService::new(
             config,

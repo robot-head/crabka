@@ -4960,6 +4960,34 @@ impl LiveMultiRangeTransfer {
         }
     }
 
+    async fn release_checkpoint_pin(
+        &self,
+        operation_id: &str,
+        range_id: crabka_gres_ranges::RangeId,
+    ) -> Result<(), crabka_gres_ranges::RangeTransferError> {
+        let resources = self
+            .retired
+            .lock()
+            .map_err(|_| range_pause_lock_error(range_id))?
+            .get(&range_id)
+            .cloned()
+            .map_or_else(|| self.range(range_id), Ok)?;
+        let checkpoint = resources.checkpoint.ok_or_else(|| {
+            crabka_gres_ranges::RangeTransferError::Unavailable {
+                range_id,
+                reason: "checkpoint runtime is unavailable for pin release".into(),
+            }
+        })?;
+        checkpoint
+            .handle
+            .release_pin(operation_id.to_owned())
+            .await
+            .map_err(|error| crabka_gres_ranges::RangeTransferError::Runtime {
+                range_id,
+                reason: format!("release checkpoint pin: {error}"),
+            })
+    }
+
     async fn retire_predecessor(
         &self,
         operation_id: &str,
@@ -5398,6 +5426,7 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
 
     async fn force_checkpoint(
         &self,
+        operation_id: &str,
         range_id: crabka_gres_ranges::RangeId,
     ) -> Result<crabka_gres_ranges::CheckpointManifest, crabka_gres_ranges::RangeTransferError>
     {
@@ -5410,9 +5439,10 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
         })?;
         let run = checkpoint
             .handle
-            .checkpoint_from_source(
+            .checkpoint_from_source_pinned(
                 Arc::clone(&checkpoint.snapshot_source),
                 crabka_gres_substrate::CheckpointTrigger::Manual,
+                operation_id.to_owned(),
             )
             .await
             .map_err(|error| crabka_gres_ranges::RangeTransferError::Runtime {
@@ -5509,12 +5539,25 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
 
     async fn resume(
         &self,
+        _operation_id: &str,
         barrier: crabka_gres_ranges::RangeTransferBarrier,
     ) -> Result<(), crabka_gres_ranges::RangeTransferError> {
         self.release_pause(barrier)
     }
 
-    fn resume_after_drop(&self, barrier: crabka_gres_ranges::RangeTransferBarrier) {
+    async fn release_checkpoint_pin(
+        &self,
+        operation_id: &str,
+        range_id: crabka_gres_ranges::RangeId,
+    ) -> Result<(), crabka_gres_ranges::RangeTransferError> {
+        LiveMultiRangeTransfer::release_checkpoint_pin(self, operation_id, range_id).await
+    }
+
+    fn resume_after_drop(
+        &self,
+        _operation_id: &str,
+        barrier: crabka_gres_ranges::RangeTransferBarrier,
+    ) {
         let irreversible_operation = self
             .pending
             .lock()
@@ -6125,6 +6168,7 @@ fn build_checkpoint_runtime(
         checkpoint_config.bytes_threshold,
         checkpoint_config.part_max_bytes,
         checkpoint_config.retain_newest,
+        Duration::from_secs(1),
     )
     .map_err(|error| std::io::Error::other(format!("checkpoint config: {error}")))?;
     let stats = Arc::new(crabka_gres_substrate::CheckpointStats::default());
@@ -6176,6 +6220,7 @@ fn build_range_checkpoint_runtime(
         checkpoint_config.bytes_threshold,
         checkpoint_config.part_max_bytes,
         checkpoint_config.retain_newest,
+        Duration::from_secs(1),
     )
     .map_err(|error| std::io::Error::other(format!("checkpoint config: {error}")))?;
     let stats = Arc::new(crabka_gres_substrate::CheckpointStats::default());
