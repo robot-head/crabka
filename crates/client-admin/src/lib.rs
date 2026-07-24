@@ -486,13 +486,13 @@ impl AdminClient {
     /// Replace the underlying connection. Used internally by the
     /// `NOT_CONTROLLER` retry path to reconnect to the current controller.
     pub(crate) async fn reconnect(&mut self, host_port: &str) -> Result<(), AdminError> {
-        let opts = Self::reconnect_options(&self.options);
+        let opts = self.options.clone();
         self.conn = Self::connect_one(host_port, opts).await?;
         Ok(())
     }
 
     pub(crate) async fn reconnect_bootstrap(&mut self) -> Result<(), AdminError> {
-        let opts = Self::reconnect_options(&self.options);
+        let opts = self.options.clone();
         for host_port in &self.bootstrap_addrs {
             match Self::connect_one(host_port, opts.clone()).await {
                 Ok(conn) => {
@@ -512,10 +512,6 @@ impl AdminClient {
         Err(AdminError::Connect {
             tried: self.bootstrap_addrs.len(),
         })
-    }
-
-    fn reconnect_options(options: &ConnectionOptions) -> ConnectionOptions {
-        options.clone()
     }
 
     pub(crate) fn is_retriable_transport_error(error: &ClientError) -> bool {
@@ -645,34 +641,63 @@ mod tests {
         assert2::assert!(res.is_err());
     }
 
-    #[test]
-    fn reconnect_options_preserve_the_full_template() {
-        use crabka_client_core::security::ClientSecurity;
+    #[tokio::test]
+    async fn connect_with_options_retains_the_full_template() {
+        use bytes::BytesMut;
+        use crabka_client_core::{MockBroker, security::ClientSecurity};
+        use crabka_protocol::{
+            Encode,
+            owned::{
+                api_versions_request,
+                api_versions_response::{ApiVersion, ApiVersionsResponse},
+            },
+        };
         use crabka_security::ListenerProtocol;
 
+        let mock = MockBroker::start(|api_key, _version, _correlation_id, _body| {
+            assert2::assert!(api_key == api_versions_request::API_KEY);
+            let response = ApiVersionsResponse {
+                error_code: 0,
+                api_keys: vec![ApiVersion {
+                    api_key: api_versions_request::API_KEY,
+                    min_version: 0,
+                    max_version: 3,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            let mut encoded = BytesMut::new();
+            response.encode(&mut encoded, 0).unwrap();
+            Some(encoded.to_vec())
+        })
+        .await;
         let options = ConnectionOptions {
             client_id: "custom-admin".into(),
             connect_timeout: Duration::from_millis(123),
             request_timeout: Duration::from_millis(456),
             security: Some(Box::new(ClientSecurity {
-                protocol: ListenerProtocol::Ssl,
+                protocol: ListenerProtocol::Plaintext,
                 tls: None,
                 sasl: None,
                 sasl_host: Some("broker.example".into()),
             })),
         };
 
-        let reconnect = AdminClient::reconnect_options(&options);
+        let admin = AdminClient::connect_with_options(&[mock.addr.to_string()], options)
+            .await
+            .unwrap();
 
-        assert2::assert!(reconnect.client_id == "custom-admin");
-        assert2::assert!(reconnect.connect_timeout == Duration::from_millis(123));
-        assert2::assert!(reconnect.request_timeout == Duration::from_millis(456));
+        assert2::assert!(admin.options.client_id == "custom-admin");
+        assert2::assert!(admin.options.connect_timeout == Duration::from_millis(123));
+        assert2::assert!(admin.options.request_timeout == Duration::from_millis(456));
         assert2::assert!(
-            reconnect
+            admin
+                .options
                 .security
                 .as_ref()
                 .is_some_and(|security| security.sasl_host.as_deref() == Some("broker.example"))
         );
+        mock.stop();
     }
 
     #[test]
@@ -683,20 +708,5 @@ mod tests {
         assert2::assert!(options.connect_timeout == Duration::from_secs(5));
         assert2::assert!(options.request_timeout == Duration::from_secs(30));
         assert2::assert!(options.security.is_none());
-    }
-
-    #[tokio::test]
-    async fn connect_with_options_accepts_a_complete_template() {
-        let options = ConnectionOptions {
-            client_id: "custom-admin".into(),
-            connect_timeout: Duration::from_millis(1),
-            request_timeout: Duration::from_millis(2),
-            security: None,
-        };
-
-        let result =
-            AdminClient::connect_with_options(&["127.0.0.1:1".to_string()], options).await;
-
-        assert2::assert!(result.is_err());
     }
 }
