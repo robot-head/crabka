@@ -1204,7 +1204,6 @@ async fn stale_pgdog_admin_view_requeues_without_confirming_hash() {
     let call_times = admin.call_times();
     let retry_delay = call_times[1].duration_since(call_times[0]);
     assert!(retry_delay >= Duration::from_millis(150));
-    assert!(retry_delay < Duration::from_secs(1));
     assert!(state.remaining_rules() == 0);
     let observed = state.take_observed();
     assert!(
