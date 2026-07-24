@@ -9,8 +9,10 @@ use std::{
 
 use crabka_client_core::security::{ClientSecurity, SaslCredentials};
 use crabka_gres_control::{
-    CheckpointPartBytes, FinalCheckpoint, PositiveI32, PositiveMillis, PositiveUsize,
-    RegistryPolicy, RegistryReplicationFactor, TenantName, TenantRecord,
+    CheckpointPartBytes, DEFAULT_CHECKPOINT_BYTES, DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS,
+    DEFAULT_CHECKPOINT_FRAMES, DEFAULT_CHECKPOINT_POLL_INTERVAL_MS,
+    DEFAULT_IDLE_SUSPEND_POLL_INTERVAL_MS, FinalCheckpoint, PositiveI32, PositiveMillis,
+    PositiveUsize, RegistryPolicy, RegistryReplicationFactor, TenantName, TenantRecord,
     decode_tenant_config_record, tenant_config_topic,
 };
 use crabka_pgexec::SqlEngine;
@@ -34,11 +36,6 @@ mod range0_follower;
 mod split_activation;
 use split_activation::{PendingLiveTopology, PreparedLiveTopology, StagedLiveRangeSuccessor};
 
-const DEFAULT_CHECKPOINT_FRAMES_THRESHOLD: u64 = 10_000;
-const DEFAULT_CHECKPOINT_BYTES_THRESHOLD: u64 = 64 * 1024 * 1024;
-const DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS: i32 = 30_000;
-const DEFAULT_CHECKPOINT_POLL_INTERVAL_MS: u64 = 1_000;
-const DEFAULT_IDLE_SUSPEND_POLL_INTERVAL_MS: u64 = 1_000;
 /// Relaxed cadence of the LOCAL (mem / --data-dir) vacuum loop: one bounded
 /// `SqlEngine::vacuum_step` this often while the sweep is keeping up with the
 /// write rate. Write paths prune the rows they touch opportunistically; the
@@ -631,10 +628,10 @@ impl CheckpointRuntimeConfig {
             object_store,
             frames_threshold: args
                 .checkpoint_frames
-                .map_or(DEFAULT_CHECKPOINT_FRAMES_THRESHOLD, NonZeroU64::get),
+                .map_or(DEFAULT_CHECKPOINT_FRAMES, NonZeroU64::get),
             bytes_threshold: args
                 .checkpoint_bytes
-                .map_or(DEFAULT_CHECKPOINT_BYTES_THRESHOLD, NonZeroU64::get),
+                .map_or(DEFAULT_CHECKPOINT_BYTES, NonZeroU64::get),
             part_max_bytes,
             retain_newest: args.checkpoint_retain.map_or(
                 crabka_gres_substrate::DEFAULT_CHECKPOINT_RETAIN,
@@ -7890,10 +7887,12 @@ mod tests {
         let defaults = CheckpointRuntimeConfig::from_args(&args)
             .expect("checkpoint defaults")
             .expect("checkpoint config");
-        assert!(defaults.frames_threshold == 10_000);
-        assert!(defaults.bytes_threshold == 67_108_864);
-        assert!(defaults.delete_records_timeout_ms == 30_000);
-        assert!(defaults.poll_interval == Duration::from_secs(1));
+        assert!(defaults.frames_threshold == DEFAULT_CHECKPOINT_FRAMES);
+        assert!(defaults.bytes_threshold == DEFAULT_CHECKPOINT_BYTES);
+        assert!(defaults.delete_records_timeout_ms == DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS);
+        assert!(
+            defaults.poll_interval == Duration::from_millis(DEFAULT_CHECKPOINT_POLL_INTERVAL_MS)
+        );
 
         let mut record = tenant_record();
         record.checkpoint_frames = Some(77);

@@ -6,7 +6,11 @@ pub mod pgdog;
 pub mod record;
 pub mod registry;
 
-pub use checkpoint::{CheckpointPartBytes, PositiveUsize};
+pub use checkpoint::{
+    CheckpointPartBytes, DEFAULT_CHECKPOINT_BYTES, DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS,
+    DEFAULT_CHECKPOINT_FRAMES, DEFAULT_CHECKPOINT_POLL_INTERVAL_MS,
+    DEFAULT_IDLE_SUSPEND_POLL_INTERVAL_MS, PositiveUsize,
+};
 pub use error::ControlError;
 pub use pgdog::{
     PgdogConnectAttempts, PgdogGeneral, PgdogPoolerMode, PgdogRenderInput, PgdogTimeouts,

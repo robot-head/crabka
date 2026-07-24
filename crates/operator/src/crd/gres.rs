@@ -3,13 +3,17 @@
 //! renders `PgDog` is added in a later batch.
 
 use crabka_gres_control::{
-    CheckpointPartBytes, PgdogConnectAttempts, PgdogPoolerMode, PositiveI32, PositiveMillis,
-    PositiveUsize,
+    CheckpointPartBytes, DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS,
+    DEFAULT_CHECKPOINT_POLL_INTERVAL_MS, DEFAULT_IDLE_SUSPEND_POLL_INTERVAL_MS,
+    PgdogConnectAttempts, PgdogPoolerMode, PositiveI32, PositiveMillis, PositiveUsize,
 };
+use crabka_gres_substrate::{DEFAULT_CHECKPOINT_RETAIN, DEFAULT_PART_MAX_BYTES};
 use kube::CustomResource;
 use refined_type::rule::GreaterI32;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+
+const DEFAULT_LIFECYCLE_REQUEUE_MS: u64 = 5_000;
 
 /// Gres fleet specification.
 #[derive(CustomResource, Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
@@ -144,27 +148,33 @@ impl GresComputeSpec {
         Ok(EffectiveGresComputePolicy {
             readiness_probe_period_seconds: self.effective_readiness_probe_period_seconds()?,
             checkpoint_part_bytes: CheckpointPartBytes::new(
-                self.checkpoint_part_bytes.unwrap_or(67_108_864),
+                self.checkpoint_part_bytes.unwrap_or(DEFAULT_PART_MAX_BYTES),
             )
             .map_err(|error| format!("spec.compute.checkpointPartBytes: {error}"))?,
-            checkpoint_retain: PositiveUsize::new(self.checkpoint_retain.unwrap_or(2))
-                .map_err(|error| format!("spec.compute.checkpointRetain: {error}"))?,
+            checkpoint_retain: PositiveUsize::new(
+                self.checkpoint_retain.unwrap_or(DEFAULT_CHECKPOINT_RETAIN),
+            )
+            .map_err(|error| format!("spec.compute.checkpointRetain: {error}"))?,
             checkpoint_delete_records_timeout_ms: PositiveI32::new(
-                self.checkpoint_delete_records_timeout_ms.unwrap_or(30_000),
+                self.checkpoint_delete_records_timeout_ms
+                    .unwrap_or(DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS),
             )
             .map_err(|error| format!("spec.compute.checkpointDeleteRecordsTimeoutMs: {error}"))?,
             checkpoint_poll_interval_ms: PositiveMillis::new(
-                self.checkpoint_poll_interval_ms.unwrap_or(1_000),
+                self.checkpoint_poll_interval_ms
+                    .unwrap_or(DEFAULT_CHECKPOINT_POLL_INTERVAL_MS),
             )
             .map_err(|error| format!("spec.compute.checkpointPollIntervalMs: {error}"))?,
             idle_suspend_poll_interval_ms: PositiveMillis::new(
-                self.idle_suspend_poll_interval_ms.unwrap_or(1_000),
+                self.idle_suspend_poll_interval_ms
+                    .unwrap_or(DEFAULT_IDLE_SUSPEND_POLL_INTERVAL_MS),
             )
             .map_err(|error| format!("spec.compute.idleSuspendPollIntervalMs: {error}"))?,
-            lifecycle_requeue_ms: PositiveMillis::new(self.lifecycle_requeue_ms.unwrap_or(5_000))
-                .map_err(|error| {
-                format!("spec.compute.lifecycleRequeueMs: {error}")
-            })?,
+            lifecycle_requeue_ms: PositiveMillis::new(
+                self.lifecycle_requeue_ms
+                    .unwrap_or(DEFAULT_LIFECYCLE_REQUEUE_MS),
+            )
+            .map_err(|error| format!("spec.compute.lifecycleRequeueMs: {error}"))?,
         })
     }
 }
@@ -735,12 +745,21 @@ mod tests {
         let defaults = GresComputeSpec::default()
             .effective_policy()
             .expect("default compute policy");
-        assert!(defaults.checkpoint_part_bytes.into_value() == 67_108_864);
-        assert!(defaults.checkpoint_retain.into_value() == 2);
-        assert!(defaults.checkpoint_delete_records_timeout_ms.into_value() == 30_000);
-        assert!(defaults.checkpoint_poll_interval_ms.into_value() == 1_000);
-        assert!(defaults.idle_suspend_poll_interval_ms.into_value() == 1_000);
-        assert!(defaults.lifecycle_requeue_ms.into_value() == 5_000);
+        assert!(defaults.checkpoint_part_bytes.into_value() == DEFAULT_PART_MAX_BYTES);
+        assert!(defaults.checkpoint_retain.into_value() == DEFAULT_CHECKPOINT_RETAIN);
+        assert!(
+            defaults.checkpoint_delete_records_timeout_ms.into_value()
+                == DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS
+        );
+        assert!(
+            defaults.checkpoint_poll_interval_ms.into_value()
+                == DEFAULT_CHECKPOINT_POLL_INTERVAL_MS
+        );
+        assert!(
+            defaults.idle_suspend_poll_interval_ms.into_value()
+                == DEFAULT_IDLE_SUSPEND_POLL_INTERVAL_MS
+        );
+        assert!(defaults.lifecycle_requeue_ms.into_value() == DEFAULT_LIFECYCLE_REQUEUE_MS);
 
         for (policy, path) in [
             (
