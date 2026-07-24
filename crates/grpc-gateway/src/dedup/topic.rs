@@ -104,7 +104,7 @@ async fn create_with_rf(
 ) -> Result<(), GatewayError> {
     let spec = CreateTopicSpec {
         name: name.to_string(),
-        partitions: i32::try_from(partitions).unwrap_or(i32::MAX),
+        partitions: topic_partition_count(partitions)?,
         replicas: i32::from(policy.replication_factor),
         configs: configs.clone(),
     };
@@ -134,11 +134,16 @@ async fn create_with_rf(
     Ok(())
 }
 
+fn topic_partition_count(partitions: u32) -> Result<i32, GatewayError> {
+    i32::try_from(partitions)
+        .map_err(|_| GatewayError::Other("internal topic partition count exceeds i32::MAX".into()))
+}
+
 #[cfg(test)]
 mod tests {
     use assert2::assert;
 
-    use super::{InternalTopicPolicy, internal_topic_policy};
+    use super::{InternalTopicPolicy, internal_topic_policy, topic_partition_count};
     use crate::config::GatewayRuntimeConfig;
 
     #[test]
@@ -162,5 +167,11 @@ mod tests {
                     min_cleanable_dirty_ratio: "0.025".into(),
                 }
         );
+    }
+
+    #[test]
+    fn topic_partition_count_rejects_values_kafka_cannot_represent() {
+        assert!(topic_partition_count(i32::MAX.cast_unsigned()).ok() == Some(i32::MAX));
+        assert!(topic_partition_count(i32::MAX.cast_unsigned() + 1).is_err());
     }
 }

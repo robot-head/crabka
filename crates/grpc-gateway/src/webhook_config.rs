@@ -157,6 +157,15 @@ impl WebhooksFile {
             // checked even when `schema_subject` is absent so a stray
             // `schema_format` typo still surfaces at load time.
             let schema_format = parse_schema_format(e.schema_format.as_deref(), &ctx)?;
+            let timestamp_tolerance_secs = refined_type::rule::GreaterEqualI64::<0>::new(
+                e.timestamp_tolerance_secs.unwrap_or(300),
+            )
+            .map_err(|error| format!("{ctx}: timestamp_tolerance_secs: {error}"))?
+            .into_value();
+            let max_body_bytes =
+                refined_type::rule::GreaterUsize::<0>::new(e.max_body_bytes.unwrap_or(1024 * 1024))
+                    .map_err(|error| format!("{ctx}: max_body_bytes: {error}"))?
+                    .into_value();
 
             out.insert(
                 e.name.clone(),
@@ -171,10 +180,10 @@ impl WebhooksFile {
                     signature_encoding,
                     signature_prefix: e.signature_prefix.clone(),
                     timestamp_header: e.timestamp_header.clone(),
-                    timestamp_tolerance_secs: e.timestamp_tolerance_secs.unwrap_or(300),
+                    timestamp_tolerance_secs,
                     idempotency_source,
                     key_source,
-                    max_body_bytes: e.max_body_bytes.unwrap_or(1024 * 1024),
+                    max_body_bytes,
                     schema_subject: e.schema_subject.clone(),
                     schema_format,
                 },
@@ -542,6 +551,18 @@ secret = "s"
 signature_header = "X-Sig"
 signature_encoding = "md5"
 "#;
+        let negative_timestamp_tolerance = r#"
+[[endpoints]]
+name = "bad"
+target_topic = "t"
+timestamp_tolerance_secs = -1
+"#;
+        let zero_body_limit = r#"
+[[endpoints]]
+name = "bad"
+target_topic = "t"
+max_body_bytes = 0
+"#;
         for (_name, input, needle) in [
             (
                 "secret_without_header",
@@ -555,6 +576,12 @@ signature_encoding = "md5"
             ),
             ("invalid_jsonpath", invalid_jsonpath, "JSONPath"),
             ("bad_encoding", bad_encoding, "signature_encoding"),
+            (
+                "negative_timestamp_tolerance",
+                negative_timestamp_tolerance,
+                "timestamp_tolerance_secs",
+            ),
+            ("zero_body_limit", zero_body_limit, "max_body_bytes"),
         ] {
             let file: WebhooksFile = toml::from_str(input).expect("parse");
             let error = file.compile().expect_err("case must fail");

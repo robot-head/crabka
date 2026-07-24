@@ -22,7 +22,7 @@ use std::{
 use axum::{
     Extension, Json, Router,
     body::Bytes,
-    extract::Path,
+    extract::{Path, Request},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::post,
@@ -87,8 +87,7 @@ pub async fn webhook_handler(
     Extension(state): Extension<Arc<AppState>>,
     Path(name): Path<String>,
     peer: Option<Extension<SocketAddr>>,
-    headers: HeaderMap,
-    body: Bytes,
+    request: Request,
 ) -> Response {
     let _req = metrics().begin_request("webhook_in");
     // 1. Look up the compiled endpoint config.
@@ -97,11 +96,14 @@ pub async fn webhook_handler(
         return StatusCode::NOT_FOUND.into_response();
     };
 
-    // 2. Body size guard.
-    if body.len() > cfg.max_body_bytes {
+    // 2. Collect with the endpoint's configured limit. Using the raw request
+    // avoids Axum's fixed 2 MiB `Bytes` extractor cap overriding this policy.
+    let (parts, body) = request.into_parts();
+    let headers = parts.headers;
+    let Ok(body) = axum::body::to_bytes(body, cfg.max_body_bytes).await else {
         metrics().record_webhook_in("too_large");
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
-    }
+    };
 
     // 3. HMAC signature verification (when configured).
     if let Some(sig_header) = &cfg.signature_header {
@@ -518,6 +520,22 @@ mod tests {
             .unwrap();
         let resp = oneshot(app, req).await;
         assert2::assert!(resp.status() == StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn configured_body_limit_can_exceed_axum_default() {
+        use jsonpath_rust::parser::parse_json_path;
+
+        let mut cfg = unsigned_cfg("t");
+        cfg.max_body_bytes = 3 * 1024 * 1024;
+        cfg.idempotency_source = Some(Source::JsonPath(parse_json_path("$.id").unwrap()));
+        let state = state_with_webhooks(make_webhook("large", cfg)).await;
+        let app = webhook_router(state);
+        let req = Request::post("/v1/webhooks/large")
+            .body(Body::from(vec![b'x'; 2 * 1024 * 1024 + 1]))
+            .unwrap();
+        let resp = oneshot(app, req).await;
+        assert2::assert!(resp.status() == StatusCode::BAD_REQUEST);
     }
 
     // -----------------------------------------------------------------------
