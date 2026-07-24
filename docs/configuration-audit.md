@@ -596,3 +596,134 @@ fully classified matches above.
   public `ensure_topic` replication parameters, and explicit policy flow
   through every required creator.
 - `git diff --check`: passed.
+
+## PgDog Front Door
+
+### Configurable
+
+The standalone `crabka gres render-pgdog` command exposes exactly 13
+CLI/environment pairs:
+
+- Kafka bootstrap, output directory, and optional activator route;
+- listen port;
+- TLS certificate, private key, and client CA;
+- fleet pooler mode and backend connection-attempt count; and
+- cold-start ceiling, normal and suspension idle timeouts, and server
+  lifetime.
+
+The corresponding variables are the 13
+`CRABKA_GRES_PGDOG_{BOOTSTRAP,OUT_DIR,ACTIVATOR,LISTEN_PORT,TLS_CERTIFICATE,TLS_PRIVATE_KEY,TLS_CLIENT_CA_CERTIFICATE,POOLER_MODE,CONNECT_ATTEMPTS,COLD_START_CEILING_MS,IDLE_TIMEOUT_MS,SUSPENSION_IDLE_TIMEOUT_MS,SERVER_LIFETIME_MS}`
+bindings. CLI values take precedence over environment values. Required
+strings remain required; the listen port uses `NonZeroU16`; attempts use the
+`refined_type`-backed positive `PgdogConnectAttempts`; and each configured
+millisecond value uses the `refined_type`-backed `PositiveMillis`. TLS
+certificate and key must be supplied together, and the client CA requires
+both.
+
+`Gres.spec.pgdog` has seven optional runtime-policy fields:
+
+| Field | Bounds | Effective default |
+|---|---:|---:|
+| `poolerMode` | `transaction` or `session` | `transaction` |
+| `connectAttempts` | `1..=65535` | `3` |
+| `idleTimeoutMs` | positive `u64` | `60000` |
+| `suspensionIdleTimeoutMs` | positive `u64` | `1000` |
+| `serverLifetimeMs` | positive `u64` | `300000` |
+| `readinessProbePeriodSeconds` | positive `i32` | `5` |
+| `directBootstrapGraceMs` | positive `u64` | `4000` |
+
+The existing required `listenPort` is independently bounded to `1..=65535`
+in OpenAPI and validated before child API access. It has no fallback or clamp.
+The effective policy rejects every configured zero. Fleet pooler mode reaches
+both the general PgDog setting and each database lacking a tenant override;
+an explicit tenant mode still wins.
+
+The operator process exposes six positive CLI/environment timing values:
+
+| CLI | Environment | Default |
+|---|---|---:|
+| `--pgdog-reload-attempts` | `PGDOG_RELOAD_ATTEMPTS` | `3` |
+| `--pgdog-reload-backoff-ms` | `PGDOG_RELOAD_BACKOFF_MS` | `100` |
+| `--pgdog-reload-requeue-ms` | `PGDOG_RELOAD_REQUEUE_MS` | `15000` |
+| `--pgdog-admin-timeout-ms` | `PGDOG_ADMIN_TIMEOUT_MS` | `20000` |
+| `--pgdog-transition-poll-ms` | `PGDOG_TRANSITION_POLL_MS` | `60000` |
+| `--controller-error-requeue-ms` | `CONTROLLER_ERROR_REQUEUE_MS` | `15000` |
+
+One validated connection-attempt value drives both sides of timeout
+arithmetic. In the operator, the activator's configured per-attempt timeout is
+checked-multiplied by attempts to form the cold-start ceiling; PgDog then
+derives the same per-attempt connect timeout and the ceiling-sized checkout
+timeout. Standalone rendering likewise derives both values from its configured
+ceiling and attempts. There are no independently configurable derived
+connect/checkout values.
+
+Suspension idle selection considers only tenants whose `spec.gres` matches the
+reconciled fleet. A tenant override takes precedence over the fleet default,
+and only an effective value greater than zero selects the suspension timeout;
+`idleSeconds: 0`, absence, and unrelated fleets select the normal timeout.
+
+The one effective `directBootstrapGraceMs` value is passed into tenant status
+deadline creation, PgDog credential retention and route expiry, and bounded
+transition scheduling. The transition delay is the earliest matching-fleet
+boundary capped by `pgdogTransitionPollMs`, so polling cannot become
+unbounded.
+
+The common configured error delay is used by exactly eight controllers:
+Kafka, KafkaNodePool, KafkaTopic, KafkaUser, SchemaRegistry,
+KafkaGrpcGateway, Gres, and GresTenant. KafkaRebalance retains its distinct
+15-second `TRANSPORT_RETRY`, which is transport state-machine policy rather
+than the common reconcile-error delay.
+
+### Fixed
+
+- `min_pool_size = 0` is required for scale-to-zero: PgDog must not retain an
+  eager backend session.
+- `3155760000000ms` is PgDog's documented disabled idle-healthcheck sentinel;
+  a healthcheck must not wake a suspended tenant.
+- Passthrough authentication and TLS-client-required state are derived from
+  mounted frontend TLS, not independent policy.
+- Activator/compute ports, TCP, command and configuration paths, UID/GID,
+  Kubernetes names and labels, and the PgDog admin command/column protocol are
+  topology, security, or compatibility invariants.
+- Checked duration conversion, saturating Unix-deadline arithmetic, rounded-up
+  timeout conversion, and the one-millisecond minimum scheduled delay are
+  safety or derived arithmetic, not deployment tuning.
+
+### Adjacent Pending Policy
+
+This closes only the PgDog/front-door sub-slice. The scanner still reports
+unrelated values in `gres-control`, `cli`, and `operator`, including broader
+GresTenant lifecycle and compute policy. `gres-control`, `cli`, `operator`,
+`gres`, `gres-activator`, `gres-loadtest`, and the other Gres-family crates
+therefore remain Pending in the crate-level Coverage Status until each
+remaining owner is independently audited.
+
+### PgDog Front-door Sub-slice Evidence
+
+On 2026-07-24 `tools/audit-runtime-values.sh` reported 5,902 repository
+matches. Relevant package totals were 41 matches across three
+`gres-control` files, 27 across two `cli` files, and 171 across 18 `operator`
+files. The focused implementation paths contributed 26 matches in
+`gres-control/src/pgdog.rs`, 20 in `cli/src/gres.rs`, 17 in
+`operator/src/controller/gres.rs`, 13 in
+`operator/src/controller/gres_tenant.rs`, and one in
+`operator/src/config.rs`. The semantic review classified every focused match
+and found no code remediation.
+
+- `cargo nextest run -p crabka-gres-control -p crabka-cli
+  -p crabka-operator --no-fail-fast`: 1,058 passed, 0 skipped, and no
+  failures.
+- `cargo clippy -p crabka-gres-control -p crabka-cli -p crabka-operator
+  --all-targets --all-features -- -D warnings`: passed.
+- `crabka gres render-pgdog --help` displayed all 13 exact
+  `CRABKA_GRES_PGDOG_*` bindings, including the client CA.
+- `crabka-operator run --help` displayed all six controller timing
+  CLI/environment pairs.
+- `cargo +nightly fmt --all -- --check`: passed.
+- `cargo run -p crabka-operator -- gen-crds <temporary-directory>` followed
+  by `diff -ru deploy/crds <temporary-directory>`: all nine CRDs matched
+  exactly.
+- Focused `rg` checks found eight common error-policy users, the unchanged
+  KafkaRebalance transport retry, one production grace default/source, no
+  listen-port fallback/clamp, and no duplicate hardcoded front-door timing.
+- `git diff --check`: passed.
