@@ -153,7 +153,13 @@ pub trait TopicAdmin: Send {
         replication_factor: i32,
         timeout_ms: i32,
     ) -> Result<(), SubstrateError> {
-        let _ = (replication_factor, timeout_ms);
+        if replication_factor != WAL_TOPIC_REPLICAS
+            || timeout_ms != WAL_TOPIC_ENSURE_TIMEOUT_MS
+        {
+            return Err(SubstrateError::Topic(format!(
+                "unsupported WAL topic policy for legacy admin: replicas={replication_factor}, timeout_ms={timeout_ms}"
+            )));
+        }
         self.create_wal_topic(topic).await
     }
 }
@@ -326,6 +332,23 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct LegacyTopicAdmin {
+        creates: usize,
+    }
+
+    #[async_trait::async_trait]
+    impl TopicAdmin for LegacyTopicAdmin {
+        async fn topic_exists(&mut self, _topic: &str) -> Result<bool, SubstrateError> {
+            Ok(false)
+        }
+
+        async fn create_wal_topic(&mut self, _topic: &str) -> Result<(), SubstrateError> {
+            self.creates += 1;
+            Ok(())
+        }
+    }
+
     #[test]
     fn wal_admin_policy_owns_defaults() {
         let policy = WalAdminPolicy::default();
@@ -451,5 +474,34 @@ mod tests {
 
         assert_eq!(admin.replication_factor, Some(i32::from(i16::MAX)));
         assert_eq!(admin.timeout_ms, Some(8));
+    }
+
+    #[tokio::test]
+    async fn legacy_topic_admin_delegates_default_policy() {
+        let mut admin = LegacyTopicAdmin::default();
+
+        ensure_wal_topic_name_with_policy(
+            &mut admin,
+            "__gres_wal.t1.r0",
+            WalAdminPolicy::default(),
+        )
+        .await
+        .expect("default policy");
+
+        assert_eq!(admin.creates, 1);
+    }
+
+    #[tokio::test]
+    async fn legacy_topic_admin_rejects_non_default_policy() {
+        let mut admin = LegacyTopicAdmin::default();
+        let policy = WalAdminPolicy::new(2, WAL_TOPIC_ENSURE_TIMEOUT_MS, 3, 4).expect("policy");
+
+        let error =
+            ensure_wal_topic_name_with_policy(&mut admin, "__gres_wal.t1.r0", policy)
+                .await
+                .expect_err("custom policy unsupported");
+
+        assert!(error.to_string().contains("unsupported WAL topic policy"));
+        assert_eq!(admin.creates, 0);
     }
 }
