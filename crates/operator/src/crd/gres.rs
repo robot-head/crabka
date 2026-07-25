@@ -14,10 +14,10 @@ use crabka_gres_control::{
 use crabka_gres_substrate::{
     DEFAULT_CHECKPOINT_RETAIN, DEFAULT_PART_MAX_BYTES, DEFAULT_WAL_ADMIN_CONNECT_TIMEOUT_MS,
     DEFAULT_WAL_ADMIN_REQUEST_TIMEOUT_MS, DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT_MS,
-    DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES, DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT_MS,
-    DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES, DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES,
-    DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT_MS, DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT_MS,
-    DEFAULT_WAL_TOPIC_REPLICATION_FACTOR,
+    DEFAULT_WAL_RECOVERY_DNS_TIMEOUT_MS, DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES,
+    DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT_MS, DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES,
+    DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES, DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT_MS,
+    DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT_MS, DEFAULT_WAL_TOPIC_REPLICATION_FACTOR,
 };
 use kube::CustomResource;
 use refined_type::rule::GreaterI32;
@@ -183,6 +183,11 @@ pub struct GresComputeSpec {
     #[schemars(range(min = 1))]
     pub wal_recovery_empty_fetch_retries: Option<usize>,
 
+    /// Timeout for resolving committed-WAL recovery broker hostnames.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub wal_recovery_dns_timeout_ms: Option<u64>,
+
     /// Timeout for opening committed-WAL recovery broker connections.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
@@ -286,6 +291,7 @@ pub(crate) struct EffectiveGresComputePolicy {
     pub(crate) wal_recovery_fetch_partition_max_bytes: PositiveI32,
     pub(crate) wal_recovery_fetch_response_max_bytes: PositiveI32,
     pub(crate) wal_recovery_empty_fetch_retries: PositiveUsize,
+    pub(crate) wal_recovery_dns_timeout_ms: PositiveMillis,
     pub(crate) wal_recovery_connect_timeout_ms: PositiveMillis,
     pub(crate) wal_recovery_request_timeout_ms: PositiveMillis,
     pub(crate) wal_producer_flush_timeout: ProducerFlushTimeout,
@@ -356,6 +362,11 @@ impl GresComputeSpec {
                     .unwrap_or(DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES),
             )
             .map_err(|error| format!("spec.compute.walRecoveryEmptyFetchRetries: {error}"))?,
+            wal_recovery_dns_timeout_ms: PositiveMillis::new(
+                self.wal_recovery_dns_timeout_ms
+                    .unwrap_or(DEFAULT_WAL_RECOVERY_DNS_TIMEOUT_MS),
+            )
+            .map_err(|error| format!("spec.compute.walRecoveryDnsTimeoutMs: {error}"))?,
             wal_recovery_connect_timeout_ms: PositiveMillis::new(
                 self.wal_recovery_connect_timeout_ms
                     .unwrap_or(DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT_MS),
@@ -1135,6 +1146,7 @@ mod tests {
             wal_recovery_fetch_partition_max_bytes: Some(22),
             wal_recovery_fetch_response_max_bytes: Some(33),
             wal_recovery_empty_fetch_retries: Some(44),
+            wal_recovery_dns_timeout_ms: Some(77),
             wal_recovery_connect_timeout_ms: Some(55),
             wal_recovery_request_timeout_ms: Some(66),
             ..GresComputeSpec::default()
@@ -1152,6 +1164,7 @@ mod tests {
             "walRecoveryFetchPartitionMaxBytes",
             "walRecoveryFetchResponseMaxBytes",
             "walRecoveryEmptyFetchRetries",
+            "walRecoveryDnsTimeoutMs",
             "walRecoveryConnectTimeoutMs",
             "walRecoveryRequestTimeoutMs",
         ] {
@@ -1179,6 +1192,10 @@ mod tests {
         assert!(
             defaults.wal_recovery_empty_fetch_retries.into_value()
                 == DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES
+        );
+        assert!(
+            defaults.wal_recovery_dns_timeout_ms.into_value()
+                == DEFAULT_WAL_RECOVERY_DNS_TIMEOUT_MS
         );
         assert!(
             defaults.wal_recovery_connect_timeout_ms.into_value()
@@ -1217,6 +1234,13 @@ mod tests {
                     ..GresComputeSpec::default()
                 },
                 "spec.compute.walRecoveryEmptyFetchRetries",
+            ),
+            (
+                GresComputeSpec {
+                    wal_recovery_dns_timeout_ms: Some(0),
+                    ..GresComputeSpec::default()
+                },
+                "spec.compute.walRecoveryDnsTimeoutMs",
             ),
             (
                 GresComputeSpec {

@@ -2024,6 +2024,8 @@ fn render_deployment(
             .wal_recovery_empty_fetch_retries
             .into_value()
             .to_string(),
+        "--wal-recovery-dns-timeout-ms".to_owned(),
+        u64::to_string(&compute_policy.wal_recovery_dns_timeout_ms.into_value()),
         "--wal-recovery-connect-timeout-ms".to_owned(),
         compute_policy
             .wal_recovery_connect_timeout_ms
@@ -2771,7 +2773,7 @@ mod tests {
                 .any(|arg| arg == "--range0-follower-poll-interval-ms")
         );
         assert!(
-            args.windows(12).any(|window| {
+            args.windows(14).any(|window| {
                 window
                     == [
                         "--wal-recovery-fetch-max-wait-ms",
@@ -2782,6 +2784,8 @@ mod tests {
                         "52428800",
                         "--wal-recovery-empty-fetch-retries",
                         "100",
+                        "--wal-recovery-dns-timeout-ms",
+                        "10000",
                         "--wal-recovery-connect-timeout-ms",
                         "10000",
                         "--wal-recovery-request-timeout-ms",
@@ -2805,7 +2809,9 @@ mod tests {
         for (spec, expected) in [
             (
                 crate::crd::gres::GresComputeSpec::default(),
-                ["100", "1048576", "52428800", "100", "10000", "30000"],
+                [
+                    "100", "1048576", "52428800", "100", "10000", "10000", "30000",
+                ],
             ),
             (
                 crate::crd::gres::GresComputeSpec {
@@ -2813,11 +2819,12 @@ mod tests {
                     wal_recovery_fetch_partition_max_bytes: Some(22),
                     wal_recovery_fetch_response_max_bytes: Some(33),
                     wal_recovery_empty_fetch_retries: Some(44),
+                    wal_recovery_dns_timeout_ms: Some(77),
                     wal_recovery_connect_timeout_ms: Some(55),
                     wal_recovery_request_timeout_ms: Some(66),
                     ..crate::crd::gres::GresComputeSpec::default()
                 },
-                ["11", "22", "33", "44", "55", "66"],
+                ["11", "22", "33", "44", "77", "55", "66"],
             ),
         ] {
             let compute_policy = spec.effective_policy().expect("compute policy");
@@ -2855,10 +2862,12 @@ mod tests {
                     expected[2],
                     "--wal-recovery-empty-fetch-retries",
                     expected[3],
-                    "--wal-recovery-connect-timeout-ms",
+                    "--wal-recovery-dns-timeout-ms",
                     expected[4],
-                    "--wal-recovery-request-timeout-ms",
+                    "--wal-recovery-connect-timeout-ms",
                     expected[5],
+                    "--wal-recovery-request-timeout-ms",
+                    expected[6],
                 ];
                 assert!(
                     args.windows(expected.len())
