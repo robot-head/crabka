@@ -1495,7 +1495,7 @@ files. The focused
 search produced the 91-line classification above.
 
 - `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo test -p crabka-gres-substrate wal_dns_lookup --lib` passed all three focused tests. The paused-time pending-resolver case stopped at the exact configured 37-millisecond deadline; success, resolver-error, and empty-result behavior also passed without external DNS.
-- `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo test -p crabka-gres-substrate -p crabka-gres -p crabka-operator --all-targets` reported 1,369 passing test results, zero failures, and zero ignored tests.
+- `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo test -p crabka-gres-substrate -p crabka-gres -p crabka-operator --all-targets` exited successfully; every emitted suite summary reported zero failures and zero ignored tests. Nested child-process summaries can interleave, so no canonical aggregate test inventory is claimed.
 - `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo clippy -p crabka-gres-substrate -p crabka-gres -p crabka-operator --all-targets -- -D warnings` passed.
 - `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo run -q -p crabka-gres -- --help | rg -- '--wal-recovery-dns-timeout-ms'` displayed the exact standalone flag.
 - `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo fmt --all -- --check` and `git diff --check` passed.
