@@ -1563,3 +1563,94 @@ On 2026-07-25 the following fresh gates exited successfully:
 - `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo clippy -p crabka-client-core --all-targets -- -D warnings`;
 - `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo fmt --all -- --check`;
 - `git diff --check`.
+
+## Gres WAL Producer DNS Timeout
+
+The Gres WAL producer reuses client-core's validated `ClientDnsTimeout` and
+10-second `DEFAULT_CLIENT_DNS_TIMEOUT`; it adds no producer-specific DNS type
+or default. `Producer::start` validates the builder's raw duration before
+constructing `Client`, then forwards the exact validated duration through
+`Client::builder().dns_timeout(...)`. DNS remains independent of the
+producer's connect/request/retry/transaction policy.
+
+Standalone Gres owns the
+`--wal-producer-dns-timeout-ms` /
+`CRABKA_GRES_WAL_PRODUCER_DNS_TIMEOUT_MS` pair. CLI input takes precedence
+over environment input, absence selects the shared 10,000-millisecond default,
+and explicit use without substrate mode is rejected. The fleet owner is the
+optional positive `spec.compute.walProducerDnsTimeoutMs` field in the Gres
+CRD.
+
+The complete live path is:
+
+```text
+GresComputeSpec.wal_producer_dns_timeout_ms
+  -> EffectiveGresComputePolicy.wal_producer_dns_timeout
+  -> wal_producer_args / --wal-producer-dns-timeout-ms
+  -> ServeArgs.wal_producer_dns_timeout_ms
+  -> SubstrateRuntimeConfig.producer_dns_timeout
+  -> LiveRecoveryConfig::with_producer_dns_timeout
+  -> recover_live_for_range_inner
+  -> Producer::builder().dns_timeout
+  -> Client::builder().dns_timeout
+  -> ConnectionOptions.dns_timeout
+  -> bootstrap and advertised-broker bounded lookup
+```
+
+The operator extends the shared WAL-producer argument vector once before
+single- versus multi-range rendering. Gres constructs
+`LiveRecoveryConfig` through one shared runtime helper, and
+`recover_live_for_range_inner` contains the only production Gres WAL
+`Producer::builder()` call. Thus the standalone and CRD inputs converge on one
+live Gres consumer; this does not cover other producer deployments.
+
+### Adjacent Pending Policy
+
+Production producer constructions still default their DNS policy in
+bench-driver, client-streams, Gres registry, gRPC Gateway, metrics,
+metrics-service, observability, observability-demo-app, profiles,
+remote-storage-topic, replicator, Schema Registry, and traces. Their
+deployment surfaces remain separate owners.
+
+The higher-level `client-consumer` builder, the client-streams raw resolver and
+embedded clients/producers, and client-admin's raw resolver and client
+connections also remain unresolved. Gres FDW and Raft raw resolver sites are
+separate visible owners. The next coherent owner is the Gres registry producer
+in `crates/gres-control/src/registry.rs`, whose shared registry deployment
+surfaces can carry the typed client policy without conflating it with WAL
+recovery or WAL producer configuration. The repository-wide hardcoded
+operational-value audit remains active.
+
+### Gres WAL Producer DNS Timeout Evidence
+
+Before this section was appended, `tools/audit-runtime-values.sh` reported
+6,155 lines across 1,049 files. The exact required search
+
+```text
+rg -n "lookup_host|ClientDnsTimeout|DEFAULT_CLIENT_DNS_TIMEOUT|dns[_-]timeout|DnsTimeout|wal-producer-dns-timeout|walProducerDnsTimeout" crates deploy/crds docs/configuration-audit.md
+```
+
+reported 226 lines across 28 files: 94 production-code references, two
+checked-in CRD schema references, 117 test/harness references, and 13 prior
+audit references. The 96 production/schema references include the completed
+generic client and Gres WAL recovery paths as well as the Gres WAL producer
+path and the unresolved owners listed above; the count is evidence inventory,
+not a claim that all 96 are covered.
+
+Fresh focused verification on 2026-07-25 passed:
+
+- producer builder filter: 8 passed, including invalid-before-I/O and exact
+  override coverage;
+- Gres substrate producer-DNS filter: 1 passed;
+- standalone Gres producer-DNS filter: 2 passed, including default,
+  environment/CLI precedence, zero rejection, and substrate-only use;
+- operator producer-DNS filter: 2 passed, covering schema/default/error and
+  exact-once single-/multi-range rendering;
+- `crabka-gres --help` displayed
+  `--wal-producer-dns-timeout-ms`;
+- a fresh operator generation produced nine CRDs and matched `deploy/crds`
+  exactly; and
+- `git diff --check` passed.
+
+This evidence closes only the Gres WAL producer DNS slice. It does not close
+the pending crate-level coverage entries or the repository-wide goal.
