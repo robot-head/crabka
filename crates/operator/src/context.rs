@@ -1188,6 +1188,19 @@ mod tests {
             .expect("reused control");
         assert!(Arc::ptr_eq(&reused, &first));
 
+        let changed_dns = defaults
+            .clone()
+            .with_producer_dns_timeout_ms(37)
+            .expect("DNS timeout");
+        let changed_dns_control: GresControlHandle = Arc::new(TestGresControl);
+        let replaced = ctx
+            .gres_control_for_with("ns-a", "demo", "a:9092", &changed_dns, async {
+                Ok(Arc::clone(&changed_dns_control))
+            })
+            .await
+            .expect("DNS policy replacement");
+        assert!(Arc::ptr_eq(&replaced, &changed_dns_control));
+
         let custom = crabka_gres_control::RegistryPolicy::new(2, 15_001, 251, 501, 1_048_577)
             .expect("policy");
         let changed_policy: GresControlHandle = Arc::new(TestGresControl);

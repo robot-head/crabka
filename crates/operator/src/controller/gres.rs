@@ -124,7 +124,7 @@ async fn reconcile_inner(obj: Arc<Gres>, ctx: Arc<Context>) -> Result<Action, Re
             || Ok(crabka_gres_control::RegistryPolicy::default()),
             crate::crd::GresRegistrySpec::policy,
         )
-        .map_err(|error| ReconcileError::Malformed(format!("spec.gresRegistry: {error}")))?;
+        .map_err(ReconcileError::Malformed)?;
     let bootstrap = internal_listener_bootstrap(&kafka)
         .unwrap_or_else(|| format!("{}-plain-bootstrap.{ns}.svc:9092", obj.spec.kafka_cluster));
     let gres_api: Api<Gres> = Api::namespaced(ctx.client.clone(), &ns);
@@ -912,6 +912,7 @@ fn render_activator_deployment(
                             "--registry-reader-retry-backoff-ms", registry_policy.reader_retry_backoff().as_millis().to_string(),
                             "--registry-fetch-max-wait-ms", registry_policy.fetch_max_wait_ms().to_string(),
                             "--registry-fetch-partition-max-bytes", registry_policy.fetch_partition_max_bytes().to_string(),
+                            "--registry-producer-dns-timeout-ms", registry_policy.producer_dns_timeout().milliseconds().to_string(),
                             "--backend-endpoint-template", format!("{{tenant}}-gres.{namespace}.svc:{COMPUTE_PORT}", namespace = obj.namespace().unwrap_or_else(|| "default".into()))
                         ],
                         "ports": [{ "name": "postgres", "containerPort": ACTIVATOR_PORT, "protocol": "TCP" }],
@@ -1338,6 +1339,8 @@ mod tests {
                 "500",
                 "--registry-fetch-partition-max-bytes",
                 "1048576",
+                "--registry-producer-dns-timeout-ms",
+                "10000",
                 "--backend-endpoint-template",
                 "{tenant}-gres.ns.svc:5432",
             ]
@@ -1356,7 +1359,9 @@ mod tests {
         });
 
         let policy = crabka_gres_control::RegistryPolicy::new(2, 15_001, 251, 501, 1_048_577)
-            .expect("policy");
+            .expect("policy")
+            .with_producer_dns_timeout_ms(37)
+            .expect("DNS timeout");
         let deployment =
             render_activator_deployment(&obj, "registry.demo.svc:9092", "activator:test", &policy)
                 .expect("render activator deployment");
@@ -1385,9 +1390,18 @@ mod tests {
                     "501",
                     "--registry-fetch-partition-max-bytes",
                     "1048577",
+                    "--registry-producer-dns-timeout-ms",
+                    "37",
                     "--backend-endpoint-template",
                     "{tenant}-gres.ns.svc:5432",
                 ]
+        );
+        let args = container.args.as_ref().expect("activator args");
+        assert!(
+            args.iter()
+                .filter(|arg| arg.as_str() == "--registry-producer-dns-timeout-ms")
+                .count()
+                == 1
         );
         assert!(
             container

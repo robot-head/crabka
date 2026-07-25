@@ -789,6 +789,12 @@ spec:
                     minimum: 1.0
                     nullable: true
                     type: integer
+                  producerDnsTimeoutMs:
+                    description: DNS lookup deadline for the registry producer.
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
                   readerRetryBackoffMs:
                     description: Registry reader retry delay in milliseconds.
                     format: uint64
