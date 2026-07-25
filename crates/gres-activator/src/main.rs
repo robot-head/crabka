@@ -72,10 +72,24 @@ struct RegistryOptions {
         default_value = "1048576"
     )]
     fetch_partition_max_bytes: PositiveI32,
+    #[arg(
+        long = "registry-producer-dns-timeout-ms",
+        env = "CRABKA_GRES_REGISTRY_PRODUCER_DNS_TIMEOUT_MS"
+    )]
+    producer_dns_timeout_ms: Option<RegistryPositiveMillis>,
 }
 
 impl RegistryOptions {
     fn policy(&self) -> RegistryPolicy {
+        let producer_dns_timeout_ms = self.producer_dns_timeout_ms.map_or_else(
+            || {
+                RegistryPolicy::default()
+                    .producer_dns_timeout()
+                    .milliseconds()
+            },
+            RegistryPositiveMillis::into_value,
+        );
+
         RegistryPolicy::new(
             self.replication_factor.into_value(),
             self.topic_create_timeout_ms.into_value(),
@@ -84,6 +98,8 @@ impl RegistryOptions {
             self.fetch_partition_max_bytes.into_value(),
         )
         .expect("validated registry options")
+        .with_producer_dns_timeout_ms(producer_dns_timeout_ms)
+        .expect("validated registry producer DNS timeout")
     }
 }
 
@@ -132,7 +148,7 @@ mod tests {
     use super::Args;
 
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    const CLEAN_CONFIG_ENV: [(&str, Option<&str>); 10] = [
+    const CLEAN_CONFIG_ENV: [(&str, Option<&str>); 11] = [
         ("CRABKA_GRES_ACTIVATOR_LISTEN", None),
         ("CRABKA_GRES_ACTIVATOR_BOOTSTRAP", None),
         ("CRABKA_GRES_ACTIVATOR_REGISTRY_POLL_MS", None),
@@ -142,6 +158,7 @@ mod tests {
         ("CRABKA_GRES_REGISTRY_READER_RETRY_BACKOFF_MS", None),
         ("CRABKA_GRES_REGISTRY_FETCH_MAX_WAIT_MS", None),
         ("CRABKA_GRES_REGISTRY_FETCH_PARTITION_MAX_BYTES", None),
+        ("CRABKA_GRES_REGISTRY_PRODUCER_DNS_TIMEOUT_MS", None),
         ("CRABKA_GRES_ACTIVATOR_BACKEND_ENDPOINT_TEMPLATE", None),
     ];
 
@@ -179,6 +196,7 @@ mod tests {
                 "--registry-reader-retry-backoff-ms=0",
                 "--registry-fetch-max-wait-ms=0",
                 "--registry-fetch-partition-max-bytes=0",
+                "--registry-producer-dns-timeout-ms=0",
                 "--backend-endpoint-template=",
             ] {
                 assert!(
@@ -231,6 +249,7 @@ mod tests {
                         "CRABKA_GRES_REGISTRY_FETCH_PARTITION_MAX_BYTES",
                         Some("1048577"),
                     ),
+                    ("CRABKA_GRES_REGISTRY_PRODUCER_DNS_TIMEOUT_MS", Some("37")),
                     (
                         "CRABKA_GRES_ACTIVATOR_BACKEND_ENDPOINT_TEMPLATE",
                         Some("env-backend:5432"),
@@ -243,10 +262,11 @@ mod tests {
                     assert!(from_env.bootstrap.into_value() == "env-broker:9092");
                     assert!(from_env.registry_poll_ms.into_value() == 251);
                     assert!(from_env.cold_start_timeout_ms.into_value() == 30_001);
-                    assert!(
-                        from_env.registry.policy()
-                            == RegistryPolicy::new(2, 15_001, 251, 501, 1_048_577).expect("policy")
-                    );
+                    let environment_policy = RegistryPolicy::new(2, 15_001, 251, 501, 1_048_577)
+                        .expect("policy")
+                        .with_producer_dns_timeout_ms(37)
+                        .expect("environment DNS timeout");
+                    assert!(from_env.registry.policy() == environment_policy);
                     assert!(from_env.backend_endpoint_template.into_value() == "env-backend:5432");
 
                     let from_cli = Args::try_parse_from([
@@ -260,6 +280,7 @@ mod tests {
                         "--registry-reader-retry-backoff-ms=252",
                         "--registry-fetch-max-wait-ms=502",
                         "--registry-fetch-partition-max-bytes=1048578",
+                        "--registry-producer-dns-timeout-ms=47",
                         "--backend-endpoint-template=cli-backend:5432",
                     ])
                     .expect("parse CLI over environment");
@@ -267,10 +288,11 @@ mod tests {
                     assert!(from_cli.bootstrap.into_value() == "cli-broker:9092");
                     assert!(from_cli.registry_poll_ms.into_value() == 252);
                     assert!(from_cli.cold_start_timeout_ms.into_value() == 30_002);
-                    assert!(
-                        from_cli.registry.policy()
-                            == RegistryPolicy::new(3, 15_002, 252, 502, 1_048_578).expect("policy")
-                    );
+                    let cli_policy = RegistryPolicy::new(3, 15_002, 252, 502, 1_048_578)
+                        .expect("policy")
+                        .with_producer_dns_timeout_ms(47)
+                        .expect("CLI DNS timeout");
+                    assert!(from_cli.registry.policy() == cli_policy);
                     assert!(from_cli.backend_endpoint_template.into_value() == "cli-backend:5432");
                 },
             );
