@@ -240,6 +240,22 @@ spec:
                     minimum: 1.0
                     nullable: true
                     type: integer
+                  walProducerBatchBytes:
+                    description: Maximum WAL producer batch size in bytes.
+                    format: uint
+                    maximum: 2147483647.0
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  walProducerCompression:
+                    description: WAL producer compression codec.
+                    enum:
+                    - none
+                    - gzip
+                    - snappy
+                    - lz4
+                    - zstd
+                    type: string
                   walProducerInitMaxBackoffMs:
                     description: WAL producer-ID initialization backoff cap.
                     format: uint64
@@ -252,6 +268,13 @@ spec:
                     format: uint64
                     maximum: 2147483647.0
                     minimum: 1.0
+                    nullable: true
+                    type: integer
+                  walProducerLingerMs:
+                    description: Delay before sending a partial WAL producer batch, in milliseconds.
+                    format: uint64
+                    maximum: 2147483647.0
+                    minimum: 0.0
                     nullable: true
                     type: integer
                   walProducerRequestTimeoutMs:
