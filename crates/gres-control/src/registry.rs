@@ -11,8 +11,8 @@ use std::{
 use bytes::Bytes;
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
 use crabka_client_core::{
-    Connection, ConnectionOptions, DEFAULT_FETCH_RESPONSE_MAX_BYTES, IsolatedFetch,
-    fetch_partition_with_isolation_progress,
+    ClientDnsTimeout, Connection, ConnectionOptions, DEFAULT_FETCH_RESPONSE_MAX_BYTES,
+    IsolatedFetch, fetch_partition_with_isolation_progress,
 };
 use crabka_client_producer::{Acks, Producer, ProducerError, ProducerRecord, Transaction};
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
@@ -143,6 +143,7 @@ pub struct RegistryPolicy {
     reader_retry_backoff: Duration,
     fetch_max_wait_ms: i32,
     fetch_partition_max_bytes: i32,
+    producer_dns_timeout: ClientDnsTimeout,
 }
 
 impl RegistryPolicy {
@@ -166,6 +167,7 @@ impl RegistryPolicy {
             ),
             fetch_max_wait_ms: PositiveI32::new(fetch_max_wait_ms)?.into_value(),
             fetch_partition_max_bytes: PositiveI32::new(fetch_partition_max_bytes)?.into_value(),
+            producer_dns_timeout: ClientDnsTimeout::default(),
         })
     }
 
@@ -197,6 +199,23 @@ impl RegistryPolicy {
     #[must_use]
     pub const fn fetch_partition_max_bytes(&self) -> i32 {
         self.fetch_partition_max_bytes
+    }
+
+    /// DNS lookup deadline used by the registry producer.
+    #[must_use]
+    pub const fn producer_dns_timeout(&self) -> ClientDnsTimeout {
+        self.producer_dns_timeout
+    }
+
+    /// Validate and replace the registry producer DNS lookup deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `milliseconds` is zero.
+    #[must_use = "the validated policy must be used"]
+    pub fn with_producer_dns_timeout_ms(mut self, milliseconds: u64) -> Result<Self, String> {
+        self.producer_dns_timeout = ClientDnsTimeout::new(Duration::from_millis(milliseconds))?;
+        Ok(self)
     }
 }
 
@@ -670,6 +689,7 @@ impl Registry {
         let producer = Producer::builder()
             .bootstrap(bootstrap.to_string())
             .client_id("crabka-gres-control-writer")
+            .dns_timeout(policy.producer_dns_timeout().duration())
             .enable_idempotence(true)
             .acks(Acks::All)
             .transactional_id(REGISTRY_TRANSACTIONAL_ID)
@@ -1801,6 +1821,22 @@ mod tests {
         assert!(RegistryPolicy::new(1, 15_000, 0, 500, 1_048_576).is_err());
         assert!(RegistryPolicy::new(1, 15_000, 250, 0, 1_048_576).is_err());
         assert!(RegistryPolicy::new(1, 15_000, 250, 500, 0).is_err());
+    }
+
+    #[test]
+    fn registry_policy_dns_timeout_defaults_and_replaces_exactly() {
+        let defaults = RegistryPolicy::default();
+        assert!(defaults.producer_dns_timeout() == crabka_client_core::ClientDnsTimeout::default());
+
+        let policy = defaults
+            .with_producer_dns_timeout_ms(37)
+            .expect("valid DNS timeout");
+        assert!(policy.producer_dns_timeout().milliseconds() == 37);
+        assert!(
+            RegistryPolicy::default()
+                .with_producer_dns_timeout_ms(0)
+                .is_err()
+        );
     }
 
     #[test]
