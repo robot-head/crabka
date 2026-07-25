@@ -1500,3 +1500,66 @@ search produced the 91-line classification above.
 - `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo run -q -p crabka-gres -- --help | rg -- '--wal-recovery-dns-timeout-ms'` displayed the exact standalone flag.
 - `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo fmt --all -- --check` and `git diff --check` passed.
 - Two fresh `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo run -q -p crabka-operator -- gen-crds <temporary-directory>` generations each produced nine files and matched each other and `deploy/crds` exactly.
+
+## Client Core DNS Timeout Policy
+
+Generic Kafka client resolution now has one shared
+`DEFAULT_CLIENT_DNS_TIMEOUT` of 10 seconds. `ClientDnsTimeout` uses
+`refined_type` to accept only positive, whole-millisecond durations
+representable as `u64` milliseconds. The client builder validates its raw
+`Duration` before resolver or socket I/O and stores the typed value in
+`ConnectionOptions`.
+
+Initial bootstrap resolution and `Client::reconnect_bootstrap` pass the stored
+policy to `bootstrap::resolve`. Each non-empty bootstrap entry independently
+passes `tokio::net::lookup_host` through `bounded_lookup`; a failed or expired
+entry is skipped, later entries retain a full attempt, and exhaustion still
+returns `Disconnected`. `BrokerPool` copies the same policy from
+`ConnectionOptions`; each advertised-broker lookup passes through
+`first_resolved_addr` and then `bounded_lookup`, so an unresolved broker remains
+absent and metadata refresh remains best-effort.
+
+DNS, TCP establishment, and request handling retain independent deadlines. The
+named defaults are 10 seconds for each DNS lookup, 30 seconds for each TCP
+connection attempt, and 30 seconds for each request.
+
+`tools/audit-runtime-values.sh` reported 6,149 lines across 1,049 files. The
+exact focused search reported 137 lines: 65 production references, 60 test or
+harness references, and 12 audit
+references.
+
+Every focused match is classified by the following reproducible groups:
+
+- The 65 production matches comprise 39 client-core references and 26 visible
+  references owned elsewhere. The client-core subtotal is 6 bootstrap, 8
+  client-builder/propagation, 11 policy/default/connection-option, 2 re-export,
+  and 12 pool references. The other 26 are 2 client-admin, 2 client-streams, 1
+  Gres FDW, 9 Gres substrate, 4 Gres, 1 operator controller, 4 operator CRD,
+  and 3 Raft references.
+- The 60 test/harness matches comprise 34 client-core inline-test references
+  and 26 references in other inline tests or integration-test harnesses.
+- The 12 remaining matches are in this and the prior Gres WAL recovery audit
+  sections.
+
+The two production `lookup_host` sites owned by client-core are both bounded:
+`bootstrap.rs` passes its resolver future directly to `bounded_lookup`, while
+`pool.rs` passes its resolver future to `first_resolved_addr`, which calls the
+same seam. This statement does not close client-admin, client-streams, Gres FDW,
+Gres substrate, Gres, operator, or Raft DNS ownership.
+
+### Adjacent Pending Policy
+
+The next coherent owner is propagation of this typed policy through the
+higher-level producer, consumer, streams, and admin builders and their
+deployment configuration surfaces. Other raw resolver sites remain separate
+visible owners, and the repository-wide hardcoded operational-value audit
+remains active.
+
+### Client Core DNS Timeout Evidence
+
+On 2026-07-25 the following fresh gates exited successfully:
+
+- `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo test -p crabka-client-core --all-targets`;
+- `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo clippy -p crabka-client-core --all-targets -- -D warnings`;
+- `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo fmt --all -- --check`;
+- `git diff --check`.
