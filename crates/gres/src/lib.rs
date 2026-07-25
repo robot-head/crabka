@@ -64,6 +64,7 @@ impl Cli {
             "wal_recovery_fetch_partition_max_bytes",
             "wal_recovery_fetch_response_max_bytes",
             "wal_recovery_empty_fetch_retries",
+            "wal_recovery_dns_timeout_ms",
             "wal_recovery_connect_timeout_ms",
             "wal_recovery_request_timeout_ms",
             "wal_topic_replication_factor",
@@ -179,6 +180,14 @@ pub struct ServeArgs {
         requires = "substrate_bootstrap"
     )]
     pub wal_recovery_empty_fetch_retries: Option<PositiveUsize>,
+
+    /// Timeout for resolving raw WAL recovery broker hostnames.
+    #[arg(
+        long = "wal-recovery-dns-timeout-ms",
+        env = "CRABKA_GRES_WAL_RECOVERY_DNS_TIMEOUT_MS",
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_recovery_dns_timeout_ms: Option<PositiveMillis>,
 
     /// Timeout for establishing raw WAL recovery broker connections.
     #[arg(
@@ -602,6 +611,7 @@ fn validate_wal_recovery_read_policy(args: &ServeArgs) -> std::io::Result<()> {
         || args.wal_recovery_fetch_partition_max_bytes.is_some()
         || args.wal_recovery_fetch_response_max_bytes.is_some()
         || args.wal_recovery_empty_fetch_retries.is_some()
+        || args.wal_recovery_dns_timeout_ms.is_some()
         || args.wal_recovery_connect_timeout_ms.is_some()
         || args.wal_recovery_request_timeout_ms.is_some()
         || args.wal_topic_replication_factor.is_some()
@@ -1029,6 +1039,14 @@ impl SubstrateRuntimeConfig {
                     PositiveUsize::into_value,
                 ),
             )
+            .and_then(|policy| {
+                policy.with_dns_timeout(
+                    args.wal_recovery_dns_timeout_ms.map_or(
+                        crabka_gres_substrate::DEFAULT_WAL_RECOVERY_DNS_TIMEOUT_MS,
+                        PositiveMillis::into_value,
+                    ),
+                )
+            })
             .and_then(|policy| {
                 policy.with_timeouts(
                     args.wal_recovery_connect_timeout_ms.map_or(
@@ -8456,6 +8474,7 @@ mod tests {
             wal_recovery_fetch_partition_max_bytes: None,
             wal_recovery_fetch_response_max_bytes: None,
             wal_recovery_empty_fetch_retries: None,
+            wal_recovery_dns_timeout_ms: None,
             wal_recovery_connect_timeout_ms: None,
             wal_recovery_request_timeout_ms: None,
             wal_topic_replication_factor: None,
@@ -9236,11 +9255,12 @@ mod tests {
     #[test]
     fn wal_recovery_read_policy_uses_defaults_environment_and_cli_precedence() {
         const CHILD: &str = "CRABKA_TEST_GRES_WAL_RECOVERY_READ_POLICY_CHILD";
-        const VARS: [&str; 21] = [
+        const VARS: [&str; 22] = [
             "CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT_MS",
             "CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES",
             "CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES",
             "CRABKA_GRES_WAL_RECOVERY_EMPTY_FETCH_RETRIES",
+            "CRABKA_GRES_WAL_RECOVERY_DNS_TIMEOUT_MS",
             "CRABKA_GRES_WAL_RECOVERY_CONNECT_TIMEOUT_MS",
             "CRABKA_GRES_WAL_RECOVERY_REQUEST_TIMEOUT_MS",
             "CRABKA_GRES_WAL_TOPIC_REPLICATION_FACTOR",
@@ -9275,7 +9295,7 @@ mod tests {
                 if mode == "environment" {
                     for (variable, value) in VARS.into_iter().zip([
                         "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28",
-                        "29", "30", "31", "32", "33", "34", "none", "35", "36",
+                        "29", "30", "31", "32", "33", "34", "35", "none", "36", "37",
                     ]) {
                         child.env(variable, value);
                     }
@@ -9291,13 +9311,14 @@ mod tests {
             "--tenant=tenant-a",
         ];
         let expected = if std::env::var(CHILD).as_deref() == Ok("environment") {
-            (17, 18, 19, 20, 21, 22, 23, 24, 25, 26)
+            (17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27)
         } else {
             (
                 crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT_MS,
                 crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES,
                 crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES,
                 crabka_gres_substrate::DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES,
+                crabka_gres_substrate::DEFAULT_WAL_RECOVERY_DNS_TIMEOUT_MS,
                 crabka_gres_substrate::DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT_MS,
                 crabka_gres_substrate::DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT_MS,
                 crabka_gres_substrate::DEFAULT_WAL_TOPIC_REPLICATION_FACTOR,
@@ -9318,19 +9339,21 @@ mod tests {
         assert_eq!(policy.fetch_partition_max_bytes(), expected.1);
         assert_eq!(policy.fetch_response_max_bytes(), expected.2);
         assert_eq!(policy.empty_fetch_retries(), expected.3);
-        assert_eq!(policy.connect_timeout(), Duration::from_millis(expected.4));
-        assert_eq!(policy.request_timeout(), Duration::from_millis(expected.5));
+        assert!(policy.dns_timeout() == Duration::from_millis(expected.4));
+        assert_eq!(policy.connect_timeout(), Duration::from_millis(expected.5));
+        assert_eq!(policy.request_timeout(), Duration::from_millis(expected.6));
         let admin = config.wal_admin_policy;
-        assert_eq!(admin.replication_factor(), expected.6);
-        assert_eq!(admin.topic_ensure_timeout_ms(), expected.7);
-        assert_eq!(admin.connect_timeout(), Duration::from_millis(expected.8));
-        assert_eq!(admin.request_timeout(), Duration::from_millis(expected.9));
+        assert_eq!(admin.replication_factor(), expected.7);
+        assert_eq!(admin.topic_ensure_timeout_ms(), expected.8);
+        assert_eq!(admin.connect_timeout(), Duration::from_millis(expected.9));
+        assert_eq!(admin.request_timeout(), Duration::from_millis(expected.10));
 
         let cli = <Cli as clap::Parser>::try_parse_from(base.into_iter().chain([
             "--wal-recovery-fetch-max-wait-ms=27",
             "--wal-recovery-fetch-partition-max-bytes=28",
             "--wal-recovery-fetch-response-max-bytes=29",
             "--wal-recovery-empty-fetch-retries=30",
+            "--wal-recovery-dns-timeout-ms=30",
             "--wal-recovery-connect-timeout-ms=31",
             "--wal-recovery-request-timeout-ms=32",
             "--wal-topic-replication-factor=33",
@@ -9347,6 +9370,7 @@ mod tests {
         assert_eq!(policy.fetch_partition_max_bytes(), 28);
         assert_eq!(policy.fetch_response_max_bytes(), 29);
         assert_eq!(policy.empty_fetch_retries(), 30);
+        assert!(policy.dns_timeout() == Duration::from_millis(30));
         assert_eq!(policy.connect_timeout(), Duration::from_millis(31));
         assert_eq!(policy.request_timeout(), Duration::from_millis(32));
         let admin = config.wal_admin_policy;
@@ -9367,6 +9391,7 @@ mod tests {
             .env("CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES", "18")
             .env("CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES", "19")
             .env("CRABKA_GRES_WAL_RECOVERY_EMPTY_FETCH_RETRIES", "20")
+            .env("CRABKA_GRES_WAL_RECOVERY_DNS_TIMEOUT_MS", "21")
             .env("CRABKA_GRES_WAL_RECOVERY_CONNECT_TIMEOUT_MS", "21")
             .env("CRABKA_GRES_WAL_RECOVERY_REQUEST_TIMEOUT_MS", "22")
             .env("CRABKA_GRES_WAL_TOPIC_REPLICATION_FACTOR", "23")
@@ -9397,6 +9422,7 @@ mod tests {
             "--wal-recovery-fetch-partition-max-bytes=0",
             "--wal-recovery-fetch-response-max-bytes=0",
             "--wal-recovery-empty-fetch-retries=0",
+            "--wal-recovery-dns-timeout-ms=0",
             "--wal-recovery-connect-timeout-ms=0",
             "--wal-recovery-request-timeout-ms=0",
             "--wal-topic-replication-factor=0",
@@ -9422,6 +9448,7 @@ mod tests {
             );
         }
         for option in [
+            "--wal-recovery-dns-timeout-ms=1",
             "--wal-recovery-connect-timeout-ms=1",
             "--wal-recovery-request-timeout-ms=1",
             "--wal-topic-replication-factor=1",
@@ -9564,7 +9591,7 @@ mod tests {
             ])
             .is_err()
         );
-        for option in 0..21 {
+        for option in 0..22 {
             let mut programmatic = serve_args(Some("trust"), Vec::new());
             set_wal_policy_option(&mut programmatic, option);
             let error = SubstrateRuntimeConfig::from_args(&programmatic)
@@ -9576,11 +9603,12 @@ mod tests {
     #[tokio::test]
     async fn wal_recovery_read_policy_validation_precedes_listener_bind() {
         const CHILD: &str = "CRABKA_TEST_GRES_WAL_RECOVERY_BIND_CHILD";
-        const VARS: [&str; 21] = [
+        const VARS: [&str; 22] = [
             "CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT_MS",
             "CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES",
             "CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES",
             "CRABKA_GRES_WAL_RECOVERY_EMPTY_FETCH_RETRIES",
+            "CRABKA_GRES_WAL_RECOVERY_DNS_TIMEOUT_MS",
             "CRABKA_GRES_WAL_RECOVERY_CONNECT_TIMEOUT_MS",
             "CRABKA_GRES_WAL_RECOVERY_REQUEST_TIMEOUT_MS",
             "CRABKA_GRES_WAL_TOPIC_REPLICATION_FACTOR",
@@ -9615,7 +9643,7 @@ mod tests {
         }
 
         let occupied = TcpListener::bind("127.0.0.1:0").await.expect("listener");
-        for option in 0..20 {
+        for option in 0..21 {
             let mut args = serve_args(Some("trust"), Vec::new());
             args.listen = occupied.local_addr().expect("address").to_string();
             set_wal_policy_option(&mut args, option);
@@ -9647,23 +9675,24 @@ mod tests {
             1 => args.wal_recovery_fetch_partition_max_bytes = PositiveI32::new(1).ok(),
             2 => args.wal_recovery_fetch_response_max_bytes = PositiveI32::new(1).ok(),
             3 => args.wal_recovery_empty_fetch_retries = PositiveUsize::new(1).ok(),
-            4 => args.wal_recovery_connect_timeout_ms = PositiveMillis::new(1).ok(),
-            5 => args.wal_recovery_request_timeout_ms = PositiveMillis::new(1).ok(),
-            6 => args.wal_topic_replication_factor = PositiveI32::new(1).ok(),
-            7 => args.wal_topic_ensure_timeout_ms = PositiveI32::new(1).ok(),
-            8 => args.wal_admin_connect_timeout_ms = PositiveMillis::new(1).ok(),
-            9 => args.wal_admin_request_timeout_ms = PositiveMillis::new(1).ok(),
-            10 => args.wal_producer_flush_timeout_ms = PositiveMillis::new(1).ok(),
-            11 => args.wal_producer_request_timeout_ms = PositiveMillis::new(1).ok(),
-            12 => args.wal_producer_retries = NonNegativeI32::new(0).ok(),
-            13 => args.wal_producer_retry_backoff_ms = PositiveMillis::new(1).ok(),
-            14 => args.wal_producer_routing_retry_budget_ms = PositiveMillis::new(1).ok(),
-            15 => args.wal_producer_init_retry_timeout_ms = PositiveMillis::new(1).ok(),
-            16 => args.wal_producer_init_max_backoff_ms = PositiveMillis::new(1).ok(),
-            17 => args.wal_producer_transaction_timeout_ms = PositiveMillis::new(1).ok(),
-            18 => args.wal_producer_compression = Some(crabka_client_producer::Compression::Gzip),
-            19 => args.wal_producer_linger_ms = Some(0),
-            20 => args.wal_producer_batch_bytes = Some(1),
+            4 => args.wal_recovery_dns_timeout_ms = PositiveMillis::new(1).ok(),
+            5 => args.wal_recovery_connect_timeout_ms = PositiveMillis::new(1).ok(),
+            6 => args.wal_recovery_request_timeout_ms = PositiveMillis::new(1).ok(),
+            7 => args.wal_topic_replication_factor = PositiveI32::new(1).ok(),
+            8 => args.wal_topic_ensure_timeout_ms = PositiveI32::new(1).ok(),
+            9 => args.wal_admin_connect_timeout_ms = PositiveMillis::new(1).ok(),
+            10 => args.wal_admin_request_timeout_ms = PositiveMillis::new(1).ok(),
+            11 => args.wal_producer_flush_timeout_ms = PositiveMillis::new(1).ok(),
+            12 => args.wal_producer_request_timeout_ms = PositiveMillis::new(1).ok(),
+            13 => args.wal_producer_retries = NonNegativeI32::new(0).ok(),
+            14 => args.wal_producer_retry_backoff_ms = PositiveMillis::new(1).ok(),
+            15 => args.wal_producer_routing_retry_budget_ms = PositiveMillis::new(1).ok(),
+            16 => args.wal_producer_init_retry_timeout_ms = PositiveMillis::new(1).ok(),
+            17 => args.wal_producer_init_max_backoff_ms = PositiveMillis::new(1).ok(),
+            18 => args.wal_producer_transaction_timeout_ms = PositiveMillis::new(1).ok(),
+            19 => args.wal_producer_compression = Some(crabka_client_producer::Compression::Gzip),
+            20 => args.wal_producer_linger_ms = Some(0),
+            21 => args.wal_producer_batch_bytes = Some(1),
             _ => unreachable!("test policy option"),
         }
     }
@@ -9672,6 +9701,8 @@ mod tests {
     fn wal_recovery_read_policy_reaches_shared_recovery_config_helper() {
         let policy = crabka_gres_substrate::RecoveryReadPolicy::new(31, 32, 33, 34)
             .expect("distinctive policy")
+            .with_dns_timeout(37)
+            .expect("distinctive DNS timeout")
             .with_timeouts(35, 36)
             .expect("distinctive timeouts");
         let mut config = SubstrateRuntimeConfig::from_args(&substrate_args())
