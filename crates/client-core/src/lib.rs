@@ -67,7 +67,10 @@ mod version;
 mod mock;
 
 pub use client::{BrokerHandle, Client};
-pub use connection::{ClientDuplex, Connection, ConnectionOptions};
+pub use connection::{
+    ClientDnsTimeout, ClientDuplex, Connection, ConnectionOptions, DEFAULT_CLIENT_CONNECT_TIMEOUT,
+    DEFAULT_CLIENT_DNS_TIMEOUT, DEFAULT_CLIENT_REQUEST_TIMEOUT,
+};
 pub use error::ClientError;
 pub use fetch::{
     DEFAULT_FETCH_RESPONSE_MAX_BYTES, FetchPartitionResult, FetchedHeader, FetchedRecord,
