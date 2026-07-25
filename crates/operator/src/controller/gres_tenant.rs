@@ -2952,10 +2952,20 @@ mod tests {
         let mut obj = tenant();
         obj.metadata.namespace = Some("ns".into());
         obj.metadata.uid = Some("uid".into());
-        let ranges = [GresTenantRangeSpec {
-            range_id: 0,
-            end_key: None,
-        }];
+        let ranges = [
+            GresTenantRangeSpec {
+                range_id: 0,
+                end_key: Some(GresTenantRangeKey {
+                    table_id: 10,
+                    bucket: None,
+                    rowid: 0,
+                }),
+            },
+            GresTenantRangeSpec {
+                range_id: 1,
+                end_key: None,
+            },
+        ];
         let operator_config = ConfigArgs::parse_from(["operator"]).config;
         for (spec, expected) in [
             (
@@ -2973,40 +2983,45 @@ mod tests {
             ),
         ] {
             let compute_policy = spec.effective_policy().expect("compute policy");
-            for range_control_enabled in [false, true] {
-                let deployment = render_deployment(
-                    &obj,
-                    &ranges[0],
-                    &DeploymentRenderConfig {
-                        all_ranges: &ranges,
-                        image: "image",
-                        readiness_probe_period_seconds: 5,
-                        bootstrap: "k:9092",
-                        wal_topic: "__gres_wal.tenant-a.r0",
-                        config_topic: "__gres_cfg.tenant-a",
-                        policy: &crabka_gres_control::RegistryPolicy::default(),
-                        compute_policy,
-                        replicas: 1,
-                        operator_config: &operator_config,
-                        kafka_sasl: false,
-                        range_control_enabled,
-                        range_tls_hash: None,
-                    },
-                )
-                .expect("render deployment");
-                let args = deployment.spec.unwrap().template.spec.unwrap().containers[0]
-                    .args
-                    .clone()
-                    .unwrap();
-                for pair in [
-                    ["--wal-producer-compression", expected[0]],
-                    ["--wal-producer-linger-ms", expected[1]],
-                    ["--wal-producer-batch-bytes", expected[2]],
-                ] {
-                    assert!(
-                        args.windows(2).filter(|window| *window == pair).count() == 1,
-                        "expected {pair:?} exactly once, got: {args:?}"
-                    );
+            for (range_control_enabled, active_ranges) in
+                [(false, &ranges[..1]), (true, &ranges[..])]
+            {
+                for range in active_ranges {
+                    let wal_topic = format!("__gres_wal.tenant-a.r{}", range.range_id);
+                    let deployment = render_deployment(
+                        &obj,
+                        range,
+                        &DeploymentRenderConfig {
+                            all_ranges: active_ranges,
+                            image: "image",
+                            readiness_probe_period_seconds: 5,
+                            bootstrap: "k:9092",
+                            wal_topic: &wal_topic,
+                            config_topic: "__gres_cfg.tenant-a",
+                            policy: &crabka_gres_control::RegistryPolicy::default(),
+                            compute_policy,
+                            replicas: 1,
+                            operator_config: &operator_config,
+                            kafka_sasl: false,
+                            range_control_enabled,
+                            range_tls_hash: None,
+                        },
+                    )
+                    .expect("render deployment");
+                    let args = deployment.spec.unwrap().template.spec.unwrap().containers[0]
+                        .args
+                        .clone()
+                        .unwrap();
+                    for pair in [
+                        ["--wal-producer-compression", expected[0]],
+                        ["--wal-producer-linger-ms", expected[1]],
+                        ["--wal-producer-batch-bytes", expected[2]],
+                    ] {
+                        assert!(
+                            args.windows(2).filter(|window| *window == pair).count() == 1,
+                            "expected {pair:?} exactly once, got: {args:?}"
+                        );
+                    }
                 }
             }
         }

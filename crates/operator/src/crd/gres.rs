@@ -229,7 +229,6 @@ pub struct GresComputeSpec {
 
     /// WAL producer compression codec.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(with = "WalProducerCompression")]
     pub wal_producer_compression: Option<WalProducerCompression>,
 
     /// Delay before sending a partial WAL producer batch, in milliseconds.
@@ -1476,14 +1475,21 @@ mod tests {
         assert!(serde_json::from_str::<GresComputeSpec>(&json).unwrap() == policy);
         assert!(serde_yaml::from_str::<GresComputeSpec>(&yaml).unwrap() == policy);
         assert!(json.contains(r#""walProducerCompression":"zstd""#));
+        assert!(
+            serde_json::from_str::<GresComputeSpec>(r#"{"walProducerCompression":null}"#)
+                .unwrap()
+                .wal_producer_compression
+                .is_none()
+        );
 
         let crd = serde_json::to_value(Gres::crd()).expect("serialize Gres CRD");
         let properties = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
             ["properties"]["compute"]["properties"];
         assert!(
             properties["walProducerCompression"]["enum"]
-                == serde_json::json!(["none", "gzip", "snappy", "lz4", "zstd"])
+                == serde_json::json!(["none", "gzip", "snappy", "lz4", "zstd", null])
         );
+        assert!(properties["walProducerCompression"]["nullable"] == true);
         assert!(properties["walProducerLingerMs"]["minimum"].as_f64() == Some(0.0));
         assert!(properties["walProducerLingerMs"]["maximum"].as_f64() == Some(f64::from(i32::MAX)));
         assert!(properties["walProducerBatchBytes"]["minimum"].as_f64() == Some(1.0));
