@@ -33,6 +33,7 @@ use tracing::Instrument as _;
 
 use crate::{
     accumulator::{Accumulator, AccumulatorMap, AppendResult},
+    builder::init_producer_id_with_retry,
     compression::Compression,
     error::ProducerError,
     partitioner::UniformStickyPartitioner,
@@ -132,6 +133,9 @@ pub struct Producer {
     pub(crate) sender_handle: Option<JoinHandle<()>>,
     pub(crate) transactional_id: Option<String>,
     pub(crate) transaction_timeout_ms: i32,
+    pub(crate) init_retry_timeout: Duration,
+    pub(crate) init_retry_backoff: Duration,
+    pub(crate) init_max_backoff: Duration,
     /// Arc-wrapped so the sender task can share the same state without
     /// additional synchronization structures.
     pub(crate) txn_state: Arc<Mutex<TxnState>>,
@@ -453,13 +457,18 @@ impl Producer {
             .build()
             .await?;
 
-        let resp = coord
-            .send(InitProducerIdRequest {
+        let resp = init_producer_id_with_retry(
+            &coord,
+            InitProducerIdRequest {
                 transactional_id: Some(tid.to_owned()),
                 transaction_timeout_ms: self.transaction_timeout_ms,
                 ..Default::default()
-            })
-            .await?;
+            },
+            self.init_retry_timeout,
+            self.init_retry_backoff,
+            self.init_max_backoff,
+        )
+        .await?;
 
         tracing::Span::current().record("error_code", resp.error_code);
         match resp.error_code {
@@ -747,6 +756,11 @@ impl Producer {
             return rx;
         }
         let mut a = acc.lock().await;
+        if let Err(error) = self.is_active() {
+            let (tx, rx) = oneshot::channel();
+            let _ = tx.send(Err(error));
+            return rx;
+        }
         // try_append currently only ever returns `Appended`; if a future
         // change adds `BatchFull` we want a compile error, so match
         // exhaustively rather than `let ... else`.

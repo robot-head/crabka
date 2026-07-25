@@ -15,7 +15,7 @@ use crabka_protocol::owned::{
     init_producer_id_response::InitProducerIdResponse,
 };
 use dashmap::DashMap;
-use refined_type::rule::{GreaterI32, GreaterU128, MinMaxU128};
+use refined_type::rule::{GreaterI32, MinMaxU128};
 use tokio::sync::{Mutex, Notify, mpsc};
 use tokio_util::sync::CancellationToken;
 
@@ -69,9 +69,9 @@ impl ProducerRetryPolicy {
     ///
     /// # Errors
     ///
-    /// Returns an error for non-positive durations, negative retries,
-    /// protocol timeouts outside `1..=i32::MAX` milliseconds, or an initial
-    /// retry backoff above its cap.
+    /// Returns an error for non-positive durations, retry durations above
+    /// `i32::MAX` milliseconds, negative retries, protocol timeouts that are
+    /// not whole milliseconds, or an initial retry backoff above its cap.
     pub fn new(
         request_timeout: Duration,
         retries: i32,
@@ -167,7 +167,7 @@ impl Default for ProducerRetryPolicy {
 }
 
 fn validated_duration(value: Duration) -> Result<Duration, String> {
-    GreaterU128::<0>::new(value.as_nanos())
+    MinMaxU128::<1, { i32::MAX as u128 * 1_000_000 }>::new(value.as_nanos())
         .map(|_| value)
         .map_err(|error| error.to_string())
 }
@@ -204,12 +204,8 @@ fn build_init_producer_id_request() -> InitProducerIdRequest {
     }
 }
 
-fn retry_deadline_elapsed(start: tokio::time::Instant, timeout: Duration) -> bool {
-    start.elapsed() >= timeout
-}
-
 fn next_backoff(backoff: Duration, max_backoff: Duration) -> Duration {
-    (backoff * 2).min(max_backoff)
+    backoff.saturating_mul(2).min(max_backoff)
 }
 
 fn validated_acks(enable_idempotence: bool, acks: Acks) -> Result<Acks, ProducerError> {
@@ -236,45 +232,53 @@ fn producer_identity_from_init(init: &InitProducerIdResponse) -> Result<(i64, i1
     Ok((init.producer_id, init.producer_epoch))
 }
 
-/// Send `InitProducerId` for an idempotent-only producer, retrying on the
+/// Send `InitProducerId`, retrying on the
 /// cold-coordinator codes (14/15/16) and transient `Disconnected` transport
 /// errors with capped exponential backoff until the deadline elapses.
 ///
 /// Mirrors the consumer crate's `with_coordinator_retry` shape: on deadline it
 /// returns the last response (so the caller's `error_code != 0` handling runs)
-/// or surfaces the transport error if the final attempt disconnected. Idempotent
-/// producers carry no `transactional_id`, so the id is allocated from any broker
-/// — no `FindCoordinator` routing is needed here.
+/// or surfaces the transport error if the final attempt disconnected.
 #[tracing::instrument(level = "info", skip_all, err)]
-async fn init_producer_id(
+pub(crate) async fn init_producer_id_with_retry(
     client: &Client,
+    request: InitProducerIdRequest,
     retry_timeout: Duration,
     initial_backoff: Duration,
     max_backoff: Duration,
 ) -> Result<InitProducerIdResponse, ProducerError> {
-    let start = tokio::time::Instant::now();
+    let deadline = tokio::time::Instant::now()
+        .checked_add(retry_timeout)
+        .ok_or(ProducerError::InvalidConfig(
+            "producer-ID retry timeout is too large",
+        ))?;
     let mut backoff = initial_backoff;
     loop {
-        match client.send(build_init_producer_id_request()).await {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let response = tokio::time::timeout(remaining, client.send(request.clone()))
+            .await
+            .map_err(|_| ProducerError::Client(ClientError::Timeout(retry_timeout)))?;
+        match response {
             Ok(resp) if !is_retriable_coordinator_code(resp.error_code) => return Ok(resp),
             Ok(resp) => {
                 // Cold coordinator: retry until the deadline, then surface the
                 // last response so the caller maps it to ProducerError::Server.
-                if retry_deadline_elapsed(start, retry_timeout) {
+                if tokio::time::Instant::now() >= deadline {
                     return Ok(resp);
                 }
             }
-            Err(ClientError::Disconnected) => {
+            Err(error @ ClientError::Disconnected) => {
                 // Transient transport failure (e.g. the broker dropped the
                 // connection while still loading): retry until the deadline,
-                // then surface the disconnect.
-                if retry_deadline_elapsed(start, retry_timeout) {
-                    return Err(ProducerError::Client(ClientError::Disconnected));
+                // then surface the final transport error.
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(ProducerError::Client(error));
                 }
             }
             Err(e) => return Err(ProducerError::Client(e)),
         }
-        tokio::time::sleep(backoff).await;
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        tokio::time::sleep(backoff.min(remaining)).await;
         backoff = next_backoff(backoff, max_backoff);
     }
 }
@@ -363,8 +367,9 @@ impl Producer {
         // backoff rather than surfacing the first error. `init_producer_id`
         // does that retry and returns the final response.
         let (producer_id, producer_epoch) = if enable_idempotence {
-            let init = init_producer_id(
+            let init = init_producer_id_with_retry(
                 &client,
+                build_init_producer_id_request(),
                 retry_policy.init_retry_timeout(),
                 retry_backoff,
                 retry_policy.init_max_backoff(),
@@ -448,6 +453,9 @@ impl Producer {
             sender_handle: Some(sender_handle),
             transactional_id,
             transaction_timeout_ms: retry_policy.transaction_timeout_ms(),
+            init_retry_timeout: retry_policy.init_retry_timeout(),
+            init_retry_backoff: retry_policy.retry_backoff(),
+            init_max_backoff: retry_policy.init_max_backoff(),
             txn_state,
             txn_recovery_required,
             txn_recovery_generation,
@@ -686,6 +694,18 @@ mod security_arg_tests {
                 .is_err()
             );
         }
+        assert2::assert!(
+            ProducerRetryPolicy::new(
+                valid[0],
+                0,
+                valid[1],
+                Duration::MAX,
+                valid[3],
+                valid[4],
+                valid[5],
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -695,12 +715,8 @@ mod security_arg_tests {
         assert2::assert!((req.transactional_id.as_ref(), req.transaction_timeout_ms) == (None, 0));
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn retry_helpers_preserve_deadline_and_backoff_boundaries() {
-        let start = tokio::time::Instant::now();
-        assert2::assert!(!retry_deadline_elapsed(start, Duration::from_secs(30)));
-        tokio::time::advance(Duration::from_secs(30)).await;
-        assert2::assert!(retry_deadline_elapsed(start, Duration::from_secs(30)));
+    #[test]
+    fn retry_backoff_doubles_and_caps() {
         for (_name, current, want) in [
             (
                 "double below cap",
@@ -843,6 +859,34 @@ mod security_arg_tests {
             ProducerError::Server(COORDINATOR_LOAD_IN_PROGRESS)
         ));
         assert2::assert!(attempts.load(Ordering::Relaxed) >= 1);
+    }
+
+    #[tokio::test]
+    async fn init_retry_timeout_bounds_an_unresponsive_request() {
+        let mock = MockBroker::start(|api_key, _version, _corr_id, _body| {
+            (api_key == api_versions_request::API_KEY)
+                .then(|| encode_v0(&ApiVersionsResponse::default()))
+        })
+        .await;
+
+        let build = Producer::builder()
+            .bootstrap(mock.addr.to_string())
+            .request_timeout(Duration::from_secs(5))
+            .retry_backoff(Duration::from_millis(1))
+            .init_max_backoff(Duration::from_millis(1))
+            .init_retry_timeout(Duration::from_millis(10))
+            .build();
+        let error = tokio::time::timeout(Duration::from_millis(200), build)
+            .await
+            .expect("init retry timeout must bound an in-flight request")
+            .expect_err("unresponsive InitProducerId must time out");
+
+        mock.stop();
+        assert2::assert!(matches!(
+            error,
+            ProducerError::Client(ClientError::Timeout(timeout))
+                if timeout == Duration::from_millis(10)
+        ));
     }
 
     #[tokio::test]
