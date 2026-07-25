@@ -80,6 +80,16 @@ pub(crate) struct ProducerIdentity {
     pub epoch: i16,
 }
 
+fn wake_sender_after_append(
+    wake_tx: &tokio::sync::mpsc::Sender<()>,
+    linger: Duration,
+    accumulator: &Accumulator,
+) {
+    if linger.is_zero() || !accumulator.ready.is_empty() {
+        let _ = wake_tx.try_send(());
+    }
+}
+
 // accumulators map is inherently complex
 pub struct Producer {
     pub(crate) client: Client,
@@ -780,7 +790,7 @@ impl Producer {
                 rx
             }
         };
-        let _ = self.wake_tx.try_send(());
+        wake_sender_after_append(&self.wake_tx, self.linger, &a);
         rx
     }
 
@@ -977,9 +987,12 @@ fn build_topics_payload(offsets: &[((String, i32), i64)]) -> Vec<TxnOffsetCommit
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::{
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
 
-    use bytes::BytesMut;
+    use bytes::{Bytes, BytesMut};
     use crabka_client_core::MockBroker;
     use crabka_protocol::{
         Decode, Encode,
@@ -991,9 +1004,35 @@ mod tests {
         },
     };
 
-    use super::Producer;
+    use super::{Producer, wake_sender_after_append};
+    use crate::accumulator::Accumulator;
 
     const CLIENT_ID: &str = "producer-test";
+
+    #[test]
+    fn append_wakes_only_for_zero_linger_or_a_ready_batch() {
+        let (wake_tx, mut wake_rx) = tokio::sync::mpsc::channel(4);
+
+        let mut coalesced = Accumulator::new(1024);
+        let _ = coalesced.try_append(None, Some(Bytes::from_static(b"a")), vec![], 0, None);
+        let _ = coalesced.try_append(None, Some(Bytes::from_static(b"b")), vec![], 0, None);
+        wake_sender_after_append(&wake_tx, Duration::from_millis(10), &coalesced);
+        assert_eq!(
+            wake_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        );
+
+        let mut rollover = Accumulator::new(20);
+        let _ = rollover.try_append(None, Some(Bytes::from_static(b"a")), vec![], 0, None);
+        let _ = rollover.try_append(None, Some(Bytes::from_static(b"b")), vec![], 0, None);
+        wake_sender_after_append(&wake_tx, Duration::from_millis(10), &rollover);
+        assert_eq!(wake_rx.try_recv(), Ok(()));
+
+        let mut immediate = Accumulator::new(1024);
+        let _ = immediate.try_append(None, Some(Bytes::from_static(b"a")), vec![], 0, None);
+        wake_sender_after_append(&wake_tx, Duration::ZERO, &immediate);
+        assert_eq!(wake_rx.try_recv(), Ok(()));
+    }
 
     fn encode_v0(resp: &impl Encode) -> Vec<u8> {
         let mut buf = BytesMut::new();
