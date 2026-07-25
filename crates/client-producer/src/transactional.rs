@@ -179,9 +179,12 @@ pub struct EndTransactionError<T> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicI16, AtomicU16, Ordering},
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicI16, AtomicU16, Ordering},
+        },
+        time::Duration,
     };
 
     use bytes::BytesMut;
@@ -214,6 +217,59 @@ mod tests {
     async fn transactional_producer(end_txn_error: Arc<AtomicI16>) -> (MockBroker, Producer) {
         transactional_producer_with_end_txn_timeout(end_txn_error, Arc::new(AtomicBool::new(false)))
             .await
+    }
+
+    #[tokio::test]
+    async fn init_transactions_retries_with_configured_policy() {
+        let port_cell = Arc::new(AtomicU16::new(0));
+        let handler_port = Arc::clone(&port_cell);
+        let attempts = Arc::new(AtomicU16::new(0));
+        let observed = Arc::clone(&attempts);
+        let mock = MockBroker::start(move |api_key, _version, _corr_id, _body| {
+            if api_key == api_versions_request::API_KEY {
+                return Some(encode_v0(&ApiVersionsResponse::default()));
+            }
+            if api_key == find_coordinator_request::API_KEY {
+                return Some(encode_v0(&FindCoordinatorResponse {
+                    error_code: 0,
+                    node_id: 1,
+                    host: "127.0.0.1".into(),
+                    port: i32::from(handler_port.load(Ordering::SeqCst)),
+                    ..Default::default()
+                }));
+            }
+            if api_key == init_producer_id_request::API_KEY {
+                let attempt = observed.fetch_add(1, Ordering::SeqCst);
+                return Some(encode_v0(&InitProducerIdResponse {
+                    error_code: if attempt == 0 { 14 } else { 0 },
+                    producer_id: 7,
+                    producer_epoch: 3,
+                    ..Default::default()
+                }));
+            }
+            None
+        })
+        .await;
+        port_cell.store(mock.addr.port(), Ordering::SeqCst);
+
+        let producer = Producer::builder()
+            .bootstrap(mock.addr.to_string())
+            .enable_idempotence(false)
+            .transactional_id("test-txn")
+            .request_timeout(Duration::from_millis(100))
+            .retry_backoff(Duration::from_millis(1))
+            .init_retry_timeout(Duration::from_millis(100))
+            .init_max_backoff(Duration::from_millis(1))
+            .build()
+            .await
+            .expect("producer connects");
+
+        producer
+            .init_transactions()
+            .await
+            .expect("cold coordinator retry succeeds");
+        assert2::assert!(attempts.load(Ordering::SeqCst) == 2);
+        mock.stop();
     }
 
     async fn transactional_producer_with_end_txn_timeout(
@@ -263,7 +319,7 @@ mod tests {
             .bootstrap(mock.addr.to_string())
             .enable_idempotence(false)
             .transactional_id("test-txn")
-            .request_timeout(std::time::Duration::from_millis(10))
+            .request_timeout(std::time::Duration::from_millis(100))
             .build()
             .await
             .expect("producer connects to the mock");

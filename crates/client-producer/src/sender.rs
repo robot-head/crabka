@@ -244,7 +244,9 @@ pub(crate) async fn run(mut cfg: SenderConfig) {
     // cannot pin the task forever; whatever remains past the budget resolves
     // its acknowledgements through the drain's terminal-failure paths or drops
     // as cancellation exactly as before.
-    let settle_deadline = Instant::now() + cfg.routing_retry_budget;
+    let settle_deadline = Instant::now()
+        .checked_add(cfg.routing_retry_budget)
+        .unwrap_or_else(Instant::now);
     loop {
         drain_once(&mut cfg, &mut state).await;
         let mut settled =
@@ -327,6 +329,10 @@ struct PreparedBatch {
     fields(batches = tracing::field::Empty),
 )]
 async fn drain_once(cfg: &mut SenderConfig, state: &mut PipelineState) {
+    if cfg.state.load(Ordering::Acquire) != STATE_ACTIVE {
+        fence(cfg, state, Vec::new());
+        return;
+    }
     let now = Instant::now();
 
     // 1. Resends first: each partition's single failed batch must precede any
@@ -335,13 +341,12 @@ async fn drain_once(cfg: &mut SenderConfig, state: &mut PipelineState) {
     //    (their in-flight slot was counted at first drain, so `finish_in_flight`
     //    once).
     fail_recovered_retry_slots(cfg, &mut state.retry);
-    let (mut to_send, expired) = collect_retries(&mut state.retry, now, cfg.routing_retry_budget);
-    for pb in expired {
-        fail_batch(
-            pb.records,
-            ProducerError::Server(codes::NOT_LEADER_OR_FOLLOWER),
-        );
-        finish_in_flight(cfg);
+    let (mut to_send, mut expired) =
+        collect_retries(&mut state.retry, now, cfg.routing_retry_budget);
+    if !expired.is_empty() {
+        expired.append(&mut to_send);
+        fence(cfg, state, expired);
+        return;
     }
     fail_recovered_batches(cfg, &mut to_send);
 
@@ -663,7 +668,7 @@ async fn send_batches(cfg: &SenderConfig, state: &mut PipelineState, to_send: Ve
             // batch is still outstanding, so its in-flight slot stays counted —
             // no `finish_in_flight` here.
             BatchVerdict::Retry if take_retry(&mut pb, cfg.retries) => {
-                terminal_fail_batch(cfg, pb, codes::NOT_LEADER_OR_FOLLOWER);
+                fenced = Some(vec![pb]);
             }
             BatchVerdict::Retry => {
                 tracing::debug!(
@@ -773,7 +778,7 @@ fn fence(cfg: &SenderConfig, state: &mut PipelineState, to_fail: Vec<PreparedBat
 /// the configured `retry_backoff`. Pulled out so the offset direction (the
 /// deadline must be in the *future*) is unit-testable.
 fn backoff_deadline(now: Instant, retry_backoff: Duration) -> Instant {
-    now + retry_backoff
+    now.checked_add(retry_backoff).unwrap_or(now)
 }
 
 /// Send a single batch as its own single-partition `ProduceRequest`, resolving
@@ -1866,6 +1871,31 @@ mod harness {
         max_in_flight: usize,
         linger: Duration,
     ) -> Harness {
+        spawn_sender_with_retries(transport, max_in_flight, linger, i32::MAX)
+    }
+
+    fn spawn_sender_with_retries(
+        transport: Arc<MockTransport>,
+        max_in_flight: usize,
+        linger: Duration,
+        retries: i32,
+    ) -> Harness {
+        spawn_sender_with_policy(
+            transport,
+            max_in_flight,
+            linger,
+            retries,
+            Duration::from_secs(30),
+        )
+    }
+
+    fn spawn_sender_with_policy(
+        transport: Arc<MockTransport>,
+        max_in_flight: usize,
+        linger: Duration,
+        retries: i32,
+        routing_retry_budget: Duration,
+    ) -> Harness {
         let accumulators: AccumulatorMap = Arc::new(DashMap::new());
         let next_seq: Arc<DashMap<(String, i32), i32>> = Arc::new(DashMap::new());
         let (wake_tx, wake_rx) = tokio::sync::mpsc::channel(64);
@@ -1890,9 +1920,9 @@ mod harness {
             compression: Compression::None,
             linger,
             request_timeout_ms: 5_000,
-            retries: i32::MAX,
+            retries,
             retry_backoff: Duration::from_millis(1),
-            routing_retry_budget: Duration::from_secs(30),
+            routing_retry_budget,
             max_in_flight,
             metadata_cache: Arc::clone(&metadata_cache),
             partition_leaders: Arc::clone(&partition_leaders),
@@ -2468,6 +2498,60 @@ mod harness {
         .await;
         assert2::assert!(drained.is_ok());
 
+        shutdown(h).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn exhausted_retry_fences_before_a_sequence_gap_can_be_sent() {
+        let transport = MockTransport::new(Duration::ZERO);
+        transport.inject_code_once(0, codes::NOT_LEADER_OR_FOLLOWER);
+        let h = spawn_sender_with_retries(transport.clone(), 1, Duration::from_millis(1), 0);
+
+        let first = produce_burst(&h, "t", 0, 1).await.pop().expect("first ack");
+        let first_error = tokio::time::timeout(Duration::from_secs(1), first)
+            .await
+            .expect("first ack resolves")
+            .expect("first sender remains")
+            .expect_err("exhausted batch must fail");
+        assert2::assert!(matches!(first_error, ProducerError::FencedProducer));
+        assert2::assert!(h.state.load(Ordering::Acquire) == STATE_FENCED);
+
+        let second = produce_burst(&h, "t", 0, 1)
+            .await
+            .pop()
+            .expect("second ack");
+        let second_error = tokio::time::timeout(Duration::from_secs(1), second)
+            .await
+            .expect("second ack resolves")
+            .expect("second sender remains")
+            .expect_err("fenced producer rejects later records");
+        assert2::assert!(matches!(second_error, ProducerError::FencedProducer));
+        assert2::assert!(transport.send_count() == 1);
+
+        shutdown(h).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn exhausted_routing_budget_fences_the_producer() {
+        let transport = MockTransport::new(Duration::ZERO);
+        transport.inject_code_once(0, codes::NOT_LEADER_OR_FOLLOWER);
+        let h = spawn_sender_with_policy(
+            transport,
+            1,
+            Duration::from_millis(1),
+            i32::MAX,
+            Duration::from_millis(1),
+        );
+
+        let ack = produce_burst(&h, "t", 0, 1).await.pop().expect("ack");
+        let error = tokio::time::timeout(Duration::from_secs(1), ack)
+            .await
+            .expect("ack resolves")
+            .expect("sender remains")
+            .expect_err("expired batch must fail");
+
+        assert2::assert!(matches!(error, ProducerError::FencedProducer));
+        assert2::assert!(h.state.load(Ordering::Acquire) == STATE_FENCED);
         shutdown(h).await;
     }
 
