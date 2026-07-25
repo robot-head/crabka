@@ -258,6 +258,13 @@ spec:
                     - null
                     nullable: true
                     type: string
+                  walProducerFlushTimeoutMs:
+                    description: Deadline for flushing all buffered and in-flight WAL records.
+                    format: uint64
+                    maximum: 2147483647.0
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
                   walProducerInitMaxBackoffMs:
                     description: WAL producer-ID initialization backoff cap.
                     format: uint64

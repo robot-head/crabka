@@ -4,6 +4,7 @@
 
 use std::time::Duration;
 
+use crabka_client_producer::ProducerFlushTimeout;
 use crabka_gres_control::{
     CheckpointPartBytes, DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS,
     DEFAULT_CHECKPOINT_POLL_INTERVAL_MS, DEFAULT_IDLE_SUSPEND_POLL_INTERVAL_MS,
@@ -192,6 +193,11 @@ pub struct GresComputeSpec {
     #[schemars(range(min = 1))]
     pub wal_recovery_request_timeout_ms: Option<u64>,
 
+    /// Deadline for flushing all buffered and in-flight WAL records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 2_147_483_647))]
+    pub wal_producer_flush_timeout_ms: Option<u64>,
+
     /// Timeout for WAL producer broker requests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1, max = 2_147_483_647))]
@@ -282,6 +288,7 @@ pub(crate) struct EffectiveGresComputePolicy {
     pub(crate) wal_recovery_empty_fetch_retries: PositiveUsize,
     pub(crate) wal_recovery_connect_timeout_ms: PositiveMillis,
     pub(crate) wal_recovery_request_timeout_ms: PositiveMillis,
+    pub(crate) wal_producer_flush_timeout: ProducerFlushTimeout,
     pub(crate) wal_producer_retry_policy: crabka_client_producer::ProducerRetryPolicy,
     pub(crate) wal_producer_throughput_policy: crabka_client_producer::ProducerThroughputPolicy,
     pub(crate) wal_topic_replication_factor: PositiveI32,
@@ -359,6 +366,12 @@ impl GresComputeSpec {
                     .unwrap_or(DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT_MS),
             )
             .map_err(|error| format!("spec.compute.walRecoveryRequestTimeoutMs: {error}"))?,
+            wal_producer_flush_timeout: ProducerFlushTimeout::new(Duration::from_millis(
+                self.wal_producer_flush_timeout_ms.unwrap_or_else(|| {
+                    duration_millis(ProducerFlushTimeout::default().duration())
+                }),
+            ))
+            .map_err(|error| format!("spec.compute.walProducerFlushTimeoutMs: {error}"))?,
             wal_producer_retry_policy: self.effective_wal_producer_retry_policy()?,
             wal_producer_throughput_policy: self.effective_wal_producer_throughput_policy()?,
             wal_topic_replication_factor: PositiveI32::new(
@@ -1447,6 +1460,51 @@ mod tests {
                 )
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn wal_producer_flush_timeout_has_exact_schema_default_override_and_errors() {
+        let crd = serde_json::to_value(Gres::crd()).expect("serialize Gres CRD");
+        let field = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
+            ["properties"]["compute"]["properties"]["walProducerFlushTimeoutMs"];
+        assert!(field["type"] == "integer");
+        assert!(field["format"] == "uint64");
+        assert!(field["minimum"].as_f64() == Some(1.0));
+        assert!(field["maximum"].as_f64() == Some(f64::from(i32::MAX)));
+
+        let default = GresComputeSpec::default()
+            .effective_policy()
+            .expect("default compute policy")
+            .wal_producer_flush_timeout;
+        assert!(default.milliseconds() == 50_000);
+
+        let configured = GresComputeSpec {
+            wal_producer_flush_timeout_ms: Some(12_345),
+            ..GresComputeSpec::default()
+        }
+        .effective_policy()
+        .expect("configured compute policy")
+        .wal_producer_flush_timeout;
+        assert!(configured.milliseconds() == 12_345);
+
+        for (value, expected) in [
+            (
+                0,
+                "spec.compute.walProducerFlushTimeoutMs: producer flush timeout: [the value must be equal to 1, but received 0 || the value must be greater than 1, but received 0]",
+            ),
+            (
+                i32::MAX as u64 + 1,
+                "spec.compute.walProducerFlushTimeoutMs: producer flush timeout: [the value must be equal to 2147483647, but received 2147483648 || the value must be less than 2147483647, but received 2147483648]",
+            ),
+        ] {
+            let error = GresComputeSpec {
+                wal_producer_flush_timeout_ms: Some(value),
+                ..GresComputeSpec::default()
+            }
+            .effective_policy()
+            .expect_err("boundary must fail");
+            assert!(error == expected, "got: {error}");
+        }
     }
 
     #[test]
