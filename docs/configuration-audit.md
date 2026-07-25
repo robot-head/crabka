@@ -1448,3 +1448,55 @@ match is paused-time test input, and no 1,000-attempt loop remains.
   each other before the checked-in Gres CRD was updated.
 - `cargo fmt --all -- --check` and `git diff --check` passed throughout the
   implementation tasks.
+
+## Gres WAL Recovery DNS Timeout Policy
+
+Raw committed-WAL hostname resolution now has one named
+`DEFAULT_WAL_RECOVERY_DNS_TIMEOUT_MS` default of 10,000 milliseconds.
+`RecoveryReadPolicy::with_dns_timeout` validates the value through the existing
+`refined_type`-backed positive-duration helper. Standalone Gres accepts
+`--wal-recovery-dns-timeout-ms` and
+`CRABKA_GRES_WAL_RECOVERY_DNS_TIMEOUT_MS`; the fleet API accepts optional
+`spec.compute.walRecoveryDnsTimeoutMs`, whose generated CRD schema has
+`minimum: 1`.
+
+The effective value follows the existing
+`RecoveryReadPolicy` -> `LiveRecoveryConfig` -> `open_wal_connection` path.
+`SubstrateRuntimeConfig` resolves CLI-over-environment precedence into the
+policy, `live_recovery_config` installs that policy on every raw WAL recovery
+configuration, and `open_wal_connection` applies `dns_timeout()` only around
+`tokio::net::lookup_host`. TCP establishment remains independently bounded by
+the existing connect timeout.
+
+The focused scan found 91 lines across 25 files: 43 production or checked-in
+schema references, 45 test or harness references, and 3 prior audit references.
+Of the 43 production/schema references, 30 define, propagate, render, or consume
+this WAL policy. The remaining 13 belong to unresolved generic client
+bootstrap/pool resolution, client-admin, client-streams, Gres FDW, and Raft;
+this slice does not cover them. The only raw WAL `lookup_host` call is the one
+in `open_wal_connection`, and it is bounded by
+`RecoveryReadPolicy::dns_timeout`.
+
+### Adjacent Pending Policy
+
+This closes only raw committed-WAL DNS resolution. The next coherent unresolved
+owner is generic Kafka client DNS resolution in
+`crates/client-core/src/bootstrap.rs` and `crates/client-core/src/pool.rs`,
+where initial bootstrap and advertised-broker lookups currently have no
+independently audited deadline. Client-admin, client-streams, Gres FDW, and
+Raft lookups remain separate visible owners. The repository-wide hardcoded
+operational-value audit remains active.
+
+### Gres WAL Recovery DNS Timeout Evidence
+
+On 2026-07-25 `tools/audit-runtime-values.sh` reported 6,138 lines across 1,048
+files. The focused
+`rg -n "lookup_host|DNS lookup|dns[_-]timeout|DnsTimeout|WAL_RECOVERY_DNS_TIMEOUT|wal-recovery-dns-timeout|walRecoveryDnsTimeout" crates deploy/crds docs/configuration-audit.md`
+search produced the 91-line classification above.
+
+- `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo test -p crabka-gres-substrate wal_dns_lookup --lib` passed all three focused tests. The paused-time pending-resolver case stopped at the exact configured 37-millisecond deadline; success, resolver-error, and empty-result behavior also passed without external DNS.
+- `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo test -p crabka-gres-substrate -p crabka-gres -p crabka-operator --all-targets` reported 1,369 passing test results, zero failures, and zero ignored tests.
+- `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo clippy -p crabka-gres-substrate -p crabka-gres -p crabka-operator --all-targets -- -D warnings` passed.
+- `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo run -q -p crabka-gres -- --help | rg -- '--wal-recovery-dns-timeout-ms'` displayed the exact standalone flag.
+- `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo fmt --all -- --check` and `git diff --check` passed.
+- Two fresh `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo run -q -p crabka-operator -- gen-crds <temporary-directory>` generations each produced nine files and matched each other and `deploy/crds` exactly.
