@@ -47,6 +47,8 @@ pub const DEFAULT_PRODUCER_BATCH_BYTES: usize = 16 * 1024;
 pub const DEFAULT_PRODUCER_MAX_IN_FLIGHT: usize = 5;
 /// Default producer request timeout.
 pub const DEFAULT_PRODUCER_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default deadline for flushing all buffered and in-flight records.
+pub const DEFAULT_PRODUCER_FLUSH_TIMEOUT: Duration = Duration::from_secs(50);
 /// Default retries after a batch's initial send.
 pub const DEFAULT_PRODUCER_RETRIES: i32 = i32::MAX;
 /// Default producer retry backoff.
@@ -59,6 +61,38 @@ pub const DEFAULT_PRODUCER_INIT_RETRY_TIMEOUT: Duration = Duration::from_secs(30
 pub const DEFAULT_PRODUCER_INIT_MAX_BACKOFF: Duration = Duration::from_secs(1);
 /// Default transaction timeout.
 pub const DEFAULT_PRODUCER_TRANSACTION_TIMEOUT: Duration = Duration::from_mins(1);
+
+/// Validated deadline for flushing all buffered and in-flight records.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProducerFlushTimeout(Duration);
+
+impl ProducerFlushTimeout {
+    /// Validate a producer flush timeout.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the timeout is zero, fractional milliseconds, or
+    /// exceeds `i32::MAX` milliseconds.
+    pub fn new(value: Duration) -> Result<Self, String> {
+        validated_protocol_duration(value, "producer flush timeout").map(Self)
+    }
+
+    #[must_use]
+    pub const fn duration(self) -> Duration {
+        self.0
+    }
+
+    #[must_use]
+    pub fn milliseconds(self) -> i32 {
+        protocol_milliseconds(self.0)
+    }
+}
+
+impl Default for ProducerFlushTimeout {
+    fn default() -> Self {
+        Self::new(DEFAULT_PRODUCER_FLUSH_TIMEOUT).expect("default producer flush timeout is valid")
+    }
+}
 
 /// Validated producer batching and compression policy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -411,6 +445,7 @@ impl Producer {
         #[builder(default = DEFAULT_PRODUCER_LINGER)] linger: Duration,
         #[builder(default = DEFAULT_PRODUCER_BATCH_BYTES)] batch_size: usize,
         #[builder(default = DEFAULT_PRODUCER_REQUEST_TIMEOUT)] request_timeout: Duration,
+        #[builder(default = DEFAULT_PRODUCER_FLUSH_TIMEOUT)] flush_timeout: Duration,
         #[builder(default = DEFAULT_PRODUCER_RETRIES)] retries: i32,
         #[builder(default = DEFAULT_PRODUCER_RETRY_BACKOFF)] retry_backoff: Duration,
         #[builder(default = DEFAULT_PRODUCER_ROUTING_RETRY_BUDGET)] routing_retry_budget: Duration,
@@ -447,6 +482,8 @@ impl Producer {
         let retries = retry_policy.retries();
         let retry_backoff = retry_policy.retry_backoff();
         let routing_retry_budget = retry_policy.routing_retry_budget();
+        let flush_timeout =
+            ProducerFlushTimeout::new(flush_timeout).map_err(ProducerError::InvalidConfig)?;
 
         // Validate config: idempotence forces acks=All, and acks=Zero is
         // incompatible with idempotence.
@@ -547,6 +584,7 @@ impl Producer {
             batch_size,
             linger,
             request_timeout,
+            flush_timeout,
             max_in_flight: max_in_flight_per_connection,
             metadata_cache,
             partition_leaders,
@@ -675,6 +713,38 @@ mod security_arg_tests {
                 17,
             )
         );
+    }
+
+    #[test]
+    fn producer_flush_timeout_defaults_and_distinct_values_are_exact() {
+        assert_eq!(
+            (
+                ProducerFlushTimeout::default().duration(),
+                ProducerFlushTimeout::default().milliseconds(),
+            ),
+            (Duration::from_secs(50), 50_000),
+        );
+
+        let timeout =
+            ProducerFlushTimeout::new(Duration::from_millis(11)).expect("distinct timeout");
+        assert_eq!(
+            (timeout.duration(), timeout.milliseconds()),
+            (Duration::from_millis(11), 11),
+        );
+    }
+
+    #[test]
+    fn producer_flush_timeout_rejects_invalid_protocol_durations() {
+        for timeout in [
+            Duration::ZERO,
+            Duration::from_nanos(1),
+            Duration::from_millis(i32::MAX as u64 + 1),
+        ] {
+            assert!(
+                ProducerFlushTimeout::new(timeout).is_err(),
+                "{timeout:?} must be rejected"
+            );
+        }
     }
 
     #[test]
@@ -1142,6 +1212,30 @@ mod security_arg_tests {
             let message = error.to_string();
             assert2::assert!(message == expected);
         }
+    }
+
+    #[tokio::test]
+    async fn producer_builder_rejects_flush_timeout_before_connection_io() {
+        macro_rules! invalid {
+            ($setter:ident, $value:expr, $field:literal) => {
+                let error = Producer::builder()
+                    .bootstrap("127.0.0.1:1")
+                    .$setter($value)
+                    .build()
+                    .await
+                    .expect_err("invalid flush timeout must fail before connection I/O");
+                assert!(
+                    matches!(
+                        error,
+                        ProducerError::InvalidConfig(ref message) if message.starts_with($field)
+                    ),
+                    "{error:?} does not name {:?}",
+                    $field
+                );
+            };
+        }
+
+        invalid!(flush_timeout, Duration::ZERO, "producer flush timeout");
     }
 
     #[tokio::test]
