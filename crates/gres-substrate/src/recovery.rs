@@ -7,7 +7,7 @@ use crabka_client_core::{
     Connection, ConnectionOptions, IsolatedFetch, fetch_partition_with_isolation_progress,
     security::ClientSecurity,
 };
-use crabka_client_producer::{Acks, Producer};
+use crabka_client_producer::{Acks, Producer, ProducerRetryPolicy};
 use crabka_gres_ranges::{RangeId, TenantName};
 use crabka_pgkv::{Kv, RestoreKv};
 use crabka_protocol::{
@@ -199,6 +199,7 @@ pub struct LiveRecoveryConfig {
     pub advertised_endpoint: Option<String>,
     read_policy: RecoveryReadPolicy,
     wal_admin_policy: WalAdminPolicy,
+    producer_retry_policy: ProducerRetryPolicy,
     /// Noncanonical identity used while a recovered range is staged and must not fence serving.
     staging_identity: Option<String>,
     replay_seed: Option<(i64, u64)>,
@@ -237,6 +238,7 @@ impl LiveRecoveryConfig {
             advertised_endpoint: None,
             read_policy: RecoveryReadPolicy::default(),
             wal_admin_policy: WalAdminPolicy::default(),
+            producer_retry_policy: ProducerRetryPolicy::default(),
             staging_identity: None,
             replay_seed: None,
         }
@@ -266,6 +268,22 @@ impl LiveRecoveryConfig {
     #[must_use]
     pub const fn wal_admin_policy(&self) -> WalAdminPolicy {
         self.wal_admin_policy
+    }
+
+    /// Override WAL producer retry and transaction timing.
+    #[must_use]
+    pub fn with_producer_retry_policy(
+        mut self,
+        producer_retry_policy: ProducerRetryPolicy,
+    ) -> Self {
+        self.producer_retry_policy = producer_retry_policy;
+        self
+    }
+
+    /// Return WAL producer retry and transaction timing.
+    #[must_use]
+    pub const fn producer_retry_policy(&self) -> ProducerRetryPolicy {
+        self.producer_retry_policy
     }
 
     /// Use checkpoint restore before committed WAL tail replay.
@@ -575,7 +593,14 @@ async fn recover_live_for_range_inner(
             .bootstrap(bootstrap_addrs[0].clone())
             .client_id(config.client_id())
             .acks(Acks::All)
+            .request_timeout(config.producer_retry_policy.request_timeout())
+            .retries(config.producer_retry_policy.retries())
+            .retry_backoff(config.producer_retry_policy.retry_backoff())
+            .routing_retry_budget(config.producer_retry_policy.routing_retry_budget())
+            .init_retry_timeout(config.producer_retry_policy.init_retry_timeout())
+            .init_max_backoff(config.producer_retry_policy.init_max_backoff())
             .transactional_id(config.transactional_id())
+            .transaction_timeout(config.producer_retry_policy.transaction_timeout())
             .maybe_security(config.security.clone())
             .build()
             .await
@@ -1590,6 +1615,34 @@ mod tests {
         let replacement = WalAdminPolicy::new(11, 22, 33, 44).expect("valid policy");
         assert_eq!(
             config.with_wal_admin_policy(replacement).wal_admin_policy(),
+            replacement
+        );
+    }
+
+    #[test]
+    fn producer_retry_policy_defaults_and_replaces_in_live_config() {
+        let tenant = TenantName::parse("tenant-a").expect("tenant");
+        let config =
+            LiveRecoveryConfig::new("localhost:9092", tenant.clone(), RangeId::new(7), None);
+        assert_eq!(
+            config.producer_retry_policy(),
+            crabka_client_producer::ProducerRetryPolicy::default()
+        );
+
+        let replacement = crabka_client_producer::ProducerRetryPolicy::new(
+            Duration::from_millis(31),
+            32,
+            Duration::from_millis(33),
+            Duration::from_millis(34),
+            Duration::from_millis(35),
+            Duration::from_millis(36),
+            Duration::from_millis(37),
+        )
+        .expect("valid policy");
+        assert_eq!(
+            LiveRecoveryConfig::new("localhost:9092", tenant, RangeId::new(7), None)
+                .with_producer_retry_policy(replacement)
+                .producer_retry_policy(),
             replacement
         );
     }

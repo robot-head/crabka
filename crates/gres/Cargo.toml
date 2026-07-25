@@ -33,6 +33,7 @@ crabka-gres-substrate = { path = "../gres-substrate" }
 crabka-object-store = { version = "0.3.8", path = "../object-store" }
 crabka-client-admin = { version = "0.3.9", path = "../client-admin" }
 crabka-client-core = { version = "0.3.9", path = "../client-core" }
+crabka-client-producer = { version = "0.3.9", path = "../client-producer" }
 crabka-protocol = { version = "0.3.9", path = "../protocol", default-features = false }
 crabka-security = { path = "../security" }
 bytes = { workspace = true }
@@ -45,6 +46,7 @@ rustls = { workspace = true }
 tokio-rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
 rand = { workspace = true }
+refined_type = { workspace = true }
 sha2 = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
@@ -57,7 +59,6 @@ async-trait = { workspace = true }
 assert2 = { workspace = true }
 bytes = { workspace = true }
 crabka-broker = { path = "../broker" }
-crabka-client-producer = { path = "../client-producer" }
 crabka-gres-control = { path = "../gres-control" }
 crabka-pgmvcc = { path = "../pgmvcc" }
 crabka-pgtypes = { path = "../pgtypes" }
