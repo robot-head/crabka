@@ -9806,9 +9806,9 @@ dependencies = [
 
 [[package]]
 name = "playwright-rs"
-version = "0.14.1"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3317d37f816d9fbd550ba155a146068575a0c97e5af969f5d0895199344fa0b5"
+checksum = "60aa6dc029f71f66d58c6681ae6ff3229416af160c1fbbe70ff46993128915b1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -9821,12 +9821,13 @@ dependencies = [
  "parking_lot",
  "playwright-rs-macros",
  "regex",
+ "rustls",
  "serde",
  "serde_json",
  "tar",
  "thiserror 2.0.19",
  "tokio",
- "tokio-tungstenite 0.29.0",
+ "tokio-tungstenite 0.30.0",
  "tracing",
  "ureq",
  "url",
@@ -13800,9 +13801,7 @@ checksum = "8f72a05e828585856dacd553fba484c242c46e391fb0e58917c942ee9202915c"
 dependencies = [
  "futures-util",
  "log",
- "native-tls",
  "tokio",
- "tokio-native-tls",
  "tungstenite 0.29.0",
 ]
 
@@ -13814,7 +13813,9 @@ checksum = "17a073bfed563fa236697a068031408a93cd9522e08abf9933ead3e73411bd71"
 dependencies = [
  "futures-util",
  "log",
+ "native-tls",
  "tokio",
+ "tokio-native-tls",
  "tungstenite 0.30.0",
 ]
 
@@ -14233,7 +14234,6 @@ dependencies = [
  "http",
  "httparse",
  "log",
- "native-tls",
  "rand 0.9.5",
  "sha1 0.10.7",
  "thiserror 2.0.19",
@@ -14250,6 +14250,7 @@ dependencies = [
  "http",
  "httparse",
  "log",
+ "native-tls",
  "rand 0.10.2",
  "sha1 0.11.0",
  "thiserror 2.0.19",
