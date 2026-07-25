@@ -1292,3 +1292,91 @@ floors.
   retry-count and routing-budget exhaustion, environment and CLI precedence,
   hostile-environment isolation, shared recovery propagation, exact schema
   bounds/errors, and exact single-/multi-range Deployment arguments.
+
+## Gres WAL Producer Throughput Policy
+
+The generic producer now resolves one validated `ProducerThroughputPolicy`
+with four shared defaults:
+
+- no compression;
+- zero linger;
+- 16,384 batch bytes;
+- five cross-partition in-flight requests.
+
+`ProducerThroughputPolicy::new` uses `refined_type` to require whole-millisecond
+linger in `0..=i32::MAX`, batch bytes in `1..=i32::MAX`, and a positive
+cross-partition in-flight limit. The producer builder preserves its existing
+arguments and defaults, but validates the complete policy before opening a
+broker connection.
+
+All four settings have live generic consumers. Batch bytes construct every
+per-topic/partition `Accumulator`, where they control rollover. Compression is
+encoded into each `RecordBatch`'s attributes. The sender limits each drain
+cycle's combined new and retry fanout to the configured cross-partition
+maximum. `MAX_IN_FLIGHT_PER_PARTITION = 1` remains fixed because idempotent
+same-partition ordering requires a single outstanding sequence until the
+client can guarantee ordered frame writes.
+
+Linger is batch-relative rather than poll-relative. The first append records an
+`Instant`; subsequent appends to the same partial batch neither reset its
+deadline nor wake the sender. Rollover wakes ready work, zero linger sends a
+force wake, and explicit flush and shutdown force draining. The sender sleeps
+until the earliest exact batch or retry deadline, so off-phase appends send at
+their own `first_append_at + linger` deadline. The implementation therefore has
+no production 1-millisecond scheduler floor: that planned fixed classification
+was superseded by the deadline-driven sender. Remaining 1-millisecond matches
+in this crate are test inputs.
+
+Gres stores the shared policy in `LiveRecoveryConfig` and applies all four
+values at its sole `Producer::builder()` call. Standalone Gres exposes exactly
+three CLI/environment pairs:
+
+- `--wal-producer-compression` /
+  `CRABKA_GRES_WAL_PRODUCER_COMPRESSION`;
+- `--wal-producer-linger-ms` /
+  `CRABKA_GRES_WAL_PRODUCER_LINGER_MS`;
+- `--wal-producer-batch-bytes` /
+  `CRABKA_GRES_WAL_PRODUCER_BATCH_BYTES`.
+
+The fleet CRD adds the matching optional
+`spec.compute.walProducerCompression`, `walProducerLingerMs`, and
+`walProducerBatchBytes` fields. Compression has the exact
+`none`/`gzip`/`snappy`/`lz4`/`zstd` enum; linger and batch bytes carry the same
+protocol bounds as the shared policy. The effective compute policy validates
+the three values and the central Deployment renderer emits each effective
+argument exactly once in both single- and multi-range modes.
+
+Gres intentionally does not expose the generic maximum. Its WAL producer
+always targets partition zero, so the fixed one-request-per-partition ordering
+rule is the effective limit and changing the cross-partition fanout would do
+nothing.
+
+### Adjacent Pending Policy
+
+This closes compression, batching, linger, and cross-partition producer fanout
+only. `Producer::flush` still uses a fixed 50-millisecond notification wait for
+up to 1,000 iterations. That approximately 50-second flush bound is live but
+is not a throughput setting; it remains a separate flush-lifecycle owner.
+DNS resolution, checkpoint deletion, registry clients, and other generic
+client defaults also remain separate owners.
+
+### Gres WAL Producer Throughput Evidence
+
+On 2026-07-25 `tools/audit-runtime-values.sh` reported 6,109 repository
+matches. The exact throughput-focused search reported 356 references across
+generic policy/default/validation/runtime code, the three Gres
+CLI/environment/CRD flows, fixed behavior, and tests. Production searches
+found no compression, linger, batch-byte, or cross-partition fanout fallback
+outside the four named shared defaults. The separate flush wait above is the
+only adjacent live producer value found.
+
+- The generic producer's 93 unit tests passed. Focused substrate, Gres, and
+  operator policy tests also passed.
+- Focused coverage pins exact defaults and protocol bounds, pre-I/O rejection,
+  canonical compression parsing, accumulator rollover, encoded compression,
+  batch-relative and off-phase linger deadlines, zero-linger/flush/shutdown
+  force drains, rollover wake behavior, and max-in-flight retry/new-batch
+  fanout.
+- Gres coverage pins defaults, environment and CLI precedence, hostile
+  environment isolation, exact runtime propagation, help, schema bounds and
+  enum values, and exact single-/multi-range Deployment arguments.
