@@ -1201,6 +1201,10 @@ mod tests {
 
     #[test]
     fn compute_wal_producer_policy_uses_shared_defaults_and_rejects_exact_boundaries() {
+        const ZERO: &str = "[the value must be equal to 1, but received 0 || the value must be greater than 1, but received 0]";
+        const MILLIS_OVERFLOW: &str = "[the value must be equal to 2147483647, but received 2147483648 || the value must be less than 2147483647, but received 2147483648]";
+        const NANOS_OVERFLOW: &str = "[the value must be equal to 2147483647000000, but received 2147483648000000 || the value must be less than 2147483647000000, but received 2147483648000000]";
+        let exact = |prefix: &str, detail: &str| [prefix, detail].concat();
         let effective = GresComputeSpec::default()
             .effective_policy()
             .expect("default compute policy")
@@ -1213,95 +1217,132 @@ mod tests {
                     wal_producer_request_timeout_ms: Some(0),
                     ..GresComputeSpec::default()
                 },
-                "spec.compute.walProducerRequestTimeoutMs",
+                exact(
+                    "spec.compute.walProducerRequestTimeoutMs: request timeout: ",
+                    ZERO
+                ),
             ),
             (
                 GresComputeSpec {
                     wal_producer_retries: Some(-1),
                     ..GresComputeSpec::default()
                 },
-                "spec.compute.walProducerRetries",
+                "spec.compute.walProducerRetries: the value must be greater than -1, but received -1"
+                    .to_owned(),
             ),
             (
                 GresComputeSpec {
                     wal_producer_retry_backoff_ms: Some(0),
                     ..GresComputeSpec::default()
                 },
-                "spec.compute.walProducerRetryBackoffMs",
+                exact(
+                    "spec.compute.walProducerRetryBackoffMs: producer retry backoff: ",
+                    ZERO
+                ),
             ),
             (
                 GresComputeSpec {
                     wal_producer_routing_retry_budget_ms: Some(0),
                     ..GresComputeSpec::default()
                 },
-                "spec.compute.walProducerRoutingRetryBudgetMs",
+                exact(
+                    "spec.compute.walProducerRoutingRetryBudgetMs: routing retry budget: ",
+                    ZERO
+                ),
             ),
             (
                 GresComputeSpec {
                     wal_producer_init_retry_timeout_ms: Some(0),
                     ..GresComputeSpec::default()
                 },
-                "spec.compute.walProducerInitRetryTimeoutMs",
+                exact(
+                    "spec.compute.walProducerInitRetryTimeoutMs: producer-ID initialization retry timeout: ",
+                    ZERO
+                ),
             ),
             (
                 GresComputeSpec {
                     wal_producer_init_max_backoff_ms: Some(0),
                     ..GresComputeSpec::default()
                 },
-                "spec.compute.walProducerInitMaxBackoffMs",
+                exact(
+                    "spec.compute.walProducerInitMaxBackoffMs: producer-ID initialization maximum backoff: ",
+                    ZERO
+                ),
             ),
             (
                 GresComputeSpec {
                     wal_producer_transaction_timeout_ms: Some(0),
                     ..GresComputeSpec::default()
                 },
-                "spec.compute.walProducerTransactionTimeoutMs",
+                exact(
+                    "spec.compute.walProducerTransactionTimeoutMs: transaction timeout: ",
+                    ZERO
+                ),
             ),
             (
                 GresComputeSpec {
                     wal_producer_request_timeout_ms: Some(i32::MAX as u64 + 1),
                     ..GresComputeSpec::default()
                 },
-                "spec.compute.walProducerRequestTimeoutMs",
+                exact(
+                    "spec.compute.walProducerRequestTimeoutMs: request timeout: ",
+                    MILLIS_OVERFLOW
+                ),
             ),
             (
                 GresComputeSpec {
                     wal_producer_retry_backoff_ms: Some(i32::MAX as u64 + 1),
                     ..GresComputeSpec::default()
                 },
-                "spec.compute.walProducerRetryBackoffMs",
+                exact(
+                    "spec.compute.walProducerRetryBackoffMs: producer retry backoff: ",
+                    NANOS_OVERFLOW
+                ),
             ),
             (
                 GresComputeSpec {
                     wal_producer_routing_retry_budget_ms: Some(i32::MAX as u64 + 1),
                     ..GresComputeSpec::default()
                 },
-                "spec.compute.walProducerRoutingRetryBudgetMs",
+                exact(
+                    "spec.compute.walProducerRoutingRetryBudgetMs: routing retry budget: ",
+                    NANOS_OVERFLOW
+                ),
             ),
             (
                 GresComputeSpec {
                     wal_producer_init_retry_timeout_ms: Some(i32::MAX as u64 + 1),
                     ..GresComputeSpec::default()
                 },
-                "spec.compute.walProducerInitRetryTimeoutMs",
+                exact(
+                    "spec.compute.walProducerInitRetryTimeoutMs: producer-ID initialization retry timeout: ",
+                    NANOS_OVERFLOW
+                ),
             ),
             (
                 GresComputeSpec {
                     wal_producer_init_max_backoff_ms: Some(i32::MAX as u64 + 1),
                     ..GresComputeSpec::default()
                 },
-                "spec.compute.walProducerInitMaxBackoffMs",
+                exact(
+                    "spec.compute.walProducerInitMaxBackoffMs: producer-ID initialization maximum backoff: ",
+                    NANOS_OVERFLOW
+                ),
             ),
             (
                 GresComputeSpec {
                     wal_producer_transaction_timeout_ms: Some(i32::MAX as u64 + 1),
                     ..GresComputeSpec::default()
                 },
-                "spec.compute.walProducerTransactionTimeoutMs",
+                exact(
+                    "spec.compute.walProducerTransactionTimeoutMs: transaction timeout: ",
+                    MILLIS_OVERFLOW
+                ),
             ),
         ] {
             let error = policy.effective_policy().expect_err("boundary must fail");
-            assert!(error.starts_with(expected), "got: {error}");
+            assert!(error == expected, "got: {error}");
         }
 
         let error = GresComputeSpec {
