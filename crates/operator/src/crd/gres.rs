@@ -1227,7 +1227,7 @@ mod tests {
                     wal_producer_retries: Some(-1),
                     ..GresComputeSpec::default()
                 },
-                "spec.compute.walProducerRetries: the value must be greater than -1, but received -1"
+                "spec.compute.walProducerRetries: producer retries: the value must be greater than -1, but received -1"
                     .to_owned(),
             ),
             (
