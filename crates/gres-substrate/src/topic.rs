@@ -40,7 +40,8 @@ impl WalAdminPolicy {
     ///
     /// # Errors
     ///
-    /// Returns an error when any value is not positive.
+    /// Returns an error when the replication factor is not in `1..=i16::MAX`
+    /// or any other value is not positive.
     pub fn new(
         replication_factor: i32,
         topic_ensure_timeout_ms: i32,
