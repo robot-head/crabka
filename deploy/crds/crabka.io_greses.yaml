@@ -228,6 +228,18 @@ spec:
                     minimum: 1.0
                     nullable: true
                     type: integer
+                  walAdminConnectTimeoutMs:
+                    description: Timeout for opening WAL admin connections in milliseconds.
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  walAdminRequestTimeoutMs:
+                    description: Timeout for WAL admin requests in milliseconds.
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
                   walRecoveryConnectTimeoutMs:
                     description: Timeout for opening committed-WAL recovery broker connections.
                     format: uint64
@@ -261,6 +273,20 @@ spec:
                   walRecoveryRequestTimeoutMs:
                     description: Timeout for committed-WAL recovery broker requests.
                     format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  walTopicEnsureTimeoutMs:
+                    description: Timeout for ensuring a range WAL topic in milliseconds.
+                    format: int32
+                    maximum: 2147483647.0
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  walTopicReplicationFactor:
+                    description: Replication factor requested when creating a range WAL topic.
+                    format: int32
+                    maximum: 32767.0
                     minimum: 1.0
                     nullable: true
                     type: integer
