@@ -2738,6 +2738,7 @@ dependencies = [
  "crabka-security",
  "futures-util",
  "rand 0.10.2",
+ "refined_type",
  "rustls",
  "rustls-pki-types",
  "serde",

@@ -29,6 +29,7 @@ use crabka_security::{
     ClientAuthMode, ListenerProtocol, SaslMechanism, TlsConfig, scram::PgScramVerifier,
 };
 use rand::RngExt as _;
+use refined_type::rule::GreaterI32;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
@@ -69,6 +70,13 @@ impl Cli {
             "wal_topic_ensure_timeout_ms",
             "wal_admin_connect_timeout_ms",
             "wal_admin_request_timeout_ms",
+            "wal_producer_request_timeout_ms",
+            "wal_producer_retries",
+            "wal_producer_retry_backoff_ms",
+            "wal_producer_routing_retry_budget_ms",
+            "wal_producer_init_retry_timeout_ms",
+            "wal_producer_init_max_backoff_ms",
+            "wal_producer_transaction_timeout_ms",
         ] {
             command = command.mut_arg(argument, |arg| arg.env(None::<&str>));
         }
@@ -215,6 +223,62 @@ pub struct ServeArgs {
         requires = "substrate_bootstrap"
     )]
     pub wal_admin_request_timeout_ms: Option<PositiveMillis>,
+
+    /// Timeout for WAL producer broker requests.
+    #[arg(
+        long = "wal-producer-request-timeout-ms",
+        env = "CRABKA_GRES_WAL_PRODUCER_REQUEST_TIMEOUT_MS",
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_producer_request_timeout_ms: Option<PositiveMillis>,
+
+    /// WAL producer retries after a batch's initial send.
+    #[arg(
+        long = "wal-producer-retries",
+        env = "CRABKA_GRES_WAL_PRODUCER_RETRIES",
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_producer_retries: Option<NonNegativeI32>,
+
+    /// WAL producer retry and producer-ID initial backoff.
+    #[arg(
+        long = "wal-producer-retry-backoff-ms",
+        env = "CRABKA_GRES_WAL_PRODUCER_RETRY_BACKOFF_MS",
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_producer_retry_backoff_ms: Option<PositiveMillis>,
+
+    /// Wall-clock routing retry budget for each WAL producer batch.
+    #[arg(
+        long = "wal-producer-routing-retry-budget-ms",
+        env = "CRABKA_GRES_WAL_PRODUCER_ROUTING_RETRY_BUDGET_MS",
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_producer_routing_retry_budget_ms: Option<PositiveMillis>,
+
+    /// Producer-ID initialization retry timeout.
+    #[arg(
+        long = "wal-producer-init-retry-timeout-ms",
+        env = "CRABKA_GRES_WAL_PRODUCER_INIT_RETRY_TIMEOUT_MS",
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_producer_init_retry_timeout_ms: Option<PositiveMillis>,
+
+    /// Producer-ID initialization retry backoff cap.
+    #[arg(
+        long = "wal-producer-init-max-backoff-ms",
+        env = "CRABKA_GRES_WAL_PRODUCER_INIT_MAX_BACKOFF_MS",
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_producer_init_max_backoff_ms: Option<PositiveMillis>,
+
+    /// Transaction timeout sent by the WAL producer.
+    #[arg(
+        long = "wal-producer-transaction-timeout-ms",
+        env = "CRABKA_GRES_WAL_PRODUCER_TRANSACTION_TIMEOUT_MS",
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_producer_transaction_timeout_ms: Option<PositiveMillis>,
 
     /// Substrate mode: comma-separated hosted range ids, for example r0,r2.
     #[arg(long = "host-ranges", requires = "ranges")]
@@ -507,12 +571,20 @@ fn validate_wal_recovery_read_policy(args: &ServeArgs) -> std::io::Result<()> {
         || args.wal_topic_replication_factor.is_some()
         || args.wal_topic_ensure_timeout_ms.is_some()
         || args.wal_admin_connect_timeout_ms.is_some()
-        || args.wal_admin_request_timeout_ms.is_some())
+        || args.wal_admin_request_timeout_ms.is_some()
+        || args.wal_producer_request_timeout_ms.is_some()
+        || args.wal_producer_retries.is_some()
+        || args.wal_producer_retry_backoff_ms.is_some()
+        || args.wal_producer_routing_retry_budget_ms.is_some()
+        || args.wal_producer_init_retry_timeout_ms.is_some()
+        || args.wal_producer_init_max_backoff_ms.is_some()
+        || args.wal_producer_transaction_timeout_ms.is_some())
         && args.substrate_bootstrap.is_none()
     {
         return invalid_input("WAL recovery options require --substrate-bootstrap");
     }
     effective_wal_admin_policy(args)?;
+    effective_wal_producer_retry_policy(args)?;
     Ok(())
 }
 
@@ -538,6 +610,71 @@ fn effective_wal_admin_policy(
         ),
     )
     .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
+}
+
+fn effective_wal_producer_retry_policy(
+    args: &ServeArgs,
+) -> std::io::Result<crabka_client_producer::ProducerRetryPolicy> {
+    let defaults = crabka_client_producer::ProducerRetryPolicy::default();
+    let millis = |duration: Duration| {
+        u64::try_from(duration.as_millis()).expect("producer policy duration fits u64 milliseconds")
+    };
+    crabka_client_producer::ProducerRetryPolicy::new(
+        Duration::from_millis(args.wal_producer_request_timeout_ms.map_or_else(
+            || millis(defaults.request_timeout()),
+            PositiveMillis::into_value,
+        )),
+        args.wal_producer_retries
+            .map_or(defaults.retries(), NonNegativeI32::into_value),
+        Duration::from_millis(args.wal_producer_retry_backoff_ms.map_or_else(
+            || millis(defaults.retry_backoff()),
+            PositiveMillis::into_value,
+        )),
+        Duration::from_millis(args.wal_producer_routing_retry_budget_ms.map_or_else(
+            || millis(defaults.routing_retry_budget()),
+            PositiveMillis::into_value,
+        )),
+        Duration::from_millis(args.wal_producer_init_retry_timeout_ms.map_or_else(
+            || millis(defaults.init_retry_timeout()),
+            PositiveMillis::into_value,
+        )),
+        Duration::from_millis(args.wal_producer_init_max_backoff_ms.map_or_else(
+            || millis(defaults.init_max_backoff()),
+            PositiveMillis::into_value,
+        )),
+        Duration::from_millis(args.wal_producer_transaction_timeout_ms.map_or_else(
+            || millis(defaults.transaction_timeout()),
+            PositiveMillis::into_value,
+        )),
+    )
+    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
+}
+
+/// A nonnegative producer retry count representable on the protocol wire.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NonNegativeI32(i32);
+
+impl NonNegativeI32 {
+    fn new(value: i32) -> Result<Self, String> {
+        GreaterI32::<-1>::new(value)
+            .map(|value| Self(value.into_value()))
+            .map_err(|error| error.to_string())
+    }
+
+    const fn into_value(self) -> i32 {
+        self.0
+    }
+}
+
+impl std::str::FromStr for NonNegativeI32 {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value
+            .parse()
+            .map_err(|error: std::num::ParseIntError| error.to_string())
+            .and_then(Self::new)
+    }
 }
 
 /// Validated Gres registry options shared by compute registry clients.
@@ -649,6 +786,8 @@ pub struct SubstrateRuntimeConfig {
     pub recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy,
     /// WAL topic creation and admin connection settings.
     pub wal_admin_policy: crabka_gres_substrate::WalAdminPolicy,
+    /// WAL producer retry and transaction timing.
+    pub producer_retry_policy: crabka_client_producer::ProducerRetryPolicy,
     /// Optional range-compute placement for distributed mode. Range 0 is always hosted.
     pub host_ranges: Option<Vec<crabka_gres_ranges::RangeId>>,
     /// mTLS client configuration required for remote range routing.
@@ -825,6 +964,7 @@ impl SubstrateRuntimeConfig {
             })
             .map_err(|error| Error::new(ErrorKind::InvalidInput, error))?,
             wal_admin_policy: effective_wal_admin_policy(args)?,
+            producer_retry_policy: effective_wal_producer_retry_policy(args)?,
             host_ranges: parse_host_ranges(args.host_ranges.as_deref())?,
             range_rpc: RangeRpcRuntimeConfig::from_args(args)?,
             advertised_endpoint: args.range_listen.clone(),
@@ -851,6 +991,7 @@ impl SubstrateRuntimeConfig {
         )
         .with_read_policy(self.recovery_read_policy)
         .with_wal_admin_policy(self.wal_admin_policy)
+        .with_producer_retry_policy(self.producer_retry_policy)
     }
 }
 
@@ -8237,6 +8378,13 @@ mod tests {
             wal_topic_ensure_timeout_ms: None,
             wal_admin_connect_timeout_ms: None,
             wal_admin_request_timeout_ms: None,
+            wal_producer_request_timeout_ms: None,
+            wal_producer_retries: None,
+            wal_producer_retry_backoff_ms: None,
+            wal_producer_routing_retry_budget_ms: None,
+            wal_producer_init_retry_timeout_ms: None,
+            wal_producer_init_max_backoff_ms: None,
+            wal_producer_transaction_timeout_ms: None,
             host_ranges: None,
             timestamp_source: TimestampSourceKind::LogicalTso,
             hlc_max_offset_ms: 250,
@@ -9000,7 +9148,7 @@ mod tests {
     #[test]
     fn wal_recovery_read_policy_uses_defaults_environment_and_cli_precedence() {
         const CHILD: &str = "CRABKA_TEST_GRES_WAL_RECOVERY_READ_POLICY_CHILD";
-        const VARS: [&str; 10] = [
+        const VARS: [&str; 17] = [
             "CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT_MS",
             "CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES",
             "CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES",
@@ -9011,6 +9159,13 @@ mod tests {
             "CRABKA_GRES_WAL_TOPIC_ENSURE_TIMEOUT_MS",
             "CRABKA_GRES_WAL_ADMIN_CONNECT_TIMEOUT_MS",
             "CRABKA_GRES_WAL_ADMIN_REQUEST_TIMEOUT_MS",
+            "CRABKA_GRES_WAL_PRODUCER_REQUEST_TIMEOUT_MS",
+            "CRABKA_GRES_WAL_PRODUCER_RETRIES",
+            "CRABKA_GRES_WAL_PRODUCER_RETRY_BACKOFF_MS",
+            "CRABKA_GRES_WAL_PRODUCER_ROUTING_RETRY_BUDGET_MS",
+            "CRABKA_GRES_WAL_PRODUCER_INIT_RETRY_TIMEOUT_MS",
+            "CRABKA_GRES_WAL_PRODUCER_INIT_MAX_BACKOFF_MS",
+            "CRABKA_GRES_WAL_PRODUCER_TRANSACTION_TIMEOUT_MS",
         ];
         if std::env::var_os(CHILD).is_none() {
             for mode in ["defaults", "environment"] {
@@ -9026,10 +9181,10 @@ mod tests {
                     child.env_remove(variable);
                 }
                 if mode == "environment" {
-                    for (variable, value) in VARS
-                        .into_iter()
-                        .zip(["17", "18", "19", "20", "21", "22", "23", "24", "25", "26"])
-                    {
+                    for (variable, value) in VARS.into_iter().zip([
+                        "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28",
+                        "29", "30", "31", "32", "33",
+                    ]) {
                         child.env(variable, value);
                     }
                 }
@@ -9126,6 +9281,13 @@ mod tests {
             .env("CRABKA_GRES_WAL_TOPIC_ENSURE_TIMEOUT_MS", "24")
             .env("CRABKA_GRES_WAL_ADMIN_CONNECT_TIMEOUT_MS", "25")
             .env("CRABKA_GRES_WAL_ADMIN_REQUEST_TIMEOUT_MS", "26")
+            .env("CRABKA_GRES_WAL_PRODUCER_REQUEST_TIMEOUT_MS", "27")
+            .env("CRABKA_GRES_WAL_PRODUCER_RETRIES", "28")
+            .env("CRABKA_GRES_WAL_PRODUCER_RETRY_BACKOFF_MS", "29")
+            .env("CRABKA_GRES_WAL_PRODUCER_ROUTING_RETRY_BUDGET_MS", "30")
+            .env("CRABKA_GRES_WAL_PRODUCER_INIT_RETRY_TIMEOUT_MS", "31")
+            .env("CRABKA_GRES_WAL_PRODUCER_INIT_MAX_BACKOFF_MS", "32")
+            .env("CRABKA_GRES_WAL_PRODUCER_TRANSACTION_TIMEOUT_MS", "33")
             .status()
             .expect("child test");
 
@@ -9145,6 +9307,12 @@ mod tests {
             "--wal-topic-ensure-timeout-ms=0",
             "--wal-admin-connect-timeout-ms=0",
             "--wal-admin-request-timeout-ms=0",
+            "--wal-producer-request-timeout-ms=0",
+            "--wal-producer-retry-backoff-ms=0",
+            "--wal-producer-routing-retry-budget-ms=0",
+            "--wal-producer-init-retry-timeout-ms=0",
+            "--wal-producer-init-max-backoff-ms=0",
+            "--wal-producer-transaction-timeout-ms=0",
         ] {
             assert!(
                 Cli::try_parse_from([
@@ -9163,6 +9331,13 @@ mod tests {
             "--wal-topic-ensure-timeout-ms=1",
             "--wal-admin-connect-timeout-ms=1",
             "--wal-admin-request-timeout-ms=1",
+            "--wal-producer-request-timeout-ms=1",
+            "--wal-producer-retries=0",
+            "--wal-producer-retry-backoff-ms=1",
+            "--wal-producer-routing-retry-budget-ms=1",
+            "--wal-producer-init-retry-timeout-ms=1",
+            "--wal-producer-init-max-backoff-ms=1",
+            "--wal-producer-transaction-timeout-ms=1",
         ] {
             assert!(Cli::try_parse_from(["crabka-gres", option]).is_err());
         }
@@ -9177,7 +9352,68 @@ mod tests {
             .expect_err("replication factor exceeds protocol maximum");
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
 
-        for option in 0..10 {
+        for option in [
+            "--wal-producer-request-timeout-ms=2147483648",
+            "--wal-producer-retry-backoff-ms=2147483648",
+            "--wal-producer-routing-retry-budget-ms=2147483648",
+            "--wal-producer-init-retry-timeout-ms=2147483648",
+            "--wal-producer-init-max-backoff-ms=2147483648",
+            "--wal-producer-transaction-timeout-ms=2147483648",
+        ] {
+            let args = Cli::try_parse_from([
+                "crabka-gres",
+                "--substrate-bootstrap=memory://",
+                "--tenant=tenant-a",
+                option,
+            ])
+            .expect("positive parser value")
+            .serve;
+            let error = SubstrateRuntimeConfig::from_args(&args)
+                .expect_err("producer duration exceeds supported maximum");
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        }
+        let args = Cli::try_parse_from([
+            "crabka-gres",
+            "--substrate-bootstrap=memory://",
+            "--tenant=tenant-a",
+            "--wal-producer-retry-backoff-ms=2",
+            "--wal-producer-init-max-backoff-ms=1",
+        ])
+        .expect("positive parser values")
+        .serve;
+        assert!(
+            SubstrateRuntimeConfig::from_args(&args)
+                .expect_err("initial backoff exceeds cap")
+                .to_string()
+                .contains("backoff")
+        );
+        let args = Cli::try_parse_from([
+            "crabka-gres",
+            "--substrate-bootstrap=memory://",
+            "--tenant=tenant-a",
+            "--wal-producer-retries=0",
+        ])
+        .expect("zero retries")
+        .serve;
+        assert_eq!(
+            SubstrateRuntimeConfig::from_args(&args)
+                .expect("zero retries are valid")
+                .expect("substrate config")
+                .producer_retry_policy
+                .retries(),
+            0
+        );
+
+        assert!(
+            Cli::try_parse_from([
+                "crabka-gres",
+                "--substrate-bootstrap=memory://",
+                "--tenant=tenant-a",
+                "--wal-producer-retries=-1",
+            ])
+            .is_err()
+        );
+        for option in 0..17 {
             let mut programmatic = serve_args(Some("trust"), Vec::new());
             set_wal_policy_option(&mut programmatic, option);
             let error = SubstrateRuntimeConfig::from_args(&programmatic)
@@ -9189,7 +9425,7 @@ mod tests {
     #[tokio::test]
     async fn wal_recovery_read_policy_validation_precedes_listener_bind() {
         const CHILD: &str = "CRABKA_TEST_GRES_WAL_RECOVERY_BIND_CHILD";
-        const VARS: [&str; 10] = [
+        const VARS: [&str; 17] = [
             "CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT_MS",
             "CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES",
             "CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES",
@@ -9200,6 +9436,13 @@ mod tests {
             "CRABKA_GRES_WAL_TOPIC_ENSURE_TIMEOUT_MS",
             "CRABKA_GRES_WAL_ADMIN_CONNECT_TIMEOUT_MS",
             "CRABKA_GRES_WAL_ADMIN_REQUEST_TIMEOUT_MS",
+            "CRABKA_GRES_WAL_PRODUCER_REQUEST_TIMEOUT_MS",
+            "CRABKA_GRES_WAL_PRODUCER_RETRIES",
+            "CRABKA_GRES_WAL_PRODUCER_RETRY_BACKOFF_MS",
+            "CRABKA_GRES_WAL_PRODUCER_ROUTING_RETRY_BUDGET_MS",
+            "CRABKA_GRES_WAL_PRODUCER_INIT_RETRY_TIMEOUT_MS",
+            "CRABKA_GRES_WAL_PRODUCER_INIT_MAX_BACKOFF_MS",
+            "CRABKA_GRES_WAL_PRODUCER_TRANSACTION_TIMEOUT_MS",
         ];
         if std::env::var_os(CHILD).is_none() {
             let mut child = std::process::Command::new(std::env::current_exe().expect("test exe"));
@@ -9217,7 +9460,7 @@ mod tests {
         }
 
         let occupied = TcpListener::bind("127.0.0.1:0").await.expect("listener");
-        for option in 0..10 {
+        for option in 0..17 {
             let mut args = serve_args(Some("trust"), Vec::new());
             args.listen = occupied.local_addr().expect("address").to_string();
             set_wal_policy_option(&mut args, option);
@@ -9247,6 +9490,13 @@ mod tests {
             7 => args.wal_topic_ensure_timeout_ms = PositiveI32::new(1).ok(),
             8 => args.wal_admin_connect_timeout_ms = PositiveMillis::new(1).ok(),
             9 => args.wal_admin_request_timeout_ms = PositiveMillis::new(1).ok(),
+            10 => args.wal_producer_request_timeout_ms = PositiveMillis::new(1).ok(),
+            11 => args.wal_producer_retries = NonNegativeI32::new(0).ok(),
+            12 => args.wal_producer_retry_backoff_ms = PositiveMillis::new(1).ok(),
+            13 => args.wal_producer_routing_retry_budget_ms = PositiveMillis::new(1).ok(),
+            14 => args.wal_producer_init_retry_timeout_ms = PositiveMillis::new(1).ok(),
+            15 => args.wal_producer_init_max_backoff_ms = PositiveMillis::new(1).ok(),
+            16 => args.wal_producer_transaction_timeout_ms = PositiveMillis::new(1).ok(),
             _ => unreachable!("test policy option"),
         }
     }
@@ -9287,6 +9537,135 @@ mod tests {
                 .count(),
             0
         );
+    }
+
+    #[test]
+    fn wal_producer_retry_policy_accepts_distinctive_values_and_reaches_recovery() {
+        let cli = Cli::try_parse_from([
+            "crabka-gres",
+            "--substrate-bootstrap=memory://",
+            "--tenant=tenant-a",
+            "--wal-producer-request-timeout-ms=31",
+            "--wal-producer-retries=32",
+            "--wal-producer-retry-backoff-ms=33",
+            "--wal-producer-routing-retry-budget-ms=34",
+            "--wal-producer-init-retry-timeout-ms=35",
+            "--wal-producer-init-max-backoff-ms=36",
+            "--wal-producer-transaction-timeout-ms=37",
+        ])
+        .expect("WAL producer policy");
+        let config = SubstrateRuntimeConfig::from_args(&cli.serve)
+            .expect("valid config")
+            .expect("substrate config");
+        let policy = config.producer_retry_policy;
+
+        assert_eq!(policy.request_timeout(), Duration::from_millis(31));
+        assert_eq!(policy.retries(), 32);
+        assert_eq!(policy.retry_backoff(), Duration::from_millis(33));
+        assert_eq!(policy.routing_retry_budget(), Duration::from_millis(34));
+        assert_eq!(policy.init_retry_timeout(), Duration::from_millis(35));
+        assert_eq!(policy.init_max_backoff(), Duration::from_millis(36));
+        assert_eq!(policy.transaction_timeout(), Duration::from_millis(37));
+
+        let tenant = crabka_gres_ranges::TenantName::parse("tenant-a").expect("tenant");
+        assert_eq!(
+            config
+                .live_recovery_config(tenant, crabka_gres_ranges::RangeId::new(7))
+                .producer_retry_policy(),
+            policy
+        );
+    }
+
+    #[test]
+    fn wal_producer_retry_policy_uses_defaults_environment_and_cli_precedence() {
+        const CHILD: &str = "CRABKA_TEST_GRES_WAL_PRODUCER_POLICY_CHILD";
+        const VARS: [&str; 7] = [
+            "CRABKA_GRES_WAL_PRODUCER_REQUEST_TIMEOUT_MS",
+            "CRABKA_GRES_WAL_PRODUCER_RETRIES",
+            "CRABKA_GRES_WAL_PRODUCER_RETRY_BACKOFF_MS",
+            "CRABKA_GRES_WAL_PRODUCER_ROUTING_RETRY_BUDGET_MS",
+            "CRABKA_GRES_WAL_PRODUCER_INIT_RETRY_TIMEOUT_MS",
+            "CRABKA_GRES_WAL_PRODUCER_INIT_MAX_BACKOFF_MS",
+            "CRABKA_GRES_WAL_PRODUCER_TRANSACTION_TIMEOUT_MS",
+        ];
+        if std::env::var_os(CHILD).is_none() {
+            for mode in ["defaults", "environment"] {
+                let mut child =
+                    std::process::Command::new(std::env::current_exe().expect("test exe"));
+                child
+                    .args([
+                        "--exact",
+                        "tests::wal_producer_retry_policy_uses_defaults_environment_and_cli_precedence",
+                    ])
+                    .env(CHILD, mode);
+                for variable in VARS {
+                    child.env_remove(variable);
+                }
+                if mode == "environment" {
+                    for (variable, value) in VARS
+                        .into_iter()
+                        .zip(["41", "42", "43", "44", "45", "46", "47"])
+                    {
+                        child.env(variable, value);
+                    }
+                }
+                assert!(child.status().expect("child test").success());
+            }
+            return;
+        }
+
+        let base = [
+            "crabka-gres",
+            "--substrate-bootstrap=memory://",
+            "--tenant=tenant-a",
+        ];
+        let config = SubstrateRuntimeConfig::from_args(
+            &<Cli as clap::Parser>::try_parse_from(base)
+                .expect("policy")
+                .serve,
+        )
+        .expect("valid config")
+        .expect("substrate config");
+        let expected = if std::env::var(CHILD).as_deref() == Ok("environment") {
+            crabka_client_producer::ProducerRetryPolicy::new(
+                Duration::from_millis(41),
+                42,
+                Duration::from_millis(43),
+                Duration::from_millis(44),
+                Duration::from_millis(45),
+                Duration::from_millis(46),
+                Duration::from_millis(47),
+            )
+            .expect("environment policy")
+        } else {
+            crabka_client_producer::ProducerRetryPolicy::default()
+        };
+        assert_eq!(config.producer_retry_policy, expected);
+
+        let cli = <Cli as clap::Parser>::try_parse_from(base.into_iter().chain([
+            "--wal-producer-request-timeout-ms=51",
+            "--wal-producer-retries=52",
+            "--wal-producer-retry-backoff-ms=53",
+            "--wal-producer-routing-retry-budget-ms=54",
+            "--wal-producer-init-retry-timeout-ms=55",
+            "--wal-producer-init-max-backoff-ms=56",
+            "--wal-producer-transaction-timeout-ms=57",
+        ]))
+        .expect("CLI policy");
+        let config = SubstrateRuntimeConfig::from_args(&cli.serve)
+            .expect("valid config")
+            .expect("substrate config");
+        let expected = crabka_client_producer::ProducerRetryPolicy::new(
+            Duration::from_millis(51),
+            52,
+            Duration::from_millis(53),
+            Duration::from_millis(54),
+            Duration::from_millis(55),
+            Duration::from_millis(56),
+            Duration::from_millis(57),
+        )
+        .expect("CLI policy");
+        assert_eq!(config.producer_retry_policy, expected);
     }
 
     #[tokio::test(start_paused = true)]
@@ -9607,6 +9986,7 @@ mod tests {
             ),
             recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
             wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
+            producer_retry_policy: crabka_client_producer::ProducerRetryPolicy::default(),
             host_ranges: None,
             range_rpc: None,
             advertised_endpoint: None,
@@ -9685,6 +10065,7 @@ mod tests {
             ),
             recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
             wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
+            producer_retry_policy: crabka_client_producer::ProducerRetryPolicy::default(),
             host_ranges: None,
             range_rpc: None,
             advertised_endpoint: None,
@@ -10044,6 +10425,7 @@ mod tests {
             ),
             recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
             wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
+            producer_retry_policy: crabka_client_producer::ProducerRetryPolicy::default(),
             host_ranges: None,
             range_rpc: None,
             advertised_endpoint: None,
@@ -10131,6 +10513,7 @@ mod tests {
             ),
             recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
             wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
+            producer_retry_policy: crabka_client_producer::ProducerRetryPolicy::default(),
             host_ranges: None,
             range_rpc: None,
             advertised_endpoint: None,
