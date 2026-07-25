@@ -258,6 +258,12 @@ spec:
                     - null
                     nullable: true
                     type: string
+                  walProducerDnsTimeoutMs:
+                    description: Timeout for resolving WAL producer broker hostnames.
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
                   walProducerFlushTimeoutMs:
                     description: Deadline for flushing all buffered and in-flight WAL records.
                     format: uint64

@@ -28,6 +28,7 @@ axum = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 clap = { workspace = true, features = ["env"] }
 crabka-client-admin = { version = "0.3.9", path = "../client-admin" }
+crabka-client-core = { version = "0.3", path = "../client-core" }
 crabka-client-producer = { version = "0.3.9", path = "../client-producer" }
 crabka-gres-control = { version = "0.3.9", path = "../gres-control" }
 crabka-gres-ranges = { version = "0.3.9", path = "../gres-ranges" }
@@ -73,7 +74,6 @@ x509-parser = { workspace = true }
 mutants = { workspace = true }
 assert2 = { workspace = true }
 crabka-broker = { version = "0.3", path = "../broker" }
-crabka-client-core = { version = "0.3", path = "../client-core" }
 # Path-only (no version): keeps this dev-dependency out of the published
 # manifest so `cargo publish`/release-plz never resolve it against crates.io.
 # crabka-rebalancer publishes a release behind the rest of the workspace, so a

@@ -2057,13 +2057,7 @@ fn render_deployment(
             .into_value()
             .to_string(),
     ];
-    args.extend(wal_producer_flush_args(
-        compute_policy.wal_producer_flush_timeout,
-    ));
-    args.extend(wal_producer_args(compute_policy.wal_producer_retry_policy));
-    args.extend(wal_producer_throughput_args(
-        compute_policy.wal_producer_throughput_policy,
-    ));
+    args.extend(wal_producer_args(&compute_policy));
     if config.range_control_enabled {
         args.extend([
             "--ranges".to_owned(),
@@ -2191,23 +2185,38 @@ fn wal_producer_flush_args(policy: crabka_client_producer::ProducerFlushTimeout)
     ]
 }
 
-fn wal_producer_args(policy: crabka_client_producer::ProducerRetryPolicy) -> [String; 14] {
+fn wal_producer_dns_args(timeout: crabka_client_core::ClientDnsTimeout) -> [String; 2] {
     [
-        "--wal-producer-request-timeout-ms".to_owned(),
-        policy.request_timeout().as_millis().to_string(),
-        "--wal-producer-retries".to_owned(),
-        policy.retries().to_string(),
-        "--wal-producer-retry-backoff-ms".to_owned(),
-        policy.retry_backoff().as_millis().to_string(),
-        "--wal-producer-routing-retry-budget-ms".to_owned(),
-        policy.routing_retry_budget().as_millis().to_string(),
-        "--wal-producer-init-retry-timeout-ms".to_owned(),
-        policy.init_retry_timeout().as_millis().to_string(),
-        "--wal-producer-init-max-backoff-ms".to_owned(),
-        policy.init_max_backoff().as_millis().to_string(),
-        "--wal-producer-transaction-timeout-ms".to_owned(),
-        policy.transaction_timeout().as_millis().to_string(),
+        "--wal-producer-dns-timeout-ms".to_owned(),
+        timeout.milliseconds().to_string(),
     ]
+}
+
+fn wal_producer_args(policy: &EffectiveGresComputePolicy) -> Vec<String> {
+    let mut args = Vec::with_capacity(24);
+    args.extend(wal_producer_flush_args(policy.wal_producer_flush_timeout));
+    args.extend(wal_producer_dns_args(policy.wal_producer_dns_timeout));
+    let retry = policy.wal_producer_retry_policy;
+    args.extend([
+        "--wal-producer-request-timeout-ms".to_owned(),
+        retry.request_timeout().as_millis().to_string(),
+        "--wal-producer-retries".to_owned(),
+        retry.retries().to_string(),
+        "--wal-producer-retry-backoff-ms".to_owned(),
+        retry.retry_backoff().as_millis().to_string(),
+        "--wal-producer-routing-retry-budget-ms".to_owned(),
+        retry.routing_retry_budget().as_millis().to_string(),
+        "--wal-producer-init-retry-timeout-ms".to_owned(),
+        retry.init_retry_timeout().as_millis().to_string(),
+        "--wal-producer-init-max-backoff-ms".to_owned(),
+        retry.init_max_backoff().as_millis().to_string(),
+        "--wal-producer-transaction-timeout-ms".to_owned(),
+        retry.transaction_timeout().as_millis().to_string(),
+    ]);
+    args.extend(wal_producer_throughput_args(
+        policy.wal_producer_throughput_policy,
+    ));
+    args
 }
 
 fn wal_producer_throughput_args(
@@ -3025,6 +3034,79 @@ mod tests {
                     args.windows(2).filter(|window| *window == pair).count() == 1,
                     "expected {pair:?} exactly once, got: {args:?}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn wal_producer_dns_timeout_is_exact_once_in_single_and_two_range_deployments() {
+        let mut obj = tenant();
+        obj.metadata.namespace = Some("ns".into());
+        obj.metadata.uid = Some("uid".into());
+        let ranges = [
+            GresTenantRangeSpec {
+                range_id: 0,
+                end_key: Some(GresTenantRangeKey {
+                    table_id: 10,
+                    bucket: None,
+                    rowid: 0,
+                }),
+            },
+            GresTenantRangeSpec {
+                range_id: 1,
+                end_key: None,
+            },
+        ];
+        let operator_config = ConfigArgs::parse_from(["operator"]).config;
+
+        for (spec, pair) in [
+            (
+                crate::crd::gres::GresComputeSpec::default(),
+                ["--wal-producer-dns-timeout-ms", "10000"],
+            ),
+            (
+                crate::crd::gres::GresComputeSpec {
+                    wal_producer_dns_timeout_ms: Some(37),
+                    ..crate::crd::gres::GresComputeSpec::default()
+                },
+                ["--wal-producer-dns-timeout-ms", "37"],
+            ),
+        ] {
+            let compute_policy = spec.effective_policy().expect("compute policy");
+            for (range_control_enabled, active_ranges) in
+                [(false, &ranges[..1]), (true, &ranges[..])]
+            {
+                for range in active_ranges {
+                    let wal_topic = format!("__gres_wal.tenant-a.r{}", range.range_id);
+                    let deployment = render_deployment(
+                        &obj,
+                        range,
+                        &DeploymentRenderConfig {
+                            all_ranges: active_ranges,
+                            image: "image",
+                            readiness_probe_period_seconds: 5,
+                            bootstrap: "k:9092",
+                            wal_topic: &wal_topic,
+                            config_topic: "__gres_cfg.tenant-a",
+                            policy: &crabka_gres_control::RegistryPolicy::default(),
+                            compute_policy,
+                            replicas: 1,
+                            operator_config: &operator_config,
+                            kafka_sasl: false,
+                            range_control_enabled,
+                            range_tls_hash: None,
+                        },
+                    )
+                    .expect("render deployment");
+                    let args = deployment.spec.unwrap().template.spec.unwrap().containers[0]
+                        .args
+                        .clone()
+                        .unwrap();
+                    assert!(
+                        args.windows(2).filter(|window| *window == pair).count() == 1,
+                        "got: {args:?}"
+                    );
+                }
             }
         }
     }

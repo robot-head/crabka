@@ -203,6 +203,11 @@ pub struct GresComputeSpec {
     #[schemars(range(min = 1, max = 2_147_483_647))]
     pub wal_producer_flush_timeout_ms: Option<u64>,
 
+    /// Timeout for resolving WAL producer broker hostnames.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub wal_producer_dns_timeout_ms: Option<u64>,
+
     /// Timeout for WAL producer broker requests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1, max = 2_147_483_647))]
@@ -295,6 +300,7 @@ pub(crate) struct EffectiveGresComputePolicy {
     pub(crate) wal_recovery_connect_timeout_ms: PositiveMillis,
     pub(crate) wal_recovery_request_timeout_ms: PositiveMillis,
     pub(crate) wal_producer_flush_timeout: ProducerFlushTimeout,
+    pub(crate) wal_producer_dns_timeout: crabka_client_core::ClientDnsTimeout,
     pub(crate) wal_producer_retry_policy: crabka_client_producer::ProducerRetryPolicy,
     pub(crate) wal_producer_throughput_policy: crabka_client_producer::ProducerThroughputPolicy,
     pub(crate) wal_topic_replication_factor: PositiveI32,
@@ -382,6 +388,12 @@ impl GresComputeSpec {
                     .unwrap_or_else(|| duration_millis(ProducerFlushTimeout::default().duration())),
             ))
             .map_err(|error| format!("spec.compute.walProducerFlushTimeoutMs: {error}"))?,
+            wal_producer_dns_timeout: crabka_client_core::ClientDnsTimeout::new(
+                Duration::from_millis(self.wal_producer_dns_timeout_ms.unwrap_or_else(|| {
+                    crabka_client_core::ClientDnsTimeout::default().milliseconds()
+                })),
+            )
+            .map_err(|error| format!("spec.compute.walProducerDnsTimeoutMs: {error}"))?,
             wal_producer_retry_policy: self.effective_wal_producer_retry_policy()?,
             wal_producer_throughput_policy: self.effective_wal_producer_throughput_policy()?,
             wal_topic_replication_factor: PositiveI32::new(
@@ -1528,6 +1540,39 @@ mod tests {
             .expect_err("boundary must fail");
             assert!(error == expected, "got: {error}");
         }
+    }
+
+    #[test]
+    fn wal_producer_dns_timeout_has_exact_schema_default_override_and_error() {
+        let crd = serde_json::to_value(Gres::crd()).expect("serialize Gres CRD");
+        let field = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
+            ["properties"]["compute"]["properties"]["walProducerDnsTimeoutMs"];
+        assert!(field["type"] == "integer");
+        assert!(field["format"] == "uint64");
+        assert!(field["minimum"].as_f64() == Some(1.0));
+
+        let default = GresComputeSpec::default()
+            .effective_policy()
+            .expect("default compute policy")
+            .wal_producer_dns_timeout;
+        assert!(default == crabka_client_core::ClientDnsTimeout::default());
+
+        let configured = GresComputeSpec {
+            wal_producer_dns_timeout_ms: Some(37),
+            ..GresComputeSpec::default()
+        }
+        .effective_policy()
+        .expect("configured compute policy")
+        .wal_producer_dns_timeout;
+        assert!(configured.milliseconds() == 37);
+
+        let error = GresComputeSpec {
+            wal_producer_dns_timeout_ms: Some(0),
+            ..GresComputeSpec::default()
+        }
+        .effective_policy()
+        .expect_err("zero DNS timeout");
+        assert!(error.starts_with("spec.compute.walProducerDnsTimeoutMs:"));
     }
 
     #[test]
