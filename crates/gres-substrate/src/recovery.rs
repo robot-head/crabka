@@ -4,8 +4,8 @@ use std::{sync::Arc, time::Duration};
 
 use crabka_client_admin::AdminClient;
 use crabka_client_core::{
-    Connection, ConnectionOptions, IsolatedFetch, fetch_partition_with_isolation_progress,
-    security::ClientSecurity,
+    ClientDnsTimeout, Connection, ConnectionOptions, IsolatedFetch,
+    fetch_partition_with_isolation_progress, security::ClientSecurity,
 };
 use crabka_client_producer::{
     Acks, Producer, ProducerFlushTimeout, ProducerRetryPolicy, ProducerThroughputPolicy,
@@ -221,6 +221,7 @@ pub struct LiveRecoveryConfig {
     pub advertised_endpoint: Option<String>,
     read_policy: RecoveryReadPolicy,
     wal_admin_policy: WalAdminPolicy,
+    producer_dns_timeout: ClientDnsTimeout,
     producer_flush_timeout: ProducerFlushTimeout,
     producer_retry_policy: ProducerRetryPolicy,
     producer_throughput_policy: ProducerThroughputPolicy,
@@ -262,6 +263,7 @@ impl LiveRecoveryConfig {
             advertised_endpoint: None,
             read_policy: RecoveryReadPolicy::default(),
             wal_admin_policy: WalAdminPolicy::default(),
+            producer_dns_timeout: ClientDnsTimeout::default(),
             producer_flush_timeout: ProducerFlushTimeout::default(),
             producer_retry_policy: ProducerRetryPolicy::default(),
             producer_throughput_policy: ProducerThroughputPolicy::default(),
@@ -294,6 +296,19 @@ impl LiveRecoveryConfig {
     #[must_use]
     pub const fn wal_admin_policy(&self) -> WalAdminPolicy {
         self.wal_admin_policy
+    }
+
+    /// Override the WAL producer broker DNS timeout.
+    #[must_use]
+    pub fn with_producer_dns_timeout(mut self, producer_dns_timeout: ClientDnsTimeout) -> Self {
+        self.producer_dns_timeout = producer_dns_timeout;
+        self
+    }
+
+    /// Return the WAL producer broker DNS timeout.
+    #[must_use]
+    pub const fn producer_dns_timeout(&self) -> ClientDnsTimeout {
+        self.producer_dns_timeout
     }
 
     /// Override the WAL producer flush deadline.
@@ -704,6 +719,7 @@ async fn recover_live_for_range_inner(
             .compression(config.producer_throughput_policy.compression())
             .linger(config.producer_throughput_policy.linger())
             .batch_size(config.producer_throughput_policy.batch_bytes())
+            .dns_timeout(config.producer_dns_timeout().duration())
             .request_timeout(config.producer_retry_policy.request_timeout())
             .flush_timeout(config.producer_flush_timeout().duration())
             .retries(config.producer_retry_policy.retries())
@@ -870,7 +886,7 @@ fn parse_bootstrap_addrs(bootstrap: &str) -> Result<Vec<String>, SubstrateError>
 
 fn wal_admin_connection_options(config: &LiveRecoveryConfig) -> ConnectionOptions {
     ConnectionOptions {
-        dns_timeout: Default::default(),
+        dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
         client_id: config.client_id(),
         connect_timeout: config.wal_admin_policy.connect_timeout(),
         request_timeout: config.wal_admin_policy.request_timeout(),
@@ -975,7 +991,7 @@ fn wal_connection_options(
     read_policy: RecoveryReadPolicy,
 ) -> ConnectionOptions {
     ConnectionOptions {
-        dns_timeout: Default::default(),
+        dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
         client_id: client_id.to_string(),
         connect_timeout: read_policy.connect_timeout(),
         request_timeout: read_policy.request_timeout(),
@@ -1857,6 +1873,25 @@ mod tests {
             LiveRecoveryConfig::new("localhost:9092", tenant, RangeId::new(7), None)
                 .with_producer_retry_policy(replacement)
                 .producer_retry_policy(),
+            replacement
+        );
+    }
+
+    #[test]
+    fn producer_dns_timeout_defaults_replaces_and_reaches_builder() {
+        let tenant = TenantName::parse("tenant-a").expect("tenant");
+        let config = LiveRecoveryConfig::new("localhost:9092", tenant, RangeId::new(7), None);
+        assert_eq!(
+            config.producer_dns_timeout(),
+            crabka_client_core::ClientDnsTimeout::default()
+        );
+
+        let replacement = crabka_client_core::ClientDnsTimeout::new(Duration::from_millis(37))
+            .expect("valid DNS timeout");
+        assert_eq!(
+            config
+                .with_producer_dns_timeout(replacement)
+                .producer_dns_timeout(),
             replacement
         );
     }
