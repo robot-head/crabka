@@ -818,10 +818,24 @@ pub struct RegistryOptions {
         default_value = "1048576"
     )]
     fetch_partition_max_bytes: PositiveI32,
+    #[arg(
+        long = "registry-producer-dns-timeout-ms",
+        env = "CRABKA_GRES_REGISTRY_PRODUCER_DNS_TIMEOUT_MS"
+    )]
+    producer_dns_timeout_ms: Option<PositiveMillis>,
 }
 
 impl RegistryOptions {
     fn policy(&self) -> RegistryPolicy {
+        let producer_dns_timeout_ms = self.producer_dns_timeout_ms.map_or_else(
+            || {
+                RegistryPolicy::default()
+                    .producer_dns_timeout()
+                    .milliseconds()
+            },
+            PositiveMillis::into_value,
+        );
+
         RegistryPolicy::new(
             self.replication_factor.into_value(),
             self.topic_create_timeout_ms.into_value(),
@@ -830,6 +844,8 @@ impl RegistryOptions {
             self.fetch_partition_max_bytes.into_value(),
         )
         .expect("validated registry options")
+        .with_producer_dns_timeout_ms(producer_dns_timeout_ms)
+        .expect("validated registry producer DNS timeout")
     }
 }
 
@@ -7600,6 +7616,7 @@ mod tests {
             "--registry-reader-retry-backoff-ms=0",
             "--registry-fetch-max-wait-ms=0",
             "--registry-fetch-partition-max-bytes=0",
+            "--registry-producer-dns-timeout-ms=0",
         ] {
             assert!(Cli::try_parse_from(["crabka-gres", option]).is_err());
         }
@@ -7614,6 +7631,7 @@ mod tests {
             ("CRABKA_GRES_REGISTRY_READER_RETRY_BACKOFF_MS", "251"),
             ("CRABKA_GRES_REGISTRY_FETCH_MAX_WAIT_MS", "501"),
             ("CRABKA_GRES_REGISTRY_FETCH_PARTITION_MAX_BYTES", "1048577"),
+            ("CRABKA_GRES_REGISTRY_PRODUCER_DNS_TIMEOUT_MS", "37"),
         ];
         if std::env::var_os(CHILD).is_none() {
             let status = std::process::Command::new(std::env::current_exe().expect("test exe"))
@@ -7629,11 +7647,12 @@ mod tests {
             return;
         }
         let environment = Cli::try_parse_from(["crabka-gres"]).expect("environment policy");
-        assert!(
-            environment.serve.registry.policy()
-                == crabka_gres_control::RegistryPolicy::new(2, 15_001, 251, 501, 1_048_577)
-                    .expect("policy")
-        );
+        let environment_policy =
+            crabka_gres_control::RegistryPolicy::new(2, 15_001, 251, 501, 1_048_577)
+                .expect("policy")
+                .with_producer_dns_timeout_ms(37)
+                .expect("environment DNS timeout");
+        assert!(environment.serve.registry.policy() == environment_policy);
         let cli = Cli::try_parse_from([
             "crabka-gres",
             "--registry-replication-factor=3",
@@ -7641,13 +7660,14 @@ mod tests {
             "--registry-reader-retry-backoff-ms=252",
             "--registry-fetch-max-wait-ms=502",
             "--registry-fetch-partition-max-bytes=1048578",
+            "--registry-producer-dns-timeout-ms=47",
         ])
         .expect("CLI policy");
-        assert!(
-            cli.serve.registry.policy()
-                == crabka_gres_control::RegistryPolicy::new(3, 15_002, 252, 502, 1_048_578)
-                    .expect("policy")
-        );
+        let cli_policy = crabka_gres_control::RegistryPolicy::new(3, 15_002, 252, 502, 1_048_578)
+            .expect("policy")
+            .with_producer_dns_timeout_ms(47)
+            .expect("CLI DNS timeout");
+        assert!(cli.serve.registry.policy() == cli_policy);
     }
 
     #[test]
@@ -8482,6 +8502,7 @@ mod tests {
                 reader_retry_backoff_ms: PositiveMillis::new(250).expect("default"),
                 fetch_max_wait_ms: PositiveI32::new(500).expect("default"),
                 fetch_partition_max_bytes: PositiveI32::new(1_048_576).expect("default"),
+                producer_dns_timeout_ms: None,
             },
             local_vacuum: LocalVacuumOptions::default(),
             listen: "127.0.0.1:0".to_string(),
@@ -8849,6 +8870,7 @@ mod tests {
             reader_retry_backoff_ms: PositiveMillis::new(251).expect("retry backoff"),
             fetch_max_wait_ms: PositiveI32::new(777).expect("fetch wait"),
             fetch_partition_max_bytes: PositiveI32::new(2_000_000).expect("fetch bytes"),
+            producer_dns_timeout_ms: None,
         };
         let expected_policy = args.registry.policy();
         let loader = RecordingTenantConfigLoader::default();

@@ -859,7 +859,7 @@ fn build_spec(
     }
 }
 
-fn registry_policy_args(policy: &RegistryPolicy) -> [String; 10] {
+fn registry_policy_args(policy: &RegistryPolicy) -> [String; 12] {
     [
         "--registry-replication-factor".to_owned(),
         policy.replication_factor().to_string(),
@@ -871,6 +871,8 @@ fn registry_policy_args(policy: &RegistryPolicy) -> [String; 10] {
         policy.fetch_max_wait_ms().to_string(),
         "--registry-fetch-partition-max-bytes".to_owned(),
         policy.fetch_partition_max_bytes().to_string(),
+        "--registry-producer-dns-timeout-ms".to_owned(),
+        policy.producer_dns_timeout().milliseconds().to_string(),
     ]
 }
 
@@ -1536,7 +1538,10 @@ mod tests {
             broker_cpus: None,
         };
         let tls = test_tls();
-        let policy = RegistryPolicy::new(3, 15_002, 252, 502, 1_048_578).expect("policy");
+        let policy = RegistryPolicy::new(3, 15_002, 252, 502, 1_048_578)
+            .expect("policy")
+            .with_producer_dns_timeout_ms(37)
+            .expect("DNS timeout");
         let context = SpecContext {
             topology: &topology,
             mode: ModeSpec::LogicalTso,
@@ -1563,6 +1568,7 @@ mod tests {
         assert!(
             arg_value(&spawned_args, "--registry-fetch-partition-max-bytes") == Some("1048578")
         );
+        assert!(arg_value(&spawned_args, "--registry-producer-dns-timeout-ms") == Some("37"));
     }
 
     #[test]
