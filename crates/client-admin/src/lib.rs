@@ -405,6 +405,7 @@ impl AdminClient {
     /// carrying the supplied security policy.
     fn opts(security: Option<crabka_client_core::security::ClientSecurity>) -> ConnectionOptions {
         ConnectionOptions {
+            dns_timeout: Default::default(),
             connect_timeout: Duration::from_secs(5),
             request_timeout: Duration::from_secs(30),
             client_id: "crabka-operator".to_string(),
@@ -731,6 +732,7 @@ mod tests {
 
     fn custom_admin_options() -> ConnectionOptions {
         ConnectionOptions {
+            dns_timeout: Default::default(),
             client_id: "custom-admin".into(),
             connect_timeout: Duration::from_millis(100),
             request_timeout: Duration::from_millis(25),

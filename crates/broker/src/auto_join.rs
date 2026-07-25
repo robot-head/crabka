@@ -284,12 +284,9 @@ async fn send_add_raft_voter(
 }
 
 fn auto_join_connection_options() -> crabka_client_core::ConnectionOptions {
-    let default = crabka_client_core::ConnectionOptions::default();
     crabka_client_core::ConnectionOptions {
         client_id: "crabka-auto-join".to_string(),
-        connect_timeout: default.connect_timeout,
-        request_timeout: default.request_timeout,
-        security: default.security,
+        ..Default::default()
     }
 }
 
