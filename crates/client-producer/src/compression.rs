@@ -1,6 +1,8 @@
 //! `Compression` enum + mapping from the producer's choice to a
 //! `RecordBatch` v2 `attributes` value + a `crabka-compression::CompressionType`.
 
+use std::{fmt, str::FromStr};
+
 use bytes::Bytes;
 
 use crate::error::ProducerError;
@@ -13,6 +15,33 @@ pub enum Compression {
     Snappy,
     Lz4,
     Zstd,
+}
+
+impl fmt::Display for Compression {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::None => "none",
+            Self::Gzip => "gzip",
+            Self::Snappy => "snappy",
+            Self::Lz4 => "lz4",
+            Self::Zstd => "zstd",
+        })
+    }
+}
+
+impl FromStr for Compression {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "none" => Ok(Self::None),
+            "gzip" => Ok(Self::Gzip),
+            "snappy" => Ok(Self::Snappy),
+            "lz4" => Ok(Self::Lz4),
+            "zstd" => Ok(Self::Zstd),
+            _ => Err(format!("unsupported producer compression: {value}")),
+        }
+    }
 }
 
 impl Compression {
@@ -82,5 +111,23 @@ mod tests {
         let decoded =
             crabka_compression::decompress(CompressionType::Gzip, &compressed, usize::MAX).unwrap();
         assert2::assert!(decoded.as_ref() == raw);
+    }
+
+    #[test]
+    fn compression_parses_and_displays_canonical_names() {
+        for (name, compression) in [
+            ("none", Compression::None),
+            ("gzip", Compression::Gzip),
+            ("snappy", Compression::Snappy),
+            ("lz4", Compression::Lz4),
+            ("zstd", Compression::Zstd),
+        ] {
+            assert_eq!(name.parse::<Compression>(), Ok(compression));
+            assert_eq!(compression.to_string(), name);
+        }
+        assert_eq!(
+            "brotli".parse::<Compression>(),
+            Err("unsupported producer compression: brotli".to_owned())
+        );
     }
 }

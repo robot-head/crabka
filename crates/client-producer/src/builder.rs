@@ -15,7 +15,7 @@ use crabka_protocol::owned::{
     init_producer_id_response::InitProducerIdResponse,
 };
 use dashmap::DashMap;
-use refined_type::rule::{GreaterI32, MinMaxU128};
+use refined_type::rule::{GreaterI32, GreaterUsize, MinMaxU128, MinMaxUsize};
 use tokio::sync::{Mutex, Notify, mpsc};
 use tokio_util::sync::CancellationToken;
 
@@ -37,6 +37,14 @@ const COORDINATOR_LOAD_IN_PROGRESS: i16 = 14;
 const COORDINATOR_NOT_AVAILABLE: i16 = 15;
 const NOT_COORDINATOR: i16 = 16;
 
+/// Default producer compression.
+pub const DEFAULT_PRODUCER_COMPRESSION: Compression = Compression::None;
+/// Default delay before sending a partial producer batch.
+pub const DEFAULT_PRODUCER_LINGER: Duration = Duration::ZERO;
+/// Default producer batch size in bytes.
+pub const DEFAULT_PRODUCER_BATCH_BYTES: usize = 16 * 1024;
+/// Default cross-partition in-flight request limit.
+pub const DEFAULT_PRODUCER_MAX_IN_FLIGHT: usize = 5;
 /// Default producer request timeout.
 pub const DEFAULT_PRODUCER_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Default retries after a batch's initial send.
@@ -51,6 +59,93 @@ pub const DEFAULT_PRODUCER_INIT_RETRY_TIMEOUT: Duration = Duration::from_secs(30
 pub const DEFAULT_PRODUCER_INIT_MAX_BACKOFF: Duration = Duration::from_secs(1);
 /// Default transaction timeout.
 pub const DEFAULT_PRODUCER_TRANSACTION_TIMEOUT: Duration = Duration::from_mins(1);
+
+/// Validated producer batching and compression policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProducerThroughputPolicy {
+    compression: Compression,
+    linger: Duration,
+    linger_ms: i32,
+    batch_bytes: usize,
+    max_in_flight: usize,
+}
+
+impl ProducerThroughputPolicy {
+    /// Validate producer batching and compression settings.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when linger is fractional or exceeds `i32::MAX`
+    /// milliseconds, batch bytes are outside `1..=i32::MAX`, or max in flight
+    /// is zero.
+    pub fn new(
+        compression: Compression,
+        linger: Duration,
+        batch_bytes: usize,
+        max_in_flight: usize,
+    ) -> Result<Self, String> {
+        let milliseconds = MinMaxU128::<0, { i32::MAX as u128 }>::new(linger.as_millis())
+            .map_err(|error| format!("producer linger: {error}"))?
+            .into_value();
+        let milliseconds =
+            u64::try_from(milliseconds).map_err(|error| format!("producer linger: {error}"))?;
+        if Duration::from_millis(milliseconds) != linger {
+            return Err("producer linger must be a whole number of milliseconds".to_owned());
+        }
+        let linger_ms =
+            i32::try_from(milliseconds).map_err(|error| format!("producer linger: {error}"))?;
+        let batch_bytes = MinMaxUsize::<1, { i32::MAX as usize }>::new(batch_bytes)
+            .map_err(|error| format!("producer batch bytes: {error}"))?
+            .into_value();
+        let max_in_flight = GreaterUsize::<0>::new(max_in_flight)
+            .map_err(|error| format!("producer max in flight: {error}"))?
+            .into_value();
+        Ok(Self {
+            compression,
+            linger,
+            linger_ms,
+            batch_bytes,
+            max_in_flight,
+        })
+    }
+
+    #[must_use]
+    pub const fn compression(self) -> Compression {
+        self.compression
+    }
+
+    #[must_use]
+    pub const fn linger(self) -> Duration {
+        self.linger
+    }
+
+    #[must_use]
+    pub const fn batch_bytes(self) -> usize {
+        self.batch_bytes
+    }
+
+    #[must_use]
+    pub const fn max_in_flight(self) -> usize {
+        self.max_in_flight
+    }
+
+    #[must_use]
+    pub const fn linger_ms(self) -> i32 {
+        self.linger_ms
+    }
+}
+
+impl Default for ProducerThroughputPolicy {
+    fn default() -> Self {
+        Self::new(
+            DEFAULT_PRODUCER_COMPRESSION,
+            DEFAULT_PRODUCER_LINGER,
+            DEFAULT_PRODUCER_BATCH_BYTES,
+            DEFAULT_PRODUCER_MAX_IN_FLIGHT,
+        )
+        .expect("default producer throughput policy is valid")
+    }
+}
 
 /// Validated producer retry and transaction timing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -310,22 +405,34 @@ impl Producer {
     pub async fn start(
         #[builder(into)] bootstrap: String,
         #[builder(into, default = "crabka-producer".to_string())] client_id: String,
-        #[builder(default = Compression::None)] compression: Compression,
+        #[builder(default = DEFAULT_PRODUCER_COMPRESSION)] compression: Compression,
         #[builder(default = true)] enable_idempotence: bool,
         #[builder(default = Acks::One)] acks: Acks,
-        #[builder(default = Duration::from_millis(0))] linger: Duration,
-        #[builder(default = 16 * 1024)] batch_size: usize,
+        #[builder(default = DEFAULT_PRODUCER_LINGER)] linger: Duration,
+        #[builder(default = DEFAULT_PRODUCER_BATCH_BYTES)] batch_size: usize,
         #[builder(default = DEFAULT_PRODUCER_REQUEST_TIMEOUT)] request_timeout: Duration,
         #[builder(default = DEFAULT_PRODUCER_RETRIES)] retries: i32,
         #[builder(default = DEFAULT_PRODUCER_RETRY_BACKOFF)] retry_backoff: Duration,
         #[builder(default = DEFAULT_PRODUCER_ROUTING_RETRY_BUDGET)] routing_retry_budget: Duration,
         #[builder(default = DEFAULT_PRODUCER_INIT_RETRY_TIMEOUT)] init_retry_timeout: Duration,
         #[builder(default = DEFAULT_PRODUCER_INIT_MAX_BACKOFF)] init_max_backoff: Duration,
-        #[builder(default = 5)] max_in_flight_per_connection: usize,
+        #[builder(default = DEFAULT_PRODUCER_MAX_IN_FLIGHT)] max_in_flight_per_connection: usize,
         #[builder(into)] transactional_id: Option<String>,
         #[builder(default = DEFAULT_PRODUCER_TRANSACTION_TIMEOUT)] transaction_timeout: Duration,
         security: Option<crabka_client_core::security::ClientSecurity>,
     ) -> Result<Self, ProducerError> {
+        let throughput_policy = ProducerThroughputPolicy::new(
+            compression,
+            linger,
+            batch_size,
+            max_in_flight_per_connection,
+        )
+        .map_err(ProducerError::InvalidConfig)?;
+        let compression = throughput_policy.compression();
+        let linger = throughput_policy.linger();
+        let batch_size = throughput_policy.batch_bytes();
+        let max_in_flight_per_connection = throughput_policy.max_in_flight();
+
         let retry_policy = ProducerRetryPolicy::new(
             request_timeout,
             retries,
@@ -568,6 +675,82 @@ mod security_arg_tests {
                 17,
             )
         );
+    }
+
+    #[test]
+    fn producer_throughput_policy_defaults_and_distinct_values_are_exact() {
+        let defaults = ProducerThroughputPolicy::default();
+        assert_eq!(
+            (
+                defaults.compression(),
+                defaults.linger(),
+                defaults.batch_bytes(),
+                defaults.max_in_flight(),
+                defaults.linger_ms(),
+            ),
+            (Compression::None, Duration::ZERO, 16_384, 5, 0,)
+        );
+
+        let policy =
+            ProducerThroughputPolicy::new(Compression::Zstd, Duration::from_millis(11), 12, 13)
+                .expect("distinct throughput policy");
+        assert_eq!(
+            (
+                policy.compression(),
+                policy.linger(),
+                policy.batch_bytes(),
+                policy.max_in_flight(),
+                policy.linger_ms(),
+            ),
+            (Compression::Zstd, Duration::from_millis(11), 12, 13, 11,)
+        );
+    }
+
+    #[test]
+    fn producer_throughput_policy_enforces_protocol_bounds() {
+        assert!(
+            ProducerThroughputPolicy::new(Compression::None, Duration::ZERO, 1, 1).is_ok(),
+            "zero linger is valid"
+        );
+        for (error, field) in [
+            (
+                ProducerThroughputPolicy::new(
+                    Compression::None,
+                    Duration::from_millis(i32::MAX as u64 + 1),
+                    1,
+                    1,
+                )
+                .expect_err("overflow linger"),
+                "producer linger",
+            ),
+            (
+                ProducerThroughputPolicy::new(Compression::None, Duration::from_nanos(1), 1, 1)
+                    .expect_err("fractional linger"),
+                "producer linger",
+            ),
+            (
+                ProducerThroughputPolicy::new(Compression::None, Duration::ZERO, 0, 1)
+                    .expect_err("zero batch bytes"),
+                "producer batch bytes",
+            ),
+            (
+                ProducerThroughputPolicy::new(
+                    Compression::None,
+                    Duration::ZERO,
+                    i32::MAX as usize + 1,
+                    1,
+                )
+                .expect_err("overflow batch bytes"),
+                "producer batch bytes",
+            ),
+            (
+                ProducerThroughputPolicy::new(Compression::None, Duration::ZERO, 1, 0)
+                    .expect_err("zero max in flight"),
+                "producer max in flight",
+            ),
+        ] {
+            assert!(error.contains(field), "{error:?} does not name {field:?}");
+        }
     }
 
     #[test]
@@ -958,6 +1141,45 @@ mod security_arg_tests {
         ] {
             let message = error.to_string();
             assert2::assert!(message == expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn producer_builder_rejects_throughput_policy_before_connection_io() {
+        macro_rules! invalid {
+            ($setter:ident, $value:expr) => {
+                Producer::builder()
+                    .bootstrap("127.0.0.1:1")
+                    .$setter($value)
+                    .build()
+                    .await
+                    .expect_err("invalid throughput policy must fail before connection I/O")
+            };
+        }
+
+        for (error, field) in [
+            (invalid!(linger, Duration::from_nanos(1)), "producer linger"),
+            (
+                invalid!(linger, Duration::from_millis(i32::MAX as u64 + 1)),
+                "producer linger",
+            ),
+            (invalid!(batch_size, 0), "producer batch bytes"),
+            (
+                invalid!(batch_size, i32::MAX as usize + 1),
+                "producer batch bytes",
+            ),
+            (
+                invalid!(max_in_flight_per_connection, 0),
+                "producer max in flight",
+            ),
+        ] {
+            assert!(
+                matches!(
+                    error,
+                    ProducerError::InvalidConfig(ref message) if message.starts_with(field)
+                ),
+                "{error:?} does not name {field:?}"
+            );
         }
     }
 }
