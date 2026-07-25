@@ -4,9 +4,9 @@
 //! The sender is `tokio::spawn`'d by the builder. It owns the `wake_rx`
 //! `Receiver` end of the wake channel (the `Producer` holds the
 //! `wake_tx` `Sender`), the `flush_notify`, the `accumulators` map, and
-//! the `next_seq` map. Linger ticks seal only expired current batches, ready
-//! wakes drain completed rollover batches, and forced wakes seal everything
-//! for zero linger, flush, or shutdown. Drained batches become v2
+//! the `next_seq` map. Per-batch deadlines seal only expired current batches,
+//! ready wakes drain completed rollover batches, and forced wakes stay active
+//! until zero-linger, flush, or shutdown work settles. Drained batches become v2
 //! `RecordBatch`es (allocating their `base_sequence`). Each batch becomes its own
 //! single-partition `ProduceRequest`, sent via `Client::broker(id)` — falling
 //! back to the bootstrap `Client::send` when the leader is unknown — with all
@@ -221,64 +221,164 @@ struct PipelineState {
     retry: HashMap<(String, i32), PreparedBatch>,
 }
 
+#[derive(Debug)]
+struct Schedule {
+    immediate: bool,
+    deadline: Option<Instant>,
+    settled: bool,
+}
+
+fn include_deadline(schedule: &mut Schedule, deadline: Instant, now: Instant) {
+    if deadline <= now {
+        schedule.immediate = true;
+    } else if schedule.deadline.is_none_or(|current| deadline < current) {
+        schedule.deadline = Some(deadline);
+    }
+}
+
+async fn schedule(cfg: &SenderConfig, state: &PipelineState, force: bool) -> Schedule {
+    let now = Instant::now();
+    let mut schedule = Schedule {
+        immediate: false,
+        deadline: None,
+        settled: state.retry.is_empty() && cfg.in_flight.load(Ordering::Acquire) == 0,
+    };
+
+    for batch in state.retry.values() {
+        schedule.settled = false;
+        if batch_crosses_recovery_barrier(cfg, batch.transaction_generation) {
+            schedule.immediate = true;
+            continue;
+        }
+        let Some(first_sent) = batch.first_sent else {
+            if let Some(backoff_until) = batch.backoff_until {
+                include_deadline(&mut schedule, backoff_until, now);
+            } else {
+                schedule.immediate = true;
+            }
+            continue;
+        };
+        include_deadline(
+            &mut schedule,
+            first_sent
+                .checked_add(cfg.routing_retry_budget)
+                .unwrap_or(now),
+            now,
+        );
+        if let Some(backoff_until) = batch.backoff_until {
+            include_deadline(&mut schedule, backoff_until, now);
+        } else {
+            schedule.immediate = true;
+        }
+    }
+
+    let keys = cfg
+        .accumulators
+        .iter()
+        .map(|entry| entry.key().clone())
+        .collect::<Vec<_>>();
+    for key in keys {
+        let Some(accumulator) = cfg
+            .accumulators
+            .get(&key)
+            .map(|entry| Arc::clone(entry.value()))
+        else {
+            continue;
+        };
+        let accumulator = accumulator.lock().await;
+        let has_current = accumulator
+            .current
+            .as_ref()
+            .is_some_and(|batch| !batch.is_empty());
+        let has_ready = !accumulator.ready.is_empty();
+        if !has_current && !has_ready {
+            continue;
+        }
+        schedule.settled = false;
+        if state.retry.contains_key(&key) {
+            continue;
+        }
+        if has_ready {
+            schedule.immediate = true;
+        }
+        if let Some(batch) = accumulator
+            .current
+            .as_ref()
+            .filter(|batch| !batch.is_empty())
+        {
+            if force || batch_crosses_recovery_barrier(cfg, batch.transaction_generation) {
+                schedule.immediate = true;
+            } else {
+                include_deadline(
+                    &mut schedule,
+                    batch.first_append_at.checked_add(cfg.linger).unwrap_or(now),
+                    now,
+                );
+            }
+        }
+    }
+
+    schedule
+}
+
 #[tracing::instrument(
     level = "debug",
     skip_all,
     fields(producer_id = cfg.producer_id, max_in_flight = cfg.max_in_flight),
 )]
 pub(crate) async fn run(mut cfg: SenderConfig) {
-    let mut ticker = tokio::time::interval(cfg.linger.max(Duration::from_millis(1)));
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
     let mut state = PipelineState::default();
-
+    let mut force = false;
+    let mut stopping = false;
     loop {
-        tokio::select! {
-            () = cfg.shutdown.cancelled() => break,
-            _ = ticker.tick() => {
-                drain_once(&mut cfg, &mut state, DrainIntent::Expired).await;
-            }
-            received = cfg.wake_rx.recv() => {
-                // A closed wake channel means every producer handle is gone,
-                // so no further record can ever arrive: fall through to the
-                // final drain instead of hot-looping on the closed receiver.
-                let Some(intent) = received else { break };
-                drain_once(&mut cfg, &mut state, intent).await;
+        let next = schedule(&cfg, &state, force).await;
+        if next.immediate {
+            let intent = if force {
+                DrainIntent::Force
+            } else {
+                DrainIntent::Expired
+            };
+            drain_once(&mut cfg, &mut state, intent).await;
+            continue;
+        }
+        if force && next.settled {
+            force = false;
+            if stopping {
+                break;
             }
         }
-    }
-
-    // Settle everything left when we shut down so neither `close()` nor a
-    // dropped-without-close producer strands records: one drain can cap out at
-    // `max_in_flight` or park a transiently failed batch in a retry slot, so
-    // keep draining on the linger cadence until the accumulators, retry slots,
-    // and in-flight count are all settled. Bounded by the same budget a
-    // failing batch is given before it is terminally failed, so a dead broker
-    // cannot pin the task forever; whatever remains past the budget resolves
-    // its acknowledgements through the drain's terminal-failure paths or drops
-    // as cancellation exactly as before.
-    let settle_deadline = Instant::now()
-        .checked_add(cfg.routing_retry_budget)
-        .unwrap_or_else(Instant::now);
-    loop {
-        drain_once(&mut cfg, &mut state, DrainIntent::Force).await;
-        let mut settled =
-            state.retry.is_empty() && cfg.in_flight.load(std::sync::atomic::Ordering::Acquire) == 0;
-        if settled {
-            for entry in cfg.accumulators.iter() {
-                let accumulator = entry.value().lock().await;
-                if accumulator.current.as_ref().is_some_and(|b| !b.is_empty())
-                    || !accumulator.ready.is_empty()
-                {
-                    settled = false;
-                    break;
-                }
-            }
-        }
-        if settled || Instant::now() >= settle_deadline {
+        if stopping && next.settled {
             break;
         }
-        tokio::time::sleep(cfg.linger.max(Duration::from_millis(1))).await;
+        if stopping {
+            tokio::time::sleep_until(
+                next.deadline
+                    .expect("unsettled stopped sender has a retry deadline"),
+            )
+            .await;
+            continue;
+        }
+
+        let received = if let Some(deadline) = next.deadline {
+            tokio::select! {
+                () = cfg.shutdown.cancelled() => None,
+                received = cfg.wake_rx.recv() => received,
+                () = tokio::time::sleep_until(deadline) => continue,
+            }
+        } else {
+            tokio::select! {
+                () = cfg.shutdown.cancelled() => None,
+                received = cfg.wake_rx.recv() => received,
+            }
+        };
+        match received {
+            Some(DrainIntent::Force) => force = true,
+            Some(DrainIntent::Ready | DrainIntent::Expired) => {}
+            None => {
+                force = true;
+                stopping = true;
+            }
+        }
     }
 }
 
@@ -301,14 +401,14 @@ struct PreparedBatch {
     record_batch: RecordBatch,
     records: Vec<PendingRecord>,
     /// Wall-clock time the batch was first handed to the transport. Set on the
-    /// first send and preserved across resends so the routing-retry budget
-    /// routing retry budget is measured from the first attempt, not the
+    /// first send and preserved across resends so the routing retry budget is
+    /// measured from the first attempt, not the
     /// most recent — a batch that keeps failing to route gives up by ~30s.
     first_sent: Option<Instant>,
     /// When `Some`, the batch is backing off after a **transport/connection**
     /// failure and must not be resent until this instant. This keeps a leader
     /// whose pod is down and refusing connections from hot-looping the drain
-    /// every linger tick. Routing redirects (`NOT_LEADER` / `UNKNOWN`) leave
+    /// scheduler. Routing redirects (`NOT_LEADER` / `UNKNOWN`) leave
     /// this `None` so they resend immediately at the freshly-resolved leader.
     backoff_until: Option<Instant>,
     /// Resends already admitted after the initial send.
@@ -378,7 +478,7 @@ async fn drain_once(cfg: &mut SenderConfig, state: &mut PipelineState, intent: D
     // 2. One eligible new batch per idle partition. Across partitions we fan out
     //    concurrently, but bound the cycle's total fan-out to `max_in_flight`
     //    (the per-connection pipelining bound); partitions not reached this cycle
-    //    are picked up on the next linger tick (their retry slots carry forward,
+    //    are picked up on the next drain cycle (their retry slots carry forward,
     //    so none is starved). `in_flight` is incremented per new batch while the
     //    accumulator lock is held, so a concurrent `flush` never sees a batch
     //    that is neither in the accumulator nor counted in flight.
@@ -462,7 +562,7 @@ fn collect_retries(
     let mut to_send: Vec<PreparedBatch> = Vec::new();
     let mut expired: Vec<PreparedBatch> = Vec::new();
     // Batches still backing off after a transport failure are re-parked here so
-    // a down/refusing leader doesn't hot-loop the drain on every linger tick.
+    // a down/refusing leader doesn't hot-loop the drain scheduler.
     let mut parked: Vec<((String, i32), PreparedBatch)> = Vec::new();
 
     for (key, mut pb) in retry.drain() {
@@ -886,7 +986,7 @@ async fn send_one_batch(cfg: &SenderConfig, mut pb: PreparedBatch) -> BatchSendR
                     );
                     // Transport failure → retry (park in the retry slot, resend
                     // verbatim). Back off before the resend so a down/refusing
-                    // leader isn't hammered every linger tick, and force a
+                    // leader isn't hammered by the drain scheduler, and force a
                     // metadata refresh so the resend re-resolves to whatever
                     // leader the cluster (re-)elected.
                     pb.backoff_until = Some(backoff_deadline(Instant::now(), cfg.retry_backoff));
@@ -1406,8 +1506,8 @@ mod tests {
     fn collect_retries_honours_connection_backoff_until() {
         // A batch parked with `backoff_until` set (after a transport failure)
         // must NOT be resent until that instant passes — otherwise a leader
-        // whose pod is down and refusing connections hot-loops the drain every
-        // linger tick. The three sample points (before / exactly at / after the
+        // whose pod is down and refusing connections hot-loops the drain
+        // scheduler. The three sample points (before / exactly at / after the
         // backoff instant) pin the `now < backoff_until` comparison so no
         // `<` → `<=`/`>`/`>=`/`==`/`!=` mutant survives.
         let backoff = Duration::from_millis(100);
@@ -2076,6 +2176,38 @@ mod harness {
         rxs
     }
 
+    async fn produce_ready_batches_without_wake(
+        h: &Harness,
+        topic: &str,
+        partition: i32,
+        n: usize,
+    ) -> Vec<oneshot::Receiver<Result<RecordMetadata, ProducerError>>> {
+        let key = (topic.to_owned(), partition);
+        let accumulator = h
+            .accumulators
+            .entry(key)
+            .or_insert_with(|| Arc::new(Mutex::new(Accumulator::new(16 * 1024))))
+            .value()
+            .clone();
+        let mut receivers = Vec::with_capacity(n);
+        let mut accumulator = accumulator.lock().await;
+        for _ in 0..n {
+            let receiver = match accumulator.try_append(
+                None,
+                Some(bytes::Bytes::from_static(b"x")),
+                vec![],
+                0,
+                None,
+            ) {
+                crate::accumulator::AppendResult::Appended(receiver) => receiver,
+                crate::accumulator::AppendResult::BatchFull => panic!("unexpected BatchFull"),
+            };
+            accumulator.seal_current();
+            receivers.push(receiver);
+        }
+        receivers
+    }
+
     async fn shutdown(h: Harness) {
         h.shutdown.cancel();
         let _ = h.handle.await;
@@ -2213,6 +2345,190 @@ mod harness {
         assert_eq!(transport.send_count(), 1);
 
         shutdown(h).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn off_phase_append_sends_at_its_own_linger_deadline() {
+        let transport = MockTransport::new(Duration::ZERO);
+        let h = spawn_sender_with(transport.clone(), 5, Duration::from_millis(100));
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(50)).await;
+        let mut receivers = produce_single_batch_without_wake(&h, "t", 0, 1).await;
+        h.wake_tx
+            .send(DrainIntent::Ready)
+            .await
+            .expect("sender is running");
+
+        tokio::time::advance(Duration::from_millis(99)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(transport.send_count(), 0);
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(transport.send_count(), 1);
+        receivers
+            .remove(0)
+            .await
+            .expect("ack channel remains connected")
+            .expect("batch is acknowledged at its own deadline");
+
+        shutdown(h).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn force_drains_more_partitions_than_max_in_flight_without_linger_wait() {
+        let transport = MockTransport::new(Duration::ZERO);
+        let h = spawn_sender_with(transport.clone(), 2, Duration::from_mins(1));
+        tokio::task::yield_now().await;
+        let start = Instant::now();
+        let mut receivers = Vec::new();
+        for partition in 0..6 {
+            receivers.extend(produce_single_batch_without_wake(&h, "t", partition, 1).await);
+        }
+
+        h.wake_tx
+            .send(DrainIntent::Force)
+            .await
+            .expect("sender is running");
+        for receiver in receivers {
+            receiver
+                .await
+                .expect("ack channel remains connected")
+                .expect("forced batch is acknowledged");
+        }
+        assert_eq!(Instant::now(), start);
+        assert_eq!(transport.send_count(), 6);
+
+        shutdown(h).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn force_drains_multiple_ready_batches_from_one_partition_without_linger_wait() {
+        let transport = MockTransport::new(Duration::ZERO);
+        let h = spawn_sender_with(transport.clone(), 5, Duration::from_mins(1));
+        tokio::task::yield_now().await;
+        let start = Instant::now();
+        let receivers = produce_ready_batches_without_wake(&h, "t", 0, 3).await;
+
+        h.wake_tx
+            .send(DrainIntent::Force)
+            .await
+            .expect("sender is running");
+        for receiver in receivers {
+            receiver
+                .await
+                .expect("ack channel remains connected")
+                .expect("forced batch is acknowledged");
+        }
+        assert_eq!(Instant::now(), start);
+        assert_eq!(transport.send_count(), 3);
+
+        shutdown(h).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn one_ready_wake_drains_coalesced_backlog_past_the_cycle_cap() {
+        let transport = MockTransport::new(Duration::ZERO);
+        let h = spawn_sender_with(transport.clone(), 2, Duration::from_mins(1));
+        tokio::task::yield_now().await;
+        let start = Instant::now();
+        let mut receivers = Vec::new();
+        for partition in 0..6 {
+            receivers.extend(produce_ready_batches_without_wake(&h, "t", partition, 1).await);
+        }
+
+        h.wake_tx
+            .send(DrainIntent::Ready)
+            .await
+            .expect("sender is running");
+        for receiver in receivers {
+            receiver
+                .await
+                .expect("ack channel remains connected")
+                .expect("ready batch is acknowledged");
+        }
+        assert_eq!(Instant::now(), start);
+        assert_eq!(transport.send_count(), 6);
+
+        shutdown(h).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_release_resumes_same_partition_ready_backlog() {
+        let transport = MockTransport::new(Duration::ZERO);
+        transport.fail_once_on(0);
+        let h = spawn_sender_with(transport.clone(), 5, Duration::from_mins(1));
+        tokio::task::yield_now().await;
+        let start = Instant::now();
+        let receivers = produce_ready_batches_without_wake(&h, "t", 0, 2).await;
+        let first_send = transport.send_started.notified();
+        tokio::pin!(first_send);
+        first_send.as_mut().enable();
+
+        h.wake_tx
+            .send(DrainIntent::Ready)
+            .await
+            .expect("sender is running");
+        first_send.await;
+        for receiver in receivers {
+            receiver
+                .await
+                .expect("ack channel remains connected")
+                .expect("retry and queued batch are acknowledged");
+        }
+        assert_eq!(
+            Instant::now().duration_since(start),
+            Duration::from_millis(1)
+        );
+        assert_eq!(transport.send_count(), 3);
+
+        shutdown(h).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_drains_multiple_batches_without_waiting_for_linger() {
+        let transport = MockTransport::new(Duration::ZERO);
+        let h = spawn_sender_with(transport.clone(), 5, Duration::from_mins(1));
+        tokio::task::yield_now().await;
+        let start = Instant::now();
+        let receivers = produce_ready_batches_without_wake(&h, "t", 0, 3).await;
+
+        h.shutdown.cancel();
+        h.handle.await.expect("sender shuts down cleanly");
+        assert_eq!(Instant::now(), start);
+        assert_eq!(transport.send_count(), 3);
+        drop(receivers);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn channel_close_waits_for_retry_deadline_not_linger() {
+        let transport = MockTransport::new(Duration::ZERO);
+        transport.fail_once_on(0);
+        let h = spawn_sender_with(transport.clone(), 5, Duration::from_mins(1));
+        tokio::task::yield_now().await;
+        let mut receivers = produce_ready_batches_without_wake(&h, "t", 0, 1).await;
+        let first_send = transport.send_started.notified();
+        tokio::pin!(first_send);
+        first_send.as_mut().enable();
+        h.wake_tx
+            .send(DrainIntent::Ready)
+            .await
+            .expect("sender is running");
+        first_send.await;
+        let start = Instant::now();
+
+        drop(h.wake_tx);
+        h.handle.await.expect("closed sender drains cleanly");
+        assert_eq!(
+            Instant::now().duration_since(start),
+            Duration::from_millis(1)
+        );
+        assert_eq!(transport.send_count(), 2);
+        receivers
+            .remove(0)
+            .await
+            .expect("ack channel remains connected")
+            .expect("retry is acknowledged before close");
     }
 
     /// THE REGRESSION TEST for the same-partition pipelining hang.
@@ -3102,20 +3418,13 @@ mod harness {
     }
 
     /// `finish_in_flight` notifies flush waiters exactly when `in_flight` reaches
-    /// zero. With a long linger the only drains are wake-triggered, so this
+    /// zero. With a long linger the only early drains are wake-triggered, so this
     /// notify is the only one a registered waiter can receive.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn finish_in_flight_notifies_when_drained() {
         let transport = MockTransport::new(Duration::ZERO);
         let h = spawn_sender_with(transport.clone(), 5, Duration::from_secs(30));
 
-        // Let the immediate first (empty) linger-tick drain pass before
-        // registering the waiter. That tick's `notify_waiters` leaves no
-        // trace (it wakes only already-registered waiters and this drain
-        // mutates no observable state), so there is no positive condition to
-        // poll — this is a deliberate ordering delay that keeps the first
-        // empty tick from waking the waiter for the wrong reason.
-        tokio::time::sleep(Duration::from_millis(50)).await;
         let flush = Arc::clone(&h.flush_notify);
         // Register the flush waiter synchronously: a `Notified` future only
         // registers once enabled/polled, and `notify_waiters` wakes only
