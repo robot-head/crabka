@@ -30,13 +30,13 @@ DNS resolution and TCP connection establishment are separate phases. Reusing the
 
 ### Validation Lives at the Client Boundary
 
-`ClientDnsTimeout` accepts only positive, whole-millisecond durations representable as `u64` milliseconds. It uses `refined_type` for the positive invariant. Invalid builder input fails before DNS or socket I/O.
+`ClientDnsTimeout` accepts only positive, whole-millisecond durations representable as `u64` milliseconds. It uses `refined_type` for the positive invariant. Invalid builder input returns `ClientError::InvalidConfig` before DNS or socket I/O.
 
 `ConnectionOptions` stores the validated type, so direct option construction cannot pass an invalid DNS deadline into the pool. No resolver trait, global setting, or new dependency beyond the workspace's existing `refined_type` dependency is introduced.
 
 ### Existing Failure Semantics Remain
 
-Resolver errors and deadline expiry are logged and skipped in bootstrap resolution. Advertised-broker resolution continues to skip an unresolved broker. No new public error variant is required because the existing APIs deliberately collapse exhausted bootstrap resolution to `Disconnected` and make metadata refresh best-effort.
+Resolver errors and deadline expiry are logged and skipped in bootstrap resolution. Advertised-broker resolution continues to skip an unresolved broker. No new runtime DNS-timeout error variant is required because the existing APIs deliberately collapse exhausted bootstrap resolution to `Disconnected` and make metadata refresh best-effort.
 
 ## Integration
 
