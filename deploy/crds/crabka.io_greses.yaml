@@ -255,6 +255,8 @@ spec:
                     - snappy
                     - lz4
                     - zstd
+                    - null
+                    nullable: true
                     type: string
                   walProducerInitMaxBackoffMs:
                     description: WAL producer-ID initialization backoff cap.
