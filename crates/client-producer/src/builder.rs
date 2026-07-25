@@ -15,6 +15,7 @@ use crabka_protocol::owned::{
     init_producer_id_response::InitProducerIdResponse,
 };
 use dashmap::DashMap;
+use refined_type::rule::{GreaterI32, GreaterU128, MinMaxU128};
 use tokio::sync::{Mutex, Notify, mpsc};
 use tokio_util::sync::CancellationToken;
 
@@ -36,10 +37,155 @@ const COORDINATOR_LOAD_IN_PROGRESS: i16 = 14;
 const COORDINATOR_NOT_AVAILABLE: i16 = 15;
 const NOT_COORDINATOR: i16 = 16;
 
-/// How long [`init_producer_id`] keeps retrying a cold coordinator before
-/// surfacing the last response. Mirrors a typical client `request.timeout.ms`
-/// and the consumer crate's `COORDINATOR_RETRY_TIMEOUT`.
-const INIT_PRODUCER_ID_RETRY_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default producer request timeout.
+pub const DEFAULT_PRODUCER_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default retries after a batch's initial send.
+pub const DEFAULT_PRODUCER_RETRIES: i32 = i32::MAX;
+/// Default producer retry backoff.
+pub const DEFAULT_PRODUCER_RETRY_BACKOFF: Duration = Duration::from_millis(100);
+/// Default wall-clock routing retry budget per batch.
+pub const DEFAULT_PRODUCER_ROUTING_RETRY_BUDGET: Duration = Duration::from_secs(30);
+/// Default producer-ID initialization retry timeout.
+pub const DEFAULT_PRODUCER_INIT_RETRY_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default producer-ID initialization backoff cap.
+pub const DEFAULT_PRODUCER_INIT_MAX_BACKOFF: Duration = Duration::from_secs(1);
+/// Default transaction timeout.
+pub const DEFAULT_PRODUCER_TRANSACTION_TIMEOUT: Duration = Duration::from_mins(1);
+
+/// Validated producer retry and transaction timing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProducerRetryPolicy {
+    request_timeout: Duration,
+    retries: i32,
+    retry_backoff: Duration,
+    routing_retry_budget: Duration,
+    init_retry_timeout: Duration,
+    init_max_backoff: Duration,
+    transaction_timeout: Duration,
+}
+
+impl ProducerRetryPolicy {
+    /// Validate producer retry and transaction timing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for non-positive durations, negative retries,
+    /// protocol timeouts outside `1..=i32::MAX` milliseconds, or an initial
+    /// retry backoff above its cap.
+    pub fn new(
+        request_timeout: Duration,
+        retries: i32,
+        retry_backoff: Duration,
+        routing_retry_budget: Duration,
+        init_retry_timeout: Duration,
+        init_max_backoff: Duration,
+        transaction_timeout: Duration,
+    ) -> Result<Self, String> {
+        let request_timeout = validated_protocol_duration(request_timeout, "request timeout")?;
+        let retries = GreaterI32::<-1>::new(retries)
+            .map_err(|error| error.to_string())?
+            .into_value();
+        let retry_backoff = validated_duration(retry_backoff)?;
+        let routing_retry_budget = validated_duration(routing_retry_budget)?;
+        let init_retry_timeout = validated_duration(init_retry_timeout)?;
+        let init_max_backoff = validated_duration(init_max_backoff)?;
+        let transaction_timeout =
+            validated_protocol_duration(transaction_timeout, "transaction timeout")?;
+        if retry_backoff > init_max_backoff {
+            return Err("producer retry backoff exceeds producer-ID backoff cap".to_owned());
+        }
+        Ok(Self {
+            request_timeout,
+            retries,
+            retry_backoff,
+            routing_retry_budget,
+            init_retry_timeout,
+            init_max_backoff,
+            transaction_timeout,
+        })
+    }
+
+    #[must_use]
+    pub const fn request_timeout(self) -> Duration {
+        self.request_timeout
+    }
+
+    #[must_use]
+    pub const fn retries(self) -> i32 {
+        self.retries
+    }
+
+    #[must_use]
+    pub const fn retry_backoff(self) -> Duration {
+        self.retry_backoff
+    }
+
+    #[must_use]
+    pub const fn routing_retry_budget(self) -> Duration {
+        self.routing_retry_budget
+    }
+
+    #[must_use]
+    pub const fn init_retry_timeout(self) -> Duration {
+        self.init_retry_timeout
+    }
+
+    #[must_use]
+    pub const fn init_max_backoff(self) -> Duration {
+        self.init_max_backoff
+    }
+
+    #[must_use]
+    pub const fn transaction_timeout(self) -> Duration {
+        self.transaction_timeout
+    }
+
+    #[must_use]
+    pub fn request_timeout_ms(self) -> i32 {
+        protocol_milliseconds(self.request_timeout)
+    }
+
+    #[must_use]
+    pub fn transaction_timeout_ms(self) -> i32 {
+        protocol_milliseconds(self.transaction_timeout)
+    }
+}
+
+impl Default for ProducerRetryPolicy {
+    fn default() -> Self {
+        Self::new(
+            DEFAULT_PRODUCER_REQUEST_TIMEOUT,
+            DEFAULT_PRODUCER_RETRIES,
+            DEFAULT_PRODUCER_RETRY_BACKOFF,
+            DEFAULT_PRODUCER_ROUTING_RETRY_BUDGET,
+            DEFAULT_PRODUCER_INIT_RETRY_TIMEOUT,
+            DEFAULT_PRODUCER_INIT_MAX_BACKOFF,
+            DEFAULT_PRODUCER_TRANSACTION_TIMEOUT,
+        )
+        .expect("default producer retry policy is valid")
+    }
+}
+
+fn validated_duration(value: Duration) -> Result<Duration, String> {
+    GreaterU128::<0>::new(value.as_nanos())
+        .map(|_| value)
+        .map_err(|error| error.to_string())
+}
+
+fn validated_protocol_duration(value: Duration, name: &str) -> Result<Duration, String> {
+    let milliseconds = MinMaxU128::<1, { i32::MAX as u128 }>::new(value.as_millis())
+        .map_err(|error| format!("{name}: {error}"))?
+        .into_value();
+    let milliseconds = u64::try_from(milliseconds).map_err(|error| format!("{name}: {error}"))?;
+    if Duration::from_millis(milliseconds) != value {
+        return Err(format!("{name} must be a whole number of milliseconds"));
+    }
+    Ok(value)
+}
+
+fn protocol_milliseconds(value: Duration) -> i32 {
+    i32::try_from(value.as_millis()).expect("validated protocol duration")
+}
 
 fn is_retriable_coordinator_code(code: i16) -> bool {
     matches!(
@@ -62,9 +208,8 @@ fn retry_deadline_elapsed(start: tokio::time::Instant, timeout: Duration) -> boo
     start.elapsed() >= timeout
 }
 
-fn next_backoff(backoff: Duration) -> Duration {
-    const MAX_BACKOFF: Duration = Duration::from_secs(1);
-    (backoff * 2).min(MAX_BACKOFF)
+fn next_backoff(backoff: Duration, max_backoff: Duration) -> Duration {
+    (backoff * 2).min(max_backoff)
 }
 
 fn validated_acks(enable_idempotence: bool, acks: Acks) -> Result<Acks, ProducerError> {
@@ -101,16 +246,21 @@ fn producer_identity_from_init(init: &InitProducerIdResponse) -> Result<(i64, i1
 /// producers carry no `transactional_id`, so the id is allocated from any broker
 /// — no `FindCoordinator` routing is needed here.
 #[tracing::instrument(level = "info", skip_all, err)]
-async fn init_producer_id(client: &Client) -> Result<InitProducerIdResponse, ProducerError> {
+async fn init_producer_id(
+    client: &Client,
+    retry_timeout: Duration,
+    initial_backoff: Duration,
+    max_backoff: Duration,
+) -> Result<InitProducerIdResponse, ProducerError> {
     let start = tokio::time::Instant::now();
-    let mut backoff = Duration::from_millis(100);
+    let mut backoff = initial_backoff;
     loop {
         match client.send(build_init_producer_id_request()).await {
             Ok(resp) if !is_retriable_coordinator_code(resp.error_code) => return Ok(resp),
             Ok(resp) => {
                 // Cold coordinator: retry until the deadline, then surface the
                 // last response so the caller maps it to ProducerError::Server.
-                if retry_deadline_elapsed(start, INIT_PRODUCER_ID_RETRY_TIMEOUT) {
+                if retry_deadline_elapsed(start, retry_timeout) {
                     return Ok(resp);
                 }
             }
@@ -118,14 +268,14 @@ async fn init_producer_id(client: &Client) -> Result<InitProducerIdResponse, Pro
                 // Transient transport failure (e.g. the broker dropped the
                 // connection while still loading): retry until the deadline,
                 // then surface the disconnect.
-                if retry_deadline_elapsed(start, INIT_PRODUCER_ID_RETRY_TIMEOUT) {
+                if retry_deadline_elapsed(start, retry_timeout) {
                     return Err(ProducerError::Client(ClientError::Disconnected));
                 }
             }
             Err(e) => return Err(ProducerError::Client(e)),
         }
         tokio::time::sleep(backoff).await;
-        backoff = next_backoff(backoff);
+        backoff = next_backoff(backoff, max_backoff);
     }
 }
 
@@ -160,14 +310,32 @@ impl Producer {
         #[builder(default = Acks::One)] acks: Acks,
         #[builder(default = Duration::from_millis(0))] linger: Duration,
         #[builder(default = 16 * 1024)] batch_size: usize,
-        #[builder(default = Duration::from_secs(30))] request_timeout: Duration,
-        #[builder(default = i32::MAX)] retries: i32,
-        #[builder(default = Duration::from_millis(100))] retry_backoff: Duration,
+        #[builder(default = DEFAULT_PRODUCER_REQUEST_TIMEOUT)] request_timeout: Duration,
+        #[builder(default = DEFAULT_PRODUCER_RETRIES)] retries: i32,
+        #[builder(default = DEFAULT_PRODUCER_RETRY_BACKOFF)] retry_backoff: Duration,
+        #[builder(default = DEFAULT_PRODUCER_ROUTING_RETRY_BUDGET)] routing_retry_budget: Duration,
+        #[builder(default = DEFAULT_PRODUCER_INIT_RETRY_TIMEOUT)] init_retry_timeout: Duration,
+        #[builder(default = DEFAULT_PRODUCER_INIT_MAX_BACKOFF)] init_max_backoff: Duration,
         #[builder(default = 5)] max_in_flight_per_connection: usize,
         #[builder(into)] transactional_id: Option<String>,
-        #[builder(default = std::time::Duration::new(60, 0))] transaction_timeout: Duration,
+        #[builder(default = DEFAULT_PRODUCER_TRANSACTION_TIMEOUT)] transaction_timeout: Duration,
         security: Option<crabka_client_core::security::ClientSecurity>,
     ) -> Result<Self, ProducerError> {
+        let retry_policy = ProducerRetryPolicy::new(
+            request_timeout,
+            retries,
+            retry_backoff,
+            routing_retry_budget,
+            init_retry_timeout,
+            init_max_backoff,
+            transaction_timeout,
+        )
+        .map_err(|_| ProducerError::InvalidConfig("invalid producer retry policy"))?;
+        let request_timeout = retry_policy.request_timeout();
+        let retries = retry_policy.retries();
+        let retry_backoff = retry_policy.retry_backoff();
+        let routing_retry_budget = retry_policy.routing_retry_budget();
+
         // Validate config: idempotence forces acks=All, and acks=Zero is
         // incompatible with idempotence.
         let acks = validated_acks(enable_idempotence, acks)?;
@@ -195,7 +363,13 @@ impl Producer {
         // backoff rather than surfacing the first error. `init_producer_id`
         // does that retry and returns the final response.
         let (producer_id, producer_epoch) = if enable_idempotence {
-            let init = init_producer_id(&client).await?;
+            let init = init_producer_id(
+                &client,
+                retry_policy.init_retry_timeout(),
+                retry_backoff,
+                retry_policy.init_max_backoff(),
+            )
+            .await?;
             producer_identity_from_init(&init)?
         } else {
             disabled_idempotence_identity()
@@ -225,8 +399,10 @@ impl Producer {
             acks,
             compression,
             linger,
-            request_timeout,
+            request_timeout_ms: retry_policy.request_timeout_ms(),
+            retries,
             retry_backoff,
+            routing_retry_budget,
             max_in_flight: max_in_flight_per_connection,
             metadata_cache: Arc::clone(&metadata_cache),
             partition_leaders: Arc::clone(&partition_leaders),
@@ -258,8 +434,6 @@ impl Producer {
             batch_size,
             linger,
             request_timeout,
-            retries,
-            retry_backoff,
             max_in_flight: max_in_flight_per_connection,
             metadata_cache,
             partition_leaders,
@@ -273,7 +447,7 @@ impl Producer {
             sender_shutdown: shutdown,
             sender_handle: Some(sender_handle),
             transactional_id,
-            transaction_timeout,
+            transaction_timeout_ms: retry_policy.transaction_timeout_ms(),
             txn_state,
             txn_recovery_required,
             txn_recovery_generation,
@@ -285,14 +459,32 @@ impl Producer {
 
 #[cfg(test)]
 mod security_arg_tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
 
+    use bytes::BytesMut;
     use crabka_client_core::{
         MockBroker,
         security::{ClientSecurity, SaslCredentials},
     };
+    use crabka_protocol::{
+        Encode,
+        owned::{
+            api_versions_request, api_versions_response::ApiVersionsResponse,
+            init_producer_id_request,
+        },
+    };
     use crabka_security::ListenerProtocol;
 
     use super::*;
+
+    fn encode_v0(response: &impl Encode) -> Vec<u8> {
+        let mut bytes = BytesMut::new();
+        response.encode(&mut bytes, 0).expect("encode response");
+        bytes.to_vec()
+    }
 
     #[test]
     fn coordinator_retry_classifier_matches_cold_start_codes_only() {
@@ -304,6 +496,195 @@ mod security_arg_tests {
             ("invalid request", 42, false),
         ] {
             assert2::assert!(is_retriable_coordinator_code(code) == want);
+        }
+    }
+
+    #[test]
+    fn producer_retry_policy_defaults_and_distinct_values_are_exact() {
+        let defaults = ProducerRetryPolicy::default();
+        assert2::assert!(
+            (
+                defaults.request_timeout(),
+                defaults.retries(),
+                defaults.retry_backoff(),
+                defaults.routing_retry_budget(),
+                defaults.init_retry_timeout(),
+                defaults.init_max_backoff(),
+                defaults.transaction_timeout(),
+                defaults.request_timeout_ms(),
+                defaults.transaction_timeout_ms(),
+            ) == (
+                Duration::from_secs(30),
+                i32::MAX,
+                Duration::from_millis(100),
+                Duration::from_secs(30),
+                Duration::from_secs(30),
+                Duration::from_secs(1),
+                Duration::from_mins(1),
+                30_000,
+                60_000,
+            )
+        );
+
+        let policy = ProducerRetryPolicy::new(
+            Duration::from_millis(11),
+            12,
+            Duration::from_millis(13),
+            Duration::from_millis(14),
+            Duration::from_millis(15),
+            Duration::from_millis(16),
+            Duration::from_millis(17),
+        )
+        .expect("distinct policy");
+        assert2::assert!(
+            (
+                policy.request_timeout(),
+                policy.retries(),
+                policy.retry_backoff(),
+                policy.routing_retry_budget(),
+                policy.init_retry_timeout(),
+                policy.init_max_backoff(),
+                policy.transaction_timeout(),
+                policy.request_timeout_ms(),
+                policy.transaction_timeout_ms(),
+            ) == (
+                Duration::from_millis(11),
+                12,
+                Duration::from_millis(13),
+                Duration::from_millis(14),
+                Duration::from_millis(15),
+                Duration::from_millis(16),
+                Duration::from_millis(17),
+                11,
+                17,
+            )
+        );
+    }
+
+    #[test]
+    fn producer_retry_policy_rejects_invalid_bounds() {
+        let valid = [
+            Duration::from_millis(1),
+            Duration::from_millis(1),
+            Duration::from_millis(1),
+            Duration::from_millis(1),
+            Duration::from_millis(1),
+            Duration::from_millis(1),
+        ];
+        for (_name, request, retries, backoff, routing, init, max, transaction) in [
+            (
+                "zero request",
+                Duration::ZERO,
+                0,
+                valid[0],
+                valid[1],
+                valid[2],
+                valid[3],
+                valid[4],
+            ),
+            (
+                "negative retries",
+                valid[0],
+                -1,
+                valid[1],
+                valid[2],
+                valid[3],
+                valid[4],
+                valid[5],
+            ),
+            (
+                "zero backoff",
+                valid[0],
+                0,
+                Duration::ZERO,
+                valid[2],
+                valid[3],
+                valid[4],
+                valid[5],
+            ),
+            (
+                "zero routing",
+                valid[0],
+                0,
+                valid[1],
+                Duration::ZERO,
+                valid[3],
+                valid[4],
+                valid[5],
+            ),
+            (
+                "zero init",
+                valid[0],
+                0,
+                valid[1],
+                valid[2],
+                Duration::ZERO,
+                valid[4],
+                valid[5],
+            ),
+            (
+                "zero max",
+                valid[0],
+                0,
+                valid[1],
+                valid[2],
+                valid[3],
+                Duration::ZERO,
+                valid[5],
+            ),
+            (
+                "zero transaction",
+                valid[0],
+                0,
+                valid[1],
+                valid[2],
+                valid[3],
+                valid[4],
+                Duration::ZERO,
+            ),
+            (
+                "request protocol overflow",
+                Duration::from_millis(i32::MAX as u64 + 1),
+                0,
+                valid[1],
+                valid[2],
+                valid[3],
+                valid[4],
+                valid[5],
+            ),
+            (
+                "transaction protocol overflow",
+                valid[0],
+                0,
+                valid[1],
+                valid[2],
+                valid[3],
+                valid[4],
+                Duration::from_millis(i32::MAX as u64 + 1),
+            ),
+            (
+                "initial exceeds max",
+                valid[0],
+                0,
+                Duration::from_millis(2),
+                valid[2],
+                valid[3],
+                Duration::from_millis(1),
+                valid[5],
+            ),
+        ] {
+            assert2::assert!(
+                ProducerRetryPolicy::new(
+                    request,
+                    retries,
+                    backoff,
+                    routing,
+                    init,
+                    max,
+                    transaction,
+                )
+                .is_err()
+            );
         }
     }
 
@@ -337,7 +718,7 @@ mod security_arg_tests {
                 Duration::from_secs(1),
             ),
         ] {
-            assert2::assert!(next_backoff(current) == want);
+            assert2::assert!(next_backoff(current, Duration::from_secs(1)) == want);
         }
     }
 
@@ -423,5 +804,56 @@ mod security_arg_tests {
             ProducerError::Client(ClientError::Timeout(d))
                 if d == Duration::from_millis(100)
         ));
+    }
+
+    #[tokio::test]
+    async fn producer_builder_uses_configured_init_retry_timeout() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&attempts);
+        let mock = MockBroker::start(move |api_key, _version, _corr_id, _body| {
+            if api_key == api_versions_request::API_KEY {
+                return Some(encode_v0(&ApiVersionsResponse::default()));
+            }
+            if api_key == init_producer_id_request::API_KEY {
+                observed.fetch_add(1, Ordering::Relaxed);
+                return Some(encode_v0(&InitProducerIdResponse {
+                    error_code: COORDINATOR_LOAD_IN_PROGRESS,
+                    ..Default::default()
+                }));
+            }
+            None
+        })
+        .await;
+
+        let build = Producer::builder()
+            .bootstrap(mock.addr.to_string())
+            .request_timeout(Duration::from_millis(100))
+            .retry_backoff(Duration::from_millis(10))
+            .init_max_backoff(Duration::from_millis(10))
+            .init_retry_timeout(Duration::from_millis(1))
+            .build();
+        let error = tokio::time::timeout(Duration::from_millis(200), build)
+            .await
+            .expect("configured init retry timeout must bound the build")
+            .expect_err("cold coordinator must remain an error");
+
+        mock.stop();
+        assert2::assert!(matches!(
+            error,
+            ProducerError::Server(COORDINATOR_LOAD_IN_PROGRESS)
+        ));
+        assert2::assert!(attempts.load(Ordering::Relaxed) >= 1);
+    }
+
+    #[tokio::test]
+    async fn producer_builder_rejects_retry_policy_before_connection_io() {
+        let error = Producer::builder()
+            .bootstrap("127.0.0.1:1")
+            .request_timeout(Duration::ZERO)
+            .build()
+            .await
+            .expect_err("zero request timeout must be invalid config");
+
+        assert2::assert!(matches!(error, ProducerError::InvalidConfig(_)));
     }
 }

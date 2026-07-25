@@ -93,16 +93,6 @@ const BOOTSTRAP_LEADER: i32 = -1;
 /// multiple full request-timeouts here only slows failover recovery.
 const TRANSPORT_RETRIES: i32 = 1;
 
-/// Wall-clock budget for routing a batch to a reachable leader, measured from
-/// its first send and preserved across resends. Spans a typical failover leader
-/// re-election (the broker session timeout is single-digit seconds) with
-/// margin, then fails the still-unroutable batch so the caller's ack/`flush`
-/// resolves instead of hanging forever. Enforced per cycle in
-/// [`collect_retries`] as a resend batch is about to be re-sent, so a batch that
-/// keeps bouncing between leaders gives up by ~30s rather than resending
-/// indefinitely.
-const ROUTING_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
-
 /// Maximum Produce requests in flight **per partition** at once.
 ///
 /// Pinned to `1`: a partition's next batch is not sent until its previous batch
@@ -155,8 +145,10 @@ pub(crate) struct SenderConfig {
     pub acks: Acks,
     pub compression: Compression,
     pub linger: Duration,
-    pub request_timeout: Duration,
+    pub request_timeout_ms: i32,
+    pub retries: i32,
     pub retry_backoff: Duration,
+    pub routing_retry_budget: Duration,
     /// Maximum number of Produce requests fired **concurrently per drain
     /// cycle**, across all partitions — the cross-partition / per-connection
     /// pipelining bound (Kafka's `max.in.flight.requests.per.connection`).
@@ -252,7 +244,7 @@ pub(crate) async fn run(mut cfg: SenderConfig) {
     // cannot pin the task forever; whatever remains past the budget resolves
     // its acknowledgements through the drain's terminal-failure paths or drops
     // as cancellation exactly as before.
-    let settle_deadline = Instant::now() + ROUTING_RETRY_BUDGET;
+    let settle_deadline = Instant::now() + cfg.routing_retry_budget;
     loop {
         drain_once(&mut cfg, &mut state).await;
         let mut settled =
@@ -295,7 +287,7 @@ struct PreparedBatch {
     records: Vec<PendingRecord>,
     /// Wall-clock time the batch was first handed to the transport. Set on the
     /// first send and preserved across resends so the routing-retry budget
-    /// (`ROUTING_RETRY_BUDGET`) is measured from the first attempt, not the
+    /// routing retry budget is measured from the first attempt, not the
     /// most recent — a batch that keeps failing to route gives up by ~30s.
     first_sent: Option<Instant>,
     /// When `Some`, the batch is backing off after a **transport/connection**
@@ -304,6 +296,8 @@ struct PreparedBatch {
     /// every linger tick. Routing redirects (`NOT_LEADER` / `UNKNOWN`) leave
     /// this `None` so they resend immediately at the freshly-resolved leader.
     backoff_until: Option<Instant>,
+    /// Resends already admitted after the initial send.
+    retries_used: i32,
     transaction_generation: Option<u64>,
 }
 
@@ -341,7 +335,7 @@ async fn drain_once(cfg: &mut SenderConfig, state: &mut PipelineState) {
     //    (their in-flight slot was counted at first drain, so `finish_in_flight`
     //    once).
     fail_recovered_retry_slots(cfg, &mut state.retry);
-    let (mut to_send, expired) = collect_retries(&mut state.retry, now);
+    let (mut to_send, expired) = collect_retries(&mut state.retry, now, cfg.routing_retry_budget);
     for pb in expired {
         fail_batch(
             pb.records,
@@ -424,7 +418,7 @@ async fn drain_once(cfg: &mut SenderConfig, state: &mut PipelineState) {
 
 /// Drain the per-partition retry slots into an ordered send list (one-slot
 /// model). Each partition holds **at most one** failed batch awaiting a verbatim
-/// resend; a batch whose routing budget ([`ROUTING_RETRY_BUDGET`], measured from
+/// resend; a batch whose routing budget (measured from
 /// its first send) has elapsed is split off into `expired` for the caller to
 /// fail instead of resending. Every resent batch keeps its allocated
 /// `base_sequence` and bytes (the broker dedups a re-landed write via
@@ -435,6 +429,7 @@ async fn drain_once(cfg: &mut SenderConfig, state: &mut PipelineState) {
 fn collect_retries(
     retry: &mut HashMap<(String, i32), PreparedBatch>,
     now: Instant,
+    routing_retry_budget: Duration,
 ) -> (Vec<PreparedBatch>, Vec<PreparedBatch>) {
     let mut to_send: Vec<PreparedBatch> = Vec::new();
     let mut expired: Vec<PreparedBatch> = Vec::new();
@@ -445,7 +440,7 @@ fn collect_retries(
     for (key, mut pb) in retry.drain() {
         if pb
             .first_sent
-            .is_some_and(|t| now.duration_since(t) >= ROUTING_RETRY_BUDGET)
+            .is_some_and(|t| now.duration_since(t) >= routing_retry_budget)
         {
             expired.push(pb);
             continue;
@@ -607,6 +602,7 @@ async fn prepare_batch(
         records: batch.records,
         first_sent: None,
         backoff_until: None,
+        retries_used: 0,
         transaction_generation: batch.transaction_generation,
     }
 }
@@ -646,7 +642,7 @@ async fn send_batches(cfg: &SenderConfig, state: &mut PipelineState, to_send: Ve
     let mut fenced: Option<Vec<PreparedBatch>> = None;
     while let Some(res) = results.next().await {
         let BatchSendResult {
-            pb,
+            mut pb,
             verdict,
             refresh_needed,
         } = res;
@@ -666,6 +662,9 @@ async fn send_batches(cfg: &SenderConfig, state: &mut PipelineState, to_send: Ve
             // the partition's single retry slot, resent verbatim next cycle. The
             // batch is still outstanding, so its in-flight slot stays counted —
             // no `finish_in_flight` here.
+            BatchVerdict::Retry if take_retry(&mut pb, cfg.retries) => {
+                terminal_fail_batch(cfg, pb, codes::NOT_LEADER_OR_FOLLOWER);
+            }
             BatchVerdict::Retry => {
                 tracing::debug!(
                     topic = %pb.topic,
@@ -695,6 +694,15 @@ async fn send_batches(cfg: &SenderConfig, state: &mut PipelineState, to_send: Ve
 
     if needs_refresh {
         update_leaders_from_metadata(cfg).await;
+    }
+}
+
+fn take_retry(batch: &mut PreparedBatch, retries: i32) -> bool {
+    if batch.retries_used >= retries {
+        true
+    } else {
+        batch.retries_used += 1;
+        false
     }
 }
 
@@ -970,7 +978,7 @@ fn build_single_batch_request(cfg: &SenderConfig, pb: &PreparedBatch) -> Produce
     ProduceRequest {
         transactional_id: req_txn_id,
         acks: cfg.acks.wire(),
-        timeout_ms: i32::try_from(cfg.request_timeout.as_millis()).unwrap_or(i32::MAX),
+        timeout_ms: cfg.request_timeout_ms,
         topic_data: vec![TopicProduceData {
             name: pb.topic.clone(),
             topic_id: pb.topic_id,
@@ -1236,6 +1244,7 @@ mod tests {
             records: vec![record],
             first_sent,
             backoff_until: None,
+            retries_used: 0,
             transaction_generation: None,
         };
         (pb, rx)
@@ -1301,14 +1310,15 @@ mod tests {
         // one is returned to send. The map is fully drained either way.
         let mut retry: HashMap<(String, i32), PreparedBatch> = HashMap::new();
         let long_ago = Instant::now()
-            .checked_sub(ROUTING_RETRY_BUDGET + Duration::from_secs(1))
+            .checked_sub(Duration::from_secs(31))
             .expect("instant in range");
         let (old, _rx_old) = prepared("t", 0, 0, Some(long_ago));
         let (recent, _rx_recent) = prepared("t", 1, 16, Some(Instant::now()));
         retry.insert(("t".to_string(), 0), old);
         retry.insert(("t".to_string(), 1), recent);
 
-        let (to_send, expired) = collect_retries(&mut retry, Instant::now());
+        let (to_send, expired) =
+            collect_retries(&mut retry, Instant::now(), Duration::from_secs(30));
 
         check!(
             (
@@ -1322,13 +1332,36 @@ mod tests {
     }
 
     #[test]
+    fn retry_count_exhausts_after_configured_resends() {
+        let (mut batch, _rx) = prepared("t", 0, 0, None);
+
+        assert2::assert!(!take_retry(&mut batch, 1));
+        assert2::assert!(take_retry(&mut batch, 1));
+    }
+
+    #[test]
+    fn routing_budget_uses_configured_duration() {
+        let mut retry = HashMap::new();
+        let now = Instant::now();
+        let first_sent = now
+            .checked_sub(Duration::from_millis(11))
+            .expect("instant in range");
+        let (old, _rx) = prepared("t", 0, 0, Some(first_sent));
+        retry.insert(("t".to_owned(), 0), old);
+
+        let (to_send, expired) = collect_retries(&mut retry, now, Duration::from_millis(10));
+
+        assert2::assert!((to_send.len(), expired.len()) == (0, 1));
+    }
+
+    #[test]
     fn collect_retries_sets_first_sent_when_unset() {
         let mut retry: HashMap<(String, i32), PreparedBatch> = HashMap::new();
         let (pb, _rx) = prepared("t", 0, 0, None);
         retry.insert(("t".to_string(), 0), pb);
 
         let now = Instant::now();
-        let (to_send, expired) = collect_retries(&mut retry, now);
+        let (to_send, expired) = collect_retries(&mut retry, now, Duration::from_secs(30));
 
         check!((expired.is_empty(), to_send.len(), to_send[0].first_sent) == (true, 1, Some(now)));
     }
@@ -1350,7 +1383,8 @@ mod tests {
             let (mut pb, _rx) = prepared("t", 0, 0, Some(now));
             pb.backoff_until = Some(now + backoff);
             retry.insert(("t".to_string(), 0), pb);
-            let (to_send, expired) = collect_retries(&mut retry, now + elapsed);
+            let (to_send, expired) =
+                collect_retries(&mut retry, now + elapsed, Duration::from_secs(30));
             assert2::assert!(expired.is_empty());
             (to_send.len(), retry.len())
         };
@@ -1855,8 +1889,10 @@ mod harness {
             acks: Acks::All,
             compression: Compression::None,
             linger,
-            request_timeout: Duration::from_secs(5),
+            request_timeout_ms: 5_000,
+            retries: i32::MAX,
             retry_backoff: Duration::from_millis(1),
+            routing_retry_budget: Duration::from_secs(30),
             max_in_flight,
             metadata_cache: Arc::clone(&metadata_cache),
             partition_leaders: Arc::clone(&partition_leaders),
