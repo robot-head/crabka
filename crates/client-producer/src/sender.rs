@@ -4,9 +4,10 @@
 //! The sender is `tokio::spawn`'d by the builder. It owns the `wake_rx`
 //! `Receiver` end of the wake channel (the `Producer` holds the
 //! `wake_tx` `Sender`), the `flush_notify`, the `accumulators` map, and
-//! the `next_seq` map. On every linger tick or wake signal it walks the
-//! accumulators, seals + drains batches, and builds a v2 `RecordBatch` per
-//! batch (allocating its `base_sequence`). Each batch becomes its own
+//! the `next_seq` map. Linger ticks seal only expired current batches, ready
+//! wakes drain completed rollover batches, and forced wakes seal everything
+//! for zero linger, flush, or shutdown. Drained batches become v2
+//! `RecordBatch`es (allocating their `base_sequence`). Each batch becomes its own
 //! single-partition `ProduceRequest`, sent via `Client::broker(id)` — falling
 //! back to the bootstrap `Client::send` when the leader is unknown — with all
 //! of a cycle's requests sent **concurrently** to keep every broker busy.
@@ -36,7 +37,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use crabka_protocol::{
@@ -49,7 +50,10 @@ use crabka_protocol::{
 };
 use dashmap::DashMap;
 use futures::stream::{FuturesUnordered, StreamExt};
-use tokio::sync::{Mutex, Notify};
+use tokio::{
+    sync::{Mutex, Notify},
+    time::Instant,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -133,6 +137,17 @@ const MAX_IN_FLIGHT_PER_PARTITION: usize = 1;
 // time so the assumption can't silently drift.
 const _: [(); 1] = [(); MAX_IN_FLIGHT_PER_PARTITION];
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DrainIntent {
+    /// Send batches already completed by rollover without sealing young
+    /// in-progress batches.
+    Ready,
+    /// Seal only in-progress batches whose own linger deadline elapsed.
+    Expired,
+    /// Seal every in-progress batch for zero linger, explicit flush, or shutdown.
+    Force,
+}
+
 /// All the bits of state the sender task needs. The builder constructs
 /// one of these, hands it to [`run`], and drops it.
 // accumulators map mirrors the Producer field; alias deferred.
@@ -168,7 +183,7 @@ pub(crate) struct SenderConfig {
     pub accumulators: AccumulatorMap,
     pub next_seq: Arc<DashMap<(String, i32), i32>>,
     pub state: Arc<AtomicU8>,
-    pub wake_rx: tokio::sync::mpsc::Receiver<()>,
+    pub wake_rx: tokio::sync::mpsc::Receiver<DrainIntent>,
     pub flush_notify: Arc<Notify>,
     /// Shared with `Producer`; tracks batches popped from an accumulator that
     /// are still being sent so `flush` can wait for them. See the field doc on
@@ -221,16 +236,14 @@ pub(crate) async fn run(mut cfg: SenderConfig) {
         tokio::select! {
             () = cfg.shutdown.cancelled() => break,
             _ = ticker.tick() => {
-                drain_once(&mut cfg, &mut state).await;
+                drain_once(&mut cfg, &mut state, DrainIntent::Expired).await;
             }
             received = cfg.wake_rx.recv() => {
                 // A closed wake channel means every producer handle is gone,
                 // so no further record can ever arrive: fall through to the
                 // final drain instead of hot-looping on the closed receiver.
-                if received.is_none() {
-                    break;
-                }
-                drain_once(&mut cfg, &mut state).await;
+                let Some(intent) = received else { break };
+                drain_once(&mut cfg, &mut state, intent).await;
             }
         }
     }
@@ -248,7 +261,7 @@ pub(crate) async fn run(mut cfg: SenderConfig) {
         .checked_add(cfg.routing_retry_budget)
         .unwrap_or_else(Instant::now);
     loop {
-        drain_once(&mut cfg, &mut state).await;
+        drain_once(&mut cfg, &mut state, DrainIntent::Force).await;
         let mut settled =
             state.retry.is_empty() && cfg.in_flight.load(std::sync::atomic::Ordering::Acquire) == 0;
         if settled {
@@ -328,7 +341,7 @@ struct PreparedBatch {
     skip_all,
     fields(batches = tracing::field::Empty),
 )]
-async fn drain_once(cfg: &mut SenderConfig, state: &mut PipelineState) {
+async fn drain_once(cfg: &mut SenderConfig, state: &mut PipelineState, intent: DrainIntent) {
     if cfg.state.load(Ordering::Acquire) != STATE_ACTIVE {
         fence(cfg, state, Vec::new());
         return;
@@ -362,7 +375,7 @@ async fn drain_once(cfg: &mut SenderConfig, state: &mut PipelineState) {
         .chain(state.retry.keys().cloned())
         .collect();
 
-    // 2. One new batch per idle partition. Across partitions we fan out
+    // 2. One eligible new batch per idle partition. Across partitions we fan out
     //    concurrently, but bound the cycle's total fan-out to `max_in_flight`
     //    (the per-connection pipelining bound); partitions not reached this cycle
     //    are picked up on the next linger tick (their retry slots carry forward,
@@ -382,13 +395,20 @@ async fn drain_once(cfg: &mut SenderConfig, state: &mut PipelineState) {
             Some(a) => Arc::clone(a.value()),
             None => continue,
         };
-        // Seal the in-progress batch, then take a single ready batch.
+        // Seal only when this drain's cause permits it, then take a single
+        // ready batch. A rollover wake must not pull an unrelated young
+        // partition into the same send.
         {
             let mut a = acc.lock().await;
-            let had_current = a.current.as_ref().is_some_and(|b| !b.is_empty());
-            a.seal_current();
-            if had_current && let Some(num_partitions) = topic_partition_count(cfg, &key.0).await {
-                cfg.partitioner.rotate(&key.0, num_partitions);
+            let should_seal = a.current.as_ref().is_some_and(|batch| {
+                !batch.is_empty()
+                    && (matches!(intent, DrainIntent::Force)
+                        || batch_crosses_recovery_barrier(cfg, batch.transaction_generation)
+                        || (matches!(intent, DrainIntent::Expired)
+                            && now.saturating_duration_since(batch.first_append_at) >= cfg.linger))
+            });
+            if should_seal {
+                a.seal_current();
             }
         }
         let batch = {
@@ -400,6 +420,9 @@ async fn drain_once(cfg: &mut SenderConfig, state: &mut PipelineState) {
             b
         };
         let Some(batch) = batch else { continue };
+        if let Some(num_partitions) = topic_partition_count(cfg, &key.0).await {
+            cfg.partitioner.rotate(&key.0, num_partitions);
+        }
         if batch_crosses_recovery_barrier(cfg, batch.transaction_generation) {
             fail_batch(batch.records, ProducerError::RecoveryRequired);
             finish_in_flight(cfg);
@@ -1855,7 +1878,7 @@ mod harness {
         partition_leaders: Arc<DashMap<(String, i32), i32>>,
         metadata_cache: Arc<Mutex<HashMap<String, TopicMetadata>>>,
         state: Arc<AtomicU8>,
-        wake_tx: tokio::sync::mpsc::Sender<()>,
+        wake_tx: tokio::sync::mpsc::Sender<DrainIntent>,
         flush_notify: Arc<Notify>,
         in_flight: Arc<AtomicUsize>,
         shutdown: CancellationToken,
@@ -1999,7 +2022,7 @@ mod harness {
             a.seal_current();
             rxs.push(rx);
         }
-        let _ = h.wake_tx.try_send(());
+        let _ = h.wake_tx.try_send(DrainIntent::Ready);
         rxs
     }
 
@@ -2015,7 +2038,7 @@ mod harness {
         n: usize,
     ) -> Vec<oneshot::Receiver<Result<RecordMetadata, ProducerError>>> {
         let rxs = produce_single_batch_without_wake(h, topic, partition, n).await;
-        let _ = h.wake_tx.try_send(());
+        let _ = h.wake_tx.try_send(DrainIntent::Force);
         rxs
     }
 
@@ -2056,6 +2079,140 @@ mod harness {
     async fn shutdown(h: Harness) {
         h.shutdown.cancel();
         let _ = h.handle.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn nonzero_linger_coalesces_until_the_batch_expires() {
+        let transport = MockTransport::new(Duration::ZERO);
+        let h = spawn_sender_with(transport.clone(), 5, Duration::from_millis(100));
+        let rxs = produce_single_batch_without_wake(&h, "t", 0, 2).await;
+
+        tokio::task::yield_now().await;
+        assert_eq!(transport.send_count(), 0, "young batch sent before linger");
+
+        tokio::time::advance(Duration::from_millis(99)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(transport.send_count(), 0, "young batch sent before linger");
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        let mut offsets = Vec::new();
+        for rx in rxs {
+            offsets.push(
+                rx.await
+                    .expect("ack channel remains connected")
+                    .expect("coalesced batch is acknowledged")
+                    .offset,
+            );
+        }
+        assert_eq!(offsets, vec![0, 1]);
+        assert_eq!(transport.send_count(), 1);
+
+        shutdown(h).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rollover_wake_sends_ready_only_and_leaves_young_currents_open() {
+        let transport = MockTransport::new(Duration::ZERO);
+        let h = spawn_sender_with(transport.clone(), 5, Duration::from_millis(100));
+        tokio::task::yield_now().await;
+
+        let rollover = Arc::new(Mutex::new(Accumulator::new(20)));
+        h.accumulators
+            .insert(("t".to_owned(), 0), Arc::clone(&rollover));
+        let (ready_rx, current_rx) = {
+            let mut accumulator = rollover.lock().await;
+            let ready = match accumulator.try_append(
+                None,
+                Some(bytes::Bytes::from_static(b"a")),
+                vec![],
+                0,
+                None,
+            ) {
+                crate::accumulator::AppendResult::Appended(rx) => rx,
+                crate::accumulator::AppendResult::BatchFull => panic!("unexpected BatchFull"),
+            };
+            let current = match accumulator.try_append(
+                None,
+                Some(bytes::Bytes::from_static(b"b")),
+                vec![],
+                0,
+                None,
+            ) {
+                crate::accumulator::AppendResult::Appended(rx) => rx,
+                crate::accumulator::AppendResult::BatchFull => panic!("unexpected BatchFull"),
+            };
+            (ready, current)
+        };
+
+        let unrelated = Arc::new(Mutex::new(Accumulator::new(1024)));
+        h.accumulators
+            .insert(("t".to_owned(), 1), Arc::clone(&unrelated));
+        let unrelated_rx = match unrelated.lock().await.try_append(
+            None,
+            Some(bytes::Bytes::from_static(b"young")),
+            vec![],
+            0,
+            None,
+        ) {
+            crate::accumulator::AppendResult::Appended(rx) => rx,
+            crate::accumulator::AppendResult::BatchFull => panic!("unexpected BatchFull"),
+        };
+
+        h.wake_tx
+            .send(DrainIntent::Ready)
+            .await
+            .expect("sender is running");
+        ready_rx
+            .await
+            .expect("ready ack channel remains connected")
+            .expect("ready rollover batch is acknowledged");
+
+        assert_eq!(transport.send_count(), 1);
+        assert!(rollover.lock().await.current.is_some());
+        assert!(unrelated.lock().await.current.is_some());
+
+        drop((current_rx, unrelated_rx));
+        shutdown(h).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn zero_linger_force_wake_sends_without_advancing_time() {
+        let transport = MockTransport::new(Duration::ZERO);
+        let h = spawn_sender_with(transport.clone(), 5, Duration::ZERO);
+        tokio::task::yield_now().await;
+        let mut rxs = produce_single_batch_without_wake(&h, "t", 0, 1).await;
+
+        h.wake_tx
+            .send(DrainIntent::Force)
+            .await
+            .expect("sender is running");
+        rxs.remove(0)
+            .await
+            .expect("ack channel remains connected")
+            .expect("zero-linger batch is acknowledged");
+        assert_eq!(transport.send_count(), 1);
+
+        shutdown(h).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn explicit_flush_intent_bypasses_nonzero_linger() {
+        let transport = MockTransport::new(Duration::ZERO);
+        let h = spawn_sender_with(transport.clone(), 5, Duration::from_mins(1));
+        tokio::task::yield_now().await;
+        let mut rxs = produce_single_batch_without_wake(&h, "t", 0, 1).await;
+
+        h.wake_tx
+            .send(DrainIntent::Force)
+            .await
+            .expect("sender is running");
+        rxs.remove(0)
+            .await
+            .expect("ack channel remains connected")
+            .expect("explicitly flushed batch is acknowledged");
+        assert_eq!(transport.send_count(), 1);
+
+        shutdown(h).await;
     }
 
     /// THE REGRESSION TEST for the same-partition pipelining hang.
@@ -2278,7 +2435,7 @@ mod harness {
 
         let mut dead_rx = produce_single_batch_without_wake(&h, "t", 0, 1).await;
         let mut live_rx = produce_single_batch_without_wake(&h, "t", 1, 1).await;
-        let _ = h.wake_tx.try_send(());
+        let _ = h.wake_tx.try_send(DrainIntent::Force);
 
         let live_md = tokio::time::timeout(Duration::from_millis(100), live_rx.remove(0))
             .await
@@ -2552,7 +2709,7 @@ mod harness {
 
         let mut failed = produce_single_batch_without_wake(&h, "t", 0, 1).await;
         let mut accepted = produce_single_batch_without_wake(&h, "t", 1, 1).await;
-        let _ = h.wake_tx.try_send(());
+        let _ = h.wake_tx.try_send(DrainIntent::Force);
 
         let failed_error = tokio::time::timeout(Duration::from_secs(1), failed.remove(0))
             .await
@@ -2863,7 +3020,10 @@ mod harness {
         // Simulate a completed InitProducerId before the sender gets to drain:
         // the old generation must still be rejected under the new epoch.
         h.recovery_required.store(false, Ordering::Release);
-        h.wake_tx.send(()).await.expect("sender is running");
+        h.wake_tx
+            .send(DrainIntent::Ready)
+            .await
+            .expect("sender is running");
 
         let acknowledgement = tokio::time::timeout(Duration::from_secs(3), rx)
             .await
@@ -2901,7 +3061,10 @@ mod harness {
         };
 
         let initial_send = transport.send_started.notified();
-        h.wake_tx.send(()).await.expect("sender is running");
+        h.wake_tx
+            .send(DrainIntent::Force)
+            .await
+            .expect("sender is running");
         tokio::time::timeout(Duration::from_secs(3), initial_send)
             .await
             .expect("transactional batch should reach the controlled transport failure");
@@ -2916,7 +3079,10 @@ mod harness {
         h.recovery_required.store(true, Ordering::Release);
         h.recovery_generation.store(1, Ordering::Release);
         h.recovery_required.store(false, Ordering::Release);
-        h.wake_tx.send(()).await.expect("sender is running");
+        h.wake_tx
+            .send(DrainIntent::Ready)
+            .await
+            .expect("sender is running");
 
         let acknowledgement = tokio::time::timeout(Duration::from_secs(3), rx)
             .await

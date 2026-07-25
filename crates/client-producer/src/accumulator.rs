@@ -2,11 +2,14 @@
 //! record + a oneshot tx; the sender drains in-flight batches and
 //! resolves the oneshots from the `ProduceResponse`.
 
-use std::{collections::VecDeque, sync::Arc, time::Instant};
+use std::{collections::VecDeque, sync::Arc};
 
 use bytes::Bytes;
 use dashmap::DashMap;
-use tokio::sync::{Mutex, oneshot};
+use tokio::{
+    sync::{Mutex, oneshot},
+    time::Instant,
+};
 
 use crate::{
     error::ProducerError,
@@ -34,10 +37,7 @@ pub(crate) struct InProgressBatch {
     /// A batch is never allowed to cross a transaction recovery boundary.
     pub transaction_generation: Option<u64>,
     /// Wall-clock time when this batch's first record was appended.
-    /// Used by the sender to decide `linger.ms` expiry (the sender
-    /// currently relies on the linger ticker rather than reading this
-    /// field, but it's still useful for diagnostics).
-    #[allow(dead_code)]
+    /// Used by the sender to decide batch-relative `linger.ms` expiry.
     pub first_append_at: Instant,
     /// Approximate uncompressed body size.
     pub size_bytes: usize,
