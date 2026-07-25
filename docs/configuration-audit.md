@@ -1209,3 +1209,86 @@ references. No focused candidate remains unclassified.
   pre-listener validation, shared recovery propagation, topic request values,
   initial connection options, controller/bootstrap reconnect preservation,
   schema bounds, and exact single-/multi-range Deployment arguments.
+
+## Gres WAL Producer Retry Policy
+
+The generic producer now resolves one validated `ProducerRetryPolicy` with
+seven shared defaults:
+
+- 30-second request timeout;
+- `i32::MAX` retries after the initial batch send;
+- 100-millisecond retry and producer-ID initial backoff;
+- 30-second per-batch routing retry budget;
+- 30-second producer-ID initialization retry timeout;
+- 1-second producer-ID backoff cap;
+- 60-second transaction timeout.
+
+`ProducerRetryPolicy::new` validates positive durations and nonnegative retries
+through `refined_type`, bounds protocol millisecond fields to `i32::MAX`, and
+rejects an initial backoff above its cap. The existing producer builder keeps
+its source-compatible defaults and validates the complete policy before
+opening a broker connection.
+
+The sender stores `retries_used` on each prepared batch across reroutes and
+resends. It admits a resend only through `take_retry`, while
+`collect_retries` independently expires the batch's configured wall-clock
+routing budget. Thus the existing `retries` builder input is live, and the
+first exhausted limit terminates the batch. The request timeout reaches both
+client connection/request handling and the Produce request wire field.
+
+Both producer-ID initialization paths use the same configured retry helper:
+idempotent producer construction in `Producer::start` and transactional
+initialization/reinitialization in `Producer::init_transactions`. The helper
+receives the configured initialization timeout, initial backoff, and maximum
+backoff. Transactional requests use the validated exact transaction-timeout
+millisecond conversion rather than a fallback.
+
+Gres has one `Producer::builder()` construction site. Its
+`LiveRecoveryConfig` policy supplies all seven builder values before the
+transactional producer is initialized. Standalone Gres exposes seven exact
+CLI/environment pairs under `--wal-producer-*` and
+`CRABKA_GRES_WAL_PRODUCER_*`. The fleet CRD exposes the matching seven optional
+`spec.compute.walProducer*` fields, validates them through the shared policy,
+and renders all seven effective arguments in both single- and multi-range
+compute Deployments.
+
+Protocol coordinator error codes, disabled producer identities, the
+single-in-flight-per-partition ordering rule, and the 1-millisecond/50-
+millisecond scheduler floors remain fixed invariants. Compression, linger,
+batch size, and the per-connection in-flight limit remain the separate
+producer-throughput policy owner; none is a retry deadline or backoff.
+
+### Adjacent Pending Policy
+
+This closes the Gres WAL producer retry and transaction policy only. Producer
+throughput, DNS resolution, checkpoint deletion, registry clients, and other
+generic client defaults remain separate owners.
+
+### Gres WAL Producer Retry Evidence
+
+On 2026-07-25 `tools/audit-runtime-values.sh` reported 6,070 repository
+matches. The exact producer-policy search reported 260 references, and the
+focused fixed-invariant/throughput search reported 58 references. Production
+searches found no retry deadline or backoff literal outside the seven named
+shared defaults; the remaining timing literals are the classified scheduler
+floors.
+
+- The four-package affected test reruns reported 1,438 passing test and
+  doc-test results, zero failures, and zero ignored tests after excluding one
+  exact unrelated baseline failure.
+- `production_service_manifest_loss_after_truncate_refuses` failed unchanged
+  at both current HEAD and pre-slice commit `aeecec39`; the isolated current
+  run and the pre-slice run produced the same `must refuse torn truncation`
+  assertion at `checkpoint_crashes.rs:362`.
+- Strict all-target/all-feature Clippy with `-D warnings` passed for
+  `crabka-client-producer`, `crabka-gres-substrate`, `crabka-gres`, and
+  `crabka-operator`.
+- Gres help displayed all seven exact WAL producer options.
+- Two fresh operator generations each produced nine CRDs; they matched each
+  other and the nine checked-in CRDs exactly.
+- `cargo fmt --all -- --check` and `git diff --check` passed.
+- Focused coverage pins exact defaults and bounds, pre-I/O rejection,
+  configured producer-ID retry timing, exact transaction-timeout conversion,
+  retry-count and routing-budget exhaustion, environment and CLI precedence,
+  hostile-environment isolation, shared recovery propagation, exact schema
+  bounds/errors, and exact single-/multi-range Deployment arguments.
