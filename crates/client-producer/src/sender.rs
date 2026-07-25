@@ -1190,7 +1190,7 @@ fn fail_batch(records: Vec<PendingRecord>, err: ProducerError) {
             ProducerError::RecordTooLarge { record_size } => Some(ProducerError::RecordTooLarge {
                 record_size: *record_size,
             }),
-            ProducerError::InvalidConfig(s) => Some(ProducerError::InvalidConfig(s)),
+            ProducerError::InvalidConfig(s) => Some(ProducerError::InvalidConfig(s.clone())),
             _ => None, // Client, Protocol, Compression — not Clone.
         }
     }

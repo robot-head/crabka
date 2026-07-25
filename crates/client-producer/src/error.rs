@@ -16,7 +16,7 @@ pub enum ProducerError {
     FencedProducer,
 
     #[error("invalid config: {0}")]
-    InvalidConfig(&'static str),
+    InvalidConfig(String),
 
     #[error("batch too large: {batch_size} > max")]
     BatchTooLarge { batch_size: usize },
@@ -69,7 +69,7 @@ mod tests {
             ),
             (
                 "invalid config",
-                ProducerError::InvalidConfig("idempotence requires acks=all"),
+                ProducerError::InvalidConfig("idempotence requires acks=all".to_owned()),
                 "invalid config: idempotence requires acks=all",
             ),
         ] {
