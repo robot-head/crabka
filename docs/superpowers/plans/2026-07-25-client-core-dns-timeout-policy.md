@@ -72,6 +72,9 @@ fn client_dns_timeout_validates_and_preserves_milliseconds() {
 #[test]
 fn connection_options_own_named_defaults() {
     let options = ConnectionOptions::default();
+    assert!(DEFAULT_CLIENT_DNS_TIMEOUT == Duration::from_secs(10));
+    assert!(DEFAULT_CLIENT_CONNECT_TIMEOUT == Duration::from_secs(30));
+    assert!(DEFAULT_CLIENT_REQUEST_TIMEOUT == Duration::from_secs(30));
     assert!(options.dns_timeout == ClientDnsTimeout::default());
     assert!(options.dns_timeout.duration() == DEFAULT_CLIENT_DNS_TIMEOUT);
     assert!(options.connect_timeout == DEFAULT_CLIENT_CONNECT_TIMEOUT);
