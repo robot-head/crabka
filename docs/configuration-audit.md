@@ -1380,3 +1380,71 @@ only adjacent live producer value found.
 - Gres coverage pins defaults, environment and CLI precedence, hostile
   environment isolation, exact runtime propagation, help, schema bounds and
   enum values, and exact single-/multi-range Deployment arguments.
+
+## Gres WAL Producer Flush Policy
+
+The generic producer now has one named
+`DEFAULT_PRODUCER_FLUSH_TIMEOUT` of 50 seconds. The public
+`ProducerFlushTimeout` scalar accepts only whole milliseconds in
+`1..=2,147,483,647`; it rejects zero, fractional milliseconds, and overflow
+before broker connection I/O. The source-compatible producer builder retains
+its raw `Duration` input, validates it into that scalar, and stores the typed
+deadline on the producer.
+
+`Producer::flush` sends the existing force-drain wake, computes one absolute
+deadline, and enables its `Notify` future before checking accumulator and
+in-flight state. This subscribe-before-check loop cannot miss a notification
+delivered during the asynchronous state check. It waits only for state changes
+until the configured deadline; the old 50-millisecond polling interval and
+1,000-attempt loop were removed rather than exposed as meaningless settings.
+
+Gres carries the typed value through `SubstrateRuntimeConfig` and the existing
+`LiveRecoveryConfig` into its sole WAL `Producer::builder()` construction.
+Standalone Gres exposes the exact
+`--wal-producer-flush-timeout-ms` /
+`CRABKA_GRES_WAL_PRODUCER_FLUSH_TIMEOUT_MS` pair. The fleet CRD exposes the
+matching optional `spec.compute.walProducerFlushTimeoutMs` field with the same
+positive protocol bounds, validates its effective value through
+`ProducerFlushTimeout`, and renders one exact argument pair in every
+single- and multi-range compute Deployment.
+
+### Adjacent Pending Policy
+
+This closes only the Gres WAL producer flush deadline. DNS resolution,
+checkpoint deletion, registry clients, and other generic client defaults
+remain separate owners, and the repository-wide hardcoded-value audit remains
+active. The next coherent live owner is the raw WAL DNS lookup in
+`gres-substrate/src/recovery.rs`, which currently awaits
+`tokio::net::lookup_host` without an independently audited deadline.
+
+### Gres WAL Producer Flush Evidence
+
+On 2026-07-25 `tools/audit-runtime-values.sh` reported 6,122 repository
+matches across 1,048 files. The exact flush-focused search reported 119 lines
+across 13 files: 48 production or checked-in schema references and 71
+test/harness references.
+
+Every production match is classified: 13 generic producer references define
+or re-export the validated scalar, builder field, stored deadline, and absolute
+deadline wait; 2 define and propagate the generic flush error; 9 substrate
+references carry the typed value into the sole producer construction; 13
+standalone Gres references cover CLI/environment resolution and runtime
+propagation; and 11 operator or CRD references cover effective policy, argument
+rendering, and the checked-in schema. The only focused generic 50-millisecond
+match is paused-time test input, and no 1,000-attempt loop remains.
+
+- Generic producer all-target verification reported 98 passing tests. Focused
+  deadline tests prove the exact configured timeout and the missed-wakeup
+  interleaving.
+- Gres substrate all-target verification reported 173 passing unit tests plus
+  every integration target. Gres reported 136 unit, 25 runtime, 17 topology
+  nemesis, and 30 split-crash tests passing.
+- Operator all-target verification reported 719 passing library tests plus
+  every integration target. Focused schema/rendering tests pin the exact
+  bounds, default, override, errors, and one argument pair per single- and
+  multi-range Deployment.
+- Strict all-target Clippy passed for each affected crate, Gres help displays
+  `--wal-producer-flush-timeout-ms`, and two fresh nine-CRD generations matched
+  each other before the checked-in Gres CRD was updated.
+- `cargo fmt --all -- --check` and `git diff --check` passed throughout the
+  implementation tasks.
