@@ -233,7 +233,7 @@ async fn prepare_tenant(
             || Ok(crabka_gres_control::RegistryPolicy::default()),
             crate::crd::GresRegistrySpec::policy,
         )
-        .map_err(|error| ReconcileError::Malformed(format!("spec.gresRegistry: {error}")))?;
+        .map_err(ReconcileError::Malformed)?;
     if obj.meta().deletion_timestamp.is_some() {
         cleanup_tenant(
             ctx,
@@ -2004,6 +2004,12 @@ fn render_deployment(
         config.policy.fetch_max_wait_ms().to_string(),
         "--registry-fetch-partition-max-bytes".to_owned(),
         config.policy.fetch_partition_max_bytes().to_string(),
+        "--registry-producer-dns-timeout-ms".to_owned(),
+        config
+            .policy
+            .producer_dns_timeout()
+            .milliseconds()
+            .to_string(),
         "--wal-recovery-fetch-max-wait-ms".to_owned(),
         compute_policy
             .wal_recovery_fetch_max_wait_ms
@@ -3301,7 +3307,9 @@ mod tests {
         .effective_policy()
         .expect("compute policy");
         let policy = crabka_gres_control::RegistryPolicy::new(2, 15_001, 251, 501, 1_048_577)
-            .expect("policy");
+            .expect("policy")
+            .with_producer_dns_timeout_ms(37)
+            .expect("DNS timeout");
         let deployment = render_deployment(
             &obj,
             &ranges[0],
@@ -3341,6 +3349,7 @@ mod tests {
             ["--registry-reader-retry-backoff-ms", "251"],
             ["--registry-fetch-max-wait-ms", "501"],
             ["--registry-fetch-partition-max-bytes", "1048577"],
+            ["--registry-producer-dns-timeout-ms", "37"],
             ["--checkpoint-part-bytes", "8388608"],
             ["--checkpoint-retain", "4"],
             ["--checkpoint-delete-records-timeout-ms", "12345"],
@@ -3374,6 +3383,12 @@ mod tests {
                 })
                 .count()
                 == 5
+        );
+        assert!(
+            args.iter()
+                .filter(|arg| arg.as_str() == "--registry-producer-dns-timeout-ms")
+                .count()
+                == 1
         );
         assert!(
             lifecycle_requeue(&compute_policy) == Action::requeue(Duration::from_millis(4_567))
