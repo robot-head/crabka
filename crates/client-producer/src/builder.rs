@@ -83,7 +83,7 @@ impl ProducerRetryPolicy {
     ) -> Result<Self, String> {
         let request_timeout = validated_protocol_duration(request_timeout, "request timeout")?;
         let retries = GreaterI32::<-1>::new(retries)
-            .map_err(|error| error.to_string())?
+            .map_err(|error| format!("producer retries: {error}"))?
             .into_value();
         let retry_backoff = validated_duration(retry_backoff, "producer retry backoff")?;
         let routing_retry_budget =
@@ -218,7 +218,7 @@ fn next_backoff(backoff: Duration, max_backoff: Duration) -> Duration {
 fn validated_acks(enable_idempotence: bool, acks: Acks) -> Result<Acks, ProducerError> {
     if enable_idempotence && acks == Acks::Zero {
         return Err(ProducerError::InvalidConfig(
-            "enable_idempotence=true requires acks=all (not Zero)",
+            "enable_idempotence=true requires acks=all (not Zero)".to_owned(),
         ));
     }
     Ok(if enable_idempotence { Acks::All } else { acks })
@@ -256,9 +256,9 @@ pub(crate) async fn init_producer_id_with_retry(
 ) -> Result<InitProducerIdResponse, ProducerError> {
     let deadline = tokio::time::Instant::now()
         .checked_add(retry_timeout)
-        .ok_or(ProducerError::InvalidConfig(
-            "producer-ID retry timeout is too large",
-        ))?;
+        .ok_or_else(|| {
+            ProducerError::InvalidConfig("producer-ID retry timeout is too large".to_owned())
+        })?;
     let mut backoff = initial_backoff;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -335,7 +335,7 @@ impl Producer {
             init_max_backoff,
             transaction_timeout,
         )
-        .map_err(|_| ProducerError::InvalidConfig("invalid producer retry policy"))?;
+        .map_err(ProducerError::InvalidConfig)?;
         let request_timeout = retry_policy.request_timeout();
         let retries = retry_policy.retries();
         let retry_backoff = retry_policy.retry_backoff();
@@ -913,13 +913,51 @@ mod security_arg_tests {
 
     #[tokio::test]
     async fn producer_builder_rejects_retry_policy_before_connection_io() {
-        let error = Producer::builder()
-            .bootstrap("127.0.0.1:1")
-            .request_timeout(Duration::ZERO)
-            .build()
-            .await
-            .expect_err("zero request timeout must be invalid config");
+        macro_rules! invalid {
+            ($setter:ident, $value:expr) => {
+                Producer::builder()
+                    .bootstrap("127.0.0.1:1")
+                    .$setter($value)
+                    .build()
+                    .await
+                    .expect_err("invalid retry policy must fail before connection I/O")
+            };
+        }
 
-        assert2::assert!(matches!(error, ProducerError::InvalidConfig(_)));
+        let zero = "[the value must be equal to 1, but received 0 || the value must be greater than 1, but received 0]";
+        for (error, expected) in [
+            (
+                invalid!(request_timeout, Duration::ZERO),
+                format!("invalid config: request timeout: {zero}"),
+            ),
+            (
+                invalid!(retries, -1),
+                "invalid config: producer retries: the value must be greater than -1, but received -1"
+                    .to_owned(),
+            ),
+            (
+                invalid!(retry_backoff, Duration::ZERO),
+                format!("invalid config: producer retry backoff: {zero}"),
+            ),
+            (
+                invalid!(routing_retry_budget, Duration::ZERO),
+                format!("invalid config: routing retry budget: {zero}"),
+            ),
+            (
+                invalid!(init_retry_timeout, Duration::ZERO),
+                format!("invalid config: producer-ID initialization retry timeout: {zero}"),
+            ),
+            (
+                invalid!(init_max_backoff, Duration::ZERO),
+                format!("invalid config: producer-ID initialization maximum backoff: {zero}"),
+            ),
+            (
+                invalid!(transaction_timeout, Duration::ZERO),
+                format!("invalid config: transaction timeout: {zero}"),
+            ),
+        ] {
+            let message = error.to_string();
+            assert2::assert!(message == expected);
+        }
     }
 }
