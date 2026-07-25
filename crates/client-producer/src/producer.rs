@@ -33,7 +33,7 @@ use tracing::Instrument as _;
 
 use crate::{
     accumulator::{Accumulator, AccumulatorMap, AppendResult},
-    builder::init_producer_id_with_retry,
+    builder::{ProducerFlushTimeout, init_producer_id_with_retry},
     compression::Compression,
     error::ProducerError,
     partitioner::UniformStickyPartitioner,
@@ -118,6 +118,7 @@ pub struct Producer {
     pub(crate) linger: Duration,
     #[allow(dead_code)]
     pub(crate) request_timeout: Duration,
+    pub(crate) flush_timeout: ProducerFlushTimeout,
     #[allow(dead_code)]
     pub(crate) max_in_flight: usize,
     pub(crate) metadata_cache: Arc<Mutex<HashMap<String, TopicMetadata>>>,
@@ -922,14 +923,23 @@ impl Producer {
     pub async fn flush(&self) -> Result<(), ProducerError> {
         self.is_active()?;
         let _ = self.wake_tx.send(DrainIntent::Force).await;
-        for _ in 0..1000 {
-            if self.all_empty().await && self.in_flight.load(Ordering::Acquire) == 0 {
-                return Ok(());
+        let deadline = tokio::time::Instant::now()
+            .checked_add(self.flush_timeout.duration())
+            .ok_or(ProducerError::FlushTimeout)?;
+
+        tokio::time::timeout_at(deadline, async {
+            loop {
+                let notified = self.flush_notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if self.all_empty().await && self.in_flight.load(Ordering::Acquire) == 0 {
+                    return;
+                }
+                notified.await;
             }
-            let _ =
-                tokio::time::timeout(Duration::from_millis(50), self.flush_notify.notified()).await;
-        }
-        Err(ProducerError::FlushTimeout)
+        })
+        .await
+        .map_err(|_| ProducerError::FlushTimeout)
     }
 
     async fn all_empty(&self) -> bool {
@@ -994,7 +1004,7 @@ fn build_topics_payload(offsets: &[((String, i32), i64)]) -> Vec<TxnOffsetCommit
 #[cfg(test)]
 mod tests {
     use std::{
-        sync::{Arc, Mutex},
+        sync::{Arc, Mutex, atomic::Ordering},
         time::Duration,
     };
 
@@ -1012,6 +1022,7 @@ mod tests {
 
     use super::{DrainIntent, Producer, wake_sender_after_append};
     use crate::accumulator::{Accumulator, AppendResult};
+    use crate::error::ProducerError;
 
     const CLIENT_ID: &str = "producer-test";
 
@@ -1144,6 +1155,22 @@ mod tests {
         (mock, producer)
     }
 
+    async fn producer_with_flush_timeout(flush_timeout: Duration) -> (MockBroker, Producer) {
+        let mock = MockBroker::start(|api_key, _version, _corr_id, _body| {
+            (api_key == api_versions_request::API_KEY).then(|| api_versions_response(4))
+        })
+        .await;
+        let producer = Producer::builder()
+            .bootstrap(mock.addr.to_string())
+            .client_id(CLIENT_ID)
+            .enable_idempotence(false)
+            .flush_timeout(flush_timeout)
+            .build()
+            .await
+            .expect("producer connects to mock broker");
+        (mock, producer)
+    }
+
     #[derive(Clone, Copy)]
     enum LookupKind {
         Group,
@@ -1214,5 +1241,50 @@ mod tests {
             assert2::assert!(*requests == vec![expected_request]);
             mock.stop();
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn flush_times_out_at_the_configured_deadline() {
+        let (mock, producer) = producer_with_flush_timeout(Duration::from_millis(7)).await;
+        producer.in_flight.store(1, Ordering::Release);
+
+        let flush = producer.flush();
+        tokio::pin!(flush);
+        assert!(futures::poll!(flush.as_mut()).is_pending());
+
+        tokio::time::advance(Duration::from_millis(6)).await;
+        assert!(futures::poll!(flush.as_mut()).is_pending());
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(matches!(
+            futures::poll!(flush.as_mut()),
+            std::task::Poll::Ready(Err(ProducerError::FlushTimeout))
+        ));
+        mock.stop();
+    }
+
+    #[tokio::test]
+    async fn flush_does_not_miss_notification_during_state_check() {
+        let (mock, producer) = producer_with_flush_timeout(Duration::from_millis(20)).await;
+        let accumulator = Arc::new(tokio::sync::Mutex::new(Accumulator::new(1024)));
+        producer
+            .accumulators
+            .insert(("held".to_owned(), 0), Arc::clone(&accumulator));
+        let mut guard = accumulator.lock().await;
+
+        let flush = producer.flush();
+        tokio::pin!(flush);
+        assert!(futures::poll!(flush.as_mut()).is_pending());
+
+        guard.current = None;
+        guard.ready.clear();
+        producer.flush_notify.notify_waiters();
+        drop(guard);
+
+        tokio::time::timeout(Duration::from_millis(20), flush)
+            .await
+            .expect("flush must not wait for another notification")
+            .expect("empty producer flushes");
+        mock.stop();
     }
 }
