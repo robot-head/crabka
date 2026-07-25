@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::{
     bootstrap,
-    connection::ConnectionOptions,
+    connection::{ClientDnsTimeout, ConnectionOptions},
     error::ClientError,
     pool::{BrokerInfo, BrokerPool},
     request::ProtocolRequest,
@@ -21,7 +21,6 @@ use crate::{
 pub struct Client {
     bootstrap: String,
     pool: Arc<BrokerPool>,
-    #[allow(dead_code)]
     options: ConnectionOptions,
 }
 
@@ -40,14 +39,17 @@ impl Client {
     pub async fn start(
         #[builder(into)] bootstrap: String,
         #[builder(into, default = "crabka".to_string())] client_id: String,
-        #[builder(default = std::time::Duration::from_secs(30))]
+        #[builder(default = crate::DEFAULT_CLIENT_DNS_TIMEOUT)] dns_timeout: std::time::Duration,
+        #[builder(default = crate::DEFAULT_CLIENT_CONNECT_TIMEOUT)]
         connect_timeout: std::time::Duration,
-        #[builder(default = std::time::Duration::from_secs(30))]
+        #[builder(default = crate::DEFAULT_CLIENT_REQUEST_TIMEOUT)]
         request_timeout: std::time::Duration,
         security: Option<crate::security::ClientSecurity>,
     ) -> Result<Self, ClientError> {
+        let dns_timeout = ClientDnsTimeout::new(dns_timeout).map_err(ClientError::InvalidConfig)?;
         let options = ConnectionOptions {
             client_id,
+            dns_timeout,
             connect_timeout,
             request_timeout,
             security: security.map(Box::new),
@@ -67,7 +69,7 @@ impl Client {
         bootstrap: String,
         options: ConnectionOptions,
     ) -> Result<Self, ClientError> {
-        let addrs = bootstrap::resolve(&bootstrap).await?;
+        let addrs = bootstrap::resolve(&bootstrap, options.dns_timeout).await?;
         let pool = Arc::new(BrokerPool::new(addrs, options.clone()));
         Ok(Client {
             bootstrap,
@@ -92,7 +94,7 @@ impl Client {
     #[tracing::instrument(level = "debug", skip_all, fields(bootstrap = %self.bootstrap))]
     pub async fn reconnect_bootstrap(&self) {
         self.pool.evict_bootstrap();
-        if let Ok(addrs) = bootstrap::resolve(&self.bootstrap).await {
+        if let Ok(addrs) = bootstrap::resolve(&self.bootstrap, self.options.dns_timeout).await {
             self.pool.replace_bootstrap(addrs);
         }
     }
@@ -365,6 +367,16 @@ mod bootstrap_failover_tests {
 
     use super::*;
     use crate::mock::MockBroker;
+
+    #[tokio::test]
+    async fn zero_dns_timeout_is_rejected_before_resolution() {
+        let result = Client::builder()
+            .bootstrap("unused.invalid:9092")
+            .dns_timeout(std::time::Duration::ZERO)
+            .build()
+            .await;
+        assert2::assert!(matches!(result, Err(ClientError::InvalidConfig(_))));
+    }
 
     fn api_versions_v0() -> Vec<u8> {
         let resp = ApiVersionsResponse {

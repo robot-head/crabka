@@ -13,6 +13,7 @@ use std::{
 use bytes::{BufMut, Bytes, BytesMut};
 use crabka_ids::{ApiKey, ApiVersion};
 use dashmap::DashMap;
+use refined_type::rule::MinMaxU128;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::TcpStream,
@@ -38,10 +39,64 @@ type Pending = Arc<DashMap<i32, oneshot::Sender<Result<Bytes, ClientError>>>>;
 /// version is flexible (v3+).
 const API_VERSIONS_KEY: i16 = 18;
 
+/// Default deadline for one client DNS lookup.
+pub const DEFAULT_CLIENT_DNS_TIMEOUT: Duration = Duration::from_secs(10);
+/// Default deadline for one client TCP connection attempt.
+pub const DEFAULT_CLIENT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default deadline for one client request.
+pub const DEFAULT_CLIENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Positive, whole-millisecond DNS lookup deadline.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ClientDnsTimeout(Duration);
+
+impl ClientDnsTimeout {
+    /// Validate a DNS lookup deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the duration is zero, fractional in milliseconds,
+    /// or cannot be represented as `u64` milliseconds.
+    pub fn new(value: Duration) -> Result<Self, String> {
+        let milliseconds = MinMaxU128::<1, { u64::MAX as u128 }>::new(value.as_millis())
+            .map_err(|error| format!("client DNS timeout: {error}"))?
+            .into_value();
+        let milliseconds =
+            u64::try_from(milliseconds).map_err(|error| format!("client DNS timeout: {error}"))?;
+        if Duration::from_millis(milliseconds) != value {
+            return Err("client DNS timeout must be a whole number of milliseconds".to_owned());
+        }
+        Ok(Self(value))
+    }
+
+    /// Return the validated duration.
+    #[must_use]
+    pub const fn duration(self) -> Duration {
+        self.0
+    }
+
+    /// Return the validated duration in milliseconds.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the invariant established by [`Self::new`] is violated.
+    #[must_use]
+    pub fn milliseconds(self) -> u64 {
+        u64::try_from(self.0.as_millis()).expect("validated client DNS timeout fits u64")
+    }
+}
+
+impl Default for ClientDnsTimeout {
+    fn default() -> Self {
+        Self::new(DEFAULT_CLIENT_DNS_TIMEOUT).expect("default client DNS timeout is valid")
+    }
+}
+
 /// Connect-time + per-request configuration knobs.
 #[derive(Debug, Clone)]
 pub struct ConnectionOptions {
     pub client_id: String,
+    pub dns_timeout: ClientDnsTimeout,
     pub connect_timeout: Duration,
     pub request_timeout: Duration,
     /// Client-side TLS/SASL policy. `None` = plaintext (default).
@@ -57,8 +112,9 @@ impl Default for ConnectionOptions {
     fn default() -> Self {
         Self {
             client_id: "crabka".into(),
-            connect_timeout: Duration::from_secs(30),
-            request_timeout: Duration::from_secs(30),
+            dns_timeout: ClientDnsTimeout::default(),
+            connect_timeout: DEFAULT_CLIENT_CONNECT_TIMEOUT,
+            request_timeout: DEFAULT_CLIENT_REQUEST_TIMEOUT,
             security: None,
         }
     }
@@ -586,6 +642,35 @@ async fn fetch_api_versions(conn: &Connection) -> Result<ApiVersionTable, Client
         .iter()
         .map(|k| (k.api_key, k.min_version, k.max_version));
     Ok(ApiVersionTable::from_entries(entries))
+}
+
+#[cfg(test)]
+mod tests {
+    use assert2::assert;
+
+    use super::*;
+
+    #[test]
+    fn client_dns_timeout_validates_and_preserves_milliseconds() {
+        let timeout = ClientDnsTimeout::new(Duration::from_millis(37)).expect("positive timeout");
+        assert!(timeout.duration() == Duration::from_millis(37));
+        assert!(timeout.milliseconds() == 37);
+        assert!(ClientDnsTimeout::new(Duration::ZERO).is_err());
+        assert!(ClientDnsTimeout::new(Duration::from_nanos(1)).is_err());
+        assert!(ClientDnsTimeout::new(Duration::from_millis(1) + Duration::from_nanos(1)).is_err());
+    }
+
+    #[test]
+    fn connection_options_own_named_defaults() {
+        let options = ConnectionOptions::default();
+        assert!(DEFAULT_CLIENT_DNS_TIMEOUT == Duration::from_secs(10));
+        assert!(DEFAULT_CLIENT_CONNECT_TIMEOUT == Duration::from_secs(30));
+        assert!(DEFAULT_CLIENT_REQUEST_TIMEOUT == Duration::from_secs(30));
+        assert!(options.dns_timeout == ClientDnsTimeout::default());
+        assert!(options.dns_timeout.duration() == DEFAULT_CLIENT_DNS_TIMEOUT);
+        assert!(options.connect_timeout == DEFAULT_CLIENT_CONNECT_TIMEOUT);
+        assert!(options.request_timeout == DEFAULT_CLIENT_REQUEST_TIMEOUT);
+    }
 }
 
 #[cfg(test)]

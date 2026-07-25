@@ -2,6 +2,7 @@
 //! connect on first use.
 
 use std::{
+    future::Future,
     net::SocketAddr,
     sync::{Arc, RwLock},
 };
@@ -9,7 +10,8 @@ use std::{
 use dashmap::DashMap;
 
 use crate::{
-    connection::{Connection, ConnectionOptions},
+    bootstrap::bounded_lookup,
+    connection::{ClientDnsTimeout, Connection, ConnectionOptions},
     error::ClientError,
 };
 
@@ -76,6 +78,7 @@ pub struct BrokerPool<C: BrokerConnector = TcpConnector> {
     by_id: DashMap<i32, Arc<C::Conn>>,
     by_addr: DashMap<i32, SocketAddr>,
     bootstrap: RwLock<Vec<SocketAddr>>,
+    dns_timeout: ClientDnsTimeout,
     connector: C,
 }
 
@@ -83,11 +86,20 @@ pub struct BrokerPool<C: BrokerConnector = TcpConnector> {
 /// Never a real Kafka node id (those are `>= 0`).
 const BOOTSTRAP_ID: i32 = -1;
 
+async fn first_resolved_addr<F, I>(timeout: ClientDnsTimeout, lookup: F) -> Option<SocketAddr>
+where
+    F: Future<Output = std::io::Result<I>>,
+    I: Iterator<Item = SocketAddr>,
+{
+    bounded_lookup(timeout, lookup).await.ok()?.ok()?.next()
+}
+
 impl BrokerPool<TcpConnector> {
     /// Create a new pool with the given bootstrap addresses and connection options.
     #[must_use]
     pub fn new(bootstrap: Vec<SocketAddr>, options: ConnectionOptions) -> Self {
-        BrokerPool::with_connector(bootstrap, TcpConnector { options })
+        let dns_timeout = options.dns_timeout;
+        BrokerPool::with_connector(bootstrap, TcpConnector { options }, dns_timeout)
     }
 }
 
@@ -96,11 +108,16 @@ impl<C: BrokerConnector> BrokerPool<C> {
     /// live connector and by tests for a mock connector.
     ///
     /// [`new`]: BrokerPool::new
-    fn with_connector(bootstrap: Vec<SocketAddr>, connector: C) -> Self {
+    fn with_connector(
+        bootstrap: Vec<SocketAddr>,
+        connector: C,
+        dns_timeout: ClientDnsTimeout,
+    ) -> Self {
         Self {
             by_id: DashMap::new(),
             by_addr: DashMap::new(),
             bootstrap: RwLock::new(bootstrap),
+            dns_timeout,
             connector,
         }
     }
@@ -211,8 +228,11 @@ impl<C: BrokerConnector> BrokerPool<C> {
             // partition whose leader isn't the bootstrap broker gets a
             // permanent `NOT_LEADER_OR_FOLLOWER`. `lookup_host` resolves both
             // DNS names and literal IPs.
-            if let Ok(mut addrs) = tokio::net::lookup_host((b.host.as_str(), port)).await
-                && let Some(addr) = addrs.next()
+            if let Some(addr) = first_resolved_addr(
+                self.dns_timeout,
+                tokio::net::lookup_host((b.host.as_str(), port)),
+            )
+            .await
             {
                 self.by_addr.insert(b.id, addr);
             }
@@ -243,11 +263,41 @@ impl<C: BrokerConnector> BrokerPool<C> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Duration,
+    };
 
     use assert2::{assert, check};
 
     use super::*;
+    use crate::connection::ClientDnsTimeout;
+
+    #[test]
+    fn pool_carries_the_configured_dns_timeout() {
+        let timeout = ClientDnsTimeout::new(Duration::from_millis(41)).expect("positive timeout");
+        let pool = BrokerPool::new(
+            vec![],
+            ConnectionOptions {
+                dns_timeout: timeout,
+                ..ConnectionOptions::default()
+            },
+        );
+        assert!(pool.dns_timeout == timeout);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn advertised_broker_lookup_stops_at_the_configured_deadline() {
+        let timeout = ClientDnsTimeout::new(Duration::from_millis(41)).expect("positive timeout");
+        let started = tokio::time::Instant::now();
+        let addr = first_resolved_addr(
+            timeout,
+            std::future::pending::<std::io::Result<std::vec::IntoIter<SocketAddr>>>(),
+        )
+        .await;
+        assert!(addr.is_none());
+        assert!(started.elapsed() == Duration::from_millis(41));
+    }
 
     #[tokio::test]
     async fn refresh_inserts_addresses() {
@@ -358,6 +408,7 @@ mod tests {
                 dials: dials.clone(),
                 fail: vec![],
             },
+            ClientDnsTimeout::default(),
         );
         // Unknown id: no address learned → Disconnected, no dial attempted.
         assert!(matches!(pool.get(5).await, Err(ClientError::Disconnected)));
@@ -381,6 +432,7 @@ mod tests {
                 dials: dials.clone(),
                 fail: vec![],
             },
+            ClientDnsTimeout::default(),
         );
         pool.by_addr.insert(1, addr(9092));
         pool.by_addr.insert(2, addr(9093));
@@ -409,6 +461,7 @@ mod tests {
                 dials: dials.clone(),
                 fail: vec![addr(1111)],
             },
+            ClientDnsTimeout::default(),
         );
         let boot = pool.bootstrap_connection().await.unwrap();
         assert!(boot.addr == addr(2222));
@@ -433,6 +486,7 @@ mod tests {
                 dials: dials.clone(),
                 fail: vec![],
             },
+            ClientDnsTimeout::default(),
         );
         let _ = pool.bootstrap_connection().await.unwrap();
         assert!(pool.by_id.contains_key(&BOOTSTRAP_ID));
@@ -454,6 +508,7 @@ mod tests {
                 dials: dials.clone(),
                 fail: vec![],
             },
+            ClientDnsTimeout::default(),
         );
         pool.by_addr.insert(3, addr(9092));
         let _ = pool.get(3).await.unwrap();
@@ -481,6 +536,7 @@ mod tests {
                 dials: dials.clone(),
                 fail: vec![],
             },
+            ClientDnsTimeout::default(),
         );
 
         let first = pool.bootstrap_connection().await.unwrap();
@@ -503,6 +559,7 @@ mod tests {
                 dials: dials.clone(),
                 fail: vec![],
             },
+            ClientDnsTimeout::default(),
         );
         pool.by_addr.insert(1, addr(9092));
         let held = pool.get(1).await.unwrap();

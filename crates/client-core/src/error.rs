@@ -18,6 +18,9 @@ pub enum ClientError {
     #[error("connection closed")]
     Disconnected,
 
+    #[error("invalid client configuration: {0}")]
+    InvalidConfig(String),
+
     #[error("request timed out after {0:?}")]
     Timeout(Duration),
 
