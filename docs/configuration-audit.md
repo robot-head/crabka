@@ -1654,3 +1654,85 @@ Fresh focused verification on 2026-07-25 passed:
 
 This evidence closes only the Gres WAL producer DNS slice. It does not close
 the pending crate-level coverage entries or the repository-wide goal.
+
+## Gres Registry Producer DNS Timeout
+
+The Gres registry producer reuses client-core's validated `ClientDnsTimeout`
+and 10-second `DEFAULT_CLIENT_DNS_TIMEOUT`; it adds no registry-specific DNS
+type or default. The four standalone surfaces accept the exact
+`--registry-producer-dns-timeout-ms` CLI flag and
+`CRABKA_GRES_REGISTRY_PRODUCER_DNS_TIMEOUT_MS` environment variable. The Kafka
+CRD owns optional `spec.gresRegistry.producerDnsTimeoutMs`, whose checked-in
+schema has `minimum: 1`.
+
+Absence selects the shared validated 10,000-millisecond default. Each
+standalone parser validates explicit input through `PositiveMillis` and
+`RegistryPolicy::with_producer_dns_timeout_ms`; CLI input takes precedence over
+environment input. The CRD follows the same typed override path.
+
+The effective fleet value follows:
+
+```text
+Kafka.spec.gresRegistry.producerDnsTimeoutMs
+  -> RegistryPolicy::with_producer_dns_timeout_ms
+  -> operator control policy / rendered --registry-producer-dns-timeout-ms
+  -> standalone RegistryOptions::policy
+  -> Registry::connect_with_policy
+  -> Producer::builder().dns_timeout
+  -> Client::builder().dns_timeout
+  -> ConnectionOptions.dns_timeout
+  -> client-core bounded bootstrap and advertised-broker lookup
+```
+
+Operator control construction and both activator and compute rendering consume
+the same effective `RegistryPolicy`. Standalone Gres, `crabka gres`, the Gres
+activator, and the Gres load-test each own the exact CLI/environment input; the
+load-test also forwards one exact flag/value pair to each child. Structural
+inspection found exactly one registry `Producer::builder()` construction, in
+`Registry::connect_with_policy`, and it consumes
+`policy.producer_dns_timeout().duration()`.
+
+The required focused scan reported 322 lines across 38 files: 134 production
+references across 21 files, 3 checked-in CRD schema references across 2 files,
+156 test or harness references across 31 files, and 29 prior-audit references
+in this file. These groups classify the complete focused result, including
+previously completed and still-open DNS owners; they do not claim all matches
+are covered by this slice.
+
+### Adjacent Pending Policy
+
+Raw registry reader and registry admin DNS paths remain open. Registry refresh
+and its background reader still use `resolve_bootstrap_addr` in
+`crates/gres-control/src/registry.rs`, while registry topic creation and
+metadata refresh use `AdminClient`, whose raw `tokio::net::lookup_host` path is
+in `crates/client-admin/src/lib.rs`. The next coherent unresolved configuration
+owner is the Gres registry reader/admin DNS policy across those paths. Other
+raw resolver sites and unrelated producers remain separate visible owners, and
+the repository-wide hardcoded operational-value audit remains active.
+
+### Gres Registry Producer DNS Timeout Evidence
+
+On 2026-07-25 `tools/audit-runtime-values.sh` reported 6,170 lines across 1,051
+files. The exact required search
+
+```text
+rg -n "lookup_host|ClientDnsTimeout|DEFAULT_CLIENT_DNS_TIMEOUT|dns[_-]timeout|DnsTimeout|registry-producer-dns-timeout|producerDnsTimeoutMs" crates deploy/crds docs/configuration-audit.md
+```
+
+produced the 322-line classification above.
+
+The implementation-task verification reported:
+
+- Gres control: 81 tests passed; strict all-target Clippy, formatting, and diff
+  hygiene passed.
+- The four standalone packages: 379 tests passed, zero failed, and one
+  pre-existing live-cluster test was ignored; strict all-target Clippy,
+  formatting, and diff hygiene passed. Gres help displayed the exact
+  `--registry-producer-dns-timeout-ms` flag.
+- Operator: the focused registry CRD, cache, activator, and compute tests
+  passed; the full all-target test and strict Clippy gates passed; all nine CRDs
+  were regenerated deterministically, and only
+  `crabka.io_kafkas.yaml` changed.
+
+This evidence closes only the Gres registry producer DNS slice. Raw registry
+reader/admin DNS ownership and the repository-wide goal remain open.
