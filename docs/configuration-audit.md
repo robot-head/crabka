@@ -1118,3 +1118,94 @@ focused candidate remains unclassified.
   environment isolation, pre-I/O inert-use rejection, shared-helper
   propagation, schema minima, and exact single-/multi-range Deployment
   arguments.
+
+## Gres WAL Admin and Topic Policy
+
+WAL recovery now resolves one validated `WalAdminPolicy` with four
+substrate-owned defaults:
+
+- `DEFAULT_WAL_TOPIC_REPLICATION_FACTOR = 1`;
+- `DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT_MS = 30_000`;
+- `DEFAULT_WAL_ADMIN_CONNECT_TIMEOUT_MS = 5_000`;
+- `DEFAULT_WAL_ADMIN_REQUEST_TIMEOUT_MS = 30_000`.
+
+`WalAdminPolicy::new` validates replication against the Kafka `i16` wire
+range and validates all four values as positive through `refined_type`.
+`LiveRecoveryConfig` owns the effective policy. The two existing public names
+`WAL_TOPIC_REPLICAS` and `WAL_TOPIC_ENSURE_TIMEOUT_MS` remain only as
+compatibility aliases of the new defaults; live recovery does not consume
+them as independent policy.
+
+All seven recovery admin connections route through one helper:
+
+```text
+read_live_committed_tail
+read_live_retained_committed
+LiveEndDialer::dial
+ensure_live_wal_topic
+bootstrap_live_range0_follower
+recover_live_for_range_inner
+live_committed_reader
+  -> connect_wal_admin
+  -> AdminClient::connect_with_options
+```
+
+The helper supplies the configured client id, security, connect timeout, and
+request timeout. `AdminClient` stores that complete `ConnectionOptions`
+template and clones it for both controller and bootstrap reconnects. Its
+legacy constructors still resolve their named 5-second/30-second defaults for
+unrelated callers.
+
+Topic creation passes the configured replication factor and ensure timeout
+through `ensure_wal_topic_name_with_policy` and the narrow `TopicAdmin` seam.
+The legacy ensure functions retain default behavior. WAL partitions remain
+one to preserve ordered range WAL semantics; `cleanup.policy=delete` and
+`retention.ms=-1` remain fixed durability invariants. The committed-end
+zero-wait sample, partition zero, read-committed isolation, and Kafka
+`TOPIC_ALREADY_EXISTS` code are fixed protocol behavior.
+
+Standalone Gres exposes the four WAL-admin CLI/environment pairs and combines
+them with the existing six WAL-recovery settings in the same pre-I/O
+validation and hostile-environment matrix. The single
+`SubstrateRuntimeConfig::live_recovery_config` helper applies both validated
+policies to all six Gres recovery construction sites. The fleet CRD exposes
+four optional positive `spec.compute.walTopic*`/`walAdmin*` fields, validates
+omitted values through the shared defaults, and renders all four effective
+arguments for both single- and multi-range substrate computes. Together, all
+ten WAL recovery/admin CLI, environment, and CRD settings have live
+consumers.
+
+### Adjacent Pending Policy
+
+This closes recovery admin connection and topic-creation policy only. DNS
+resolution, checkpoint deletion, registry clients, and generic client
+defaults remain separate owners. The next coherent Gres owner is the
+transactional WAL producer construction/initialization policy, beginning with
+the producer request timeout, retry backoff, and transaction timeout currently
+inherited from `crabka-client-producer`.
+
+### Gres WAL Admin Evidence
+
+On 2026-07-25 `tools/audit-runtime-values.sh` reported 5,978 repository
+matches. The exact policy-focused search reported 250 references: 26
+shared-default or compatibility references, 86 configured production
+type/parser/validation/schema/render/runtime references, and 138 test/harness
+references. A separate fixed protocol/durability search reported 17
+references. No focused candidate remains unclassified.
+
+- The six-package affected test command reported 1,539 passing test and
+  doc-test results, zero failures, and four ignored Docker-only tests.
+- Strict all-target/all-feature Clippy with `-D warnings` passed for
+  `crabka-client-core`, `crabka-client-admin`, `crabka-gres-control`,
+  `crabka-gres-substrate`, `crabka-gres`, and `crabka-operator`.
+- Gres help displayed all ten WAL recovery/admin options, including the four
+  new topic/admin pairs.
+- Fresh operator generation produced nine CRDs; both directories contained
+  nine files and `diff -ru` against `deploy/crds` was empty.
+- `cargo fmt --all -- --check` and `git diff --check` passed. Stable rustfmt
+  emitted only the repository's existing nightly-option warnings.
+- Focused tests cover exact defaults and bounds, zero and overflow rejection,
+  environment parsing and CLI precedence, hostile-environment isolation,
+  pre-listener validation, shared recovery propagation, topic request values,
+  initial connection options, controller/bootstrap reconnect preservation,
+  schema bounds, and exact single-/multi-range Deployment arguments.
