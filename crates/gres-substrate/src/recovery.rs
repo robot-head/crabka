@@ -49,6 +49,8 @@ pub const DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES: i32 =
     crabka_client_core::DEFAULT_FETCH_RESPONSE_MAX_BYTES;
 /// Default consecutive empty-fetch retries after the initial empty fetch.
 pub const DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES: usize = 100;
+/// Default timeout for resolving a raw committed-WAL broker address.
+pub const DEFAULT_WAL_RECOVERY_DNS_TIMEOUT_MS: u64 = 10_000;
 /// Default timeout for establishing a raw committed-WAL connection.
 pub const DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT_MS: u64 = 10_000;
 /// Default timeout for requests on a raw committed-WAL connection.
@@ -66,6 +68,7 @@ pub struct RecoveryReadPolicy {
     fetch_partition_max_bytes: i32,
     fetch_response_max_bytes: i32,
     empty_fetch_retries: usize,
+    dns_timeout: Duration,
     connect_timeout: Duration,
     request_timeout: Duration,
 }
@@ -95,9 +98,20 @@ impl RecoveryReadPolicy {
             empty_fetch_retries: GreaterUsize::<0>::new(empty_fetch_retries)
                 .map_err(|error| error.to_string())?
                 .into_value(),
+            dns_timeout: validated_timeout(DEFAULT_WAL_RECOVERY_DNS_TIMEOUT_MS)?,
             connect_timeout: validated_timeout(DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT_MS)?,
             request_timeout: validated_timeout(DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT_MS)?,
         })
+    }
+
+    /// Replace the raw WAL DNS lookup timeout.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the timeout is zero.
+    pub fn with_dns_timeout(mut self, dns_timeout_ms: u64) -> Result<Self, String> {
+        self.dns_timeout = validated_timeout(dns_timeout_ms)?;
+        Ok(self)
     }
 
     /// Replace the raw WAL connection timeouts.
@@ -137,6 +151,12 @@ impl RecoveryReadPolicy {
     #[must_use]
     pub const fn empty_fetch_retries(self) -> usize {
         self.empty_fetch_retries
+    }
+
+    /// Return the raw WAL DNS lookup timeout.
+    #[must_use]
+    pub const fn dns_timeout(self) -> Duration {
+        self.dns_timeout
     }
 
     /// Return the raw WAL connection establishment timeout.
@@ -911,6 +931,28 @@ fn wal_connection_options(
     }
 }
 
+async fn resolve_wal_addr<I>(
+    host_port: &str,
+    timeout: Duration,
+    lookup: impl std::future::Future<Output = std::io::Result<I>>,
+) -> Result<std::net::SocketAddr, SubstrateError>
+where
+    I: Iterator<Item = std::net::SocketAddr>,
+{
+    let mut addrs = tokio::time::timeout(timeout, lookup)
+        .await
+        .map_err(|_| {
+            SubstrateError::Unavailable(format!(
+                "DNS lookup {host_port} timed out after {} ms",
+                timeout.as_millis()
+            ))
+        })?
+        .map_err(|error| SubstrateError::Unavailable(format!("DNS lookup {host_port}: {error}")))?;
+    addrs
+        .next()
+        .ok_or_else(|| SubstrateError::Unavailable(format!("no addresses for {host_port}")))
+}
+
 /// Open one raw broker connection to the first bootstrap address.
 async fn open_wal_connection(
     bootstrap_addrs: &[String],
@@ -921,12 +963,12 @@ async fn open_wal_connection(
     let host_port = bootstrap_addrs.first().ok_or_else(|| {
         SubstrateError::Unavailable("substrate bootstrap address list is empty".into())
     })?;
-    let mut addrs = tokio::net::lookup_host(host_port)
-        .await
-        .map_err(|error| SubstrateError::Unavailable(format!("DNS lookup {host_port}: {error}")))?;
-    let addr = addrs
-        .next()
-        .ok_or_else(|| SubstrateError::Unavailable(format!("no addresses for {host_port}")))?;
+    let addr = resolve_wal_addr(
+        host_port,
+        read_policy.dns_timeout(),
+        tokio::net::lookup_host(host_port),
+    )
+    .await?;
     Connection::connect_with_options(
         addr,
         wal_connection_options(client_id, security, read_policy),
@@ -1557,6 +1599,24 @@ mod tests {
             policy.request_timeout(),
             std::time::Duration::from_millis(DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT_MS)
         );
+        assert!(policy.dns_timeout() == Duration::from_millis(DEFAULT_WAL_RECOVERY_DNS_TIMEOUT_MS));
+    }
+
+    #[test]
+    fn recovery_read_policy_validates_and_replaces_dns_timeout() {
+        assert!(RecoveryReadPolicy::default().with_dns_timeout(0).is_err());
+
+        let policy = RecoveryReadPolicy::new(11, 22, 33, 44)
+            .expect("valid policy")
+            .with_timeouts(55, 66)
+            .expect("valid connection timeouts")
+            .with_dns_timeout(77)
+            .expect("valid DNS timeout");
+
+        assert!(policy.fetch_max_wait_ms() == 11);
+        assert!(policy.connect_timeout() == Duration::from_millis(55));
+        assert!(policy.request_timeout() == Duration::from_millis(66));
+        assert!(policy.dns_timeout() == Duration::from_millis(77));
     }
 
     #[test]
@@ -1603,6 +1663,65 @@ mod tests {
         assert_eq!(
             policy.request_timeout(),
             std::time::Duration::from_millis(66)
+        );
+    }
+
+    #[tokio::test]
+    async fn wal_dns_lookup_returns_first_address_and_reports_resolver_failures() {
+        let first: std::net::SocketAddr = "127.0.0.1:9092".parse().expect("first address");
+        let second: std::net::SocketAddr = "127.0.0.2:9092".parse().expect("second address");
+        let resolved = resolve_wal_addr(
+            "broker:9092",
+            Duration::from_millis(10),
+            std::future::ready(Ok(vec![first, second].into_iter())),
+        )
+        .await
+        .expect("resolved address");
+        assert!(resolved == first);
+
+        let error = resolve_wal_addr(
+            "broker:9092",
+            Duration::from_millis(10),
+            std::future::ready(Err::<std::vec::IntoIter<std::net::SocketAddr>, _>(
+                std::io::Error::other("resolver failed"),
+            )),
+        )
+        .await
+        .expect_err("resolver error");
+        assert!(
+            error
+                .to_string()
+                .contains("DNS lookup broker:9092: resolver failed")
+        );
+    }
+
+    #[tokio::test]
+    async fn wal_dns_lookup_rejects_an_empty_result() {
+        let error = resolve_wal_addr(
+            "broker:9092",
+            Duration::from_millis(10),
+            std::future::ready(Ok(Vec::<std::net::SocketAddr>::new().into_iter())),
+        )
+        .await
+        .expect_err("empty resolution");
+
+        assert!(error.to_string().contains("no addresses for broker:9092"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wal_dns_lookup_stops_at_the_configured_timeout() {
+        let error = resolve_wal_addr(
+            "broker:9092",
+            Duration::from_millis(37),
+            std::future::pending::<std::io::Result<std::vec::IntoIter<std::net::SocketAddr>>>(),
+        )
+        .await
+        .expect_err("DNS timeout");
+
+        assert!(
+            error
+                .to_string()
+                .contains("DNS lookup broker:9092 timed out after 37 ms")
         );
     }
 
