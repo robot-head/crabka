@@ -2182,9 +2182,7 @@ fn render_deployment(
     }))?)
 }
 
-fn wal_producer_flush_args(
-    policy: crabka_client_producer::ProducerFlushTimeout,
-) -> [String; 2] {
+fn wal_producer_flush_args(policy: crabka_client_producer::ProducerFlushTimeout) -> [String; 2] {
     [
         "--wal-producer-flush-timeout-ms".to_owned(),
         policy.milliseconds().to_string(),
@@ -2986,9 +2984,7 @@ mod tests {
         .effective_policy()
         .expect("compute policy");
 
-        for (range_control_enabled, active_ranges) in
-            [(false, &ranges[..1]), (true, &ranges[..])]
-        {
+        for (range_control_enabled, active_ranges) in [(false, &ranges[..1]), (true, &ranges[..])] {
             for range in active_ranges {
                 let wal_topic = format!("__gres_wal.tenant-a.r{}", range.range_id);
                 let deployment = render_deployment(
