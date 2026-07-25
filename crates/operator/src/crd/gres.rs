@@ -9,10 +9,12 @@ use crabka_gres_control::{
     PositiveMillis, PositiveUsize,
 };
 use crabka_gres_substrate::{
-    DEFAULT_CHECKPOINT_RETAIN, DEFAULT_PART_MAX_BYTES, DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT_MS,
+    DEFAULT_CHECKPOINT_RETAIN, DEFAULT_PART_MAX_BYTES, DEFAULT_WAL_ADMIN_CONNECT_TIMEOUT_MS,
+    DEFAULT_WAL_ADMIN_REQUEST_TIMEOUT_MS, DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT_MS,
     DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES, DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT_MS,
     DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES, DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES,
-    DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT_MS,
+    DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT_MS, DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT_MS,
+    DEFAULT_WAL_TOPIC_REPLICATION_FACTOR,
 };
 use kube::CustomResource;
 use refined_type::rule::GreaterI32;
@@ -161,6 +163,26 @@ pub struct GresComputeSpec {
     #[schemars(range(min = 1))]
     pub wal_recovery_request_timeout_ms: Option<u64>,
 
+    /// Replication factor requested when creating a range WAL topic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 32_767))]
+    pub wal_topic_replication_factor: Option<i32>,
+
+    /// Timeout for ensuring a range WAL topic in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 2_147_483_647))]
+    pub wal_topic_ensure_timeout_ms: Option<i32>,
+
+    /// Timeout for opening WAL admin connections in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub wal_admin_connect_timeout_ms: Option<u64>,
+
+    /// Timeout for WAL admin requests in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub wal_admin_request_timeout_ms: Option<u64>,
+
     /// Tenant lifecycle reconciliation interval in milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
@@ -182,6 +204,10 @@ pub(crate) struct EffectiveGresComputePolicy {
     pub(crate) wal_recovery_empty_fetch_retries: PositiveUsize,
     pub(crate) wal_recovery_connect_timeout_ms: PositiveMillis,
     pub(crate) wal_recovery_request_timeout_ms: PositiveMillis,
+    pub(crate) wal_topic_replication_factor: PositiveI32,
+    pub(crate) wal_topic_ensure_timeout_ms: PositiveI32,
+    pub(crate) wal_admin_connect_timeout_ms: PositiveMillis,
+    pub(crate) wal_admin_request_timeout_ms: PositiveMillis,
     pub(crate) lifecycle_requeue_ms: PositiveMillis,
 }
 
@@ -253,6 +279,26 @@ impl GresComputeSpec {
                     .unwrap_or(DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT_MS),
             )
             .map_err(|error| format!("spec.compute.walRecoveryRequestTimeoutMs: {error}"))?,
+            wal_topic_replication_factor: PositiveI32::new(
+                self.wal_topic_replication_factor
+                    .unwrap_or(DEFAULT_WAL_TOPIC_REPLICATION_FACTOR),
+            )
+            .map_err(|error| format!("spec.compute.walTopicReplicationFactor: {error}"))?,
+            wal_topic_ensure_timeout_ms: PositiveI32::new(
+                self.wal_topic_ensure_timeout_ms
+                    .unwrap_or(DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT_MS),
+            )
+            .map_err(|error| format!("spec.compute.walTopicEnsureTimeoutMs: {error}"))?,
+            wal_admin_connect_timeout_ms: PositiveMillis::new(
+                self.wal_admin_connect_timeout_ms
+                    .unwrap_or(DEFAULT_WAL_ADMIN_CONNECT_TIMEOUT_MS),
+            )
+            .map_err(|error| format!("spec.compute.walAdminConnectTimeoutMs: {error}"))?,
+            wal_admin_request_timeout_ms: PositiveMillis::new(
+                self.wal_admin_request_timeout_ms
+                    .unwrap_or(DEFAULT_WAL_ADMIN_REQUEST_TIMEOUT_MS),
+            )
+            .map_err(|error| format!("spec.compute.walAdminRequestTimeoutMs: {error}"))?,
             lifecycle_requeue_ms: PositiveMillis::new(
                 self.lifecycle_requeue_ms
                     .unwrap_or(DEFAULT_LIFECYCLE_REQUEUE_MS),
@@ -1013,6 +1059,96 @@ mod tests {
         ] {
             let error = policy.effective_policy().expect_err("zero must fail");
             assert!(error.contains(path), "got: {error}");
+        }
+    }
+
+    #[test]
+    fn compute_wal_admin_policy_round_trips_validates_and_uses_substrate_defaults() {
+        let policy = GresComputeSpec {
+            wal_topic_replication_factor: Some(32_767),
+            wal_topic_ensure_timeout_ms: Some(i32::MAX),
+            wal_admin_connect_timeout_ms: Some(33),
+            wal_admin_request_timeout_ms: Some(44),
+            ..GresComputeSpec::default()
+        };
+        let json = serde_json::to_string(&policy).expect("serialize compute policy");
+        let yaml = serde_yaml::to_string(&policy).expect("serialize compute policy");
+        assert!(serde_json::from_str::<GresComputeSpec>(&json).unwrap() == policy);
+        assert!(serde_yaml::from_str::<GresComputeSpec>(&yaml).unwrap() == policy);
+
+        let crd = serde_json::to_value(Gres::crd()).expect("serialize Gres CRD");
+        let properties = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
+            ["properties"]["compute"]["properties"];
+        for field in [
+            "walTopicReplicationFactor",
+            "walTopicEnsureTimeoutMs",
+            "walAdminConnectTimeoutMs",
+            "walAdminRequestTimeoutMs",
+        ] {
+            assert!(
+                properties[field]["minimum"].as_f64() == Some(1.0),
+                "missing minimum for {field}: {properties}"
+            );
+        }
+        assert!(properties["walTopicReplicationFactor"]["maximum"].as_f64() == Some(32_767.0));
+        assert!(
+            properties["walTopicEnsureTimeoutMs"]["maximum"].as_f64() == Some(f64::from(i32::MAX))
+        );
+
+        let defaults = GresComputeSpec::default()
+            .effective_policy()
+            .expect("default compute policy");
+        assert!(
+            defaults.wal_topic_replication_factor.into_value()
+                == DEFAULT_WAL_TOPIC_REPLICATION_FACTOR
+        );
+        assert!(
+            defaults.wal_topic_ensure_timeout_ms.into_value()
+                == DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT_MS
+        );
+        assert!(
+            defaults.wal_admin_connect_timeout_ms.into_value()
+                == DEFAULT_WAL_ADMIN_CONNECT_TIMEOUT_MS
+        );
+        assert!(
+            defaults.wal_admin_request_timeout_ms.into_value()
+                == DEFAULT_WAL_ADMIN_REQUEST_TIMEOUT_MS
+        );
+
+        for (policy, expected) in [
+            (
+                GresComputeSpec {
+                    wal_topic_replication_factor: Some(0),
+                    ..GresComputeSpec::default()
+                },
+                "spec.compute.walTopicReplicationFactor: [the value must be equal to 1, but received 0 || the value must be greater than 1, but received 0]",
+            ),
+            (
+                GresComputeSpec {
+                    wal_topic_ensure_timeout_ms: Some(0),
+                    ..GresComputeSpec::default()
+                },
+                "spec.compute.walTopicEnsureTimeoutMs: [the value must be equal to 1, but received 0 || the value must be greater than 1, but received 0]",
+            ),
+            (
+                GresComputeSpec {
+                    wal_admin_connect_timeout_ms: Some(0),
+                    ..GresComputeSpec::default()
+                },
+                "spec.compute.walAdminConnectTimeoutMs: the value must be greater than 0, but received 0",
+            ),
+            (
+                GresComputeSpec {
+                    wal_admin_request_timeout_ms: Some(0),
+                    ..GresComputeSpec::default()
+                },
+                "spec.compute.walAdminRequestTimeoutMs: the value must be greater than 0, but received 0",
+            ),
+        ] {
+            assert!(
+                policy.effective_policy().expect_err("zero must fail") == expected,
+                "wrong validation error"
+            );
         }
     }
 

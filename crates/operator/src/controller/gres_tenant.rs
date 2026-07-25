@@ -1986,6 +1986,7 @@ fn render_deployment(
     let selector = range_labels(obj, range.range_id);
     let host_ranges = host_ranges_arg(range.range_id);
     let ranges = ranges_arg(config.all_ranges);
+    let compute_policy = config.compute_policy;
     let mut args = vec![
         "--listen".to_owned(),
         format!("0.0.0.0:{COMPUTE_PORT}"),
@@ -2004,39 +2005,53 @@ fn render_deployment(
         "--registry-fetch-partition-max-bytes".to_owned(),
         config.policy.fetch_partition_max_bytes().to_string(),
         "--wal-recovery-fetch-max-wait-ms".to_owned(),
-        config
-            .compute_policy
+        compute_policy
             .wal_recovery_fetch_max_wait_ms
             .into_value()
             .to_string(),
         "--wal-recovery-fetch-partition-max-bytes".to_owned(),
-        config
-            .compute_policy
+        compute_policy
             .wal_recovery_fetch_partition_max_bytes
             .into_value()
             .to_string(),
         "--wal-recovery-fetch-response-max-bytes".to_owned(),
-        config
-            .compute_policy
+        compute_policy
             .wal_recovery_fetch_response_max_bytes
             .into_value()
             .to_string(),
         "--wal-recovery-empty-fetch-retries".to_owned(),
-        config
-            .compute_policy
+        compute_policy
             .wal_recovery_empty_fetch_retries
             .into_value()
             .to_string(),
         "--wal-recovery-connect-timeout-ms".to_owned(),
-        config
-            .compute_policy
+        compute_policy
             .wal_recovery_connect_timeout_ms
             .into_value()
             .to_string(),
         "--wal-recovery-request-timeout-ms".to_owned(),
-        config
-            .compute_policy
+        compute_policy
             .wal_recovery_request_timeout_ms
+            .into_value()
+            .to_string(),
+        "--wal-topic-replication-factor".to_owned(),
+        compute_policy
+            .wal_topic_replication_factor
+            .into_value()
+            .to_string(),
+        "--wal-topic-ensure-timeout-ms".to_owned(),
+        compute_policy
+            .wal_topic_ensure_timeout_ms
+            .into_value()
+            .to_string(),
+        "--wal-admin-connect-timeout-ms".to_owned(),
+        compute_policy
+            .wal_admin_connect_timeout_ms
+            .into_value()
+            .to_string(),
+        "--wal-admin-request-timeout-ms".to_owned(),
+        compute_policy
+            .wal_admin_request_timeout_ms
             .into_value()
             .to_string(),
     ];
@@ -2061,8 +2076,7 @@ fn render_deployment(
             "--operator-control-principal".to_owned(),
             format!("CN={name}-operator"),
             "--range0-follower-poll-interval-ms".to_owned(),
-            config
-                .compute_policy
+            compute_policy
                 .range0_follower_poll_interval_ms
                 .into_value()
                 .to_string(),
@@ -2072,32 +2086,24 @@ fn render_deployment(
     if !checkpoint_runtime_args.is_empty() {
         args.extend([
             "--checkpoint-part-bytes".to_owned(),
-            config
-                .compute_policy
+            compute_policy
                 .checkpoint_part_bytes
                 .into_value()
                 .to_string(),
             "--checkpoint-retain".to_owned(),
-            config
-                .compute_policy
-                .checkpoint_retain
-                .into_value()
-                .to_string(),
+            compute_policy.checkpoint_retain.into_value().to_string(),
             "--checkpoint-delete-records-timeout-ms".to_owned(),
-            config
-                .compute_policy
+            compute_policy
                 .checkpoint_delete_records_timeout_ms
                 .into_value()
                 .to_string(),
             "--checkpoint-poll-interval-ms".to_owned(),
-            config
-                .compute_policy
+            compute_policy
                 .checkpoint_poll_interval_ms
                 .into_value()
                 .to_string(),
             "--idle-suspend-poll-interval-ms".to_owned(),
-            config
-                .compute_policy
+            compute_policy
                 .idle_suspend_poll_interval_ms
                 .into_value()
                 .to_string(),
@@ -2811,6 +2817,77 @@ mod tests {
                     expected[4],
                     "--wal-recovery-request-timeout-ms",
                     expected[5],
+                ];
+                assert!(
+                    args.windows(expected.len())
+                        .any(|window| window == expected),
+                    "got: {args:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn compute_wal_admin_args_are_exact_in_single_and_multi_range_modes() {
+        let mut obj = tenant();
+        obj.metadata.namespace = Some("ns".into());
+        obj.metadata.uid = Some("uid".into());
+        let ranges = [GresTenantRangeSpec {
+            range_id: 0,
+            end_key: None,
+        }];
+        let operator_config = ConfigArgs::parse_from(["operator"]).config;
+        for (spec, expected) in [
+            (
+                crate::crd::gres::GresComputeSpec::default(),
+                ["1", "30000", "5000", "30000"],
+            ),
+            (
+                crate::crd::gres::GresComputeSpec {
+                    wal_topic_replication_factor: Some(11),
+                    wal_topic_ensure_timeout_ms: Some(22),
+                    wal_admin_connect_timeout_ms: Some(33),
+                    wal_admin_request_timeout_ms: Some(44),
+                    ..crate::crd::gres::GresComputeSpec::default()
+                },
+                ["11", "22", "33", "44"],
+            ),
+        ] {
+            let compute_policy = spec.effective_policy().expect("compute policy");
+            for range_control_enabled in [false, true] {
+                let deployment = render_deployment(
+                    &obj,
+                    &ranges[0],
+                    &DeploymentRenderConfig {
+                        all_ranges: &ranges,
+                        image: "image",
+                        readiness_probe_period_seconds: 5,
+                        bootstrap: "k:9092",
+                        wal_topic: "__gres_wal.tenant-a.r0",
+                        config_topic: "__gres_cfg.tenant-a",
+                        policy: &crabka_gres_control::RegistryPolicy::default(),
+                        compute_policy,
+                        replicas: 1,
+                        operator_config: &operator_config,
+                        kafka_sasl: false,
+                        range_control_enabled,
+                        range_tls_hash: None,
+                    },
+                )
+                .expect("render deployment");
+                let args = deployment.spec.unwrap().template.spec.unwrap().containers[0]
+                    .args
+                    .clone()
+                    .unwrap();
+                let expected = [
+                    "--wal-topic-replication-factor",
+                    expected[0],
+                    "--wal-topic-ensure-timeout-ms",
+                    expected[1],
+                    "--wal-admin-connect-timeout-ms",
+                    expected[2],
+                    "--wal-admin-request-timeout-ms",
+                    expected[3],
                 ];
                 assert!(
                     args.windows(expected.len())
