@@ -258,27 +258,21 @@ pub(crate) async fn init_producer_id_with_retry(
         let response = tokio::time::timeout(remaining, client.send(request.clone()))
             .await
             .map_err(|_| ProducerError::Client(ClientError::Timeout(retry_timeout)))?;
-        match response {
+        let last_outcome = match response {
             Ok(resp) if !is_retriable_coordinator_code(resp.error_code) => return Ok(resp),
-            Ok(resp) => {
-                // Cold coordinator: retry until the deadline, then surface the
-                // last response so the caller maps it to ProducerError::Server.
-                if tokio::time::Instant::now() >= deadline {
-                    return Ok(resp);
-                }
-            }
-            Err(error @ ClientError::Disconnected) => {
-                // Transient transport failure (e.g. the broker dropped the
-                // connection while still loading): retry until the deadline,
-                // then surface the final transport error.
-                if tokio::time::Instant::now() >= deadline {
-                    return Err(ProducerError::Client(error));
-                }
-            }
+            Ok(resp) => Ok(resp),
+            Err(error @ ClientError::Disconnected) => Err(error),
             Err(e) => return Err(ProducerError::Client(e)),
-        }
+        };
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        tokio::time::sleep(backoff.min(remaining)).await;
+        if remaining.is_zero() {
+            return last_outcome.map_err(ProducerError::Client);
+        }
+        let sleep_for = backoff.min(remaining);
+        tokio::time::sleep(sleep_for).await;
+        if tokio::time::Instant::now() >= deadline {
+            return last_outcome.map_err(ProducerError::Client);
+        }
         backoff = next_backoff(backoff, max_backoff);
     }
 }

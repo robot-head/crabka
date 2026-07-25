@@ -654,7 +654,15 @@ async fn send_batches(cfg: &SenderConfig, state: &mut PipelineState, to_send: Ve
         needs_refresh |= refresh_needed;
 
         if let Some(to_fail) = &mut fenced {
-            to_fail.push(pb);
+            match verdict {
+                BatchVerdict::Acked { base_offset } => ack_batch(cfg, pb, base_offset),
+                BatchVerdict::Terminal(code) => terminal_fail_batch(cfg, pb, code),
+                BatchVerdict::RecoveryRequired => {
+                    fail_batch(pb.records, ProducerError::RecoveryRequired);
+                    finish_in_flight(cfg);
+                }
+                BatchVerdict::Retry | BatchVerdict::Fence => to_fail.push(pb),
+            }
             continue;
         }
 
@@ -2528,6 +2536,39 @@ mod harness {
         assert2::assert!(matches!(second_error, ProducerError::FencedProducer));
         assert2::assert!(transport.send_count() == 1);
 
+        shutdown(h).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retry_exhaustion_preserves_concurrent_successful_ack() {
+        let transport = MockTransport::new(Duration::ZERO);
+        transport.add_known_broker(0);
+        transport.add_known_broker(1);
+        transport.fail_once_on_leader(0);
+        transport.delay_leader(1, Duration::from_millis(20));
+        let h = spawn_sender_with_retries(transport.clone(), 2, Duration::from_secs(1), 0);
+        h.partition_leaders.insert(("t".to_owned(), 0), 0);
+        h.partition_leaders.insert(("t".to_owned(), 1), 1);
+
+        let mut failed = produce_single_batch_without_wake(&h, "t", 0, 1).await;
+        let mut accepted = produce_single_batch_without_wake(&h, "t", 1, 1).await;
+        let _ = h.wake_tx.try_send(());
+
+        let failed_error = tokio::time::timeout(Duration::from_secs(1), failed.remove(0))
+            .await
+            .expect("failed ack resolves")
+            .expect("failed sender remains")
+            .expect_err("exhausted partition must fence");
+        let accepted_metadata = tokio::time::timeout(Duration::from_secs(1), accepted.remove(0))
+            .await
+            .expect("accepted ack resolves")
+            .expect("accepted sender remains")
+            .expect("broker-accepted partition must remain acknowledged");
+
+        assert2::assert!(matches!(failed_error, ProducerError::FencedProducer));
+        assert2::assert!((accepted_metadata.partition, accepted_metadata.offset) == (1, 0));
+        assert2::assert!(h.state.load(Ordering::Acquire) == STATE_FENCED);
+        assert2::assert!(transport.send_count() == 2);
         shutdown(h).await;
     }
 
