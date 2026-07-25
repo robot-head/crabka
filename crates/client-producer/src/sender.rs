@@ -416,11 +416,10 @@ struct PreparedBatch {
     /// measured from the first attempt, not the
     /// most recent — a batch that keeps failing to route gives up by ~30s.
     first_sent: Option<Instant>,
-    /// When `Some`, the batch is backing off after a **transport/connection**
-    /// failure and must not be resent until this instant. This keeps a leader
-    /// whose pod is down and refusing connections from hot-looping the drain
-    /// scheduler. Routing redirects (`NOT_LEADER` / `UNKNOWN`) leave
-    /// this `None` so they resend immediately at the freshly-resolved leader.
+    /// When `Some`, the batch must not be resent until this instant after a
+    /// transport failure, missing response, or retriable/routing broker
+    /// response. This prevents failed sends from hot-looping the drain
+    /// scheduler.
     backoff_until: Option<Instant>,
     /// Resends already admitted after the initial send.
     retries_used: i32,
@@ -2110,14 +2109,15 @@ mod harness {
         handle: tokio::task::JoinHandle<()>,
     }
 
-    /// Spawn a sender backed by `transport`, with `max_in_flight` and a fast
-    /// 1ms linger so the loop spins quickly.
+    /// Spawn a sender backed by `transport`, with `max_in_flight` and a 1ms
+    /// linger so batch deadlines expire quickly.
     fn spawn_sender(transport: Arc<MockTransport>, max_in_flight: usize) -> Harness {
         spawn_sender_with(transport, max_in_flight, Duration::from_millis(1))
     }
 
-    /// Spawn a sender with an explicit `linger`. A long linger lets a test
-    /// observe wake-triggered drains in isolation (no empty linger-tick drains).
+    /// Spawn a sender with an explicit `linger`. A long linger keeps the batch
+    /// deadline in the future so a test can observe wake-triggered drains in
+    /// isolation.
     fn spawn_sender_with(
         transport: Arc<MockTransport>,
         max_in_flight: usize,
