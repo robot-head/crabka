@@ -820,6 +820,7 @@ fn parse_bootstrap_addrs(bootstrap: &str) -> Result<Vec<String>, SubstrateError>
 
 fn wal_admin_connection_options(config: &LiveRecoveryConfig) -> ConnectionOptions {
     ConnectionOptions {
+        dns_timeout: Default::default(),
         client_id: config.client_id(),
         connect_timeout: config.wal_admin_policy.connect_timeout(),
         request_timeout: config.wal_admin_policy.request_timeout(),
@@ -924,6 +925,7 @@ fn wal_connection_options(
     read_policy: RecoveryReadPolicy,
 ) -> ConnectionOptions {
     ConnectionOptions {
+        dns_timeout: Default::default(),
         client_id: client_id.to_string(),
         connect_timeout: read_policy.connect_timeout(),
         request_timeout: read_policy.request_timeout(),

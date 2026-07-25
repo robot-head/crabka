@@ -1524,20 +1524,20 @@ named defaults are 10 seconds for each DNS lookup, 30 seconds for each TCP
 connection attempt, and 30 seconds for each request.
 
 `tools/audit-runtime-values.sh` reported 6,149 lines across 1,049 files. The
-exact focused search reported 137 lines: 65 production references, 60 test or
+exact focused search reported 142 lines: 69 production references, 61 test or
 harness references, and 12 audit
 references.
 
 Every focused match is classified by the following reproducible groups:
 
-- The 65 production matches comprise 39 client-core references and 26 visible
+- The 69 production matches comprise 39 client-core references and 30 visible
   references owned elsewhere. The client-core subtotal is 6 bootstrap, 8
   client-builder/propagation, 11 policy/default/connection-option, 2 re-export,
-  and 12 pool references. The other 26 are 2 client-admin, 2 client-streams, 1
-  Gres FDW, 9 Gres substrate, 4 Gres, 1 operator controller, 4 operator CRD,
+  and 12 pool references. The other 30 are 3 client-admin, 2 client-streams, 2
+  Gres FDW, 11 Gres substrate, 4 Gres, 1 operator controller, 4 operator CRD,
   and 3 Raft references.
-- The 60 test/harness matches comprise 34 client-core inline-test references
-  and 26 references in other inline tests or integration-test harnesses.
+- The 61 test/harness matches comprise 34 client-core inline-test references
+  and 27 references in other inline tests or integration-test harnesses.
 - The 12 remaining matches are in this and the prior Gres WAL recovery audit
   sections.
 
