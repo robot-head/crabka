@@ -38,6 +38,7 @@ use crate::{
     error::ProducerError,
     partitioner::UniformStickyPartitioner,
     record::{ProducerRecord, RecordMetadata},
+    sender::DrainIntent,
     transactional::{OwnedTransaction, Transaction, TxnState},
 };
 
@@ -81,12 +82,19 @@ pub(crate) struct ProducerIdentity {
 }
 
 fn wake_sender_after_append(
-    wake_tx: &tokio::sync::mpsc::Sender<()>,
+    wake_tx: &tokio::sync::mpsc::Sender<DrainIntent>,
     linger: Duration,
     accumulator: &Accumulator,
 ) {
-    if linger.is_zero() || !accumulator.ready.is_empty() {
-        let _ = wake_tx.try_send(());
+    let intent = if linger.is_zero() {
+        Some(DrainIntent::Force)
+    } else if !accumulator.ready.is_empty() {
+        Some(DrainIntent::Ready)
+    } else {
+        None
+    };
+    if let Some(intent) = intent {
+        let _ = wake_tx.try_send(intent);
     }
 }
 
@@ -130,7 +138,7 @@ pub struct Producer {
     pub(crate) next_seq: Arc<DashMap<(String, i32), i32>>,
     pub(crate) partitioner: Arc<UniformStickyPartitioner>,
     pub(crate) state: Arc<AtomicU8>,
-    pub(crate) wake_tx: tokio::sync::mpsc::Sender<()>,
+    pub(crate) wake_tx: tokio::sync::mpsc::Sender<DrainIntent>,
     pub(crate) flush_notify: Arc<Notify>,
     /// Count of batches the sender has popped from an accumulator but not yet
     /// finished sending (Produce in-flight, awaiting the broker ack). A batch
@@ -670,7 +678,7 @@ impl Producer {
         if !self.txn_recovery_required.swap(true, Ordering::AcqRel) {
             self.txn_recovery_generation.fetch_add(1, Ordering::AcqRel);
         }
-        let _ = self.wake_tx.try_send(());
+        let _ = self.wake_tx.try_send(DrainIntent::Ready);
     }
 
     fn transaction_recovery_required(&self) -> bool {
@@ -915,7 +923,7 @@ impl Producer {
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn flush(&self) -> Result<(), ProducerError> {
         self.is_active()?;
-        let _ = self.wake_tx.send(()).await;
+        let _ = self.wake_tx.send(DrainIntent::Force).await;
         for _ in 0..1000 {
             if self.all_empty().await && self.in_flight.load(Ordering::Acquire) == 0 {
                 return Ok(());
@@ -1004,7 +1012,7 @@ mod tests {
         },
     };
 
-    use super::{Producer, wake_sender_after_append};
+    use super::{DrainIntent, Producer, wake_sender_after_append};
     use crate::accumulator::Accumulator;
 
     const CLIENT_ID: &str = "producer-test";
@@ -1026,12 +1034,12 @@ mod tests {
         let _ = rollover.try_append(None, Some(Bytes::from_static(b"a")), vec![], 0, None);
         let _ = rollover.try_append(None, Some(Bytes::from_static(b"b")), vec![], 0, None);
         wake_sender_after_append(&wake_tx, Duration::from_millis(10), &rollover);
-        assert_eq!(wake_rx.try_recv(), Ok(()));
+        assert_eq!(wake_rx.try_recv(), Ok(DrainIntent::Ready));
 
         let mut immediate = Accumulator::new(1024);
         let _ = immediate.try_append(None, Some(Bytes::from_static(b"a")), vec![], 0, None);
         wake_sender_after_append(&wake_tx, Duration::ZERO, &immediate);
-        assert_eq!(wake_rx.try_recv(), Ok(()));
+        assert_eq!(wake_rx.try_recv(), Ok(DrainIntent::Force));
     }
 
     fn encode_v0(resp: &impl Encode) -> Vec<u8> {
