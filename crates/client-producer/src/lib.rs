@@ -67,6 +67,12 @@ mod sender;
 mod transactional;
 mod transport;
 
+pub use builder::{
+    DEFAULT_PRODUCER_INIT_MAX_BACKOFF, DEFAULT_PRODUCER_INIT_RETRY_TIMEOUT,
+    DEFAULT_PRODUCER_REQUEST_TIMEOUT, DEFAULT_PRODUCER_RETRIES, DEFAULT_PRODUCER_RETRY_BACKOFF,
+    DEFAULT_PRODUCER_ROUTING_RETRY_BUDGET, DEFAULT_PRODUCER_TRANSACTION_TIMEOUT,
+    ProducerRetryPolicy,
+};
 pub use compression::Compression;
 pub use crabka_client_consumer::ConsumerGroupMetadata;
 pub use error::ProducerError;

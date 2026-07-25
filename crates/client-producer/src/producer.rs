@@ -105,10 +105,6 @@ pub struct Producer {
     #[allow(dead_code)]
     pub(crate) request_timeout: Duration,
     #[allow(dead_code)]
-    pub(crate) retries: i32,
-    #[allow(dead_code)]
-    pub(crate) retry_backoff: Duration,
-    #[allow(dead_code)]
     pub(crate) max_in_flight: usize,
     pub(crate) metadata_cache: Arc<Mutex<HashMap<String, TopicMetadata>>>,
     /// Per-`(topic, partition)` leader-id cache used by the sender to route
@@ -135,7 +131,7 @@ pub struct Producer {
     pub(crate) sender_shutdown: CancellationToken,
     pub(crate) sender_handle: Option<JoinHandle<()>>,
     pub(crate) transactional_id: Option<String>,
-    pub(crate) transaction_timeout: Duration,
+    pub(crate) transaction_timeout_ms: i32,
     /// Arc-wrapped so the sender task can share the same state without
     /// additional synchronization structures.
     pub(crate) txn_state: Arc<Mutex<TxnState>>,
@@ -457,12 +453,10 @@ impl Producer {
             .build()
             .await?;
 
-        let timeout_ms = i32::try_from(self.transaction_timeout.as_millis()).unwrap_or(60_000);
-
         let resp = coord
             .send(InitProducerIdRequest {
                 transactional_id: Some(tid.to_owned()),
-                transaction_timeout_ms: timeout_ms,
+                transaction_timeout_ms: self.transaction_timeout_ms,
                 ..Default::default()
             })
             .await?;
