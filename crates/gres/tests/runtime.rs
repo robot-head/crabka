@@ -168,6 +168,9 @@ fn binary_help_exposes_only_single_node_serve_surface() {
     assert!(help.contains("--wal-topic-ensure-timeout-ms"));
     assert!(help.contains("--wal-admin-connect-timeout-ms"));
     assert!(help.contains("--wal-admin-request-timeout-ms"));
+    assert!(help.contains("--wal-producer-compression"));
+    assert!(help.contains("--wal-producer-linger-ms"));
+    assert!(help.contains("--wal-producer-batch-bytes"));
     assert!(help.contains("--host-ranges"));
     assert!(help.contains("--timestamp-source"));
     assert!(help.contains("--hlc-max-offset-ms"));
@@ -240,6 +243,9 @@ fn test_args(listen: String, data_dir: Option<std::path::PathBuf>) -> crabka_gre
         wal_producer_init_retry_timeout_ms: None,
         wal_producer_init_max_backoff_ms: None,
         wal_producer_transaction_timeout_ms: None,
+        wal_producer_compression: None,
+        wal_producer_linger_ms: None,
+        wal_producer_batch_bytes: None,
         host_ranges: None,
         timestamp_source: crabka_gres::TimestampSourceKind::LogicalTso,
         hlc_max_offset_ms: 250,
@@ -400,6 +406,7 @@ async fn live_multirange_substrate_default_fdw_server_reads_own_broker() {
         recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
         wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
         producer_retry_policy: crabka_client_producer::ProducerRetryPolicy::default(),
+        producer_throughput_policy: crabka_client_producer::ProducerThroughputPolicy::default(),
         host_ranges: None,
         range_rpc: None,
         advertised_endpoint: None,
@@ -466,6 +473,7 @@ async fn live_multirange_substrate_hlc_mode_commits_and_mints_wall_anchored_stam
         recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
         wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
         producer_retry_policy: crabka_client_producer::ProducerRetryPolicy::default(),
+        producer_throughput_policy: crabka_client_producer::ProducerThroughputPolicy::default(),
         host_ranges: None,
         range_rpc: None,
         advertised_endpoint: None,
@@ -630,6 +638,7 @@ async fn live_multirange_transfer_stages_populated_successor_without_publishing_
         recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
         wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
         producer_retry_policy: crabka_client_producer::ProducerRetryPolicy::default(),
+        producer_throughput_policy: crabka_client_producer::ProducerThroughputPolicy::default(),
         host_ranges: None,
         range_rpc: None,
         advertised_endpoint: Some("127.0.0.1:7443".into()),
@@ -991,6 +1000,7 @@ fn activation_crash_config(
         recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
         wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
         producer_retry_policy: crabka_client_producer::ProducerRetryPolicy::default(),
+        producer_throughput_policy: crabka_client_producer::ProducerThroughputPolicy::default(),
         host_ranges: None,
         range_rpc: None,
         advertised_endpoint: Some("127.0.0.1:7443".into()),
@@ -2532,6 +2542,7 @@ async fn live_populated_hash_split_partitions_physical_rows_and_sequence() {
         recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
         wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
         producer_retry_policy: crabka_client_producer::ProducerRetryPolicy::default(),
+        producer_throughput_policy: crabka_client_producer::ProducerThroughputPolicy::default(),
         host_ranges: None,
         range_rpc: None,
         advertised_endpoint: Some("127.0.0.1:7443".into()),
@@ -2703,6 +2714,7 @@ async fn live_multirange_transfer_rejects_concurrent_pause_without_waiting() {
         recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
         wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
         producer_retry_policy: crabka_client_producer::ProducerRetryPolicy::default(),
+        producer_throughput_policy: crabka_client_producer::ProducerThroughputPolicy::default(),
         host_ranges: None,
         range_rpc: None,
         advertised_endpoint: None,
@@ -2773,6 +2785,7 @@ async fn non_live_runtimes_do_not_expose_range_transfer_capability() {
         recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
         wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
         producer_retry_policy: crabka_client_producer::ProducerRetryPolicy::default(),
+        producer_throughput_policy: crabka_client_producer::ProducerThroughputPolicy::default(),
         host_ranges: None,
         range_rpc: None,
         advertised_endpoint: None,
@@ -2797,6 +2810,7 @@ async fn non_live_runtimes_do_not_expose_range_transfer_capability() {
             recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
             wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
             producer_retry_policy: crabka_client_producer::ProducerRetryPolicy::default(),
+            producer_throughput_policy: crabka_client_producer::ProducerThroughputPolicy::default(),
             host_ranges: None,
             range_rpc: None,
             advertised_endpoint: None,

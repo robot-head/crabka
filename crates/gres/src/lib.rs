@@ -76,6 +76,9 @@ impl Cli {
             "wal_producer_init_retry_timeout_ms",
             "wal_producer_init_max_backoff_ms",
             "wal_producer_transaction_timeout_ms",
+            "wal_producer_compression",
+            "wal_producer_linger_ms",
+            "wal_producer_batch_bytes",
         ] {
             command = command.mut_arg(argument, |arg| arg.env(None::<&str>));
         }
@@ -278,6 +281,30 @@ pub struct ServeArgs {
         requires = "substrate_bootstrap"
     )]
     pub wal_producer_transaction_timeout_ms: Option<PositiveMillis>,
+
+    /// Compression used for WAL producer record batches.
+    #[arg(
+        long = "wal-producer-compression",
+        env = "CRABKA_GRES_WAL_PRODUCER_COMPRESSION",
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_producer_compression: Option<crabka_client_producer::Compression>,
+
+    /// WAL producer linger in whole milliseconds.
+    #[arg(
+        long = "wal-producer-linger-ms",
+        env = "CRABKA_GRES_WAL_PRODUCER_LINGER_MS",
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_producer_linger_ms: Option<u64>,
+
+    /// Maximum uncompressed WAL producer batch size in bytes.
+    #[arg(
+        long = "wal-producer-batch-bytes",
+        env = "CRABKA_GRES_WAL_PRODUCER_BATCH_BYTES",
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_producer_batch_bytes: Option<usize>,
 
     /// Substrate mode: comma-separated hosted range ids, for example r0,r2.
     #[arg(long = "host-ranges", requires = "ranges")]
@@ -577,13 +604,17 @@ fn validate_wal_recovery_read_policy(args: &ServeArgs) -> std::io::Result<()> {
         || args.wal_producer_routing_retry_budget_ms.is_some()
         || args.wal_producer_init_retry_timeout_ms.is_some()
         || args.wal_producer_init_max_backoff_ms.is_some()
-        || args.wal_producer_transaction_timeout_ms.is_some())
+        || args.wal_producer_transaction_timeout_ms.is_some()
+        || args.wal_producer_compression.is_some()
+        || args.wal_producer_linger_ms.is_some()
+        || args.wal_producer_batch_bytes.is_some())
         && args.substrate_bootstrap.is_none()
     {
         return invalid_input("WAL recovery options require --substrate-bootstrap");
     }
     effective_wal_admin_policy(args)?;
     effective_wal_producer_retry_policy(args)?;
+    effective_wal_producer_throughput_policy(args)?;
     Ok(())
 }
 
@@ -645,6 +676,23 @@ fn effective_wal_producer_retry_policy(
             || millis(defaults.transaction_timeout()),
             PositiveMillis::into_value,
         )),
+    )
+    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
+}
+
+fn effective_wal_producer_throughput_policy(
+    args: &ServeArgs,
+) -> std::io::Result<crabka_client_producer::ProducerThroughputPolicy> {
+    let defaults = crabka_client_producer::ProducerThroughputPolicy::default();
+    let default_linger_ms = u64::try_from(defaults.linger().as_millis())
+        .expect("default producer linger fits u64 milliseconds");
+    crabka_client_producer::ProducerThroughputPolicy::new(
+        args.wal_producer_compression
+            .unwrap_or(defaults.compression()),
+        Duration::from_millis(args.wal_producer_linger_ms.unwrap_or(default_linger_ms)),
+        args.wal_producer_batch_bytes
+            .unwrap_or(defaults.batch_bytes()),
+        defaults.max_in_flight(),
     )
     .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
 }
@@ -787,6 +835,8 @@ pub struct SubstrateRuntimeConfig {
     pub wal_admin_policy: crabka_gres_substrate::WalAdminPolicy,
     /// WAL producer retry and transaction timing.
     pub producer_retry_policy: crabka_client_producer::ProducerRetryPolicy,
+    /// WAL producer batching and compression settings.
+    pub producer_throughput_policy: crabka_client_producer::ProducerThroughputPolicy,
     /// Optional range-compute placement for distributed mode. Range 0 is always hosted.
     pub host_ranges: Option<Vec<crabka_gres_ranges::RangeId>>,
     /// mTLS client configuration required for remote range routing.
@@ -964,6 +1014,7 @@ impl SubstrateRuntimeConfig {
             .map_err(|error| Error::new(ErrorKind::InvalidInput, error))?,
             wal_admin_policy: effective_wal_admin_policy(args)?,
             producer_retry_policy: effective_wal_producer_retry_policy(args)?,
+            producer_throughput_policy: effective_wal_producer_throughput_policy(args)?,
             host_ranges: parse_host_ranges(args.host_ranges.as_deref())?,
             range_rpc: RangeRpcRuntimeConfig::from_args(args)?,
             advertised_endpoint: args.range_listen.clone(),
@@ -991,6 +1042,7 @@ impl SubstrateRuntimeConfig {
         .with_read_policy(self.recovery_read_policy)
         .with_wal_admin_policy(self.wal_admin_policy)
         .with_producer_retry_policy(self.producer_retry_policy)
+        .with_producer_throughput_policy(self.producer_throughput_policy)
     }
 }
 
@@ -4175,13 +4227,14 @@ async fn open_multirange_runtime(
         early_tso_service,
     )
     .await?;
-    let (recovered_map, paused_control_recovery) = split_activation::reconcile_before_readiness(
-        config,
-        &mut engines,
-        checkpoint_store,
-        activation_receipt,
-    )
-    .await?;
+    let (recovered_map, paused_control_recovery) =
+        Box::pin(split_activation::reconcile_before_readiness(
+            config,
+            &mut engines,
+            checkpoint_store,
+            activation_receipt,
+        ))
+        .await?;
     if let Some(recovered_map) = recovered_map {
         tenant_config.range_map = recovered_map;
         if let Some(hosted) = &mut tenant_config.hosted_ranges {
@@ -8429,6 +8482,9 @@ mod tests {
             wal_producer_init_retry_timeout_ms: None,
             wal_producer_init_max_backoff_ms: None,
             wal_producer_transaction_timeout_ms: None,
+            wal_producer_compression: None,
+            wal_producer_linger_ms: None,
+            wal_producer_batch_bytes: None,
             host_ranges: None,
             timestamp_source: TimestampSourceKind::LogicalTso,
             hlc_max_offset_ms: 250,
@@ -9192,7 +9248,7 @@ mod tests {
     #[test]
     fn wal_recovery_read_policy_uses_defaults_environment_and_cli_precedence() {
         const CHILD: &str = "CRABKA_TEST_GRES_WAL_RECOVERY_READ_POLICY_CHILD";
-        const VARS: [&str; 17] = [
+        const VARS: [&str; 20] = [
             "CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT_MS",
             "CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES",
             "CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES",
@@ -9210,6 +9266,9 @@ mod tests {
             "CRABKA_GRES_WAL_PRODUCER_INIT_RETRY_TIMEOUT_MS",
             "CRABKA_GRES_WAL_PRODUCER_INIT_MAX_BACKOFF_MS",
             "CRABKA_GRES_WAL_PRODUCER_TRANSACTION_TIMEOUT_MS",
+            "CRABKA_GRES_WAL_PRODUCER_COMPRESSION",
+            "CRABKA_GRES_WAL_PRODUCER_LINGER_MS",
+            "CRABKA_GRES_WAL_PRODUCER_BATCH_BYTES",
         ];
         if std::env::var_os(CHILD).is_none() {
             for mode in ["defaults", "environment"] {
@@ -9227,7 +9286,7 @@ mod tests {
                 if mode == "environment" {
                     for (variable, value) in VARS.into_iter().zip([
                         "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28",
-                        "29", "30", "31", "32", "33",
+                        "29", "30", "31", "32", "33", "none", "34", "35",
                     ]) {
                         child.env(variable, value);
                     }
@@ -9332,6 +9391,9 @@ mod tests {
             .env("CRABKA_GRES_WAL_PRODUCER_INIT_RETRY_TIMEOUT_MS", "31")
             .env("CRABKA_GRES_WAL_PRODUCER_INIT_MAX_BACKOFF_MS", "32")
             .env("CRABKA_GRES_WAL_PRODUCER_TRANSACTION_TIMEOUT_MS", "33")
+            .env("CRABKA_GRES_WAL_PRODUCER_COMPRESSION", "gzip")
+            .env("CRABKA_GRES_WAL_PRODUCER_LINGER_MS", "34")
+            .env("CRABKA_GRES_WAL_PRODUCER_BATCH_BYTES", "35")
             .status()
             .expect("child test");
 
@@ -9382,6 +9444,9 @@ mod tests {
             "--wal-producer-init-retry-timeout-ms=1",
             "--wal-producer-init-max-backoff-ms=1",
             "--wal-producer-transaction-timeout-ms=1",
+            "--wal-producer-compression=gzip",
+            "--wal-producer-linger-ms=0",
+            "--wal-producer-batch-bytes=1",
         ] {
             assert!(Cli::try_parse_from(["crabka-gres", option]).is_err());
         }
@@ -9450,6 +9515,33 @@ mod tests {
                 .to_string()
                 .contains("backoff")
         );
+        for (option, field) in [
+            ("--wal-producer-linger-ms=2147483648", "linger"),
+            ("--wal-producer-batch-bytes=0", "batch bytes"),
+            ("--wal-producer-batch-bytes=2147483648", "batch bytes"),
+        ] {
+            let args = Cli::try_parse_from([
+                "crabka-gres",
+                "--substrate-bootstrap=memory://",
+                "--tenant=tenant-a",
+                option,
+            ])
+            .expect("parser value")
+            .serve;
+            let error = SubstrateRuntimeConfig::from_args(&args)
+                .expect_err("throughput value exceeds supported range");
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+            assert!(error.to_string().contains(field), "{error}");
+        }
+        assert!(
+            Cli::try_parse_from([
+                "crabka-gres",
+                "--substrate-bootstrap=memory://",
+                "--tenant=tenant-a",
+                "--wal-producer-compression=brotli",
+            ])
+            .is_err()
+        );
         let args = Cli::try_parse_from([
             "crabka-gres",
             "--substrate-bootstrap=memory://",
@@ -9476,7 +9568,7 @@ mod tests {
             ])
             .is_err()
         );
-        for option in 0..17 {
+        for option in 0..20 {
             let mut programmatic = serve_args(Some("trust"), Vec::new());
             set_wal_policy_option(&mut programmatic, option);
             let error = SubstrateRuntimeConfig::from_args(&programmatic)
@@ -9488,7 +9580,7 @@ mod tests {
     #[tokio::test]
     async fn wal_recovery_read_policy_validation_precedes_listener_bind() {
         const CHILD: &str = "CRABKA_TEST_GRES_WAL_RECOVERY_BIND_CHILD";
-        const VARS: [&str; 17] = [
+        const VARS: [&str; 20] = [
             "CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT_MS",
             "CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES",
             "CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES",
@@ -9506,6 +9598,9 @@ mod tests {
             "CRABKA_GRES_WAL_PRODUCER_INIT_RETRY_TIMEOUT_MS",
             "CRABKA_GRES_WAL_PRODUCER_INIT_MAX_BACKOFF_MS",
             "CRABKA_GRES_WAL_PRODUCER_TRANSACTION_TIMEOUT_MS",
+            "CRABKA_GRES_WAL_PRODUCER_COMPRESSION",
+            "CRABKA_GRES_WAL_PRODUCER_LINGER_MS",
+            "CRABKA_GRES_WAL_PRODUCER_BATCH_BYTES",
         ];
         if std::env::var_os(CHILD).is_none() {
             let mut child = std::process::Command::new(std::env::current_exe().expect("test exe"));
@@ -9523,7 +9618,7 @@ mod tests {
         }
 
         let occupied = TcpListener::bind("127.0.0.1:0").await.expect("listener");
-        for option in 0..17 {
+        for option in 0..20 {
             let mut args = serve_args(Some("trust"), Vec::new());
             args.listen = occupied.local_addr().expect("address").to_string();
             set_wal_policy_option(&mut args, option);
@@ -9538,6 +9633,14 @@ mod tests {
         let error = run_serve(args)
             .await
             .expect_err("invalid replication factor before bind");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+
+        let mut args = substrate_args();
+        args.listen = occupied.local_addr().expect("address").to_string();
+        args.wal_producer_batch_bytes = Some(0);
+        let error = run_serve(args)
+            .await
+            .expect_err("invalid producer throughput before bind");
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     }
 
@@ -9560,6 +9663,9 @@ mod tests {
             14 => args.wal_producer_init_retry_timeout_ms = PositiveMillis::new(1).ok(),
             15 => args.wal_producer_init_max_backoff_ms = PositiveMillis::new(1).ok(),
             16 => args.wal_producer_transaction_timeout_ms = PositiveMillis::new(1).ok(),
+            17 => args.wal_producer_compression = Some(crabka_client_producer::Compression::Gzip),
+            18 => args.wal_producer_linger_ms = Some(0),
+            19 => args.wal_producer_batch_bytes = Some(1),
             _ => unreachable!("test policy option"),
         }
     }
@@ -9640,9 +9746,120 @@ mod tests {
     }
 
     #[test]
+    fn wal_producer_throughput_policy_accepts_distinctive_values_and_reaches_recovery() {
+        let cli = Cli::try_parse_from([
+            "crabka-gres",
+            "--substrate-bootstrap=memory://",
+            "--tenant=tenant-a",
+            "--wal-producer-compression=zstd",
+            "--wal-producer-linger-ms=38",
+            "--wal-producer-batch-bytes=39",
+        ])
+        .expect("WAL producer throughput policy");
+        let config = SubstrateRuntimeConfig::from_args(&cli.serve)
+            .expect("valid config")
+            .expect("substrate config");
+        let policy = config.producer_throughput_policy;
+
+        assert_eq!(
+            policy.compression(),
+            crabka_client_producer::Compression::Zstd
+        );
+        assert_eq!(policy.linger(), Duration::from_millis(38));
+        assert_eq!(policy.batch_bytes(), 39);
+        assert_eq!(
+            policy.max_in_flight(),
+            crabka_client_producer::DEFAULT_PRODUCER_MAX_IN_FLIGHT
+        );
+
+        let tenant = crabka_gres_ranges::TenantName::parse("tenant-a").expect("tenant");
+        assert_eq!(
+            config
+                .live_recovery_config(tenant, crabka_gres_ranges::RangeId::new(7))
+                .producer_throughput_policy(),
+            policy
+        );
+    }
+
+    #[test]
+    fn wal_producer_throughput_policy_uses_defaults_environment_and_cli_precedence() {
+        const CHILD: &str = "CRABKA_TEST_GRES_WAL_PRODUCER_THROUGHPUT_POLICY_CHILD";
+        const VARS: [&str; 3] = [
+            "CRABKA_GRES_WAL_PRODUCER_COMPRESSION",
+            "CRABKA_GRES_WAL_PRODUCER_LINGER_MS",
+            "CRABKA_GRES_WAL_PRODUCER_BATCH_BYTES",
+        ];
+        if std::env::var_os(CHILD).is_none() {
+            for mode in ["defaults", "environment"] {
+                let mut child =
+                    std::process::Command::new(std::env::current_exe().expect("test exe"));
+                child
+                    .args([
+                        "--exact",
+                        "tests::wal_producer_throughput_policy_uses_defaults_environment_and_cli_precedence",
+                    ])
+                    .env(CHILD, mode);
+                for variable in VARS {
+                    child.env_remove(variable);
+                }
+                if mode == "environment" {
+                    for (variable, value) in VARS.into_iter().zip(["gzip", "41", "42"]) {
+                        child.env(variable, value);
+                    }
+                }
+                assert!(child.status().expect("child test").success());
+            }
+            return;
+        }
+
+        let base = [
+            "crabka-gres",
+            "--substrate-bootstrap=memory://",
+            "--tenant=tenant-a",
+        ];
+        let config = SubstrateRuntimeConfig::from_args(
+            &<Cli as clap::Parser>::try_parse_from(base)
+                .expect("policy")
+                .serve,
+        )
+        .expect("valid config")
+        .expect("substrate config");
+        let expected = if std::env::var(CHILD).as_deref() == Ok("environment") {
+            crabka_client_producer::ProducerThroughputPolicy::new(
+                crabka_client_producer::Compression::Gzip,
+                Duration::from_millis(41),
+                42,
+                crabka_client_producer::DEFAULT_PRODUCER_MAX_IN_FLIGHT,
+            )
+            .expect("environment policy")
+        } else {
+            crabka_client_producer::ProducerThroughputPolicy::default()
+        };
+        assert_eq!(config.producer_throughput_policy, expected);
+
+        let cli = <Cli as clap::Parser>::try_parse_from(base.into_iter().chain([
+            "--wal-producer-compression=lz4",
+            "--wal-producer-linger-ms=51",
+            "--wal-producer-batch-bytes=52",
+        ]))
+        .expect("CLI policy");
+        let config = SubstrateRuntimeConfig::from_args(&cli.serve)
+            .expect("valid config")
+            .expect("substrate config");
+        let expected = crabka_client_producer::ProducerThroughputPolicy::new(
+            crabka_client_producer::Compression::Lz4,
+            Duration::from_millis(51),
+            52,
+            crabka_client_producer::DEFAULT_PRODUCER_MAX_IN_FLIGHT,
+        )
+        .expect("CLI policy");
+        assert_eq!(config.producer_throughput_policy, expected);
+    }
+
+    #[test]
     fn wal_producer_retry_policy_uses_defaults_environment_and_cli_precedence() {
         const CHILD: &str = "CRABKA_TEST_GRES_WAL_PRODUCER_POLICY_CHILD";
-        const VARS: [&str; 17] = [
+        const VARS: [&str; 20] = [
             "CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT_MS",
             "CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES",
             "CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES",
@@ -9660,6 +9877,9 @@ mod tests {
             "CRABKA_GRES_WAL_PRODUCER_INIT_RETRY_TIMEOUT_MS",
             "CRABKA_GRES_WAL_PRODUCER_INIT_MAX_BACKOFF_MS",
             "CRABKA_GRES_WAL_PRODUCER_TRANSACTION_TIMEOUT_MS",
+            "CRABKA_GRES_WAL_PRODUCER_COMPRESSION",
+            "CRABKA_GRES_WAL_PRODUCER_LINGER_MS",
+            "CRABKA_GRES_WAL_PRODUCER_BATCH_BYTES",
         ];
         if std::env::var_os(CHILD).is_none() {
             for mode in ["defaults", "environment"] {
@@ -9676,7 +9896,7 @@ mod tests {
                     child.env_remove(variable);
                 }
                 if mode == "environment" {
-                    for (variable, value) in VARS[10..]
+                    for (variable, value) in VARS[10..17]
                         .iter()
                         .copied()
                         .zip(["41", "42", "43", "44", "45", "46", "47"])
@@ -10062,6 +10282,7 @@ mod tests {
             recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
             wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
             producer_retry_policy: crabka_client_producer::ProducerRetryPolicy::default(),
+            producer_throughput_policy: crabka_client_producer::ProducerThroughputPolicy::default(),
             host_ranges: None,
             range_rpc: None,
             advertised_endpoint: None,
@@ -10141,6 +10362,7 @@ mod tests {
             recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
             wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
             producer_retry_policy: crabka_client_producer::ProducerRetryPolicy::default(),
+            producer_throughput_policy: crabka_client_producer::ProducerThroughputPolicy::default(),
             host_ranges: None,
             range_rpc: None,
             advertised_endpoint: None,
@@ -10501,6 +10723,7 @@ mod tests {
             recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
             wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
             producer_retry_policy: crabka_client_producer::ProducerRetryPolicy::default(),
+            producer_throughput_policy: crabka_client_producer::ProducerThroughputPolicy::default(),
             host_ranges: None,
             range_rpc: None,
             advertised_endpoint: None,
@@ -10589,6 +10812,7 @@ mod tests {
             recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
             wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
             producer_retry_policy: crabka_client_producer::ProducerRetryPolicy::default(),
+            producer_throughput_policy: crabka_client_producer::ProducerThroughputPolicy::default(),
             host_ranges: None,
             range_rpc: None,
             advertised_endpoint: None,

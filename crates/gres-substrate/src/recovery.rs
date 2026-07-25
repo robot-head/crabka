@@ -7,7 +7,7 @@ use crabka_client_core::{
     Connection, ConnectionOptions, IsolatedFetch, fetch_partition_with_isolation_progress,
     security::ClientSecurity,
 };
-use crabka_client_producer::{Acks, Producer, ProducerRetryPolicy};
+use crabka_client_producer::{Acks, Producer, ProducerRetryPolicy, ProducerThroughputPolicy};
 use crabka_gres_ranges::{RangeId, TenantName};
 use crabka_pgkv::{Kv, RestoreKv};
 use crabka_protocol::{
@@ -200,6 +200,7 @@ pub struct LiveRecoveryConfig {
     read_policy: RecoveryReadPolicy,
     wal_admin_policy: WalAdminPolicy,
     producer_retry_policy: ProducerRetryPolicy,
+    producer_throughput_policy: ProducerThroughputPolicy,
     /// Noncanonical identity used while a recovered range is staged and must not fence serving.
     staging_identity: Option<String>,
     replay_seed: Option<(i64, u64)>,
@@ -239,6 +240,7 @@ impl LiveRecoveryConfig {
             read_policy: RecoveryReadPolicy::default(),
             wal_admin_policy: WalAdminPolicy::default(),
             producer_retry_policy: ProducerRetryPolicy::default(),
+            producer_throughput_policy: ProducerThroughputPolicy::default(),
             staging_identity: None,
             replay_seed: None,
         }
@@ -284,6 +286,22 @@ impl LiveRecoveryConfig {
     #[must_use]
     pub const fn producer_retry_policy(&self) -> ProducerRetryPolicy {
         self.producer_retry_policy
+    }
+
+    /// Override WAL producer batching and compression settings.
+    #[must_use]
+    pub fn with_producer_throughput_policy(
+        mut self,
+        producer_throughput_policy: ProducerThroughputPolicy,
+    ) -> Self {
+        self.producer_throughput_policy = producer_throughput_policy;
+        self
+    }
+
+    /// Return WAL producer batching and compression settings.
+    #[must_use]
+    pub const fn producer_throughput_policy(&self) -> ProducerThroughputPolicy {
+        self.producer_throughput_policy
     }
 
     /// Use checkpoint restore before committed WAL tail replay.
@@ -593,12 +611,16 @@ async fn recover_live_for_range_inner(
             .bootstrap(bootstrap_addrs[0].clone())
             .client_id(config.client_id())
             .acks(Acks::All)
+            .compression(config.producer_throughput_policy.compression())
+            .linger(config.producer_throughput_policy.linger())
+            .batch_size(config.producer_throughput_policy.batch_bytes())
             .request_timeout(config.producer_retry_policy.request_timeout())
             .retries(config.producer_retry_policy.retries())
             .retry_backoff(config.producer_retry_policy.retry_backoff())
             .routing_retry_budget(config.producer_retry_policy.routing_retry_budget())
             .init_retry_timeout(config.producer_retry_policy.init_retry_timeout())
             .init_max_backoff(config.producer_retry_policy.init_max_backoff())
+            .max_in_flight_per_connection(config.producer_throughput_policy.max_in_flight())
             .transactional_id(config.transactional_id())
             .transaction_timeout(config.producer_retry_policy.transaction_timeout())
             .maybe_security(config.security.clone())
@@ -1645,6 +1667,50 @@ mod tests {
                 .producer_retry_policy(),
             replacement
         );
+    }
+
+    #[test]
+    fn producer_throughput_policy_defaults_and_replaces_in_live_config() {
+        let tenant = TenantName::parse("tenant-a").expect("tenant");
+        let config =
+            LiveRecoveryConfig::new("localhost:9092", tenant.clone(), RangeId::new(7), None);
+        assert_eq!(
+            config.producer_throughput_policy(),
+            crabka_client_producer::ProducerThroughputPolicy::default()
+        );
+
+        let replacement = crabka_client_producer::ProducerThroughputPolicy::new(
+            crabka_client_producer::Compression::Zstd,
+            Duration::from_millis(38),
+            39,
+            crabka_client_producer::DEFAULT_PRODUCER_MAX_IN_FLIGHT,
+        )
+        .expect("valid policy");
+        assert_eq!(
+            LiveRecoveryConfig::new("localhost:9092", tenant, RangeId::new(7), None)
+                .with_producer_throughput_policy(replacement)
+                .producer_throughput_policy(),
+            replacement
+        );
+
+        let source = include_str!("recovery.rs");
+        for setting in [
+            concat!(
+                ".compression(config.",
+                "producer_throughput_policy.compression())"
+            ),
+            concat!(".linger(config.", "producer_throughput_policy.linger())"),
+            concat!(
+                ".batch_size(config.",
+                "producer_throughput_policy.batch_bytes())"
+            ),
+            concat!(
+                ".max_in_flight_per_connection(config.",
+                "producer_throughput_policy.max_in_flight())"
+            ),
+        ] {
+            assert_eq!(source.matches(setting).count(), 1, "{setting}");
+        }
     }
 
     #[test]
