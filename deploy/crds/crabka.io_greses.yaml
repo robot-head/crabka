@@ -240,6 +240,54 @@ spec:
                     minimum: 1.0
                     nullable: true
                     type: integer
+                  walProducerInitMaxBackoffMs:
+                    description: WAL producer-ID initialization backoff cap.
+                    format: uint64
+                    maximum: 2147483647.0
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  walProducerInitRetryTimeoutMs:
+                    description: WAL producer-ID initialization retry timeout.
+                    format: uint64
+                    maximum: 2147483647.0
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  walProducerRequestTimeoutMs:
+                    description: Timeout for WAL producer broker requests.
+                    format: uint64
+                    maximum: 2147483647.0
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  walProducerRetries:
+                    description: WAL producer retries after the initial batch send.
+                    format: int32
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  walProducerRetryBackoffMs:
+                    description: WAL producer retry and producer-ID initial backoff.
+                    format: uint64
+                    maximum: 2147483647.0
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  walProducerRoutingRetryBudgetMs:
+                    description: Per-batch WAL producer routing retry budget.
+                    format: uint64
+                    maximum: 2147483647.0
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  walProducerTransactionTimeoutMs:
+                    description: WAL producer transaction timeout.
+                    format: uint64
+                    maximum: 2147483647.0
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
                   walRecoveryConnectTimeoutMs:
                     description: Timeout for opening committed-WAL recovery broker connections.
                     format: uint64

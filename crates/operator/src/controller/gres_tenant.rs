@@ -294,7 +294,7 @@ async fn reconcile_inner(
     obj: Arc<GresTenant>,
     ctx: Arc<Context>,
 ) -> Result<Action, ReconcileError> {
-    let ready = match prepare_tenant(&obj, &ctx).await? {
+    let ready = match Box::pin(prepare_tenant(&obj, &ctx)).await? {
         TenantPreparation::Ready(ready) => ready,
         TenantPreparation::Requeue(action) => return Ok(action),
     };
@@ -2055,6 +2055,7 @@ fn render_deployment(
             .into_value()
             .to_string(),
     ];
+    args.extend(wal_producer_args(compute_policy.wal_producer_retry_policy));
     if config.range_control_enabled {
         args.extend([
             "--ranges".to_owned(),
@@ -2173,6 +2174,25 @@ fn render_deployment(
             }
         }
     }))?)
+}
+
+fn wal_producer_args(policy: crabka_client_producer::ProducerRetryPolicy) -> [String; 14] {
+    [
+        "--wal-producer-request-timeout-ms".to_owned(),
+        policy.request_timeout().as_millis().to_string(),
+        "--wal-producer-retries".to_owned(),
+        policy.retries().to_string(),
+        "--wal-producer-retry-backoff-ms".to_owned(),
+        policy.retry_backoff().as_millis().to_string(),
+        "--wal-producer-routing-retry-budget-ms".to_owned(),
+        policy.routing_retry_budget().as_millis().to_string(),
+        "--wal-producer-init-retry-timeout-ms".to_owned(),
+        policy.init_retry_timeout().as_millis().to_string(),
+        "--wal-producer-init-max-backoff-ms".to_owned(),
+        policy.init_max_backoff().as_millis().to_string(),
+        "--wal-producer-transaction-timeout-ms".to_owned(),
+        policy.transaction_timeout().as_millis().to_string(),
+    ]
 }
 
 fn kafka_internal_listener_requires_sasl(kafka: &Kafka) -> bool {
@@ -2828,6 +2848,94 @@ mod tests {
     }
 
     #[test]
+    fn compute_wal_producer_args_are_exact_in_single_and_multi_range_modes() {
+        let mut obj = tenant();
+        obj.metadata.namespace = Some("ns".into());
+        obj.metadata.uid = Some("uid".into());
+        let ranges = [GresTenantRangeSpec {
+            range_id: 0,
+            end_key: None,
+        }];
+        let operator_config = ConfigArgs::parse_from(["operator"]).config;
+        for (spec, expected) in [
+            (
+                crate::crd::gres::GresComputeSpec::default(),
+                [
+                    "30000",
+                    "2147483647",
+                    "100",
+                    "30000",
+                    "30000",
+                    "1000",
+                    "60000",
+                ],
+            ),
+            (
+                crate::crd::gres::GresComputeSpec {
+                    wal_producer_request_timeout_ms: Some(11),
+                    wal_producer_retries: Some(12),
+                    wal_producer_retry_backoff_ms: Some(13),
+                    wal_producer_routing_retry_budget_ms: Some(14),
+                    wal_producer_init_retry_timeout_ms: Some(15),
+                    wal_producer_init_max_backoff_ms: Some(16),
+                    wal_producer_transaction_timeout_ms: Some(17),
+                    ..crate::crd::gres::GresComputeSpec::default()
+                },
+                ["11", "12", "13", "14", "15", "16", "17"],
+            ),
+        ] {
+            let compute_policy = spec.effective_policy().expect("compute policy");
+            for range_control_enabled in [false, true] {
+                let deployment = render_deployment(
+                    &obj,
+                    &ranges[0],
+                    &DeploymentRenderConfig {
+                        all_ranges: &ranges,
+                        image: "image",
+                        readiness_probe_period_seconds: 5,
+                        bootstrap: "k:9092",
+                        wal_topic: "__gres_wal.tenant-a.r0",
+                        config_topic: "__gres_cfg.tenant-a",
+                        policy: &crabka_gres_control::RegistryPolicy::default(),
+                        compute_policy,
+                        replicas: 1,
+                        operator_config: &operator_config,
+                        kafka_sasl: false,
+                        range_control_enabled,
+                        range_tls_hash: None,
+                    },
+                )
+                .expect("render deployment");
+                let args = deployment.spec.unwrap().template.spec.unwrap().containers[0]
+                    .args
+                    .clone()
+                    .unwrap();
+                let expected = [
+                    "--wal-producer-request-timeout-ms",
+                    expected[0],
+                    "--wal-producer-retries",
+                    expected[1],
+                    "--wal-producer-retry-backoff-ms",
+                    expected[2],
+                    "--wal-producer-routing-retry-budget-ms",
+                    expected[3],
+                    "--wal-producer-init-retry-timeout-ms",
+                    expected[4],
+                    "--wal-producer-init-max-backoff-ms",
+                    expected[5],
+                    "--wal-producer-transaction-timeout-ms",
+                    expected[6],
+                ];
+                assert!(
+                    args.windows(expected.len())
+                        .any(|window| window == expected),
+                    "got: {args:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn compute_wal_admin_args_are_exact_in_single_and_multi_range_modes() {
         let mut obj = tenant();
         obj.metadata.namespace = Some("ns".into());
@@ -3084,7 +3192,7 @@ mod tests {
             metrics,
         );
 
-        let Err(error) = prepare_tenant(&tenant(), &ctx).await else {
+        let Err(error) = Box::pin(prepare_tenant(&tenant(), &ctx)).await else {
             panic!("invalid compute policy must fail");
         };
 

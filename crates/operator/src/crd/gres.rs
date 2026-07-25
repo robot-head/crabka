@@ -2,6 +2,8 @@
 //! cluster. Tenant CRs point at a `Gres` fleet by name; the controller that
 //! renders `PgDog` is added in a later batch.
 
+use std::time::Duration;
+
 use crabka_gres_control::{
     CheckpointPartBytes, DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS,
     DEFAULT_CHECKPOINT_POLL_INTERVAL_MS, DEFAULT_IDLE_SUSPEND_POLL_INTERVAL_MS,
@@ -22,6 +24,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_LIFECYCLE_REQUEUE_MS: u64 = 5_000;
+
+fn duration_millis(value: Duration) -> u64 {
+    u64::try_from(value.as_millis()).expect("validated producer duration fits u64 milliseconds")
+}
 
 /// Gres fleet specification.
 #[derive(CustomResource, Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
@@ -163,6 +169,41 @@ pub struct GresComputeSpec {
     #[schemars(range(min = 1))]
     pub wal_recovery_request_timeout_ms: Option<u64>,
 
+    /// Timeout for WAL producer broker requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 2_147_483_647))]
+    pub wal_producer_request_timeout_ms: Option<u64>,
+
+    /// WAL producer retries after the initial batch send.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0))]
+    pub wal_producer_retries: Option<i32>,
+
+    /// WAL producer retry and producer-ID initial backoff.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 2_147_483_647))]
+    pub wal_producer_retry_backoff_ms: Option<u64>,
+
+    /// Per-batch WAL producer routing retry budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 2_147_483_647))]
+    pub wal_producer_routing_retry_budget_ms: Option<u64>,
+
+    /// WAL producer-ID initialization retry timeout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 2_147_483_647))]
+    pub wal_producer_init_retry_timeout_ms: Option<u64>,
+
+    /// WAL producer-ID initialization backoff cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 2_147_483_647))]
+    pub wal_producer_init_max_backoff_ms: Option<u64>,
+
+    /// WAL producer transaction timeout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 2_147_483_647))]
+    pub wal_producer_transaction_timeout_ms: Option<u64>,
+
     /// Replication factor requested when creating a range WAL topic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1, max = 32_767))]
@@ -204,6 +245,7 @@ pub(crate) struct EffectiveGresComputePolicy {
     pub(crate) wal_recovery_empty_fetch_retries: PositiveUsize,
     pub(crate) wal_recovery_connect_timeout_ms: PositiveMillis,
     pub(crate) wal_recovery_request_timeout_ms: PositiveMillis,
+    pub(crate) wal_producer_retry_policy: crabka_client_producer::ProducerRetryPolicy,
     pub(crate) wal_topic_replication_factor: PositiveI32,
     pub(crate) wal_topic_ensure_timeout_ms: PositiveI32,
     pub(crate) wal_admin_connect_timeout_ms: PositiveMillis,
@@ -279,6 +321,7 @@ impl GresComputeSpec {
                     .unwrap_or(DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT_MS),
             )
             .map_err(|error| format!("spec.compute.walRecoveryRequestTimeoutMs: {error}"))?,
+            wal_producer_retry_policy: self.effective_wal_producer_retry_policy()?,
             wal_topic_replication_factor: PositiveI32::new(
                 self.wal_topic_replication_factor
                     .unwrap_or(DEFAULT_WAL_TOPIC_REPLICATION_FACTOR),
@@ -304,6 +347,61 @@ impl GresComputeSpec {
                     .unwrap_or(DEFAULT_LIFECYCLE_REQUEUE_MS),
             )
             .map_err(|error| format!("spec.compute.lifecycleRequeueMs: {error}"))?,
+        })
+    }
+
+    fn effective_wal_producer_retry_policy(
+        &self,
+    ) -> Result<crabka_client_producer::ProducerRetryPolicy, String> {
+        let defaults = crabka_client_producer::ProducerRetryPolicy::default();
+        let retry_backoff_ms = self
+            .wal_producer_retry_backoff_ms
+            .unwrap_or_else(|| duration_millis(defaults.retry_backoff()));
+        let init_max_backoff_ms = self
+            .wal_producer_init_max_backoff_ms
+            .unwrap_or_else(|| duration_millis(defaults.init_max_backoff()));
+        crabka_client_producer::ProducerRetryPolicy::new(
+            Duration::from_millis(
+                self.wal_producer_request_timeout_ms
+                    .unwrap_or_else(|| duration_millis(defaults.request_timeout())),
+            ),
+            self.wal_producer_retries.unwrap_or(defaults.retries()),
+            Duration::from_millis(retry_backoff_ms),
+            Duration::from_millis(
+                self.wal_producer_routing_retry_budget_ms
+                    .unwrap_or_else(|| duration_millis(defaults.routing_retry_budget())),
+            ),
+            Duration::from_millis(
+                self.wal_producer_init_retry_timeout_ms
+                    .unwrap_or_else(|| duration_millis(defaults.init_retry_timeout())),
+            ),
+            Duration::from_millis(init_max_backoff_ms),
+            Duration::from_millis(
+                self.wal_producer_transaction_timeout_ms
+                    .unwrap_or_else(|| duration_millis(defaults.transaction_timeout())),
+            ),
+        )
+        .map_err(|error| {
+            let field = if error == "producer retry backoff exceeds producer-ID backoff cap" {
+                "walProducerRetryBackoffMs/walProducerInitMaxBackoffMs"
+            } else if error.starts_with("request timeout:") {
+                "walProducerRequestTimeoutMs"
+            } else if self.wal_producer_retries.is_some_and(|value| value < 0) {
+                "walProducerRetries"
+            } else if error.starts_with("producer retry backoff:") {
+                "walProducerRetryBackoffMs"
+            } else if error.starts_with("routing retry budget:") {
+                "walProducerRoutingRetryBudgetMs"
+            } else if error.starts_with("producer-ID initialization retry timeout:") {
+                "walProducerInitRetryTimeoutMs"
+            } else if error.starts_with("producer-ID initialization maximum backoff:") {
+                "walProducerInitMaxBackoffMs"
+            } else if error.starts_with("transaction timeout:") {
+                "walProducerTransactionTimeoutMs"
+            } else {
+                "walProducerRetries"
+            };
+            format!("spec.compute.{field}: {error}")
         })
     }
 }
@@ -674,6 +772,8 @@ pub struct GresBalancerStatus {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use assert2::{assert, check};
     use kube::CustomResourceExt as _;
 
@@ -1060,6 +1160,188 @@ mod tests {
             let error = policy.effective_policy().expect_err("zero must fail");
             assert!(error.contains(path), "got: {error}");
         }
+    }
+
+    #[test]
+    fn compute_wal_producer_policy_round_trips_and_has_exact_schema_bounds() {
+        let policy = GresComputeSpec {
+            wal_producer_request_timeout_ms: Some(i32::MAX as u64),
+            wal_producer_retries: Some(0),
+            wal_producer_retry_backoff_ms: Some(1),
+            wal_producer_routing_retry_budget_ms: Some(i32::MAX as u64),
+            wal_producer_init_retry_timeout_ms: Some(i32::MAX as u64),
+            wal_producer_init_max_backoff_ms: Some(1),
+            wal_producer_transaction_timeout_ms: Some(i32::MAX as u64),
+            ..GresComputeSpec::default()
+        };
+        let json = serde_json::to_string(&policy).expect("serialize compute policy");
+        let yaml = serde_yaml::to_string(&policy).expect("serialize compute policy");
+        assert!(serde_json::from_str::<GresComputeSpec>(&json).unwrap() == policy);
+        assert!(serde_yaml::from_str::<GresComputeSpec>(&yaml).unwrap() == policy);
+
+        let crd = serde_json::to_value(Gres::crd()).expect("serialize Gres CRD");
+        let properties = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
+            ["properties"]["compute"]["properties"];
+        for field in [
+            "walProducerRequestTimeoutMs",
+            "walProducerRetryBackoffMs",
+            "walProducerRoutingRetryBudgetMs",
+            "walProducerInitRetryTimeoutMs",
+            "walProducerInitMaxBackoffMs",
+            "walProducerTransactionTimeoutMs",
+        ] {
+            assert!(properties[field]["minimum"].as_f64() == Some(1.0));
+            assert!(
+                properties[field]["maximum"].as_f64() == Some(f64::from(i32::MAX)),
+                "wrong maximum for {field}: {properties}"
+            );
+        }
+        assert!(properties["walProducerRetries"]["minimum"].as_f64() == Some(0.0));
+    }
+
+    #[test]
+    fn compute_wal_producer_policy_uses_shared_defaults_and_rejects_exact_boundaries() {
+        let effective = GresComputeSpec::default()
+            .effective_policy()
+            .expect("default compute policy")
+            .wal_producer_retry_policy;
+        assert!(effective == crabka_client_producer::ProducerRetryPolicy::default());
+
+        for (policy, expected) in [
+            (
+                GresComputeSpec {
+                    wal_producer_request_timeout_ms: Some(0),
+                    ..GresComputeSpec::default()
+                },
+                "spec.compute.walProducerRequestTimeoutMs",
+            ),
+            (
+                GresComputeSpec {
+                    wal_producer_retries: Some(-1),
+                    ..GresComputeSpec::default()
+                },
+                "spec.compute.walProducerRetries",
+            ),
+            (
+                GresComputeSpec {
+                    wal_producer_retry_backoff_ms: Some(0),
+                    ..GresComputeSpec::default()
+                },
+                "spec.compute.walProducerRetryBackoffMs",
+            ),
+            (
+                GresComputeSpec {
+                    wal_producer_routing_retry_budget_ms: Some(0),
+                    ..GresComputeSpec::default()
+                },
+                "spec.compute.walProducerRoutingRetryBudgetMs",
+            ),
+            (
+                GresComputeSpec {
+                    wal_producer_init_retry_timeout_ms: Some(0),
+                    ..GresComputeSpec::default()
+                },
+                "spec.compute.walProducerInitRetryTimeoutMs",
+            ),
+            (
+                GresComputeSpec {
+                    wal_producer_init_max_backoff_ms: Some(0),
+                    ..GresComputeSpec::default()
+                },
+                "spec.compute.walProducerInitMaxBackoffMs",
+            ),
+            (
+                GresComputeSpec {
+                    wal_producer_transaction_timeout_ms: Some(0),
+                    ..GresComputeSpec::default()
+                },
+                "spec.compute.walProducerTransactionTimeoutMs",
+            ),
+            (
+                GresComputeSpec {
+                    wal_producer_request_timeout_ms: Some(i32::MAX as u64 + 1),
+                    ..GresComputeSpec::default()
+                },
+                "spec.compute.walProducerRequestTimeoutMs",
+            ),
+            (
+                GresComputeSpec {
+                    wal_producer_retry_backoff_ms: Some(i32::MAX as u64 + 1),
+                    ..GresComputeSpec::default()
+                },
+                "spec.compute.walProducerRetryBackoffMs",
+            ),
+            (
+                GresComputeSpec {
+                    wal_producer_routing_retry_budget_ms: Some(i32::MAX as u64 + 1),
+                    ..GresComputeSpec::default()
+                },
+                "spec.compute.walProducerRoutingRetryBudgetMs",
+            ),
+            (
+                GresComputeSpec {
+                    wal_producer_init_retry_timeout_ms: Some(i32::MAX as u64 + 1),
+                    ..GresComputeSpec::default()
+                },
+                "spec.compute.walProducerInitRetryTimeoutMs",
+            ),
+            (
+                GresComputeSpec {
+                    wal_producer_init_max_backoff_ms: Some(i32::MAX as u64 + 1),
+                    ..GresComputeSpec::default()
+                },
+                "spec.compute.walProducerInitMaxBackoffMs",
+            ),
+            (
+                GresComputeSpec {
+                    wal_producer_transaction_timeout_ms: Some(i32::MAX as u64 + 1),
+                    ..GresComputeSpec::default()
+                },
+                "spec.compute.walProducerTransactionTimeoutMs",
+            ),
+        ] {
+            let error = policy.effective_policy().expect_err("boundary must fail");
+            assert!(error.starts_with(expected), "got: {error}");
+        }
+
+        let error = GresComputeSpec {
+            wal_producer_retry_backoff_ms: Some(2),
+            wal_producer_init_max_backoff_ms: Some(1),
+            ..GresComputeSpec::default()
+        }
+        .effective_policy()
+        .expect_err("cross-field violation must fail");
+        assert!(
+            error
+                == "spec.compute.walProducerRetryBackoffMs/walProducerInitMaxBackoffMs: producer retry backoff exceeds producer-ID backoff cap"
+        );
+
+        let configured = GresComputeSpec {
+            wal_producer_request_timeout_ms: Some(11),
+            wal_producer_retries: Some(12),
+            wal_producer_retry_backoff_ms: Some(13),
+            wal_producer_routing_retry_budget_ms: Some(14),
+            wal_producer_init_retry_timeout_ms: Some(15),
+            wal_producer_init_max_backoff_ms: Some(16),
+            wal_producer_transaction_timeout_ms: Some(17),
+            ..GresComputeSpec::default()
+        }
+        .effective_policy()
+        .expect("valid producer policy")
+        .wal_producer_retry_policy;
+        assert!(
+            configured
+                == crabka_client_producer::ProducerRetryPolicy::new(
+                    Duration::from_millis(11),
+                    12,
+                    Duration::from_millis(13),
+                    Duration::from_millis(14),
+                    Duration::from_millis(15),
+                    Duration::from_millis(16),
+                    Duration::from_millis(17),
+                )
+                .unwrap()
+        );
     }
 
     #[test]
