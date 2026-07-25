@@ -410,7 +410,7 @@ async fn open_connection(profile: &ConnProfile) -> Result<Connection, KafkaFdwEr
         .ok_or_else(|| KafkaFdwError::Other(format!("no addresses for {host_port}")))?;
 
     let options = crabka_client_core::ConnectionOptions {
-        dns_timeout: Default::default(),
+        dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
         client_id: "crabka-fdw".to_string(),
         connect_timeout: std::time::Duration::from_secs(10),
         request_timeout: std::time::Duration::from_secs(30),
