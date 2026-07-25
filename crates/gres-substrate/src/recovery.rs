@@ -7,7 +7,9 @@ use crabka_client_core::{
     Connection, ConnectionOptions, IsolatedFetch, fetch_partition_with_isolation_progress,
     security::ClientSecurity,
 };
-use crabka_client_producer::{Acks, Producer, ProducerRetryPolicy, ProducerThroughputPolicy};
+use crabka_client_producer::{
+    Acks, Producer, ProducerFlushTimeout, ProducerRetryPolicy, ProducerThroughputPolicy,
+};
 use crabka_gres_ranges::{RangeId, TenantName};
 use crabka_pgkv::{Kv, RestoreKv};
 use crabka_protocol::{
@@ -199,6 +201,7 @@ pub struct LiveRecoveryConfig {
     pub advertised_endpoint: Option<String>,
     read_policy: RecoveryReadPolicy,
     wal_admin_policy: WalAdminPolicy,
+    producer_flush_timeout: ProducerFlushTimeout,
     producer_retry_policy: ProducerRetryPolicy,
     producer_throughput_policy: ProducerThroughputPolicy,
     /// Noncanonical identity used while a recovered range is staged and must not fence serving.
@@ -239,6 +242,7 @@ impl LiveRecoveryConfig {
             advertised_endpoint: None,
             read_policy: RecoveryReadPolicy::default(),
             wal_admin_policy: WalAdminPolicy::default(),
+            producer_flush_timeout: ProducerFlushTimeout::default(),
             producer_retry_policy: ProducerRetryPolicy::default(),
             producer_throughput_policy: ProducerThroughputPolicy::default(),
             staging_identity: None,
@@ -270,6 +274,22 @@ impl LiveRecoveryConfig {
     #[must_use]
     pub const fn wal_admin_policy(&self) -> WalAdminPolicy {
         self.wal_admin_policy
+    }
+
+    /// Override the WAL producer flush deadline.
+    #[must_use]
+    pub fn with_producer_flush_timeout(
+        mut self,
+        producer_flush_timeout: ProducerFlushTimeout,
+    ) -> Self {
+        self.producer_flush_timeout = producer_flush_timeout;
+        self
+    }
+
+    /// Return the WAL producer flush deadline.
+    #[must_use]
+    pub const fn producer_flush_timeout(&self) -> ProducerFlushTimeout {
+        self.producer_flush_timeout
     }
 
     /// Override WAL producer retry and transaction timing.
@@ -665,6 +685,7 @@ async fn recover_live_for_range_inner(
             .linger(config.producer_throughput_policy.linger())
             .batch_size(config.producer_throughput_policy.batch_bytes())
             .request_timeout(config.producer_retry_policy.request_timeout())
+            .flush_timeout(config.producer_flush_timeout().duration())
             .retries(config.producer_retry_policy.retries())
             .retry_backoff(config.producer_retry_policy.retry_backoff())
             .routing_retry_budget(config.producer_retry_policy.routing_retry_budget())
@@ -1716,6 +1737,42 @@ mod tests {
                 .with_producer_retry_policy(replacement)
                 .producer_retry_policy(),
             replacement
+        );
+    }
+
+    #[test]
+    fn producer_flush_timeout_defaults_replaces_and_reaches_builder() {
+        let tenant = TenantName::parse("tenant-a").expect("tenant");
+        let config =
+            LiveRecoveryConfig::new("localhost:9092", tenant.clone(), RangeId::new(7), None);
+        assert_eq!(
+            config.producer_flush_timeout(),
+            crabka_client_producer::ProducerFlushTimeout::default()
+        );
+        assert_eq!(
+            config.producer_flush_timeout().duration(),
+            crabka_client_producer::DEFAULT_PRODUCER_FLUSH_TIMEOUT
+        );
+        assert_eq!(config.producer_flush_timeout().milliseconds(), 50_000);
+
+        let replacement =
+            crabka_client_producer::ProducerFlushTimeout::new(Duration::from_millis(31))
+                .expect("valid timeout");
+        assert_eq!(
+            LiveRecoveryConfig::new("localhost:9092", tenant, RangeId::new(7), None)
+                .with_producer_flush_timeout(replacement)
+                .producer_flush_timeout(),
+            replacement
+        );
+
+        assert_eq!(
+            include_str!("recovery.rs")
+                .matches(concat!(
+                    ".flush_timeout(config.",
+                    "producer_flush_timeout().duration())"
+                ))
+                .count(),
+            1
         );
     }
 
