@@ -9829,6 +9829,32 @@ mod tests {
         ])
         .expect("positive parser value");
         assert!(SubstrateRuntimeConfig::from_args(&oversized.serve).is_err());
+
+        let maximum = <Cli as clap::Parser>::try_parse_from([
+            "crabka-gres",
+            "--substrate-bootstrap=memory://",
+            "--tenant=tenant-a",
+            "--wal-producer-flush-timeout-ms=2147483647",
+        ])
+        .expect("maximum protocol timeout");
+        assert_eq!(
+            SubstrateRuntimeConfig::from_args(&maximum.serve)
+                .expect("valid config")
+                .expect("substrate config")
+                .producer_flush_timeout
+                .milliseconds(),
+            2_147_483_647
+        );
+
+        let fractional = <Cli as clap::Parser>::try_parse_from([
+            "crabka-gres",
+            "--substrate-bootstrap=memory://",
+            "--tenant=tenant-a",
+            "--wal-producer-flush-timeout-ms=1.5",
+        ])
+        .expect_err("fractional milliseconds");
+        assert_eq!(fractional.kind(), clap::error::ErrorKind::ValueValidation);
+
         assert!(
             <Cli as clap::Parser>::try_parse_from([
                 "crabka-gres",
