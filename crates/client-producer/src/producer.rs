@@ -922,12 +922,12 @@ impl Producer {
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn flush(&self) -> Result<(), ProducerError> {
         self.is_active()?;
-        let _ = self.wake_tx.send(DrainIntent::Force).await;
         let deadline = tokio::time::Instant::now()
             .checked_add(self.flush_timeout.duration())
             .ok_or(ProducerError::FlushTimeout)?;
 
         tokio::time::timeout_at(deadline, async {
+            let _ = self.wake_tx.send(DrainIntent::Force).await;
             loop {
                 let notified = self.flush_notify.notified();
                 tokio::pin!(notified);
@@ -1247,6 +1247,33 @@ mod tests {
     async fn flush_times_out_at_the_configured_deadline() {
         let (mock, producer) = producer_with_flush_timeout(Duration::from_millis(7)).await;
         producer.in_flight.store(1, Ordering::Release);
+
+        let flush = producer.flush();
+        tokio::pin!(flush);
+        assert!(futures::poll!(flush.as_mut()).is_pending());
+
+        tokio::time::advance(Duration::from_millis(6)).await;
+        assert!(futures::poll!(flush.as_mut()).is_pending());
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(matches!(
+            futures::poll!(flush.as_mut()),
+            std::task::Poll::Ready(Err(ProducerError::FlushTimeout))
+        ));
+        mock.stop();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn flush_timeout_bounds_a_blocked_force_wake() {
+        let (mock, mut producer) = producer_with_flush_timeout(Duration::from_millis(7)).await;
+        let (wake_tx, _wake_rx) = tokio::sync::mpsc::channel(16);
+        producer.wake_tx = wake_tx;
+        for _ in 0..16 {
+            producer
+                .wake_tx
+                .try_send(DrainIntent::Force)
+                .expect("wake channel has capacity");
+        }
 
         let flush = producer.flush();
         tokio::pin!(flush);
