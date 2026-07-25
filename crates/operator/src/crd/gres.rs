@@ -100,6 +100,29 @@ pub struct GresActivatorSpec {
     pub readiness_probe_period_seconds: Option<i32>,
 }
 
+/// Compression codec for the Gres WAL producer.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum WalProducerCompression {
+    None,
+    Gzip,
+    Snappy,
+    Lz4,
+    Zstd,
+}
+
+impl From<WalProducerCompression> for crabka_client_producer::Compression {
+    fn from(value: WalProducerCompression) -> Self {
+        match value {
+            WalProducerCompression::None => Self::None,
+            WalProducerCompression::Gzip => Self::Gzip,
+            WalProducerCompression::Snappy => Self::Snappy,
+            WalProducerCompression::Lz4 => Self::Lz4,
+            WalProducerCompression::Zstd => Self::Zstd,
+        }
+    }
+}
+
 /// Tenant compute workload policy.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -204,6 +227,21 @@ pub struct GresComputeSpec {
     #[schemars(range(min = 1, max = 2_147_483_647))]
     pub wal_producer_transaction_timeout_ms: Option<u64>,
 
+    /// WAL producer compression codec.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "WalProducerCompression")]
+    pub wal_producer_compression: Option<WalProducerCompression>,
+
+    /// Delay before sending a partial WAL producer batch, in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0, max = 2_147_483_647))]
+    pub wal_producer_linger_ms: Option<u64>,
+
+    /// Maximum WAL producer batch size in bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 2_147_483_647))]
+    pub wal_producer_batch_bytes: Option<usize>,
+
     /// Replication factor requested when creating a range WAL topic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1, max = 32_767))]
@@ -246,6 +284,7 @@ pub(crate) struct EffectiveGresComputePolicy {
     pub(crate) wal_recovery_connect_timeout_ms: PositiveMillis,
     pub(crate) wal_recovery_request_timeout_ms: PositiveMillis,
     pub(crate) wal_producer_retry_policy: crabka_client_producer::ProducerRetryPolicy,
+    pub(crate) wal_producer_throughput_policy: crabka_client_producer::ProducerThroughputPolicy,
     pub(crate) wal_topic_replication_factor: PositiveI32,
     pub(crate) wal_topic_ensure_timeout_ms: PositiveI32,
     pub(crate) wal_admin_connect_timeout_ms: PositiveMillis,
@@ -322,6 +361,7 @@ impl GresComputeSpec {
             )
             .map_err(|error| format!("spec.compute.walRecoveryRequestTimeoutMs: {error}"))?,
             wal_producer_retry_policy: self.effective_wal_producer_retry_policy()?,
+            wal_producer_throughput_policy: self.effective_wal_producer_throughput_policy()?,
             wal_topic_replication_factor: PositiveI32::new(
                 self.wal_topic_replication_factor
                     .unwrap_or(DEFAULT_WAL_TOPIC_REPLICATION_FACTOR),
@@ -400,6 +440,31 @@ impl GresComputeSpec {
                 "walProducerTransactionTimeoutMs"
             } else {
                 "walProducerRetries"
+            };
+            format!("spec.compute.{field}: {error}")
+        })
+    }
+
+    fn effective_wal_producer_throughput_policy(
+        &self,
+    ) -> Result<crabka_client_producer::ProducerThroughputPolicy, String> {
+        let defaults = crabka_client_producer::ProducerThroughputPolicy::default();
+        crabka_client_producer::ProducerThroughputPolicy::new(
+            self.wal_producer_compression
+                .map_or_else(|| defaults.compression(), Into::into),
+            Duration::from_millis(
+                self.wal_producer_linger_ms
+                    .unwrap_or_else(|| duration_millis(defaults.linger())),
+            ),
+            self.wal_producer_batch_bytes
+                .unwrap_or_else(|| defaults.batch_bytes()),
+            defaults.max_in_flight(),
+        )
+        .map_err(|error| {
+            let field = if error.starts_with("producer linger:") {
+                "walProducerLingerMs"
+            } else {
+                "walProducerBatchBytes"
             };
             format!("spec.compute.{field}: {error}")
         })
@@ -1383,6 +1448,103 @@ mod tests {
                 )
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn compute_wal_producer_throughput_round_trips_and_has_exact_schema() {
+        for (compression, serialized) in [
+            (WalProducerCompression::None, r#""none""#),
+            (WalProducerCompression::Gzip, r#""gzip""#),
+            (WalProducerCompression::Snappy, r#""snappy""#),
+            (WalProducerCompression::Lz4, r#""lz4""#),
+            (WalProducerCompression::Zstd, r#""zstd""#),
+        ] {
+            assert!(serde_json::to_string(&compression).unwrap() == serialized);
+            assert!(
+                serde_json::from_str::<WalProducerCompression>(serialized).unwrap() == compression
+            );
+        }
+
+        let policy = GresComputeSpec {
+            wal_producer_compression: Some(WalProducerCompression::Zstd),
+            wal_producer_linger_ms: Some(i32::MAX as u64),
+            wal_producer_batch_bytes: Some(i32::MAX as usize),
+            ..GresComputeSpec::default()
+        };
+        let json = serde_json::to_string(&policy).expect("serialize compute policy");
+        let yaml = serde_yaml::to_string(&policy).expect("serialize compute policy");
+        assert!(serde_json::from_str::<GresComputeSpec>(&json).unwrap() == policy);
+        assert!(serde_yaml::from_str::<GresComputeSpec>(&yaml).unwrap() == policy);
+        assert!(json.contains(r#""walProducerCompression":"zstd""#));
+
+        let crd = serde_json::to_value(Gres::crd()).expect("serialize Gres CRD");
+        let properties = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
+            ["properties"]["compute"]["properties"];
+        assert!(
+            properties["walProducerCompression"]["enum"]
+                == serde_json::json!(["none", "gzip", "snappy", "lz4", "zstd"])
+        );
+        assert!(properties["walProducerLingerMs"]["minimum"].as_f64() == Some(0.0));
+        assert!(properties["walProducerLingerMs"]["maximum"].as_f64() == Some(f64::from(i32::MAX)));
+        assert!(properties["walProducerBatchBytes"]["minimum"].as_f64() == Some(1.0));
+        assert!(
+            properties["walProducerBatchBytes"]["maximum"].as_f64() == Some(f64::from(i32::MAX))
+        );
+    }
+
+    #[test]
+    fn compute_wal_producer_throughput_uses_shared_defaults_and_exact_errors() {
+        let effective = GresComputeSpec::default()
+            .effective_policy()
+            .expect("default compute policy")
+            .wal_producer_throughput_policy;
+        assert!(effective == crabka_client_producer::ProducerThroughputPolicy::default());
+
+        let configured = GresComputeSpec {
+            wal_producer_compression: Some(WalProducerCompression::Lz4),
+            wal_producer_linger_ms: Some(11),
+            wal_producer_batch_bytes: Some(12),
+            ..GresComputeSpec::default()
+        }
+        .effective_policy()
+        .expect("valid producer throughput policy")
+        .wal_producer_throughput_policy;
+        assert!(
+            configured
+                == crabka_client_producer::ProducerThroughputPolicy::new(
+                    crabka_client_producer::Compression::Lz4,
+                    Duration::from_millis(11),
+                    12,
+                    crabka_client_producer::DEFAULT_PRODUCER_MAX_IN_FLIGHT,
+                )
+                .unwrap()
+        );
+
+        for (policy, expected) in [
+            (
+                GresComputeSpec {
+                    wal_producer_linger_ms: Some(i32::MAX as u64 + 1),
+                    ..GresComputeSpec::default()
+                },
+                "spec.compute.walProducerLingerMs: producer linger: [the value must be equal to 2147483647, but received 2147483648 || the value must be less than 2147483647, but received 2147483648]",
+            ),
+            (
+                GresComputeSpec {
+                    wal_producer_batch_bytes: Some(0),
+                    ..GresComputeSpec::default()
+                },
+                "spec.compute.walProducerBatchBytes: producer batch bytes: [the value must be equal to 1, but received 0 || the value must be greater than 1, but received 0]",
+            ),
+            (
+                GresComputeSpec {
+                    wal_producer_batch_bytes: Some(i32::MAX as usize + 1),
+                    ..GresComputeSpec::default()
+                },
+                "spec.compute.walProducerBatchBytes: producer batch bytes: [the value must be equal to 2147483647, but received 2147483648 || the value must be less than 2147483647, but received 2147483648]",
+            ),
+        ] {
+            assert!(policy.effective_policy().expect_err("invalid boundary") == expected);
+        }
     }
 
     #[test]

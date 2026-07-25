@@ -413,7 +413,7 @@ async fn reconcile_inner(
                 },
             )
             .await?;
-            return Ok(lifecycle_requeue(compute_policy));
+            return Ok(lifecycle_requeue(&compute_policy));
         }
         if matches!(
             lifecycle_state,
@@ -710,7 +710,7 @@ async fn reconcile_compute_and_status(
                 .await
                 .map_err(|error| ReconcileError::Malformed(error.to_string()))?;
         }
-        return Ok(lifecycle_requeue(config.compute_policy));
+        return Ok(lifecycle_requeue(&config.compute_policy));
     }
 
     let policy_api: Api<NetworkPolicy> =
@@ -746,10 +746,10 @@ async fn reconcile_compute_and_status(
         },
     )
     .await?;
-    Ok(lifecycle_requeue(config.compute_policy))
+    Ok(lifecycle_requeue(&config.compute_policy))
 }
 
-fn lifecycle_requeue(policy: EffectiveGresComputePolicy) -> Action {
+fn lifecycle_requeue(policy: &EffectiveGresComputePolicy) -> Action {
     Action::requeue(Duration::from_millis(
         policy.lifecycle_requeue_ms.into_value(),
     ))
@@ -2056,6 +2056,9 @@ fn render_deployment(
             .to_string(),
     ];
     args.extend(wal_producer_args(compute_policy.wal_producer_retry_policy));
+    args.extend(wal_producer_throughput_args(
+        compute_policy.wal_producer_throughput_policy,
+    ));
     if config.range_control_enabled {
         args.extend([
             "--ranges".to_owned(),
@@ -2192,6 +2195,19 @@ fn wal_producer_args(policy: crabka_client_producer::ProducerRetryPolicy) -> [St
         policy.init_max_backoff().as_millis().to_string(),
         "--wal-producer-transaction-timeout-ms".to_owned(),
         policy.transaction_timeout().as_millis().to_string(),
+    ]
+}
+
+fn wal_producer_throughput_args(
+    policy: crabka_client_producer::ProducerThroughputPolicy,
+) -> [String; 6] {
+    [
+        "--wal-producer-compression".to_owned(),
+        policy.compression().to_string(),
+        "--wal-producer-linger-ms".to_owned(),
+        policy.linger_ms().to_string(),
+        "--wal-producer-batch-bytes".to_owned(),
+        policy.batch_bytes().to_string(),
     ]
 }
 
@@ -2932,6 +2948,71 @@ mod tests {
     }
 
     #[test]
+    fn compute_wal_producer_throughput_args_are_exact_once_in_single_and_multi_range_modes() {
+        let mut obj = tenant();
+        obj.metadata.namespace = Some("ns".into());
+        obj.metadata.uid = Some("uid".into());
+        let ranges = [GresTenantRangeSpec {
+            range_id: 0,
+            end_key: None,
+        }];
+        let operator_config = ConfigArgs::parse_from(["operator"]).config;
+        for (spec, expected) in [
+            (
+                crate::crd::gres::GresComputeSpec::default(),
+                ["none", "0", "16384"],
+            ),
+            (
+                crate::crd::gres::GresComputeSpec {
+                    wal_producer_compression: Some(crate::crd::gres::WalProducerCompression::Zstd),
+                    wal_producer_linger_ms: Some(18),
+                    wal_producer_batch_bytes: Some(19),
+                    ..crate::crd::gres::GresComputeSpec::default()
+                },
+                ["zstd", "18", "19"],
+            ),
+        ] {
+            let compute_policy = spec.effective_policy().expect("compute policy");
+            for range_control_enabled in [false, true] {
+                let deployment = render_deployment(
+                    &obj,
+                    &ranges[0],
+                    &DeploymentRenderConfig {
+                        all_ranges: &ranges,
+                        image: "image",
+                        readiness_probe_period_seconds: 5,
+                        bootstrap: "k:9092",
+                        wal_topic: "__gres_wal.tenant-a.r0",
+                        config_topic: "__gres_cfg.tenant-a",
+                        policy: &crabka_gres_control::RegistryPolicy::default(),
+                        compute_policy,
+                        replicas: 1,
+                        operator_config: &operator_config,
+                        kafka_sasl: false,
+                        range_control_enabled,
+                        range_tls_hash: None,
+                    },
+                )
+                .expect("render deployment");
+                let args = deployment.spec.unwrap().template.spec.unwrap().containers[0]
+                    .args
+                    .clone()
+                    .unwrap();
+                for pair in [
+                    ["--wal-producer-compression", expected[0]],
+                    ["--wal-producer-linger-ms", expected[1]],
+                    ["--wal-producer-batch-bytes", expected[2]],
+                ] {
+                    assert!(
+                        args.windows(2).filter(|window| *window == pair).count() == 1,
+                        "expected {pair:?} exactly once, got: {args:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn compute_wal_admin_args_are_exact_in_single_and_multi_range_modes() {
         let mut obj = tenant();
         obj.metadata.namespace = Some("ns".into());
@@ -3111,7 +3192,9 @@ mod tests {
                 .count()
                 == 5
         );
-        assert!(lifecycle_requeue(compute_policy) == Action::requeue(Duration::from_millis(4_567)));
+        assert!(
+            lifecycle_requeue(&compute_policy) == Action::requeue(Duration::from_millis(4_567))
+        );
         let readiness = deployment
             .spec
             .as_ref()
