@@ -9,7 +9,7 @@ use std::{
     time::Duration,
 };
 
-use crabka_client_core::{Client, ClientError};
+use crabka_client_core::{Client, ClientDnsTimeout, ClientError, DEFAULT_CLIENT_DNS_TIMEOUT};
 use crabka_protocol::owned::{
     init_producer_id_request::InitProducerIdRequest,
     init_producer_id_response::InitProducerIdResponse,
@@ -444,6 +444,7 @@ impl Producer {
         #[builder(default = Acks::One)] acks: Acks,
         #[builder(default = DEFAULT_PRODUCER_LINGER)] linger: Duration,
         #[builder(default = DEFAULT_PRODUCER_BATCH_BYTES)] batch_size: usize,
+        #[builder(default = DEFAULT_CLIENT_DNS_TIMEOUT)] dns_timeout: Duration,
         #[builder(default = DEFAULT_PRODUCER_REQUEST_TIMEOUT)] request_timeout: Duration,
         #[builder(default = DEFAULT_PRODUCER_FLUSH_TIMEOUT)] flush_timeout: Duration,
         #[builder(default = DEFAULT_PRODUCER_RETRIES)] retries: i32,
@@ -456,6 +457,8 @@ impl Producer {
         #[builder(default = DEFAULT_PRODUCER_TRANSACTION_TIMEOUT)] transaction_timeout: Duration,
         security: Option<crabka_client_core::security::ClientSecurity>,
     ) -> Result<Self, ProducerError> {
+        let dns_timeout =
+            ClientDnsTimeout::new(dns_timeout).map_err(ProducerError::InvalidConfig)?;
         let throughput_policy = ProducerThroughputPolicy::new(
             compression,
             linger,
@@ -495,6 +498,7 @@ impl Producer {
         let client = Client::builder()
             .bootstrap(bootstrap)
             .client_id(client_id.clone())
+            .dns_timeout(dns_timeout.duration())
             .connect_timeout(request_timeout)
             .request_timeout(request_timeout)
             .maybe_security(security.clone())
@@ -1212,6 +1216,35 @@ mod security_arg_tests {
             let message = error.to_string();
             assert2::assert!(message == expected);
         }
+    }
+
+    #[tokio::test]
+    async fn producer_builder_rejects_invalid_dns_timeout_before_connection_io() {
+        for timeout in [Duration::ZERO, Duration::from_nanos(1), Duration::MAX] {
+            let error = Producer::builder()
+                .bootstrap("127.0.0.1:1")
+                .dns_timeout(timeout)
+                .build()
+                .await
+                .expect_err("invalid DNS timeout must fail before connection I/O");
+            assert2::assert!(matches!(
+                error,
+                ProducerError::InvalidConfig(message)
+                    if message.starts_with("client DNS timeout")
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn producer_builder_accepts_a_distinct_dns_timeout() {
+        let producer = Producer::builder()
+            .bootstrap("127.0.0.1:1")
+            .dns_timeout(Duration::from_millis(37))
+            .enable_idempotence(false)
+            .build()
+            .await
+            .expect("valid DNS timeout");
+        producer.close().await.expect("close producer");
     }
 
     #[tokio::test]
