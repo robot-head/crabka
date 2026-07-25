@@ -326,6 +326,12 @@ spec:
                     minimum: 1.0
                     nullable: true
                     type: integer
+                  walRecoveryDnsTimeoutMs:
+                    description: Timeout for resolving committed-WAL recovery broker hostnames.
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
                   walRecoveryEmptyFetchRetries:
                     description: Consecutive empty-fetch retries after the first empty recovery fetch.
                     format: uint
