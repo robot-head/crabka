@@ -1040,9 +1040,9 @@ impl SubstrateRuntimeConfig {
             )
             .and_then(|policy| {
                 policy.with_dns_timeout(args.wal_recovery_dns_timeout_ms.map_or(
-                        crabka_gres_substrate::DEFAULT_WAL_RECOVERY_DNS_TIMEOUT_MS,
-                        PositiveMillis::into_value,
-                    ))
+                    crabka_gres_substrate::DEFAULT_WAL_RECOVERY_DNS_TIMEOUT_MS,
+                    PositiveMillis::into_value,
+                ))
             })
             .and_then(|policy| {
                 policy.with_timeouts(
