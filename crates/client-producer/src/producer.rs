@@ -81,21 +81,13 @@ pub(crate) struct ProducerIdentity {
     pub epoch: i16,
 }
 
-fn wake_sender_after_append(
-    wake_tx: &tokio::sync::mpsc::Sender<DrainIntent>,
-    linger: Duration,
-    accumulator: &Accumulator,
-) {
+fn wake_sender_after_append(wake_tx: &tokio::sync::mpsc::Sender<DrainIntent>, linger: Duration) {
     let intent = if linger.is_zero() {
-        Some(DrainIntent::Force)
-    } else if !accumulator.ready.is_empty() {
-        Some(DrainIntent::Ready)
+        DrainIntent::Force
     } else {
-        None
+        DrainIntent::Ready
     };
-    if let Some(intent) = intent {
-        let _ = wake_tx.try_send(intent);
-    }
+    let _ = wake_tx.try_send(intent);
 }
 
 // accumulators map is inherently complex
@@ -798,7 +790,7 @@ impl Producer {
                 rx
             }
         };
-        wake_sender_after_append(&self.wake_tx, self.linger, &a);
+        wake_sender_after_append(&self.wake_tx, self.linger);
         rx
     }
 
@@ -1018,27 +1010,24 @@ mod tests {
     const CLIENT_ID: &str = "producer-test";
 
     #[test]
-    fn append_wakes_only_for_zero_linger_or_a_ready_batch() {
+    fn every_append_schedules_and_zero_linger_forces_a_drain() {
         let (wake_tx, mut wake_rx) = tokio::sync::mpsc::channel(4);
 
         let mut coalesced = Accumulator::new(1024);
         let _ = coalesced.try_append(None, Some(Bytes::from_static(b"a")), vec![], 0, None);
         let _ = coalesced.try_append(None, Some(Bytes::from_static(b"b")), vec![], 0, None);
-        wake_sender_after_append(&wake_tx, Duration::from_millis(10), &coalesced);
-        assert_eq!(
-            wake_rx.try_recv(),
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-        );
+        wake_sender_after_append(&wake_tx, Duration::from_millis(10));
+        assert_eq!(wake_rx.try_recv(), Ok(DrainIntent::Ready));
 
         let mut rollover = Accumulator::new(20);
         let _ = rollover.try_append(None, Some(Bytes::from_static(b"a")), vec![], 0, None);
         let _ = rollover.try_append(None, Some(Bytes::from_static(b"b")), vec![], 0, None);
-        wake_sender_after_append(&wake_tx, Duration::from_millis(10), &rollover);
+        wake_sender_after_append(&wake_tx, Duration::from_millis(10));
         assert_eq!(wake_rx.try_recv(), Ok(DrainIntent::Ready));
 
         let mut immediate = Accumulator::new(1024);
         let _ = immediate.try_append(None, Some(Bytes::from_static(b"a")), vec![], 0, None);
-        wake_sender_after_append(&wake_tx, Duration::ZERO, &immediate);
+        wake_sender_after_append(&wake_tx, Duration::ZERO);
         assert_eq!(wake_rx.try_recv(), Ok(DrainIntent::Force));
     }
 
