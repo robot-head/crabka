@@ -9932,11 +9932,12 @@ mod tests {
     #[test]
     fn wal_producer_throughput_policy_uses_defaults_environment_and_cli_precedence() {
         const CHILD: &str = "CRABKA_TEST_GRES_WAL_PRODUCER_THROUGHPUT_POLICY_CHILD";
-        const VARS: [&str; 21] = [
+        const VARS: [&str; 22] = [
             "CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT_MS",
             "CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES",
             "CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES",
             "CRABKA_GRES_WAL_RECOVERY_EMPTY_FETCH_RETRIES",
+            "CRABKA_GRES_WAL_RECOVERY_DNS_TIMEOUT_MS",
             "CRABKA_GRES_WAL_RECOVERY_CONNECT_TIMEOUT_MS",
             "CRABKA_GRES_WAL_RECOVERY_REQUEST_TIMEOUT_MS",
             "CRABKA_GRES_WAL_TOPIC_REPLICATION_FACTOR",
@@ -9969,7 +9970,7 @@ mod tests {
                     child.env_remove(variable);
                 }
                 if mode == "environment" {
-                    for (variable, value) in VARS[18..].iter().copied().zip(["gzip", "41", "42"]) {
+                    for (variable, value) in VARS[19..].iter().copied().zip(["gzip", "41", "42"]) {
                         child.env(variable, value);
                     }
                 }
@@ -10025,11 +10026,12 @@ mod tests {
     #[test]
     fn wal_producer_retry_policy_uses_defaults_environment_and_cli_precedence() {
         const CHILD: &str = "CRABKA_TEST_GRES_WAL_PRODUCER_POLICY_CHILD";
-        const VARS: [&str; 21] = [
+        const VARS: [&str; 22] = [
             "CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT_MS",
             "CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES",
             "CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES",
             "CRABKA_GRES_WAL_RECOVERY_EMPTY_FETCH_RETRIES",
+            "CRABKA_GRES_WAL_RECOVERY_DNS_TIMEOUT_MS",
             "CRABKA_GRES_WAL_RECOVERY_CONNECT_TIMEOUT_MS",
             "CRABKA_GRES_WAL_RECOVERY_REQUEST_TIMEOUT_MS",
             "CRABKA_GRES_WAL_TOPIC_REPLICATION_FACTOR",
@@ -10063,7 +10065,7 @@ mod tests {
                     child.env_remove(variable);
                 }
                 if mode == "environment" {
-                    for (variable, value) in VARS[11..18]
+                    for (variable, value) in VARS[12..19]
                         .iter()
                         .copied()
                         .zip(["41", "42", "43", "44", "45", "46", "47"])
