@@ -367,9 +367,8 @@ impl GresComputeSpec {
             )
             .map_err(|error| format!("spec.compute.walRecoveryRequestTimeoutMs: {error}"))?,
             wal_producer_flush_timeout: ProducerFlushTimeout::new(Duration::from_millis(
-                self.wal_producer_flush_timeout_ms.unwrap_or_else(|| {
-                    duration_millis(ProducerFlushTimeout::default().duration())
-                }),
+                self.wal_producer_flush_timeout_ms
+                    .unwrap_or_else(|| duration_millis(ProducerFlushTimeout::default().duration())),
             ))
             .map_err(|error| format!("spec.compute.walProducerFlushTimeoutMs: {error}"))?,
             wal_producer_retry_policy: self.effective_wal_producer_retry_policy()?,
