@@ -9784,7 +9784,24 @@ mod tests {
     #[test]
     fn wal_producer_throughput_policy_uses_defaults_environment_and_cli_precedence() {
         const CHILD: &str = "CRABKA_TEST_GRES_WAL_PRODUCER_THROUGHPUT_POLICY_CHILD";
-        const VARS: [&str; 3] = [
+        const VARS: [&str; 20] = [
+            "CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT_MS",
+            "CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES",
+            "CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES",
+            "CRABKA_GRES_WAL_RECOVERY_EMPTY_FETCH_RETRIES",
+            "CRABKA_GRES_WAL_RECOVERY_CONNECT_TIMEOUT_MS",
+            "CRABKA_GRES_WAL_RECOVERY_REQUEST_TIMEOUT_MS",
+            "CRABKA_GRES_WAL_TOPIC_REPLICATION_FACTOR",
+            "CRABKA_GRES_WAL_TOPIC_ENSURE_TIMEOUT_MS",
+            "CRABKA_GRES_WAL_ADMIN_CONNECT_TIMEOUT_MS",
+            "CRABKA_GRES_WAL_ADMIN_REQUEST_TIMEOUT_MS",
+            "CRABKA_GRES_WAL_PRODUCER_REQUEST_TIMEOUT_MS",
+            "CRABKA_GRES_WAL_PRODUCER_RETRIES",
+            "CRABKA_GRES_WAL_PRODUCER_RETRY_BACKOFF_MS",
+            "CRABKA_GRES_WAL_PRODUCER_ROUTING_RETRY_BUDGET_MS",
+            "CRABKA_GRES_WAL_PRODUCER_INIT_RETRY_TIMEOUT_MS",
+            "CRABKA_GRES_WAL_PRODUCER_INIT_MAX_BACKOFF_MS",
+            "CRABKA_GRES_WAL_PRODUCER_TRANSACTION_TIMEOUT_MS",
             "CRABKA_GRES_WAL_PRODUCER_COMPRESSION",
             "CRABKA_GRES_WAL_PRODUCER_LINGER_MS",
             "CRABKA_GRES_WAL_PRODUCER_BATCH_BYTES",
@@ -9803,7 +9820,7 @@ mod tests {
                     child.env_remove(variable);
                 }
                 if mode == "environment" {
-                    for (variable, value) in VARS.into_iter().zip(["gzip", "41", "42"]) {
+                    for (variable, value) in VARS[17..].iter().copied().zip(["gzip", "41", "42"]) {
                         child.env(variable, value);
                     }
                 }
