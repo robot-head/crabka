@@ -85,10 +85,17 @@ impl ProducerRetryPolicy {
         let retries = GreaterI32::<-1>::new(retries)
             .map_err(|error| error.to_string())?
             .into_value();
-        let retry_backoff = validated_duration(retry_backoff)?;
-        let routing_retry_budget = validated_duration(routing_retry_budget)?;
-        let init_retry_timeout = validated_duration(init_retry_timeout)?;
-        let init_max_backoff = validated_duration(init_max_backoff)?;
+        let retry_backoff = validated_duration(retry_backoff, "producer retry backoff")?;
+        let routing_retry_budget =
+            validated_duration(routing_retry_budget, "routing retry budget")?;
+        let init_retry_timeout = validated_duration(
+            init_retry_timeout,
+            "producer-ID initialization retry timeout",
+        )?;
+        let init_max_backoff = validated_duration(
+            init_max_backoff,
+            "producer-ID initialization maximum backoff",
+        )?;
         let transaction_timeout =
             validated_protocol_duration(transaction_timeout, "transaction timeout")?;
         if retry_backoff > init_max_backoff {
@@ -166,10 +173,10 @@ impl Default for ProducerRetryPolicy {
     }
 }
 
-fn validated_duration(value: Duration) -> Result<Duration, String> {
+fn validated_duration(value: Duration, name: &str) -> Result<Duration, String> {
     MinMaxU128::<1, { i32::MAX as u128 * 1_000_000 }>::new(value.as_nanos())
         .map(|_| value)
-        .map_err(|error| error.to_string())
+        .map_err(|error| format!("{name}: {error}"))
 }
 
 fn validated_protocol_duration(value: Duration, name: &str) -> Result<Duration, String> {
@@ -699,6 +706,27 @@ mod security_arg_tests {
                 valid[5],
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn producer_retry_policy_names_invalid_retry_duration() {
+        let valid = Duration::from_millis(1);
+        let oversized = Duration::from_millis(i32::MAX as u64 + 1);
+        let error = |backoff, routing, init, max| {
+            ProducerRetryPolicy::new(valid, 0, backoff, routing, init, max, valid)
+                .expect_err("invalid retry duration")
+        };
+
+        assert!(error(oversized, valid, valid, valid).contains("producer retry backoff"));
+        assert!(error(valid, oversized, valid, valid).contains("routing retry budget"));
+        assert!(
+            error(valid, valid, oversized, valid)
+                .contains("producer-ID initialization retry timeout")
+        );
+        assert!(
+            error(valid, valid, valid, oversized)
+                .contains("producer-ID initialization maximum backoff")
         );
     }
 

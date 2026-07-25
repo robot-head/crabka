@@ -9352,13 +9352,31 @@ mod tests {
             .expect_err("replication factor exceeds protocol maximum");
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
 
-        for option in [
-            "--wal-producer-request-timeout-ms=2147483648",
-            "--wal-producer-retry-backoff-ms=2147483648",
-            "--wal-producer-routing-retry-budget-ms=2147483648",
-            "--wal-producer-init-retry-timeout-ms=2147483648",
-            "--wal-producer-init-max-backoff-ms=2147483648",
-            "--wal-producer-transaction-timeout-ms=2147483648",
+        for (option, field) in [
+            (
+                "--wal-producer-request-timeout-ms=2147483648",
+                "request timeout",
+            ),
+            (
+                "--wal-producer-retry-backoff-ms=2147483648",
+                "producer retry backoff",
+            ),
+            (
+                "--wal-producer-routing-retry-budget-ms=2147483648",
+                "routing retry budget",
+            ),
+            (
+                "--wal-producer-init-retry-timeout-ms=2147483648",
+                "producer-ID initialization retry timeout",
+            ),
+            (
+                "--wal-producer-init-max-backoff-ms=2147483648",
+                "producer-ID initialization maximum backoff",
+            ),
+            (
+                "--wal-producer-transaction-timeout-ms=2147483648",
+                "transaction timeout",
+            ),
         ] {
             let args = Cli::try_parse_from([
                 "crabka-gres",
@@ -9371,6 +9389,7 @@ mod tests {
             let error = SubstrateRuntimeConfig::from_args(&args)
                 .expect_err("producer duration exceeds supported maximum");
             assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+            assert!(error.to_string().contains(field), "{error}");
         }
         let args = Cli::try_parse_from([
             "crabka-gres",
@@ -9579,7 +9598,17 @@ mod tests {
     #[test]
     fn wal_producer_retry_policy_uses_defaults_environment_and_cli_precedence() {
         const CHILD: &str = "CRABKA_TEST_GRES_WAL_PRODUCER_POLICY_CHILD";
-        const VARS: [&str; 7] = [
+        const VARS: [&str; 17] = [
+            "CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT_MS",
+            "CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES",
+            "CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES",
+            "CRABKA_GRES_WAL_RECOVERY_EMPTY_FETCH_RETRIES",
+            "CRABKA_GRES_WAL_RECOVERY_CONNECT_TIMEOUT_MS",
+            "CRABKA_GRES_WAL_RECOVERY_REQUEST_TIMEOUT_MS",
+            "CRABKA_GRES_WAL_TOPIC_REPLICATION_FACTOR",
+            "CRABKA_GRES_WAL_TOPIC_ENSURE_TIMEOUT_MS",
+            "CRABKA_GRES_WAL_ADMIN_CONNECT_TIMEOUT_MS",
+            "CRABKA_GRES_WAL_ADMIN_REQUEST_TIMEOUT_MS",
             "CRABKA_GRES_WAL_PRODUCER_REQUEST_TIMEOUT_MS",
             "CRABKA_GRES_WAL_PRODUCER_RETRIES",
             "CRABKA_GRES_WAL_PRODUCER_RETRY_BACKOFF_MS",
@@ -9597,13 +9626,15 @@ mod tests {
                         "--exact",
                         "tests::wal_producer_retry_policy_uses_defaults_environment_and_cli_precedence",
                     ])
-                    .env(CHILD, mode);
+                    .env(CHILD, mode)
+                    .env("CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT_MS", "0");
                 for variable in VARS {
                     child.env_remove(variable);
                 }
                 if mode == "environment" {
-                    for (variable, value) in VARS
-                        .into_iter()
+                    for (variable, value) in VARS[10..]
+                        .iter()
+                        .copied()
                         .zip(["41", "42", "43", "44", "45", "46", "47"])
                     {
                         child.env(variable, value);
