@@ -975,7 +975,7 @@ GresComputeSpec
 ```
 
 There is exactly one production `LiveRecoveryConfig::new` in Gres, inside the
-shared helper. Its six production call sites cover the range-0 follower,
+shared helper. Its production call sites cover the range-0 follower,
 multi-range recovery map, single-range recovery, activation discovery,
 successor recovery, and staged transfer recovery. Every one therefore receives
 the configured policy.
@@ -1168,7 +1168,7 @@ Standalone Gres exposes the four WAL-admin CLI/environment pairs and combines
 them with the existing six WAL-recovery settings in the same pre-I/O
 validation and hostile-environment matrix. The single
 `SubstrateRuntimeConfig::live_recovery_config` helper applies both validated
-policies to all six Gres recovery construction sites. The fleet CRD exposes
+policies to all Gres recovery construction sites. The fleet CRD exposes
 four optional positive `spec.compute.walTopic*`/`walAdmin*` fields, validates
 omitted values through the shared defaults, and renders all four effective
 arguments for both single- and multi-range substrate computes. Together, all
