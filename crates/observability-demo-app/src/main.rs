@@ -11,6 +11,7 @@
 //! streams showcase.
 
 use std::{
+    num::NonZeroU64,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -19,7 +20,7 @@ use bytes::Bytes;
 use clap::{Parser, ValueEnum};
 use crabka_client_consumer::{Consumer, ConsumerRecord};
 use crabka_client_producer::{Acks, Header, Producer, ProducerRecord};
-use crabka_client_streams::{SchemaSerde, Serde, processor::serde::SerdeRole};
+use crabka_client_streams::{ClientDnsTimeout, SchemaSerde, Serde, processor::serde::SerdeRole};
 use crabka_schema_serde::{
     CacheConfig, RegistryClient, SchemaCache, format::protobuf::ProtobufSerde, set_default_registry,
 };
@@ -63,11 +64,37 @@ struct Cli {
     output_topic: String,
     #[arg(long, env = "CRABKA_DEMO_ORDERS_PER_SEC", default_value_t = 50)]
     orders_per_sec: u32,
+    /// Kafka Streams broker DNS timeout in milliseconds.
+    #[arg(long, env = "CRABKA_DEMO_STREAMS_BROKER_DNS_TIMEOUT_MS")]
+    streams_broker_dns_timeout_ms: Option<NonZeroU64>,
+}
+
+fn effective_streams_broker_dns_timeout(cli: &Cli) -> std::io::Result<ClientDnsTimeout> {
+    if cli.role != Role::Stream
+        && let Some(milliseconds) = cli.streams_broker_dns_timeout_ms
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "--streams-broker-dns-timeout-ms ({} ms) is only valid with --role stream",
+                milliseconds.get(),
+            ),
+        ));
+    }
+
+    cli.streams_broker_dns_timeout_ms.map_or_else(
+        || Ok(ClientDnsTimeout::default()),
+        |milliseconds| {
+            ClientDnsTimeout::new(Duration::from_millis(milliseconds.get()))
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
+        },
+    )
 }
 
 #[tokio::main]
 async fn main() -> Result<(), BoxError> {
     let cli = Cli::parse();
+    let streams_broker_dns_timeout = effective_streams_broker_dns_timeout(&cli)?;
 
     let telemetry = crabka_telemetry::init(
         crabka_telemetry::OtlpConfig::from_env(
@@ -91,7 +118,7 @@ async fn main() -> Result<(), BoxError> {
 
     match cli.role {
         Role::Produce => run_produce(&cli, &metrics).await?,
-        Role::Stream => run_stream(&cli).await?,
+        Role::Stream => run_stream(&cli, streams_broker_dns_timeout).await?,
         Role::Consume => run_consume(&cli, &metrics).await?,
     }
     telemetry.shutdown();
@@ -218,11 +245,12 @@ async fn run_produce(cli: &Cli, metrics: &DemoMetrics) -> Result<(), BoxError> {
     }
 }
 
-async fn run_stream(cli: &Cli) -> Result<(), BoxError> {
+async fn run_stream(cli: &Cli, broker_dns_timeout: ClientDnsTimeout) -> Result<(), BoxError> {
     let app = crabka_client_streams::StreamsApp::builder()
         .bootstrap(cli.bootstrap.clone())
         .application_id("orders-analytics")
         .schema_registry(cli.registry.clone())
+        .broker_dns_timeout(broker_dns_timeout)
         .build();
     let topology = app.streams_builder();
     topology
@@ -377,4 +405,63 @@ async fn stage(metrics: &DemoMetrics, name: &'static str, work: Duration) {
 async fn futures_idle() {
     // Park forever (used when production is paused).
     std::future::pending::<()>().await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn streams_broker_dns_timeout_uses_default_and_cli_override() {
+        let defaults = Cli {
+            role: Role::Stream,
+            bootstrap: "127.0.0.1:9092".to_owned(),
+            registry: "http://127.0.0.1:8081".to_owned(),
+            input_topic: "orders".to_owned(),
+            output_topic: "order-counts".to_owned(),
+            orders_per_sec: 50,
+            streams_broker_dns_timeout_ms: None,
+        };
+        assert_eq!(
+            effective_streams_broker_dns_timeout(&defaults).expect("typed default"),
+            crabka_client_streams::ClientDnsTimeout::default()
+        );
+
+        let overridden = Cli {
+            streams_broker_dns_timeout_ms: std::num::NonZeroU64::new(37),
+            ..defaults
+        };
+        assert_eq!(
+            effective_streams_broker_dns_timeout(&overridden)
+                .expect("typed override")
+                .milliseconds(),
+            37
+        );
+    }
+
+    #[test]
+    fn streams_broker_dns_timeout_rejects_zero_and_non_stream_roles() {
+        Cli::try_parse_from([
+            "observability-demo-app",
+            "--role",
+            "stream",
+            "--streams-broker-dns-timeout-ms",
+            "0",
+        ])
+        .expect_err("zero must fail in Clap");
+
+        let produce = Cli::try_parse_from([
+            "observability-demo-app",
+            "--role",
+            "produce",
+            "--streams-broker-dns-timeout-ms",
+            "37",
+        ])
+        .expect("parse before role validation");
+        let error = effective_streams_broker_dns_timeout(&produce).expect_err("Stream-only option");
+        assert_eq!(
+            error.to_string(),
+            "--streams-broker-dns-timeout-ms (37 ms) is only valid with --role stream"
+        );
+    }
 }
