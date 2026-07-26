@@ -439,6 +439,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn heartbeat_uses_configured_rebalance_timeout() {
+        let fake = FakeTransport::new(vec![ok_resp(9, vec![0])]);
+        let sent = fake.sent_arc();
+        let (mut state, _rx) = state_with(fake);
+        state.rebalance_timeout_ms = 45_000;
+
+        check!(matches!(heartbeat_once(&state, false).await, Outcome::Ok));
+        check!(sent.lock().unwrap()[0].rebalance_timeout_ms == 45_000);
+    }
+
+    #[tokio::test]
     async fn heartbeat_fenced_member_epoch_requests_rejoin() {
         let fake = FakeTransport::new(vec![err_resp(110)]);
         let (st, _rx) = state_with(fake);

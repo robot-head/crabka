@@ -6,7 +6,9 @@ mod coordinator;
 mod status;
 mod types;
 
-pub use client::{SchemaPrewarm, StreamsMembership};
+pub use client::{
+    DEFAULT_STREAMS_REBALANCE_TIMEOUT, SchemaPrewarm, StreamsMembership, StreamsRebalanceTimeout,
+};
 pub use types::{
     StreamsAssignment, StreamsEvent, StreamsStatus, TaskAssignment, TaskOffsetTracker,
     TopicPartition,
