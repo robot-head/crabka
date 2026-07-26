@@ -2008,6 +2008,8 @@ fn render_deployment(
         u64::to_string(&config.policy.producer_dns_timeout().milliseconds()),
         "--registry-reader-admin-dns-timeout-ms".to_owned(),
         u64::to_string(&config.policy.reader_admin_dns_timeout().milliseconds()),
+        "--fdw-broker-dns-timeout-ms".to_owned(),
+        u64::to_string(&compute_policy.fdw_broker_dns_timeout.milliseconds()),
         "--wal-recovery-fetch-max-wait-ms".to_owned(),
         compute_policy
             .wal_recovery_fetch_max_wait_ms
@@ -3116,6 +3118,79 @@ mod tests {
     }
 
     #[test]
+    fn fdw_broker_dns_timeout_is_exact_once_in_single_and_two_range_deployments() {
+        let mut obj = tenant();
+        obj.metadata.namespace = Some("ns".into());
+        obj.metadata.uid = Some("uid".into());
+        let ranges = [
+            GresTenantRangeSpec {
+                range_id: 0,
+                end_key: Some(GresTenantRangeKey {
+                    table_id: 10,
+                    bucket: None,
+                    rowid: 0,
+                }),
+            },
+            GresTenantRangeSpec {
+                range_id: 1,
+                end_key: None,
+            },
+        ];
+        let operator_config = ConfigArgs::parse_from(["operator"]).config;
+
+        for (spec, pair) in [
+            (
+                crate::crd::gres::GresComputeSpec::default(),
+                ["--fdw-broker-dns-timeout-ms", "10000"],
+            ),
+            (
+                crate::crd::gres::GresComputeSpec {
+                    fdw_broker_dns_timeout_ms: Some(37),
+                    ..crate::crd::gres::GresComputeSpec::default()
+                },
+                ["--fdw-broker-dns-timeout-ms", "37"],
+            ),
+        ] {
+            let compute_policy = spec.effective_policy().expect("compute policy");
+            for (range_control_enabled, active_ranges) in
+                [(false, &ranges[..1]), (true, &ranges[..])]
+            {
+                for range in active_ranges {
+                    let wal_topic = format!("__gres_wal.tenant-a.r{}", range.range_id);
+                    let deployment = render_deployment(
+                        &obj,
+                        range,
+                        &DeploymentRenderConfig {
+                            all_ranges: active_ranges,
+                            image: "image",
+                            readiness_probe_period_seconds: 5,
+                            bootstrap: "k:9092",
+                            wal_topic: &wal_topic,
+                            config_topic: "__gres_cfg.tenant-a",
+                            policy: &crabka_gres_control::RegistryPolicy::default(),
+                            compute_policy,
+                            replicas: 1,
+                            operator_config: &operator_config,
+                            kafka_sasl: false,
+                            range_control_enabled,
+                            range_tls_hash: None,
+                        },
+                    )
+                    .expect("render deployment");
+                    let args = deployment.spec.unwrap().template.spec.unwrap().containers[0]
+                        .args
+                        .clone()
+                        .expect("compute args");
+                    assert!(
+                        args.windows(2).filter(|window| *window == pair).count() == 1,
+                        "expected {pair:?} exactly once, got: {args:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn compute_wal_producer_throughput_args_are_exact_once_in_single_and_multi_range_modes() {
         let mut obj = tenant();
         obj.metadata.namespace = Some("ns".into());
@@ -3431,58 +3506,68 @@ mod tests {
 
         use tower::service_fn;
 
-        let requests = Arc::new(AtomicUsize::new(0));
-        let observed = Arc::clone(&requests);
-        let client = kube::Client::new(
-            service_fn(move |_request| {
-                let observed = Arc::clone(&observed);
-                async move {
-                    observed.fetch_add(1, Ordering::SeqCst);
-                    let body = serde_json::to_vec(&json!({
-                        "apiVersion": "crabka.io/v1alpha1",
-                        "kind": "Gres",
-                        "metadata": {"name": "fleet", "namespace": "default"},
-                        "spec": {
-                            "kafkaCluster": "demo",
-                            "pgdog": {
-                                "replicas": 1,
-                                "listenPort": 6432,
-                                "adminSecretRef": {"name": "admin", "key": "password"}
-                            },
-                            "compute": {"checkpointPartBytes": 7}
-                        }
-                    }))
-                    .expect("serialize Gres");
-                    Ok::<_, std::convert::Infallible>(
-                        http::Response::builder()
-                            .status(200)
-                            .header(http::header::CONTENT_TYPE, "application/json")
-                            .body(kube::client::Body::from(body))
-                            .expect("response"),
-                    )
-                }
-            }),
-            "default",
-        );
-        let (registry, metrics) = crate::telemetry::new_registry_with_metrics();
-        let ctx = Context::new(
-            client,
-            ConfigArgs::parse_from(["operator"]).config,
-            Arc::new(tokio::sync::Mutex::new(registry)),
-            metrics,
-        );
+        for (compute, expected_path) in [
+            (
+                json!({"checkpointPartBytes": 7}),
+                "spec.compute.checkpointPartBytes",
+            ),
+            (
+                json!({"fdwBrokerDnsTimeoutMs": 0}),
+                "spec.compute.fdwBrokerDnsTimeoutMs",
+            ),
+        ] {
+            let requests = Arc::new(AtomicUsize::new(0));
+            let observed = Arc::clone(&requests);
+            let client = kube::Client::new(
+                service_fn(move |_request| {
+                    let observed = Arc::clone(&observed);
+                    let compute = compute.clone();
+                    async move {
+                        observed.fetch_add(1, Ordering::SeqCst);
+                        let body = serde_json::to_vec(&json!({
+                            "apiVersion": "crabka.io/v1alpha1",
+                            "kind": "Gres",
+                            "metadata": {"name": "fleet", "namespace": "default"},
+                            "spec": {
+                                "kafkaCluster": "demo",
+                                "pgdog": {
+                                    "replicas": 1,
+                                    "listenPort": 6432,
+                                    "adminSecretRef": {"name": "admin", "key": "password"}
+                                },
+                                "compute": compute
+                            }
+                        }))
+                        .expect("serialize Gres");
+                        Ok::<_, std::convert::Infallible>(
+                            http::Response::builder()
+                                .status(200)
+                                .header(http::header::CONTENT_TYPE, "application/json")
+                                .body(kube::client::Body::from(body))
+                                .expect("response"),
+                        )
+                    }
+                }),
+                "default",
+            );
+            let (registry, metrics) = crate::telemetry::new_registry_with_metrics();
+            let ctx = Context::new(
+                client,
+                ConfigArgs::parse_from(["operator"]).config,
+                Arc::new(tokio::sync::Mutex::new(registry)),
+                metrics,
+            );
 
-        let Err(error) = Box::pin(prepare_tenant(&tenant(), &ctx)).await else {
-            panic!("invalid compute policy must fail");
-        };
+            let Err(error) = Box::pin(prepare_tenant(&tenant(), &ctx)).await else {
+                panic!("invalid compute policy must fail");
+            };
 
-        assert!(
-            error
-                .to_string()
-                .contains("spec.compute.checkpointPartBytes"),
-            "got: {error}"
-        );
-        assert!(requests.load(Ordering::SeqCst) == 1);
+            assert!(error.to_string().contains(expected_path), "got: {error}");
+            assert!(
+                requests.load(Ordering::SeqCst) == 1,
+                "validation for {expected_path} performed downstream I/O"
+            );
+        }
     }
 
     #[test]

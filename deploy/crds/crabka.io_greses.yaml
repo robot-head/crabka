@@ -204,6 +204,12 @@ spec:
                     minimum: 1.0
                     nullable: true
                     type: integer
+                  fdwBrokerDnsTimeoutMs:
+                    description: Timeout for resolving Kafka broker hostnames used by the FDW.
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
                   idleSuspendPollIntervalMs:
                     description: Idle-suspend polling interval in milliseconds.
                     format: uint64
