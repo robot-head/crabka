@@ -53,7 +53,7 @@ use crabka_schema_serde::{
 
 use crate::{
     DEFAULT_STREAMS_STATE_STORE_CACHE_MAX_BYTES, StreamsInteractiveQueryQueueCapacity,
-    StreamsJoinRetryBackoff, StreamsRebalanceTimeout,
+    StreamsJoinRetryBackoff, StreamsLeaveHeartbeatTimeout, StreamsRebalanceTimeout,
     dsl::StreamsBuilder,
     error::StreamsClientError,
     runtime::{KafkaStreams, StreamsCommitInterval, StreamsPollInterval, eos::ProcessingGuarantee},
@@ -74,6 +74,7 @@ pub struct StreamsApp {
     commit_interval: StreamsCommitInterval,
     rebalance_timeout: StreamsRebalanceTimeout,
     join_retry_backoff: StreamsJoinRetryBackoff,
+    leave_heartbeat_timeout: StreamsLeaveHeartbeatTimeout,
     broker_dns_timeout: crabka_client_core::ClientDnsTimeout,
     cache_max_bytes: i64,
     interactive_query_queue_capacity: StreamsInteractiveQueryQueueCapacity,
@@ -109,6 +110,9 @@ impl StreamsApp {
         /// Delay between Client Streams initial join retries.
         #[builder(default)]
         join_retry_backoff: StreamsJoinRetryBackoff,
+        /// Deadline for the final Client Streams leave heartbeat during shutdown.
+        #[builder(default)]
+        leave_heartbeat_timeout: StreamsLeaveHeartbeatTimeout,
         /// Deadline for each Kafka broker DNS lookup owned by this process.
         #[builder(default)]
         broker_dns_timeout: crabka_client_core::ClientDnsTimeout,
@@ -135,6 +139,7 @@ impl StreamsApp {
             commit_interval,
             rebalance_timeout,
             join_retry_backoff,
+            leave_heartbeat_timeout,
             broker_dns_timeout,
             cache_max_bytes,
             interactive_query_queue_capacity,
@@ -203,6 +208,7 @@ impl StreamsApp {
             .commit_interval(self.commit_interval.duration())
             .rebalance_timeout(self.rebalance_timeout.duration())
             .join_retry_backoff(self.join_retry_backoff.duration())
+            .leave_heartbeat_timeout(self.leave_heartbeat_timeout.duration())
             .broker_dns_timeout(self.broker_dns_timeout)
             .cache_max_bytes(self.cache_max_bytes)
             .interactive_query_queue_capacity(self.interactive_query_queue_capacity)
@@ -367,5 +373,29 @@ mod tests {
             .join_retry_backoff(backoff)
             .build();
         assert_eq!(overridden.join_retry_backoff, backoff);
+    }
+
+    #[test]
+    fn leave_heartbeat_timeout_uses_typed_default_and_override() {
+        let defaults = StreamsApp::builder()
+            .bootstrap("127.0.0.1:9092")
+            .application_id("leave-default")
+            .schema_registry("http://127.0.0.1:8081")
+            .build();
+        assert_eq!(
+            defaults.leave_heartbeat_timeout,
+            crate::StreamsLeaveHeartbeatTimeout::default()
+        );
+
+        let timeout =
+            crate::StreamsLeaveHeartbeatTimeout::new(std::time::Duration::from_millis(37))
+                .expect("positive timeout");
+        let overridden = StreamsApp::builder()
+            .bootstrap("127.0.0.1:9092")
+            .application_id("leave-override")
+            .schema_registry("http://127.0.0.1:8081")
+            .leave_heartbeat_timeout(timeout)
+            .build();
+        assert_eq!(overridden.leave_heartbeat_timeout, timeout);
     }
 }

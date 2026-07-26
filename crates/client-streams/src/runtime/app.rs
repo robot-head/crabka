@@ -15,8 +15,9 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     error::StreamsClientError,
     membership::{
-        DEFAULT_STREAMS_JOIN_RETRY_BACKOFF, DEFAULT_STREAMS_REBALANCE_TIMEOUT, StreamsEvent,
-        StreamsJoinRetryBackoff, StreamsMembership, StreamsRebalanceTimeout,
+        DEFAULT_STREAMS_JOIN_RETRY_BACKOFF, DEFAULT_STREAMS_LEAVE_HEARTBEAT_TIMEOUT,
+        DEFAULT_STREAMS_REBALANCE_TIMEOUT, StreamsEvent, StreamsJoinRetryBackoff,
+        StreamsLeaveHeartbeatTimeout, StreamsMembership, StreamsRebalanceTimeout,
     },
     processor::serde::Serde,
     runtime::{
@@ -215,6 +216,7 @@ fn validate_runtime_configuration(
     commit_interval: Duration,
     rebalance_timeout: Duration,
     join_retry_backoff: Duration,
+    leave_heartbeat_timeout: Duration,
     cache_max_bytes: i64,
 ) -> Result<
     (
@@ -222,6 +224,7 @@ fn validate_runtime_configuration(
         StreamsCommitInterval,
         StreamsRebalanceTimeout,
         StreamsJoinRetryBackoff,
+        StreamsLeaveHeartbeatTimeout,
         StreamsStateStoreCacheMaxBytes,
     ),
     StreamsClientError,
@@ -234,6 +237,8 @@ fn validate_runtime_configuration(
         StreamsRebalanceTimeout::new(rebalance_timeout).map_err(StreamsClientError::Runtime)?;
     let join_retry_backoff =
         StreamsJoinRetryBackoff::new(join_retry_backoff).map_err(StreamsClientError::Runtime)?;
+    let leave_heartbeat_timeout = StreamsLeaveHeartbeatTimeout::new(leave_heartbeat_timeout)
+        .map_err(StreamsClientError::Runtime)?;
     let cache_max_bytes = StreamsStateStoreCacheMaxBytes::new(cache_max_bytes)
         .map_err(StreamsClientError::Runtime)?;
     Ok((
@@ -241,6 +246,7 @@ fn validate_runtime_configuration(
         commit_interval,
         rebalance_timeout,
         join_retry_backoff,
+        leave_heartbeat_timeout,
         cache_max_bytes,
     ))
 }
@@ -285,6 +291,8 @@ impl KafkaStreams {
         #[builder(default = DEFAULT_STREAMS_COMMIT_INTERVAL)] commit_interval: Duration,
         #[builder(default = DEFAULT_STREAMS_REBALANCE_TIMEOUT)] rebalance_timeout: Duration,
         #[builder(default = DEFAULT_STREAMS_JOIN_RETRY_BACKOFF)] join_retry_backoff: Duration,
+        #[builder(default = DEFAULT_STREAMS_LEAVE_HEARTBEAT_TIMEOUT)]
+        leave_heartbeat_timeout: Duration,
         #[builder(default)] store_backend: crate::store::backend::StoreBackend,
         #[builder(default)] processing_guarantee: crate::runtime::eos::ProcessingGuarantee,
         /// Deadline for each Kafka broker DNS lookup owned by this process.
@@ -303,12 +311,14 @@ impl KafkaStreams {
             commit_interval,
             rebalance_timeout,
             join_retry_backoff,
+            leave_heartbeat_timeout,
             cache_max_bytes,
         ) = validate_runtime_configuration(
             poll_interval,
             commit_interval,
             rebalance_timeout,
             join_retry_backoff,
+            leave_heartbeat_timeout,
             cache_max_bytes,
         )?;
         let cache_max_bytes = cache_max_bytes.bytes();
@@ -362,6 +372,7 @@ impl KafkaStreams {
             .broker_dns_timeout(broker_dns_timeout)
             .rebalance_timeout(rebalance_timeout.duration())
             .join_retry_backoff(join_retry_backoff.duration())
+            .leave_heartbeat_timeout(leave_heartbeat_timeout.duration())
             .build()
             .await?;
         let member_id = membership.member_id().to_string();
@@ -571,7 +582,10 @@ mod tests {
         StreamsInteractiveQueryQueueCapacity, StreamsPollInterval, StreamsStateStoreCacheMaxBytes,
         interactive_query_queue_capacities, validate_runtime_configuration,
     };
-    use crate::{membership::DEFAULT_STREAMS_JOIN_RETRY_BACKOFF, topology::Topology};
+    use crate::{
+        membership::{DEFAULT_STREAMS_JOIN_RETRY_BACKOFF, DEFAULT_STREAMS_LEAVE_HEARTBEAT_TIMEOUT},
+        topology::Topology,
+    };
 
     #[test]
     fn interactive_query_queue_capacity_uses_default_and_valid_override() {
@@ -677,6 +691,7 @@ mod tests {
             Duration::from_secs(5),
             Duration::from_secs(30),
             DEFAULT_STREAMS_JOIN_RETRY_BACKOFF,
+            DEFAULT_STREAMS_LEAVE_HEARTBEAT_TIMEOUT,
             DEFAULT_STREAMS_STATE_STORE_CACHE_MAX_BYTES,
         )
         .expect_err("zero poll interval");
@@ -687,6 +702,7 @@ mod tests {
             Duration::ZERO,
             Duration::from_secs(30),
             DEFAULT_STREAMS_JOIN_RETRY_BACKOFF,
+            DEFAULT_STREAMS_LEAVE_HEARTBEAT_TIMEOUT,
             DEFAULT_STREAMS_STATE_STORE_CACHE_MAX_BYTES,
         )
         .expect_err("zero commit interval");
@@ -697,6 +713,7 @@ mod tests {
             Duration::from_secs(5),
             Duration::from_millis(u64::try_from(i32::MAX).expect("i32 max fits u64") + 1),
             DEFAULT_STREAMS_JOIN_RETRY_BACKOFF,
+            DEFAULT_STREAMS_LEAVE_HEARTBEAT_TIMEOUT,
             DEFAULT_STREAMS_STATE_STORE_CACHE_MAX_BYTES,
         )
         .expect_err("rebalance timeout outside Kafka wire range");
@@ -711,6 +728,7 @@ mod tests {
             Duration::from_secs(5),
             Duration::from_secs(30),
             Duration::ZERO,
+            DEFAULT_STREAMS_LEAVE_HEARTBEAT_TIMEOUT,
             DEFAULT_STREAMS_STATE_STORE_CACHE_MAX_BYTES,
         )
         .expect_err("zero join retry backoff");
@@ -720,11 +738,27 @@ mod tests {
                 .contains("streams join retry backoff")
         );
 
+        let leave_error = validate_runtime_configuration(
+            Duration::from_millis(200),
+            Duration::from_secs(5),
+            Duration::from_secs(30),
+            DEFAULT_STREAMS_JOIN_RETRY_BACKOFF,
+            Duration::ZERO,
+            DEFAULT_STREAMS_STATE_STORE_CACHE_MAX_BYTES,
+        )
+        .expect_err("zero leave heartbeat timeout");
+        assert2::assert!(
+            leave_error
+                .to_string()
+                .contains("streams leave heartbeat timeout")
+        );
+
         let cache_error = validate_runtime_configuration(
             Duration::from_millis(200),
             Duration::from_secs(5),
             Duration::from_secs(30),
             DEFAULT_STREAMS_JOIN_RETRY_BACKOFF,
+            DEFAULT_STREAMS_LEAVE_HEARTBEAT_TIMEOUT,
             -1,
         )
         .expect_err("negative cache budget");
@@ -732,6 +766,30 @@ mod tests {
             cache_error
                 .to_string()
                 .contains("streams state-store cache max bytes")
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_leave_heartbeat_timeout_fails_before_broker_lookup() {
+        let mut topology = Topology::new();
+        let source = topology.add_source::<String, String>("source", ["input"]);
+        topology.add_sink("sink", "output", [&source]);
+        let topology = topology.build("leave-validation").expect("topology");
+
+        let error = KafkaStreams::builder()
+            .bootstrap("invalid.invalid:9092")
+            .application_id("leave-validation")
+            .topology(topology)
+            .leave_heartbeat_timeout(Duration::ZERO)
+            .build()
+            .await
+            .err()
+            .expect("invalid configuration");
+
+        assert2::assert!(
+            error
+                .to_string()
+                .contains("streams leave heartbeat timeout")
         );
     }
 

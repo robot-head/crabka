@@ -33,6 +33,20 @@ pub const DEFAULT_STREAMS_REBALANCE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Default delay between Client Streams initial join retries.
 pub const DEFAULT_STREAMS_JOIN_RETRY_BACKOFF: Duration = Duration::from_millis(200);
 
+/// Default deadline for the final Client Streams leave heartbeat.
+pub const DEFAULT_STREAMS_LEAVE_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn validate_positive_whole_milliseconds(field: &str, value: Duration) -> Result<u64, String> {
+    let milliseconds = MinMaxU128::<1, { u64::MAX as u128 }>::new(value.as_millis())
+        .map_err(|error| format!("{field}: {error}"))?
+        .into_value();
+    let milliseconds = u64::try_from(milliseconds).map_err(|error| format!("{field}: {error}"))?;
+    if Duration::from_millis(milliseconds) != value {
+        return Err(format!("{field} must be a whole number of milliseconds"));
+    }
+    Ok(milliseconds)
+}
+
 /// Positive, whole-millisecond delay between Client Streams initial join retries.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StreamsJoinRetryBackoff(Duration);
@@ -45,16 +59,7 @@ impl StreamsJoinRetryBackoff {
     /// Returns an error for zero, fractional milliseconds, or a value whose
     /// milliseconds cannot be represented as `u64`.
     pub fn new(value: Duration) -> Result<Self, String> {
-        let milliseconds = MinMaxU128::<1, { u64::MAX as u128 }>::new(value.as_millis())
-            .map_err(|error| format!("streams join retry backoff: {error}"))?
-            .into_value();
-        let milliseconds = u64::try_from(milliseconds)
-            .map_err(|error| format!("streams join retry backoff: {error}"))?;
-        if Duration::from_millis(milliseconds) != value {
-            return Err(
-                "streams join retry backoff must be a whole number of milliseconds".to_owned(),
-            );
-        }
+        validate_positive_whole_milliseconds("streams join retry backoff", value)?;
         Ok(Self(value))
     }
 
@@ -79,6 +84,47 @@ impl Default for StreamsJoinRetryBackoff {
     fn default() -> Self {
         Self::new(DEFAULT_STREAMS_JOIN_RETRY_BACKOFF)
             .expect("default streams join retry backoff is valid")
+    }
+}
+
+/// Positive, whole-millisecond deadline for the final leave heartbeat.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StreamsLeaveHeartbeatTimeout(Duration);
+
+impl StreamsLeaveHeartbeatTimeout {
+    /// Validate a final leave-heartbeat timeout.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for zero, fractional milliseconds, or a value whose
+    /// milliseconds cannot be represented as `u64`.
+    pub fn new(value: Duration) -> Result<Self, String> {
+        validate_positive_whole_milliseconds("streams leave heartbeat timeout", value)?;
+        Ok(Self(value))
+    }
+
+    /// Return the validated duration.
+    #[must_use]
+    pub const fn duration(self) -> Duration {
+        self.0
+    }
+
+    /// Return the validated whole milliseconds.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the validated timeout no longer fits in `u64` milliseconds.
+    #[must_use]
+    pub fn milliseconds(self) -> u64 {
+        u64::try_from(self.0.as_millis())
+            .expect("validated streams leave heartbeat timeout fits u64")
+    }
+}
+
+impl Default for StreamsLeaveHeartbeatTimeout {
+    fn default() -> Self {
+        Self::new(DEFAULT_STREAMS_LEAVE_HEARTBEAT_TIMEOUT)
+            .expect("default streams leave heartbeat timeout is valid")
     }
 }
 
@@ -186,6 +232,8 @@ impl StreamsMembership {
         #[builder(into)] instance_id: Option<String>,
         #[builder(default = DEFAULT_STREAMS_REBALANCE_TIMEOUT)] rebalance_timeout: Duration,
         #[builder(default = DEFAULT_STREAMS_JOIN_RETRY_BACKOFF)] join_retry_backoff: Duration,
+        #[builder(default = DEFAULT_STREAMS_LEAVE_HEARTBEAT_TIMEOUT)]
+        leave_heartbeat_timeout: Duration,
         #[builder(default)] broker_dns_timeout: ClientDnsTimeout,
         security: Option<crabka_client_core::security::ClientSecurity>,
         schema_prewarm: Option<std::sync::Arc<dyn SchemaPrewarm>>,
@@ -196,6 +244,8 @@ impl StreamsMembership {
         let rebalance_timeout =
             StreamsRebalanceTimeout::new(rebalance_timeout).map_err(StreamsClientError::Runtime)?;
         let join_retry_backoff = StreamsJoinRetryBackoff::new(join_retry_backoff)
+            .map_err(StreamsClientError::Runtime)?;
+        let leave_heartbeat_timeout = StreamsLeaveHeartbeatTimeout::new(leave_heartbeat_timeout)
             .map_err(StreamsClientError::Runtime)?;
         if let Some(prewarm) = &schema_prewarm {
             prewarm.prewarm().await?;
@@ -279,6 +329,7 @@ impl StreamsMembership {
             owned_warmup,
             tracker: tracker.clone(),
             heartbeat_interval: hb_interval,
+            leave_heartbeat_timeout: leave_heartbeat_timeout.duration(),
             events: events_tx,
             last_assignment: tokio::sync::Mutex::new(initial),
         };
@@ -439,9 +490,9 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        COORDINATOR_LOAD_IN_PROGRESS, StreamsJoinRetryBackoff, StreamsRebalanceTimeout,
-        build_join_heartbeat, heartbeat_interval, join_retry_delay, map_error,
-        should_emit_statuses,
+        COORDINATOR_LOAD_IN_PROGRESS, StreamsJoinRetryBackoff, StreamsLeaveHeartbeatTimeout,
+        StreamsRebalanceTimeout, build_join_heartbeat, heartbeat_interval, join_retry_delay,
+        map_error, should_emit_statuses,
     };
     use crate::{
         error::StreamsClientError, membership::types::TaskOffsetTracker, topology::Topology,
@@ -539,6 +590,66 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn leave_heartbeat_timeout_uses_default_and_valid_override() {
+        let default = StreamsLeaveHeartbeatTimeout::default();
+        check!(default.duration() == Duration::from_secs(5));
+        check!(default.milliseconds() == 5_000);
+
+        let timeout = StreamsLeaveHeartbeatTimeout::new(Duration::from_millis(37))
+            .expect("positive whole milliseconds");
+        check!(timeout.duration() == Duration::from_millis(37));
+        check!(timeout.milliseconds() == 37);
+    }
+
+    #[test]
+    fn leave_heartbeat_timeout_validates_millisecond_boundaries() {
+        check!(StreamsLeaveHeartbeatTimeout::new(Duration::ZERO).is_err());
+        check!(
+            StreamsLeaveHeartbeatTimeout::new(Duration::from_millis(1) + Duration::from_nanos(1))
+                .is_err()
+        );
+        check!(StreamsLeaveHeartbeatTimeout::new(Duration::from_millis(u64::MAX)).is_ok());
+        check!(StreamsLeaveHeartbeatTimeout::new(Duration::from_secs(u64::MAX)).is_err());
+    }
+
+    struct CountingPrewarm(Arc<std::sync::atomic::AtomicUsize>);
+
+    #[async_trait::async_trait]
+    impl super::SchemaPrewarm for CountingPrewarm {
+        async fn prewarm(&self) -> Result<(), StreamsClientError> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_leave_heartbeat_timeout_fails_before_prewarm_or_broker_lookup() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut topology = Topology::new();
+        let source = topology.add_source::<String, String>("source", ["input"]);
+        topology.add_sink("sink", "output", [&source]);
+        let topology = Arc::new(topology.build("leave-validation").expect("topology"));
+
+        let error = super::StreamsMembership::builder()
+            .bootstrap("invalid.invalid:9092")
+            .group_id("leave-validation")
+            .topology(topology)
+            .leave_heartbeat_timeout(Duration::ZERO)
+            .schema_prewarm(Arc::new(CountingPrewarm(Arc::clone(&calls))))
+            .build()
+            .await
+            .err()
+            .expect("invalid configuration");
+
+        check!(
+            error
+                .to_string()
+                .contains("streams leave heartbeat timeout")
+        );
+        check!(calls.load(std::sync::atomic::Ordering::Relaxed) == 0);
     }
 
     #[test]

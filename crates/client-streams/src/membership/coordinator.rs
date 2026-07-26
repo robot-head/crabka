@@ -72,6 +72,7 @@ pub(crate) struct CoordinatorState<T: HeartbeatTransport> {
     /// Tracker containing current and end offsets of all tasks.
     pub tracker: Arc<Mutex<TaskOffsetTracker>>,
     pub heartbeat_interval: Duration,
+    pub leave_heartbeat_timeout: Duration,
     pub events: mpsc::UnboundedSender<StreamsEvent>,
     /// The last assignment emitted, to suppress duplicate `Assigned` events
     /// (the broker re-sends `active_tasks: Some(...)` every heartbeat).
@@ -133,7 +134,7 @@ pub(crate) async fn run<T: HeartbeatTransport>(
         member_epoch: -1,
         ..Default::default()
     });
-    let _ = tokio::time::timeout(Duration::from_secs(5), leave).await;
+    let _ = tokio::time::timeout(state.leave_heartbeat_timeout, leave).await;
 }
 
 #[tracing::instrument(
@@ -318,7 +319,10 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::*;
-    use crate::topology::{NodeHandle, Topology};
+    use crate::{
+        membership::DEFAULT_STREAMS_LEAVE_HEARTBEAT_TIMEOUT,
+        topology::{NodeHandle, Topology},
+    };
 
     // ---------------------------------------------------------------------------
     // Fake transport
@@ -365,6 +369,22 @@ mod tests {
             req: StreamsGroupHeartbeatRequest,
         ) -> Result<StreamsGroupHeartbeatResponse, ClientError> {
             self.as_ref().send_heartbeat(req).await
+        }
+    }
+
+    struct HangingLeaveTransport;
+
+    #[async_trait::async_trait]
+    impl HeartbeatTransport for HangingLeaveTransport {
+        async fn send_heartbeat(
+            &self,
+            req: StreamsGroupHeartbeatRequest,
+        ) -> Result<StreamsGroupHeartbeatResponse, ClientError> {
+            if req.member_epoch == -1 {
+                std::future::pending().await
+            } else {
+                Ok(ok_resp(7, vec![]))
+            }
         }
     }
 
@@ -418,6 +438,7 @@ mod tests {
             owned_warmup: Arc::new(Mutex::new(Vec::new())),
             tracker: Arc::new(Mutex::new(TaskOffsetTracker::default())),
             heartbeat_interval: Duration::from_millis(1),
+            leave_heartbeat_timeout: DEFAULT_STREAMS_LEAVE_HEARTBEAT_TIMEOUT,
             events: tx,
             last_assignment: tokio::sync::Mutex::new(StreamsAssignment::default()),
         };
@@ -619,6 +640,18 @@ mod tests {
         let sent = sent.lock().unwrap();
         // Even with immediate shutdown, leave heartbeat must be sent
         check!(sent.iter().any(|r| r.member_epoch == -1));
+    }
+
+    #[tokio::test]
+    async fn run_loop_bounds_stalled_leave_with_configured_timeout() {
+        let (mut state, _rx) = state_with(HangingLeaveTransport);
+        state.leave_heartbeat_timeout = Duration::from_millis(37);
+        let shutdown = CancellationToken::new();
+        shutdown.cancel();
+
+        tokio::time::timeout(Duration::from_secs(1), run(state, shutdown))
+            .await
+            .expect("configured leave timeout bounds shutdown");
     }
 
     // ---------------------------------------------------------------------------
