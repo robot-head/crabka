@@ -455,6 +455,7 @@ services:
     environment:
       <<: *otlp-env
       OTEL_SERVICE_NAME: demo-stream
+      CRABKA_DEMO_STREAMS_BROKER_DNS_TIMEOUT_MS: "${CRABKA_DEMO_STREAMS_BROKER_DNS_TIMEOUT_MS:-10000}"
       CRABKA_DEMO_BOOTSTRAP: broker:9092
       CRABKA_DEMO_REGISTRY: http://schema-registry:8081
     depends_on:

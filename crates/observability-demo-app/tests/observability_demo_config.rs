@@ -715,3 +715,18 @@ fn alerts_surface_recent_observability_container_restarts() {
         assert2::assert!(alerts.contains(service));
     }
 }
+
+#[test]
+fn streams_dns_timeout_is_configurable_only_on_the_stream_role() {
+    let compose = docker_compose();
+    let stream = compose_service_block(&compose, "demo-stream");
+    assert2::assert!(stream.contains(
+        "CRABKA_DEMO_STREAMS_BROKER_DNS_TIMEOUT_MS: \"${CRABKA_DEMO_STREAMS_BROKER_DNS_TIMEOUT_MS:-10000}\""
+    ));
+    for service in ["demo-produce", "demo-consume"] {
+        assert2::assert!(
+            !compose_service_block(&compose, service)
+                .contains("CRABKA_DEMO_STREAMS_BROKER_DNS_TIMEOUT_MS")
+        );
+    }
+}
