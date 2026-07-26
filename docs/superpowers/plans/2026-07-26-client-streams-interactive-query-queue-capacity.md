@@ -11,8 +11,10 @@
 ## Global Constraints
 
 - Preserve the exact default capacity of `64` for both interactive-query queues.
-- Use `refined_type::rule::GreaterUsize<0>` for the new validated newtype.
-- Accept every positive `usize`; reject zero.
+- Use `refined_type::rule::MinMaxUsize<1, {
+  tokio::sync::Semaphore::MAX_PERMITS }>` for the new validated newtype.
+- Accept `1..=tokio::sync::Semaphore::MAX_PERMITS`; reject values outside that
+  inclusive range.
 - Use one capacity for both `IqRequest` and `Iq2Request` channels.
 - Keep bounded Tokio MPSC behavior, asynchronous backpressure, shutdown behavior, query dispatch, and response handling unchanged.
 - Use typed `StreamsInteractiveQueryQueueCapacity` inputs on both public `StreamsApp` and `KafkaStreams` builders.
@@ -21,7 +23,7 @@
 - Resolve and validate demo configuration before telemetry or external I/O.
 - Expose the deployment variable only on `demo-stream`, defaulting to `64`.
 - Add no CRD: the operator does not own or render a Client Streams workload.
-- Add no per-version settings, unbounded channel, dynamic resizing, enqueue timeout, drop policy, fairness change, queue metric, generic queue abstraction, macro, upper bound, or cross-field rule.
+- Add no per-version settings, unbounded channel, dynamic resizing, enqueue timeout, drop policy, fairness change, queue metric, generic queue abstraction, macro, arbitrary smaller upper bound, or cross-field rule.
 - Leave the test-only 16-entry interactive-query servicer channel unchanged.
 - Run every Cargo command with `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0`; use `--locked` for lock-aware commands.
 - Do not modify `Cargo.lock`.
@@ -77,6 +79,19 @@ fn interactive_query_queue_capacity_rejects_zero() {
 }
 
 #[test]
+fn interactive_query_queue_capacity_matches_tokio_boundaries() {
+    let maximum =
+        StreamsInteractiveQueryQueueCapacity::new(tokio::sync::Semaphore::MAX_PERMITS)
+            .expect("Tokio maximum queue capacity");
+    assert_eq!(maximum.capacity(), tokio::sync::Semaphore::MAX_PERMITS);
+
+    StreamsInteractiveQueryQueueCapacity::new(
+        tokio::sync::Semaphore::MAX_PERMITS + 1,
+    )
+    .expect_err("capacity above Tokio maximum");
+}
+
+#[test]
 fn interactive_query_queues_share_the_configured_capacity() {
     let capacity =
         StreamsInteractiveQueryQueueCapacity::new(37).expect("positive queue capacity");
@@ -121,19 +136,19 @@ Run:
 CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo test -p crabka-client-streams interactive_query_queue_capacity --locked
 ```
 
-Expected: compilation fails because the semantic type, helper, builder inputs,
-and `StreamsApp` field do not exist.
+Expected for the boundary regression: the maximum-plus-one assertion fails
+because the semantic type erroneously accepts a capacity that Tokio rejects.
 
 - [ ] **Step 4: Implement the validated semantic type and pure helper**
 
-In `runtime/app.rs`, import `refined_type::rule::GreaterUsize` and add beside
+In `runtime/app.rs`, import `refined_type::rule::MinMaxUsize` and add beside
 the other public runtime configuration types:
 
 ```rust
 /// Default capacity of each Client Streams interactive-query request queue.
 pub const DEFAULT_STREAMS_INTERACTIVE_QUERY_QUEUE_CAPACITY: usize = 64;
 
-/// Positive capacity shared by the Client Streams interactive-query queues.
+/// Tokio-supported capacity shared by the Client Streams interactive-query queues.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StreamsInteractiveQueryQueueCapacity(usize);
 
@@ -142,9 +157,10 @@ impl StreamsInteractiveQueryQueueCapacity {
     ///
     /// # Errors
     ///
-    /// Returns an error when `value` is zero.
+    /// Returns an error unless `value` is within Tokio's supported channel
+    /// capacity range.
     pub fn new(value: usize) -> Result<Self, String> {
-        GreaterUsize::<0>::new(value)
+        MinMaxUsize::<1, { tokio::sync::Semaphore::MAX_PERMITS }>::new(value)
             .map(|value| Self(value.into_value()))
             .map_err(|error| {
                 format!("streams interactive-query queue capacity: {error}")
@@ -563,7 +579,8 @@ broker-derived heartbeat fallback as configuration.
 Append `## Client Streams Interactive Query Queue Capacity` to
 `docs/configuration-audit.md`. Record:
 
-- the public type, positive-`usize` validation, and shared default of 64;
+- the public type, Tokio-supported inclusive validation range, and shared
+  default of 64;
 - typed ownership in both public builders;
 - the exact `StreamsApp` to `KafkaStreams` to v1/v2 channel flow;
 - unchanged bounded-channel backpressure, shutdown, dispatch, and response

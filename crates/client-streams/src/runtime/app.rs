@@ -8,7 +8,7 @@
 use std::{sync::Arc, time::Duration};
 
 use crabka_client_core::ClientDnsTimeout;
-use refined_type::rule::{GreaterUsize, MinMaxU128};
+use refined_type::rule::{MinMaxU128, MinMaxUsize};
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
@@ -39,7 +39,7 @@ pub const DEFAULT_STREAMS_COMMIT_INTERVAL: Duration = Duration::from_secs(5);
 /// Default capacity of each Client Streams interactive-query request queue.
 pub const DEFAULT_STREAMS_INTERACTIVE_QUERY_QUEUE_CAPACITY: usize = 64;
 
-/// Positive capacity shared by the Client Streams interactive-query queues.
+/// Tokio-supported capacity shared by the Client Streams interactive-query queues.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StreamsInteractiveQueryQueueCapacity(usize);
 
@@ -48,9 +48,10 @@ impl StreamsInteractiveQueryQueueCapacity {
     ///
     /// # Errors
     ///
-    /// Returns an error when `value` is zero.
+    /// Returns an error unless `value` is within Tokio's supported channel
+    /// capacity range.
     pub fn new(value: usize) -> Result<Self, String> {
-        GreaterUsize::<0>::new(value)
+        MinMaxUsize::<1, { tokio::sync::Semaphore::MAX_PERMITS }>::new(value)
             .map(|value| Self(value.into_value()))
             .map_err(|error| format!("streams interactive-query queue capacity: {error}"))
     }
@@ -528,6 +529,17 @@ mod tests {
     fn interactive_query_queue_capacity_rejects_zero() {
         let error = StreamsInteractiveQueryQueueCapacity::new(0).expect_err("zero queue capacity");
         assert2::assert!(error.contains("streams interactive-query queue capacity"));
+    }
+
+    #[test]
+    fn interactive_query_queue_capacity_matches_tokio_boundaries() {
+        let maximum =
+            StreamsInteractiveQueryQueueCapacity::new(tokio::sync::Semaphore::MAX_PERMITS)
+                .expect("Tokio maximum queue capacity");
+        assert_eq!(maximum.capacity(), tokio::sync::Semaphore::MAX_PERMITS);
+
+        StreamsInteractiveQueryQueueCapacity::new(tokio::sync::Semaphore::MAX_PERMITS + 1)
+            .expect_err("capacity above Tokio maximum");
     }
 
     #[test]
