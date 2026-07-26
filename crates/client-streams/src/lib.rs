@@ -902,6 +902,7 @@ pub mod topology;
 
 #[doc(hidden)]
 pub use async_trait::async_trait as __async_trait;
+pub use crabka_client_core::ClientDnsTimeout;
 pub use dsl::{
     BranchedStream, BufferConfig, CogroupedKStream, GlobalKTable, Grouped, JoinWindows, Joined,
     KGroupedStream, KStream, KTable, Materialized, Repartitioned, SessionWindowedCogroupedStream,
