@@ -2122,3 +2122,81 @@ interval and fixed 3-second invalid-response fallback remain defensive protocol
 behavior, are not configuration policy, and are unchanged. Other membership
 and protocol timing, other Client Streams operational values, and the
 repository-wide hardcoded operational-value goal remain open.
+
+## Client Streams Join Retry Backoff
+
+Client Streams now represents the delay between initial join retries with the
+public `StreamsJoinRetryBackoff` semantic type. It accepts exactly positive,
+whole-millisecond durations in `1..=u64::MAX` milliseconds and defaults to
+`DEFAULT_STREAMS_JOIN_RETRY_BACKOFF = 200 ms`. `StreamsApp` owns the typed
+value. The public `KafkaStreams` and `StreamsMembership` builders retain their
+compatible raw-`Duration` inputs and 200-millisecond defaults, but validate
+them at both low-level boundaries: `KafkaStreams` before topology wrapping or
+broker construction, and `StreamsMembership` before schema prewarm or broker
+construction.
+
+The exact live flow is:
+
+```text
+StreamsApp::join_retry_backoff
+  -> KafkaStreams::join_retry_backoff
+  -> StreamsMembership::join_retry_backoff
+  -> initial-join COORDINATOR_LOAD_IN_PROGRESS response
+  -> tokio::time::sleep(configured backoff)
+  -> next initial-join request
+```
+
+Each `COORDINATOR_LOAD_IN_PROGRESS` response receives the same configured
+fixed delay; there is no exponential schedule or jitter. A success or any
+other response code does not take this sleep path and retains its existing
+mapping. The numeric response code, initial join request, retry ordering,
+broker-provided heartbeat interval, fixed invalid-heartbeat fallback,
+subsequent coordinator heartbeat behavior, rebalance timeout, and all other
+protocol behavior are unchanged.
+
+The observability demo exposes `--streams-join-retry-backoff-ms`, backed by
+`CRABKA_DEMO_STREAMS_JOIN_RETRY_BACKOFF_MS`, with CLI over environment over
+the typed 200-millisecond default precedence. Explicit values parse as
+`NonZeroU64` and pass through the public type's validation. Resolution rejects
+the setting for Produce and Consume before telemetry or external I/O. Only the
+`demo-stream` Compose service receives the variable, with
+`${CRABKA_DEMO_STREAMS_JOIN_RETRY_BACKOFF_MS:-200}`. There is no CRD because
+this slice configures the standalone demo Stream process, not an
+operator-managed resource.
+
+Before this section was appended, `tools/audit-runtime-values.sh` reported
+6,233 lines across 1,053 files. The focused search
+
+```text
+rg -n "join_retry_backoff|StreamsJoinRetryBackoff|DEFAULT_STREAMS_JOIN_RETRY_BACKOFF|streams-join-retry-backoff|STREAMS_JOIN_RETRY_BACKOFF|COORDINATOR_LOAD_IN_PROGRESS" crates/client-streams crates/observability-demo-app demo/observability docs/configuration-audit.md
+```
+
+reported 85 lines across 10 files. The exclusive classification is 31 Client
+Streams production references, 13 demo-policy references, one demo-deployment
+reference, 39 test or harness references, one prior-audit reference in this
+file, and zero unresolved-owner references. The categories sum to all 85
+focused lines.
+
+Task 1 verification passed five focused join-retry tests, the focused
+low-level validation test, the Client Streams all-target suite (450 unit tests
+plus every integration and example target), strict all-target Clippy, nightly
+formatting, and diff-hygiene gates. Task 2 verification passed two subprocess
+configuration tests, one focused Compose ownership test, the complete demo
+all-target suite (45 tests), strict all-target Clippy, the live help check,
+nightly formatting, and diff-hygiene gates. The fresh combined final run
+passed the Client Streams and demo all-target suites, strict combined Clippy,
+the exact single-help-flag check, nightly formatting, and diff-hygiene gates.
+`Cargo.lock` remained unchanged.
+
+### Adjacent Pending Policy
+
+This closes only the Client Streams initial-join retry delay. The next
+scanner-visible operational owner with actual production consumers is the
+supervisor interactive-query queue capacity in
+`crates/client-streams/src/runtime/app.rs`: separate v1 and v2 channels each
+have a fixed capacity of 64. `KafkaStreams` store accessors and `query` enqueue
+requests through those senders, and the supervisor `select!` drains both
+receivers into `StreamThread`. Protocol identifiers, wire constants, topology
+names, test values, and the broker-provided heartbeat fallback remain
+invariants rather than configuration. Other Client Streams operational values
+and the repository-wide hardcoded operational-value goal remain open.
