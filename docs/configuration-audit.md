@@ -2072,3 +2072,63 @@ The broker supplies `heartbeat_interval`; its 3-second fallback is defensive
 broker-protocol behavior that remains fixed and is not configuration policy.
 Other membership and protocol timing, other Client Streams operational values,
 and the repository-wide hardcoded operational-value goal remain open.
+
+## Client Streams Rebalance Timeout
+
+Client Streams now represents the client-provided rebalance timeout with the
+public `StreamsRebalanceTimeout` semantic type. It accepts exactly positive,
+whole-millisecond durations in `1..=i32::MAX` milliseconds and defaults to
+`DEFAULT_STREAMS_REBALANCE_TIMEOUT = 30,000 ms`. `StreamsApp` owns the typed
+value. The public `KafkaStreams` and `StreamsMembership` builders retain their
+compatible raw-`Duration` inputs and 30-second defaults, but validate them at
+their boundaries: `KafkaStreams` before broker construction and
+`StreamsMembership` before schema prewarm or broker construction. Invalid
+values therefore cannot reach prewarm or broker I/O.
+
+The validated signed millisecond value reaches both the initial join heartbeat
+and every subsequent coordinator heartbeat. The demo exposes
+`--streams-rebalance-timeout-ms`, backed by
+`CRABKA_DEMO_STREAMS_REBALANCE_TIMEOUT_MS`, with CLI over environment over the
+typed 30,000-ms default precedence. Resolution and validation occur before
+telemetry or external I/O. Only the `demo-stream` Compose service receives the
+variable, with `${CRABKA_DEMO_STREAMS_REBALANCE_TIMEOUT_MS:-30000}`; Produce
+and Consume reject the setting.
+
+Before this section was appended, `tools/audit-runtime-values.sh` reported
+6,223 lines across 1,053 files. The exact focused search
+
+```text
+rg -n "rebalance_timeout|StreamsRebalanceTimeout|DEFAULT_STREAMS_REBALANCE_TIMEOUT|streams-rebalance-timeout|STREAMS_REBALANCE_TIMEOUT" crates/client-streams crates/observability-demo-app demo/observability docs/configuration-audit.md
+```
+
+reported 94 lines across 12 files. The exclusive classification is 33 Client
+Streams production references, 13 completed downstream demo-policy references,
+one demo-deployment reference, 46 test or harness references, one prior-audit
+reference in this file, and zero unresolved-owner references. The categories
+sum to all 94 focused lines.
+
+Task 1 verification passed four focused tests, the Client Streams all-target
+suite (444 library tests plus every integration and example target), strict
+all-target Clippy, formatting, and diff-hygiene gates. Task 2 verification
+passed the typed app test, two demo subprocess tests, the Compose ownership
+test, the complete demo all-target suite (6 library, 6 binary, 24
+configuration, 2 cadence, 2 DNS, and 2 rebalance-timeout subprocess tests),
+strict all-target Clippy, the exact single-help-flag check, formatting, and
+diff-hygiene gates. Its reviewed follow-up added only the narrow test-local
+Clippy allowance already used by Task 1 and passed the focused app test,
+combined strict Clippy, nightly formatting, and commit-diff checks. The fresh
+combined final run passed 445 Client Streams library tests and every
+integration, example, and demo target; strict Clippy, live help, nightly
+formatting, and diff-hygiene gates also passed. The help flag appeared exactly
+once and `Cargo.lock` remained unchanged.
+
+### Adjacent Pending Policy
+
+This closes only the client-provided Client Streams rebalance timeout. The next
+scanner-visible operational owner is the fixed 200-millisecond
+`COORDINATOR_LOAD_IN_PROGRESS` join retry delay in
+`crates/client-streams/src/membership/client.rs`. The broker-provided heartbeat
+interval and fixed 3-second invalid-response fallback remain defensive protocol
+behavior, are not configuration policy, and are unchanged. Other membership
+and protocol timing, other Client Streams operational values, and the
+repository-wide hardcoded operational-value goal remain open.
