@@ -390,6 +390,29 @@ pub(crate) fn kafka_error_if(code: i16, message: Option<String>) -> Option<Kafka
     }
 }
 
+async fn lookup_first<F, I>(
+    host_port: &str,
+    dns_timeout: crabka_client_core::ClientDnsTimeout,
+    lookup: F,
+) -> Result<std::net::SocketAddr, AdminError>
+where
+    F: std::future::Future<Output = std::io::Result<I>>,
+    I: Iterator<Item = std::net::SocketAddr>,
+{
+    let mut addrs = tokio::time::timeout(dns_timeout.duration(), lookup)
+        .await
+        .map_err(|_| {
+            AdminError::Protocol(format!(
+                "DNS lookup {host_port} timed out after {} ms",
+                dns_timeout.milliseconds(),
+            ))
+        })?
+        .map_err(|error| AdminError::Protocol(format!("DNS lookup {host_port}: {error}")))?;
+    addrs
+        .next()
+        .ok_or_else(|| AdminError::Protocol(format!("no addresses for {host_port}")))
+}
+
 /// Short-lived admin client targeting one cluster's controller.
 /// Optionally negotiates TLS/SASL via [`AdminClient::connect_secured`].
 pub struct AdminClient {
@@ -424,6 +447,19 @@ impl AdminClient {
         security: Option<crabka_client_core::security::ClientSecurity>,
     ) -> Result<Self, AdminError> {
         Self::connect_with_options(bootstrap_addrs, Self::opts(security)).await
+    }
+
+    /// Connect with the standard plaintext admin policy and a custom DNS deadline.
+    ///
+    /// # Errors
+    /// Returns `AdminError::Connect { tried }` if no bootstrap address connects.
+    pub async fn connect_with_dns_timeout(
+        bootstrap_addrs: &[String],
+        dns_timeout: crabka_client_core::ClientDnsTimeout,
+    ) -> Result<Self, AdminError> {
+        let mut options = Self::opts(None);
+        options.dns_timeout = dns_timeout;
+        Self::connect_with_options(bootstrap_addrs, options).await
     }
 
     /// Connect using a complete connection-options template.
@@ -473,12 +509,12 @@ impl AdminClient {
         host_port: &str,
         opts: ConnectionOptions,
     ) -> Result<Connection, AdminError> {
-        let mut addrs = tokio::net::lookup_host(host_port)
-            .await
-            .map_err(|e| AdminError::Protocol(format!("DNS lookup {host_port}: {e}")))?;
-        let addr = addrs
-            .next()
-            .ok_or_else(|| AdminError::Protocol(format!("no addresses for {host_port}")))?;
+        let addr = lookup_first(
+            host_port,
+            opts.dns_timeout,
+            tokio::net::lookup_host(host_port),
+        )
+        .await?;
         Connection::connect_with_options(addr, opts)
             .await
             .map_err(AdminError::from)
@@ -838,6 +874,20 @@ mod tests {
         assert2::assert!(res.is_err());
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn dns_lookup_stops_at_connection_option_deadline() {
+        let timeout = crabka_client_core::ClientDnsTimeout::new(Duration::from_millis(37))
+            .expect("positive timeout");
+        let started = tokio::time::Instant::now();
+        let pending =
+            std::future::pending::<std::io::Result<std::vec::IntoIter<std::net::SocketAddr>>>();
+
+        let result = lookup_first("broker.invalid:9092", timeout, pending).await;
+
+        assert2::assert!(result.is_err());
+        assert2::assert!(started.elapsed() == Duration::from_millis(37));
+    }
+
     #[tokio::test]
     async fn custom_options_are_observable_on_initial_dial() {
         let live = ObservedAdminBroker::start(Duration::ZERO).await;
@@ -861,6 +911,22 @@ mod tests {
 
         live.stop();
         slow.stop();
+    }
+
+    #[tokio::test]
+    async fn connect_with_dns_timeout_preserves_admin_defaults() {
+        let live = ObservedAdminBroker::start(Duration::ZERO).await;
+        let timeout = crabka_client_core::ClientDnsTimeout::new(Duration::from_millis(37))
+            .expect("positive timeout");
+        let admin = AdminClient::connect_with_dns_timeout(&[live.addr.to_string()], timeout)
+            .await
+            .expect("admin connects");
+
+        assert2::assert!(admin.options.dns_timeout == timeout);
+        assert2::assert!(admin.options.client_id == "crabka-operator");
+        assert2::assert!(admin.options.connect_timeout == Duration::from_secs(5));
+        assert2::assert!(admin.options.request_timeout == Duration::from_secs(30));
+        live.stop();
     }
 
     #[tokio::test]
