@@ -77,6 +77,11 @@ struct RegistryOptions {
         env = "CRABKA_GRES_REGISTRY_PRODUCER_DNS_TIMEOUT_MS"
     )]
     producer_dns_timeout_ms: Option<RegistryPositiveMillis>,
+    #[arg(
+        long = "registry-reader-admin-dns-timeout-ms",
+        env = "CRABKA_GRES_REGISTRY_READER_ADMIN_DNS_TIMEOUT_MS"
+    )]
+    reader_admin_dns_timeout_ms: Option<RegistryPositiveMillis>,
 }
 
 impl RegistryOptions {
@@ -85,6 +90,14 @@ impl RegistryOptions {
             || {
                 RegistryPolicy::default()
                     .producer_dns_timeout()
+                    .milliseconds()
+            },
+            RegistryPositiveMillis::into_value,
+        );
+        let reader_admin_dns_timeout_ms = self.reader_admin_dns_timeout_ms.map_or_else(
+            || {
+                RegistryPolicy::default()
+                    .reader_admin_dns_timeout()
                     .milliseconds()
             },
             RegistryPositiveMillis::into_value,
@@ -100,6 +113,8 @@ impl RegistryOptions {
         .expect("validated registry options")
         .with_producer_dns_timeout_ms(producer_dns_timeout_ms)
         .expect("validated registry producer DNS timeout")
+        .with_reader_admin_dns_timeout_ms(reader_admin_dns_timeout_ms)
+        .expect("validated registry reader/admin DNS timeout")
     }
 }
 
@@ -148,7 +163,7 @@ mod tests {
     use super::Args;
 
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    const CLEAN_CONFIG_ENV: [(&str, Option<&str>); 11] = [
+    const CLEAN_CONFIG_ENV: [(&str, Option<&str>); 12] = [
         ("CRABKA_GRES_ACTIVATOR_LISTEN", None),
         ("CRABKA_GRES_ACTIVATOR_BOOTSTRAP", None),
         ("CRABKA_GRES_ACTIVATOR_REGISTRY_POLL_MS", None),
@@ -159,6 +174,7 @@ mod tests {
         ("CRABKA_GRES_REGISTRY_FETCH_MAX_WAIT_MS", None),
         ("CRABKA_GRES_REGISTRY_FETCH_PARTITION_MAX_BYTES", None),
         ("CRABKA_GRES_REGISTRY_PRODUCER_DNS_TIMEOUT_MS", None),
+        ("CRABKA_GRES_REGISTRY_READER_ADMIN_DNS_TIMEOUT_MS", None),
         ("CRABKA_GRES_ACTIVATOR_BACKEND_ENDPOINT_TEMPLATE", None),
     ];
 
@@ -197,6 +213,7 @@ mod tests {
                 "--registry-fetch-max-wait-ms=0",
                 "--registry-fetch-partition-max-bytes=0",
                 "--registry-producer-dns-timeout-ms=0",
+                "--registry-reader-admin-dns-timeout-ms=0",
                 "--backend-endpoint-template=",
             ] {
                 assert!(
@@ -251,6 +268,10 @@ mod tests {
                     ),
                     ("CRABKA_GRES_REGISTRY_PRODUCER_DNS_TIMEOUT_MS", Some("37")),
                     (
+                        "CRABKA_GRES_REGISTRY_READER_ADMIN_DNS_TIMEOUT_MS",
+                        Some("37"),
+                    ),
+                    (
                         "CRABKA_GRES_ACTIVATOR_BACKEND_ENDPOINT_TEMPLATE",
                         Some("env-backend:5432"),
                     ),
@@ -265,7 +286,9 @@ mod tests {
                     let environment_policy = RegistryPolicy::new(2, 15_001, 251, 501, 1_048_577)
                         .expect("policy")
                         .with_producer_dns_timeout_ms(37)
-                        .expect("environment DNS timeout");
+                        .expect("environment DNS timeout")
+                        .with_reader_admin_dns_timeout_ms(37)
+                        .expect("environment reader/admin DNS timeout");
                     assert!(from_env.registry.policy() == environment_policy);
                     assert!(from_env.backend_endpoint_template.into_value() == "env-backend:5432");
 
@@ -281,6 +304,7 @@ mod tests {
                         "--registry-fetch-max-wait-ms=502",
                         "--registry-fetch-partition-max-bytes=1048578",
                         "--registry-producer-dns-timeout-ms=47",
+                        "--registry-reader-admin-dns-timeout-ms=47",
                         "--backend-endpoint-template=cli-backend:5432",
                     ])
                     .expect("parse CLI over environment");
@@ -291,7 +315,9 @@ mod tests {
                     let cli_policy = RegistryPolicy::new(3, 15_002, 252, 502, 1_048_578)
                         .expect("policy")
                         .with_producer_dns_timeout_ms(47)
-                        .expect("CLI DNS timeout");
+                        .expect("CLI DNS timeout")
+                        .with_reader_admin_dns_timeout_ms(47)
+                        .expect("CLI reader/admin DNS timeout");
                     assert!(from_cli.registry.policy() == cli_policy);
                     assert!(from_cli.backend_endpoint_template.into_value() == "cli-backend:5432");
                 },
