@@ -526,11 +526,18 @@ mod tests {
     }
 
     #[test]
-    fn join_retry_backoff_rejects_zero_and_fractional_milliseconds() {
+    fn join_retry_backoff_validates_millisecond_boundaries() {
         check!(StreamsJoinRetryBackoff::new(Duration::ZERO).is_err());
         check!(
             StreamsJoinRetryBackoff::new(Duration::from_millis(1) + Duration::from_nanos(1))
                 .is_err()
+        );
+        check!(StreamsJoinRetryBackoff::new(Duration::from_millis(u64::MAX)).is_ok());
+        check!(
+            StreamsJoinRetryBackoff::new(
+                Duration::from_millis(u64::MAX) + Duration::from_millis(1)
+            )
+            .is_err()
         );
     }
 
