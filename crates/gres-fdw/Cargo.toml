@@ -26,7 +26,7 @@ crabka-pgcatalog = { version = "0.3.9", path = "../pgcatalog" }
 crabka-pgtypes = { version = "0.3.9", path = "../pgtypes" }
 crabka-pgexec = { version = "0.3.9", path = "../pgexec" }
 crabka-pgkv = { version = "0.3.9", path = "../pgkv" }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "test-util"] }
 thiserror = { workspace = true }
 crabka-client-core = { version = "0.3.9", path = "../client-core" }
 crabka-client-admin = { version = "0.3.9", path = "../client-admin" }

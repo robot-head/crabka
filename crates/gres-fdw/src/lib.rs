@@ -22,7 +22,7 @@ pub mod types;
 pub use config::{ConnProfile, ServerProfile, resolve, resolve_server};
 pub use decode::{DecodedValue, Wire, decode_value};
 pub use error::KafkaFdwError;
-pub use source::{FetchPlan, RawRecord, plan_fetch, scan_topic};
+pub use source::{FetchPlan, RawRecord, plan_fetch, scan_topic, scan_topic_with_dns_timeout};
 pub use types::{
     avro_schema_to_columns, json_schema_to_columns, project, protobuf_message_to_columns,
 };
@@ -39,13 +39,33 @@ pub use types::{
 #[derive(Debug, Default)]
 pub struct KafkaFdw {
     default_bootstrap: Option<String>,
+    broker_dns_timeout: crabka_client_core::ClientDnsTimeout,
 }
 
 impl KafkaFdw {
     /// Construct a scanner with an optional default bootstrap address list.
     #[must_use]
     pub fn with_defaults(default_bootstrap: Option<String>) -> Self {
-        Self { default_bootstrap }
+        Self {
+            default_bootstrap,
+            broker_dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
+        }
+    }
+
+    /// Override the broker DNS lookup deadline for this scanner.
+    #[must_use]
+    pub fn with_broker_dns_timeout(
+        mut self,
+        timeout: crabka_client_core::ClientDnsTimeout,
+    ) -> Self {
+        self.broker_dns_timeout = timeout;
+        self
+    }
+
+    /// Return the broker DNS lookup deadline for this scanner.
+    #[must_use]
+    pub fn broker_dns_timeout(&self) -> crabka_client_core::ClientDnsTimeout {
+        self.broker_dns_timeout
     }
 
     /// Return the configured default bootstrap, when this scanner has one.
@@ -96,9 +116,14 @@ impl ForeignScanner for KafkaFdw {
         // a blocking thread).
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                let raws = source::scan_topic(&profile, &profile.topic, bounds)
-                    .await
-                    .map_err(|err| to_exec_err(&err))?;
+                let raws = source::scan_topic_with_dns_timeout(
+                    &profile,
+                    &profile.topic,
+                    bounds,
+                    self.broker_dns_timeout,
+                )
+                .await
+                .map_err(|err| to_exec_err(&err))?;
                 scan::assemble_rows(table, &raws, &profile, &cache)
                     .await
                     .map_err(|err| to_exec_err(&err))
@@ -126,12 +151,13 @@ impl ForeignScanner for KafkaFdw {
             tokio::runtime::Handle::current().block_on(async {
                 // Enumerate every topic via the admin metadata RPC (empty topic
                 // list = all topics, per Kafka semantics).
-                let mut admin =
-                    AdminClient::connect_secured(&profile.bootstrap, profile.security.clone())
-                        .await
-                        .map_err(|e| {
-                            ExecError::Unsupported(format!("import: admin connect: {e}"))
-                        })?;
+                let mut admin = AdminClient::connect_secured_with_dns_timeout(
+                    &profile.bootstrap,
+                    profile.security.clone(),
+                    self.broker_dns_timeout,
+                )
+                .await
+                .map_err(|e| ExecError::Unsupported(format!("import: admin connect: {e}")))?;
                 let meta = admin.metadata(&[]).await.map_err(|e| {
                     ExecError::Unsupported(format!("import: list topics metadata: {e}"))
                 })?;
@@ -271,4 +297,21 @@ async fn fetch_value_columns(
     }
 
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fdw_carries_typed_broker_dns_timeout() {
+        let timeout =
+            crabka_client_core::ClientDnsTimeout::new(std::time::Duration::from_millis(37))
+                .expect("positive timeout");
+        let fdw =
+            KafkaFdw::with_defaults(Some("broker:9092".into())).with_broker_dns_timeout(timeout);
+
+        assert_eq!(fdw.default_bootstrap(), Some("broker:9092"));
+        assert_eq!(fdw.broker_dns_timeout(), timeout);
+    }
 }
