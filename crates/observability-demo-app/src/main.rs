@@ -22,7 +22,7 @@ use crabka_client_consumer::{Consumer, ConsumerRecord};
 use crabka_client_producer::{Acks, Header, Producer, ProducerRecord};
 use crabka_client_streams::{
     ClientDnsTimeout, SchemaSerde, Serde, StreamsCommitInterval, StreamsPollInterval,
-    processor::serde::SerdeRole,
+    StreamsRebalanceTimeout, processor::serde::SerdeRole,
 };
 use crabka_schema_serde::{
     CacheConfig, RegistryClient, SchemaCache, format::protobuf::ProtobufSerde, set_default_registry,
@@ -76,6 +76,9 @@ struct Cli {
     /// Client Streams commit interval in milliseconds.
     #[arg(long, env = "CRABKA_DEMO_STREAMS_COMMIT_INTERVAL_MS")]
     streams_commit_interval_ms: Option<NonZeroU64>,
+    /// Client Streams rebalance timeout in milliseconds.
+    #[arg(long, env = "CRABKA_DEMO_STREAMS_REBALANCE_TIMEOUT_MS")]
+    streams_rebalance_timeout_ms: Option<NonZeroU64>,
 }
 
 fn effective_streams_broker_dns_timeout(cli: &Cli) -> std::io::Result<ClientDnsTimeout> {
@@ -141,11 +144,34 @@ fn effective_streams_runtime_cadence(
     Ok((poll, commit))
 }
 
+fn effective_streams_rebalance_timeout(cli: &Cli) -> std::io::Result<StreamsRebalanceTimeout> {
+    if cli.role != Role::Stream
+        && let Some(milliseconds) = cli.streams_rebalance_timeout_ms
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "--streams-rebalance-timeout-ms ({} ms) is only valid with --role stream",
+                milliseconds.get(),
+            ),
+        ));
+    }
+
+    cli.streams_rebalance_timeout_ms.map_or_else(
+        || Ok(StreamsRebalanceTimeout::default()),
+        |milliseconds| {
+            StreamsRebalanceTimeout::new(Duration::from_millis(milliseconds.get()))
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
+        },
+    )
+}
+
 #[tokio::main]
 async fn main() -> Result<(), BoxError> {
     let cli = Cli::parse();
     let streams_broker_dns_timeout = effective_streams_broker_dns_timeout(&cli)?;
     let (streams_poll_interval, streams_commit_interval) = effective_streams_runtime_cadence(&cli)?;
+    let streams_rebalance_timeout = effective_streams_rebalance_timeout(&cli)?;
 
     let telemetry = crabka_telemetry::init(
         crabka_telemetry::OtlpConfig::from_env(
@@ -175,6 +201,7 @@ async fn main() -> Result<(), BoxError> {
                 streams_broker_dns_timeout,
                 streams_poll_interval,
                 streams_commit_interval,
+                streams_rebalance_timeout,
             )
             .await?;
         }
@@ -309,6 +336,7 @@ async fn run_stream(
     broker_dns_timeout: ClientDnsTimeout,
     streams_poll_interval: StreamsPollInterval,
     streams_commit_interval: StreamsCommitInterval,
+    streams_rebalance_timeout: StreamsRebalanceTimeout,
 ) -> Result<(), BoxError> {
     let app = crabka_client_streams::StreamsApp::builder()
         .bootstrap(cli.bootstrap.clone())
@@ -317,6 +345,7 @@ async fn run_stream(
         .broker_dns_timeout(broker_dns_timeout)
         .poll_interval(streams_poll_interval)
         .commit_interval(streams_commit_interval)
+        .rebalance_timeout(streams_rebalance_timeout)
         .build();
     let topology = app.streams_builder();
     topology
@@ -489,6 +518,7 @@ mod tests {
             streams_broker_dns_timeout_ms: None,
             streams_poll_interval_ms: None,
             streams_commit_interval_ms: None,
+            streams_rebalance_timeout_ms: None,
         };
         assert_eq!(
             effective_streams_broker_dns_timeout(&defaults).expect("typed default"),
@@ -545,6 +575,7 @@ mod tests {
             streams_broker_dns_timeout_ms: None,
             streams_poll_interval_ms: None,
             streams_commit_interval_ms: None,
+            streams_rebalance_timeout_ms: None,
         };
         let (poll, commit) = effective_streams_runtime_cadence(&defaults).expect("typed defaults");
         assert_eq!(poll, crabka_client_streams::StreamsPollInterval::default());
@@ -595,6 +626,75 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "--streams-poll-interval-ms (37 ms) is only valid with --role stream"
+        );
+    }
+
+    #[test]
+    fn streams_rebalance_timeout_uses_default_and_cli_override() {
+        let defaults = Cli {
+            role: Role::Stream,
+            bootstrap: "127.0.0.1:9092".to_owned(),
+            registry: "http://127.0.0.1:8081".to_owned(),
+            input_topic: "orders".to_owned(),
+            output_topic: "order-counts".to_owned(),
+            orders_per_sec: 50,
+            streams_broker_dns_timeout_ms: None,
+            streams_poll_interval_ms: None,
+            streams_commit_interval_ms: None,
+            streams_rebalance_timeout_ms: None,
+        };
+        assert_eq!(
+            effective_streams_rebalance_timeout(&defaults).expect("typed default"),
+            crabka_client_streams::StreamsRebalanceTimeout::default()
+        );
+
+        let overridden = Cli {
+            streams_rebalance_timeout_ms: std::num::NonZeroU64::new(45_000),
+            ..defaults
+        };
+        assert_eq!(
+            effective_streams_rebalance_timeout(&overridden)
+                .expect("typed override")
+                .milliseconds(),
+            45_000
+        );
+    }
+
+    #[test]
+    fn streams_rebalance_timeout_rejects_zero_overflow_and_non_stream_roles() {
+        Cli::try_parse_from([
+            "observability-demo-app",
+            "--role",
+            "stream",
+            "--streams-rebalance-timeout-ms",
+            "0",
+        ])
+        .expect_err("zero must fail in Clap");
+
+        let overflow = Cli::try_parse_from([
+            "observability-demo-app",
+            "--role",
+            "stream",
+            "--streams-rebalance-timeout-ms",
+            "2147483648",
+        ])
+        .expect("parse before typed validation");
+        let error =
+            effective_streams_rebalance_timeout(&overflow).expect_err("i32 overflow must fail");
+        assert!(error.to_string().contains("streams rebalance timeout"));
+
+        let produce = Cli::try_parse_from([
+            "observability-demo-app",
+            "--role",
+            "produce",
+            "--streams-rebalance-timeout-ms",
+            "45000",
+        ])
+        .expect("parse before role validation");
+        let error = effective_streams_rebalance_timeout(&produce).expect_err("Stream-only option");
+        assert_eq!(
+            error.to_string(),
+            "--streams-rebalance-timeout-ms (45000 ms) is only valid with --role stream"
         );
     }
 }
