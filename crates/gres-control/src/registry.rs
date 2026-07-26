@@ -2,7 +2,7 @@
 
 use std::{
     collections::BTreeMap,
-    net::{SocketAddr, ToSocketAddrs},
+    net::SocketAddr,
     str::FromStr,
     sync::{Arc, Mutex as StdMutex, RwLock},
     time::Duration,
@@ -144,6 +144,7 @@ pub struct RegistryPolicy {
     fetch_max_wait_ms: i32,
     fetch_partition_max_bytes: i32,
     producer_dns_timeout: ClientDnsTimeout,
+    reader_admin_dns_timeout: ClientDnsTimeout,
 }
 
 impl RegistryPolicy {
@@ -168,6 +169,7 @@ impl RegistryPolicy {
             fetch_max_wait_ms: PositiveI32::new(fetch_max_wait_ms)?.into_value(),
             fetch_partition_max_bytes: PositiveI32::new(fetch_partition_max_bytes)?.into_value(),
             producer_dns_timeout: ClientDnsTimeout::default(),
+            reader_admin_dns_timeout: ClientDnsTimeout::default(),
         })
     }
 
@@ -215,6 +217,23 @@ impl RegistryPolicy {
     #[must_use = "the validated policy must be used"]
     pub fn with_producer_dns_timeout_ms(mut self, milliseconds: u64) -> Result<Self, String> {
         self.producer_dns_timeout = ClientDnsTimeout::new(Duration::from_millis(milliseconds))?;
+        Ok(self)
+    }
+
+    /// DNS lookup deadline used by registry reader and admin paths.
+    #[must_use]
+    pub const fn reader_admin_dns_timeout(&self) -> ClientDnsTimeout {
+        self.reader_admin_dns_timeout
+    }
+
+    /// Validate and replace the registry reader/admin DNS lookup deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `milliseconds` is zero.
+    #[must_use = "the validated policy must be used"]
+    pub fn with_reader_admin_dns_timeout_ms(mut self, milliseconds: u64) -> Result<Self, String> {
+        self.reader_admin_dns_timeout = ClientDnsTimeout::new(Duration::from_millis(milliseconds))?;
         Ok(self)
     }
 }
@@ -1247,19 +1266,26 @@ impl Registry {
 
     async fn refresh(&self) -> Result<(), ControlError> {
         let bootstrap_addrs = split_bootstrap(&self.bootstrap);
-        let mut admin = AdminClient::connect(&bootstrap_addrs).await?;
+        let mut admin = AdminClient::connect_with_dns_timeout(
+            &bootstrap_addrs,
+            self.policy.reader_admin_dns_timeout(),
+        )
+        .await?;
         let metadata = admin.metadata(&[TENANT_REGISTRY_TOPIC]).await?;
         let entry = metadata
             .topics
             .into_iter()
             .find(|topic| topic.name == TENANT_REGISTRY_TOPIC)
             .ok_or_else(|| ControlError::TopicMissing(TENANT_REGISTRY_TOPIC.to_string()))?;
-        let Some(addr) = resolve_bootstrap_addr(&self.bootstrap) else {
+        let Some(addr) =
+            resolve_bootstrap_addr(&self.bootstrap, self.policy.reader_admin_dns_timeout()).await
+        else {
             return Err(ControlError::TopicMissing(
                 TENANT_REGISTRY_TOPIC.to_string(),
             ));
         };
         let opts = ConnectionOptions {
+            dns_timeout: self.policy.reader_admin_dns_timeout(),
             client_id: "crabka-gres-control-refresh".to_string(),
             ..Default::default()
         };
@@ -1588,7 +1614,9 @@ async fn ensure_compacted_single_partition_topic(
     policy: &RegistryPolicy,
 ) -> Result<crabka_client_admin::TopicMetadataEntry, ControlError> {
     let bootstrap_addrs = split_bootstrap(bootstrap);
-    let mut admin = AdminClient::connect(&bootstrap_addrs).await?;
+    let mut admin =
+        AdminClient::connect_with_dns_timeout(&bootstrap_addrs, policy.reader_admin_dns_timeout())
+            .await?;
     let (spec, timeout_ms) = compacted_topic_request(topic, replicas, policy);
     let outcomes = admin.create_topics(&[spec], timeout_ms).await?;
     if let Some(outcome) = outcomes.into_iter().next() {
@@ -1667,13 +1695,16 @@ fn spawn_reader(
     tokio::spawn(async move {
         let mut next_offset = 0_i64;
         loop {
-            let Some(addr) = resolve_bootstrap_addr(&bootstrap) else {
+            let Some(addr) =
+                resolve_bootstrap_addr(&bootstrap, policy.reader_admin_dns_timeout()).await
+            else {
                 tracing::error!(%bootstrap, "gres control registry reader: bad bootstrap address");
                 tokio::time::sleep(reader_retry_delay(&policy, ReaderFailure::ResolveBootstrap))
                     .await;
                 continue;
             };
             let opts = ConnectionOptions {
+                dns_timeout: policy.reader_admin_dns_timeout(),
                 client_id: "crabka-gres-control-reader".to_string(),
                 ..Default::default()
             };
@@ -1739,11 +1770,25 @@ fn split_bootstrap(bootstrap: &str) -> Vec<String> {
         .collect()
 }
 
-fn resolve_bootstrap_addr(bootstrap: &str) -> Option<SocketAddr> {
-    bootstrap
+async fn resolve_bootstrap_addr(
+    bootstrap: &str,
+    dns_timeout: ClientDnsTimeout,
+) -> Option<SocketAddr> {
+    for entry in bootstrap
         .split(',')
-        .filter_map(|entry| entry.trim().to_socket_addrs().ok())
-        .find_map(|mut addrs| addrs.next())
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+    {
+        let Ok(Ok(mut addrs)) =
+            tokio::time::timeout(dns_timeout.duration(), tokio::net::lookup_host(entry)).await
+        else {
+            continue;
+        };
+        if let Some(addr) = addrs.next() {
+            return Some(addr);
+        }
+    }
+    None
 }
 
 fn to_wire_uuid(id: uuid::Uuid) -> WireUuid {
@@ -1837,6 +1882,33 @@ mod tests {
                 .with_producer_dns_timeout_ms(0)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn registry_reader_admin_dns_defaults_and_replaces_exactly() {
+        let defaults = RegistryPolicy::default();
+        assert!(
+            defaults.reader_admin_dns_timeout() == crabka_client_core::ClientDnsTimeout::default()
+        );
+
+        let policy = defaults
+            .with_reader_admin_dns_timeout_ms(37)
+            .expect("valid DNS timeout");
+        assert!(policy.reader_admin_dns_timeout().milliseconds() == 37);
+        assert!(
+            RegistryPolicy::default()
+                .with_reader_admin_dns_timeout_ms(0)
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn registry_bootstrap_resolver_accepts_typed_deadline() {
+        let timeout = ClientDnsTimeout::new(Duration::from_millis(37)).expect("positive timeout");
+        let addr = resolve_bootstrap_addr("127.0.0.1:9092", timeout)
+            .await
+            .expect("literal address");
+        assert!(addr.port() == 9092);
     }
 
     #[test]
