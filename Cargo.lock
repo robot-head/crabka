@@ -2607,6 +2607,7 @@ dependencies = [
  "proptest",
  "prost 0.14.4",
  "prost-reflect",
+ "refined_type",
  "schemars 1.2.1",
  "serde",
  "serde_json",

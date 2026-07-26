@@ -54,7 +54,7 @@ use crabka_schema_serde::{
 use crate::{
     dsl::StreamsBuilder,
     error::StreamsClientError,
-    runtime::{KafkaStreams, eos::ProcessingGuarantee},
+    runtime::{KafkaStreams, StreamsCommitInterval, StreamsPollInterval, eos::ProcessingGuarantee},
     store::StoreBackend,
     topology::BuiltTopology,
 };
@@ -68,6 +68,8 @@ pub struct StreamsApp {
     cache: Arc<SchemaCache>,
     store_backend: StoreBackend,
     processing_guarantee: ProcessingGuarantee,
+    poll_interval: StreamsPollInterval,
+    commit_interval: StreamsCommitInterval,
     broker_dns_timeout: crabka_client_core::ClientDnsTimeout,
     cache_max_bytes: i64,
 }
@@ -90,6 +92,12 @@ impl StreamsApp {
         cache_config: Option<CacheConfig>,
         #[builder(default)] store_backend: StoreBackend,
         #[builder(default)] processing_guarantee: ProcessingGuarantee,
+        /// Delay between Client Streams processing polls.
+        #[builder(default)]
+        poll_interval: StreamsPollInterval,
+        /// Delay between Client Streams commit attempts.
+        #[builder(default)]
+        commit_interval: StreamsCommitInterval,
         /// Deadline for each Kafka broker DNS lookup owned by this process.
         #[builder(default)]
         broker_dns_timeout: crabka_client_core::ClientDnsTimeout,
@@ -109,6 +117,8 @@ impl StreamsApp {
             cache,
             store_backend,
             processing_guarantee,
+            poll_interval,
+            commit_interval,
             broker_dns_timeout,
             cache_max_bytes,
         }
@@ -172,6 +182,8 @@ impl StreamsApp {
             .topology(topology)
             .store_backend(self.store_backend)
             .processing_guarantee(self.processing_guarantee)
+            .poll_interval(self.poll_interval.duration())
+            .commit_interval(self.commit_interval.duration())
             .broker_dns_timeout(self.broker_dns_timeout)
             .cache_max_bytes(self.cache_max_bytes)
             .build()
@@ -216,5 +228,36 @@ mod tests {
             .broker_dns_timeout(timeout)
             .build();
         assert_eq!(overridden.broker_dns_timeout, timeout);
+    }
+
+    #[test]
+    fn runtime_cadence_uses_typed_defaults_and_independent_overrides() {
+        let defaults = StreamsApp::builder()
+            .bootstrap("127.0.0.1:9092")
+            .application_id("cadence-default")
+            .schema_registry("http://127.0.0.1:8081")
+            .build();
+        assert_eq!(
+            defaults.poll_interval,
+            crate::StreamsPollInterval::default()
+        );
+        assert_eq!(
+            defaults.commit_interval,
+            crate::StreamsCommitInterval::default()
+        );
+
+        let poll = crate::StreamsPollInterval::new(std::time::Duration::from_millis(37))
+            .expect("positive poll interval");
+        let commit = crate::StreamsCommitInterval::new(std::time::Duration::from_millis(41))
+            .expect("positive commit interval");
+        let overridden = StreamsApp::builder()
+            .bootstrap("127.0.0.1:9092")
+            .application_id("cadence-override")
+            .schema_registry("http://127.0.0.1:8081")
+            .poll_interval(poll)
+            .commit_interval(commit)
+            .build();
+        assert_eq!(overridden.poll_interval, poll);
+        assert_eq!(overridden.commit_interval, commit);
     }
 }

@@ -8,6 +8,7 @@
 use std::{sync::Arc, time::Duration};
 
 use crabka_client_core::ClientDnsTimeout;
+use refined_type::rule::MinMaxU128;
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
@@ -27,6 +28,112 @@ use crate::{
     store::iq::StoreKind,
     topology::BuiltTopology,
 };
+
+/// Default delay between Client Streams processing polls.
+pub const DEFAULT_STREAMS_POLL_INTERVAL: Duration = Duration::from_millis(200);
+/// Default delay between Client Streams commit attempts.
+pub const DEFAULT_STREAMS_COMMIT_INTERVAL: Duration = Duration::from_secs(5);
+
+fn validate_positive_whole_milliseconds(field: &str, value: Duration) -> Result<u64, String> {
+    let milliseconds = MinMaxU128::<1, { u64::MAX as u128 }>::new(value.as_millis())
+        .map_err(|error| format!("{field}: {error}"))?
+        .into_value();
+    let milliseconds = u64::try_from(milliseconds).map_err(|error| format!("{field}: {error}"))?;
+    if Duration::from_millis(milliseconds) != value {
+        return Err(format!("{field} must be a whole number of milliseconds"));
+    }
+    Ok(milliseconds)
+}
+
+/// Positive, whole-millisecond Client Streams processing poll interval.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StreamsPollInterval(Duration);
+
+impl StreamsPollInterval {
+    /// Validate a processing poll interval.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for zero, fractional milliseconds, or a value whose
+    /// milliseconds cannot be represented as `u64`.
+    pub fn new(value: Duration) -> Result<Self, String> {
+        validate_positive_whole_milliseconds("streams poll interval", value)?;
+        Ok(Self(value))
+    }
+
+    /// Return the validated duration.
+    #[must_use]
+    pub const fn duration(self) -> Duration {
+        self.0
+    }
+
+    /// Return the validated whole milliseconds.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the validated interval no longer fits in `u64`.
+    #[must_use]
+    pub fn milliseconds(self) -> u64 {
+        u64::try_from(self.0.as_millis()).expect("validated streams poll interval fits u64")
+    }
+}
+
+impl Default for StreamsPollInterval {
+    fn default() -> Self {
+        Self::new(DEFAULT_STREAMS_POLL_INTERVAL).expect("default streams poll interval is valid")
+    }
+}
+
+/// Positive, whole-millisecond Client Streams commit interval.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StreamsCommitInterval(Duration);
+
+impl StreamsCommitInterval {
+    /// Validate a commit interval.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for zero, fractional milliseconds, or a value whose
+    /// milliseconds cannot be represented as `u64`.
+    pub fn new(value: Duration) -> Result<Self, String> {
+        validate_positive_whole_milliseconds("streams commit interval", value)?;
+        Ok(Self(value))
+    }
+
+    /// Return the validated duration.
+    #[must_use]
+    pub const fn duration(self) -> Duration {
+        self.0
+    }
+
+    /// Return the validated whole milliseconds.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the validated interval no longer fits in `u64`.
+    #[must_use]
+    pub fn milliseconds(self) -> u64 {
+        u64::try_from(self.0.as_millis()).expect("validated streams commit interval fits u64")
+    }
+}
+
+impl Default for StreamsCommitInterval {
+    fn default() -> Self {
+        Self::new(DEFAULT_STREAMS_COMMIT_INTERVAL)
+            .expect("default streams commit interval is valid")
+    }
+}
+
+fn validate_runtime_intervals(
+    poll_interval: Duration,
+    commit_interval: Duration,
+) -> Result<(StreamsPollInterval, StreamsCommitInterval), StreamsClientError> {
+    let poll_interval =
+        StreamsPollInterval::new(poll_interval).map_err(StreamsClientError::Runtime)?;
+    let commit_interval =
+        StreamsCommitInterval::new(commit_interval).map_err(StreamsClientError::Runtime)?;
+    Ok((poll_interval, commit_interval))
+}
 
 /// A managed Kafka Streams runtime: joins a streams group, runs assigned tasks
 /// (fetch → process → produce → commit, at-least-once), and reacts to rebalances.
@@ -63,8 +170,8 @@ impl KafkaStreams {
         #[builder(into)] bootstrap: String,
         #[builder(into)] application_id: String,
         topology: BuiltTopology,
-        #[builder(default = Duration::from_millis(200))] poll_interval: Duration,
-        #[builder(default = Duration::from_secs(5))] commit_interval: Duration,
+        #[builder(default = DEFAULT_STREAMS_POLL_INTERVAL)] poll_interval: Duration,
+        #[builder(default = DEFAULT_STREAMS_COMMIT_INTERVAL)] commit_interval: Duration,
         #[builder(default)] store_backend: crate::store::backend::StoreBackend,
         #[builder(default)] processing_guarantee: crate::runtime::eos::ProcessingGuarantee,
         /// Deadline for each Kafka broker DNS lookup owned by this process.
@@ -75,6 +182,8 @@ impl KafkaStreams {
         #[builder(default = 10_485_760)]
         cache_max_bytes: i64,
     ) -> Result<Self, StreamsClientError> {
+        let (poll_interval, commit_interval) =
+            validate_runtime_intervals(poll_interval, commit_interval)?;
         let built = Arc::new(topology);
 
         // Broker I/O. Under EOS-v2 the producer is transactional: the SAME object
@@ -143,8 +252,8 @@ impl KafkaStreams {
                 application_id,
                 cache_max_bytes,
             );
-            let mut poll = tokio::time::interval(poll_interval);
-            let mut commit = tokio::time::interval(commit_interval);
+            let mut poll = tokio::time::interval(poll_interval.duration());
+            let mut commit = tokio::time::interval(commit_interval.duration());
             let tracker = membership.tracker();
             loop {
                 tokio::select! {
@@ -317,5 +426,50 @@ impl KafkaStreams {
         self.shutdown.cancel();
         let _ = self.handle.await;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::{StreamsCommitInterval, StreamsPollInterval, validate_runtime_intervals};
+
+    #[test]
+    fn runtime_intervals_use_typed_defaults_and_valid_overrides() {
+        let poll = StreamsPollInterval::default();
+        let commit = StreamsCommitInterval::default();
+        assert2::assert!(poll.milliseconds() == 200);
+        assert2::assert!(commit.milliseconds() == 5_000);
+
+        let poll = StreamsPollInterval::new(Duration::from_millis(37))
+            .expect("positive whole milliseconds");
+        let commit = StreamsCommitInterval::new(Duration::from_millis(41))
+            .expect("positive whole milliseconds");
+        assert2::assert!(poll.duration() == Duration::from_millis(37));
+        assert2::assert!(commit.duration() == Duration::from_millis(41));
+    }
+
+    #[test]
+    fn runtime_intervals_reject_zero_and_fractional_milliseconds() {
+        assert2::assert!(StreamsPollInterval::new(Duration::ZERO).is_err());
+        assert2::assert!(StreamsCommitInterval::new(Duration::ZERO).is_err());
+        assert2::assert!(
+            StreamsPollInterval::new(Duration::from_millis(1) + Duration::from_nanos(1)).is_err()
+        );
+        assert2::assert!(
+            StreamsCommitInterval::new(Duration::from_millis(1) + Duration::from_nanos(1)).is_err()
+        );
+    }
+
+    #[test]
+    fn low_level_runtime_validation_names_the_invalid_field() {
+        let poll_error = validate_runtime_intervals(Duration::ZERO, Duration::from_secs(5))
+            .expect_err("zero poll interval");
+        assert2::assert!(poll_error.to_string().contains("streams poll interval"));
+
+        let commit_error = validate_runtime_intervals(Duration::from_millis(200), Duration::ZERO)
+            .expect_err("zero commit interval");
+        assert2::assert!(commit_error.to_string().contains("streams commit interval"));
     }
 }
