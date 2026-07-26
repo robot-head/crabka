@@ -7508,10 +7508,18 @@ fn local_checkpoint_root(config: &SubstrateRuntimeConfig) -> Option<&std::path::
 
 /// Register Crabka's Kafka foreign-data scanner with the SQL engine.
 pub fn register_kafka_scanner(engine: &mut SqlEngine) {
-    engine.set_foreign_scanner(Arc::new(
-        crabka_gres_fdw::KafkaFdw::with_defaults(None)
-            .with_broker_dns_timeout(crabka_client_core::ClientDnsTimeout::default()),
-    ));
+    engine.set_foreign_scanner(Arc::new(kafka_scanner(
+        None,
+        crabka_client_core::ClientDnsTimeout::default(),
+    )));
+}
+
+fn kafka_scanner(
+    default_bootstrap: Option<String>,
+    broker_dns_timeout: crabka_client_core::ClientDnsTimeout,
+) -> crabka_gres_fdw::KafkaFdw {
+    crabka_gres_fdw::KafkaFdw::with_defaults(default_bootstrap)
+        .with_broker_dns_timeout(broker_dns_timeout)
 }
 
 /// Register Crabka's Kafka foreign-data scanner with an optional default bootstrap.
@@ -7520,10 +7528,8 @@ pub fn register_kafka_scanner_with_default_bootstrap(
     default_bootstrap: Option<String>,
     broker_dns_timeout: crabka_client_core::ClientDnsTimeout,
 ) {
-    let scanner: Arc<dyn crabka_pgexec::foreign::ForeignScanner> = Arc::new(
-        crabka_gres_fdw::KafkaFdw::with_defaults(default_bootstrap)
-            .with_broker_dns_timeout(broker_dns_timeout),
-    );
+    let scanner: Arc<dyn crabka_pgexec::foreign::ForeignScanner> =
+        Arc::new(kafka_scanner(default_bootstrap, broker_dns_timeout));
     match engine {
         RuntimeEngine::Single(engine) => engine.set_foreign_scanner(scanner),
         RuntimeEngine::Multi(tenant) => tenant.set_foreign_scanner(&scanner),
@@ -10130,6 +10136,26 @@ mod tests {
             .expect_err("zero DNS timeout");
         Cli::try_parse_from(["crabka-gres", "--fdw-broker-dns-timeout-ms=1"])
             .expect("local FDW policy");
+    }
+
+    #[test]
+    fn substrate_fdw_broker_dns_timeout_reaches_registered_scanner() {
+        let args = <Cli as clap::Parser>::try_parse_from([
+            "crabka-gres",
+            "--substrate-bootstrap=memory://",
+            "--tenant=tenant-a",
+            "--fdw-broker-dns-timeout-ms=37",
+        ])
+        .expect("substrate FDW DNS timeout")
+        .serve;
+
+        let scanner = kafka_scanner(
+            kafka_scanner_default_bootstrap(&args),
+            effective_fdw_broker_dns_timeout(&args).expect("valid FDW DNS timeout"),
+        );
+
+        assert_eq!(scanner.default_bootstrap(), Some("memory://"));
+        assert_eq!(scanner.broker_dns_timeout().milliseconds(), 37);
     }
 
     #[test]
