@@ -169,6 +169,12 @@ fn binary_help_exposes_only_single_node_serve_surface() {
     assert!(help.contains("--wal-admin-connect-timeout-ms"));
     assert!(help.contains("--wal-admin-request-timeout-ms"));
     assert!(help.contains("--wal-producer-flush-timeout-ms"));
+    assert_eq!(
+        help.split_whitespace()
+            .filter(|word| *word == "--fdw-broker-dns-timeout-ms")
+            .count(),
+        1
+    );
     assert!(help.contains("--wal-producer-compression"));
     assert!(help.contains("--wal-producer-linger-ms"));
     assert!(help.contains("--wal-producer-batch-bytes"));
