@@ -413,13 +413,7 @@ pub async fn scan_topic_with_dns_timeout(
     Ok(records)
 }
 
-/// Open a single raw [`Connection`] to the first bootstrap address.
-///
-/// `fetch_partition_with_isolation` requires a `&Connection`, and `Connection`
-/// also serves the `ListOffsets` RPCs via [`Connection::send`], so one
-/// connection covers the whole scan. (`Client` exposes neither a fetch method
-/// nor its underlying `Connection`, so there is nothing to be gained by also
-/// building a `Client`.)
+/// Resolve the first address within the configured DNS deadline.
 async fn lookup_first<F, I>(
     host_port: &str,
     dns_timeout: crabka_client_core::ClientDnsTimeout,
@@ -443,6 +437,13 @@ where
         .ok_or_else(|| KafkaFdwError::Other(format!("no addresses for {host_port}")))
 }
 
+/// Open a single raw [`Connection`] to the first bootstrap address.
+///
+/// `fetch_partition_with_isolation` requires a `&Connection`, and `Connection`
+/// also serves the `ListOffsets` RPCs via [`Connection::send`], so one
+/// connection covers the whole scan. (`Client` exposes neither a fetch method
+/// nor its underlying `Connection`, so there is nothing to be gained by also
+/// building a `Client`.)
 async fn open_connection(
     profile: &ConnProfile,
     dns_timeout: crabka_client_core::ClientDnsTimeout,
