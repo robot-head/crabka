@@ -52,7 +52,8 @@ use crabka_schema_serde::{
 };
 
 use crate::{
-    StreamsInteractiveQueryQueueCapacity, StreamsJoinRetryBackoff, StreamsRebalanceTimeout,
+    DEFAULT_STREAMS_STATE_STORE_CACHE_MAX_BYTES, StreamsInteractiveQueryQueueCapacity,
+    StreamsJoinRetryBackoff, StreamsRebalanceTimeout,
     dsl::StreamsBuilder,
     error::StreamsClientError,
     runtime::{KafkaStreams, StreamsCommitInterval, StreamsPollInterval, eos::ProcessingGuarantee},
@@ -113,7 +114,7 @@ impl StreamsApp {
         broker_dns_timeout: crabka_client_core::ClientDnsTimeout,
         /// Record-cache budget (JVM `statestore.cache.max.bytes`); `0` disables
         /// caching. Defaults to 10 MiB, matching the JVM default.
-        #[builder(default = 10_485_760)]
+        #[builder(default = DEFAULT_STREAMS_STATE_STORE_CACHE_MAX_BYTES)]
         cache_max_bytes: i64,
         /// Capacity shared by the v1 and v2 interactive-query request queues.
         #[builder(default)]
@@ -213,6 +214,24 @@ impl StreamsApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn state_store_cache_budget_preserves_raw_builder_default_and_override() {
+        let defaults = StreamsApp::builder()
+            .bootstrap("127.0.0.1:9092")
+            .application_id("cache-default")
+            .schema_registry("http://127.0.0.1:8081")
+            .build();
+        assert_eq!(defaults.cache_max_bytes, 10_485_760);
+
+        let overridden = StreamsApp::builder()
+            .bootstrap("127.0.0.1:9092")
+            .application_id("cache-override")
+            .schema_registry("http://127.0.0.1:8081")
+            .cache_max_bytes(37)
+            .build();
+        assert_eq!(overridden.cache_max_bytes, 37);
+    }
 
     #[test]
     fn interactive_query_queue_capacity_uses_typed_default_and_override() {
