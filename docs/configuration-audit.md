@@ -2006,3 +2006,70 @@ Client Streams operational owner is the runtime cadence pair in
 high-level runtime owner and flow, while membership and protocol timing remain
 separate policy work. Other Client Streams operational values and the
 repository-wide hardcoded operational-value goal remain open.
+
+## Client Streams Runtime Cadence
+
+Client Streams now represents processing cadence with the public
+`StreamsPollInterval` and `StreamsCommitInterval` semantic types. Their exact
+defaults remain `DEFAULT_STREAMS_POLL_INTERVAL = 200 ms` and
+`DEFAULT_STREAMS_COMMIT_INTERVAL = 5,000 ms`. `StreamsApp` stores them in the
+`poll_interval` and `commit_interval` builder fields. The demo exposes
+`--streams-poll-interval-ms` and `--streams-commit-interval-ms`, backed by
+`CRABKA_DEMO_STREAMS_POLL_INTERVAL_MS` and
+`CRABKA_DEMO_STREAMS_COMMIT_INTERVAL_MS`. Only the `demo-stream` Compose
+service passes those variables, with `${CRABKA_DEMO_STREAMS_POLL_INTERVAL_MS:-200}`
+and `${CRABKA_DEMO_STREAMS_COMMIT_INTERVAL_MS:-5000}`. Clap provides the exact
+CLI over environment precedence, and absence of either source selects the
+corresponding typed library default.
+
+The demo parses explicit values as `NonZeroU64`, resolves both typed values
+before telemetry or external I/O, and rejects either option for a non-Stream
+role at that same early boundary. `StreamsPollInterval::new` and
+`StreamsCommitInterval::new` accept only positive, whole-millisecond durations
+whose millisecond count fits in `u64`. The demo forwards the resolved types to
+the matching `StreamsApp` fields. `StreamsApp::run_built` converts them back to
+`Duration` for the compatible low-level `KafkaStreams` builder. That builder
+retains its existing `Duration` inputs and defaults, immediately validates both
+fields before topology wrapping or broker setup, and gives field-specific
+configuration errors. The validated durations then feed the existing
+`tokio::time::interval` poll and commit timers. Direct low-level callers remain
+source-compatible, and Tokio's immediate first ticks and the surrounding
+`select!` ordering are unchanged.
+
+Before this section was appended, `tools/audit-runtime-values.sh` reported
+6,213 lines across 1,053 files. The exact focused search
+
+```text
+rg -n "poll_interval|commit_interval|StreamsPollInterval|StreamsCommitInterval|DEFAULT_STREAMS_(POLL|COMMIT)_INTERVAL|streams-(poll|commit)-interval|STREAMS_(POLL|COMMIT)_INTERVAL" crates/client-streams crates/observability-demo-app demo/observability docs/configuration-audit.md
+```
+
+reported 118 lines across 10 files. The exclusive primary classification is
+38 Client Streams production references, 23 completed downstream demo-policy
+references, two demo-deployment references, 52 test or harness references,
+three prior-audit references in this file, and zero current unresolved-owner
+references. Thus every focused production and deployment path for the 200-ms
+poll interval and 5,000-ms commit interval now enters through the validated
+policy described above.
+
+Task 1 verification passed three focused library tests, including defaults,
+independent overrides, invalid low-level values, and field-specific errors;
+the Client Streams all-target suite (441 library tests plus every integration
+and example target); strict all-target Clippy; formatting; and diff-hygiene
+gates. Existing minute-long direct `KafkaStreams` `Duration` callers compiled
+unchanged. Task 2 verification passed two demo unit tests, two subprocess
+configuration tests, one focused Compose test, the complete demo all-target
+suite (6 library, 4 binary, 24 configuration, 2 cadence subprocess, and 2 DNS
+subprocess tests), strict all-target Clippy, the exact two-help-flag check,
+formatting, and diff-hygiene gates. Its follow-up hermetic subprocess test also
+passed with a hostile inherited DNS-timeout environment.
+
+### Adjacent Pending Policy
+
+This closes only the Client Streams runtime cadence pair. The next coherent
+Client Streams operational owner is membership cadence in
+`crates/client-streams/src/membership/client.rs`: the 30-second
+`rebalance_timeout` default and the 3-second fallback heartbeat interval share
+one membership boundary and remain raw operational values in the scanner
+evidence. Other membership and protocol timing, other Client Streams
+operational values, and the repository-wide hardcoded operational-value goal
+remain open.
