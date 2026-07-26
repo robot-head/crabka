@@ -30,6 +30,62 @@ const COORDINATOR_LOAD_IN_PROGRESS: i16 = 14;
 /// Default Client Streams rebalance timeout.
 pub const DEFAULT_STREAMS_REBALANCE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Default delay between Client Streams initial join retries.
+pub const DEFAULT_STREAMS_JOIN_RETRY_BACKOFF: Duration = Duration::from_millis(200);
+
+/// Positive, whole-millisecond delay between Client Streams initial join retries.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StreamsJoinRetryBackoff(Duration);
+
+impl StreamsJoinRetryBackoff {
+    /// Validate a Client Streams initial join retry backoff.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for zero, fractional milliseconds, or a value whose
+    /// milliseconds cannot be represented as `u64`.
+    pub fn new(value: Duration) -> Result<Self, String> {
+        let milliseconds = MinMaxU128::<1, { u64::MAX as u128 }>::new(value.as_millis())
+            .map_err(|error| format!("streams join retry backoff: {error}"))?
+            .into_value();
+        let milliseconds = u64::try_from(milliseconds)
+            .map_err(|error| format!("streams join retry backoff: {error}"))?;
+        if Duration::from_millis(milliseconds) != value {
+            return Err(
+                "streams join retry backoff must be a whole number of milliseconds".to_owned(),
+            );
+        }
+        Ok(Self(value))
+    }
+
+    /// Return the validated duration.
+    #[must_use]
+    pub const fn duration(self) -> Duration {
+        self.0
+    }
+
+    /// Return the validated whole milliseconds.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the validated duration no longer fits in `u64` milliseconds.
+    #[must_use]
+    pub fn milliseconds(self) -> u64 {
+        u64::try_from(self.0.as_millis()).expect("validated streams join retry backoff fits u64")
+    }
+}
+
+impl Default for StreamsJoinRetryBackoff {
+    fn default() -> Self {
+        Self::new(DEFAULT_STREAMS_JOIN_RETRY_BACKOFF)
+            .expect("default streams join retry backoff is valid")
+    }
+}
+
+fn join_retry_delay(error_code: i16, backoff: StreamsJoinRetryBackoff) -> Option<Duration> {
+    (error_code == COORDINATOR_LOAD_IN_PROGRESS).then(|| backoff.duration())
+}
+
 /// Positive, whole-millisecond rebalance timeout representable on the Kafka wire.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StreamsRebalanceTimeout(Duration);
@@ -129,6 +185,7 @@ impl StreamsMembership {
         #[builder(into)] process_id: Option<String>,
         #[builder(into)] instance_id: Option<String>,
         #[builder(default = DEFAULT_STREAMS_REBALANCE_TIMEOUT)] rebalance_timeout: Duration,
+        #[builder(default = DEFAULT_STREAMS_JOIN_RETRY_BACKOFF)] join_retry_backoff: Duration,
         #[builder(default)] broker_dns_timeout: ClientDnsTimeout,
         security: Option<crabka_client_core::security::ClientSecurity>,
         schema_prewarm: Option<std::sync::Arc<dyn SchemaPrewarm>>,
@@ -138,6 +195,8 @@ impl StreamsMembership {
         }
         let rebalance_timeout =
             StreamsRebalanceTimeout::new(rebalance_timeout).map_err(StreamsClientError::Runtime)?;
+        let join_retry_backoff = StreamsJoinRetryBackoff::new(join_retry_backoff)
+            .map_err(StreamsClientError::Runtime)?;
         if let Some(prewarm) = &schema_prewarm {
             prewarm.prewarm().await?;
         }
@@ -166,8 +225,8 @@ impl StreamsMembership {
                     &topology,
                 ))
                 .await?;
-            if resp.error_code == COORDINATOR_LOAD_IN_PROGRESS {
-                tokio::time::sleep(Duration::from_millis(200)).await;
+            if let Some(delay) = join_retry_delay(resp.error_code, join_retry_backoff) {
+                tokio::time::sleep(delay).await;
                 continue;
             }
             break map_error(resp)?;
@@ -380,7 +439,8 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        StreamsRebalanceTimeout, build_join_heartbeat, heartbeat_interval, map_error,
+        COORDINATOR_LOAD_IN_PROGRESS, StreamsJoinRetryBackoff, StreamsRebalanceTimeout,
+        build_join_heartbeat, heartbeat_interval, join_retry_delay, map_error,
         should_emit_statuses,
     };
     use crate::{
@@ -451,6 +511,39 @@ mod tests {
             ))
             .is_err()
         );
+    }
+
+    #[test]
+    fn join_retry_backoff_uses_default_and_valid_override() {
+        let default = StreamsJoinRetryBackoff::default();
+        check!(default.duration() == Duration::from_millis(200));
+        check!(default.milliseconds() == 200);
+
+        let backoff = StreamsJoinRetryBackoff::new(Duration::from_millis(37))
+            .expect("positive whole milliseconds");
+        check!(backoff.duration() == Duration::from_millis(37));
+        check!(backoff.milliseconds() == 37);
+    }
+
+    #[test]
+    fn join_retry_backoff_rejects_zero_and_fractional_milliseconds() {
+        check!(StreamsJoinRetryBackoff::new(Duration::ZERO).is_err());
+        check!(
+            StreamsJoinRetryBackoff::new(Duration::from_millis(1) + Duration::from_nanos(1))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn join_retry_path_uses_configured_backoff_only_while_coordinator_loads() {
+        let backoff = StreamsJoinRetryBackoff::new(Duration::from_millis(37))
+            .expect("positive whole milliseconds");
+        check!(
+            join_retry_delay(COORDINATOR_LOAD_IN_PROGRESS, backoff)
+                == Some(Duration::from_millis(37))
+        );
+        check!(join_retry_delay(0, backoff).is_none());
+        check!(join_retry_delay(15, backoff).is_none());
     }
 
     #[test]
