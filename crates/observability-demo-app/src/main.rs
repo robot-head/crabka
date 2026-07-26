@@ -11,7 +11,7 @@
 //! streams showcase.
 
 use std::{
-    num::NonZeroU64,
+    num::{NonZeroU64, NonZeroUsize},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -21,8 +21,9 @@ use clap::{Parser, ValueEnum};
 use crabka_client_consumer::{Consumer, ConsumerRecord};
 use crabka_client_producer::{Acks, Header, Producer, ProducerRecord};
 use crabka_client_streams::{
-    ClientDnsTimeout, SchemaSerde, Serde, StreamsCommitInterval, StreamsJoinRetryBackoff,
-    StreamsPollInterval, StreamsRebalanceTimeout, processor::serde::SerdeRole,
+    ClientDnsTimeout, SchemaSerde, Serde, StreamsCommitInterval,
+    StreamsInteractiveQueryQueueCapacity, StreamsJoinRetryBackoff, StreamsPollInterval,
+    StreamsRebalanceTimeout, processor::serde::SerdeRole,
 };
 use crabka_schema_serde::{
     CacheConfig, RegistryClient, SchemaCache, format::protobuf::ProtobufSerde, set_default_registry,
@@ -82,6 +83,9 @@ struct Cli {
     /// Client Streams initial join retry backoff in milliseconds.
     #[arg(long, env = "CRABKA_DEMO_STREAMS_JOIN_RETRY_BACKOFF_MS")]
     streams_join_retry_backoff_ms: Option<NonZeroU64>,
+    /// Capacity shared by the Client Streams interactive-query request queues.
+    #[arg(long, env = "CRABKA_DEMO_STREAMS_INTERACTIVE_QUERY_QUEUE_CAPACITY")]
+    streams_interactive_query_queue_capacity: Option<NonZeroUsize>,
 }
 
 fn effective_streams_broker_dns_timeout(cli: &Cli) -> std::io::Result<ClientDnsTimeout> {
@@ -191,6 +195,30 @@ fn effective_streams_join_retry_backoff(cli: &Cli) -> std::io::Result<StreamsJoi
     )
 }
 
+fn effective_streams_interactive_query_queue_capacity(
+    cli: &Cli,
+) -> std::io::Result<StreamsInteractiveQueryQueueCapacity> {
+    if cli.role != Role::Stream
+        && let Some(capacity) = cli.streams_interactive_query_queue_capacity
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "--streams-interactive-query-queue-capacity ({}) is only valid with --role stream",
+                capacity.get(),
+            ),
+        ));
+    }
+
+    cli.streams_interactive_query_queue_capacity.map_or_else(
+        || Ok(StreamsInteractiveQueryQueueCapacity::default()),
+        |capacity| {
+            StreamsInteractiveQueryQueueCapacity::new(capacity.get())
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
+        },
+    )
+}
+
 #[tokio::main]
 async fn main() -> Result<(), BoxError> {
     let cli = Cli::parse();
@@ -198,6 +226,8 @@ async fn main() -> Result<(), BoxError> {
     let (streams_poll_interval, streams_commit_interval) = effective_streams_runtime_cadence(&cli)?;
     let streams_rebalance_timeout = effective_streams_rebalance_timeout(&cli)?;
     let streams_join_retry_backoff = effective_streams_join_retry_backoff(&cli)?;
+    let streams_interactive_query_queue_capacity =
+        effective_streams_interactive_query_queue_capacity(&cli)?;
 
     let telemetry = crabka_telemetry::init(
         crabka_telemetry::OtlpConfig::from_env(
@@ -229,6 +259,7 @@ async fn main() -> Result<(), BoxError> {
                 streams_commit_interval,
                 streams_rebalance_timeout,
                 streams_join_retry_backoff,
+                streams_interactive_query_queue_capacity,
             )
             .await?;
         }
@@ -365,6 +396,7 @@ async fn run_stream(
     streams_commit_interval: StreamsCommitInterval,
     streams_rebalance_timeout: StreamsRebalanceTimeout,
     streams_join_retry_backoff: StreamsJoinRetryBackoff,
+    streams_interactive_query_queue_capacity: StreamsInteractiveQueryQueueCapacity,
 ) -> Result<(), BoxError> {
     let app = crabka_client_streams::StreamsApp::builder()
         .bootstrap(cli.bootstrap.clone())
@@ -375,6 +407,7 @@ async fn run_stream(
         .commit_interval(streams_commit_interval)
         .rebalance_timeout(streams_rebalance_timeout)
         .join_retry_backoff(streams_join_retry_backoff)
+        .interactive_query_queue_capacity(streams_interactive_query_queue_capacity)
         .build();
     let topology = app.streams_builder();
     topology
@@ -549,6 +582,7 @@ mod tests {
             streams_commit_interval_ms: None,
             streams_rebalance_timeout_ms: None,
             streams_join_retry_backoff_ms: None,
+            streams_interactive_query_queue_capacity: None,
         };
         assert_eq!(
             effective_streams_broker_dns_timeout(&defaults).expect("typed default"),
@@ -607,6 +641,7 @@ mod tests {
             streams_commit_interval_ms: None,
             streams_rebalance_timeout_ms: None,
             streams_join_retry_backoff_ms: None,
+            streams_interactive_query_queue_capacity: None,
         };
         let (poll, commit) = effective_streams_runtime_cadence(&defaults).expect("typed defaults");
         assert_eq!(poll, crabka_client_streams::StreamsPollInterval::default());
@@ -674,6 +709,7 @@ mod tests {
             streams_commit_interval_ms: None,
             streams_rebalance_timeout_ms: None,
             streams_join_retry_backoff_ms: None,
+            streams_interactive_query_queue_capacity: None,
         };
         assert_eq!(
             effective_streams_rebalance_timeout(&defaults).expect("typed default"),
@@ -744,6 +780,7 @@ mod tests {
             streams_commit_interval_ms: None,
             streams_rebalance_timeout_ms: None,
             streams_join_retry_backoff_ms: None,
+            streams_interactive_query_queue_capacity: None,
         };
         assert_eq!(
             effective_streams_join_retry_backoff(&defaults).expect("typed default"),
@@ -758,6 +795,39 @@ mod tests {
             effective_streams_join_retry_backoff(&overridden)
                 .expect("typed override")
                 .milliseconds(),
+            37
+        );
+    }
+
+    #[test]
+    fn streams_interactive_query_queue_capacity_uses_default_and_override() {
+        let defaults = Cli {
+            role: Role::Stream,
+            bootstrap: "127.0.0.1:9092".to_owned(),
+            registry: "http://127.0.0.1:8081".to_owned(),
+            input_topic: "orders".to_owned(),
+            output_topic: "order-counts".to_owned(),
+            orders_per_sec: 50,
+            streams_broker_dns_timeout_ms: None,
+            streams_poll_interval_ms: None,
+            streams_commit_interval_ms: None,
+            streams_rebalance_timeout_ms: None,
+            streams_join_retry_backoff_ms: None,
+            streams_interactive_query_queue_capacity: None,
+        };
+        assert_eq!(
+            effective_streams_interactive_query_queue_capacity(&defaults).expect("typed default"),
+            StreamsInteractiveQueryQueueCapacity::default()
+        );
+
+        let overridden = Cli {
+            streams_interactive_query_queue_capacity: NonZeroUsize::new(37),
+            ..defaults
+        };
+        assert_eq!(
+            effective_streams_interactive_query_queue_capacity(&overridden)
+                .expect("typed override")
+                .capacity(),
             37
         );
     }
