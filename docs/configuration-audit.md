@@ -2200,3 +2200,94 @@ receivers into `StreamThread`. Protocol identifiers, wire constants, topology
 names, test values, and the broker-provided heartbeat fallback remain
 invariants rather than configuration. Other Client Streams operational values
 and the repository-wide hardcoded operational-value goal remain open.
+
+## Client Streams Interactive Query Queue Capacity
+
+Client Streams now represents the capacity shared by its v1 and v2
+interactive-query request queues with the public
+`StreamsInteractiveQueryQueueCapacity` semantic type. It accepts every
+positive `usize`, rejects zero through `GreaterUsize<0>`, and defaults to the
+public `DEFAULT_STREAMS_INTERACTIVE_QUERY_QUEUE_CAPACITY` value of `64`.
+Both public builders own a defaulted typed value: `StreamsApp` carries it
+through `run_built`, and `KafkaStreams` converts the one validated setting into
+the two equal bounded-channel capacities.
+
+The exact live flow is:
+
+```text
+StreamsApp::interactive_query_queue_capacity
+  -> KafkaStreams::interactive_query_queue_capacity
+  -> interactive_query_queue_capacities
+  -> mpsc::channel::<IqRequest>(capacity)
+     <- key-value, window, and session store requests
+     -> supervisor iq_rx branch
+     -> StreamThread::serve_iq
+  -> mpsc::channel::<Iq2Request>(capacity)
+     <- KafkaStreams::query
+     -> supervisor iq2_rx branch
+     -> StreamThread::serve_iq2
+```
+
+The queues remain independently bounded and retain Tokio `send` backpressure.
+Their sender cloning, request and oneshot-response types, validation,
+dispatch, supervisor `select!` branches, shutdown behavior, and v1/v2 response
+handling are unchanged. The separate 16-entry channel in
+`runtime/iq_view.rs` remains a test-only servicer channel and is not part of
+this production policy.
+
+The observability demo exposes
+`--streams-interactive-query-queue-capacity`, backed by
+`CRABKA_DEMO_STREAMS_INTERACTIVE_QUERY_QUEUE_CAPACITY`. Clap provides CLI over
+environment precedence; absence selects the typed library default. Explicit
+values parse as `NonZeroUsize`, and the demo resolves the type and rejects the
+setting for Produce and Consume before telemetry or external I/O. Only the
+`demo-stream` Compose service receives the variable, with
+`${CRABKA_DEMO_STREAMS_INTERACTIVE_QUERY_QUEUE_CAPACITY:-64}`. There is no CRD
+because this setting belongs to the standalone observability demo Stream
+process, not an operator-managed resource.
+
+Before this section was appended, `tools/audit-runtime-values.sh` reported
+6,233 lines across 1,053 files. The exact focused search
+
+```text
+rg -n \
+  "interactive_query_queue_capacity|StreamsInteractiveQueryQueueCapacity|DEFAULT_STREAMS_INTERACTIVE_QUERY_QUEUE_CAPACITY|streams-interactive-query-queue-capacity|STREAMS_INTERACTIVE_QUERY_QUEUE_CAPACITY|mpsc::channel::<Iq(Request|2Request)>\(64\)" \
+  crates/client-streams \
+  crates/observability-demo-app \
+  demo/observability \
+  docs/configuration-audit.md
+```
+
+reported 65 lines across eight files. The exclusive classification is
+17 Client Streams production references, 15 demo-policy references, one
+demo-deployment reference, 32 test or harness references, zero prior-audit
+references, and zero unresolved-owner references. The categories sum to all
+65 focused lines.
+
+Task 1 verification passed three focused tests plus the plural-named shared
+capacity test in the full package run, the Client Streams all-target suite
+(454 library tests plus every integration and example target), strict
+all-target Clippy, nightly formatting, and diff-hygiene gates. Task 2
+verification passed two subprocess configuration tests, one focused Compose
+ownership test, the complete demo all-target suite (48 tests), strict
+all-target Clippy, the exact single-help-flag check, nightly formatting, and
+diff-hygiene gates. `Cargo.lock` remained unchanged in both tasks.
+
+The fresh combined final run passed the 454-test Client Streams library target,
+every Client Streams integration and example target, and all 48 demo tests.
+Strict combined Clippy, the exact single-help-flag check, nightly formatting,
+and diff-hygiene gates also passed. `Cargo.lock` remained unchanged.
+
+### Adjacent Pending Policy
+
+This closes only the Client Streams interactive-query queue capacity. The next
+scanner-visible operational owner with an actual production consumer is the
+state-store record-cache byte budget. Its current `10_485_760`-byte (10 MiB)
+default is owned by `StreamsApp`, passed through `KafkaStreams` into
+`StreamThread`, and supplied to each task topology instantiation, where it
+constructs the cache budget used by eligible materialized state stores.
+Protocol identifiers, wire-format sizes, algorithm constants, topology names,
+test values, the test-only 16-entry query channel, and the broker-derived
+heartbeat fallback remain invariants rather than configuration. Other Client
+Streams operational values and the repository-wide hardcoded-operational-value
+goal remain open.
