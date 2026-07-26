@@ -1841,3 +1841,87 @@ Implementation-task verification reported:
 
 This evidence does not close the Gres FDW or other pending DNS owners, and it
 does not complete the repository-wide configuration goal.
+
+## Gres FDW Broker DNS Timeout
+
+The Gres FDW broker DNS policy reuses client-core's validated
+`ClientDnsTimeout` and its 10,000-millisecond default. Standalone Gres exposes
+the exact `--fdw-broker-dns-timeout-ms` CLI flag and
+`CRABKA_GRES_FDW_BROKER_DNS_TIMEOUT_MS` environment variable. The Gres CRD
+owns optional `spec.compute.fdwBrokerDnsTimeoutMs`, whose checked-in schema has
+`minimum: 1`. CLI input takes precedence over environment input, which takes
+precedence over the typed default; zero is rejected at the CLI or CRD boundary.
+
+The effective value follows:
+
+```text
+Gres.spec.compute.fdwBrokerDnsTimeoutMs
+  -> EffectiveGresComputePolicy
+  -> rendered --fdw-broker-dns-timeout-ms
+  -> ServeArgs
+  -> ClientDnsTimeout
+  -> KafkaFdw
+  -> scan metadata admin connection
+     / scan raw broker lookup
+     / import metadata admin connection
+```
+
+Local and substrate modes resolve the same process policy once when registering
+the scanner. `KafkaFdw` carries that value separately from catalog-derived
+foreign-server options, so SQL cannot override it. Scan metadata and
+`IMPORT FOREIGN SCHEMA` use the secured admin constructor, preserving TLS,
+SASL, bootstrap ordering, and the independent 5-second connect and 30-second
+request defaults. Raw scans preserve first-address selection while bounding
+`lookup_host`; resolver and empty-result errors retain the broker address, and
+deadline errors name both the address and configured milliseconds.
+
+Before this section was appended, `tools/audit-runtime-values.sh` reported
+6,199 lines across 1,052 files. The exact required focused search
+
+```text
+rg -n "lookup_host|ToSocketAddrs|ClientDnsTimeout|dns[_-]timeout|DnsTimeout|fdw-broker-dns-timeout|fdwBrokerDnsTimeoutMs" crates deploy/crds docs/configuration-audit.md
+```
+
+reported 542 lines across 43 files. Every match was classified by its owning
+path and surrounding module: this slice's production flow is in
+`client-admin`, `gres-fdw`, `gres`, and the Gres operator; the five
+`deploy/crds` matches are checked-in schema; matches under test targets and
+`cfg(test)` modules are test or harness evidence; the 59 matches already in
+this file are prior audit evidence. Client-core, WAL recovery and producer,
+and registry producer and reader/admin matches are completed unrelated DNS
+policies. The remaining production resolver matches are unresolved owners,
+including Client Streams, Raft, Schema Registry, and general address-binding
+sites.
+
+### Adjacent Pending Policy
+
+This closes only Kafka broker DNS resolution owned by the Gres FDW. The next
+coherent unresolved DNS owner is Client Streams broker I/O:
+`crates/client-streams/src/runtime/io_broker.rs` contains two direct
+`tokio::net::lookup_host` calls without an independently audited deadline.
+Raft, Schema Registry, and general address-binding sites remain visible
+separate owners. Other FDW connection, request, and fetch operational values
+also remain open, and the repository-wide hardcoded operational-value goal is
+not complete.
+
+### Gres FDW Broker DNS Timeout Evidence
+
+Implementation-task verification reported:
+
+- Client admin: the secured constructor preserved supplied security and the
+  standard admin defaults while changing only DNS policy; all-target tests and
+  strict Clippy passed.
+- Gres FDW: the paused-clock raw resolver test expired at exactly 37
+  milliseconds; scan metadata, raw scan resolution, and import metadata consume
+  the carried policy; 56 tests and strict Clippy passed.
+- Standalone Gres: default, environment, CLI precedence, zero rejection, local
+  and substrate acceptance, exact help, and scanner propagation tests passed;
+  the all-target suite and strict Clippy passed.
+- Operator: schema default, override, minimum, field-specific error,
+  pre-I/O rejection, and exact-once single- and two-range rendering tests
+  passed; 723 library tests and all integration targets passed; strict Clippy
+  passed; all nine generated CRDs were compared and only the expected Gres CRD
+  changed.
+
+This evidence closes only the Gres FDW broker DNS slice. Other FDW operational
+values and the repository-wide configuration goal remain open.
