@@ -2205,9 +2205,11 @@ and the repository-wide hardcoded operational-value goal remain open.
 
 Client Streams now represents the capacity shared by its v1 and v2
 interactive-query request queues with the public
-`StreamsInteractiveQueryQueueCapacity` semantic type. It accepts every
-positive `usize`, rejects zero through `GreaterUsize<0>`, and defaults to the
-public `DEFAULT_STREAMS_INTERACTIVE_QUERY_QUEUE_CAPACITY` value of `64`.
+`StreamsInteractiveQueryQueueCapacity` semantic type. It accepts capacities in
+`1..=tokio::sync::Semaphore::MAX_PERMITS` through
+`MinMaxUsize`, rejects values outside that Tokio-supported range before
+channel construction, and defaults to the public
+`DEFAULT_STREAMS_INTERACTIVE_QUERY_QUEUE_CAPACITY` value of `64`.
 Both public builders own a defaulted typed value: `StreamsApp` carries it
 through `run_built`, and `KafkaStreams` converts the one validated setting into
 the two equal bounded-channel capacities.
@@ -2277,6 +2279,11 @@ The fresh combined final run passed the 454-test Client Streams library target,
 every Client Streams integration and example target, and all 48 demo tests.
 Strict combined Clippy, the exact single-help-flag check, nightly formatting,
 and diff-hygiene gates also passed. `Cargo.lock` remained unchanged.
+
+Final review aligned the public domain with Tokio's actual bounded-channel
+limit. A focused constructor-only boundary test proves
+`tokio::sync::Semaphore::MAX_PERMITS` is accepted and one greater is rejected
+before either MPSC channel can be constructed.
 
 ### Adjacent Pending Policy
 

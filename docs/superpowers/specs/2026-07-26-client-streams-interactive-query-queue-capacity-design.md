@@ -14,14 +14,17 @@ response handling.
 ## Validated Value
 
 Add a public `StreamsInteractiveQueryQueueCapacity` newtype backed by
-`refined_type::rule::GreaterUsize<0>`. It accepts any positive `usize`, exposes
-the validated value through `capacity()`, and defaults to exactly 64.
+`refined_type::rule::MinMaxUsize<1, {
+tokio::sync::Semaphore::MAX_PERMITS }>`. It accepts Tokio's inclusive supported
+channel-capacity range, exposes the validated value through `capacity()`, and
+defaults to exactly 64.
 
 The type derives `Clone`, `Copy`, `Debug`, `Eq`, and `PartialEq`. Its
-constructor documents that zero is rejected.
+constructor documents that values outside Tokio's supported range are
+rejected.
 
-No generic queue policy, channel abstraction, macro, upper bound, or
-cross-field rule is introduced.
+No generic queue policy, channel abstraction, macro, arbitrary smaller upper
+bound, or cross-field rule is introduced.
 
 ## Ownership and Runtime Data Flow
 
@@ -79,12 +82,14 @@ Streams workload.
 
 ## Error Behavior
 
-`StreamsInteractiveQueryQueueCapacity::new(0)` returns a validation error
-identifying the interactive-query queue capacity. Positive values retain their
-exact `usize` representation.
+`StreamsInteractiveQueryQueueCapacity::new(0)` and values above
+`tokio::sync::Semaphore::MAX_PERMITS` return a validation error identifying the
+interactive-query queue capacity. Values in the supported inclusive range
+retain their exact `usize` representation.
 
-Clap rejects zero and malformed demo inputs. Demo role validation and typed
-resolution occur before telemetry initialization or external I/O.
+Clap rejects zero and malformed demo inputs. The typed resolver rejects values
+above Tokio's maximum. Demo role validation and typed resolution occur before
+telemetry initialization or external I/O.
 
 ## Verification
 
@@ -93,6 +98,8 @@ Focused tests prove:
 - the typed default is 64;
 - a distinctive positive override preserves its exact value;
 - zero is rejected;
+- `tokio::sync::Semaphore::MAX_PERMITS` is accepted and one greater is
+  rejected without constructing a channel;
 - the pure helper applies the configured value to both queue capacities;
 - `StreamsApp` stores and forwards its typed default and override;
 - demo environment values are used and CLI values win;
