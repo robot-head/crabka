@@ -62,7 +62,7 @@ assert2 = "0.4"
 # its `Clock`/`NanoClock`/`Sleeper` traits so tests can drive time deterministically
 # with `MockClock`/`MockTime` instead of `thread::sleep`/`tokio::time::sleep`.
 # Enable the `tokio` feature per-crate where async `AsyncSleeper` is needed.
-qubit-clock = "0.8"
+qubit-clock = "0.10"
 # Stable data-driven test harness. Use for file-backed corpora so nextest can
 # schedule each fixture as its own test process.
 datatest-stable = "0.3.3"
