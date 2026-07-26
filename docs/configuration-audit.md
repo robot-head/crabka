@@ -2387,3 +2387,89 @@ the broker-provided heartbeat interval, and its invalid-response fallback
 remain protocol or test invariants rather than configuration policy. Other
 Client Streams operational values and the repository-wide hardcoded
 operational-value goal remain open.
+
+## Client Streams Leave-Heartbeat Timeout
+
+Client Streams now represents the deadline for its final shutdown heartbeat
+with the public `StreamsLeaveHeartbeatTimeout` semantic type. It accepts
+positive, whole-millisecond durations in `1..=u64::MAX` milliseconds and
+defaults to exactly `DEFAULT_STREAMS_LEAVE_HEARTBEAT_TIMEOUT = 5,000 ms`.
+Zero, fractional milliseconds, and durations above the representable
+millisecond range are rejected; zero does not disable the leave attempt.
+
+The public `StreamsMembership` and `KafkaStreams` builders retain compatible
+raw-`Duration` setters and five-second defaults. Direct
+`StreamsMembership::start` validates after the group-id check and before schema
+prewarming or broker lookup. `KafkaStreams::start` validates with the other
+runtime settings before topology wrapping or broker construction.
+`StreamsApp` owns the typed setting and forwards its duration through the exact
+live path:
+
+```text
+StreamsApp
+  -> KafkaStreams
+  -> StreamsMembership
+  -> CoordinatorState
+  -> tokio::time::timeout(configured timeout, final heartbeat)
+```
+
+The final request still carries `member_epoch = -1`. It remains one
+best-effort attempt: timeout, transport error, and broker error are ignored,
+and shutdown continues when the configured deadline expires.
+
+The observability demo exposes
+`--streams-leave-heartbeat-timeout-ms`, backed by
+`CRABKA_DEMO_STREAMS_LEAVE_HEARTBEAT_TIMEOUT_MS`. Clap provides CLI over
+environment precedence; absence selects the typed five-second default.
+Explicit values parse as `NonZeroU64` and pass through the semantic type.
+Resolution rejects the setting for Produce and Consume before telemetry or
+external I/O. Only the `demo-stream` Compose service receives the variable,
+with `${CRABKA_DEMO_STREAMS_LEAVE_HEARTBEAT_TIMEOUT_MS:-5000}`. There is no
+CRD because this setting belongs to the standalone observability demo Stream
+process, not an operator-managed resource.
+
+Before this section was appended, `tools/audit-runtime-values.sh` reported
+6,249 lines across 1,053 files. The exact focused search
+
+```text
+rg -n \
+  "leave_heartbeat_timeout|StreamsLeaveHeartbeatTimeout|DEFAULT_STREAMS_LEAVE_HEARTBEAT_TIMEOUT|streams-leave-heartbeat-timeout-ms|STREAMS_LEAVE_HEARTBEAT_TIMEOUT_MS|member_epoch: -1" \
+  crates/client-streams \
+  crates/observability-demo-app \
+  demo/observability \
+  docs/configuration-audit.md
+```
+
+reported 90 lines across 11 files. The exclusive classification is 33 Client
+Streams production references, 14 demo-policy references, one demo-deployment
+reference, 42 test or harness references, zero prior-audit references, and
+zero unresolved-owner references. The categories sum to all 90 focused lines.
+
+Task 1 verification passed five focused leave-timeout tests, the focused
+configured coordinator deadline test, the focused low-level validation test,
+the Client Streams all-target suite (466 unit tests plus every integration and
+example target), strict all-target Clippy, nightly formatting, and
+diff-hygiene gates. Task 2 verification passed two subprocess configuration
+tests, one focused Compose ownership test, the complete demo all-target suite
+(52 tests), strict all-target Clippy, the exact single-help-flag check, nightly
+formatting, and diff-hygiene gates. `Cargo.lock` remained unchanged in both
+tasks.
+
+The fresh combined final run passed 466 Client Streams library tests, every
+Client Streams integration and example target, and all 52 demo tests. Strict
+combined Clippy, the exact single-help-flag check, nightly formatting, and
+diff-hygiene gates also passed. The help flag appeared exactly once and
+`Cargo.lock` remained unchanged.
+
+### Adjacent Pending Policy
+
+This closes only the Client Streams final leave-heartbeat deadline. The next
+scanner-visible operational owner with real production consumers is the fixed
+five-second Client Consumer leave-group deadline: startup cleanup in
+`crates/client-consumer/src/consumer.rs` and coordinator shutdown in
+`crates/client-consumer/src/coordinator.rs` both bound best-effort sends with
+that value. The separate fixed five-second Share Consumer leave-heartbeat
+deadline in `crates/client-consumer/src/share/coordinator.rs` also remains
+pending and is not part of that owner. Other Client Streams operational
+values, both consumer leave policies, and the repository-wide hardcoded
+operational-value goal remain open.
