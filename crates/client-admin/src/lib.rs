@@ -449,6 +449,21 @@ impl AdminClient {
         Self::connect_with_options(bootstrap_addrs, Self::opts(security)).await
     }
 
+    /// Connect with supplied security and DNS deadline while preserving the
+    /// standard admin identity, TCP-connect timeout, and request timeout.
+    ///
+    /// # Errors
+    /// Returns `AdminError::Connect { tried }` if no bootstrap address connects.
+    pub async fn connect_secured_with_dns_timeout(
+        bootstrap_addrs: &[String],
+        security: Option<crabka_client_core::security::ClientSecurity>,
+        dns_timeout: crabka_client_core::ClientDnsTimeout,
+    ) -> Result<Self, AdminError> {
+        let mut options = Self::opts(security);
+        options.dns_timeout = dns_timeout;
+        Self::connect_with_options(bootstrap_addrs, options).await
+    }
+
     /// Connect with the standard plaintext admin policy and a custom DNS deadline.
     ///
     /// # Errors
@@ -457,9 +472,7 @@ impl AdminClient {
         bootstrap_addrs: &[String],
         dns_timeout: crabka_client_core::ClientDnsTimeout,
     ) -> Result<Self, AdminError> {
-        let mut options = Self::opts(None);
-        options.dns_timeout = dns_timeout;
-        Self::connect_with_options(bootstrap_addrs, options).await
+        Self::connect_secured_with_dns_timeout(bootstrap_addrs, None, dns_timeout).await
     }
 
     /// Connect using a complete connection-options template.
@@ -923,6 +936,36 @@ mod tests {
             .expect("admin connects");
 
         assert2::assert!(admin.options.dns_timeout == timeout);
+        assert2::assert!(admin.options.client_id == "crabka-operator");
+        assert2::assert!(admin.options.connect_timeout == Duration::from_secs(5));
+        assert2::assert!(admin.options.request_timeout == Duration::from_secs(30));
+        live.stop();
+    }
+
+    #[tokio::test]
+    async fn secured_dns_timeout_preserves_security_and_admin_defaults() {
+        let live = ObservedAdminBroker::start(Duration::ZERO).await;
+        let timeout = crabka_client_core::ClientDnsTimeout::new(Duration::from_millis(37))
+            .expect("positive timeout");
+        let security = ClientSecurity {
+            protocol: ListenerProtocol::SaslPlaintext,
+            tls: None,
+            sasl: Some(SaslCredentials::Plain {
+                username: "u".into(),
+                password: "p".into(),
+            }),
+            sasl_host: Some("broker.example".into()),
+        };
+        let admin = AdminClient::connect_secured_with_dns_timeout(
+            &[live.addr.to_string()],
+            Some(security),
+            timeout,
+        )
+        .await
+        .expect("secured admin connects");
+
+        assert2::assert!(admin.options.dns_timeout == timeout);
+        assert2::assert!(admin.options.security.is_some());
         assert2::assert!(admin.options.client_id == "crabka-operator");
         assert2::assert!(admin.options.connect_timeout == Duration::from_secs(5));
         assert2::assert!(admin.options.request_timeout == Duration::from_secs(30));
