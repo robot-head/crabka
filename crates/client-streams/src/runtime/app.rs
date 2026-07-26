@@ -15,7 +15,8 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     error::StreamsClientError,
     membership::{
-        DEFAULT_STREAMS_REBALANCE_TIMEOUT, StreamsEvent, StreamsMembership, StreamsRebalanceTimeout,
+        DEFAULT_STREAMS_JOIN_RETRY_BACKOFF, DEFAULT_STREAMS_REBALANCE_TIMEOUT, StreamsEvent,
+        StreamsJoinRetryBackoff, StreamsMembership, StreamsRebalanceTimeout,
     },
     processor::serde::Serde,
     runtime::{
@@ -130,11 +131,13 @@ fn validate_runtime_configuration(
     poll_interval: Duration,
     commit_interval: Duration,
     rebalance_timeout: Duration,
+    join_retry_backoff: Duration,
 ) -> Result<
     (
         StreamsPollInterval,
         StreamsCommitInterval,
         StreamsRebalanceTimeout,
+        StreamsJoinRetryBackoff,
     ),
     StreamsClientError,
 > {
@@ -144,7 +147,14 @@ fn validate_runtime_configuration(
         StreamsCommitInterval::new(commit_interval).map_err(StreamsClientError::Runtime)?;
     let rebalance_timeout =
         StreamsRebalanceTimeout::new(rebalance_timeout).map_err(StreamsClientError::Runtime)?;
-    Ok((poll_interval, commit_interval, rebalance_timeout))
+    let join_retry_backoff =
+        StreamsJoinRetryBackoff::new(join_retry_backoff).map_err(StreamsClientError::Runtime)?;
+    Ok((
+        poll_interval,
+        commit_interval,
+        rebalance_timeout,
+        join_retry_backoff,
+    ))
 }
 
 /// A managed Kafka Streams runtime: joins a streams group, runs assigned tasks
@@ -185,6 +195,7 @@ impl KafkaStreams {
         #[builder(default = DEFAULT_STREAMS_POLL_INTERVAL)] poll_interval: Duration,
         #[builder(default = DEFAULT_STREAMS_COMMIT_INTERVAL)] commit_interval: Duration,
         #[builder(default = DEFAULT_STREAMS_REBALANCE_TIMEOUT)] rebalance_timeout: Duration,
+        #[builder(default = DEFAULT_STREAMS_JOIN_RETRY_BACKOFF)] join_retry_backoff: Duration,
         #[builder(default)] store_backend: crate::store::backend::StoreBackend,
         #[builder(default)] processing_guarantee: crate::runtime::eos::ProcessingGuarantee,
         /// Deadline for each Kafka broker DNS lookup owned by this process.
@@ -195,8 +206,13 @@ impl KafkaStreams {
         #[builder(default = 10_485_760)]
         cache_max_bytes: i64,
     ) -> Result<Self, StreamsClientError> {
-        let (poll_interval, commit_interval, rebalance_timeout) =
-            validate_runtime_configuration(poll_interval, commit_interval, rebalance_timeout)?;
+        let (poll_interval, commit_interval, rebalance_timeout, join_retry_backoff) =
+            validate_runtime_configuration(
+                poll_interval,
+                commit_interval,
+                rebalance_timeout,
+                join_retry_backoff,
+            )?;
         let built = Arc::new(topology);
 
         // Broker I/O. Under EOS-v2 the producer is transactional: the SAME object
@@ -246,6 +262,7 @@ impl KafkaStreams {
             .topology(Arc::clone(&built))
             .broker_dns_timeout(broker_dns_timeout)
             .rebalance_timeout(rebalance_timeout.duration())
+            .join_retry_backoff(join_retry_backoff.duration())
             .build()
             .await?;
         let member_id = membership.member_id().to_string();
@@ -447,7 +464,10 @@ impl KafkaStreams {
 mod tests {
     use std::time::Duration;
 
-    use super::{StreamsCommitInterval, StreamsPollInterval, validate_runtime_configuration};
+    use super::{
+        KafkaStreams, StreamsCommitInterval, StreamsPollInterval, validate_runtime_configuration,
+    };
+    use crate::{membership::DEFAULT_STREAMS_JOIN_RETRY_BACKOFF, topology::Topology};
 
     #[test]
     fn runtime_intervals_use_typed_defaults_and_valid_overrides() {
@@ -482,6 +502,7 @@ mod tests {
             Duration::ZERO,
             Duration::from_secs(5),
             Duration::from_secs(30),
+            DEFAULT_STREAMS_JOIN_RETRY_BACKOFF,
         )
         .expect_err("zero poll interval");
         assert2::assert!(poll_error.to_string().contains("streams poll interval"));
@@ -490,6 +511,7 @@ mod tests {
             Duration::from_millis(200),
             Duration::ZERO,
             Duration::from_secs(30),
+            DEFAULT_STREAMS_JOIN_RETRY_BACKOFF,
         )
         .expect_err("zero commit interval");
         assert2::assert!(commit_error.to_string().contains("streams commit interval"));
@@ -498,6 +520,7 @@ mod tests {
             Duration::from_millis(200),
             Duration::from_secs(5),
             Duration::from_millis(u64::try_from(i32::MAX).expect("i32 max fits u64") + 1),
+            DEFAULT_STREAMS_JOIN_RETRY_BACKOFF,
         )
         .expect_err("rebalance timeout outside Kafka wire range");
         assert2::assert!(
@@ -505,5 +528,38 @@ mod tests {
                 .to_string()
                 .contains("streams rebalance timeout")
         );
+
+        let join_retry_error = validate_runtime_configuration(
+            Duration::from_millis(200),
+            Duration::from_secs(5),
+            Duration::from_secs(30),
+            Duration::ZERO,
+        )
+        .expect_err("zero join retry backoff");
+        assert2::assert!(
+            join_retry_error
+                .to_string()
+                .contains("streams join retry backoff")
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_join_retry_backoff_fails_before_broker_lookup() {
+        let mut topology = Topology::new();
+        let source = topology.add_source::<String, String>("source", ["input"]);
+        topology.add_sink("sink", "output", [&source]);
+        let topology = topology.build("join-retry-validation").expect("topology");
+
+        let error = KafkaStreams::builder()
+            .bootstrap("invalid.invalid:9092")
+            .application_id("join-retry-validation")
+            .topology(topology)
+            .join_retry_backoff(Duration::ZERO)
+            .build()
+            .await
+            .err()
+            .expect("invalid configuration");
+
+        assert2::assert!(error.to_string().contains("streams join retry backoff"));
     }
 }

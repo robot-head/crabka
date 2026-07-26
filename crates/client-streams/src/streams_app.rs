@@ -52,7 +52,7 @@ use crabka_schema_serde::{
 };
 
 use crate::{
-    StreamsRebalanceTimeout,
+    StreamsJoinRetryBackoff, StreamsRebalanceTimeout,
     dsl::StreamsBuilder,
     error::StreamsClientError,
     runtime::{KafkaStreams, StreamsCommitInterval, StreamsPollInterval, eos::ProcessingGuarantee},
@@ -72,6 +72,7 @@ pub struct StreamsApp {
     poll_interval: StreamsPollInterval,
     commit_interval: StreamsCommitInterval,
     rebalance_timeout: StreamsRebalanceTimeout,
+    join_retry_backoff: StreamsJoinRetryBackoff,
     broker_dns_timeout: crabka_client_core::ClientDnsTimeout,
     cache_max_bytes: i64,
 }
@@ -103,6 +104,9 @@ impl StreamsApp {
         /// Timeout advertised for completing a Client Streams rebalance.
         #[builder(default)]
         rebalance_timeout: StreamsRebalanceTimeout,
+        /// Delay between Client Streams initial join retries.
+        #[builder(default)]
+        join_retry_backoff: StreamsJoinRetryBackoff,
         /// Deadline for each Kafka broker DNS lookup owned by this process.
         #[builder(default)]
         broker_dns_timeout: crabka_client_core::ClientDnsTimeout,
@@ -125,6 +129,7 @@ impl StreamsApp {
             poll_interval,
             commit_interval,
             rebalance_timeout,
+            join_retry_backoff,
             broker_dns_timeout,
             cache_max_bytes,
         }
@@ -191,6 +196,7 @@ impl StreamsApp {
             .poll_interval(self.poll_interval.duration())
             .commit_interval(self.commit_interval.duration())
             .rebalance_timeout(self.rebalance_timeout.duration())
+            .join_retry_backoff(self.join_retry_backoff.duration())
             .broker_dns_timeout(self.broker_dns_timeout)
             .cache_max_bytes(self.cache_max_bytes)
             .build()
@@ -290,5 +296,28 @@ mod tests {
             .rebalance_timeout(timeout)
             .build();
         assert_eq!(overridden.rebalance_timeout, timeout);
+    }
+
+    #[test]
+    fn join_retry_backoff_uses_typed_default_and_override() {
+        let defaults = StreamsApp::builder()
+            .bootstrap("127.0.0.1:9092")
+            .application_id("join-retry-default")
+            .schema_registry("http://127.0.0.1:8081")
+            .build();
+        assert_eq!(
+            defaults.join_retry_backoff,
+            crate::StreamsJoinRetryBackoff::default()
+        );
+
+        let backoff = crate::StreamsJoinRetryBackoff::new(std::time::Duration::from_millis(37))
+            .expect("positive join retry backoff");
+        let overridden = StreamsApp::builder()
+            .bootstrap("127.0.0.1:9092")
+            .application_id("join-retry-override")
+            .schema_registry("http://127.0.0.1:8081")
+            .join_retry_backoff(backoff)
+            .build();
+        assert_eq!(overridden.join_retry_backoff, backoff);
     }
 }
