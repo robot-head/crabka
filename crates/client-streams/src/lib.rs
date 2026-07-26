@@ -925,9 +925,10 @@ pub use processor::{
 };
 pub use runtime::{
     DEFAULT_STREAMS_COMMIT_INTERVAL, DEFAULT_STREAMS_INTERACTIVE_QUERY_QUEUE_CAPACITY,
-    DEFAULT_STREAMS_POLL_INTERVAL, KafkaStreams, ReadOnlyKeyValueStore, ReadOnlySessionStore,
+    DEFAULT_STREAMS_POLL_INTERVAL, DEFAULT_STREAMS_STATE_STORE_CACHE_MAX_BYTES, KafkaStreams,
+    MAX_STREAMS_STATE_STORE_CACHE_MAX_BYTES, ReadOnlyKeyValueStore, ReadOnlySessionStore,
     ReadOnlyWindowStore, StreamsCommitInterval, StreamsInteractiveQueryQueueCapacity,
-    StreamsPollInterval,
+    StreamsPollInterval, StreamsStateStoreCacheMaxBytes,
     eos::ProcessingGuarantee,
     iq::IqError,
     iqv2::{

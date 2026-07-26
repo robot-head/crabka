@@ -8,7 +8,7 @@
 use std::{sync::Arc, time::Duration};
 
 use crabka_client_core::ClientDnsTimeout;
-use refined_type::rule::{MinMaxU128, MinMaxUsize};
+use refined_type::rule::{MinMaxI64, MinMaxU128, MinMaxUsize};
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
@@ -38,6 +38,50 @@ pub const DEFAULT_STREAMS_POLL_INTERVAL: Duration = Duration::from_millis(200);
 pub const DEFAULT_STREAMS_COMMIT_INTERVAL: Duration = Duration::from_secs(5);
 /// Default capacity of each Client Streams interactive-query request queue.
 pub const DEFAULT_STREAMS_INTERACTIVE_QUERY_QUEUE_CAPACITY: usize = 64;
+/// Default Client Streams state-store record-cache budget in bytes.
+pub const DEFAULT_STREAMS_STATE_STORE_CACHE_MAX_BYTES: i64 = 10_485_760;
+
+/// Largest cache budget representable by both the public `i64` API and the
+/// target's internal `usize` cache accounting.
+#[allow(clippy::cast_possible_wrap)]
+pub const MAX_STREAMS_STATE_STORE_CACHE_MAX_BYTES: i64 = if usize::BITS >= i64::BITS {
+    i64::MAX
+} else {
+    usize::MAX as i64
+};
+
+/// Target-supported Client Streams state-store record-cache budget in bytes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StreamsStateStoreCacheMaxBytes(i64);
+
+impl StreamsStateStoreCacheMaxBytes {
+    /// Validate a state-store cache byte budget.
+    ///
+    /// Zero disables caching.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for negative values or values that cannot be represented
+    /// by the target's internal cache accounting.
+    pub fn new(value: i64) -> Result<Self, String> {
+        MinMaxI64::<0, MAX_STREAMS_STATE_STORE_CACHE_MAX_BYTES>::new(value)
+            .map(|value| Self(value.into_value()))
+            .map_err(|error| format!("streams state-store cache max bytes: {error}"))
+    }
+
+    /// Return the validated byte budget.
+    #[must_use]
+    pub const fn bytes(self) -> i64 {
+        self.0
+    }
+}
+
+impl Default for StreamsStateStoreCacheMaxBytes {
+    fn default() -> Self {
+        Self::new(DEFAULT_STREAMS_STATE_STORE_CACHE_MAX_BYTES)
+            .expect("default streams state-store cache max bytes is valid")
+    }
+}
 
 /// Tokio-supported capacity shared by the Client Streams interactive-query queues.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -171,12 +215,14 @@ fn validate_runtime_configuration(
     commit_interval: Duration,
     rebalance_timeout: Duration,
     join_retry_backoff: Duration,
+    cache_max_bytes: i64,
 ) -> Result<
     (
         StreamsPollInterval,
         StreamsCommitInterval,
         StreamsRebalanceTimeout,
         StreamsJoinRetryBackoff,
+        StreamsStateStoreCacheMaxBytes,
     ),
     StreamsClientError,
 > {
@@ -188,11 +234,14 @@ fn validate_runtime_configuration(
         StreamsRebalanceTimeout::new(rebalance_timeout).map_err(StreamsClientError::Runtime)?;
     let join_retry_backoff =
         StreamsJoinRetryBackoff::new(join_retry_backoff).map_err(StreamsClientError::Runtime)?;
+    let cache_max_bytes = StreamsStateStoreCacheMaxBytes::new(cache_max_bytes)
+        .map_err(StreamsClientError::Runtime)?;
     Ok((
         poll_interval,
         commit_interval,
         rebalance_timeout,
         join_retry_backoff,
+        cache_max_bytes,
     ))
 }
 
@@ -243,19 +292,26 @@ impl KafkaStreams {
         broker_dns_timeout: ClientDnsTimeout,
         /// Record-cache budget (JVM `statestore.cache.max.bytes`); `0` disables
         /// caching. Threaded onto each task graph at `instantiate`.
-        #[builder(default = 10_485_760)]
+        #[builder(default = DEFAULT_STREAMS_STATE_STORE_CACHE_MAX_BYTES)]
         cache_max_bytes: i64,
         /// Capacity shared by the v1 and v2 interactive-query request queues.
         #[builder(default)]
         interactive_query_queue_capacity: StreamsInteractiveQueryQueueCapacity,
     ) -> Result<Self, StreamsClientError> {
-        let (poll_interval, commit_interval, rebalance_timeout, join_retry_backoff) =
-            validate_runtime_configuration(
-                poll_interval,
-                commit_interval,
-                rebalance_timeout,
-                join_retry_backoff,
-            )?;
+        let (
+            poll_interval,
+            commit_interval,
+            rebalance_timeout,
+            join_retry_backoff,
+            cache_max_bytes,
+        ) = validate_runtime_configuration(
+            poll_interval,
+            commit_interval,
+            rebalance_timeout,
+            join_retry_backoff,
+            cache_max_bytes,
+        )?;
+        let cache_max_bytes = cache_max_bytes.bytes();
         let built = Arc::new(topology);
 
         // Broker I/O. Under EOS-v2 the producer is transactional: the SAME object
@@ -510,8 +566,10 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        KafkaStreams, StreamsCommitInterval, StreamsInteractiveQueryQueueCapacity,
-        StreamsPollInterval, interactive_query_queue_capacities, validate_runtime_configuration,
+        DEFAULT_STREAMS_STATE_STORE_CACHE_MAX_BYTES, KafkaStreams,
+        MAX_STREAMS_STATE_STORE_CACHE_MAX_BYTES, StreamsCommitInterval,
+        StreamsInteractiveQueryQueueCapacity, StreamsPollInterval, StreamsStateStoreCacheMaxBytes,
+        interactive_query_queue_capacities, validate_runtime_configuration,
     };
     use crate::{membership::DEFAULT_STREAMS_JOIN_RETRY_BACKOFF, topology::Topology};
 
@@ -550,6 +608,42 @@ mod tests {
     }
 
     #[test]
+    fn state_store_cache_max_bytes_uses_default_and_valid_overrides() {
+        let default = StreamsStateStoreCacheMaxBytes::default();
+        assert_eq!(default.bytes(), 10_485_760);
+        assert_eq!(
+            StreamsStateStoreCacheMaxBytes::new(0)
+                .expect("zero disables caching")
+                .bytes(),
+            0
+        );
+        assert_eq!(
+            StreamsStateStoreCacheMaxBytes::new(37)
+                .expect("positive cache budget")
+                .bytes(),
+            37
+        );
+    }
+
+    #[test]
+    fn state_store_cache_max_bytes_rejects_negative_values() {
+        let error = StreamsStateStoreCacheMaxBytes::new(-1).expect_err("negative cache budget");
+        assert2::assert!(error.contains("streams state-store cache max bytes"));
+    }
+
+    #[test]
+    fn state_store_cache_max_bytes_matches_target_boundaries() {
+        let maximum = StreamsStateStoreCacheMaxBytes::new(MAX_STREAMS_STATE_STORE_CACHE_MAX_BYTES)
+            .expect("target-supported maximum");
+        assert_eq!(maximum.bytes(), MAX_STREAMS_STATE_STORE_CACHE_MAX_BYTES);
+
+        if let Some(too_large) = MAX_STREAMS_STATE_STORE_CACHE_MAX_BYTES.checked_add(1) {
+            StreamsStateStoreCacheMaxBytes::new(too_large)
+                .expect_err("value above target-supported maximum");
+        }
+    }
+
+    #[test]
     fn runtime_intervals_use_typed_defaults_and_valid_overrides() {
         let poll = StreamsPollInterval::default();
         let commit = StreamsCommitInterval::default();
@@ -583,6 +677,7 @@ mod tests {
             Duration::from_secs(5),
             Duration::from_secs(30),
             DEFAULT_STREAMS_JOIN_RETRY_BACKOFF,
+            DEFAULT_STREAMS_STATE_STORE_CACHE_MAX_BYTES,
         )
         .expect_err("zero poll interval");
         assert2::assert!(poll_error.to_string().contains("streams poll interval"));
@@ -592,6 +687,7 @@ mod tests {
             Duration::ZERO,
             Duration::from_secs(30),
             DEFAULT_STREAMS_JOIN_RETRY_BACKOFF,
+            DEFAULT_STREAMS_STATE_STORE_CACHE_MAX_BYTES,
         )
         .expect_err("zero commit interval");
         assert2::assert!(commit_error.to_string().contains("streams commit interval"));
@@ -601,6 +697,7 @@ mod tests {
             Duration::from_secs(5),
             Duration::from_millis(u64::try_from(i32::MAX).expect("i32 max fits u64") + 1),
             DEFAULT_STREAMS_JOIN_RETRY_BACKOFF,
+            DEFAULT_STREAMS_STATE_STORE_CACHE_MAX_BYTES,
         )
         .expect_err("rebalance timeout outside Kafka wire range");
         assert2::assert!(
@@ -614,12 +711,27 @@ mod tests {
             Duration::from_secs(5),
             Duration::from_secs(30),
             Duration::ZERO,
+            DEFAULT_STREAMS_STATE_STORE_CACHE_MAX_BYTES,
         )
         .expect_err("zero join retry backoff");
         assert2::assert!(
             join_retry_error
                 .to_string()
                 .contains("streams join retry backoff")
+        );
+
+        let cache_error = validate_runtime_configuration(
+            Duration::from_millis(200),
+            Duration::from_secs(5),
+            Duration::from_secs(30),
+            DEFAULT_STREAMS_JOIN_RETRY_BACKOFF,
+            -1,
+        )
+        .expect_err("negative cache budget");
+        assert2::assert!(
+            cache_error
+                .to_string()
+                .contains("streams state-store cache max bytes")
         );
     }
 
@@ -641,5 +753,29 @@ mod tests {
             .expect("invalid configuration");
 
         assert2::assert!(error.to_string().contains("streams join retry backoff"));
+    }
+
+    #[tokio::test]
+    async fn invalid_state_store_cache_budget_fails_before_broker_lookup() {
+        let mut topology = Topology::new();
+        let source = topology.add_source::<String, String>("source", ["input"]);
+        topology.add_sink("sink", "output", [&source]);
+        let topology = topology.build("cache-budget-validation").expect("topology");
+
+        let error = KafkaStreams::builder()
+            .bootstrap("invalid.invalid:9092")
+            .application_id("cache-budget-validation")
+            .topology(topology)
+            .cache_max_bytes(-1)
+            .build()
+            .await
+            .err()
+            .expect("invalid configuration");
+
+        assert2::assert!(
+            error
+                .to_string()
+                .contains("streams state-store cache max bytes")
+        );
     }
 }
