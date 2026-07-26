@@ -22,8 +22,9 @@ use crabka_client_consumer::{Consumer, ConsumerRecord};
 use crabka_client_producer::{Acks, Header, Producer, ProducerRecord};
 use crabka_client_streams::{
     ClientDnsTimeout, SchemaSerde, Serde, StreamsCommitInterval,
-    StreamsInteractiveQueryQueueCapacity, StreamsJoinRetryBackoff, StreamsPollInterval,
-    StreamsRebalanceTimeout, StreamsStateStoreCacheMaxBytes, processor::serde::SerdeRole,
+    StreamsInteractiveQueryQueueCapacity, StreamsJoinRetryBackoff, StreamsLeaveHeartbeatTimeout,
+    StreamsPollInterval, StreamsRebalanceTimeout, StreamsStateStoreCacheMaxBytes,
+    processor::serde::SerdeRole,
 };
 use crabka_schema_serde::{
     CacheConfig, RegistryClient, SchemaCache, format::protobuf::ProtobufSerde, set_default_registry,
@@ -80,6 +81,9 @@ struct Cli {
     /// Client Streams rebalance timeout in milliseconds.
     #[arg(long, env = "CRABKA_DEMO_STREAMS_REBALANCE_TIMEOUT_MS")]
     streams_rebalance_timeout_ms: Option<NonZeroU64>,
+    /// Client Streams final leave-heartbeat timeout in milliseconds.
+    #[arg(long, env = "CRABKA_DEMO_STREAMS_LEAVE_HEARTBEAT_TIMEOUT_MS")]
+    streams_leave_heartbeat_timeout_ms: Option<NonZeroU64>,
     /// Client Streams initial join retry backoff in milliseconds.
     #[arg(long, env = "CRABKA_DEMO_STREAMS_JOIN_RETRY_BACKOFF_MS")]
     streams_join_retry_backoff_ms: Option<NonZeroU64>,
@@ -176,6 +180,30 @@ fn effective_streams_rebalance_timeout(cli: &Cli) -> std::io::Result<StreamsReba
     )
 }
 
+fn effective_streams_leave_heartbeat_timeout(
+    cli: &Cli,
+) -> std::io::Result<StreamsLeaveHeartbeatTimeout> {
+    if cli.role != Role::Stream
+        && let Some(milliseconds) = cli.streams_leave_heartbeat_timeout_ms
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "--streams-leave-heartbeat-timeout-ms ({} ms) is only valid with --role stream",
+                milliseconds.get(),
+            ),
+        ));
+    }
+
+    cli.streams_leave_heartbeat_timeout_ms.map_or_else(
+        || Ok(StreamsLeaveHeartbeatTimeout::default()),
+        |milliseconds| {
+            StreamsLeaveHeartbeatTimeout::new(Duration::from_millis(milliseconds.get()))
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
+        },
+    )
+}
+
 fn effective_streams_join_retry_backoff(cli: &Cli) -> std::io::Result<StreamsJoinRetryBackoff> {
     if cli.role != Role::Stream
         && let Some(milliseconds) = cli.streams_join_retry_backoff_ms
@@ -251,6 +279,7 @@ async fn main() -> Result<(), BoxError> {
     let streams_broker_dns_timeout = effective_streams_broker_dns_timeout(&cli)?;
     let (streams_poll_interval, streams_commit_interval) = effective_streams_runtime_cadence(&cli)?;
     let streams_rebalance_timeout = effective_streams_rebalance_timeout(&cli)?;
+    let streams_leave_heartbeat_timeout = effective_streams_leave_heartbeat_timeout(&cli)?;
     let streams_join_retry_backoff = effective_streams_join_retry_backoff(&cli)?;
     let streams_interactive_query_queue_capacity =
         effective_streams_interactive_query_queue_capacity(&cli)?;
@@ -285,6 +314,7 @@ async fn main() -> Result<(), BoxError> {
                 streams_poll_interval,
                 streams_commit_interval,
                 streams_rebalance_timeout,
+                streams_leave_heartbeat_timeout,
                 streams_join_retry_backoff,
                 streams_interactive_query_queue_capacity,
                 streams_state_store_cache_max_bytes,
@@ -424,6 +454,7 @@ async fn run_stream(
     streams_poll_interval: StreamsPollInterval,
     streams_commit_interval: StreamsCommitInterval,
     streams_rebalance_timeout: StreamsRebalanceTimeout,
+    streams_leave_heartbeat_timeout: StreamsLeaveHeartbeatTimeout,
     streams_join_retry_backoff: StreamsJoinRetryBackoff,
     streams_interactive_query_queue_capacity: StreamsInteractiveQueryQueueCapacity,
     streams_state_store_cache_max_bytes: StreamsStateStoreCacheMaxBytes,
@@ -436,6 +467,7 @@ async fn run_stream(
         .poll_interval(streams_poll_interval)
         .commit_interval(streams_commit_interval)
         .rebalance_timeout(streams_rebalance_timeout)
+        .leave_heartbeat_timeout(streams_leave_heartbeat_timeout)
         .join_retry_backoff(streams_join_retry_backoff)
         .interactive_query_queue_capacity(streams_interactive_query_queue_capacity)
         .cache_max_bytes(streams_state_store_cache_max_bytes.bytes())
@@ -612,6 +644,7 @@ mod tests {
             streams_poll_interval_ms: None,
             streams_commit_interval_ms: None,
             streams_rebalance_timeout_ms: None,
+            streams_leave_heartbeat_timeout_ms: None,
             streams_join_retry_backoff_ms: None,
             streams_interactive_query_queue_capacity: None,
             streams_state_store_cache_max_bytes: None,
@@ -672,6 +705,7 @@ mod tests {
             streams_poll_interval_ms: None,
             streams_commit_interval_ms: None,
             streams_rebalance_timeout_ms: None,
+            streams_leave_heartbeat_timeout_ms: None,
             streams_join_retry_backoff_ms: None,
             streams_interactive_query_queue_capacity: None,
             streams_state_store_cache_max_bytes: None,
@@ -741,6 +775,7 @@ mod tests {
             streams_poll_interval_ms: None,
             streams_commit_interval_ms: None,
             streams_rebalance_timeout_ms: None,
+            streams_leave_heartbeat_timeout_ms: None,
             streams_join_retry_backoff_ms: None,
             streams_interactive_query_queue_capacity: None,
             streams_state_store_cache_max_bytes: None,
@@ -813,6 +848,7 @@ mod tests {
             streams_poll_interval_ms: None,
             streams_commit_interval_ms: None,
             streams_rebalance_timeout_ms: None,
+            streams_leave_heartbeat_timeout_ms: None,
             streams_join_retry_backoff_ms: None,
             streams_interactive_query_queue_capacity: None,
             streams_state_store_cache_max_bytes: None,
@@ -847,6 +883,7 @@ mod tests {
             streams_poll_interval_ms: None,
             streams_commit_interval_ms: None,
             streams_rebalance_timeout_ms: None,
+            streams_leave_heartbeat_timeout_ms: None,
             streams_join_retry_backoff_ms: None,
             streams_interactive_query_queue_capacity: None,
             streams_state_store_cache_max_bytes: None,
