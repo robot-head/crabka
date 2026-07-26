@@ -159,13 +159,37 @@ pub async fn scan_topic(
     topic: &str,
     bounds: &ScanBounds,
 ) -> Result<Vec<RawRecord>, KafkaFdwError> {
+    scan_topic_with_dns_timeout(
+        profile,
+        topic,
+        bounds,
+        crabka_client_core::ClientDnsTimeout::default(),
+    )
+    .await
+}
+
+/// Materialise a bounded snapshot with an explicit broker DNS deadline.
+///
+/// # Errors
+/// Returns [`KafkaFdwError`] on transport failures, unknown topics, or broker
+/// errors.
+pub async fn scan_topic_with_dns_timeout(
+    profile: &ConnProfile,
+    topic: &str,
+    bounds: &ScanBounds,
+    dns_timeout: crabka_client_core::ClientDnsTimeout,
+) -> Result<Vec<RawRecord>, KafkaFdwError> {
     // Step 1: ensure the rustcrypto TLS provider is installed.
     crate::provider::install_default_provider();
 
     // Step 2: resolve partition metadata.
-    let mut admin = AdminClient::connect_secured(&profile.bootstrap, profile.security.clone())
-        .await
-        .map_err(|e| KafkaFdwError::Other(format!("admin connect: {e}")))?;
+    let mut admin = AdminClient::connect_secured_with_dns_timeout(
+        &profile.bootstrap,
+        profile.security.clone(),
+        dns_timeout,
+    )
+    .await
+    .map_err(|e| KafkaFdwError::Other(format!("admin connect: {e}")))?;
 
     let meta = admin
         .metadata(&[topic])
@@ -220,7 +244,7 @@ pub async fn scan_topic(
     }
 
     // Step 3: open ONE connection and reuse it for ListOffsets + Fetch.
-    let conn = open_connection(profile).await?;
+    let conn = open_connection(profile, dns_timeout).await?;
 
     // Step 4: ListOffsets — batch earliest + HWM for all partitions in one RPC.
     let list_offsets_req_earliest = ListOffsetsRequest {
@@ -396,25 +420,45 @@ pub async fn scan_topic(
 /// connection covers the whole scan. (`Client` exposes neither a fetch method
 /// nor its underlying `Connection`, so there is nothing to be gained by also
 /// building a `Client`.)
-async fn open_connection(profile: &ConnProfile) -> Result<Connection, KafkaFdwError> {
+async fn lookup_first<F, I>(
+    host_port: &str,
+    dns_timeout: crabka_client_core::ClientDnsTimeout,
+    lookup: F,
+) -> Result<std::net::SocketAddr, KafkaFdwError>
+where
+    F: std::future::Future<Output = std::io::Result<I>>,
+    I: Iterator<Item = std::net::SocketAddr>,
+{
+    let mut addrs = tokio::time::timeout(dns_timeout.duration(), lookup)
+        .await
+        .map_err(|_| {
+            KafkaFdwError::Other(format!(
+                "DNS lookup {host_port} timed out after {} ms",
+                dns_timeout.milliseconds(),
+            ))
+        })?
+        .map_err(|error| KafkaFdwError::Other(format!("DNS lookup {host_port}: {error}")))?;
+    addrs
+        .next()
+        .ok_or_else(|| KafkaFdwError::Other(format!("no addresses for {host_port}")))
+}
+
+async fn open_connection(
+    profile: &ConnProfile,
+    dns_timeout: crabka_client_core::ClientDnsTimeout,
+) -> Result<Connection, KafkaFdwError> {
     let host_port = profile.bootstrap.first().ok_or_else(|| {
         KafkaFdwError::Config("no bootstrap address in connection profile".to_string())
     })?;
 
-    let mut addrs = tokio::net::lookup_host(host_port)
-        .await
-        .map_err(|e| KafkaFdwError::Other(format!("DNS lookup {host_port}: {e}")))?;
-
-    let addr = addrs
-        .next()
-        .ok_or_else(|| KafkaFdwError::Other(format!("no addresses for {host_port}")))?;
+    let addr = lookup_first(host_port, dns_timeout, tokio::net::lookup_host(host_port)).await?;
 
     let options = crabka_client_core::ConnectionOptions {
-        dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
         client_id: "crabka-fdw".to_string(),
         connect_timeout: std::time::Duration::from_secs(10),
         request_timeout: std::time::Duration::from_secs(30),
         security: profile.security.clone().map(Box::new),
+        ..crabka_client_core::ConnectionOptions::default()
     };
 
     crabka_client_core::Connection::connect_with_options(addr, options)
@@ -427,6 +471,7 @@ async fn open_connection(profile: &ConnProfile) -> Result<Connection, KafkaFdwEr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     // Helper: `ScanBounds` with per-partition start/end vectors.
     fn bounds_with(start_offsets: Vec<(i32, i64)>, end_offsets: Vec<(i32, i64)>) -> ScanBounds {
@@ -535,6 +580,29 @@ mod tests {
             "start ({}) >= stop ({}) for empty partition",
             plan.start,
             plan.stop
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn raw_dns_lookup_stops_at_configured_deadline() {
+        let timeout = crabka_client_core::ClientDnsTimeout::new(Duration::from_millis(37))
+            .expect("positive timeout");
+        let started = tokio::time::Instant::now();
+        let pending =
+            std::future::pending::<std::io::Result<std::vec::IntoIter<std::net::SocketAddr>>>();
+
+        let error = lookup_first("broker.example:9092", timeout, pending)
+            .await
+            .expect_err("lookup times out");
+
+        assert_eq!(
+            tokio::time::Instant::now() - started,
+            Duration::from_millis(37)
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("DNS lookup broker.example:9092 timed out after 37 ms")
         );
     }
 }
