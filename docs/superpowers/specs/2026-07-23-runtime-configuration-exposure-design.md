@@ -100,4 +100,3 @@ Each configuration slice includes focused behavior tests proving:
 CRD slices regenerate and check manifests and schemas.
 
 Completion requires formatting, Clippy, targeted crate tests, workspace tests where practical, and a fresh production-literal audit reconciled against the decision ledger.
-
