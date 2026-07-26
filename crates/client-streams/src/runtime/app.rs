@@ -8,7 +8,7 @@
 use std::{sync::Arc, time::Duration};
 
 use crabka_client_core::ClientDnsTimeout;
-use refined_type::rule::MinMaxU128;
+use refined_type::rule::{GreaterUsize, MinMaxU128};
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
@@ -36,6 +36,44 @@ use crate::{
 pub const DEFAULT_STREAMS_POLL_INTERVAL: Duration = Duration::from_millis(200);
 /// Default delay between Client Streams commit attempts.
 pub const DEFAULT_STREAMS_COMMIT_INTERVAL: Duration = Duration::from_secs(5);
+/// Default capacity of each Client Streams interactive-query request queue.
+pub const DEFAULT_STREAMS_INTERACTIVE_QUERY_QUEUE_CAPACITY: usize = 64;
+
+/// Positive capacity shared by the Client Streams interactive-query queues.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StreamsInteractiveQueryQueueCapacity(usize);
+
+impl StreamsInteractiveQueryQueueCapacity {
+    /// Validate an interactive-query queue capacity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `value` is zero.
+    pub fn new(value: usize) -> Result<Self, String> {
+        GreaterUsize::<0>::new(value)
+            .map(|value| Self(value.into_value()))
+            .map_err(|error| format!("streams interactive-query queue capacity: {error}"))
+    }
+
+    /// Return the validated capacity.
+    #[must_use]
+    pub const fn capacity(self) -> usize {
+        self.0
+    }
+}
+
+impl Default for StreamsInteractiveQueryQueueCapacity {
+    fn default() -> Self {
+        Self::new(DEFAULT_STREAMS_INTERACTIVE_QUERY_QUEUE_CAPACITY)
+            .expect("default streams interactive-query queue capacity is valid")
+    }
+}
+
+fn interactive_query_queue_capacities(
+    capacity: StreamsInteractiveQueryQueueCapacity,
+) -> [usize; 2] {
+    [capacity.capacity(); 2]
+}
 
 fn validate_positive_whole_milliseconds(field: &str, value: Duration) -> Result<u64, String> {
     let milliseconds = MinMaxU128::<1, { u64::MAX as u128 }>::new(value.as_millis())
@@ -188,6 +226,7 @@ impl KafkaStreams {
     )]
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
+    #[allow(clippy::similar_names)]
     pub async fn start(
         #[builder(into)] bootstrap: String,
         #[builder(into)] application_id: String,
@@ -205,6 +244,9 @@ impl KafkaStreams {
         /// caching. Threaded onto each task graph at `instantiate`.
         #[builder(default = 10_485_760)]
         cache_max_bytes: i64,
+        /// Capacity shared by the v1 and v2 interactive-query request queues.
+        #[builder(default)]
+        interactive_query_queue_capacity: StreamsInteractiveQueryQueueCapacity,
     ) -> Result<Self, StreamsClientError> {
         let (poll_interval, commit_interval, rebalance_timeout, join_retry_backoff) =
             validate_runtime_configuration(
@@ -273,8 +315,10 @@ impl KafkaStreams {
         let sd = shutdown.clone();
         let topo_for_thread = Arc::clone(&built);
         let fetcher_for_thread = Arc::clone(&fetcher);
-        let (iq_tx, mut iq_rx) = mpsc::channel::<IqRequest>(64);
-        let (iq2_tx, mut iq2_rx) = mpsc::channel::<Iq2Request>(64);
+        let [iq_capacity, iq2_capacity] =
+            interactive_query_queue_capacities(interactive_query_queue_capacity);
+        let (iq_tx, mut iq_rx) = mpsc::channel::<IqRequest>(iq_capacity);
+        let (iq2_tx, mut iq2_rx) = mpsc::channel::<Iq2Request>(iq2_capacity);
         let is_eos = processing_guarantee == ProcessingGuarantee::ExactlyOnceV2;
         let handle = tokio::spawn(async move {
             let mut thread = StreamThread::new(
@@ -465,9 +509,33 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        KafkaStreams, StreamsCommitInterval, StreamsPollInterval, validate_runtime_configuration,
+        KafkaStreams, StreamsCommitInterval, StreamsInteractiveQueryQueueCapacity,
+        StreamsPollInterval, interactive_query_queue_capacities, validate_runtime_configuration,
     };
     use crate::{membership::DEFAULT_STREAMS_JOIN_RETRY_BACKOFF, topology::Topology};
+
+    #[test]
+    fn interactive_query_queue_capacity_uses_default_and_valid_override() {
+        let default = StreamsInteractiveQueryQueueCapacity::default();
+        assert_eq!(default.capacity(), 64);
+
+        let capacity =
+            StreamsInteractiveQueryQueueCapacity::new(37).expect("positive queue capacity");
+        assert_eq!(capacity.capacity(), 37);
+    }
+
+    #[test]
+    fn interactive_query_queue_capacity_rejects_zero() {
+        let error = StreamsInteractiveQueryQueueCapacity::new(0).expect_err("zero queue capacity");
+        assert2::assert!(error.contains("streams interactive-query queue capacity"));
+    }
+
+    #[test]
+    fn interactive_query_queues_share_the_configured_capacity() {
+        let capacity =
+            StreamsInteractiveQueryQueueCapacity::new(37).expect("positive queue capacity");
+        assert_eq!(interactive_query_queue_capacities(capacity), [37, 37]);
+    }
 
     #[test]
     fn runtime_intervals_use_typed_defaults_and_valid_overrides() {

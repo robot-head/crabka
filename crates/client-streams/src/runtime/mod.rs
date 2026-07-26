@@ -13,8 +13,9 @@ mod task;
 mod thread;
 
 pub use app::{
-    DEFAULT_STREAMS_COMMIT_INTERVAL, DEFAULT_STREAMS_POLL_INTERVAL, KafkaStreams,
-    StreamsCommitInterval, StreamsPollInterval,
+    DEFAULT_STREAMS_COMMIT_INTERVAL, DEFAULT_STREAMS_INTERACTIVE_QUERY_QUEUE_CAPACITY,
+    DEFAULT_STREAMS_POLL_INTERVAL, KafkaStreams, StreamsCommitInterval,
+    StreamsInteractiveQueryQueueCapacity, StreamsPollInterval,
 };
 pub use io::{FetchBatch, FetchedRec, IsolationLevel, OffsetStore, RecordFetcher, RecordProducer};
 pub use iq_view::{ReadOnlyKeyValueStore, ReadOnlySessionStore, ReadOnlyWindowStore};
