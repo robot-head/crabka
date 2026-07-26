@@ -2063,16 +2063,6 @@ subprocess tests), strict all-target Clippy, the exact two-help-flag check,
 formatting, and diff-hygiene gates. Its follow-up hermetic subprocess test also
 passed with a hostile inherited DNS-timeout environment.
 
-### Adjacent Pending Policy
-
-This closes only the Client Streams runtime cadence pair. The next coherent
-Client Streams operational owner is the existing 30-second
-`rebalance_timeout` default in `crates/client-streams/src/membership/client.rs`.
-The broker supplies `heartbeat_interval`; its 3-second fallback is defensive
-broker-protocol behavior that remains fixed and is not configuration policy.
-Other membership and protocol timing, other Client Streams operational values,
-and the repository-wide hardcoded operational-value goal remain open.
-
 ## Client Streams Rebalance Timeout
 
 Client Streams now represents the client-provided rebalance timeout with the
@@ -2095,7 +2085,7 @@ variable, with `${CRABKA_DEMO_STREAMS_REBALANCE_TIMEOUT_MS:-30000}`; Produce
 and Consume reject the setting.
 
 Before this section was appended, `tools/audit-runtime-values.sh` reported
-6,223 lines across 1,053 files. The exact focused search
+6,223 lines across 1,053 files. The focused search
 
 ```text
 rg -n "rebalance_timeout|StreamsRebalanceTimeout|DEFAULT_STREAMS_REBALANCE_TIMEOUT|streams-rebalance-timeout|STREAMS_REBALANCE_TIMEOUT" crates/client-streams crates/observability-demo-app demo/observability docs/configuration-audit.md
