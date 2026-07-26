@@ -1925,3 +1925,84 @@ Implementation-task verification reported:
 
 This evidence closes only the Gres FDW broker DNS slice. Other FDW operational
 values and the repository-wide configuration goal remain open.
+
+## Client Streams Broker DNS Timeout
+
+Client Streams reuses the library-level
+`crabka_client_core::ClientDnsTimeout`, publicly re-exported as
+`crabka_client_streams::ClientDnsTimeout`, with its exact 10,000-millisecond
+default. `StreamsApp::builder().broker_dns_timeout(...)` is the public library
+surface. The observability demo exposes
+`--streams-broker-dns-timeout-ms` and
+`CRABKA_DEMO_STREAMS_BROKER_DNS_TIMEOUT_MS`; the `demo-stream` Compose service
+passes through that environment variable with a `10000` default. Clap provides
+CLI-over-environment precedence, and absence selects
+`ClientDnsTimeout::default()`.
+
+The complete live flow is:
+
+```text
+--streams-broker-dns-timeout-ms
+  / CRABKA_DEMO_STREAMS_BROKER_DNS_TIMEOUT_MS
+  / ClientDnsTimeout::default()
+  -> StreamsApp::broker_dns_timeout
+  -> KafkaStreams::broker_dns_timeout
+  -> ALO or EOS broker I/O
+     -> metadata Client
+     -> raw fetch lookup and ConnectionOptions
+     -> Producer
+     -> offsets Client
+  -> StreamsMembership::broker_dns_timeout
+     -> join Client
+     -> coordinator/heartbeat Client
+```
+
+One typed value therefore covers ALO and EOS metadata, raw fetch, producer,
+offsets, join, and heartbeat broker DNS resolution. Both direct production
+`tokio::net::lookup_host` calls in `runtime/io_broker.rs` pass through the
+shared bounded first-address helper. Deadline errors name the broker and the
+configured milliseconds; resolver and empty-result errors preserve broker
+context. The demo parses explicit values as `NonZeroU64`, rejects zero at the
+CLI or environment boundary, and rejects the option for non-Stream roles
+before telemetry or external I/O. `ClientDnsTimeout` retains the shared
+positive whole-millisecond validation.
+
+This policy changes DNS resolution only. Bootstrap ordering and first-address
+selection remain unchanged, as do TLS/SASL forwarding, the independent TCP
+connect and request deadlines, fetch sizing, producer and offset behavior,
+ALO/EOS semantics, membership timing and protocol behavior, and Schema
+Registry resolution. Defaulted builder fields preserve existing callers.
+
+Before this section was appended, `tools/audit-runtime-values.sh` reported
+6,203 lines across 1,053 files. The exact focused search
+
+```text
+rg -n "lookup_host|ToSocketAddrs|ClientDnsTimeout|dns[_-]timeout|DnsTimeout|streams-broker-dns-timeout|STREAMS_BROKER_DNS_TIMEOUT|broker_dns_timeout" crates/client-streams crates/observability-demo-app demo/observability docs/configuration-audit.md
+```
+
+reported 159 lines across 19 files. The exclusive primary classification is
+46 Client Streams production references, 25 demo-deployment references
+(24 application references and one Compose reference), 20 test or harness
+references, and 68 prior-audit references in this file. No focused line remains
+as a current unresolved owner: the earlier audit text includes completed
+downstream DNS policies and the former unresolved Client Streams owner, but
+those lines are classified as prior audit evidence rather than counted twice.
+Both production raw lookups are bounded as described above.
+
+Task 1 verification passed the focused raw-lookup, fetch-options, and
+builder-default tests, then the Client Streams all-target suite (437 library
+tests plus every integration and example target) and strict all-target Clippy.
+Task 2 verification passed the demo's two unit tests, two subprocess
+configuration tests, one focused Compose test, the full demo all-target suite,
+strict all-target Clippy, and the exact single-help-flag check. Formatting and
+diff-hygiene gates passed for both tasks.
+
+### Adjacent Pending Policy
+
+This closes only Client Streams broker DNS resolution. The next coherent
+Client Streams operational owner is the runtime cadence pair in
+`crates/client-streams/src/runtime/app.rs`: the default 200-millisecond
+`poll_interval` and 5-second `commit_interval`. They already share one
+high-level runtime owner and flow, while membership and protocol timing remain
+separate policy work. Other Client Streams operational values and the
+repository-wide hardcoded operational-value goal remain open.
