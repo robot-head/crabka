@@ -68,6 +68,7 @@ pub struct StreamsApp {
     cache: Arc<SchemaCache>,
     store_backend: StoreBackend,
     processing_guarantee: ProcessingGuarantee,
+    broker_dns_timeout: crabka_client_core::ClientDnsTimeout,
     cache_max_bytes: i64,
 }
 
@@ -89,6 +90,9 @@ impl StreamsApp {
         cache_config: Option<CacheConfig>,
         #[builder(default)] store_backend: StoreBackend,
         #[builder(default)] processing_guarantee: ProcessingGuarantee,
+        /// Deadline for each Kafka broker DNS lookup owned by this process.
+        #[builder(default)]
+        broker_dns_timeout: crabka_client_core::ClientDnsTimeout,
         /// Record-cache budget (JVM `statestore.cache.max.bytes`); `0` disables
         /// caching. Defaults to 10 MiB, matching the JVM default.
         #[builder(default = 10_485_760)]
@@ -105,6 +109,7 @@ impl StreamsApp {
             cache,
             store_backend,
             processing_guarantee,
+            broker_dns_timeout,
             cache_max_bytes,
         }
     }
@@ -167,6 +172,7 @@ impl StreamsApp {
             .topology(topology)
             .store_backend(self.store_backend)
             .processing_guarantee(self.processing_guarantee)
+            .broker_dns_timeout(self.broker_dns_timeout)
             .cache_max_bytes(self.cache_max_bytes)
             .build()
             .await
@@ -186,5 +192,29 @@ mod tests {
             .build();
 
         assert_eq!(app.application_id(), "orders-app");
+    }
+
+    #[test]
+    fn broker_dns_timeout_uses_typed_default_and_override() {
+        let defaults = StreamsApp::builder()
+            .bootstrap("127.0.0.1:9092")
+            .application_id("default")
+            .schema_registry("http://127.0.0.1:8081")
+            .build();
+        assert_eq!(
+            defaults.broker_dns_timeout,
+            crabka_client_core::ClientDnsTimeout::default()
+        );
+
+        let timeout =
+            crabka_client_core::ClientDnsTimeout::new(std::time::Duration::from_millis(43))
+                .expect("positive timeout");
+        let overridden = StreamsApp::builder()
+            .bootstrap("127.0.0.1:9092")
+            .application_id("override")
+            .schema_registry("http://127.0.0.1:8081")
+            .broker_dns_timeout(timeout)
+            .build();
+        assert_eq!(overridden.broker_dns_timeout, timeout);
     }
 }

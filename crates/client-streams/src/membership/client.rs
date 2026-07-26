@@ -9,7 +9,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use crabka_client_core::Client;
+use crabka_client_core::{Client, ClientDnsTimeout};
 use crabka_protocol::owned::streams_group_heartbeat_request::StreamsGroupHeartbeatRequest;
 use tokio::{
     sync::{Mutex, mpsc},
@@ -69,6 +69,7 @@ impl StreamsMembership {
         #[builder(into)] process_id: Option<String>,
         #[builder(into)] instance_id: Option<String>,
         #[builder(default = Duration::from_secs(30))] rebalance_timeout: Duration,
+        #[builder(default)] broker_dns_timeout: ClientDnsTimeout,
         security: Option<crabka_client_core::security::ClientSecurity>,
         schema_prewarm: Option<std::sync::Arc<dyn SchemaPrewarm>>,
     ) -> Result<Self, StreamsClientError> {
@@ -86,6 +87,7 @@ impl StreamsMembership {
         let client = Client::builder()
             .bootstrap(&bootstrap)
             .client_id(client_id.clone())
+            .dns_timeout(broker_dns_timeout.duration())
             .maybe_security(security.clone())
             .build()
             .await?;
@@ -134,6 +136,7 @@ impl StreamsMembership {
         let coordinator_client = Client::builder()
             .bootstrap(&bootstrap)
             .client_id(client_id.clone())
+            .dns_timeout(broker_dns_timeout.duration())
             .maybe_security(security.clone())
             .build()
             .await?;

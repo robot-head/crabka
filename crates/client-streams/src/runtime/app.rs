@@ -7,6 +7,7 @@
 
 use std::{sync::Arc, time::Duration};
 
+use crabka_client_core::ClientDnsTimeout;
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
@@ -66,6 +67,9 @@ impl KafkaStreams {
         #[builder(default = Duration::from_secs(5))] commit_interval: Duration,
         #[builder(default)] store_backend: crate::store::backend::StoreBackend,
         #[builder(default)] processing_guarantee: crate::runtime::eos::ProcessingGuarantee,
+        /// Deadline for each Kafka broker DNS lookup owned by this process.
+        #[builder(default)]
+        broker_dns_timeout: ClientDnsTimeout,
         /// Record-cache budget (JVM `statestore.cache.max.bytes`); `0` disables
         /// caching. Threaded onto each task graph at `instantiate`.
         #[builder(default = 10_485_760)]
@@ -83,8 +87,13 @@ impl KafkaStreams {
         let txn: Option<Arc<dyn TransactionalProducer>>;
         match processing_guarantee {
             ProcessingGuarantee::AtLeastOnce => {
-                let (f, p, s) =
-                    io_broker::build(&bootstrap, &application_id, &application_id).await?;
+                let (f, p, s) = io_broker::build(
+                    &bootstrap,
+                    &application_id,
+                    &application_id,
+                    broker_dns_timeout,
+                )
+                .await?;
                 fetcher = Arc::new(f);
                 producer = p;
                 store = s;
@@ -92,9 +101,14 @@ impl KafkaStreams {
             }
             ProcessingGuarantee::ExactlyOnceV2 => {
                 let txn_id = crate::runtime::eos::transactional_id(&application_id, 0);
-                let (f, txn_producer, s) =
-                    io_broker::build_eos(&bootstrap, &application_id, &application_id, &txn_id)
-                        .await?;
+                let (f, txn_producer, s) = io_broker::build_eos(
+                    &bootstrap,
+                    &application_id,
+                    &application_id,
+                    &txn_id,
+                    broker_dns_timeout,
+                )
+                .await?;
                 fetcher = Arc::new(f);
                 // Two trait-object views of the one transactional producer.
                 producer = Arc::clone(&txn_producer) as Arc<dyn RecordProducer>;
@@ -108,6 +122,7 @@ impl KafkaStreams {
             .bootstrap(bootstrap.clone())
             .group_id(application_id.clone())
             .topology(Arc::clone(&built))
+            .broker_dns_timeout(broker_dns_timeout)
             .build()
             .await?;
         let member_id = membership.member_id().to_string();
