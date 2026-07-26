@@ -241,6 +241,7 @@ fn test_args(listen: String, data_dir: Option<std::path::PathBuf>) -> crabka_gre
         wal_admin_request_timeout_ms: None,
         wal_producer_flush_timeout_ms: None,
         wal_producer_dns_timeout_ms: None,
+        fdw_broker_dns_timeout_ms: None,
         wal_producer_request_timeout_ms: None,
         wal_producer_retries: None,
         wal_producer_retry_backoff_ms: None,
@@ -426,6 +427,7 @@ async fn live_multirange_substrate_default_fdw_server_reads_own_broker() {
     crabka_gres::register_kafka_scanner_with_default_bootstrap(
         &mut runtime.engine,
         Some(bootstrap),
+        crabka_client_core::ClientDnsTimeout::default(),
     );
     let mut session = runtime.engine.connect();
     session
