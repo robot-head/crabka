@@ -20,7 +20,10 @@ use bytes::Bytes;
 use clap::{Parser, ValueEnum};
 use crabka_client_consumer::{Consumer, ConsumerRecord};
 use crabka_client_producer::{Acks, Header, Producer, ProducerRecord};
-use crabka_client_streams::{ClientDnsTimeout, SchemaSerde, Serde, processor::serde::SerdeRole};
+use crabka_client_streams::{
+    ClientDnsTimeout, SchemaSerde, Serde, StreamsCommitInterval, StreamsPollInterval,
+    processor::serde::SerdeRole,
+};
 use crabka_schema_serde::{
     CacheConfig, RegistryClient, SchemaCache, format::protobuf::ProtobufSerde, set_default_registry,
 };
@@ -67,6 +70,12 @@ struct Cli {
     /// Kafka Streams broker DNS timeout in milliseconds.
     #[arg(long, env = "CRABKA_DEMO_STREAMS_BROKER_DNS_TIMEOUT_MS")]
     streams_broker_dns_timeout_ms: Option<NonZeroU64>,
+    /// Client Streams processing poll interval in milliseconds.
+    #[arg(long, env = "CRABKA_DEMO_STREAMS_POLL_INTERVAL_MS")]
+    streams_poll_interval_ms: Option<NonZeroU64>,
+    /// Client Streams commit interval in milliseconds.
+    #[arg(long, env = "CRABKA_DEMO_STREAMS_COMMIT_INTERVAL_MS")]
+    streams_commit_interval_ms: Option<NonZeroU64>,
 }
 
 fn effective_streams_broker_dns_timeout(cli: &Cli) -> std::io::Result<ClientDnsTimeout> {
@@ -91,10 +100,52 @@ fn effective_streams_broker_dns_timeout(cli: &Cli) -> std::io::Result<ClientDnsT
     )
 }
 
+fn effective_streams_runtime_cadence(
+    cli: &Cli,
+) -> std::io::Result<(StreamsPollInterval, StreamsCommitInterval)> {
+    if cli.role != Role::Stream {
+        if let Some(milliseconds) = cli.streams_poll_interval_ms {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "--streams-poll-interval-ms ({} ms) is only valid with --role stream",
+                    milliseconds.get(),
+                ),
+            ));
+        }
+        if let Some(milliseconds) = cli.streams_commit_interval_ms {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "--streams-commit-interval-ms ({} ms) is only valid with --role stream",
+                    milliseconds.get(),
+                ),
+            ));
+        }
+    }
+
+    let poll = cli.streams_poll_interval_ms.map_or_else(
+        || Ok(StreamsPollInterval::default()),
+        |milliseconds| {
+            StreamsPollInterval::new(Duration::from_millis(milliseconds.get()))
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
+        },
+    )?;
+    let commit = cli.streams_commit_interval_ms.map_or_else(
+        || Ok(StreamsCommitInterval::default()),
+        |milliseconds| {
+            StreamsCommitInterval::new(Duration::from_millis(milliseconds.get()))
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
+        },
+    )?;
+    Ok((poll, commit))
+}
+
 #[tokio::main]
 async fn main() -> Result<(), BoxError> {
     let cli = Cli::parse();
     let streams_broker_dns_timeout = effective_streams_broker_dns_timeout(&cli)?;
+    let (streams_poll_interval, streams_commit_interval) = effective_streams_runtime_cadence(&cli)?;
 
     let telemetry = crabka_telemetry::init(
         crabka_telemetry::OtlpConfig::from_env(
@@ -118,7 +169,15 @@ async fn main() -> Result<(), BoxError> {
 
     match cli.role {
         Role::Produce => run_produce(&cli, &metrics).await?,
-        Role::Stream => run_stream(&cli, streams_broker_dns_timeout).await?,
+        Role::Stream => {
+            run_stream(
+                &cli,
+                streams_broker_dns_timeout,
+                streams_poll_interval,
+                streams_commit_interval,
+            )
+            .await?;
+        }
         Role::Consume => run_consume(&cli, &metrics).await?,
     }
     telemetry.shutdown();
@@ -245,12 +304,19 @@ async fn run_produce(cli: &Cli, metrics: &DemoMetrics) -> Result<(), BoxError> {
     }
 }
 
-async fn run_stream(cli: &Cli, broker_dns_timeout: ClientDnsTimeout) -> Result<(), BoxError> {
+async fn run_stream(
+    cli: &Cli,
+    broker_dns_timeout: ClientDnsTimeout,
+    streams_poll_interval: StreamsPollInterval,
+    streams_commit_interval: StreamsCommitInterval,
+) -> Result<(), BoxError> {
     let app = crabka_client_streams::StreamsApp::builder()
         .bootstrap(cli.bootstrap.clone())
         .application_id("orders-analytics")
         .schema_registry(cli.registry.clone())
         .broker_dns_timeout(broker_dns_timeout)
+        .poll_interval(streams_poll_interval)
+        .commit_interval(streams_commit_interval)
         .build();
     let topology = app.streams_builder();
     topology
@@ -421,6 +487,8 @@ mod tests {
             output_topic: "order-counts".to_owned(),
             orders_per_sec: 50,
             streams_broker_dns_timeout_ms: None,
+            streams_poll_interval_ms: None,
+            streams_commit_interval_ms: None,
         };
         assert_eq!(
             effective_streams_broker_dns_timeout(&defaults).expect("typed default"),
@@ -462,6 +530,71 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "--streams-broker-dns-timeout-ms (37 ms) is only valid with --role stream"
+        );
+    }
+
+    #[test]
+    fn streams_runtime_cadence_uses_defaults_and_independent_overrides() {
+        let defaults = Cli {
+            role: Role::Stream,
+            bootstrap: "127.0.0.1:9092".to_owned(),
+            registry: "http://127.0.0.1:8081".to_owned(),
+            input_topic: "orders".to_owned(),
+            output_topic: "order-counts".to_owned(),
+            orders_per_sec: 50,
+            streams_broker_dns_timeout_ms: None,
+            streams_poll_interval_ms: None,
+            streams_commit_interval_ms: None,
+        };
+        let (poll, commit) = effective_streams_runtime_cadence(&defaults).expect("typed defaults");
+        assert_eq!(poll, crabka_client_streams::StreamsPollInterval::default());
+        assert_eq!(
+            commit,
+            crabka_client_streams::StreamsCommitInterval::default()
+        );
+
+        let overridden = Cli {
+            streams_poll_interval_ms: std::num::NonZeroU64::new(37),
+            streams_commit_interval_ms: std::num::NonZeroU64::new(41),
+            ..defaults
+        };
+        let (poll, commit) =
+            effective_streams_runtime_cadence(&overridden).expect("typed overrides");
+        assert_eq!(poll.milliseconds(), 37);
+        assert_eq!(commit.milliseconds(), 41);
+    }
+
+    #[test]
+    fn streams_runtime_cadence_rejects_zero_and_non_stream_roles() {
+        Cli::try_parse_from([
+            "observability-demo-app",
+            "--role",
+            "stream",
+            "--streams-poll-interval-ms",
+            "0",
+        ])
+        .expect_err("zero poll interval");
+        Cli::try_parse_from([
+            "observability-demo-app",
+            "--role",
+            "stream",
+            "--streams-commit-interval-ms",
+            "0",
+        ])
+        .expect_err("zero commit interval");
+
+        let produce = Cli::try_parse_from([
+            "observability-demo-app",
+            "--role",
+            "produce",
+            "--streams-poll-interval-ms",
+            "37",
+        ])
+        .expect("parse before role validation");
+        let error = effective_streams_runtime_cadence(&produce).expect_err("Stream-only option");
+        assert_eq!(
+            error.to_string(),
+            "--streams-poll-interval-ms (37 ms) is only valid with --role stream"
         );
     }
 }

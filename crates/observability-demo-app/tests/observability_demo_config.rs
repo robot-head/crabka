@@ -730,3 +730,20 @@ fn streams_dns_timeout_is_configurable_only_on_the_stream_role() {
         );
     }
 }
+
+#[test]
+fn streams_runtime_cadence_is_configurable_only_on_the_stream_role() {
+    let compose = docker_compose();
+    let stream = compose_service_block(&compose, "demo-stream");
+    assert2::assert!(stream.contains(
+        "CRABKA_DEMO_STREAMS_POLL_INTERVAL_MS: \"${CRABKA_DEMO_STREAMS_POLL_INTERVAL_MS:-200}\""
+    ));
+    assert2::assert!(stream.contains(
+        "CRABKA_DEMO_STREAMS_COMMIT_INTERVAL_MS: \"${CRABKA_DEMO_STREAMS_COMMIT_INTERVAL_MS:-5000}\""
+    ));
+    for service in ["demo-produce", "demo-consume"] {
+        let service = compose_service_block(&compose, service);
+        assert2::assert!(!service.contains("CRABKA_DEMO_STREAMS_POLL_INTERVAL_MS"));
+        assert2::assert!(!service.contains("CRABKA_DEMO_STREAMS_COMMIT_INTERVAL_MS"));
+    }
+}
