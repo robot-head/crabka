@@ -269,6 +269,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::duration_suboptimal_units)]
     fn rebalance_timeout_uses_typed_default_and_override() {
         let defaults = StreamsApp::builder()
             .bootstrap("127.0.0.1:9092")
