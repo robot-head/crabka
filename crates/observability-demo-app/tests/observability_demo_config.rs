@@ -744,10 +744,14 @@ fn streams_runtime_policy_is_configurable_only_on_the_stream_role() {
     assert2::assert!(stream.contains(
         "CRABKA_DEMO_STREAMS_REBALANCE_TIMEOUT_MS: \"${CRABKA_DEMO_STREAMS_REBALANCE_TIMEOUT_MS:-30000}\""
     ));
+    assert2::assert!(stream.contains(
+        "CRABKA_DEMO_STREAMS_JOIN_RETRY_BACKOFF_MS: \"${CRABKA_DEMO_STREAMS_JOIN_RETRY_BACKOFF_MS:-200}\""
+    ));
     for service in ["demo-produce", "demo-consume"] {
         let service = compose_service_block(&compose, service);
         assert2::assert!(!service.contains("CRABKA_DEMO_STREAMS_POLL_INTERVAL_MS"));
         assert2::assert!(!service.contains("CRABKA_DEMO_STREAMS_COMMIT_INTERVAL_MS"));
         assert2::assert!(!service.contains("CRABKA_DEMO_STREAMS_REBALANCE_TIMEOUT_MS"));
+        assert2::assert!(!service.contains("CRABKA_DEMO_STREAMS_JOIN_RETRY_BACKOFF_MS"));
     }
 }
