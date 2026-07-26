@@ -861,7 +861,7 @@ fn build_spec(
     }
 }
 
-fn registry_policy_args(policy: &RegistryPolicy) -> [String; 12] {
+fn registry_policy_args(policy: &RegistryPolicy) -> [String; 14] {
     [
         "--registry-replication-factor".to_owned(),
         policy.replication_factor().to_string(),
@@ -875,6 +875,8 @@ fn registry_policy_args(policy: &RegistryPolicy) -> [String; 12] {
         policy.fetch_partition_max_bytes().to_string(),
         "--registry-producer-dns-timeout-ms".to_owned(),
         policy.producer_dns_timeout().milliseconds().to_string(),
+        "--registry-reader-admin-dns-timeout-ms".to_owned(),
+        policy.reader_admin_dns_timeout().milliseconds().to_string(),
     ]
 }
 
@@ -1543,7 +1545,9 @@ mod tests {
         let policy = RegistryPolicy::new(3, 15_002, 252, 502, 1_048_578)
             .expect("policy")
             .with_producer_dns_timeout_ms(37)
-            .expect("DNS timeout");
+            .expect("DNS timeout")
+            .with_reader_admin_dns_timeout_ms(37)
+            .expect("reader/admin DNS timeout");
         let context = SpecContext {
             topology: &topology,
             mode: ModeSpec::LogicalTso,
@@ -1571,6 +1575,7 @@ mod tests {
             arg_value(&spawned_args, "--registry-fetch-partition-max-bytes") == Some("1048578")
         );
         assert!(arg_value(&spawned_args, "--registry-producer-dns-timeout-ms") == Some("37"));
+        assert!(arg_value(&spawned_args, "--registry-reader-admin-dns-timeout-ms",) == Some("37"));
     }
 
     #[test]
