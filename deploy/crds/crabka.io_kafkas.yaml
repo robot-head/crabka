@@ -795,6 +795,12 @@ spec:
                     minimum: 1.0
                     nullable: true
                     type: integer
+                  readerAdminDnsTimeoutMs:
+                    description: DNS lookup deadline for registry reader and admin paths.
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
                   readerRetryBackoffMs:
                     description: Registry reader retry delay in milliseconds.
                     format: uint64

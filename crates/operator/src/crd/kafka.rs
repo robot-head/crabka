@@ -162,6 +162,10 @@ pub struct GresRegistrySpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
     pub producer_dns_timeout_ms: Option<u64>,
+    /// DNS lookup deadline for registry reader and admin paths.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub reader_admin_dns_timeout_ms: Option<u64>,
 }
 
 impl GresRegistrySpec {
@@ -176,6 +180,11 @@ impl GresRegistrySpec {
                 .producer_dns_timeout()
                 .milliseconds()
         });
+        let reader_admin_dns_timeout_ms = self.reader_admin_dns_timeout_ms.unwrap_or_else(|| {
+            crabka_gres_control::RegistryPolicy::default()
+                .reader_admin_dns_timeout()
+                .milliseconds()
+        });
         let policy = crabka_gres_control::RegistryPolicy::new(
             self.replication_factor.unwrap_or(1),
             self.topic_create_timeout_ms.unwrap_or(15_000),
@@ -184,9 +193,12 @@ impl GresRegistrySpec {
             self.fetch_partition_max_bytes.unwrap_or(1_048_576),
         )
         .map_err(|error| format!("spec.gresRegistry: {error}"))?;
-        policy
+        let policy = policy
             .with_producer_dns_timeout_ms(producer_dns_timeout_ms)
-            .map_err(|error| format!("spec.gresRegistry.producerDnsTimeoutMs: {error}"))
+            .map_err(|error| format!("spec.gresRegistry.producerDnsTimeoutMs: {error}"))?;
+        policy
+            .with_reader_admin_dns_timeout_ms(reader_admin_dns_timeout_ms)
+            .map_err(|error| format!("spec.gresRegistry.readerAdminDnsTimeoutMs: {error}"))
     }
 }
 
@@ -1367,7 +1379,8 @@ mod tests {
                     "readerRetryBackoffMs":251,
                     "fetchMaxWaitMs":501,
                     "fetchPartitionMaxBytes":1048577,
-                    "producerDnsTimeoutMs":37
+                    "producerDnsTimeoutMs":37,
+                    "readerAdminDnsTimeoutMs":37
                 }
             }"#,
         )
@@ -1375,7 +1388,9 @@ mod tests {
         let expected = crabka_gres_control::RegistryPolicy::new(2, 15_001, 251, 501, 1_048_577)
             .expect("expected policy")
             .with_producer_dns_timeout_ms(37)
-            .expect("DNS timeout");
+            .expect("DNS timeout")
+            .with_reader_admin_dns_timeout_ms(37)
+            .expect("reader/admin DNS timeout");
         assert!(
             custom
                 .gres_registry
@@ -1416,6 +1431,7 @@ mod tests {
             "fetchMaxWaitMs",
             "fetchPartitionMaxBytes",
             "producerDnsTimeoutMs",
+            "readerAdminDnsTimeoutMs",
         ] {
             assert!(
                 registry["properties"][field]["minimum"].as_f64() == Some(1.0),
@@ -1456,6 +1472,10 @@ mod tests {
                 producer_dns_timeout_ms: Some(0),
                 ..Default::default()
             },
+            GresRegistrySpec {
+                reader_admin_dns_timeout_ms: Some(0),
+                ..Default::default()
+            },
         ];
 
         for spec in cases {
@@ -1469,6 +1489,14 @@ mod tests {
         .policy()
         .expect_err("zero DNS timeout");
         assert!(error.starts_with("spec.gresRegistry.producerDnsTimeoutMs:"));
+
+        let error = GresRegistrySpec {
+            reader_admin_dns_timeout_ms: Some(0),
+            ..Default::default()
+        }
+        .policy()
+        .expect_err("zero reader/admin DNS timeout");
+        assert!(error.starts_with("spec.gresRegistry.readerAdminDnsTimeoutMs:"));
     }
 
     #[test]

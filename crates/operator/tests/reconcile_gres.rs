@@ -423,6 +423,8 @@ async fn renders_pgdog_config_secret_and_status_hash() {
                 "1048576",
                 "--registry-producer-dns-timeout-ms",
                 "10000",
+                "--registry-reader-admin-dns-timeout-ms",
+                "10000",
                 "--backend-endpoint-template",
                 "{tenant}-gres.ns.svc:5432"
             ])
@@ -552,6 +554,8 @@ async fn custom_activator_policy_renders_workload_and_pgdog_timeout_budget() {
                 "--registry-fetch-partition-max-bytes",
                 "1048577",
                 "--registry-producer-dns-timeout-ms",
+                "10000",
+                "--registry-reader-admin-dns-timeout-ms",
                 "10000",
                 "--backend-endpoint-template",
                 "{tenant}-gres.ns.svc:5432"
