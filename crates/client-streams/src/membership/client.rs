@@ -11,6 +11,7 @@ use std::{sync::Arc, time::Duration};
 
 use crabka_client_core::{Client, ClientDnsTimeout};
 use crabka_protocol::owned::streams_group_heartbeat_request::StreamsGroupHeartbeatRequest;
+use refined_type::rule::MinMaxU128;
 use tokio::{
     sync::{Mutex, mpsc},
     task::JoinHandle,
@@ -25,6 +26,65 @@ use super::{
 use crate::{error::StreamsClientError, membership::assignment::resolve};
 
 const COORDINATOR_LOAD_IN_PROGRESS: i16 = 14;
+
+/// Default Client Streams rebalance timeout.
+pub const DEFAULT_STREAMS_REBALANCE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Positive, whole-millisecond rebalance timeout representable on the Kafka wire.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StreamsRebalanceTimeout(Duration);
+
+impl StreamsRebalanceTimeout {
+    /// Validate a Client Streams rebalance timeout.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for zero, fractional milliseconds, or a value greater
+    /// than `i32::MAX` milliseconds.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a positive `i32` cannot be represented as `u64`.
+    pub fn new(value: Duration) -> Result<Self, String> {
+        let milliseconds = MinMaxU128::<1, { i32::MAX as u128 }>::new(value.as_millis())
+            .map_err(|error| format!("streams rebalance timeout: {error}"))?
+            .into_value();
+        let milliseconds = i32::try_from(milliseconds)
+            .map_err(|error| format!("streams rebalance timeout: {error}"))?;
+        let whole = Duration::from_millis(
+            u64::try_from(milliseconds).expect("positive i32 milliseconds fit u64"),
+        );
+        if whole != value {
+            return Err(
+                "streams rebalance timeout must be a whole number of milliseconds".to_owned(),
+            );
+        }
+        Ok(Self(value))
+    }
+
+    #[must_use]
+    /// Return the validated duration.
+    pub const fn duration(self) -> Duration {
+        self.0
+    }
+
+    #[must_use]
+    /// Return the validated signed wire milliseconds.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the validated timeout no longer fits in `i32`.
+    pub fn milliseconds(self) -> i32 {
+        i32::try_from(self.0.as_millis()).expect("validated streams rebalance timeout fits i32")
+    }
+}
+
+impl Default for StreamsRebalanceTimeout {
+    fn default() -> Self {
+        Self::new(DEFAULT_STREAMS_REBALANCE_TIMEOUT)
+            .expect("default streams rebalance timeout is valid")
+    }
+}
 
 /// Hook invoked once at membership start to resolve schema ids before
 /// processing. Implemented by `SchemaCache` under the `schema-serde` feature.
@@ -68,7 +128,7 @@ impl StreamsMembership {
         topology: std::sync::Arc<crate::topology::BuiltTopology>,
         #[builder(into)] process_id: Option<String>,
         #[builder(into)] instance_id: Option<String>,
-        #[builder(default = Duration::from_secs(30))] rebalance_timeout: Duration,
+        #[builder(default = DEFAULT_STREAMS_REBALANCE_TIMEOUT)] rebalance_timeout: Duration,
         #[builder(default)] broker_dns_timeout: ClientDnsTimeout,
         security: Option<crabka_client_core::security::ClientSecurity>,
         schema_prewarm: Option<std::sync::Arc<dyn SchemaPrewarm>>,
@@ -76,13 +136,15 @@ impl StreamsMembership {
         if group_id.is_empty() {
             return Err(StreamsClientError::Server(0));
         }
+        let rebalance_timeout =
+            StreamsRebalanceTimeout::new(rebalance_timeout).map_err(StreamsClientError::Runtime)?;
         if let Some(prewarm) = &schema_prewarm {
             prewarm.prewarm().await?;
         }
         let process_id = process_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let member_id = uuid::Uuid::new_v4().to_string();
         tracing::Span::current().record("member_id", tracing::field::display(&member_id));
-        let rebalance_timeout_ms = i32::try_from(rebalance_timeout.as_millis()).unwrap_or(30_000);
+        let rebalance_timeout_ms = rebalance_timeout.milliseconds();
 
         let client = Client::builder()
             .bootstrap(&bootstrap)
@@ -310,14 +372,17 @@ fn map_error(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{sync::Arc, time::Duration};
 
     use assert2::check;
     use crabka_protocol::owned::streams_group_heartbeat_response::StreamsGroupHeartbeatResponse;
     use tokio::sync::{Mutex, mpsc};
     use tokio_util::sync::CancellationToken;
 
-    use super::{build_join_heartbeat, heartbeat_interval, map_error, should_emit_statuses};
+    use super::{
+        StreamsRebalanceTimeout, build_join_heartbeat, heartbeat_interval, map_error,
+        should_emit_statuses,
+    };
     use crate::{
         error::StreamsClientError, membership::types::TaskOffsetTracker, topology::Topology,
     };
@@ -358,6 +423,34 @@ mod tests {
         check!(req.instance_id.as_deref() == Some("instance-1"));
         check!(req.rebalance_timeout_ms == 45_000);
         check!(req.topology.is_some());
+    }
+
+    #[test]
+    #[allow(clippy::duration_suboptimal_units)]
+    fn rebalance_timeout_uses_default_and_valid_override() {
+        let default = StreamsRebalanceTimeout::default();
+        check!(default.duration() == Duration::from_secs(30));
+        check!(default.milliseconds() == 30_000);
+
+        let timeout = StreamsRebalanceTimeout::new(Duration::from_millis(45_000))
+            .expect("valid rebalance timeout");
+        check!(timeout.duration() == Duration::from_secs(45));
+        check!(timeout.milliseconds() == 45_000);
+    }
+
+    #[test]
+    fn rebalance_timeout_rejects_invalid_wire_values() {
+        check!(StreamsRebalanceTimeout::new(Duration::ZERO).is_err());
+        check!(
+            StreamsRebalanceTimeout::new(Duration::from_millis(1) + Duration::from_nanos(1))
+                .is_err()
+        );
+        check!(
+            StreamsRebalanceTimeout::new(Duration::from_millis(
+                u64::try_from(i32::MAX).expect("i32 max fits u64") + 1,
+            ))
+            .is_err()
+        );
     }
 
     #[test]

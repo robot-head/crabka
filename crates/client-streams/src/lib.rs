@@ -913,8 +913,9 @@ pub use dsl::{
 };
 pub use error::StreamsClientError;
 pub use membership::{
-    SchemaPrewarm, StreamsAssignment, StreamsEvent, StreamsMembership, StreamsStatus,
-    TaskAssignment, TaskOffsetTracker, TopicPartition,
+    DEFAULT_STREAMS_REBALANCE_TIMEOUT, SchemaPrewarm, StreamsAssignment, StreamsEvent,
+    StreamsMembership, StreamsRebalanceTimeout, StreamsStatus, TaskAssignment, TaskOffsetTracker,
+    TopicPartition,
 };
 pub use processor::{
     BytesSerde, Cancellable, Consumed, DefaultSerde, FixedKeyProcessor, FixedKeyProcessorContext,

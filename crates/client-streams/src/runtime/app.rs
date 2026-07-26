@@ -14,7 +14,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     error::StreamsClientError,
-    membership::{StreamsEvent, StreamsMembership},
+    membership::{
+        DEFAULT_STREAMS_REBALANCE_TIMEOUT, StreamsEvent, StreamsMembership, StreamsRebalanceTimeout,
+    },
     processor::serde::Serde,
     runtime::{
         eos::{ProcessingGuarantee, TransactionalProducer},
@@ -124,15 +126,25 @@ impl Default for StreamsCommitInterval {
     }
 }
 
-fn validate_runtime_intervals(
+fn validate_runtime_configuration(
     poll_interval: Duration,
     commit_interval: Duration,
-) -> Result<(StreamsPollInterval, StreamsCommitInterval), StreamsClientError> {
+    rebalance_timeout: Duration,
+) -> Result<
+    (
+        StreamsPollInterval,
+        StreamsCommitInterval,
+        StreamsRebalanceTimeout,
+    ),
+    StreamsClientError,
+> {
     let poll_interval =
         StreamsPollInterval::new(poll_interval).map_err(StreamsClientError::Runtime)?;
     let commit_interval =
         StreamsCommitInterval::new(commit_interval).map_err(StreamsClientError::Runtime)?;
-    Ok((poll_interval, commit_interval))
+    let rebalance_timeout =
+        StreamsRebalanceTimeout::new(rebalance_timeout).map_err(StreamsClientError::Runtime)?;
+    Ok((poll_interval, commit_interval, rebalance_timeout))
 }
 
 /// A managed Kafka Streams runtime: joins a streams group, runs assigned tasks
@@ -172,6 +184,7 @@ impl KafkaStreams {
         topology: BuiltTopology,
         #[builder(default = DEFAULT_STREAMS_POLL_INTERVAL)] poll_interval: Duration,
         #[builder(default = DEFAULT_STREAMS_COMMIT_INTERVAL)] commit_interval: Duration,
+        #[builder(default = DEFAULT_STREAMS_REBALANCE_TIMEOUT)] rebalance_timeout: Duration,
         #[builder(default)] store_backend: crate::store::backend::StoreBackend,
         #[builder(default)] processing_guarantee: crate::runtime::eos::ProcessingGuarantee,
         /// Deadline for each Kafka broker DNS lookup owned by this process.
@@ -182,8 +195,8 @@ impl KafkaStreams {
         #[builder(default = 10_485_760)]
         cache_max_bytes: i64,
     ) -> Result<Self, StreamsClientError> {
-        let (poll_interval, commit_interval) =
-            validate_runtime_intervals(poll_interval, commit_interval)?;
+        let (poll_interval, commit_interval, rebalance_timeout) =
+            validate_runtime_configuration(poll_interval, commit_interval, rebalance_timeout)?;
         let built = Arc::new(topology);
 
         // Broker I/O. Under EOS-v2 the producer is transactional: the SAME object
@@ -232,6 +245,7 @@ impl KafkaStreams {
             .group_id(application_id.clone())
             .topology(Arc::clone(&built))
             .broker_dns_timeout(broker_dns_timeout)
+            .rebalance_timeout(rebalance_timeout.duration())
             .build()
             .await?;
         let member_id = membership.member_id().to_string();
@@ -433,7 +447,7 @@ impl KafkaStreams {
 mod tests {
     use std::time::Duration;
 
-    use super::{StreamsCommitInterval, StreamsPollInterval, validate_runtime_intervals};
+    use super::{StreamsCommitInterval, StreamsPollInterval, validate_runtime_configuration};
 
     #[test]
     fn runtime_intervals_use_typed_defaults_and_valid_overrides() {
@@ -464,12 +478,32 @@ mod tests {
 
     #[test]
     fn low_level_runtime_validation_names_the_invalid_field() {
-        let poll_error = validate_runtime_intervals(Duration::ZERO, Duration::from_secs(5))
-            .expect_err("zero poll interval");
+        let poll_error = validate_runtime_configuration(
+            Duration::ZERO,
+            Duration::from_secs(5),
+            Duration::from_secs(30),
+        )
+        .expect_err("zero poll interval");
         assert2::assert!(poll_error.to_string().contains("streams poll interval"));
 
-        let commit_error = validate_runtime_intervals(Duration::from_millis(200), Duration::ZERO)
-            .expect_err("zero commit interval");
+        let commit_error = validate_runtime_configuration(
+            Duration::from_millis(200),
+            Duration::ZERO,
+            Duration::from_secs(30),
+        )
+        .expect_err("zero commit interval");
         assert2::assert!(commit_error.to_string().contains("streams commit interval"));
+
+        let rebalance_error = validate_runtime_configuration(
+            Duration::from_millis(200),
+            Duration::from_secs(5),
+            Duration::from_millis(u64::try_from(i32::MAX).expect("i32 max fits u64") + 1),
+        )
+        .expect_err("rebalance timeout outside Kafka wire range");
+        assert2::assert!(
+            rebalance_error
+                .to_string()
+                .contains("streams rebalance timeout")
+        );
     }
 }
