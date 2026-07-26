@@ -163,6 +163,11 @@ pub struct GresComputeSpec {
     #[schemars(range(min = 1))]
     pub range0_follower_poll_interval_ms: Option<u64>,
 
+    /// Timeout for resolving Kafka broker hostnames used by the FDW.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub fdw_broker_dns_timeout_ms: Option<u64>,
+
     /// Kafka broker long-poll wait for committed-WAL recovery fetches.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
@@ -292,6 +297,7 @@ pub(crate) struct EffectiveGresComputePolicy {
     pub(crate) checkpoint_poll_interval_ms: PositiveMillis,
     pub(crate) idle_suspend_poll_interval_ms: PositiveMillis,
     pub(crate) range0_follower_poll_interval_ms: PositiveMillis,
+    pub(crate) fdw_broker_dns_timeout: crabka_client_core::ClientDnsTimeout,
     pub(crate) wal_recovery_fetch_max_wait_ms: PositiveI32,
     pub(crate) wal_recovery_fetch_partition_max_bytes: PositiveI32,
     pub(crate) wal_recovery_fetch_response_max_bytes: PositiveI32,
@@ -348,6 +354,12 @@ impl GresComputeSpec {
                     .unwrap_or(DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS),
             )
             .map_err(|error| format!("spec.compute.range0FollowerPollIntervalMs: {error}"))?,
+            fdw_broker_dns_timeout: crabka_client_core::ClientDnsTimeout::new(
+                Duration::from_millis(self.fdw_broker_dns_timeout_ms.unwrap_or_else(|| {
+                    crabka_client_core::ClientDnsTimeout::default().milliseconds()
+                })),
+            )
+            .map_err(|error| format!("spec.compute.fdwBrokerDnsTimeoutMs: {error}"))?,
             wal_recovery_fetch_max_wait_ms: PositiveI32::new(
                 self.wal_recovery_fetch_max_wait_ms
                     .unwrap_or(DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT_MS),
@@ -1573,6 +1585,38 @@ mod tests {
         .effective_policy()
         .expect_err("zero DNS timeout");
         assert!(error.starts_with("spec.compute.walProducerDnsTimeoutMs:"));
+    }
+
+    #[test]
+    fn fdw_broker_dns_timeout_has_exact_schema_default_override_and_error() {
+        let crd = serde_json::to_value(Gres::crd()).expect("serialize Gres CRD");
+        let field = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
+            ["properties"]["compute"]["properties"]["fdwBrokerDnsTimeoutMs"];
+        assert_eq!(field["minimum"].as_f64(), Some(1.0));
+
+        let defaults = GresComputeSpec::default()
+            .effective_policy()
+            .expect("default policy");
+        assert_eq!(
+            defaults.fdw_broker_dns_timeout,
+            crabka_client_core::ClientDnsTimeout::default()
+        );
+
+        let overridden = GresComputeSpec {
+            fdw_broker_dns_timeout_ms: Some(37),
+            ..GresComputeSpec::default()
+        }
+        .effective_policy()
+        .expect("override");
+        assert_eq!(overridden.fdw_broker_dns_timeout.milliseconds(), 37);
+
+        let error = GresComputeSpec {
+            fdw_broker_dns_timeout_ms: Some(0),
+            ..GresComputeSpec::default()
+        }
+        .effective_policy()
+        .expect_err("zero must fail");
+        assert!(error.starts_with("spec.compute.fdwBrokerDnsTimeoutMs:"));
     }
 
     #[test]
