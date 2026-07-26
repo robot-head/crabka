@@ -2005,11 +2005,9 @@ fn render_deployment(
         "--registry-fetch-partition-max-bytes".to_owned(),
         config.policy.fetch_partition_max_bytes().to_string(),
         "--registry-producer-dns-timeout-ms".to_owned(),
-        config
-            .policy
-            .producer_dns_timeout()
-            .milliseconds()
-            .to_string(),
+        u64::to_string(&config.policy.producer_dns_timeout().milliseconds()),
+        "--registry-reader-admin-dns-timeout-ms".to_owned(),
+        u64::to_string(&config.policy.reader_admin_dns_timeout().milliseconds()),
         "--wal-recovery-fetch-max-wait-ms".to_owned(),
         compute_policy
             .wal_recovery_fetch_max_wait_ms
@@ -3305,7 +3303,9 @@ mod tests {
         let policy = crabka_gres_control::RegistryPolicy::new(2, 15_001, 251, 501, 1_048_577)
             .expect("policy")
             .with_producer_dns_timeout_ms(37)
-            .expect("DNS timeout");
+            .expect("DNS timeout")
+            .with_reader_admin_dns_timeout_ms(37)
+            .expect("reader/admin DNS timeout");
         let deployment = render_deployment(
             &obj,
             &ranges[0],
@@ -3346,6 +3346,7 @@ mod tests {
             ["--registry-fetch-max-wait-ms", "501"],
             ["--registry-fetch-partition-max-bytes", "1048577"],
             ["--registry-producer-dns-timeout-ms", "37"],
+            ["--registry-reader-admin-dns-timeout-ms", "37"],
             ["--checkpoint-part-bytes", "8388608"],
             ["--checkpoint-retain", "4"],
             ["--checkpoint-delete-records-timeout-ms", "12345"],
@@ -3383,6 +3384,12 @@ mod tests {
         assert!(
             args.iter()
                 .filter(|arg| arg.as_str() == "--registry-producer-dns-timeout-ms")
+                .count()
+                == 1
+        );
+        assert!(
+            args.iter()
+                .filter(|arg| { arg.as_str() == "--registry-reader-admin-dns-timeout-ms" })
                 .count()
                 == 1
         );

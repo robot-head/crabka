@@ -913,6 +913,7 @@ fn render_activator_deployment(
                             "--registry-fetch-max-wait-ms", registry_policy.fetch_max_wait_ms().to_string(),
                             "--registry-fetch-partition-max-bytes", registry_policy.fetch_partition_max_bytes().to_string(),
                             "--registry-producer-dns-timeout-ms", registry_policy.producer_dns_timeout().milliseconds().to_string(),
+                            "--registry-reader-admin-dns-timeout-ms", registry_policy.reader_admin_dns_timeout().milliseconds().to_string(),
                             "--backend-endpoint-template", format!("{{tenant}}-gres.{namespace}.svc:{COMPUTE_PORT}", namespace = obj.namespace().unwrap_or_else(|| "default".into()))
                         ],
                         "ports": [{ "name": "postgres", "containerPort": ACTIVATOR_PORT, "protocol": "TCP" }],
@@ -1341,6 +1342,8 @@ mod tests {
                 "1048576",
                 "--registry-producer-dns-timeout-ms",
                 "10000",
+                "--registry-reader-admin-dns-timeout-ms",
+                "10000",
                 "--backend-endpoint-template",
                 "{tenant}-gres.ns.svc:5432",
             ]
@@ -1361,7 +1364,9 @@ mod tests {
         let policy = crabka_gres_control::RegistryPolicy::new(2, 15_001, 251, 501, 1_048_577)
             .expect("policy")
             .with_producer_dns_timeout_ms(37)
-            .expect("DNS timeout");
+            .expect("DNS timeout")
+            .with_reader_admin_dns_timeout_ms(37)
+            .expect("reader/admin DNS timeout");
         let deployment =
             render_activator_deployment(&obj, "registry.demo.svc:9092", "activator:test", &policy)
                 .expect("render activator deployment");
@@ -1392,6 +1397,8 @@ mod tests {
                     "1048577",
                     "--registry-producer-dns-timeout-ms",
                     "37",
+                    "--registry-reader-admin-dns-timeout-ms",
+                    "37",
                     "--backend-endpoint-template",
                     "{tenant}-gres.ns.svc:5432",
                 ]
@@ -1400,6 +1407,12 @@ mod tests {
         assert!(
             args.iter()
                 .filter(|arg| arg.as_str() == "--registry-producer-dns-timeout-ms")
+                .count()
+                == 1
+        );
+        assert!(
+            args.iter()
+                .filter(|arg| { arg.as_str() == "--registry-reader-admin-dns-timeout-ms" })
                 .count()
                 == 1
         );
