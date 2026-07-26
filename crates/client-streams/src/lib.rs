@@ -913,8 +913,9 @@ pub use dsl::{
 };
 pub use error::StreamsClientError;
 pub use membership::{
-    DEFAULT_STREAMS_JOIN_RETRY_BACKOFF, DEFAULT_STREAMS_REBALANCE_TIMEOUT, SchemaPrewarm,
-    StreamsAssignment, StreamsEvent, StreamsJoinRetryBackoff, StreamsMembership,
+    DEFAULT_STREAMS_JOIN_RETRY_BACKOFF, DEFAULT_STREAMS_LEAVE_HEARTBEAT_TIMEOUT,
+    DEFAULT_STREAMS_REBALANCE_TIMEOUT, SchemaPrewarm, StreamsAssignment, StreamsEvent,
+    StreamsJoinRetryBackoff, StreamsLeaveHeartbeatTimeout, StreamsMembership,
     StreamsRebalanceTimeout, StreamsStatus, TaskAssignment, TaskOffsetTracker, TopicPartition,
 };
 pub use processor::{
