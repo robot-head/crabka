@@ -2298,3 +2298,88 @@ test values, the test-only 16-entry query channel, and the broker-derived
 heartbeat fallback remain invariants rather than configuration. Other Client
 Streams operational values and the repository-wide hardcoded-operational-value
 goal remain open.
+
+## Client Streams State-Store Cache Budget
+
+Client Streams now represents its state-store record-cache byte budget with the
+public `StreamsStateStoreCacheMaxBytes` semantic type. It accepts
+`0..=MAX_STREAMS_STATE_STORE_CACHE_MAX_BYTES`, where the maximum is the largest
+`i64` representable by the target's internal `usize` accounting (`i64::MAX` on
+64-bit targets), and defaults to
+`DEFAULT_STREAMS_STATE_STORE_CACHE_MAX_BYTES = 10_485_760` bytes (10 MiB).
+Zero retains its existing meaning: caching is disabled and eligible stores
+emit on update.
+
+The public `StreamsApp::cache_max_bytes(i64)` and
+`KafkaStreams::cache_max_bytes(i64)` builder setters remain raw and
+source-compatible. `KafkaStreams::start` is the single validation boundary:
+it validates the raw value before broker lookup, broker construction, or
+supervisor spawn, then recovers the validated raw bytes for the unchanged
+downstream interfaces. The exact live flow is:
+
+```text
+StreamsApp::cache_max_bytes
+  -> KafkaStreams::cache_max_bytes
+  -> KafkaStreams::start validation
+  -> StreamThread::new(cache_max_bytes)
+  -> BuiltTopology::instantiate(cache_max_bytes)
+  -> wire_record_caches
+  -> ThreadCache::new(cache_max_bytes)
+```
+
+Cache accounting, eviction, flushing, per-task allocation, materialized-store
+eligibility, and the downstream raw `i64` flow are unchanged.
+
+The observability demo exposes
+`--streams-state-store-cache-max-bytes`, backed by
+`CRABKA_DEMO_STREAMS_STATE_STORE_CACHE_MAX_BYTES`. Clap provides CLI over
+environment precedence; absence selects the typed 10 MiB library default.
+Resolution validates the value and rejects the setting for Produce and Consume
+before telemetry or external I/O. Zero is accepted as the explicit disable
+value. Only the `demo-stream` Compose service receives the variable, with
+`${CRABKA_DEMO_STREAMS_STATE_STORE_CACHE_MAX_BYTES:-10485760}`. There is no CRD
+because this setting belongs to the standalone observability demo Stream
+process, not an operator-managed resource.
+
+Before this section was appended, `tools/audit-runtime-values.sh` reported
+6,239 lines across 1,053 files. The exact focused search
+
+```text
+rg -n \
+  "cache_max_bytes|StreamsStateStoreCacheMaxBytes|DEFAULT_STREAMS_STATE_STORE_CACHE_MAX_BYTES|MAX_STREAMS_STATE_STORE_CACHE_MAX_BYTES|streams-state-store-cache-max-bytes|STREAMS_STATE_STORE_CACHE_MAX_BYTES|statestore.cache.max.bytes" \
+  crates/client-streams \
+  crates/observability-demo-app \
+  demo/observability \
+  docs/configuration-audit.md
+```
+
+reported 129 lines across 17 files. The exclusive classification is 58 Client
+Streams production references, 14 demo-policy references, one demo-deployment
+reference, 56 test or harness references, zero prior-audit references, and zero
+unresolved-owner references. The categories sum to all 129 focused lines.
+
+Task 1 verification passed five focused state-store-cache tests, the focused
+shared low-level validation test, the Client Streams all-target suite (460
+library tests plus every integration and example target), strict all-target
+Clippy, nightly formatting, and diff-hygiene gates. Task 2 verification passed
+two subprocess configuration tests, one focused Compose ownership test, the
+complete demo all-target suite (50 tests), strict all-target Clippy, the exact
+single-help-flag check, nightly formatting, and diff-hygiene gates.
+`Cargo.lock` remained unchanged in both tasks.
+
+The fresh combined final run passed the Client Streams and demo all-target
+suites, strict combined Clippy, the exact single-help-flag check, nightly
+formatting, and diff-hygiene gates. `Cargo.lock` remained unchanged.
+
+### Adjacent Pending Policy
+
+This closes only the Client Streams state-store record-cache byte budget. The
+next scanner-visible operational owner with an actual production consumer is
+the fixed five-second shutdown leave-heartbeat deadline in
+`crates/client-streams/src/membership/coordinator.rs`: after the coordinator
+loop observes shutdown, `run` bounds its final `member_epoch = -1` heartbeat
+with that timeout. Error codes, wire constants, topology names, test values,
+the broker-provided heartbeat interval, and its invalid-response fallback
+remain protocol or test invariants rather than configuration policy. Other
+Client Streams operational values and the repository-wide hardcoded
+operational-value goal remain open.
