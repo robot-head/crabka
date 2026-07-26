@@ -73,6 +73,7 @@ impl Cli {
             "wal_admin_request_timeout_ms",
             "wal_producer_flush_timeout_ms",
             "wal_producer_dns_timeout_ms",
+            "fdw_broker_dns_timeout_ms",
             "wal_producer_request_timeout_ms",
             "wal_producer_retries",
             "wal_producer_retry_backoff_ms",
@@ -253,6 +254,13 @@ pub struct ServeArgs {
         requires = "substrate_bootstrap"
     )]
     pub wal_producer_dns_timeout_ms: Option<PositiveMillis>,
+
+    /// Timeout for resolving Kafka broker hostnames used by the FDW.
+    #[arg(
+        long = "fdw-broker-dns-timeout-ms",
+        env = "CRABKA_GRES_FDW_BROKER_DNS_TIMEOUT_MS"
+    )]
+    pub fdw_broker_dns_timeout_ms: Option<PositiveMillis>,
 
     /// Timeout for WAL producer broker requests.
     #[arg(
@@ -646,6 +654,7 @@ fn validate_wal_recovery_read_policy(args: &ServeArgs) -> std::io::Result<()> {
     effective_wal_admin_policy(args)?;
     effective_wal_producer_flush_timeout(args)?;
     effective_wal_producer_dns_timeout(args)?;
+    effective_fdw_broker_dns_timeout(args)?;
     effective_wal_producer_retry_policy(args)?;
     effective_wal_producer_throughput_policy(args)?;
     Ok(())
@@ -695,6 +704,18 @@ fn effective_wal_producer_dns_timeout(
     args: &ServeArgs,
 ) -> std::io::Result<crabka_client_core::ClientDnsTimeout> {
     args.wal_producer_dns_timeout_ms.map_or_else(
+        || Ok(crabka_client_core::ClientDnsTimeout::default()),
+        |timeout| {
+            crabka_client_core::ClientDnsTimeout::new(Duration::from_millis(timeout.into_value()))
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
+        },
+    )
+}
+
+fn effective_fdw_broker_dns_timeout(
+    args: &ServeArgs,
+) -> std::io::Result<crabka_client_core::ClientDnsTimeout> {
+    args.fdw_broker_dns_timeout_ms.map_or_else(
         || Ok(crabka_client_core::ClientDnsTimeout::default()),
         |timeout| {
             crabka_client_core::ClientDnsTimeout::new(Duration::from_millis(timeout.into_value()))
@@ -2446,6 +2467,7 @@ pub async fn serve_listener_with_tenant_config_loader(
     register_kafka_scanner_with_default_bootstrap(
         &mut runtime.engine,
         kafka_scanner_default_bootstrap(&effective_args),
+        effective_fdw_broker_dns_timeout(&effective_args)?,
     );
     let session_config = build_session_config_from_tenant(&effective_args, tenant_record.as_ref())?;
 
@@ -7475,16 +7497,22 @@ fn local_checkpoint_root(config: &SubstrateRuntimeConfig) -> Option<&std::path::
 
 /// Register Crabka's Kafka foreign-data scanner with the SQL engine.
 pub fn register_kafka_scanner(engine: &mut SqlEngine) {
-    engine.set_foreign_scanner(Arc::new(crabka_gres_fdw::KafkaFdw::with_defaults(None)));
+    engine.set_foreign_scanner(Arc::new(
+        crabka_gres_fdw::KafkaFdw::with_defaults(None)
+            .with_broker_dns_timeout(crabka_client_core::ClientDnsTimeout::default()),
+    ));
 }
 
 /// Register Crabka's Kafka foreign-data scanner with an optional default bootstrap.
 pub fn register_kafka_scanner_with_default_bootstrap(
     engine: &mut RuntimeEngine,
     default_bootstrap: Option<String>,
+    broker_dns_timeout: crabka_client_core::ClientDnsTimeout,
 ) {
-    let scanner: Arc<dyn crabka_pgexec::foreign::ForeignScanner> =
-        Arc::new(crabka_gres_fdw::KafkaFdw::with_defaults(default_bootstrap));
+    let scanner: Arc<dyn crabka_pgexec::foreign::ForeignScanner> = Arc::new(
+        crabka_gres_fdw::KafkaFdw::with_defaults(default_bootstrap)
+            .with_broker_dns_timeout(broker_dns_timeout),
+    );
     match engine {
         RuntimeEngine::Single(engine) => engine.set_foreign_scanner(scanner),
         RuntimeEngine::Multi(tenant) => tenant.set_foreign_scanner(&scanner),
@@ -8552,6 +8580,7 @@ mod tests {
             wal_admin_request_timeout_ms: None,
             wal_producer_flush_timeout_ms: None,
             wal_producer_dns_timeout_ms: None,
+            fdw_broker_dns_timeout_ms: None,
             wal_producer_request_timeout_ms: None,
             wal_producer_retries: None,
             wal_producer_retry_backoff_ms: None,
@@ -9997,6 +10026,66 @@ mod tests {
         let error = SubstrateRuntimeConfig::from_args(&programmatic)
             .expect_err("programmatic DNS timeout without substrate");
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn fdw_broker_dns_timeout_uses_default_environment_and_cli_precedence() {
+        const CHILD: &str = "CRABKA_TEST_GRES_FDW_BROKER_DNS_TIMEOUT_CHILD";
+        const ENV: &str = "CRABKA_GRES_FDW_BROKER_DNS_TIMEOUT_MS";
+        if std::env::var_os(CHILD).is_none() {
+            for mode in ["defaults", "environment"] {
+                let mut child =
+                    std::process::Command::new(std::env::current_exe().expect("test exe"));
+                child
+                    .args([
+                        "--exact",
+                        "tests::fdw_broker_dns_timeout_uses_default_environment_and_cli_precedence",
+                    ])
+                    .env(CHILD, mode)
+                    .env_remove(ENV);
+                if mode == "environment" {
+                    child.env(ENV, "27");
+                }
+                assert!(child.status().expect("child test").success());
+            }
+            return;
+        }
+
+        let args = <Cli as clap::Parser>::try_parse_from(["crabka-gres"])
+            .expect("default FDW DNS timeout")
+            .serve;
+        let expected_ms = if std::env::var(CHILD).as_deref() == Ok("environment") {
+            27
+        } else {
+            crabka_client_core::ClientDnsTimeout::default().milliseconds()
+        };
+        assert_eq!(
+            effective_fdw_broker_dns_timeout(&args)
+                .expect("valid FDW DNS timeout")
+                .milliseconds(),
+            expected_ms
+        );
+
+        let args = <Cli as clap::Parser>::try_parse_from([
+            "crabka-gres",
+            "--fdw-broker-dns-timeout-ms=37",
+        ])
+        .expect("CLI FDW DNS timeout")
+        .serve;
+        assert_eq!(
+            effective_fdw_broker_dns_timeout(&args)
+                .expect("valid FDW DNS timeout")
+                .milliseconds(),
+            37
+        );
+    }
+
+    #[test]
+    fn fdw_broker_dns_timeout_rejects_zero_but_allows_local_mode() {
+        Cli::try_parse_from(["crabka-gres", "--fdw-broker-dns-timeout-ms=0"])
+            .expect_err("zero DNS timeout");
+        Cli::try_parse_from(["crabka-gres", "--fdw-broker-dns-timeout-ms=1"])
+            .expect("local FDW policy");
     }
 
     #[test]
