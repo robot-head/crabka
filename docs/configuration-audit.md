@@ -1736,3 +1736,108 @@ The implementation-task verification reported:
 
 This evidence closes only the Gres registry producer DNS slice. Raw registry
 reader/admin DNS ownership and the repository-wide goal remain open.
+
+## Gres Registry Reader/Admin DNS Timeout
+
+The Gres registry reader and admin paths reuse client-core's validated
+`ClientDnsTimeout` and 10-second `DEFAULT_CLIENT_DNS_TIMEOUT`; they add no
+registry-specific timeout type or default. The four standalone surfaces accept
+the exact `--registry-reader-admin-dns-timeout-ms` CLI flag and
+`CRABKA_GRES_REGISTRY_READER_ADMIN_DNS_TIMEOUT_MS` environment variable. The
+Kafka CRD owns optional `spec.gresRegistry.readerAdminDnsTimeoutMs`, whose
+checked-in schema has `minimum: 1`.
+
+Absence selects the shared validated 10,000-millisecond default. Each
+standalone parser validates explicit input through its existing positive
+millisecond type and
+`RegistryPolicy::with_reader_admin_dns_timeout_ms`; CLI input takes precedence
+over environment input. The CRD follows the same typed override path and
+reports invalid input under the exact
+`spec.gresRegistry.readerAdminDnsTimeoutMs` owner.
+
+The effective fleet value follows:
+
+```text
+Kafka.spec.gresRegistry.readerAdminDnsTimeoutMs
+  -> GresRegistrySpec::policy
+  -> RegistryPolicy::with_reader_admin_dns_timeout_ms
+  -> operator-internal Gres control policy
+     / rendered --registry-reader-admin-dns-timeout-ms
+  -> standalone RegistryOptions::policy
+  -> Registry::connect_with_policy
+  -> Registry::ensure_topic / refresh / background reader
+```
+
+Operator-internal control construction and both activator and compute rendering
+consume the same effective `RegistryPolicy`. Standalone Gres, `crabka gres`,
+the Gres activator, and the Gres load-test each own the exact CLI/environment
+input; the load-test also forwards one exact flag/value pair to each child.
+
+Within `Registry`, topic creation and its following metadata request construct
+`AdminClient` with `policy.reader_admin_dns_timeout()`. Synchronous refresh
+uses the same value for both its admin metadata lookup and
+`resolve_bootstrap_addr`; the background reader receives a clone of the same
+policy and uses that value on every resolution/reconnect cycle. Each ordered,
+comma-separated reader lookup gets its own deadline, and the resulting raw
+`ConnectionOptions` carries the same typed value.
+
+`AdminClient` now applies its carried `ConnectionOptions.dns_timeout` in
+`connect_one` around every `tokio::net::lookup_host`. Initial bootstrap,
+controller reconnect, and bootstrap retry all route through `connect_one`, so
+the root fix covers topic creation and metadata refresh without caller-local
+guards. Its 5-second TCP-connect and 30-second request defaults remain separate
+and unchanged.
+
+The registry producer DNS slice remains separately completed and unchanged:
+`--registry-producer-dns-timeout-ms`,
+`CRABKA_GRES_REGISTRY_PRODUCER_DNS_TIMEOUT_MS`, and
+`spec.gresRegistry.producerDnsTimeoutMs` continue through
+`RegistryPolicy::producer_dns_timeout()` to the sole registry
+`Producer::builder()` construction.
+
+Before this section was appended, `tools/audit-runtime-values.sh` reported
+6,191 lines across 1,051 files. The exact required focused search
+
+```text
+rg -n "lookup_host|ToSocketAddrs|ClientDnsTimeout|dns[_-]timeout|DnsTimeout|registry-reader-admin-dns-timeout|readerAdminDnsTimeoutMs" crates deploy/crds docs/configuration-audit.md
+```
+
+reported 436 lines across 42 files: 187 production references across 25 files,
+4 checked-in CRD schema references across 2 files, 203 test or harness
+references across 31 files, and 42 prior-audit references in this file. These
+groups classify the complete focused result, including separately completed
+DNS paths and unresolved owners; they do not claim all matches are covered by
+this slice.
+
+### Adjacent Pending Policy
+
+This closes only Gres registry reader/admin DNS resolution. The next coherent
+unresolved owner is the raw Gres FDW lookup in
+`crates/gres-fdw/src/source.rs`: `open_connection` awaits
+`tokio::net::lookup_host` without a deadline even though its subsequent
+`ConnectionOptions` contains the default typed DNS value. Client Streams,
+Raft, Schema Registry, and unrelated producer DNS paths remain separate visible
+owners. The repository-wide hardcoded operational-value audit remains active.
+
+### Gres Registry Reader/Admin DNS Timeout Evidence
+
+Implementation-task verification reported:
+
+- Client admin: the exact paused-clock lookup test stopped at 37 milliseconds;
+  the custom constructor preserved the standard admin identity and independent
+  connect/request defaults; all-target tests and strict Clippy passed.
+- Gres control: both focused reader/admin policy and resolver tests passed; the
+  full all-target run passed 83 tests; strict Clippy, formatting, and diff
+  hygiene passed.
+- The four standalone packages: default, zero rejection, environment/CLI
+  precedence, and load-test child forwarding tests passed; the full all-target
+  run had zero failures and retained one pre-existing ignored live-cluster
+  case; strict Clippy and formatting passed. Gres help displayed the exact
+  `--registry-reader-admin-dns-timeout-ms` flag.
+- Operator: focused CRD, one-field cache replacement, activator, and compute
+  rendering tests passed; the final library run passed 721 tests and the
+  `reconcile_gres` target passed 20 tests; strict all-target Clippy passed. Two
+  fresh nine-file CRD generations matched each other and `deploy/crds`.
+
+This evidence does not close the Gres FDW or other pending DNS owners, and it
+does not complete the repository-wide configuration goal.
