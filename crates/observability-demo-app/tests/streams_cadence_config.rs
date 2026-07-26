@@ -3,6 +3,7 @@ use std::process::Command;
 fn demo() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_observability-demo-app"));
     command
+        .env_remove("CRABKA_DEMO_STREAMS_BROKER_DNS_TIMEOUT_MS")
         .env_remove("CRABKA_DEMO_STREAMS_POLL_INTERVAL_MS")
         .env_remove("CRABKA_DEMO_STREAMS_COMMIT_INTERVAL_MS");
     command
