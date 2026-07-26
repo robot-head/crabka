@@ -2368,8 +2368,12 @@ single-help-flag check, nightly formatting, and diff-hygiene gates.
 `Cargo.lock` remained unchanged in both tasks.
 
 The fresh combined final run passed the Client Streams and demo all-target
-suites, strict combined Clippy, the exact single-help-flag check, nightly
-formatting, and diff-hygiene gates. `Cargo.lock` remained unchanged.
+suites, strict combined Clippy, nightly formatting, and diff-hygiene gates.
+The prescribed `./target/debug/observability-demo-app --help` flag count
+returned `0` because that pre-existing binary was stale. The freshly built
+task-specific binary at
+`/tmp/configuration_expose_task3_target_20260726.lf2J58/debug/observability-demo-app`
+returned the required flag count of `1`. `Cargo.lock` remained unchanged.
 
 ### Adjacent Pending Policy
 
