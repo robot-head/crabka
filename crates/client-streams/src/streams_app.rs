@@ -52,7 +52,7 @@ use crabka_schema_serde::{
 };
 
 use crate::{
-    StreamsJoinRetryBackoff, StreamsRebalanceTimeout,
+    StreamsInteractiveQueryQueueCapacity, StreamsJoinRetryBackoff, StreamsRebalanceTimeout,
     dsl::StreamsBuilder,
     error::StreamsClientError,
     runtime::{KafkaStreams, StreamsCommitInterval, StreamsPollInterval, eos::ProcessingGuarantee},
@@ -75,6 +75,7 @@ pub struct StreamsApp {
     join_retry_backoff: StreamsJoinRetryBackoff,
     broker_dns_timeout: crabka_client_core::ClientDnsTimeout,
     cache_max_bytes: i64,
+    interactive_query_queue_capacity: StreamsInteractiveQueryQueueCapacity,
 }
 
 #[bon::bon]
@@ -114,6 +115,9 @@ impl StreamsApp {
         /// caching. Defaults to 10 MiB, matching the JVM default.
         #[builder(default = 10_485_760)]
         cache_max_bytes: i64,
+        /// Capacity shared by the v1 and v2 interactive-query request queues.
+        #[builder(default)]
+        interactive_query_queue_capacity: StreamsInteractiveQueryQueueCapacity,
     ) -> Self {
         let cache = SchemaCache::new(
             RegistryClient::new(schema_registry),
@@ -132,6 +136,7 @@ impl StreamsApp {
             join_retry_backoff,
             broker_dns_timeout,
             cache_max_bytes,
+            interactive_query_queue_capacity,
         }
     }
 }
@@ -199,6 +204,7 @@ impl StreamsApp {
             .join_retry_backoff(self.join_retry_backoff.duration())
             .broker_dns_timeout(self.broker_dns_timeout)
             .cache_max_bytes(self.cache_max_bytes)
+            .interactive_query_queue_capacity(self.interactive_query_queue_capacity)
             .build()
             .await
     }
@@ -207,6 +213,29 @@ impl StreamsApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interactive_query_queue_capacity_uses_typed_default_and_override() {
+        let defaults = StreamsApp::builder()
+            .bootstrap("127.0.0.1:9092")
+            .application_id("iq-capacity-default")
+            .schema_registry("http://127.0.0.1:8081")
+            .build();
+        assert_eq!(
+            defaults.interactive_query_queue_capacity,
+            crate::StreamsInteractiveQueryQueueCapacity::default()
+        );
+
+        let capacity =
+            crate::StreamsInteractiveQueryQueueCapacity::new(37).expect("positive queue capacity");
+        let overridden = StreamsApp::builder()
+            .bootstrap("127.0.0.1:9092")
+            .application_id("iq-capacity-override")
+            .schema_registry("http://127.0.0.1:8081")
+            .interactive_query_queue_capacity(capacity)
+            .build();
+        assert_eq!(overridden.interactive_query_queue_capacity, capacity);
+    }
 
     #[test]
     fn application_id_returns_configured_value() {

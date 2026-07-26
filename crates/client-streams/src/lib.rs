@@ -924,8 +924,9 @@ pub use processor::{
     RecordContext, Serde, SerdeError, StringSerde, schema_serde::SchemaSerde,
 };
 pub use runtime::{
-    DEFAULT_STREAMS_COMMIT_INTERVAL, DEFAULT_STREAMS_POLL_INTERVAL, KafkaStreams,
-    ReadOnlyKeyValueStore, ReadOnlySessionStore, ReadOnlyWindowStore, StreamsCommitInterval,
+    DEFAULT_STREAMS_COMMIT_INTERVAL, DEFAULT_STREAMS_INTERACTIVE_QUERY_QUEUE_CAPACITY,
+    DEFAULT_STREAMS_POLL_INTERVAL, KafkaStreams, ReadOnlyKeyValueStore, ReadOnlySessionStore,
+    ReadOnlyWindowStore, StreamsCommitInterval, StreamsInteractiveQueryQueueCapacity,
     StreamsPollInterval,
     eos::ProcessingGuarantee,
     iq::IqError,
