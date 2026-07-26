@@ -2066,10 +2066,9 @@ passed with a hostile inherited DNS-timeout environment.
 ### Adjacent Pending Policy
 
 This closes only the Client Streams runtime cadence pair. The next coherent
-Client Streams operational owner is membership cadence in
-`crates/client-streams/src/membership/client.rs`: the 30-second
-`rebalance_timeout` default and the 3-second fallback heartbeat interval share
-one membership boundary and remain raw operational values in the scanner
-evidence. Other membership and protocol timing, other Client Streams
-operational values, and the repository-wide hardcoded operational-value goal
-remain open.
+Client Streams operational owner is the existing 30-second
+`rebalance_timeout` default in `crates/client-streams/src/membership/client.rs`.
+The broker supplies `heartbeat_interval`; its 3-second fallback is defensive
+broker-protocol behavior that remains fixed and is not configuration policy.
+Other membership and protocol timing, other Client Streams operational values,
+and the repository-wide hardcoded operational-value goal remain open.
