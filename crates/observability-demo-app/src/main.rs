@@ -23,7 +23,7 @@ use crabka_client_producer::{Acks, Header, Producer, ProducerRecord};
 use crabka_client_streams::{
     ClientDnsTimeout, SchemaSerde, Serde, StreamsCommitInterval,
     StreamsInteractiveQueryQueueCapacity, StreamsJoinRetryBackoff, StreamsPollInterval,
-    StreamsRebalanceTimeout, processor::serde::SerdeRole,
+    StreamsRebalanceTimeout, StreamsStateStoreCacheMaxBytes, processor::serde::SerdeRole,
 };
 use crabka_schema_serde::{
     CacheConfig, RegistryClient, SchemaCache, format::protobuf::ProtobufSerde, set_default_registry,
@@ -86,6 +86,9 @@ struct Cli {
     /// Capacity shared by the Client Streams interactive-query request queues.
     #[arg(long, env = "CRABKA_DEMO_STREAMS_INTERACTIVE_QUERY_QUEUE_CAPACITY")]
     streams_interactive_query_queue_capacity: Option<NonZeroUsize>,
+    /// Client Streams state-store record-cache budget in bytes; zero disables it.
+    #[arg(long, env = "CRABKA_DEMO_STREAMS_STATE_STORE_CACHE_MAX_BYTES")]
+    streams_state_store_cache_max_bytes: Option<i64>,
 }
 
 fn effective_streams_broker_dns_timeout(cli: &Cli) -> std::io::Result<ClientDnsTimeout> {
@@ -219,6 +222,29 @@ fn effective_streams_interactive_query_queue_capacity(
     )
 }
 
+fn effective_streams_state_store_cache_max_bytes(
+    cli: &Cli,
+) -> std::io::Result<StreamsStateStoreCacheMaxBytes> {
+    if cli.role != Role::Stream
+        && let Some(bytes) = cli.streams_state_store_cache_max_bytes
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "--streams-state-store-cache-max-bytes ({bytes}) is only valid with --role stream"
+            ),
+        ));
+    }
+
+    cli.streams_state_store_cache_max_bytes.map_or_else(
+        || Ok(StreamsStateStoreCacheMaxBytes::default()),
+        |bytes| {
+            StreamsStateStoreCacheMaxBytes::new(bytes)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
+        },
+    )
+}
+
 #[tokio::main]
 async fn main() -> Result<(), BoxError> {
     let cli = Cli::parse();
@@ -228,6 +254,7 @@ async fn main() -> Result<(), BoxError> {
     let streams_join_retry_backoff = effective_streams_join_retry_backoff(&cli)?;
     let streams_interactive_query_queue_capacity =
         effective_streams_interactive_query_queue_capacity(&cli)?;
+    let streams_state_store_cache_max_bytes = effective_streams_state_store_cache_max_bytes(&cli)?;
 
     let telemetry = crabka_telemetry::init(
         crabka_telemetry::OtlpConfig::from_env(
@@ -260,6 +287,7 @@ async fn main() -> Result<(), BoxError> {
                 streams_rebalance_timeout,
                 streams_join_retry_backoff,
                 streams_interactive_query_queue_capacity,
+                streams_state_store_cache_max_bytes,
             )
             .await?;
         }
@@ -389,6 +417,7 @@ async fn run_produce(cli: &Cli, metrics: &DemoMetrics) -> Result<(), BoxError> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_stream(
     cli: &Cli,
     broker_dns_timeout: ClientDnsTimeout,
@@ -397,6 +426,7 @@ async fn run_stream(
     streams_rebalance_timeout: StreamsRebalanceTimeout,
     streams_join_retry_backoff: StreamsJoinRetryBackoff,
     streams_interactive_query_queue_capacity: StreamsInteractiveQueryQueueCapacity,
+    streams_state_store_cache_max_bytes: StreamsStateStoreCacheMaxBytes,
 ) -> Result<(), BoxError> {
     let app = crabka_client_streams::StreamsApp::builder()
         .bootstrap(cli.bootstrap.clone())
@@ -408,6 +438,7 @@ async fn run_stream(
         .rebalance_timeout(streams_rebalance_timeout)
         .join_retry_backoff(streams_join_retry_backoff)
         .interactive_query_queue_capacity(streams_interactive_query_queue_capacity)
+        .cache_max_bytes(streams_state_store_cache_max_bytes.bytes())
         .build();
     let topology = app.streams_builder();
     topology
@@ -583,6 +614,7 @@ mod tests {
             streams_rebalance_timeout_ms: None,
             streams_join_retry_backoff_ms: None,
             streams_interactive_query_queue_capacity: None,
+            streams_state_store_cache_max_bytes: None,
         };
         assert_eq!(
             effective_streams_broker_dns_timeout(&defaults).expect("typed default"),
@@ -642,6 +674,7 @@ mod tests {
             streams_rebalance_timeout_ms: None,
             streams_join_retry_backoff_ms: None,
             streams_interactive_query_queue_capacity: None,
+            streams_state_store_cache_max_bytes: None,
         };
         let (poll, commit) = effective_streams_runtime_cadence(&defaults).expect("typed defaults");
         assert_eq!(poll, crabka_client_streams::StreamsPollInterval::default());
@@ -710,6 +743,7 @@ mod tests {
             streams_rebalance_timeout_ms: None,
             streams_join_retry_backoff_ms: None,
             streams_interactive_query_queue_capacity: None,
+            streams_state_store_cache_max_bytes: None,
         };
         assert_eq!(
             effective_streams_rebalance_timeout(&defaults).expect("typed default"),
@@ -781,6 +815,7 @@ mod tests {
             streams_rebalance_timeout_ms: None,
             streams_join_retry_backoff_ms: None,
             streams_interactive_query_queue_capacity: None,
+            streams_state_store_cache_max_bytes: None,
         };
         assert_eq!(
             effective_streams_join_retry_backoff(&defaults).expect("typed default"),
@@ -814,6 +849,7 @@ mod tests {
             streams_rebalance_timeout_ms: None,
             streams_join_retry_backoff_ms: None,
             streams_interactive_query_queue_capacity: None,
+            streams_state_store_cache_max_bytes: None,
         };
         assert_eq!(
             effective_streams_interactive_query_queue_capacity(&defaults).expect("typed default"),
