@@ -52,6 +52,7 @@ use crabka_schema_serde::{
 };
 
 use crate::{
+    StreamsRebalanceTimeout,
     dsl::StreamsBuilder,
     error::StreamsClientError,
     runtime::{KafkaStreams, StreamsCommitInterval, StreamsPollInterval, eos::ProcessingGuarantee},
@@ -70,6 +71,7 @@ pub struct StreamsApp {
     processing_guarantee: ProcessingGuarantee,
     poll_interval: StreamsPollInterval,
     commit_interval: StreamsCommitInterval,
+    rebalance_timeout: StreamsRebalanceTimeout,
     broker_dns_timeout: crabka_client_core::ClientDnsTimeout,
     cache_max_bytes: i64,
 }
@@ -98,6 +100,9 @@ impl StreamsApp {
         /// Delay between Client Streams commit attempts.
         #[builder(default)]
         commit_interval: StreamsCommitInterval,
+        /// Timeout advertised for completing a Client Streams rebalance.
+        #[builder(default)]
+        rebalance_timeout: StreamsRebalanceTimeout,
         /// Deadline for each Kafka broker DNS lookup owned by this process.
         #[builder(default)]
         broker_dns_timeout: crabka_client_core::ClientDnsTimeout,
@@ -119,6 +124,7 @@ impl StreamsApp {
             processing_guarantee,
             poll_interval,
             commit_interval,
+            rebalance_timeout,
             broker_dns_timeout,
             cache_max_bytes,
         }
@@ -184,6 +190,7 @@ impl StreamsApp {
             .processing_guarantee(self.processing_guarantee)
             .poll_interval(self.poll_interval.duration())
             .commit_interval(self.commit_interval.duration())
+            .rebalance_timeout(self.rebalance_timeout.duration())
             .broker_dns_timeout(self.broker_dns_timeout)
             .cache_max_bytes(self.cache_max_bytes)
             .build()
@@ -259,5 +266,28 @@ mod tests {
             .build();
         assert_eq!(overridden.poll_interval, poll);
         assert_eq!(overridden.commit_interval, commit);
+    }
+
+    #[test]
+    fn rebalance_timeout_uses_typed_default_and_override() {
+        let defaults = StreamsApp::builder()
+            .bootstrap("127.0.0.1:9092")
+            .application_id("rebalance-default")
+            .schema_registry("http://127.0.0.1:8081")
+            .build();
+        assert_eq!(
+            defaults.rebalance_timeout,
+            crate::StreamsRebalanceTimeout::default()
+        );
+
+        let timeout = crate::StreamsRebalanceTimeout::new(std::time::Duration::from_millis(45_000))
+            .expect("valid timeout");
+        let overridden = StreamsApp::builder()
+            .bootstrap("127.0.0.1:9092")
+            .application_id("rebalance-override")
+            .schema_registry("http://127.0.0.1:8081")
+            .rebalance_timeout(timeout)
+            .build();
+        assert_eq!(overridden.rebalance_timeout, timeout);
     }
 }
