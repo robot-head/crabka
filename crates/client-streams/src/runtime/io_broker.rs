@@ -18,8 +18,8 @@ use std::{collections::HashMap, sync::Arc};
 
 use bytes::Bytes;
 use crabka_client_core::{
-    Client, Connection, ConnectionOptions, DEFAULT_FETCH_RESPONSE_MAX_BYTES, IsolatedFetch,
-    fetch_partition_with_isolation,
+    Client, ClientDnsTimeout, Connection, ConnectionOptions, DEFAULT_FETCH_RESPONSE_MAX_BYTES,
+    IsolatedFetch, fetch_partition_with_isolation,
 };
 use crabka_client_producer::{Acks, Producer, ProducerError, ProducerRecord, RecordMetadata};
 use crabka_protocol::{
@@ -703,6 +703,42 @@ impl OffsetStore for BrokerOffsetStore {
 
 // ─── build ────────────────────────────────────────────────────────────────────
 
+async fn lookup_first<F, I>(
+    bootstrap: &str,
+    dns_timeout: ClientDnsTimeout,
+    lookup: F,
+) -> Result<std::net::SocketAddr, StreamsClientError>
+where
+    F: std::future::Future<Output = std::io::Result<I>>,
+    I: Iterator<Item = std::net::SocketAddr>,
+{
+    let mut addrs = tokio::time::timeout(dns_timeout.duration(), lookup)
+        .await
+        .map_err(|_| {
+            StreamsClientError::Runtime(format!(
+                "DNS lookup {bootstrap} timed out after {} ms",
+                dns_timeout.milliseconds(),
+            ))
+        })?
+        .map_err(|error| {
+            StreamsClientError::Runtime(format!("failed to resolve bootstrap {bootstrap}: {error}"))
+        })?;
+    addrs.next().ok_or_else(|| {
+        StreamsClientError::Runtime(format!("no addresses resolved for bootstrap: {bootstrap}"))
+    })
+}
+
+fn fetch_connection_options(
+    client_id: &str,
+    broker_dns_timeout: ClientDnsTimeout,
+) -> ConnectionOptions {
+    ConnectionOptions {
+        client_id: client_id.to_owned(),
+        dns_timeout: broker_dns_timeout,
+        ..ConnectionOptions::default()
+    }
+}
+
 /// Construct the three broker-backed I/O trait objects from a single bootstrap
 /// address.
 ///
@@ -713,31 +749,27 @@ pub(crate) async fn build(
     bootstrap: &str,
     group_id: &str,
     client_id: &str,
+    broker_dns_timeout: ClientDnsTimeout,
 ) -> Result<(BrokerFetcher, Arc<BrokerProducer>, Arc<BrokerOffsetStore>), StreamsClientError> {
     // 1. Client for metadata + offset RPCs.
     let metadata_client = Client::builder()
         .bootstrap(bootstrap)
         .client_id(client_id)
+        .dns_timeout(broker_dns_timeout.duration())
         .build()
         .await?;
 
     // 2. Dedicated fetch connection (single bootstrap broker).
     // Resolve the bootstrap address (e.g. "localhost:9092") to a SocketAddr.
-    let addr = tokio::net::lookup_host(bootstrap)
-        .await
-        .map_err(|e| {
-            StreamsClientError::Runtime(format!("failed to resolve bootstrap address: {e}"))
-        })?
-        .next()
-        .ok_or_else(|| {
-            StreamsClientError::Runtime(format!("no addresses resolved for bootstrap: {bootstrap}"))
-        })?;
+    let addr = lookup_first(
+        bootstrap,
+        broker_dns_timeout,
+        tokio::net::lookup_host(bootstrap),
+    )
+    .await?;
     let fetch_conn = Connection::connect_with_options(
         addr,
-        ConnectionOptions {
-            client_id: client_id.to_string(),
-            ..Default::default()
-        },
+        fetch_connection_options(client_id, broker_dns_timeout),
     )
     .await?;
 
@@ -747,6 +779,7 @@ pub(crate) async fn build(
         .client_id(format!("{client_id}-producer"))
         .enable_idempotence(true)
         .acks(Acks::All)
+        .dns_timeout(broker_dns_timeout.duration())
         .build()
         .await
         .map_err(|e| StreamsClientError::Runtime(e.to_string()))?;
@@ -757,6 +790,7 @@ pub(crate) async fn build(
     let offset_client = Client::builder()
         .bootstrap(bootstrap)
         .client_id(format!("{client_id}-offsets"))
+        .dns_timeout(broker_dns_timeout.duration())
         .build()
         .await?;
 
@@ -789,6 +823,7 @@ pub(crate) async fn build_eos(
     group_id: &str,
     client_id: &str,
     transactional_id: &str,
+    broker_dns_timeout: ClientDnsTimeout,
 ) -> Result<
     (
         BrokerFetcher,
@@ -801,26 +836,21 @@ pub(crate) async fn build_eos(
     let metadata_client = Client::builder()
         .bootstrap(bootstrap)
         .client_id(client_id)
+        .dns_timeout(broker_dns_timeout.duration())
         .build()
         .await?;
 
     // 2. Dedicated fetch connection (single bootstrap broker).
     // Resolve the bootstrap address (e.g. "localhost:9092") to a SocketAddr.
-    let addr = tokio::net::lookup_host(bootstrap)
-        .await
-        .map_err(|e| {
-            StreamsClientError::Runtime(format!("failed to resolve bootstrap address: {e}"))
-        })?
-        .next()
-        .ok_or_else(|| {
-            StreamsClientError::Runtime(format!("no addresses resolved for bootstrap: {bootstrap}"))
-        })?;
+    let addr = lookup_first(
+        bootstrap,
+        broker_dns_timeout,
+        tokio::net::lookup_host(bootstrap),
+    )
+    .await?;
     let fetch_conn = Connection::connect_with_options(
         addr,
-        ConnectionOptions {
-            client_id: client_id.to_string(),
-            ..Default::default()
-        },
+        fetch_connection_options(client_id, broker_dns_timeout),
     )
     .await?;
 
@@ -831,6 +861,7 @@ pub(crate) async fn build_eos(
         .enable_idempotence(true)
         .acks(Acks::All)
         .transactional_id(transactional_id.to_string())
+        .dns_timeout(broker_dns_timeout.duration())
         .build()
         .await
         .map_err(|e| StreamsClientError::Runtime(e.to_string()))?;
@@ -841,6 +872,7 @@ pub(crate) async fn build_eos(
     let offset_client = Client::builder()
         .bootstrap(bootstrap)
         .client_id(format!("{client_id}-offsets"))
+        .dns_timeout(broker_dns_timeout.duration())
         .build()
         .await?;
 
@@ -865,16 +897,18 @@ pub(crate) async fn build_eos(
 #[cfg(test)]
 mod tests {
 
-    use std::sync::Arc;
+    use std::{net::SocketAddr, sync::Arc, time::Duration};
 
     use bytes::Bytes;
     use crabka_broker::{Broker, BrokerConfig};
-    use crabka_client_core::Client;
+    use crabka_client_core::{Client, ClientDnsTimeout};
     use crabka_client_producer::Producer;
     use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
     use tokio::sync::Mutex;
 
-    use super::{BrokerOffsetStore, BrokerTransactionalProducer};
+    use super::{
+        BrokerOffsetStore, BrokerTransactionalProducer, fetch_connection_options, lookup_first,
+    };
     use crate::{
         error::StreamsClientError,
         runtime::{
@@ -909,6 +943,70 @@ mod tests {
         assert_eq!(
             resp.topics[0].error_code, 0,
             "topic create failed: {resp:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn raw_lookup_stops_at_the_configured_deadline() {
+        let timeout = ClientDnsTimeout::new(Duration::from_millis(37)).expect("positive timeout");
+        let started = tokio::time::Instant::now();
+        let error = lookup_first(
+            "broker.example:9092",
+            timeout,
+            std::future::pending::<std::io::Result<std::vec::IntoIter<SocketAddr>>>(),
+        )
+        .await
+        .expect_err("pending resolver must time out");
+
+        assert2::assert!(started.elapsed() == Duration::from_millis(37));
+        assert2::assert!(
+            error.to_string()
+                == "runtime error: DNS lookup broker.example:9092 timed out after 37 ms"
+        );
+    }
+
+    #[tokio::test]
+    async fn raw_lookup_preserves_resolver_and_empty_result_context() {
+        let timeout = ClientDnsTimeout::default();
+        let resolver_error = lookup_first(
+            "bad.example:9092",
+            timeout,
+            std::future::ready(Err::<std::vec::IntoIter<SocketAddr>, _>(
+                std::io::Error::other("resolver failed"),
+            )),
+        )
+        .await
+        .expect_err("resolver error");
+        assert2::assert!(
+            resolver_error.to_string()
+                == "runtime error: failed to resolve bootstrap bad.example:9092: resolver failed"
+        );
+
+        let empty = lookup_first(
+            "empty.example:9092",
+            timeout,
+            std::future::ready(Ok(Vec::<SocketAddr>::new().into_iter())),
+        )
+        .await
+        .expect_err("empty result");
+        assert2::assert!(
+            empty.to_string()
+                == "runtime error: no addresses resolved for bootstrap: empty.example:9092"
+        );
+    }
+
+    #[test]
+    fn fetch_connection_options_carry_the_typed_dns_timeout() {
+        let timeout = ClientDnsTimeout::new(Duration::from_millis(41)).expect("positive timeout");
+        let options = fetch_connection_options("streams-fetch", timeout);
+
+        assert2::assert!(options.client_id == "streams-fetch");
+        assert2::assert!(options.dns_timeout == timeout);
+        assert2::assert!(
+            options.connect_timeout == crabka_client_core::DEFAULT_CLIENT_CONNECT_TIMEOUT
+        );
+        assert2::assert!(
+            options.request_timeout == crabka_client_core::DEFAULT_CLIENT_REQUEST_TIMEOUT
         );
     }
 
