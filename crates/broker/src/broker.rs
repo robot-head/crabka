@@ -3521,8 +3521,8 @@ impl Broker {
     /// return the handle.
     /// # Errors
     /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
-    pub fn start(config: BrokerConfig) -> BoxFuture<'static, Result<BrokerHandle, BrokerError>> {
-        Self::start_with_listeners(config, None, None)
+    pub async fn start(config: BrokerConfig) -> Result<BrokerHandle, BrokerError> {
+        Self::start_with_listeners(config, None, None).await
     }
 
     /// Like [`Self::start`], but adopts a caller-supplied, already-bound
@@ -3533,11 +3533,11 @@ impl Broker {
     /// See that method for the full handoff contract.
     /// # Errors
     /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
-    pub fn start_with_controller_listener(
+    pub async fn start_with_controller_listener(
         config: BrokerConfig,
         controller_listener: Option<tokio::net::TcpListener>,
-    ) -> BoxFuture<'static, Result<BrokerHandle, BrokerError>> {
-        Self::start_with_listeners(config, controller_listener, None)
+    ) -> Result<BrokerHandle, BrokerError> {
+        Self::start_with_listeners(config, controller_listener, None).await
     }
 
     /// Like [`Self::start`], but adopts caller-supplied, already-bound
@@ -3567,7 +3567,15 @@ impl Broker {
     #[cfg_attr(test, mutants::skip)]
     /// # Errors
     /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
-    pub fn start_with_listeners(
+    pub async fn start_with_listeners(
+        config: BrokerConfig,
+        controller_listener: Option<tokio::net::TcpListener>,
+        data_plane_listener: Option<tokio::net::TcpListener>,
+    ) -> Result<BrokerHandle, BrokerError> {
+        Self::start_with_listeners_boxed(config, controller_listener, data_plane_listener).await
+    }
+
+    fn start_with_listeners_boxed(
         config: BrokerConfig,
         controller_listener: Option<tokio::net::TcpListener>,
         data_plane_listener: Option<tokio::net::TcpListener>,
@@ -4497,9 +4505,30 @@ fn tune_accepted_socket(
 #[cfg(test)]
 mod tests {
     use assert2::{assert, check};
+    use futures_util::future::BoxFuture;
     use tempfile::tempdir;
 
     use super::*;
+
+    #[test]
+    fn public_startup_futures_are_unboxed() {
+        let boxed_size =
+            std::mem::size_of::<BoxFuture<'static, Result<BrokerHandle, BrokerError>>>();
+        let start = Broker::start(BrokerConfig::for_tests(std::path::PathBuf::new()));
+        let start_with_controller_listener = Broker::start_with_controller_listener(
+            BrokerConfig::for_tests(std::path::PathBuf::new()),
+            None,
+        );
+        let start_with_listeners = Broker::start_with_listeners(
+            BrokerConfig::for_tests(std::path::PathBuf::new()),
+            None,
+            None,
+        );
+
+        assert!(std::mem::size_of_val(&start) > boxed_size);
+        assert!(std::mem::size_of_val(&start_with_controller_listener) > boxed_size);
+        assert!(std::mem::size_of_val(&start_with_listeners) > boxed_size);
+    }
 
     #[tokio::test]
     async fn audit_metrics_cancellation_releases_log_before_next_poll() {
