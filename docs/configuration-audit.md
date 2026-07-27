@@ -2473,3 +2473,92 @@ deadline in `crates/client-consumer/src/share/coordinator.rs` also remains
 pending and is not part of that owner. Other Client Streams operational
 values, both consumer leave policies, and the repository-wide hardcoded
 operational-value goal remain open.
+
+## Client Consumer Leave-Group Timeout
+
+The classic Client Consumer now represents its best-effort leave-group
+deadline with the public `ConsumerLeaveGroupTimeout` semantic type. It accepts
+positive, whole-millisecond durations in `1..=u64::MAX` milliseconds and
+defaults to exactly `DEFAULT_CONSUMER_LEAVE_GROUP_TIMEOUT = 5,000 ms`. Zero,
+fractional milliseconds, and durations above the representable millisecond
+range are rejected; zero does not disable either leave attempt.
+
+The public `Consumer::builder().leave_group_timeout(Duration)` setter remains a
+raw duration input with the five-second default. `Consumer::start` validates it
+after the existing local argument checks and before the startup retry loop or
+network I/O, then carries the validated duration through the exact live flow:
+
+```text
+Consumer::start
+  -> StartConfig
+     -> failed-startup cleanup
+        -> leave_startup_member
+        -> tokio::time::timeout(configured timeout, LeaveGroup)
+     -> successful startup
+        -> CoordinatorState
+        -> coordinator shutdown
+        -> leave_group
+        -> tokio::time::timeout(configured timeout, LeaveGroup)
+```
+
+Both paths retain one best-effort request. Request construction, coordinator
+routing, and member identity are unchanged; timeout, transport, and broker
+errors remain ignored so shutdown or startup error propagation continues after
+the configured deadline.
+
+The observability demo exposes `--consumer-leave-group-timeout-ms`, backed by
+`CRABKA_DEMO_CONSUMER_LEAVE_GROUP_TIMEOUT_MS`. Clap provides CLI over
+environment precedence; absence selects the typed five-second default.
+Explicit values parse as `NonZeroU64` and pass through the semantic type.
+Resolution rejects the setting for Produce and Stream before telemetry or
+external I/O. Only the `demo-consume` Compose service receives the variable,
+with `${CRABKA_DEMO_CONSUMER_LEAVE_GROUP_TIMEOUT_MS:-5000}`. There is no CRD
+because the operator does not own or render this standalone demo Consumer.
+
+Before this section was appended, `tools/audit-runtime-values.sh` reported
+6,262 lines across 1,053 files. The exact focused search
+
+```text
+rg -n \
+  "leave_group_timeout|ConsumerLeaveGroupTimeout|DEFAULT_CONSUMER_LEAVE_GROUP_TIMEOUT|consumer-leave-group-timeout-ms|CONSUMER_LEAVE_GROUP_TIMEOUT_MS|leave_startup_member|leave_group\(" \
+  crates/client-consumer \
+  crates/observability-demo-app \
+  demo/observability \
+  docs/configuration-audit.md
+```
+
+reported 68 lines across seven files. The exclusive classification is 23
+classic Client Consumer production references, zero ShareConsumer production
+references, 13 demo-policy references, one demo-deployment reference, 31 test
+or harness references, zero prior-audit references, and zero unresolved-owner
+references. The categories sum to all 68 focused lines.
+
+Task 1 verification passed three focused semantic/builder tests, two startup
+cleanup tests, the configured coordinator-shutdown test, the
+`crabka-client-consumer` all-target suite (139 unit tests plus all three
+integration tests), strict all-target Clippy, nightly formatting, and
+diff-hygiene gates. Adding the existing workspace `refined_type` dependency
+required and received approval for the one-line `Cargo.lock` package-dependency
+update.
+
+Task 2 verification passed two subprocess configuration tests, one focused
+Compose ownership test, the complete demo all-target suite (55 tests), strict
+all-target Clippy, the exact single-help-flag check, nightly formatting,
+lockfile stability, and diff-hygiene gates.
+
+The fresh combined final run passed 139 Client Consumer unit tests, all three
+Client Consumer integration tests, and all 55 demo tests. Strict combined
+Clippy, the exact single-help-flag check, nightly formatting, lockfile
+stability, and diff-hygiene gates also passed.
+
+### Adjacent Pending Policy
+
+This closes only the classic Client Consumer leave-group deadline. The next
+scanner-visible operational owner with an actual production consumer is the
+separate fixed five-second ShareConsumer final leave-heartbeat deadline in
+`crates/client-consumer/src/share/coordinator.rs`: after its coordinator loop
+observes shutdown, `run` bounds one best-effort `member_epoch = -1` heartbeat
+with that timeout. Protocol error codes, wire fields, test values, and the
+broker-driven heartbeat interval remain invariants rather than this
+configuration policy. The ShareConsumer deadline and the repository-wide
+hardcoded-operational-value goal remain open.
