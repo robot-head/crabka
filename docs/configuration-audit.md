@@ -2562,3 +2562,58 @@ with that timeout. Protocol error codes, wire fields, test values, and the
 broker-driven heartbeat interval remain invariants rather than this
 configuration policy. The ShareConsumer deadline and the repository-wide
 hardcoded-operational-value goal remain open.
+
+## ShareConsumer Leave-Heartbeat Timeout
+
+ShareConsumer now represents the deadline for its final shutdown heartbeat
+with the public `ShareConsumerLeaveHeartbeatTimeout` semantic type. It accepts
+positive whole milliseconds through `u64::MAX` and defaults to exactly
+`DEFAULT_SHARE_CONSUMER_LEAVE_HEARTBEAT_TIMEOUT = 5,000 ms`. Zero, fractional
+milliseconds, and larger durations are rejected.
+
+`ShareConsumer::builder()` accepts a raw `Duration` and validates it before
+`Client` construction or network I/O. The validated duration flows through the
+exact live path:
+
+```text
+ShareConsumer::start
+  -> ShareCoordinatorState
+  -> coordinator observes shutdown
+  -> leave_group
+  -> tokio::time::timeout(configured timeout, final heartbeat)
+```
+
+Shutdown preserves the final acknowledgement flush, then coordinator
+cancellation and join. The coordinator sends exactly one best-effort
+`member_epoch = -1` heartbeat. Timeout, transport, and broker errors remain
+ignored, with no retry or disable switch.
+
+There is no CLI, environment variable, demo service, CRD, or operator field
+because no production process owns ShareConsumer.
+
+Before this section was appended, `tools/audit-runtime-values.sh` reported
+6,270 lines across 1,053 files. The exact focused search
+
+```text
+rg -n \
+  "leave_heartbeat_timeout|ShareConsumerLeaveHeartbeatTimeout|DEFAULT_SHARE_CONSUMER_LEAVE_HEARTBEAT_TIMEOUT|build_leave_heartbeat_request|member_epoch: -1" \
+  crates/client-consumer \
+  docs/configuration-audit.md
+```
+
+reported 36 lines across six files. The exclusive classification is 19
+ShareConsumer production references, one classic Consumer production
+reference, 15 test or harness references, one prior-audit reference, and zero
+unresolved-owner references. The categories sum to all 36 focused lines.
+
+Focused tests, the `crabka-client-consumer` all-target tests, strict Clippy,
+nightly formatting, and diff hygiene passed. `Cargo.lock` remained unchanged.
+
+### Adjacent Pending Policy
+
+This closes only the ShareConsumer final leave-heartbeat deadline. The next
+scanner-visible operational owner is the ShareConsumer poll-fetch limits in
+`crates/client-consumer/src/share/poll.rs`: `MAX_BYTES = 52_428_800`,
+`PARTITION_MAX_BYTES = 1_048_576`, `MAX_RECORDS = 500`, and request
+`min_bytes = 1`. Other ShareConsumer operational values and the
+repository-wide hardcoded-operational-value goal remain open.
