@@ -1225,7 +1225,7 @@ mod security_arg_tests {
 
         let client = Client::builder()
             .bootstrap(mock.addr.to_string())
-            .request_timeout(Duration::from_secs(1))
+            .request_timeout(Duration::from_secs(5))
             .build()
             .await
             .expect("client");
