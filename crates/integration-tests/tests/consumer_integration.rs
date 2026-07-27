@@ -991,6 +991,7 @@ async fn cold_start_rejoins_when_subscribed_topic_appears() {
         .group_id("cold-start-grp")
         .session_timeout(Duration::from_secs(30))
         .heartbeat_interval(Duration::from_millis(500))
+        .subscription_metadata_refresh_interval(Duration::from_millis(750))
         .auto_offset_reset(AutoOffsetReset::Earliest)
         .subscribe(["wal-late".to_string()])
         .build()
@@ -1005,9 +1006,9 @@ async fn cold_start_rejoins_when_subscribed_topic_appears() {
     // The distributor creates the WAL topic AFTER the consumer has joined.
     create_topic_with_partitions(&producer, "wal-late", 2).await;
 
-    // Recovery is driven only by the coordinator's metadata refresh
-    // (SUBSCRIPTION_METADATA_REFRESH = 5s) — there is no membership change — so
-    // allow a few multiples of that interval on slow CI.
+    // Recovery is driven by the configured metadata refresh interval and
+    // bounded by heartbeat wakeups — there is no membership change — so keep a
+    // generous outer deadline for slow CI.
     tokio::time::timeout(Duration::from_secs(30), async {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
