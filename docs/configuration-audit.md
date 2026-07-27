@@ -2677,3 +2677,75 @@ operational owner is `share_acquire_mode: 0` in
 `crates/client-consumer/src/share/poll.rs`. It is a supported ShareFetch policy
 field and needs its own design decision; it is not folded into this slice, and
 the repository-wide hardcoded-operational-value goal remains open.
+
+## Client Consumer Subscription Metadata Refresh Interval
+
+The classic Client Consumer now represents its subscribed-topic metadata
+refresh cadence with the public
+`ConsumerSubscriptionMetadataRefreshInterval` semantic type. It accepts
+positive, whole-millisecond durations in `1..=u64::MAX` milliseconds and
+defaults to exactly
+`DEFAULT_CONSUMER_SUBSCRIPTION_METADATA_REFRESH_INTERVAL = 5,000 ms`. Zero,
+fractional milliseconds, and durations above the representable millisecond
+range are rejected.
+
+The public
+`Consumer::builder().subscription_metadata_refresh_interval(Duration)` setter
+remains a raw duration input. `Consumer::start` validates it after the existing
+local argument checks and before the startup retry loop or network I/O, then
+carries the validated duration through the exact live flow:
+
+```text
+Consumer::start
+  -> StartConfig
+  -> start_once
+  -> CoordinatorState
+  -> run
+```
+
+The coordinator refreshes when elapsed time is greater than or equal to the
+configured interval. Checks run on heartbeat wakeups, so the effective refresh
+can occur up to one heartbeat interval after the threshold. Existing semantics
+are unchanged: no refresh occurs while a rejoin is already pending, metadata
+errors remain best-effort and retry on a later wakeup, only subscribed-topic
+partition growth triggers a rejoin, and the baseline advances monotonically
+from metadata actually used by a successful rejoin.
+
+Before this section was appended, `tools/audit-runtime-values.sh` reported
+6,280 lines across 1,053 files. The exact focused search
+
+```text
+rg -n \
+  "SUBSCRIPTION_METADATA_REFRESH|subscription_metadata_refresh|ConsumerSubscriptionMetadataRefreshInterval|DEFAULT_CONSUMER_SUBSCRIPTION_METADATA_REFRESH_INTERVAL|subscribed_partition_counts|ShareAcquireMode|BatchOptimized" \
+  crates/client-consumer \
+  crates/integration-tests/tests/consumer_integration.rs \
+  crates/observability-demo-app \
+  docs/configuration-audit.md
+```
+
+reported 38 lines across four files. The mutually exclusive classification is
+23 classic Consumer production references, zero ShareConsumer production
+references, 15 integration-test references (one focused integration-test line
+and 14 colocated unit-test lines), zero observability-demo owner references,
+zero prior-audit references, zero parked acquisition-mode references, and zero
+unresolved-owner references. The categories sum to all 38 focused lines.
+
+Task 1 verification passed all 150 `crabka-client-consumer` unit tests and its
+three integration tests. The focused
+`cold_start_rejoins_when_subscribed_topic_appears` run passed one test with
+eight filtered out. Strict Clippy for both targets, nightly formatting, and
+diff hygiene passed. `Cargo.lock` remained unchanged.
+
+This library slice adds no CLI, environment variable, or CRD. The
+`observability-demo-app` is the first production configuration owner to
+propagate next, using only its Consume role and `demo-consume` service, with no
+CRD. The separately queued ShareAcquireMode slice retains the approved
+`ShareAcquireMode::BatchOptimized` default.
+
+### Adjacent Pending Policy
+
+This closes only the classic Client Consumer library configuration slice.
+Propagation through the observability demo remains open, as does the broader
+repository-wide hardcoded-operational-value objective. The separately queued
+ShareAcquireMode policy slice also remains open with its approved
+`BatchOptimized` default.
