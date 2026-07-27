@@ -19,7 +19,7 @@ module(
     version = "0.3.6",
 )
 
-bazel_dep(name = "rules_rust", version = "0.71.3")
+bazel_dep(name = "rules_rust", version = "0.72.0")
 
 # ---------------------------------------------------------------------------
 # Rust toolchain — pinned to the workspace channel (rust-toolchain.toml).
