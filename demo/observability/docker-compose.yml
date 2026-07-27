@@ -478,6 +478,7 @@ services:
       CRABKA_DEMO_BOOTSTRAP: broker:9092
       CRABKA_DEMO_REGISTRY: http://schema-registry:8081
       CRABKA_DEMO_CONSUMER_LEAVE_GROUP_TIMEOUT_MS: "${CRABKA_DEMO_CONSUMER_LEAVE_GROUP_TIMEOUT_MS:-5000}"
+      CRABKA_DEMO_CONSUMER_SUBSCRIPTION_METADATA_REFRESH_INTERVAL_MS: "${CRABKA_DEMO_CONSUMER_SUBSCRIPTION_METADATA_REFRESH_INTERVAL_MS:-5000}"
     depends_on:
       topic-setup: { condition: service_completed_successfully }
       # The traced consumer now deserialises Order via the registry (to enrich

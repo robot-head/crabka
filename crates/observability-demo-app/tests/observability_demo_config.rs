@@ -782,3 +782,18 @@ fn consumer_leave_timeout_is_configurable_only_on_the_consume_role() {
         );
     }
 }
+
+#[test]
+fn consumer_metadata_refresh_is_configurable_only_on_the_consume_role() {
+    let compose = docker_compose();
+    let consume = compose_service_block(&compose, "demo-consume");
+    assert2::assert!(consume.contains(
+        "CRABKA_DEMO_CONSUMER_SUBSCRIPTION_METADATA_REFRESH_INTERVAL_MS: \"${CRABKA_DEMO_CONSUMER_SUBSCRIPTION_METADATA_REFRESH_INTERVAL_MS:-5000}\""
+    ));
+    for service in ["demo-produce", "demo-stream"] {
+        assert2::assert!(
+            !compose_service_block(&compose, service)
+                .contains("CRABKA_DEMO_CONSUMER_SUBSCRIPTION_METADATA_REFRESH_INTERVAL_MS")
+        );
+    }
+}
