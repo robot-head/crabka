@@ -22,6 +22,7 @@ use crabka_protocol::{
     },
     primitives::uuid::Uuid as WireUuid,
 };
+use refined_type::rule::MinMaxU128;
 use tokio::{sync::Mutex, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
@@ -106,8 +107,61 @@ struct StartConfig {
     fetch_max_bytes: i32,
     fetch_partition_max_bytes: i32,
     request_timeout: Duration,
+    leave_group_timeout: Duration,
     client_rack: Option<String>,
     security: Option<crabka_client_core::security::ClientSecurity>,
+}
+
+/// Default deadline for classic Consumer best-effort group departure.
+pub const DEFAULT_CONSUMER_LEAVE_GROUP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Positive, whole-millisecond classic Consumer leave-group deadline.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ConsumerLeaveGroupTimeout(Duration);
+
+impl ConsumerLeaveGroupTimeout {
+    /// Validate a leave-group timeout.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for zero, fractional milliseconds, or a value whose
+    /// milliseconds cannot be represented as `u64`.
+    pub fn new(value: Duration) -> Result<Self, String> {
+        let milliseconds = MinMaxU128::<1, { u64::MAX as u128 }>::new(value.as_millis())
+            .map_err(|error| format!("consumer leave-group timeout: {error}"))?
+            .into_value();
+        let milliseconds = u64::try_from(milliseconds)
+            .map_err(|error| format!("consumer leave-group timeout: {error}"))?;
+        if Duration::from_millis(milliseconds) != value {
+            return Err(
+                "consumer leave-group timeout must be a whole number of milliseconds".to_owned(),
+            );
+        }
+        Ok(Self(value))
+    }
+
+    /// Return the validated duration.
+    #[must_use]
+    pub const fn duration(self) -> Duration {
+        self.0
+    }
+
+    /// Return the validated duration in milliseconds.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the invariant established by [`Self::new`] is violated.
+    #[must_use]
+    pub fn milliseconds(self) -> u64 {
+        u64::try_from(self.0.as_millis()).expect("validated consumer leave-group timeout fits u64")
+    }
+}
+
+impl Default for ConsumerLeaveGroupTimeout {
+    fn default() -> Self {
+        Self::new(DEFAULT_CONSUMER_LEAVE_GROUP_TIMEOUT)
+            .expect("default consumer leave-group timeout is valid")
+    }
 }
 
 impl Drop for Consumer {
@@ -225,6 +279,7 @@ async fn leave_startup_member(
     group_id: &str,
     member_id: &str,
     group_instance_id: Option<String>,
+    leave_group_timeout: Duration,
 ) {
     if member_id.is_empty() {
         return;
@@ -235,7 +290,7 @@ async fn leave_startup_member(
         member_id.to_string(),
         group_instance_id,
     ));
-    let _ = tokio::time::timeout(Duration::from_secs(5), send).await;
+    let _ = tokio::time::timeout(leave_group_timeout, send).await;
 }
 
 fn has_assigned_partitions(assigned_partitions: &[(String, i32)]) -> bool {
@@ -315,6 +370,8 @@ impl Consumer {
         fetch_partition_max_bytes: i32,
         #[builder(default = std::time::Duration::from_secs(30))]
         request_timeout: std::time::Duration,
+        #[builder(default = DEFAULT_CONSUMER_LEAVE_GROUP_TIMEOUT)]
+        leave_group_timeout: std::time::Duration,
         #[builder(into)] client_rack: Option<String>,
         security: Option<crabka_client_core::security::ClientSecurity>,
     ) -> Result<Self, ConsumerError> {
@@ -340,6 +397,8 @@ impl Consumer {
                 "fetch_partition_max_bytes must be positive".into(),
             ));
         }
+        let leave_group_timeout = ConsumerLeaveGroupTimeout::new(leave_group_timeout)
+            .map_err(ConsumerError::RebalanceFailed)?;
 
         let config = StartConfig {
             bootstrap,
@@ -356,6 +415,7 @@ impl Consumer {
             fetch_max_bytes,
             fetch_partition_max_bytes,
             request_timeout,
+            leave_group_timeout: leave_group_timeout.duration(),
             client_rack,
             security,
         };
@@ -515,6 +575,7 @@ impl Consumer {
         let cleanup_group_id = group_id.clone();
         let cleanup_member_id = member_id.clone();
         let cleanup_group_instance_id = group_instance_id.clone();
+        let cleanup_leave_group_timeout = finish_config.leave_group_timeout;
         let start_result = finish_startup(
             finish_config,
             client,
@@ -534,6 +595,7 @@ impl Consumer {
                     &cleanup_group_id,
                     &cleanup_member_id,
                     cleanup_group_instance_id,
+                    cleanup_leave_group_timeout,
                 )
                 .await;
                 Err(ConsumerError::StartupAfterJoin(Box::new(error)))
@@ -804,6 +866,7 @@ async fn spawn_consumer(
         fetch_max_bytes,
         fetch_partition_max_bytes,
         request_timeout,
+        leave_group_timeout,
         client_rack,
         security,
     } = config;
@@ -865,6 +928,7 @@ async fn spawn_consumer(
         session_timeout,
         rebalance_timeout,
         heartbeat_interval,
+        leave_group_timeout,
         auto_offset_reset,
         client_rack: client_rack.clone(),
         // The metadata snapshot this initial assignment was computed against,
@@ -1067,6 +1131,44 @@ mod security_arg_tests {
         buf.to_vec()
     }
 
+    #[test]
+    fn leave_group_timeout_uses_default_and_valid_override() {
+        let default = ConsumerLeaveGroupTimeout::default();
+        assert2::assert!(default.duration() == Duration::from_secs(5));
+        assert2::assert!(default.milliseconds() == 5_000);
+
+        let timeout = ConsumerLeaveGroupTimeout::new(Duration::from_millis(37))
+            .expect("positive whole milliseconds");
+        assert2::assert!(timeout.duration() == Duration::from_millis(37));
+        assert2::assert!(timeout.milliseconds() == 37);
+    }
+
+    #[test]
+    fn leave_group_timeout_validates_millisecond_boundaries() {
+        assert2::assert!(ConsumerLeaveGroupTimeout::new(Duration::ZERO).is_err());
+        assert2::assert!(
+            ConsumerLeaveGroupTimeout::new(Duration::from_millis(1) + Duration::from_nanos(1))
+                .is_err()
+        );
+        assert2::assert!(ConsumerLeaveGroupTimeout::new(Duration::from_millis(u64::MAX)).is_ok());
+        assert2::assert!(ConsumerLeaveGroupTimeout::new(Duration::from_secs(u64::MAX)).is_err());
+    }
+
+    #[tokio::test]
+    async fn invalid_leave_group_timeout_fails_before_broker_lookup() {
+        let error = Consumer::builder()
+            .bootstrap("invalid.invalid:9092")
+            .group_id("leave-validation")
+            .subscribe(["topic".to_owned()])
+            .leave_group_timeout(Duration::ZERO)
+            .build()
+            .await
+            .err()
+            .expect("invalid configuration");
+
+        assert2::assert!(error.to_string().contains("consumer leave-group timeout"));
+    }
+
     #[tokio::test]
     async fn startup_member_cleanup_sends_leave_group() {
         let saw_leave = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1097,8 +1199,51 @@ mod security_arg_tests {
             "group-a",
             "member-a",
             Some("instance-a".into()),
+            Duration::from_millis(37),
         )
         .await;
+
+        mock.stop();
+        assert2::assert!(saw_leave.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn startup_member_cleanup_bounds_stalled_leave_with_configured_timeout() {
+        let saw_leave = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let saw_leave_in_mock = Arc::clone(&saw_leave);
+        let mock = MockBroker::start(move |api_key, _version, _corr_id, _body| {
+            if api_key == api_versions_request::API_KEY {
+                Some(api_versions_for_startup_cleanup())
+            } else if api_key == leave_group_request::API_KEY {
+                saw_leave_in_mock.store(true, Ordering::SeqCst);
+                None
+            } else {
+                None
+            }
+        })
+        .await;
+
+        let client = Client::builder()
+            .bootstrap(mock.addr.to_string())
+            .request_timeout(Duration::from_secs(1))
+            .build()
+            .await
+            .expect("client");
+        let coordinator_id = AtomicI32::new(0);
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            leave_startup_member(
+                &client,
+                &coordinator_id,
+                "group-a",
+                "member-a",
+                None,
+                Duration::from_millis(37),
+            ),
+        )
+        .await
+        .expect("configured leave deadline bounds cleanup");
 
         mock.stop();
         assert2::assert!(saw_leave.load(Ordering::SeqCst));

@@ -356,6 +356,7 @@ pub(crate) struct CoordinatorState {
     pub session_timeout: Duration,
     pub rebalance_timeout: Duration,
     pub heartbeat_interval: Duration,
+    pub leave_group_timeout: Duration,
     pub auto_offset_reset: AutoOffsetReset,
     pub client_rack: Option<String>,
     /// Subscribed-topic partition counts the INITIAL assignment was computed
@@ -617,7 +618,7 @@ async fn leave_group(state: &CoordinatorState) {
         state.member_id.clone(),
         state.group_instance_id.clone(),
     ));
-    let _ = tokio::time::timeout(Duration::from_secs(5), send).await;
+    let _ = tokio::time::timeout(state.leave_group_timeout, send).await;
 }
 
 /// Send one `Heartbeat` to the coordinator broker and translate the response
@@ -1349,7 +1350,15 @@ mod retry_tests {
         sync::atomic::{AtomicUsize, Ordering},
     };
 
-    use crabka_protocol::UnknownTaggedFields;
+    use crabka_client_core::MockBroker;
+    use crabka_protocol::{
+        Encode, UnknownTaggedFields,
+        owned::{
+            api_versions_request,
+            api_versions_response::{ApiVersion, ApiVersionsResponse},
+            leave_group_request,
+        },
+    };
 
     use super::*;
 
@@ -1362,6 +1371,83 @@ mod retry_tests {
             addr: SocketAddr::from(([127, 0, 0, 1], 9092)),
             source: io::Error::new(io::ErrorKind::ConnectionRefused, "refused"),
         })
+    }
+
+    fn api_versions_for_leave_group() -> Vec<u8> {
+        let response = ApiVersionsResponse {
+            error_code: 0,
+            api_keys: vec![
+                ApiVersion {
+                    api_key: api_versions_request::API_KEY,
+                    min_version: 0,
+                    max_version: 3,
+                    ..Default::default()
+                },
+                ApiVersion {
+                    api_key: leave_group_request::API_KEY,
+                    min_version: 0,
+                    max_version: leave_group_request::MAX_VERSION,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let mut buffer = bytes::BytesMut::new();
+        response
+            .encode(&mut buffer, 0)
+            .expect("encode API versions");
+        buffer.to_vec()
+    }
+
+    #[tokio::test]
+    async fn coordinator_leave_group_uses_configured_timeout() {
+        let saw_leave = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let saw_leave_in_mock = Arc::clone(&saw_leave);
+        let mock = MockBroker::start(move |api_key, _version, _corr_id, _body| {
+            if api_key == api_versions_request::API_KEY {
+                Some(api_versions_for_leave_group())
+            } else if api_key == leave_group_request::API_KEY {
+                saw_leave_in_mock.store(true, Ordering::SeqCst);
+                None
+            } else {
+                None
+            }
+        })
+        .await;
+        let client = Client::builder()
+            .bootstrap(mock.addr.to_string())
+            .request_timeout(Duration::from_secs(1))
+            .build()
+            .await
+            .expect("client");
+        let state = CoordinatorState {
+            client,
+            group_id: "group-a".into(),
+            coordinator_id: Arc::new(AtomicI32::new(0)),
+            member_id: "member-a".into(),
+            group_instance_id: None,
+            generation_id: 1,
+            current_generation: Arc::new(AtomicI32::new(1)),
+            assignor: Assignor::Range,
+            subscribed_topics: vec!["topic".into()],
+            assigned: Arc::new(Mutex::new(Vec::new())),
+            next_offsets: Arc::new(Mutex::new(HashMap::new())),
+            positions: Arc::new(Mutex::new(HashMap::new())),
+            topic_ids: Arc::new(Mutex::new(HashMap::new())),
+            session_timeout: Duration::from_secs(45),
+            rebalance_timeout: Duration::from_mins(1),
+            heartbeat_interval: Duration::from_secs(3),
+            leave_group_timeout: Duration::from_millis(37),
+            auto_offset_reset: AutoOffsetReset::Latest,
+            client_rack: None,
+            initial_subscribed_counts: HashMap::new(),
+        };
+
+        tokio::time::timeout(Duration::from_secs(1), leave_group(&state))
+            .await
+            .expect("configured leave deadline bounds coordinator shutdown");
+        mock.stop();
+        assert2::assert!(saw_leave.load(Ordering::SeqCst));
     }
 
     #[test]

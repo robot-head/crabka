@@ -92,7 +92,10 @@ mod validate;
 
 pub use assignor::Assignor;
 pub use builder::{AutoOffsetReset, IsolationLevel};
-pub use consumer::{Consumer, ConsumerRecord, Header};
+pub use consumer::{
+    Consumer, ConsumerLeaveGroupTimeout, ConsumerRecord, DEFAULT_CONSUMER_LEAVE_GROUP_TIMEOUT,
+    Header,
+};
 pub use error::ConsumerError;
 pub use group_metadata::ConsumerGroupMetadata;
 pub use share::{ShareAckMode, ShareAckType, ShareConsumer, ShareConsumerRecord};
