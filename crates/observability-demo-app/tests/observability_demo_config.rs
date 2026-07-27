@@ -767,3 +767,18 @@ fn streams_runtime_policy_is_configurable_only_on_the_stream_role() {
         assert2::assert!(!service.contains("CRABKA_DEMO_STREAMS_STATE_STORE_CACHE_MAX_BYTES"));
     }
 }
+
+#[test]
+fn consumer_leave_timeout_is_configurable_only_on_the_consume_role() {
+    let compose = docker_compose();
+    let consume = compose_service_block(&compose, "demo-consume");
+    assert2::assert!(consume.contains(
+        "CRABKA_DEMO_CONSUMER_LEAVE_GROUP_TIMEOUT_MS: \"${CRABKA_DEMO_CONSUMER_LEAVE_GROUP_TIMEOUT_MS:-5000}\""
+    ));
+    for service in ["demo-produce", "demo-stream"] {
+        assert2::assert!(
+            !compose_service_block(&compose, service)
+                .contains("CRABKA_DEMO_CONSUMER_LEAVE_GROUP_TIMEOUT_MS")
+        );
+    }
+}
