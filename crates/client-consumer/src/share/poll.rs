@@ -45,14 +45,6 @@ use super::{
 };
 use crate::error::ConsumerError;
 
-/// `partition_max_bytes` / `max_bytes` budget for a `ShareFetch` (mirrors the
-/// classic consumer's 50 MiB fetch budget).
-const MAX_BYTES: i32 = 52_428_800;
-/// Per-partition byte budget.
-const PARTITION_MAX_BYTES: i32 = 1_048_576;
-/// Cap on records returned per fetch.
-const MAX_RECORDS: i32 = 500;
-
 fn build_share_fetch_topics(
     assignment: &[(WireUuid, String, i32)],
     acks: &HashMap<(WireUuid, i32), Vec<FetchAckBatch>>,
@@ -72,7 +64,6 @@ fn build_share_fetch_topics(
                 .map(
                     |(partition_index, acknowledgement_batches)| FetchPartition {
                         partition_index,
-                        partition_max_bytes: PARTITION_MAX_BYTES,
                         acknowledgement_batches,
                         ..Default::default()
                     },
@@ -83,11 +74,15 @@ fn build_share_fetch_topics(
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_share_fetch_request(
     group_id: String,
     member_id: String,
     share_session_epoch: i32,
     timeout: Duration,
+    min_bytes: i32,
+    max_bytes: i32,
+    max_records: i32,
     topics: Vec<FetchTopic>,
 ) -> ShareFetchRequest {
     ShareFetchRequest {
@@ -95,10 +90,10 @@ fn build_share_fetch_request(
         member_id: Some(member_id),
         share_session_epoch,
         max_wait_ms: i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX),
-        min_bytes: 1,
-        max_bytes: MAX_BYTES,
-        max_records: MAX_RECORDS,
-        batch_size: MAX_RECORDS,
+        min_bytes,
+        max_bytes,
+        max_records,
+        batch_size: max_records,
         topics,
         ..Default::default()
     }
@@ -195,6 +190,9 @@ impl ShareConsumer {
                 self.member_id.clone(),
                 self.share_session_epoch,
                 timeout,
+                self.fetch_min_bytes,
+                self.fetch_max_bytes,
+                self.fetch_max_records,
                 topics,
             ))
             .await?;
@@ -565,6 +563,9 @@ mod tests {
             assignment: Arc::new(Mutex::new(vec![(id(7), "topic-a".into(), 2)])),
             topic_names: Arc::new(Mutex::new(HashMap::new())),
             share_session_epoch: 4,
+            fetch_min_bytes: crate::share::DEFAULT_SHARE_CONSUMER_FETCH_MIN_BYTES,
+            fetch_max_bytes: crate::share::DEFAULT_SHARE_CONSUMER_FETCH_MAX_BYTES,
+            fetch_max_records: crate::share::DEFAULT_SHARE_CONSUMER_FETCH_MAX_RECORDS,
             ack_mode,
             pending_acks: Vec::new(),
             prev_delivered: Vec::new(),
@@ -579,7 +580,7 @@ mod tests {
     }
 
     #[test]
-    fn share_fetch_request_preserves_wire_fields_and_timeout_bounds() {
+    fn share_fetch_request_preserves_configured_limits_and_timeout_bounds() {
         let topic = FetchTopic {
             topic_id: id(7),
             partitions: vec![FetchPartition {
@@ -596,6 +597,9 @@ mod tests {
             "member-a".into(),
             4,
             Duration::from_millis(250),
+            7,
+            65_536,
+            37,
             vec![topic.clone()],
         );
 
@@ -605,10 +609,10 @@ mod tests {
                 member_id: Some("member-a".into()),
                 share_session_epoch: 4,
                 max_wait_ms: 250,
-                min_bytes: 1,
-                max_bytes: 52_428_800,
-                max_records: 500,
-                batch_size: 500,
+                min_bytes: 7,
+                max_bytes: 65_536,
+                max_records: 37,
+                batch_size: 37,
                 share_acquire_mode: 0,
                 is_renew_ack: false,
                 topics: vec![topic],
@@ -622,6 +626,9 @@ mod tests {
             "member-a".into(),
             4,
             Duration::from_millis(u64::from(u32::MAX)),
+            7,
+            65_536,
+            37,
             Vec::new(),
         );
         assert2::assert!(saturated.max_wait_ms == i32::MAX);
@@ -658,7 +665,7 @@ mod tests {
             (
                 part.partition_max_bytes,
                 part.acknowledgement_batches.as_slice()
-            ) == (PARTITION_MAX_BYTES, &[ack][..])
+            ) == (0, &[ack][..])
         );
         let empty = topic
             .partitions
