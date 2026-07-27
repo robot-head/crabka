@@ -18,7 +18,9 @@ mod poll;
 mod types;
 
 pub use consumer::{
-    DEFAULT_SHARE_CONSUMER_LEAVE_HEARTBEAT_TIMEOUT, ShareConsumer,
-    ShareConsumerLeaveHeartbeatTimeout,
+    DEFAULT_SHARE_CONSUMER_FETCH_MAX_BYTES, DEFAULT_SHARE_CONSUMER_FETCH_MAX_RECORDS,
+    DEFAULT_SHARE_CONSUMER_FETCH_MIN_BYTES, DEFAULT_SHARE_CONSUMER_LEAVE_HEARTBEAT_TIMEOUT,
+    ShareConsumer, ShareConsumerFetchMaxBytes, ShareConsumerFetchMaxRecords,
+    ShareConsumerFetchMinBytes, ShareConsumerLeaveHeartbeatTimeout,
 };
 pub use types::{ShareAckMode, ShareAckType, ShareConsumerRecord};
