@@ -46,6 +46,7 @@ pub(crate) struct ShareCoordinatorState {
     pub topic_names: Arc<Mutex<HashMap<WireUuid, String>>>,
     pub subscribe: Vec<String>,
     pub heartbeat_interval: Duration,
+    pub leave_heartbeat_timeout: Duration,
 }
 
 /// Outcome of a single `ShareGroupHeartbeat` RPC.
@@ -138,11 +139,15 @@ pub(crate) async fn run(state: ShareCoordinatorState, shutdown: CancellationToke
     // Graceful departure: a leave heartbeat (`member_epoch = -1`) tells the
     // broker to evict us now rather than waiting out the session timeout.
     // Best-effort and bounded so a hung broker can't block `close()`.
+    leave_group(&state).await;
+}
+
+async fn leave_group(state: &ShareCoordinatorState) {
     let leave = state.client.send(build_leave_heartbeat_request(
         state.group_id.clone(),
         state.member_id.clone(),
     ));
-    let _ = tokio::time::timeout(Duration::from_secs(5), leave).await;
+    let _ = tokio::time::timeout(state.leave_heartbeat_timeout, leave).await;
 }
 
 /// Send one `ShareGroupHeartbeat` and translate the response into a directive.
@@ -236,9 +241,21 @@ fn hex_topic_id(id: WireUuid) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
 
+    use bytes::BytesMut;
+    use crabka_client_core::MockBroker;
     use crabka_protocol::{
-        owned::common::share_group_heartbeat_response::topic_partitions::TopicPartitions,
+        Encode,
+        owned::{
+            api_versions_request,
+            api_versions_response::{ApiVersion, ApiVersionsResponse},
+            common::share_group_heartbeat_response::topic_partitions::TopicPartitions,
+            share_group_heartbeat_request,
+        },
         tagged_fields::UnknownTaggedFields,
     };
 
@@ -248,6 +265,74 @@ mod tests {
         let mut b = [0u8; 16];
         b[15] = n;
         WireUuid(b)
+    }
+
+    fn api_versions_for_share_leave() -> Vec<u8> {
+        let response = ApiVersionsResponse {
+            error_code: 0,
+            api_keys: vec![
+                ApiVersion {
+                    api_key: api_versions_request::API_KEY,
+                    min_version: 0,
+                    max_version: 3,
+                    ..Default::default()
+                },
+                ApiVersion {
+                    api_key: share_group_heartbeat_request::API_KEY,
+                    min_version: share_group_heartbeat_request::MIN_VERSION,
+                    max_version: share_group_heartbeat_request::MAX_VERSION,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let mut buffer = BytesMut::new();
+        response
+            .encode(&mut buffer, 0)
+            .expect("encode API versions");
+        buffer.to_vec()
+    }
+
+    #[tokio::test]
+    async fn leave_group_uses_configured_timeout_for_one_best_effort_request() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&requests);
+        let mock = MockBroker::start(move |api_key, _version, _corr_id, _body| {
+            if api_key == api_versions_request::API_KEY {
+                Some(api_versions_for_share_leave())
+            } else if api_key == share_group_heartbeat_request::API_KEY {
+                observed.fetch_add(1, Ordering::SeqCst);
+                None
+            } else {
+                panic!("unexpected API key {api_key}");
+            }
+        })
+        .await;
+        let client = Client::builder()
+            .bootstrap(mock.addr.to_string())
+            .client_id("share-leave-timeout-test")
+            .request_timeout(Duration::from_secs(5))
+            .build()
+            .await
+            .expect("client");
+        let state = ShareCoordinatorState {
+            client,
+            group_id: "group-a".into(),
+            member_id: "member-a".into(),
+            member_epoch: Arc::new(Mutex::new(3)),
+            assignment: Arc::new(Mutex::new(Vec::new())),
+            topic_names: Arc::new(Mutex::new(HashMap::new())),
+            subscribe: vec!["topic-a".into()],
+            heartbeat_interval: Duration::from_secs(1),
+            leave_heartbeat_timeout: Duration::from_millis(37),
+        };
+
+        tokio::time::timeout(Duration::from_secs(1), leave_group(&state))
+            .await
+            .expect("configured leave deadline bounds shutdown");
+
+        mock.stop();
+        assert2::assert!(requests.load(Ordering::SeqCst) == 1);
     }
 
     async fn state() -> ShareCoordinatorState {
@@ -267,6 +352,7 @@ mod tests {
             topic_names: Arc::new(Mutex::new(names)),
             subscribe: vec!["topic-a".into()],
             heartbeat_interval: Duration::from_secs(1),
+            leave_heartbeat_timeout: Duration::from_secs(5),
         }
     }
 

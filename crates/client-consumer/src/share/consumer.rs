@@ -16,11 +16,66 @@ use crabka_protocol::{
     },
     primitives::uuid::Uuid as WireUuid,
 };
+use refined_type::rule::MinMaxU128;
 use tokio::{sync::Mutex, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
 use super::{coordinator::ShareCoordinatorState, types::ShareAckMode};
 use crate::error::ConsumerError;
+
+/// Default deadline for the final best-effort `ShareGroup` leave heartbeat.
+pub const DEFAULT_SHARE_CONSUMER_LEAVE_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Validated deadline for the final best-effort `ShareGroup` leave heartbeat.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ShareConsumerLeaveHeartbeatTimeout(Duration);
+
+impl ShareConsumerLeaveHeartbeatTimeout {
+    /// Validate a positive, whole-millisecond timeout representable as `u64`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for zero, fractional milliseconds, or a value above
+    /// `u64::MAX` milliseconds.
+    pub fn new(value: Duration) -> Result<Self, String> {
+        let milliseconds = MinMaxU128::<1, { u64::MAX as u128 }>::new(value.as_millis())
+            .map_err(|error| format!("share consumer leave-heartbeat timeout: {error}"))?
+            .into_value();
+        let milliseconds = u64::try_from(milliseconds)
+            .map_err(|error| format!("share consumer leave-heartbeat timeout: {error}"))?;
+        if Duration::from_millis(milliseconds) != value {
+            return Err(
+                "share consumer leave-heartbeat timeout must be a whole number of milliseconds"
+                    .to_owned(),
+            );
+        }
+        Ok(Self(value))
+    }
+
+    /// Return the validated duration.
+    #[must_use]
+    pub const fn duration(self) -> Duration {
+        self.0
+    }
+
+    /// Return the validated timeout in whole milliseconds.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if this type's constructor invariant is broken.
+    #[must_use]
+    pub fn milliseconds(self) -> u64 {
+        u64::try_from(self.0.as_millis())
+            .expect("validated share consumer leave-heartbeat timeout fits u64")
+    }
+}
+
+impl Default for ShareConsumerLeaveHeartbeatTimeout {
+    fn default() -> Self {
+        Self::new(DEFAULT_SHARE_CONSUMER_LEAVE_HEARTBEAT_TIMEOUT)
+            .expect("default share consumer leave-heartbeat timeout is valid")
+    }
+}
 
 fn build_join_heartbeat_request(
     group_id: String,
@@ -135,6 +190,8 @@ impl ShareConsumer {
         #[builder(default = ShareAckMode::Implicit)] ack_mode: ShareAckMode,
         #[builder(default = std::time::Duration::from_secs(45))] session_timeout: Duration,
         #[builder(default = std::time::Duration::from_secs(3))] heartbeat_interval: Duration,
+        #[builder(default = DEFAULT_SHARE_CONSUMER_LEAVE_HEARTBEAT_TIMEOUT)]
+        leave_heartbeat_timeout: Duration,
         security: Option<crabka_client_core::security::ClientSecurity>,
     ) -> Result<Self, ConsumerError> {
         // `session_timeout` is reserved for a future tagged-field on the
@@ -147,6 +204,10 @@ impl ShareConsumer {
         if group_id.is_empty() {
             return Err(ConsumerError::RebalanceFailed("group_id required".into()));
         }
+        let leave_heartbeat_timeout =
+            ShareConsumerLeaveHeartbeatTimeout::new(leave_heartbeat_timeout)
+                .map_err(ConsumerError::RebalanceFailed)?
+                .duration();
 
         let client = Client::builder()
             .bootstrap(&bootstrap)
@@ -229,6 +290,7 @@ impl ShareConsumer {
             topic_names: Arc::clone(&topic_names),
             subscribe,
             heartbeat_interval: hb_interval,
+            leave_heartbeat_timeout,
         };
         let hb_handle = tokio::spawn(super::coordinator::run(state, shutdown.clone()));
 
@@ -319,6 +381,64 @@ mod tests {
         let mut b = [0u8; 16];
         b[15] = n;
         WireUuid(b)
+    }
+
+    #[test]
+    fn leave_heartbeat_timeout_uses_default_and_valid_override() {
+        let default = ShareConsumerLeaveHeartbeatTimeout::default();
+        check!(default.duration() == DEFAULT_SHARE_CONSUMER_LEAVE_HEARTBEAT_TIMEOUT);
+        check!(default.milliseconds() == 5_000);
+
+        let configured =
+            ShareConsumerLeaveHeartbeatTimeout::new(Duration::from_millis(37)).unwrap();
+        check!(configured.duration() == Duration::from_millis(37));
+        check!(configured.milliseconds() == 37);
+    }
+
+    #[test]
+    fn leave_heartbeat_timeout_validates_millisecond_boundaries() {
+        assert2::assert!(
+            ShareConsumerLeaveHeartbeatTimeout::new(Duration::ZERO)
+                .unwrap_err()
+                .contains("share consumer leave-heartbeat timeout")
+        );
+        assert2::assert!(
+            ShareConsumerLeaveHeartbeatTimeout::new(
+                Duration::from_millis(1) + Duration::from_nanos(1)
+            )
+            .unwrap_err()
+            .contains("whole number of milliseconds")
+        );
+        check!(
+            ShareConsumerLeaveHeartbeatTimeout::new(Duration::from_millis(u64::MAX))
+                .unwrap()
+                .milliseconds()
+                == u64::MAX
+        );
+        assert2::assert!(
+            ShareConsumerLeaveHeartbeatTimeout::new(Duration::from_secs(u64::MAX))
+                .unwrap_err()
+                .contains("share consumer leave-heartbeat timeout")
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_leave_heartbeat_timeout_fails_before_broker_lookup() {
+        let error = ShareConsumer::builder()
+            .bootstrap("invalid.invalid:9092")
+            .group_id("leave-validation")
+            .subscribe(["topic".to_owned()])
+            .leave_heartbeat_timeout(Duration::ZERO)
+            .build()
+            .await
+            .err()
+            .expect("zero leave-heartbeat timeout must fail");
+
+        assert2::assert!(
+            error
+                .to_string()
+                .contains("share consumer leave-heartbeat timeout")
+        );
     }
 
     async fn test_consumer() -> ShareConsumer {

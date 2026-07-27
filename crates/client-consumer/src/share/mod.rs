@@ -17,5 +17,8 @@ mod coordinator;
 mod poll;
 mod types;
 
-pub use consumer::ShareConsumer;
+pub use consumer::{
+    DEFAULT_SHARE_CONSUMER_LEAVE_HEARTBEAT_TIMEOUT, ShareConsumer,
+    ShareConsumerLeaveHeartbeatTimeout,
+};
 pub use types::{ShareAckMode, ShareAckType, ShareConsumerRecord};
