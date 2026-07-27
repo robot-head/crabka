@@ -2749,3 +2749,76 @@ Propagation through the observability demo remains open, as does the broader
 repository-wide hardcoded-operational-value objective. The separately queued
 ShareAcquireMode policy slice also remains open with its approved
 `BatchOptimized` default.
+
+## Observability Demo Consumer Metadata Refresh
+
+The observability demo exposes the classic Consumer subscribed-topic metadata
+refresh cadence as
+`--consumer-subscription-metadata-refresh-interval-ms` and
+`CRABKA_DEMO_CONSUMER_SUBSCRIPTION_METADATA_REFRESH_INTERVAL_MS`. The setting
+has CLI-over-environment-over-typed-default precedence: when both explicit
+inputs are absent, the resolver uses the typed
+`ConsumerSubscriptionMetadataRefreshInterval::default()`. Inputs must be
+positive whole milliseconds, and the default remains exactly `5_000`
+milliseconds.
+
+The role check and typed construction happen before telemetry initialization or
+external I/O. Explicit values are valid only for the Consume role. The exact
+data flow is:
+
+```text
+Cli
+  -> effective_consumer_subscription_metadata_refresh_interval
+  -> main
+  -> run_consume
+  -> Consumer::builder().subscription_metadata_refresh_interval(...)
+```
+
+Compose owns the setting only on `demo-consume`, through:
+
+```text
+CRABKA_DEMO_CONSUMER_SUBSCRIPTION_METADATA_REFRESH_INTERVAL_MS: "${CRABKA_DEMO_CONSUMER_SUBSCRIPTION_METADATA_REFRESH_INTERVAL_MS:-5000}"
+```
+
+No CRD or operator field exists because the operator does not own this
+standalone Compose demo process. The client-consumer library API, validation,
+default, refresh scheduling, and error behavior are unchanged; this slice only
+propagates the existing typed setting through the demo's Consume role.
+
+Before this section was appended, the exact scanner command
+
+```text
+tools/audit-runtime-values.sh
+```
+
+reported 6,280 lines across 1,053 files. The exact focused search
+
+```text
+rg -n \
+  "consumer_subscription_metadata_refresh|ConsumerSubscriptionMetadataRefreshInterval|DEFAULT_CONSUMER_SUBSCRIPTION_METADATA_REFRESH_INTERVAL|consumer-subscription-metadata-refresh-interval-ms|CONSUMER_SUBSCRIPTION_METADATA_REFRESH_INTERVAL_MS|ShareAcquireMode|BatchOptimized" \
+  crates/client-consumer \
+  crates/integration-tests/tests/consumer_integration.rs \
+  crates/observability-demo-app \
+  demo/observability \
+  docs/configuration-audit.md
+```
+
+reported 56 lines. The exclusive classification is nine classic Consumer
+production references, 15 demo production-policy references, one demo
+deployment reference, 24 test or harness references, three prior-audit
+references, four parked acquisition-mode-policy references, and zero
+unresolved-owner references. The categories sum to all 56 focused lines:
+`9 + 15 + 1 + 24 + 3 + 4 + 0 = 56`.
+
+Task 1 verification passed its typed resolver test, both hermetic subprocess
+tests, and its Compose ownership test. All 59 observability-demo package tests
+passed, as did strict Clippy, nightly formatting, the demo binary build, the
+single-help-entry check, and diff hygiene. `Cargo.lock` remained unchanged.
+
+### Adjacent Pending Policy
+
+This closes only the observability-demo owner of the classic Consumer
+subscription metadata refresh interval. Other classic Consumer production
+owners and the repository-wide hardcoded-operational-value objective remain
+open. The separately queued `ShareAcquireMode` policy slice also remains open
+with its approved `ShareAcquireMode::BatchOptimized` default.
