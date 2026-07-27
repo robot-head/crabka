@@ -2617,3 +2617,63 @@ scanner-visible operational owner is the ShareConsumer poll-fetch limits in
 `PARTITION_MAX_BYTES = 1_048_576`, `MAX_RECORDS = 500`, and request
 `min_bytes = 1`. Other ShareConsumer operational values and the
 repository-wide hardcoded-operational-value goal remain open.
+
+## ShareConsumer Fetch Limits
+
+ShareConsumer now represents its fetch limits with the public
+`ShareConsumerFetchMinBytes`, `ShareConsumerFetchMaxBytes`, and
+`ShareConsumerFetchMaxRecords` semantic types. All three accept values from 1
+through `i32::MAX`. Defaults remain exactly 1 minimum byte, 52,428,800 maximum
+bytes, and 500 maximum records. Zero and negative values are rejected, as is a
+minimum greater than the maximum.
+
+`ShareConsumer::builder()` accepts raw `i32` values and validates them before
+`Client` construction or network I/O. The validated values are stored on
+`ShareConsumer` and used by every poll through this exact flow:
+
+```text
+ShareConsumer::start
+  -> validated ShareConsumer fetch fields
+  -> ShareConsumer::poll
+  -> build_share_fetch_request
+     -> min_bytes
+     -> max_bytes
+     -> max_records
+     -> batch_size = max_records
+```
+
+Both `max_records` and `batch_size` receive the configured maximum-record
+value. `poll(timeout)` remains the sole `max_wait_ms` control.
+`PARTITION_MAX_BYTES` was deleted because supported ShareFetch versions 1 and
+2 do not encode the version-0-only field. `FetchPartition::partition_max_bytes`
+remains at its generated zero default.
+
+There is no CLI, environment variable, demo service, CRD, or operator field
+because no production process owns ShareConsumer. `Cargo.lock` remained
+unchanged.
+
+Before this section was appended, `tools/audit-runtime-values.sh` reported
+6,271 lines across 1,053 files. The exact focused search
+
+```text
+rg -n \
+  "fetch_min_bytes|fetch_max_bytes|fetch_max_records|ShareConsumerFetch(MinBytes|MaxBytes|MaxRecords)|DEFAULT_SHARE_CONSUMER_FETCH_(MIN_BYTES|MAX_BYTES|MAX_RECORDS)|PARTITION_MAX_BYTES|batch_size" \
+  crates/client-consumer \
+  docs/configuration-audit.md
+```
+
+reported 79 lines across seven files. The exclusive classification is 40
+ShareConsumer production references, 11 classic Consumer production
+references, 25 test or harness references, three prior-audit references, and
+zero unresolved-owner references. The categories sum to all 79 focused lines.
+
+Focused tests, the `crabka-client-consumer` all-target tests, strict Clippy,
+nightly formatting, and diff hygiene passed. `Cargo.lock` remained unchanged.
+
+### Adjacent Pending Policy
+
+This closes only the ShareConsumer fetch limits. The next scanner-visible
+operational owner is `share_acquire_mode: 0` in
+`crates/client-consumer/src/share/poll.rs`. It is a supported ShareFetch policy
+field and needs its own design decision; it is not folded into this slice, and
+the repository-wide hardcoded-operational-value goal remains open.
