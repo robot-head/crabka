@@ -18,7 +18,7 @@ use std::{
 
 use bytes::Bytes;
 use clap::{Parser, ValueEnum};
-use crabka_client_consumer::{Consumer, ConsumerRecord};
+use crabka_client_consumer::{Consumer, ConsumerLeaveGroupTimeout, ConsumerRecord};
 use crabka_client_producer::{Acks, Header, Producer, ProducerRecord};
 use crabka_client_streams::{
     ClientDnsTimeout, SchemaSerde, Serde, StreamsCommitInterval,
@@ -69,6 +69,9 @@ struct Cli {
     output_topic: String,
     #[arg(long, env = "CRABKA_DEMO_ORDERS_PER_SEC", default_value_t = 50)]
     orders_per_sec: u32,
+    /// Classic Consumer best-effort leave-group timeout in milliseconds.
+    #[arg(long, env = "CRABKA_DEMO_CONSUMER_LEAVE_GROUP_TIMEOUT_MS")]
+    consumer_leave_group_timeout_ms: Option<NonZeroU64>,
     /// Kafka Streams broker DNS timeout in milliseconds.
     #[arg(long, env = "CRABKA_DEMO_STREAMS_BROKER_DNS_TIMEOUT_MS")]
     streams_broker_dns_timeout_ms: Option<NonZeroU64>,
@@ -93,6 +96,28 @@ struct Cli {
     /// Client Streams state-store record-cache budget in bytes; zero disables it.
     #[arg(long, env = "CRABKA_DEMO_STREAMS_STATE_STORE_CACHE_MAX_BYTES")]
     streams_state_store_cache_max_bytes: Option<i64>,
+}
+
+fn effective_consumer_leave_group_timeout(cli: &Cli) -> std::io::Result<ConsumerLeaveGroupTimeout> {
+    if cli.role != Role::Consume
+        && let Some(milliseconds) = cli.consumer_leave_group_timeout_ms
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "--consumer-leave-group-timeout-ms ({} ms) is only valid with --role consume",
+                milliseconds.get(),
+            ),
+        ));
+    }
+
+    cli.consumer_leave_group_timeout_ms.map_or_else(
+        || Ok(ConsumerLeaveGroupTimeout::default()),
+        |milliseconds| {
+            ConsumerLeaveGroupTimeout::new(Duration::from_millis(milliseconds.get()))
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
+        },
+    )
 }
 
 fn effective_streams_broker_dns_timeout(cli: &Cli) -> std::io::Result<ClientDnsTimeout> {
@@ -276,6 +301,7 @@ fn effective_streams_state_store_cache_max_bytes(
 #[tokio::main]
 async fn main() -> Result<(), BoxError> {
     let cli = Cli::parse();
+    let consumer_leave_group_timeout = effective_consumer_leave_group_timeout(&cli)?;
     let streams_broker_dns_timeout = effective_streams_broker_dns_timeout(&cli)?;
     let (streams_poll_interval, streams_commit_interval) = effective_streams_runtime_cadence(&cli)?;
     let streams_rebalance_timeout = effective_streams_rebalance_timeout(&cli)?;
@@ -321,7 +347,7 @@ async fn main() -> Result<(), BoxError> {
             )
             .await?;
         }
-        Role::Consume => run_consume(&cli, &metrics).await?,
+        Role::Consume => run_consume(&cli, &metrics, consumer_leave_group_timeout).await?,
     }
     telemetry.shutdown();
     Ok(())
@@ -491,13 +517,18 @@ async fn run_stream(
 /// producer's distributed trace via the `traceparent` header, and runs a
 /// multi-stage processing pipeline (validate → enrich → `fraud_check` → fulfill),
 /// each stage a child span with a per-stage latency metric.
-async fn run_consume(cli: &Cli, metrics: &DemoMetrics) -> Result<(), BoxError> {
+async fn run_consume(
+    cli: &Cli,
+    metrics: &DemoMetrics,
+    consumer_leave_group_timeout: ConsumerLeaveGroupTimeout,
+) -> Result<(), BoxError> {
     let serde = order_serde(cli, &cli.input_topic).await?;
 
     let mut consumer = Consumer::builder()
         .bootstrap(cli.bootstrap.clone())
         .group_id("orders-processor")
         .subscribe([cli.input_topic.clone()])
+        .leave_group_timeout(consumer_leave_group_timeout.duration())
         .build()
         .await?;
     tracing::info!(topic = %cli.input_topic, "order processor starting");
@@ -640,6 +671,7 @@ mod tests {
             input_topic: "orders".to_owned(),
             output_topic: "order-counts".to_owned(),
             orders_per_sec: 50,
+            consumer_leave_group_timeout_ms: None,
             streams_broker_dns_timeout_ms: None,
             streams_poll_interval_ms: None,
             streams_commit_interval_ms: None,
@@ -701,6 +733,7 @@ mod tests {
             input_topic: "orders".to_owned(),
             output_topic: "order-counts".to_owned(),
             orders_per_sec: 50,
+            consumer_leave_group_timeout_ms: None,
             streams_broker_dns_timeout_ms: None,
             streams_poll_interval_ms: None,
             streams_commit_interval_ms: None,
@@ -771,6 +804,7 @@ mod tests {
             input_topic: "orders".to_owned(),
             output_topic: "order-counts".to_owned(),
             orders_per_sec: 50,
+            consumer_leave_group_timeout_ms: None,
             streams_broker_dns_timeout_ms: None,
             streams_poll_interval_ms: None,
             streams_commit_interval_ms: None,
@@ -844,6 +878,7 @@ mod tests {
             input_topic: "orders".to_owned(),
             output_topic: "order-counts".to_owned(),
             orders_per_sec: 50,
+            consumer_leave_group_timeout_ms: None,
             streams_broker_dns_timeout_ms: None,
             streams_poll_interval_ms: None,
             streams_commit_interval_ms: None,
@@ -879,6 +914,7 @@ mod tests {
             input_topic: "orders".to_owned(),
             output_topic: "order-counts".to_owned(),
             orders_per_sec: 50,
+            consumer_leave_group_timeout_ms: None,
             streams_broker_dns_timeout_ms: None,
             streams_poll_interval_ms: None,
             streams_commit_interval_ms: None,
