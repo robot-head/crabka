@@ -356,6 +356,7 @@ pub(crate) struct CoordinatorState {
     pub session_timeout: Duration,
     pub rebalance_timeout: Duration,
     pub heartbeat_interval: Duration,
+    pub subscription_metadata_refresh_interval: Duration,
     pub leave_group_timeout: Duration,
     pub auto_offset_reset: AutoOffsetReset,
     pub client_rack: Option<String>,
@@ -415,11 +416,9 @@ fn heartbeat_outcome(error_code: i16) -> HeartbeatOutcome {
 /// as soon as the broker signals a rebalance; the next tick performs
 /// the rejoin in place of heartbeating.
 #[cfg_attr(test, mutants::skip)] // cargo-mutants: long-running I/O event loop, exercised by integration tests
-/// How often the coordinator re-checks broker metadata for subscribed-topic
-/// partition changes (a topic being created, or gaining partitions) so it can
-/// rejoin to (re)distribute them. Short enough that a consumer which joined at
-/// cold-start before its WAL topic existed recovers within seconds.
-const SUBSCRIPTION_METADATA_REFRESH: Duration = Duration::from_secs(5);
+fn subscription_metadata_refresh_due(last_check: tokio::time::Instant, interval: Duration) -> bool {
+    last_check.elapsed() >= interval
+}
 
 /// Current partition count of each subscribed topic that exists in broker
 /// metadata. A subscribed topic not yet created is simply absent from the map
@@ -514,7 +513,12 @@ pub(crate) async fn run(mut state: CoordinatorState, shutdown: CancellationToken
         // joined (the cold-start race that otherwise strands an empty
         // assignment) and rejoin to distribute it. Throttled, and only when not
         // already rejoining. Best-effort: a failed metadata RPC just retries.
-        if !needs_rejoin && last_meta_check.elapsed() >= SUBSCRIPTION_METADATA_REFRESH {
+        if !needs_rejoin
+            && subscription_metadata_refresh_due(
+                last_meta_check,
+                state.subscription_metadata_refresh_interval,
+            )
+        {
             last_meta_check = tokio::time::Instant::now();
             if let Ok(current) = subscribed_partition_counts(&state).await
                 && subscribed_topics_grew(&known_counts, &current)
@@ -1399,6 +1403,18 @@ mod retry_tests {
         buffer.to_vec()
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn subscription_metadata_refresh_due_uses_configured_inclusive_boundary() {
+        let last_check = tokio::time::Instant::now();
+        let interval = Duration::from_millis(37);
+
+        tokio::time::advance(Duration::from_millis(36)).await;
+        assert2::assert!(!subscription_metadata_refresh_due(last_check, interval));
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert2::assert!(subscription_metadata_refresh_due(last_check, interval));
+    }
+
     #[tokio::test]
     async fn coordinator_leave_group_uses_configured_timeout() {
         let saw_leave = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1437,6 +1453,7 @@ mod retry_tests {
             session_timeout: Duration::from_secs(45),
             rebalance_timeout: Duration::from_mins(1),
             heartbeat_interval: Duration::from_secs(3),
+            subscription_metadata_refresh_interval: Duration::from_millis(37),
             leave_group_timeout: Duration::from_millis(37),
             auto_offset_reset: AutoOffsetReset::Latest,
             client_rack: None,

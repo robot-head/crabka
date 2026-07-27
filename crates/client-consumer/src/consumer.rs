@@ -99,6 +99,7 @@ struct StartConfig {
     session_timeout: Duration,
     rebalance_timeout: Duration,
     heartbeat_interval: Duration,
+    subscription_metadata_refresh_interval: Duration,
     subscribe: Vec<String>,
     group_instance_id: Option<String>,
     auto_offset_reset: AutoOffsetReset,
@@ -161,6 +162,61 @@ impl Default for ConsumerLeaveGroupTimeout {
     fn default() -> Self {
         Self::new(DEFAULT_CONSUMER_LEAVE_GROUP_TIMEOUT)
             .expect("default consumer leave-group timeout is valid")
+    }
+}
+
+/// Default cadence for checking subscribed-topic metadata changes.
+pub const DEFAULT_CONSUMER_SUBSCRIPTION_METADATA_REFRESH_INTERVAL: Duration =
+    Duration::from_secs(5);
+
+/// Positive, whole-millisecond subscribed-topic metadata refresh cadence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ConsumerSubscriptionMetadataRefreshInterval(Duration);
+
+impl ConsumerSubscriptionMetadataRefreshInterval {
+    /// Validate a subscribed-topic metadata refresh interval.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for zero, fractional milliseconds, or a value whose
+    /// milliseconds cannot be represented as `u64`.
+    pub fn new(value: Duration) -> Result<Self, String> {
+        let milliseconds = MinMaxU128::<1, { u64::MAX as u128 }>::new(value.as_millis())
+            .map_err(|error| format!("consumer subscription metadata refresh interval: {error}"))?
+            .into_value();
+        let milliseconds = u64::try_from(milliseconds)
+            .map_err(|error| format!("consumer subscription metadata refresh interval: {error}"))?;
+        if Duration::from_millis(milliseconds) != value {
+            return Err(
+                "consumer subscription metadata refresh interval must be a whole number of milliseconds"
+                    .to_owned(),
+            );
+        }
+        Ok(Self(value))
+    }
+
+    /// Return the validated duration.
+    #[must_use]
+    pub const fn duration(self) -> Duration {
+        self.0
+    }
+
+    /// Return the validated duration in milliseconds.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the invariant established by [`Self::new`] is violated.
+    #[must_use]
+    pub fn milliseconds(self) -> u64 {
+        u64::try_from(self.0.as_millis())
+            .expect("validated consumer subscription metadata refresh interval fits u64")
+    }
+}
+
+impl Default for ConsumerSubscriptionMetadataRefreshInterval {
+    fn default() -> Self {
+        Self::new(DEFAULT_CONSUMER_SUBSCRIPTION_METADATA_REFRESH_INTERVAL)
+            .expect("default consumer subscription metadata refresh interval is valid")
     }
 }
 
@@ -360,6 +416,8 @@ impl Consumer {
         rebalance_timeout: std::time::Duration,
         #[builder(default = std::time::Duration::from_secs(3))]
         heartbeat_interval: std::time::Duration,
+        #[builder(default = DEFAULT_CONSUMER_SUBSCRIPTION_METADATA_REFRESH_INTERVAL)]
+        subscription_metadata_refresh_interval: std::time::Duration,
         #[builder(into)] subscribe: Vec<String>,
         #[builder(into)] group_instance_id: Option<String>,
         #[builder(default = AutoOffsetReset::Latest)] auto_offset_reset: AutoOffsetReset,
@@ -399,6 +457,11 @@ impl Consumer {
         }
         let leave_group_timeout = ConsumerLeaveGroupTimeout::new(leave_group_timeout)
             .map_err(ConsumerError::RebalanceFailed)?;
+        let subscription_metadata_refresh_interval =
+            ConsumerSubscriptionMetadataRefreshInterval::new(
+                subscription_metadata_refresh_interval,
+            )
+            .map_err(ConsumerError::RebalanceFailed)?;
 
         let config = StartConfig {
             bootstrap,
@@ -407,6 +470,8 @@ impl Consumer {
             session_timeout,
             rebalance_timeout,
             heartbeat_interval,
+            subscription_metadata_refresh_interval: subscription_metadata_refresh_interval
+                .duration(),
             subscribe,
             group_instance_id,
             auto_offset_reset,
@@ -858,6 +923,7 @@ async fn spawn_consumer(
         session_timeout,
         rebalance_timeout,
         heartbeat_interval,
+        subscription_metadata_refresh_interval,
         subscribe,
         group_instance_id,
         auto_offset_reset,
@@ -928,6 +994,7 @@ async fn spawn_consumer(
         session_timeout,
         rebalance_timeout,
         heartbeat_interval,
+        subscription_metadata_refresh_interval,
         leave_group_timeout,
         auto_offset_reset,
         client_rack: client_rack.clone(),
@@ -1152,6 +1219,56 @@ mod security_arg_tests {
         );
         assert2::assert!(ConsumerLeaveGroupTimeout::new(Duration::from_millis(u64::MAX)).is_ok());
         assert2::assert!(ConsumerLeaveGroupTimeout::new(Duration::from_secs(u64::MAX)).is_err());
+    }
+
+    #[test]
+    fn subscription_metadata_refresh_interval_uses_default_and_valid_override() {
+        let default = ConsumerSubscriptionMetadataRefreshInterval::default();
+        assert2::assert!(default.duration() == Duration::from_secs(5));
+        assert2::assert!(default.milliseconds() == 5_000);
+
+        let interval = ConsumerSubscriptionMetadataRefreshInterval::new(Duration::from_millis(37))
+            .expect("positive whole milliseconds");
+        assert2::assert!(interval.duration() == Duration::from_millis(37));
+        assert2::assert!(interval.milliseconds() == 37);
+    }
+
+    #[test]
+    fn subscription_metadata_refresh_interval_validates_millisecond_boundaries() {
+        assert2::assert!(ConsumerSubscriptionMetadataRefreshInterval::new(Duration::ZERO).is_err());
+        assert2::assert!(
+            ConsumerSubscriptionMetadataRefreshInterval::new(
+                Duration::from_millis(1) + Duration::from_nanos(1)
+            )
+            .is_err()
+        );
+        assert2::assert!(
+            ConsumerSubscriptionMetadataRefreshInterval::new(Duration::from_millis(u64::MAX))
+                .is_ok()
+        );
+        assert2::assert!(
+            ConsumerSubscriptionMetadataRefreshInterval::new(Duration::from_secs(u64::MAX))
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_subscription_metadata_refresh_interval_fails_before_broker_lookup() {
+        let error = Consumer::builder()
+            .bootstrap("invalid.invalid:9092")
+            .group_id("metadata-refresh-validation")
+            .subscribe(["topic".to_owned()])
+            .subscription_metadata_refresh_interval(Duration::ZERO)
+            .build()
+            .await
+            .err()
+            .expect("invalid configuration");
+
+        assert2::assert!(
+            error
+                .to_string()
+                .contains("consumer subscription metadata refresh interval")
+        );
     }
 
     #[tokio::test]
