@@ -18,7 +18,10 @@ use std::{
 
 use bytes::Bytes;
 use clap::{Parser, ValueEnum};
-use crabka_client_consumer::{Consumer, ConsumerLeaveGroupTimeout, ConsumerRecord};
+use crabka_client_consumer::{
+    Consumer, ConsumerLeaveGroupTimeout, ConsumerRecord,
+    ConsumerSubscriptionMetadataRefreshInterval,
+};
 use crabka_client_producer::{Acks, Header, Producer, ProducerRecord};
 use crabka_client_streams::{
     ClientDnsTimeout, SchemaSerde, Serde, StreamsCommitInterval,
@@ -72,6 +75,12 @@ struct Cli {
     /// Classic Consumer best-effort leave-group timeout in milliseconds.
     #[arg(long, env = "CRABKA_DEMO_CONSUMER_LEAVE_GROUP_TIMEOUT_MS")]
     consumer_leave_group_timeout_ms: Option<NonZeroU64>,
+    /// Classic Consumer subscribed-topic metadata refresh interval in milliseconds.
+    #[arg(
+        long,
+        env = "CRABKA_DEMO_CONSUMER_SUBSCRIPTION_METADATA_REFRESH_INTERVAL_MS"
+    )]
+    consumer_subscription_metadata_refresh_interval_ms: Option<NonZeroU64>,
     /// Kafka Streams broker DNS timeout in milliseconds.
     #[arg(long, env = "CRABKA_DEMO_STREAMS_BROKER_DNS_TIMEOUT_MS")]
     streams_broker_dns_timeout_ms: Option<NonZeroU64>,
@@ -118,6 +127,33 @@ fn effective_consumer_leave_group_timeout(cli: &Cli) -> std::io::Result<Consumer
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
         },
     )
+}
+
+fn effective_consumer_subscription_metadata_refresh_interval(
+    cli: &Cli,
+) -> std::io::Result<ConsumerSubscriptionMetadataRefreshInterval> {
+    if cli.role != Role::Consume
+        && let Some(milliseconds) = cli.consumer_subscription_metadata_refresh_interval_ms
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "--consumer-subscription-metadata-refresh-interval-ms ({} ms) is only valid with --role consume",
+                milliseconds.get(),
+            ),
+        ));
+    }
+
+    cli.consumer_subscription_metadata_refresh_interval_ms
+        .map_or_else(
+            || Ok(ConsumerSubscriptionMetadataRefreshInterval::default()),
+            |milliseconds| {
+                ConsumerSubscriptionMetadataRefreshInterval::new(Duration::from_millis(
+                    milliseconds.get(),
+                ))
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
+            },
+        )
 }
 
 fn effective_streams_broker_dns_timeout(cli: &Cli) -> std::io::Result<ClientDnsTimeout> {
@@ -302,6 +338,8 @@ fn effective_streams_state_store_cache_max_bytes(
 async fn main() -> Result<(), BoxError> {
     let cli = Cli::parse();
     let consumer_leave_group_timeout = effective_consumer_leave_group_timeout(&cli)?;
+    let consumer_subscription_metadata_refresh_interval =
+        effective_consumer_subscription_metadata_refresh_interval(&cli)?;
     let streams_broker_dns_timeout = effective_streams_broker_dns_timeout(&cli)?;
     let (streams_poll_interval, streams_commit_interval) = effective_streams_runtime_cadence(&cli)?;
     let streams_rebalance_timeout = effective_streams_rebalance_timeout(&cli)?;
@@ -347,7 +385,15 @@ async fn main() -> Result<(), BoxError> {
             )
             .await?;
         }
-        Role::Consume => run_consume(&cli, &metrics, consumer_leave_group_timeout).await?,
+        Role::Consume => {
+            run_consume(
+                &cli,
+                &metrics,
+                consumer_leave_group_timeout,
+                consumer_subscription_metadata_refresh_interval,
+            )
+            .await?;
+        }
     }
     telemetry.shutdown();
     Ok(())
@@ -521,6 +567,7 @@ async fn run_consume(
     cli: &Cli,
     metrics: &DemoMetrics,
     consumer_leave_group_timeout: ConsumerLeaveGroupTimeout,
+    consumer_subscription_metadata_refresh_interval: ConsumerSubscriptionMetadataRefreshInterval,
 ) -> Result<(), BoxError> {
     let serde = order_serde(cli, &cli.input_topic).await?;
 
@@ -529,6 +576,9 @@ async fn run_consume(
         .group_id("orders-processor")
         .subscribe([cli.input_topic.clone()])
         .leave_group_timeout(consumer_leave_group_timeout.duration())
+        .subscription_metadata_refresh_interval(
+            consumer_subscription_metadata_refresh_interval.duration(),
+        )
         .build()
         .await?;
     tracing::info!(topic = %cli.input_topic, "order processor starting");
@@ -663,6 +713,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn consumer_subscription_metadata_refresh_uses_default_and_override() {
+        let defaults = Cli::try_parse_from(["observability-demo-app", "--role", "consume"])
+            .expect("default CLI");
+        assert_eq!(
+            effective_consumer_subscription_metadata_refresh_interval(&defaults)
+                .expect("typed default")
+                .milliseconds(),
+            5_000
+        );
+
+        let overridden = Cli::try_parse_from([
+            "observability-demo-app",
+            "--role",
+            "consume",
+            "--consumer-subscription-metadata-refresh-interval-ms",
+            "37",
+        ])
+        .expect("override CLI");
+        assert_eq!(
+            effective_consumer_subscription_metadata_refresh_interval(&overridden)
+                .expect("typed override")
+                .milliseconds(),
+            37
+        );
+    }
+
+    #[test]
     fn streams_broker_dns_timeout_uses_default_and_cli_override() {
         let defaults = Cli {
             role: Role::Stream,
@@ -672,6 +749,7 @@ mod tests {
             output_topic: "order-counts".to_owned(),
             orders_per_sec: 50,
             consumer_leave_group_timeout_ms: None,
+            consumer_subscription_metadata_refresh_interval_ms: None,
             streams_broker_dns_timeout_ms: None,
             streams_poll_interval_ms: None,
             streams_commit_interval_ms: None,
@@ -734,6 +812,7 @@ mod tests {
             output_topic: "order-counts".to_owned(),
             orders_per_sec: 50,
             consumer_leave_group_timeout_ms: None,
+            consumer_subscription_metadata_refresh_interval_ms: None,
             streams_broker_dns_timeout_ms: None,
             streams_poll_interval_ms: None,
             streams_commit_interval_ms: None,
@@ -805,6 +884,7 @@ mod tests {
             output_topic: "order-counts".to_owned(),
             orders_per_sec: 50,
             consumer_leave_group_timeout_ms: None,
+            consumer_subscription_metadata_refresh_interval_ms: None,
             streams_broker_dns_timeout_ms: None,
             streams_poll_interval_ms: None,
             streams_commit_interval_ms: None,
@@ -879,6 +959,7 @@ mod tests {
             output_topic: "order-counts".to_owned(),
             orders_per_sec: 50,
             consumer_leave_group_timeout_ms: None,
+            consumer_subscription_metadata_refresh_interval_ms: None,
             streams_broker_dns_timeout_ms: None,
             streams_poll_interval_ms: None,
             streams_commit_interval_ms: None,
@@ -915,6 +996,7 @@ mod tests {
             output_topic: "order-counts".to_owned(),
             orders_per_sec: 50,
             consumer_leave_group_timeout_ms: None,
+            consumer_subscription_metadata_refresh_interval_ms: None,
             streams_broker_dns_timeout_ms: None,
             streams_poll_interval_ms: None,
             streams_commit_interval_ms: None,
