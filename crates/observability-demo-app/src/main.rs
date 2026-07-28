@@ -32,6 +32,7 @@ use crabka_client_streams::{
 use crabka_schema_serde::{
     CacheConfig, RegistryClient, SchemaCache, format::protobuf::ProtobufSerde, set_default_registry,
 };
+use crabka_units::prelude::*;
 use observability_demo_app::{
     Order, classify_outcome, is_anomalous,
     metrics::{DemoMetrics, metrics_router},
@@ -103,6 +104,10 @@ struct Cli {
     #[arg(long, env = "CRABKA_DEMO_STREAMS_INTERACTIVE_QUERY_QUEUE_CAPACITY")]
     streams_interactive_query_queue_capacity: Option<NonZeroUsize>,
     /// Client Streams state-store record-cache budget in bytes; zero disables it.
+    ///
+    /// The flag name and its bare-integer form mirror the JVM
+    /// `statestore.cache.max.bytes` config key, so it stays a raw byte count here
+    /// and gains its dimension at [`StreamsStateStoreCacheMaxBytes`].
     #[arg(long, env = "CRABKA_DEMO_STREAMS_STATE_STORE_CACHE_MAX_BYTES")]
     streams_state_store_cache_max_bytes: Option<i64>,
 }
@@ -327,8 +332,8 @@ fn effective_streams_state_store_cache_max_bytes(
 
     cli.streams_state_store_cache_max_bytes.map_or_else(
         || Ok(StreamsStateStoreCacheMaxBytes::default()),
-        |bytes| {
-            StreamsStateStoreCacheMaxBytes::new(bytes)
+        |raw| {
+            StreamsStateStoreCacheMaxBytes::new(ByteSize::from_bytes_i64(raw))
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
         },
     )
@@ -542,7 +547,7 @@ async fn run_stream(
         .leave_heartbeat_timeout(streams_leave_heartbeat_timeout)
         .join_retry_backoff(streams_join_retry_backoff)
         .interactive_query_queue_capacity(streams_interactive_query_queue_capacity)
-        .cache_max_bytes(streams_state_store_cache_max_bytes.bytes())
+        .cache_max_bytes(streams_state_store_cache_max_bytes.size())
         .build();
     let topology = app.streams_builder();
     topology

@@ -22,6 +22,7 @@ use std::{
 };
 
 use crabka_broker::{Broker, BrokerConfig};
+use crabka_units::prelude::*;
 
 /// The broker binds host port 9092 and cp-schema-registry reaches it via
 /// `host.docker.internal:9092` (container network) while the host connects
@@ -71,11 +72,11 @@ async fn start_host_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir)
         node_id: crabka_broker::NodeId(1),
         controller_listen_addr: controller_addr,
         controller_quorum_voters: vec![(crabka_broker::NodeId(1), controller_addr.to_string())],
-        heartbeat_interval_ms: 3_000,
-        heartbeat_timeout_ms: 9_000,
-        replica_lag_time_max_ms: 30_000,
-        controller_election_timeout: Duration::from_secs(5),
-        controller_heartbeat_interval: Duration::from_millis(500),
+        heartbeat_interval: secs(3),
+        heartbeat_timeout: secs(9),
+        replica_lag_time_max: secs(30),
+        controller_election_timeout: secs(5),
+        controller_heartbeat_interval: millis(500),
         bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
         ..BrokerConfig::default()
     };

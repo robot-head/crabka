@@ -95,11 +95,11 @@ where
         // timeDifferenceMs + timeDifferenceMs + gracePeriodMs + 86_400_000
         // (a sliding window spans [t - timeDiff, t + timeDiff] so the effective
         // window size for changelog retention is 2 * timeDifferenceMs).
-        let size = self.windows.time_difference_ms * 2;
+        let size = self.windows.time_difference * 2.0;
         // The true sliding window size for the key end is 1 * timeDiff (the
         // retention basis above is the 2× span).
-        let window_size = self.windows.time_difference_ms;
-        let grace = self.windows.grace_ms;
+        let window_size = self.windows.time_difference;
+        let grace = self.windows.grace;
         let registrar: StoreRegistrarFn = Box::new(move |state, procs| {
             state.topology.add_window_store::<K, VOut, KS, VS>(
                 store_for_reg.clone(),
@@ -123,16 +123,17 @@ where
             merge_id,
             Some(store_name),
             None,
-            TimeWindowedSerde::new(key_serde, self.windows.time_difference_ms),
+            TimeWindowedSerde::new(key_serde, self.windows.time_difference),
             value_serde,
         )
-        .with_window_grace(Some(self.windows.grace_ms))
+        .with_window_grace(Some(self.windows.grace))
     }
 }
 
 #[cfg(test)]
 mod caching_tests {
     use assert2::check;
+    use crabka_units::prelude::*;
 
     use crate::{
         I64Serde, Materialized, Produced, SlidingWindows, StringSerde,
@@ -149,7 +150,9 @@ mod caching_tests {
             acc + i64::try_from(v.len()).unwrap_or(i64::MAX)
         })
         .cogroup(g2, |_k, _v: &String, acc| acc + 1)
-        .windowed_by_sliding(SlidingWindows::of_time_difference_with_no_grace(100))
+        .windowed_by_sliding(SlidingWindows::of_time_difference_with_no_grace(millis(
+            100,
+        )))
         .aggregate_explicit(
             || 0i64,
             Materialized::with(StringSerde, I64Serde).as_store("cg"),
@@ -157,11 +160,11 @@ mod caching_tests {
         .to_stream()
         .to_explicit(
             "out",
-            Produced::with(TimeWindowedSerde::new(StringSerde, 100), I64Serde),
+            Produced::with(TimeWindowedSerde::new(StringSerde, millis(100)), I64Serde),
         );
         let built = b.build("app").unwrap();
-        let g =
-            pollster::block_on(built.instantiate(&StoreBackend::InMemory, "app", 1024)).unwrap();
+        let g = pollster::block_on(built.instantiate(&StoreBackend::InMemory, "app", kibibytes(1)))
+            .unwrap();
         check!(g.cache_owner.contains_key("cg"));
     }
 
@@ -174,7 +177,9 @@ mod caching_tests {
             acc + i64::try_from(v.len()).unwrap_or(i64::MAX)
         })
         .cogroup(g2, |_k, _v: &String, acc| acc + 1)
-        .windowed_by_sliding(SlidingWindows::of_time_difference_with_no_grace(100))
+        .windowed_by_sliding(SlidingWindows::of_time_difference_with_no_grace(millis(
+            100,
+        )))
         .aggregate_explicit(
             || 0i64,
             Materialized::with(StringSerde, I64Serde)
@@ -184,11 +189,11 @@ mod caching_tests {
         .to_stream()
         .to_explicit(
             "out",
-            Produced::with(TimeWindowedSerde::new(StringSerde, 100), I64Serde),
+            Produced::with(TimeWindowedSerde::new(StringSerde, millis(100)), I64Serde),
         );
         let built = b.build("app").unwrap();
-        let g =
-            pollster::block_on(built.instantiate(&StoreBackend::InMemory, "app", 1024)).unwrap();
+        let g = pollster::block_on(built.instantiate(&StoreBackend::InMemory, "app", kibibytes(1)))
+            .unwrap();
         check!(!g.cache_owner.contains_key("cg"));
     }
 }

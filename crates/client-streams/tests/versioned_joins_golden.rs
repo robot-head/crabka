@@ -16,6 +16,7 @@ use assert2::check;
 use crabka_client_streams::{
     Consumed, I64Serde, Materialized, Produced, StringSerde, dsl::StreamsBuilder,
 };
+use crabka_units::prelude::*;
 use serde::Deserialize;
 
 /// One output record in the table-table golden `out` array (String value).
@@ -88,7 +89,7 @@ fn asof_stream_table_join_matches_golden() {
     let table = b.table_explicit::<StringSerde, I64Serde>(
         "table",
         Consumed::with(StringSerde, I64Serde),
-        Materialized::with(StringSerde, I64Serde).as_versioned("vt", 600_000),
+        Materialized::with(StringSerde, I64Serde).as_versioned("vt", millis(600_000)),
     );
     b.stream_explicit::<StringSerde, I64Serde>(["stream"], Consumed::with(StringSerde, I64Serde))
         .join_table(&table, |s: &i64, t: &i64| s + t)
@@ -159,7 +160,7 @@ fn asof_stream_table_left_join_emits_on_miss() {
     let table = b.table_explicit::<StringSerde, I64Serde>(
         "table",
         Consumed::with(StringSerde, I64Serde),
-        Materialized::with(StringSerde, I64Serde).as_versioned("vt", 600_000),
+        Materialized::with(StringSerde, I64Serde).as_versioned("vt", millis(600_000)),
     );
     b.stream_explicit::<StringSerde, I64Serde>(["stream"], Consumed::with(StringSerde, I64Serde))
         .left_join_table(&table, |s: &i64, t: Option<&i64>| {
@@ -233,13 +234,13 @@ fn grace_stream_table_left_join_emits_on_miss() {
     let table = b.table_explicit::<StringSerde, I64Serde>(
         "table",
         Consumed::with(StringSerde, I64Serde),
-        Materialized::with(StringSerde, I64Serde).as_versioned("vt", 600_000),
+        Materialized::with(StringSerde, I64Serde).as_versioned("vt", millis(600_000)),
     );
     b.stream_explicit::<StringSerde, I64Serde>(["stream"], Consumed::with(StringSerde, I64Serde))
         .left_join_table_with(
             &table,
             |s: &i64, t: Option<&i64>| s + t.copied().unwrap_or(-1),
-            Joined::with_grace_period(60_000),
+            Joined::with_grace_period(millis(60_000)),
         )
         .to_explicit("out", Produced::with(StringSerde, I64Serde));
     drop(table);
@@ -333,13 +334,13 @@ fn build_grace_app() -> crabka_client_streams::topology::BuiltTopology {
     let table = b.table_explicit::<StringSerde, I64Serde>(
         "table",
         Consumed::with(StringSerde, I64Serde),
-        Materialized::with(StringSerde, I64Serde).as_versioned("vt", 600_000),
+        Materialized::with(StringSerde, I64Serde).as_versioned("vt", millis(600_000)),
     );
     b.stream_explicit::<StringSerde, I64Serde>(["stream"], Consumed::with(StringSerde, I64Serde))
         .join_table_with(
             &table,
             |s: &i64, t: &i64| s + t,
-            Joined::with_grace_period(60_000),
+            Joined::with_grace_period(millis(60_000)),
         )
         .to_explicit("out", Produced::with(StringSerde, I64Serde));
     drop(table);
@@ -534,12 +535,12 @@ fn table_table_versioned_join_matches_golden() {
     let a = b.table_explicit::<StringSerde, StringSerde>(
         "a",
         Consumed::with(StringSerde, StringSerde),
-        Materialized::with(StringSerde, StringSerde).as_versioned("va", 600_000),
+        Materialized::with(StringSerde, StringSerde).as_versioned("va", millis(600_000)),
     );
     let b_table = b.table_explicit::<StringSerde, StringSerde>(
         "b",
         Consumed::with(StringSerde, StringSerde),
-        Materialized::with(StringSerde, StringSerde).as_versioned("vb", 600_000),
+        Materialized::with(StringSerde, StringSerde).as_versioned("vb", millis(600_000)),
     );
     a.join(&b_table, |va: &String, vb: &String| format!("{va}|{vb}"))
         .to_stream()
@@ -610,12 +611,12 @@ fn table_table_versioned_no_extra_changelog_wire() {
     let a = b.table_explicit::<StringSerde, StringSerde>(
         "a",
         Consumed::with(StringSerde, StringSerde),
-        Materialized::with(StringSerde, StringSerde).as_versioned("va", 600_000),
+        Materialized::with(StringSerde, StringSerde).as_versioned("va", millis(600_000)),
     );
     let b_table = b.table_explicit::<StringSerde, StringSerde>(
         "b",
         Consumed::with(StringSerde, StringSerde),
-        Materialized::with(StringSerde, StringSerde).as_versioned("vb", 600_000),
+        Materialized::with(StringSerde, StringSerde).as_versioned("vb", millis(600_000)),
     );
     a.join(&b_table, |va: &String, vb: &String| format!("{va}|{vb}"))
         .to_stream()

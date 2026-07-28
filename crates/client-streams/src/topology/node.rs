@@ -4,6 +4,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crabka_units::prelude::*;
+
 use super::builder::TopologyError;
 
 /// What a node is and which topics/predecessors it touches.
@@ -28,19 +30,24 @@ pub(crate) struct Node {
 }
 
 /// Which changelog topic configuration a store's changelog topic gets.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// The retention and compaction-lag extents are [`Time`] quantities; the wire
+/// layer renders them as the raw millisecond integers Kafka's config keys
+/// require. `Time` stores `f64`, so this cannot derive `Eq` — nothing keys a map
+/// or set on it, so `PartialEq` is enough.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum ChangelogKind {
     /// KV store: `cleanup.policy=compact` only.
     Kv,
     /// Aggregation window store: `cleanup.policy=compact,delete` + `retention.ms`.
-    AggWindow { retention_ms: i64 },
+    AggWindow { retention: Time },
     /// Join window store: `cleanup.policy=delete` + `retention.ms`
     /// (retainDuplicates prevents compaction).
-    JoinWindow { retention_ms: i64 },
+    JoinWindow { retention: Time },
     /// Versioned store: `cleanup.policy=compact` + `min.compaction.lag.ms`
-    /// (= `historyRetention` + `86_400_000`) so recent version history is not
+    /// (= `historyRetention` + one day) so recent version history is not
     /// compacted away before restore reads it.
-    Versioned { min_compaction_lag_ms: i64 },
+    Versioned { min_compaction_lag: Time },
 }
 
 /// A registered state store: its name, the processors it connects (used to
@@ -159,58 +166,56 @@ impl NodeRegistry {
         });
     }
 
-    /// Register a windowed aggregation state store. The `retention_ms` is stored
-    /// and passed to the wire layer so the changelog topic gets `compact,delete` +
-    /// `retention.ms=<retention_ms>` configs instead of the KV `compact`-only set.
+    /// Register a windowed aggregation state store. The `retention` is stored and
+    /// passed to the wire layer so the changelog topic gets `compact,delete` +
+    /// `retention.ms` configs instead of the KV `compact`-only set.
     pub fn add_window_store(
         &mut self,
         name: &str,
         processors: Vec<String>,
         changelog_override: Option<String>,
-        retention_ms: i64,
+        retention: Time,
     ) {
         self.stores.push(StoreEntry {
             name: name.to_string(),
             processors,
             changelog_override,
-            changelog_kind: ChangelogKind::AggWindow { retention_ms },
+            changelog_kind: ChangelogKind::AggWindow { retention },
         });
     }
 
     /// Register a versioned state store. The changelog gets `compact` policy +
-    /// `min.compaction.lag.ms=<min_compaction_lag_ms>`.
+    /// `min.compaction.lag.ms`.
     pub fn add_versioned_store(
         &mut self,
         name: &str,
         processors: Vec<String>,
         changelog_override: Option<String>,
-        min_compaction_lag_ms: i64,
+        min_compaction_lag: Time,
     ) {
         self.stores.push(StoreEntry {
             name: name.to_string(),
             processors,
             changelog_override,
-            changelog_kind: ChangelogKind::Versioned {
-                min_compaction_lag_ms,
-            },
+            changelog_kind: ChangelogKind::Versioned { min_compaction_lag },
         });
     }
 
     /// Register a join window state store. The changelog gets `delete`-only
-    /// policy + `retention.ms=<retention_ms>` (retainDuplicates means the store
-    /// cannot be compacted — only deleted).
+    /// policy + `retention.ms` (retainDuplicates means the store cannot be
+    /// compacted — only deleted).
     pub fn add_join_window_store(
         &mut self,
         name: &str,
         processors: Vec<String>,
         changelog_override: Option<String>,
-        retention_ms: i64,
+        retention: Time,
     ) {
         self.stores.push(StoreEntry {
             name: name.to_string(),
             processors,
             changelog_override,
-            changelog_kind: ChangelogKind::JoinWindow { retention_ms },
+            changelog_kind: ChangelogKind::JoinWindow { retention },
         });
     }
 

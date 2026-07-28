@@ -6,12 +6,13 @@ use std::collections::BTreeMap;
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
 use crabka_client_core::ClientSecurity;
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
+use crabka_units::prelude::*;
 
 use crate::config::RegistryConfig;
 
 const TOPIC_ALREADY_EXISTS: i16 = 36;
 
-fn schemas_topic_spec(cfg: &RegistryConfig) -> (CreateTopicSpec, i32) {
+fn schemas_topic_spec(cfg: &RegistryConfig) -> (CreateTopicSpec, Time) {
     (
         CreateTopicSpec {
             name: cfg.schemas_topic.clone(),
@@ -19,7 +20,7 @@ fn schemas_topic_spec(cfg: &RegistryConfig) -> (CreateTopicSpec, i32) {
             replicas: cfg.schemas_topic_rf,
             configs: BTreeMap::from([("cleanup.policy".to_string(), "compact".to_string())]),
         },
-        cfg.runtime.schemas_topic_create_timeout_ms,
+        cfg.runtime.schemas_topic_create_timeout,
     )
 }
 
@@ -45,8 +46,9 @@ pub async fn ensure_schemas_topic(
         .collect();
     let mut admin = AdminClient::connect_secured(&bootstrap, security).await?;
 
-    let (spec, timeout_ms) = schemas_topic_spec(cfg);
-    let outcomes = admin.create_topics(&[spec], timeout_ms).await?;
+    let (spec, timeout) = schemas_topic_spec(cfg);
+    // `create_topics` takes the raw `CreateTopics.timeout_ms` wire field.
+    let outcomes = admin.create_topics(&[spec], timeout.millis_i32()).await?;
     if let Some(o) = outcomes.into_iter().next() {
         match o.error {
             None => {
@@ -74,6 +76,8 @@ fn to_wire_uuid(id: uuid::Uuid) -> WireUuid {
 
 #[cfg(test)]
 mod tests {
+    use crabka_units::prelude::*;
+
     use super::{schemas_topic_spec, to_wire_uuid};
     use crate::config::{RegistryConfig, RegistryRuntimeConfig, SecurityConfig};
 
@@ -88,19 +92,19 @@ mod tests {
             group_id: "schema-registry".into(),
             leader_eligibility: true,
             runtime: RegistryRuntimeConfig {
-                schemas_topic_create_timeout_ms: 22_000,
+                schemas_topic_create_timeout: secs(22),
                 ..RegistryRuntimeConfig::default()
             },
             security: SecurityConfig::default(),
         };
 
-        assert2::assert!(schemas_topic_spec(&cfg).1 == 22_000);
+        assert2::check!(schemas_topic_spec(&cfg).1 == secs(22));
     }
 
     #[test]
     fn uuid_bytes_preserved() {
         let u = uuid::Uuid::from_u128(0x1234_5678_9abc_def0_1122_3344_5566_7788);
         let wire = to_wire_uuid(u);
-        assert2::assert!(wire.0 == *u.as_bytes());
+        assert2::check!(wire.0 == *u.as_bytes());
     }
 }

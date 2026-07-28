@@ -18,6 +18,7 @@
 use std::collections::BTreeMap;
 
 use bytes::Bytes;
+use crabka_units::prelude::*;
 
 use crate::{processor::record::RecordContext, store::cache::entry::LruCacheEntry};
 
@@ -61,8 +62,10 @@ impl NamedCache {
         self.map.len()
     }
 
-    pub fn size_bytes(&self) -> usize {
-        self.size_bytes
+    /// The cache's total held size. The running total is kept as a `usize` so the
+    /// incremental add/subtract stays exact; the dimension is put back on here.
+    pub fn size_bytes(&self) -> ByteSize {
+        ByteSize::from_bytes(self.size_bytes.try_into().unwrap_or(u64::MAX))
     }
 
     /// Lookup without promotion (read-only borrow).
@@ -316,7 +319,7 @@ mod tests {
         // a:  1 + (1 + 21) = 23
         // bb: 2 + (2 + 21) = 25
         // ccc:3 + (3 + 21) = 27
-        assert_eq!(c.size_bytes(), 23 + 25 + 27);
+        check!(c.size_bytes() == bytes(23 + 25 + 27));
     }
 
     #[test]

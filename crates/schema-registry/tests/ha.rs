@@ -83,7 +83,7 @@ async fn start_node(bootstrap: &str) -> Node {
         primary: primary.clone(),
         http: reqwest::Client::new(),
         node_id: c.advertised_url.clone(),
-        forward_max_body_bytes: usize::try_from(c.runtime.forward_max_body_bytes).unwrap(),
+        forward_max_body: c.runtime.forward_max_body,
     };
     let app: Router = rest::router_with_forwarding(
         AppState {

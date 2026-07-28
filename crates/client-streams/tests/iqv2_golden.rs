@@ -10,6 +10,7 @@ use crabka_client_streams::{
     Consumed, FailureReason, KeyQuery, RangeQuery, StateQueryRequest, StreamsBuilder, StringSerde,
     TimeWindows, TopologyTestDriver, WindowKeyQuery, WindowRangeQuery,
 };
+use crabka_units::prelude::*;
 use serde_json::Value;
 
 /// The committed golden, parsed once per test.
@@ -188,7 +189,8 @@ async fn iqv2_failure_paths() {
 async fn iqv2_window_key_and_range_parity() {
     let g = golden();
     let w = &g["window"];
-    let size = w["size_ms"].as_i64().unwrap();
+    // The golden fixture keys stay `*_ms`; the value becomes an extent here.
+    let size = Time::from_millis(w["size_ms"].as_i64().unwrap());
 
     let b = StreamsBuilder::new();
     b.stream::<String, String>(["in"])
@@ -274,7 +276,7 @@ async fn iqv2_versioned_key_and_multi_parity() {
 
     let g = golden();
     let v = &g["versioned"];
-    let retention = v["retention_ms"].as_i64().unwrap();
+    let retention = Time::from_millis(v["retention_ms"].as_i64().unwrap());
 
     let b = StreamsBuilder::new();
     b.table_explicit::<StringSerde, I64Serde>(

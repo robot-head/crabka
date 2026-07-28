@@ -173,6 +173,7 @@ impl StoreRegistry {
 #[cfg(test)]
 mod tests {
     use assert2::check;
+    use crabka_units::prelude::*;
 
     use super::*;
     use crate::{
@@ -186,7 +187,7 @@ mod tests {
         let mut reg = StoreRegistry::default();
         reg.insert(Box::new(VersionedBytesStore::<String, i64>::in_memory(
             "v".into(),
-            1_000_000,
+            secs(1_000),
             Box::new(StringSerde),
             Box::new(I64Serde),
             "v-changelog".into(),

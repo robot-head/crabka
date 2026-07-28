@@ -43,6 +43,7 @@ use crabka_security::{
     ClientAuthMode, Jwks, TlsConfig,
     ca::{SubjectAltName, generate_clients_ca, issue_broker_cert, issue_user_cert},
 };
+use crabka_units::prelude::*;
 use tokio_util::sync::CancellationToken;
 
 const SR_CONTENT_TYPE: &str = "application/vnd.schemaregistry.v1+json";
@@ -85,7 +86,7 @@ fn secure_cfg_with_scheme(
             authz: Some(AuthzConfig {
                 enabled: true,
                 super_users: HashSet::new(),
-                acl_refresh: Duration::from_millis(300),
+                acl_refresh: millis(300),
             }),
             client: None,
         },
@@ -169,7 +170,7 @@ async fn start_secure_node(bootstrap: &str) -> Node {
         let refresh_cancel = cancel.clone();
         tokio::spawn(async move {
             authz
-                .run_acl_refresh(admin, Duration::from_millis(300), refresh_cancel)
+                .run_acl_refresh(admin, millis(300), refresh_cancel)
                 .await;
         });
     }
@@ -178,7 +179,7 @@ async fn start_secure_node(bootstrap: &str) -> Node {
         primary: primary.clone(),
         http: reqwest::Client::new(),
         node_id: cfg.advertised_url.clone(),
-        forward_max_body_bytes: usize::try_from(cfg.runtime.forward_max_body_bytes).unwrap(),
+        forward_max_body: cfg.runtime.forward_max_body,
     };
     let app: Router = rest::router_with_security(
         AppState {
@@ -363,7 +364,7 @@ async fn start_mtls_node(bootstrap: &str, tls: TlsConfig, forward_http: reqwest:
         let refresh_cancel = cancel.clone();
         tokio::spawn(async move {
             authz
-                .run_acl_refresh(admin, Duration::from_millis(300), refresh_cancel)
+                .run_acl_refresh(admin, millis(300), refresh_cancel)
                 .await;
         });
     }
@@ -372,7 +373,7 @@ async fn start_mtls_node(bootstrap: &str, tls: TlsConfig, forward_http: reqwest:
         primary: primary.clone(),
         http: forward_http,
         node_id: cfg.advertised_url.clone(),
-        forward_max_body_bytes: usize::try_from(cfg.runtime.forward_max_body_bytes).unwrap(),
+        forward_max_body: cfg.runtime.forward_max_body,
     };
     let app: Router = rest::router_with_security(
         AppState {
@@ -513,7 +514,7 @@ async fn https_round_trip_enforces_auth_over_tls() {
         primary: primary.clone(),
         http: reqwest::Client::new(),
         node_id: cfg.advertised_url.clone(),
-        forward_max_body_bytes: usize::try_from(cfg.runtime.forward_max_body_bytes).unwrap(),
+        forward_max_body: cfg.runtime.forward_max_body,
     };
     let app: Router = rest::router_with_security(
         AppState {
@@ -817,7 +818,7 @@ async fn start_jwks_node(
         primary: primary.clone(),
         http: reqwest::Client::new(),
         node_id: cfg.advertised_url.clone(),
-        forward_max_body_bytes: usize::try_from(cfg.runtime.forward_max_body_bytes).unwrap(),
+        forward_max_body: cfg.runtime.forward_max_body,
     };
     let app: Router = rest::router_with_security(
         AppState {

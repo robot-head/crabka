@@ -1,6 +1,8 @@
 //! DSL config objects mirroring JVM `Grouped`/`Materialized`/`Repartitioned`.
 //! `Consumed`/`Produced` are reused from `crate::processor::serde`.
 
+use crabka_units::prelude::*;
+
 /// Serdes (+ optional repartition name) for `groupBy`/`groupByKey`.
 #[derive(Debug, Clone)]
 pub struct Grouped<KS, VS> {
@@ -25,13 +27,13 @@ impl<KS, VS> Grouped<KS, VS> {
     }
 }
 
-/// Versioned-store settings for a `Materialized` (KIP-889). `segment_interval_ms`
+/// Versioned-store settings for a `Materialized` (KIP-889). `segment_interval`
 /// only affects JVM eviction granularity (non-observable here); accepted for API
 /// parity. `None` segment interval uses the JVM default segment heuristic.
 #[derive(Debug, Clone, Copy)]
 pub struct VersionedConfig {
-    pub history_retention_ms: i64,
-    pub segment_interval_ms: Option<i64>,
+    pub history_retention: Time,
+    pub segment_interval: Option<Time>,
 }
 
 /// Store name + serdes + logging flag for a materialized `KTable`.
@@ -79,13 +81,13 @@ impl<KS, VS> Materialized<KS, VS> {
         self.caching
     }
     /// Materialize this table into a versioned key-value store (KIP-889) named
-    /// `name`, retaining `history_retention_ms` of version history.
+    /// `name`, retaining `history_retention` of version history.
     #[must_use]
-    pub fn as_versioned(mut self, name: impl Into<String>, history_retention_ms: i64) -> Self {
+    pub fn as_versioned(mut self, name: impl Into<String>, history_retention: Time) -> Self {
         self.store_name = Some(name.into());
         self.versioned = Some(VersionedConfig {
-            history_retention_ms,
-            segment_interval_ms: None,
+            history_retention,
+            segment_interval: None,
         });
         self
     }
@@ -137,19 +139,19 @@ impl<KS, V1S, V2S> StreamJoined<KS, V1S, V2S> {
 
 /// Stream–table join config (KIP-923). Carries an optional grace period that
 /// buffers stream records so out-of-order records still join the table value
-/// as-of their own timestamp. `grace_ms` requires the joined table to be
-/// versioned and must be `< history_retention_ms` (asserted at build time by the
-/// join DSL). `name` optionally names the grace buffer store.
+/// as-of their own timestamp. `grace` requires the joined table to be versioned
+/// and must be `< history_retention` (asserted at build time by the join DSL).
+/// `name` optionally names the grace buffer store.
 #[derive(Debug, Clone, Default)]
 pub struct Joined {
-    pub(crate) grace_ms: Option<i64>,
+    pub(crate) grace: Option<Time>,
     pub(crate) name: Option<String>,
 }
 impl Joined {
     #[must_use]
-    pub fn with_grace_period(grace_ms: i64) -> Self {
+    pub fn with_grace_period(grace: Time) -> Self {
         Self {
-            grace_ms: Some(grace_ms),
+            grace: Some(grace),
             name: None,
         }
     }
@@ -220,17 +222,17 @@ mod tests {
 
     #[test]
     fn joined_carries_grace_and_name() {
-        let j = Joined::with_grace_period(5_000).as_named("jb");
-        check!(j.grace_ms == Some(5_000));
+        let j = Joined::with_grace_period(secs(5)).as_named("jb");
+        check!(j.grace == Some(secs(5)));
         check!(j.name.as_deref() == Some("jb"));
-        check!(Joined::default().grace_ms == None);
+        check!(Joined::default().grace == None);
     }
 
     #[test]
     fn materialized_as_versioned_sets_config() {
-        let m = Materialized::with(StringSerde, I64Serde).as_versioned("vstore", 600_000);
+        let m = Materialized::with(StringSerde, I64Serde).as_versioned("vstore", minutes(10));
         check!(m.store_name.as_deref() == Some("vstore"));
         let vc = m.versioned.expect("versioned config");
-        check!(vc.history_retention_ms == 600_000);
+        check!(vc.history_retention == minutes(10));
     }
 }

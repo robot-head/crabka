@@ -237,7 +237,7 @@ where
                                 proc_name,
                                 move || KStreamSessionAggregateProcessor {
                                     store_name: store.clone(),
-                                    gap_ms: w.gap_ms,
+                                    gap: w.gap,
                                     init: {
                                         let i = init.clone();
                                         move || i()
@@ -252,7 +252,7 @@ where
                                     },
                                     // Cogroup does not expose emit-final; default to emit-on-update.
                                     emit: crate::dsl::emit::EmitStrategy::default(),
-                                    grace_ms: w.grace_ms,
+                                    grace: w.grace,
                                     stream_time: i64::MIN,
                                     last_emitted_close: i64::MIN,
                                     forwarder: TupleForwarder::default(),
@@ -501,6 +501,7 @@ where
 #[cfg(test)]
 mod tests {
     use assert2::check;
+    use crabka_units::prelude::*;
 
     use crate::dsl::StreamsBuilder;
 
@@ -525,7 +526,7 @@ mod tests {
             "app",
             // A generous (default-sized) budget: a marked cogroup store must land
             // in cache_owner.
-            10_485_760,
+            mebibytes(10),
         ))
         .unwrap();
         check!(
@@ -540,6 +541,7 @@ mod tests {
 #[cfg(test)]
 mod cogroup_caching_tests {
     use assert2::check;
+    use crabka_units::prelude::*;
 
     use crate::{
         I64Serde, Materialized, Produced, StringSerde, dsl::StreamsBuilder,
@@ -568,7 +570,8 @@ mod cogroup_caching_tests {
         .to_explicit("out", Produced::with(StringSerde, I64Serde));
         let built = b.build("app").unwrap();
         let mut g =
-            pollster::block_on(built.instantiate(&StoreBackend::InMemory, "app", 1024)).unwrap();
+            pollster::block_on(built.instantiate(&StoreBackend::InMemory, "app", kibibytes(1)))
+                .unwrap();
         check!(g.cache_owner.contains_key("cg"));
         pollster::block_on(g.init_processors()).unwrap();
 
@@ -605,8 +608,8 @@ mod cogroup_caching_tests {
         .to_stream()
         .to_explicit("out", Produced::with(StringSerde, I64Serde));
         let built = b.build("app").unwrap();
-        let g =
-            pollster::block_on(built.instantiate(&StoreBackend::InMemory, "app", 1024)).unwrap();
+        let g = pollster::block_on(built.instantiate(&StoreBackend::InMemory, "app", kibibytes(1)))
+            .unwrap();
         check!(!g.cache_owner.contains_key("cg"));
     }
 }

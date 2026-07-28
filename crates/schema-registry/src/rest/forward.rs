@@ -9,6 +9,7 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
+use crabka_units::prelude::*;
 use tokio::sync::watch;
 
 use crate::election::PrimaryState;
@@ -20,7 +21,8 @@ pub struct ForwardState {
     pub primary: watch::Receiver<PrimaryState>,
     pub http: reqwest::Client,
     pub node_id: String,
-    pub forward_max_body_bytes: usize,
+    /// Largest forwarded request body this node buffers before replaying it.
+    pub forward_max_body: ByteSize,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -75,7 +77,8 @@ async fn proxy(fwd: &ForwardState, primary_url: &str, req: Request) -> Response 
     let (parts, body) = req.into_parts();
     let path_q = parts.uri.path_and_query().map_or("", |p| p.as_str());
     let url = format!("{primary_url}{path_q}");
-    let Ok(bytes) = axum::body::to_bytes(body, fwd.forward_max_body_bytes).await else {
+    // `to_bytes` takes a raw `usize` cap.
+    let Ok(bytes) = axum::body::to_bytes(body, fwd.forward_max_body.bytes_usize()).await else {
         return (StatusCode::BAD_REQUEST, "body read failed").into_response();
     };
     let method = reqwest::Method::from_bytes(parts.method.as_str().as_bytes())
@@ -190,7 +193,7 @@ mod tests {
             primary,
             http: reqwest::Client::new(),
             node_id: "secondary".into(),
-            forward_max_body_bytes: 3,
+            forward_max_body: bytes(3),
         };
         let request = Request::builder()
             .method(Method::POST)

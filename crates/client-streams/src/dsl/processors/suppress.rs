@@ -1,5 +1,5 @@
 //! `KTableSuppressProcessor` — KIP suppression. Buffers `Change` updates and emits
-//! each buffered record once stream-time passes `buffer_time(record) + wait_ms`.
+//! each buffered record once stream-time passes `buffer_time(record) + wait`.
 //! Unifies `untilWindowCloses` (`buffer_time` = window.end, wait = grace) and
 //! `untilTimeLimitElapsed` (`buffer_time` = record ts, wait = the duration) behind a
 //! `fn(&K, i64) -> i64` buffer-time pointer.
@@ -11,6 +11,7 @@
 use std::marker::PhantomData;
 
 use async_trait::async_trait;
+use crabka_units::prelude::*;
 
 use crate::{
     dsl::processors::change::Change,
@@ -26,10 +27,10 @@ type Marker<T> = PhantomData<fn() -> T>;
 pub(crate) struct KTableSuppressProcessor<K, V> {
     pub store_name: String,
     pub observed_stream_time: i64,
-    pub wait_ms: i64,
+    pub wait: Time,
     pub buffer_time: fn(&K, i64) -> i64,
     pub max_records: Option<usize>,
-    pub max_bytes: Option<usize>,
+    pub max_bytes: Option<ByteSize>,
     pub emit_early: bool,
     pub _pd: Marker<(K, V)>,
 }
@@ -37,16 +38,16 @@ pub(crate) struct KTableSuppressProcessor<K, V> {
 impl<K, V> KTableSuppressProcessor<K, V> {
     pub(crate) fn new(
         store_name: String,
-        wait_ms: i64,
+        wait: Time,
         buffer_time: fn(&K, i64) -> i64,
         max_records: Option<usize>,
-        max_bytes: Option<usize>,
+        max_bytes: Option<ByteSize>,
         emit_early: bool,
     ) -> Self {
         Self {
             store_name,
             observed_stream_time: i64::MIN,
-            wait_ms,
+            wait,
             buffer_time,
             max_records,
             max_bytes,
@@ -59,9 +60,9 @@ impl<K, V> KTableSuppressProcessor<K, V> {
 /// The buffer is "full" if it exceeds either configured cap (records or bytes).
 fn over_caps(
     len: usize,
-    byte_size: usize,
+    byte_size: ByteSize,
     max_records: Option<usize>,
-    max_bytes: Option<usize>,
+    max_bytes: Option<ByteSize>,
 ) -> bool {
     max_records.is_some_and(|c| len > c) || max_bytes.is_some_and(|c| byte_size > c)
 }
@@ -104,8 +105,10 @@ where
             store.put(key, bt, r.value, rec_ctx).await;
         }
 
-        // Emit every entry whose buffer_time has elapsed (stream_time - wait_ms).
-        let threshold = self.observed_stream_time - self.wait_ms;
+        // Emit every entry whose buffer_time has elapsed (stream_time - wait).
+        // The threshold is an instant, so the wait extent crosses into epoch
+        // milliseconds here.
+        let threshold = self.observed_stream_time - self.wait.millis_i64();
         let due = {
             let store = ctx
                 .get_suppress_store::<K, V>(&self.store_name)
@@ -155,7 +158,8 @@ where
                 if let Some(cap) = self.max_bytes {
                     assert!(
                         store.byte_size() <= cap,
-                        "suppress buffer exceeded its max capacity of {cap} bytes (shutDownWhenFull)"
+                        "suppress buffer exceeded its max capacity of {} bytes (shutDownWhenFull)",
+                        cap.bytes_usize()
                     );
                 }
             }
@@ -166,6 +170,8 @@ where
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+
+    use assert2::check;
 
     use super::*;
     use crate::{
@@ -192,7 +198,7 @@ mod tests {
         stores.insert(Box::new(
             SuppressBytesStore::<Windowed<String>, i64>::in_memory(
                 "sup".into(),
-                Box::new(TimeWindowedSerde::new(StringSerde, 10)),
+                Box::new(TimeWindowedSerde::new(StringSerde, millis(10))),
                 Box::new(I64Serde),
                 "app-sup-changelog".into(),
             ),
@@ -201,12 +207,12 @@ mod tests {
 
     /// Construct a window-close processor (`buffer_time` = window.end, strict).
     fn window_close_proc(
-        grace_ms: i64,
+        grace: Time,
         max_records: Option<usize>,
     ) -> KTableSuppressProcessor<Windowed<String>, i64> {
         KTableSuppressProcessor::new(
             "sup".into(),
-            grace_ms,
+            grace,
             |k: &Windowed<String>, _ts| k.window.end,
             max_records,
             None,
@@ -228,7 +234,7 @@ mod tests {
             timestamp: 0,
         };
 
-        let mut proc = window_close_proc(0, None);
+        let mut proc = window_close_proc(Time::ZERO, None);
 
         // Two updates for window [0,10): count 1 then 2. ts in [0,10) < window end.
         for (cnt, ts) in [(1i64, 1i64), (2, 3)] {
@@ -259,7 +265,7 @@ mod tests {
             .await;
         }
         // Nothing emitted yet (stream_time = 3 < window end 10).
-        assert!(buffer.is_empty());
+        check!(buffer.is_empty());
 
         // A record for window [20,30) advances stream_time to 25 ≥ 10 → [0,10) closes.
         {
@@ -306,7 +312,7 @@ mod tests {
             timestamp: 0,
         };
 
-        let mut proc = window_close_proc(5, None); // grace 5
+        let mut proc = window_close_proc(millis(5), None); // grace 5
 
         {
             let globals = crate::runtime::global::GlobalStateManager::default();
@@ -353,7 +359,7 @@ mod tests {
             )
             .await;
         }
-        assert!(buffer.is_empty());
+        check!(buffer.is_empty());
         // stream_time 16 → threshold 11 >= 10 → [0,10) closes.
         {
             let globals = crate::runtime::global::GlobalStateManager::default();
@@ -403,7 +409,7 @@ mod tests {
             offset: 0,
             timestamp: 0,
         };
-        let mut proc = window_close_proc(0, Some(2)); // cap 2
+        let mut proc = window_close_proc(Time::ZERO, Some(2)); // cap 2
         // Three distinct keys in the SAME open window [0,10) (ts < 10 → none close).
         for (k, ts) in [("a", 1i64), ("b", 2), ("c", 3)] {
             let globals = crate::runtime::global::GlobalStateManager::default();
@@ -449,10 +455,10 @@ mod tests {
         // holds one entry (17 <= 20) but the second (34 > 20) shuts down.
         let mut proc = KTableSuppressProcessor::<Windowed<String>, i64>::new(
             "sup".into(),
-            0,
+            Time::ZERO,
             |k: &Windowed<String>, _ts| k.window.end,
             None,
-            Some(20),
+            Some(bytes(20)),
             false,
         );
         for (k, ts) in [("a", 1i64), ("b", 2)] {
@@ -492,7 +498,7 @@ mod tests {
             offset: 0,
             timestamp: 0,
         };
-        let mut proc = window_close_proc(0, Some(2)); // cap 2
+        let mut proc = window_close_proc(Time::ZERO, Some(2)); // cap 2
         // Two keys in [0,10): len == cap, not over → no panic.
         for (k, ts) in [("a", 1i64), ("b", 2)] {
             let globals = crate::runtime::global::GlobalStateManager::default();
@@ -516,7 +522,7 @@ mod tests {
             )
             .await;
         }
-        assert!(buffer.is_empty()); // nothing closed yet
+        check!(buffer.is_empty()); // nothing closed yet
         // A record in window [10,20) at ts=15 closes [0,10): the close-eviction runs
         // BEFORE the cap check, so len drops to 1 (the new window) → no panic, and
         // both [0,10) entries emit.
@@ -566,7 +572,7 @@ mod tests {
         // Rate-limiter, wait 50: buffer_time = record ts (any key).
         let mut proc = KTableSuppressProcessor::<String, i64>::new(
             "sup".into(),
-            50,
+            millis(50),
             |_k: &String, ts| ts,
             None,
             None,
@@ -599,7 +605,7 @@ mod tests {
             proc.process(&mut ctx, Record::new(Some(k.to_string()), change, ts))
                 .await;
         }
-        assert!(
+        check!(
             buffer.is_empty(),
             "old timer (60) must not fire after the reset"
         );

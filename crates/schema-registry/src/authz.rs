@@ -10,7 +10,7 @@
 //! [`authz_layer`] is the `from_fn_with_state` middleware that gates each request
 //! (`403` on deny) and lets trusted intra-cluster forwards through untouched.
 
-use std::{collections::HashSet, net::SocketAddr, sync::Arc, time::Duration};
+use std::{collections::HashSet, net::SocketAddr, sync::Arc};
 
 use arc_swap::ArcSwap;
 use axum::{
@@ -22,6 +22,7 @@ use axum::{
 use crabka_authz::{AclCache, AuthorizationRequest, AuthorizationResult, Authorizer};
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_security::Principal;
+use crabka_units::prelude::*;
 use tokio_util::sync::CancellationToken;
 
 /// The `ResourceType::Cluster` resource name for cluster-global operations,
@@ -168,7 +169,7 @@ impl SchemaRegistryAuthz {
     pub async fn run_acl_refresh(
         &self,
         mut admin: crabka_client_admin::AdminClient,
-        refresh: Duration,
+        refresh: Time,
         shutdown: CancellationToken,
     ) {
         loop {
@@ -184,7 +185,7 @@ impl SchemaRegistryAuthz {
             }
             tokio::select! {
                 () = shutdown.cancelled() => return,
-                () = tokio::time::sleep(refresh) => {}
+                () = tokio::time::sleep(refresh.to_std()) => {}
             }
         }
     }

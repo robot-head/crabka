@@ -3,8 +3,6 @@
 //! on shutdown. Generic over `protocol_type` + opaque JSON metadata/assignment;
 //! models `client-consumer`'s coordinator loop without consumer semantics.
 
-use std::time::Duration;
-
 use bytes::Bytes;
 use crabka_client_core::{Client, ClientSecurity};
 use crabka_protocol::owned::{
@@ -14,6 +12,7 @@ use crabka_protocol::owned::{
     leave_group_request::{LeaveGroupRequest, MemberIdentity},
     sync_group_request::{SyncGroupRequest, SyncGroupRequestAssignment},
 };
+use crabka_units::prelude::*;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
@@ -36,20 +35,21 @@ const UNKNOWN_MEMBER_ID: i16 = 25;
 const REBALANCE_IN_PROGRESS: i16 = 27;
 const MEMBER_ID_REQUIRED: i16 = 79;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// `PartialEq` but not `Eq`: [`Time`] stores `f64`.
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct ElectionPolicy {
-    session_timeout_ms: i32,
-    rebalance_timeout_ms: i32,
-    heartbeat_interval: Duration,
-    reconnect_backoff: Duration,
+    session_timeout: Time,
+    rebalance_timeout: Time,
+    heartbeat_interval: Time,
+    reconnect_backoff: Time,
 }
 
 fn election_policy(runtime: &RegistryRuntimeConfig) -> ElectionPolicy {
     ElectionPolicy {
-        session_timeout_ms: runtime.election_session_timeout_ms,
-        rebalance_timeout_ms: runtime.election_rebalance_timeout_ms,
-        heartbeat_interval: Duration::from_millis(runtime.election_heartbeat_interval_ms),
-        reconnect_backoff: Duration::from_millis(runtime.election_reconnect_backoff_ms),
+        session_timeout: runtime.election_session_timeout,
+        rebalance_timeout: runtime.election_rebalance_timeout,
+        heartbeat_interval: runtime.election_heartbeat_interval,
+        reconnect_backoff: runtime.election_reconnect_backoff,
     }
 }
 
@@ -83,7 +83,7 @@ impl ElectionClient {
                     let _ = self.tx.send(PrimaryState::default());
                     if cancel
                         .run_until_cancelled(tokio::time::sleep(
-                            election_policy(&self.runtime).reconnect_backoff,
+                            election_policy(&self.runtime).reconnect_backoff.to_std(),
                         ))
                         .await
                         .is_none()
@@ -127,7 +127,7 @@ impl ElectionClient {
                         }).await;
                         return Ok(());
                     }
-                    () = tokio::time::sleep(election_policy(&self.runtime).heartbeat_interval) => {
+                    () = tokio::time::sleep(election_policy(&self.runtime).heartbeat_interval.to_std()) => {
                         let hb = coord.send(HeartbeatRequest {
                             group_id: self.group_id.clone(),
                             generation_id: generation,
@@ -194,8 +194,10 @@ impl ElectionClient {
         let policy = election_policy(&self.runtime);
         let mk_join = |mid: String| JoinGroupRequest {
             group_id: self.group_id.clone(),
-            session_timeout_ms: policy.session_timeout_ms,
-            rebalance_timeout_ms: policy.rebalance_timeout_ms,
+            // `JoinGroup` is a generated wire request: the extents render back
+            // to raw `int32` milliseconds here.
+            session_timeout_ms: policy.session_timeout.millis_i32(),
+            rebalance_timeout_ms: policy.rebalance_timeout.millis_i32(),
             member_id: mid,
             protocol_type: SR_PROTOCOL_TYPE.to_string(),
             protocols: vec![JoinGroupRequestProtocol {
@@ -291,20 +293,20 @@ mod tests {
     #[test]
     fn election_policy_uses_configured_runtime() {
         let runtime = RegistryRuntimeConfig {
-            election_session_timeout_ms: 12_000,
-            election_rebalance_timeout_ms: 40_000,
-            election_heartbeat_interval_ms: 2_000,
-            election_reconnect_backoff_ms: 750,
+            election_session_timeout: secs(12),
+            election_rebalance_timeout: secs(40),
+            election_heartbeat_interval: secs(2),
+            election_reconnect_backoff: millis(750),
             ..RegistryRuntimeConfig::default()
         };
 
-        assert2::assert!(
+        assert2::check!(
             election_policy(&runtime)
                 == ElectionPolicy {
-                    session_timeout_ms: 12_000,
-                    rebalance_timeout_ms: 40_000,
-                    heartbeat_interval: Duration::from_secs(2),
-                    reconnect_backoff: Duration::from_millis(750),
+                    session_timeout: secs(12),
+                    rebalance_timeout: secs(40),
+                    heartbeat_interval: secs(2),
+                    reconnect_backoff: millis(750),
                 }
         );
     }

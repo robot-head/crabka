@@ -14,6 +14,7 @@ use crabka_protocol::owned::{
     create_topics_request::{CreatableTopic, CreateTopicsRequest},
     update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest},
 };
+use crabka_units::prelude::*;
 
 // ─── broker helpers ───────────────────────────────────────────────────────────
 
@@ -247,7 +248,7 @@ async fn dsl_count_restart_restore_emit_on_update() {
         .bootstrap(&bootstrap)
         .application_id(app_id)
         .topology(dsl_counting_topology(app_id))
-        .cache_max_bytes(0)
+        .cache_max_bytes(ByteSize::ZERO)
         .build()
         .await
         .unwrap();
@@ -285,7 +286,7 @@ async fn dsl_count_restart_restore_emit_on_update() {
         .bootstrap(&bootstrap)
         .application_id(app_id)
         .topology(dsl_counting_topology(app_id))
-        .cache_max_bytes(0) // see step 2: emit-on-update / immediate changelog
+        .cache_max_bytes(ByteSize::ZERO) // see step 2: emit-on-update / immediate changelog
         .build()
         .await
         .unwrap();
@@ -377,7 +378,7 @@ async fn dsl_count_restart_restore_caching_on() {
         .bootstrap(&bootstrap)
         .application_id(app_id)
         .topology(dsl_counting_topology(app_id))
-        .cache_max_bytes(10_485_760) // default; explicit for clarity (cache ON)
+        .cache_max_bytes(mebibytes(10)) // default; explicit for clarity (cache ON)
         .commit_interval(Duration::from_mins(1))
         .build()
         .await
@@ -454,7 +455,7 @@ async fn dsl_count_restart_restore_caching_on() {
         .bootstrap(&bootstrap)
         .application_id(app_id)
         .topology(dsl_counting_topology(app_id))
-        .cache_max_bytes(10_485_760)
+        .cache_max_bytes(mebibytes(10))
         .commit_interval(Duration::from_mins(1))
         .build()
         .await

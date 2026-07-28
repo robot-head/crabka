@@ -4,6 +4,7 @@
 use std::{any::Any, marker::PhantomData};
 
 use async_trait::async_trait;
+use crabka_units::prelude::*;
 
 use super::{
     erased::{Dispatch, ErasedRecord},
@@ -266,16 +267,16 @@ where
         P: crate::processor::punctuation::Punctuator<KOut, VOut>,
     {
         use crate::processor::punctuation::PunctuationType;
-        let interval_ms = i64::try_from(interval.as_millis()).unwrap_or(i64::MAX);
+        let interval = interval.as_time();
         assert!(
-            interval_ms >= 1,
+            interval >= millis(1),
             "schedule interval must be positive (>= 1ms)"
         );
         let base = match ty {
             PunctuationType::StreamTime => self.dispatch.sched_stream_time,
             PunctuationType::WallClockTime => self.dispatch.sched_wall_clock,
         };
-        let next_time = base.saturating_add(interval_ms);
+        let next_time = base.saturating_add(interval.millis_i64());
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let erased: Box<dyn crate::processor::punctuation::ErasedPunctuator> =
             Box::new(crate::processor::punctuation::TypedPunctuator::<
@@ -287,7 +288,7 @@ where
             .schedules
             .push(crate::processor::punctuation::ScheduleEntry {
                 node_idx: self.dispatch.node_idx,
-                interval_ms,
+                interval,
                 ty,
                 next_time,
                 punctuator: erased,
