@@ -24,7 +24,7 @@ use crabka_client_producer::{Producer, ProducerError, ProducerRecord, RecordMeta
 use crabka_security::ListenerProtocol;
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use hdrhistogram::Histogram;
-use refined_type::rule::MinMaxU64;
+use refined_type::rule::{GreaterU32, GreaterU64, MinMaxU64};
 use tokio::{task::JoinSet, time::Instant};
 use tracing::{info, warn};
 
@@ -47,7 +47,6 @@ use crate::{
 /// on the hot path), and `run()` merges them into the `samples` series.
 const SAMPLE_INTERVAL_MS: u64 = 2000;
 const PRODUCER_FINAL_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
-const CONSUMER_BUILD_ATTEMPTS: u32 = 6;
 
 type AckResult =
     Result<Result<RecordMetadata, ProducerError>, tokio::sync::oneshot::error::RecvError>;
@@ -57,6 +56,9 @@ pub const MAX_CLIENT_REQUEST_TIMEOUT_SECONDS: u64 = 2_147_483;
 pub const DEFAULT_PRODUCER_REQUEST_TIMEOUT_SECONDS: u64 = 2;
 pub const DEFAULT_CRABKA_CONSUMER_REQUEST_TIMEOUT_SECONDS: u64 = 5;
 pub const DEFAULT_KAFKA_CONSUMER_REQUEST_TIMEOUT_SECONDS: u64 = 30;
+pub const DEFAULT_CONSUMER_BUILD_ATTEMPTS: u32 = 6;
+pub const DEFAULT_CONSUMER_BUILD_INITIAL_BACKOFF_MS: u64 = 100;
+pub const DEFAULT_CONSUMER_BUILD_MAX_BACKOFF_MS: u64 = 2_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClientRequestTimeoutSeconds(u64);
@@ -123,6 +125,166 @@ pub fn default_consumer_request_timeout(stack: Stack) -> ClientRequestTimeoutSec
         .expect("default consumer request timeout is protocol-safe")
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConsumerBuildAttempts(u32);
+
+impl ConsumerBuildAttempts {
+    /// Validate a consumer-build attempt count.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `value` is zero.
+    pub fn new(value: u32) -> Result<Self, String> {
+        GreaterU32::<0>::new(value)
+            .map(|value| Self(value.into_value()))
+            .map_err(|error| error.to_string())
+    }
+
+    #[must_use]
+    pub const fn into_value(self) -> u32 {
+        self.0
+    }
+}
+
+impl Default for ConsumerBuildAttempts {
+    fn default() -> Self {
+        Self::new(DEFAULT_CONSUMER_BUILD_ATTEMPTS)
+            .expect("default consumer-build attempts are positive")
+    }
+}
+
+impl fmt::Display for ConsumerBuildAttempts {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl FromStr for ConsumerBuildAttempts {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value
+            .parse()
+            .map_err(|error: std::num::ParseIntError| error.to_string())
+            .and_then(Self::new)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConsumerBuildBackoffMs(u64);
+
+impl ConsumerBuildBackoffMs {
+    /// Validate a consumer-build retry backoff.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `value` is zero.
+    pub fn new(value: u64) -> Result<Self, String> {
+        GreaterU64::<0>::new(value)
+            .map(|value| Self(value.into_value()))
+            .map_err(|error| error.to_string())
+    }
+
+    #[must_use]
+    pub const fn duration(self) -> Duration {
+        Duration::from_millis(self.0)
+    }
+}
+
+impl fmt::Display for ConsumerBuildBackoffMs {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl FromStr for ConsumerBuildBackoffMs {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value
+            .parse()
+            .map_err(|error: std::num::ParseIntError| error.to_string())
+            .and_then(Self::new)
+    }
+}
+
+/// Return the validated initial consumer-build backoff default.
+///
+/// # Panics
+///
+/// Panics if the named default is not positive.
+#[must_use]
+pub fn default_consumer_build_initial_backoff() -> ConsumerBuildBackoffMs {
+    ConsumerBuildBackoffMs::new(DEFAULT_CONSUMER_BUILD_INITIAL_BACKOFF_MS)
+        .expect("default initial consumer-build backoff is positive")
+}
+
+/// Return the validated maximum consumer-build backoff default.
+///
+/// # Panics
+///
+/// Panics if the named default is not positive.
+#[must_use]
+pub fn default_consumer_build_max_backoff() -> ConsumerBuildBackoffMs {
+    ConsumerBuildBackoffMs::new(DEFAULT_CONSUMER_BUILD_MAX_BACKOFF_MS)
+        .expect("default maximum consumer-build backoff is positive")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConsumerBuildRetryPolicy {
+    attempts: ConsumerBuildAttempts,
+    initial_backoff: ConsumerBuildBackoffMs,
+    max_backoff: ConsumerBuildBackoffMs,
+}
+
+impl ConsumerBuildRetryPolicy {
+    /// Validate a complete consumer-build retry policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the initial backoff exceeds the maximum.
+    pub fn new(
+        attempts: ConsumerBuildAttempts,
+        initial_backoff: ConsumerBuildBackoffMs,
+        max_backoff: ConsumerBuildBackoffMs,
+    ) -> Result<Self, String> {
+        if initial_backoff.duration() > max_backoff.duration() {
+            return Err("consumer-build initial backoff exceeds maximum".to_owned());
+        }
+        Ok(Self {
+            attempts,
+            initial_backoff,
+            max_backoff,
+        })
+    }
+
+    #[must_use]
+    pub const fn attempts(self) -> u32 {
+        self.attempts.into_value()
+    }
+
+    #[must_use]
+    pub const fn initial_backoff(self) -> Duration {
+        self.initial_backoff.duration()
+    }
+
+    #[must_use]
+    pub const fn max_backoff(self) -> Duration {
+        self.max_backoff.duration()
+    }
+}
+
+impl Default for ConsumerBuildRetryPolicy {
+    fn default() -> Self {
+        Self::new(
+            ConsumerBuildAttempts::default(),
+            default_consumer_build_initial_backoff(),
+            default_consumer_build_max_backoff(),
+        )
+        .expect("default consumer-build retry range is ordered")
+    }
+}
+
 /// The fixed sampling grid, shared (by Copy) with every task so all tasks
 /// bucket into the same slices.
 #[derive(Clone, Copy)]
@@ -157,6 +319,7 @@ pub struct DriverConfig {
     pub prometheus_request_timeout_seconds: PrometheusRequestTimeoutSeconds,
     pub producer_request_timeout_seconds: ClientRequestTimeoutSeconds,
     pub consumer_request_timeout_seconds: ClientRequestTimeoutSeconds,
+    pub consumer_build_retry_policy: ConsumerBuildRetryPolicy,
     pub broker_count: u32,
     pub scenario_id: u64,
     /// TLS data-path config. `None` → plaintext (the default benchmark path).
@@ -281,6 +444,7 @@ pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
             security: sec,
             grid,
             request_timeout: cfg.consumer_request_timeout_seconds,
+            build_retry_policy: cfg.consumer_build_retry_policy,
         }));
     }
 
@@ -946,6 +1110,7 @@ struct ConsumerTask {
     security: Option<ClientSecurity>,
     grid: Grid,
     request_timeout: ClientRequestTimeoutSeconds,
+    build_retry_policy: ConsumerBuildRetryPolicy,
 }
 
 async fn run_consumer(task: ConsumerTask) -> ConsumerOut {
@@ -959,6 +1124,7 @@ async fn run_consumer(task: ConsumerTask) -> ConsumerOut {
         security,
         grid,
         request_timeout,
+        build_retry_policy,
     } = task;
     let group_id = format!("crabka-bench-{}", scenario.name);
     let mut consumer = match build_consumer_with_retry(
@@ -968,6 +1134,7 @@ async fn run_consumer(task: ConsumerTask) -> ConsumerOut {
         &topic,
         security,
         request_timeout,
+        build_retry_policy,
     )
     .await
     {
@@ -1047,11 +1214,12 @@ async fn build_consumer_with_retry(
     topic: &str,
     security: Option<ClientSecurity>,
     request_timeout: ClientRequestTimeoutSeconds,
+    retry_policy: ConsumerBuildRetryPolicy,
 ) -> Result<Consumer> {
     let backoff = exponential_backoff::Backoff::new(
-        CONSUMER_BUILD_ATTEMPTS,
-        Duration::from_millis(100),
-        Some(Duration::from_secs(2)),
+        retry_policy.attempts(),
+        retry_policy.initial_backoff(),
+        Some(retry_policy.max_backoff()),
     );
     for (attempt_idx, delay) in backoff.into_iter().enumerate() {
         let attempt = attempt_idx + 1;
@@ -1109,6 +1277,7 @@ mod tests {
             prometheus_request_timeout_seconds: PrometheusRequestTimeoutSeconds::default(),
             producer_request_timeout_seconds: default_producer_request_timeout(),
             consumer_request_timeout_seconds: default_consumer_request_timeout(Stack::Crabka),
+            consumer_build_retry_policy: ConsumerBuildRetryPolicy::default(),
             broker_count,
             scenario_id: 0,
             tls: None,
@@ -1156,7 +1325,52 @@ mod tests {
             default_consumer_request_timeout(Stack::Kafka).duration(),
             Duration::from_secs(30)
         );
-        assert2::assert!(CONSUMER_BUILD_ATTEMPTS == 6);
+    }
+
+    #[test]
+    fn consumer_build_retry_defaults_preserve_policy() {
+        let policy = ConsumerBuildRetryPolicy::default();
+
+        assert_eq!(policy.attempts(), 6);
+        assert_eq!(policy.initial_backoff(), Duration::from_millis(100));
+        assert_eq!(policy.max_backoff(), Duration::from_secs(2));
+    }
+
+    #[test]
+    fn consumer_build_retry_accepts_positive_minimum_and_equal_backoffs() {
+        let attempts = ConsumerBuildAttempts::new(1).expect("one attempt is valid");
+        let one_ms = ConsumerBuildBackoffMs::new(1).expect("one millisecond is valid");
+        let policy = ConsumerBuildRetryPolicy::new(attempts, one_ms, one_ms)
+            .expect("equal bounds are valid");
+
+        assert_eq!(policy.attempts(), 1);
+        assert_eq!(policy.initial_backoff(), Duration::from_millis(1));
+        assert_eq!(policy.max_backoff(), Duration::from_millis(1));
+    }
+
+    #[test]
+    fn consumer_build_retry_rejects_invalid_primitive_values() {
+        for invalid in ["0", "not-a-number", "-1", "4294967296"] {
+            assert!(
+                invalid.parse::<ConsumerBuildAttempts>().is_err(),
+                "attempts {invalid:?} must be rejected"
+            );
+        }
+        for invalid in ["0", "not-a-number", "-1", "18446744073709551616"] {
+            assert!(
+                invalid.parse::<ConsumerBuildBackoffMs>().is_err(),
+                "backoff {invalid:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn consumer_build_retry_rejects_inverted_backoff_range() {
+        let attempts = ConsumerBuildAttempts::new(1).expect("valid attempts");
+        let initial = ConsumerBuildBackoffMs::new(2).expect("valid initial");
+        let max = ConsumerBuildBackoffMs::new(1).expect("valid maximum");
+
+        assert!(ConsumerBuildRetryPolicy::new(attempts, initial, max).is_err());
     }
 
     #[test]
