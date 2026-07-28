@@ -46,7 +46,7 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 serde-wincode = { workspace = true }
 wincode = { workspace = true }
-clap = { workspace = true }
+clap = { workspace = true, features = ["env"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
