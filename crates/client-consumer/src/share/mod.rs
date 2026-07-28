@@ -23,4 +23,4 @@ pub use consumer::{
     ShareConsumer, ShareConsumerFetchMaxBytes, ShareConsumerFetchMaxRecords,
     ShareConsumerFetchMinBytes, ShareConsumerLeaveHeartbeatTimeout,
 };
-pub use types::{ShareAckMode, ShareAckType, ShareConsumerRecord};
+pub use types::{ShareAckMode, ShareAckType, ShareAcquireMode, ShareConsumerRecord};
