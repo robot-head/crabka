@@ -208,6 +208,34 @@ fn metrics_compactor_bounds_cold_block_retention_for_demo() {
 }
 
 #[test]
+fn trace_and_profile_snapshot_policy_is_overrideable_per_signal() {
+    let compose = docker_compose();
+    for (service, signal) in [
+        ("traces-block-builder", "TRACES"),
+        ("profiles-block-builder", "PROFILES"),
+    ] {
+        let block = compose_service_block(&compose, service);
+        assert2::assert!(block.contains(&format!(
+            "CRABKA_{signal}_INDEX_SNAPSHOT_MAX_BYTES: \"${{CRABKA_{signal}_INDEX_SNAPSHOT_MAX_BYTES:-268435456}}\""
+        )));
+        assert2::assert!(block.contains(&format!(
+            "CRABKA_{signal}_INDEX_SNAPSHOT_RETAIN: \"${{CRABKA_{signal}_INDEX_SNAPSHOT_RETAIN:-8}}\""
+        )));
+    }
+
+    for (service, signal) in [
+        ("traces-querier", "TRACES"),
+        ("profiles-querier", "PROFILES"),
+    ] {
+        let block = compose_service_block(&compose, service);
+        assert2::assert!(block.contains(&format!(
+            "CRABKA_{signal}_INDEX_SNAPSHOT_MAX_BYTES: \"${{CRABKA_{signal}_INDEX_SNAPSHOT_MAX_BYTES:-268435456}}\""
+        )));
+        assert2::assert!(!block.contains(&format!("CRABKA_{signal}_INDEX_SNAPSHOT_RETAIN:")));
+    }
+}
+
+#[test]
 fn otlp_heartbeat_traces_use_per_component_service_names() {
     let compose = docker_compose();
     assert2::assert!(compose.contains("CRABKA_OTLP_HEARTBEAT_INTERVAL_SECS: \"15\""));
