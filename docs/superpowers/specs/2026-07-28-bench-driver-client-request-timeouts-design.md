@@ -109,8 +109,8 @@ Add both variables to the documented inputs and container environment in
 
 In `bench/scripts/run-scenario.sh`, provide an overrideable 2-second producer
 default. If no consumer override is supplied, select 5 seconds for `crabka` and
-30 seconds for `kafka`, using the already-validated `STACK` argument. Export
-both nonempty values through the existing `envsubst` rendering path.
+30 seconds for `kafka`, using the required `STACK` argument. Export both
+nonempty values through the existing `envsubst` rendering path.
 
 No CRD or operator field is added because the benchmark launcher and Job
 template own this binary.
