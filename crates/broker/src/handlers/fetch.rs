@@ -1181,7 +1181,10 @@ async fn do_read(
                     target_os = "dragonfly",
                 )))]
                 let records: RecordsPayload = {
-                    let _ = sendfile_capable;
+                    // Both sendfile inputs are consumed only by the platform
+                    // branch above, so discard them here or `-D warnings` fails
+                    // the build on this target.
+                    let _ = (sendfile_capable, sendfile_min_bytes);
                     RecordsPayload::Raw(log.read_raw(fetch_offset, limit_offset, read_max)?.bytes)
                 };
 
