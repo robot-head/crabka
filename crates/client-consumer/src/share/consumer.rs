@@ -20,7 +20,10 @@ use refined_type::rule::{GreaterI32, MinMaxU128};
 use tokio::{sync::Mutex, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
-use super::{coordinator::ShareCoordinatorState, types::ShareAckMode};
+use super::{
+    coordinator::ShareCoordinatorState,
+    types::{ShareAckMode, ShareAcquireMode},
+};
 use crate::error::ConsumerError;
 
 /// Default deadline for the final best-effort `ShareGroup` leave heartbeat.
@@ -248,6 +251,7 @@ pub struct ShareConsumer {
     pub(crate) fetch_min_bytes: i32,
     pub(crate) fetch_max_bytes: i32,
     pub(crate) fetch_max_records: i32,
+    pub(crate) acquire_mode: ShareAcquireMode,
     pub(crate) ack_mode: ShareAckMode,
     /// Acks staged for the next `ShareFetch` / `ShareAcknowledge` as
     /// `(topic_id, partition, first_offset, last_offset, ack_type_wire)`.
@@ -288,6 +292,7 @@ impl ShareConsumer {
         #[builder(into)] group_id: String,
         #[builder(into)] subscribe: Vec<String>,
         #[builder(default = ShareAckMode::Implicit)] ack_mode: ShareAckMode,
+        #[builder(default = ShareAcquireMode::BatchOptimized)] acquire_mode: ShareAcquireMode,
         #[builder(default = DEFAULT_SHARE_CONSUMER_FETCH_MIN_BYTES)] fetch_min_bytes: i32,
         #[builder(default = DEFAULT_SHARE_CONSUMER_FETCH_MAX_BYTES)] fetch_max_bytes: i32,
         #[builder(default = DEFAULT_SHARE_CONSUMER_FETCH_MAX_RECORDS)] fetch_max_records: i32,
@@ -422,6 +427,7 @@ impl ShareConsumer {
             fetch_min_bytes,
             fetch_max_bytes,
             fetch_max_records,
+            acquire_mode,
             ack_mode,
             pending_acks: Vec::new(),
             prev_delivered: Vec::new(),
@@ -646,6 +652,7 @@ mod tests {
             fetch_min_bytes: DEFAULT_SHARE_CONSUMER_FETCH_MIN_BYTES,
             fetch_max_bytes: DEFAULT_SHARE_CONSUMER_FETCH_MAX_BYTES,
             fetch_max_records: DEFAULT_SHARE_CONSUMER_FETCH_MAX_RECORDS,
+            acquire_mode: ShareAcquireMode::BatchOptimized,
             ack_mode: ShareAckMode::Explicit,
             pending_acks: Vec::new(),
             prev_delivered: Vec::new(),

@@ -41,7 +41,7 @@ use crabka_protocol::{
 
 use super::{
     consumer::ShareConsumer,
-    types::{ShareAckMode, ShareAckType, ShareConsumerRecord},
+    types::{ShareAckMode, ShareAckType, ShareAcquireMode, ShareConsumerRecord},
 };
 use crate::error::ConsumerError;
 
@@ -83,6 +83,7 @@ fn build_share_fetch_request(
     min_bytes: i32,
     max_bytes: i32,
     max_records: i32,
+    acquire_mode: ShareAcquireMode,
     topics: Vec<FetchTopic>,
 ) -> ShareFetchRequest {
     ShareFetchRequest {
@@ -94,6 +95,7 @@ fn build_share_fetch_request(
         max_bytes,
         max_records,
         batch_size: max_records,
+        share_acquire_mode: acquire_mode.wire(),
         topics,
         ..Default::default()
     }
@@ -193,6 +195,7 @@ impl ShareConsumer {
                 self.fetch_min_bytes,
                 self.fetch_max_bytes,
                 self.fetch_max_records,
+                self.acquire_mode,
                 topics,
             ))
             .await?;
@@ -566,6 +569,7 @@ mod tests {
             fetch_min_bytes: crate::share::DEFAULT_SHARE_CONSUMER_FETCH_MIN_BYTES,
             fetch_max_bytes: crate::share::DEFAULT_SHARE_CONSUMER_FETCH_MAX_BYTES,
             fetch_max_records: crate::share::DEFAULT_SHARE_CONSUMER_FETCH_MAX_RECORDS,
+            acquire_mode: ShareAcquireMode::BatchOptimized,
             ack_mode,
             pending_acks: Vec::new(),
             prev_delivered: Vec::new(),
@@ -580,7 +584,7 @@ mod tests {
     }
 
     #[test]
-    fn share_fetch_request_preserves_configured_limits_and_timeout_bounds() {
+    fn share_fetch_request_preserves_acquire_mode_limits_and_timeout_bounds() {
         let topic = FetchTopic {
             topic_id: id(7),
             partitions: vec![FetchPartition {
@@ -600,6 +604,7 @@ mod tests {
             7,
             65_536,
             37,
+            ShareAcquireMode::RecordLimit,
             vec![topic.clone()],
         );
 
@@ -613,7 +618,7 @@ mod tests {
                 max_bytes: 65_536,
                 max_records: 37,
                 batch_size: 37,
-                share_acquire_mode: 0,
+                share_acquire_mode: 1,
                 is_renew_ack: false,
                 topics: vec![topic],
                 forgotten_topics_data: Vec::new(),
@@ -629,9 +634,10 @@ mod tests {
             7,
             65_536,
             37,
+            ShareAcquireMode::BatchOptimized,
             Vec::new(),
         );
-        assert2::assert!(saturated.max_wait_ms == i32::MAX);
+        assert2::assert!((saturated.max_wait_ms, saturated.share_acquire_mode) == (i32::MAX, 0));
     }
 
     #[test]
