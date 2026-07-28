@@ -1096,11 +1096,11 @@ dependencies = [
 
 [[package]]
 name = "bcrypt"
-version = "0.19.2"
+version = "0.19.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f3c067aa24dd4ed5c79cf222a38f260c8f23d3b82a062fba3f28c6fe563b753"
+checksum = "a0cd0bd35a28836d528d2b58ad499bc3c5641d59379421b1be9eeb0c2f2b912a"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.0",
  "blowfish",
  "getrandom 0.4.3",
  "subtle",
@@ -2414,7 +2414,7 @@ dependencies = [
  "rustix 1.1.4",
  "rustls",
  "rustls-pki-types",
- "schemars 1.2.1",
+ "schemars 1.2.2",
  "serde",
  "serde-wincode",
  "serde_json",
@@ -2611,7 +2611,7 @@ dependencies = [
  "prost 0.14.4",
  "prost-reflect",
  "refined_type",
- "schemars 1.2.1",
+ "schemars 1.2.2",
  "serde",
  "serde_json",
  "tempfile",
@@ -2710,7 +2710,7 @@ dependencies = [
  "crabka-protocol",
  "crabka-raft",
  "kube",
- "schemars 1.2.1",
+ "schemars 1.2.2",
  "serde_json",
  "tempfile",
 ]
@@ -3366,7 +3366,7 @@ dependencies = [
  "reqwest 0.13.4",
  "ring",
  "rustls",
- "schemars 1.2.1",
+ "schemars 1.2.2",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -3882,7 +3882,7 @@ dependencies = [
  "prost 0.14.4",
  "prost-reflect",
  "reqwest 0.13.4",
- "schemars 1.2.1",
+ "schemars 1.2.2",
  "serde",
  "serde_json",
  "thiserror 2.0.19",
@@ -4397,15 +4397,15 @@ dependencies = [
 
 [[package]]
 name = "dashu-base"
-version = "0.5.0"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "98a4867772ef92740ddb786be2aa7407f6588c2f5713cfa3e7ec747dc3a8a221"
+checksum = "a64b04cdfc4c8533100fe00304eb9687173bda47b1f1dac8af12ba13712ed49d"
 
 [[package]]
 name = "dashu-float"
-version = "0.5.0"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d43bcba9866582229a8832840158b2ef08fe1b5a803939e765eecc44a572cf39"
+checksum = "dff9b4987c9fe252fb0e7ec775b676f419e0a44b28138ae79bf3475581932f63"
 dependencies = [
  "dashu-base",
  "dashu-int",
@@ -4417,9 +4417,9 @@ dependencies = [
 
 [[package]]
 name = "dashu-int"
-version = "0.5.0"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09237178fe9f89615eb6ba5516fc8c061a4fb203e9550f823f8fbcc4c30e3520"
+checksum = "b6ee98721d5d223e5b64b642dd9588b79d9ef415554b13720308b77d628c3be6"
 dependencies = [
  "cfg-if",
  "dashu-base",
@@ -6630,7 +6630,7 @@ dependencies = [
  "libc",
  "log",
  "rustversion",
- "windows-link 0.2.1",
+ "windows-link 0.1.3",
  "windows-result 0.4.1",
 ]
 
@@ -7520,9 +7520,9 @@ dependencies = [
 
 [[package]]
 name = "jiff"
-version = "0.2.34"
+version = "0.2.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e184d09547b80eb7e20d141ba2fb1fbac843ca53f4cf1b31210adc4c1adc6e16"
+checksum = "668b7183bd07af9a4885f5c35b0cc5c83c4607a913c16b7e17291832910d2dcc"
 dependencies = [
  "defmt",
  "jiff-core",
@@ -7547,9 +7547,9 @@ dependencies = [
 
 [[package]]
 name = "jiff-static"
-version = "0.2.34"
+version = "0.2.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "323da076b7a6faf914dc677cb05a4b907742ff7375c8322c9e7f5061e5e0e9de"
+checksum = "3a69dcb3a21cfb32ce1cd056169337ca284af0766dd766e7878819b251a49204"
 dependencies = [
  "jiff-core",
  "proc-macro2",
@@ -7681,9 +7681,9 @@ dependencies = [
 
 [[package]]
 name = "jsonpath-rust"
-version = "1.0.5"
+version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4222e00941bfe18bf81b79fa23ad933e233bfa18f3ee27254c5dd9b1543b5d5f"
+checksum = "f62a190c17bf3c6e3a2a676b522edf09d3ba94046e3cdb85fb9d6f09234fdc82"
 dependencies = [
  "pest",
  "pest_derive",
@@ -7715,9 +7715,9 @@ dependencies = [
 
 [[package]]
 name = "jsonschema"
-version = "0.48.5"
+version = "0.49.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f05a6cff806294a7699d48761d4ae2bdebab7fa2eef05e4a0b83320f0ff46901"
+checksum = "f8a77951c56b6a0af03c22af6953d6ffcfba9403c765578921f3f1089b999db6"
 dependencies = [
  "ahash",
  "bytecount",
@@ -7744,18 +7744,18 @@ dependencies = [
 
 [[package]]
 name = "jsonschema-regex"
-version = "0.48.5"
+version = "0.49.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "84708dd3f6c5327478a96f37378adb27deed6a626cf84d19de780d9e8ae84b17"
+checksum = "a4c2e64f341a1d6a15d2daa3c967e48921cf15b9c7f23a9899e8b63c7f7c4199"
 dependencies = [
  "regex-syntax",
 ]
 
 [[package]]
 name = "jsonschema-value"
-version = "0.48.5"
+version = "0.49.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd8c04ab4ce60e42c4e302d3bd9d184652bb56f212495d2eea23573bcbf72556"
+checksum = "94e097778f3e9c6a33862077dbf07aca0360d0b18d2a7abc323da132df49ee83"
 dependencies = [
  "ahash",
  "bytecount",
@@ -7773,7 +7773,7 @@ checksum = "d9c6922f6afe80418dd6019818af5d0d34584c371780ff09b9752370c25b4abb"
 dependencies = [
  "base64 0.22.1",
  "jiff",
- "schemars 1.2.1",
+ "schemars 1.2.2",
  "serde",
  "serde_json",
 ]
@@ -7907,7 +7907,7 @@ dependencies = [
  "jiff",
  "json-patch",
  "k8s-openapi",
- "schemars 1.2.1",
+ "schemars 1.2.2",
  "serde",
  "serde-value",
  "serde_json",
@@ -9824,9 +9824,9 @@ dependencies = [
 
 [[package]]
 name = "playwright-rs"
-version = "0.14.1"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3317d37f816d9fbd550ba155a146068575a0c97e5af969f5d0895199344fa0b5"
+checksum = "60aa6dc029f71f66d58c6681ae6ff3229416af160c1fbbe70ff46993128915b1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -9839,12 +9839,13 @@ dependencies = [
  "parking_lot",
  "playwright-rs-macros",
  "regex",
+ "rustls",
  "serde",
  "serde_json",
  "tar",
  "thiserror 2.0.19",
  "tokio",
- "tokio-tungstenite 0.29.0",
+ "tokio-tungstenite 0.30.0",
  "tracing",
  "ureq",
  "url",
@@ -11574,9 +11575,9 @@ dependencies = [
 
 [[package]]
 name = "referencing"
-version = "0.48.5"
+version = "0.49.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "980e77f5cfffc592c0e7dfb6d20770a0b96a6ab94d403de7454ed9799505e4ba"
+checksum = "b772e96f8eb6badd4eb10fbc08b8a98244c09b4af37e72e8fa612c854604b870"
 dependencies = [
  "ahash",
  "fluent-uri",
@@ -12055,9 +12056,9 @@ dependencies = [
 
 [[package]]
 name = "schemars"
-version = "1.2.1"
+version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a2b42f36aa1cd011945615b92222f6bf73c599a102a300334cd7f8dbeec726cc"
+checksum = "687274d293b6cdc6e73e0fee520bf2049650090d7164f87672d212a3c530cf4a"
 dependencies = [
  "dyn-clone",
  "ref-cast",
@@ -12068,14 +12069,14 @@ dependencies = [
 
 [[package]]
 name = "schemars_derive"
-version = "1.2.1"
+version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d115b50f4aaeea07e79c1912f645c7513d81715d0420f8bc77a18c6260b307f"
+checksum = "d98c67716b46af2f0b8cf752abc930f6f9aecfbf671ecfb531db8a31dbe4e2ba"
 dependencies = [
  "proc-macro2",
  "quote",
  "serde_derive_internals",
- "syn 2.0.119",
+ "syn 3.0.3",
 ]
 
 [[package]]
@@ -12256,13 +12257,13 @@ dependencies = [
 
 [[package]]
 name = "serde_derive_internals"
-version = "0.29.1"
+version = "0.30.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "18d26a20a969b9e3fdf2fc2d9f21eda6c40e2de84c9408bb5d3b05d499aae711"
+checksum = "f852137cce035d6a4df67ccce505ff6b3e9fd3a10e3e52b24dc71e650bb1a9bd"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.3",
 ]
 
 [[package]]
@@ -12369,7 +12370,7 @@ dependencies = [
  "indexmap 1.9.3",
  "indexmap 2.14.0",
  "schemars 0.9.0",
- "schemars 1.2.1",
+ "schemars 1.2.2",
  "serde_core",
  "serde_json",
  "serde_with_macros",
@@ -13829,9 +13830,7 @@ checksum = "8f72a05e828585856dacd553fba484c242c46e391fb0e58917c942ee9202915c"
 dependencies = [
  "futures-util",
  "log",
- "native-tls",
  "tokio",
- "tokio-native-tls",
  "tungstenite 0.29.0",
 ]
 
@@ -13843,7 +13842,9 @@ checksum = "17a073bfed563fa236697a068031408a93cd9522e08abf9933ead3e73411bd71"
 dependencies = [
  "futures-util",
  "log",
+ "native-tls",
  "tokio",
+ "tokio-native-tls",
  "tungstenite 0.30.0",
 ]
 
@@ -14262,7 +14263,6 @@ dependencies = [
  "http",
  "httparse",
  "log",
- "native-tls",
  "rand 0.9.5",
  "sha1 0.10.7",
  "thiserror 2.0.19",
@@ -14279,6 +14279,7 @@ dependencies = [
  "http",
  "httparse",
  "log",
+ "native-tls",
  "rand 0.10.2",
  "sha1 0.11.0",
  "thiserror 2.0.19",
