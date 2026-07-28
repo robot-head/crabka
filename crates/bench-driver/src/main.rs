@@ -8,7 +8,10 @@ use clap::Parser;
 use crabka_bench_driver::{
     prom::PrometheusRequestTimeoutSeconds,
     scenario::{Scenario, Stack},
-    workload::{self, ClientRequestTimeoutSeconds, DriverConfig},
+    workload::{
+        self, ClientRequestTimeoutSeconds, ConsumerBuildAttempts, ConsumerBuildBackoffMs,
+        ConsumerBuildRetryPolicy, DriverConfig,
+    },
 };
 use tracing_subscriber::EnvFilter;
 
@@ -52,6 +55,27 @@ struct Cli {
     /// for Kafka.
     #[arg(long, env = "BENCH_CONSUMER_REQUEST_TIMEOUT_SECONDS")]
     consumer_request_timeout_seconds: Option<ClientRequestTimeoutSeconds>,
+    /// Maximum attempts when building each consumer.
+    #[arg(
+        long,
+        env = "BENCH_CONSUMER_BUILD_ATTEMPTS",
+        default_value_t = ConsumerBuildAttempts::default()
+    )]
+    consumer_build_attempts: ConsumerBuildAttempts,
+    /// Initial consumer-build retry backoff, in milliseconds.
+    #[arg(
+        long,
+        env = "BENCH_CONSUMER_BUILD_INITIAL_BACKOFF_MS",
+        default_value_t = workload::default_consumer_build_initial_backoff()
+    )]
+    consumer_build_initial_backoff_ms: ConsumerBuildBackoffMs,
+    /// Maximum consumer-build retry backoff, in milliseconds.
+    #[arg(
+        long,
+        env = "BENCH_CONSUMER_BUILD_MAX_BACKOFF_MS",
+        default_value_t = workload::default_consumer_build_max_backoff()
+    )]
+    consumer_build_max_backoff_ms: ConsumerBuildBackoffMs,
     /// Configured broker count. The driver uses this to gate RF=3-only
     /// scenarios.
     #[arg(long, env = "BENCH_BROKER_COUNT", default_value_t = 1)]
@@ -108,6 +132,15 @@ fn resolve_consumer_request_timeout(
     configured.unwrap_or_else(|| workload::default_consumer_request_timeout(stack))
 }
 
+fn resolve_consumer_build_retry_policy(cli: &Cli) -> Result<ConsumerBuildRetryPolicy> {
+    ConsumerBuildRetryPolicy::new(
+        cli.consumer_build_attempts,
+        cli.consumer_build_initial_backoff_ms,
+        cli.consumer_build_max_backoff_ms,
+    )
+    .map_err(anyhow::Error::msg)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -122,6 +155,7 @@ async fn main() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let cli = Cli::parse();
+    let consumer_build_retry_policy = resolve_consumer_build_retry_policy(&cli)?;
 
     let yaml = tokio::fs::read_to_string(&cli.scenario)
         .await
@@ -169,6 +203,7 @@ async fn main() -> Result<()> {
         prometheus_request_timeout_seconds: cli.prometheus_request_timeout_seconds,
         producer_request_timeout_seconds: cli.producer_request_timeout_seconds,
         consumer_request_timeout_seconds,
+        consumer_build_retry_policy,
         broker_count: cli.broker_count,
         scenario_id,
         tls,
@@ -264,6 +299,97 @@ mod tests {
                 assert!(Cli::try_parse_from(args).is_err(), "{option}={invalid}");
             }
         }
+    }
+
+    #[test]
+    fn consumer_build_retry_cli_defaults_preserve_policy() {
+        let cli = Cli::try_parse_from(required_args("crabka")).expect("retry defaults");
+        let policy = resolve_consumer_build_retry_policy(&cli).expect("valid defaults");
+
+        assert_eq!(policy.attempts(), 6);
+        assert_eq!(policy.initial_backoff(), Duration::from_millis(100));
+        assert_eq!(policy.max_backoff(), Duration::from_secs(2));
+    }
+
+    #[test]
+    fn consumer_build_retry_rejects_invalid_cli_values() {
+        let cases = [
+            ("--consumer-build-attempts", "0"),
+            ("--consumer-build-attempts", "4294967296"),
+            ("--consumer-build-initial-backoff-ms", "0"),
+            (
+                "--consumer-build-initial-backoff-ms",
+                "18446744073709551616",
+            ),
+            ("--consumer-build-max-backoff-ms", "0"),
+            ("--consumer-build-max-backoff-ms", "18446744073709551616"),
+        ];
+        for (option, invalid) in cases {
+            let mut args = required_args("crabka");
+            args.extend([option, invalid]);
+            assert!(Cli::try_parse_from(args).is_err(), "{option}={invalid}");
+        }
+    }
+
+    #[test]
+    fn consumer_build_retry_rejects_inverted_cli_range() {
+        let mut args = required_args("crabka");
+        args.extend([
+            "--consumer-build-initial-backoff-ms",
+            "2",
+            "--consumer-build-max-backoff-ms",
+            "1",
+        ]);
+        let cli = Cli::try_parse_from(args).expect("individual values are valid");
+
+        assert!(resolve_consumer_build_retry_policy(&cli).is_err());
+    }
+
+    #[test]
+    fn consumer_build_retry_reads_environment_and_prefers_cli() {
+        const CHILD: &str = "CRABKA_BENCH_CONSUMER_BUILD_RETRY_CHILD";
+
+        if std::env::var_os(CHILD).is_none() {
+            let status =
+                std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args([
+                        "--exact",
+                        "tests::consumer_build_retry_reads_environment_and_prefers_cli",
+                    ])
+                    .env(CHILD, "1")
+                    .env("BENCH_CONSUMER_BUILD_ATTEMPTS", "2")
+                    .env("BENCH_CONSUMER_BUILD_INITIAL_BACKOFF_MS", "11")
+                    .env("BENCH_CONSUMER_BUILD_MAX_BACKOFF_MS", "12")
+                    .status()
+                    .expect("child test");
+            assert!(status.success());
+            return;
+        }
+
+        let from_env = Cli::try_parse_from(required_args("crabka")).expect("environment");
+        let environment_policy =
+            resolve_consumer_build_retry_policy(&from_env).expect("valid environment");
+        assert_eq!(environment_policy.attempts(), 2);
+        assert_eq!(
+            environment_policy.initial_backoff(),
+            Duration::from_millis(11)
+        );
+        assert_eq!(environment_policy.max_backoff(), Duration::from_millis(12));
+
+        let mut args = required_args("crabka");
+        args.extend([
+            "--consumer-build-attempts",
+            "3",
+            "--consumer-build-initial-backoff-ms",
+            "21",
+            "--consumer-build-max-backoff-ms",
+            "22",
+        ]);
+        let from_cli = Cli::try_parse_from(args).expect("CLI over environment");
+        let cli_policy = resolve_consumer_build_retry_policy(&from_cli).expect("valid CLI");
+        assert_eq!(cli_policy.attempts(), 3);
+        assert_eq!(cli_policy.initial_backoff(), Duration::from_millis(21));
+        assert_eq!(cli_policy.max_backoff(), Duration::from_millis(22));
     }
 
     #[test]
