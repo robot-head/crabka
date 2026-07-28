@@ -2317,6 +2317,7 @@ dependencies = [
  "kube",
  "num-traits",
  "plotly",
+ "refined_type",
  "reqwest 0.13.4",
  "rustls",
  "serde",

@@ -2,9 +2,10 @@
 //! queries at scenario end to capture resource usage on the broker pods
 //! and (Strimzi only) JVM heap / non-heap from the JMX exporter.
 
-use std::{collections::BTreeMap, time::Duration};
+use std::{collections::BTreeMap, fmt, str::FromStr, time::Duration};
 
 use anyhow::{Context, Result, anyhow};
+use refined_type::rule::GreaterU64;
 use serde::Deserialize;
 
 use crate::{
@@ -12,6 +13,56 @@ use crate::{
     numeric::{nonnegative_f64_to_u64, to_f64},
     scenario::{BrokerSample, Resource, Stack},
 };
+
+/// Default HTTP request timeout for Prometheus queries.
+pub const DEFAULT_PROMETHEUS_REQUEST_TIMEOUT_SECONDS: u64 = 15;
+
+/// A positive Prometheus HTTP request timeout in seconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrometheusRequestTimeoutSeconds(u64);
+
+impl PrometheusRequestTimeoutSeconds {
+    /// Validate a Prometheus HTTP request timeout.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `value` is zero.
+    pub fn new(value: u64) -> Result<Self, String> {
+        GreaterU64::<0>::new(value)
+            .map(|value| Self(value.into_value()))
+            .map_err(|error| error.to_string())
+    }
+
+    /// Return the validated timeout.
+    #[must_use]
+    pub const fn duration(self) -> Duration {
+        Duration::from_secs(self.0)
+    }
+}
+
+impl Default for PrometheusRequestTimeoutSeconds {
+    fn default() -> Self {
+        Self::new(DEFAULT_PROMETHEUS_REQUEST_TIMEOUT_SECONDS)
+            .expect("default Prometheus request timeout is positive")
+    }
+}
+
+impl fmt::Display for PrometheusRequestTimeoutSeconds {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl FromStr for PrometheusRequestTimeoutSeconds {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value
+            .parse()
+            .map_err(|error: std::num::ParseIntError| error.to_string())
+            .and_then(Self::new)
+    }
+}
 
 pub struct PromClient {
     base_url: String,
@@ -23,9 +74,12 @@ impl PromClient {
     /// No trailing slash required.
     /// # Errors
     /// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
-    pub fn new(base_url: impl Into<String>) -> Result<Self> {
+    pub fn new(
+        base_url: impl Into<String>,
+        request_timeout: PrometheusRequestTimeoutSeconds,
+    ) -> Result<Self> {
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(15))
+            .timeout(request_timeout.duration())
             .build()
             .context("build reqwest client")?;
         Ok(Self {
@@ -312,6 +366,44 @@ struct PromResult {
 mod tests {
 
     use super::*;
+
+    #[test]
+    fn prometheus_request_timeout_default_remains_fifteen_seconds() {
+        assert_eq!(
+            PrometheusRequestTimeoutSeconds::default().duration(),
+            Duration::from_secs(15)
+        );
+    }
+
+    #[test]
+    fn prometheus_request_timeout_accepts_one_second() {
+        assert_eq!(
+            PrometheusRequestTimeoutSeconds::new(1)
+                .expect("one second is valid")
+                .duration(),
+            Duration::from_secs(1)
+        );
+    }
+
+    #[test]
+    fn prometheus_request_timeout_rejects_invalid_values() {
+        assert!(PrometheusRequestTimeoutSeconds::new(0).is_err());
+
+        let overflow = format!("{}0", u64::MAX);
+        for invalid in ["0", "not-a-number", "-1", overflow.as_str()] {
+            assert!(
+                invalid.parse::<PrometheusRequestTimeoutSeconds>().is_err(),
+                "{invalid:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn prometheus_request_timeout_constructs_prom_client() {
+        let timeout = PrometheusRequestTimeoutSeconds::new(1).expect("valid timeout");
+
+        assert!(PromClient::new("http://prometheus.example", timeout).is_ok());
+    }
 
     #[test]
     fn parses_success_with_one_result() {
