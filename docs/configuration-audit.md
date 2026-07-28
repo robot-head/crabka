@@ -17,8 +17,8 @@ applicable rule below:
 
 ## Coverage Status
 
-- Complete: `broker`, `schema-registry`, `grpc-gateway`.
-- Pending: `admin-ui`, `audit`, `authz`, `bench-driver`, `blockstore`, `cli`,
+- Complete: `bench-driver`, `broker`, `schema-registry`, `grpc-gateway`.
+- Pending: `admin-ui`, `audit`, `authz`, `blockstore`, `cli`,
   `client-admin`, `client-consumer`, `client-core`, `client-producer`,
   `client-streams`, `compression`, `connect`, `connect-derive`,
   `connect-postgres`, `docgen`, `gres`, `gres-activator`, `gres-balancer`,
@@ -3616,3 +3616,97 @@ operational owner is the fixed 2,000-millisecond sample interval in
 `crates/bench-driver/src/workload.rs`. It controls time-series resolution and
 remains fixed rather than flowing through the existing CLI/environment
 boundary.
+
+## Bench Driver Sample Interval
+
+The bench driver's time-series sample interval is now a positive
+`SampleIntervalMs` value stored in `DriverConfig`. It retains the existing
+2,000-millisecond default.
+
+The setting is resolved from:
+
+```text
+--sample-interval-ms
+BENCH_SAMPLE_INTERVAL_MS
+```
+
+The command-line value wins when both inputs are present. Parsing rejects zero,
+malformed, negative, and primitive-overflow values before scenario-file or
+network I/O. `SampleIntervalMs` uses
+`refined_type::rule::GreaterU64<0>`.
+
+The value flow is:
+
+```text
+Cli
+  -> DriverConfig::sample_interval
+  -> run
+  -> Grid::interval_ms
+  -> producer and consumer sample buckets
+```
+
+The interval-count ceiling, minimum-one bucket behavior, shared `Copy` grid,
+index clamping, task-local histograms, and merged output are unchanged. No task
+field was added because every producer and consumer already receives the
+complete grid.
+
+The checked-in deployment flow is:
+
+```text
+BENCH_SAMPLE_INTERVAL_MS
+  -> bench/scripts/run-scenario.sh
+  -> envsubst
+  -> bench/manifests/driver/job-template.yaml
+  -> driver container environment
+```
+
+The launcher supplies an overrideable 2,000-millisecond default, and the
+rendered Job always contains the value. No CRD or operator field was added
+because the benchmark launcher and Job template own this binary.
+
+After the implementation and before this section was appended, the exact
+scanner command
+
+```text
+tools/audit-runtime-values.sh
+```
+
+reported 6,326 lines across 1,055 files. Its bench-driver subset contained 78
+lines: 11 configured defaults, 54 test or harness values, and 13 protocol,
+format, state, mathematical, or query invariants. The categories sum to all 78
+lines, with zero unresolved operational values:
+`11 + 54 + 13 = 78`.
+
+Before this section was appended, the exact focused search
+
+```text
+rg -n \
+  "sample_interval|SampleIntervalMs|DEFAULT_SAMPLE_INTERVAL_MS|sample-interval-ms|BENCH_SAMPLE_INTERVAL_MS" \
+  crates/bench-driver \
+  bench \
+  docs/configuration-audit.md
+```
+
+reported 37 lines. The mutually exclusive classification is 14 production
+configuration-flow references, six deployment-flow references, 17 test
+references, and zero prior-audit or unresolved-owner references:
+`14 + 6 + 17 + 0 = 37`.
+
+The package's 98 registered tests passed, including positive-boundary,
+invalid-value, preserved-default, and hermetic CLI-over-environment tests.
+Strict package Clippy, nightly formatting, one help entry, shell syntax,
+default 2,000 and explicit 21-millisecond manifest renders, diff hygiene, and
+the unchanged `Cargo.lock` check all passed.
+
+### Bench Driver Closure
+
+Every bench-driver scanner hit is now a configured value, a test or harness
+value, or a protocol, format, state, mathematical, or query invariant. The
+bench driver has no remaining unresolved operational values and is moved to
+the complete list above.
+
+The next coherent repository owner is blockstore safety and retention policy:
+the one-gibibyte block read cap, 256-mebibyte index and profile-index snapshot
+caps, and eight-snapshot retention default in `crates/blockstore`. These values
+bound production I/O and storage but currently remain library defaults rather
+than deployment configuration.
