@@ -350,6 +350,7 @@ impl QuerierBackend for MockQuerier {
 
 #[cfg(test)]
 mod tests {
+    use crabka_units::millis;
 
     use super::*;
     use crate::frontend::{job::JobShard, wire::TraceJson};
@@ -360,7 +361,7 @@ mod tests {
             root_service_name: svc.to_string(),
             root_trace_name: "GET /".to_string(),
             start_time_unix_nano: "1".to_string(),
-            duration_ms: 1,
+            duration: millis(1),
             span_sets: vec![],
         }
     }

@@ -11,6 +11,7 @@
 use std::collections::BTreeSet;
 
 use crabka_traceql::{ScopedTag, TagScope, TypedValue};
+use crabka_units::ByteSize;
 
 use crate::frontend::{
     backend::{SearchPartial, TagNamesPartial, TagValuesPartial, TracePartial},
@@ -71,7 +72,9 @@ fn merge_trace(merged: &mut Vec<TraceJson>, trace: TraceJson) {
             .start_time_unix_nano
             .clone_from(&trace.start_time_unix_nano);
     }
-    existing.duration_ms = existing.duration_ms.max(trace.duration_ms);
+    if trace.duration > existing.duration {
+        existing.duration = trace.duration;
+    }
     if existing.root_service_name.is_empty() {
         existing
             .root_service_name
@@ -147,13 +150,13 @@ fn parse_nanos(s: &str) -> i128 {
 
 /// Assemble one trace from per-querier by-id partials: union `resourceSpans`,
 /// dedupe spans by `spanId`, accumulate metrics, and flag `Partial` when the
-/// assembled trace exceeds `max_trace_bytes` (or any partial reported `PARTIAL`).
+/// assembled trace exceeds `max_trace` (or any partial reported `PARTIAL`).
 ///
 /// Returns `None` when no querier returned the trace.
 #[must_use]
 pub fn assemble_trace(
     partials: Vec<TracePartial>,
-    max_trace_bytes: u64,
+    max_trace: ByteSize,
 ) -> (Option<TraceByIdResponseJson>, Metrics, TraceStatus) {
     let mut metrics = Metrics::default();
     let mut acc: Option<TraceByIdResponseJson> = None;
@@ -177,7 +180,7 @@ pub fn assemble_trace(
     }
 
     let status = match &acc {
-        Some(t) if any_partial || t.approx_size_bytes() > max_trace_bytes => TraceStatus::Partial,
+        Some(t) if any_partial || t.approx_size() > max_trace => TraceStatus::Partial,
         _ => TraceStatus::Complete,
     };
     (acc, metrics, status)
@@ -339,6 +342,7 @@ pub use crate::frontend::metrics_merge::{
 #[cfg(test)]
 mod tests {
     use assert2::check;
+    use crabka_units::{bytes, millis};
 
     use super::*;
     use crate::frontend::wire::{
@@ -361,7 +365,7 @@ mod tests {
             root_service_name: svc.to_string(),
             root_trace_name: "GET /".to_string(),
             start_time_unix_nano: start.to_string(),
-            duration_ms: 1,
+            duration: millis(1),
             span_sets: vec![SpanSetJson { spans, matched }],
         }
     }
@@ -397,7 +401,7 @@ mod tests {
                     root_service_name: "checkout".to_string(),
                     root_trace_name: "GET /".to_string(),
                     start_time_unix_nano: "8".to_string(),
-                    duration_ms: 1,
+                    duration: millis(1),
                     span_sets: vec![SpanSetJson {
                         spans: vec![span("01", 10, 5), span("02", 8, 9)],
                         matched: 2,
@@ -566,7 +570,7 @@ mod tests {
         let p0 = by_id_partial(TraceByIdResponseJson::default(), 5);
         let p1 = by_id_partial(TraceByIdResponseJson::default(), 5);
         assert2::assert!(
-            assemble_trace(vec![p0, p1], 1_000_000)
+            assemble_trace(vec![p0, p1], bytes(1_000_000))
                 == (
                     None,
                     Metrics {
@@ -587,7 +591,7 @@ mod tests {
         // querier A holds spans 1,2; querier B holds spans 2,3 (2 overlaps).
         let p0 = by_id_partial(by_id_body(&["01", "02"], "COMPLETE"), 100);
         let p1 = by_id_partial(by_id_body(&["02", "03"], "COMPLETE"), 100);
-        let (trace, metrics, status) = assemble_trace(vec![p0, p1], 1_000_000);
+        let (trace, metrics, status) = assemble_trace(vec![p0, p1], bytes(1_000_000));
         let trace = trace.unwrap();
         check!(assembled_span_count(&trace) == 3);
         check!(
@@ -607,7 +611,7 @@ mod tests {
     #[test]
     fn assemble_flags_partial_over_byte_budget() {
         let p0 = by_id_partial(by_id_body(&["01", "02", "03"], "COMPLETE"), 100);
-        let (trace, _m, status) = assemble_trace(vec![p0], 1);
+        let (trace, _m, status) = assemble_trace(vec![p0], bytes(1));
         assert2::assert!(trace.is_some());
         assert2::assert!(matches!(status, TraceStatus::Partial));
     }
@@ -615,7 +619,7 @@ mod tests {
     #[test]
     fn assemble_propagates_querier_partial_status() {
         let p0 = by_id_partial(by_id_body(&["01"], "PARTIAL"), 100);
-        let (_t, _m, status) = assemble_trace(vec![p0], 1_000_000);
+        let (_t, _m, status) = assemble_trace(vec![p0], bytes(1_000_000));
         assert2::assert!(matches!(status, TraceStatus::Partial));
     }
 

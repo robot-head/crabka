@@ -92,6 +92,20 @@ fn wire_conversions_round_trip() {
     check!(ByteRate::from_bytes_per_sec(1_048_576).bytes_per_sec_i64() == 1_048_576);
 }
 
+/// Truncating extraction matches an external format that integer-divides, and
+/// does not lose a millisecond to float error on an exact extent.
+#[test]
+fn truncating_millis_matches_integer_division() {
+    check!(millis(42).millis_i64_trunc() == 42);
+    check!(nanos(41_999_999).millis_i64_trunc() == 41);
+    check!(nanos(42_000_001).millis_i64_trunc() == 42);
+    check!(micros(1_500).millis_i64_trunc() == 1);
+    check!(Time::ZERO.millis_i64_trunc() == 0);
+    // Where rounding and truncation disagree, this is the half that floors.
+    check!(micros(1_999).millis_i64_trunc() == 1);
+    check!(micros(1_999).millis_i64() == 2);
+}
+
 /// A `Duration` survives the trip through a quantity, and a negative extent
 /// clamps rather than panicking.
 #[test]

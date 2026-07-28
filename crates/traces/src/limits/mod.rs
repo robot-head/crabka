@@ -1,3 +1,4 @@
+use crabka_units::{ByteSize, Frequency, Time, bytes, convert::TimeExt, per_sec};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -9,29 +10,32 @@ pub use overrides::{OverridesError, OverridesProvider};
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Limits {
-    /// Tempo `ingestion_rate_limit_bytes` analog, counted as spans/sec; `0.0` is unlimited.
-    pub ingestion_rate_spans_per_sec: f64,
+    /// Tempo `ingestion_rate_limit_bytes` analog, counted as spans/sec; zero is unlimited.
+    #[serde(with = "crabka_units::serde_units::human::frequency")]
+    pub ingestion_rate: Frequency,
     /// Tempo `ingestion_burst_size_bytes` analog, counted as spans.
     pub ingestion_burst_spans: u64,
     /// Per-tenant ceiling for `/api/search`'s `limit` query parameter; `0` is unlimited.
     pub max_traces_per_search: u64,
     /// Tempo `max_bytes_per_trace` analog, counted as spans; `0` is unlimited.
     pub max_spans_per_trace: u64,
-    /// Maximum UTF-8 bytes in any attribute key or string value; `0` is unlimited.
-    pub max_attribute_bytes: u64,
-    /// Tempo `max_search_duration`; `(end-start)` ceiling in seconds; `0` is unlimited.
-    pub max_search_duration_secs: u64,
+    /// Maximum size of any attribute key or string value; zero is unlimited.
+    #[serde(with = "crabka_units::serde_units::human::byte_size")]
+    pub max_attribute: ByteSize,
+    /// Tempo `max_search_duration`; the `(end-start)` ceiling; zero is unlimited.
+    #[serde(with = "crabka_units::serde_units::human::time")]
+    pub max_search_duration: Time,
 }
 
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            ingestion_rate_spans_per_sec: 100_000.0,
+            ingestion_rate: per_sec(100_000),
             ingestion_burst_spans: 100_000,
             max_traces_per_search: 1000,
             max_spans_per_trace: 200_000,
-            max_attribute_bytes: 2048,
-            max_search_duration_secs: 0,
+            max_attribute: bytes(2048),
+            max_search_duration: <Time as TimeExt>::ZERO,
         }
     }
 }
@@ -81,12 +85,12 @@ mod tests {
         assert2::assert!(
             Limits::default()
                 == Limits {
-                    ingestion_rate_spans_per_sec: 100_000.0,
+                    ingestion_rate: per_sec(100_000),
                     ingestion_burst_spans: 100_000,
                     max_traces_per_search: 1000,
                     max_spans_per_trace: 200_000,
-                    max_attribute_bytes: 2048,
-                    max_search_duration_secs: 0,
+                    max_attribute: bytes(2048),
+                    max_search_duration: <Time as TimeExt>::ZERO,
                 }
         );
     }

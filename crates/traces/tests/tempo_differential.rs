@@ -28,6 +28,10 @@ use crabka_traces::{
         StatusCode as MetricsStatusCode,
     },
 };
+use crabka_units::{
+    ByteSize, Time,
+    convert::{ByteSizeExt as _, TimeExt as _},
+};
 use http_body_util::BodyExt as _;
 use opentelemetry_proto::tonic::{
     common::v1::{AnyValue, InstrumentationScope, KeyValue as OtlpKeyValue, any_value::Value},
@@ -746,7 +750,7 @@ fn metrics_span(
         status_message: String::new(),
         service_name: service.into(),
         attributes: vec![],
-        size_bytes: 0,
+        size: ByteSize::from_bytes(0),
     }
 }
 
@@ -858,7 +862,7 @@ fn input_span(span: Span) -> InputSpan {
         name: span.name,
         kind: span.kind.as_i32(),
         start_unix_nano: span.start_ns,
-        duration_nanos: span.duration_ns,
+        duration: Time::from_nanos(span.duration_ns),
         status_code: span.status.as_i32(),
         status_message: span.status_message,
         instrumentation_name: span.instrumentation_scope,

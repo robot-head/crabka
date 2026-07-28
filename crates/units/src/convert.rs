@@ -175,6 +175,15 @@ pub trait TimeExt: Sized + Copy {
     /// The extent as Kafka's `int64` millisecond fields (`retention_ms`).
     fn millis_i64(self) -> i64;
 
+    /// The extent in whole milliseconds, truncated toward zero.
+    ///
+    /// [`Self::millis_i64`] rounds to nearest, which is what a value meant to be
+    /// read back as a duration wants. Reach for this one only to match an
+    /// external format that truncates: Tempo's `durationMs` is its nanosecond
+    /// duration integer-divided by a million, so rounding would report a
+    /// millisecond more than Tempo does for the same span.
+    fn millis_i64_trunc(self) -> i64;
+
     /// The extent in microseconds.
     fn micros_i64(self) -> i64;
 
@@ -236,6 +245,13 @@ impl TimeExt for Time {
 
     fn millis_i64(self) -> i64 {
         round_i64(self.value * 1e3)
+    }
+
+    fn millis_i64_trunc(self) -> i64 {
+        // Divide the exact nanosecond count rather than truncating a scaled
+        // float: `0.042 * 1e3` is not exactly 42, so a float `trunc` here would
+        // report 41 milliseconds for a 42-millisecond extent.
+        self.nanos_i64() / 1_000_000
     }
 
     fn micros_i64(self) -> i64 {

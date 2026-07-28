@@ -6,7 +6,7 @@
 //! job restricts to one block + a row-group range via `block` /
 //! `rowGroupStart` / `rowGroupEnd` (the querier's [`crabka_traceql::ScanJob`]);
 //! the live hot tier is the unrestricted scan. A block larger than
-//! `target_bytes_per_job` fans into multiple row-group-range jobs.
+//! `target_per_job` fans into multiple row-group-range jobs.
 
 use std::collections::BTreeMap;
 
@@ -14,32 +14,35 @@ use async_trait::async_trait;
 use crabka_blockstore::{
     BlockStore, Result as BlockStoreResult, TraceIndex, read_row_group_metadata,
 };
+use crabka_units::{ByteSize, convert::ByteSizeExt};
 
 /// One candidate row-group of a backend block.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RowGroupInfo {
     pub index: u32,
-    pub compressed_bytes: u64,
+    /// This row-group's compressed size on the object store.
+    pub compressed: ByteSize,
 }
 
 /// Block metadata the planner needs (from the querier's block catalog).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct BlockMetaInfo {
     pub block_id: String,
     pub start_ns: i64,
     pub end_ns: i64,
-    pub size_bytes: u64,
+    /// The block's compressed size on the object store.
+    pub size: ByteSize,
     pub row_groups: Vec<RowGroupInfo>,
 }
 
 impl BlockMetaInfo {
-    /// Total compressed bytes across this block's row-groups (falls back to
-    /// `size_bytes` when row-group sizes are unavailable).
+    /// Total compressed size across this block's row-groups (falls back to
+    /// [`Self::size`] when row-group sizes are unavailable).
     #[must_use]
-    pub fn total_bytes(&self) -> u64 {
-        let rg_total: u64 = self.row_groups.iter().map(|rg| rg.compressed_bytes).sum();
-        if rg_total == 0 {
-            self.size_bytes
+    pub fn total(&self) -> ByteSize {
+        let rg_total: ByteSize = self.row_groups.iter().map(|rg| rg.compressed).sum();
+        if rg_total == <ByteSize as ByteSizeExt>::ZERO {
+            self.size
         } else {
             rg_total
         }
@@ -166,16 +169,16 @@ pub async fn blocks_for_tenant(
                     let index = u32::try_from(rg.index).ok()?;
                     Some(RowGroupInfo {
                         index,
-                        compressed_bytes: rg.compressed_bytes,
+                        compressed: ByteSize::from_bytes(rg.compressed_bytes),
                     })
                 })
                 .collect();
-        let size_bytes = row_groups.iter().map(|rg| rg.compressed_bytes).sum();
+        let size = row_groups.iter().map(|rg| rg.compressed).sum();
         out.push(BlockMetaInfo {
             block_id: block.object_key.clone(),
             start_ns: block.min_ts,
             end_ns: block.max_ts,
-            size_bytes,
+            size,
             row_groups,
         });
     }
@@ -204,13 +207,13 @@ impl BlockCatalog for TraceIndexCatalog {
     }
 }
 
-/// Fan one block into row-group-range jobs sized ~`target_bytes_per_job`.
-fn plan_block_jobs(block: &BlockMetaInfo, target_bytes_per_job: u64) -> Vec<JobShard> {
+/// Fan one block into row-group-range jobs sized ~`target_per_job`.
+fn plan_block_jobs(block: &BlockMetaInfo, target_per_job: ByteSize) -> Vec<JobShard> {
     // A whole-block job when sizing is disabled, the block has <=1 row-group, or
     // it fits under the budget.
-    if target_bytes_per_job == 0
+    if target_per_job == <ByteSize as ByteSizeExt>::ZERO
         || block.row_groups.len() <= 1
-        || block.total_bytes() <= target_bytes_per_job
+        || block.total() <= target_per_job
     {
         let end = block
             .row_groups
@@ -227,18 +230,18 @@ fn plan_block_jobs(block: &BlockMetaInfo, target_bytes_per_job: u64) -> Vec<JobS
     let mut jobs = Vec::new();
     let mut range_start: Option<u32> = None;
     let mut range_end = 0u32;
-    let mut bytes = 0u64;
+    let mut accumulated = <ByteSize as ByteSizeExt>::ZERO;
     for rg in &block.row_groups {
         range_start.get_or_insert(rg.index);
         range_end = rg.index.saturating_add(1);
-        bytes = bytes.saturating_add(rg.compressed_bytes);
-        if bytes >= target_bytes_per_job {
+        accumulated += rg.compressed;
+        if accumulated >= target_per_job {
             jobs.push(JobShard::Block {
                 block_id: block.block_id.clone(),
                 row_group_start: range_start.take().unwrap_or(rg.index),
                 row_group_end: range_end,
             });
-            bytes = 0;
+            accumulated = <ByteSize as ByteSizeExt>::ZERO;
         }
     }
     if let Some(start) = range_start {
@@ -257,20 +260,20 @@ fn plan_block_jobs(block: &BlockMetaInfo, target_bytes_per_job: u64) -> Vec<JobS
 /// - One `Live` job iff the query window reaches the hot tier
 ///   (`query_end_ns >= hot_frontier_ns`).
 /// - For each block: one whole-block job if it fits the budget, else one
-///   row-group-range job per ~`target_bytes_per_job` chunk.
+///   row-group-range job per ~`target_per_job` chunk.
 #[must_use]
 pub fn plan_search_jobs(
     blocks: &[BlockMetaInfo],
     query_end_ns: i64,
     hot_frontier_ns: i64,
-    target_bytes_per_job: u64,
+    target_per_job: ByteSize,
 ) -> JobPlan {
     let mut jobs = Vec::new();
     if query_end_ns >= hot_frontier_ns {
         jobs.push(JobShard::Live);
     }
     for b in blocks {
-        jobs.extend(plan_block_jobs(b, target_bytes_per_job));
+        jobs.extend(plan_block_jobs(b, target_per_job));
     }
     JobPlan {
         jobs,
@@ -280,6 +283,8 @@ pub fn plan_search_jobs(
 
 #[cfg(test)]
 mod tests {
+    use crabka_units::bytes;
+
     use super::*;
 
     fn block(id: &str, start: i64, end: i64, rgs: &[u64]) -> BlockMetaInfo {
@@ -288,14 +293,14 @@ mod tests {
             .enumerate()
             .map(|(i, &b)| RowGroupInfo {
                 index: u32::try_from(i).unwrap(),
-                compressed_bytes: b,
+                compressed: ByteSize::from_bytes(b),
             })
             .collect();
         BlockMetaInfo {
             block_id: id.to_string(),
             start_ns: start,
             end_ns: end,
-            size_bytes: rgs.iter().sum(),
+            size: ByteSize::from_bytes(rgs.iter().sum()),
             row_groups,
         }
     }
@@ -304,7 +309,7 @@ mod tests {
     fn small_block_is_one_job_plus_live() {
         // Query window ends at 300, frontier 200 => window reaches hot.
         let blocks = vec![block("b1", 0, 100, &[500])];
-        let plan = plan_search_jobs(&blocks, 300, 200, 10_000);
+        let plan = plan_search_jobs(&blocks, 300, 200, bytes(10_000));
         assert2::assert!(
             plan == JobPlan {
                 jobs: vec![
@@ -325,7 +330,7 @@ mod tests {
         // size 30k > budget 10k, 3 row-groups => 3 row-group-range jobs, no Live
         // (query window ends at -10, before the frontier 0).
         let blocks = vec![block("b2", -1000, -10, &[10_000, 10_000, 10_000])];
-        let plan = plan_search_jobs(&blocks, -10, 0, 10_000);
+        let plan = plan_search_jobs(&blocks, -10, 0, bytes(10_000));
         // Each job is a single-row-group range; no Live job.
         assert2::assert!(
             plan == JobPlan {
@@ -354,7 +359,7 @@ mod tests {
     #[test]
     fn empty_blocks_with_hot_window_is_just_live() {
         let blocks: Vec<BlockMetaInfo> = vec![];
-        let plan = plan_search_jobs(&blocks, i64::MAX, 0, 10_000);
+        let plan = plan_search_jobs(&blocks, i64::MAX, 0, bytes(10_000));
         assert2::assert!(
             plan == JobPlan {
                 jobs: vec![JobShard::Live],
@@ -366,7 +371,7 @@ mod tests {
     #[test]
     fn target_bytes_zero_never_splits() {
         let blocks = vec![block("b", 0, 10, &[10_000, 10_000, 10_000])];
-        let plan = plan_search_jobs(&blocks, i64::MAX, 0, 0);
+        let plan = plan_search_jobs(&blocks, i64::MAX, 0, bytes(0));
         let rg_jobs: Vec<_> = plan
             .jobs
             .iter()

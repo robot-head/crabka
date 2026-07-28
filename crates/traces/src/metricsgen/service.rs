@@ -6,6 +6,7 @@ use std::{
     time::Duration,
 };
 
+use crabka_units::{convert::TimeExt as _, secs};
 use tokio_util::sync::CancellationToken;
 
 use crate::metricsgen::{
@@ -240,8 +241,8 @@ where
     }
 
     pub async fn run(self, shutdown: CancellationToken) {
-        let interval = self.cfg.collection_interval.max(Duration::from_secs(1));
-        let mut ticker = tokio::time::interval(interval);
+        let interval = self.cfg.collection_interval.max(secs(1));
+        let mut ticker = tokio::time::interval(interval.to_std());
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
@@ -273,6 +274,7 @@ mod tests {
     use std::sync::Arc;
 
     use assert2::check;
+    use crabka_units::{ByteSize, convert::ByteSizeExt as _};
 
     use super::*;
     use crate::metricsgen::{
@@ -297,7 +299,7 @@ mod tests {
             status_message: String::new(),
             service_name: "svc".into(),
             attributes: vec![],
-            size_bytes: 10,
+            size: ByteSize::from_bytes(10),
         }
     }
 

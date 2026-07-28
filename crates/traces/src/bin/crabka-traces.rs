@@ -2,7 +2,7 @@
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-use std::{net::SocketAddr, process::ExitCode, sync::Arc, time::Duration};
+use std::{net::SocketAddr, process::ExitCode, sync::Arc};
 
 use arc_swap::ArcSwap;
 use clap::{ArgAction, Args, Parser, ValueEnum};
@@ -30,13 +30,21 @@ use crabka_traces::{
     },
     span::batch::RESOURCE_ATTR_PREFIX,
 };
+use crabka_units::{
+    ByteSize, Frequency, Time,
+    convert::{ByteSizeExt as _, FrequencyExt, TimeExt as _},
+    kibibytes, mebibytes, secs,
+};
+use num_traits::ToPrimitive as _;
 use object_store::{ObjectStore, path::Path};
 use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-const WAL_FETCH_MAX_BYTES: i32 = 2 * 1024 * 1024;
-const WAL_FETCH_PARTITION_MAX_BYTES: i32 = 256 * 1024;
+/// Fetch budget for one WAL poll across all assigned partitions.
+const WAL_FETCH_MAX: ByteSize = mebibytes(2);
+/// Fetch budget for one WAL poll per partition.
+const WAL_FETCH_PARTITION_MAX: ByteSize = kibibytes(256);
 
 #[derive(Debug, Parser)]
 #[command(name = "crabka-traces")]
@@ -65,11 +73,11 @@ struct Cli {
     #[arg(long, default_value_t = 30 * 60 * 1_000_000_000_i64)]
     retention_ns: i64,
     #[arg(long, default_value_t = 5)]
-    block_builder_window_secs: u64,
+    block_builder_window_secs: i64,
     #[arg(long, default_value_t = crabka_traces::blockbuilder::DEFAULT_FLUSH_MAX_RECORDS)]
     block_builder_flush_max_records: usize,
-    #[arg(long, default_value_t = crabka_traces::blockbuilder::DEFAULT_FLUSH_MAX_AGE.as_millis() as u64)]
-    block_builder_flush_max_age_ms: u64,
+    #[arg(long, default_value_t = crabka_traces::blockbuilder::DEFAULT_FLUSH_MAX_AGE.millis_i64())]
+    block_builder_flush_max_age_ms: i64,
     #[arg(long, action = ArgAction::SetTrue)]
     querier_live_store: bool,
     #[arg(long)]
@@ -167,7 +175,9 @@ impl ConfiguredObjectStore {
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
-    match run(cli).await {
+    // `run` fans out over every role, so its state machine is large; boxing keeps
+    // it off the startup task's stack.
+    match Box::pin(run(cli)).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("{err}");
@@ -225,11 +235,11 @@ async fn run_distributor(
         DistributorState::with_metrics(Arc::new(KafkaSink::new(Arc::new(producer))), metrics);
     state.limits.max_spans_per_request = cli.max_spans_per_request;
     state.limits.max_spans_per_trace = cli.max_spans_per_trace;
-    state.limits.max_ingest_spans_per_second = cli.max_ingest_spans_per_second;
+    state.limits.max_ingest_rate = ingest_rate_from_cli(cli.max_ingest_spans_per_second);
     state.limits.ingest_rate_burst = cli.ingest_rate_burst;
-    state.limits.max_attr_value_len = cli.max_attr_value_len;
+    state.limits.max_attr_value = size_from_usize(cli.max_attr_value_len);
     state.shared_limits = state.limits.to_shared_limits();
-    state.max_decompressed = cli.max_decompressed_bytes;
+    state.max_decompressed = size_from_usize(cli.max_decompressed_bytes);
     let state = Arc::new(state);
     let addr: SocketAddr = cli.listen.parse()?;
     let grpc_addr: SocketAddr = cli.grpc_listen.parse()?;
@@ -308,10 +318,10 @@ async fn run_block_builder(
         blockbuilder::BlockBuilderConfig {
             object_key_prefix,
             index_key: trace_index_key,
-            window: Duration::from_secs(cli.block_builder_window_secs),
+            window: Time::from_secs(cli.block_builder_window_secs),
             promoted_attrs,
             flush_max_records: cli.block_builder_flush_max_records,
-            flush_max_age: Duration::from_millis(cli.block_builder_flush_max_age_ms),
+            flush_max_age: Time::from_millis(cli.block_builder_flush_max_age_ms),
         },
         metrics,
         shutdown,
@@ -376,9 +386,9 @@ async fn run_querier(
     let refresh_shutdown = shutdown.clone();
     let refresh_store = Arc::clone(&store);
     let refresh_index = Arc::clone(&trace_index);
-    let refresh_interval = cli.block_builder_window_secs.max(1);
+    let refresh_interval = Time::from_secs(cli.block_builder_window_secs).max(secs(1));
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(std::time::Duration::from_secs(refresh_interval));
+        let mut tick = tokio::time::interval(refresh_interval.to_std());
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
@@ -646,12 +656,10 @@ fn frontend_config_from_cli(
     let querier_addrs = parse_querier_addrs(&cli.querier_url)?;
     Ok(FrontendConfig {
         querier_addrs,
-        target_bytes_per_job: cli.target_bytes_per_job,
+        target_per_job: ByteSize::from_bytes(cli.target_bytes_per_job),
         max_concurrency: cli.query_queue_depth.max(1),
         hot_frontier_ns: cli.live_frontier_ns.unwrap_or(0),
-        max_trace_bytes: u64::try_from(cli.max_trace_spans)
-            .unwrap_or(u64::MAX)
-            .saturating_mul(64 * 1024),
+        max_trace: max_trace_size(cli.max_trace_spans),
         listen_addr,
         ..FrontendConfig::default()
     })
@@ -709,7 +717,7 @@ async fn build_query_frontend_router(
     let addr: SocketAddr = cli.listen.parse()?;
     let cfg = frontend_config_from_cli(cli, addr)?;
     let catalog = build_trace_index_catalog(cli).await?;
-    let backend = HttpQuerier::new(cfg.querier_addrs.clone(), cfg.request_timeout)?;
+    let backend = HttpQuerier::new(cfg.querier_addrs.clone(), cfg.request_timeout.to_std())?;
     let qf = Arc::new(QueryFrontend::new(
         Arc::new(backend),
         Arc::new(catalog),
@@ -807,9 +815,32 @@ async fn run_metrics_generator(
     Ok(())
 }
 
+/// `usize::MAX` is the CLI's "no limit" spelling; a zero rate is how the shared
+/// limits express unlimited.
+fn ingest_rate_from_cli(spans_per_sec: usize) -> Frequency {
+    if spans_per_sec == usize::MAX {
+        <Frequency as FrequencyExt>::ZERO
+    } else {
+        Frequency::from_per_sec(f64_from_usize(spans_per_sec))
+    }
+}
+
+fn size_from_usize(value: usize) -> ByteSize {
+    ByteSize::from_bytes(u64::try_from(value).unwrap_or(u64::MAX))
+}
+
+fn f64_from_usize(value: usize) -> f64 {
+    value.to_f64().unwrap_or(f64::MAX)
+}
+
+/// The assembled-trace ceiling, budgeting ~64KiB of OTLP JSON per span.
+fn max_trace_size(spans: usize) -> ByteSize {
+    kibibytes(64) * f64_from_usize(spans)
+}
+
 fn apply_metrics_generator_cli_overrides(cfg: &mut MetricsGenConfig, cli: &Cli) {
     if let Some(secs) = cli.collection_interval_secs {
-        cfg.collection_interval = Duration::from_secs(secs);
+        cfg.collection_interval = Time::from_secs(i64::try_from(secs).unwrap_or(i64::MAX));
     }
     if let Some(url) = &cli.remote_write_url {
         cfg.remote_write_url.clone_from(url);
@@ -818,7 +849,7 @@ fn apply_metrics_generator_cli_overrides(cfg: &mut MetricsGenConfig, cli: &Cli) 
         cfg.max_exemplars_per_series = max;
     }
     if let Some(secs) = cli.edge_ttl_secs {
-        cfg.edge_ttl = Duration::from_secs(secs);
+        cfg.edge_ttl = Time::from_secs(i64::try_from(secs).unwrap_or(i64::MAX));
     }
     if let Some(max) = cli.edge_store_max_items {
         cfg.edge_store_max_items = max;
@@ -840,8 +871,8 @@ async fn wal_consumer(
         .bootstrap(bootstrap)
         .group_id(group_id.to_string())
         .maybe_group_instance_id(group_instance_id)
-        .fetch_max_bytes(WAL_FETCH_MAX_BYTES)
-        .fetch_partition_max_bytes(WAL_FETCH_PARTITION_MAX_BYTES)
+        .fetch_max_bytes(WAL_FETCH_MAX.bytes_i32())
+        .fetch_partition_max_bytes(WAL_FETCH_PARTITION_MAX.bytes_i32())
         .subscribe(vec![TRACES_WAL_TOPIC.to_string()])
         .auto_offset_reset(AutoOffsetReset::Earliest)
         .build()
@@ -856,6 +887,7 @@ mod tests {
         http::{Request, StatusCode as HttpStatusCode},
     };
     use clap::Parser;
+    use crabka_units::minutes;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
@@ -973,8 +1005,7 @@ mod tests {
         );
         assert2::assert!(
             cli.block_builder_flush_max_age_ms
-                == u64::try_from(crabka_traces::blockbuilder::DEFAULT_FLUSH_MAX_AGE.as_millis())
-                    .unwrap()
+                == crabka_traces::blockbuilder::DEFAULT_FLUSH_MAX_AGE.millis_i64()
         );
     }
 
@@ -1414,9 +1445,9 @@ mod tests {
     fn metrics_generator_config_preserves_file_values_without_cli_overrides() {
         let cli = Cli::try_parse_from(["crabka-traces", "--target", "metrics-generator"]).unwrap();
         let mut cfg = MetricsGenConfig {
-            collection_interval: Duration::from_secs(30),
+            collection_interval: secs(30),
             max_exemplars_per_series: 5,
-            edge_ttl: Duration::from_mins(1),
+            edge_ttl: minutes(1),
             edge_store_max_items: 2_000,
             histogram_buckets_ns: vec![1_000.0, 2_000.0],
             remote_write_url: "http://metrics.example/api/v1/push".into(),
@@ -1434,9 +1465,9 @@ mod tests {
                 cfg.histogram_buckets_ns.as_slice(),
                 cfg.remote_write_url.as_str(),
             ) == (
-                Duration::from_secs(30),
+                secs(30),
                 5,
-                Duration::from_mins(1),
+                minutes(1),
                 2_000,
                 &[1_000.0, 2_000.0][..],
                 "http://metrics.example/api/v1/push",
@@ -1473,9 +1504,9 @@ mod tests {
                 cfg.histogram_buckets_ns.as_slice(),
                 cfg.remote_write_url.as_str(),
             ) == (
-                Duration::from_secs(45),
+                secs(45),
                 2,
-                Duration::from_secs(9),
+                secs(9),
                 77,
                 &[500.0, 1_000.0, 2_500.0][..],
                 "http://override.example/api/v1/push",

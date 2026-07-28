@@ -13,6 +13,11 @@ use crabka_blockstore::{
     span_block_schema_with_promoted_attrs,
 };
 use crabka_client_consumer::{Consumer, ConsumerRecord};
+use crabka_units::{
+    Time,
+    convert::{StdDurationExt as _, TimeExt as _},
+    secs,
+};
 use object_store::ObjectStore;
 use tokio::{sync::Mutex, time::Instant};
 use tokio_util::sync::CancellationToken;
@@ -88,19 +93,20 @@ pub const DEFAULT_FLUSH_MAX_RECORDS: usize = 50_000;
 /// `flush_max_records` cap still batches bursty traffic into larger blocks
 /// (the proliferation case). Deployments that attach a querier live tier can
 /// raise it to batch more aggressively without a freshness cost.
-pub const DEFAULT_FLUSH_MAX_AGE: Duration = Duration::from_secs(10);
+pub const DEFAULT_FLUSH_MAX_AGE: Time = secs(10);
 
 /// Runtime settings for the block-builder loop.
 #[derive(Clone, Debug)]
 pub struct BlockBuilderConfig {
     pub object_key_prefix: String,
     pub index_key: String,
-    pub window: Duration,
+    /// How long each WAL poll waits for records.
+    pub window: Time,
     pub promoted_attrs: Vec<PromotedSpanAttr>,
     /// Flush the accumulated buffer once this many span records are buffered.
     pub flush_max_records: usize,
     /// Flush the accumulated buffer once the oldest buffered record reaches this age.
-    pub flush_max_age: Duration,
+    pub flush_max_age: Time,
 }
 
 struct BlockBuildOptions<'a> {
@@ -186,7 +192,7 @@ impl FlushAccumulator {
             return true;
         }
         match self.oldest_record_at {
-            Some(oldest) => now.saturating_duration_since(oldest) >= config.flush_max_age,
+            Some(oldest) => now.saturating_duration_since(oldest).as_time() >= config.flush_max_age,
             None => false,
         }
     }
@@ -442,7 +448,7 @@ where
 {
     let mut accumulator = FlushAccumulator::new();
     while !shutdown.is_cancelled() {
-        let records = consumer.poll(config.window).await?;
+        let records = consumer.poll(config.window.to_std()).await?;
         let windows = decode_consumer_records(&records)?;
 
         // One consume span per NON-EMPTY poll batch (NOT per record). Parent it

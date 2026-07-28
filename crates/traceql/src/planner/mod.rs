@@ -5,6 +5,7 @@ mod selector;
 use std::sync::Arc;
 
 use arrow::record_batch::RecordBatch;
+use crabka_units::ByteSize;
 use datafusion::{catalog::MemTable, logical_expr::LogicalPlan, prelude::SessionContext};
 
 use crate::{
@@ -28,10 +29,10 @@ pub(crate) struct PlannerContext {
 pub(crate) struct PlannedSpanset {
     pub ctx: SessionContext,
     pub plan: LogicalPlan,
-    /// Bytes inspected by the primary span scan (threaded to
-    /// `SearchResponse::inspected_bytes`). Nested structural-join tables re-scan
-    /// the same blocks, so only the primary scan is counted.
-    pub inspected_bytes: u64,
+    /// Span data inspected by the primary span scan (threaded to
+    /// `SearchResponse::inspected`). Nested structural-join tables re-scan the
+    /// same blocks, so only the primary scan is counted.
+    pub inspected: ByteSize,
 }
 
 pub(crate) async fn plan_query<S: SpanStore>(
@@ -66,7 +67,7 @@ async fn plan_spanset_sql<S: SpanStore>(
             &scan_options,
         )
         .await?;
-    let inspected_bytes = scan.inspected_bytes;
+    let inspected = scan.inspected;
     let nested_tables = register_nested_selector_tables(store, ctx, &scan.ctx, root).await?;
     let spanset_sql = spanset_to_sql(root, &selector::ident(&scan.span_table), &nested_tables)?;
     let sql = pipeline_to_sql(&spanset_sql, pipeline)?;
@@ -75,7 +76,7 @@ async fn plan_spanset_sql<S: SpanStore>(
     Ok(PlannedSpanset {
         ctx: scan.ctx,
         plan,
-        inspected_bytes,
+        inspected,
     })
 }
 
@@ -845,6 +846,7 @@ fn structural_is_union(op: StructuralOp) -> bool {
 mod tests {
     use arrow::{array::Array, record_batch::RecordBatch};
     use assert2::{assert, check};
+    use crabka_units::{Time, convert::TimeExt as _, nanos};
     use datafusion::arrow::array::AsArray;
 
     use super::*;
@@ -871,7 +873,7 @@ mod tests {
             name: name.into(),
             kind: 0,
             start_unix_nano: i64::from(id),
-            duration_nanos,
+            duration: Time::from_nanos(duration_nanos),
             status_code: 0,
             status_message: String::new(),
             instrumentation_name: String::new(),
@@ -1095,19 +1097,19 @@ mod tests {
     async fn grouped_pipeline_filters_by_nested_event_intrinsic() {
         let mut miss_one = span(1, "miss-one", 50, vec![]);
         miss_one.events = vec![EventRef {
-            time_since_start_nano: 10,
+            time_since_start: nanos(10),
             name: "cache.miss".into(),
             attributes: Vec::new(),
         }];
         let mut miss_two = span(2, "miss-two", 50, vec![]);
         miss_two.events = vec![EventRef {
-            time_since_start_nano: 20,
+            time_since_start: nanos(20),
             name: "cache.miss".into(),
             attributes: Vec::new(),
         }];
         let mut hit = span(3, "hit", 50, vec![]);
         hit.events = vec![EventRef {
-            time_since_start_nano: 30,
+            time_since_start: nanos(30),
             name: "cache.hit".into(),
             attributes: Vec::new(),
         }];
@@ -1130,12 +1132,12 @@ mod tests {
         let mut one = span(1, "one", 50, vec![("svc", AttrValue::Str("api".into()))]);
         one.events = vec![
             EventRef {
-                time_since_start_nano: 10,
+                time_since_start: nanos(10),
                 name: "cache.miss".into(),
                 attributes: Vec::new(),
             },
             EventRef {
-                time_since_start_nano: 20,
+                time_since_start: nanos(20),
                 name: "cache.hit".into(),
                 attributes: Vec::new(),
             },
@@ -1143,12 +1145,12 @@ mod tests {
         let mut two = span(2, "two", 50, vec![("svc", AttrValue::Str("api".into()))]);
         two.events = vec![
             EventRef {
-                time_since_start_nano: 30,
+                time_since_start: nanos(30),
                 name: "cache.wait".into(),
                 attributes: Vec::new(),
             },
             EventRef {
-                time_since_start_nano: 40,
+                time_since_start: nanos(40),
                 name: "cache.hit".into(),
                 attributes: Vec::new(),
             },

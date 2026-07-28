@@ -13,6 +13,10 @@ use arrow::{
     datatypes::DataType,
     record_batch::RecordBatch,
 };
+use crabka_units::{
+    ByteSize, Time,
+    convert::{ByteSizeExt as _, TimeExt as _},
+};
 use datafusion::{catalog::MemTable, prelude::SessionContext};
 
 use crate::{
@@ -50,7 +54,7 @@ struct StoredTrace {
     root_service_name: String,
     root_span_name: String,
     trace_start_unix_nano: i64,
-    trace_duration_nanos: i64,
+    trace_duration: Time,
     spans: Vec<InputSpan>,
     nested: Vec<NestedSet>,
 }
@@ -78,7 +82,7 @@ impl InMemorySpanStore {
         let trace_start_unix_nano = spans.iter().map(|s| s.start_unix_nano).min().unwrap_or(0);
         let trace_end_unix_nano = spans
             .iter()
-            .map(|s| s.start_unix_nano + s.duration_nanos)
+            .map(|s| s.start_unix_nano + s.duration.nanos_i64())
             .max()
             .unwrap_or(trace_start_unix_nano);
         let nested = assign_nested_set(&spans);
@@ -91,7 +95,7 @@ impl InMemorySpanStore {
                 root_service_name: root_service_name.to_string(),
                 root_span_name: root_span_name.to_string(),
                 trace_start_unix_nano,
-                trace_duration_nanos: trace_end_unix_nano - trace_start_unix_nano,
+                trace_duration: Time::from_nanos(trace_end_unix_nano - trace_start_unix_nano),
                 spans,
                 nested,
             });
@@ -162,7 +166,7 @@ fn span_ref(span: &InputSpan, nested: &NestedSet) -> SpanRef {
         nested_set_right: nested.right,
         nested_set_parent: nested.parent_id,
         start_time_unix_nano: u64::try_from(span.start_unix_nano).unwrap_or(0),
-        duration_nanos: u64::try_from(span.duration_nanos).unwrap_or(0),
+        duration: span.duration,
         status_code: span.status_code,
         status_message: span.status_message.clone(),
         instrumentation_name: span.instrumentation_name.clone(),
@@ -301,11 +305,12 @@ impl ScanBuilders {
         self.root_service.append_value(&trace.root_service_name);
         self.root_span.append_value(&trace.root_span_name);
         self.trace_start.append_value(trace.trace_start_unix_nano);
-        self.trace_duration.append_value(trace.trace_duration_nanos);
+        self.trace_duration
+            .append_value(trace.trace_duration.nanos_i64());
         self.name.append_value(&span.name);
         self.kind.append_value(span.kind);
         self.start.append_value(span.start_unix_nano);
-        self.duration.append_value(span.duration_nanos);
+        self.duration.append_value(span.duration.nanos_i64());
         self.status_code.append_value(span.status_code);
         self.status_message.append_value(&span.status_message);
         self.instrumentation_name
@@ -324,7 +329,7 @@ impl ScanBuilders {
         if let Some(event) = event {
             self.event_name.append_value(&event.name);
             self.event_time_since_start
-                .append_value(i64::try_from(event.time_since_start_nano).unwrap_or(i64::MAX));
+                .append_value(event.time_since_start.nanos_i64());
         } else {
             self.event_name.append_null();
             self.event_time_since_start.append_null();
@@ -424,14 +429,15 @@ impl InMemorySpanStore {
 
         let batch = RecordBatch::try_new(schema.clone(), columns)
             .map_err(|e| TraceqlError::Store(e.to_string()))?;
-        let inspected_bytes = u64::try_from(batch.get_array_memory_size()).unwrap_or(u64::MAX);
+        let inspected =
+            ByteSize::from_bytes(u64::try_from(batch.get_array_memory_size()).unwrap_or(u64::MAX));
         let ctx = SessionContext::new();
         let table = MemTable::try_new(schema, vec![vec![batch]])?;
         ctx.register_table("spans", Arc::new(table))?;
         Ok(ScanResult {
             ctx,
             span_table: "spans".into(),
-            inspected_bytes,
+            inspected,
         })
     }
 }
@@ -802,7 +808,7 @@ fn event_matcher_matches_event(event: &EventRef, matcher: &SpanMatcher) -> bool 
             "event:timeSinceStart" => nested_presence_matches(true, matcher.op, &matcher.value)
                 .unwrap_or_else(|| {
                     int_matches(
-                        i64::try_from(event.time_since_start_nano).unwrap_or(i64::MAX),
+                        event.time_since_start.nanos_i64(),
                         matcher.op,
                         &matcher.value,
                     )
@@ -959,7 +965,7 @@ fn intrinsic_matches(
                 .unwrap_or_else(|| {
                     span.events.iter().any(|event| {
                         int_matches(
-                            i64::try_from(event.time_since_start_nano).unwrap_or(i64::MAX),
+                            event.time_since_start.nanos_i64(),
                             matcher.op,
                             &matcher.value,
                         )
@@ -985,9 +991,11 @@ fn intrinsic_matches(
         "trace:id" => string_matches(&bytes_to_hex(&trace.trace_id), matcher.op, &matcher.value),
         "trace:rootService" => string_matches(&trace.root_service_name, matcher.op, &matcher.value),
         "trace:rootName" => string_matches(&trace.root_span_name, matcher.op, &matcher.value),
-        "trace:duration" => int_matches(trace.trace_duration_nanos, matcher.op, &matcher.value),
+        "trace:duration" => {
+            int_matches(trace.trace_duration.nanos_i64(), matcher.op, &matcher.value)
+        }
         "duration" | "span:duration" => {
-            int_matches(span.duration_nanos, matcher.op, &matcher.value)
+            int_matches(span.duration.nanos_i64(), matcher.op, &matcher.value)
         }
         "span:id" => string_matches(&bytes_to_hex(&span.span_id), matcher.op, &matcher.value),
         "span:parentID" => span.parent_span_id.map_or_else(
@@ -1211,7 +1219,7 @@ fn collect_trace_intrinsic_values(
         "trace:duration" => {
             values.insert((
                 "duration".to_string(),
-                trace.trace_duration_nanos.to_string(),
+                trace.trace_duration.nanos_i64().to_string(),
             ));
         }
         "trace:id" => {
@@ -1246,7 +1254,10 @@ fn collect_span_intrinsic_values(
             }
         }
         "span:duration" => {
-            values.insert(("duration".to_string(), span.duration_nanos.to_string()));
+            values.insert((
+                "duration".to_string(),
+                span.duration.nanos_i64().to_string(),
+            ));
         }
         "span:id" => {
             values.insert(("string".to_string(), bytes_to_hex(&span.span_id)));
@@ -1304,7 +1315,7 @@ fn collect_event_values(span: &InputSpan, tag: &str, values: &mut BTreeSet<(Stri
             "event:timeSinceStart" => {
                 values.insert((
                     "duration".to_string(),
-                    event.time_since_start_nano.to_string(),
+                    event.time_since_start.nanos_i64().to_string(),
                 ));
             }
             _ => {}
@@ -1378,6 +1389,7 @@ fn child_count_for(nested_sets: &[NestedSet], idx: usize) -> i32 {
 #[cfg(test)]
 mod tests {
     use assert2::{assert, check};
+    use crabka_units::nanos;
     use datafusion::arrow::array::AsArray;
 
     use super::*;
@@ -1394,7 +1406,7 @@ mod tests {
             name: name.into(),
             kind: 0,
             start_unix_nano: 1000,
-            duration_nanos: 5,
+            duration: nanos(5),
             status_code: 0,
             status_message: String::new(),
             instrumentation_name: String::new(),
@@ -1471,7 +1483,7 @@ mod tests {
                     nested_set_right: 2,
                     nested_set_parent: -1,
                     start_time_unix_nano: 1000,
-                    duration_nanos: 5,
+                    duration: nanos(5),
                     status_code: 0,
                     status_message: String::new(),
                     instrumentation_name: String::new(),
@@ -1556,7 +1568,7 @@ mod tests {
     async fn tag_names_and_values_return_event_and_link_metadata() {
         let mut input = span(1, None, "root", vec![]);
         input.events = vec![EventRef {
-            time_since_start_nano: 50,
+            time_since_start: nanos(50),
             name: "exception".into(),
             attributes: vec![("cache.key".into(), AttrValue::Str("users".into()))],
         }];
@@ -1760,7 +1772,7 @@ mod tests {
             name: "checkout".into(),
             kind: 2,
             start_unix_nano: 1000,
-            duration_nanos: 5_000_000,
+            duration: nanos(5_000_000),
             status_code: 2,
             status_message: "boom".into(),
             instrumentation_name: "tracer".into(),
@@ -1772,7 +1784,7 @@ mod tests {
                 ("ok".into(), AttrValue::Bool(true)),
             ],
             events: vec![EventRef {
-                time_since_start_nano: 50,
+                time_since_start: nanos(50),
                 name: "exception".into(),
                 attributes: vec![("ev.attr".into(), AttrValue::Str("kaboom".into()))],
             }],
@@ -2750,7 +2762,7 @@ mod tests {
             root_service_name: "rootsvc".into(),
             root_span_name: "rootname".into(),
             trace_start_unix_nano: 0,
-            trace_duration_nanos: 1234,
+            trace_duration: nanos(1234),
             spans: vec![span],
             nested: vec![NestedSet {
                 left: 1,
@@ -2769,7 +2781,7 @@ mod tests {
     fn intrinsic_matches_event_name_arm_presence_and_value() {
         let mut sp = span(1, None, "root", vec![]);
         sp.events = vec![EventRef {
-            time_since_start_nano: 50,
+            time_since_start: nanos(50),
             name: "cache.miss".into(),
             attributes: Vec::new(),
         }];
@@ -2813,7 +2825,7 @@ mod tests {
     fn intrinsic_matches_event_time_since_start_arm() {
         let mut sp = span(1, None, "root", vec![]);
         sp.events = vec![EventRef {
-            time_since_start_nano: 50,
+            time_since_start: nanos(50),
             name: "e".into(),
             attributes: Vec::new(),
         }];
@@ -3080,7 +3092,7 @@ mod tests {
         // (`key == &matcher.key`). With `!=` they would read the wrong attribute.
         let mut sp = span(1, None, "root", vec![]);
         sp.events = vec![EventRef {
-            time_since_start_nano: 1,
+            time_since_start: nanos(1),
             name: "e".into(),
             attributes: vec![
                 ("want".into(), AttrValue::Str("yes".into())),
@@ -3164,12 +3176,12 @@ mod tests {
         let mut sp = span(1, None, "root", vec![]);
         sp.events = vec![
             EventRef {
-                time_since_start_nano: 10,
+                time_since_start: nanos(10),
                 name: "cache.miss".into(),
                 attributes: Vec::new(),
             },
             EventRef {
-                time_since_start_nano: 20,
+                time_since_start: nanos(20),
                 name: "cache.hit".into(),
                 attributes: Vec::new(),
             },

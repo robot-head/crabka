@@ -13,6 +13,10 @@ use crabka_traceql::{
     SearchOptions, SearchResponse, SpanRef, SpanStore, SpansetExpr, TagScope, TraceMetricsResponse,
     TraceSpans, TraceqlEngine, TraceqlError, TypedValue, Value as TraceqlValue,
 };
+use crabka_units::{
+    Time,
+    convert::{ByteSizeExt as _, TimeExt as _},
+};
 use opentelemetry_proto::tonic::{
     common::v1::{
         AnyValue as OtlpAnyValue, ArrayValue as OtlpArrayValue, InstrumentationScope,
@@ -254,11 +258,11 @@ where
         Ok(value) => value.unwrap_or(0),
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
-    let min_duration_ns = match duration_param(&uri, "minDuration") {
+    let min_duration = match duration_param(&uri, "minDuration") {
         Ok(value) => value,
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
-    let max_duration_ns = match duration_param(&uri, "maxDuration") {
+    let max_duration = match duration_param(&uri, "maxDuration") {
         Ok(value) => value,
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
@@ -267,7 +271,7 @@ where
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
 
-    let duration_filtered = min_duration_ns.is_some() || max_duration_ns.is_some();
+    let duration_filtered = min_duration.is_some() || max_duration.is_some();
     let search_limit = duration_filtered.then_some(usize::MAX);
 
     match state
@@ -290,8 +294,8 @@ where
             let resp = if duration_filtered {
                 filter_search_duration(
                     resp,
-                    min_duration_ns,
-                    max_duration_ns,
+                    min_duration,
+                    max_duration,
                     state.engine.effective_search_limit(limit),
                 )
             } else {
@@ -1270,9 +1274,13 @@ fn exemplar_selection(uri: &Uri) -> ExemplarSelection {
     }
 }
 
-fn duration_param(uri: &Uri, key: &str) -> Result<Option<u64>, String> {
+fn duration_param(uri: &Uri, key: &str) -> Result<Option<Time>, String> {
     query_param(uri, key)
-        .map(|value| parse_go_duration_ns(&value).map_err(|err| format!("invalid {key}: {err}")))
+        .map(|value| {
+            parse_go_duration_ns(&value)
+                .map(|nanos| Time::from_nanos(i64::try_from(nanos).unwrap_or(i64::MAX)))
+                .map_err(|err| format!("invalid {key}: {err}"))
+        })
         .transpose()
 }
 
@@ -1380,7 +1388,7 @@ fn decode_trace_id(trace_id: &str) -> Result<[u8; 16], hex::FromHexError> {
 
 fn search_json(resp: SearchResponse) -> Value {
     let inspected_traces = resp.inspected_traces;
-    let inspected_bytes = resp.inspected_bytes;
+    let inspected_bytes = resp.inspected.bytes_u64();
     // Spans this response scanned/returned: the distinct matched spans across
     // every returned trace's spanSets. The frontend folds this per-job sum into
     // the merged `metrics.inspectedSpans`.
@@ -1397,7 +1405,7 @@ fn search_json(resp: SearchResponse) -> Value {
                 "rootServiceName": trace.root_service_name,
                 "rootTraceName": trace.root_trace_name,
                 "startTimeUnixNano": trace.start_time_unix_nano.to_string(),
-                "durationMs": trace.duration_ms,
+                "durationMs": trace.duration.millis_i64(),
                 "spanSets": trace.span_sets.into_iter().map(|set| {
                     json!({
                         "spans": set.spans.iter().map(search_span_json).collect::<Vec<_>>(),
@@ -1421,16 +1429,16 @@ fn search_json(resp: SearchResponse) -> Value {
 
 fn filter_search_duration(
     mut resp: SearchResponse,
-    min_duration_ns: Option<u64>,
-    max_duration_ns: Option<u64>,
+    min_duration: Option<Time>,
+    max_duration: Option<Time>,
     limit: usize,
 ) -> SearchResponse {
-    if min_duration_ns.is_none() && max_duration_ns.is_none() {
+    if min_duration.is_none() && max_duration.is_none() {
         return resp;
     }
     resp.traces.retain(|trace| {
-        min_duration_ns.is_none_or(|min| trace.duration_nanos >= min)
-            && max_duration_ns.is_none_or(|max| trace.duration_nanos <= max)
+        min_duration.is_none_or(|min| trace.duration >= min)
+            && max_duration.is_none_or(|max| trace.duration <= max)
     });
     resp.inspected_traces = resp.traces.len();
     resp.traces.truncate(limit);
@@ -1722,8 +1730,8 @@ fn collect_trace_intrinsic_values(
 ) {
     match tag {
         "trace:duration" => {
-            if let Some(duration) = trace_duration_nanos(trace) {
-                values.insert(("duration".to_string(), duration.to_string()));
+            if let Some(duration) = trace_duration(trace) {
+                values.insert(("duration".to_string(), duration.nanos_i64().to_string()));
             }
         }
         "trace:id" => {
@@ -1739,21 +1747,29 @@ fn collect_trace_intrinsic_values(
     }
 }
 
-fn trace_duration_nanos(trace: &TraceSpans) -> Option<u64> {
+fn trace_duration(trace: &TraceSpans) -> Option<Time> {
     let start = trace
         .spans
         .iter()
         .map(|span| span.start_time_unix_nano)
         .min()?;
-    let end = trace
-        .spans
-        .iter()
-        .map(|span| {
-            span.start_time_unix_nano
-                .saturating_add(span.duration_nanos)
-        })
-        .max()?;
-    Some(end.saturating_sub(start))
+    let end = trace.spans.iter().map(span_end_unix_nano).max()?;
+    Some(Time::from_nanos(
+        i64::try_from(end.saturating_sub(start)).unwrap_or(i64::MAX),
+    ))
+}
+
+/// A span's end instant: its start coordinate advanced by its duration.
+fn span_end_unix_nano(span: &SpanRef) -> u64 {
+    span.start_time_unix_nano
+        .saturating_add(u64::try_from(span.duration.nanos_i64()).unwrap_or(0))
+}
+
+/// An event's absolute instant: the span's start coordinate advanced by the
+/// event's offset into the span.
+fn event_unix_nano(span: &SpanRef, event: &crabka_traceql::EventRef) -> u64 {
+    span.start_time_unix_nano
+        .saturating_add(u64::try_from(event.time_since_start.nanos_i64()).unwrap_or(0))
 }
 
 fn collect_span_intrinsic_values(
@@ -1771,7 +1787,10 @@ fn collect_span_intrinsic_values(
             values.insert(("int".to_string(), count.to_string()));
         }
         "span:duration" => {
-            values.insert(("duration".to_string(), span.duration_nanos.to_string()));
+            values.insert((
+                "duration".to_string(),
+                span.duration.nanos_i64().to_string(),
+            ));
         }
         "span:id" => {
             values.insert(("string".to_string(), hex::encode(span.span_id)));
@@ -1821,7 +1840,7 @@ fn collect_event_values(span: &SpanRef, tag: &str, values: &mut BTreeSet<(String
             "event:timeSinceStart" => {
                 values.insert((
                     "duration".to_string(),
-                    event.time_since_start_nano.to_string(),
+                    event.time_since_start.nanos_i64().to_string(),
                 ));
             }
             _ => {}
@@ -1975,7 +1994,7 @@ fn search_span_json(span: &SpanRef) -> Value {
     json!({
         "spanID": hex::encode(span.span_id),
         "startTimeUnixNano": span.start_time_unix_nano.to_string(),
-        "durationNanos": span.duration_nanos.to_string(),
+        "durationNanos": span.duration.nanos_i64().to_string(),
         "attributes": attrs_json(&span.attributes),
     })
 }
@@ -2158,9 +2177,7 @@ fn otlp_span(trace_id: [u8; 16], span: &SpanRef) -> OtlpSpan {
         name: span.name.clone(),
         kind: span.kind,
         start_time_unix_nano: span.start_time_unix_nano,
-        end_time_unix_nano: span
-            .start_time_unix_nano
-            .saturating_add(span.duration_nanos),
+        end_time_unix_nano: span_end_unix_nano(span),
         attributes: otlp_attrs(&span.attributes),
         events: span
             .events
@@ -2175,9 +2192,7 @@ fn otlp_span(trace_id: [u8; 16], span: &SpanRef) -> OtlpSpan {
 
 fn otlp_event(span: &SpanRef, event: &crabka_traceql::EventRef) -> OtlpEvent {
     OtlpEvent {
-        time_unix_nano: span
-            .start_time_unix_nano
-            .saturating_add(event.time_since_start_nano),
+        time_unix_nano: event_unix_nano(span, event),
         name: event.name.clone(),
         attributes: otlp_attrs(&event.attributes),
         ..OtlpEvent::default()
@@ -2296,7 +2311,7 @@ fn trace_span_json(trace_id: [u8; 16], span: &SpanRef) -> Value {
     );
     obj.insert(
         "endTimeUnixNano".into(),
-        json!((span.start_time_unix_nano + span.duration_nanos).to_string()),
+        json!(span_end_unix_nano(span).to_string()),
     );
     obj.insert(
         "status".into(),
@@ -2318,10 +2333,7 @@ fn events_json(span: &SpanRef) -> Value {
             .iter()
             .map(|event| {
                 json!({
-                    "timeUnixNano": span
-                        .start_time_unix_nano
-                        .saturating_add(event.time_since_start_nano)
-                        .to_string(),
+                    "timeUnixNano": event_unix_nano(span, event).to_string(),
                     "name": event.name,
                     "attributes": attrs_json(&event.attributes),
                 })
@@ -2450,6 +2462,7 @@ mod tests {
     use crabka_traceql::{
         AttrValue, EngineOpts, EventRef, InMemorySpanStore, InputSpan, LinkRef, TraceqlEngine,
     };
+    use crabka_units::{nanos, secs};
     use http_body_util::BodyExt;
     use object_store::{memory::InMemory, path::Path};
     use opentelemetry_proto::tonic::trace::v1::TracesData;
@@ -2494,7 +2507,7 @@ mod tests {
             name: "span".into(),
             kind: 0,
             start_unix_nano: start_ns,
-            duration_nanos: 200,
+            duration: nanos(200),
             status_code: 0,
             status_message: String::new(),
             instrumentation_name: String::new(),
@@ -3272,7 +3285,7 @@ overrides:
         let app = app_with_http_config(HttpConfig {
             max_trace_spans: usize::MAX,
             limits: crate::limits::Limits {
-                max_search_duration_secs: 1,
+                max_search_duration: secs(1),
                 ..crate::limits::Limits::default()
             },
             overrides: None,
@@ -3410,9 +3423,9 @@ overrides:
     #[tokio::test]
     async fn search_honors_nanosecond_precision_min_duration_parameter() {
         let mut short = span_at(1, 1, None, "a", 1_000_000_000);
-        short.duration_nanos = 1_000_000;
+        short.duration = nanos(1_000_000);
         let mut long = span_at(2, 1, None, "b", 1_000_000_000);
-        long.duration_nanos = 1_000_001;
+        long.duration = nanos(1_000_001);
 
         let mut store = InMemorySpanStore::new();
         store.push_trace("tenant-a", "svc-a", "short", vec![short]);
@@ -3697,7 +3710,7 @@ overrides:
                 nested_set_right: 2,
                 nested_set_parent: 0,
                 start_time_unix_nano: 1_001,
-                duration_nanos: 200,
+                duration: nanos(200),
                 status_code: 0,
                 status_message: String::new(),
                 instrumentation_name: String::new(),
@@ -3741,7 +3754,7 @@ overrides:
                 nested_set_right: 2,
                 nested_set_parent: 0,
                 start_time_unix_nano: 1_001,
-                duration_nanos: 200,
+                duration: nanos(200),
                 status_code: 0,
                 status_message: String::new(),
                 instrumentation_name: String::new(),
@@ -3794,7 +3807,7 @@ overrides:
                     nested_set_right: 4,
                     nested_set_parent: 0,
                     start_time_unix_nano: 1_001,
-                    duration_nanos: 200,
+                    duration: nanos(200),
                     status_code: 0,
                     status_message: String::new(),
                     instrumentation_name: String::new(),
@@ -3816,7 +3829,7 @@ overrides:
                     nested_set_right: 3,
                     nested_set_parent: 1,
                     start_time_unix_nano: 1_002,
-                    duration_nanos: 100,
+                    duration: nanos(100),
                     status_code: 0,
                     status_message: String::new(),
                     instrumentation_name: String::new(),
@@ -3903,7 +3916,7 @@ overrides:
                 nested_set_right: 2,
                 nested_set_parent: 0,
                 start_time_unix_nano: 1_001,
-                duration_nanos: 200,
+                duration: nanos(200),
                 status_code: 0,
                 status_message: String::new(),
                 instrumentation_name: String::new(),
@@ -4157,7 +4170,7 @@ overrides:
         let mut store = InMemorySpanStore::new();
         let mut span = span_at(9, 1, None, "a", 1_000);
         span.events = vec![EventRef {
-            time_since_start_nano: 50,
+            time_since_start: nanos(50),
             name: "exception".into(),
             attributes: vec![("exception.type".into(), AttrValue::Str("timeout".into()))],
         }];
@@ -4740,7 +4753,7 @@ overrides:
             vec![("env".into(), AttrValue::Str("prod".into()))],
         );
         root.events = vec![EventRef {
-            time_since_start_nano: 50,
+            time_since_start: nanos(50),
             name: "exception".into(),
             attributes: vec![("exception.type".into(), AttrValue::Str("timeout".into()))],
         }];
@@ -5560,7 +5573,7 @@ overrides:
             vec![("env".into(), AttrValue::Str("prod".into()))],
         );
         root.events = vec![EventRef {
-            time_since_start_nano: 50,
+            time_since_start: nanos(50),
             name: "exception".into(),
             attributes: Vec::new(),
         }];
@@ -5645,7 +5658,7 @@ overrides:
             vec![("env".into(), AttrValue::Str("prod".into()))],
         );
         root.events = vec![EventRef {
-            time_since_start_nano: 50,
+            time_since_start: nanos(50),
             name: "exception".into(),
             attributes: vec![("cache.key".into(), AttrValue::Str("users".into()))],
         }];

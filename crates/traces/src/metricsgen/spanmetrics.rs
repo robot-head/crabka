@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crabka_units::convert::ByteSizeExt as _;
 use num_traits::ToPrimitive as _;
 
 use crate::metricsgen::{
@@ -110,7 +111,7 @@ impl SpanMetricsRegistry {
         });
 
         entry.calls += 1.0;
-        entry.size_total += size_as_f64(span.size_bytes);
+        entry.size_total += span.size.bytes_f64();
         let duration_ns = duration_as_f64(span.duration_ns);
         entry.latency.observe(duration_ns);
 
@@ -245,10 +246,6 @@ fn status_dim(status: StatusCode) -> &'static str {
     }
 }
 
-fn size_as_f64(size_bytes: u64) -> f64 {
-    size_bytes.to_f64().unwrap_or(f64::MAX)
-}
-
 fn duration_as_f64(duration_ns: i64) -> f64 {
     duration_ns.max(0).to_f64().unwrap_or(f64::MAX)
 }
@@ -256,6 +253,7 @@ fn duration_as_f64(duration_ns: i64) -> f64 {
 #[cfg(test)]
 mod tests {
     use assert2::check;
+    use crabka_units::ByteSize;
 
     use super::*;
     use crate::metricsgen::{
@@ -285,7 +283,7 @@ mod tests {
             status_message: String::new(),
             service_name: service.into(),
             attributes: vec![],
-            size_bytes: size,
+            size: ByteSize::from_bytes(size),
         }
     }
 

@@ -21,6 +21,7 @@ use crabka_traces::{
     ids::{MaxOffset, MinOffset, WindowStartNs},
     metrics::ServiceMetrics,
 };
+use crabka_units::{hours, millis, minutes};
 use futures::stream::BoxStream;
 use object_store::{
     CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
@@ -257,7 +258,7 @@ async fn replaying_saved_partition_window_after_restart_is_idempotent() {
     let config = crabka_traces::blockbuilder::BlockBuilderConfig {
         object_key_prefix: String::new(),
         index_key: "index/traces.json".into(),
-        window: std::time::Duration::from_millis(1),
+        window: millis(1),
         promoted_attrs: Vec::new(),
         flush_max_records: crabka_traces::blockbuilder::DEFAULT_FLUSH_MAX_RECORDS,
         flush_max_age: crabka_traces::blockbuilder::DEFAULT_FLUSH_MAX_AGE,
@@ -309,10 +310,10 @@ async fn multiple_polls_below_threshold_flush_one_block_per_partition() {
     let config = BlockBuilderConfig {
         object_key_prefix: String::new(),
         index_key: "index/traces.json".into(),
-        window: std::time::Duration::from_millis(1),
+        window: millis(1),
         promoted_attrs: Vec::new(),
         flush_max_records: 50_000,
-        flush_max_age: std::time::Duration::from_mins(1),
+        flush_max_age: minutes(1),
     };
 
     // Three polls, each well under the flush threshold, all for the same trace
@@ -380,10 +381,10 @@ async fn accumulator_flushes_on_record_count_threshold() {
     let config = BlockBuilderConfig {
         object_key_prefix: String::new(),
         index_key: "index/traces.json".into(),
-        window: std::time::Duration::from_millis(1),
+        window: millis(1),
         promoted_attrs: Vec::new(),
         flush_max_records: 2,
-        flush_max_age: std::time::Duration::from_mins(1),
+        flush_max_age: minutes(1),
     };
 
     let mut accumulator = FlushAccumulator::new();
@@ -410,10 +411,10 @@ async fn accumulator_flushes_on_age_for_low_traffic_stream() {
     let config = BlockBuilderConfig {
         object_key_prefix: String::new(),
         index_key: "index/traces.json".into(),
-        window: std::time::Duration::from_millis(1),
+        window: millis(1),
         promoted_attrs: Vec::new(),
         flush_max_records: 50_000,
-        flush_max_age: std::time::Duration::from_mins(1),
+        flush_max_age: minutes(1),
     };
 
     let mut accumulator = FlushAccumulator::new();
@@ -442,10 +443,10 @@ async fn shutdown_drain_flushes_remaining_buffer_without_losing_spans() {
     let config = BlockBuilderConfig {
         object_key_prefix: String::new(),
         index_key: "index/traces.json".into(),
-        window: std::time::Duration::from_millis(1),
+        window: millis(1),
         promoted_attrs: Vec::new(),
         flush_max_records: 50_000,
-        flush_max_age: std::time::Duration::from_mins(1),
+        flush_max_age: minutes(1),
     };
 
     // Two polls buffered, never reaching the flush threshold (mirrors a pending
@@ -756,12 +757,12 @@ fn block_builder_config() -> BlockBuilderConfig {
     BlockBuilderConfig {
         object_key_prefix: String::new(),
         index_key: "index/traces.json".into(),
-        window: std::time::Duration::from_millis(1),
+        window: millis(1),
         promoted_attrs: Vec::new(),
         // Below-threshold counts never trip the count flush; the loop drains on
         // shutdown instead, exercising the drain path the tests target.
         flush_max_records: 50_000,
-        flush_max_age: std::time::Duration::from_hours(1),
+        flush_max_age: hours(1),
     }
 }
 

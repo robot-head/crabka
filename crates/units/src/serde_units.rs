@@ -271,6 +271,19 @@ pub mod numeric {
         crate::convert::TimeExt::from_millis
     );
     numeric_module!(
+        /// A time extent as whole milliseconds, **truncated** on the way out.
+        ///
+        /// For mirroring an external format that integer-divides rather than
+        /// rounds, such as Tempo's `durationMs`. Reading is exact, so this is
+        /// deliberately asymmetric — see
+        /// [`TimeExt::millis_i64_trunc`](crate::convert::TimeExt::millis_i64_trunc).
+        millis_i64_trunc / option_millis_i64_trunc,
+        crate::Time,
+        i64,
+        crate::convert::TimeExt::millis_i64_trunc,
+        crate::convert::TimeExt::from_millis
+    );
+    numeric_module!(
         /// A time extent as whole seconds.
         secs_i64 / option_secs_i64,
         crate::Time,

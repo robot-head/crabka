@@ -4,6 +4,7 @@ use assert2::assert;
 use crabka_traceql::{
     AttrValue, EngineOpts, InMemorySpanStore, InputSpan, SearchResponse, TraceqlEngine,
 };
+use crabka_units::{Time, convert::TimeExt as _};
 
 fn span(
     trace: u8,
@@ -20,7 +21,7 @@ fn span(
         name: name.into(),
         kind: 0,
         start_unix_nano: 1_000 + i64::from(id),
-        duration_nanos,
+        duration: Time::from_nanos(duration_nanos),
         status_code: 0,
         status_message: String::new(),
         instrumentation_name: String::new(),

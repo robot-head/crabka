@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use bytes::{Buf, BufMut, BytesMut};
+use crabka_units::convert::TimeExt as _;
 use num_traits::ToPrimitive as _;
 
 use crate::metricsgen::{
@@ -111,7 +112,7 @@ impl EdgeStore {
     pub fn new(cfg: &MetricsGenConfig) -> Self {
         Self {
             max_items: cfg.edge_store_max_items,
-            ttl_ns: i64::try_from(cfg.edge_ttl.as_nanos()).unwrap_or(i64::MAX),
+            ttl_ns: cfg.edge_ttl.nanos_i64(),
             enable_messaging_latency: cfg.enable_messaging_system_latency,
             bucket_edges_ns: cfg.histogram_buckets_ns.clone(),
             edges: HashMap::new(),
@@ -620,9 +621,8 @@ fn ns_to_seconds(ns: i64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use assert2::check;
+    use crabka_units::{ByteSize, convert::ByteSizeExt as _, secs};
 
     use super::*;
     use crate::metricsgen::{
@@ -652,7 +652,7 @@ mod tests {
             status_message: String::new(),
             service_name: service.into(),
             attributes: vec![],
-            size_bytes: 0,
+            size: ByteSize::from_bytes(0),
         }
     }
 
@@ -852,7 +852,7 @@ mod tests {
     #[test]
     fn unpaired_half_edge_expires_after_ttl() {
         let cfg = MetricsGenConfig {
-            edge_ttl: Duration::from_secs(10),
+            edge_ttl: secs(10),
             ..MetricsGenConfig::default()
         };
         let mut store = EdgeStore::new(&cfg);
@@ -878,7 +878,7 @@ mod tests {
     #[test]
     fn unpaired_client_span_keeps_service_graph_labels() {
         let cfg = MetricsGenConfig {
-            edge_ttl: Duration::from_secs(10),
+            edge_ttl: secs(10),
             ..MetricsGenConfig::default()
         };
         let mut store = EdgeStore::new(&cfg);
@@ -928,7 +928,7 @@ mod tests {
     fn expired_half_edges_do_not_consume_store_capacity() {
         let cfg = MetricsGenConfig {
             edge_store_max_items: 1,
-            edge_ttl: Duration::from_secs(10),
+            edge_ttl: secs(10),
             ..MetricsGenConfig::default()
         };
         let mut store = EdgeStore::new(&cfg);
