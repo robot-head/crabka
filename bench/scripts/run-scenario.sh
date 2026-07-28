@@ -25,6 +25,10 @@
 #                        initial consumer build retry backoff (default 100)
 #   BENCH_CONSUMER_BUILD_MAX_BACKOFF_MS
 #                        maximum consumer build retry backoff (default 2000)
+#   BENCH_CONSUMER_POLL_TIMEOUT_MS
+#                        consumer poll timeout (default 50)
+#   BENCH_CONSUMER_POLL_ERROR_BACKOFF_MS
+#                        sleep after consumer poll errors (default 100)
 #   BENCH_RESULTS_DIR    where to write the per-run JSON (default bench/results)
 #   BENCH_RUN_TAG        optional filename suffix (e.g. "-run07") for repeated
 #                        runs; set by run-matrix.sh so a 10× pass keeps all
@@ -53,6 +57,8 @@ fi
 : "${BENCH_CONSUMER_BUILD_ATTEMPTS:=6}"
 : "${BENCH_CONSUMER_BUILD_INITIAL_BACKOFF_MS:=100}"
 : "${BENCH_CONSUMER_BUILD_MAX_BACKOFF_MS:=2000}"
+: "${BENCH_CONSUMER_POLL_TIMEOUT_MS:=50}"
+: "${BENCH_CONSUMER_POLL_ERROR_BACKOFF_MS:=100}"
 if [[ "$STACK" == "crabka" ]]; then
   : "${BENCH_CONSUMER_REQUEST_TIMEOUT_SECONDS:=5}"
 else
@@ -142,6 +148,8 @@ export BENCH_CONSUMER_REQUEST_TIMEOUT_SECONDS
 export BENCH_CONSUMER_BUILD_ATTEMPTS
 export BENCH_CONSUMER_BUILD_INITIAL_BACKOFF_MS
 export BENCH_CONSUMER_BUILD_MAX_BACKOFF_MS
+export BENCH_CONSUMER_POLL_TIMEOUT_MS
+export BENCH_CONSUMER_POLL_ERROR_BACKOFF_MS
 
 # TLS data-path knobs consumed by the job-template envsubst. All three are
 # always exported (with inert defaults on the plaintext path) so envsubst never
