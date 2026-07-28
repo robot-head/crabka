@@ -25,6 +25,8 @@
 #                           consumer poll timeout
 #   BENCH_CONSUMER_POLL_ERROR_BACKOFF_MS
 #                           sleep after consumer poll errors
+#   BENCH_SAMPLE_INTERVAL_MS
+#                           time-series sample interval
 #
 # TLS data-path env vars (run-scenario.sh exports these; default to the
 # plaintext path when BENCH_TLS is unset):
@@ -101,6 +103,8 @@ spec:
               value: "${BENCH_CONSUMER_POLL_TIMEOUT_MS}"
             - name: BENCH_CONSUMER_POLL_ERROR_BACKOFF_MS
               value: "${BENCH_CONSUMER_POLL_ERROR_BACKOFF_MS}"
+            - name: BENCH_SAMPLE_INTERVAL_MS
+              value: "${BENCH_SAMPLE_INTERVAL_MS}"
             - name: BENCH_BROKER_COUNT
               value: "${BENCH_BROKER_COUNT}"
             - name: BENCH_OUTPUT_PATH
