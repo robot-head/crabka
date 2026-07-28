@@ -28,7 +28,7 @@ use crabka_client_streams::{
     processor::serde::{Serde, SerdeRole},
 };
 use crabka_schema_registry::{
-    config::{RegistryConfig, SecurityConfig},
+    config::{RegistryConfig, RegistryRuntimeConfig, SecurityConfig},
     kafkastore::KafkaStore,
     rest::{self, AppState},
 };
@@ -121,6 +121,7 @@ async fn boot() -> Boot {
         advertised_url: "http://127.0.0.1:0".into(),
         group_id: "schema-registry".into(),
         leader_eligibility: true,
+        runtime: RegistryRuntimeConfig::default(),
         security: SecurityConfig::default(),
     };
     let store = KafkaStore::start(&cfg, cancel.clone())

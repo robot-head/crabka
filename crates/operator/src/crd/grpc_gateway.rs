@@ -111,8 +111,8 @@ pub struct DedupSpec {
     #[schemars(range(min = 1, max = 2_147_483_647))]
     pub partitions: Option<u32>,
 
-    /// Dedup window in milliseconds. Records with the same idempotency
-    /// key within this window are dropped. Default `86_400_000` (24 h).
+    /// Dedup window, as a unit-carrying duration (`24h`, `30m`). Records with
+    /// the same idempotency key within this window are dropped. Default `24h`.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -242,7 +242,7 @@ pub struct GatewayTlsSpec {
     #[schemars(range(min = 1))]
     pub validity_days: Option<u32>,
 
-    /// Cert hot-reload poll interval in seconds. Default 30.
+    /// Cert hot-reload poll interval, as a unit-carrying duration. Default `30s`.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -266,7 +266,7 @@ pub struct GatewayAuthzSpec {
     pub super_users: Vec<String>,
 
     /// How often the gateway refreshes its ACL cache from the broker,
-    /// in seconds. Default 60.
+    /// as a unit-carrying duration. Default `60s`.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -293,7 +293,8 @@ pub struct GatewayBearerSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub principal_claim: Option<String>,
 
-    /// Allowable clock skew for bearer-token timestamps in milliseconds.
+    /// Allowable clock skew for bearer-token timestamps, as a unit-carrying
+    /// duration (`30s`, `500ms`).
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -334,12 +335,12 @@ pub struct InboundWebhookSpec {
     pub signature_prefix: Option<String>,
 
     /// HTTP header carrying the request timestamp. Used with
-    /// `timestampToleranceSecs` to reject replayed requests.
+    /// `timestampTolerance` to reject replayed requests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timestamp_header: Option<String>,
 
-    /// Maximum age of a request timestamp in seconds before it is
-    /// rejected as a replay. Default 300 (5 minutes).
+    /// Maximum age of a request timestamp before it is rejected as a replay,
+    /// as a unit-carrying duration. Default `300s`.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -410,7 +411,8 @@ pub struct OutboundSubscriptionSpec {
     #[schemars(range(min = 1))]
     pub max_attempts: Option<u32>,
 
-    /// Initial backoff in milliseconds for exponential retry. Default 500.
+    /// Initial backoff for exponential retry, as a unit-carrying duration.
+    /// Default `500ms`.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -419,7 +421,7 @@ pub struct OutboundSubscriptionSpec {
     #[schemars(with = "Option<String>")]
     pub base_backoff: Option<Time>,
 
-    /// Maximum backoff cap in milliseconds. Default 30000.
+    /// Maximum backoff cap, as a unit-carrying duration. Default `30s`.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -428,7 +430,7 @@ pub struct OutboundSubscriptionSpec {
     #[schemars(with = "Option<String>")]
     pub max_backoff: Option<Time>,
 
-    /// HTTP request timeout in milliseconds. Default 10000.
+    /// HTTP request timeout, as a unit-carrying duration. Default `10s`.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",

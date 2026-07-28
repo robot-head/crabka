@@ -112,7 +112,7 @@ const BASIS_POINT: Ratio = fraction(0.0001);
 /// Dedup window the gateway assumes when the CR leaves `window` unset.
 const DEFAULT_DEDUP_WINDOW: Time = hours(24);
 
-/// ACL refresh cadence the gateway assumes when `aclRefreshSecs` is unset.
+/// ACL refresh cadence the gateway assumes when `aclRefresh` is unset.
 const DEFAULT_ACL_REFRESH: Time = minutes(1);
 
 /// Outbound-subscription retry backoff bounds the gateway assumes when the CR

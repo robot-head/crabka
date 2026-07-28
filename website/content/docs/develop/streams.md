@@ -178,6 +178,7 @@ async fn boot() -> Boot {
         advertised_url: "http://127.0.0.1:0".into(),
         group_id: "schema-registry".into(),
         leader_eligibility: true,
+        runtime: RegistryRuntimeConfig::default(),
         security: SecurityConfig::default(),
     };
     let store = KafkaStore::start(&cfg, cancel.clone())
