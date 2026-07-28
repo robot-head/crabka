@@ -5,6 +5,7 @@
 use std::collections::BTreeSet;
 
 use async_trait::async_trait;
+use crabka_units::{ByteRate, convert::ByteRateExt};
 
 use crate::{executor::throttle::ThrottleTargets, model::Movement};
 
@@ -15,14 +16,14 @@ use crate::{executor::throttle::ThrottleTargets, model::Movement};
 #[async_trait]
 pub trait ClientFacade: Send + Sync {
     /// `IncrementalAlterConfigs` — sets or deletes the four KIP-73
-    /// throttle keys derived from `targets` + `throttle_bytes_per_sec`.
+    /// throttle keys derived from `targets` + `throttle`.
     /// `op` is `ConfigOp::Set` for `ApplyThrottle` and `ConfigOp::Delete`
     /// for `ClearThrottle`.
     async fn alter_throttle_configs(
         &self,
         op: ConfigOp,
         targets: &ThrottleTargets,
-        throttle_bytes_per_sec: i64,
+        throttle: ByteRate,
     ) -> Result<(), PhaseError>;
 
     /// `AlterPartitionReassignments` — submits the partition movements
@@ -64,10 +65,10 @@ pub enum PhaseError {
 pub async fn apply_throttle(
     client: &(impl ClientFacade + ?Sized),
     targets: &ThrottleTargets,
-    throttle_bytes_per_sec: i64,
+    throttle: ByteRate,
 ) -> Result<(), PhaseError> {
     client
-        .alter_throttle_configs(ConfigOp::Set, targets, throttle_bytes_per_sec)
+        .alter_throttle_configs(ConfigOp::Set, targets, throttle)
         .await
 }
 
@@ -81,7 +82,7 @@ pub async fn clear_throttle(
     targets: &ThrottleTargets,
 ) -> Result<(), PhaseError> {
     client
-        .alter_throttle_configs(ConfigOp::Delete, targets, 0)
+        .alter_throttle_configs(ConfigOp::Delete, targets, ByteRate::ZERO)
         .await
 }
 
@@ -117,6 +118,8 @@ pub mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
+    use crabka_units::mebibytes_per_sec;
+
     use super::*;
 
     /// Mock that records every call. Tests inspect the recorded log to
@@ -131,12 +134,14 @@ pub mod tests {
         pub list_scope: Mutex<Vec<(String, i32)>>,
     }
 
-    #[derive(Debug, Clone, PartialEq, Eq)]
+    /// `PartialEq` but not `Eq`: `AlterConfigs::rate` is an `f64`-backed
+    /// quantity.
+    #[derive(Debug, Clone, PartialEq)]
     pub enum MockCall {
         AlterConfigs {
             op: ConfigOp,
             targets: ThrottleTargets,
-            rate: i64,
+            rate: ByteRate,
         },
         Submit(Vec<Movement>),
         Cancel(Vec<(String, i32)>),
@@ -173,12 +178,12 @@ pub mod tests {
             &self,
             op: ConfigOp,
             targets: &ThrottleTargets,
-            throttle_bytes_per_sec: i64,
+            throttle: ByteRate,
         ) -> Result<(), PhaseError> {
             self.calls.lock().unwrap().push(MockCall::AlterConfigs {
                 op,
                 targets: targets.clone(),
-                rate: throttle_bytes_per_sec,
+                rate: throttle,
             });
             Ok(())
         }
@@ -264,7 +269,9 @@ pub mod tests {
         let client = MockClient::new();
         let targets =
             crate::executor::throttle::compute_throttle_targets(&[mv("t", 0, vec![1], vec![2])]);
-        apply_throttle(&client, &targets, 50_000_000).await.unwrap();
+        apply_throttle(&client, &targets, mebibytes_per_sec(48))
+            .await
+            .unwrap();
         clear_throttle(&client, &targets).await.unwrap();
         let calls = client.calls();
         let ops: Vec<_> = calls

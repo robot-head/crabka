@@ -88,6 +88,19 @@ type exists to prevent.
 For logs and diagnostics, `Human::human()` renders the operator form:
 `tracing::info!(size = %limit.human(), "…")` prints `512MiB`.
 
+## Where a quantity cannot go: `Eq`
+
+Quantities store `f64`, so they are `PartialEq` but never `Eq`. A struct that
+derives `Eq` therefore cannot hold one, and dropping the derive is not always
+free — the Kubernetes operator diffs CRD specs by equality to decide whether to
+reconcile, so `Eq` there is load-bearing. Those fields stay raw integers and
+convert on the way into the domain.
+
+This is a consequence of the storage-type choice, not an oversight: one storage
+type across all five dimensions is what makes `ByteSize / Time` compile, and no
+integer storage can represent a sub-second duration. Where you hit it, convert at
+the seam and say why in a comment.
+
 ## Naming after conversion
 
 Drop the unit from the name once the type carries it: `session_timeout_ms: i32`

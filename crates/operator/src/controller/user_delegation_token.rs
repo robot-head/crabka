@@ -27,16 +27,14 @@
 //! trait pair. Unit tests substitute trivial in-memory mocks; production
 //! wires `kube::Api<Secret>` / `kube::Api<KafkaUser>` adapters.
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    time::Duration,
-};
+use std::collections::{BTreeMap, BTreeSet};
 
 use async_trait::async_trait;
 use base64::Engine as _;
 use crabka_client_admin::AdminError;
 use crabka_metadata::DelegationToken;
 use crabka_security::KafkaPrincipal;
+use crabka_units::{Time, convert::TimeExt as _, hours, minutes};
 use k8s_openapi::{
     ByteString,
     api::core::v1::Secret,
@@ -59,7 +57,7 @@ pub(crate) const DEFAULT_RENEW_BEFORE_EXPIRY_MS: i64 = 24 * 60 * 60 * 1_000;
 
 /// Transient broker errors trigger a 5-minute requeue backoff per spec
 /// §2.5 (`AUTH_DISABLED`, `AUTHORIZATION_FAILED`, `REQUEST_NOT_ALLOWED`).
-const TRANSIENT_BACKOFF: Duration = Duration::from_mins(5);
+const TRANSIENT_BACKOFF: Time = minutes(5);
 
 /// Broker error codes the spec §2.5 table calls out.
 const CODE_INVALID_REQUEST: i16 = 42;
@@ -248,7 +246,7 @@ pub(crate) async fn reconcile(
 
     // 2. Drive the decision. Each arm yields the live token + its
     //    expiry-driven requeue cadence.
-    let (token, requeue): (DelegationToken, Duration) = match decision {
+    let (token, requeue): (DelegationToken, Time) = match decision {
         ReconcileDecision::Create => match issue_new_token(&name, auth, admin).await {
             Ok(t) => {
                 let r = compute_requeue(&t, auth, now_ms);
@@ -304,7 +302,7 @@ pub(crate) async fn reconcile(
     users.patch_status(&name, body).await?;
 
     Ok(ReconcileOutcome {
-        action: Action::requeue(requeue),
+        action: Action::requeue(requeue.to_std()),
     })
 }
 
@@ -401,21 +399,31 @@ fn user_owner_ref(obj: &KafkaUser) -> Result<OwnerReference, ReconcileError> {
     })
 }
 
-/// Wait until ~`renew_before_expiry_ms` before expiry. Clamped:
-/// - at most 24h (the operator wants to re-check at least once a day),
-/// - at least 1m (prevent a hot loop if the broker hands back an
-///   already-stale `expiry_ts`).
+/// Shortest gap the reconciler will wait before re-checking a token, so an
+/// already-stale `expiry_ts` from the broker cannot spin the loop.
+const MIN_REQUEUE: Time = minutes(1);
+/// Longest gap, so the operator re-checks at least once a day even for a token
+/// with a distant expiry.
+const MAX_REQUEUE: Time = hours(24);
+
+/// Wait until ~`renew_before_expiry_ms` before expiry, clamped to
+/// `[MIN_REQUEUE, MAX_REQUEUE]`.
+///
+/// `expiry_timestamp_ms` and `now_ms` are instants; their difference (less the
+/// renewal lead time, which the CRD carries as raw milliseconds) is the extent.
 pub(crate) fn compute_requeue(
     token: &DelegationToken,
     auth: &DelegationTokenAuth,
     now_ms: i64,
-) -> Duration {
-    let renew_before = auth
-        .renew_before_expiry_ms
-        .unwrap_or(DEFAULT_RENEW_BEFORE_EXPIRY_MS);
-    let until_renew_ms = (token.expiry_timestamp_ms - now_ms - renew_before).max(0);
-    let clamped_ms = until_renew_ms.clamp(60 * 1_000, 24 * 60 * 60 * 1_000); // [1m, 24h]
-    Duration::from_millis(clamped_ms.cast_unsigned())
+) -> Time {
+    let renew_before = Time::from_millis(
+        auth.renew_before_expiry_ms
+            .unwrap_or(DEFAULT_RENEW_BEFORE_EXPIRY_MS),
+    );
+    let until_expiry = Time::from_millis(token.expiry_timestamp_ms - now_ms);
+    (until_expiry - renew_before)
+        .max(MIN_REQUEUE)
+        .min(MAX_REQUEUE)
 }
 
 /// Compute the `Ready` + `TokenIssued` + `TokenExpiring` conditions.
@@ -526,12 +534,12 @@ async fn on_admin_error(
     op: &'static str,
     users: &dyn KafkaUserStatusWriter,
 ) -> Result<ReconcileOutcome, ReconcileError> {
-    let (reason, message, requeue): (&'static str, String, Duration) = match &err {
+    let (reason, message, requeue): (&'static str, String, Time) = match &err {
         AdminError::Broker { code, .. } if *code == CODE_INVALID_REQUEST => (
             "InvalidSpec",
             format!("{op}: INVALID_REQUEST (42)"),
             // No automatic recovery — long requeue so a human notices.
-            Duration::from_hours(1),
+            hours(1),
         ),
         AdminError::Broker { code, .. } if *code == CODE_DELEGATION_TOKEN_AUTH_DISABLED => (
             "BrokerAuthDisabled",
@@ -570,7 +578,7 @@ async fn on_admin_error(
     let body = build_failure_status_patch(&conds);
     users.patch_status(name, body).await?;
     Ok(ReconcileOutcome {
-        action: Action::requeue(requeue),
+        action: Action::requeue(requeue.to_std()),
     })
 }
 
@@ -1116,10 +1124,10 @@ mod tests {
     #[test]
     fn compute_requeue_clamps_to_one_minute_minimum() {
         // Token expires "now" with renew_before unset — without a clamp
-        // we'd compute Duration::ZERO and hot-loop the reconciler.
+        // we'd compute a zero extent and hot-loop the reconciler.
         let t = token_with(0, vec![]);
         let r = compute_requeue(&t, &auth(vec![], None), 0);
-        assert!(r >= Duration::from_mins(1));
+        assert!(r == minutes(1));
     }
 
     #[test]
@@ -1127,7 +1135,15 @@ mod tests {
         // Token expires in a year; without clamp we'd requeue weeks out.
         let t = token_with(365 * 24 * 60 * 60 * 1_000, vec![]);
         let r = compute_requeue(&t, &auth(vec![], None), 0);
-        assert!(r <= Duration::from_hours(24));
+        assert!(r == hours(24));
+    }
+
+    #[test]
+    fn compute_requeue_lands_between_the_clamps() {
+        // Expiry 3h out, renewal lead 1h -> re-check in 2h.
+        let t = token_with(3 * 60 * 60 * 1_000, vec![]);
+        let r = compute_requeue(&t, &auth(vec![], Some(60 * 60 * 1_000)), 0);
+        assert!(r == hours(2));
     }
 
     #[test]

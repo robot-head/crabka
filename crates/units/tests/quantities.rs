@@ -317,6 +317,30 @@ fn serde_round_trips_both_encodings() {
     check!(encoded.contains(r#""retention_bytes":2147483648"#));
 }
 
+/// An optional fraction round-trips in every encoding it accepts.
+#[test]
+fn optional_fractions_round_trip() {
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct Config {
+        #[serde(with = "serde_units::human::option_ratio")]
+        dirty_ratio: Option<Ratio>,
+    }
+
+    assert!(let Ok(set) = serde_json::from_str::<Config>(r#"{"dirty_ratio": "2.5%"}"#));
+    check!(set.dirty_ratio == Some(fraction(0.025)));
+
+    assert!(let Ok(bare) = serde_json::from_str::<Config>(r#"{"dirty_ratio": 0.025}"#));
+    check!(bare.dirty_ratio == set.dirty_ratio);
+
+    assert!(let Ok(unset) = serde_json::from_str::<Config>(r#"{"dirty_ratio": null}"#));
+    check!(unset.dirty_ratio == None);
+
+    assert!(let Ok(encoded) = serde_json::to_string(&set));
+    check!(encoded == r#"{"dirty_ratio":"2.5%"}"#);
+    assert!(let Ok(reparsed) = serde_json::from_str::<Config>(&encoded));
+    check!(reparsed == set);
+}
+
 /// A human-form field rejects a bare number rather than guessing its unit.
 #[test]
 fn serde_human_form_requires_a_unit() {

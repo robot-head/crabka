@@ -176,11 +176,59 @@ pub mod human {
         /// Either encoding a fraction may arrive in.
         #[derive(serde::Deserialize)]
         #[serde(untagged)]
-        enum Encoded {
+        pub(super) enum Encoded {
             /// `"25%"`.
             Text(String),
             /// `0.25`.
             Number(f64),
+        }
+    }
+
+    /// A dimensionless fraction as `"25%"` or `0.25`, or `null`.
+    pub mod option_ratio {
+        use serde::{
+            Deserializer, Serializer,
+            de::{Deserialize as _, Error as _, Unexpected},
+        };
+
+        use super::ratio::Encoded;
+        use crate::{Ratio, fmt::Human as _, fraction};
+
+        /// Writes the fraction as a percentage string, or `null`.
+        ///
+        /// # Errors
+        ///
+        /// Whatever the serializer reports for an optional string.
+        pub fn serialize<S: Serializer>(
+            value: &Option<Ratio>,
+            serializer: S,
+        ) -> Result<S::Ok, S::Error> {
+            match value {
+                Some(value) => serializer.collect_str(&value.human()),
+                None => serializer.serialize_none(),
+            }
+        }
+
+        /// Reads the fraction from a percentage string, a bare number, or `null`.
+        ///
+        /// # Errors
+        ///
+        /// If the value is neither `null` nor a number nor a string holding a
+        /// fraction.
+        pub fn deserialize<'de, D: Deserializer<'de>>(
+            deserializer: D,
+        ) -> Result<Option<Ratio>, D::Error> {
+            match Option::<Encoded>::deserialize(deserializer)? {
+                None => Ok(None),
+                Some(Encoded::Text(raw)) => crate::parse::ratio(&raw)
+                    .map(Some)
+                    .map_err(D::Error::custom),
+                Some(Encoded::Number(value)) if value.is_finite() => Ok(Some(fraction(value))),
+                Some(Encoded::Number(value)) => Err(D::Error::invalid_value(
+                    Unexpected::Float(value),
+                    &"a finite fraction",
+                )),
+            }
         }
     }
 }

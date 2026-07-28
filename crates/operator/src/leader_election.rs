@@ -1,5 +1,4 @@
-use std::time::Duration;
-
+use crabka_units::{Time, convert::TimeExt as _, secs};
 use k8s_openapi::{
     api::coordination::v1::{Lease, LeaseSpec},
     apimachinery::pkg::apis::meta::v1::{MicroTime, ObjectMeta},
@@ -10,11 +9,20 @@ use kube::{
     api::{Api, Patch, PatchParams, PostParams},
 };
 
-const LEASE_DURATION_SECS: i32 = 15;
-const RETRY: Duration = Duration::from_secs(2);
+/// How long a held Lease stays valid without a renewal.
+const LEASE_DURATION: Time = secs(15);
+/// Poll cadence while another replica holds the Lease.
+const RETRY: Time = secs(2);
 
 fn now() -> jiff::Timestamp {
     jiff::Timestamp::now()
+}
+
+/// The Lease duration as k8s's `leaseDurationSeconds` (`Option<i32>`). The
+/// field belongs to `k8s_openapi`'s generated `LeaseSpec`, so the extent
+/// narrows to whole seconds here; an absurd extent saturates at `i32::MAX`.
+fn lease_duration_seconds(extent: Time) -> i32 {
+    i32::try_from(extent.secs_i64()).unwrap_or(i32::MAX)
 }
 
 /// Block until this process holds the Lease.
@@ -44,7 +52,7 @@ pub async fn acquire(
                     },
                     spec: Some(LeaseSpec {
                         holder_identity: Some(identity.into()),
-                        lease_duration_seconds: Some(LEASE_DURATION_SECS),
+                        lease_duration_seconds: Some(lease_duration_seconds(LEASE_DURATION)),
                         acquire_time: Some(MicroTime(now())),
                         renew_time: Some(MicroTime(now())),
                         lease_transitions: Some(1),
@@ -71,7 +79,7 @@ pub async fn acquire(
                     let patch = serde_json::json!({
                         "spec": {
                             "holderIdentity": identity,
-                            "leaseDurationSeconds": LEASE_DURATION_SECS,
+                            "leaseDurationSeconds": lease_duration_seconds(LEASE_DURATION),
                             "acquireTime": MicroTime(now()),
                             "renewTime": MicroTime(now()),
                         }
@@ -90,7 +98,7 @@ pub async fn acquire(
                     }
                 }
                 tracing::debug!(%name, "lease held by another replica, waiting");
-                tokio::time::sleep(RETRY).await;
+                tokio::time::sleep(RETRY.to_std()).await;
             }
         }
     }
@@ -111,9 +119,11 @@ fn is_expired(lease: &Lease) -> bool {
     let Some(renew) = spec.renew_time.as_ref() else {
         return true;
     };
-    let dur_secs = i64::from(spec.lease_duration_seconds.unwrap_or(LEASE_DURATION_SECS));
-    let elapsed_secs = now().as_second() - renew.0.as_second();
-    elapsed_secs > dur_secs
+    let lease_duration = spec
+        .lease_duration_seconds
+        .map_or(LEASE_DURATION, |raw| Time::from_secs(i64::from(raw)));
+    let elapsed = Time::from_secs(now().as_second() - renew.0.as_second());
+    elapsed > lease_duration
 }
 
 #[cfg(test)]
@@ -149,5 +159,14 @@ mod tests {
         let fresh = now();
         assert!(is_expired(&lease_with("x", stale)));
         assert!(!is_expired(&lease_with("x", fresh)));
+    }
+
+    #[test]
+    fn lease_duration_renders_as_whole_seconds() {
+        // The k8s field is `Option<i32>` seconds; the extent narrows there and
+        // nowhere else.
+        assert!(lease_duration_seconds(LEASE_DURATION) == 15);
+        assert!(lease_duration_seconds(crabka_units::minutes(2)) == 120);
+        assert!(lease_duration_seconds(crabka_units::days(365 * 100)) == i32::MAX);
     }
 }

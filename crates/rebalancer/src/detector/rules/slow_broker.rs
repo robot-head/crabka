@@ -4,6 +4,8 @@
 
 use std::collections::HashMap;
 
+use crabka_units::convert::RatioExt as _;
+
 use super::{Rule, RuleCtx, RuleHit};
 use crate::{
     detector::{AnomalyKey, AnomalyKind, AnomalySeverity},
@@ -17,14 +19,14 @@ impl SlowBroker {
         let mut per_broker: HashMap<i32, f64> = HashMap::new();
         for p in &ctx.snapshot.partitions {
             for replica in &p.replicas {
-                if let Some(rate) = ctx.usages.cpu_micros_rate(
+                if let Some(cores) = ctx.usages.cpu_cores_rate(
                     *replica,
                     &p.topic,
                     p.partition,
                     Window::FiveMin,
                     ctx.now_ms,
                 ) {
-                    *per_broker.entry(*replica).or_insert(0.0) += rate / 1_000_000.0;
+                    *per_broker.entry(*replica).or_insert(0.0) += cores.as_f64();
                 }
             }
         }
@@ -78,7 +80,9 @@ impl Rule for SlowBroker {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::Duration};
+    use std::sync::Arc;
+
+    use crabka_units::prelude::*;
 
     use super::*;
     use crate::{
@@ -118,12 +122,12 @@ mod tests {
     }
 
     /// `samples`: (broker, topic, partition, `v_t0`, `v_t1`) — CPU counter is
-    /// monotonic; we feed two samples 1s apart so `cpu_micros_rate` has
+    /// monotonic; we feed two samples 1s apart so `cpu_cores_rate` has
     /// at least one delta to compute.
     fn store_with_cpu(samples: Vec<(i32, &str, i32, f64, f64)>) -> Arc<UsageStore> {
         let store = UsageStore::new(WindowConfig {
-            scrape_interval: Duration::from_secs(30),
-            retention: Duration::from_hours(1),
+            scrape_interval: secs(30),
+            retention: hours(1),
         });
         for (broker, topic, partition, v0, _) in &samples {
             store.insert(

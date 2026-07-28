@@ -81,18 +81,18 @@ fn runtime_crd_surface_round_trips() {
             "tuning": {
                 "internalTopicReplicationFactor": 2,
                 "internalTopicAllowReplicationFallback": false,
-                "internalTopicCreateTimeoutMs": 7001,
-                "internalTopicSegmentMs": 22001,
+                "internalTopicCreateTimeout": "7.001s",
+                "internalTopicSegment": "22.001s",
                 "internalTopicMinCleanableDirtyRatioBasisPoints": 250,
-                "consumerPollTimeoutMs": 501,
+                "consumerPollTimeout": "501ms",
                 "ownershipWarmupEmptyPolls": 3,
-                "readinessPollIntervalMs": 251,
-                "produceMaxBodyBytes": 3_145_728,
-                "forwardMaxBodyBytes": 3_145_727
+                "readinessPollInterval": "251ms",
+                "produceMaxBody": "3MiB",
+                "forwardMaxBody": "3145727B"
             },
             "schemaRegistry": {
                 "url": "http://registry:8081",
-                "latestCacheTtlMs": 5001,
+                "latestCacheTtl": "5.001s",
                 "frameRaw": true
             },
             "healthChecks": {
@@ -102,9 +102,9 @@ fn runtime_crd_surface_round_trips() {
                 "livenessPeriodSeconds": 12
             },
             "dedup": { "ownershipGroup": "owners-custom" },
-            "tls": { "reloadIntervalSecs": 31 },
+            "tls": { "reloadInterval": "31s" },
             "authz": {
-                "bearer": { "allowableClockSkewMs": 31001 }
+                "bearer": { "allowableClockSkew": "31.001s" }
             },
             "webhooks": [{
                 "name": "orders",
@@ -127,13 +127,13 @@ fn runtime_crd_surface_round_trips() {
     for pointer in [
         "/membershipTopic",
         "/tuning/internalTopicReplicationFactor",
-        "/tuning/produceMaxBodyBytes",
-        "/tuning/forwardMaxBodyBytes",
-        "/schemaRegistry/latestCacheTtlMs",
+        "/tuning/produceMaxBody",
+        "/tuning/forwardMaxBody",
+        "/schemaRegistry/latestCacheTtl",
         "/healthChecks/readinessPeriodSeconds",
         "/dedup/ownershipGroup",
-        "/tls/reloadIntervalSecs",
-        "/authz/bearer/allowableClockSkewMs",
+        "/tls/reloadInterval",
+        "/authz/bearer/allowableClockSkew",
         "/webhooks/0/schemaSubject",
         "/outboundSubscriptions/0/groupId",
         "/outboundSubscriptions/0/decodeToJson",
@@ -148,9 +148,9 @@ fn runtime_crd_surface_round_trips() {
 #[tokio::test]
 async fn runtime_invalid_values_stop_before_child_rendering() {
     for invalid in [
-        serde_json::json!({"tuning": {"consumerPollTimeoutMs": 0}}),
-        serde_json::json!({"tuning": {"produceMaxBodyBytes": 0}}),
-        serde_json::json!({"tuning": {"forwardMaxBodyBytes": 0}}),
+        serde_json::json!({"tuning": {"consumerPollTimeout": "0s"}}),
+        serde_json::json!({"tuning": {"produceMaxBody": "0B"}}),
+        serde_json::json!({"tuning": {"forwardMaxBody": "0B"}}),
         serde_json::json!({
             "tuning": {"internalTopicMinCleanableDirtyRatioBasisPoints": 10001}
         }),
@@ -158,8 +158,8 @@ async fn runtime_invalid_values_stop_before_child_rendering() {
             "name": "s",
             "sourceTopics": ["t"],
             "targetUrl": "https://example.com",
-            "baseBackoffMs": 2,
-            "maxBackoffMs": 1
+            "baseBackoff": "2ms",
+            "maxBackoff": "1ms"
         }]}),
         serde_json::json!({"schemaRegistry": {"url": "not a URL"}}),
         serde_json::json!({"healthChecks": {"readinessInitialDelaySeconds": -1}}),

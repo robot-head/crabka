@@ -9,6 +9,10 @@
 
 use std::{collections::BTreeMap, fmt::Debug, future::Future, pin::Pin, sync::Arc};
 
+use crabka_units::{
+    Time,
+    convert::{StdDurationExt as _, TimeExt as _},
+};
 use k8s_openapi::{
     ByteString,
     api::{
@@ -46,9 +50,30 @@ pub(crate) const DEFAULT_BROKER_IMAGE: &str = concat!(
 );
 
 pub(super) fn error_requeue(ctx: Arc<Context>) -> Action {
-    let delay = ctx.config.controller_error_requeue_ms.duration();
+    let delay = ctx.config.controller_error_requeue_ms.time();
     drop(ctx);
-    Action::requeue(delay)
+    Action::requeue(delay.to_std())
+}
+
+/// A millisecond count held as `u64` — a `refined_type` newtype such as
+/// `crabka_gres_control`'s `PositiveMillis` — as a time extent.
+/// [`TimeExt::from_millis`] takes an `i64`, so a value past `i64::MAX`
+/// milliseconds saturates rather than wrapping negative.
+pub(crate) fn time_from_millis_u64(millis: u64) -> Time {
+    Time::from_millis(i64::try_from(millis).unwrap_or(i64::MAX))
+}
+
+/// A time extent back in whole milliseconds as `u64`, for arithmetic against
+/// the epoch-millisecond instants the Gres status fields carry. A negative
+/// extent clamps to zero.
+pub(crate) fn millis_u64(extent: Time) -> u64 {
+    u64::try_from(extent.millis_i64()).unwrap_or_default()
+}
+
+/// A time extent back in whole seconds as `u64`, for the `refined_type` rules
+/// that guard `…Secs` CRD fields. A negative extent clamps to zero.
+pub(crate) fn secs_u64(extent: Time) -> u64 {
+    u64::try_from(extent.secs_i64()).unwrap_or_default()
 }
 
 /// Reconcile-error surface shared by both reconcilers.
@@ -208,7 +233,7 @@ where
         crate::telemetry::ReconcileResult::Error
     };
     ctx.metrics
-        .record_reconcile(kind, outcome, started.elapsed().as_secs_f64());
+        .record_reconcile(kind, outcome, started.elapsed().as_time());
     result
 }
 

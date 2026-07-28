@@ -16,6 +16,7 @@ use crabka_protocol::owned::{
     list_partition_reassignments_request::ListPartitionReassignmentsRequest,
     list_partition_reassignments_response::ListPartitionReassignmentsResponse,
 };
+use crabka_units::{ByteRate, convert::ByteRateExt as _};
 
 use crate::{
     executor::{
@@ -102,13 +103,14 @@ fn check_reassign_response(
 fn build_alter_throttle_request(
     op: ConfigOp,
     targets: &ThrottleTargets,
-    throttle_bytes_per_sec: i64,
+    throttle: ByteRate,
 ) -> IncrementalAlterConfigsRequest {
     let op_byte = match op {
         ConfigOp::Set => OP_SET,
         ConfigOp::Delete => OP_DELETE,
     };
-    let rate_str = throttle_bytes_per_sec.to_string();
+    // KIP-73 expresses both rate keys as a decimal bytes-per-second string.
+    let rate_str = throttle.bytes_per_sec_i64().to_string();
     let mut resources: Vec<AlterConfigsResource> = Vec::new();
 
     // Per-broker rate configs.
@@ -277,9 +279,9 @@ impl ClientFacade for LiveClient {
         &self,
         op: ConfigOp,
         targets: &ThrottleTargets,
-        throttle_bytes_per_sec: i64,
+        throttle: ByteRate,
     ) -> Result<(), PhaseError> {
-        let req = build_alter_throttle_request(op, targets, throttle_bytes_per_sec);
+        let req = build_alter_throttle_request(op, targets, throttle);
         let resp = self
             .inner
             .send(req)
@@ -328,10 +330,7 @@ impl ClientFacade for LiveClient {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::{BTreeMap, BTreeSet},
-        time::Duration,
-    };
+    use std::collections::{BTreeMap, BTreeSet};
 
     use assert2::check;
     use crabka_protocol::{
@@ -349,8 +348,12 @@ mod tests {
             },
         },
     };
+    use crabka_units::{Time, bytes_per_sec, convert::TimeExt as _, millis};
 
     use super::*;
+
+    /// Connect/request timeout for the deliberately-unreachable test client.
+    const CLIENT_TIMEOUT: Time = millis(50);
 
     fn movement(topic: &str, partition: i32, old: Vec<i32>, new: Vec<i32>) -> Movement {
         Movement {
@@ -424,7 +427,7 @@ mod tests {
 
     #[test]
     fn build_alter_throttle_request_sets_all_resource_fields() {
-        let req = build_alter_throttle_request(ConfigOp::Set, &targets(), 1234);
+        let req = build_alter_throttle_request(ConfigOp::Set, &targets(), bytes_per_sec(1234));
 
         assert2::assert!(
             req == IncrementalAlterConfigsRequest {
@@ -479,7 +482,7 @@ mod tests {
 
     #[test]
     fn build_alter_throttle_delete_request_tombstones_values() {
-        let req = build_alter_throttle_request(ConfigOp::Delete, &targets(), 1234);
+        let req = build_alter_throttle_request(ConfigOp::Delete, &targets(), bytes_per_sec(1234));
         assert2::assert!(req.resources.iter().all(|r| {
             r.configs
                 .iter()
@@ -607,8 +610,8 @@ mod tests {
         let inner = Client::builder()
             .bootstrap("127.0.0.1:1")
             .client_id(format!("rebalancer-live-client-test-{suffix}"))
-            .connect_timeout(Duration::from_millis(50))
-            .request_timeout(Duration::from_millis(50))
+            .connect_timeout(CLIENT_TIMEOUT.to_std())
+            .request_timeout(CLIENT_TIMEOUT.to_std())
             .build()
             .await
             .expect("client build does not connect");
@@ -621,7 +624,7 @@ mod tests {
 
         assert2::assert!(matches!(
             client
-                .alter_throttle_configs(ConfigOp::Set, &targets(), 1234)
+                .alter_throttle_configs(ConfigOp::Set, &targets(), bytes_per_sec(1234))
                 .await,
             Err(PhaseError::Client(_))
         ));

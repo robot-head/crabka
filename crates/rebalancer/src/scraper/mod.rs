@@ -8,9 +8,10 @@ pub mod window;
 use std::{
     collections::HashMap,
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
+use crabka_units::{fmt::Human as _, prelude::*};
 pub use parse::{MetricKind, ParsedSample};
 pub use targets::{ScrapeTarget, TargetParseError, TargetSource, parse_targets};
 use tokio_util::sync::CancellationToken;
@@ -50,9 +51,13 @@ pub fn classify(prev: Option<bool>, current: bool) -> ScrapeLogLevel {
     }
 }
 
+/// How long a single `/metrics` fetch may take before the scraper gives up
+/// on that broker for this tick.
+const HTTP_TIMEOUT: Time = secs(5);
+
 pub struct Scraper {
     source: TargetSource,
-    interval: Duration,
+    interval: Time,
     store: Arc<UsageStore>,
     http: reqwest::Client,
     shutdown: CancellationToken,
@@ -68,12 +73,12 @@ impl Scraper {
     /// Panics if an internal lock is poisoned or validated cluster state is missing an assignment required by the plan.
     pub fn new(
         source: TargetSource,
-        interval: Duration,
+        interval: Time,
         store: Arc<UsageStore>,
         shutdown: CancellationToken,
     ) -> Self {
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(5))
+            .timeout(HTTP_TIMEOUT.to_std())
             .build()
             .expect("reqwest client");
         Self {
@@ -87,8 +92,8 @@ impl Scraper {
     }
 
     pub async fn run(mut self) {
-        info!(interval_secs = self.interval.as_secs(), "scraper started");
-        let mut ticker = tokio::time::interval(self.interval);
+        info!(interval = %self.interval.human(), "scraper started");
+        let mut ticker = tokio::time::interval(self.interval.to_std());
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
@@ -197,6 +202,7 @@ enum Outcome {
 mod tests {
     use std::collections::BTreeSet;
 
+    use crabka_units::prelude::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
@@ -296,15 +302,15 @@ mod tests {
             })));
 
         let store = Arc::new(UsageStore::new(WindowConfig {
-            scrape_interval: Duration::from_secs(1),
-            retention: Duration::from_mins(1),
+            scrape_interval: secs(1),
+            retention: minutes(1),
         }));
         let mut scraper = Scraper::new(
             TargetSource::Discovered {
                 snapshot: snapshot.clone(),
                 metrics_port: 1, // bogus port — scrapes will fail but that's fine
             },
-            Duration::from_millis(50),
+            millis(50),
             store,
             CancellationToken::new(),
         );
@@ -342,15 +348,15 @@ mod tests {
 
         let failed_addr = one_response_server("500 Internal Server Error", metric_body).await;
         let failed_store = Arc::new(UsageStore::new(WindowConfig {
-            scrape_interval: Duration::from_secs(1),
-            retention: Duration::from_mins(1),
+            scrape_interval: secs(1),
+            retention: minutes(1),
         }));
         let mut failed_scraper = Scraper::new(
             TargetSource::Static(vec![ScrapeTarget {
                 broker_id: 1,
                 addr: failed_addr,
             }]),
-            Duration::from_millis(50),
+            millis(50),
             failed_store.clone(),
             CancellationToken::new(),
         );
@@ -364,15 +370,15 @@ mod tests {
 
         let ok_addr = one_response_server("200 OK", metric_body).await;
         let ok_store = Arc::new(UsageStore::new(WindowConfig {
-            scrape_interval: Duration::from_secs(1),
-            retention: Duration::from_mins(1),
+            scrape_interval: secs(1),
+            retention: minutes(1),
         }));
         let mut ok_scraper = Scraper::new(
             TargetSource::Static(vec![ScrapeTarget {
                 broker_id: 1,
                 addr: ok_addr,
             }]),
-            Duration::from_millis(50),
+            millis(50),
             ok_store.clone(),
             CancellationToken::new(),
         );
@@ -381,7 +387,7 @@ mod tests {
         assert2::assert!(
             ok_store
                 .disk_bytes_avg(1, "t", 0, Window::FiveMin, crate::goals::now_ms())
-                .is_some_and(|v| (v - 42.0).abs() < 1e-9)
+                .is_some_and(|v| v == bytes(42))
         );
     }
 
@@ -390,16 +396,16 @@ mod tests {
         let shutdown = CancellationToken::new();
         let scraper = Scraper::new(
             TargetSource::Static(vec![]),
-            Duration::from_mins(1),
+            minutes(1),
             Arc::new(UsageStore::default()),
             shutdown.clone(),
         );
 
         let handle = tokio::spawn(scraper.run());
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::time::sleep(millis(10).to_std()).await;
         assert2::assert!(!handle.is_finished());
         shutdown.cancel();
-        tokio::time::timeout(Duration::from_secs(1), handle)
+        tokio::time::timeout(secs(1).to_std(), handle)
             .await
             .expect("scraper should stop after cancellation")
             .expect("scraper task should join");

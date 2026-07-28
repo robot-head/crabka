@@ -14,6 +14,7 @@ use crabka_operator::{
         SchemaRegistryHealthChecks, SchemaRegistryRuntime, SchemaRegistrySpec,
     },
 };
+use crabka_units::{millis, secs};
 use http::Method;
 
 #[path = "shared/mod.rs"]
@@ -314,7 +315,7 @@ async fn runtime_invalid_policy_is_rejected_before_deployment() {
             jwks_expected_audience: None,
             jwks_tls_secret_name: None,
             jwks_principal_claim: None,
-            jwks_refresh_ms: Some(0),
+            jwks_refresh_ms: Some(millis(0)),
         }),
     });
     assert_schema_registry_config_invalid(invalid_jwks).await;
@@ -324,7 +325,7 @@ async fn runtime_invalid_policy_is_rejected_before_deployment() {
     invalid_acl.spec.authorization = Some(SchemaRegistryAuthz {
         enabled: true,
         super_users: Vec::new(),
-        acl_refresh_seconds: Some(0),
+        acl_refresh_seconds: Some(secs(0)),
     });
     assert_schema_registry_config_invalid(invalid_acl).await;
 }
@@ -679,7 +680,7 @@ async fn full_security_fields_render_to_args_and_mounts() {
     cr.spec.authorization = Some(crabka_operator::crd::SchemaRegistryAuthz {
         enabled: true,
         super_users: vec!["User:admin".into()],
-        acl_refresh_seconds: Some(15),
+        acl_refresh_seconds: Some(secs(15)),
     });
     // No Kafka GET rule needed (bootstrap override). Provide the apply/status rules.
     let rules = vec![
@@ -1211,7 +1212,7 @@ async fn bearer_jwks_renders_to_args() {
             jwks_expected_audience: Some("kafka-sr".into()),
             jwks_tls_secret_name: None,
             jwks_principal_claim: Some("email".into()),
-            jwks_refresh_ms: Some(30_000),
+            jwks_refresh_ms: Some(millis(30_000)),
         }),
     });
     let rules = vec![

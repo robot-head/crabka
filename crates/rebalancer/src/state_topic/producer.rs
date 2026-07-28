@@ -3,8 +3,6 @@
 //! `ingest::admin_client` pattern; we don't pull in the high-level
 //! `crabka-client-producer` for a one-key-per-write workload.
 
-use std::time::Duration;
-
 use bytes::Bytes;
 use crabka_client_core::Client;
 use crabka_protocol::{
@@ -17,16 +15,19 @@ use crabka_protocol::{
     primitives::uuid::Uuid,
     records::{Record, RecordBatch},
 };
+use crabka_units::{Time, convert::TimeExt as _, millis, secs};
 use tracing::debug;
 
 use crate::state_topic::error::{StateTopicError, is_transient_topic_partition_code};
 
 const PRODUCE_RETRY_ATTEMPTS: usize = 50;
-const PRODUCE_RETRY_BACKOFF: Duration = Duration::from_millis(200);
+const PRODUCE_RETRY_BACKOFF: Time = millis(200);
+/// How long the broker may take to acknowledge an `acks=all` produce.
+const PRODUCE_TIMEOUT: Time = secs(10);
 
 /// Produce a single record to `(topic, partition=0)`. `value=None` is
 /// a tombstone (null value), matching Kafka compaction semantics.
-/// `acks=all`, `timeout_ms=10_000`. Transient error codes (see
+/// `acks=all`, with a [`PRODUCE_TIMEOUT`] ack deadline. Transient error codes (see
 /// [`is_transient_topic_partition_code`]) retry with a short backoff for up
 /// to `PRODUCE_RETRY_ATTEMPTS * PRODUCE_RETRY_BACKOFF` total wait.
 pub(crate) async fn produce_state(
@@ -50,7 +51,7 @@ pub(crate) async fn produce_state(
                     attempt,
                     topic, "metadata returned no topic_id; retrying after backoff"
                 );
-                tokio::time::sleep(PRODUCE_RETRY_BACKOFF).await;
+                tokio::time::sleep(PRODUCE_RETRY_BACKOFF.to_std()).await;
                 continue;
             }
             Err(e) => return Err(e),
@@ -65,7 +66,7 @@ pub(crate) async fn produce_state(
                     code,
                     attempt, "transient produce error; retrying after backoff"
                 );
-                tokio::time::sleep(PRODUCE_RETRY_BACKOFF).await;
+                tokio::time::sleep(PRODUCE_RETRY_BACKOFF.to_std()).await;
             }
             Err(e) => return Err(e),
         }
@@ -134,7 +135,7 @@ fn produce_request(
     };
     ProduceRequest {
         acks: -1, // all
-        timeout_ms: 10_000,
+        timeout_ms: PRODUCE_TIMEOUT.millis_i32(),
         topic_data: vec![TopicProduceData {
             name: topic.into(),
             topic_id,
@@ -187,6 +188,9 @@ mod tests {
 
     use super::*;
 
+    /// Connect/request timeout for the deliberately-unreachable test client.
+    const CLIENT_TIMEOUT: Time = millis(50);
+
     fn response_with_error(code: i16) -> ProduceResponse {
         ProduceResponse {
             responses: vec![TopicProduceResponse {
@@ -208,8 +212,8 @@ mod tests {
         Client::builder()
             .bootstrap("127.0.0.1:1")
             .client_id(unreachable_client_id(suffix))
-            .connect_timeout(Duration::from_millis(50))
-            .request_timeout(Duration::from_millis(50))
+            .connect_timeout(CLIENT_TIMEOUT.to_std())
+            .request_timeout(CLIENT_TIMEOUT.to_std())
             .build()
             .await
             .expect("client build does not connect")

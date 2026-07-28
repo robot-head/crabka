@@ -16,13 +16,17 @@ use crabka_operator::{
         ProposalStatus, ProposalSummary, RebalancerClientLike, RebalancerError, RebalancerProposal,
     },
 };
+use crabka_units::ByteRate;
 
 /// One recorded Connect-RPC.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum RebalCall {
     CreateProposal(Vec<String>),
     GetProposal(String),
-    ExecuteProposal { id: String, throttle: Option<i64> },
+    ExecuteProposal {
+        id: String,
+        throttle: Option<ByteRate>,
+    },
     CancelExecution(String),
 }
 
@@ -142,11 +146,11 @@ impl RebalancerClientLike for FakeRebalancerClient {
     async fn execute_proposal(
         &self,
         id: &str,
-        throttle_bytes_per_sec: Option<i64>,
+        throttle: Option<ByteRate>,
     ) -> Result<RebalancerProposal, RebalancerError> {
         self.calls.lock().unwrap().push(RebalCall::ExecuteProposal {
             id: id.into(),
-            throttle: throttle_bytes_per_sec,
+            throttle,
         });
         Self::serve(&self.execute)
     }

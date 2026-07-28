@@ -8,6 +8,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crabka_units::Ratio;
+
 use crate::{
     goals::{Goal, GoalContext, GoalPriority, OriginalReplicaState},
     model::{ClusterState, Movement, PartitionView},
@@ -33,8 +35,8 @@ impl TopicReplicaDistribution {
         m
     }
 
-    fn imbalance_pct(counts: &HashMap<i32, usize>) -> u32 {
-        crate::goals::imbalance_pct_usize(counts)
+    fn imbalance(counts: &HashMap<i32, usize>) -> Ratio {
+        crate::goals::imbalance_ratio_usize(counts)
     }
 }
 
@@ -59,7 +61,7 @@ impl Goal for TopicReplicaDistribution {
         for topic in &topics {
             loop {
                 let counts = Self::counts_for_topic(&working, &broker_ids, topic);
-                if Self::imbalance_pct(&counts) <= ctx.imbalance_threshold_pct {
+                if Self::imbalance(&counts) <= ctx.imbalance_threshold {
                     break;
                 }
                 let mut by_load: Vec<(i32, usize)> = counts.into_iter().collect();
@@ -96,12 +98,14 @@ impl Goal for TopicReplicaDistribution {
 #[cfg(test)]
 mod tests {
 
+    use crabka_units::prelude::*;
+
     use super::*;
     use crate::model::BrokerView;
 
-    fn ctx_with(threshold: u32, cap: usize) -> GoalContext {
+    fn ctx_with(threshold: Ratio, cap: usize) -> GoalContext {
         GoalContext {
-            imbalance_threshold_pct: threshold,
+            imbalance_threshold: threshold,
             max_movements_per_proposal: cap,
             min_topic_leaders_per_broker: 0,
             broker_capacities: std::sync::Arc::new(crate::capacity::BrokerCapacities::default()),
@@ -110,7 +114,7 @@ mod tests {
     }
 
     fn ctx() -> GoalContext {
-        ctx_with(10, 256)
+        ctx_with(percent(10), 256)
     }
 
     fn state_with(parts: Vec<PartitionView>, brokers: Vec<i32>) -> ClusterState {
@@ -155,9 +159,9 @@ mod tests {
     }
 
     #[test]
-    fn imbalance_pct_uses_difference_times_100_over_total() {
+    fn imbalance_is_spread_over_total() {
         let counts = std::collections::HashMap::from([(1, 3), (2, 1)]);
-        assert2::assert!(TopicReplicaDistribution::imbalance_pct(&counts) == 50);
+        assert2::assert!(TopicReplicaDistribution::imbalance(&counts) == percent(50));
     }
 
     #[test]
@@ -176,7 +180,7 @@ mod tests {
         let parts = vec![part("t", 0, vec![1, 99], 1), part("t", 1, vec![1], 1)];
         let s = state_with(parts, vec![1, 2]);
 
-        let mvs = TopicReplicaDistribution.propose(&s, &ctx_with(10, 1));
+        let mvs = TopicReplicaDistribution.propose(&s, &ctx_with(percent(10), 1));
 
         assert2::assert!(
             mvs == vec![Movement {
@@ -201,7 +205,7 @@ mod tests {
         ];
         let s = state_with(parts, vec![1, 2, 99]);
 
-        let mvs = TopicReplicaDistribution.propose(&s, &ctx_with(10, 1));
+        let mvs = TopicReplicaDistribution.propose(&s, &ctx_with(percent(10), 1));
 
         assert2::assert!(
             mvs == vec![Movement {
@@ -224,7 +228,7 @@ mod tests {
         ];
         let s = state_with(parts, vec![1, 2, 3]);
 
-        let mvs = TopicReplicaDistribution.propose(&s, &ctx_with(10, 1));
+        let mvs = TopicReplicaDistribution.propose(&s, &ctx_with(percent(10), 1));
 
         assert2::assert!(
             mvs == vec![Movement {
@@ -260,7 +264,7 @@ mod tests {
     fn respects_max_movements_cap() {
         let parts: Vec<_> = (0..20).map(|i| part("t", i, vec![1], 1)).collect();
         let s = state_with(parts, vec![1, 2, 3]);
-        let mvs = TopicReplicaDistribution.propose(&s, &ctx_with(10, 2));
+        let mvs = TopicReplicaDistribution.propose(&s, &ctx_with(percent(10), 2));
         assert2::assert!(mvs.len() <= 2);
     }
 
@@ -269,7 +273,7 @@ mod tests {
         let parts: Vec<_> = (0..20).map(|i| part("t", i, vec![1], 1)).collect();
         let s = state_with(parts, vec![1, 2, 3]);
 
-        let mvs = TopicReplicaDistribution.propose(&s, &ctx_with(10, 1));
+        let mvs = TopicReplicaDistribution.propose(&s, &ctx_with(percent(10), 1));
 
         assert2::assert!(mvs.len() == 1);
     }

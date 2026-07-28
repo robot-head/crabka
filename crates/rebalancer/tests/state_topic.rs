@@ -2,7 +2,7 @@
 //!
 //! Requires Docker; gated `#[ignore]` and CI runs with `--include-ignored`.
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_admin::AdminClient;
@@ -11,6 +11,7 @@ use crabka_rebalancer::{
     executor::state::{InFlightFile, Phase},
     state_topic::{LoadedState, StateBackend, StateTopic, StateTopicLoader, topic_admin},
 };
+use crabka_units::{Time, bytes_per_sec, convert::StdDurationExt as _, secs};
 use tokio_util::sync::CancellationToken;
 
 /// Boot a single-broker in-process Crabka, return its bootstrap address.
@@ -25,11 +26,14 @@ async fn boot_broker() -> (crabka_broker::BrokerHandle, String, tempfile::TempDi
     (broker, bootstrap, dir)
 }
 
-async fn drive_loader_until_loaded(state: Arc<LoadedState>, timeout: Duration) {
+/// How long a loader may take to reach its quiet-period steady state.
+const LOADER_TIMEOUT: Time = secs(10);
+
+async fn drive_loader_until_loaded(state: Arc<LoadedState>, timeout: Time) {
     let start = std::time::Instant::now();
     while !state.is_loaded() {
-        assert!(
-            start.elapsed() <= timeout,
+        assert2::assert!(
+            start.elapsed().as_time() <= timeout,
             "loader did not converge within {timeout:?}"
         );
         tokio::task::yield_now().await;
@@ -76,13 +80,13 @@ async fn write_load_round_trip_via_real_broker() {
         shutdown: warmup_shutdown.clone(),
     };
     let warmup_handle = tokio::spawn(warmup_loader.run());
-    drive_loader_until_loaded(warmup_state.clone(), Duration::from_secs(10)).await;
+    drive_loader_until_loaded(warmup_state.clone(), LOADER_TIMEOUT).await;
     warmup_shutdown.cancel();
     warmup_handle.await.unwrap();
 
     let state = LoadedState::new();
     let st = StateTopic::new(client.clone(), topic.clone(), state.clone());
-    let f = InFlightFile::new("p-1".into(), Phase::Wait, 1_111, 50_000_000);
+    let f = InFlightFile::new("p-1".into(), Phase::Wait, 1_111, bytes_per_sec(50_000_000));
     st.write(&f).await.expect("write");
 
     let shutdown = CancellationToken::new();
@@ -94,7 +98,7 @@ async fn write_load_round_trip_via_real_broker() {
     };
     let handle = tokio::spawn(loader_task.run());
 
-    drive_loader_until_loaded(state.clone(), Duration::from_secs(10)).await;
+    drive_loader_until_loaded(state.clone(), LOADER_TIMEOUT).await;
     let loaded = state.current().expect("non-tombstone");
     assert2::assert!((loaded.proposal_id.as_str(), loaded.phase) == ("p-1", Phase::Wait));
     shutdown.cancel();
@@ -114,7 +118,7 @@ async fn write_load_round_trip_via_real_broker() {
     };
     let handle2 = tokio::spawn(loader2.run());
 
-    drive_loader_until_loaded(state2.clone(), Duration::from_secs(10)).await;
+    drive_loader_until_loaded(state2.clone(), LOADER_TIMEOUT).await;
     assert2::assert!(state2.current().is_none());
     shutdown2.cancel();
     handle2.await.unwrap();

@@ -37,6 +37,7 @@ crabka-logfmt = { version = "0.3.8", path = "../logfmt" }
 crabka-metadata = { version = "0.3.8", path = "../metadata" }
 crabka-object-store = { version = "0.3.8", path = "../object-store" }
 crabka-security = { workspace = true }
+crabka-units = { workspace = true }
 base64 = { workspace = true }
 bytes = { workspace = true }
 derive_more = { workspace = true }

@@ -4,6 +4,7 @@
 //! primary, the rest forward writes. Associated with a managed `Kafka` via
 //! the `crabka.io/cluster` label (mirrors `KafkaTopic`).
 
+use crabka_units::Time;
 use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -232,8 +233,13 @@ pub struct BearerAuthn {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jwks_principal_claim: Option<String>,
     /// JWKS key-set refresh interval in milliseconds. Default 60 000.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub jwks_refresh_ms: Option<i64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::numeric::option_millis_i64"
+    )]
+    #[schemars(with = "Option<i64>")]
+    pub jwks_refresh_ms: Option<Time>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
@@ -252,8 +258,13 @@ pub struct SchemaRegistryAuthz {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub super_users: Vec<String>,
     /// ACL-cache refresh interval (seconds). Default 30.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub acl_refresh_seconds: Option<i64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::numeric::option_secs_i64"
+    )]
+    #[schemars(with = "Option<i64>")]
+    pub acl_refresh_seconds: Option<Time>,
 }
 
 /// SR → broker client security. Maps to the binary's `--kafka-*` flags.

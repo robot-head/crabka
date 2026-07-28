@@ -4,6 +4,7 @@
 
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
+use crabka_units::convert::TimeExt as _;
 use futures::StreamExt as _;
 use k8s_openapi::api::{
     apps::v1::Deployment,
@@ -420,7 +421,7 @@ fn validate_config(spec: &SchemaRegistrySpec) -> Result<(), String> {
         .and_then(|authn| authn.bearer.as_ref())
         .and_then(|bearer| bearer.jwks_refresh_ms)
     {
-        refined_type::rule::GreaterI64::<0>::new(refresh_ms)
+        refined_type::rule::GreaterI64::<0>::new(refresh_ms.millis_i64())
             .map_err(|error| format!("spec.authentication.bearer.jwksRefreshMs: {error}"))?;
     }
     if let Some(refresh_seconds) = spec
@@ -428,7 +429,7 @@ fn validate_config(spec: &SchemaRegistrySpec) -> Result<(), String> {
         .as_ref()
         .and_then(|authz| authz.acl_refresh_seconds)
     {
-        refined_type::rule::GreaterI64::<0>::new(refresh_seconds)
+        refined_type::rule::GreaterI64::<0>::new(refresh_seconds.secs_i64())
             .map_err(|error| format!("spec.authorization.aclRefreshSeconds: {error}"))?;
     }
     Ok(())
@@ -710,8 +711,8 @@ fn build_args_and_mounts(
                     {
                         a.push(format!("--bearer-jwks-principal-claim={pc}"));
                     }
-                    if let Some(ms) = bearer.jwks_refresh_ms {
-                        a.push(format!("--bearer-jwks-refresh-ms={ms}"));
+                    if let Some(refresh) = bearer.jwks_refresh_ms {
+                        a.push(format!("--bearer-jwks-refresh-ms={}", refresh.millis_i64()));
                     }
                     if let Some(ca_sn) = &bearer.jwks_tls_secret_name {
                         a.push("--bearer-jwks-ca=/etc/sr/jwks-ca/ca.crt".into());
@@ -734,8 +735,8 @@ fn build_args_and_mounts(
         for u in &az.super_users {
             a.push(format!("--super-user={u}"));
         }
-        if let Some(r) = az.acl_refresh_seconds {
-            a.push(format!("--acl-refresh-secs={r}"));
+        if let Some(refresh) = az.acl_refresh_seconds {
+            a.push(format!("--acl-refresh-secs={}", refresh.secs_i64()));
         }
     }
 

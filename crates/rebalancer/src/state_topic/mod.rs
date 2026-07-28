@@ -188,6 +188,8 @@ pub mod fake {
 
 #[cfg(test)]
 mod tests {
+    use crabka_units::bytes_per_sec;
+
     use super::*;
     use crate::{
         executor::state::{InFlightFile, Phase},
@@ -195,7 +197,7 @@ mod tests {
     };
 
     fn in_flight(id: &str, phase: Phase) -> InFlightFile {
-        InFlightFile::new(id.to_string(), phase, 42, 50_000_000)
+        InFlightFile::new(id.to_string(), phase, 42, bytes_per_sec(50_000_000))
     }
 
     #[test]

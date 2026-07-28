@@ -3,7 +3,7 @@
 //! the consumer has seen no new records for 5 consecutive 100ms polls
 //! (the "quiet period" end-of-log heuristic).
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use crabka_client_core::Client;
 use crabka_protocol::{
@@ -12,6 +12,11 @@ use crabka_protocol::{
         fetch_response::FetchResponse,
     },
     records::RecordsPayload,
+};
+use crabka_units::{
+    ByteSize, Time,
+    convert::{ByteSizeExt as _, TimeExt as _},
+    mebibytes, millis,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -22,9 +27,13 @@ use crate::state_topic::{
     serde_format,
 };
 
-const POLL_INTERVAL: Duration = Duration::from_millis(100);
+const POLL_INTERVAL: Time = millis(100);
 const QUIET_POLLS_TO_DECLARE_LOADED: u32 = 5;
-const MAX_BYTES_PER_FETCH: i32 = 1 << 20; // 1 MiB
+const MAX_BYTES_PER_FETCH: ByteSize = mebibytes(1);
+/// The loader drains the log as fast as the broker will answer, so it asks for
+/// whatever is already there rather than parking on the broker's fetch queue.
+const NO_FETCH_WAIT: Time = Time::ZERO;
+const NO_MIN_BYTES: ByteSize = ByteSize::ZERO;
 
 /// `(absolute_offset, key_bytes, value_bytes)` — value is `None` for tombstones.
 type FetchedRecord = (i64, Option<Vec<u8>>, Option<Vec<u8>>);
@@ -43,7 +52,7 @@ impl StateTopicLoader {
         let mut quiet_polls: u32 = 0;
         loop {
             tokio::select! {
-                () = tokio::time::sleep(POLL_INTERVAL) => {}
+                () = tokio::time::sleep(POLL_INTERVAL.to_std()) => {}
                 () = self.shutdown.cancelled() => {
                     info!("state-topic loader shutting down");
                     return;
@@ -79,13 +88,15 @@ impl StateTopicLoader {
 
 fn fetch_request(topic: &str, fetch_offset: i64) -> FetchRequest {
     FetchRequest {
-        max_bytes: MAX_BYTES_PER_FETCH,
+        max_wait_ms: NO_FETCH_WAIT.millis_i32(),
+        min_bytes: NO_MIN_BYTES.bytes_i32(),
+        max_bytes: MAX_BYTES_PER_FETCH.bytes_i32(),
         topics: vec![FetchTopic {
             topic: topic.to_string(),
             partitions: vec![FetchPartition {
                 partition: 0,
                 fetch_offset,
-                partition_max_bytes: MAX_BYTES_PER_FETCH,
+                partition_max_bytes: MAX_BYTES_PER_FETCH.bytes_i32(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -166,8 +177,6 @@ fn fetched_records_from_response(
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use bytes::Bytes;
     use crabka_protocol::{
         UnknownTaggedFields,
@@ -182,8 +191,16 @@ mod tests {
     use super::*;
     use crate::executor::state::{InFlightFile, Phase};
 
+    /// Connect/request timeout for the deliberately-unreachable test client.
+    const CLIENT_TIMEOUT: Time = millis(50);
+
     fn in_flight(id: &str) -> InFlightFile {
-        InFlightFile::new(id.to_string(), Phase::Wait, 42, 50_000_000)
+        InFlightFile::new(
+            id.to_string(),
+            Phase::Wait,
+            42,
+            crabka_units::bytes_per_sec(50_000_000),
+        )
     }
 
     fn fetched(offset: i64, key: Option<&str>, value: Option<Vec<u8>>) -> FetchedRecord {
@@ -355,8 +372,8 @@ mod tests {
             Client::builder()
                 .bootstrap("127.0.0.1:1")
                 .client_id("state-topic-loader-test")
-                .connect_timeout(Duration::from_millis(50))
-                .request_timeout(Duration::from_millis(50))
+                .connect_timeout(CLIENT_TIMEOUT.to_std())
+                .request_timeout(CLIENT_TIMEOUT.to_std())
                 .build()
                 .await
                 .expect("client build does not connect"),

@@ -1,10 +1,16 @@
-use std::{net::SocketAddr, str::FromStr, time::Duration};
+use std::{net::SocketAddr, str::FromStr};
 
 use clap::{Args, ValueEnum};
+use crabka_units::{Time, convert::TimeExt as _};
 use refined_type::rule::GreaterU64;
 use serde::{Deserialize, Serialize};
 
 /// A validated positive operator configuration value.
+///
+/// Deliberately still an integer newtype rather than a quantity: it is the
+/// `clap` / `serde` parse target for the `--pgdog-reload-backoff-ms`-family
+/// flags, and the `refined_type` rule that rejects zero is what makes an
+/// instance proof of a usable value. The dimension is attached in [`Self::time`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "u64", into = "u64")]
 pub struct PositiveU64(u64);
@@ -16,10 +22,13 @@ impl PositiveU64 {
         self.0
     }
 
-    /// Return the value as a duration in milliseconds.
+    /// Return the value as a time extent, interpreting it as milliseconds.
+    ///
+    /// A configured value beyond `i64::MAX` milliseconds (~292 million years)
+    /// saturates rather than wrapping negative.
     #[must_use]
-    pub const fn duration(self) -> Duration {
-        Duration::from_millis(self.0)
+    pub fn time(self) -> Time {
+        Time::from_millis(i64::try_from(self.0).unwrap_or(i64::MAX))
     }
 }
 
@@ -184,6 +193,7 @@ mod tests {
 
     use assert2::assert;
     use clap::Parser;
+    use crabka_units::{millis, secs};
 
     use super::*;
 
@@ -290,5 +300,19 @@ mod tests {
         let value: PositiveU64 = "123".parse().expect("positive value");
         assert!(serde_json::to_value(value).unwrap() == 123);
         assert!(serde_json::from_str::<PositiveU64>("0").is_err());
+    }
+
+    #[test]
+    fn positive_config_value_reads_as_milliseconds() {
+        for (raw, want) in [("1", millis(1)), ("100", millis(100)), ("15000", secs(15))] {
+            let value: PositiveU64 = raw.parse().expect("positive value");
+            assert!(value.time() == want, "case {raw:?}");
+        }
+    }
+
+    #[test]
+    fn positive_config_value_time_saturates_past_i64_millis() {
+        let value: PositiveU64 = u64::MAX.to_string().parse().expect("positive value");
+        assert!(value.time() == Time::from_millis(i64::MAX));
     }
 }

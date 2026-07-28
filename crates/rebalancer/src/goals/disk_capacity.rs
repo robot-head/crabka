@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use num_traits::ToPrimitive;
+use crabka_units::convert::ByteSizeExt;
 
 use crate::{
     goals::{Goal, GoalContext, GoalPriority, OriginalReplicaState},
@@ -28,6 +28,7 @@ impl DiskCapacity {
         crate::goals::replica_totals(partitions, broker_ids, |broker, topic, partition| {
             ctx.broker_usages
                 .disk_bytes_avg(broker, topic, partition, Window::FiveMin, now_ms)
+                .map(ByteSizeExt::bytes_f64)
         })
     }
 }
@@ -60,7 +61,7 @@ impl Goal for DiskCapacity {
                 let Some(limit) = cap.disk_bytes else {
                     continue;
                 };
-                let limit_f = limit.to_f64().expect("u64 capacity must convert to f64");
+                let limit_f = limit.bytes_f64();
                 if *current > limit_f {
                     let excess = current - limit_f;
                     let prior_excess = over.map_or(0.0, |(_, c, l)| c - l);
@@ -86,12 +87,12 @@ impl Goal for DiskCapacity {
                     .broker_capacities
                     .for_broker(*a)
                     .and_then(|c| c.disk_bytes)
-                    .map(|limit| limit.to_f64().expect("u64 capacity must convert to f64") - cur_a);
+                    .map(|limit| limit.bytes_f64() - cur_a);
                 let headroom_b = ctx
                     .broker_capacities
                     .for_broker(*b)
                     .and_then(|c| c.disk_bytes)
-                    .map(|limit| limit.to_f64().expect("u64 capacity must convert to f64") - cur_b);
+                    .map(|limit| limit.bytes_f64() - cur_b);
                 match (headroom_a, headroom_b) {
                     (Some(ha), Some(hb)) if ha > 0.0 && hb > 0.0 => hb
                         .partial_cmp(&ha)
@@ -143,7 +144,7 @@ impl Goal for DiskCapacity {
             let Some(limit) = cap.disk_bytes else {
                 continue;
             };
-            if *current > limit.to_f64().expect("u64 capacity must convert to f64") {
+            if *current > limit.bytes_f64() {
                 return false;
             }
         }
@@ -153,7 +154,9 @@ impl Goal for DiskCapacity {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::Duration};
+    use std::sync::Arc;
+
+    use crabka_units::prelude::*;
 
     use super::*;
     use crate::{
@@ -164,7 +167,7 @@ mod tests {
 
     fn ctx_with(caps: BrokerCapacities, store: Arc<UsageStore>) -> GoalContext {
         GoalContext {
-            imbalance_threshold_pct: 10,
+            imbalance_threshold: percent(10),
             max_movements_per_proposal: 256,
             min_topic_leaders_per_broker: 0,
             broker_capacities: Arc::new(caps),
@@ -203,8 +206,8 @@ mod tests {
 
     fn store_with_disk(samples: Vec<(i32, &str, i32, f64)>) -> Arc<UsageStore> {
         let store = UsageStore::new(WindowConfig {
-            scrape_interval: Duration::from_secs(30),
-            retention: Duration::from_hours(1),
+            scrape_interval: secs(30),
+            retention: hours(1),
         });
         // Insert at "now" so the stale-data guard in UsageStore (which
         // compares against the goal's wall-clock `now_ms()`) sees the
@@ -225,7 +228,7 @@ mod tests {
         Arc::new(store)
     }
 
-    fn caps_with_disk(broker: i32, disk_bytes: u64) -> BrokerCapacities {
+    fn caps_with_disk(broker: i32, disk_bytes: ByteSize) -> BrokerCapacities {
         let mut b = std::collections::HashMap::new();
         b.insert(
             broker,
@@ -242,7 +245,7 @@ mod tests {
         let parts: Vec<_> = (0..3).map(|i| part("t", i, vec![1, 2], 1)).collect();
         let s = state_with(parts, vec![1, 2]);
         let ctx = ctx_with(
-            caps_with_disk(1, 1_000_000),
+            caps_with_disk(1, bytes(1_000_000)),
             Arc::new(UsageStore::default()),
         );
         assert2::assert!(
@@ -260,7 +263,7 @@ mod tests {
         let s = state_with(parts, vec![1, 2, 3]);
         let samples: Vec<_> = (0..3).map(|i| (1, "t", i, 500.0)).collect();
         let store = store_with_disk(samples);
-        let ctx = ctx_with(caps_with_disk(1, 1000), store);
+        let ctx = ctx_with(caps_with_disk(1, bytes(1000)), store);
         let mvs = DiskCapacity.propose(&s, &ctx);
         assert2::assert!(!mvs.is_empty());
         for m in &mvs {
@@ -276,7 +279,7 @@ mod tests {
         let s = state_with(parts, vec![1, 2]);
         let samples: Vec<_> = (0..3).map(|i| (1, "t", i, 500.0)).collect();
         let store = store_with_disk(samples);
-        let ctx = ctx_with(caps_with_disk(1, 1000), store);
+        let ctx = ctx_with(caps_with_disk(1, bytes(1000)), store);
         assert2::assert!(!DiskCapacity.is_satisfied_with_ctx(&s, &ctx));
     }
 
@@ -286,7 +289,7 @@ mod tests {
         let s = state_with(parts, vec![1, 2, 3]);
         let samples: Vec<_> = (0..2).map(|i| (1, "t", i, 500.0)).collect();
         let store = store_with_disk(samples);
-        let ctx = ctx_with(caps_with_disk(1, 1000), store);
+        let ctx = ctx_with(caps_with_disk(1, bytes(1000)), store);
         assert2::assert!(
             (
                 DiskCapacity.propose(&s, &ctx).is_empty(),
@@ -304,21 +307,21 @@ mod tests {
         by.insert(
             1,
             BrokerCapacity {
-                disk_bytes: Some(1000),
+                disk_bytes: Some(bytes(1000)),
                 ..Default::default()
             },
         );
         by.insert(
             2,
             BrokerCapacity {
-                disk_bytes: Some(100),
+                disk_bytes: Some(bytes(100)),
                 ..Default::default()
             },
         );
         by.insert(
             3,
             BrokerCapacity {
-                disk_bytes: Some(1400),
+                disk_bytes: Some(bytes(1400)),
                 ..Default::default()
             },
         );
@@ -338,14 +341,14 @@ mod tests {
         by.insert(
             1,
             BrokerCapacity {
-                disk_bytes: Some(1000),
+                disk_bytes: Some(bytes(1000)),
                 ..Default::default()
             },
         );
         by.insert(
             2,
             BrokerCapacity {
-                disk_bytes: Some(2000),
+                disk_bytes: Some(bytes(2000)),
                 ..Default::default()
             },
         );
@@ -365,21 +368,21 @@ mod tests {
         by.insert(
             1,
             BrokerCapacity {
-                disk_bytes: Some(1000),
+                disk_bytes: Some(bytes(1000)),
                 ..Default::default()
             },
         );
         by.insert(
             2,
             BrokerCapacity {
-                disk_bytes: Some(900),
+                disk_bytes: Some(bytes(900)),
                 ..Default::default()
             },
         );
         by.insert(
             3,
             BrokerCapacity {
-                disk_bytes: Some(0),
+                disk_bytes: Some(bytes(0)),
                 ..Default::default()
             },
         );
@@ -395,7 +398,7 @@ mod tests {
         let parts = vec![part("hot", 0, vec![1, 2], 1)];
         let s = state_with(parts, vec![1, 2]);
         let store = store_with_disk(vec![(1, "hot", 0, 1500.0)]);
-        let ctx = ctx_with(caps_with_disk(1, 1000), store);
+        let ctx = ctx_with(caps_with_disk(1, bytes(1000)), store);
 
         assert2::assert!(DiskCapacity.propose(&s, &ctx).is_empty());
     }
@@ -405,7 +408,7 @@ mod tests {
         let parts = vec![part("hot", 0, vec![1], 1)];
         let s = state_with(parts, vec![1, 2]);
         let store = store_with_disk(vec![(1, "hot", 0, 1500.0)]);
-        let ctx = ctx_with(caps_with_disk(1, 1000), store);
+        let ctx = ctx_with(caps_with_disk(1, bytes(1000)), store);
 
         let mvs = DiskCapacity.propose(&s, &ctx);
 
@@ -427,7 +430,7 @@ mod tests {
         let s = state_with(parts, vec![1, 2, 3]);
         let samples: Vec<_> = (0..3).map(|i| (1, "hot", i, 600.0)).collect();
         let store = store_with_disk(samples);
-        let mut ctx = ctx_with(caps_with_disk(1, 1000), store);
+        let mut ctx = ctx_with(caps_with_disk(1, bytes(1000)), store);
         ctx.max_movements_per_proposal = 1;
 
         let mvs = DiskCapacity.propose(&s, &ctx);

@@ -16,8 +16,11 @@
 //!
 //! The decode path below is deliberately tolerant of all of the above.
 
-use std::time::Duration;
-
+use crabka_units::{
+    ByteRate, Time,
+    convert::{ByteRateExt as _, TimeExt as _},
+    secs,
+};
 use serde_json::{Value, json};
 
 use crate::ids::{LeaderMovementCount, MaxLeadersCount, MaxReplicasCount, ReplicaMovementCount};
@@ -45,7 +48,7 @@ pub trait RebalancerClientLike: Send + Sync {
     async fn execute_proposal(
         &self,
         id: &str,
-        throttle_bytes_per_sec: Option<i64>,
+        throttle: Option<ByteRate>,
     ) -> Result<RebalancerProposal, RebalancerError>;
 
     /// `CancelExecution` — revert pending reassignments + clear throttle,
@@ -222,13 +225,30 @@ pub struct ConnectRebalancerClient {
 
 const SERVICE_PATH: &str = "crabka.rebalancer.v1.Rebalancer";
 
+/// Per-request ceiling on a Connect unary call. Generous enough for a
+/// `CreateProposal` that walks the whole cluster snapshot, short enough that a
+/// wedged rebalancer does not pin a reconcile pass indefinitely.
+const REQUEST_TIMEOUT: Time = secs(30);
+
+/// Body of an `ExecuteProposal` request. Split out from
+/// [`RebalancerClientLike::execute_proposal`] so the exact JSON the rebalancer
+/// sees is testable without an HTTP round-trip.
+fn execute_body(id: &str, throttle: Option<ByteRate>) -> Value {
+    let mut body = json!({ "id": id });
+    if let Some(throttle) = throttle {
+        // proto3 JSON encodes int64 as a string.
+        body["throttleBytesPerSec"] = Value::String(throttle.bytes_per_sec_i64().to_string());
+    }
+    body
+}
+
 impl ConnectRebalancerClient {
     /// Build a client for the rebalancer at `base_url` (e.g.
     /// `http://host:9300`). A trailing slash on `base_url` is tolerated.
     #[must_use]
     pub fn new(base_url: &str) -> Self {
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(REQUEST_TIMEOUT.to_std())
             .build()
             .unwrap_or_default();
         Self {
@@ -302,14 +322,11 @@ impl RebalancerClientLike for ConnectRebalancerClient {
     async fn execute_proposal(
         &self,
         id: &str,
-        throttle_bytes_per_sec: Option<i64>,
+        throttle: Option<ByteRate>,
     ) -> Result<RebalancerProposal, RebalancerError> {
-        let mut body = json!({ "id": id });
-        if let Some(t) = throttle_bytes_per_sec {
-            // proto3 JSON encodes int64 as a string.
-            body["throttleBytesPerSec"] = Value::String(t.to_string());
-        }
-        let v = self.call("ExecuteProposal", body).await?;
+        let v = self
+            .call("ExecuteProposal", execute_body(id, throttle))
+            .await?;
         Ok(proposal_from_json(&v))
     }
 
@@ -322,6 +339,7 @@ impl RebalancerClientLike for ConnectRebalancerClient {
 #[cfg(test)]
 mod tests {
     use assert2::assert;
+    use crabka_units::{bytes_per_sec, mebibytes_per_sec};
 
     use super::*;
 
@@ -484,5 +502,30 @@ mod tests {
     fn base_url_trailing_slash_trimmed() {
         let c = ConnectRebalancerClient::new("http://host:9300/");
         assert!(c.base_url == "http://host:9300");
+    }
+
+    #[test]
+    fn execute_body_encodes_throttle_as_decimal_string() {
+        // proto3 JSON maps int64 to a string, so a 50 MiB/s quota must go out
+        // as "52428800" — not a number, and not the base-unit float the
+        // quantity stores internally.
+        for (throttle, want) in [
+            (
+                Some(mebibytes_per_sec(50)),
+                json!({ "id": "p1", "throttleBytesPerSec": "52428800" }),
+            ),
+            (
+                Some(bytes_per_sec(1_000_000)),
+                json!({ "id": "p1", "throttleBytesPerSec": "1000000" }),
+            ),
+            (None, json!({ "id": "p1" })),
+        ] {
+            assert!(execute_body("p1", throttle) == want, "case {throttle:?}");
+        }
+    }
+
+    #[test]
+    fn request_timeout_is_thirty_seconds() {
+        assert!(REQUEST_TIMEOUT.to_std() == core::time::Duration::from_secs(30));
     }
 }

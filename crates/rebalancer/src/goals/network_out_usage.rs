@@ -4,6 +4,8 @@
 
 use std::collections::HashMap;
 
+use crabka_units::{Ratio, convert::ByteRateExt};
+
 use crate::{
     goals::{Goal, GoalContext, GoalPriority, OriginalReplicaState},
     model::{ClusterState, Movement, PartitionView},
@@ -24,11 +26,12 @@ impl NetworkOutUsage {
         crate::goals::replica_totals(partitions, broker_ids, |broker, topic, partition| {
             ctx.broker_usages
                 .bytes_out_rate(broker, topic, partition, Window::FiveMin, now_ms)
+                .map(ByteRateExt::bytes_per_sec_f64)
         })
     }
 
-    fn imbalance_pct(totals: &HashMap<i32, f64>) -> u32 {
-        crate::goals::imbalance_pct_f64(totals)
+    fn imbalance(totals: &HashMap<i32, f64>) -> Ratio {
+        crate::goals::imbalance_ratio_f64(totals)
     }
 }
 
@@ -52,7 +55,7 @@ impl Goal for NetworkOutUsage {
             if totals.values().all(|v| *v == 0.0) {
                 break;
             }
-            if Self::imbalance_pct(&totals) <= ctx.imbalance_threshold_pct {
+            if Self::imbalance(&totals) <= ctx.imbalance_threshold {
                 break;
             }
             let mut by_load: Vec<(i32, f64)> = totals.into_iter().collect();
@@ -84,7 +87,9 @@ impl Goal for NetworkOutUsage {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::Duration};
+    use std::sync::Arc;
+
+    use crabka_units::prelude::*;
 
     use super::*;
     use crate::{
@@ -94,7 +99,7 @@ mod tests {
 
     fn ctx_with(store: Arc<UsageStore>) -> GoalContext {
         GoalContext {
-            imbalance_threshold_pct: 10,
+            imbalance_threshold: percent(10),
             max_movements_per_proposal: 256,
             min_topic_leaders_per_broker: 0,
             broker_capacities: Arc::new(crate::capacity::BrokerCapacities::default()),
@@ -133,8 +138,8 @@ mod tests {
 
     fn store_with_counter_pair(samples: Vec<(i32, &str, i32, f64, f64)>) -> Arc<UsageStore> {
         let store = UsageStore::new(WindowConfig {
-            scrape_interval: Duration::from_secs(30),
-            retention: Duration::from_hours(1),
+            scrape_interval: secs(30),
+            retention: hours(1),
         });
         // Insert at "now-1000" and "now" so the 1-second delta still
         // yields the same rate and both samples are inside the 5-min
@@ -191,9 +196,9 @@ mod tests {
     }
 
     #[test]
-    fn imbalance_pct_uses_difference_times_100_over_total() {
+    fn imbalance_is_spread_over_total() {
         let totals = std::collections::HashMap::from([(1, 300.0), (2, 100.0)]);
-        assert2::assert!(NetworkOutUsage::imbalance_pct(&totals) == 50);
+        assert2::assert!(NetworkOutUsage::imbalance(&totals) == percent(50));
     }
 
     #[test]

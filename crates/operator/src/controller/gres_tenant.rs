@@ -14,6 +14,7 @@ use crabka_security::{
     ca::{SubjectAltName, generate_cluster_ca, issue_broker_cert},
     scram::PgScramVerifier,
 };
+use crabka_units::convert::TimeExt as _;
 use futures::StreamExt as _;
 use k8s_openapi::{
     ByteString,
@@ -42,7 +43,10 @@ use sha2::{Digest as _, Sha256};
 use crate::{
     context::Context,
     controller::{
-        common::{self, FIELD_MANAGER, ReconcileError, apply_object, condition, owner_ref},
+        common::{
+            self, FIELD_MANAGER, ReconcileError, apply_object, condition, owner_ref,
+            time_from_millis_u64,
+        },
         gres_split_operation::{
             MtlsRangeMutationClient, active_operations, reconcile_activated_cutover,
             reconcile_one_rpc_phase, successors_may_be_deployed, verify_target_topology_ready,
@@ -750,9 +754,7 @@ async fn reconcile_compute_and_status(
 }
 
 fn lifecycle_requeue(policy: &EffectiveGresComputePolicy) -> Action {
-    Action::requeue(Duration::from_millis(
-        policy.lifecycle_requeue_ms.into_value(),
-    ))
+    Action::requeue(time_from_millis_u64(policy.lifecycle_requeue_ms.into_value()).to_std())
 }
 
 async fn reconcile_range_tls_secret(
@@ -3469,7 +3471,8 @@ mod tests {
                 == 1
         );
         assert!(
-            lifecycle_requeue(&compute_policy) == Action::requeue(Duration::from_millis(4_567))
+            lifecycle_requeue(&compute_policy)
+                == Action::requeue(crabka_units::millis(4_567).to_std())
         );
         let readiness = deployment
             .spec

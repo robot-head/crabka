@@ -16,8 +16,9 @@
 //! `approve` (→ `ExecuteProposal`) does. This keeps a human (or `GitOps`
 //! approval) in the loop before any partition data moves.
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
+use crabka_units::{Time, convert::TimeExt as _, minutes, secs};
 use futures::StreamExt as _;
 use kube::{
     Resource, ResourceExt as _,
@@ -42,11 +43,11 @@ const ANNOTATION: &str = "crabka.io/rebalance";
 /// Default Connect-RPC port the rebalancer binds (`--listen-addr`).
 const REBALANCER_PORT: u16 = 9300;
 
-const POLL_INTERVAL: Duration = Duration::from_secs(10);
-const IDLE_INTERVAL: Duration = Duration::from_mins(5);
+const POLL_INTERVAL: Time = secs(10);
+const IDLE_INTERVAL: Time = minutes(5);
 // Transport recovery is protocol-specific and intentionally independent of
 // the common controller error-policy requeue.
-const TRANSPORT_RETRY: Duration = Duration::from_secs(15);
+const TRANSPORT_RETRY: Time = secs(15);
 
 /// The rebalance lifecycle state. Surfaced as the active condition's
 /// `type` in the CRD status.
@@ -163,7 +164,7 @@ struct Outcome {
     state: RebalanceState,
     reason: String,
     message: String,
-    requeue: Duration,
+    requeue: Time,
     /// Set when a fresh proposal id should be recorded (`CreateProposal`).
     new_session: Option<String>,
     /// Set when a fresh optimization result should be recorded.
@@ -260,7 +261,7 @@ impl Outcome {
     }
 
     /// A status with no proposal-id / optimization changes.
-    fn transient(state: RebalanceState, reason: &str, message: String, requeue: Duration) -> Self {
+    fn transient(state: RebalanceState, reason: &str, message: String, requeue: Time) -> Self {
         Self {
             state,
             reason: reason.into(),
@@ -453,7 +454,7 @@ pub async fn run(ctx: Context) -> anyhow::Result<()> {
 
 pub fn error_policy(_obj: Arc<KafkaRebalance>, err: &ReconcileError, _ctx: Arc<Context>) -> Action {
     tracing::warn!(error = %err, "rebalance reconcile error, requeueing");
-    Action::requeue(TRANSPORT_RETRY)
+    Action::requeue(TRANSPORT_RETRY.to_std())
 }
 
 /// Reconcile entry point. Times the pass and records the reconcile
@@ -507,7 +508,7 @@ async fn reconcile_inner(
                 ),
             )
             .await?;
-            return Ok(Action::requeue(IDLE_INTERVAL));
+            return Ok(Action::requeue(IDLE_INTERVAL.to_std()));
         }
         Err(invalid) => {
             tracing::warn!(error = %invalid.message, "rejecting spec.endpoint (SSRF guard)");
@@ -523,7 +524,7 @@ async fn reconcile_inner(
                 ),
             )
             .await?;
-            return Ok(Action::requeue(IDLE_INTERVAL));
+            return Ok(Action::requeue(IDLE_INTERVAL.to_std()));
         }
     };
 
@@ -539,7 +540,7 @@ async fn reconcile_inner(
         if command.is_some() {
             remove_command_annotation(&api, &name).await?;
         }
-        return Ok(Action::requeue(IDLE_INTERVAL));
+        return Ok(Action::requeue(IDLE_INTERVAL.to_std()));
     }
 
     // 4. Issue the RPC.
@@ -583,7 +584,7 @@ async fn reconcile_inner(
         Err(RebalancerError::Transport(msg)) => {
             tracing::warn!(error = %msg, %endpoint, "rebalancer unreachable; retrying");
             ctx.drop_rebalancer_client(&endpoint).await;
-            return Ok(Action::requeue(TRANSPORT_RETRY));
+            return Ok(Action::requeue(TRANSPORT_RETRY.to_std()));
         }
         Err(e) => Outcome::from_rpc_error(&e),
     };
@@ -598,7 +599,7 @@ async fn reconcile_inner(
     //    when the outcome didn't produce new ones.
     let requeue = outcome.requeue;
     write_status(&api, &name, &obj, &outcome).await?;
-    Ok(Action::requeue(requeue))
+    Ok(Action::requeue(requeue.to_std()))
 }
 
 /// Merge-patch the status. Carries forward `sessionId` /
@@ -682,7 +683,7 @@ mod tests {
 
     #[test]
     fn transport_retry_remains_protocol_specific() {
-        assert!(TRANSPORT_RETRY == Duration::from_secs(15));
+        assert!(TRANSPORT_RETRY == secs(15));
     }
 
     fn cr(name: &str) -> KafkaRebalance {
@@ -808,7 +809,7 @@ mod tests {
                 state: RebalanceState::ProposalReady,
                 reason: "ProposalReady".into(),
                 message: "proposal p1 computed: 3 replica / 1 leader movements".into(),
-                requeue: Duration::from_mins(5),
+                requeue: minutes(5),
                 new_session: Some("p1".into()),
                 new_optimization: Some(OptimizationResult {
                     replica_movements: ReplicaMovementCount(3),
@@ -833,7 +834,7 @@ mod tests {
                 state: RebalanceState::Rebalancing,
                 reason: "Rebalancing".into(),
                 message: "executing proposal p".into(),
-                requeue: Duration::from_secs(10),
+                requeue: secs(10),
                 new_session: None,
                 new_optimization: None,
                 advance_generation: false,

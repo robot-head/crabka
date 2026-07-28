@@ -1,10 +1,14 @@
 //! `Gres` fleet reconciler. Renders the `PgDog` front door from live tenants.
 
-use std::{collections::BTreeMap, fmt::Write as _, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, fmt::Write as _, sync::Arc};
 
 use crabka_gres_control::{
     PgdogGeneral, PgdogRenderInput, PgdogTimeouts, PgdogUser, TenantEndpoint, TenantName,
     TenantState, render_pgdog_toml, render_users_toml,
+};
+use crabka_units::{
+    Time,
+    convert::{StdDurationExt as _, TimeExt as _},
 };
 use futures::StreamExt as _;
 use k8s_openapi::{
@@ -29,7 +33,10 @@ use sha2::{Digest as _, Sha256};
 use crate::{
     context::{Context, PgdogExpectedRoute, PgdogReloadRequest},
     controller::{
-        common::{self, FIELD_MANAGER, ReconcileError, apply_object, condition, owner_ref},
+        common::{
+            self, FIELD_MANAGER, ReconcileError, apply_object, condition, millis_u64, owner_ref,
+            time_from_millis_u64,
+        },
         gres_tenant::COMPUTE_PORT,
         topic::internal_listener_bootstrap,
     },
@@ -98,12 +105,13 @@ async fn reconcile_inner(obj: Arc<Gres>, ctx: Arc<Context>) -> Result<Action, Re
         .and_then(|activator| activator.cold_start_timeout_ms)
         .unwrap_or(DEFAULT_ACTIVATOR_COLD_START_TIMEOUT_MS);
     let cold_start_ceiling = PgdogTimeouts::cold_start_ceiling_for_attempt_timeout(
-        Duration::from_millis(activator_cold_start_timeout_ms),
+        time_from_millis_u64(activator_cold_start_timeout_ms).to_std(),
         pgdog_policy.connect_attempts,
     )
     .map_err(|error| {
         ReconcileError::Malformed(format!("spec.activator.coldStartTimeoutMs: {error}"))
-    })?;
+    })?
+    .as_time();
     let ns = obj.namespace().unwrap_or_else(|| "default".into());
     let name = obj.name_any();
     let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &ns);
@@ -159,7 +167,7 @@ async fn reconcile_inner(obj: Arc<Gres>, ctx: Arc<Context>) -> Result<Action, Re
             endpoint.state,
             grace_deadline,
             now,
-            pgdog_policy.direct_bootstrap_grace.into_value(),
+            time_from_millis_u64(pgdog_policy.direct_bootstrap_grace.into_value()),
         );
         let password = if needs_bootstrap_credential {
             let reference = &tenant.spec.password_secret_ref;
@@ -237,7 +245,7 @@ async fn reconcile_inner(obj: Arc<Gres>, ctx: Arc<Context>) -> Result<Action, Re
         .and_then(|status| status.confirmed_pgdog_config_hash.as_deref())
         != Some(hash.as_str())
     {
-        let admin_timeout = ctx.config.pgdog_admin_timeout_ms.duration();
+        let admin_timeout = ctx.config.pgdog_admin_timeout_ms.time().to_std();
         let verified = tokio::time::timeout(
             admin_timeout,
             verify_pgdog_reload(&obj, &ctx, &endpoints, &rollout_hash),
@@ -251,7 +259,7 @@ async fn reconcile_inner(obj: Arc<Gres>, ctx: Arc<Context>) -> Result<Action, Re
         if !verified {
             tracing::warn!(gres = %name, config_hash = %hash, "pgdog admin view is stale after reload attempts");
             return Ok(Action::requeue(
-                ctx.config.pgdog_reload_requeue_ms.duration(),
+                ctx.config.pgdog_reload_requeue_ms.time().to_std(),
             ));
         }
     }
@@ -263,10 +271,10 @@ async fn reconcile_inner(obj: Arc<Gres>, ctx: Arc<Context>) -> Result<Action, Re
         &tenants.items,
         &name,
         now,
-        pgdog_policy.direct_bootstrap_grace.into_value(),
-        ctx.config.pgdog_transition_poll_ms.into_value(),
+        time_from_millis_u64(pgdog_policy.direct_bootstrap_grace.into_value()),
+        ctx.config.pgdog_transition_poll_ms.time(),
     );
-    Ok(Action::requeue(requeue))
+    Ok(Action::requeue(requeue.to_std()))
 }
 
 fn validate_activator_config(spec: &crate::crd::GresSpec) -> Result<(), ReconcileError> {
@@ -309,18 +317,24 @@ fn validate_activator_config(spec: &crate::crd::GresSpec) -> Result<(), Reconcil
     Ok(())
 }
 
+/// Next requeue that lands on a credential-grace boundary, or `fallback` when
+/// every boundary is already behind `now`.
+///
+/// The deadlines and `now` are epoch-millisecond instants; `direct_bootstrap_grace`
+/// and the result are extents, so the grace window narrows back to raw
+/// milliseconds only for the instant arithmetic.
 fn next_pgdog_transition_requeue(
     grace_deadlines: impl Iterator<Item = u64>,
     now: u64,
-    direct_bootstrap_grace_ms: u64,
-    fallback_ms: u64,
-) -> Duration {
-    let fallback = Duration::from_millis(fallback_ms);
+    direct_bootstrap_grace: Time,
+    fallback: Time,
+) -> Time {
+    let grace_ms = millis_u64(direct_bootstrap_grace);
     grace_deadlines
-        .flat_map(|deadline| [deadline, deadline.saturating_add(direct_bootstrap_grace_ms)])
+        .flat_map(|deadline| [deadline, deadline.saturating_add(grace_ms)])
         .filter(|deadline| *deadline > now)
-        .map(|deadline| Duration::from_millis(deadline.saturating_sub(now).max(1)))
-        .min()
+        .map(|deadline| time_from_millis_u64(deadline.saturating_sub(now).max(1)))
+        .reduce(Time::min)
         .map_or(fallback, |boundary| boundary.min(fallback))
 }
 
@@ -328,9 +342,9 @@ fn pgdog_transition_requeue_for_tenants(
     tenants: &[GresTenant],
     gres_name: &str,
     now: u64,
-    direct_bootstrap_grace_ms: u64,
-    fallback_ms: u64,
-) -> Duration {
+    direct_bootstrap_grace: Time,
+    fallback: Time,
+) -> Time {
     next_pgdog_transition_requeue(
         tenants
             .iter()
@@ -342,8 +356,8 @@ fn pgdog_transition_requeue_for_tenants(
                     .and_then(|status| status.pgdog_credential_grace_until_unix_ms)
             }),
         now,
-        direct_bootstrap_grace_ms,
-        fallback_ms,
+        direct_bootstrap_grace,
+        fallback,
     )
 }
 
@@ -351,11 +365,11 @@ fn needs_bootstrap_credential(
     state: TenantState,
     grace_deadline: Option<u64>,
     now: u64,
-    direct_bootstrap_grace_ms: u64,
+    direct_bootstrap_grace: Time,
 ) -> bool {
+    let grace_ms = millis_u64(direct_bootstrap_grace);
     state != TenantState::Active
-        || grace_deadline
-            .is_some_and(|deadline| now < deadline.saturating_add(direct_bootstrap_grace_ms))
+        || grace_deadline.is_some_and(|deadline| now < deadline.saturating_add(grace_ms))
 }
 
 fn uses_suspension_idle_timeout(
@@ -382,7 +396,7 @@ fn render_pgdog_files(
     policy: &EffectivePgdogPolicy,
     tenants: &[GresTenant],
     endpoints: &[TenantEndpoint],
-    cold_start_ceiling: Duration,
+    cold_start_ceiling: Time,
     users: Vec<PgdogUser>,
 ) -> Result<(String, String), ReconcileError> {
     let tls = obj.spec.pgdog.tls_secret_ref.as_ref();
@@ -407,12 +421,12 @@ fn render_pgdog_files(
                 &obj.name_any(),
                 obj.spec.defaults.as_ref(),
             ) {
-                Duration::from_millis(policy.suspension_idle_timeout.into_value())
+                time_from_millis_u64(policy.suspension_idle_timeout.into_value()).to_std()
             } else {
-                Duration::from_millis(policy.idle_timeout.into_value())
+                time_from_millis_u64(policy.idle_timeout.into_value()).to_std()
             },
-            server_lifetime: Duration::from_millis(policy.server_lifetime.into_value()),
-            cold_start_ceiling,
+            server_lifetime: time_from_millis_u64(policy.server_lifetime.into_value()).to_std(),
+            cold_start_ceiling: cold_start_ceiling.to_std(),
             users,
             ..Default::default()
         },
@@ -553,7 +567,7 @@ async fn verify_pgdog_reload(
             return Ok(true);
         }
         if attempt < reload_attempts {
-            tokio::time::sleep(ctx.config.pgdog_reload_backoff_ms.duration()).await;
+            tokio::time::sleep(ctx.config.pgdog_reload_backoff_ms.time().to_std()).await;
         }
     }
     Ok(false)
@@ -1139,6 +1153,7 @@ fn all_balancer_goal_names() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use assert2::assert;
+    use crabka_units::{millis, secs};
 
     use super::*;
     use crate::crd::{
@@ -1500,8 +1515,12 @@ mod tests {
         let now = grace_deadline + 1_000;
 
         assert!(
-            next_pgdog_transition_requeue([grace_deadline].into_iter(), now, 7_000, 60_000)
-                == Duration::from_secs(6)
+            next_pgdog_transition_requeue(
+                [grace_deadline].into_iter(),
+                now,
+                millis(7_000),
+                millis(60_000)
+            ) == secs(6)
         );
     }
 
@@ -1516,25 +1535,29 @@ mod tests {
                 &[matching, unrelated],
                 "fleet",
                 1_000,
-                7_000,
-                60_000,
-            ) == Duration::from_secs(10)
+                millis(7_000),
+                millis(60_000),
+            ) == secs(10)
         );
     }
 
     #[test]
     fn pgdog_requeue_uses_configured_fallback_without_future_deadlines() {
         assert!(
-            next_pgdog_transition_requeue([].into_iter(), 1_000, 7_000, 1_234)
-                == Duration::from_millis(1_234)
+            next_pgdog_transition_requeue([].into_iter(), 1_000, millis(7_000), millis(1_234))
+                == millis(1_234)
         );
     }
 
     #[test]
     fn pgdog_requeue_polls_before_a_later_grace_boundary() {
         assert!(
-            next_pgdog_transition_requeue([601_000].into_iter(), 1_000, 7_000, 1_000)
-                == Duration::from_secs(1)
+            next_pgdog_transition_requeue(
+                [601_000].into_iter(),
+                1_000,
+                millis(7_000),
+                millis(1_000)
+            ) == secs(1)
         );
     }
 
@@ -1546,19 +1569,19 @@ mod tests {
             TenantState::Active,
             deadline,
             16_999,
-            7_000
+            millis(7_000)
         ));
         assert!(!needs_bootstrap_credential(
             TenantState::Active,
             deadline,
             17_000,
-            7_000
+            millis(7_000)
         ));
         assert!(needs_bootstrap_credential(
             TenantState::Suspended,
             None,
             17_000,
-            7_000
+            millis(7_000)
         ));
     }
 }

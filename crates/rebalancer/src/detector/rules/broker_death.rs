@@ -4,6 +4,8 @@
 
 use std::collections::HashSet;
 
+use crabka_units::convert::TimeExt as _;
+
 use super::{Rule, RuleCtx, RuleHit, sustained_memo};
 use crate::detector::{AnomalyKey, AnomalyKind, AnomalySeverity};
 
@@ -39,7 +41,7 @@ impl Rule for BrokerDeath {
             .filter(|id| !old_live.contains(id))
             .collect();
         ids.sort_unstable();
-        let secs = ctx.cfg.broker_death_threshold.as_secs();
+        let secs = ctx.cfg.broker_death_threshold.secs_i64();
         ids.into_iter()
             .map(|id| RuleHit {
                 key: AnomalyKey::Broker(id),
@@ -52,7 +54,8 @@ impl Rule for BrokerDeath {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+
+    use crabka_units::prelude::*;
 
     use super::*;
     use crate::{
@@ -96,7 +99,7 @@ mod tests {
         }
     }
 
-    fn cfg(threshold: Duration) -> DetectorConfig {
+    fn cfg(threshold: Time) -> DetectorConfig {
         DetectorConfig {
             broker_death_threshold: threshold,
             ..DetectorConfig::default()
@@ -105,7 +108,7 @@ mod tests {
 
     #[test]
     fn fresh_absence_does_not_fire() {
-        let cfg = cfg(Duration::from_mins(1));
+        let cfg = cfg(minutes(1));
         let snap = state(&[1, 2], vec![("t", 0, vec![1, 2, 3], 1)], 1_000);
         let mut hist = SnapshotHistory::new(10);
         hist.push(&snap);
@@ -124,7 +127,7 @@ mod tests {
 
     #[test]
     fn sustained_absence_fires_critical() {
-        let cfg = cfg(Duration::from_mins(1));
+        let cfg = cfg(minutes(1));
         let usages = UsageStore::default();
         let capacities = BrokerCapacities::default();
         let mut hist = SnapshotHistory::new(10);
@@ -155,7 +158,7 @@ mod tests {
 
     #[test]
     fn reappearance_does_not_fire() {
-        let cfg = cfg(Duration::from_mins(1));
+        let cfg = cfg(minutes(1));
         let usages = UsageStore::default();
         let capacities = BrokerCapacities::default();
         let mut hist = SnapshotHistory::new(10);

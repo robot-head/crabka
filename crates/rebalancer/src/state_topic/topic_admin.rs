@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 
 use crabka_client_admin::{AdminClient, AdminError, CreateTopicOutcome, CreateTopicSpec};
+use crabka_units::{Time, convert::TimeExt as _, secs};
 use tracing::warn;
 
 use crate::state_topic::error::StateTopicError;
@@ -11,12 +12,15 @@ use crate::state_topic::error::StateTopicError;
 /// Kafka error code for "replication factor exceeds available brokers".
 const INVALID_REPLICATION_FACTOR: i16 = 38;
 
+/// How long the broker may take to acknowledge the `CreateTopics` request.
+const CREATE_TOPIC_TIMEOUT: Time = secs(10);
+
 #[async_trait::async_trait]
 pub trait TopicAdminClient: Send {
     async fn create_topics(
         &mut self,
         specs: &[CreateTopicSpec],
-        timeout_ms: i32,
+        timeout: Time,
     ) -> Result<Vec<CreateTopicOutcome>, AdminError>;
 }
 
@@ -27,9 +31,9 @@ impl TopicAdminClient for AdminClient {
     async fn create_topics(
         &mut self,
         specs: &[CreateTopicSpec],
-        timeout_ms: i32,
+        timeout: Time,
     ) -> Result<Vec<CreateTopicOutcome>, AdminError> {
-        AdminClient::create_topics(self, specs, timeout_ms).await
+        AdminClient::create_topics(self, specs, timeout.millis_i32()).await
     }
 }
 
@@ -84,9 +88,7 @@ async fn try_create_topic<A: TopicAdminClient + ?Sized>(
         replicas: i32::from(rf),
         configs: configs.clone(),
     };
-    let outcomes = admin
-        .create_topics(&[spec], /* timeout_ms */ 10_000)
-        .await?;
+    let outcomes = admin.create_topics(&[spec], CREATE_TOPIC_TIMEOUT).await?;
     for o in outcomes {
         // 36 = TOPIC_ALREADY_EXISTS  → idempotent, treat as success.
         // 38 = INVALID_REPLICATION_FACTOR → retry with rf=1 if rf > 1.
@@ -114,7 +116,7 @@ mod tests {
     #[derive(Default)]
     struct FakeAdmin {
         outcomes: VecDeque<Result<Vec<CreateTopicOutcome>, AdminError>>,
-        calls: Vec<(Vec<CreateTopicSpec>, i32)>,
+        calls: Vec<(Vec<CreateTopicSpec>, Time)>,
     }
 
     #[async_trait::async_trait]
@@ -122,9 +124,9 @@ mod tests {
         async fn create_topics(
             &mut self,
             specs: &[CreateTopicSpec],
-            timeout_ms: i32,
+            timeout: Time,
         ) -> Result<Vec<CreateTopicOutcome>, AdminError> {
-            self.calls.push((specs.to_vec(), timeout_ms));
+            self.calls.push((specs.to_vec(), timeout));
             self.outcomes.pop_front().expect("fake outcome")
         }
     }
@@ -164,9 +166,9 @@ mod tests {
             ("segment.ms".to_string(), "60000".to_string()),
         ]);
         assert2::assert!(
-            admin.calls.first().map(|(specs, timeout_ms)| {
+            admin.calls.first().map(|(specs, timeout)| {
                 (
-                    *timeout_ms,
+                    *timeout,
                     specs.first().map(|spec| {
                         (
                             spec.name.as_str(),
@@ -176,7 +178,7 @@ mod tests {
                         )
                     }),
                 )
-            }) == Some((10_000, Some(("__crabka_state", 1, 3, &expected_configs))))
+            }) == Some((secs(10), Some(("__crabka_state", 1, 3, &expected_configs))))
         );
     }
 
