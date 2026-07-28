@@ -78,10 +78,10 @@ struct PartialLimits {
     max_samples_per_query: Option<u64>,
     #[serde(default)]
     max_fetched_series_per_query: Option<u64>,
-    #[serde(default)]
-    max_query_lookback_secs: Option<u64>,
-    #[serde(default)]
-    max_query_length_secs: Option<u64>,
+    #[serde(default, with = "serde_units::human::option_time")]
+    max_query_lookback: Option<Time>,
+    #[serde(default, with = "serde_units::human::option_time")]
+    max_query_length: Option<Time>,
     #[serde(default, with = "serde_units::human::option_time")]
     out_of_order_time_window: Option<Time>,
 }
@@ -116,12 +116,10 @@ fn merge_limits(base: &Limits, partial: &PartialLimits) -> Limits {
         max_fetched_series_per_query: partial
             .max_fetched_series_per_query
             .unwrap_or(base.max_fetched_series_per_query),
-        max_query_lookback_secs: partial
-            .max_query_lookback_secs
-            .unwrap_or(base.max_query_lookback_secs),
-        max_query_length_secs: partial
-            .max_query_length_secs
-            .unwrap_or(base.max_query_length_secs),
+        max_query_lookback: partial
+            .max_query_lookback
+            .unwrap_or(base.max_query_lookback),
+        max_query_length: partial.max_query_length.unwrap_or(base.max_query_length),
         out_of_order_time_window: partial
             .out_of_order_time_window
             .unwrap_or(base.out_of_order_time_window),
@@ -143,6 +141,8 @@ overrides:
     max_label_value_length: "64B"
   tenant-c:
     out_of_order_time_window: "1500ms"
+    max_query_length: "1h"
+    max_query_lookback: "7d"
 "#;
 
     #[test]
@@ -167,6 +167,15 @@ overrides:
         let p = OverridesProvider::from_yaml(YAML).unwrap();
         assert!(p.for_tenant("tenant-c").out_of_order_time_window == millis(1500));
         assert!(p.for_tenant("tenant-a").out_of_order_time_window == Time::ZERO);
+    }
+
+    #[test]
+    fn parses_query_span_cap_overrides() {
+        let p = OverridesProvider::from_yaml(YAML).unwrap();
+        let c = p.for_tenant("tenant-c");
+        check!(c.max_query_length == hours(1));
+        check!(c.max_query_lookback == days(7));
+        check!(p.for_tenant("tenant-a").max_query_length == Time::ZERO);
     }
 
     #[test]

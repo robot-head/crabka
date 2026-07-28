@@ -9,6 +9,7 @@ pub mod scalar_math;
 
 use std::{any::Any, sync::Arc, time::Duration};
 
+use crabka_units::prelude::*;
 use num_traits::ToPrimitive;
 use promql_parser::{
     parser::{
@@ -20,29 +21,32 @@ use promql_parser::{
 use crate::{PromqlError, error::Result};
 
 /// Query-range values available to Prometheus duration expressions.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// `start` and `end` are epoch-millisecond instants; `step` is the grid
+/// resolution, an extent. Not `Eq`, because [`Time`] stores `f64`.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DurationExprContext {
-    start: i64,
-    end: i64,
-    step: i64,
+    start_ms: i64,
+    end_ms: i64,
+    step: Time,
 }
 
 impl DurationExprContext {
     #[must_use]
     pub fn instant(time_ms: i64) -> Self {
         Self {
-            start: time_ms,
-            end: time_ms,
-            step: 0,
+            start_ms: time_ms,
+            end_ms: time_ms,
+            step: Time::ZERO,
         }
     }
 
     #[must_use]
-    pub fn range(start_ms: i64, end_ms: i64, step_ms: i64) -> Self {
+    pub fn range(start_ms: i64, end_ms: i64, step: Time) -> Self {
         Self {
-            start: start_ms,
-            end: end_ms,
-            step: step_ms,
+            start_ms,
+            end_ms,
+            step,
         }
     }
 }
@@ -690,12 +694,13 @@ impl<'a> DurationExprParser<'a> {
         }
 
         match name.to_ascii_lowercase().as_str() {
-            "step" if args.is_empty() => Ok(ms_to_seconds(self.context.step)),
-            "range" if args.is_empty() => Ok(ms_to_seconds(
-                self.context.end.saturating_sub(self.context.start),
-            )),
-            "start" if args.is_empty() => Ok(ms_to_seconds(self.context.start)),
-            "end" if args.is_empty() => Ok(ms_to_seconds(self.context.end)),
+            "step" if args.is_empty() => Ok(self.context.step.secs_f64()),
+            "range" if args.is_empty() => Ok(Time::from_millis(
+                self.context.end_ms.saturating_sub(self.context.start_ms),
+            )
+            .secs_f64()),
+            "start" if args.is_empty() => Ok(ms_to_seconds(self.context.start_ms)),
+            "end" if args.is_empty() => Ok(ms_to_seconds(self.context.end_ms)),
             "min" if !args.is_empty() => Ok(args.into_iter().fold(f64::INFINITY, f64::min)),
             "max" if !args.is_empty() => Ok(args.into_iter().fold(f64::NEG_INFINITY, f64::max)),
             _ => Err(PromqlError::Parse(format!(
@@ -827,7 +832,7 @@ mod tests {
     fn parse_promql_folds_range_duration_expressions() {
         let expr = parse_promql_with_duration_context(
             "metric[step()+1ms]",
-            DurationExprContext::range(50_000, 60_000, 5_000),
+            DurationExprContext::range(50_000, 60_000, secs(5)),
         )
         .unwrap();
 
@@ -863,7 +868,7 @@ mod tests {
     fn parse_promql_preserves_unparenthesized_offset_precedence() {
         let expr = parse_promql_with_duration_context(
             "metric offset step()*0",
-            DurationExprContext::range(50_000, 60_000, 5_000),
+            DurationExprContext::range(50_000, 60_000, secs(5)),
         )
         .unwrap();
 

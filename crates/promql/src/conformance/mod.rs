@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use crabka_blockstore::Labels;
 use crabka_metrics::{BucketSpan, NativeHistogram, ResetHint};
+use crabka_units::prelude::*;
 
 use crate::{PromqlError, error::Result};
 
@@ -17,6 +18,7 @@ pub mod testkit {
     };
 
     use crabka_blockstore::Labels;
+    use crabka_units::prelude::*;
 
     use super::Result;
     use crate::{
@@ -93,7 +95,7 @@ pub mod testkit {
 
         for statement in &file.statements {
             match statement {
-                Statement::Load { step_ms, series } => {
+                Statement::Load { step, series } => {
                     for load_series in series {
                         let labels = metric_to_labels(&load_series.metric);
                         for (index, sample) in load_series.values.iter().enumerate() {
@@ -102,7 +104,7 @@ pub mod testkit {
                                     store.push_float(
                                         TENANT,
                                         labels.clone(),
-                                        index_to_timestamp(index, *step_ms)?,
+                                        index_to_timestamp(index, *step)?,
                                         *value,
                                     );
                                 }
@@ -110,7 +112,7 @@ pub mod testkit {
                                     store.push_histogram(
                                         TENANT,
                                         labels.clone(),
-                                        index_to_timestamp(index, *step_ms)?,
+                                        index_to_timestamp(index, *step)?,
                                         histogram.clone(),
                                     );
                                 }
@@ -118,7 +120,7 @@ pub mod testkit {
                                     store.push_float(
                                         TENANT,
                                         labels.clone(),
-                                        index_to_timestamp(index, *step_ms)?,
+                                        index_to_timestamp(index, *step)?,
                                         stale_nan(),
                                     );
                                 }
@@ -157,7 +159,7 @@ pub mod testkit {
                 Statement::EvalRange {
                     start_ms,
                     end_ms,
-                    step_ms,
+                    step,
                     expr,
                     expect,
                     annotations,
@@ -165,7 +167,7 @@ pub mod testkit {
                 } => {
                     let engine = PromqlEngine::new(Arc::new(store.clone()), EngineOpts::default());
                     let result = engine
-                        .query_range_with_annotations(TENANT, expr, *start_ms, *end_ms, *step_ms)
+                        .query_range_with_annotations(TENANT, expr, *start_ms, *end_ms, *step)
                         .await;
                     handle_range_eval_result(
                         result,
@@ -173,7 +175,7 @@ pub mod testkit {
                         annotations,
                         fail_message.as_deref(),
                         *start_ms,
-                        *step_ms,
+                        *step,
                     )
                     .map_err(|error| add_eval_context(error, "range", expr))?;
                 }
@@ -363,7 +365,7 @@ pub mod testkit {
                         result,
                         expect,
                         range_expect.start_ms,
-                        range_expect.step_ms,
+                        range_expect.step,
                     ),
                     None => compare_instant_result(result, expect),
                 }
@@ -377,7 +379,7 @@ pub mod testkit {
         annotations: &[AnnotationExpect],
         fail_message: Option<&str>,
         start_ms: i64,
-        step_ms: i64,
+        step: Time,
     ) -> Result<()> {
         match (result, fail_message) {
             (Ok(_), Some(_)) => Err(PromqlError::Exec(
@@ -387,7 +389,7 @@ pub mod testkit {
             (Err(error), None) => Err(error),
             (Ok((result, raised)), None) => {
                 compare_annotations(annotations, &raised)?;
-                compare_range_result(result, expect, start_ms, step_ms)
+                compare_range_result(result, expect, start_ms, step)
             }
         }
     }
@@ -518,7 +520,7 @@ pub mod testkit {
         result: QueryResult,
         expect: &[ExpectLine],
         start_ms: i64,
-        step_ms: i64,
+        step: Time,
     ) -> Result<()> {
         let actual = match result {
             QueryResult::RangeMatrix(series) => series
@@ -544,7 +546,7 @@ pub mod testkit {
             .map(|line| {
                 Ok((
                     labels_key(&metric_to_labels(&line.metric)),
-                    expected_range_samples(line, start_ms, step_ms)?,
+                    expected_range_samples(line, start_ms, step)?,
                 ))
             })
             .collect::<Result<BTreeMap<_, _>>>()?;
@@ -669,8 +671,9 @@ pub mod testkit {
     fn expected_range_samples(
         line: &ExpectLine,
         start_ms: i64,
-        step_ms: i64,
+        step: Time,
     ) -> Result<Vec<(i64, SampleValue)>> {
+        let step_ms = step.millis_i64();
         line.values
             .iter()
             .enumerate()
@@ -691,11 +694,11 @@ pub mod testkit {
             .collect()
     }
 
-    fn index_to_timestamp(index: usize, step_ms: i64) -> Result<i64> {
+    fn index_to_timestamp(index: usize, step: Time) -> Result<i64> {
         let index = i64::try_from(index)
             .map_err(|error| PromqlError::Exec(format!("sample index too large: {error}")))?;
         index
-            .checked_mul(step_ms)
+            .checked_mul(step.millis_i64())
             .ok_or_else(|| PromqlError::Exec("sample timestamp overflow".to_string()))
     }
 
@@ -762,8 +765,8 @@ pub struct TestFile {
 pub enum Statement {
     /// Load one or more series at a fixed step.
     Load {
-        /// Step between loaded samples in milliseconds.
-        step_ms: i64,
+        /// Step between loaded samples.
+        step: Time,
         /// Series loaded by this statement.
         series: Vec<LoadSeries>,
     },
@@ -788,8 +791,8 @@ pub enum Statement {
         start_ms: i64,
         /// Range end timestamp in milliseconds.
         end_ms: i64,
-        /// Query step in milliseconds.
-        step_ms: i64,
+        /// Query step.
+        step: Time,
         /// `PromQL` expression.
         expr: String,
         /// Expected output lines.
@@ -864,8 +867,8 @@ pub enum AnnotationExpect {
 pub struct RangeExpect {
     /// Expected first sample timestamp in milliseconds.
     pub start_ms: i64,
-    /// Expected step between samples in milliseconds.
-    pub step_ms: i64,
+    /// Expected step between samples.
+    pub step: Time,
 }
 
 /// Parse the legacy Prometheus `.test` DSL subset used by the conformance harness.
@@ -950,7 +953,7 @@ impl<'a> TestParser<'a> {
                 .strip_prefix("load ")
                 .ok_or_else(|| parse_error(header, "expected load statement"))?
         };
-        let step_ms = parse_duration_ms(step.trim(), header)?;
+        let step = Time::from_millis(parse_duration_ms(step.trim(), header)?);
         let mut series = Vec::new();
 
         while let Some(line) = self.peek() {
@@ -976,7 +979,7 @@ impl<'a> TestParser<'a> {
             series.extend(load_with_nhcb_series(&series, header)?);
         }
 
-        Ok(Statement::Load { step_ms, series })
+        Ok(Statement::Load { step, series })
     }
 
     fn parse_eval_instant(&mut self) -> Result<Statement> {
@@ -1046,7 +1049,7 @@ impl<'a> TestParser<'a> {
         Ok(Statement::EvalRange {
             start_ms: parse_duration_ms(start, header)?,
             end_ms: parse_duration_ms(end, header)?,
-            step_ms: parse_duration_ms(step, header)?,
+            step: Time::from_millis(parse_duration_ms(step, header)?),
             expr: expr.to_string(),
             expect,
             annotations,
@@ -1172,7 +1175,7 @@ fn parse_range_vector_directive(directive: &str, line: Line<'_>) -> Result<Optio
     let step = rest.trim();
     Ok(Some(RangeExpect {
         start_ms: parse_duration_ms(start, line)?,
-        step_ms: parse_duration_ms(step, line)?,
+        step: Time::from_millis(parse_duration_ms(step, line)?),
     }))
 }
 
@@ -1970,7 +1973,7 @@ clear
         let expected = TestFile {
             statements: vec![
                 Statement::Load {
-                    step_ms: 60_000,
+                    step: minutes(1),
                     series: vec![LoadSeries {
                         metric: r#"metric{a="b"}"#.to_string(),
                         values: vec![

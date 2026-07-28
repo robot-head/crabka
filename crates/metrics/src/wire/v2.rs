@@ -24,7 +24,7 @@ pub fn decode_v2(
     body: &[u8],
     max_decompressed: ByteSize,
 ) -> Result<(Vec<DecodedSeries>, WrittenCounts), WireError> {
-    let raw = snappy_block_decode(body, max_decompressed.bytes_usize())?;
+    let raw = snappy_block_decode(body, max_decompressed)?;
     let req = pb::v2::Request::decode(raw.as_slice())
         .map_err(|error| WireError::ProtobufDecode(error.to_string()))?;
     let table = SymbolTable::from_symbols(req.symbols)

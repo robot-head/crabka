@@ -26,6 +26,7 @@ assert2 = { workspace = true }
 crabka-blockstore = { path = "../blockstore", version = "0.3.7" }
 crabka-ids = { path = "../ids", version = "0.3.8" }
 crabka-metrics = { path = "../metrics", version = "0.3.8" }
+crabka-units = { workspace = true }
 arrow = { workspace = true }
 datafusion = { workspace = true }
 promql-parser = { workspace = true }

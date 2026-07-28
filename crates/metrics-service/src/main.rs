@@ -79,9 +79,8 @@ struct Cli {
     ///
     /// Raw milliseconds rather than a [`Time`]: the flag name and its bare
     /// integer value are the deployment contract (the demo compose file passes
-    /// `--wal-head-retention-ms=$CRABKA_METRICS_QUERIER_WAL_HEAD_RETENTION_MS`),
-    /// and `WalHead` takes the same raw millisecond count, so there is no seam
-    /// between them for a quantity to sit in.
+    /// `--wal-head-retention-ms=$CRABKA_METRICS_QUERIER_WAL_HEAD_RETENTION_MS`).
+    /// It becomes a [`Time`] at the `WalHead` seam below.
     #[arg(long, default_value_t = DEFAULT_WAL_HEAD_RETENTION_MS)]
     wal_head_retention_ms: i64,
 }
@@ -149,7 +148,7 @@ async fn run_query_frontend(
         .with_metrics(metrics)
         .with_query_frontend_cache(
             QueryFrontendOptions {
-                split_interval_ms: cli.query_frontend_split.millis_i64(),
+                split_interval: cli.query_frontend_split,
                 shard_count: cli.query_frontend_shards,
             },
             Arc::new(crabka_promql::ObjectStoreQueryFrontendCache::new(
@@ -298,7 +297,7 @@ async fn run_querier(
     let object_store_url = url::Url::parse(&cli.object_store_url)?;
     let (store, _prefix) = object_store::parse_url_opts(&object_store_url, std::env::vars())?;
     let store: Arc<dyn ObjectStore> = Arc::from(store);
-    let head = WalHead::with_retention_ms(cli.wal_head_retention_ms);
+    let head = WalHead::with_retention(Time::from_millis(cli.wal_head_retention_ms));
     let shutdown = Shutdown::new();
     spawn_ctrl_c_listener(shutdown.clone());
     if let Some(bootstrap) = cli.wal_bootstrap.clone() {

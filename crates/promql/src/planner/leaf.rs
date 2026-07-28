@@ -19,6 +19,7 @@ use arrow::{
     record_batch::RecordBatch,
 };
 use crabka_blockstore::{Labels, SeriesFingerprint};
+use crabka_units::prelude::*;
 use datafusion::{
     catalog::MemTable,
     logical_expr::{Extension, LogicalPlan},
@@ -67,10 +68,10 @@ pub struct InstantSelectorPlan {
 }
 
 /// Build the leaf table and operator chain that evaluates a bare instant-vector
-/// selector at `eval_time_ms` with the given `lookback_delta_ms`.
+/// selector at `eval_time_ms` with the given `lookback_delta`.
 ///
 /// `samples` are the float samples of the matched series over the scan window
-/// `(eval_time_ms - lookback_delta_ms, eval_time_ms]`. Stale-NaN markers must be
+/// `(eval_time_ms - lookback_delta, eval_time_ms]`. Stale-NaN markers must be
 /// filtered out by the caller (matching interpreter staleness handling) before
 /// the values reach [`InstantManipulate`].
 ///
@@ -80,7 +81,7 @@ pub struct InstantSelectorPlan {
 pub async fn plan_instant_vector_selector(
     samples: Vec<LabeledSample>,
     eval_time_ms: i64,
-    lookback_delta_ms: i64,
+    lookback_delta: Time,
 ) -> Result<InstantSelectorPlan> {
     // Collect the distinct label names across all matched series; these become
     // the label columns carried through the operator chain.
@@ -139,8 +140,8 @@ pub async fn plan_instant_vector_selector(
             start_ms: eval_time_ms,
             end_ms: eval_time_ms,
             // A single grid step: any positive stride covers exactly one point.
-            step_ms: lookback_delta_ms.max(1),
-            lookback_delta_ms,
+            step_ms: lookback_delta.millis_i64().max(1),
+            lookback_delta_ms: lookback_delta.millis_i64(),
             time_index: TIME_COLUMN.to_string(),
             field_column: VALUE_COLUMN.to_string(),
             input: normalize,

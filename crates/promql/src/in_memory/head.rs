@@ -5,6 +5,7 @@ use std::{
 
 use crabka_blockstore::{LabelMatcher, Labels};
 use crabka_metrics::WalRecord;
+use crabka_units::prelude::*;
 
 use super::{InMemoryMetricStore, PartitionWatermark, PruneStats};
 use crate::{
@@ -33,10 +34,10 @@ impl WalHead {
         Self::default()
     }
 
-    /// Build a head with an explicit retention window in milliseconds.
+    /// Build a head with an explicit retention window.
     #[must_use]
-    pub fn with_retention_ms(retention_ms: i64) -> Self {
-        Self::from_store(InMemoryMetricStore::with_retention_ms(retention_ms))
+    pub fn with_retention(retention: Time) -> Self {
+        Self::from_store(InMemoryMetricStore::with_retention(retention))
     }
 
     #[must_use]
@@ -125,15 +126,15 @@ impl WalHead {
             .clone()
     }
 
-    /// The retention window in milliseconds.
+    /// The retention window.
     #[must_use]
     /// # Panics
     /// Panics if shared metric state is poisoned or validated series data is missing an index entry required by the operation.
-    pub fn retention_ms(&self) -> i64 {
+    pub fn retention(&self) -> Time {
         self.inner
             .read()
             .expect("wal head lock poisoned")
-            .retention_ms()
+            .retention()
     }
 }
 

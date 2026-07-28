@@ -1,4 +1,14 @@
 //! Custom `DataFusion` operators used to model `PromQL` vectors.
+//!
+//! The window widths these nodes carry — a step, a lookback delta, a range, a
+//! grid interval — are extents, but they stay raw `i64` milliseconds here rather
+//! than becoming [`Time`](crabka_units::Time) quantities.
+//! `UserDefinedLogicalNodeCore` requires `Eq` and `Hash` so the `DataFusion`
+//! planner can key on and deduplicate nodes, and a quantity stores `f64`, so it
+//! can be neither. The paired `*Exec` nodes hold the same raw integers, which
+//! also keeps the per-row timestamp arithmetic in integer space. The seam is the
+//! planner in [`crate::planner`], which converts a `Time` into milliseconds
+//! exactly once as it builds the node.
 
 pub mod instant_manipulate;
 pub mod normalize;

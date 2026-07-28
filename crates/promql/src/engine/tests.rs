@@ -3,6 +3,7 @@ use std::{collections::BTreeMap, sync::Arc};
 use assert2::check;
 use crabka_blockstore::Labels;
 use crabka_metrics::{BucketSpan, NativeHistogram, ResetHint};
+use crabka_units::prelude::*;
 
 use super::{MAX_RESOLUTION_POINTS, check_resolution_points, match_rate_range_call};
 use crate::{EngineOpts, InMemoryMetricStore, PromqlEngine, PromqlError, QueryResult, SampleValue};
@@ -309,7 +310,13 @@ async fn range_query_scans_store_once_per_matcher_set_not_per_step() {
     // cache it is one float scan + one histogram scan + one series resolution
     // total, reused across every step.
     let result = engine
-        .eval_range_via_planner_forced("t", "count({job=\"broker\"})", 0, 19 * 15_000, 15_000)
+        .eval_range_via_planner_forced(
+            "t",
+            "count({job=\"broker\"})",
+            0,
+            19 * 15_000,
+            millis(15_000),
+        )
         .await
         .unwrap();
     assert2::assert!(matches!(result, QueryResult::RangeMatrix(_)));
@@ -1083,7 +1090,7 @@ async fn instant_selector_returns_latest_sample_within_lookback() {
     let engine = PromqlEngine::new(
         Arc::new(store),
         EngineOpts {
-            lookback_delta_ms: 15_000,
+            lookback_delta: millis(15_000),
             max_samples: 100,
             ..EngineOpts::default()
         },
@@ -1130,7 +1137,7 @@ async fn instant_selector_offset_shifts_evaluation_time_backwards() {
     let engine = PromqlEngine::new(
         Arc::new(store),
         EngineOpts {
-            lookback_delta_ms: 30_000,
+            lookback_delta: millis(30_000),
             max_samples: 100,
             ..EngineOpts::default()
         },
@@ -1167,7 +1174,7 @@ async fn instant_selector_at_uses_absolute_evaluation_time() {
     let engine = PromqlEngine::new(
         Arc::new(store),
         EngineOpts {
-            lookback_delta_ms: 30_000,
+            lookback_delta: millis(30_000),
             max_samples: 100,
             ..EngineOpts::default()
         },
@@ -1204,7 +1211,7 @@ async fn instant_selector_at_and_offset_combine_order_independently() {
     let engine = PromqlEngine::new(
         Arc::new(store),
         EngineOpts {
-            lookback_delta_ms: 30_000,
+            lookback_delta: millis(30_000),
             max_samples: 100,
             ..EngineOpts::default()
         },
@@ -1324,7 +1331,7 @@ async fn instant_selector_stale_marker_terminates_series_before_lookback_expiry(
     let engine = PromqlEngine::new(
         Arc::new(store),
         EngineOpts {
-            lookback_delta_ms: 60_000,
+            lookback_delta: millis(60_000),
             max_samples: 100,
             ..EngineOpts::default()
         },
@@ -4037,7 +4044,7 @@ async fn range_rate_uses_each_step_as_window_end() {
             "rate(http_requests_total[5m])",
             240_000,
             300_000,
-            60_000,
+            millis(60_000),
         )
         .await
         .unwrap();
@@ -4072,7 +4079,7 @@ async fn range_selector_at_start_and_end_use_query_bounds() {
     let engine = PromqlEngine::new(Arc::new(store), EngineOpts::default());
     for (query, expected) in [("up @ start()", 1.0), ("up @ end()", 3.0)] {
         let result = engine
-            .query_range("tenant-a", query, 60_000, 180_000, 60_000)
+            .query_range("tenant-a", query, 60_000, 180_000, millis(60_000))
             .await
             .unwrap();
 
@@ -4380,7 +4387,7 @@ async fn range_duration_expression_helpers_return_query_range_and_step_seconds()
         ("end()", 180.0),
     ] {
         let result = engine
-            .query_range("tenant-a", query, 60_000, 180_000, 30_000)
+            .query_range("tenant-a", query, 60_000, 180_000, millis(30_000))
             .await
             .unwrap();
 
@@ -4927,7 +4934,7 @@ async fn range_selector_returns_samples_in_each_step_window() {
 
     let engine = PromqlEngine::new(Arc::new(store), EngineOpts::default());
     let result = engine
-        .query_range("tenant-a", "up[2m]", 120_000, 180_000, 60_000)
+        .query_range("tenant-a", "up[2m]", 120_000, 180_000, millis(60_000))
         .await
         .unwrap();
 
@@ -4955,7 +4962,7 @@ async fn range_query_accepts_parenthesized_expression() {
 
     let engine = PromqlEngine::new(Arc::new(store), EngineOpts::default());
     let result = engine
-        .query_range("tenant-a", "(up)", 0, 120_000, 60_000)
+        .query_range("tenant-a", "(up)", 0, 120_000, millis(60_000))
         .await
         .unwrap();
 
@@ -5055,7 +5062,7 @@ async fn instant_subquery_uses_global_eval_interval_when_step_is_omitted() {
     let engine = PromqlEngine::new(
         Arc::new(store),
         EngineOpts {
-            eval_interval_ms: 30_000,
+            eval_interval: millis(30_000),
             ..EngineOpts::default()
         },
     );
@@ -5182,7 +5189,7 @@ fn range_planner_gate_routes_expected_shapes() {
     let routes = |query: &str| -> bool {
         let expr = parse_promql_with_duration_context(
             query,
-            DurationExprContext::range(0, 120_000, 60_000),
+            DurationExprContext::range(0, 120_000, millis(60_000)),
         )
         .unwrap_or_else(|error| panic!("parse `{query}`: {error}"));
         let mut probe = &expr;
@@ -5398,7 +5405,7 @@ async fn range_planner_path_matches_interpreter() {
 
     let engine = PromqlEngine::new(Arc::new(store), EngineOpts::default());
 
-    let (start, end, step) = (0_i64, 300_000_i64, 60_000_i64);
+    let (start, end, step) = (0_i64, 300_000_i64, millis(60_000));
 
     // Queries the production gate routes through the per-step operator
     // planner. For these, the gate must accept them and the planner-routed
@@ -5725,7 +5732,7 @@ async fn empty_valued_label_planner_path_matches_interpreter() {
     // also route through the operator leaf and keep the present-empty (a),
     // non-empty (b), and absent (c) series DISTINCT — three separate result
     // series, the present-empty/absent pair not collapsed.
-    let (start, end, step) = (0_i64, 120_000_i64, 60_000_i64);
+    let (start, end, step) = (0_i64, 120_000_i64, millis(60_000));
     let query = "rate(m[2m])";
     let QueryResult::RangeMatrix(mut series) = engine
         .query_range("t", query, start, end, step)
@@ -5757,7 +5764,7 @@ async fn empty_valued_label_planner_path_matches_interpreter() {
 ///      NO point.
 #[tokio::test]
 async fn range_bare_selector_lookback_boundary_matches_prometheus() {
-    let lookback = EngineOpts::default().lookback_delta_ms; // 300_000 (5m)
+    let lookback = EngineOpts::default().lookback_delta.millis_i64(); // 300_000 (5m)
 
     let mut store = InMemoryMetricStore::new();
     // A single sample at t=0. With a 5m lookback:
@@ -5773,7 +5780,7 @@ async fn range_bare_selector_lookback_boundary_matches_prometheus() {
     );
     let engine = PromqlEngine::new(Arc::new(store), EngineOpts::default());
 
-    let (start, end, step) = (0_i64, lookback, 60_000_i64);
+    let (start, end, step) = (0_i64, lookback, millis(60_000));
 
     // (1) the gate routes the bare selector through the planner.
     {
@@ -5839,7 +5846,7 @@ async fn range_at_start_end_selector_planner_matches_interpreter() {
     }
     let engine = PromqlEngine::new(Arc::new(store), EngineOpts::default());
 
-    let (start, end, step) = (0_i64, 300_000_i64, 60_000_i64);
+    let (start, end, step) = (0_i64, 300_000_i64, millis(60_000));
 
     // `m @ start()` pins eval to t=0 and `m @ end()` to t=300000: both have
     // an in-window sample, so they yield series. `m @ start() offset 1m`
@@ -6009,7 +6016,7 @@ async fn range_scalar_expr_planner_path_matches_interpreter() {
     store.push_float("t", labels(&[("__name__", "m"), ("job", "a")]), 0, 1.0);
     let engine = PromqlEngine::new(Arc::new(store), EngineOpts::default());
 
-    let (start, end, step) = (0_i64, 300_000_i64, 60_000_i64);
+    let (start, end, step) = (0_i64, 300_000_i64, millis(60_000));
 
     for query in ["42", "1 + 2", "time()", "2 * (3 + 4)"] {
         let expr =
@@ -6440,7 +6447,7 @@ async fn subquery_planner_path_matches_interpreter() {
     let engine = PromqlEngine::new(Arc::new(store), EngineOpts::default());
 
     // Each query must route through the operator path and match the
-    // interpreter byte-for-byte. `EngineOpts::default().eval_interval_ms` is
+    // interpreter byte-for-byte. `EngineOpts::default().eval_interval` is
     // 60s, so a subquery written `[range:]` (no resolution) uses a 60s stride
     // on BOTH paths.
     let queries = [
@@ -7575,21 +7582,21 @@ async fn quantile_out_of_range_phi_returns_signed_inf_with_warning() {
 #[test]
 fn check_resolution_points_enforces_cap() {
     // A non-positive step is rejected outright.
-    assert2::assert!(check_resolution_points(0, 1_000, 0).is_err());
-    assert2::assert!(check_resolution_points(0, 1_000, -1).is_err());
+    assert2::assert!(check_resolution_points(0, 1_000, Time::ZERO).is_err());
+    assert2::assert!(check_resolution_points(0, 1_000, millis(1) * -1.0).is_err());
 
     // `(end-start)/step == MAX_RESOLUTION_POINTS` intervals is accepted — the
     // same boundary the HTTP gate and Prometheus' `(end-start)/step > 11000`
     // rule admit (no off-by-one re-rejection of a gate-admitted query).
     let at_cap = i64::try_from(MAX_RESOLUTION_POINTS).unwrap(); // step = 1ms => intervals == MAX.
-    assert2::assert!(check_resolution_points(0, at_cap, 1).is_ok());
+    assert2::assert!(check_resolution_points(0, at_cap, millis(1)).is_ok());
 
     // One interval over the cap errors.
-    assert2::assert!(check_resolution_points(0, at_cap + 1, 1).is_err());
+    assert2::assert!(check_resolution_points(0, at_cap + 1, millis(1)).is_err());
 
     // The abusive `[1000d:1ms]`-style resolution is rejected before looping.
     let thousand_days_ms = 1_000_i64 * 24 * 60 * 60 * 1_000;
-    let err = check_resolution_points(0, thousand_days_ms, 1).expect_err("must reject");
+    let err = check_resolution_points(0, thousand_days_ms, millis(1)).expect_err("must reject");
     assert2::assert!(err.to_string().contains("exceeded maximum resolution"));
 }
 

@@ -14,7 +14,7 @@ use super::{
 /// # Errors
 /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub fn decode_v1(body: &[u8], max_decompressed: ByteSize) -> Result<Vec<DecodedSeries>, WireError> {
-    let raw = snappy_block_decode(body, max_decompressed.bytes_usize())?;
+    let raw = snappy_block_decode(body, max_decompressed)?;
     let req = pb::v1::WriteRequest::decode(raw.as_slice())
         .map_err(|error| WireError::ProtobufDecode(error.to_string()))?;
 

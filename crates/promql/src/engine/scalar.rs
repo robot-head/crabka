@@ -1,3 +1,5 @@
+#[cfg(feature = "experimental-functions")]
+use crabka_units::prelude::*;
 use num_traits::ToPrimitive;
 use time::OffsetDateTime;
 
@@ -290,10 +292,10 @@ impl DurationHelper {
     pub(super) fn value_ms(self) -> i64 {
         QUERY_RANGE_CONTEXT
             .try_with(|context| match self {
-                Self::Range => context.end.saturating_sub(context.start),
-                Self::Step => context.step,
-                Self::Start => context.start,
-                Self::End => context.end,
+                Self::Range => context.end_ms.saturating_sub(context.start_ms),
+                Self::Step => context.step.millis_i64(),
+                Self::Start => context.start_ms,
+                Self::End => context.end_ms,
             })
             .unwrap_or(0)
     }

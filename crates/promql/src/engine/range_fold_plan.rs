@@ -1,3 +1,4 @@
+use crabka_units::prelude::*;
 use promql_parser::parser::{Call, SubqueryExpr};
 
 #[cfg(feature = "experimental-functions")]
@@ -5,12 +6,13 @@ use super::range_functions::validate_smoothing_factor;
 use super::{
     PromqlEngine, RangeEval,
     annotations::{emit_warning, invalid_quantile_warning, is_valid_quantile},
-    apply_selector_time_modifier, duration_ms,
+    apply_selector_time_modifier,
     planned::PlannedInstant,
     planner_support::{SubqueryOuterFn, instant_expr_is_plannable, range_fold_range_arg_index},
     range_functions::{
         IrateFn, OuterRangeFn, OverTimeFn, RangeFn, align_subquery_start, apply_outer_range_fn,
     },
+    selector_duration,
 };
 use crate::{
     PromqlError,
@@ -141,10 +143,10 @@ impl<S: MetricStore> PromqlEngine<S> {
                 OuterRangeFn::QuantileOverTime(quantile)
             }
             "predict_linear" => {
-                let duration_seconds = self
+                let duration = self
                     .eval_scalar_arg(tenant, call, 1, time_ms, "duration")
                     .await?;
-                OuterRangeFn::PredictLinear(duration_seconds)
+                OuterRangeFn::PredictLinear(Time::from_secs_f64(duration))
             }
             #[cfg(feature = "experimental-functions")]
             "double_exponential_smoothing" => {
@@ -255,7 +257,7 @@ impl<S: MetricStore> PromqlEngine<S> {
                 else {
                     return Ok(None);
                 };
-                OuterRangeFn::PredictLinear(value)
+                OuterRangeFn::PredictLinear(Time::from_secs_f64(value))
             }
             #[cfg(feature = "experimental-functions")]
             SubqueryOuterFn::DoubleExponentialSmoothing { smoothing, trend } => {
@@ -282,12 +284,12 @@ impl<S: MetricStore> PromqlEngine<S> {
         // Resolve the subquery grid exactly as `eval_subquery` does: range,
         // resolution (default = global eval interval), the `@`/offset-shifted end,
         // and the step-aligned start.
-        let range_ms = duration_ms(subquery.range)?;
-        let step_ms = match subquery.step {
-            Some(step) => duration_ms(step)?,
-            None => self.opts.eval_interval_ms,
+        let range = selector_duration(subquery.range)?;
+        let step = match subquery.step {
+            Some(step) => selector_duration(step)?,
+            None => self.opts.eval_interval,
         };
-        if step_ms <= 0 {
+        if step <= Time::ZERO {
             // The interpreter raises a hard error here; fall back so it does.
             return Ok(None);
         }
@@ -297,13 +299,13 @@ impl<S: MetricStore> PromqlEngine<S> {
             subquery.offset.as_ref(),
             None,
         )?;
-        let start_ms = align_subquery_start(end_ms.saturating_sub(range_ms), step_ms);
+        let start_ms = align_subquery_start(end_ms.saturating_sub(range.millis_i64()), step);
 
         // Build the subquery's range vector through the recursive planner. A
         // `None` here means some sub-step's shape is not planner-supported, so the
         // whole subquery falls back to the interpreter.
         let Some(series) = self
-            .eval_range_via_planner(tenant, &subquery.expr, start_ms, end_ms, step_ms)
+            .eval_range_via_planner(tenant, &subquery.expr, start_ms, end_ms, step)
             .await?
         else {
             return Ok(None);
@@ -316,7 +318,7 @@ impl<S: MetricStore> PromqlEngine<S> {
         let range = RangeEval {
             series,
             end_ms,
-            range_ms,
+            range,
             modifier: None,
         };
         Ok(Some(PlannedInstant::Precomputed(apply_outer_range_fn(

@@ -52,6 +52,7 @@ pub(crate) use annotations::ANNOTATIONS;
 use annotations::{emit_warning, invalid_quantile_warning, is_valid_quantile};
 #[cfg(test)]
 use binary::{InstantValue, combine_instant_binary};
+use crabka_units::prelude::*;
 #[cfg(all(test, feature = "experimental-functions"))]
 use histogram::apply_histogram_quantiles;
 #[cfg(test)]
@@ -74,7 +75,7 @@ use range_functions::validate_smoothing_factor;
 use range_functions::{IrateFn, OverTimeFn, RangeFn};
 use range_functions::{OuterRangeFn, apply_outer_range_fn};
 pub(crate) use selector::label_matcher_sets;
-use selector::{AtModifierBounds, apply_selector_time_modifier, duration_ms};
+use selector::{AtModifierBounds, apply_selector_time_modifier, selector_duration};
 
 #[cfg(test)]
 use crate::extension::is_stale_nan;
@@ -88,12 +89,14 @@ use crate::{
 };
 
 /// Static options for `PromQL` evaluation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// Not `Eq`: the two windows are [`Time`] quantities, which store `f64`.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EngineOpts {
     /// Maximum age of a sample considered by an instant-vector selector.
-    pub lookback_delta_ms: i64,
+    pub lookback_delta: Time,
     /// Global evaluation interval used when a subquery omits its resolution.
-    pub eval_interval_ms: i64,
+    pub eval_interval: Time,
     /// Maximum float samples returned by one query.
     pub max_samples: usize,
 }
@@ -101,8 +104,8 @@ pub struct EngineOpts {
 impl Default for EngineOpts {
     fn default() -> Self {
         Self {
-            lookback_delta_ms: 5 * 60 * 1000,
-            eval_interval_ms: 60_000,
+            lookback_delta: minutes(5),
+            eval_interval: minutes(1),
             max_samples: 50_000_000,
         }
     }
@@ -114,7 +117,7 @@ impl Default for EngineOpts {
 /// before the per-step loop runs.
 pub const MAX_RESOLUTION_POINTS: u64 = 11_000;
 
-/// Compute the resolution-point count `(end_ms - start_ms) / step_ms + 1` for a
+/// Compute the resolution-point count `(end_ms - start_ms) / step + 1` for a
 /// range/subquery grid, rejecting an abusive resolution before any per-step
 /// evaluation runs.
 ///
@@ -125,9 +128,10 @@ pub const MAX_RESOLUTION_POINTS: u64 = 11_000;
 ///
 /// # Errors
 ///
-/// Returns [`PromqlError::Plan`] (HTTP 400 `bad_data`) when `step_ms <= 0` or when
-/// the interval count exceeds [`MAX_RESOLUTION_POINTS`].
-pub fn check_resolution_points(start_ms: i64, end_ms: i64, step_ms: i64) -> Result<u64> {
+/// Returns [`PromqlError::Plan`] (HTTP 400 `bad_data`) when `step` is not
+/// positive or when the interval count exceeds [`MAX_RESOLUTION_POINTS`].
+pub fn check_resolution_points(start_ms: i64, end_ms: i64, step: Time) -> Result<u64> {
+    let step_ms = step.millis_i64();
     if step_ms <= 0 {
         return Err(PromqlError::Plan(format!(
             "zero or negative query resolution step widths are not accepted. Try a positive integer (step={step_ms}ms)"
@@ -158,9 +162,12 @@ pub struct PromqlEngine<S: MetricStore> {
 #[cfg(feature = "experimental-functions")]
 #[derive(Clone, Copy)]
 pub(super) struct QueryRangeContext {
-    pub(super) start: i64,
-    pub(super) end: i64,
-    pub(super) step: i64,
+    /// Range start, an epoch-millisecond instant.
+    pub(super) start_ms: i64,
+    /// Range end, an epoch-millisecond instant.
+    pub(super) end_ms: i64,
+    /// Grid resolution — an extent, unlike the two bounds.
+    pub(super) step: Time,
 }
 
 #[cfg(feature = "experimental-functions")]
@@ -188,7 +195,7 @@ fn current_at_modifier_bounds() -> Option<AtModifierBounds> {
 struct RangeEval {
     series: Vec<RangeSeries>,
     end_ms: i64,
-    range_ms: i64,
+    range: Time,
     modifier: Option<ExtendedSelectorModifier>,
 }
 

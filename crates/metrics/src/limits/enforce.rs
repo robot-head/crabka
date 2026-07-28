@@ -198,23 +198,23 @@ impl QueryEnforcer {
         end_ms: i64,
         now_ms: i64,
     ) -> Result<(), LimitError> {
-        let length_cap = limits.max_query_length();
+        let length_cap = limits.max_query_length;
         if length_cap > Time::ZERO {
             let span = extent_between(start_ms, end_ms);
             if span > length_cap {
                 return Err(LimitError::QueryRangeTooLong {
-                    limit_secs: limits.max_query_length_secs,
+                    limit_secs: secs_ceil(length_cap),
                     observed_secs: secs_ceil(span),
                 });
             }
         }
 
-        let lookback_cap = limits.max_query_lookback();
+        let lookback_cap = limits.max_query_lookback;
         if lookback_cap > Time::ZERO {
             let lookback = extent_between(start_ms, now_ms);
             if lookback > lookback_cap {
                 return Err(LimitError::QueryLookbackExceeded {
-                    limit_secs: limits.max_query_lookback_secs,
+                    limit_secs: secs_ceil(lookback_cap),
                     observed_secs: secs_ceil(lookback),
                 });
             }
@@ -412,8 +412,8 @@ mod tests {
     #[test]
     fn query_range_and_lookback_caps() {
         let l = Limits {
-            max_query_length_secs: 3600,
-            max_query_lookback_secs: 86_400,
+            max_query_length: hours(1),
+            max_query_lookback: days(1),
             ..Limits::default()
         };
         let now = 1_000_000_000_000_i64;

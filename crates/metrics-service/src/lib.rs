@@ -1701,7 +1701,7 @@ mod tests {
         let response = super::query_frontend_prometheus_router_for_store(
             store,
             crabka_promql::QueryFrontendOptions {
-                split_interval_ms: 60_000,
+                split_interval: minutes(1),
                 shard_count: 1,
             },
         )
@@ -2737,7 +2737,7 @@ rules:
 
     #[tokio::test]
     async fn replay_wal_head_records_prunes_outside_head_retention() {
-        let head = crabka_promql::WalHead::with_retention_ms(1_000);
+        let head = crabka_promql::WalHead::with_retention(secs(1));
         let record = |job: &str, timestamp_ms: i64| crabka_metrics::WalRecord {
             tenant: "tenant-a".to_string(),
             labels: vec![

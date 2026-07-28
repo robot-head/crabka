@@ -19,8 +19,8 @@ use num_traits::ToPrimitive;
 use prost::Message;
 
 use super::{
-    ApiError, PrometheusApiState, enforce_sample_count, enforce_selected_series_limit,
-    tenant_from_headers, validate_timestamp_range,
+    ApiError, PrometheusApiState, REMOTE_READ_MAX_BODY, enforce_sample_count,
+    enforce_selected_series_limit, tenant_from_headers, validate_timestamp_range,
 };
 use crate::{
     MetricStore, PromqlError,
@@ -40,7 +40,7 @@ pub(super) async fn remote_read<S: MetricStore>(
         return error.into_response();
     }
 
-    let decompressed = match snappy_block_decode(&body, 64 * 1024 * 1024) {
+    let decompressed = match snappy_block_decode(&body, REMOTE_READ_MAX_BODY) {
         Ok(decompressed) => decompressed,
         Err(error) => return ApiError::from(error).into_response(),
     };

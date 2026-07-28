@@ -18,7 +18,7 @@ pub use alerting::{
     evaluate_and_persist_alerting_rule_with_state,
 };
 #[cfg(test)]
-use config::parse_duration_ms;
+use config::parse_duration;
 pub use evaluation::{
     evaluate_and_persist_ruler_rule_group, evaluate_and_persist_ruler_rule_set,
     evaluate_and_persist_ruler_rule_set_for_shard_due_for_eval, evaluate_ruler_rule_group,

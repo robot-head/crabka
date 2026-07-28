@@ -1,13 +1,14 @@
 use std::collections::BTreeMap;
 
 use crabka_blockstore::SeriesFingerprint;
+use crabka_units::prelude::*;
 use promql_parser::parser::{Expr, MatrixSelector, SubqueryExpr, VectorSelector};
 
 use super::{
     AtModifierBounds, PromqlEngine, RangeEval,
     planner_support::validate_extended_selector_modifier,
     range_functions::{align_subquery_start, instant_smoothed_boundary_value},
-    selector::{apply_selector_time_modifier, duration_ms, label_matcher_sets},
+    selector::{apply_selector_time_modifier, label_matcher_sets, selector_duration},
 };
 use crate::{
     PromqlError,
@@ -31,7 +32,7 @@ impl<S: MetricStore> PromqlEngine<S> {
             selector.offset.as_ref(),
             None,
         )?;
-        let start_ms = eval_time_ms.saturating_sub(self.opts.lookback_delta_ms);
+        let start_ms = eval_time_ms.saturating_sub(self.opts.lookback_delta.millis_i64());
         let matcher_sets = label_matcher_sets(selector);
         let labels_by_fp = self
             .labels_by_fingerprint_sets(tenant, &matcher_sets, start_ms, eval_time_ms)
@@ -99,8 +100,8 @@ impl<S: MetricStore> PromqlEngine<S> {
             selector.offset.as_ref(),
             None,
         )?;
-        let scan_start_ms = eval_time_ms.saturating_sub(self.opts.lookback_delta_ms);
-        let scan_end_ms = eval_time_ms.saturating_add(self.opts.lookback_delta_ms);
+        let scan_start_ms = eval_time_ms.saturating_sub(self.opts.lookback_delta.millis_i64());
+        let scan_end_ms = eval_time_ms.saturating_add(self.opts.lookback_delta.millis_i64());
         let matcher_sets = label_matcher_sets(selector);
         let labels_by_fp = self
             .labels_by_fingerprint_sets(tenant, &matcher_sets, scan_start_ms, scan_end_ms)
@@ -145,7 +146,7 @@ impl<S: MetricStore> PromqlEngine<S> {
         end_ms: i64,
         modifier: Option<ExtendedSelectorModifier>,
     ) -> Result<Vec<RangeSeries>> {
-        let range_ms = duration_ms(selector.range)?;
+        let range = selector_duration(selector.range)?;
         let bounds = AtModifierBounds { start_ms, end_ms };
         let eval_start_ms = apply_selector_time_modifier(
             start_ms,
@@ -159,16 +160,16 @@ impl<S: MetricStore> PromqlEngine<S> {
             selector.vs.offset.as_ref(),
             Some(bounds),
         )?;
-        let range_start_ms = eval_start_ms.saturating_sub(range_ms);
+        let range_start_ms = eval_start_ms.saturating_sub(range.millis_i64());
         let scan_start_ms = match modifier {
             Some(ExtendedSelectorModifier::Anchored | ExtendedSelectorModifier::Smoothed) => {
-                range_start_ms.saturating_sub(self.opts.lookback_delta_ms)
+                range_start_ms.saturating_sub(self.opts.lookback_delta.millis_i64())
             }
             None => range_start_ms,
         };
         let scan_end_ms = match modifier {
             Some(ExtendedSelectorModifier::Smoothed) => {
-                eval_end_ms.saturating_add(self.opts.lookback_delta_ms)
+                eval_end_ms.saturating_add(self.opts.lookback_delta.millis_i64())
             }
             Some(ExtendedSelectorModifier::Anchored) | None => eval_end_ms,
         };
@@ -226,12 +227,12 @@ impl<S: MetricStore> PromqlEngine<S> {
         subquery: &SubqueryExpr,
         time_ms: i64,
     ) -> Result<Vec<RangeSeries>> {
-        let range_ms = duration_ms(subquery.range)?;
-        let step_ms = match subquery.step {
-            Some(step) => duration_ms(step)?,
-            None => self.opts.eval_interval_ms,
+        let range = selector_duration(subquery.range)?;
+        let step = match subquery.step {
+            Some(step) => selector_duration(step)?,
+            None => self.opts.eval_interval,
         };
-        if step_ms <= 0 {
+        if step <= Time::ZERO {
             return Err(PromqlError::Plan(
                 "subquery step must be positive".to_string(),
             ));
@@ -242,12 +243,12 @@ impl<S: MetricStore> PromqlEngine<S> {
             subquery.offset.as_ref(),
             None,
         )?;
-        let start_ms = align_subquery_start(end_ms.saturating_sub(range_ms), step_ms);
+        let start_ms = align_subquery_start(end_ms.saturating_sub(range.millis_i64()), step);
         // Evaluate the subquery's inner instant expression over its sub-grid
         // through the operator planner (the sole evaluation engine). The planner
         // is total, so it produces a result for every plannable inner; an
         // `Ok(None)` would be a planner bug, surfaced as an internal error.
-        self.eval_range_via_planner(tenant, &subquery.expr, start_ms, end_ms, step_ms)
+        self.eval_range_via_planner(tenant, &subquery.expr, start_ms, end_ms, step)
             .await?
             .ok_or_else(|| {
                 PromqlError::Plan("planner returned no result for a subquery inner".to_string())
@@ -291,7 +292,7 @@ impl<S: MetricStore> PromqlEngine<S> {
 
         match expr {
             Expr::MatrixSelector(selector) => {
-                let range_ms = duration_ms(selector.range)?;
+                let range = selector_duration(selector.range)?;
                 let end_ms = apply_selector_time_modifier(
                     time_ms,
                     selector.vs.at.as_ref(),
@@ -304,12 +305,12 @@ impl<S: MetricStore> PromqlEngine<S> {
                 Ok(RangeEval {
                     series,
                     end_ms,
-                    range_ms,
+                    range,
                     modifier,
                 })
             }
             Expr::Subquery(subquery) => {
-                let range_ms = duration_ms(subquery.range)?;
+                let range = selector_duration(subquery.range)?;
                 let end_ms = apply_selector_time_modifier(
                     time_ms,
                     subquery.at.as_ref(),
@@ -320,7 +321,7 @@ impl<S: MetricStore> PromqlEngine<S> {
                 Ok(RangeEval {
                     series,
                     end_ms,
-                    range_ms,
+                    range,
                     modifier,
                 })
             }

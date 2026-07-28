@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use crabka_blockstore::{Labels, MatchOp};
 use crabka_metrics::{BucketSpan, NativeHistogram, ResetHint};
+use crabka_units::prelude::*;
 
 use super::*;
 use crate::{EngineOpts, InMemoryMetricStore, PromqlEngine, QueryResult, RangeSeries, SampleValue};
@@ -70,9 +71,9 @@ fn range_query_plan_splits_on_step_grid_without_duplicate_steps() {
         "rate(http_requests_total[5m])",
         0,
         250_000,
-        60_000,
+        millis(60_000),
         QueryFrontendOptions {
-            split_interval_ms: 120_000,
+            split_interval: millis(120_000),
             shard_count: 1,
         },
     )
@@ -106,9 +107,9 @@ fn range_query_plan_rejects_resolution_over_point_cap() {
         "up",
         0,
         20_000,
-        1,
+        millis(1),
         QueryFrontendOptions {
-            split_interval_ms: 120_000,
+            split_interval: millis(120_000),
             shard_count: 1,
         },
     )
@@ -132,9 +133,9 @@ fn range_query_plan_allows_resolution_at_point_cap_boundary() {
         "up",
         0,
         11_000,
-        1,
+        millis(1),
         QueryFrontendOptions {
-            split_interval_ms: 120_000,
+            split_interval: millis(120_000),
             shard_count: 1,
         },
     )
@@ -151,9 +152,9 @@ fn range_query_plan_aligns_subranges_to_absolute_split_grid() {
         "up",
         60_000,
         300_000,
-        60_000,
+        millis(60_000),
         QueryFrontendOptions {
-            split_interval_ms: 120_000,
+            split_interval: millis(120_000),
             shard_count: 1,
         },
     )
@@ -172,7 +173,7 @@ fn range_query_plan_aligns_subranges_to_absolute_split_grid() {
 #[tokio::test]
 async fn moving_window_reuses_cached_subranges() {
     let opts = QueryFrontendOptions {
-        split_interval_ms: 120_000,
+        split_interval: millis(120_000),
         shard_count: 1,
     };
     let cache = QueryFrontendCache::default();
@@ -187,7 +188,7 @@ async fn moving_window_reuses_cached_subranges() {
             query: "up".into(),
             start_ms: 0,
             end_ms: 360_000,
-            step_ms: 60_000,
+            step: millis(60_000),
             opts,
         },
     )
@@ -215,7 +216,7 @@ async fn moving_window_reuses_cached_subranges() {
             query: "up".into(),
             start_ms: 60_000,
             end_ms: 420_000,
-            step_ms: 60_000,
+            step: millis(60_000),
             opts,
         },
     )
@@ -246,9 +247,9 @@ fn range_query_plan_expands_each_split_across_mimir_query_shards() {
         "sum(rate(http_requests_total[5m]))",
         0,
         60_000,
-        60_000,
+        millis(60_000),
         QueryFrontendOptions {
-            split_interval_ms: 120_000,
+            split_interval: millis(120_000),
             shard_count: 3,
         },
     )
@@ -276,9 +277,9 @@ fn range_query_plan_shards_avg_for_partial_sum_count_reduction() {
         "avg(up)",
         0,
         60_000,
-        60_000,
+        millis(60_000),
         QueryFrontendOptions {
-            split_interval_ms: 120_000,
+            split_interval: millis(120_000),
             shard_count: 3,
         },
     )
@@ -295,9 +296,9 @@ fn range_query_plan_shards_stddev_and_stdvar_for_moment_reduction() {
             query,
             0,
             60_000,
-            60_000,
+            millis(60_000),
             QueryFrontendOptions {
-                split_interval_ms: 120_000,
+                split_interval: millis(120_000),
                 shard_count: 3,
             },
         )
@@ -314,9 +315,9 @@ fn range_query_plan_skips_shards_for_unsupported_aggregate_reducers() {
         "quantile(0.9, up)",
         0,
         60_000,
-        60_000,
+        millis(60_000),
         QueryFrontendOptions {
-            split_interval_ms: 120_000,
+            split_interval: millis(120_000),
             shard_count: 3,
         },
     )
@@ -332,9 +333,9 @@ fn range_query_plan_skips_nested_avg_until_rewrite_is_aggregate_aware() {
         "avg(sum by (job)(up))",
         0,
         60_000,
-        60_000,
+        millis(60_000),
         QueryFrontendOptions {
-            split_interval_ms: 120_000,
+            split_interval: millis(120_000),
             shard_count: 3,
         },
     )
@@ -351,9 +352,9 @@ fn range_query_plan_shards_min_and_max_aggregate_reducers() {
             query,
             0,
             60_000,
-            60_000,
+            millis(60_000),
             QueryFrontendOptions {
-                split_interval_ms: 120_000,
+                split_interval: millis(120_000),
                 shard_count: 3,
             },
         )
@@ -370,9 +371,9 @@ fn range_query_plan_shards_group_aggregate_reducer() {
         "group(up)",
         0,
         60_000,
-        60_000,
+        millis(60_000),
         QueryFrontendOptions {
-            split_interval_ms: 120_000,
+            split_interval: millis(120_000),
             shard_count: 3,
         },
     )
@@ -389,9 +390,9 @@ fn range_query_plan_shards_topk_and_bottomk_for_final_rank_reduction() {
             query,
             0,
             60_000,
-            60_000,
+            millis(60_000),
             QueryFrontendOptions {
-                split_interval_ms: 120_000,
+                split_interval: millis(120_000),
                 shard_count: 3,
             },
         )
@@ -572,7 +573,7 @@ fn range_result_cache_is_scoped_by_tenant_query_range_step_and_shard() {
         query: "up".into(),
         start_ms: 0,
         end_ms: 60_000,
-        step_ms: 60_000,
+        step: millis(60_000),
         shard: Some(QueryShard { index: 1, total: 2 }),
     };
     let result = QueryResult::RangeMatrix(vec![RangeSeries {
@@ -599,7 +600,7 @@ fn range_result_cache_returns_owned_results() {
         query: "up".into(),
         start_ms: 0,
         end_ms: 0,
-        step_ms: 60_000,
+        step: millis(60_000),
         shard: None,
     };
     let result = QueryResult::RangeMatrix(vec![RangeSeries {
@@ -622,13 +623,12 @@ fn range_result_cache_returns_owned_results() {
 #[test]
 fn in_memory_round_trips_then_expires() {
     let clock = Arc::new(ManualClock::new(1_000_000));
-    let cache =
-        QueryFrontendCache::with_ttl(std::time::Duration::from_secs(90)).with_clock(clock.clone());
+    let cache = QueryFrontendCache::with_ttl(secs(90)).with_clock(clock.clone());
     let query = FrontendRangeQuery {
         query: "up".into(),
         start_ms: 0,
         end_ms: 0,
-        step_ms: 60_000,
+        step: millis(60_000),
         shard: None,
     };
     let result = QueryResult::RangeMatrix(vec![RangeSeries {
@@ -663,7 +663,7 @@ fn in_memory_without_ttl_never_expires() {
         query: "up".into(),
         start_ms: 0,
         end_ms: 0,
-        step_ms: 60_000,
+        step: millis(60_000),
         shard: None,
     };
     let result = QueryResult::RangeMatrix(vec![RangeSeries {
@@ -681,13 +681,13 @@ async fn object_store_range_result_cache_expires_stale_objects() {
     let object_store = std::sync::Arc::new(object_store::memory::InMemory::new());
     let clock = Arc::new(ManualClock::new(5_000_000));
     let cache = ObjectStoreQueryFrontendCache::new(object_store, "query-cache".to_string())
-        .with_ttl(std::time::Duration::from_secs(30))
+        .with_ttl(secs(30))
         .with_clock(clock.clone());
     let query = FrontendRangeQuery {
         query: "up".into(),
         start_ms: 0,
         end_ms: 0,
-        step_ms: 60_000,
+        step: millis(60_000),
         shard: None,
     };
     let result = QueryResult::RangeMatrix(vec![RangeSeries {
@@ -718,7 +718,7 @@ async fn object_store_range_result_cache_persists_across_instances() {
         query: "up".into(),
         start_ms: 0,
         end_ms: 0,
-        step_ms: 60_000,
+        step: millis(60_000),
         shard: Some(QueryShard { index: 1, total: 2 }),
     };
     let result = QueryResult::RangeMatrix(vec![RangeSeries {
@@ -888,9 +888,9 @@ async fn frontend_range_execution_reduces_sharded_topk_from_rank_candidates() {
             query: "topk(2, up)".into(),
             start_ms: 0,
             end_ms: 0,
-            step_ms: 60_000,
+            step: millis(60_000),
             opts: QueryFrontendOptions {
-                split_interval_ms: 60_000,
+                split_interval: millis(60_000),
                 shard_count: 2,
             },
         },
@@ -941,9 +941,9 @@ async fn frontend_range_execution_reduces_sharded_stdvar_from_moment_partials() 
             query: "stdvar(up)".into(),
             start_ms: 0,
             end_ms: 0,
-            step_ms: 60_000,
+            step: millis(60_000),
             opts: QueryFrontendOptions {
-                split_interval_ms: 60_000,
+                split_interval: millis(60_000),
                 shard_count: 2,
             },
         },
@@ -992,9 +992,9 @@ async fn frontend_range_execution_reduces_sharded_stddev_from_moment_partials() 
             query: "stddev(up)".into(),
             start_ms: 0,
             end_ms: 0,
-            step_ms: 60_000,
+            step: millis(60_000),
             opts: QueryFrontendOptions {
-                split_interval_ms: 60_000,
+                split_interval: millis(60_000),
                 shard_count: 2,
             },
         },
@@ -1024,9 +1024,9 @@ async fn frontend_range_execution_reduces_sharded_avg_from_sum_and_count_partial
             query: "avg(up)".into(),
             start_ms: 0,
             end_ms: 0,
-            step_ms: 60_000,
+            step: millis(60_000),
             opts: QueryFrontendOptions {
-                split_interval_ms: 60_000,
+                split_interval: millis(60_000),
                 shard_count: 2,
             },
         },
@@ -1068,7 +1068,7 @@ async fn frontend_range_execution_uses_cache_and_merges_subquery_results() {
         query: "up".into(),
         start_ms: 0,
         end_ms: 60_000,
-        step_ms: 60_000,
+        step: millis(60_000),
         shard: None,
     };
     cache.insert(
@@ -1088,9 +1088,9 @@ async fn frontend_range_execution_uses_cache_and_merges_subquery_results() {
             query: "up".into(),
             start_ms: 0,
             end_ms: 180_000,
-            step_ms: 60_000,
+            step: millis(60_000),
             opts: QueryFrontendOptions {
-                split_interval_ms: 120_000,
+                split_interval: millis(120_000),
                 shard_count: 1,
             },
         },
@@ -1184,9 +1184,9 @@ async fn frontend_range_execution_dispatches_subqueries_concurrently() {
         "up",
         0,
         720_000,
-        60_000,
+        millis(60_000),
         QueryFrontendOptions {
-            split_interval_ms: 180_000,
+            split_interval: millis(180_000),
             shard_count: 1,
         },
     )
@@ -1264,9 +1264,9 @@ async fn frontend_range_execution_runs_against_promql_engine() {
             query: "up".into(),
             start_ms: 0,
             end_ms: 120_000,
-            step_ms: 60_000,
+            step: millis(60_000),
             opts: QueryFrontendOptions {
-                split_interval_ms: 60_000,
+                split_interval: millis(60_000),
                 shard_count: 1,
             },
         },

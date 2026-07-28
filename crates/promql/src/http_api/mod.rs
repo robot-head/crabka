@@ -14,6 +14,7 @@ use axum::{
     routing::{get, post},
 };
 use crabka_metrics::{LimitError, OverridesProvider, wire::WireError};
+use crabka_units::prelude::*;
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -51,7 +52,7 @@ use query::{
 use remote_read::remote_read;
 use request::{
     CardinalityParams, DiscoveryParams, apply_limit, apply_result_limit, check_range_resolution,
-    discovery_matchers, discovery_window, duration_ms, enforce_sample_count,
+    discovery_matchers, discovery_window, duration_param, enforce_sample_count,
     enforce_selected_series_limit, optional_timestamp_ms, parse_cardinality_form,
     parse_cardinality_params, parse_discovery_form, parse_discovery_params, parse_limit_parameter,
     required_form_param, selector_matchers, tenant_from_headers, timestamp_ms, unix_now_ms,
@@ -157,18 +158,18 @@ impl<S: MetricStore> PrometheusApiState<S> {
 
     /// Record one query request outcome on `route`, if a metrics bundle is
     /// configured. No-op otherwise.
-    fn record_query(&self, route: &str, ok: bool, secs: f64) {
+    fn record_query(&self, route: &str, ok: bool, latency: Time) {
         if let Some(metrics) = &self.metrics {
-            metrics.record_query(route, ok, secs);
+            metrics.record_query(route, ok, latency);
         }
     }
 
     /// Record one `PromQL` engine evaluation (`query_type` = `"instant"` /
     /// `"range"`) — its latency and, when `!ok`, an error increment. No-op when
     /// no metrics bundle is configured.
-    fn record_eval(&self, query_type: &str, ok: bool, secs: f64) {
+    fn record_eval(&self, query_type: &str, ok: bool, latency: Time) {
         if let Some(metrics) = &self.metrics {
-            metrics.record_eval(query_type, ok, secs);
+            metrics.record_eval(query_type, ok, latency);
         }
     }
 
@@ -300,14 +301,14 @@ async fn acquire_query_permit<S: MetricStore>(
     }
 }
 
-/// Maximum accepted `remote_read` request body, in bytes.
+/// Maximum accepted `remote_read` request body.
 ///
 /// Bounds the snappy-compressed protobuf payload before it is buffered, so a
 /// client cannot force an unbounded allocation by streaming a huge body. Matches
-/// the 64 MiB decompressed-size cap [`remote_read`] already passes to
+/// the decompressed-size cap [`remote_read`] already passes to
 /// `snappy_block_decode`, since there is no configured `max_decompressed`
 /// override to reuse.
-const REMOTE_READ_MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
+const REMOTE_READ_MAX_BODY: ByteSize = mebibytes(64);
 
 /// Build routes for the Prometheus API and Mimir's `/prometheus` prefix.
 pub fn prometheus_router<S: MetricStore + 'static>(state: Arc<PrometheusApiState<S>>) -> Router {
@@ -323,7 +324,7 @@ pub fn prometheus_router<S: MetricStore + 'static>(state: Arc<PrometheusApiState
         )
         .route(
             "/api/v1/read",
-            post(remote_read::<S>).layer(DefaultBodyLimit::max(REMOTE_READ_MAX_BODY_BYTES)),
+            post(remote_read::<S>).layer(DefaultBodyLimit::max(REMOTE_READ_MAX_BODY.bytes_usize())),
         )
         .route(
             "/api/v1/cardinality/label_names",
@@ -379,7 +380,7 @@ pub fn prometheus_router<S: MetricStore + 'static>(state: Arc<PrometheusApiState
         )
         .route(
             "/prometheus/api/v1/read",
-            post(remote_read::<S>).layer(DefaultBodyLimit::max(REMOTE_READ_MAX_BODY_BYTES)),
+            post(remote_read::<S>).layer(DefaultBodyLimit::max(REMOTE_READ_MAX_BODY.bytes_usize())),
         )
         .route(
             "/prometheus/api/v1/cardinality/label_names",
@@ -469,7 +470,7 @@ fn record_query_response<S: MetricStore>(
     started: std::time::Instant,
 ) {
     let ok = !response.status().is_client_error() && !response.status().is_server_error();
-    state.record_query(route, ok, started.elapsed().as_secs_f64());
+    state.record_query(route, ok, started.elapsed().as_time());
 }
 
 #[derive(Debug)]

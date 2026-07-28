@@ -1,5 +1,4 @@
 use crabka_units::{prelude::*, serde_units};
-use num_traits::ToPrimitive as _;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -24,12 +23,12 @@ pub struct Limits {
     pub max_label_value_length: ByteSize,
     pub max_samples_per_query: u64,
     pub max_fetched_series_per_query: u64,
-    /// Query lookback cap in seconds; `0` disables the cap. Read it as a
-    /// [`Time`] through [`Limits::max_query_lookback`].
-    pub max_query_lookback_secs: u64,
-    /// Range-query span cap in seconds; `0` disables the cap. Read it as a
-    /// [`Time`] through [`Limits::max_query_length`].
-    pub max_query_length_secs: u64,
+    /// How far back a query may reach; a zero extent disables the cap.
+    #[serde(with = "serde_units::human::time")]
+    pub max_query_lookback: Time,
+    /// The widest span a range query may cover; a zero extent disables the cap.
+    #[serde(with = "serde_units::human::time")]
+    pub max_query_length: Time,
     /// Accepted out-of-order ingest window; a negative extent disables the cap.
     #[serde(with = "serde_units::human::time")]
     pub out_of_order_time_window: Time,
@@ -45,28 +44,10 @@ impl Default for Limits {
             max_label_value_length: kibibytes(2),
             max_samples_per_query: 50_000_000,
             max_fetched_series_per_query: 100_000,
-            max_query_lookback_secs: 0,
-            max_query_length_secs: 0,
+            max_query_lookback: Time::ZERO,
+            max_query_length: Time::ZERO,
             out_of_order_time_window: Time::ZERO,
         }
-    }
-}
-
-impl Limits {
-    /// The query lookback cap as a time extent.
-    ///
-    /// The field behind it stays a raw second count because it is the config key
-    /// operators and the query API name; the accessor is the seam.
-    #[must_use]
-    pub fn max_query_lookback(&self) -> Time {
-        Time::from_secs(self.max_query_lookback_secs.to_i64().unwrap_or(i64::MAX))
-    }
-
-    /// The range-query span cap as a time extent. See
-    /// [`Limits::max_query_lookback`] for why the field stays raw seconds.
-    #[must_use]
-    pub fn max_query_length(&self) -> Time {
-        Time::from_secs(self.max_query_length_secs.to_i64().unwrap_or(i64::MAX))
     }
 }
 
@@ -141,17 +122,15 @@ mod tests {
     }
 
     #[test]
-    fn query_span_accessors_read_the_raw_second_fields_as_extents() {
-        // The `_secs` fields stay raw integers (they are the config/query-API
-        // keys); the accessors are the only seam that gives them a dimension.
+    fn query_span_caps_are_extents() {
         let l = Limits {
-            max_query_lookback_secs: 86_400,
-            max_query_length_secs: 3600,
+            max_query_lookback: days(1),
+            max_query_length: hours(1),
             ..Limits::default()
         };
-        check!(l.max_query_lookback() == days(1));
-        check!(l.max_query_length() == hours(1));
-        check!(Limits::default().max_query_lookback() == Time::ZERO);
+        check!(l.max_query_lookback == secs(86_400));
+        check!(l.max_query_length == secs(3600));
+        check!(Limits::default().max_query_lookback == Time::ZERO);
     }
 
     #[test]

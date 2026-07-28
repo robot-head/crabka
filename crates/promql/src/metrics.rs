@@ -12,6 +12,7 @@
 
 use std::sync::Arc;
 
+use crabka_units::prelude::*;
 use prometheus_client::{
     encoding::EncodeLabelSet,
     metrics::{counter::Counter, family::Family, gauge::Gauge, histogram::Histogram},
@@ -175,20 +176,22 @@ impl ServiceMetrics {
     /// Record one ingest request outcome. `wal_append_failures` is NOT touched
     /// here — increment it separately at the actual WAL/produce error site so a
     /// 4xx client/validation error does not inflate the WAL-failure counter.
-    pub fn record_ingest(&self, ok: bool, bytes: u64, items: u64, secs: f64) {
+    pub fn record_ingest(&self, ok: bool, size: ByteSize, items: u64, latency: Time) {
         let status = if ok { "ok" } else { "error" };
         self.ingest_requests
             .get_or_create(&StatusLabel {
                 status: status.into(),
             })
             .inc();
-        self.ingest_bytes.inc_by(bytes);
+        self.ingest_bytes.inc_by(size.bytes_u64());
         self.ingest_items.inc_by(items);
-        self.ingest_duration.observe(secs);
+        // Prometheus histograms are in base units, so the latency lands in
+        // seconds no matter what unit the caller measured it in.
+        self.ingest_duration.observe(latency.secs_f64());
     }
 
     /// Record one query request outcome on `route` with its latency.
-    pub fn record_query(&self, route: &str, ok: bool, secs: f64) {
+    pub fn record_query(&self, route: &str, ok: bool, latency: Time) {
         let status = if ok { "ok" } else { "error" };
         self.query_requests
             .get_or_create(&RouteStatusLabel {
@@ -200,19 +203,19 @@ impl ServiceMetrics {
             .get_or_create(&RouteLabel {
                 route: route.into(),
             })
-            .observe(secs);
+            .observe(latency.secs_f64());
     }
 
-    /// Record one `PromQL` engine evaluation: its latency `secs` under
+    /// Record one `PromQL` engine evaluation: its `latency` under
     /// `query_eval_duration{type}` and, when `ok` is false, a
     /// `query_errors{type}` increment. `query_type` is `"instant"` or
     /// `"range"`.
-    pub fn record_eval(&self, query_type: &str, ok: bool, secs: f64) {
+    pub fn record_eval(&self, query_type: &str, ok: bool, latency: Time) {
         self.query_eval_duration
             .get_or_create(&QueryTypeLabel {
                 r#type: query_type.into(),
             })
-            .observe(secs);
+            .observe(latency.secs_f64());
         if !ok {
             self.query_errors
                 .get_or_create(&QueryTypeLabel {
@@ -292,17 +295,17 @@ mod tests {
         // Exercise the ingest helpers too so every counter family materializes
         // a sample line (an empty Family emits only # HELP/# TYPE metadata,
         // which carry the name WITHOUT the `_total` suffix).
-        m.record_ingest(true, 1024, 5, 0.012);
+        m.record_ingest(true, kibibytes(1), 5, millis(12));
         m.wal_append_failures.inc();
-        m.record_query("query", true, 0.05);
-        m.record_query("query_range", false, 1.5);
-        m.record_query("series", true, 0.2);
-        m.record_query("labels", true, 0.1);
-        m.record_query("label_values", true, 0.1);
+        m.record_query("query", true, millis(50));
+        m.record_query("query_range", false, millis(1500));
+        m.record_query("series", true, millis(200));
+        m.record_query("labels", true, millis(100));
+        m.record_query("label_values", true, millis(100));
         // Engine-eval metrics: an instant success, a range failure, and some
         // in-flight tracking so every new metric materializes a sample line.
-        m.record_eval("instant", true, 0.02);
-        m.record_eval("range", false, 1.2);
+        m.record_eval("instant", true, millis(20));
+        m.record_eval("range", false, millis(1200));
         m.query_started();
         m.query_started();
         m.query_finished();
@@ -337,7 +340,7 @@ mod tests {
     #[tokio::test]
     async fn metrics_route_returns_openmetrics() {
         let m = ServiceMetrics::new();
-        m.record_query("query", true, 0.01);
+        m.record_query("query", true, millis(10));
         let app = metrics_router(m.registry);
         let resp = app
             .oneshot(
@@ -349,7 +352,7 @@ mod tests {
             .await
             .unwrap();
         check!(resp.status() == StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        let body = axum::body::to_bytes(resp.into_body(), kibibytes(64).bytes_usize())
             .await
             .unwrap();
         let s = std::str::from_utf8(&body).unwrap();
