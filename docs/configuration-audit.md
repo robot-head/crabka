@@ -3710,3 +3710,110 @@ the one-gibibyte block read cap, 256-mebibyte index and profile-index snapshot
 caps, and eight-snapshot retention default in `crates/blockstore`. These values
 bound production I/O and storage but currently remain library defaults rather
 than deployment configuration.
+
+## Blockstore Trace/Profile Index Snapshot Policy
+
+Trace and profile index-snapshot reads now use a positive
+`IndexSnapshotMaxBytes` value, and snapshot writers use a positive
+`IndexSnapshotRetain` value. The settings preserve the existing
+268,435,456-byte and eight-snapshot defaults.
+
+Both service binaries accept:
+
+```text
+--index-snapshot-max-bytes
+--index-snapshot-retain
+```
+
+The traces binary reads:
+
+```text
+CRABKA_TRACES_INDEX_SNAPSHOT_MAX_BYTES
+CRABKA_TRACES_INDEX_SNAPSHOT_RETAIN
+```
+
+The profiles binary reads:
+
+```text
+CRABKA_PROFILES_INDEX_SNAPSHOT_MAX_BYTES
+CRABKA_PROFILES_INDEX_SNAPSHOT_RETAIN
+```
+
+Command-line values win over environment values. Parsing rejects zero,
+malformed, negative, and primitive-overflow values before object-store or
+network I/O. The newtypes use `refined_type::rule::GreaterU64<0>` and
+`refined_type::rule::GreaterUsize<0>`.
+
+The read flow is:
+
+```text
+CLI / environment / typed default
+  -> service or block-builder configuration
+  -> TraceIndex / ProfileIndex configurable load
+  -> crabka_object_store::read_capped
+```
+
+This adds the existing 256-mebibyte safety boundary to the previously unbounded
+trace snapshot read. Startup, periodic refresh, query-index, compactor, and
+block-builder load paths all receive the configured value.
+
+The write flow is:
+
+```text
+CLI / environment / typed default
+  -> service or block-builder configuration
+  -> TraceIndex / ProfileIndex configurable save
+  -> shared snapshot writer
+  -> prune to configured retention
+```
+
+Block-builder and compactor save paths receive the configured retention.
+Existing public methods remain default-preserving compatibility wrappers.
+Snapshot format, naming, latest selection, object-store layout, and caller
+fallback behavior are unchanged.
+
+The checked-in deployment owner is
+`demo/observability/docker-compose.yml`. Trace/profile block-builders receive
+both settings; read-only queriers receive only the maximum-byte setting.
+Compose supplies overrideable 268,435,456-byte and eight-snapshot defaults. No
+CRD or operator field was added because these services are not managed by an
+existing repository CRD.
+
+After implementation and before this section was appended,
+`tools/audit-runtime-values.sh` reported 6,328 lines across 1,055 files. Its
+affected-package subsets contained 64 blockstore lines, 132 traces lines, and
+70 profiles lines.
+
+Before this section was appended, the exact focused search
+
+```text
+rg -n \
+  "MAX_(INDEX|PROFILE_INDEX)_SNAPSHOT_BYTES|DEFAULT_INDEX_SNAPSHOT_(MAX_BYTES|RETAIN)|index_snapshot_(max_bytes|retain)|index-snapshot-(max-bytes|retain)|INDEX_SNAPSHOT_(MAX_BYTES|RETAIN)" \
+  crates \
+  demo \
+  docs/configuration-audit.md
+```
+
+reported 97 lines. The mutually exclusive classification is 43 production
+configuration-flow or compatibility-API references, six deployment-flow
+references, 48 test references, and zero unresolved references for the
+trace/profile snapshot owner: `43 + 6 + 48 + 0 = 97`.
+
+The legacy generic `Index::load` cap has no production caller and remains a
+default-preserving library compatibility API. The trace/profile production
+paths use the new configurable APIs.
+
+The combined all-target test gate passed for `crabka-blockstore`,
+`crabka-traces`, `crabka-profiles`, and `observability-demo-app`. Strict
+combined Clippy with warnings denied, nightly formatting, Compose validation,
+diff hygiene, and lockfile-diff inspection also passed. Default and overridden
+Compose rendering and one help entry per setting in each service binary passed
+during the package-level gates. The only lockfile change for this slice was the
+already committed direct `refined_type` dependency on `crabka-blockstore`.
+
+### Adjacent Pending Policy
+
+This closes trace/profile index-snapshot size and retention configuration. The
+separate one-gibibyte Parquet block-read cap in
+`crates/blockstore/src/reader.rs` remains pending as the next coherent
+blockstore owner.
