@@ -3574,35 +3574,39 @@ mod tests {
         writer.write(&second).await.unwrap();
         writer.close().await.unwrap();
 
-        let mut index = TraceIndex::new();
-        index.add_trace_block(
-            "tenant",
-            TraceBlockStats {
-                object_key: "blocks/row-groups.parquet".into(),
-                min_ts: 0,
-                max_ts: 10,
-                bloom: ShardedTraceBloom::with_tempo_defaults(1),
-                tag_names: BTreeSet::new(),
-                tag_values: BTreeMap::new(),
-            },
-        );
-        let store = CrabkaSpanStore::new(blocks, shared(index), None);
-
-        let scan = store
-            .scan_with_options(
+        let index = || {
+            let mut index = TraceIndex::new();
+            index.add_trace_block(
                 "tenant",
-                &[],
-                0,
-                10,
-                &ScanOptions {
-                    job: Some(ScanJob {
-                        object_key: "blocks/row-groups.parquet".into(),
-                        row_group_start: 1,
-                        row_group_end: 2,
-                    }),
-                    ..ScanOptions::default()
+                TraceBlockStats {
+                    object_key: "blocks/row-groups.parquet".into(),
+                    min_ts: 0,
+                    max_ts: 10,
+                    bloom: ShardedTraceBloom::with_tempo_defaults(1),
+                    tag_names: BTreeSet::new(),
+                    tag_values: BTreeMap::new(),
                 },
-            )
+            );
+            index
+        };
+        let capped_blocks = Arc::new(BlockStore::new_with_block_read_max_bytes(
+            object_store,
+            Url::parse("memory:///").unwrap(),
+            crabka_blockstore::BlockReadMaxBytes::new(1).unwrap(),
+        ));
+        let capped_store = CrabkaSpanStore::new(capped_blocks, shared(index()), None);
+        let store = CrabkaSpanStore::new(blocks, shared(index()), None);
+
+        let options = ScanOptions {
+            job: Some(ScanJob {
+                object_key: "blocks/row-groups.parquet".into(),
+                row_group_start: 1,
+                row_group_end: 2,
+            }),
+            ..ScanOptions::default()
+        };
+        let scan = store
+            .scan_with_options("tenant", &[], 0, 10, &options)
             .await
             .unwrap();
         let batches = collect_table(&scan.ctx, &scan.span_table).await.unwrap();
@@ -3622,6 +3626,12 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert2::assert!(names == vec!["second-rg"]);
+        assert2::assert!(
+            capped_store
+                .scan_with_options("tenant", &[], 0, 10, &options)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

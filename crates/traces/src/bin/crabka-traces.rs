@@ -7,8 +7,8 @@ use std::{net::SocketAddr, process::ExitCode, sync::Arc, time::Duration};
 use arc_swap::ArcSwap;
 use clap::{ArgAction, Args, Parser, ValueEnum};
 use crabka_blockstore::{
-    BlockStore, BlockWriter, IndexSnapshotMaxBytes, IndexSnapshotRetain, PromotedSpanAttr,
-    TraceIndex,
+    BlockReadMaxBytes, BlockStore, BlockWriter, IndexSnapshotMaxBytes, IndexSnapshotRetain,
+    PromotedSpanAttr, TraceIndex,
 };
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
 use crabka_client_producer::Producer;
@@ -16,7 +16,7 @@ use crabka_telemetry::OtlpConfig;
 use crabka_traceql::{EngineOpts, TraceqlEngine};
 use crabka_traces::{
     LiveStore, TRACES_WAL_TOPIC, blockbuilder,
-    compactor::compact_index_window,
+    compactor::compact_index_window_with_max_bytes,
     distributor::{self, DistributorState, KafkaSink},
     frontend::{self, FrontendConfig, TraceIndexCatalog},
     livestore,
@@ -91,6 +91,12 @@ struct Cli {
         default_value_t = IndexSnapshotRetain::default()
     )]
     index_snapshot_retain: IndexSnapshotRetain,
+    #[arg(
+        long,
+        env = "CRABKA_TRACES_BLOCK_READ_MAX_BYTES",
+        default_value_t = BlockReadMaxBytes::default()
+    )]
+    block_read_max_bytes: BlockReadMaxBytes,
     #[arg(long, default_value = "memory:///")]
     object_store_url: String,
     #[arg(long)]
@@ -456,9 +462,10 @@ async fn build_querier_router_with_live(
     .await
     .unwrap_or_else(|_| TraceIndex::new());
     let trace_index: SharedTraceIndex = Arc::new(ArcSwap::from_pointee(initial));
-    let blocks = Arc::new(BlockStore::new(
+    let blocks = Arc::new(BlockStore::new_with_block_read_max_bytes(
         Arc::clone(&configured.store),
         configured.root,
+        cli.block_read_max_bytes,
     ));
     let live = if let Some(store) = live_store {
         Some(LiveTier::new(Arc::new(IndexedLiveSource::new(
@@ -707,7 +714,11 @@ async fn build_trace_index_catalog(
     )
     .await
     .unwrap_or_else(|_| TraceIndex::new());
-    let blocks = BlockStore::new(configured.store, configured.root);
+    let blocks = BlockStore::new_with_block_read_max_bytes(
+        configured.store,
+        configured.root,
+        cli.block_read_max_bytes,
+    );
     Ok(TraceIndexCatalog::from_trace_index(&blocks, &trace_index)
         .await
         .unwrap_or_else(|_| TraceIndexCatalog::new(std::collections::BTreeMap::new())))
@@ -765,13 +776,14 @@ async fn run_compactor(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send 
     )
     .await
     .unwrap_or_else(|_| TraceIndex::new());
-    compact_index_window(
+    compact_index_window_with_max_bytes(
         configured.store.clone(),
         &writer,
         &mut index,
         configured.prefix.as_ref(),
         cli.compaction_start_ns,
         cli.compaction_end_ns,
+        cli.block_read_max_bytes,
     )
     .await?;
     index
@@ -1094,6 +1106,62 @@ mod tests {
         .unwrap();
         assert_eq!(from_cli.index_snapshot_max_bytes.into_value(), 2048);
         assert_eq!(from_cli.index_snapshot_retain.into_value(), 4);
+    }
+
+    #[test]
+    fn block_read_max_bytes_defaults_and_rejects_invalid_values() {
+        let cli = Cli::try_parse_from(["crabka-traces", "--target", "querier"]).unwrap();
+        assert_eq!(
+            cli.block_read_max_bytes.into_value(),
+            crabka_blockstore::DEFAULT_BLOCK_READ_MAX_BYTES
+        );
+
+        for invalid in ["0", "not-a-number", "-1", "18446744073709551616"] {
+            assert!(
+                Cli::try_parse_from([
+                    "crabka-traces",
+                    "--target",
+                    "querier",
+                    "--block-read-max-bytes",
+                    invalid,
+                ])
+                .is_err(),
+                "--block-read-max-bytes should reject {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn block_read_max_bytes_reads_environment_and_prefers_cli() {
+        const CHILD: &str = "CRABKA_TRACES_BLOCK_READ_MAX_BYTES_CHILD";
+
+        if std::env::var_os(CHILD).is_none() {
+            let status =
+                std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args([
+                        "--exact",
+                        "tests::block_read_max_bytes_reads_environment_and_prefers_cli",
+                    ])
+                    .env(CHILD, "1")
+                    .env("CRABKA_TRACES_BLOCK_READ_MAX_BYTES", "1024")
+                    .status()
+                    .expect("child test");
+            assert!(status.success());
+            return;
+        }
+
+        let from_env = Cli::try_parse_from(["crabka-traces", "--target", "querier"]).unwrap();
+        assert_eq!(from_env.block_read_max_bytes.into_value(), 1024);
+
+        let from_cli = Cli::try_parse_from([
+            "crabka-traces",
+            "--target",
+            "querier",
+            "--block-read-max-bytes",
+            "2048",
+        ])
+        .unwrap();
+        assert_eq!(from_cli.block_read_max_bytes.into_value(), 2048);
     }
 
     #[test]

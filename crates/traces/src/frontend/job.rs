@@ -11,9 +11,7 @@
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
-use crabka_blockstore::{
-    BlockStore, Result as BlockStoreResult, TraceIndex, read_row_group_metadata,
-};
+use crabka_blockstore::{BlockStore, Result as BlockStoreResult, TraceIndex};
 
 /// One candidate row-group of a backend block.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -158,18 +156,18 @@ pub async fn blocks_for_tenant(
 ) -> BlockStoreResult<Vec<BlockMetaInfo>> {
     let mut out = Vec::new();
     for block in index.trace_blocks(tenant) {
-        let row_groups: Vec<RowGroupInfo> =
-            read_row_group_metadata(blocks.object_store(), &block.object_key)
-                .await?
-                .into_iter()
-                .filter_map(|rg| {
-                    let index = u32::try_from(rg.index).ok()?;
-                    Some(RowGroupInfo {
-                        index,
-                        compressed_bytes: rg.compressed_bytes,
-                    })
+        let row_groups: Vec<RowGroupInfo> = blocks
+            .read_row_group_metadata(&block.object_key)
+            .await?
+            .into_iter()
+            .filter_map(|rg| {
+                let index = u32::try_from(rg.index).ok()?;
+                Some(RowGroupInfo {
+                    index,
+                    compressed_bytes: rg.compressed_bytes,
                 })
-                .collect();
+            })
+            .collect();
         let size_bytes = row_groups.iter().map(|rg| rg.compressed_bytes).sum();
         out.push(BlockMetaInfo {
             block_id: block.object_key.clone(),
