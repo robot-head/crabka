@@ -393,6 +393,82 @@ mod tests {
     }
 
     #[test]
+    fn consumer_poll_timing_cli_defaults_preserve_behavior() {
+        let cli = Cli::try_parse_from(required_args("crabka")).expect("poll defaults");
+
+        assert_eq!(
+            cli.consumer_poll_timeout_ms.duration(),
+            Duration::from_millis(50)
+        );
+        assert_eq!(
+            cli.consumer_poll_error_backoff_ms.duration(),
+            Duration::from_millis(100)
+        );
+    }
+
+    #[test]
+    fn consumer_poll_timing_rejects_invalid_cli_values() {
+        for option in [
+            "--consumer-poll-timeout-ms",
+            "--consumer-poll-error-backoff-ms",
+        ] {
+            for invalid in ["0", "not-a-number", "-1", "18446744073709551616"] {
+                let mut args = required_args("crabka");
+                args.extend([option, invalid]);
+                assert!(Cli::try_parse_from(args).is_err(), "{option}={invalid}");
+            }
+        }
+    }
+
+    #[test]
+    fn consumer_poll_timing_reads_environment_and_prefers_cli() {
+        const CHILD: &str = "CRABKA_BENCH_CONSUMER_POLL_TIMING_CHILD";
+
+        if std::env::var_os(CHILD).is_none() {
+            let status =
+                std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args([
+                        "--exact",
+                        "tests::consumer_poll_timing_reads_environment_and_prefers_cli",
+                    ])
+                    .env(CHILD, "1")
+                    .env("BENCH_CONSUMER_POLL_TIMEOUT_MS", "11")
+                    .env("BENCH_CONSUMER_POLL_ERROR_BACKOFF_MS", "12")
+                    .status()
+                    .expect("child test");
+            assert!(status.success());
+            return;
+        }
+
+        let from_env = Cli::try_parse_from(required_args("crabka")).expect("environment");
+        assert_eq!(
+            from_env.consumer_poll_timeout_ms.duration(),
+            Duration::from_millis(11)
+        );
+        assert_eq!(
+            from_env.consumer_poll_error_backoff_ms.duration(),
+            Duration::from_millis(12)
+        );
+
+        let mut args = required_args("crabka");
+        args.extend([
+            "--consumer-poll-timeout-ms",
+            "21",
+            "--consumer-poll-error-backoff-ms",
+            "22",
+        ]);
+        let from_cli = Cli::try_parse_from(args).expect("CLI over environment");
+        assert_eq!(
+            from_cli.consumer_poll_timeout_ms.duration(),
+            Duration::from_millis(21)
+        );
+        assert_eq!(
+            from_cli.consumer_poll_error_backoff_ms.duration(),
+            Duration::from_millis(22)
+        );
+    }
+
+    #[test]
     fn client_request_timeouts_read_environment_and_prefer_cli() {
         const CHILD: &str = "CRABKA_BENCH_CLIENT_TIMEOUTS_CHILD";
 
