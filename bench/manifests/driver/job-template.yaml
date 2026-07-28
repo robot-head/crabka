@@ -13,6 +13,12 @@
 #                           producer request timeout
 #   BENCH_CONSUMER_REQUEST_TIMEOUT_SECONDS
 #                           active-stack consumer request timeout
+#   BENCH_CONSUMER_BUILD_ATTEMPTS
+#                           maximum consumer build attempts
+#   BENCH_CONSUMER_BUILD_INITIAL_BACKOFF_MS
+#                           initial consumer build retry backoff
+#   BENCH_CONSUMER_BUILD_MAX_BACKOFF_MS
+#                           maximum consumer build retry backoff
 #
 # TLS data-path env vars (run-scenario.sh exports these; default to the
 # plaintext path when BENCH_TLS is unset):
@@ -77,6 +83,12 @@ spec:
               value: "${BENCH_PRODUCER_REQUEST_TIMEOUT_SECONDS}"
             - name: BENCH_CONSUMER_REQUEST_TIMEOUT_SECONDS
               value: "${BENCH_CONSUMER_REQUEST_TIMEOUT_SECONDS}"
+            - name: BENCH_CONSUMER_BUILD_ATTEMPTS
+              value: "${BENCH_CONSUMER_BUILD_ATTEMPTS}"
+            - name: BENCH_CONSUMER_BUILD_INITIAL_BACKOFF_MS
+              value: "${BENCH_CONSUMER_BUILD_INITIAL_BACKOFF_MS}"
+            - name: BENCH_CONSUMER_BUILD_MAX_BACKOFF_MS
+              value: "${BENCH_CONSUMER_BUILD_MAX_BACKOFF_MS}"
             - name: BENCH_BROKER_COUNT
               value: "${BENCH_BROKER_COUNT}"
             - name: BENCH_OUTPUT_PATH

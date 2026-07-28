@@ -19,6 +19,12 @@
 #                        producer request timeout (default 2)
 #   BENCH_CONSUMER_REQUEST_TIMEOUT_SECONDS
 #                        consumer request timeout (default 5 for crabka, 30 for kafka)
+#   BENCH_CONSUMER_BUILD_ATTEMPTS
+#                        consumer build attempts (default 6)
+#   BENCH_CONSUMER_BUILD_INITIAL_BACKOFF_MS
+#                        initial consumer build retry backoff (default 100)
+#   BENCH_CONSUMER_BUILD_MAX_BACKOFF_MS
+#                        maximum consumer build retry backoff (default 2000)
 #   BENCH_RESULTS_DIR    where to write the per-run JSON (default bench/results)
 #   BENCH_RUN_TAG        optional filename suffix (e.g. "-run07") for repeated
 #                        runs; set by run-matrix.sh so a 10× pass keeps all
@@ -44,6 +50,9 @@ fi
 : "${BENCH_DRIVER_IMAGE:=crabka-bench-driver:e2e}"
 : "${BENCH_PROMETHEUS_REQUEST_TIMEOUT_SECONDS:=15}"
 : "${BENCH_PRODUCER_REQUEST_TIMEOUT_SECONDS:=2}"
+: "${BENCH_CONSUMER_BUILD_ATTEMPTS:=6}"
+: "${BENCH_CONSUMER_BUILD_INITIAL_BACKOFF_MS:=100}"
+: "${BENCH_CONSUMER_BUILD_MAX_BACKOFF_MS:=2000}"
 if [[ "$STACK" == "crabka" ]]; then
   : "${BENCH_CONSUMER_REQUEST_TIMEOUT_SECONDS:=5}"
 else
@@ -130,6 +139,9 @@ export BENCH_DRIVER_IMAGE
 export BENCH_PROMETHEUS_REQUEST_TIMEOUT_SECONDS
 export BENCH_PRODUCER_REQUEST_TIMEOUT_SECONDS
 export BENCH_CONSUMER_REQUEST_TIMEOUT_SECONDS
+export BENCH_CONSUMER_BUILD_ATTEMPTS
+export BENCH_CONSUMER_BUILD_INITIAL_BACKOFF_MS
+export BENCH_CONSUMER_BUILD_MAX_BACKOFF_MS
 
 # TLS data-path knobs consumed by the job-template envsubst. All three are
 # always exported (with inert defaults on the plaintext path) so envsubst never
