@@ -2972,3 +2972,73 @@ operational owner is the eight-hour `session_ttl_seconds` default, which is
 stored in `AdminUiConfig` but has no CLI or environment input. The three
 30,000-millisecond broker-admin request timeouts in `server_fns.rs` also remain
 fixed operational policy for a later slice.
+
+## Admin UI Session TTL
+
+The admin UI session lifetime is now a positive, platform-representable
+`SessionTtlSeconds` stored in `AdminUiConfig`. It retains the 28,800-second
+default and is resolved from:
+
+```text
+--session-ttl-seconds
+CRABKA_ADMIN_UI_SESSION_TTL_SECONDS
+```
+
+The command-line value wins when both inputs are present. Parsing rejects zero,
+malformed, negative, and values that cannot be added to the platform monotonic
+clock before server startup. `SessionTtlSeconds` uses
+`refined_type::rule::GreaterU64<0>` for positivity and
+`Instant::checked_add` for representability.
+
+The exact runtime flow is:
+
+```text
+AdminUiRuntimeArgs
+  -> AdminUiConfig::session_ttl
+  -> AppState::new
+  -> SessionStore::new
+  -> SessionRecord::expires_at
+```
+
+Session creation, lookup, expiration, logout, credentials storage, cookie
+handling, and the lower-level `SessionStore` handling of zero and oversized
+durations are unchanged. No CRD or operator field was added because no
+checked-in Kubernetes owner deploys the standalone admin UI process.
+
+After the implementation and before this section was appended, the exact
+scanner command
+
+```text
+tools/audit-runtime-values.sh
+```
+
+reported 6,281 lines across 1,054 files. Its admin UI subset contained 15
+lines: two configured defaults, 11 invariant permission-bit assignments, one
+invariant session-cookie name, and one structural sidebar-link table. The
+categories sum to all 15 lines, with zero unresolved scanner-visible admin UI
+owners.
+
+Before this section was appended, the exact focused search
+
+```text
+rg -n \
+  "session_ttl|SessionTtlSeconds|DEFAULT_SESSION_TTL_SECONDS|session-ttl-seconds|CRABKA_ADMIN_UI_SESSION_TTL_SECONDS" \
+  crates/admin-ui \
+  docs/configuration-audit.md
+```
+
+reported 35 lines. The mutually exclusive classification is 16 production
+configuration-flow references, 18 test references, one prior-audit reference,
+and zero unresolved-owner references: `16 + 18 + 1 + 0 = 35`.
+
+The package's 121 tests passed, including typed default, accepted minimum,
+invalid-value rejection, hermetic CLI-over-environment precedence,
+`AppState` propagation, immediate-expiry, and oversized-duration no-panic
+tests. Strict package Clippy, nightly formatting, the single-help-entry check,
+diff hygiene, and the unchanged `Cargo.lock` check all passed.
+
+### Adjacent Pending Policy
+
+This closes only the admin UI session TTL. The next admin UI operational owner
+is the 30,000-millisecond broker-admin request timeout repeated in the topic
+creation, deletion, and partition-expansion calls in `server_fns.rs`.
