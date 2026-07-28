@@ -3042,3 +3042,77 @@ diff hygiene, and the unchanged `Cargo.lock` check all passed.
 This closes only the admin UI session TTL. The next admin UI operational owner
 is the 30,000-millisecond broker-admin request timeout repeated in the topic
 creation, deletion, and partition-expansion calls in `server_fns.rs`.
+
+## Admin UI Topic Mutation Timeout
+
+The admin UI topic-mutation timeout is now a positive
+`TopicMutationTimeoutMs` stored in `AdminUiConfig`. It retains the
+30,000-millisecond default and is resolved from:
+
+```text
+--topic-mutation-timeout-ms
+CRABKA_ADMIN_UI_TOPIC_MUTATION_TIMEOUT_MS
+```
+
+The command-line value wins when both inputs are present. Parsing rejects zero,
+malformed, negative, and `i32` overflow values before server startup.
+`TopicMutationTimeoutMs` uses `refined_type::rule::GreaterI32<0>` for the
+positive-value invariant.
+
+The exact runtime flow is:
+
+```text
+AdminUiRuntimeArgs
+  -> AdminUiConfig::topic_mutation_timeout_ms
+  -> BrokerAdminMutationSeam
+  -> AdminClient::create_topics
+     AdminClient::delete_topics
+     AdminClient::create_partitions
+```
+
+Authentication, request validation, outcome mapping, and the existing
+`NOT_CONTROLLER` retry behavior are unchanged. Each retry continues to reuse
+the same configured Kafka request timeout. No CRD or operator field was added
+because no checked-in Kubernetes owner deploys the standalone admin UI
+process.
+
+After the implementation and before this section was appended, the exact
+scanner command
+
+```text
+tools/audit-runtime-values.sh
+```
+
+reported 6,282 lines across 1,054 files. Its admin UI subset contained 16
+lines: three configured defaults, 11 invariant permission-bit assignments,
+one invariant session-cookie name, and one structural sidebar-link table. The
+categories sum to all 16 lines, with zero unresolved scanner-visible admin UI
+owners.
+
+Before this section was appended, the exact focused search
+
+```text
+rg -n \
+  "topic_mutation_timeout_ms|TopicMutationTimeoutMs|DEFAULT_TOPIC_MUTATION_TIMEOUT_MS|topic-mutation-timeout-ms|CRABKA_ADMIN_UI_TOPIC_MUTATION_TIMEOUT_MS" \
+  crates/admin-ui \
+  docs/configuration-audit.md
+```
+
+reported 26 lines. The mutually exclusive classification is 17 production
+configuration-flow references, nine test references, and zero unresolved-owner
+references: `17 + 9 + 0 = 26`.
+
+The package's 126 tests passed, including typed default, accepted minimum,
+invalid-value rejection, and hermetic CLI-over-environment precedence tests.
+Focused call-site inspection found exactly three configured consumers and no
+remaining `30_000` literal in `server_fns.rs`. Strict package Clippy, nightly
+formatting, the single-help-entry check, diff hygiene, and the unchanged
+`Cargo.lock` check all passed.
+
+### Adjacent Pending Policy
+
+This closes the scanner-visible operational owners in `crabka-admin-ui`. The
+next scanner-visible production owner is the fixed 15-second Prometheus HTTP
+request timeout in `crates/bench-driver/src/prom.rs`. The bench-driver binary
+already owns a CLI/environment boundary, but this timeout does not yet flow
+through it.
