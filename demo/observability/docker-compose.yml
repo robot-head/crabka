@@ -304,6 +304,7 @@ services:
     environment:
       <<: [*s3-env, *otlp-env]
       CRABKA_TRACES_INDEX_SNAPSHOT_MAX_BYTES: "${CRABKA_TRACES_INDEX_SNAPSHOT_MAX_BYTES:-268435456}"
+      CRABKA_TRACES_BLOCK_READ_MAX_BYTES: "${CRABKA_TRACES_BLOCK_READ_MAX_BYTES:-1073741824}"
       OTEL_SERVICE_NAME: traces-querier
     ports: ["3200:3200"]
     depends_on:
