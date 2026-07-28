@@ -11,7 +11,7 @@ use std::{
 use clap::Parser;
 use crabka_client_core::security::TlsConnectorConfig;
 use crabka_security::ListenerProtocol;
-use refined_type::rule::{GreaterU64, GreaterUsize};
+use refined_type::rule::{GreaterI32, GreaterU64, GreaterUsize};
 use thiserror::Error;
 
 /// Default maximum size of an authenticated mutation JSON body.
@@ -124,6 +124,56 @@ impl FromStr for SessionTtlSeconds {
     }
 }
 
+/// Default Kafka request timeout for admin UI topic mutations.
+pub const DEFAULT_TOPIC_MUTATION_TIMEOUT_MS: i32 = 30_000;
+
+/// A positive Kafka request timeout for admin UI topic mutations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TopicMutationTimeoutMs(i32);
+
+impl TopicMutationTimeoutMs {
+    /// Validate a topic-mutation request timeout.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `value` is not positive.
+    pub fn new(value: i32) -> Result<Self, String> {
+        GreaterI32::<0>::new(value)
+            .map(|value| Self(value.into_value()))
+            .map_err(|error| error.to_string())
+    }
+
+    /// Return the validated timeout in milliseconds.
+    #[must_use]
+    pub const fn into_value(self) -> i32 {
+        self.0
+    }
+}
+
+impl Default for TopicMutationTimeoutMs {
+    fn default() -> Self {
+        Self::new(DEFAULT_TOPIC_MUTATION_TIMEOUT_MS)
+            .expect("default topic-mutation timeout is positive")
+    }
+}
+
+impl fmt::Display for TopicMutationTimeoutMs {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl FromStr for TopicMutationTimeoutMs {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value
+            .parse()
+            .map_err(|error: std::num::ParseIntError| error.to_string())
+            .and_then(Self::new)
+    }
+}
+
 /// Command-line and environment inputs owned by the admin UI runtime.
 #[derive(Debug, Clone, Parser)]
 #[command(name = "crabka-admin-ui")]
@@ -143,6 +193,14 @@ pub struct AdminUiRuntimeArgs {
         default_value_t = SessionTtlSeconds::default()
     )]
     pub session_ttl: SessionTtlSeconds,
+
+    /// Kafka request timeout for topic mutations, in milliseconds.
+    #[arg(
+        long = "topic-mutation-timeout-ms",
+        env = "CRABKA_ADMIN_UI_TOPIC_MUTATION_TIMEOUT_MS",
+        default_value_t = TopicMutationTimeoutMs::default()
+    )]
+    pub topic_mutation_timeout_ms: TopicMutationTimeoutMs,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -163,6 +221,7 @@ pub struct AdminUiConfig {
     pub security: BrokerSecurityConfig,
     pub session_ttl: SessionTtlSeconds,
     pub mutation_json_body_limit_bytes: MutationJsonBodyLimitBytes,
+    pub topic_mutation_timeout_ms: TopicMutationTimeoutMs,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -192,6 +251,7 @@ impl Default for AdminUiConfig {
             security: BrokerSecurityConfig::SaslPlaintext,
             session_ttl: SessionTtlSeconds::default(),
             mutation_json_body_limit_bytes: MutationJsonBodyLimitBytes::default(),
+            topic_mutation_timeout_ms: TopicMutationTimeoutMs::default(),
         }
     }
 }
