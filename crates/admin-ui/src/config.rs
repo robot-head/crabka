@@ -1,10 +1,75 @@
 //! Runtime configuration for one admin UI instance.
 
-use std::{net::SocketAddr, path::PathBuf};
+use std::{fmt, net::SocketAddr, path::PathBuf, str::FromStr};
 
+use clap::Parser;
 use crabka_client_core::security::TlsConnectorConfig;
 use crabka_security::ListenerProtocol;
+use refined_type::rule::GreaterUsize;
 use thiserror::Error;
+
+/// Default maximum size of an authenticated mutation JSON body.
+pub const DEFAULT_MUTATION_JSON_BODY_LIMIT_BYTES: usize = 1_048_576;
+
+/// A positive maximum size for an authenticated mutation JSON body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MutationJsonBodyLimitBytes(usize);
+
+impl MutationJsonBodyLimitBytes {
+    /// Validate a mutation JSON body limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `value` is zero.
+    pub fn new(value: usize) -> Result<Self, String> {
+        GreaterUsize::<0>::new(value)
+            .map(|value| Self(value.into_value()))
+            .map_err(|error| error.to_string())
+    }
+
+    /// Return the validated byte limit.
+    #[must_use]
+    pub const fn into_value(self) -> usize {
+        self.0
+    }
+}
+
+impl Default for MutationJsonBodyLimitBytes {
+    fn default() -> Self {
+        Self::new(DEFAULT_MUTATION_JSON_BODY_LIMIT_BYTES)
+            .expect("default mutation JSON body limit is positive")
+    }
+}
+
+impl fmt::Display for MutationJsonBodyLimitBytes {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl FromStr for MutationJsonBodyLimitBytes {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value
+            .parse()
+            .map_err(|error: std::num::ParseIntError| error.to_string())
+            .and_then(Self::new)
+    }
+}
+
+/// Command-line and environment inputs owned by the admin UI runtime.
+#[derive(Debug, Clone, Parser)]
+#[command(name = "crabka-admin-ui")]
+pub struct AdminUiRuntimeArgs {
+    /// Maximum authenticated mutation JSON body size in bytes.
+    #[arg(
+        long,
+        env = "CRABKA_ADMIN_UI_MUTATION_JSON_BODY_LIMIT_BYTES",
+        default_value_t = MutationJsonBodyLimitBytes::default()
+    )]
+    pub mutation_json_body_limit_bytes: MutationJsonBodyLimitBytes,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BrokerSecurityConfig {
@@ -23,6 +88,7 @@ pub struct AdminUiConfig {
     pub bootstrap_addrs: Vec<String>,
     pub security: BrokerSecurityConfig,
     pub session_ttl_seconds: u64,
+    pub mutation_json_body_limit_bytes: MutationJsonBodyLimitBytes,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -51,6 +117,7 @@ impl Default for AdminUiConfig {
             bootstrap_addrs: Vec::new(),
             security: BrokerSecurityConfig::SaslPlaintext,
             session_ttl_seconds: 8 * 60 * 60,
+            mutation_json_body_limit_bytes: MutationJsonBodyLimitBytes::default(),
         }
     }
 }

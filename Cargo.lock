@@ -2246,6 +2246,7 @@ dependencies = [
  "mutants",
  "parking_lot",
  "playwright-rs",
+ "refined_type",
  "serde",
  "serde_json",
  "tempfile",
