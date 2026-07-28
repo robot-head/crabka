@@ -46,7 +46,6 @@ use crate::{
 /// per-slice counts + a per-slice latency histogram locally (no shared locks
 /// on the hot path), and `run()` merges them into the `samples` series.
 const SAMPLE_INTERVAL_MS: u64 = 2000;
-const PRODUCER_FINAL_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 
 type AckResult =
     Result<Result<RecordMetadata, ProducerError>, tokio::sync::oneshot::error::RecvError>;
@@ -59,6 +58,7 @@ pub const DEFAULT_KAFKA_CONSUMER_REQUEST_TIMEOUT_SECONDS: u64 = 30;
 pub const DEFAULT_CONSUMER_BUILD_ATTEMPTS: u32 = 6;
 pub const DEFAULT_CONSUMER_BUILD_INITIAL_BACKOFF_MS: u64 = 100;
 pub const DEFAULT_CONSUMER_BUILD_MAX_BACKOFF_MS: u64 = 2_000;
+pub const DEFAULT_PRODUCER_FINAL_DRAIN_TIMEOUT_SECONDS: u64 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClientRequestTimeoutSeconds(u64);
@@ -285,6 +285,50 @@ impl Default for ConsumerBuildRetryPolicy {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProducerFinalDrainTimeoutSeconds(u64);
+
+impl ProducerFinalDrainTimeoutSeconds {
+    /// Validate a producer final-drain timeout.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `value` is zero.
+    pub fn new(value: u64) -> Result<Self, String> {
+        GreaterU64::<0>::new(value)
+            .map(|value| Self(value.into_value()))
+            .map_err(|error| error.to_string())
+    }
+
+    #[must_use]
+    pub const fn duration(self) -> Duration {
+        Duration::from_secs(self.0)
+    }
+}
+
+impl Default for ProducerFinalDrainTimeoutSeconds {
+    fn default() -> Self {
+        Self::new(DEFAULT_PRODUCER_FINAL_DRAIN_TIMEOUT_SECONDS)
+            .expect("default producer final-drain timeout is positive")
+    }
+}
+
+impl fmt::Display for ProducerFinalDrainTimeoutSeconds {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl FromStr for ProducerFinalDrainTimeoutSeconds {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value
+            .parse()
+            .map_err(|error: std::num::ParseIntError| error.to_string())
+            .and_then(Self::new)
+    }
+}
 /// The fixed sampling grid, shared (by Copy) with every task so all tasks
 /// bucket into the same slices.
 #[derive(Clone, Copy)]
@@ -318,6 +362,7 @@ pub struct DriverConfig {
     pub prometheus_url: Option<String>,
     pub prometheus_request_timeout_seconds: PrometheusRequestTimeoutSeconds,
     pub producer_request_timeout_seconds: ClientRequestTimeoutSeconds,
+    pub producer_final_drain_timeout: ProducerFinalDrainTimeoutSeconds,
     pub consumer_request_timeout_seconds: ClientRequestTimeoutSeconds,
     pub consumer_build_retry_policy: ConsumerBuildRetryPolicy,
     pub broker_count: u32,
@@ -410,19 +455,19 @@ pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
         let topic = cfg.topic.clone();
         let stop = stop.clone();
         let first_ack = first_ack_unix_ms.clone();
-        let sid = cfg.scenario_id;
         let sec = security.clone();
         prod_set.spawn(run_producer(ProducerTask {
             idx: i,
             scenario: s,
             bootstrap,
             topic,
-            scenario_id: sid,
+            scenario_id: cfg.scenario_id,
             stop,
             first_ack,
             security: sec,
             grid,
             request_timeout: cfg.producer_request_timeout_seconds,
+            final_drain_timeout: cfg.producer_final_drain_timeout,
         }));
     }
 
@@ -865,6 +910,7 @@ struct ProducerTask {
     security: Option<ClientSecurity>,
     grid: Grid,
     request_timeout: ClientRequestTimeoutSeconds,
+    final_drain_timeout: ProducerFinalDrainTimeoutSeconds,
 }
 
 async fn run_producer(task: ProducerTask) -> ProducerOut {
@@ -879,6 +925,7 @@ async fn run_producer(task: ProducerTask) -> ProducerOut {
         security,
         grid,
         request_timeout,
+        final_drain_timeout,
     } = task;
     // Idempotence forces acks=All; turn it off whenever the scenario
     // requested something weaker.
@@ -1057,7 +1104,7 @@ async fn run_producer(task: ProducerTask) -> ProducerOut {
     // do not let a stuck producer retry slot keep the whole benchmark job alive
     // forever. Unsettled sends are counted as drops so failover reports capture
     // the stall instead of timing out without a JSON result.
-    let drain_until = Instant::now() + PRODUCER_FINAL_DRAIN_TIMEOUT;
+    let drain_until = Instant::now() + final_drain_timeout.duration();
     while !inflight.is_empty() {
         let now = Instant::now();
         if now >= drain_until {
@@ -1276,6 +1323,7 @@ mod tests {
             prometheus_url: None,
             prometheus_request_timeout_seconds: PrometheusRequestTimeoutSeconds::default(),
             producer_request_timeout_seconds: default_producer_request_timeout(),
+            producer_final_drain_timeout: ProducerFinalDrainTimeoutSeconds::default(),
             consumer_request_timeout_seconds: default_consumer_request_timeout(Stack::Crabka),
             consumer_build_retry_policy: ConsumerBuildRetryPolicy::default(),
             broker_count,
@@ -1400,6 +1448,34 @@ mod tests {
         for invalid in ["0", "not-a-number", "-1", "18446744073709551616"] {
             assert!(
                 invalid.parse::<ConsumerPollDurationMs>().is_err(),
+                "{invalid:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn producer_final_drain_timeout_default_preserves_behavior() {
+        assert_eq!(
+            ProducerFinalDrainTimeoutSeconds::default().duration(),
+            Duration::from_secs(10)
+        );
+    }
+
+    #[test]
+    fn producer_final_drain_timeout_accepts_positive_minimum() {
+        assert_eq!(
+            ProducerFinalDrainTimeoutSeconds::new(1)
+                .expect("one second is valid")
+                .duration(),
+            Duration::from_secs(1)
+        );
+    }
+
+    #[test]
+    fn producer_final_drain_timeout_rejects_invalid_values() {
+        for invalid in ["0", "not-a-number", "-1", "18446744073709551616"] {
+            assert!(
+                invalid.parse::<ProducerFinalDrainTimeoutSeconds>().is_err(),
                 "{invalid:?} must be rejected"
             );
         }

@@ -10,7 +10,7 @@ use crabka_bench_driver::{
     scenario::{Scenario, Stack},
     workload::{
         self, ClientRequestTimeoutSeconds, ConsumerBuildAttempts, ConsumerBuildBackoffMs,
-        ConsumerBuildRetryPolicy, DriverConfig,
+        ConsumerBuildRetryPolicy, DriverConfig, ProducerFinalDrainTimeoutSeconds,
     },
 };
 use tracing_subscriber::EnvFilter;
@@ -51,6 +51,13 @@ struct Cli {
         default_value_t = workload::default_producer_request_timeout()
     )]
     producer_request_timeout_seconds: ClientRequestTimeoutSeconds,
+    /// Maximum time to drain outstanding producer sends, in seconds.
+    #[arg(
+        long,
+        env = "BENCH_PRODUCER_FINAL_DRAIN_TIMEOUT_SECONDS",
+        default_value_t = ProducerFinalDrainTimeoutSeconds::default()
+    )]
+    producer_final_drain_timeout_seconds: ProducerFinalDrainTimeoutSeconds,
     /// Consumer request timeout, in seconds. Defaults to 5 for Crabka and 30
     /// for Kafka.
     #[arg(long, env = "BENCH_CONSUMER_REQUEST_TIMEOUT_SECONDS")]
@@ -202,6 +209,7 @@ async fn main() -> Result<()> {
         prometheus_url: cli.prometheus,
         prometheus_request_timeout_seconds: cli.prometheus_request_timeout_seconds,
         producer_request_timeout_seconds: cli.producer_request_timeout_seconds,
+        producer_final_drain_timeout: cli.producer_final_drain_timeout_seconds,
         consumer_request_timeout_seconds,
         consumer_build_retry_policy,
         broker_count: cli.broker_count,
@@ -465,6 +473,59 @@ mod tests {
         assert_eq!(
             from_cli.consumer_poll_error_backoff_ms.duration(),
             Duration::from_millis(22)
+        );
+    }
+
+    #[test]
+    fn producer_final_drain_timeout_cli_default_preserves_behavior() {
+        let cli = Cli::try_parse_from(required_args("crabka")).expect("drain default");
+
+        assert_eq!(
+            cli.producer_final_drain_timeout_seconds.duration(),
+            Duration::from_secs(10)
+        );
+    }
+
+    #[test]
+    fn producer_final_drain_timeout_rejects_invalid_cli_values() {
+        for invalid in ["0", "not-a-number", "-1", "18446744073709551616"] {
+            let mut args = required_args("crabka");
+            args.extend(["--producer-final-drain-timeout-seconds", invalid]);
+            assert!(Cli::try_parse_from(args).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn producer_final_drain_timeout_reads_environment_and_prefers_cli() {
+        const CHILD: &str = "CRABKA_BENCH_PRODUCER_FINAL_DRAIN_TIMEOUT_CHILD";
+
+        if std::env::var_os(CHILD).is_none() {
+            let status =
+                std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args([
+                        "--exact",
+                        "tests::producer_final_drain_timeout_reads_environment_and_prefers_cli",
+                    ])
+                    .env(CHILD, "1")
+                    .env("BENCH_PRODUCER_FINAL_DRAIN_TIMEOUT_SECONDS", "11")
+                    .status()
+                    .expect("child test");
+            assert!(status.success());
+            return;
+        }
+
+        let from_env = Cli::try_parse_from(required_args("crabka")).expect("environment");
+        assert_eq!(
+            from_env.producer_final_drain_timeout_seconds.duration(),
+            Duration::from_secs(11)
+        );
+
+        let mut args = required_args("crabka");
+        args.extend(["--producer-final-drain-timeout-seconds", "21"]);
+        let from_cli = Cli::try_parse_from(args).expect("CLI over environment");
+        assert_eq!(
+            from_cli.producer_final_drain_timeout_seconds.duration(),
+            Duration::from_secs(21)
         );
     }
 
