@@ -2822,3 +2822,73 @@ subscription metadata refresh interval. Other classic Consumer production
 owners and the repository-wide hardcoded-operational-value objective remain
 open. The separately queued `ShareAcquireMode` policy slice also remains open
 with its approved `ShareAcquireMode::BatchOptimized` default.
+
+## Share Consumer Acquire Mode
+
+`ShareAcquireMode` now exposes the ShareFetch acquisition policy on
+`ShareConsumer::builder().acquire_mode`. `BatchOptimized` remains the default
+and maps to wire value `0`; `RecordLimit` maps to wire value `1`. The exact
+live flow is:
+
+```text
+ShareConsumer::builder().acquire_mode
+  -> ShareConsumer::acquire_mode
+  -> ShareConsumer::poll
+  -> build_share_fetch_request
+  -> ShareFetchRequest::share_acquire_mode
+```
+
+ShareFetch version 1 compatibility is unchanged: the generated encoder already
+omits `share_acquire_mode` before version 2. No `refined_type` or string parser
+was added because the public enum admits only the two supported policies. No
+CLI, environment setting, CRD, or operator field was added because no
+production process owns `ShareConsumer`.
+
+Before this section was appended, the exact scanner command
+
+```text
+tools/audit-runtime-values.sh
+```
+
+reported 6,280 lines across 1,053 files. The exact focused search is:
+
+```text
+rg -n \
+  "share_acquire_mode|ShareAcquireMode|BatchOptimized|RecordLimit|acquire_mode" \
+  crates/client-consumer \
+  crates/integration-tests/tests/consumer_share_consumer.rs \
+  docs/configuration-audit.md
+```
+
+Before this section was appended, it reported 37 lines. After this section and
+formatting, it reported 46 lines. The final mutually exclusive classification
+is 16 production-policy-flow references, 12 test or harness references, 18
+prior-audit references, and zero unresolved-owner references:
+`16 + 12 + 18 + 0 = 46`.
+
+The `crabka-client-consumer` all-target test passed 152 unit tests and three
+integration tests with no failures. The first workspace all-target test stopped
+in `crabka-client-producer` after 100 tests passed and
+`producer_builder_uses_configured_init_retry_timeout` failed its one-millisecond
+deadline assertion; the focused rerun passed one test with 100 filtered out.
+The authoritative workspace rerun passed that producer test, then stopped in
+`crabka-gres-ranges` after two nemesis tests passed and
+`real_range_partition_aborts_transfer_and_heal_restores_2pc` failed because a
+post-heal request hit its five-second range transport timeout. A focused rerun
+reproduced that failure with two tests filtered out. Task 1 changed only
+`crates/client-consumer`, so neither workspace failure is in this slice.
+
+Workspace Clippy exited successfully with two `doc_markdown` warnings for the
+new `ShareFetch` documentation in `ShareAcquireMode` and the pre-existing
+`crabka-traces` large-future warning. Nightly formatting and diff hygiene
+passed. `Cargo.lock` remained unchanged.
+
+### Adjacent Pending Policy
+
+This closes only the ShareConsumer acquisition mode. The next scanner-visible
+operational owner is the admin UI mutation JSON body limit,
+`MUTATION_JSON_BODY_LIMIT_BYTES = 1,048,576`, in
+`crates/admin-ui/src/server.rs`. It is a production security and resource-usage
+policy applied to every authenticated mutation request, remains a fixed
+constant rather than an `AdminUiConfig` value, and is not a protocol constant,
+sentinel, test fixture, ignored argument, or already-configured value.
