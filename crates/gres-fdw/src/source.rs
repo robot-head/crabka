@@ -471,8 +471,9 @@ async fn open_connection(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::time::Duration;
+
+    use super::*;
 
     // Helper: `ScanBounds` with per-partition start/end vectors.
     fn bounds_with(start_offsets: Vec<(i32, i64)>, end_offsets: Vec<(i32, i64)>) -> ScanBounds {

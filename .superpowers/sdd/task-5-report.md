@@ -1,3 +1,82 @@
+# Runtime configuration Task 5 report
+
+Status: DONE
+
+Implemented `Kafka.spec.brokerTuning` as 117 typed optional camel-case fields,
+matching the complete broker `RuntimeFileConfig` field set. This includes the
+consumed Share and Streams settings and excludes the unconsumed staged Streams
+enable/max-groups/max-size controls. Scalar constraints use `refined_type`
+directly in operator production validation; cross-field checks resolve absent
+values against broker defaults. Invalid values set
+`KafkaConfigValid=False`, reason `KafkaConfigInvalid`, with the camel-case CRD
+path in the message and leave the existing broker ConfigMap untouched.
+
+The operator renders a deterministic numeric `[runtime]` TOML section in field
+declaration order and omits it for absent or empty tuning. The generated Kafka
+CRD contains all 117 properties and their schema minimum/maximum/minLength
+constraints. `crabka-broker` remains a dev-dependency only.
+
+KafkaSpec constructor fallout was updated explicitly in:
+
+- `crates/operator/src/controller/common.rs`
+- `crates/operator/src/controller/grpc_gateway.rs`
+- `crates/operator/src/controller/kafka.rs`
+- `crates/operator/src/controller/kafka_node_pool.rs`
+- `crates/operator/src/controller/listeners.rs`
+- `crates/operator/src/controller/metrics.rs`
+- `crates/operator/src/controller/network_policy.rs`
+- `crates/operator/src/controller/topic.rs`
+- `crates/operator/src/crd/kafka.rs`
+- `crates/operator/tests/reconcile_ca.rs`
+- `crates/operator/tests/reconcile_ca_rotation.rs`
+- `crates/operator/tests/reconcile_inter_broker_mtls.rs`
+- `crates/operator/tests/reconcile_kafka.rs`
+- `crates/operator/tests/reconcile_kafka_authorization.rs`
+- `crates/operator/tests/reconcile_listener_auth.rs`
+- `crates/operator/tests/reconcile_listener_gssapi.rs`
+- `crates/operator/tests/reconcile_listener_ingress.rs`
+- `crates/operator/tests/reconcile_listener_oauth.rs`
+- `crates/operator/tests/reconcile_oauth_introspection.rs`
+- `crates/operator/tests/reconcile_oauth_trust.rs`
+
+Verification:
+
+- strict RED: missing `BrokerTuning` and `KafkaSpec.broker_tuning`
+- focused broker-tuning reconciliation/validation tests: 5 passed
+- `cargo test -p crabka-operator --lib crd`: 157 passed
+- `cargo test -p crabka-operator --test reconcile_kafka`: 28 passed
+- `cargo check -p crabka-operator --all-targets`: passed
+- strict all-target/all-feature Clippy with `-D warnings`: passed
+- operator rustfmt check and `git diff --check`: passed
+- generated CRD/runtime field-set comparison: 117 equals 117, no differences
+
+Concerns: none.
+
+## Review fix: broker tuning rolls pods
+
+Fix commit: `fb66e9e4`, following `5c513cc0`.
+
+RED:
+
+- `cargo test -p crabka-operator --lib combined_hash_tracks_nonempty_broker_tuning_only`
+- failed because nonempty tuning and absent tuning both hashed to
+  `e3b0c44298fc1c14`.
+
+GREEN:
+
+- the focused regression passed;
+- `controller::common::config_hash_tests`: 11 passed;
+- `reconcile_kafka`: 28 passed;
+- strict operator all-target/all-feature Clippy with `-D warnings`: passed;
+- operator rustfmt check and `git diff --check`: passed.
+
+`combined_config_hash` now includes the deterministic
+`BrokerTuning::render_runtime_toml()` bytes. Absent and
+`Some(BrokerTuning::default())` still take the existing empty-hash collapse;
+any rendered tuning value changes the desired pool hash and rolls broker pods.
+
+---
+
 # G9 Task 5 report
 
 Status: DONE

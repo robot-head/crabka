@@ -102,6 +102,7 @@ same `BrokerConfig` → CLI/environment/file → CRD path:
 | `audit_tail_read_max_bytes` | `usize` | `1048576` | `>= 1` |
 | `offsets_topic_metadata_wait_timeout_ms` | `u64` | `30000` | `>= 1` |
 | `client_metrics_stale_push_intervals` | `u32` | `3` | `>= 1` |
+| `client_metrics_otlp_queue_capacity` | `usize` | `256` | `>= 1` |
 | `coordinator_actor_mailbox_capacity` | `usize` | `64` | `>= 1` |
 | `unclean_recovery_queue_capacity` | `usize` | `256` | `>= 1` |
 | `share_recovery_read_max_bytes` | `usize` | `1048576` | `>= 1` |
@@ -117,6 +118,7 @@ same `BrokerConfig` → CLI/environment/file → CRD path:
 | `telemetry_decompressed_output_ceiling_bytes` | `usize` | `1073741824` | `>= floor` |
 | `inter_broker_server_name` | `String` | `"localhost"` | nonempty |
 | `producer_id_expiration_ms` | `i64` | `86400000` | `>= 1` |
+| `producer_id_expiration_scan_interval_ms` | `u64` | `600000` | `>= 1` |
 | `max_produce_group` | `usize` | `1024` | `>= 1` |
 | `partition_writer_queue_depth` | `usize` | `64` | `>= 1` |
 | `default_min_insync_replicas` | `i32` | `1` | `>= 1` |
