@@ -10,7 +10,7 @@ use std::{
 
 use crabka_admin_ui::{
     auth::{LoginBroker, LoginRequest},
-    config::{AdminUiConfig, BrokerSecurityConfig},
+    config::{AdminUiConfig, BrokerSecurityConfig, SessionTtlSeconds},
     dto::{
         AclRequestDto, AlterConfigRequestDto, ConfigEntryDto, CreatePartitionsRequestDto,
         CreateTopicRequestDto, DeleteTopicRequestDto, GroupRow, LogDirMoveRequestDto, LogDirRow,
@@ -53,7 +53,7 @@ fn app_state_carries_config_and_sessions() {
         cluster_name: "task-six-cluster".to_string(),
         bootstrap_addrs: vec!["127.0.0.1:9092".to_string()],
         security: BrokerSecurityConfig::SaslPlaintext,
-        session_ttl_seconds: 37,
+        session_ttl: SessionTtlSeconds::new(37).expect("test TTL is valid"),
         ..AdminUiConfig::default()
     };
 

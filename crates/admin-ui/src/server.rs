@@ -1,6 +1,6 @@
 //! HTTP server helpers for the admin UI.
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use axum::{
     Form, Router,
@@ -40,7 +40,7 @@ pub struct AdminRouterState<F, B = AdminClientLoginBroker> {
 impl AppState {
     #[must_use]
     pub fn new(cfg: AdminUiConfig) -> Self {
-        let session_ttl = Duration::from_secs(cfg.session_ttl_seconds);
+        let session_ttl = cfg.session_ttl.duration();
 
         Self {
             cfg: Arc::new(cfg),
