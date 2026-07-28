@@ -51,7 +51,7 @@ pub(crate) fn handle(
     let log_config = broker.config.log_config.clone();
     let move_policy = future_log::MovePolicy {
         retry_backoff: broker.config.future_log_move_retry_backoff,
-        read_chunk_bytes: broker.config.future_log_move_read_chunk_bytes,
+        read_chunk: broker.config.future_log_move_read_chunk,
     };
     Box::pin(async move {
         let mut cur: &[u8] = &req_bytes;

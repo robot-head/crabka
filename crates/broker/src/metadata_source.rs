@@ -552,8 +552,8 @@ mod tests {
                 dialer: Arc::new(crabka_raft::PlaintextDialer),
                 client_id: "observer-source-test".into(),
                 cluster_id,
-                max_bytes: 1_048_576,
-                poll_interval: std::time::Duration::from_mins(1),
+                max_bytes: crabka_units::mebibytes(1),
+                poll_interval: crabka_units::minutes(1),
                 sleeper: Arc::new(qubit_clock::sleep::SystemSleeper::new()),
             },
         );

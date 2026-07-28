@@ -10,12 +10,13 @@ use std::{sync::Arc, time::Duration};
 use crabka_client_core::ConnectionOptions;
 use crabka_protocol::owned::broker_heartbeat_request::BrokerHeartbeatRequest;
 use crabka_security::ListenerProtocol;
+use crabka_units::{Time, convert::TimeExt as _};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 pub(crate) struct Config {
     pub broker_id: i32,
-    pub interval: Duration,
+    pub interval: Time,
     pub controller: Arc<dyn crate::metadata_source::MetadataSource>,
     pub shutdown: CancellationToken,
     /// Shared inter-broker dialer used to reach the controller leader.
@@ -101,7 +102,7 @@ fn trigger_all_dirs_offline_shutdown(cfg: &mut Config, reason: &str) {
 }
 
 pub(crate) async fn run(mut cfg: Config) {
-    let mut tick = tokio::time::interval(cfg.interval);
+    let mut tick = tokio::time::interval(cfg.interval.to_std());
     loop {
         tokio::select! {
             _ = tick.tick() => {},
@@ -137,8 +138,8 @@ pub(crate) async fn run(mut cfg: Config) {
                 || (broker_rec.host.clone(), broker_rec.port),
                 |e| (e.host.clone(), e.port),
             );
-        let opts = heartbeat_connection_options(cfg.broker_id, cfg.interval);
-        let rpc_timeout = heartbeat_rpc_timeout(cfg.interval);
+        let opts = heartbeat_connection_options(cfg.broker_id, cfg.interval.to_std());
+        let rpc_timeout = heartbeat_rpc_timeout(cfg.interval.to_std());
         let client_res = tokio::time::timeout(
             rpc_timeout,
             cfg.inter_broker_client.connect_as_connection(

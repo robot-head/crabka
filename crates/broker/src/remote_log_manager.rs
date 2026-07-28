@@ -27,6 +27,7 @@ use crabka_remote_storage::{
     RemoteLogSegmentMetadataUpdate, RemoteLogSegmentState, RemotePartitionDeleteMetadata,
     RemotePartitionDeleteState, RemoteStorageManager, TopicIdPartition,
 };
+use crabka_units::{Time, convert::TimeExt as _, secs};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 use uuid::Uuid;
@@ -34,12 +35,12 @@ use uuid::Uuid;
 use crate::{partition::Partition, partition_registry::PartitionRegistry};
 
 /// Default cadence of the tiered-storage sweep (copy + retention passes).
-const DEFAULT_TIERING_INTERVAL: Duration = Duration::from_secs(30);
+const DEFAULT_TIERING_INTERVAL: Time = secs(30);
 
 /// Tunables for [`run`].
 #[derive(Debug, Clone)]
 pub(crate) struct RemoteLogManagerConfig {
-    pub interval: Duration,
+    pub interval: Time,
 }
 
 impl Default for RemoteLogManagerConfig {
@@ -66,7 +67,7 @@ pub(crate) async fn run(
     cfg: RemoteLogManagerConfig,
     shutdown: CancellationToken,
 ) {
-    let mut ticker = tokio::time::interval(cfg.interval);
+    let mut ticker = tokio::time::interval(cfg.interval.to_std());
     loop {
         tokio::select! {
             _ = ticker.tick() => {}
@@ -719,6 +720,7 @@ mod tests {
         CustomMetadata, IndexType, InmemoryRemoteLogMetadataManager, LocalTieredStorage,
         RemoteStorageError,
     };
+    use crabka_units::millis;
 
     use super::*;
 
@@ -996,7 +998,7 @@ mod tests {
                 broker_id: 1,
             },
             RemoteLogManagerConfig {
-                interval: Duration::from_millis(10),
+                interval: millis(10),
             },
             shutdown.clone(),
         ));

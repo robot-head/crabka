@@ -89,12 +89,12 @@ async fn start_broker_with_topic_rlmm() -> (BrokerHandle, TempDir, TempDir) {
     cfg.remote_storage_backend = Some(RemoteStorageBackend::Local {
         dir: remote_dir.path().to_path_buf(),
     });
-    cfg.remote_log_manager_interval = Duration::from_secs(1);
+    cfg.remote_log_manager_interval = crabka_units::secs(1);
     cfg.remote_log_metadata = RlmmKind::TopicBacked(KafkaRlmmConfig {
         bootstrap: format!("127.0.0.1:{}", listen.port()),
         num_partitions: 1,
         replication: 1,
-        snapshot_interval: Duration::from_hours(1),
+        snapshot_interval: crabka_units::hours(1),
         snapshot_dir: log_dir.path().join("remote-log-metadata"),
         security: None,
     });
@@ -449,14 +449,14 @@ async fn start_sasl_broker_with_topic_rlmm() -> (BrokerHandle, TempDir, TempDir)
     cfg.remote_storage_backend = Some(RemoteStorageBackend::Local {
         dir: remote_dir.path().to_path_buf(),
     });
-    cfg.remote_log_manager_interval = Duration::from_secs(1);
+    cfg.remote_log_manager_interval = crabka_units::secs(1);
     cfg.remote_log_metadata = RlmmKind::TopicBacked(KafkaRlmmConfig {
         // The broker overrides bootstrap + security from the inter-broker
         // listener; the operator value here is the same loopback addr.
         bootstrap: format!("127.0.0.1:{}", listen.port()),
         num_partitions: 1,
         replication: 1,
-        snapshot_interval: Duration::from_hours(1),
+        snapshot_interval: crabka_units::hours(1),
         snapshot_dir: log_dir.path().join("remote-log-metadata"),
         security: None,
     });
@@ -506,14 +506,14 @@ async fn copy_task_skips_tiering_while_rlmm_not_ready_case() {
     cfg.remote_storage_backend = Some(RemoteStorageBackend::Local {
         dir: remote_dir.path().to_path_buf(),
     });
-    cfg.remote_log_manager_interval = Duration::from_millis(200);
+    cfg.remote_log_manager_interval = crabka_units::millis(200);
     // Dead port: the retry loop can never dial the bootstrap; the SwappableRlmm
     // stays on the NotReadyRlmm stub for the entire test.
     cfg.remote_log_metadata = RlmmKind::TopicBacked(KafkaRlmmConfig {
         bootstrap: "127.0.0.1:1".into(),
         num_partitions: 1,
         replication: 1,
-        snapshot_interval: Duration::from_hours(1),
+        snapshot_interval: crabka_units::hours(1),
         snapshot_dir: log_dir.path().join("rlmm-snap"),
         security: None,
     });

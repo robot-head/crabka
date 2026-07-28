@@ -310,7 +310,7 @@ async fn partition_level_metrics_and_disk_gauge_render() {
     cfg.metrics_listen_addr = Some("127.0.0.1:0".parse().unwrap());
     // Enable the disk scanner with a 1s tick so the gauge gets a
     // chance to populate within the test's wait window.
-    cfg.partition_disk_scan_interval_secs = 1;
+    cfg.partition_disk_scan_interval = crabka_units::secs(1);
 
     let handle = Broker::start(cfg).await.unwrap();
     let kafka_addr = handle.listen_addr();

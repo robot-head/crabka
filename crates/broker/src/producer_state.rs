@@ -6,6 +6,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use crabka_ids::PartitionIndex;
 use crabka_log::ProducerId;
+use crabka_units::{Time, convert::TimeExt as _};
 use dashmap::DashMap;
 use tokio::sync::Mutex;
 
@@ -267,7 +268,7 @@ impl ProducerState {
         topic: &str,
         partition: PartitionIndex,
         now_ms: i64,
-        expiration_ms: i64,
+        expiration: Time,
     ) -> HashMap<i64, LogOffset> {
         // Mirror `snapshot`: avoid inserting an empty entry for an unknown
         // partition (the borrowed lookups allocate nothing on a miss).
@@ -287,13 +288,15 @@ impl ProducerState {
         state
             .entries
             .iter()
-            .filter(|(_pid, e)| now_ms.saturating_sub(e.last_activity_ms) <= expiration_ms)
+            .filter(|(_pid, e)| {
+                now_ms.saturating_sub(e.last_activity_ms) <= expiration.millis_i64()
+            })
             .map(|(pid, e)| (pid.get(), e.base_offset))
             .collect()
     }
 
     /// Evict idempotent-producer entries whose last activity is older
-    /// than `ttl_ms` relative to `now_ms`, mirroring Kafka's
+    /// than `ttl` relative to `now_ms`, mirroring Kafka's
     /// `producer.id.expiration.ms` (default `86_400_000` ms = 24h). Kafka
     /// expires by *inactivity*: an entry that keeps receiving produces
     /// is retained; one that has gone quiet past the window is dropped so
@@ -305,7 +308,8 @@ impl ProducerState {
     ///
     /// This provides the mechanism only; the periodic caller (a broker
     /// maintenance loop) is wired separately.
-    pub async fn expire_older_than(&self, now_ms: i64, ttl_ms: i64) -> usize {
+    pub async fn expire_older_than(&self, now_ms: i64, ttl: Time) -> usize {
+        let ttl_ms = ttl.millis_i64();
         let mut evicted = 0usize;
         // Snapshot the (topic -> partition-map) refs first so we don't
         // hold a DashMap shard guard across the per-partition `.await`.
@@ -351,6 +355,7 @@ mod producer_state_model;
 #[cfg(test)]
 mod tests {
     use assert2::{assert, check};
+    use crabka_units::{millis, secs};
 
     use super::*;
 
@@ -608,7 +613,7 @@ mod tests {
         }
         // now = 10_000, ttl = 5_000 → pid 1 (age 9_000) expires, pid 2
         // (age 1_000) survives.
-        let evicted = s.expire_older_than(10_000, 5_000).await;
+        let evicted = s.expire_older_than(10_000, secs(5)).await;
         assert!(evicted == 1);
         let snap = s.snapshot("t", PartitionIndex(0)).await;
         assert!(snap.len() == 1);
@@ -629,7 +634,7 @@ mod tests {
                 .last_activity_ms = 5_000;
         }
 
-        let evicted = s.expire_older_than(10_000, 5_000).await;
+        let evicted = s.expire_older_than(10_000, secs(5)).await;
         assert!(evicted == 1);
         assert!(s.snapshot("t", PartitionIndex(0)).await.is_empty());
     }
@@ -671,14 +676,14 @@ mod tests {
         // now = 10_000, expiration = 5_000 → pid 1 (age 9_000 > 5_000)
         // excluded; pid 2 (age 500 <= 5_000) included with its base_offset.
         let snap = s
-            .active_snapshot("t", PartitionIndex(0), 10_000, 5_000)
+            .active_snapshot("t", PartitionIndex(0), 10_000, secs(5))
             .await;
         let expected: HashMap<i64, i64> = [(2, 20)].into_iter().collect();
         assert!(snap == expected);
         // Unknown partition / topic → empty without panicking.
         for (topic, partition) in [("t", PartitionIndex(99)), ("nope", PartitionIndex(0))] {
             assert!(
-                s.active_snapshot(topic, partition, 10_000, 5_000).await == HashMap::new(),
+                s.active_snapshot(topic, partition, 10_000, secs(5)).await == HashMap::new(),
                 "case: {topic}/{partition}"
             );
         }
@@ -697,7 +702,7 @@ mod tests {
                 .unwrap()
                 .last_activity_ms = 0;
         }
-        let evicted = s.expire_older_than(1_000_000, 1).await;
+        let evicted = s.expire_older_than(1_000_000, millis(1)).await;
         // The empty partition and topic maps are pruned (the empty topic slot
         // must be removed), and a subsequent produce still works after pruning.
         check!(evicted == 1);

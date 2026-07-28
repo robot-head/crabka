@@ -23,6 +23,7 @@ use crabka_ids::PartitionIndex;
 use crabka_log::{Log, LogConfig};
 use crabka_metadata::MetadataImage;
 use crabka_raft::NodeId;
+use crabka_units::Time;
 use dashmap::DashMap;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -85,7 +86,7 @@ pub(crate) struct MaterializePartitionConfig<'a> {
     pub log_config: &'a LogConfig,
     pub log_dir_status: &'a crate::log_dir_status::LogDirRegistry,
     pub producer_state: &'a Arc<crate::producer_state::ProducerState>,
-    pub producer_id_expiration_ms: i64,
+    pub producer_id_expiration: Time,
     pub max_produce_group: usize,
     pub partition_writer_queue_depth: usize,
     pub diskless: bool,
@@ -104,7 +105,7 @@ pub(crate) fn materialize_partition(config: MaterializePartitionConfig<'_>) -> R
         log_config,
         log_dir_status,
         producer_state,
-        producer_id_expiration_ms,
+        producer_id_expiration,
         max_produce_group,
         partition_writer_queue_depth,
         diskless,
@@ -135,7 +136,7 @@ pub(crate) fn materialize_partition(config: MaterializePartitionConfig<'_>) -> R
             log,
             log_dir_status: log_dir_status.clone(),
             producer_state: producer_state.clone(),
-            producer_id_expiration_ms,
+            producer_id_expiration,
             max_produce_group,
             partition_writer_queue_depth,
             diskless,
@@ -296,7 +297,7 @@ pub(crate) struct ReplicatorSupervisor {
     /// writer's `Compact` handler can snapshot active producers for
     /// KIP-534 `RETAIN_EMPTY`.
     producer_state: Arc<crate::producer_state::ProducerState>,
-    producer_id_expiration_ms: i64,
+    producer_id_expiration: Time,
     max_produce_group: usize,
     partition_writer_queue_depth: usize,
     /// Broker-wide metrics handle. Each spawned replicator
@@ -341,7 +342,7 @@ pub(crate) struct ReplicatorSupervisorConfig {
     pub throttle_state: Arc<ThrottleState>,
     pub log_dir_status: crate::log_dir_status::LogDirRegistry,
     pub producer_state: Arc<crate::producer_state::ProducerState>,
-    pub producer_id_expiration_ms: i64,
+    pub producer_id_expiration: Time,
     pub max_produce_group: usize,
     pub partition_writer_queue_depth: usize,
     pub metrics: crate::metrics::BrokerMetrics,
@@ -371,7 +372,7 @@ impl ReplicatorSupervisor {
             throttle_state,
             log_dir_status,
             producer_state,
-            producer_id_expiration_ms,
+            producer_id_expiration,
             max_produce_group,
             partition_writer_queue_depth,
             metrics,
@@ -405,7 +406,7 @@ impl ReplicatorSupervisor {
             throttle_state,
             log_dir_status,
             producer_state,
-            producer_id_expiration_ms,
+            producer_id_expiration,
             max_produce_group,
             partition_writer_queue_depth,
             metrics,
@@ -710,7 +711,7 @@ impl ReplicatorSupervisor {
             log_config: &self.log_config,
             log_dir_status: &self.log_dir_status,
             producer_state: &self.producer_state,
-            producer_id_expiration_ms: self.producer_id_expiration_ms,
+            producer_id_expiration: self.producer_id_expiration,
             max_produce_group: self.max_produce_group,
             partition_writer_queue_depth: self.partition_writer_queue_depth,
             diskless,
@@ -765,6 +766,7 @@ mod tests {
         AddVoter, Node, QuorumState, RaftError, ReconfigOutcome, RemoveVoter, SnapshotRange,
         UpdateVoter,
     };
+    use crabka_units::hours;
     use tokio::sync::watch;
     use uuid::Uuid;
 
@@ -974,7 +976,7 @@ mod tests {
             throttle_state: Arc::new(ThrottleState::new()),
             log_dir_status: crate::log_dir_status::LogDirRegistry::default(),
             producer_state: Arc::new(crate::producer_state::ProducerState::new()),
-            producer_id_expiration_ms: 86_400_000,
+            producer_id_expiration: hours(24),
             max_produce_group: 1_024,
             partition_writer_queue_depth: 64,
             metrics: crate::metrics::BrokerMetrics::default(),
@@ -1101,7 +1103,7 @@ mod tests {
             log_config: &LogConfig::default(),
             log_dir_status: &crate::log_dir_status::LogDirRegistry::default(),
             producer_state: &Arc::new(crate::producer_state::ProducerState::new()),
-            producer_id_expiration_ms: 86_400_000,
+            producer_id_expiration: hours(24),
             max_produce_group: 1_024,
             partition_writer_queue_depth: 64,
             diskless: false,
@@ -1150,7 +1152,7 @@ mod tests {
             log_config: &LogConfig::default(),
             log_dir_status: &crate::log_dir_status::LogDirRegistry::default(),
             producer_state: &Arc::new(crate::producer_state::ProducerState::new()),
-            producer_id_expiration_ms: 86_400_000,
+            producer_id_expiration: hours(24),
             max_produce_group: 1_024,
             partition_writer_queue_depth: 64,
             diskless: true,
@@ -1573,7 +1575,7 @@ mod tests {
             log_config: &LogConfig::default(),
             log_dir_status: &crate::log_dir_status::LogDirRegistry::default(),
             producer_state: &Arc::new(crate::producer_state::ProducerState::new()),
-            producer_id_expiration_ms: 86_400_000,
+            producer_id_expiration: hours(24),
             max_produce_group: 1_024,
             partition_writer_queue_depth: 64,
             diskless: false,
@@ -1644,7 +1646,7 @@ mod tests {
             log_config: &LogConfig::default(),
             log_dir_status: &crate::log_dir_status::LogDirRegistry::default(),
             producer_state: &Arc::new(crate::producer_state::ProducerState::new()),
-            producer_id_expiration_ms: 86_400_000,
+            producer_id_expiration: hours(24),
             max_produce_group: 1_024,
             partition_writer_queue_depth: 64,
             diskless: false,
@@ -1716,7 +1718,7 @@ mod tests {
             log_config: &LogConfig::default(),
             log_dir_status: &crate::log_dir_status::LogDirRegistry::default(),
             producer_state: &Arc::new(crate::producer_state::ProducerState::new()),
-            producer_id_expiration_ms: 86_400_000,
+            producer_id_expiration: hours(24),
             max_produce_group: 1_024,
             partition_writer_queue_depth: 64,
             diskless: false,

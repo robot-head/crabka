@@ -26,6 +26,7 @@ use crabka_protocol::{
         init_producer_id_response::InitProducerIdResponse,
     },
 };
+use crabka_units::convert::TimeExt as _;
 
 use crate::{
     authorizer::{AuthorizationRequest, AuthorizationResult},
@@ -181,7 +182,7 @@ pub(crate) async fn handle(
                     log_config: &log_config,
                     log_dir_status: &log_dir_status,
                     producer_state: &broker.producer_state,
-                    producer_id_expiration_ms: broker.config.producer_id_expiration_ms,
+                    producer_id_expiration: broker.config.producer_id_expiration,
                     max_produce_group: broker.config.max_produce_group,
                     partition_writer_queue_depth: broker.config.partition_writer_queue_depth,
                     diskless: false,
@@ -193,8 +194,8 @@ pub(crate) async fn handle(
                 let txn_timeout = crate::txn::two_pc::resolve_txn_timeout(
                     req.enable2_pc,
                     req.transaction_timeout_ms,
-                    broker.config.transaction_min_timeout_ms,
-                    broker.config.transaction_max_timeout_ms,
+                    broker.config.transaction_min_timeout.millis_i32(),
+                    broker.config.transaction_max_timeout.millis_i32(),
                 );
                 handle_transactional(&coord, tid, txnv, txn_timeout).await?
             } else {
@@ -330,6 +331,7 @@ mod tests {
     use assert2::assert;
     use crabka_ids::PartitionIndex;
     use crabka_log::{Log, LogConfig, ProducerId};
+    use crabka_units::secs;
 
     use super::*;
     use crate::{
@@ -414,8 +416,8 @@ mod tests {
         let (broker_handle, _dir) = start_broker_with(|config| {
             config.audit_enabled = false;
             config.transaction_state_num_partitions = 7;
-            config.transaction_min_timeout_ms = 2_000;
-            config.transaction_max_timeout_ms = 8_000;
+            config.transaction_min_timeout = secs(2);
+            config.transaction_max_timeout = secs(8);
             config.features.transaction_two_phase_commit_enable = true;
         })
         .await;

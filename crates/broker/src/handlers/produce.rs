@@ -27,6 +27,7 @@ use crabka_protocol::{
         count_records_in_v2_batches, produce_framing, validate_one_v2_batch,
     },
 };
+use crabka_units::{Time, convert::TimeExt};
 use tokio::sync::oneshot;
 
 use crate::{
@@ -377,8 +378,7 @@ async fn finish_produce_response(
                 broker.config.quota_throttle_max,
             )
         })
-        .max()
-        .unwrap_or(Duration::ZERO);
+        .fold(<Time as TimeExt>::ZERO, Time::max);
     let elapsed_micros = u64::try_from(
         handler_start
             .elapsed()
@@ -397,11 +397,11 @@ async fn finish_produce_response(
     let delay = data_delay.max(request_delay);
     let response = ProduceResponse {
         responses: topic_results,
-        throttle_time_ms: i32::try_from(delay.as_millis()).unwrap_or(i32::MAX),
+        throttle_time_ms: crate::quota::throttle_time_ms(delay),
         ..Default::default()
     };
-    if delay > Duration::ZERO {
-        tokio::time::sleep(delay).await;
+    if delay > <Time as TimeExt>::ZERO {
+        tokio::time::sleep(delay.to_std()).await;
     }
     let mut encoded = BytesMut::new();
     if (0..3).contains(&version) {
@@ -1340,6 +1340,7 @@ mod tests {
         MetadataImage, MetadataRecord, PartitionRecord, TopicConfigRecord, TopicRecord,
     };
     use crabka_protocol::records::{Record, RecordBatch, RecordsPayload};
+    use crabka_units::{Time, convert::TimeExt, secs};
     use uuid::Uuid;
 
     use super::{
@@ -1944,10 +1945,10 @@ mod tests {
             "app-x",
             "default",
             4096,
-            std::time::Duration::from_secs(1),
+            secs(1),
         );
         assert!(
-            delay_match > std::time::Duration::ZERO,
+            delay_match > <Time as TimeExt>::ZERO,
             "tuple quota match should throttle on overage; got {delay_match:?}"
         );
         // No tuple match for client_id="other"; no (user=alice)-only quota exists.
@@ -1959,10 +1960,10 @@ mod tests {
             "other",
             "default",
             4096,
-            std::time::Duration::from_secs(1),
+            secs(1),
         );
         assert!(
-            delay_other == std::time::Duration::ZERO,
+            delay_other == <Time as TimeExt>::ZERO,
             "non-matching client_id should not throttle; got {delay_other:?}"
         );
     }

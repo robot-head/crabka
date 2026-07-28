@@ -6,8 +6,9 @@
 
 pub mod scan;
 
-use std::{path::PathBuf, time::Duration};
+use std::path::PathBuf;
 
+use crabka_units::{Time, convert::TimeExt as _};
 use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -19,7 +20,7 @@ use crate::{
 
 pub struct DiskScanner {
     pub log_dirs: Vec<PathBuf>,
-    pub interval: Duration,
+    pub interval: Time,
     pub metrics: BrokerMetrics,
     pub shutdown: CancellationToken,
 }
@@ -27,10 +28,10 @@ pub struct DiskScanner {
 impl DiskScanner {
     pub async fn run(self) {
         info!(
-            interval_secs = self.interval.as_secs(),
+            interval_secs = self.interval.secs_i64(),
             "disk scanner started"
         );
-        let mut ticker = interval(self.interval);
+        let mut ticker = interval(self.interval.to_std());
         loop {
             tokio::select! {
                 _ = ticker.tick() => {}
@@ -71,9 +72,10 @@ impl DiskScanner {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
+    use std::{io::Write, time::Duration};
 
     use assert2::assert;
+    use crabka_units::{hours, millis, minutes};
 
     use super::*;
 
@@ -97,7 +99,7 @@ mod tests {
         let metrics = BrokerMetrics::new();
         let scanner = DiskScanner {
             log_dirs: vec![tmp.path().to_path_buf()],
-            interval: Duration::from_mins(1),
+            interval: minutes(1),
             metrics: metrics.clone(),
             shutdown: CancellationToken::new(),
         };
@@ -135,7 +137,7 @@ mod tests {
         let shutdown = CancellationToken::new();
         let scanner = DiskScanner {
             log_dirs: vec![tmp.path().to_path_buf()],
-            interval: Duration::from_millis(10),
+            interval: millis(10),
             metrics: metrics.clone(),
             shutdown: shutdown.clone(),
         };
@@ -170,7 +172,7 @@ mod tests {
         let shutdown = CancellationToken::new();
         let scanner = DiskScanner {
             log_dirs: vec![tmp.path().to_path_buf()],
-            interval: Duration::from_hours(1),
+            interval: hours(1),
             metrics,
             shutdown: shutdown.clone(),
         };

@@ -8,6 +8,7 @@ use crabka_ids::PartitionIndex;
 use crabka_metadata::{MetadataRecord, PartitionRecord, TopicRecord};
 use crabka_protocol::records::RecordBatch;
 use crabka_raft::RaftError;
+use crabka_units::convert::TimeExt as _;
 
 use crate::{
     broker::spawn_partition,
@@ -227,7 +228,8 @@ pub async fn bootstrap(
             // correct — submitting a duplicate on timeout is what caused the
             // JVM fatal fault.
             let mut images = controller.watch_image();
-            let deadline = tokio::time::Instant::now() + config.offsets_topic_metadata_wait_timeout;
+            let deadline =
+                tokio::time::Instant::now() + config.offsets_topic_metadata_wait_timeout.to_std();
             while controller.current_image().topic(OFFSETS_TOPIC).is_none() {
                 let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
                 if remaining.is_zero() {

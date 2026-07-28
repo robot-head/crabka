@@ -16,7 +16,7 @@ use std::{
 use clap::Parser;
 use crabka_broker::{
     BootstrapMode, Broker, BrokerConfig,
-    config::DEFAULT_CONTROLLED_SHUTDOWN_DRAIN_TIMEOUT_MS,
+    config::DEFAULT_CONTROLLED_SHUTDOWN_DRAIN_TIMEOUT,
     config_value::{
         Percentage, PositiveCount, PositiveI16, PositiveI32, PositiveI64, PositiveMillis,
         VoterRequestTimeoutMillis, parse_percentage, parse_positive_count, parse_positive_i16,
@@ -25,6 +25,7 @@ use crabka_broker::{
     },
 };
 use crabka_log::LogConfig;
+use crabka_units::{Time, convert::TimeExt as _};
 
 /// Parse `--process-roles` string values into `NodeRole`s.
 fn parse_roles_arg(roles: &[String]) -> Result<Vec<crabka_broker::config::NodeRole>, String> {
@@ -816,14 +817,16 @@ impl Args {
         &self,
         cfg: &mut BrokerConfig,
         file_shutdown_ms: Option<u64>,
-    ) -> Result<u64, String> {
+    ) -> Result<Time, String> {
         let runtime = self.runtime_overlay();
         let cli_shutdown_ms = runtime.controlled_shutdown_drain_timeout_ms;
         runtime.apply_to(cfg).map_err(|error| error.to_string())?;
         cfg.validate().map_err(|error| error.to_string())?;
         Ok(cli_shutdown_ms
             .or(file_shutdown_ms)
-            .unwrap_or(DEFAULT_CONTROLLED_SHUTDOWN_DRAIN_TIMEOUT_MS))
+            .map_or(DEFAULT_CONTROLLED_SHUTDOWN_DRAIN_TIMEOUT, |milliseconds| {
+                Time::from_millis(i64::try_from(milliseconds).unwrap_or(i64::MAX))
+            }))
     }
 
     fn base_broker_config(
@@ -962,7 +965,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(fc) = file_config {
         fc.apply_before_runtime_overlay(&mut config)?;
     }
-    let controlled_shutdown_drain_timeout_ms =
+    let controlled_shutdown_drain_timeout =
         args.apply_runtime_to(&mut config, file_shutdown_timeout_ms)?;
     // Detect against the *resolved* log_dir so a TOML override picks up
     // its on-disk state rather than the CLI-default empty path. This is
@@ -1008,9 +1011,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // seconds). Bounded well under the pod's terminationGracePeriod (30s); on
     // timeout `controlled_shutdown` falls back to a hard stop internally.
     match handle
-        .controlled_shutdown(std::time::Duration::from_millis(
-            controlled_shutdown_drain_timeout_ms,
-        ))
+        .controlled_shutdown(controlled_shutdown_drain_timeout.to_std())
         .await
     {
         Ok(()) => tracing::info!("controlled shutdown complete (leadership drained)"),
@@ -1099,6 +1100,7 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
 
     use assert2::assert;
+    use crabka_units::secs;
     use tempfile::tempdir;
 
     use super::*;
@@ -1327,26 +1329,19 @@ mod tests {
             .and_then(|runtime| runtime.controlled_shutdown_drain_timeout_ms);
         file.apply_to(&mut config).expect("apply file runtime");
 
-        let shutdown_ms = args
+        let shutdown = args
             .apply_runtime_to(&mut config, file_shutdown_ms)
             .expect("overlay CLI runtime");
 
         assert!(
             (
                 config.cleaner_interval,
-                shutdown_ms,
+                shutdown,
                 config.auto_join_voter_request_timeout,
                 config.share_coordinator.state_topic_replication_factor,
                 config.transaction_state_replication_factor,
                 config.streams_group.internal_topic_replication_factor,
-            ) == (
-                std::time::Duration::from_secs(30),
-                20_000,
-                std::time::Duration::from_secs(30),
-                3,
-                3,
-                3,
-            )
+            ) == (secs(30), secs(20), secs(30), 3, 3, 3)
         );
     }
 
@@ -1377,26 +1372,19 @@ mod tests {
                     .and_then(|runtime| runtime.controlled_shutdown_drain_timeout_ms);
                 file.apply_to(&mut config).expect("apply file runtime");
 
-                let shutdown_ms = args
+                let shutdown = args
                     .apply_runtime_to(&mut config, file_shutdown_ms)
                     .expect("overlay env runtime");
 
                 assert!(
                     (
                         config.cleaner_interval,
-                        shutdown_ms,
+                        shutdown,
                         config.auto_join_voter_request_timeout,
                         config.share_coordinator.state_topic_replication_factor,
                         config.transaction_state_replication_factor,
                         config.streams_group.internal_topic_replication_factor,
-                    ) == (
-                        std::time::Duration::from_secs(30),
-                        20_000,
-                        std::time::Duration::from_secs(30),
-                        3,
-                        3,
-                        3,
-                    )
+                    ) == (secs(30), secs(20), secs(30), 3, 3, 3)
                 );
             },
         );

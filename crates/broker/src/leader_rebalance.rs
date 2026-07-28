@@ -6,10 +6,15 @@
 
 #![allow(dead_code)]
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use crabka_metadata::{MetadataImage, MetadataRecord};
+use crabka_units::{
+    Ratio, Time,
+    convert::{RatioExt, TimeExt as _},
+    fraction,
+};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -29,8 +34,8 @@ pub(crate) trait ControllerLike: Send + Sync {
 
 #[derive(Debug, Clone)]
 pub(crate) struct AutoRebalanceConfig {
-    pub check_interval: Duration,
-    pub imbalance_threshold_pct: u32,
+    pub check_interval: Time,
+    pub imbalance_threshold: Ratio,
 }
 
 /// Spawned task entry point.
@@ -40,7 +45,7 @@ pub(crate) async fn run(
     cfg: AutoRebalanceConfig,
     shutdown: CancellationToken,
 ) {
-    let mut ticker = tokio::time::interval(cfg.check_interval);
+    let mut ticker = tokio::time::interval(cfg.check_interval.to_std());
     loop {
         tokio::select! {
             _ = ticker.tick() => {},
@@ -94,8 +99,16 @@ pub(crate) async fn rebalance_tick(
     if to_submit.is_empty() {
         return;
     }
-    let pct = (imbalanced * 100) / total;
-    if pct < u64::from(cfg.imbalance_threshold_pct) {
+    // A dimensioned ratio, not a truncated integer percentage: at 100 total
+    // partitions with 10.9% imbalanced, the old `(imbalanced * 100) / total`
+    // read 10, sat on a 10% threshold, and declared the cluster balanced.
+    // `u32` keeps both widenings lossless; a broker with more than 4 billion
+    // partitions has lost long before the threshold matters.
+    let imbalanced_f64 = f64::from(u32::try_from(imbalanced).unwrap_or(u32::MAX));
+    let total_f64 = f64::from(u32::try_from(total).unwrap_or(u32::MAX));
+    let ratio = fraction(imbalanced_f64 / total_f64);
+    if ratio < cfg.imbalance_threshold {
+        let pct = ratio.percent_f64();
         debug!(imbalanced, total, pct, "auto-rebalance: below threshold");
         return;
     }
@@ -107,10 +120,11 @@ pub(crate) async fn rebalance_tick(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::{sync::Mutex, time::Duration};
 
     use assert2::assert;
     use crabka_metadata::{PartitionRecord, TopicRecord};
+    use crabka_units::{millis, minutes, percent, secs};
     use uuid::Uuid;
 
     use super::*;
@@ -210,7 +224,7 @@ mod tests {
     }
 
     async fn liveness_all_alive() -> ControllerLivenessState {
-        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        let l = ControllerLivenessState::new(secs(10));
         for n in [1, 2, 3] {
             l.record_heartbeat(n).await;
         }
@@ -223,8 +237,8 @@ mod tests {
         let mock = MockController::new(img_with_n_partitions(5, 95), true);
         let liveness = liveness_all_alive().await;
         let cfg = AutoRebalanceConfig {
-            check_interval: Duration::from_mins(5),
-            imbalance_threshold_pct: 10,
+            check_interval: minutes(5),
+            imbalance_threshold: percent(10),
         };
         rebalance_tick(&mock, &liveness, &cfg).await;
         assert!(mock.submitted.lock().unwrap().is_empty());
@@ -236,11 +250,39 @@ mod tests {
         let mock = MockController::new(img_with_n_partitions(10, 90), true);
         let liveness = liveness_all_alive().await;
         let cfg = AutoRebalanceConfig {
-            check_interval: Duration::from_mins(5),
-            imbalance_threshold_pct: 10,
+            check_interval: minutes(5),
+            imbalance_threshold: percent(10),
         };
         rebalance_tick(&mock, &liveness, &cfg).await;
         assert!(mock.submitted.lock().unwrap().len() == 10);
+    }
+
+    /// The threshold is a [`Ratio`], so a fraction that falls between two
+    /// whole percentages is compared at full precision. `floor(100 * r) < T`
+    /// and `r < T / 100` agree for every integer `T`, so this pins that the
+    /// switch away from the old truncating `(imbalanced * 100) / total` left
+    /// the KIP-460 decision boundary exactly where it was.
+    #[tokio::test]
+    async fn fractional_percentages_compare_against_the_threshold_exactly() {
+        // 200 partitions gives half-percent granularity either side of 10%.
+        for (imbalanced, balanced, want_submitted) in
+            [(19_usize, 181_usize, 0_usize), (21, 179, 21)]
+        {
+            let mock = MockController::new(img_with_n_partitions(imbalanced, balanced), true);
+            let liveness = liveness_all_alive().await;
+            let cfg = AutoRebalanceConfig {
+                check_interval: minutes(5),
+                imbalance_threshold: percent(10),
+            };
+
+            rebalance_tick(&mock, &liveness, &cfg).await;
+
+            assert!(
+                mock.submitted.lock().unwrap().len() == want_submitted,
+                "{imbalanced}/{} imbalanced",
+                imbalanced + balanced
+            );
+        }
     }
 
     #[tokio::test]
@@ -253,8 +295,8 @@ mod tests {
         let mock = MockController::new(img_with_n_partitions(0, 5), true);
         let liveness = liveness_all_alive().await;
         let cfg = AutoRebalanceConfig {
-            check_interval: Duration::from_secs(1),
-            imbalance_threshold_pct: 0,
+            check_interval: secs(1),
+            imbalance_threshold: <Ratio as RatioExt>::ZERO,
         };
         rebalance_tick(&mock, &liveness, &cfg).await;
         assert!(
@@ -269,8 +311,8 @@ mod tests {
         let mock = MockController::new(img_with_n_partitions(20, 80), true);
         let liveness = liveness_all_alive().await;
         let cfg = AutoRebalanceConfig {
-            check_interval: Duration::from_mins(5),
-            imbalance_threshold_pct: 10,
+            check_interval: minutes(5),
+            imbalance_threshold: percent(10),
         };
         rebalance_tick(&mock, &liveness, &cfg).await;
         let submitted = mock.submitted.lock().unwrap();
@@ -294,8 +336,8 @@ mod tests {
             controller_for_run,
             liveness,
             AutoRebalanceConfig {
-                check_interval: Duration::from_millis(10),
-                imbalance_threshold_pct: 0,
+                check_interval: millis(10),
+                imbalance_threshold: <Ratio as RatioExt>::ZERO,
             },
             shutdown.clone(),
         ));

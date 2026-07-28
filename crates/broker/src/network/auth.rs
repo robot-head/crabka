@@ -23,6 +23,7 @@ use crabka_protocol::{
     },
 };
 use crabka_security::{Principal, SaslMechanism, ScramServerExchange};
+use crabka_units::{Time, convert::TimeExt as _};
 
 use crate::{
     codes::{ILLEGAL_SASL_STATE, UNSUPPORTED_SASL_MECHANISM},
@@ -766,7 +767,7 @@ pub async fn handle_authenticate_oauthbearer(
     auth: &mut ConnectionAuth,
     validator: &crabka_security::OAuthBearerValidator,
     now_ms: i64,
-    max_session_lifetime_seconds: Option<u32>,
+    max_session_lifetime: Option<Time>,
 ) -> SaslAuthenticateResponse {
     match auth {
         ConnectionAuth::Negotiating {
@@ -787,11 +788,8 @@ pub async fn handle_authenticate_oauthbearer(
                     // we stored the raw token exp here, the broker would
                     // tolerate the connection past the value reported to
                     // the client.
-                    let (session_lifetime_ms, effective_expires_at_ms) = oauth_session_lifetime(
-                        outcome.expires_at_ms,
-                        now_ms,
-                        max_session_lifetime_seconds,
-                    );
+                    let (session_lifetime_ms, effective_expires_at_ms) =
+                        oauth_session_lifetime(outcome.expires_at_ms, now_ms, max_session_lifetime);
                     *auth = ConnectionAuth::Authenticated {
                         principal: outcome.principal,
                         mechanism: mech,
@@ -860,11 +858,8 @@ pub async fn handle_authenticate_oauthbearer(
                     }
                     // Same clamp as the Negotiating-success arm
                     // so re-auth respects the broker cap.
-                    let (session_lifetime_ms, effective_expires_at_ms) = oauth_session_lifetime(
-                        outcome.expires_at_ms,
-                        now_ms,
-                        max_session_lifetime_seconds,
-                    );
+                    let (session_lifetime_ms, effective_expires_at_ms) =
+                        oauth_session_lifetime(outcome.expires_at_ms, now_ms, max_session_lifetime);
                     *auth = ConnectionAuth::Authenticated {
                         principal: outcome.principal,
                         mechanism: prev_mech,
@@ -894,12 +889,11 @@ pub async fn handle_authenticate_oauthbearer(
 fn oauth_session_lifetime(
     expires_at_ms: Option<i64>,
     now_ms: i64,
-    max_session_lifetime_seconds: Option<u32>,
+    max_session_lifetime: Option<Time>,
 ) -> (i64, Option<i64>) {
     let raw_session_ms = expires_at_ms.map_or(0, |expires| (expires - now_ms).max(0));
-    let session_lifetime_ms = max_session_lifetime_seconds.map_or(raw_session_ms, |cap| {
-        raw_session_ms.min(i64::from(cap) * 1000)
-    });
+    let session_lifetime_ms =
+        max_session_lifetime.map_or(raw_session_ms, |cap| raw_session_ms.min(cap.millis_i64()));
     (session_lifetime_ms, Some(now_ms + session_lifetime_ms))
 }
 
@@ -968,6 +962,7 @@ fn fail_authenticate(reason: &str) -> SaslAuthenticateResponse {
 #[cfg(test)]
 mod tests {
     use assert2::{assert, check};
+    use crabka_units::secs;
 
     use super::*;
 
@@ -1686,9 +1681,9 @@ mod tests {
         // stored expires_at_ms must reflect the clamped value too, not the
         // raw token exp.
         let cases = [
-            (Some(30), 30_000_i64), // cap below the token's 60s exp → clamped
-            (None, 60_000),         // unset cap → raw token exp
-            (Some(600), 60_000),    // cap above exp → no effect
+            (Some(secs(30)), 30_000_i64), // cap below the token's 60s exp → clamped
+            (None, 60_000),               // unset cap → raw token exp
+            (Some(secs(600)), 60_000),    // cap above exp → no effect
         ];
         for (cap, want_lifetime_ms) in cases {
             let mut auth = ConnectionAuth::Negotiating {

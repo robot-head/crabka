@@ -15,6 +15,7 @@ use crabka_protocol::{
     },
 };
 use crabka_raft::{NodeId, RaftError};
+use crabka_units::{Time, convert::TimeExt};
 
 use crate::{
     authorizer::{AuthorizationResult, authorize_topics},
@@ -261,7 +262,7 @@ pub(crate) async fn handle(
                         log_config: &log_config,
                         log_dir_status: &log_dir_status,
                         producer_state: &producer_state,
-                        producer_id_expiration_ms: broker.config.producer_id_expiration_ms,
+                        producer_id_expiration: broker.config.producer_id_expiration,
                         max_produce_group: broker.config.max_produce_group,
                         partition_writer_queue_depth: broker.config.partition_writer_queue_depth,
                         node_id,
@@ -336,7 +337,7 @@ struct MaterializeContext<'a> {
     log_config: &'a crabka_log::LogConfig,
     log_dir_status: &'a crate::log_dir_status::LogDirRegistry,
     producer_state: &'a std::sync::Arc<crate::producer_state::ProducerState>,
-    producer_id_expiration_ms: i64,
+    producer_id_expiration: Time,
     max_produce_group: usize,
     partition_writer_queue_depth: usize,
     node_id: NodeId,
@@ -367,7 +368,7 @@ async fn materialize_new_partitions(
                 log_config: context.log_config,
                 log_dir_status: context.log_dir_status,
                 producer_state: context.producer_state,
-                producer_id_expiration_ms: context.producer_id_expiration_ms,
+                producer_id_expiration: context.producer_id_expiration,
                 max_produce_group: context.max_produce_group,
                 partition_writer_queue_depth: context.partition_writer_queue_depth,
                 diskless: context.diskless,
@@ -451,12 +452,9 @@ async fn finish_response(
         mutation_count,
         broker.config.quota_throttle_max,
     );
-    let resp = create_partitions_response(
-        results,
-        i32::try_from(delay.as_millis()).unwrap_or(i32::MAX),
-    );
-    if delay > std::time::Duration::ZERO {
-        tokio::time::sleep(delay).await;
+    let resp = create_partitions_response(results, crate::quota::throttle_time_ms(delay));
+    if delay > <Time as TimeExt>::ZERO {
+        tokio::time::sleep(delay.to_std()).await;
     }
     encode_response(&resp, version)
 }

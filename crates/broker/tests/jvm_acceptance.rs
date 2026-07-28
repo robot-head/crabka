@@ -84,11 +84,11 @@ async fn start_host_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir)
         node_id: crabka_broker::NodeId(1),
         controller_listen_addr: controller_addr,
         controller_quorum_voters: vec![(crabka_broker::NodeId(1), controller_addr.to_string())],
-        heartbeat_interval_ms: 3_000,
-        heartbeat_timeout_ms: 9_000,
-        replica_lag_time_max_ms: 30_000,
-        controller_election_timeout: std::time::Duration::from_secs(5),
-        controller_heartbeat_interval: std::time::Duration::from_millis(500),
+        heartbeat_interval: crabka_units::millis(3_000),
+        heartbeat_timeout: crabka_units::millis(9_000),
+        replica_lag_time_max: crabka_units::millis(30_000),
+        controller_election_timeout: crabka_units::secs(5),
+        controller_heartbeat_interval: crabka_units::millis(500),
         bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
         ..BrokerConfig::default()
     };
@@ -622,11 +622,11 @@ async fn three_node_jvm_round_trip() {
             .iter()
             .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
             .collect(),
-        heartbeat_interval_ms: 3_000,
-        heartbeat_timeout_ms: 9_000,
-        replica_lag_time_max_ms: 30_000,
-        controller_election_timeout: std::time::Duration::from_secs(5),
-        controller_heartbeat_interval: std::time::Duration::from_millis(500),
+        heartbeat_interval: crabka_units::millis(3_000),
+        heartbeat_timeout: crabka_units::millis(9_000),
+        replica_lag_time_max: crabka_units::millis(30_000),
+        controller_election_timeout: crabka_units::secs(5),
+        controller_heartbeat_interval: crabka_units::millis(500),
         bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
         ..BrokerConfig::default()
     };
@@ -652,11 +652,11 @@ async fn three_node_jvm_round_trip() {
                 .iter()
                 .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
                 .collect(),
-            heartbeat_interval_ms: 3_000,
-            heartbeat_timeout_ms: 9_000,
-            replica_lag_time_max_ms: 30_000,
-            controller_election_timeout: std::time::Duration::from_secs(5),
-            controller_heartbeat_interval: std::time::Duration::from_millis(500),
+            heartbeat_interval: crabka_units::millis(3_000),
+            heartbeat_timeout: crabka_units::millis(9_000),
+            replica_lag_time_max: crabka_units::millis(30_000),
+            controller_election_timeout: crabka_units::secs(5),
+            controller_heartbeat_interval: crabka_units::millis(500),
             bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
             ..BrokerConfig::default()
         };
@@ -876,11 +876,11 @@ async fn three_node_replication_byte_compare() {
             .iter()
             .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
             .collect(),
-        heartbeat_interval_ms: 3_000,
-        heartbeat_timeout_ms: 9_000,
-        replica_lag_time_max_ms: 30_000,
-        controller_election_timeout: std::time::Duration::from_secs(5),
-        controller_heartbeat_interval: std::time::Duration::from_millis(500),
+        heartbeat_interval: crabka_units::millis(3_000),
+        heartbeat_timeout: crabka_units::millis(9_000),
+        replica_lag_time_max: crabka_units::millis(30_000),
+        controller_election_timeout: crabka_units::secs(5),
+        controller_heartbeat_interval: crabka_units::millis(500),
         bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
         ..BrokerConfig::default()
     };
@@ -906,11 +906,11 @@ async fn three_node_replication_byte_compare() {
                 .iter()
                 .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
                 .collect(),
-            heartbeat_interval_ms: 3_000,
-            heartbeat_timeout_ms: 9_000,
-            replica_lag_time_max_ms: 30_000,
-            controller_election_timeout: std::time::Duration::from_secs(5),
-            controller_heartbeat_interval: std::time::Duration::from_millis(500),
+            heartbeat_interval: crabka_units::millis(3_000),
+            heartbeat_timeout: crabka_units::millis(9_000),
+            replica_lag_time_max: crabka_units::millis(30_000),
+            controller_election_timeout: crabka_units::secs(5),
+            controller_heartbeat_interval: crabka_units::millis(500),
             bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
             ..BrokerConfig::default()
         };
@@ -1122,11 +1122,11 @@ async fn transactional_console_producer_eos() {
                 .iter()
                 .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
                 .collect(),
-            heartbeat_interval_ms: 3_000,
-            heartbeat_timeout_ms: 9_000,
-            replica_lag_time_max_ms: 30_000,
-            controller_election_timeout: std::time::Duration::from_secs(5),
-            controller_heartbeat_interval: std::time::Duration::from_millis(500),
+            heartbeat_interval: crabka_units::millis(3_000),
+            heartbeat_timeout: crabka_units::millis(9_000),
+            replica_lag_time_max: crabka_units::millis(30_000),
+            controller_election_timeout: crabka_units::secs(5),
+            controller_heartbeat_interval: crabka_units::millis(500),
             bootstrap_mode: if i == 0 {
                 crabka_broker::BootstrapMode::Bootstrap
             } else {
@@ -1294,11 +1294,11 @@ async fn acks_all_durability() {
             .iter()
             .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
             .collect(),
-        heartbeat_interval_ms: 3_000,
-        heartbeat_timeout_ms: 9_000,
-        replica_lag_time_max_ms: 30_000,
-        controller_election_timeout: std::time::Duration::from_secs(5),
-        controller_heartbeat_interval: std::time::Duration::from_millis(500),
+        heartbeat_interval: crabka_units::millis(3_000),
+        heartbeat_timeout: crabka_units::millis(9_000),
+        replica_lag_time_max: crabka_units::millis(30_000),
+        controller_election_timeout: crabka_units::secs(5),
+        controller_heartbeat_interval: crabka_units::millis(500),
         bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
         ..crabka_broker::BrokerConfig::default()
     };
@@ -1324,11 +1324,11 @@ async fn acks_all_durability() {
                 .iter()
                 .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
                 .collect(),
-            heartbeat_interval_ms: 3_000,
-            heartbeat_timeout_ms: 9_000,
-            replica_lag_time_max_ms: 30_000,
-            controller_election_timeout: std::time::Duration::from_secs(5),
-            controller_heartbeat_interval: std::time::Duration::from_millis(500),
+            heartbeat_interval: crabka_units::millis(3_000),
+            heartbeat_timeout: crabka_units::millis(9_000),
+            replica_lag_time_max: crabka_units::millis(30_000),
+            controller_election_timeout: crabka_units::secs(5),
+            controller_heartbeat_interval: crabka_units::millis(500),
             bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
             ..crabka_broker::BrokerConfig::default()
         };
@@ -1495,11 +1495,11 @@ async fn acks_all_survives_leader_crash() {
             .iter()
             .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
             .collect(),
-        heartbeat_interval_ms: 200,
-        heartbeat_timeout_ms: 2_000,
-        replica_lag_time_max_ms: 2_000,
-        controller_election_timeout: std::time::Duration::from_millis(500),
-        controller_heartbeat_interval: std::time::Duration::from_millis(100),
+        heartbeat_interval: crabka_units::millis(200),
+        heartbeat_timeout: crabka_units::millis(2_000),
+        replica_lag_time_max: crabka_units::millis(2_000),
+        controller_election_timeout: crabka_units::millis(500),
+        controller_heartbeat_interval: crabka_units::millis(100),
         bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
         ..crabka_broker::BrokerConfig::default()
     };
@@ -1525,11 +1525,11 @@ async fn acks_all_survives_leader_crash() {
                 .iter()
                 .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
                 .collect(),
-            heartbeat_interval_ms: 200,
-            heartbeat_timeout_ms: 2_000,
-            replica_lag_time_max_ms: 2_000,
-            controller_election_timeout: std::time::Duration::from_millis(500),
-            controller_heartbeat_interval: std::time::Duration::from_millis(100),
+            heartbeat_interval: crabka_units::millis(200),
+            heartbeat_timeout: crabka_units::millis(2_000),
+            replica_lag_time_max: crabka_units::millis(2_000),
+            controller_election_timeout: crabka_units::millis(500),
+            controller_heartbeat_interval: crabka_units::millis(100),
             bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
             ..crabka_broker::BrokerConfig::default()
         };
@@ -2247,11 +2247,11 @@ fn start_sasl_plaintext_broker(
         node_id: crabka_broker::NodeId(1),
         controller_listen_addr: controller_addr,
         controller_quorum_voters: vec![(crabka_broker::NodeId(1), controller_addr.to_string())],
-        heartbeat_interval_ms: 3_000,
-        heartbeat_timeout_ms: 9_000,
-        replica_lag_time_max_ms: 30_000,
-        controller_election_timeout: std::time::Duration::from_secs(5),
-        controller_heartbeat_interval: std::time::Duration::from_millis(500),
+        heartbeat_interval: crabka_units::millis(3_000),
+        heartbeat_timeout: crabka_units::millis(9_000),
+        replica_lag_time_max: crabka_units::millis(30_000),
+        controller_election_timeout: crabka_units::secs(5),
+        controller_heartbeat_interval: crabka_units::millis(500),
         bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
         listeners: vec![ListenerSpec {
             name: "SASL_PLAINTEXT".to_string(),
@@ -2318,11 +2318,11 @@ fn start_dual_mech_broker(
         node_id: crabka_broker::NodeId(1),
         controller_listen_addr: controller_addr,
         controller_quorum_voters: vec![(crabka_broker::NodeId(1), controller_addr.to_string())],
-        heartbeat_interval_ms: 3_000,
-        heartbeat_timeout_ms: 9_000,
-        replica_lag_time_max_ms: 30_000,
-        controller_election_timeout: std::time::Duration::from_secs(5),
-        controller_heartbeat_interval: std::time::Duration::from_millis(500),
+        heartbeat_interval: crabka_units::millis(3_000),
+        heartbeat_timeout: crabka_units::millis(9_000),
+        replica_lag_time_max: crabka_units::millis(30_000),
+        controller_election_timeout: crabka_units::secs(5),
+        controller_heartbeat_interval: crabka_units::millis(500),
         bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
         listeners: vec![ListenerSpec {
             name: "SASL_PLAINTEXT".to_string(),
@@ -2589,11 +2589,11 @@ async fn start_oauthbearer_broker() -> (crabka_broker::BrokerHandle, tempfile::T
         node_id: crabka_broker::NodeId(1),
         controller_listen_addr: controller_addr,
         controller_quorum_voters: vec![(crabka_broker::NodeId(1), controller_addr.to_string())],
-        heartbeat_interval_ms: 3_000,
-        heartbeat_timeout_ms: 9_000,
-        replica_lag_time_max_ms: 30_000,
-        controller_election_timeout: std::time::Duration::from_secs(5),
-        controller_heartbeat_interval: std::time::Duration::from_millis(500),
+        heartbeat_interval: crabka_units::millis(3_000),
+        heartbeat_timeout: crabka_units::millis(9_000),
+        replica_lag_time_max: crabka_units::millis(30_000),
+        controller_election_timeout: crabka_units::secs(5),
+        controller_heartbeat_interval: crabka_units::millis(500),
         bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
         listeners: vec![ListenerSpec {
             name: "SASL_PLAINTEXT".to_string(),
@@ -3146,11 +3146,11 @@ async fn start_ssl_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir) 
         node_id: crabka_broker::NodeId(1),
         controller_listen_addr: controller_addr,
         controller_quorum_voters: vec![(crabka_broker::NodeId(1), controller_addr.to_string())],
-        heartbeat_interval_ms: 3_000,
-        heartbeat_timeout_ms: 9_000,
-        replica_lag_time_max_ms: 30_000,
-        controller_election_timeout: std::time::Duration::from_secs(5),
-        controller_heartbeat_interval: std::time::Duration::from_millis(500),
+        heartbeat_interval: crabka_units::millis(3_000),
+        heartbeat_timeout: crabka_units::millis(9_000),
+        replica_lag_time_max: crabka_units::millis(30_000),
+        controller_election_timeout: crabka_units::secs(5),
+        controller_heartbeat_interval: crabka_units::millis(500),
         bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
         listeners: vec![ListenerSpec {
             name: "SSL".to_string(),
@@ -3406,11 +3406,11 @@ fn start_sasl_ssl_broker(
         node_id: crabka_broker::NodeId(1),
         controller_listen_addr: controller_addr,
         controller_quorum_voters: vec![(crabka_broker::NodeId(1), controller_addr.to_string())],
-        heartbeat_interval_ms: 3_000,
-        heartbeat_timeout_ms: 9_000,
-        replica_lag_time_max_ms: 30_000,
-        controller_election_timeout: std::time::Duration::from_secs(5),
-        controller_heartbeat_interval: std::time::Duration::from_millis(500),
+        heartbeat_interval: crabka_units::millis(3_000),
+        heartbeat_timeout: crabka_units::millis(9_000),
+        replica_lag_time_max: crabka_units::millis(30_000),
+        controller_election_timeout: crabka_units::secs(5),
+        controller_heartbeat_interval: crabka_units::millis(500),
         bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
         listeners: vec![ListenerSpec {
             name: "SASL_SSL".to_string(),
@@ -3703,11 +3703,11 @@ async fn start_two_sasl_brokers(
                 .iter()
                 .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
                 .collect(),
-            heartbeat_interval_ms: 3_000,
-            heartbeat_timeout_ms: 9_000,
-            replica_lag_time_max_ms: 30_000,
-            controller_election_timeout: std::time::Duration::from_secs(5),
-            controller_heartbeat_interval: std::time::Duration::from_millis(500),
+            heartbeat_interval: crabka_units::millis(3_000),
+            heartbeat_timeout: crabka_units::millis(9_000),
+            replica_lag_time_max: crabka_units::millis(30_000),
+            controller_election_timeout: crabka_units::secs(5),
+            controller_heartbeat_interval: crabka_units::millis(500),
             bootstrap_mode: mode,
             listeners: vec![ListenerSpec {
                 name: "SASL_PLAINTEXT".to_string(),
@@ -3991,15 +3991,15 @@ async fn start_two_sasl_ssl_brokers_with_controller_protocol(
                 .iter()
                 .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
                 .collect(),
-            heartbeat_interval_ms: 3_000,
-            heartbeat_timeout_ms: 9_000,
-            replica_lag_time_max_ms: 30_000,
+            heartbeat_interval: crabka_units::millis(3_000),
+            heartbeat_timeout: crabka_units::millis(9_000),
+            replica_lag_time_max: crabka_units::millis(30_000),
             // Slightly more generous than the SASL_PLAINTEXT helper because
             // both data-plane and controller-plane handshakes now include
             // a TLS handshake on top of SASL; on a busy WSL/CI runner the
             // extra round trips can push past 5s.
-            controller_election_timeout: std::time::Duration::from_secs(8),
-            controller_heartbeat_interval: std::time::Duration::from_millis(500),
+            controller_election_timeout: crabka_units::secs(8),
+            controller_heartbeat_interval: crabka_units::millis(500),
             bootstrap_mode: mode,
             listeners: vec![ListenerSpec {
                 name: "SASL_SSL".to_string(),
@@ -4307,11 +4307,11 @@ fn start_sasl_plaintext_broker_with_super_user(
         node_id: crabka_broker::NodeId(1),
         controller_listen_addr: controller_addr,
         controller_quorum_voters: vec![(crabka_broker::NodeId(1), controller_addr.to_string())],
-        heartbeat_interval_ms: 3_000,
-        heartbeat_timeout_ms: 9_000,
-        replica_lag_time_max_ms: 30_000,
-        controller_election_timeout: std::time::Duration::from_secs(5),
-        controller_heartbeat_interval: std::time::Duration::from_millis(500),
+        heartbeat_interval: crabka_units::millis(3_000),
+        heartbeat_timeout: crabka_units::millis(9_000),
+        replica_lag_time_max: crabka_units::millis(30_000),
+        controller_election_timeout: crabka_units::secs(5),
+        controller_heartbeat_interval: crabka_units::millis(500),
         bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
         listeners: vec![ListenerSpec {
             name: "SASL_PLAINTEXT".to_string(),
@@ -5251,11 +5251,11 @@ async fn start_three_broker_sasl_plaintext_jvm_cluster(
                 .iter()
                 .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
                 .collect(),
-            heartbeat_interval_ms: 3_000,
-            heartbeat_timeout_ms: 9_000,
-            replica_lag_time_max_ms: 30_000,
-            controller_election_timeout: std::time::Duration::from_secs(5),
-            controller_heartbeat_interval: std::time::Duration::from_millis(500),
+            heartbeat_interval: crabka_units::millis(3_000),
+            heartbeat_timeout: crabka_units::millis(9_000),
+            replica_lag_time_max: crabka_units::millis(30_000),
+            controller_election_timeout: crabka_units::secs(5),
+            controller_heartbeat_interval: crabka_units::millis(500),
             bootstrap_mode: mode,
             listeners: vec![ListenerSpec {
                 name: "SASL_PLAINTEXT".to_string(),
@@ -6102,11 +6102,11 @@ async fn start_three_broker_sasl_plaintext_jvm_cluster_with_users(
                 .iter()
                 .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
                 .collect(),
-            heartbeat_interval_ms: 3_000,
-            heartbeat_timeout_ms: 9_000,
-            replica_lag_time_max_ms: 30_000,
-            controller_election_timeout: std::time::Duration::from_secs(5),
-            controller_heartbeat_interval: std::time::Duration::from_millis(500),
+            heartbeat_interval: crabka_units::millis(3_000),
+            heartbeat_timeout: crabka_units::millis(9_000),
+            replica_lag_time_max: crabka_units::millis(30_000),
+            controller_election_timeout: crabka_units::secs(5),
+            controller_heartbeat_interval: crabka_units::millis(500),
             bootstrap_mode: mode,
             listeners: vec![ListenerSpec {
                 name: "SASL_PLAINTEXT".to_string(),
@@ -6721,14 +6721,14 @@ async fn jvm_kafka_console_consumer_sees_compacted_topic_end_to_end() {
         node_id: crabka_broker::NodeId(1),
         controller_listen_addr: controller_addr,
         controller_quorum_voters: vec![(crabka_broker::NodeId(1), controller_addr.to_string())],
-        heartbeat_interval_ms: 3_000,
-        heartbeat_timeout_ms: 9_000,
-        replica_lag_time_max_ms: 30_000,
-        controller_election_timeout: std::time::Duration::from_secs(5),
-        controller_heartbeat_interval: std::time::Duration::from_millis(500),
+        heartbeat_interval: crabka_units::millis(3_000),
+        heartbeat_timeout: crabka_units::millis(9_000),
+        replica_lag_time_max: crabka_units::millis(30_000),
+        controller_election_timeout: crabka_units::secs(5),
+        controller_heartbeat_interval: crabka_units::millis(500),
         bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
         // 3s cleaner tick so we don't have to wait the full 30s default.
-        cleaner_interval_override: Some(std::time::Duration::from_secs(3)),
+        cleaner_interval_override: Some(crabka_units::secs(3)),
         ..BrokerConfig::default()
     };
     let broker = Broker::start(config).await.expect("start broker");
@@ -6925,11 +6925,11 @@ async fn start_host_broker_jbod() -> (
         node_id: crabka_broker::NodeId(1),
         controller_listen_addr: controller_addr,
         controller_quorum_voters: vec![(crabka_broker::NodeId(1), controller_addr.to_string())],
-        heartbeat_interval_ms: 3_000,
-        heartbeat_timeout_ms: 9_000,
-        replica_lag_time_max_ms: 30_000,
-        controller_election_timeout: std::time::Duration::from_secs(5),
-        controller_heartbeat_interval: std::time::Duration::from_millis(500),
+        heartbeat_interval: crabka_units::millis(3_000),
+        heartbeat_timeout: crabka_units::millis(9_000),
+        replica_lag_time_max: crabka_units::millis(30_000),
+        controller_election_timeout: crabka_units::secs(5),
+        controller_heartbeat_interval: crabka_units::millis(500),
         bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
         ..BrokerConfig::default()
     };
@@ -7078,11 +7078,11 @@ async fn start_three_broker_sasl_plaintext_jvm_cluster_with_delegation_tokens(
                 .iter()
                 .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
                 .collect(),
-            heartbeat_interval_ms: 3_000,
-            heartbeat_timeout_ms: 9_000,
-            replica_lag_time_max_ms: 30_000,
-            controller_election_timeout: std::time::Duration::from_secs(5),
-            controller_heartbeat_interval: std::time::Duration::from_millis(500),
+            heartbeat_interval: crabka_units::millis(3_000),
+            heartbeat_timeout: crabka_units::millis(9_000),
+            replica_lag_time_max: crabka_units::millis(30_000),
+            controller_election_timeout: crabka_units::secs(5),
+            controller_heartbeat_interval: crabka_units::millis(500),
             bootstrap_mode: mode,
             listeners: vec![ListenerSpec {
                 name: "SASL_PLAINTEXT".to_string(),
@@ -7741,16 +7741,16 @@ fn start_host_broker_with_minio_tier(
         node_id: crabka_broker::NodeId(1),
         controller_listen_addr: controller_addr,
         controller_quorum_voters: vec![(crabka_broker::NodeId(1), controller_addr.to_string())],
-        heartbeat_interval_ms: 3_000,
-        heartbeat_timeout_ms: 9_000,
-        replica_lag_time_max_ms: 30_000,
-        controller_election_timeout: std::time::Duration::from_secs(5),
-        controller_heartbeat_interval: std::time::Duration::from_millis(500),
+        heartbeat_interval: crabka_units::millis(3_000),
+        heartbeat_timeout: crabka_units::millis(9_000),
+        replica_lag_time_max: crabka_units::millis(30_000),
+        controller_election_timeout: crabka_units::secs(5),
+        controller_heartbeat_interval: crabka_units::millis(500),
         bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
         remote_storage_backend: Some(crabka_broker::RemoteStorageBackend::S3(s3)),
         // 1s tick so the producer's sealed segments reach S3 (and the
         // local-retention pass evicts them) within the test's wall clock.
-        remote_log_manager_interval: std::time::Duration::from_secs(1),
+        remote_log_manager_interval: crabka_units::secs(1),
         remote_log_metadata: rlmm,
         ..BrokerConfig::default()
     };
@@ -8048,7 +8048,7 @@ async fn tiered_storage_topic_rlmm_survives_restart() {
             bootstrap: String::new(),
             num_partitions: 5,
             replication: 1,
-            snapshot_interval: std::time::Duration::from_secs(2),
+            snapshot_interval: crabka_units::secs(2),
             snapshot_dir: std::path::PathBuf::new(),
             security: None,
         }),
@@ -8750,7 +8750,7 @@ async fn start_two_brokers_with_minio_tier(
         bootstrap: RLMM_BOOTSTRAP.to_string(),
         num_partitions: 1,
         replication: 1,
-        snapshot_interval: std::time::Duration::from_secs(2),
+        snapshot_interval: crabka_units::secs(2),
         snapshot_dir: std::path::PathBuf::new(), // derived from log.dir
         security: None,
     };
@@ -8773,14 +8773,14 @@ async fn start_two_brokers_with_minio_tier(
             .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
             .collect(),
         // Accelerated timers for fast failover — matches acks_all_survives_leader_crash.
-        heartbeat_interval_ms: 200,
-        heartbeat_timeout_ms: 2_000,
-        replica_lag_time_max_ms: 2_000,
-        controller_election_timeout: std::time::Duration::from_millis(500),
-        controller_heartbeat_interval: std::time::Duration::from_millis(100),
+        heartbeat_interval: crabka_units::millis(200),
+        heartbeat_timeout: crabka_units::millis(2_000),
+        replica_lag_time_max: crabka_units::millis(2_000),
+        controller_election_timeout: crabka_units::millis(500),
+        controller_heartbeat_interval: crabka_units::millis(100),
         bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
         remote_storage_backend: Some(crabka_broker::RemoteStorageBackend::S3(s3_b0)),
-        remote_log_manager_interval: std::time::Duration::from_secs(1),
+        remote_log_manager_interval: crabka_units::secs(1),
         remote_log_metadata: crabka_broker::RlmmKind::TopicBacked(rlmm_b0),
         ..BrokerConfig::default()
     };
@@ -8797,14 +8797,14 @@ async fn start_two_brokers_with_minio_tier(
             .iter()
             .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
             .collect(),
-        heartbeat_interval_ms: 200,
-        heartbeat_timeout_ms: 2_000,
-        replica_lag_time_max_ms: 2_000,
-        controller_election_timeout: std::time::Duration::from_millis(500),
-        controller_heartbeat_interval: std::time::Duration::from_millis(100),
+        heartbeat_interval: crabka_units::millis(200),
+        heartbeat_timeout: crabka_units::millis(2_000),
+        replica_lag_time_max: crabka_units::millis(2_000),
+        controller_election_timeout: crabka_units::millis(500),
+        controller_heartbeat_interval: crabka_units::millis(100),
         bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
         remote_storage_backend: Some(crabka_broker::RemoteStorageBackend::S3(s3_b1)),
-        remote_log_manager_interval: std::time::Duration::from_secs(1),
+        remote_log_manager_interval: crabka_units::secs(1),
         remote_log_metadata: crabka_broker::RlmmKind::TopicBacked(rlmm_b1),
         ..BrokerConfig::default()
     };

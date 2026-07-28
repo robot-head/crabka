@@ -18,11 +18,14 @@
 use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::Duration,
 };
 
 use crabka_ids::PartitionIndex;
 use crabka_log::{Log, LogConfig, Offset};
+use crabka_units::{
+    ByteSize, Time,
+    convert::{ByteSizeExt as _, TimeExt as _},
+};
 use dashmap::DashMap;
 use tokio::{sync::oneshot, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
@@ -108,8 +111,8 @@ impl From<std::io::Error> for MoveError {
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct MovePolicy {
-    pub retry_backoff: Duration,
-    pub read_chunk_bytes: usize,
+    pub retry_backoff: Time,
+    pub read_chunk: ByteSize,
 }
 
 /// Start (or no-op-confirm) a move of `(topic, partition)` to
@@ -296,7 +299,7 @@ async fn replicator_loop(task: ReplicatorTask) {
         }
         // Read whatever is missing from the future log up to the
         // source's current LEO.
-        let advance = match catch_up(&part, &future_log, policy.read_chunk_bytes) {
+        let advance = match catch_up(&part, &future_log, policy.read_chunk.bytes_usize()) {
             Ok(v) => v,
             Err(e) => {
                 warn!(
@@ -306,7 +309,7 @@ async fn replicator_loop(task: ReplicatorTask) {
                 );
                 tokio::select! {
                     () = cancel.cancelled() => break,
-                    () = tokio::time::sleep(policy.retry_backoff) => continue,
+                    () = tokio::time::sleep(policy.retry_backoff.to_std()) => continue,
                 }
             }
         };
@@ -436,27 +439,30 @@ fn canonicalize_or_self(p: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use assert2::assert;
+    use crabka_units::{kibibytes, mebibytes, millis};
     use tempfile::tempdir;
 
     use super::*;
 
     fn test_policy() -> MovePolicy {
         MovePolicy {
-            retry_backoff: Duration::from_millis(5),
-            read_chunk_bytes: 1024 * 1024,
+            retry_backoff: millis(5),
+            read_chunk: mebibytes(1),
         }
     }
 
     #[test]
     fn move_policy_preserves_nondefault_values() {
         let policy = MovePolicy {
-            retry_backoff: Duration::from_millis(7),
-            read_chunk_bytes: 4096,
+            retry_backoff: millis(7),
+            read_chunk: kibibytes(4),
         };
 
-        assert!(policy.retry_backoff == Duration::from_millis(7));
-        assert!(policy.read_chunk_bytes == 4096);
+        assert!(policy.retry_backoff == millis(7));
+        assert!(policy.read_chunk == kibibytes(4));
     }
 
     #[test]

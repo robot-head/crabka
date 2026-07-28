@@ -11,6 +11,10 @@ use crabka_protocol::{
         push_telemetry_response::PushTelemetryResponse,
     },
 };
+use crabka_units::{
+    ByteSize, Ratio,
+    convert::{ByteSizeExt as _, RatioExt as _},
+};
 use uuid::Uuid;
 
 use crate::{
@@ -22,12 +26,14 @@ use crate::{
 };
 
 fn decompressed_output_bound(
-    compressed_len: usize,
-    ratio: usize,
-    floor: usize,
-    ceiling: usize,
-) -> usize {
-    compressed_len.saturating_mul(ratio).clamp(floor, ceiling)
+    compressed_len: ByteSize,
+    ratio: Ratio,
+    floor: ByteSize,
+    ceiling: ByteSize,
+) -> ByteSize {
+    ByteSize::from_bytes_f64(compressed_len.bytes_f64() * ratio.as_f64())
+        .max(floor)
+        .min(ceiling)
 }
 
 #[tracing::instrument(
@@ -76,11 +82,12 @@ pub(crate) fn handle(
             // Bound decompressed output to guard against a decompression bomb
             // in the client-metrics payload.
             let max_output = decompressed_output_bound(
-                req.metrics.len(),
+                ByteSize::from_bytes(u64::try_from(req.metrics.len()).unwrap_or(u64::MAX)),
                 broker.config.telemetry_max_decompression_ratio,
-                broker.config.telemetry_decompressed_output_floor_bytes,
-                broker.config.telemetry_decompressed_output_ceiling_bytes,
-            );
+                broker.config.telemetry_decompressed_output_floor,
+                broker.config.telemetry_decompressed_output_ceiling,
+            )
+            .bytes_usize();
             match crabka_compression::decompress(ct, &req.metrics, max_output) {
                 Ok(raw) => match otlp::decode_metrics(&raw) {
                     Ok(md) => {
@@ -186,6 +193,7 @@ mod tests {
     use bytes::Bytes;
     use crabka_compression::CompressionType;
     use crabka_protocol::{owned::push_telemetry_response, primitives::uuid::Uuid as ProtoUuid};
+    use crabka_units::{bytes, fraction, gibibytes};
     use opentelemetry_proto::tonic::metrics::v1::{
         Gauge, Histogram, HistogramDataPoint, Metric, MetricsData, NumberDataPoint,
         ResourceMetrics, ScopeMetrics, Sum, metric, number_data_point,
@@ -226,22 +234,27 @@ mod tests {
     #[test]
     fn decompressed_output_bound_uses_runtime_policy() {
         let cases = [
-            ("ratio", 10, 7, 1, 1_000, 70),
-            ("floor", 10, 2, 50, 1_000, 50),
-            ("ceiling", 10, 100, 1, 500, 500),
+            ("ratio", bytes(10), 7, bytes(1), bytes(1_000), bytes(70)),
+            ("floor", bytes(10), 2, bytes(50), bytes(1_000), bytes(50)),
+            ("ceiling", bytes(10), 100, bytes(1), bytes(500), bytes(500)),
             (
-                "saturating multiplication",
-                usize::MAX,
-                2,
-                1,
-                usize::MAX,
-                usize::MAX,
+                "ceiling clamps a very large product",
+                gibibytes(4),
+                1_000_000,
+                bytes(1),
+                gibibytes(1),
+                gibibytes(1),
             ),
         ];
 
         for (name, compressed_len, ratio, floor, ceiling, expected) in cases {
             assert!(
-                decompressed_output_bound(compressed_len, ratio, floor, ceiling) == expected,
+                decompressed_output_bound(
+                    compressed_len,
+                    fraction(f64::from(ratio)),
+                    floor,
+                    ceiling
+                ) == expected,
                 "{name}"
             );
         }

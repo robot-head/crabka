@@ -19,6 +19,7 @@ use crabka_protocol::{
         elect_leaders_response::{ElectLeadersResponse, PartitionResult, ReplicaElectionResult},
     },
 };
+use crabka_units::convert::TimeExt as _;
 use tokio::sync::oneshot;
 
 use crate::{
@@ -216,7 +217,7 @@ async fn run_offset_aware_recovery(
         })
         .await;
     let (error_code, error_message) =
-        match tokio::time::timeout(broker.config.operator_recovery_deadline, rx).await {
+        match tokio::time::timeout(broker.config.operator_recovery_deadline.to_std(), rx).await {
             Ok(Ok(RecoveryOutcome::Elected(_))) => (codes::NONE, None),
             Ok(Ok(RecoveryOutcome::NoEligibleReplica)) => (
                 codes::ELIGIBLE_LEADERS_NOT_AVAILABLE,

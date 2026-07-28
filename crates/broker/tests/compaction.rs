@@ -12,7 +12,7 @@
 //! Gated to non-Windows to match the multi-broker test convention from
 //! slices 10b/12b/14/15.
 
-use std::{io, net::SocketAddr, time::Duration};
+use std::{io, net::SocketAddr};
 
 use assert2::assert;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -96,7 +96,7 @@ async fn round_trip(
 async fn start_broker_with_fast_cleaner() -> (BrokerHandle, TempDir, SocketAddr) {
     let log_dir = tempfile::tempdir().unwrap();
     let mut cfg = BrokerConfig::for_tests(log_dir.path().to_path_buf());
-    cfg.cleaner_interval_override = Some(Duration::from_secs(1));
+    cfg.cleaner_interval_override = Some(crabka_units::secs(1));
     let handle = Broker::start(cfg).await.expect("broker must start");
     let addr = handle.listen_addr();
     (handle, log_dir, addr)

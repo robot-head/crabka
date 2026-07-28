@@ -142,11 +142,11 @@ async fn start_host_broker_on(client_port: u16, controller_port: u16) -> (Broker
             crabka_broker::NodeId(1),
             format!("127.0.0.1:{controller_port}"),
         )],
-        heartbeat_interval_ms: 3_000,
-        heartbeat_timeout_ms: 9_000,
-        replica_lag_time_max_ms: 30_000,
-        controller_election_timeout: Duration::from_secs(5),
-        controller_heartbeat_interval: Duration::from_millis(500),
+        heartbeat_interval: crabka_units::millis(3_000),
+        heartbeat_timeout: crabka_units::millis(9_000),
+        replica_lag_time_max: crabka_units::millis(30_000),
+        controller_election_timeout: crabka_units::secs(5),
+        controller_heartbeat_interval: crabka_units::millis(500),
         bootstrap_mode: BootstrapMode::Bootstrap,
         ..BrokerConfig::default()
     };
@@ -501,11 +501,11 @@ fn crabka_mixed_config(
     cfg.auto_join = false;
     cfg.bootstrap_servers = vec![];
     cfg.cluster_id = Some(cluster_id);
-    cfg.heartbeat_interval_ms = 1_000;
-    cfg.heartbeat_timeout_ms = 4_000;
-    cfg.replica_lag_time_max_ms = 10_000;
-    cfg.controller_election_timeout = Duration::from_secs(3);
-    cfg.controller_heartbeat_interval = Duration::from_millis(250);
+    cfg.heartbeat_interval = crabka_units::millis(1_000);
+    cfg.heartbeat_timeout = crabka_units::millis(4_000);
+    cfg.replica_lag_time_max = crabka_units::millis(10_000);
+    cfg.controller_election_timeout = crabka_units::secs(3);
+    cfg.controller_heartbeat_interval = crabka_units::millis(250);
     cfg
 }
 

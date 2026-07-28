@@ -642,7 +642,7 @@ async fn non_super_user_without_acl_denied() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// 3-broker PLAINTEXT cluster with `auto_leader_rebalance_enable = true`,
-/// `leader_imbalance_check_interval_secs = 1`, `leader_imbalance_per_broker_percentage = 0`.
+/// `leader_imbalance_check_interval = crabka_units::secs(1)`, `leader_imbalance_per_broker = crabka_units::percent(0)`.
 ///
 /// Scenario:
 /// 1. Create rf=2 topic via wire. With 3 registered brokers, round-robin
@@ -683,8 +683,8 @@ async fn auto_rebalance_restores_preferred_leader() {
         crabka_broker::BootstrapMode::Bootstrap,
     );
     cfg0.features.auto_leader_rebalance_enable = true;
-    cfg0.leader_imbalance_check_interval_secs = 1;
-    cfg0.leader_imbalance_per_broker_percentage = 0;
+    cfg0.leader_imbalance_check_interval = crabka_units::secs(1);
+    cfg0.leader_imbalance_per_broker = crabka_units::percent(0);
 
     let mut cfg1 = support::broker_config(
         1,
@@ -695,8 +695,8 @@ async fn auto_rebalance_restores_preferred_leader() {
         crabka_broker::BootstrapMode::Bootstrap,
     );
     cfg1.features.auto_leader_rebalance_enable = true;
-    cfg1.leader_imbalance_check_interval_secs = 1;
-    cfg1.leader_imbalance_per_broker_percentage = 0;
+    cfg1.leader_imbalance_check_interval = crabka_units::secs(1);
+    cfg1.leader_imbalance_per_broker = crabka_units::percent(0);
 
     let mut cfg2 = support::broker_config(
         2,
@@ -707,8 +707,8 @@ async fn auto_rebalance_restores_preferred_leader() {
         crabka_broker::BootstrapMode::Bootstrap,
     );
     cfg2.features.auto_leader_rebalance_enable = true;
-    cfg2.leader_imbalance_check_interval_secs = 1;
-    cfg2.leader_imbalance_per_broker_percentage = 0;
+    cfg2.leader_imbalance_check_interval = crabka_units::secs(1);
+    cfg2.leader_imbalance_per_broker = crabka_units::percent(0);
 
     // Start all three statically; they elect among themselves over the wire.
     let mut client_ls = client_listeners.into_iter();

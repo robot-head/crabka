@@ -11,13 +11,10 @@
 //! stays in place — better to keep serving with the old cert than to
 //! drop connections.
 
-use std::{
-    path::Path,
-    sync::Arc,
-    time::{Duration, SystemTime},
-};
+use std::{path::Path, sync::Arc, time::SystemTime};
 
 use crabka_security::{DynamicServerConfig, TlsConfig};
+use crabka_units::{Time, convert::TimeExt};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -45,15 +42,15 @@ fn snapshot_mtimes(cfg: &TlsConfig) -> PathMtimes {
 pub(crate) async fn run(
     dynamic: Arc<DynamicServerConfig>,
     cfg: TlsConfig,
-    interval: Duration,
+    interval: Time,
     shutdown: CancellationToken,
 ) {
-    if interval.is_zero() {
+    if interval <= <Time as TimeExt>::ZERO {
         info!("tls hot-reload watcher disabled (interval == 0)");
         return;
     }
     let mut last = snapshot_mtimes(&cfg);
-    let mut ticker = tokio::time::interval(interval);
+    let mut ticker = tokio::time::interval(interval.to_std());
     // First tick fires immediately; skip it so we don't double-load on
     // startup (the broker already built the initial ServerConfig).
     ticker.tick().await;
@@ -89,10 +86,12 @@ mod tests {
     use std::{
         fs,
         path::{Path, PathBuf},
+        time::Duration,
     };
 
     use assert2::assert;
     use crabka_security::ClientAuthMode;
+    use crabka_units::secs;
 
     use super::*;
 
@@ -180,12 +179,7 @@ mod tests {
         let before = dynamic.current();
         let shutdown = CancellationToken::new();
 
-        let task = tokio::spawn(run(
-            dynamic.clone(),
-            cfg.clone(),
-            Duration::from_secs(1),
-            shutdown.clone(),
-        ));
+        let task = tokio::spawn(run(dynamic.clone(), cfg.clone(), secs(1), shutdown.clone()));
         tokio::task::yield_now().await;
 
         tokio::time::advance(Duration::from_secs(1)).await;

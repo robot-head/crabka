@@ -5,6 +5,7 @@
 //! log.
 
 use crabka_raft::NodeId;
+use crabka_units::{Time, convert::TimeExt as _};
 
 /// One replica's reported log state, gathered from a `GetReplicaLogInfo`
 /// response. Decoupled from the generated wire type so the selection
@@ -60,15 +61,15 @@ use crate::{
 
 #[derive(Debug, Clone)]
 pub(crate) struct RecoveryPolicy {
-    pub aggressive_deadline: Duration,
-    pub balanced_deadline: Duration,
+    pub aggressive_deadline: Time,
+    pub balanced_deadline: Time,
     pub queue_capacity: usize,
     pub listener_protocol: crabka_security::ListenerProtocol,
     pub inter_broker_server_name: String,
 }
 
 impl RecoveryPolicy {
-    fn deadline(&self, strategy: RecoveryStrategy) -> Duration {
+    fn deadline(&self, strategy: RecoveryStrategy) -> Time {
         match strategy {
             RecoveryStrategy::Aggressive | RecoveryStrategy::None => self.aggressive_deadline,
             RecoveryStrategy::Balanced => self.balanced_deadline,
@@ -267,7 +268,7 @@ impl UncleanRecoveryManager {
         }
 
         let deadline = self.policy.deadline(job.strategy);
-        let collected: Vec<ReplicaLogInfo> = gather_responses(futs, deadline).await;
+        let collected: Vec<ReplicaLogInfo> = gather_responses(futs, deadline.to_std()).await;
 
         if has_newer_leader(&collected, known_epoch.0) {
             return RecoveryOutcome::Stale;
@@ -418,6 +419,7 @@ where
 #[cfg(test)]
 mod tests {
     use assert2::assert;
+    use crabka_units::millis;
 
     use super::*;
 
@@ -457,15 +459,15 @@ mod tests {
     #[test]
     fn recovery_policy_selects_configured_deadlines() {
         let policy = RecoveryPolicy {
-            aggressive_deadline: Duration::from_millis(7),
-            balanced_deadline: Duration::from_millis(19),
+            aggressive_deadline: millis(7),
+            balanced_deadline: millis(19),
             queue_capacity: 3,
             listener_protocol: crabka_security::ListenerProtocol::Ssl,
             inter_broker_server_name: "broker.internal".to_string(),
         };
 
-        assert!(policy.deadline(RecoveryStrategy::Aggressive) == Duration::from_millis(7));
-        assert!(policy.deadline(RecoveryStrategy::Balanced) == Duration::from_millis(19));
+        assert!(policy.deadline(RecoveryStrategy::Aggressive) == millis(7));
+        assert!(policy.deadline(RecoveryStrategy::Balanced) == millis(19));
         assert!(policy.queue_capacity == 3);
         assert!(policy.listener_protocol == crabka_security::ListenerProtocol::Ssl);
         assert!(policy.inter_broker_server_name == "broker.internal");
@@ -549,6 +551,7 @@ mod run_recovery_tests {
         AddVoter, Node, QuorumState, RaftError, ReconfigOutcome, RemoveVoter, SnapshotRange,
         UpdateVoter,
     };
+    use crabka_units::secs;
     use tokio::sync::watch;
     use uuid::Uuid;
 
@@ -666,7 +669,7 @@ mod run_recovery_tests {
     }
 
     async fn liveness_with_alive(alive: &[u64]) -> Arc<ControllerLivenessState> {
-        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        let l = ControllerLivenessState::new(crabka_units::secs(10));
         for &n in alive {
             l.record_heartbeat(n).await;
         }
@@ -685,8 +688,8 @@ mod run_recovery_tests {
             listener_protocol: crabka_security::ListenerProtocol::Plaintext,
             metrics: crate::metrics::BrokerMetrics::new(),
             policy: RecoveryPolicy {
-                aggressive_deadline: Duration::from_secs(2),
-                balanced_deadline: Duration::from_secs(30),
+                aggressive_deadline: secs(2),
+                balanced_deadline: secs(30),
                 queue_capacity: 256,
                 listener_protocol: crabka_security::ListenerProtocol::Plaintext,
                 inter_broker_server_name: "localhost".to_string(),

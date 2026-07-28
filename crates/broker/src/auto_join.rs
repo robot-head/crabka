@@ -20,7 +20,7 @@
 //! coordinator or openraft membership directly. All the lockstep safety lives
 //! on the leader.
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
 use crabka_protocol::{
@@ -30,6 +30,7 @@ use crabka_protocol::{
         add_raft_voter_response::AddRaftVoterResponse,
     },
 };
+use crabka_units::{Time, convert::TimeExt as _};
 
 use crate::codes;
 
@@ -40,8 +41,8 @@ use crate::codes;
 /// + promotion — so the two must run concurrently.
 pub(crate) struct AutoJoinParams {
     pub auto_join: bool,
-    pub retry_backoff: Duration,
-    pub voter_request_timeout: Duration,
+    pub retry_backoff: Time,
+    pub voter_request_timeout: Time,
     pub node_id: crabka_raft::NodeId,
     pub directory_id: uuid::Uuid,
     pub cluster_id: Option<uuid::Uuid>,
@@ -87,7 +88,7 @@ pub(crate) async fn run(params: AutoJoinParams) {
     let protocol = params.listener_protocol;
     let server_name = params.inter_broker_server_name;
     let retry_backoff = params.retry_backoff;
-    let Ok(voter_request_timeout_ms) = i32::try_from(params.voter_request_timeout.as_millis())
+    let Ok(voter_request_timeout_ms) = i32::try_from(params.voter_request_timeout.millis_i64())
     else {
         tracing::error!(
             timeout = ?params.voter_request_timeout,
@@ -132,7 +133,7 @@ pub(crate) async fn run(params: AutoJoinParams) {
             }
         }
 
-        tokio::time::sleep(retry_backoff).await;
+        tokio::time::sleep(retry_backoff.to_std()).await;
     }
 }
 
@@ -296,6 +297,7 @@ mod tests {
         collections::BTreeSet,
         net::SocketAddr,
         sync::atomic::{AtomicUsize, Ordering},
+        time::Duration,
     };
 
     use assert2::assert;
@@ -307,6 +309,7 @@ mod tests {
         AddVoter, Node, NodeId, QuorumState, RaftError, ReconfigOutcome, RemoveVoter,
         SnapshotRange, UpdateVoter,
     };
+    use crabka_units::{millis, secs};
     use tokio::sync::watch;
 
     use super::*;
@@ -546,8 +549,8 @@ mod tests {
 
         let params = AutoJoinParams {
             auto_join: false,
-            retry_backoff: Duration::from_millis(7),
-            voter_request_timeout: Duration::from_secs(30),
+            retry_backoff: millis(7),
+            voter_request_timeout: secs(30),
             node_id: crabka_raft::NodeId(999),
             directory_id: uuid::Uuid::from_u128(1),
             cluster_id: None,
@@ -575,8 +578,8 @@ mod tests {
         });
         let params = AutoJoinParams {
             auto_join: true,
-            retry_backoff: Duration::from_millis(7),
-            voter_request_timeout: Duration::from_secs(30),
+            retry_backoff: millis(7),
+            voter_request_timeout: secs(30),
             node_id: crabka_raft::NodeId(7),
             directory_id: uuid::Uuid::from_u128(7),
             cluster_id: None,

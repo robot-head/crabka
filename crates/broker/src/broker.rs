@@ -10,6 +10,10 @@ use std::{
 };
 
 use crabka_ids::PartitionIndex;
+use crabka_units::{
+    ByteSize, Time,
+    convert::{ByteSizeExt as _, TimeExt},
+};
 use dashmap::DashMap;
 use futures_util::future::BoxFuture;
 use tokio::{net::TcpListener, task::JoinHandle};
@@ -325,8 +329,8 @@ async fn start_metadata_source(
             initial_voters: prepare_initial_voters(config, bootstrap_records),
             controller_listen_addr: config.controller_listen_addr,
             log_dir: config.log_dir.join("__cluster_metadata"),
-            election_timeout: config.controller_election_timeout,
-            heartbeat_interval: config.controller_heartbeat_interval,
+            election_timeout: config.controller_election_timeout.to_std(),
+            heartbeat_interval: config.controller_heartbeat_interval.to_std(),
             client_id: format!("crabka-broker-{}-controller", config.broker_id),
             bootstrap_mode: config.bootstrap_mode,
             cluster_id: config.cluster_id,
@@ -335,8 +339,8 @@ async fn start_metadata_source(
             shard_router: Some(Arc::new(crate::wal::quorum::registry::WalShardRouter::new(
                 wal_shards,
             ))),
-            max_bytes_between_snapshots: config.metadata_max_bytes_between_snapshots,
-            max_snapshot_interval: config.metadata_max_snapshot_interval,
+            max_bytes_between_snapshots: config.metadata_max_bytes_between_snapshots.bytes_u64(),
+            max_snapshot_interval: config.metadata_max_snapshot_interval.to_std(),
             snapshot_interval_records: config.metadata_snapshot_interval_records,
         };
         let controller = Arc::new(
@@ -356,7 +360,7 @@ async fn start_metadata_source(
             dialer: Arc::clone(&dialer),
             client_id: format!("crabka-broker-{}-observer", config.broker_id),
             cluster_id: config.cluster_id.unwrap_or_else(uuid::Uuid::nil),
-            max_bytes: config.observer_fetch_max_bytes,
+            max_bytes: config.observer_fetch_max,
             poll_interval: config.observer_poll_interval,
             sleeper: Arc::new(qubit_clock::sleep::SystemSleeper::new()),
         },
@@ -433,8 +437,8 @@ async fn register_broker(
         crabka_metadata::MetadataRecord::V1BrokerRegistration(self_registration_record(config));
     let backoff = exponential_backoff::Backoff::new(
         config.self_registration_max_attempts,
-        config.self_registration_backoff_min,
-        Some(config.self_registration_backoff_max),
+        config.self_registration_backoff_min.to_std(),
+        Some(config.self_registration_backoff_max.to_std()),
     );
     for (attempt_index, delay) in backoff.into_iter().enumerate() {
         match controller.submit_change(vec![registration.clone()]).await {
@@ -527,7 +531,7 @@ async fn recover_storage_and_groups(
                 log,
                 log_dir_status: log_dir_status.clone(),
                 producer_state: Arc::clone(&producer_state),
-                producer_id_expiration_ms: config.producer_id_expiration_ms,
+                producer_id_expiration: config.producer_id_expiration,
                 max_produce_group: config.max_produce_group,
                 partition_writer_queue_depth: config.partition_writer_queue_depth,
                 diskless,
@@ -547,10 +551,11 @@ async fn recover_storage_and_groups(
         )),
     );
     let mut consumer_group = config.next_gen_consumer_group.as_ref().clone();
-    consumer_group.session_expiry_tick = config.coordinator_session_expiry_tick;
+    consumer_group.session_expiry_tick = config.coordinator_session_expiry_tick.to_std();
     consumer_group.actor_mailbox_capacity = config.coordinator_actor_mailbox_capacity;
-    consumer_group.shutdown_ack_timeout = config.coordinator_shutdown_ack_timeout;
-    consumer_group.classic_initial_rebalance_delay = config.classic_group_initial_rebalance_delay;
+    consumer_group.shutdown_ack_timeout = config.coordinator_shutdown_ack_timeout.to_std();
+    consumer_group.classic_initial_rebalance_delay =
+        config.classic_group_initial_rebalance_delay.to_std();
     let mut share_group = config.share_group.as_ref().clone();
     share_group.actor_mailbox_capacity = config.coordinator_actor_mailbox_capacity;
     let mut streams_group = config.streams_group.as_ref().clone();
@@ -609,7 +614,7 @@ async fn start_coordinators(
         tracing::warn!(%error, "transaction coordinator recovery error");
     }
     let mut share_coordinator_config = (*config.share_coordinator).clone();
-    share_coordinator_config.recovery_read_max_bytes = config.share_recovery_read_max_bytes;
+    share_coordinator_config.recovery_read_max_bytes = config.share_recovery_read_max.bytes_usize();
     let share_coordinator = Arc::new(
         crate::share_coordinator::coordinator::ShareCoordinator::new(
             config.node_id,
@@ -678,7 +683,7 @@ fn open_audit_spool(config: &BrokerConfig) -> Option<crabka_audit::Spool> {
     } else {
         config.log_dir.join(&config.audit_spool_dir)
     };
-    match crabka_audit::Spool::open(&directory, config.audit_spool_max_bytes) {
+    match crabka_audit::Spool::open(&directory, config.audit_spool_max.bytes_u64()) {
         Ok(spool) => Some(spool),
         Err(error) => {
             tracing::error!(%error, "failed to open audit spool; spooling disabled");
@@ -691,12 +696,12 @@ fn spawn_audit_metrics(
     stats: Arc<crabka_audit::AuditStats>,
     log: Arc<crabka_audit::AuditLog>,
     metrics: crate::metrics::BrokerMetrics,
-    poll_interval: std::time::Duration,
+    poll_interval: Time,
     shutdown: CancellationToken,
 ) {
     tokio::spawn(async move {
         let mut previous = (0, 0, 0);
-        let mut tick = tokio::time::interval(poll_interval);
+        let mut tick = tokio::time::interval(poll_interval.to_std());
         loop {
             tokio::select! {
                 _ = tick.tick() => {}
@@ -765,7 +770,7 @@ fn start_audit_pipeline(
                         crate::audit_recovery::recover_from_partition_tail(
                             &partition,
                             config.audit_tail_window_offsets,
-                            config.audit_tail_read_max_bytes,
+                            config.audit_tail_read_max,
                         )
                     })
             });
@@ -780,13 +785,11 @@ fn start_audit_pipeline(
                 product: Broker::audit_product(),
                 signer: audit_signer(config),
                 checkpoint_every_n: config.audit_checkpoint_every_n,
-                checkpoint_every: std::time::Duration::from_secs(
-                    config.audit_checkpoint_every_secs,
-                ),
+                checkpoint_every: config.audit_checkpoint_every.to_std(),
                 chain,
                 spool,
                 stats: Arc::clone(&stats),
-                replay_every: config.audit_spool_replay_interval,
+                replay_every: config.audit_spool_replay_interval.to_std(),
                 sleeper: Arc::new(qubit_clock::sleep::SystemSleeper::new()),
             },
         );
@@ -820,7 +823,7 @@ fn spawn_broker_gauge_updater(
     let poll_interval = config.gauge_poll_interval;
     let default_min_insync_replicas = config.default_min_insync_replicas;
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(poll_interval);
+        let mut tick = tokio::time::interval(poll_interval.to_std());
         loop {
             tokio::select! {
                 _ = tick.tick() => {}
@@ -897,11 +900,11 @@ fn spawn_liveness_ticker(
     node_id: crabka_metadata::NodeId,
     metrics: crate::metrics::BrokerMetrics,
     recovery: crate::unclean_recovery::UncleanRecoveryHandle,
-    tick_interval: std::time::Duration,
+    tick_interval: Time,
     shutdown: CancellationToken,
 ) {
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(tick_interval);
+        let mut tick = tokio::time::interval(tick_interval.to_std());
         loop {
             tokio::select! {
                 _ = tick.tick() => {}
@@ -990,9 +993,7 @@ fn start_liveness_services(
     ),
 ) -> LivenessStartup {
     let liveness = Arc::new(
-        crate::heartbeat::controller_state::ControllerLivenessState::new(
-            std::time::Duration::from_millis(config.heartbeat_timeout_ms),
-        ),
+        crate::heartbeat::controller_state::ControllerLivenessState::new(config.heartbeat_timeout),
     );
     let (want_shutdown, want_shutdown_rx) = tokio::sync::watch::channel(false);
     let (should_shutdown, _) = tokio::sync::watch::channel(false);
@@ -1001,7 +1002,7 @@ fn start_liveness_services(
     tokio::spawn(crate::heartbeat::client::run(
         crate::heartbeat::client::Config {
             broker_id: config.broker_id,
-            interval: std::time::Duration::from_millis(config.heartbeat_interval_ms),
+            interval: config.heartbeat_interval,
             controller: Arc::clone(controller),
             shutdown: shutdown.child_token(),
             inter_broker_client: Arc::clone(inter_broker_client),
@@ -1078,8 +1079,8 @@ async fn start_observability(
         None
     };
     let client_metrics = Arc::new(crate::client_metrics::ClientMetrics::new(
-        config.client_metrics_telemetry_max_bytes,
-        config.client_metrics_default_interval_ms,
+        config.client_metrics_telemetry_max,
+        config.client_metrics_default_interval,
         config.client_metrics_otlp_endpoint.clone(),
         config.client_metrics_otlp_queue_capacity,
         config.client_metrics_prom_snapshot_ttl,
@@ -1095,13 +1096,13 @@ async fn start_observability(
     let stale_push_intervals = config.client_metrics_stale_push_intervals;
     let stale_floor = config.client_metrics_stale_floor;
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(eviction_tick);
+        let mut tick = tokio::time::interval(eviction_tick.to_std());
         loop {
             tokio::select! {
                 () = eviction_shutdown.cancelled() => return,
                 _ = tick.tick() => eviction_metrics.manager.evict_stale(
                     stale_push_intervals,
-                    stale_floor,
+                    stale_floor.to_std(),
                 ),
             }
         }
@@ -1124,17 +1125,17 @@ fn spawn_storage_security_maintenance(
             node_id: config.node_id,
             partitions: Arc::clone(partitions),
             controller: Arc::clone(controller),
-            replica_lag_time_max: std::time::Duration::from_millis(config.replica_lag_time_max_ms),
+            replica_lag_time_max: config.replica_lag_time_max,
             scan_interval: config.isr_scan_interval,
             broker_id: config.broker_id,
             shutdown: shutdown.child_token(),
             metrics: metrics.clone(),
         },
     ));
-    let disk_scanner = (config.partition_disk_scan_interval_secs > 0).then(|| {
+    let disk_scanner = (config.partition_disk_scan_interval > <Time as TimeExt>::ZERO).then(|| {
         let scanner = crate::disk_scanner::DiskScanner {
             log_dirs: config.all_log_dirs(),
-            interval: std::time::Duration::from_secs(config.partition_disk_scan_interval_secs),
+            interval: config.partition_disk_scan_interval,
             metrics: metrics.clone(),
             shutdown: shutdown.child_token(),
         };
@@ -1172,18 +1173,18 @@ fn spawn_storage_security_maintenance(
 
 fn spawn_producer_expiry(
     producer_state: Arc<crate::producer_state::ProducerState>,
-    scan_interval: std::time::Duration,
-    expiration_ms: i64,
+    scan_interval: Time,
+    expiration: Time,
     shutdown: CancellationToken,
 ) {
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(scan_interval);
+        let mut tick = tokio::time::interval(scan_interval.to_std());
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
                 _ = tick.tick() => {
                     producer_state
-                        .expire_older_than(crate::time_util::now_ms(), expiration_ms)
+                        .expire_older_than(crate::time_util::now_ms(), expiration)
                         .await;
                 }
                 () = shutdown.cancelled() => return,
@@ -1223,10 +1224,8 @@ fn spawn_cluster_data_maintenance(
             adapter,
             Arc::clone(liveness),
             crate::leader_rebalance::AutoRebalanceConfig {
-                check_interval: std::time::Duration::from_secs(
-                    config.leader_imbalance_check_interval_secs,
-                ),
-                imbalance_threshold_pct: config.leader_imbalance_per_broker_percentage,
+                check_interval: config.leader_imbalance_check_interval,
+                imbalance_threshold: config.leader_imbalance_per_broker,
             },
             shutdown.child_token(),
         ));
@@ -1244,7 +1243,7 @@ fn spawn_cluster_data_maintenance(
     spawn_producer_expiry(
         Arc::clone(producer_state),
         config.producer_id_expiration_scan_interval,
-        config.producer_id_expiration_ms,
+        config.producer_id_expiration,
         shutdown.child_token(),
     );
     tokio::spawn(crate::cleaner::run(
@@ -1316,9 +1315,9 @@ fn kafka_swap_kickoff(config: &BrokerConfig) -> Option<KafkaSwapKickoff> {
             security,
         },
         broker_id: config.broker_id,
-        bootstrap_backoff_initial: config.rlmm_bootstrap_backoff_initial,
-        bootstrap_backoff_max: config.rlmm_bootstrap_backoff_max,
-        reconcile_tick: config.rlmm_reconcile_tick,
+        bootstrap_backoff_initial: config.rlmm_bootstrap_backoff_initial.to_std(),
+        bootstrap_backoff_max: config.rlmm_bootstrap_backoff_max.to_std(),
+        reconcile_tick: config.rlmm_reconcile_tick.to_std(),
     })
 }
 
@@ -1463,12 +1462,7 @@ fn start_runtime_watchers(
         shutdown.child_token(),
     ));
     if config.delegation_token_secret_key.is_some() {
-        let interval = std::time::Duration::from_millis(
-            u64::try_from(config.delegation_token_expiry_check_interval_ms).unwrap_or(
-                u64::try_from(crate::config::DEFAULT_DELEGATION_TOKEN_EXPIRY_CHECK_INTERVAL_MS)
-                    .unwrap_or(3_600_000),
-            ),
-        );
+        let interval = config.delegation_token_expiry_check_interval;
         let token_controller: Arc<dyn crate::delegation_token_cleanup::DelegationTokenController> =
             Arc::new(DelegationTokenCleanupControllerAdapter {
                 handle: Arc::clone(controller),
@@ -1479,7 +1473,7 @@ fn start_runtime_watchers(
             shutdown.child_token(),
         ));
     }
-    if !config.txn_abort_cleanup_interval.is_zero() {
+    if config.txn_abort_cleanup_interval > <Time as TimeExt>::ZERO {
         tokio::spawn(crate::txn::expiration::run(
             Arc::clone(txn_coordinator),
             Arc::clone(controller),
@@ -1547,7 +1541,7 @@ async fn bind_listeners_and_recover_moves(
                 partition,
                 crate::future_log::MovePolicy {
                     retry_backoff: config.future_log_move_retry_backoff,
-                    read_chunk_bytes: config.future_log_move_read_chunk_bytes,
+                    read_chunk: config.future_log_move_read_chunk,
                 },
             ) {
                 tracing::warn!(%topic, partition = partition_id, ?error,
@@ -1587,11 +1581,14 @@ async fn emit_broker_started(broker: &Broker, audit_partition: Option<PartitionI
     };
     let topic = broker.config.audit_topic.clone();
     let partitions = Arc::clone(&broker.partitions);
-    let _ = tokio::time::timeout(broker.config.audit_partition_wait_timeout, async move {
-        while !partitions.contains(&topic, partition_index) {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
+    let _ = tokio::time::timeout(
+        broker.config.audit_partition_wait_timeout.to_std(),
+        async move {
+            while !partitions.contains(&topic, partition_index) {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        },
+    )
     .await;
     broker.audit_log.emit(crabka_audit::AuditEvent::Lifecycle {
         kind: crabka_audit::LifecycleKind::BrokerStarted,
@@ -1661,7 +1658,7 @@ async fn start_metadata_phase(
     )
     .await?;
     spawn_auto_join(config, &controller, inter_broker_client);
-    wait_for_metadata_leader(&*controller, config.startup_leader_wait_timeout).await?;
+    wait_for_metadata_leader(&*controller, config.startup_leader_wait_timeout.to_std()).await?;
     register_broker(config, &*controller).await?;
     submit_bootstrap_records(config, &*controller, bootstrap_records).await?;
     Ok(controller)
@@ -1815,7 +1812,7 @@ fn spawn_replicator_supervisor(
             throttle_state: Arc::clone(runtime.1),
             log_dir_status: storage.log_dir_status.clone(),
             producer_state: Arc::clone(storage.producer_state),
-            producer_id_expiration_ms: config.producer_id_expiration_ms,
+            producer_id_expiration: config.producer_id_expiration,
             max_produce_group: config.max_produce_group,
             partition_writer_queue_depth: config.partition_writer_queue_depth,
             metrics: runtime.2.clone(),
@@ -3860,7 +3857,7 @@ async fn bootstrap_topic_rlmm(
             log.clone(),
             runtime.clone(),
             cfg.cfg.snapshot_dir.clone(),
-            cfg.cfg.snapshot_interval,
+            cfg.cfg.snapshot_interval.to_std(),
         ) {
             Ok(m) => m,
             Err(e) => {
@@ -4082,7 +4079,7 @@ pub(crate) fn spawn_partition(
         log,
         log_dir_status,
         producer_state,
-        producer_id_expiration_ms: broker_config.producer_id_expiration_ms,
+        producer_id_expiration: broker_config.producer_id_expiration,
         max_produce_group: broker_config.max_produce_group,
         partition_writer_queue_depth: broker_config.partition_writer_queue_depth,
         diskless,
@@ -4101,7 +4098,7 @@ pub(crate) struct PartitionSpawnConfig {
     pub log: crabka_log::Log,
     pub log_dir_status: crate::log_dir_status::LogDirRegistry,
     pub producer_state: Arc<crate::producer_state::ProducerState>,
-    pub producer_id_expiration_ms: i64,
+    pub producer_id_expiration: Time,
     pub max_produce_group: usize,
     pub partition_writer_queue_depth: usize,
     pub diskless: bool,
@@ -4121,7 +4118,7 @@ pub(crate) fn try_spawn_partition_with_sequencer(
         log,
         log_dir_status,
         producer_state,
-        producer_id_expiration_ms,
+        producer_id_expiration,
         max_produce_group,
         partition_writer_queue_depth,
         diskless,
@@ -4157,7 +4154,7 @@ pub(crate) fn try_spawn_partition_with_sequencer(
             hw_advance_notify.clone(),
         ),
         (log_dir_status, producer_state, wal),
-        (producer_id_expiration_ms, max_produce_group),
+        (producer_id_expiration, max_produce_group),
         sequencer,
     ));
     Ok(Arc::new(Partition {
@@ -4376,9 +4373,9 @@ impl Drop for ConnectionGuard {
 /// for `ip` entities.
 const CONNECTION_CREATION_RATE_QUOTA_KEY: &str = "connection_creation_rate";
 
-fn connection_creation_delay(rate: f64, maximum: std::time::Duration) -> std::time::Duration {
+fn connection_creation_delay(rate: f64, maximum: Time) -> Time {
     let delay_micros = crate::quota::positive_f64_to_u64((1.0_f64 / rate) * 1_000_000.0);
-    std::time::Duration::from_micros(delay_micros).min(maximum)
+    Time::from_micros(i64::try_from(delay_micros).unwrap_or(i64::MAX)).min(maximum)
 }
 
 async fn accept_loop(
@@ -4400,8 +4397,8 @@ async fn accept_loop(
                         let peer_ip = peer.ip();
                         tune_accepted_socket(
                             &stream,
-                            broker.config.socket_send_buffer_bytes,
-                            broker.config.socket_receive_buffer_bytes,
+                            broker.config.socket_send_buffer,
+                            broker.config.socket_receive_buffer,
                         );
 
                         // `max.connections` / `max.connections.per.ip` caps.
@@ -4443,7 +4440,7 @@ async fn accept_loop(
                                     rate,
                                     broker.config.connection_creation_throttle_max,
                                 );
-                                tokio::time::sleep(delay).await;
+                                tokio::time::sleep(delay.to_std()).await;
                             }
                         }
                         let b = broker.clone();
@@ -4487,17 +4484,17 @@ async fn accept_loop(
 /// tuned still serves correctly, just less optimally.
 fn tune_accepted_socket(
     stream: &tokio::net::TcpStream,
-    send_buffer_bytes: usize,
-    receive_buffer_bytes: usize,
+    send_buffer: ByteSize,
+    receive_buffer: ByteSize,
 ) {
     if let Err(e) = stream.set_nodelay(true) {
         tracing::debug!(error = %e, "TCP_NODELAY set failed on accepted socket");
     }
     let sock = socket2::SockRef::from(stream);
-    if let Err(e) = sock.set_send_buffer_size(send_buffer_bytes) {
+    if let Err(e) = sock.set_send_buffer_size(send_buffer.bytes_usize()) {
         tracing::debug!(error = %e, "SO_SNDBUF set failed on accepted socket");
     }
-    if let Err(e) = sock.set_recv_buffer_size(receive_buffer_bytes) {
+    if let Err(e) = sock.set_recv_buffer_size(receive_buffer.bytes_usize()) {
         tracing::debug!(error = %e, "SO_RCVBUF set failed on accepted socket");
     }
 }
@@ -4505,6 +4502,7 @@ fn tune_accepted_socket(
 #[cfg(test)]
 mod tests {
     use assert2::{assert, check};
+    use crabka_units::{kibibytes, millis, minutes, secs};
     use futures_util::future::BoxFuture;
     use tempfile::tempdir;
 
@@ -4540,7 +4538,7 @@ mod tests {
             stats,
             log.clone(),
             crate::metrics::BrokerMetrics::new(),
-            std::time::Duration::from_mins(1),
+            minutes(1),
             shutdown.child_token(),
         );
         drop(log);
@@ -4688,17 +4686,13 @@ mod tests {
         ));
         let metrics = crate::metrics::BrokerMetrics::new();
         let mut config = BrokerConfig::for_tests(std::path::PathBuf::new());
-        config.gauge_poll_interval = std::time::Duration::from_millis(1);
+        config.gauge_poll_interval = millis(1);
         config.default_min_insync_replicas = 2;
         let shutdown = CancellationToken::new();
         spawn_broker_gauge_updater(
             Arc::new(PartitionRegistry::new()),
             Arc::new(MockMetadataSource::new(image, None)),
-            Arc::new(
-                crate::heartbeat::controller_state::ControllerLivenessState::new(
-                    std::time::Duration::from_secs(10),
-                ),
-            ),
+            Arc::new(crate::heartbeat::controller_state::ControllerLivenessState::new(secs(10))),
             node_id,
             metrics.clone(),
             &config,
@@ -4799,7 +4793,7 @@ mod tests {
                 .expect("open log"),
             log_dir_status: crate::log_dir_status::LogDirRegistry::default(),
             producer_state: Arc::new(crate::producer_state::ProducerState::new()),
-            producer_id_expiration_ms: 1,
+            producer_id_expiration: millis(1),
             max_produce_group: crate::config::BrokerConfig::default().max_produce_group,
             partition_writer_queue_depth: 2,
             diskless: false,
@@ -5343,7 +5337,7 @@ protocol = "Plaintext"
         let send_before = sock.send_buffer_size().expect("read baseline send buffer");
         let recv_before = sock.recv_buffer_size().expect("read baseline recv buffer");
 
-        tune_accepted_socket(&server, 65_536, 131_072);
+        tune_accepted_socket(&server, kibibytes(64), kibibytes(128));
 
         assert!(server.nodelay().expect("read TCP_NODELAY"));
         // Kernels clamp and may double requested sizes, so compare the distinct
@@ -5358,10 +5352,7 @@ protocol = "Plaintext"
 
     #[test]
     fn connection_creation_delay_honors_nondefault_cap() {
-        assert!(
-            connection_creation_delay(0.1, std::time::Duration::from_millis(17))
-                == std::time::Duration::from_millis(17)
-        );
+        assert!(connection_creation_delay(0.1, millis(17)) == millis(17));
     }
 
     #[test]
@@ -6523,7 +6514,7 @@ protocol = "Plaintext"
                 bootstrap,
                 num_partitions: 1,
                 replication: 1,
-                snapshot_interval: std::time::Duration::from_mins(1),
+                snapshot_interval: minutes(1),
                 snapshot_dir: snapshot_dir.path().to_path_buf(),
                 security: None,
             },

@@ -23,6 +23,7 @@ use crabka_protocol::{
         },
     },
 };
+use crabka_units::convert::TimeExt as _;
 
 use crate::{
     authorizer::{AuthorizationRequest, AuthorizationResult},
@@ -252,7 +253,11 @@ pub(crate) fn handle(
                 ) {
                     denied_result(r.resource_type, r.resource_name, code)
                 } else {
-                    describe_one(&image, r, broker.config.client_metrics_default_interval_ms)
+                    describe_one(
+                        &image,
+                        r,
+                        broker.config.client_metrics_default_interval.millis_i32(),
+                    )
                 }
             })
             .collect();

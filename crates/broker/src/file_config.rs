@@ -8,6 +8,11 @@
 use std::{net::SocketAddr, sync::Arc};
 
 use crabka_security::ListenerProtocol;
+use crabka_units::{
+    ByteSize, Time,
+    convert::{ByteSizeExt as _, TimeExt as _},
+    percent,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -851,7 +856,7 @@ fn default_spool_dir() -> String {
 }
 
 fn default_spool_max_bytes() -> u64 {
-    crate::config::DEFAULT_AUDIT_SPOOL_MAX_BYTES
+    crate::config::DEFAULT_AUDIT_SPOOL_MAX.bytes_u64()
 }
 
 /// `[audit.signing]` — Ed25519 checkpoint signing key.
@@ -886,7 +891,9 @@ fn default_checkpoint_every_n() -> u64 {
 }
 
 fn default_checkpoint_every_secs() -> u64 {
-    crate::config::DEFAULT_AUDIT_CHECKPOINT_EVERY_SECS
+    crate::config::DEFAULT_AUDIT_CHECKPOINT_EVERY
+        .secs_i64()
+        .cast_unsigned()
 }
 
 fn default_audit_enabled() -> bool {
@@ -1031,7 +1038,9 @@ fn apply_oauthbearer(oauth: Option<FileOAuthBearerConfig>, cfg: &mut crate::conf
         .clone_from(&oauth.idp_tls_trust);
     // Optional session-lifetime cap. Carried unconditionally;
     // the auth handler interprets None as "no cap".
-    cfg.oauthbearer_max_session_lifetime_seconds = oauth.max_session_lifetime_seconds;
+    cfg.oauthbearer_max_session_lifetime = oauth
+        .max_session_lifetime_seconds
+        .map(|seconds| Time::from_secs(i64::from(seconds)));
 
     // Compile the JsonPath expression once at load time;
     // a malformed expression panics with a descriptive error.
@@ -1103,7 +1112,8 @@ fn apply_oauthbearer(oauth: Option<FileOAuthBearerConfig>, cfg: &mut crate::conf
             cfg.oauthbearer_validator = crabka_security::OAuthBearerValidator::Signed(v);
             cfg.oauthbearer_jwks_endpoint = Some(jwks_uri);
             if let Some(ms) = oauth.jwks_refresh_interval_ms {
-                cfg.oauthbearer_jwks_refresh_interval = std::time::Duration::from_millis(ms);
+                cfg.oauthbearer_jwks_refresh_interval =
+                    Time::from_millis(i64::try_from(ms).unwrap_or(i64::MAX));
             }
 
             // Park signal_rx + shared state for Broker::start.
@@ -1113,7 +1123,7 @@ fn apply_oauthbearer(oauth: Option<FileOAuthBearerConfig>, cfg: &mut crate::conf
             cfg.oauthbearer_jwks_min_on_demand_pause = oauth
                 .jwks_min_refresh_pause_seconds
                 .map_or(crate::config::DEFAULT_JWKS_MIN_ON_DEMAND_PAUSE, |s| {
-                    std::time::Duration::from_secs(u64::from(s))
+                    Time::from_secs(i64::from(s))
                 });
             cfg.features.oauthbearer_jwks_ignore_key_use =
                 oauth.jwks_ignore_key_use.unwrap_or(false);
@@ -1334,16 +1344,22 @@ fn apply_delegation_tokens(
         cfg.delegation_token_secret_key = Some(crabka_security::SecretBytes::new(key.into_bytes()));
     }
     if let Some(milliseconds) = delegation.max_lifetime_ms {
-        cfg.delegation_token_max_lifetime_ms =
-            positive_i64("delegation_token.max_lifetime_ms", milliseconds)?;
+        cfg.delegation_token_max_lifetime = Time::from_millis(positive_i64(
+            "delegation_token.max_lifetime_ms",
+            milliseconds,
+        )?);
     }
     if let Some(milliseconds) = delegation.expiry_check_interval_ms {
-        cfg.delegation_token_expiry_check_interval_ms =
-            positive_i64("delegation_token.expiry_check_interval_ms", milliseconds)?;
+        cfg.delegation_token_expiry_check_interval = Time::from_millis(positive_i64(
+            "delegation_token.expiry_check_interval_ms",
+            milliseconds,
+        )?);
     }
     if let Some(milliseconds) = delegation.default_renew_period_ms {
-        cfg.delegation_token_default_renew_period_ms =
-            positive_i64("delegation_token.default_renew_period_ms", milliseconds)?;
+        cfg.delegation_token_default_renew_period = Time::from_millis(positive_i64(
+            "delegation_token.default_renew_period_ms",
+            milliseconds,
+        )?);
     }
     Ok(())
 }
@@ -1370,7 +1386,7 @@ fn apply_config_tail(
                         opa.allow_on_error,
                         opa.maximum_cache_size,
                         opa.expire_after_ms,
-                        cfg.opa_http_timeout,
+                        cfg.opa_http_timeout.to_std(),
                     )
                     .map_err(|error| FileConfigError::OpaConfig(format!("{error:?}")))?,
                 )
@@ -1447,10 +1463,11 @@ fn apply_config_tail(
     }
     let checkpoint = audit.checkpoint.unwrap_or_default();
     cfg.audit_checkpoint_every_n = checkpoint.every_n;
-    cfg.audit_checkpoint_every_secs = checkpoint.every_secs;
+    cfg.audit_checkpoint_every =
+        Time::from_secs(i64::try_from(checkpoint.every_secs).unwrap_or(i64::MAX));
     let spool = audit.spool.unwrap_or_default();
     cfg.audit_spool_dir = spool.dir.into();
-    cfg.audit_spool_max_bytes = spool.max_bytes;
+    cfg.audit_spool_max = ByteSize::from_bytes(spool.max_bytes);
     Ok(())
 }
 
@@ -1488,6 +1505,14 @@ fn positive_u32(name: &str, value: u32) -> Result<u32, FileConfigError> {
     Ok(value)
 }
 
+/// A validated-positive millisecond count from the operator's TOML, as a
+/// [`Time`]. The single place a `*_ms` key becomes a dimensioned extent
+/// outside the `set_runtime_*` macros.
+fn millis_time(name: &str, value: u64) -> Result<Time, FileConfigError> {
+    let value = positive_u64(name, value)?;
+    Ok(Time::from_millis(i64::try_from(value).unwrap_or(i64::MAX)))
+}
+
 fn positive_i16(name: &str, value: i16) -> Result<i16, FileConfigError> {
     positive_i32(name, i32::from(value))?;
     Ok(value)
@@ -1499,11 +1524,53 @@ fn percentage(name: &str, value: u32) -> Result<u32, FileConfigError> {
         .map_err(|error| invalid_runtime_value(name, error))
 }
 
+/// Assigns a `_ms` key from the operator's TOML into a [`Time`] field.
+///
+/// The raw integer stops here: this is the one place a broker runtime timeout
+/// crosses from "a number an operator wrote" into a dimensioned quantity.
+macro_rules! set_runtime_time_millis {
+    ($runtime:ident, $field:ident, $target:expr) => {
+        set_runtime_time_millis!($runtime, $field, $target, positive_u64);
+    };
+    ($runtime:ident, $field:ident, $target:expr, $validator:ident) => {
+        if let Some(value) = $runtime.$field {
+            let value = $validator(stringify!($field), value)?;
+            $target = Time::from_millis(i64::try_from(value).unwrap_or(i64::MAX));
+        }
+    };
+}
+
+/// Assigns a `_ms` key into a [`std::time::Duration`] field.
+///
+/// For the group-coordinator configs, which are still `Duration`-typed: two of
+/// the four (`StreamsGroupConfig`, `ShareCoordinatorConfig`) derive `Eq` and so
+/// cannot hold an `f64`-backed quantity, and keeping all four in one
+/// representation is what lets `BrokerConfig::validate` compare them uniformly.
 macro_rules! set_runtime_duration {
     ($runtime:ident, $field:ident, $target:expr) => {
         if let Some(value) = $runtime.$field {
             let value = positive_u64(stringify!($field), value)?;
             $target = std::time::Duration::from_millis(value);
+        }
+    };
+}
+
+/// Assigns a `_secs` key from the operator's TOML into a [`Time`] field.
+macro_rules! set_runtime_time_secs {
+    ($runtime:ident, $field:ident, $target:expr) => {
+        if let Some(value) = $runtime.$field {
+            let value = positive_u64(stringify!($field), value)?;
+            $target = Time::from_secs(i64::try_from(value).unwrap_or(i64::MAX));
+        }
+    };
+}
+
+/// Assigns a `_bytes` key from the operator's TOML into a [`ByteSize`] field.
+macro_rules! set_runtime_size_bytes {
+    ($runtime:ident, $field:ident, $target:expr, $validator:ident) => {
+        if let Some(value) = $runtime.$field {
+            let value = $validator(stringify!($field), value)?;
+            $target = ByteSize::from_bytes(u64::try_from(value).unwrap_or(u64::MAX));
         }
     };
 }
@@ -1578,102 +1645,104 @@ impl RuntimeFileConfig {
     fn apply_core(&mut self, cfg: &mut crate::config::BrokerConfig) -> Result<(), FileConfigError> {
         let runtime = self;
 
-        set_runtime_duration!(
+        set_runtime_time_millis!(
             runtime,
             startup_leader_wait_timeout_ms,
             cfg.startup_leader_wait_timeout
         );
-        set_runtime_duration!(
+        set_runtime_time_millis!(
             runtime,
             self_registration_backoff_min_ms,
             cfg.self_registration_backoff_min
         );
-        set_runtime_duration!(
+        set_runtime_time_millis!(
             runtime,
             self_registration_backoff_max_ms,
             cfg.self_registration_backoff_max
         );
-        set_runtime_duration!(
+        set_runtime_time_millis!(
             runtime,
             observer_poll_interval_ms,
             cfg.observer_poll_interval
         );
-        set_runtime_duration!(
+        set_runtime_time_millis!(
             runtime,
             audit_spool_replay_interval_ms,
             cfg.audit_spool_replay_interval
         );
-        set_runtime_duration!(
+        set_runtime_time_millis!(
             runtime,
             audit_stats_poll_interval_ms,
             cfg.audit_stats_poll_interval
         );
-        set_runtime_duration!(
+        set_runtime_time_millis!(
             runtime,
             audit_partition_wait_timeout_ms,
             cfg.audit_partition_wait_timeout
         );
-        set_runtime_duration!(
+        set_runtime_time_millis!(
             runtime,
             liveness_tick_interval_ms,
             cfg.liveness_tick_interval
         );
-        set_runtime_duration!(runtime, gauge_poll_interval_ms, cfg.gauge_poll_interval);
-        set_runtime_duration!(runtime, isr_scan_interval_ms, cfg.isr_scan_interval);
-        set_runtime_duration!(runtime, cleaner_interval_ms, cfg.cleaner_interval);
-        set_runtime_duration!(
+        set_runtime_time_millis!(runtime, gauge_poll_interval_ms, cfg.gauge_poll_interval);
+        set_runtime_time_millis!(runtime, isr_scan_interval_ms, cfg.isr_scan_interval);
+        set_runtime_time_millis!(runtime, cleaner_interval_ms, cfg.cleaner_interval);
+        set_runtime_time_millis!(
             runtime,
             future_log_move_retry_backoff_ms,
             cfg.future_log_move_retry_backoff
         );
-        set_runtime_duration!(
+        set_runtime_time_millis!(
             runtime,
             client_metrics_eviction_tick_ms,
             cfg.client_metrics_eviction_tick
         );
-        set_runtime_duration!(
+        set_runtime_time_millis!(
             runtime,
             client_metrics_stale_floor_ms,
             cfg.client_metrics_stale_floor
         );
-        set_runtime_i32!(
+        set_runtime_time_millis!(
             runtime,
             client_metrics_default_interval_ms,
-            cfg.client_metrics_default_interval_ms
+            cfg.client_metrics_default_interval,
+            positive_i32
         );
-        set_runtime_i32!(
+        set_runtime_size_bytes!(
             runtime,
             client_metrics_telemetry_max_bytes,
-            cfg.client_metrics_telemetry_max_bytes
+            cfg.client_metrics_telemetry_max,
+            positive_i32
         );
-        set_runtime_duration!(
+        set_runtime_time_millis!(
             runtime,
             client_metrics_prom_snapshot_ttl_ms,
             cfg.client_metrics_prom_snapshot_ttl
         );
-        set_runtime_duration!(runtime, rlmm_reconcile_tick_ms, cfg.rlmm_reconcile_tick);
-        set_runtime_duration!(
+        set_runtime_time_millis!(runtime, rlmm_reconcile_tick_ms, cfg.rlmm_reconcile_tick);
+        set_runtime_time_millis!(
             runtime,
             rlmm_bootstrap_backoff_initial_ms,
             cfg.rlmm_bootstrap_backoff_initial
         );
-        set_runtime_duration!(
+        set_runtime_time_millis!(
             runtime,
             rlmm_bootstrap_backoff_max_ms,
             cfg.rlmm_bootstrap_backoff_max
         );
-        set_runtime_duration!(
+        set_runtime_time_millis!(
             runtime,
             connection_creation_throttle_max_ms,
             cfg.connection_creation_throttle_max
         );
-        set_runtime_duration!(runtime, opa_http_timeout_ms, cfg.opa_http_timeout);
-        set_runtime_duration!(
+        set_runtime_time_millis!(runtime, opa_http_timeout_ms, cfg.opa_http_timeout);
+        set_runtime_time_millis!(
             runtime,
             oauth_jwks_http_timeout_ms,
             cfg.oauth_jwks_http_timeout
         );
-        set_runtime_duration!(
+        set_runtime_time_millis!(
             runtime,
             auto_join_retry_backoff_ms,
             cfg.auto_join_retry_backoff
@@ -1684,7 +1753,8 @@ impl RuntimeFileConfig {
                     invalid_runtime_value("auto_join_voter_request_timeout_ms", error)
                 })?
                 .into_value();
-            cfg.auto_join_voter_request_timeout = std::time::Duration::from_millis(value);
+            cfg.auto_join_voter_request_timeout =
+                Time::from_millis(i64::try_from(value).unwrap_or(i64::MAX));
         }
         Ok(())
     }
@@ -1752,12 +1822,12 @@ impl RuntimeFileConfig {
         cfg: &mut crate::config::BrokerConfig,
     ) -> Result<(), FileConfigError> {
         let runtime = self;
-        set_runtime_duration!(
+        set_runtime_time_millis!(
             runtime,
             coordinator_session_expiry_tick_ms,
             cfg.coordinator_session_expiry_tick
         );
-        set_runtime_duration!(
+        set_runtime_time_millis!(
             runtime,
             coordinator_shutdown_ack_timeout_ms,
             cfg.coordinator_shutdown_ack_timeout
@@ -1797,12 +1867,12 @@ impl RuntimeFileConfig {
             consumer_group_max_size,
             cfg.next_gen_consumer_group.max_size
         );
-        set_runtime_duration!(
+        set_runtime_time_millis!(
             runtime,
             classic_group_initial_rebalance_delay_ms,
             cfg.classic_group_initial_rebalance_delay
         );
-        set_runtime_duration!(
+        set_runtime_time_millis!(
             runtime,
             sync_group_follower_wait_ms,
             cfg.sync_group_follower_wait
@@ -1815,31 +1885,32 @@ impl RuntimeFileConfig {
         cfg: &mut crate::config::BrokerConfig,
     ) -> Result<(), FileConfigError> {
         let runtime = self;
-        set_runtime_duration!(
+        set_runtime_time_millis!(
             runtime,
             unclean_recovery_aggressive_deadline_ms,
             cfg.unclean_recovery_aggressive_deadline
         );
-        set_runtime_duration!(
+        set_runtime_time_millis!(
             runtime,
             unclean_recovery_balanced_deadline_ms,
             cfg.unclean_recovery_balanced_deadline
         );
-        set_runtime_duration!(
+        set_runtime_time_millis!(
             runtime,
             operator_recovery_deadline_ms,
             cfg.operator_recovery_deadline
         );
-        set_runtime_duration!(runtime, quota_throttle_max_ms, cfg.quota_throttle_max);
+        set_runtime_time_millis!(runtime, quota_throttle_max_ms, cfg.quota_throttle_max);
         set_runtime_u32!(
             runtime,
             self_registration_max_attempts,
             cfg.self_registration_max_attempts
         );
-        set_runtime_u32!(
+        set_runtime_size_bytes!(
             runtime,
             observer_fetch_max_bytes,
-            cfg.observer_fetch_max_bytes
+            cfg.observer_fetch_max,
+            positive_u32
         );
         set_runtime_usize!(
             runtime,
@@ -1851,12 +1922,13 @@ impl RuntimeFileConfig {
             audit_tail_window_offsets,
             cfg.audit_tail_window_offsets
         );
-        set_runtime_usize!(
+        set_runtime_size_bytes!(
             runtime,
             audit_tail_read_max_bytes,
-            cfg.audit_tail_read_max_bytes
+            cfg.audit_tail_read_max,
+            positive_usize
         );
-        set_runtime_duration!(
+        set_runtime_time_millis!(
             runtime,
             offsets_topic_metadata_wait_timeout_ms,
             cfg.offsets_topic_metadata_wait_timeout
@@ -1881,10 +1953,11 @@ impl RuntimeFileConfig {
             unclean_recovery_queue_capacity,
             cfg.unclean_recovery_queue_capacity
         );
-        set_runtime_usize!(
+        set_runtime_size_bytes!(
             runtime,
             share_recovery_read_max_bytes,
-            cfg.share_recovery_read_max_bytes
+            cfg.share_recovery_read_max,
+            positive_usize
         );
         set_runtime_usize!(
             runtime,
@@ -1899,46 +1972,60 @@ impl RuntimeFileConfig {
         cfg: &mut crate::config::BrokerConfig,
     ) -> Result<(), FileConfigError> {
         let runtime = self;
-        set_runtime_usize!(
+        set_runtime_size_bytes!(
             runtime,
             socket_request_max_bytes,
-            cfg.socket_request_max_bytes
+            cfg.socket_request_max,
+            positive_usize
         );
-        set_runtime_usize!(runtime, sendfile_min_bytes, cfg.sendfile_min_bytes);
-        set_runtime_usize!(
+        set_runtime_size_bytes!(
+            runtime,
+            sendfile_min_bytes,
+            cfg.sendfile_min,
+            positive_usize
+        );
+        set_runtime_size_bytes!(
             runtime,
             socket_send_buffer_bytes,
-            cfg.socket_send_buffer_bytes
+            cfg.socket_send_buffer,
+            positive_usize
         );
-        set_runtime_usize!(
+        set_runtime_size_bytes!(
             runtime,
             socket_receive_buffer_bytes,
-            cfg.socket_receive_buffer_bytes
+            cfg.socket_receive_buffer,
+            positive_usize
         );
-        set_runtime_usize!(
+        set_runtime_size_bytes!(
             runtime,
             acl_max_principal_bytes,
-            cfg.acl_max_principal_bytes
+            cfg.acl_max_principal,
+            positive_usize
         );
-        set_runtime_usize!(
+        set_runtime_size_bytes!(
             runtime,
             acl_max_resource_name_bytes,
-            cfg.acl_max_resource_name_bytes
+            cfg.acl_max_resource_name,
+            positive_usize
         );
-        set_runtime_usize!(
-            runtime,
-            telemetry_max_decompression_ratio,
-            cfg.telemetry_max_decompression_ratio
-        );
-        set_runtime_usize!(
+        if let Some(value) = runtime.telemetry_max_decompression_ratio {
+            let value = positive_usize("telemetry_max_decompression_ratio", value)?;
+            // A multiplier, not a fraction: `100` means "100× the compressed
+            // size", so it lands as `fraction(100.0)` rather than `percent(100)`.
+            cfg.telemetry_max_decompression_ratio =
+                crabka_units::fraction(f64::from(u32::try_from(value).unwrap_or(u32::MAX)));
+        }
+        set_runtime_size_bytes!(
             runtime,
             telemetry_decompressed_output_floor_bytes,
-            cfg.telemetry_decompressed_output_floor_bytes
+            cfg.telemetry_decompressed_output_floor,
+            positive_usize
         );
-        set_runtime_usize!(
+        set_runtime_size_bytes!(
             runtime,
             telemetry_decompressed_output_ceiling_bytes,
-            cfg.telemetry_decompressed_output_ceiling_bytes
+            cfg.telemetry_decompressed_output_ceiling,
+            positive_usize
         );
         Ok(())
     }
@@ -1948,12 +2035,13 @@ impl RuntimeFileConfig {
         cfg: &mut crate::config::BrokerConfig,
     ) -> Result<(), FileConfigError> {
         let runtime = self;
-        set_runtime_i64!(
+        set_runtime_time_millis!(
             runtime,
             producer_id_expiration_ms,
-            cfg.producer_id_expiration_ms
+            cfg.producer_id_expiration,
+            positive_i64
         );
-        set_runtime_duration!(
+        set_runtime_time_millis!(
             runtime,
             producer_id_expiration_scan_interval_ms,
             cfg.producer_id_expiration_scan_interval
@@ -1969,10 +2057,11 @@ impl RuntimeFileConfig {
             default_min_insync_replicas,
             cfg.default_min_insync_replicas
         );
-        set_runtime_usize!(
+        set_runtime_size_bytes!(
             runtime,
             future_log_move_read_chunk_bytes,
-            cfg.future_log_move_read_chunk_bytes
+            cfg.future_log_move_read_chunk,
+            positive_usize
         );
         set_runtime_i32!(
             runtime,
@@ -1992,15 +2081,17 @@ impl RuntimeFileConfig {
             cfg.transaction_state_replication_factor =
                 positive_i16("transaction_state_replication_factor", value)?;
         }
-        set_runtime_i32!(
+        set_runtime_time_millis!(
             runtime,
             transaction_min_timeout_ms,
-            cfg.transaction_min_timeout_ms
+            cfg.transaction_min_timeout,
+            positive_i32
         );
-        set_runtime_i32!(
+        set_runtime_time_millis!(
             runtime,
             transaction_max_timeout_ms,
-            cfg.transaction_max_timeout_ms
+            cfg.transaction_max_timeout,
+            positive_i32
         );
         Ok(())
     }
@@ -2010,25 +2101,22 @@ impl RuntimeFileConfig {
         cfg: &mut crate::config::BrokerConfig,
     ) -> Result<(), FileConfigError> {
         let runtime = self;
-        set_runtime_plain!(
-            runtime,
-            partition_disk_scan_interval_secs,
-            cfg.partition_disk_scan_interval_secs
-        );
+        // Zero is a valid `partition_disk_scan_interval_secs`: it disables the
+        // scanner, so this one is not routed through the positive-only macro.
+        if let Some(value) = runtime.partition_disk_scan_interval_secs {
+            cfg.partition_disk_scan_interval =
+                Time::from_secs(i64::try_from(value).unwrap_or(i64::MAX));
+        }
         set_runtime_plain!(runtime, observer_lag_bound, cfg.observer_lag_bound);
-        set_runtime_positive_u64!(runtime, heartbeat_interval_ms, cfg.heartbeat_interval_ms);
-        set_runtime_positive_u64!(runtime, heartbeat_timeout_ms, cfg.heartbeat_timeout_ms);
-        set_runtime_positive_u64!(
-            runtime,
-            replica_lag_time_max_ms,
-            cfg.replica_lag_time_max_ms
-        );
-        set_runtime_duration!(
+        set_runtime_time_millis!(runtime, heartbeat_interval_ms, cfg.heartbeat_interval);
+        set_runtime_time_millis!(runtime, heartbeat_timeout_ms, cfg.heartbeat_timeout);
+        set_runtime_time_millis!(runtime, replica_lag_time_max_ms, cfg.replica_lag_time_max);
+        set_runtime_time_millis!(
             runtime,
             controller_election_timeout_ms,
             cfg.controller_election_timeout
         );
-        set_runtime_duration!(
+        set_runtime_time_millis!(
             runtime,
             controller_heartbeat_interval_ms,
             cfg.controller_heartbeat_interval
@@ -2036,33 +2124,41 @@ impl RuntimeFileConfig {
         if let Some(value) = runtime.controlled_shutdown_drain_timeout_ms {
             positive_u64("controlled_shutdown_drain_timeout_ms", value)?;
         }
-        set_runtime_positive_u64!(
+        set_runtime_size_bytes!(
             runtime,
             metadata_max_bytes_between_snapshots,
-            cfg.metadata_max_bytes_between_snapshots
+            cfg.metadata_max_bytes_between_snapshots,
+            positive_u64
         );
+        // Zero disables the time-based snapshot cap, so it bypasses the
+        // positive-only macro.
         if let Some(value) = runtime.metadata_max_snapshot_interval_ms {
-            cfg.metadata_max_snapshot_interval = std::time::Duration::from_millis(value);
+            cfg.metadata_max_snapshot_interval =
+                Time::from_millis(i64::try_from(value).unwrap_or(i64::MAX));
         }
         set_runtime_positive_u64!(
             runtime,
             metadata_snapshot_interval_records,
             cfg.metadata_snapshot_interval_records
         );
+        // Zero disables the reaper, so it bypasses the positive-only macro.
         if let Some(value) = runtime.txn_abort_cleanup_interval_ms {
-            cfg.txn_abort_cleanup_interval = std::time::Duration::from_millis(value);
+            cfg.txn_abort_cleanup_interval =
+                Time::from_millis(i64::try_from(value).unwrap_or(i64::MAX));
         }
-        set_runtime_positive_u64!(
+        set_runtime_time_secs!(
             runtime,
             leader_imbalance_check_interval_secs,
-            cfg.leader_imbalance_check_interval_secs
+            cfg.leader_imbalance_check_interval
         );
         if let Some(value) = runtime.leader_imbalance_per_broker_percentage {
             let value = percentage("leader_imbalance_per_broker_percentage", value)?;
-            cfg.leader_imbalance_per_broker_percentage = value;
+            cfg.leader_imbalance_per_broker = percent(value);
         }
+        // Zero disables the periodic TLS watcher, so it bypasses the
+        // positive-only macro.
         if let Some(value) = runtime.tls_reload_interval_ms {
-            cfg.tls_reload_interval = std::time::Duration::from_millis(value);
+            cfg.tls_reload_interval = Time::from_millis(i64::try_from(value).unwrap_or(i64::MAX));
         }
         set_runtime_plain!(
             runtime,
@@ -2071,22 +2167,25 @@ impl RuntimeFileConfig {
         );
         set_runtime_plain!(runtime, max_connections, cfg.max_connections);
         set_runtime_plain!(runtime, max_connections_per_ip, cfg.max_connections_per_ip);
-        set_runtime_i64!(
+        set_runtime_time_millis!(
             runtime,
             delegation_token_max_lifetime_ms,
-            cfg.delegation_token_max_lifetime_ms
+            cfg.delegation_token_max_lifetime,
+            positive_i64
         );
-        set_runtime_i64!(
+        set_runtime_time_millis!(
             runtime,
             delegation_token_expiry_check_interval_ms,
-            cfg.delegation_token_expiry_check_interval_ms
+            cfg.delegation_token_expiry_check_interval,
+            positive_i64
         );
-        set_runtime_i64!(
+        set_runtime_time_millis!(
             runtime,
             delegation_token_default_renew_period_ms,
-            cfg.delegation_token_default_renew_period_ms
+            cfg.delegation_token_default_renew_period,
+            positive_i64
         );
-        set_runtime_duration!(
+        set_runtime_time_millis!(
             runtime,
             remote_log_manager_interval_ms,
             cfg.remote_log_manager_interval
@@ -2284,35 +2383,30 @@ impl FileConfig {
             })?;
         }
         if let Some(ms) = self.heartbeat_interval_ms
-            && cfg.heartbeat_interval_ms == defaults.heartbeat_interval_ms
+            && cfg.heartbeat_interval == defaults.heartbeat_interval
         {
-            cfg.heartbeat_interval_ms = positive_u64("heartbeat_interval_ms", ms)?;
+            cfg.heartbeat_interval = millis_time("heartbeat_interval_ms", ms)?;
         }
         if let Some(ms) = self.heartbeat_timeout_ms
-            && cfg.heartbeat_timeout_ms == defaults.heartbeat_timeout_ms
+            && cfg.heartbeat_timeout == defaults.heartbeat_timeout
         {
-            cfg.heartbeat_timeout_ms = positive_u64("heartbeat_timeout_ms", ms)?;
+            cfg.heartbeat_timeout = millis_time("heartbeat_timeout_ms", ms)?;
         }
         if let Some(ms) = self.replica_lag_time_max_ms
-            && cfg.replica_lag_time_max_ms == defaults.replica_lag_time_max_ms
+            && cfg.replica_lag_time_max == defaults.replica_lag_time_max
         {
-            cfg.replica_lag_time_max_ms = positive_u64("replica_lag_time_max_ms", ms)?;
+            cfg.replica_lag_time_max = millis_time("replica_lag_time_max_ms", ms)?;
         }
         if let Some(ms) = self.controller_election_timeout_ms
             && cfg.controller_election_timeout == defaults.controller_election_timeout
         {
-            cfg.controller_election_timeout = std::time::Duration::from_millis(positive_u64(
-                "controller_election_timeout_ms",
-                ms,
-            )?);
+            cfg.controller_election_timeout = millis_time("controller_election_timeout_ms", ms)?;
         }
         if let Some(ms) = self.controller_heartbeat_interval_ms
             && cfg.controller_heartbeat_interval == defaults.controller_heartbeat_interval
         {
-            cfg.controller_heartbeat_interval = std::time::Duration::from_millis(positive_u64(
-                "controller_heartbeat_interval_ms",
-                ms,
-            )?);
+            cfg.controller_heartbeat_interval =
+                millis_time("controller_heartbeat_interval_ms", ms)?;
         }
         if let Some(ld) = self.log_dir
             && cfg.log_dir == defaults.log_dir
@@ -2549,6 +2643,10 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
 
     use assert2::{assert, check};
+    use crabka_units::{
+        convert::{ByteSizeExt as _, RatioExt as _, TimeExt as _},
+        days, hours, mebibytes, millis, minutes, secs,
+    };
 
     use super::*;
 
@@ -2993,11 +3091,11 @@ controller_heartbeat_interval_ms = 100
 
         file.apply_to(&mut cfg).unwrap();
 
-        check!(cfg.heartbeat_interval_ms == 500);
-        check!(cfg.heartbeat_timeout_ms == 1500);
-        check!(cfg.replica_lag_time_max_ms == 2000);
-        check!(cfg.controller_election_timeout == std::time::Duration::from_millis(500));
-        check!(cfg.controller_heartbeat_interval == std::time::Duration::from_millis(100));
+        check!(cfg.heartbeat_interval == millis(500));
+        check!(cfg.heartbeat_timeout == millis(1500));
+        check!(cfg.replica_lag_time_max == secs(2));
+        check!(cfg.controller_election_timeout == millis(500));
+        check!(cfg.controller_heartbeat_interval == millis(100));
     }
 
     #[test]
@@ -3110,7 +3208,7 @@ jwks_expiry_seconds = 360
         let mut cfg = crate::config::BrokerConfig::default();
         file.apply_to(&mut cfg).unwrap();
         assert!(cfg.oauthbearer_jwks_endpoint.as_deref() == Some("https://idp.example/jwks"));
-        assert!(cfg.oauthbearer_jwks_refresh_interval == std::time::Duration::from_mins(1));
+        assert!(cfg.oauthbearer_jwks_refresh_interval == minutes(1));
         match cfg.oauthbearer_validator {
             crabka_security::OAuthBearerValidator::Signed(v) => {
                 check!(v.valid_issuer.as_deref() == Some("https://idp.example"));
@@ -3649,9 +3747,9 @@ secret_key = "abcdef"
                     .map(|s| s.as_bytes().to_vec())
                     == Some(b"abcdef".to_vec())
             );
-            check!(cfg.delegation_token_max_lifetime_ms == 7 * 24 * 60 * 60 * 1_000);
-            check!(cfg.delegation_token_expiry_check_interval_ms == 60 * 60 * 1_000);
-            check!(cfg.delegation_token_default_renew_period_ms == 24 * 60 * 60 * 1_000);
+            check!(cfg.delegation_token_max_lifetime == days(7));
+            check!(cfg.delegation_token_expiry_check_interval == hours(1));
+            check!(cfg.delegation_token_default_renew_period == hours(24));
         });
     }
 
@@ -3669,7 +3767,7 @@ secret_key = "abcdef"
             let mut cfg = crate::config::BrokerConfig::default();
             file.apply_to(&mut cfg).unwrap();
             assert!(
-                cfg.delegation_token_default_renew_period_ms == 24 * 60 * 60 * 1_000,
+                cfg.delegation_token_default_renew_period == hours(24),
                 "absent default_renew_period_ms should leave the 24h default in place"
             );
 
@@ -3683,7 +3781,7 @@ default_renew_period_ms = 7200000
             let mut cfg = crate::config::BrokerConfig::default();
             file.apply_to(&mut cfg).unwrap();
             assert!(
-                cfg.delegation_token_default_renew_period_ms == 7_200_000,
+                cfg.delegation_token_default_renew_period == hours(2),
                 "TOML default_renew_period_ms must override the default"
             );
         });
@@ -3723,9 +3821,9 @@ secret_key = "toml-loses"
             // No secret key anywhere; lifetime knobs stay at their defaults
             // when no section is present.
             check!(cfg.delegation_token_secret_key.is_none());
-            check!(cfg.delegation_token_max_lifetime_ms == 7 * 24 * 60 * 60 * 1_000);
-            check!(cfg.delegation_token_expiry_check_interval_ms == 60 * 60 * 1_000);
-            check!(cfg.delegation_token_default_renew_period_ms == 24 * 60 * 60 * 1_000);
+            check!(cfg.delegation_token_max_lifetime == days(7));
+            check!(cfg.delegation_token_expiry_check_interval == hours(1));
+            check!(cfg.delegation_token_default_renew_period == hours(24));
         });
     }
 
@@ -3880,7 +3978,9 @@ expire_after_ms = 60000
                 opa.allow_on_error,
                 opa.maximum_cache_size,
                 opa.expire_after_ms,
-                crate::config::BrokerConfig::default().opa_http_timeout,
+                crate::config::BrokerConfig::default()
+                    .opa_http_timeout
+                    .to_std(),
             )
             .unwrap();
             let img = MetadataImage::new(uuid::Uuid::nil());
@@ -4203,7 +4303,7 @@ in_memory = true
         );
         assert2::check!(cfg.audit_signing_key_id.as_deref() == Some("audit-2026"));
         assert2::check!(cfg.audit_checkpoint_every_n == 500);
-        assert2::check!(cfg.audit_checkpoint_every_secs == 30);
+        assert2::check!(cfg.audit_checkpoint_every == secs(30));
     }
 
     #[test]
@@ -4214,7 +4314,7 @@ in_memory = true
         assert2::check!(cfg.audit_signing_key_path == None);
         assert2::check!(cfg.audit_signing_key_id == None);
         assert2::check!(cfg.audit_checkpoint_every_n == 1000);
-        assert2::check!(cfg.audit_checkpoint_every_secs == 60);
+        assert2::check!(cfg.audit_checkpoint_every == secs(60));
     }
 
     #[test]
@@ -4232,13 +4332,13 @@ in_memory = true
         assert2::check!(
             cfg.audit_spool_dir == std::path::PathBuf::from("/var/lib/crabka/audit-spool")
         );
-        assert2::check!(cfg.audit_spool_max_bytes == 2048);
+        assert2::check!(cfg.audit_spool_max == crabka_units::kibibytes(2));
 
         let fc2: FileConfig = toml::from_str("[audit]\nenabled = true\n").expect("parse");
         let mut cfg2 = crate::config::BrokerConfig::for_tests(std::path::PathBuf::from("/tmp/x"));
         fc2.apply_to(&mut cfg2).expect("apply");
         assert2::check!(cfg2.audit_spool_dir == std::path::PathBuf::from("audit-spool"));
-        assert2::check!(cfg2.audit_spool_max_bytes == 1_073_741_824);
+        assert2::check!(cfg2.audit_spool_max == crabka_units::gibibytes(1));
     }
 
     #[test]
@@ -4267,15 +4367,135 @@ replication_fetch_min_bytes = 2
                 cfg.replication.fetch_max_bytes,
                 cfg.replication.fetch_max_wait_ms,
                 cfg.replication.fetch_min_bytes,
-            ) == (
-                std::time::Duration::from_secs(7),
-                std::time::Duration::from_millis(800),
-                std::time::Duration::from_millis(2_500),
-                2_097_152,
-                750,
-                2,
-            )
+            ) == (secs(7), millis(800), millis(2_500), 2_097_152, 750, 2)
         );
+    }
+
+    /// Every `*_ms` / `*_bytes` runtime key must survive the round trip
+    /// TOML integer → quantity → wire integer unchanged. This is the
+    /// regression the `crabka-units` adoption exists to prevent: a mapping
+    /// that reads `30000` as 30 000 *seconds*, or writes a 30 s timeout back
+    /// as `30`, changes a Kafka wire field by three orders of magnitude.
+    #[test]
+    fn runtime_millisecond_and_byte_keys_round_trip_through_quantities() {
+        let file: FileConfig = toml::from_str(
+            r"
+[runtime]
+heartbeat_interval_ms = 3000
+heartbeat_timeout_ms = 9000
+replica_lag_time_max_ms = 30000
+transaction_min_timeout_ms = 1000
+transaction_max_timeout_ms = 900000
+producer_id_expiration_ms = 86400000
+client_metrics_default_interval_ms = 300000
+delegation_token_max_lifetime_ms = 604800000
+socket_request_max_bytes = 104857600
+client_metrics_telemetry_max_bytes = 1048576
+observer_fetch_max_bytes = 1048576
+",
+        )
+        .expect("parse runtime config");
+        let mut cfg = crate::config::BrokerConfig::default();
+
+        file.apply_to(&mut cfg).expect("apply runtime config");
+
+        // Landed as dimensioned quantities, spelled in their natural units.
+        assert!(cfg.heartbeat_interval == secs(3));
+        assert!(cfg.heartbeat_timeout == secs(9));
+        assert!(cfg.replica_lag_time_max == secs(30));
+        assert!(cfg.transaction_min_timeout == secs(1));
+        assert!(cfg.transaction_max_timeout == minutes(15));
+        assert!(cfg.producer_id_expiration == hours(24));
+        assert!(cfg.client_metrics_default_interval == minutes(5));
+        assert!(cfg.delegation_token_max_lifetime == days(7));
+        assert!(cfg.socket_request_max == mebibytes(100));
+        assert!(cfg.client_metrics_telemetry_max == mebibytes(1));
+        assert!(cfg.observer_fetch_max == mebibytes(1));
+
+        // …and leave for the wire exactly the integers that came in.
+        let millis: [(&str, i64); 8] = [
+            ("heartbeat_interval_ms", cfg.heartbeat_interval.millis_i64()),
+            ("heartbeat_timeout_ms", cfg.heartbeat_timeout.millis_i64()),
+            (
+                "replica_lag_time_max_ms",
+                cfg.replica_lag_time_max.millis_i64(),
+            ),
+            (
+                "transaction_min_timeout_ms",
+                i64::from(cfg.transaction_min_timeout.millis_i32()),
+            ),
+            (
+                "transaction_max_timeout_ms",
+                i64::from(cfg.transaction_max_timeout.millis_i32()),
+            ),
+            (
+                "producer_id_expiration_ms",
+                cfg.producer_id_expiration.millis_i64(),
+            ),
+            (
+                "client_metrics_default_interval_ms",
+                i64::from(cfg.client_metrics_default_interval.millis_i32()),
+            ),
+            (
+                "delegation_token_max_lifetime_ms",
+                cfg.delegation_token_max_lifetime.millis_i64(),
+            ),
+        ];
+        assert!(
+            millis
+                == [
+                    ("heartbeat_interval_ms", 3_000),
+                    ("heartbeat_timeout_ms", 9_000),
+                    ("replica_lag_time_max_ms", 30_000),
+                    ("transaction_min_timeout_ms", 1_000),
+                    ("transaction_max_timeout_ms", 900_000),
+                    ("producer_id_expiration_ms", 86_400_000),
+                    ("client_metrics_default_interval_ms", 300_000),
+                    ("delegation_token_max_lifetime_ms", 604_800_000),
+                ]
+        );
+        let sizes: [(&str, i64); 3] = [
+            (
+                "socket_request_max_bytes",
+                cfg.socket_request_max.bytes_i64(),
+            ),
+            (
+                "client_metrics_telemetry_max_bytes",
+                i64::from(cfg.client_metrics_telemetry_max.bytes_i32()),
+            ),
+            (
+                "observer_fetch_max_bytes",
+                cfg.observer_fetch_max.bytes_i64(),
+            ),
+        ];
+        assert!(
+            sizes
+                == [
+                    ("socket_request_max_bytes", 104_857_600),
+                    ("client_metrics_telemetry_max_bytes", 1_048_576),
+                    ("observer_fetch_max_bytes", 1_048_576),
+                ]
+        );
+    }
+
+    /// Kafka's `leader.imbalance.per.broker.percentage` is an integer
+    /// percentage on the operator surface and a [`Ratio`] in the domain.
+    #[test]
+    fn leader_imbalance_percentage_lands_as_a_ratio() {
+        for (raw, want) in [(0_u32, 0.0), (10, 0.10), (55, 0.55), (100, 1.0)] {
+            let file: FileConfig = toml::from_str(&format!(
+                "[runtime]\nleader_imbalance_per_broker_percentage = {raw}\n"
+            ))
+            .expect("parse runtime config");
+            let mut cfg = crate::config::BrokerConfig::default();
+
+            file.apply_to(&mut cfg).expect("apply runtime config");
+
+            assert!(
+                (cfg.leader_imbalance_per_broker.as_f64() - want).abs() < 1e-12,
+                "{raw}% should be {want}"
+            );
+        }
     }
 
     #[test]

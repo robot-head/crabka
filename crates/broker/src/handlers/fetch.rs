@@ -27,6 +27,10 @@ use crabka_protocol::{
     primitives::uuid::Uuid as WireUuid,
     records::{RecordBatch, RecordsPayload},
 };
+use crabka_units::{
+    Time,
+    convert::{ByteSizeExt as _, TimeExt},
+};
 use num_traits::ToPrimitive as _;
 use tokio::sync::Notify;
 
@@ -652,11 +656,11 @@ async fn apply_consumer_fetch_quota(
         broker.config.quota_throttle_max,
     );
     let delay = data_delay.max(request_delay);
-    if delay == Duration::ZERO {
+    if delay <= <Time as TimeExt>::ZERO {
         return 0;
     }
-    tokio::time::sleep(delay).await;
-    i32::try_from(delay.as_millis()).unwrap_or(i32::MAX)
+    tokio::time::sleep(delay.to_std()).await;
+    crate::quota::throttle_time_ms(delay)
 }
 
 fn finalize_fetch_session(
@@ -744,7 +748,7 @@ async fn execute_pending_reads(
                 read_committed: read.read_committed,
                 is_follower_fetch: read.is_follower_fetch,
                 sendfile_capable,
-                sendfile_min_bytes: broker.config.sendfile_min_bytes,
+                sendfile_min_bytes: broker.config.sendfile_min.bytes_usize(),
             },
             &mut read.out,
         )
@@ -1493,7 +1497,7 @@ async fn long_poll_then_reread(
                 read_committed: p.read_committed,
                 is_follower_fetch: p.is_follower_fetch,
                 sendfile_capable,
-                sendfile_min_bytes: broker.config.sendfile_min_bytes,
+                sendfile_min_bytes: broker.config.sendfile_min.bytes_usize(),
             },
             &mut p.out,
         )
@@ -1556,15 +1560,15 @@ fn consume_consumer_quota(
     principal: &str,
     client_id: &str,
     bytes: u64,
-    maximum: Duration,
-) -> Duration {
+    maximum: Time,
+) -> Time {
     let Some((entity_key, rate)) =
         crate::quota::lookup_quota_with_key(image, principal, client_id, "consumer_byte_rate")
     else {
-        return Duration::ZERO;
+        return <Time as TimeExt>::ZERO;
     };
     if rate <= 0.0 {
-        return Duration::ZERO;
+        return <Time as TimeExt>::ZERO;
     }
     let bucket = buckets.get_or_create(
         "consumer_byte_rate",
@@ -1573,11 +1577,11 @@ fn consume_consumer_quota(
     );
     let granted = bucket.try_consume(bytes);
     if granted >= bytes {
-        return Duration::ZERO;
+        return <Time as TimeExt>::ZERO;
     }
     let overage = bytes - granted;
     let delay_secs = overage.to_f64().unwrap_or(f64::MAX) / rate;
-    Duration::from_secs_f64(delay_secs.min(maximum.as_secs_f64()))
+    Time::from_secs_f64(delay_secs).min(maximum)
 }
 
 fn should_use_sendfile(total_bytes: usize, has_regions: bool, minimum_bytes: usize) -> bool {
@@ -1645,6 +1649,7 @@ pub(crate) fn encode_fetch_response(
 #[cfg(test)]
 mod tests {
     use assert2::assert;
+    use crabka_units::{Time, convert::TimeExt, millis};
     #[test]
     fn consume_consumer_quota_tuple_match_overage_throttles() {
         use crabka_metadata::{ClientQuotaRecord, MetadataImage, MetadataRecord, QuotaEntity};
@@ -1664,29 +1669,17 @@ mod tests {
             config_value: Some(1024.0),
         }));
         let buckets = crate::quota::QuotaBuckets::new();
-        let delay_match = super::consume_consumer_quota(
-            &img,
-            &buckets,
-            "alice",
-            "app-x",
-            4096,
-            std::time::Duration::from_millis(25),
-        );
+        let delay_match =
+            super::consume_consumer_quota(&img, &buckets, "alice", "app-x", 4096, millis(25));
         assert!(
-            delay_match == std::time::Duration::from_millis(25),
+            delay_match == millis(25),
             "tuple quota match should honor the configured cap; got {delay_match:?}"
         );
         let buckets2 = crate::quota::QuotaBuckets::new();
-        let delay_other = super::consume_consumer_quota(
-            &img,
-            &buckets2,
-            "alice",
-            "other",
-            4096,
-            std::time::Duration::from_millis(25),
-        );
+        let delay_other =
+            super::consume_consumer_quota(&img, &buckets2, "alice", "other", 4096, millis(25));
         assert!(
-            delay_other == std::time::Duration::ZERO,
+            delay_other == <Time as TimeExt>::ZERO,
             "non-matching client_id should not throttle; got {delay_other:?}"
         );
     }

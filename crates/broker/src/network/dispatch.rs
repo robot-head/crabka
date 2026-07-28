@@ -16,6 +16,10 @@ use std::net::SocketAddr;
 
 use bytes::{BufMut, Bytes, BytesMut};
 use crabka_protocol::{Decode as _, api_key::ApiKey};
+use crabka_units::{
+    Time,
+    convert::{ByteSizeExt as _, TimeExt},
+};
 use futures_util::{SinkExt, StreamExt};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -405,7 +409,7 @@ where
         parsed.correlation_id,
         parsed.body_flexible,
         &body.freeze(),
-        broker.config.socket_request_max_bytes,
+        broker.config.socket_request_max.bytes_usize(),
     ) {
         Ok(response) => response,
         Err(error) => {
@@ -519,8 +523,10 @@ async fn serve_connection_stream<S>(
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static + crate::network::fetch_writer::SendfileSink,
 {
-    let mut framed: Framed<S, _> =
-        Framed::new(stream, codec::codec(broker.config.socket_request_max_bytes));
+    let mut framed: Framed<S, _> = Framed::new(
+        stream,
+        codec::codec(broker.config.socket_request_max.bytes_usize()),
+    );
     let is_sasl_listener = spec.protocol.requires_sasl();
     let sasl_mechanisms = crate::network::listener::resolve_sasl_mechanisms_for_listener(
         &spec,
@@ -738,7 +744,7 @@ async fn handle_sasl_frame(
                             auth,
                             &broker.config.oauthbearer_validator,
                             now_ms,
-                            broker.config.oauthbearer_max_session_lifetime_seconds,
+                            broker.config.oauthbearer_max_session_lifetime,
                         )
                         .await
                     }
@@ -786,7 +792,7 @@ async fn handle_sasl_frame(
         parsed.correlation_id,
         parsed.body_flexible,
         &resp_body,
-        broker.config.socket_request_max_bytes,
+        broker.config.socket_request_max.bytes_usize(),
     )?;
     Ok(SaslFrameOutcome {
         response_bytes,
@@ -868,7 +874,7 @@ async fn handle_fetch_frame_from_parsed(
             parsed.correlation_id,
             parsed.body_flexible,
             &body_bytes,
-            broker.config.socket_request_max_bytes,
+            broker.config.socket_request_max.bytes_usize(),
         )?;
         // Prepend the 4-byte frame length so the writer path is uniform.
         let mut framed_with_len = BytesMut::with_capacity(4 + framed.len());
@@ -902,7 +908,7 @@ async fn handle_fetch_frame_from_parsed(
                 version,
                 parsed.correlation_id,
                 parsed.body_flexible,
-                broker.config.socket_request_max_bytes,
+                broker.config.socket_request_max.bytes_usize(),
                 crate::network::fetch_writer::resolve_records_sendfile,
             );
         }
@@ -913,7 +919,7 @@ async fn handle_fetch_frame_from_parsed(
         version,
         parsed.correlation_id,
         parsed.body_flexible,
-        broker.config.socket_request_max_bytes,
+        broker.config.socket_request_max.bytes_usize(),
         crate::network::fetch_writer::resolve_records_inline,
     )
 }
@@ -957,7 +963,7 @@ async fn dispatch_registered_bytes(
             );
             Some(encode_dispatch_result(
                 parsed,
-                broker.config.socket_request_max_bytes,
+                broker.config.socket_request_max.bytes_usize(),
                 handler(
                     broker,
                     parsed.api_version,
@@ -970,7 +976,7 @@ async fn dispatch_registered_bytes(
         }
         crate::handlers::DispatchKind::Auth(handler) => Some(encode_dispatch_result(
             parsed,
-            broker.config.socket_request_max_bytes,
+            broker.config.socket_request_max.bytes_usize(),
             handler(
                 broker,
                 parsed.api_version,
@@ -993,7 +999,7 @@ async fn dispatch_registered_bytes(
             let body_bytes = frame.slice(body_offset..);
             Some(encode_dispatch_result(
                 parsed,
-                broker.config.socket_request_max_bytes,
+                broker.config.socket_request_max.bytes_usize(),
                 handler(
                     broker,
                     parsed.api_version,
@@ -1014,7 +1020,7 @@ async fn dispatch_registered_bytes(
             );
             Some(encode_dispatch_result(
                 parsed,
-                broker.config.socket_request_max_bytes,
+                broker.config.socket_request_max.bytes_usize(),
                 handler(
                     broker,
                     parsed.api_version,
@@ -1068,7 +1074,7 @@ async fn dispatch_registry_response(
                     parsed.correlation_id,
                     parsed.body_flexible,
                     &body,
-                    broker.config.socket_request_max_bytes,
+                    broker.config.socket_request_max.bytes_usize(),
                 )
                 .map(Some)
             }
@@ -1102,9 +1108,9 @@ async fn maybe_apply_request_quota(
             elapsed_micros,
             broker.config.quota_throttle_max,
         );
-        if delay > std::time::Duration::ZERO {
+        if delay > <Time as TimeExt>::ZERO {
             if throttle_is_leading_field(parsed.api_key, parsed.api_version) {
-                let delay_ms = i32::try_from(delay.as_millis()).unwrap_or(i32::MAX);
+                let delay_ms = crate::quota::throttle_time_ms(delay);
                 response_bytes = patch_leading_throttle(
                     response_bytes,
                     parsed.api_key,
@@ -1112,7 +1118,7 @@ async fn maybe_apply_request_quota(
                     delay_ms,
                 );
             }
-            tokio::time::sleep(delay).await;
+            tokio::time::sleep(delay.to_std()).await;
         }
     }
     response_bytes
