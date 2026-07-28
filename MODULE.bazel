@@ -102,6 +102,7 @@ crate.from_cargo(
         "//crates:remote-storage-topic/Cargo.toml",
         "//crates:schema-registry/Cargo.toml",
         "//crates:telemetry/Cargo.toml",
+        "//crates:units/Cargo.toml",
     ],
 )
 use_repo(crate, "crates")

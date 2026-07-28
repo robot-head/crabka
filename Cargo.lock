@@ -4044,6 +4044,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "crabka-units"
+version = "0.3.9"
+dependencies = [
+ "assert2",
+ "num-traits",
+ "proptest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "uom",
+]
+
+[[package]]
 name = "crabka-verified"
 version = "0.3.9"
 dependencies = [
@@ -8820,6 +8833,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "73f88a1307638156682bada9d7604135552957b7818057dcef22705b4d509495"
 dependencies = [
  "num-traits",
+ "serde",
 ]
 
 [[package]]
@@ -8882,6 +8896,7 @@ dependencies = [
  "num-bigint 0.4.8",
  "num-integer",
  "num-traits",
+ "serde",
 ]
 
 [[package]]
@@ -14655,6 +14670,20 @@ name = "unty"
 version = "0.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6d49784317cd0d1ee7ec5c716dd598ec5b4483ea832a2dced265471cc0f690ae"
+
+[[package]]
+name = "uom"
+version = "0.38.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a739f83872836c82a4f2527d4e54b37007b3de68cafe7edde95fd695968bf4b9"
+dependencies = [
+ "num-bigint 0.4.8",
+ "num-complex",
+ "num-rational",
+ "num-traits",
+ "serde_core",
+ "typenum",
+]
 
 [[package]]
 name = "ureq"
