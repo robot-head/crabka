@@ -3319,3 +3319,110 @@ operational owner is the consumer-build retry policy in
 initial backoff and a two-second backoff cap. Those values control startup
 failure recovery and remain fixed rather than flowing through the existing
 CLI/environment boundary.
+
+## Bench Driver Consumer Build Retry
+
+The bench driver's consumer-build retry policy is now represented by validated
+`ConsumerBuildAttempts`, `ConsumerBuildBackoffMs`, and
+`ConsumerBuildRetryPolicy` values stored in `DriverConfig`. It retains the
+existing defaults:
+
+- six total build attempts;
+- 100 milliseconds of initial backoff;
+- 2,000 milliseconds of maximum backoff.
+
+The settings are resolved from:
+
+```text
+--consumer-build-attempts
+BENCH_CONSUMER_BUILD_ATTEMPTS
+
+--consumer-build-initial-backoff-ms
+BENCH_CONSUMER_BUILD_INITIAL_BACKOFF_MS
+
+--consumer-build-max-backoff-ms
+BENCH_CONSUMER_BUILD_MAX_BACKOFF_MS
+```
+
+The command-line value wins when both inputs are present. Parsing rejects zero,
+malformed, negative, and primitive-overflow values.
+`ConsumerBuildAttempts` uses `refined_type::rule::GreaterU32<0>` and
+`ConsumerBuildBackoffMs` uses `refined_type::rule::GreaterU64<0>`. The complete
+policy also rejects an initial backoff above the maximum immediately after
+command-line parsing and before scenario-file I/O.
+
+The value flow is:
+
+```text
+Cli
+  -> ConsumerBuildRetryPolicy
+  -> DriverConfig::consumer_build_retry_policy
+  -> ConsumerTask
+  -> build_consumer_with_retry
+  -> exponential_backoff::Backoff::new
+```
+
+The existing loop still retries every consumer-build error, preserves attempt
+numbering, warning fields, and the terminal error, and uses the dependency's
+fixed growth factor and jitter. Client request timeouts, TLS, polling,
+poll-error backoff, sampling, and producer behavior are unchanged.
+
+The checked-in deployment flow is:
+
+```text
+BENCH_CONSUMER_BUILD_ATTEMPTS
+BENCH_CONSUMER_BUILD_INITIAL_BACKOFF_MS
+BENCH_CONSUMER_BUILD_MAX_BACKOFF_MS
+  -> bench/scripts/run-scenario.sh
+  -> envsubst
+  -> bench/manifests/driver/job-template.yaml
+  -> driver container environment
+```
+
+The launcher supplies overrideable 6/100/2,000 defaults, and the rendered Job
+always contains all three values. No CRD or operator field was added because
+the benchmark launcher and Job template own this binary.
+
+After the implementation and before this section was appended, the exact
+scanner command
+
+```text
+tools/audit-runtime-values.sh
+```
+
+reported 6,309 lines across 1,055 files. Its bench-driver subset contained 61
+lines: seven configured defaults, 37 test or harness values, 13 protocol,
+format, state, mathematical, or query invariants, and four unresolved
+operational values. The categories sum to all 61 lines:
+`7 + 37 + 13 + 4 = 61`.
+
+Before this section was appended, the exact focused search
+
+```text
+rg -n \
+  "consumer_build_retry_policy|ConsumerBuildRetryPolicy|ConsumerBuildAttempts|ConsumerBuildBackoffMs|DEFAULT_CONSUMER_BUILD_(ATTEMPTS|INITIAL_BACKOFF_MS|MAX_BACKOFF_MS)|consumer-build-(attempts|initial-backoff-ms|max-backoff-ms)|BENCH_CONSUMER_BUILD_(ATTEMPTS|INITIAL_BACKOFF_MS|MAX_BACKOFF_MS)" \
+  crates/bench-driver \
+  bench \
+  docs/configuration-audit.md
+```
+
+reported 91 lines. The mutually exclusive classification is 44 production
+configuration-flow references, 18 deployment-flow references, 29 test
+references, and zero prior-audit or unresolved-owner references:
+`44 + 18 + 29 + 0 = 91`.
+
+The package's 80 registered tests passed, including positive-boundary,
+primitive-rejection, ordered-range, preserved-default, early-resolution, and
+hermetic CLI-over-environment tests. Strict package Clippy, nightly formatting,
+one help entry per flag, shell syntax, default 6/100/2,000 and explicit
+3/21/22 manifest renders, diff hygiene, and the unchanged `Cargo.lock` check
+all passed.
+
+### Adjacent Pending Policy
+
+This closes only consumer construction retries. The next coherent bench-driver
+operational owner is consumer polling in
+`crates/bench-driver/src/workload.rs`: the 50-millisecond poll wait and
+100-millisecond sleep after poll errors. Those values control steady-state
+latency and failure recovery and remain fixed rather than flowing through the
+existing CLI/environment boundary.
