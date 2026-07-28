@@ -4,6 +4,7 @@ use clap::Parser;
 use crabka_admin_ui::config::{
     AdminUiConfig, AdminUiRuntimeArgs, BrokerSecurityConfig, ConfigError,
     DEFAULT_MUTATION_JSON_BODY_LIMIT_BYTES, MutationJsonBodyLimitBytes, SessionTtlSeconds,
+    TopicMutationTimeoutMs,
 };
 
 #[test]
@@ -158,6 +159,79 @@ fn session_ttl_precedence_child() {
         AdminUiRuntimeArgs::try_parse_from(["crabka-admin-ui", "--session-ttl-seconds", "64"])
             .expect("CLI value is valid");
     assert_eq!(from_cli.session_ttl.duration(), Duration::from_secs(64));
+}
+
+#[test]
+fn topic_mutation_timeout_default_remains_thirty_seconds() {
+    let cfg = AdminUiConfig::default();
+
+    assert_eq!(cfg.topic_mutation_timeout_ms.into_value(), 30_000);
+}
+
+#[test]
+fn topic_mutation_timeout_accepts_one_millisecond() {
+    assert_eq!(
+        TopicMutationTimeoutMs::new(1)
+            .expect("one millisecond is valid")
+            .into_value(),
+        1
+    );
+}
+
+#[test]
+fn topic_mutation_timeout_rejects_invalid_values() {
+    assert!(TopicMutationTimeoutMs::new(0).is_err());
+
+    let overflowing = format!("{}0", i32::MAX);
+    for invalid in ["0", "not-a-number", "-1", overflowing.as_str()] {
+        assert!(
+            AdminUiRuntimeArgs::try_parse_from([
+                "crabka-admin-ui",
+                "--topic-mutation-timeout-ms",
+                invalid,
+            ])
+            .is_err(),
+            "{invalid:?} must be rejected"
+        );
+    }
+}
+
+#[test]
+fn topic_mutation_timeout_environment_and_cli_precedence() {
+    let output = Command::new(std::env::current_exe().expect("test binary path is available"))
+        .arg("--exact")
+        .arg("topic_mutation_timeout_precedence_child")
+        .arg("--nocapture")
+        .env("CRABKA_ADMIN_UI_TOPIC_TIMEOUT_CHILD", "1")
+        .env("CRABKA_ADMIN_UI_TOPIC_MUTATION_TIMEOUT_MS", "32")
+        .output()
+        .expect("child test process runs");
+
+    assert!(
+        output.status.success(),
+        "child test failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn topic_mutation_timeout_precedence_child() {
+    if std::env::var_os("CRABKA_ADMIN_UI_TOPIC_TIMEOUT_CHILD").is_none() {
+        return;
+    }
+
+    let from_env = AdminUiRuntimeArgs::try_parse_from(["crabka-admin-ui"])
+        .expect("environment value is valid");
+    assert_eq!(from_env.topic_mutation_timeout_ms.into_value(), 32);
+
+    let from_cli = AdminUiRuntimeArgs::try_parse_from([
+        "crabka-admin-ui",
+        "--topic-mutation-timeout-ms",
+        "64",
+    ])
+    .expect("CLI value is valid");
+    assert_eq!(from_cli.topic_mutation_timeout_ms.into_value(), 64);
 }
 
 #[test]
