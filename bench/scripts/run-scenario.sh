@@ -13,6 +13,8 @@
 # Env vars:
 #   BENCH_DRIVER_IMAGE   image ref for the driver Job (default crabka-bench-driver:e2e)
 #   BENCH_NAMESPACE      target namespace for the Kafka CR (default 'default')
+#   BENCH_PROMETHEUS_REQUEST_TIMEOUT_SECONDS
+#                        Prometheus HTTP request timeout (default 15)
 #   BENCH_RESULTS_DIR    where to write the per-run JSON (default bench/results)
 #   BENCH_RUN_TAG        optional filename suffix (e.g. "-run07") for repeated
 #                        runs; set by run-matrix.sh so a 10× pass keeps all
@@ -36,6 +38,7 @@ fi
 : "${BENCH_TLS:=}"
 
 : "${BENCH_DRIVER_IMAGE:=crabka-bench-driver:e2e}"
+: "${BENCH_PROMETHEUS_REQUEST_TIMEOUT_SECONDS:=15}"
 : "${BENCH_RESULTS_DIR:=$REPO_ROOT/bench/results}"
 
 mkdir -p "$BENCH_RESULTS_DIR"
@@ -114,6 +117,7 @@ export BENCH_SCENARIO_NAME="$SCENARIO"
 export BENCH_BOOTSTRAP
 export BENCH_BROKER_COUNT
 export BENCH_DRIVER_IMAGE
+export BENCH_PROMETHEUS_REQUEST_TIMEOUT_SECONDS
 
 # TLS data-path knobs consumed by the job-template envsubst. All three are
 # always exported (with inert defaults on the plaintext path) so envsubst never

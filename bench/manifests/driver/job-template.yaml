@@ -7,6 +7,8 @@
 #   BENCH_BOOTSTRAP        <service-dns>:9092 (plaintext) or :9093 (TLS)
 #   BENCH_BROKER_COUNT     1 or 3
 #   BENCH_DRIVER_IMAGE     crabka-bench-driver:e2e (or :0.1.1)
+#   BENCH_PROMETHEUS_REQUEST_TIMEOUT_SECONDS
+#                           Prometheus HTTP request timeout
 #
 # TLS data-path env vars (run-scenario.sh exports these; default to the
 # plaintext path when BENCH_TLS is unset):
@@ -65,6 +67,8 @@ spec:
               value: default
             - name: BENCH_PROMETHEUS_URL
               value: http://prometheus.monitoring.svc.cluster.local:9090
+            - name: BENCH_PROMETHEUS_REQUEST_TIMEOUT_SECONDS
+              value: "${BENCH_PROMETHEUS_REQUEST_TIMEOUT_SECONDS}"
             - name: BENCH_BROKER_COUNT
               value: "${BENCH_BROKER_COUNT}"
             - name: BENCH_OUTPUT_PATH
