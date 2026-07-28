@@ -3526,3 +3526,93 @@ operational owner is the producer's 10-second final-drain timeout in
 `crates/bench-driver/src/workload.rs`. It bounds how long unresolved sends can
 delay benchmark completion and remains fixed rather than flowing through the
 existing CLI/environment boundary.
+
+## Bench Driver Producer Final-Drain Timeout
+
+The bench driver's producer final-drain timeout is now a positive
+`ProducerFinalDrainTimeoutSeconds` value stored in `DriverConfig`. It retains
+the existing 10-second default.
+
+The setting is resolved from:
+
+```text
+--producer-final-drain-timeout-seconds
+BENCH_PRODUCER_FINAL_DRAIN_TIMEOUT_SECONDS
+```
+
+The command-line value wins when both inputs are present. Parsing rejects zero,
+malformed, negative, and primitive-overflow values before scenario-file or
+network I/O. `ProducerFinalDrainTimeoutSeconds` uses
+`refined_type::rule::GreaterU64<0>`. It is separate from
+`ClientRequestTimeoutSeconds` because the latter's upper bound exists for a
+Kafka protocol field, while final drain is an in-process Tokio deadline.
+
+The value flow is:
+
+```text
+Cli
+  -> DriverConfig::producer_final_drain_timeout
+  -> ProducerTask
+  -> final drain deadline
+  -> timeout_at for outstanding sends
+```
+
+The deadline check, unresolved-send drop accounting, first-error preservation,
+timeout error text, producer flush, producer close, and all other behavior are
+unchanged.
+
+The checked-in deployment flow is:
+
+```text
+BENCH_PRODUCER_FINAL_DRAIN_TIMEOUT_SECONDS
+  -> bench/scripts/run-scenario.sh
+  -> envsubst
+  -> bench/manifests/driver/job-template.yaml
+  -> driver container environment
+```
+
+The launcher supplies an overrideable 10-second default, and the rendered Job
+always contains the value. No CRD or operator field was added because the
+benchmark launcher and Job template own this binary.
+
+After the implementation and before this section was appended, the exact
+scanner command
+
+```text
+tools/audit-runtime-values.sh
+```
+
+reported 6,325 lines across 1,055 files. Its bench-driver subset contained 77
+lines: 10 configured defaults, 53 test or harness values, 13 protocol, format,
+state, mathematical, or query invariants, and one unresolved operational
+value. The categories sum to all 77 lines:
+`10 + 53 + 13 + 1 = 77`.
+
+Before this section was appended, the exact focused search
+
+```text
+rg -n \
+  "producer_final_drain_timeout|ProducerFinalDrainTimeoutSeconds|DEFAULT_PRODUCER_FINAL_DRAIN_TIMEOUT_SECONDS|producer-final-drain-timeout-seconds|BENCH_PRODUCER_FINAL_DRAIN_TIMEOUT_SECONDS" \
+  crates/bench-driver \
+  bench \
+  docs/configuration-audit.md
+```
+
+reported 38 lines. The mutually exclusive classification is 15 production
+configuration-flow references, six deployment-flow references, 17 test
+references, and zero prior-audit or unresolved-owner references:
+`15 + 6 + 17 + 0 = 38`.
+
+The package's 92 registered tests passed, including positive-boundary,
+invalid-value, preserved-default, and hermetic CLI-over-environment tests.
+Strict package Clippy, nightly formatting, one help entry, shell syntax,
+default 10 and explicit 21-second manifest renders, diff hygiene, and the
+unchanged `Cargo.lock` check all passed.
+
+### Adjacent Pending Policy
+
+This closes only producer final-drain timing. The next coherent bench-driver
+operational owner is the fixed 2,000-millisecond sample interval in
+`crates/bench-driver/src/workload.rs`. It controls time-series resolution and
+remains fixed rather than flowing through the existing CLI/environment
+boundary.
