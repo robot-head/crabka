@@ -1021,8 +1021,10 @@ mod tests {
     };
 
     use super::{DrainIntent, Producer, wake_sender_after_append};
-    use crate::accumulator::{Accumulator, AppendResult};
-    use crate::error::ProducerError;
+    use crate::{
+        accumulator::{Accumulator, AppendResult},
+        error::ProducerError,
+    };
 
     const CLIENT_ID: &str = "producer-test";
 

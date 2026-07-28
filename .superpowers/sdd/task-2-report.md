@@ -1,4 +1,116 @@
-# Task 2 report: explicit timestamp-transaction sessions
+# Task 2 Report: Route Schema Registry Runtime Policy
+
+## Status
+
+Complete.
+
+## Scope
+
+Modified only the six Task 2 production files:
+
+- `crates/schema-registry/src/election/mod.rs`
+- `crates/schema-registry/src/election/client.rs`
+- `crates/schema-registry/src/kafkastore/reader.rs`
+- `crates/schema-registry/src/kafkastore/topic.rs`
+- `crates/schema-registry/src/kafkastore/mod.rs`
+- `crates/schema-registry/src/store/mod.rs`
+
+No CLI, environment, file configuration, or CRD surface changed.
+
+## RED
+
+Tests were added before production code for:
+
+- election policy conversion;
+- reader policy conversion;
+- schema topic create timeout;
+- configured store defaults and replay override precedence.
+
+The three required focused commands failed during compilation because the
+production seams did not exist:
+
+```text
+cargo test -p crabka-schema-registry election_policy
+cargo test -p crabka-schema-registry reader_policy
+cargo test -p crabka-schema-registry schemas_topic_spec
+
+error[E0425]: cannot find function `election_policy`
+error[E0422]: cannot find struct `ElectionPolicy`
+error[E0425]: cannot find function `reader_policy`
+error[E0422]: cannot find struct `ReaderPolicy`
+error[E0432]: unresolved import `super::schemas_topic_spec`
+error[E0599]: no function or associated item named `with_defaults`
+```
+
+These failures were caused by the missing runtime wiring, not test syntax or
+setup.
+
+## GREEN
+
+- `ElectionClient` owns a copy of `RegistryRuntimeConfig`.
+- `election_policy` supplies both `JoinGroupRequest` timeout fields, heartbeat
+  sleep, and reconnect sleep.
+- `reader_policy` is copied before the reader task is spawned and supplies
+  every retry sleep and both fetch limits.
+- `schemas_topic_spec` supplies the configured timeout to
+  `AdminClient::create_topics`.
+- `KafkaStore::start` creates `StoreState` with configured compatibility and
+  mode defaults before starting replay.
+- `StoreState` keeps replayed globals separate from configured defaults;
+  replayed values take precedence.
+- `StoreState::default` reuses `RegistryRuntimeConfig::default` rather than
+  duplicating policy strings.
+
+Removed the local election constants, four reader `250ms` literals, reader
+fetch `500`/`1 << 20` literals, topic create `15_000`, and store fallback
+string literals.
+
+## Verification
+
+Focused behavior:
+
+```text
+cargo test -p crabka-schema-registry election
+10 passed, 0 failed
+
+cargo test -p crabka-schema-registry kafkastore
+18 passed, 0 failed
+
+cargo test -p crabka-schema-registry store
+38 passed, 0 failed
+```
+
+Fresh final gates:
+
+```text
+cargo nextest run -p crabka-schema-registry --status-level fail --final-status-level fail
+191 passed, 9 skipped, 0 failed
+
+cargo clippy -p crabka-schema-registry --all-targets -- -D warnings
+passed
+
+cargo +nightly fmt --all -- --check
+passed
+
+git diff --check
+passed
+```
+
+The targeted literal scan returned no matches for the removed election,
+reader, topic timeout, or store fallback patterns.
+
+## Self-review
+
+- Every new helper is called from its real production path.
+- Every reader error branch uses the same configured retry backoff.
+- Existing protocol constants and fixed topic semantics remain fixed.
+- No new dependency, public abstraction, compatibility shim, or lint
+  suppression was added.
+- No concerns remain within Task 2 scope.
+
+---
+
+# Prior Task 2 report: explicit timestamp-transaction sessions
 
 ## Status
 
