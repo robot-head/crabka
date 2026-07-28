@@ -220,7 +220,10 @@ async fn run_distributor(
     metrics: ServiceMetrics,
     shutdown: CancellationToken,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let producer = Producer::builder().bootstrap(cli.bootstrap).build().await?;
+    // Boxed: the producer-startup future is several KB and would otherwise be
+    // inlined into this role's future (and from there into `run`'s). One
+    // allocation at startup keeps the role futures small.
+    let producer = Box::pin(Producer::builder().bootstrap(cli.bootstrap).build()).await?;
     let mut state =
         DistributorState::with_metrics(Arc::new(KafkaSink::new(Arc::new(producer))), metrics);
     state.limits.max_spans_per_request = cli.max_spans_per_request;
@@ -836,16 +839,23 @@ async fn wal_consumer(
     group_id: &str,
     group_instance_id: Option<&str>,
 ) -> Result<Consumer, crabka_client_consumer::ConsumerError> {
-    Consumer::builder()
-        .bootstrap(bootstrap)
-        .group_id(group_id.to_string())
-        .maybe_group_instance_id(group_instance_id)
-        .fetch_max_bytes(WAL_FETCH_MAX_BYTES)
-        .fetch_partition_max_bytes(WAL_FETCH_PARTITION_MAX_BYTES)
-        .subscribe(vec![TRACES_WAL_TOPIC.to_string()])
-        .auto_offset_reset(AutoOffsetReset::Earliest)
-        .build()
-        .await
+    // Boxed: consumer startup (bootstrap resolve, double `JoinGroup`,
+    // `SyncGroup`, offset priming) builds a ~13 KB future. Every role that
+    // reads the WAL awaits this, so leaving it inline pushes each role future
+    // — and the `run` dispatcher that unions them — past `clippy::large_futures`.
+    // The consumer is built once per process, so the allocation is free.
+    Box::pin(
+        Consumer::builder()
+            .bootstrap(bootstrap)
+            .group_id(group_id.to_string())
+            .maybe_group_instance_id(group_instance_id)
+            .fetch_max_bytes(WAL_FETCH_MAX_BYTES)
+            .fetch_partition_max_bytes(WAL_FETCH_PARTITION_MAX_BYTES)
+            .subscribe(vec![TRACES_WAL_TOPIC.to_string()])
+            .auto_offset_reset(AutoOffsetReset::Earliest)
+            .build(),
+    )
+    .await
 }
 
 #[cfg(test)]
