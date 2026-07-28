@@ -74,7 +74,9 @@ pub use profile_schema::{
     PCOL_TOTAL_VALUE, PCOL_TRACE_ID, PCOL_VALUE, profile_samples_decl, profile_samples_schema,
 };
 pub use reader::{
-    MAX_BLOCK_BYTES, RowGroupMeta, read_block, read_block_row_groups, read_row_group_metadata,
+    BlockReadMaxBytes, DEFAULT_BLOCK_READ_MAX_BYTES, MAX_BLOCK_BYTES, RowGroupMeta, read_block,
+    read_block_row_groups, read_block_row_groups_with_max_bytes, read_block_with_max_bytes,
+    read_row_group_metadata, read_row_group_metadata_with_max_bytes,
 };
 pub use span_block::{
     AttrValue, SpanAttr, SpanEvent, SpanLink, SpanRow, encode_span_rows,

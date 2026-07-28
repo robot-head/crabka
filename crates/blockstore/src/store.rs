@@ -15,7 +15,10 @@ use crate::{
     error::{BlockStoreError, Result},
     index::Index,
     matcher::LabelMatcher,
-    reader::read_block_row_groups,
+    reader::{
+        BlockReadMaxBytes, RowGroupMeta, read_block_row_groups_with_max_bytes,
+        read_row_group_metadata_with_max_bytes,
+    },
     writer::BlockWriter,
 };
 
@@ -37,15 +40,26 @@ pub struct BlockStore {
     store: Arc<dyn ObjectStore>,
     base: Url,
     index: Arc<Index>,
+    block_read_max_bytes: BlockReadMaxBytes,
 }
 
 impl BlockStore {
     #[must_use]
     pub fn new(store: Arc<dyn ObjectStore>, base: Url) -> Self {
+        Self::new_with_block_read_max_bytes(store, base, BlockReadMaxBytes::default())
+    }
+
+    #[must_use]
+    pub fn new_with_block_read_max_bytes(
+        store: Arc<dyn ObjectStore>,
+        base: Url,
+        block_read_max_bytes: BlockReadMaxBytes,
+    ) -> Self {
         Self {
             store,
             base,
             index: Arc::new(Index::new()),
+            block_read_max_bytes,
         }
     }
 
@@ -83,7 +97,25 @@ impl BlockStore {
 
     #[must_use]
     pub fn empty_like(&self) -> Self {
-        Self::new(self.store.clone(), self.base.clone())
+        Self::new_with_block_read_max_bytes(
+            self.store.clone(),
+            self.base.clone(),
+            self.block_read_max_bytes,
+        )
+    }
+
+    /// Read Parquet row-group metadata with this store's configured cap.
+    ///
+    /// # Errors
+    /// Returns an error when object-store I/O fails, the block exceeds the
+    /// configured cap, or persisted metadata is malformed.
+    pub async fn read_row_group_metadata(&self, object_key: &str) -> Result<Vec<RowGroupMeta>> {
+        read_row_group_metadata_with_max_bytes(
+            self.store.clone(),
+            object_key,
+            self.block_read_max_bytes,
+        )
+        .await
     }
 
     /// # Errors
@@ -232,7 +264,13 @@ impl BlockStore {
             return Ok((ctx, TABLE_NAME.to_string()));
         }
 
-        let batches = read_block_row_groups(self.store.clone(), object_key, row_groups).await?;
+        let batches = read_block_row_groups_with_max_bytes(
+            self.store.clone(),
+            object_key,
+            row_groups,
+            self.block_read_max_bytes,
+        )
+        .await?;
         let partitions = if batches.is_empty() {
             vec![vec![]]
         } else {
@@ -423,6 +461,36 @@ mod tests {
         let batches = df.collect().await.unwrap();
         let total: usize = batches.iter().map(RecordBatch::num_rows).sum();
         assert2::assert!(total == 2);
+    }
+
+    #[tokio::test]
+    async fn block_read_max_bytes_reaches_metadata_row_groups_and_empty_like() {
+        let (bs, schema) = seeded_store().await;
+        let capped = BlockStore::new_with_block_read_max_bytes(
+            bs.object_store(),
+            url::Url::parse("memory:///").unwrap(),
+            crate::BlockReadMaxBytes::new(1).unwrap(),
+        );
+
+        assert2::assert!(
+            capped
+                .read_row_group_metadata("blocks/b1.parquet")
+                .await
+                .is_err()
+        );
+        assert2::assert!(
+            capped
+                .scan_block_row_groups("blocks/b1.parquet", &[0], schema)
+                .await
+                .is_err()
+        );
+        assert2::assert!(
+            capped
+                .empty_like()
+                .read_row_group_metadata("blocks/b1.parquet")
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
