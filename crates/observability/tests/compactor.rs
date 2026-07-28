@@ -32,7 +32,7 @@ use crabka_observability::{
     run_compactor_once, run_compactor_until_idle, run_compactor_until_shutdown, serve_service,
     serve_service_listener, write_compaction_frontier_to_object_store,
 };
-use crabka_units::{Time, millis};
+use crabka_units::{Time, bytes, millis};
 use futures_util::stream::BoxStream;
 use object_store::{
     CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
@@ -1184,7 +1184,7 @@ async fn compactor_runtime_appends_shard_without_loading_historical_shards() {
     old_blocks.insert(crabka_blockstore::BlockDescriptor::new_with_size(
         old_key,
         BTreeSet::from([old_fingerprint]),
-        1,
+        bytes(1),
     ));
     write_tenant_log_index_shards_to_object_store(
         &store,

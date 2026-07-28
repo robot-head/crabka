@@ -2341,6 +2341,7 @@ dependencies = [
  "assert2",
  "async-trait",
  "crabka-object-store",
+ "crabka-units",
  "datafusion",
  "futures",
  "num-traits",
@@ -2779,6 +2780,7 @@ dependencies = [
  "crabka-gres-substrate",
  "crabka-pgkv",
  "crabka-pgwire",
+ "crabka-units",
  "futures-util",
  "refined_type",
  "temp-env",
@@ -2795,7 +2797,9 @@ dependencies = [
  "assert2",
  "crabka-gres-control",
  "crabka-gres-substrate",
+ "crabka-units",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

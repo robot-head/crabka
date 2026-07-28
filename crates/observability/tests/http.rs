@@ -29,7 +29,7 @@ use crabka_observability::{
     distributor_router, loki_router, otlp_grpc_logs_service, otlp_grpc_logs_service_with_limiter,
     serve_service_listener, write_compaction_frontier_to_object_store,
 };
-use crabka_units::{Time, bytes, millis, nanos};
+use crabka_units::{Time, bytes, convert::ByteSizeExt as _, millis, nanos};
 use datafusion::arrow::{
     array::{Float64Array, MapArray, StringArray, TimestampNanosecondArray},
     datatypes::{DataType, TimeUnit},
@@ -5404,7 +5404,7 @@ async fn compactor_delete_requests_filter_querier_stream_results() {
     )
     .unwrap();
     let mut block_index = BlockIndex::default();
-    let block_bytes = block.size_bytes;
+    let block_bytes = block.size.bytes_u64();
     block_index.insert(block);
     write_log_index_manifest(&dir, &label_index, &block_index).unwrap();
     let querier_config = ServiceConfig {
@@ -5489,7 +5489,7 @@ async fn compactor_delete_requests_persist_for_configured_querier() {
     )
     .unwrap();
     let mut block_index = BlockIndex::default();
-    let block_bytes = block.size_bytes;
+    let block_bytes = block.size.bytes_u64();
     block_index.insert(block);
     write_log_index_manifest(&dir, &label_index, &block_index).unwrap();
 
@@ -5649,7 +5649,7 @@ async fn compactor_delete_requests_filter_querier_metric_results() {
     )
     .unwrap();
     let mut block_index = BlockIndex::default();
-    let block_bytes = block.size_bytes;
+    let block_bytes = block.size.bytes_u64();
     block_index.insert(block);
     write_log_index_manifest(&dir, &label_index, &block_index).unwrap();
     let querier_config = ServiceConfig {
@@ -10984,7 +10984,7 @@ async fn query_endpoint_populates_loki_stats_from_planned_cold_blocks() {
         ],
     )
     .unwrap();
-    let expected_block_bytes = api_block.size_bytes;
+    let expected_block_bytes = api_block.size.bytes_u64();
     let mut block_index = BlockIndex::default();
     block_index.insert(api_block);
     let app = loki_router(QuerierState::new(dir, label_index, block_index));
@@ -11027,7 +11027,7 @@ async fn metric_query_endpoint_populates_loki_stats_from_planned_cold_blocks() {
         ],
     )
     .unwrap();
-    let expected_block_bytes = api_block.size_bytes;
+    let expected_block_bytes = api_block.size.bytes_u64();
     let mut block_index = BlockIndex::default();
     block_index.insert(api_block);
     let app = loki_router(QuerierState::new(dir, label_index, block_index));
@@ -13630,7 +13630,7 @@ async fn query_range_endpoint_returns_metric_timestamps_as_unix_seconds_numbers(
         ],
     )
     .unwrap();
-    let expected_block_bytes = api_block.size_bytes;
+    let expected_block_bytes = api_block.size.bytes_u64();
     let mut block_index = BlockIndex::default();
     block_index.insert(api_block);
     let app = loki_router(QuerierState::new(dir, label_index, block_index));
@@ -14649,7 +14649,7 @@ async fn configured_object_store_query_returns_partial_warning_for_missing_block
     )
     .await
     .unwrap();
-    let readable_block_bytes = readable_block.size_bytes;
+    let readable_block_bytes = readable_block.size.bytes_u64();
     let missing_block = BlockDescriptor::new(
         BlockKey::new("tenant-a", 0, 20, 29, TimeRange::new(20, 29).unwrap()),
         BTreeSet::from([api]),
@@ -14754,7 +14754,7 @@ async fn configured_object_store_backward_limited_query_stops_after_newest_block
     )
     .await
     .unwrap();
-    let newest_block_bytes = newest_block.size_bytes;
+    let newest_block_bytes = newest_block.size.bytes_u64();
     let mut block_index = BlockIndex::default();
     block_index.insert(missing_old_block);
     block_index.insert(newest_block);
@@ -14845,7 +14845,7 @@ async fn configured_object_store_query_merges_hot_tail_with_source_split_stats()
     )
     .await
     .unwrap();
-    let cold_block_bytes = cold_block.size_bytes;
+    let cold_block_bytes = cold_block.size.bytes_u64();
     let mut block_index = BlockIndex::default();
     block_index.insert(cold_block);
     write_tenant_log_index_manifest_to_object_store(
@@ -14957,7 +14957,7 @@ async fn configured_object_store_metric_query_returns_partial_warning_for_missin
     )
     .await
     .unwrap();
-    let readable_block_bytes = readable_block.size_bytes;
+    let readable_block_bytes = readable_block.size.bytes_u64();
     let missing_block = BlockDescriptor::new(
         BlockKey::new("tenant-a", 0, 20, 29, TimeRange::new(20, 29).unwrap()),
         BTreeSet::from([api]),
@@ -17227,7 +17227,7 @@ async fn index_stats_endpoint_returns_stream_chunk_entry_and_byte_counts() {
         ],
     )
     .unwrap();
-    let expected_block_bytes = api_block.size_bytes;
+    let expected_block_bytes = api_block.size.bytes_u64();
     let mut block_index = BlockIndex::default();
     block_index.insert(api_block);
     let state = QuerierState::new(dir, label_index, block_index);
@@ -17270,7 +17270,7 @@ async fn index_stats_endpoint_accepts_form_encoded_post_body() {
         ],
     )
     .unwrap();
-    let expected_block_bytes = api_block.size_bytes;
+    let expected_block_bytes = api_block.size.bytes_u64();
     let mut block_index = BlockIndex::default();
     block_index.insert(api_block);
     let state = QuerierState::new(dir, label_index, block_index);
@@ -17314,7 +17314,7 @@ async fn index_volume_endpoint_returns_series_vector_bytes() {
         vec![LogRow::new(api, 19, "api error", BTreeMap::new())],
     )
     .unwrap();
-    let expected_block_bytes = api_block.size_bytes;
+    let expected_block_bytes = api_block.size.bytes_u64();
     let worker_block = write_log_block(
         &dir,
         &BlockKey::new("tenant-a", 1, 10, 19, TimeRange::new(10, 19).unwrap()),
@@ -17371,7 +17371,7 @@ async fn index_volume_range_endpoint_returns_vector_with_target_labels() {
         vec![LogRow::new(api, 19, "api error", BTreeMap::new())],
     )
     .unwrap();
-    let expected_block_bytes = api_block.size_bytes;
+    let expected_block_bytes = api_block.size.bytes_u64();
     let mut block_index = BlockIndex::default();
     block_index.insert(api_block);
     let state = QuerierState::new(dir, label_index, block_index);
@@ -17424,7 +17424,7 @@ async fn index_volume_range_endpoint_accepts_form_post_query_with_raw_ampersand(
         vec![LogRow::new(api, 19, "api edge error", BTreeMap::new())],
     )
     .unwrap();
-    let expected_block_bytes = api_block.size_bytes;
+    let expected_block_bytes = api_block.size.bytes_u64();
     let mut block_index = BlockIndex::default();
     block_index.insert(api_block);
     let state = QuerierState::new(dir, label_index, block_index);
@@ -17477,7 +17477,7 @@ async fn index_volume_range_endpoint_returns_vector_without_target_labels() {
         vec![LogRow::new(api, 19, "api error", BTreeMap::new())],
     )
     .unwrap();
-    let expected_block_bytes = api_block.size_bytes;
+    let expected_block_bytes = api_block.size.bytes_u64();
     let mut block_index = BlockIndex::default();
     block_index.insert(api_block);
     let state = QuerierState::new(dir, label_index, block_index);
@@ -17767,7 +17767,7 @@ async fn index_volume_endpoint_supports_label_aggregation_and_limit() {
         vec![LogRow::new(api, 19, "api error", BTreeMap::new())],
     )
     .unwrap();
-    let expected_block_bytes = api_block.size_bytes;
+    let expected_block_bytes = api_block.size.bytes_u64();
     let mut block_index = BlockIndex::default();
     block_index.insert(api_block);
     let state = QuerierState::new(dir, label_index, block_index);
@@ -18998,7 +18998,7 @@ async fn configured_object_store_index_stats_endpoint_counts_entries_from_object
     )
     .await
     .unwrap();
-    let expected_block_bytes = api_block.size_bytes;
+    let expected_block_bytes = api_block.size.bytes_u64();
     let mut block_index = BlockIndex::default();
     block_index.insert(api_block);
     write_tenant_log_index_manifest_to_object_store(
@@ -19079,7 +19079,7 @@ async fn configured_object_store_index_stats_endpoint_loads_request_tenant_manif
     )
     .await
     .unwrap();
-    let expected_block_bytes = tenant_b_block.size_bytes;
+    let expected_block_bytes = tenant_b_block.size.bytes_u64();
     let mut block_index = BlockIndex::default();
     block_index.insert(tenant_b_block);
     write_tenant_log_index_manifest_to_object_store(
@@ -19160,7 +19160,7 @@ async fn configured_object_store_index_volume_endpoint_loads_request_tenant_mani
     )
     .await
     .unwrap();
-    let expected_block_bytes = tenant_b_block.size_bytes;
+    let expected_block_bytes = tenant_b_block.size.bytes_u64();
     let mut block_index = BlockIndex::default();
     block_index.insert(tenant_b_block);
     write_tenant_log_index_manifest_to_object_store(
@@ -19463,7 +19463,7 @@ async fn configured_object_store_querier_loads_manifest_for_request_tenant_heade
     .await
     .unwrap();
     let mut block_index = BlockIndex::default();
-    let stage_block_bytes = stage_block.size_bytes;
+    let stage_block_bytes = stage_block.size.bytes_u64();
     block_index.insert(prod_block);
     block_index.insert(stage_block);
     write_tenant_log_index_manifest_to_object_store(
@@ -19625,7 +19625,7 @@ async fn configured_object_store_shard_catalog_querier_loads_shards_for_request_
     .await
     .unwrap();
     let mut block_index = BlockIndex::default();
-    let tenant_b_block_bytes = tenant_b_block.size_bytes;
+    let tenant_b_block_bytes = tenant_b_block.size.bytes_u64();
     block_index.insert(tenant_b_block);
     write_tenant_log_index_shards_to_object_store(
         &store,
@@ -19831,8 +19831,8 @@ fn multi_tenant_fixture() -> (QuerierState, u64, u64) {
         )],
     )
     .unwrap();
-    let prod_bytes = prod_block.size_bytes;
-    let stage_bytes = stage_block.size_bytes;
+    let prod_bytes = prod_block.size.bytes_u64();
+    let stage_bytes = stage_block.size.bytes_u64();
 
     let mut block_index = BlockIndex::default();
     block_index.insert(prod_block);

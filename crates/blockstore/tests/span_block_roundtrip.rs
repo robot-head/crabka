@@ -13,6 +13,7 @@ use crabka_blockstore::{
     SummaryColumns, encode_span_rows, encode_span_rows_with_promoted_attrs, read_block,
     span_block_decl, span_block_schema, span_block_schema_with_promoted_attrs, validate_against,
 };
+use crabka_units::prelude::*;
 use object_store::{ObjectStore, memory::InMemory};
 
 fn row(trace: u8, span: u8, left: i32) -> SpanRow {
@@ -29,11 +30,11 @@ fn row(trace: u8, span: u8, left: i32) -> SpanRow {
         root_service_name: Some("svc".into()),
         root_span_name: Some("root".into()),
         trace_start_unix_nano: 100,
-        trace_duration_nanos: 10,
+        trace_duration: nanos(10),
         name: Some("op".into()),
         kind: SpanKind::Server,
         start_unix_nano: 100,
-        duration_nanos: 5,
+        duration: nanos(5),
         status_code: StatusCode::Ok,
         status_message: None,
         instrumentation_name: Some("tracer".into()),

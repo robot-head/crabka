@@ -12791,12 +12791,7 @@ async fn execute_index_stats_query(
     validate_query_series_limit(&state, &plan)?;
     validate_query_bytes_limit(&state, &plan)?;
     let entries = count_index_stats_entries(&state, &plan).await?;
-    let bytes = plan
-        .blocks
-        .iter()
-        .map(|block| block.size_bytes)
-        .try_fold(0_u64, u64::checked_add)
-        .unwrap_or(u64::MAX);
+    let bytes = planned_block_bytes(&plan).bytes_u64();
     let streams = plan
         .blocks
         .iter()
@@ -13582,7 +13577,7 @@ fn index_volume_samples(
             for metric in volume_metrics_for_labels(labels, params) {
                 let samples = volumes.entry(metric).or_default();
                 let sample = samples.entry(sample_time).or_default();
-                *sample = sample.saturating_add(block.size_bytes);
+                *sample = sample.saturating_add(block.size.bytes_u64());
             }
         }
     }
@@ -15356,15 +15351,7 @@ fn validate_query_bytes_limit(
     let Some(max_query_read) = state.max_query_read else {
         return Ok(());
     };
-    // `BlockDescriptor::size_bytes` is a `crabka-blockstore` row field, so the
-    // sum is taken over the raw integers and lifted at the boundary.
-    let planned = ByteSize::from_bytes(
-        plan.blocks
-            .iter()
-            .map(|block| block.size_bytes)
-            .try_fold(0_u64, u64::checked_add)
-            .unwrap_or(u64::MAX),
-    );
+    let planned = planned_block_bytes(plan);
     if planned > max_query_read {
         // The error carries plain integers so its rendered message is fixed by
         // the `#[error]` format string alone.
@@ -19567,11 +19554,14 @@ fn add_loki_query_stats_for_metric_plan_with_hot_tail(
 
 fn populate_loki_query_scan_stats(
     stats: &mut Value,
-    bytes: u64,
+    scanned: ByteSize,
     store_lines: u64,
     ingester_lines: u64,
     chunks: u64,
 ) {
+    // Loki's stats block reports whole bytes, so the quantity is lowered once
+    // here, at the JSON boundary.
+    let bytes = scanned.bytes_u64();
     if ingester_lines > 0 {
         stats["ingester"]["decompressedLines"] = json!(ingester_lines);
         stats["ingester"]["totalLinesSent"] = json!(ingester_lines);
@@ -19587,16 +19577,12 @@ fn populate_loki_query_scan_stats(
     stats["summary"]["totalLinesProcessed"] = json!(store_lines.saturating_add(ingester_lines));
 }
 
-fn planned_block_bytes(plan: &StreamPlan) -> u64 {
+fn planned_block_bytes(plan: &StreamPlan) -> ByteSize {
     planned_block_bytes_for_blocks(&plan.blocks)
 }
 
-fn planned_block_bytes_for_blocks(blocks: &[BlockDescriptor]) -> u64 {
-    blocks
-        .iter()
-        .map(|block| block.size_bytes)
-        .try_fold(0_u64, u64::checked_add)
-        .unwrap_or(u64::MAX)
+fn planned_block_bytes_for_blocks(blocks: &[BlockDescriptor]) -> ByteSize {
+    blocks.iter().map(|block| block.size).sum()
 }
 
 fn count_loki_stream_result_lines(value: &Value) -> u64 {

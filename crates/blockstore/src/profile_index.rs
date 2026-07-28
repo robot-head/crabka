@@ -9,6 +9,7 @@ use std::{
     sync::Arc,
 };
 
+use crabka_units::prelude::*;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload, path::Path};
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
@@ -34,7 +35,7 @@ pub const LABEL_PROFILE_TYPE: &str = "__profile_type__";
 /// object from shared storage could otherwise OOM the process. The object is
 /// `head()`ed first and rejected above this cap, mirroring the profiles gunzip
 /// `max_decompressed` pattern. Defaults to 256 MiB.
-pub const MAX_PROFILE_INDEX_SNAPSHOT_BYTES: usize = 256 * 1024 * 1024;
+pub const MAX_PROFILE_INDEX_SNAPSHOT_BYTES: ByteSize = mebibytes(256);
 
 #[derive(Default, Serialize, Deserialize)]
 struct TenantProfileExtras {
@@ -385,7 +386,7 @@ impl ProfileIndex {
     async fn load_with_cap(
         store: &Arc<dyn ObjectStore>,
         key: &str,
-        max_bytes: usize,
+        max_bytes: ByteSize,
     ) -> Result<Self> {
         Self::load_path_with_cap(store, &Path::from(key), max_bytes).await
     }
@@ -399,9 +400,10 @@ impl ProfileIndex {
     async fn load_path_with_cap(
         store: &Arc<dyn ObjectStore>,
         path: &Path,
-        max_bytes: usize,
+        max_bytes: ByteSize,
     ) -> Result<Self> {
-        let bytes = match crabka_object_store::read_capped(store, path, max_bytes as u64).await {
+        let bytes = match crabka_object_store::read_capped(store, path, max_bytes.bytes_u64()).await
+        {
             Ok(bytes) => bytes,
             Err(error) => {
                 return Err(match error {
@@ -542,7 +544,8 @@ mod tests {
 
     #[test]
     fn snapshot_size_cap_is_256_mib() {
-        assert2::assert!(MAX_PROFILE_INDEX_SNAPSHOT_BYTES == 256 * 1024 * 1024);
+        assert2::assert!(MAX_PROFILE_INDEX_SNAPSHOT_BYTES == mebibytes(256));
+        assert2::assert!(MAX_PROFILE_INDEX_SNAPSHOT_BYTES.bytes_u64() == 256 * 1024 * 1024);
     }
 
     #[test]
@@ -909,7 +912,7 @@ mod tests {
             .size;
         assert2::assert!(size > 1);
 
-        let got = ProfileIndex::load_with_cap(&store, "index/profiles.json", 1).await;
+        let got = ProfileIndex::load_with_cap(&store, "index/profiles.json", bytes(1)).await;
         let Err(BlockStoreError::InvalidBlock(msg)) = got else {
             panic!("expected InvalidBlock for oversized profile index snapshot");
         };
@@ -920,13 +923,10 @@ mod tests {
         );
 
         // A cap at/above the real size still loads.
-        let loaded = ProfileIndex::load_with_cap(
-            &store,
-            "index/profiles.json",
-            usize::try_from(size).unwrap(),
-        )
-        .await
-        .unwrap();
+        let loaded =
+            ProfileIndex::load_with_cap(&store, "index/profiles.json", ByteSize::from_bytes(size))
+                .await
+                .unwrap();
         let mut profile_types = loaded.profile_types("t");
         profile_types.sort();
         assert2::assert!(profile_types == strings(&[HEAP_TYPE, CPU_TYPE]));

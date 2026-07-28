@@ -30,7 +30,7 @@ use crabka_observability::{
     run_compactor_until_idle, run_compactor_until_shutdown, serve_service_listener,
 };
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_units::millis;
+use crabka_units::{convert::ByteSizeExt as _, millis};
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -896,7 +896,7 @@ async fn config_built_distributor_compactor_querier_loop_serves_compacted_logs()
                         ]
                     }
                 ],
-                "stats": expected_loki_stats_with(descriptors[0].size_bytes, 1, 1)
+                "stats": expected_loki_stats_with(descriptors[0].size.bytes_u64(), 1, 1)
             }
         })
     );

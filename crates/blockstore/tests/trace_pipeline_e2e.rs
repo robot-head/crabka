@@ -16,6 +16,7 @@ use crabka_blockstore::{
     SummaryColumns, TraceBlockStats, TraceIndex, assign_nested_set, encode_span_rows, read_block,
     span_block_decl, span_block_schema,
 };
+use crabka_units::prelude::*;
 use object_store::{ObjectStore, memory::InMemory};
 
 fn sid(n: u8) -> [u8; 8] {
@@ -40,11 +41,11 @@ fn build_trace(trace_id: [u8; 16], nodes: &[SpanNode], service: &str) -> Vec<Spa
             root_service_name: Some(service.to_string()),
             root_span_name: Some("POST /pay".into()),
             trace_start_unix_nano: 1_000,
-            trace_duration_nanos: 300,
+            trace_duration: nanos(300),
             name: Some(format!("span-{i}")),
             kind: SpanKind::Server,
             start_unix_nano: 1_000 + i64::try_from(i).unwrap(),
-            duration_nanos: 10,
+            duration: nanos(10),
             status_code: StatusCode::Ok,
             status_message: None,
             instrumentation_name: Some("tracer".into()),

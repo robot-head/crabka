@@ -7,6 +7,7 @@ use crabka_blockstore::{
     AttrValue as BlockAttrValue, NestedSet as BlockNestedSet, PromotedSpanAttr, SpanAttr,
     SpanEvent, SpanKind, SpanLink, SpanRow, StatusCode, encode_span_rows_with_promoted_attrs,
 };
+use crabka_units::prelude::*;
 
 use super::{AttrValue, KeyValue, Span, nested_set::assign_nested_set};
 use crate::error::TracesError;
@@ -76,11 +77,11 @@ pub fn span_batch_for_window(
             root_service_name: Some(root_service_name.clone()),
             root_span_name: Some(root_span_name.clone()),
             trace_start_unix_nano: trace_start,
-            trace_duration_nanos: trace_duration,
+            trace_duration,
             name: Some(span.name.clone()),
             kind: block_kind(span.kind),
             start_unix_nano: span.start_ns,
-            duration_nanos: span.duration_ns,
+            duration: Time::from_nanos(span.duration_ns),
             status_code: block_status(span.status),
             status_message: Some(span.status_message.clone()),
             instrumentation_name: Some(span.instrumentation_scope.clone()),
@@ -117,7 +118,7 @@ fn child_counts(nested: &[crate::span::nested_set::NestedSet]) -> Vec<i32> {
 /// reflect only the subset, not the trace. Callers that materialize rows from a
 /// clipped window must use [`span_batch_for_window`] and pass the full trace's
 /// spans here.
-fn root_info(spans: &[Span]) -> (String, String, i64, i64) {
+fn root_info(spans: &[Span]) -> (String, String, i64, Time) {
     let root = spans
         .iter()
         .find(|span| span.is_root())
@@ -132,7 +133,12 @@ fn root_info(spans: &[Span]) -> (String, String, i64, i64) {
         .map(|span| span.start_ns.saturating_add(span.duration_ns))
         .max()
         .unwrap_or(start);
-    (service, name, start, end.saturating_sub(start))
+    (
+        service,
+        name,
+        start,
+        Time::from_nanos(end.saturating_sub(start)),
+    )
 }
 
 fn service_name(attrs: &[KeyValue]) -> Option<String> {
@@ -236,7 +242,7 @@ fn span_events(span: &Span) -> Vec<SpanEvent> {
         .iter()
         .map(|event| SpanEvent {
             name: event.name.clone(),
-            time_since_start_nano: event.time_unix_nano.saturating_sub(span.start_ns),
+            time_since_start: Time::from_nanos(event.time_unix_nano.saturating_sub(span.start_ns)),
             attrs: event_attrs(&event.attrs),
         })
         .collect()

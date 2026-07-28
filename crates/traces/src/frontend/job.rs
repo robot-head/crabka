@@ -169,7 +169,7 @@ pub async fn blocks_for_tenant(
                     let index = u32::try_from(rg.index).ok()?;
                     Some(RowGroupInfo {
                         index,
-                        compressed: ByteSize::from_bytes(rg.compressed_bytes),
+                        compressed: rg.compressed,
                     })
                 })
                 .collect();
