@@ -4,9 +4,11 @@
 //! per-task histograms into the public `LatencyPercentiles` shape.
 
 use std::{
+    fmt,
     future::Future,
     path::PathBuf,
     pin::Pin,
+    str::FromStr,
     sync::{
         Arc,
         atomic::{AtomicU8, AtomicU64, Ordering},
@@ -22,6 +24,7 @@ use crabka_client_producer::{Producer, ProducerError, ProducerRecord, RecordMeta
 use crabka_security::ListenerProtocol;
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use hdrhistogram::Histogram;
+use refined_type::rule::MinMaxU64;
 use tokio::{task::JoinSet, time::Instant};
 use tracing::{info, warn};
 
@@ -50,15 +53,74 @@ type AckResult =
     Result<Result<RecordMetadata, ProducerError>, tokio::sync::oneshot::error::RecvError>;
 type AckFuture = Pin<Box<dyn Future<Output = (AckResult, Instant)> + Send>>;
 
-fn producer_request_timeout() -> Duration {
-    Duration::from_secs(2)
+pub const MAX_CLIENT_REQUEST_TIMEOUT_SECONDS: u64 = 2_147_483;
+pub const DEFAULT_PRODUCER_REQUEST_TIMEOUT_SECONDS: u64 = 2;
+pub const DEFAULT_CRABKA_CONSUMER_REQUEST_TIMEOUT_SECONDS: u64 = 5;
+pub const DEFAULT_KAFKA_CONSUMER_REQUEST_TIMEOUT_SECONDS: u64 = 30;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientRequestTimeoutSeconds(u64);
+
+impl ClientRequestTimeoutSeconds {
+    /// Validate a client request timeout.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `value` is zero or exceeds the largest
+    /// whole-second Kafka protocol timeout.
+    pub fn new(value: u64) -> Result<Self, String> {
+        MinMaxU64::<1, 2_147_483>::new(value)
+            .map(|value| Self(value.into_value()))
+            .map_err(|error| error.to_string())
+    }
+
+    #[must_use]
+    pub const fn duration(self) -> Duration {
+        Duration::from_secs(self.0)
+    }
 }
 
-fn consumer_request_timeout(stack: Stack) -> Duration {
-    match stack {
-        Stack::Crabka => Duration::from_secs(5),
-        Stack::Kafka => Duration::from_secs(30),
+impl fmt::Display for ClientRequestTimeoutSeconds {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
     }
+}
+
+impl FromStr for ClientRequestTimeoutSeconds {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value
+            .parse()
+            .map_err(|error: std::num::ParseIntError| error.to_string())
+            .and_then(Self::new)
+    }
+}
+
+/// Return the validated producer request-timeout default.
+///
+/// # Panics
+///
+/// Panics if the named default is not protocol-safe.
+#[must_use]
+pub fn default_producer_request_timeout() -> ClientRequestTimeoutSeconds {
+    ClientRequestTimeoutSeconds::new(DEFAULT_PRODUCER_REQUEST_TIMEOUT_SECONDS)
+        .expect("default producer request timeout is protocol-safe")
+}
+
+/// Return the validated consumer request-timeout default for `stack`.
+///
+/// # Panics
+///
+/// Panics if the selected named default is not protocol-safe.
+#[must_use]
+pub fn default_consumer_request_timeout(stack: Stack) -> ClientRequestTimeoutSeconds {
+    let seconds = match stack {
+        Stack::Crabka => DEFAULT_CRABKA_CONSUMER_REQUEST_TIMEOUT_SECONDS,
+        Stack::Kafka => DEFAULT_KAFKA_CONSUMER_REQUEST_TIMEOUT_SECONDS,
+    };
+    ClientRequestTimeoutSeconds::new(seconds)
+        .expect("default consumer request timeout is protocol-safe")
 }
 
 /// The fixed sampling grid, shared (by Copy) with every task so all tasks
@@ -93,6 +155,8 @@ pub struct DriverConfig {
     pub namespace: String,
     pub prometheus_url: Option<String>,
     pub prometheus_request_timeout_seconds: PrometheusRequestTimeoutSeconds,
+    pub producer_request_timeout_seconds: ClientRequestTimeoutSeconds,
+    pub consumer_request_timeout_seconds: ClientRequestTimeoutSeconds,
     pub broker_count: u32,
     pub scenario_id: u64,
     /// TLS data-path config. `None` → plaintext (the default benchmark path).
@@ -195,6 +259,7 @@ pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
             first_ack,
             security: sec,
             grid,
+            request_timeout: cfg.producer_request_timeout_seconds,
         }));
     }
 
@@ -206,7 +271,6 @@ pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
         let stop = stop.clone();
         let sid = cfg.scenario_id;
         let sec = security.clone();
-        let stack = cfg.stack;
         cons_set.spawn(run_consumer(ConsumerTask {
             idx: i,
             scenario: s,
@@ -216,7 +280,7 @@ pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
             stop,
             security: sec,
             grid,
-            stack,
+            request_timeout: cfg.consumer_request_timeout_seconds,
         }));
     }
 
@@ -636,6 +700,7 @@ struct ProducerTask {
     first_ack: Arc<AtomicU64>,
     security: Option<ClientSecurity>,
     grid: Grid,
+    request_timeout: ClientRequestTimeoutSeconds,
 }
 
 async fn run_producer(task: ProducerTask) -> ProducerOut {
@@ -649,6 +714,7 @@ async fn run_producer(task: ProducerTask) -> ProducerOut {
         first_ack,
         security,
         grid,
+        request_timeout,
     } = task;
     // Idempotence forces acks=All; turn it off whenever the scenario
     // requested something weaker.
@@ -673,7 +739,7 @@ async fn run_producer(task: ProducerTask) -> ProducerOut {
         // send to a *killed* leader blocks before the client re-routes, so the
         // measured failover recovery reflects the cluster's leader re-election
         // rather than the 30s default request timeout.
-        .request_timeout(producer_request_timeout())
+        .request_timeout(request_timeout.duration())
         // `None` → plaintext (default). `Some` → all produce traffic for this
         // task goes over the broker's TLS listener.
         .maybe_security(security)
@@ -879,7 +945,7 @@ struct ConsumerTask {
     stop: Arc<AtomicU8>,
     security: Option<ClientSecurity>,
     grid: Grid,
-    stack: Stack,
+    request_timeout: ClientRequestTimeoutSeconds,
 }
 
 async fn run_consumer(task: ConsumerTask) -> ConsumerOut {
@@ -892,7 +958,7 @@ async fn run_consumer(task: ConsumerTask) -> ConsumerOut {
         stop,
         security,
         grid,
-        stack,
+        request_timeout,
     } = task;
     let group_id = format!("crabka-bench-{}", scenario.name);
     let mut consumer = match build_consumer_with_retry(
@@ -901,7 +967,7 @@ async fn run_consumer(task: ConsumerTask) -> ConsumerOut {
         group_id,
         &topic,
         security,
-        consumer_request_timeout(stack),
+        request_timeout,
     )
     .await
     {
@@ -980,7 +1046,7 @@ async fn build_consumer_with_retry(
     group_id: String,
     topic: &str,
     security: Option<ClientSecurity>,
-    request_timeout: Duration,
+    request_timeout: ClientRequestTimeoutSeconds,
 ) -> Result<Consumer> {
     let backoff = exponential_backoff::Backoff::new(
         CONSUMER_BUILD_ATTEMPTS,
@@ -995,7 +1061,7 @@ async fn build_consumer_with_retry(
             .group_id(group_id.clone())
             .subscribe(vec![topic.to_string()])
             .auto_offset_reset(AutoOffsetReset::Earliest)
-            .request_timeout(request_timeout)
+            .request_timeout(request_timeout.duration())
             // `None` → plaintext (default). `Some` → all fetch traffic for this
             // task goes over the broker's TLS listener (kTLS sendfile on crabka).
             .maybe_security(security.clone())
@@ -1041,6 +1107,8 @@ mod tests {
             namespace: "default".into(),
             prometheus_url: None,
             prometheus_request_timeout_seconds: PrometheusRequestTimeoutSeconds::default(),
+            producer_request_timeout_seconds: default_producer_request_timeout(),
+            consumer_request_timeout_seconds: default_consumer_request_timeout(Stack::Crabka),
             broker_count,
             scenario_id: 0,
             tls: None,
@@ -1075,11 +1143,46 @@ mod tests {
     }
 
     #[test]
-    fn request_timeout_policy_bounds_producers_and_only_crabka_consumers() {
-        assert2::assert!(producer_request_timeout() == Duration::from_secs(2));
-        assert2::assert!(consumer_request_timeout(Stack::Crabka) == Duration::from_secs(5));
-        assert2::assert!(consumer_request_timeout(Stack::Kafka) == Duration::from_secs(30));
+    fn client_request_timeout_defaults_preserve_policy() {
+        assert_eq!(
+            default_producer_request_timeout().duration(),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            default_consumer_request_timeout(Stack::Crabka).duration(),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            default_consumer_request_timeout(Stack::Kafka).duration(),
+            Duration::from_secs(30)
+        );
         assert2::assert!(CONSUMER_BUILD_ATTEMPTS == 6);
+    }
+
+    #[test]
+    fn client_request_timeout_accepts_protocol_bounds() {
+        assert_eq!(
+            ClientRequestTimeoutSeconds::new(1)
+                .expect("one second is valid")
+                .duration(),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            ClientRequestTimeoutSeconds::new(MAX_CLIENT_REQUEST_TIMEOUT_SECONDS)
+                .expect("maximum whole-second protocol timeout is valid")
+                .duration(),
+            Duration::from_secs(2_147_483)
+        );
+    }
+
+    #[test]
+    fn client_request_timeout_rejects_invalid_values() {
+        for invalid in ["0", "not-a-number", "-1", "2147484"] {
+            assert!(
+                invalid.parse::<ClientRequestTimeoutSeconds>().is_err(),
+                "{invalid:?} must be rejected"
+            );
+        }
     }
 
     // TLS enabled: a CA path + server_name must build a `ClientSecurity` whose

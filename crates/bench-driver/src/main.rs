@@ -8,7 +8,7 @@ use clap::Parser;
 use crabka_bench_driver::{
     prom::PrometheusRequestTimeoutSeconds,
     scenario::{Scenario, Stack},
-    workload::{self, DriverConfig},
+    workload::{self, ClientRequestTimeoutSeconds, DriverConfig},
 };
 use tracing_subscriber::EnvFilter;
 
@@ -41,6 +41,17 @@ struct Cli {
         default_value_t = PrometheusRequestTimeoutSeconds::default()
     )]
     prometheus_request_timeout_seconds: PrometheusRequestTimeoutSeconds,
+    /// Producer request timeout, in seconds.
+    #[arg(
+        long,
+        env = "BENCH_PRODUCER_REQUEST_TIMEOUT_SECONDS",
+        default_value_t = workload::default_producer_request_timeout()
+    )]
+    producer_request_timeout_seconds: ClientRequestTimeoutSeconds,
+    /// Consumer request timeout, in seconds. Defaults to 5 for Crabka and 30
+    /// for Kafka.
+    #[arg(long, env = "BENCH_CONSUMER_REQUEST_TIMEOUT_SECONDS")]
+    consumer_request_timeout_seconds: Option<ClientRequestTimeoutSeconds>,
     /// Configured broker count. The driver uses this to gate RF=3-only
     /// scenarios.
     #[arg(long, env = "BENCH_BROKER_COUNT", default_value_t = 1)]
@@ -88,6 +99,13 @@ impl StackArg {
             StackArg::Kafka => Stack::Kafka,
         }
     }
+}
+
+fn resolve_consumer_request_timeout(
+    stack: Stack,
+    configured: Option<ClientRequestTimeoutSeconds>,
+) -> ClientRequestTimeoutSeconds {
+    configured.unwrap_or_else(|| workload::default_consumer_request_timeout(stack))
 }
 
 #[tokio::main]
@@ -139,13 +157,18 @@ async fn main() -> Result<()> {
         None
     };
 
+    let stack = cli.stack.into_stack();
+    let consumer_request_timeout_seconds =
+        resolve_consumer_request_timeout(stack, cli.consumer_request_timeout_seconds);
     let cfg = DriverConfig {
         bootstrap: cli.bootstrap,
         topic: cli.topic,
-        stack: cli.stack.into_stack(),
+        stack,
         namespace: cli.namespace,
         prometheus_url: cli.prometheus,
         prometheus_request_timeout_seconds: cli.prometheus_request_timeout_seconds,
+        producer_request_timeout_seconds: cli.producer_request_timeout_seconds,
+        consumer_request_timeout_seconds,
         broker_count: cli.broker_count,
         scenario_id,
         tls,
@@ -193,7 +216,7 @@ mod tests {
 
     use super::*;
 
-    fn required_args() -> Vec<&'static str> {
+    fn required_args(stack: &'static str) -> Vec<&'static str> {
         vec![
             "crabka-bench-driver",
             "--scenario",
@@ -201,8 +224,102 @@ mod tests {
             "--bootstrap",
             "broker:9092",
             "--stack",
-            "crabka",
+            stack,
         ]
+    }
+
+    #[test]
+    fn client_request_timeout_defaults_follow_active_stack() {
+        let crabka = Cli::try_parse_from(required_args("crabka")).expect("Crabka timeout defaults");
+        let kafka = Cli::try_parse_from(required_args("kafka")).expect("Kafka timeout defaults");
+
+        assert_eq!(
+            crabka.producer_request_timeout_seconds.duration(),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            resolve_consumer_request_timeout(
+                Stack::Crabka,
+                crabka.consumer_request_timeout_seconds,
+            )
+            .duration(),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            resolve_consumer_request_timeout(Stack::Kafka, kafka.consumer_request_timeout_seconds,)
+                .duration(),
+            Duration::from_secs(30)
+        );
+    }
+
+    #[test]
+    fn client_request_timeout_rejects_invalid_cli_values() {
+        for option in [
+            "--producer-request-timeout-seconds",
+            "--consumer-request-timeout-seconds",
+        ] {
+            for invalid in ["0", "not-a-number", "-1", "2147484"] {
+                let mut args = required_args("crabka");
+                args.extend([option, invalid]);
+                assert!(Cli::try_parse_from(args).is_err(), "{option}={invalid}");
+            }
+        }
+    }
+
+    #[test]
+    fn client_request_timeouts_read_environment_and_prefer_cli() {
+        const CHILD: &str = "CRABKA_BENCH_CLIENT_TIMEOUTS_CHILD";
+
+        if std::env::var_os(CHILD).is_none() {
+            let status =
+                std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args([
+                        "--exact",
+                        "tests::client_request_timeouts_read_environment_and_prefer_cli",
+                    ])
+                    .env(CHILD, "1")
+                    .env("BENCH_PRODUCER_REQUEST_TIMEOUT_SECONDS", "11")
+                    .env("BENCH_CONSUMER_REQUEST_TIMEOUT_SECONDS", "12")
+                    .status()
+                    .expect("child test");
+            assert!(status.success());
+            return;
+        }
+
+        let from_env = Cli::try_parse_from(required_args("crabka")).expect("environment");
+        assert_eq!(
+            from_env.producer_request_timeout_seconds.duration(),
+            Duration::from_secs(11)
+        );
+        assert_eq!(
+            resolve_consumer_request_timeout(
+                Stack::Crabka,
+                from_env.consumer_request_timeout_seconds,
+            )
+            .duration(),
+            Duration::from_secs(12)
+        );
+
+        let mut args = required_args("crabka");
+        args.extend([
+            "--producer-request-timeout-seconds",
+            "21",
+            "--consumer-request-timeout-seconds",
+            "22",
+        ]);
+        let from_cli = Cli::try_parse_from(args).expect("CLI over environment");
+        assert_eq!(
+            from_cli.producer_request_timeout_seconds.duration(),
+            Duration::from_secs(21)
+        );
+        assert_eq!(
+            resolve_consumer_request_timeout(
+                Stack::Crabka,
+                from_cli.consumer_request_timeout_seconds,
+            )
+            .duration(),
+            Duration::from_secs(22)
+        );
     }
 
     #[test]
@@ -224,13 +341,13 @@ mod tests {
             return;
         }
 
-        let from_env = Cli::try_parse_from(required_args()).expect("environment");
+        let from_env = Cli::try_parse_from(required_args("crabka")).expect("environment");
         assert_eq!(
             from_env.prometheus_request_timeout_seconds.duration(),
             Duration::from_secs(32)
         );
 
-        let mut args = required_args();
+        let mut args = required_args("crabka");
         args.extend(["--prometheus-request-timeout-seconds", "64"]);
         let from_cli = Cli::try_parse_from(args).expect("CLI over environment");
         assert_eq!(
