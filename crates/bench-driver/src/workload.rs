@@ -30,7 +30,7 @@ use crate::{
     ids::{DurationSeconds, MessageCount, TimeOffsetMs, WallclockMs},
     numeric::{nonnegative_i64_to_u64, saturating_u128_to_u64, to_f64},
     payload,
-    prom::PromClient,
+    prom::{PromClient, PrometheusRequestTimeoutSeconds},
     rate::Pacer,
     scenario::{
         BrokerSample, Disturbance, LoadMode, ModeTag, Resource, RunOutput, Sample, Scenario, Stack,
@@ -92,6 +92,7 @@ pub struct DriverConfig {
     pub stack: Stack,
     pub namespace: String,
     pub prometheus_url: Option<String>,
+    pub prometheus_request_timeout_seconds: PrometheusRequestTimeoutSeconds,
     pub broker_count: u32,
     pub scenario_id: u64,
     /// TLS data-path config. `None` → plaintext (the default benchmark path).
@@ -476,7 +477,7 @@ async fn capture_resources(
         notes.push("prometheus-url-not-set".into());
         return (Resource::default(), Vec::new());
     };
-    let client = match PromClient::new(url) {
+    let client = match PromClient::new(url, cfg.prometheus_request_timeout_seconds) {
         Ok(client) => client,
         Err(error) => {
             notes.push(format!("prometheus-client-failed: {error}"));
@@ -1039,6 +1040,7 @@ mod tests {
             stack: Stack::Crabka,
             namespace: "default".into(),
             prometheus_url: None,
+            prometheus_request_timeout_seconds: PrometheusRequestTimeoutSeconds::default(),
             broker_count,
             scenario_id: 0,
             tls: None,

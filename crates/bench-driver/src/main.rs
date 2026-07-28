@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Parser;
 use crabka_bench_driver::{
+    prom::PrometheusRequestTimeoutSeconds,
     scenario::{Scenario, Stack},
     workload::{self, DriverConfig},
 };
@@ -33,6 +34,13 @@ struct Cli {
     /// `notes` reflects the skip.
     #[arg(long, env = "BENCH_PROMETHEUS_URL")]
     prometheus: Option<String>,
+    /// HTTP request timeout for Prometheus queries, in seconds.
+    #[arg(
+        long,
+        env = "BENCH_PROMETHEUS_REQUEST_TIMEOUT_SECONDS",
+        default_value_t = PrometheusRequestTimeoutSeconds::default()
+    )]
+    prometheus_request_timeout_seconds: PrometheusRequestTimeoutSeconds,
     /// Configured broker count. The driver uses this to gate RF=3-only
     /// scenarios.
     #[arg(long, env = "BENCH_BROKER_COUNT", default_value_t = 1)]
@@ -137,6 +145,7 @@ async fn main() -> Result<()> {
         stack: cli.stack.into_stack(),
         namespace: cli.namespace,
         prometheus_url: cli.prometheus,
+        prometheus_request_timeout_seconds: cli.prometheus_request_timeout_seconds,
         broker_count: cli.broker_count,
         scenario_id,
         tls,
@@ -174,4 +183,59 @@ fn hash_str(s: &str) -> u64 {
     let mut h = DefaultHasher::new();
     s.hash(&mut h);
     h.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use clap::Parser;
+
+    use super::*;
+
+    fn required_args() -> Vec<&'static str> {
+        vec![
+            "crabka-bench-driver",
+            "--scenario",
+            "scenario.yaml",
+            "--bootstrap",
+            "broker:9092",
+            "--stack",
+            "crabka",
+        ]
+    }
+
+    #[test]
+    fn prometheus_request_timeout_environment_and_cli_precedence() {
+        const CHILD: &str = "CRABKA_BENCH_PROMETHEUS_TIMEOUT_CHILD";
+
+        if std::env::var_os(CHILD).is_none() {
+            let status =
+                std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args([
+                        "--exact",
+                        "tests::prometheus_request_timeout_environment_and_cli_precedence",
+                    ])
+                    .env(CHILD, "1")
+                    .env("BENCH_PROMETHEUS_REQUEST_TIMEOUT_SECONDS", "32")
+                    .status()
+                    .expect("child test");
+            assert!(status.success());
+            return;
+        }
+
+        let from_env = Cli::try_parse_from(required_args()).expect("environment");
+        assert_eq!(
+            from_env.prometheus_request_timeout_seconds.duration(),
+            Duration::from_secs(32)
+        );
+
+        let mut args = required_args();
+        args.extend(["--prometheus-request-timeout-seconds", "64"]);
+        let from_cli = Cli::try_parse_from(args).expect("CLI over environment");
+        assert_eq!(
+            from_cli.prometheus_request_timeout_seconds.duration(),
+            Duration::from_secs(64)
+        );
+    }
 }
