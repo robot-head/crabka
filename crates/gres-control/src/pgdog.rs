@@ -4,7 +4,7 @@
 //! assembling text by hand. When the pinned `PgDog` image changes, re-run the G-4
 //! front-door e2e leg against these goldens before accepting any output change.
 
-use std::{collections::HashSet, str::FromStr};
+use std::{collections::HashSet, str::FromStr, time::Duration};
 
 use crabka_units::{Time, convert::TimeExt as _, days, minutes, secs};
 use refined_type::rule::GreaterU16;
@@ -98,12 +98,29 @@ pub struct PgdogTimeouts {
 
 impl PgdogTimeouts {
     /// Derive the total cold-start ceiling from one connection-attempt timeout.
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the attempt budget exceeds what a [`Duration`] can
+    /// represent, which is the misconfiguration this used to catch by way of
+    /// `Duration::checked_mul`.
     pub fn cold_start_ceiling_for_attempt_timeout(
         attempt_timeout: Time,
         connect_attempts: PgdogConnectAttempts,
-    ) -> Time {
-        attempt_timeout * f64::from(connect_attempts.into_value())
+    ) -> Result<Time, ControlError> {
+        let ceiling = attempt_timeout * f64::from(connect_attempts.into_value());
+        // A `Time` is `f64` and cannot overflow the way the `Duration` this
+        // replaced could, so the budget check has to be explicit or it silently
+        // disappears: the ceiling is ultimately handed to tokio as a `Duration`,
+        // and an unrepresentable one is exactly the misconfiguration the old
+        // `checked_mul` rejected.
+        if Duration::try_from_secs_f64(ceiling.secs_f64()).is_err() {
+            return Err(ControlError::invalid_field(
+                "cold_start_timeout",
+                "connection attempt budget overflowed",
+            ));
+        }
+        Ok(ceiling)
     }
 
     /// Build timeout values that can cover the supplied cold-start ceiling.
@@ -684,9 +701,27 @@ mod tests {
     fn cold_start_ceiling_uses_attempt_count() {
         let three = PgdogConnectAttempts::new(3).expect("positive attempts");
 
-        let ceiling = PgdogTimeouts::cold_start_ceiling_for_attempt_timeout(secs(30), three);
+        let ceiling = PgdogTimeouts::cold_start_ceiling_for_attempt_timeout(secs(30), three)
+            .expect("30s over three attempts is representable");
 
         assert!(ceiling == secs(90));
+    }
+
+    /// An attempt budget past what a `Duration` can hold is still rejected.
+    ///
+    /// The ceiling became a `Time`, whose `f64` cannot overflow the way the
+    /// `Duration` it replaced did, so without an explicit check this validation
+    /// would vanish and an absurd `coldStartTimeoutMs` would reach the cluster.
+    #[test]
+    fn cold_start_ceiling_rejects_an_unrepresentable_budget() {
+        let many = PgdogConnectAttempts::new(65_535).expect("positive attempts");
+
+        let ceiling = PgdogTimeouts::cold_start_ceiling_for_attempt_timeout(
+            Time::from_millis(i64::MAX),
+            many,
+        );
+
+        assert!(let Err(_) = ceiling);
     }
 
     #[test]

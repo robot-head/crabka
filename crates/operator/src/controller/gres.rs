@@ -107,7 +107,10 @@ async fn reconcile_inner(obj: Arc<Gres>, ctx: Arc<Context>) -> Result<Action, Re
     let cold_start_ceiling = PgdogTimeouts::cold_start_ceiling_for_attempt_timeout(
         time_from_millis_u64(activator_cold_start_timeout_ms),
         pgdog_policy.connect_attempts,
-    );
+    )
+    .map_err(|error| {
+        ReconcileError::Malformed(format!("spec.activator.coldStartTimeoutMs: {error}"))
+    })?;
     let ns = obj.namespace().unwrap_or_else(|| "default".into());
     let name = obj.name_any();
     let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &ns);
