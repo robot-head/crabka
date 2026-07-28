@@ -3116,3 +3116,93 @@ next scanner-visible production owner is the fixed 15-second Prometheus HTTP
 request timeout in `crates/bench-driver/src/prom.rs`. The bench-driver binary
 already owns a CLI/environment boundary, but this timeout does not yet flow
 through it.
+
+## Bench Driver Prometheus Request Timeout
+
+The bench driver's Prometheus HTTP request timeout is now a positive
+`PrometheusRequestTimeoutSeconds` stored in `DriverConfig`. It retains the
+15-second default and is resolved from:
+
+```text
+--prometheus-request-timeout-seconds
+BENCH_PROMETHEUS_REQUEST_TIMEOUT_SECONDS
+```
+
+The command-line value wins when both inputs are present. Parsing rejects zero,
+malformed, negative, and `u64` overflow values before Prometheus I/O.
+`PrometheusRequestTimeoutSeconds` uses
+`refined_type::rule::GreaterU64<0>` for the positive-value invariant.
+
+The exact runtime flow is:
+
+```text
+Cli
+  -> DriverConfig::prometheus_request_timeout_seconds
+  -> PromClient::new
+  -> reqwest::ClientBuilder::timeout
+```
+
+`PromClient::new` requires the validated timeout and has no hidden fallback.
+Prometheus queries, resource capture, response parsing, skip notes, and error
+handling are unchanged.
+
+The checked-in deployment flow is:
+
+```text
+BENCH_PROMETHEUS_REQUEST_TIMEOUT_SECONDS
+  -> bench/scripts/run-scenario.sh
+  -> envsubst
+  -> bench/manifests/driver/job-template.yaml
+  -> driver container environment
+```
+
+The launcher supplies an overrideable 15-second default, and the rendered Job
+always contains a nonempty value. No CRD or operator field was added because
+the benchmark launcher and Job template, rather than an operator-managed
+resource, own this binary.
+
+After the implementation and before this section was appended, the exact
+scanner command
+
+```text
+tools/audit-runtime-values.sh
+```
+
+reported 6,287 lines across 1,055 files. Its bench-driver subset contained 39
+lines: one configured timeout default, 16 test or harness values, 12 protocol,
+format, state, mathematical, or query invariants, and 10 unresolved operational
+values. The categories sum to all 39 lines:
+`1 + 16 + 12 + 10 = 39`.
+
+Before this section was appended, the exact focused search
+
+```text
+rg -n \
+  "prometheus_request_timeout_seconds|PrometheusRequestTimeoutSeconds|DEFAULT_PROMETHEUS_REQUEST_TIMEOUT_SECONDS|prometheus-request-timeout-seconds|BENCH_PROMETHEUS_REQUEST_TIMEOUT_SECONDS" \
+  crates/bench-driver \
+  bench \
+  docs/configuration-audit.md
+```
+
+reported 32 lines. The mutually exclusive classification is 16 production
+configuration-flow references, six deployment-flow references, 10 test
+references, and zero unresolved-owner references:
+`16 + 6 + 10 + 0 = 32`.
+
+The package's 67 registered tests passed, including the typed default, accepted
+minimum, invalid-value rejection, validated client construction, and hermetic
+CLI-over-environment precedence tests. Strict package Clippy, nightly
+formatting, the single-help-entry check, shell syntax, rendered manifest
+inspection with an explicit seven-second override, and diff hygiene all
+passed. The only `Cargo.lock` change adds the already workspace-pinned
+`refined_type` to `crabka-bench-driver`'s direct dependency list; dependency
+versions and transitive packages are unchanged.
+
+### Adjacent Pending Policy
+
+This closes only the Prometheus HTTP request timeout. The next coherent
+bench-driver operational owner is the client request-timeout policy in
+`crates/bench-driver/src/workload.rs`: two seconds for producers, five seconds
+for Crabka consumers, and 30 seconds for Kafka consumers. Those values affect
+network failure behavior and remain fixed rather than flowing through the
+existing CLI/environment boundary.
