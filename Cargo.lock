@@ -2954,6 +2954,7 @@ dependencies = [
  "crabka-protocol",
  "crabka-raft",
  "crabka-security",
+ "crabka-units",
  "hex",
  "object_store",
  "proptest",
