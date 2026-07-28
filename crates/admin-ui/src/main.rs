@@ -10,6 +10,7 @@ async fn main() -> anyhow::Result<()> {
     let runtime_args = AdminUiRuntimeArgs::parse();
     let mut cfg = AdminUiConfig::from_env().context("load admin UI config")?;
     cfg.mutation_json_body_limit_bytes = runtime_args.mutation_json_body_limit_bytes;
+    cfg.session_ttl = runtime_args.session_ttl;
     let listen_addr = cfg.listen_addr;
     let cluster_name = cfg.cluster_name.clone();
     let state = crabka_admin_ui::server::AppState::new(cfg);

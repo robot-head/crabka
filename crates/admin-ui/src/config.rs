@@ -1,11 +1,17 @@
 //! Runtime configuration for one admin UI instance.
 
-use std::{fmt, net::SocketAddr, path::PathBuf, str::FromStr};
+use std::{
+    fmt,
+    net::SocketAddr,
+    path::PathBuf,
+    str::FromStr,
+    time::{Duration, Instant},
+};
 
 use clap::Parser;
 use crabka_client_core::security::TlsConnectorConfig;
 use crabka_security::ListenerProtocol;
-use refined_type::rule::GreaterUsize;
+use refined_type::rule::{GreaterU64, GreaterUsize};
 use thiserror::Error;
 
 /// Default maximum size of an authenticated mutation JSON body.
@@ -58,6 +64,66 @@ impl FromStr for MutationJsonBodyLimitBytes {
     }
 }
 
+/// Default server-side lifetime for an authenticated admin UI session.
+pub const DEFAULT_SESSION_TTL_SECONDS: u64 = 28_800;
+
+/// A positive session lifetime representable by the platform monotonic clock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionTtlSeconds(u64);
+
+impl SessionTtlSeconds {
+    /// Validate an admin UI session lifetime.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `value` is zero or cannot be added to the
+    /// platform monotonic clock.
+    pub fn new(value: u64) -> Result<Self, String> {
+        let value = GreaterU64::<0>::new(value)
+            .map(refined_type::Refined::into_value)
+            .map_err(|error| error.to_string())?;
+
+        if Instant::now()
+            .checked_add(Duration::from_secs(value))
+            .is_none()
+        {
+            return Err("session TTL exceeds the platform monotonic clock".to_string());
+        }
+
+        Ok(Self(value))
+    }
+
+    /// Return the validated session lifetime.
+    #[must_use]
+    pub const fn duration(self) -> Duration {
+        Duration::from_secs(self.0)
+    }
+}
+
+impl Default for SessionTtlSeconds {
+    fn default() -> Self {
+        Self::new(DEFAULT_SESSION_TTL_SECONDS)
+            .expect("default session TTL is positive and representable")
+    }
+}
+
+impl fmt::Display for SessionTtlSeconds {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl FromStr for SessionTtlSeconds {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value
+            .parse()
+            .map_err(|error: std::num::ParseIntError| error.to_string())
+            .and_then(Self::new)
+    }
+}
+
 /// Command-line and environment inputs owned by the admin UI runtime.
 #[derive(Debug, Clone, Parser)]
 #[command(name = "crabka-admin-ui")]
@@ -69,6 +135,14 @@ pub struct AdminUiRuntimeArgs {
         default_value_t = MutationJsonBodyLimitBytes::default()
     )]
     pub mutation_json_body_limit_bytes: MutationJsonBodyLimitBytes,
+
+    /// Server-side lifetime for an authenticated session, in seconds.
+    #[arg(
+        long = "session-ttl-seconds",
+        env = "CRABKA_ADMIN_UI_SESSION_TTL_SECONDS",
+        default_value_t = SessionTtlSeconds::default()
+    )]
+    pub session_ttl: SessionTtlSeconds,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,7 +161,7 @@ pub struct AdminUiConfig {
     pub cluster_name: String,
     pub bootstrap_addrs: Vec<String>,
     pub security: BrokerSecurityConfig,
-    pub session_ttl_seconds: u64,
+    pub session_ttl: SessionTtlSeconds,
     pub mutation_json_body_limit_bytes: MutationJsonBodyLimitBytes,
 }
 
@@ -116,7 +190,7 @@ impl Default for AdminUiConfig {
             cluster_name: "local".to_string(),
             bootstrap_addrs: Vec::new(),
             security: BrokerSecurityConfig::SaslPlaintext,
-            session_ttl_seconds: 8 * 60 * 60,
+            session_ttl: SessionTtlSeconds::default(),
             mutation_json_body_limit_bytes: MutationJsonBodyLimitBytes::default(),
         }
     }

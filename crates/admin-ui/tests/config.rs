@@ -1,9 +1,9 @@
-use std::{net::SocketAddr, path::PathBuf, process::Command};
+use std::{net::SocketAddr, path::PathBuf, process::Command, time::Duration};
 
 use clap::Parser;
 use crabka_admin_ui::config::{
     AdminUiConfig, AdminUiRuntimeArgs, BrokerSecurityConfig, ConfigError,
-    DEFAULT_MUTATION_JSON_BODY_LIMIT_BYTES, MutationJsonBodyLimitBytes,
+    DEFAULT_MUTATION_JSON_BODY_LIMIT_BYTES, MutationJsonBodyLimitBytes, SessionTtlSeconds,
 };
 
 #[test]
@@ -87,6 +87,77 @@ fn mutation_json_body_limit_precedence_child() {
     ])
     .expect("CLI value is valid");
     assert_eq!(from_cli.mutation_json_body_limit_bytes.into_value(), 64);
+}
+
+#[test]
+fn session_ttl_default_remains_eight_hours() {
+    let cfg = AdminUiConfig::default();
+
+    assert_eq!(cfg.session_ttl.duration(), Duration::from_hours(8));
+}
+
+#[test]
+fn session_ttl_accepts_one_second() {
+    assert_eq!(
+        SessionTtlSeconds::new(1)
+            .expect("one second is valid")
+            .duration(),
+        Duration::from_secs(1)
+    );
+}
+
+#[test]
+fn session_ttl_rejects_invalid_values() {
+    assert!(SessionTtlSeconds::new(0).is_err());
+    assert!(SessionTtlSeconds::new(u64::MAX).is_err());
+
+    let unrepresentable = u64::MAX.to_string();
+    for invalid in ["0", "not-a-number", "-1", unrepresentable.as_str()] {
+        assert!(
+            AdminUiRuntimeArgs::try_parse_from([
+                "crabka-admin-ui",
+                "--session-ttl-seconds",
+                invalid,
+            ])
+            .is_err(),
+            "{invalid:?} must be rejected"
+        );
+    }
+}
+
+#[test]
+fn session_ttl_environment_and_cli_precedence() {
+    let output = Command::new(std::env::current_exe().expect("test binary path is available"))
+        .arg("--exact")
+        .arg("session_ttl_precedence_child")
+        .arg("--nocapture")
+        .env("CRABKA_ADMIN_UI_SESSION_TTL_CHILD", "1")
+        .env("CRABKA_ADMIN_UI_SESSION_TTL_SECONDS", "32")
+        .output()
+        .expect("child test process runs");
+
+    assert!(
+        output.status.success(),
+        "child test failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn session_ttl_precedence_child() {
+    if std::env::var_os("CRABKA_ADMIN_UI_SESSION_TTL_CHILD").is_none() {
+        return;
+    }
+
+    let from_env = AdminUiRuntimeArgs::try_parse_from(["crabka-admin-ui"])
+        .expect("environment value is valid");
+    assert_eq!(from_env.session_ttl.duration(), Duration::from_secs(32));
+
+    let from_cli =
+        AdminUiRuntimeArgs::try_parse_from(["crabka-admin-ui", "--session-ttl-seconds", "64"])
+            .expect("CLI value is valid");
+    assert_eq!(from_cli.session_ttl.duration(), Duration::from_secs(64));
 }
 
 #[test]
