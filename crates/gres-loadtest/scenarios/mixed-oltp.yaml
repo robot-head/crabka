@@ -10,9 +10,9 @@ topology:
 workload:
   connections: 32
   rate:
-    fixed: { tps: 2000 }
-  warmup_s: 10
-  duration_s: 60
+    fixed: { target_rate: 2000/s }
+  warmup: 10s
+  duration: 60s
   mix:
     single_shard_insert: 55
     cross_shard_txn: 20

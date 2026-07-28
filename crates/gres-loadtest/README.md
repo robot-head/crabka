@@ -32,7 +32,7 @@ cargo run -p crabka-gres-loadtest -- run \
 # Force a timestamp mode regardless of the scenario's own
 cargo run -p crabka-gres-loadtest -- run \
   --scenario crates/gres-loadtest/scenarios/baseline-single-shard.yaml \
-  --mode hlc --hlc-max-offset-ms 250
+  --mode hlc --hlc-max-offset 250ms
 
 # Run under logical-tso then hlc and render a side-by-side comparison
 cargo run -p crabka-gres-loadtest -- compare \
@@ -56,7 +56,7 @@ cargo run -p crabka-gres-loadtest -- compare \
 
 ## Scenario Schema
 
-A scenario is one YAML document:
+A scenario is one YAML document. **Every dimensioned value carries its unit** — `60s`, `250ms`, `2000/s`, `128KiB/s`. A bare number is rejected rather than guessed at, because whether `30` means seconds or milliseconds is exactly what the units exist to settle. Durations accept `ns`/`µs`/`ms`/`s`/`m`/`h`/`d`, sizes and byte rates the binary (`KiB`, `MiB`, `GiB`) and decimal (`kB`, `MB`, `GB`) prefixes, and event rates `/s`, `/min`, or `Hz`.
 
 ```yaml
 name: my-scenario          # used in report file names
@@ -64,7 +64,7 @@ description: One line for the report header.
 topology:
   nodes: 3                 # crabka-gres processes
   ranges: 4                # ranges r0..r3, round-robin over nodes (r0 on node 0)
-  clock_skew_ms: { 0: 400 }  # per-node HLC wall-clock offset (hlc mode only)
+  clock_skew: { 0: 400ms }   # per-node HLC wall-clock offset (hlc mode only)
   cpus_per_node: 3           # optional: pin each node to 3 dedicated CPUs
                              # (broker gets CPUs 0-1). Makes each node a
                              # fixed-capacity "host" so single-machine scaling
@@ -73,18 +73,18 @@ topology:
                              # harness itself under `taskset` on the leftover
                              # CPUs. Fails fast if 2 + nodes*cpus exceeds the
                              # machine.
-mode: logical-tso          # or:  mode: { hlc: { max_offset_ms: 250 } }
+mode: logical-tso          # or:  mode: { hlc: { max_offset: 250ms } }
 workload:
   connections: 24          # concurrent clients, round-robin over node front doors
-  rate: saturate           # or:  rate: { fixed: { tps: 2000 } }
-  warmup_s: 10             # unrecorded load before measurement
-  duration_s: 60           # measured window
+  rate: saturate           # or:  rate: { fixed: { target_rate: 2000/s } }
+  warmup: 10s              # unrecorded load before measurement
+  duration: 60s            # measured window
   mix: { single_shard_insert: 70, read_only: 30 }
   hot_rows: 1000           # contended-update table size
   zipf_exponent: 1.1       # contended-update skew
 faults:
-  - at_s: 20               # seconds after the measurement window starts
-    partition: { target: "range:0", duration_s: 15, style: blackhole }
+  - at: 20s                # offset from the start of the measurement window
+    partition: { target: "range:0", duration: 15s, style: blackhole }
 ```
 
 ### Workload mix classes
@@ -100,15 +100,15 @@ Weights are relative; classes with weight 0 are never issued.
 
 ### Fault actions
 
-Every action takes a `target`; timed actions un-apply themselves after `duration_s`.
+Every action takes a `target`; timed actions un-apply themselves after `duration`.
 
 | Action | Fields | Effect |
 |--------|--------|--------|
-| `partition` | `target`, `duration_s`, `style` | Cuts the target's link, heals it after the duration. |
-| `latency` | `target`, `ms`, `jitter_ms`, `duration_s` | One-way delay per direction (a round trip pays roughly twice `ms`). |
-| `throttle` | `target`, `bytes_per_sec`, `duration_s` | Per-direction bandwidth cap. |
-| `kill_node` | `node`, `restart_after_s` | SIGKILLs the node's process; restarts it after the delay, or leaves it down when omitted. |
-| `flap` | `target`, `period_s`, `duration_s` | Alternates blackhole-partition and heal every `period_s`; always ends healed by `at_s + duration_s`. |
+| `partition` | `target`, `duration`, `style` | Cuts the target's link, heals it after the duration. |
+| `latency` | `target`, `delay`, `jitter`, `duration` | One-way delay per direction (a round trip pays roughly twice `delay`), with a uniform draw from `0..jitter` on top. |
+| `throttle` | `target`, `rate`, `duration` | Per-direction bandwidth cap (e.g. `rate: 128KiB/s`). |
+| `kill_node` | `node`, `restart_after` | SIGKILLs the node's process; restarts it after the delay, or leaves it down when omitted. |
+| `flap` | `target`, `period`, `duration` | Alternates blackhole-partition and heal every `period`; always ends healed by `at + duration`. |
 
 Targets: `range:<id>` (one range's RPC endpoint), `all-ranges`, `sql:<node>` (one node's SQL front door), `all-sql`.
 
@@ -118,8 +118,10 @@ Partition styles: `blackhole` (default) makes packets vanish — live connection
 
 Each run writes two files into the output directory, named `<scenario>-<mode-slug>` (`logical-tso` or `hlc`):
 
-- `<scenario>-<mode>.json` — the full `RunReport`: committed/failed transactions and mean TPS, latency percentiles (p50/p95/p99/p99.9/max) per operation class, an error taxonomy (serialization retries, unavailable, connection errors, other), a per-second timeline (throughput dips make faults visible), per-process CPU core-seconds and peak RSS, cluster-wide efficiency (committed txn per CPU core-second), and the applied-fault log.
+- `<scenario>-<mode>.json` — the full `RunReport`: committed/failed transactions and the mean transaction rate, latency percentiles (p50/p95/p99/p99.9/max) per operation class, an error taxonomy (serialization retries, unavailable, connection errors, other), a per-second timeline (throughput dips make faults visible), per-process CPU time and peak RSS, cluster-wide efficiency (committed txn per CPU core-second), and the applied-fault log.
 - `<scenario>-<mode>.md` — the same run rendered as Markdown, with the timeline reduced to the interesting seconds (near a fault or deviating from median throughput).
+
+Dimensioned JSON fields come in two encodings. Values a person reads — `throughput.mean_rate` (`"1000/s"`), `resources[].max_rss` (`"512MiB"`), `faults[].at` (`"20s"`) — carry their unit as a string. Values a script compares or plots are exact integers in a fixed unit: latency percentiles and `timeline[].mean_latency` in **nanoseconds**, `timeline[].t` in **seconds**, and `duration`, `resources[].cpu_time`, and `efficiency.total_cpu` in **milliseconds**. `started_unix_ms` stays a raw epoch-milliseconds stamp — it is an instant, not an extent.
 
 `compare` additionally writes `<scenario>-comparison.md`: both modes side by side with relative deltas and both fault logs.
 
@@ -181,7 +183,7 @@ Reports land in `loadtest-out/mixed-oltp-external.{json,md}`. Note that a contai
 
 ## Limitations
 
-- **Single-authority HLC today.** Non-r0 nodes still fetch timestamps from range 0 via RPC, so per-node `clock_skew_ms` is only observable on the node hosting range 0 until multi-node HLC stamping lands.
+- **Single-authority HLC today.** Non-r0 nodes still fetch timestamps from range 0 via RPC, so per-node `clock_skew` is only observable on the node hosting range 0 until multi-node HLC stamping lands.
 - **Restarted nodes report as separate rows.** The `/proc` sampler follows a live process roster: a node restarted by `kill_node` is attached at the next sample tick under a `label#N` entry (e.g. `node2#2`), so its post-restart CPU/RSS is counted alongside — not merged into — the original incarnation's row.
 - **Localhost only.** The chaos proxies model the network in user space; OS-level `netem`/`tc` shaping is out of scope.
 - **Relative numbers, not benchmarks.** Results depend on the machine, debug/release build, and concurrent load; they are for comparing modes and scenarios on the same host, not for absolute claims.

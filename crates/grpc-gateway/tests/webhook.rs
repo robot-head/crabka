@@ -36,6 +36,7 @@ use crabka_grpc_gateway::{
 };
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_security::{AuthMethod, Principal};
+use crabka_units::prelude::*;
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use tempfile::TempDir;
@@ -105,7 +106,7 @@ async fn webhook_state(
             bootstrap,
             DEDUP_TOPIC,
             N,
-            3_600_000,
+            hours(1),
             &crabka_grpc_gateway::dedup::topic::InternalTopicPolicy {
                 replication_factor: 1,
                 ..Default::default()
@@ -172,7 +173,7 @@ async fn webhook_state(
             client_id: client_prefix.into(),
             dedup_topic: DEDUP_TOPIC.into(),
             dedup_partitions: N,
-            dedup_window_ms: 3_600_000,
+            dedup_window: hours(1),
             dedup_ownership_group: OWNERS_GROUP.into(),
             dedup_txn_id_prefix: format!("crabka-wh-dedup-{client_prefix}"),
             advertised_addr: "127.0.0.1:0".into(),
@@ -651,7 +652,7 @@ async fn generic_produce_route() {
     broker.shutdown().await;
 }
 
-/// Body larger than `max_body_bytes` → 413 Payload Too Large.
+/// Body larger than `max_body` → 413 Payload Too Large.
 #[tokio::test]
 async fn body_too_large_413() {
     let (broker, bootstrap, _dir) = boot().await;
@@ -660,7 +661,7 @@ async fn body_too_large_413() {
 [[endpoints]]
 name = "tiny"
 target_topic = "irrelevant"
-max_body_bytes = 16
+max_body = "16B"
 "#;
 
     let (state, token, _store) = webhook_state(&bootstrap, "btl", toml, false).await;
@@ -744,7 +745,7 @@ async fn webhook_state_with_authz(
             client_id: client_prefix.into(),
             dedup_topic: DEDUP_TOPIC.into(),
             dedup_partitions: N,
-            dedup_window_ms: 3_600_000,
+            dedup_window: hours(1),
             dedup_ownership_group: OWNERS_GROUP.into(),
             dedup_txn_id_prefix: format!("crabka-wh-dedup-{client_prefix}"),
             advertised_addr: "127.0.0.1:0".into(),
@@ -893,7 +894,7 @@ signature_encoding = "hex"
         let authz = authz.clone();
         let bootstrap = bootstrap.clone();
         let shutdown = shutdown.clone();
-        tokio::spawn(authz.run_acl_refresh(bootstrap, Duration::from_millis(200), shutdown, None));
+        tokio::spawn(authz.run_acl_refresh(bootstrap, millis(200), shutdown, None));
     }
 
     // Build a Principal matching what the authorizer sees for this endpoint.
@@ -960,7 +961,7 @@ secret = "secret"
 signature_header = "X-Sig"
 signature_encoding = "hex"
 timestamp_header = "X-Timestamp"
-timestamp_tolerance_secs = 300
+timestamp_tolerance = "300s"
 "#;
 
     let (state, token, _store) = webhook_state(&bootstrap, "tsof", toml, false).await;

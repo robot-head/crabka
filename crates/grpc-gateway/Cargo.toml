@@ -30,6 +30,7 @@ crabka-client-producer = { version = "0.3.9", path = "../client-producer" }
 crabka-client-consumer = { version = "0.3.9", path = "../client-consumer" }
 crabka-client-admin = { version = "0.3.9", path = "../client-admin" }
 crabka-metadata = { version = "0.3.8", path = "../metadata" }
+crabka-units = { workspace = true }
 arc-swap = { workspace = true }
 prometheus-client = { workspace = true }
 connectrpc-axum.workspace = true

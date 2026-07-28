@@ -2,24 +2,24 @@
 #   - kill_at_ms (wallclock of the kubectl-equivalent delete)
 #   - recovery_at_ms (first successful Ok ack post-kill)
 #   - dropped (records whose ack-receiver returned Err)
-#   - latency_spike_max_ms (max latency sample during the disturbance)
+#   - latency_spike_max (max latency sample during the disturbance)
 # Auto-skipped at runtime if replication_factor < 3 or broker_count < 3.
 name: failover
 mode_tag: cluster
-msg_size_bytes: 1024
+msg_size: 1KiB
 partitions: 12
 replication_factor: 3
 producers: 2
 consumers: 1
 mode:
   kind: fixed_rate
-  msgs_per_sec: 10000
+  rate: 10000/s
 acks: all
 compression: none
-linger_ms: 5
-batch_size: 16384
-warmup_s: 30
-duration_s: 180
+linger: 5ms
+batch_size: 16KiB
+warmup: 30s
+duration: 180s
 failover:
-  kill_at_s: 60
+  kill_after: 60s
   target: partition0_leader

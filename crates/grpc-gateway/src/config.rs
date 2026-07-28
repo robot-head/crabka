@@ -3,6 +3,7 @@
 use std::{collections::HashMap, net::SocketAddr, path::PathBuf};
 
 pub use crabka_security::ClientAuthMode;
+use crabka_units::prelude::*;
 
 use crate::webhook_config::CompiledWebhook;
 
@@ -20,8 +21,8 @@ pub struct TlsSettings {
     /// `client_auth != Disabled`.
     pub client_ca_path: Option<PathBuf>,
     pub client_auth: ClientAuthMode,
-    /// Cert hot-reload poll interval (seconds).
-    pub reload_interval_secs: u64,
+    /// Cert hot-reload poll interval.
+    pub reload_interval: Time,
 }
 
 impl TlsSettings {
@@ -55,16 +56,16 @@ pub struct BearerSettings {
     /// The JWT claim whose string value becomes the principal name.
     /// Defaults to `"sub"`.
     pub principal_claim_name: String,
-    /// Allowable clock-skew tolerance (milliseconds) for `exp`/`iat` checks.
-    /// Defaults to `30_000` (30 seconds), mirroring the JVM default.
-    pub allowable_clock_skew_ms: i64,
+    /// Allowable clock-skew tolerance for `exp`/`iat` checks. Defaults to 30
+    /// seconds, mirroring the JVM default.
+    pub allowable_clock_skew: Time,
 }
 
 impl Default for BearerSettings {
     fn default() -> Self {
         Self {
             principal_claim_name: "sub".to_string(),
-            allowable_clock_skew_ms: 30_000,
+            allowable_clock_skew: secs(30),
         }
     }
 }
@@ -84,7 +85,8 @@ impl BearerSettings {
         Ok(crabka_security::OAuthBearerValidator::Unsecured(
             crabka_security::UnsecuredJwsValidator {
                 principal_claim_name: self.principal_claim_name.clone(),
-                allowable_clock_skew_ms: self.allowable_clock_skew_ms,
+                // `crabka-security` takes the tolerance as raw milliseconds.
+                allowable_clock_skew_ms: self.allowable_clock_skew.millis_i64(),
                 ..Default::default()
             },
         ))
@@ -96,24 +98,24 @@ impl BearerSettings {
 pub struct AuthzSettings {
     /// Principals (bare names) that bypass ACL checks.
     pub super_users: Vec<String>,
-    /// ACL-cache refresh interval (seconds).
-    pub acl_refresh_secs: u64,
+    /// ACL-cache refresh interval.
+    pub acl_refresh: Time,
 }
 
 /// Deployment policy shared by gateway runtime components.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct GatewayRuntimeConfig {
     pub internal_topic_replication_factor: i16,
     pub internal_topic_allow_replication_fallback: bool,
-    pub internal_topic_create_timeout_ms: i32,
-    pub internal_topic_segment_ms: i64,
-    pub internal_topic_min_cleanable_dirty_ratio_basis_points: u32,
-    pub consumer_poll_timeout_ms: u64,
+    pub internal_topic_create_timeout: Time,
+    pub internal_topic_segment: Time,
+    pub internal_topic_min_cleanable_dirty_ratio: Ratio,
+    pub consumer_poll_timeout: Time,
     pub ownership_warmup_empty_polls: u32,
-    pub readiness_poll_interval_ms: u64,
-    pub produce_max_body_bytes: usize,
-    pub forward_max_body_bytes: usize,
-    pub schema_registry_latest_cache_ttl_ms: u64,
+    pub readiness_poll_interval: Time,
+    pub produce_max_body: ByteSize,
+    pub forward_max_body: ByteSize,
+    pub schema_registry_latest_cache_ttl: Time,
     pub schema_registry_frame_raw: bool,
 }
 
@@ -122,15 +124,15 @@ impl Default for GatewayRuntimeConfig {
         Self {
             internal_topic_replication_factor: 3,
             internal_topic_allow_replication_fallback: true,
-            internal_topic_create_timeout_ms: 10_000,
-            internal_topic_segment_ms: 60_000,
-            internal_topic_min_cleanable_dirty_ratio_basis_points: 100,
-            consumer_poll_timeout_ms: 500,
+            internal_topic_create_timeout: secs(10),
+            internal_topic_segment: minutes(1),
+            internal_topic_min_cleanable_dirty_ratio: percent(1),
+            consumer_poll_timeout: millis(500),
             ownership_warmup_empty_polls: 2,
-            readiness_poll_interval_ms: 250,
-            produce_max_body_bytes: 2_097_152,
-            forward_max_body_bytes: 2_097_152,
-            schema_registry_latest_cache_ttl_ms: 5_000,
+            readiness_poll_interval: millis(250),
+            produce_max_body: mebibytes(2),
+            forward_max_body: mebibytes(2),
+            schema_registry_latest_cache_ttl: secs(5),
             schema_registry_frame_raw: false,
         }
     }
@@ -150,7 +152,7 @@ pub struct GatewayConfig {
     /// Partition count of the dedup topic (also the ownership shard count in P3).
     pub dedup_partitions: u32,
     /// Dedup window: claim-topic `retention.ms` and the dedup guarantee horizon.
-    pub dedup_window_ms: i64,
+    pub dedup_window: Time,
     /// Consumer group used to divide dedup-topic ownership between replicas.
     pub dedup_ownership_group: String,
     /// `transactional.id` prefix; the per-partition id is `{prefix}-{p}`.
@@ -186,9 +188,10 @@ pub struct GatewayConfig {
 #[cfg(test)]
 mod tests {
     use assert2::{assert, check};
+    use crabka_units::prelude::*;
 
-    use super::GatewayRuntimeConfig;
-    use crate::config_value::{DirtyRatioBasisPoints, PositiveU64};
+    use super::{BearerSettings, GatewayRuntimeConfig};
+    use crate::config_value::{PartitionCount, PositiveU32};
 
     #[test]
     fn runtime_defaults_and_boundaries() {
@@ -197,21 +200,39 @@ mod tests {
                 == GatewayRuntimeConfig {
                     internal_topic_replication_factor: 3,
                     internal_topic_allow_replication_fallback: true,
-                    internal_topic_create_timeout_ms: 10_000,
-                    internal_topic_segment_ms: 60_000,
-                    internal_topic_min_cleanable_dirty_ratio_basis_points: 100,
-                    consumer_poll_timeout_ms: 500,
+                    internal_topic_create_timeout: secs(10),
+                    internal_topic_segment: secs(60),
+                    internal_topic_min_cleanable_dirty_ratio: fraction(0.01),
+                    consumer_poll_timeout: millis(500),
                     ownership_warmup_empty_polls: 2,
-                    readiness_poll_interval_ms: 250,
-                    produce_max_body_bytes: 2_097_152,
-                    forward_max_body_bytes: 2_097_152,
-                    schema_registry_latest_cache_ttl_ms: 5_000,
+                    readiness_poll_interval: millis(250),
+                    produce_max_body: kibibytes(2048),
+                    forward_max_body: kibibytes(2048),
+                    schema_registry_latest_cache_ttl: secs(5),
                     schema_registry_frame_raw: false,
                 }
         );
-        check!(PositiveU64::new(0).is_err());
-        check!(PositiveU64::new(1).is_ok());
-        check!(DirtyRatioBasisPoints::new(10_001).is_err());
-        check!(DirtyRatioBasisPoints::new(10_000).is_ok());
+        check!(PositiveU32::new(0).is_err());
+        check!(PositiveU32::new(1).is_ok());
+        check!(PartitionCount::new(2_147_483_648).is_err());
+        check!(PartitionCount::new(2_147_483_647).is_ok());
+    }
+
+    /// The bearer tolerance is held as a `Time` and handed to `crabka-security`
+    /// as the raw millisecond count its validator expects.
+    #[test]
+    fn bearer_clock_skew_reaches_the_validator_in_milliseconds() {
+        let validator = BearerSettings {
+            principal_claim_name: "sub".to_string(),
+            allowable_clock_skew: secs(45),
+        }
+        .build()
+        .expect("unsecured validator builds");
+
+        let crabka_security::OAuthBearerValidator::Unsecured(unsecured) = validator else {
+            panic!("unsecured settings build an unsecured validator");
+        };
+        check!(unsecured.allowable_clock_skew_ms == 45_000);
+        check!(unsecured.principal_claim_name.as_str() == "sub");
     }
 }

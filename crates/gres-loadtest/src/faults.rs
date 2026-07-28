@@ -18,9 +18,10 @@
 //! and bypass the proxy bookkeeping. The returned log records what was
 //! actually applied, in application order, for inclusion in the report.
 
-use std::{collections::BTreeMap, fmt, time::Duration};
+use std::{cmp::Ordering, collections::BTreeMap, fmt};
 
 use anyhow::Context as _;
+use crabka_units::{fmt::Human as _, prelude::*};
 use tokio::time::Instant;
 
 use crate::{
@@ -55,7 +56,7 @@ pub async fn run_schedule(
     let mut state = ScheduleState::default();
     let mut applied = Vec::with_capacity(atoms.len());
     for atom in atoms {
-        tokio::time::sleep_until(window_start + Duration::from_secs(atom.at_s)).await;
+        tokio::time::sleep_until(window_start + atom.at.to_std()).await;
         let step = state.step(atom, ranges, nodes);
         for command in step.commands {
             issue(cluster, command).await;
@@ -64,11 +65,11 @@ pub async fn run_schedule(
             AtomAction::Kill { node } => cluster
                 .kill_node(node)
                 .await
-                .with_context(|| format!("kill node {node} at t={}s", atom.at_s))?,
+                .with_context(|| format!("kill node {node} at t={}", atom.at.human()))?,
             AtomAction::Restart { node } => cluster
                 .restart_node(node)
                 .await
-                .with_context(|| format!("restart node {node} at t={}s", atom.at_s))?,
+                .with_context(|| format!("restart node {node} at t={}", atom.at.human()))?,
             AtomAction::Partition { .. }
             | AtomAction::Heal { .. }
             | AtomAction::SetLatency { .. }
@@ -76,9 +77,9 @@ pub async fn run_schedule(
             | AtomAction::SetThrottle { .. }
             | AtomAction::ClearThrottle { .. } => {}
         }
-        tracing::info!(at_s = atom.at_s, description = %step.description, "fault applied");
+        tracing::info!(at = %atom.at.human(), description = %step.description, "fault applied");
         applied.push(AppliedFault {
-            at_s: atom.at_s,
+            at: atom.at,
             description: step.description,
         });
     }
@@ -86,10 +87,10 @@ pub async fn run_schedule(
 }
 
 /// One atomic state change in the expanded fault timeline.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct Atom {
-    /// Seconds after the measurement window starts.
-    at_s: u64,
+    /// Offset from the start of the measurement window.
+    at: Time,
     /// Index of the source [`FaultEvent`], so overlapping events release
     /// only their own contribution.
     event: usize,
@@ -98,7 +99,7 @@ struct Atom {
 }
 
 /// The concrete state change one atom applies.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum AtomAction {
     /// Cut the target's link.
     Partition {
@@ -116,10 +117,10 @@ enum AtomAction {
     SetLatency {
         /// Whose proxies to delay.
         target: FaultTarget,
-        /// Base one-way delay in milliseconds.
-        ms: u64,
+        /// Base one-way delay.
+        delay: Time,
         /// Uniform jitter added on top.
-        jitter_ms: u64,
+        jitter: Time,
     },
     /// End this event's delay on the target.
     ClearLatency {
@@ -130,8 +131,8 @@ enum AtomAction {
     SetThrottle {
         /// Whose proxies to cap.
         target: FaultTarget,
-        /// Cap in bytes per second, per direction.
-        bytes_per_sec: u64,
+        /// Cap per direction.
+        rate: ByteRate,
     },
     /// End this event's bandwidth cap on the target.
     ClearThrottle {
@@ -157,112 +158,107 @@ fn expand(events: &[FaultEvent]) -> Vec<Atom> {
     for (event, entry) in events.iter().enumerate() {
         expand_event(event, entry, &mut atoms);
     }
-    atoms.sort_by_key(|atom| atom.at_s);
+    // `Time` is float-backed, so the ordering comes from a total float
+    // comparison; the sort stays stable, keeping same-offset atoms in event
+    // order.
+    atoms.sort_by(|left, right| total_order(left.at, right.at));
     atoms
 }
 
-/// Appends one event's atoms: the applying atom at `at_s` and, for timed
+/// Total ordering of two offsets, for sorting the atom timeline.
+fn total_order(left: Time, right: Time) -> Ordering {
+    left.secs_f64().total_cmp(&right.secs_f64())
+}
+
+/// Appends one event's atoms: the applying atom at `at` and, for timed
 /// faults, the corresponding heal/restore/restart atom when the duration
 /// elapses.
 fn expand_event(event: usize, entry: &FaultEvent, atoms: &mut Vec<Atom>) {
-    let at_s = entry.at_s;
-    let mut push = |at_s: u64, action: AtomAction| {
-        atoms.push(Atom {
-            at_s,
-            event,
-            action,
-        });
+    let at = entry.at;
+    let mut push = |at: Time, action: AtomAction| {
+        atoms.push(Atom { at, event, action });
     };
     match &entry.action {
         FaultAction::Partition {
             target,
-            duration_s,
+            duration,
             style,
         } => {
             push(
-                at_s,
+                at,
                 AtomAction::Partition {
                     target: *target,
                     style: *style,
                 },
             );
-            push(
-                at_s.saturating_add(*duration_s),
-                AtomAction::Heal { target: *target },
-            );
+            push(at + *duration, AtomAction::Heal { target: *target });
         }
         FaultAction::Latency {
             target,
-            ms,
-            jitter_ms,
-            duration_s,
+            delay,
+            jitter,
+            duration,
         } => {
             push(
-                at_s,
+                at,
                 AtomAction::SetLatency {
                     target: *target,
-                    ms: *ms,
-                    jitter_ms: *jitter_ms,
+                    delay: *delay,
+                    jitter: *jitter,
                 },
             );
-            push(
-                at_s.saturating_add(*duration_s),
-                AtomAction::ClearLatency { target: *target },
-            );
+            push(at + *duration, AtomAction::ClearLatency { target: *target });
         }
         FaultAction::Throttle {
             target,
-            bytes_per_sec,
-            duration_s,
+            rate,
+            duration,
         } => {
             push(
-                at_s,
+                at,
                 AtomAction::SetThrottle {
                     target: *target,
-                    bytes_per_sec: *bytes_per_sec,
+                    rate: *rate,
                 },
             );
             push(
-                at_s.saturating_add(*duration_s),
+                at + *duration,
                 AtomAction::ClearThrottle { target: *target },
             );
         }
         FaultAction::KillNode {
             node,
-            restart_after_s,
+            restart_after,
         } => {
-            push(at_s, AtomAction::Kill { node: *node });
-            if let Some(delay_s) = restart_after_s {
-                push(
-                    at_s.saturating_add(*delay_s),
-                    AtomAction::Restart { node: *node },
-                );
+            push(at, AtomAction::Kill { node: *node });
+            if let Some(delay) = restart_after {
+                push(at + *delay, AtomAction::Restart { node: *node });
             }
         }
         FaultAction::Flap {
             target,
-            period_s,
-            duration_s,
-        } => expand_flap(event, *target, at_s, *period_s, *duration_s, atoms),
+            period,
+            duration,
+        } => expand_flap(event, *target, at, *period, *duration, atoms),
     }
 }
 
-/// Emits alternating blackhole/heal atoms every `period_s` starting at
-/// `at_s`, guaranteed to end healed at or before `at_s + duration_s`. A zero
-/// period is clamped to one second; a zero duration emits nothing.
+/// Emits alternating blackhole/heal atoms every `period` starting at `at`,
+/// guaranteed to end healed at or before `at + duration`. A non-positive
+/// period is clamped to [`MIN_FLAP_PERIOD`]; a zero duration emits nothing.
 fn expand_flap(
     event: usize,
     target: FaultTarget,
-    at_s: u64,
-    period_s: u64,
-    duration_s: u64,
+    at: Time,
+    period: Time,
+    duration: Time,
     atoms: &mut Vec<Atom>,
 ) {
-    let period_s = period_s.max(1);
-    let end_s = at_s.saturating_add(duration_s);
-    let mut t_s = at_s;
+    let period = period.max(MIN_FLAP_PERIOD);
+    let end = at + duration;
+    let mut t = at;
     let mut cut = false;
-    while t_s < end_s {
+    while t < end {
         let action = if cut {
             AtomAction::Heal { target }
         } else {
@@ -272,21 +268,25 @@ fn expand_flap(
             }
         };
         atoms.push(Atom {
-            at_s: t_s,
+            at: t,
             event,
             action,
         });
         cut = !cut;
-        t_s = t_s.saturating_add(period_s);
+        t += period;
     }
     if cut {
         atoms.push(Atom {
-            at_s: end_s,
+            at: end,
             event,
             action: AtomAction::Heal { target },
         });
     }
 }
+
+/// Shortest half-cycle a flap may use, so a zero configured period cannot
+/// spin the expansion.
+const MIN_FLAP_PERIOD: Time = secs(1);
 
 /// One concrete proxied endpoint, the unit the active-fault bookkeeping
 /// tracks (broad targets are fanned out to these before bookkeeping).
@@ -319,21 +319,21 @@ enum FaultKind {
 }
 
 /// The value one proxy-state fault applies while active.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum FaultValue {
     /// Cut with this style.
     Partition(PartitionStyle),
-    /// Delay by `ms` with `jitter_ms` of jitter.
+    /// Delay by `delay` with `jitter` of jitter.
     Latency {
-        /// Base one-way delay in milliseconds.
-        ms: u64,
+        /// Base one-way delay.
+        delay: Time,
         /// Uniform jitter added on top.
-        jitter_ms: u64,
+        jitter: Time,
     },
-    /// Cap at this many bytes per second.
+    /// Cap at this throughput.
     Throttle {
-        /// Cap in bytes per second, per direction.
-        bytes_per_sec: u64,
+        /// Cap per direction.
+        rate: ByteRate,
     },
 }
 
@@ -357,26 +357,24 @@ fn kind_word(kind: FaultKind) -> &'static str {
 
 /// One reconfiguration command for a concrete proxy; a `None` payload clears
 /// the corresponding state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum ProxyCommand {
     /// Set or clear the partition state.
     Partition(ProxyId, Option<PartitionStyle>),
     /// Set or clear the latency state.
     Latency(ProxyId, Option<LatencySpec>),
     /// Set or clear the throttle state.
-    Throttle(ProxyId, Option<u64>),
+    Throttle(ProxyId, Option<ByteRate>),
 }
 
 /// The command applying `value` to `proxy`.
 fn set_command(proxy: ProxyId, value: FaultValue) -> ProxyCommand {
     match value {
         FaultValue::Partition(style) => ProxyCommand::Partition(proxy, Some(style)),
-        FaultValue::Latency { ms, jitter_ms } => {
-            ProxyCommand::Latency(proxy, Some(LatencySpec { ms, jitter_ms }))
+        FaultValue::Latency { delay, jitter } => {
+            ProxyCommand::Latency(proxy, Some(LatencySpec { delay, jitter }))
         }
-        FaultValue::Throttle { bytes_per_sec } => {
-            ProxyCommand::Throttle(proxy, Some(bytes_per_sec))
-        }
+        FaultValue::Throttle { rate } => ProxyCommand::Throttle(proxy, Some(rate)),
     }
 }
 
@@ -400,16 +398,16 @@ fn fan_out(target: FaultTarget, ranges: u16, nodes: u16) -> Vec<ProxyId> {
 }
 
 /// One active fault: which event applied it, when, and its value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct ActiveEntry {
     event: usize,
-    at_s: u64,
+    at: Time,
     value: FaultValue,
 }
 
 /// Result of resolving one atom against the bookkeeping: the proxy commands
 /// to issue (in fan-out order) and the fault-log description.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct Step {
     commands: Vec<ProxyCommand>,
     description: String,
@@ -441,23 +439,20 @@ impl ScheduleState {
             ),
             AtomAction::SetLatency {
                 target,
-                ms,
-                jitter_ms,
+                delay,
+                jitter,
             } => self.apply_step(
                 atom,
                 target,
-                FaultValue::Latency { ms, jitter_ms },
+                FaultValue::Latency { delay, jitter },
                 ranges,
                 nodes,
                 base,
             ),
-            AtomAction::SetThrottle {
-                target,
-                bytes_per_sec,
-            } => self.apply_step(
+            AtomAction::SetThrottle { target, rate } => self.apply_step(
                 atom,
                 target,
-                FaultValue::Throttle { bytes_per_sec },
+                FaultValue::Throttle { rate },
                 ranges,
                 nodes,
                 base,
@@ -497,7 +492,7 @@ impl ScheduleState {
         let commands = fan_out(target, ranges, nodes)
             .into_iter()
             .map(|proxy| {
-                self.insert(atom.event, atom.at_s, proxy, value);
+                self.insert(atom.event, atom.at, proxy, value);
                 set_command(proxy, value)
             })
             .collect();
@@ -527,7 +522,7 @@ impl ScheduleState {
             match self.release(event, proxy, kind) {
                 Some(entry) => {
                     commands.push(set_command(proxy, entry.value));
-                    remnants.push((proxy, entry.at_s));
+                    remnants.push((proxy, entry.at));
                 }
                 None => commands.push(clear_command(kind, proxy)),
             }
@@ -542,10 +537,10 @@ impl ScheduleState {
 
     /// Marks `value` active for `event` on `proxy`, replacing the event's
     /// previous entry (as a flap's next cycle does).
-    fn insert(&mut self, event: usize, at_s: u64, proxy: ProxyId, value: FaultValue) {
+    fn insert(&mut self, event: usize, at: Time, proxy: ProxyId, value: FaultValue) {
         let entries = self.active.entry((proxy, kind_of(value))).or_default();
         entries.retain(|entry| entry.event != event);
-        entries.push(ActiveEntry { event, at_s, value });
+        entries.push(ActiveEntry { event, at, value });
     }
 
     /// Removes `event`'s entry for `(proxy, kind)` and returns the most
@@ -572,7 +567,7 @@ async fn issue(cluster: &Cluster, command: ProxyCommand) {
             proxy_ref(cluster, proxy).set_latency(latency);
         }
         ProxyCommand::Throttle(proxy, limit) => {
-            proxy_ref(cluster, proxy).set_throttle_bytes_per_sec(limit);
+            proxy_ref(cluster, proxy).set_throttle(limit);
         }
     }
 }
@@ -594,14 +589,13 @@ fn describe(action: AtomAction) -> String {
         AtomAction::Heal { target } => format!("heal {target}"),
         AtomAction::SetLatency {
             target,
-            ms,
-            jitter_ms,
-        } => format!("latency {target} {ms}ms±{jitter_ms}ms"),
+            delay,
+            jitter,
+        } => format!("latency {target} {}±{}", delay.human(), jitter.human()),
         AtomAction::ClearLatency { target } => format!("clear latency {target}"),
-        AtomAction::SetThrottle {
-            target,
-            bytes_per_sec,
-        } => format!("throttle {target} {bytes_per_sec}B/s"),
+        AtomAction::SetThrottle { target, rate } => {
+            format!("throttle {target} {}", rate.human())
+        }
         AtomAction::ClearThrottle { target } => format!("clear throttle {target}"),
         AtomAction::Kill { node } => format!("kill node{node}"),
         AtomAction::Restart { node } => format!("restart node{node}"),
@@ -611,16 +605,16 @@ fn describe(action: AtomAction) -> String {
 /// Description suffix for a heal/clear that left other events' faults
 /// active: empty when everything cleared, otherwise the surviving faults
 /// and when they were applied.
-fn describe_remnants(kind: FaultKind, remnants: &[(ProxyId, u64)], fanned: usize) -> String {
+fn describe_remnants(kind: FaultKind, remnants: &[(ProxyId, Time)], fanned: usize) -> String {
     match remnants {
         [] => String::new(),
-        [(_, at_s)] if fanned == 1 => {
-            format!(" ({} from t={at_s}s still active)", kind_word(kind))
+        [(_, at)] if fanned == 1 => {
+            format!(" ({} from t={} still active)", kind_word(kind), at.human())
         }
         _ => {
             let survivors: Vec<String> = remnants
                 .iter()
-                .map(|(proxy, at_s)| format!("{proxy} from t={at_s}s"))
+                .map(|(proxy, at)| format!("{proxy} from t={}", at.human()))
                 .collect();
             format!(
                 " ({} still active on {})",
@@ -645,24 +639,24 @@ mod tests {
 
     use super::*;
 
-    fn event(at_s: u64, action: FaultAction) -> FaultEvent {
-        FaultEvent { at_s, action }
+    fn event(at: Time, action: FaultAction) -> FaultEvent {
+        FaultEvent { at, action }
     }
 
     /// Expands `events` and drives every atom through a fresh
     /// [`ScheduleState`], returning what the executor would do at each
-    /// step: `(at_s, commands, description)`.
+    /// step: `(at, commands, description)`.
     fn drive(
         events: &[FaultEvent],
         ranges: u16,
         nodes: u16,
-    ) -> Vec<(u64, Vec<ProxyCommand>, String)> {
+    ) -> Vec<(Time, Vec<ProxyCommand>, String)> {
         let mut state = ScheduleState::default();
         expand(events)
             .into_iter()
             .map(|atom| {
                 let step = state.step(atom, ranges, nodes);
-                (atom.at_s, step.commands, step.description)
+                (atom.at, step.commands, step.description)
             })
             .collect()
     }
@@ -670,8 +664,8 @@ mod tests {
     #[test]
     fn expansion_pairs_each_timed_fault_with_its_heal() {
         let range0 = FaultTarget::Range(0);
-        let atom = |at_s: u64, action: AtomAction| Atom {
-            at_s,
+        let atom = |at: Time, action: AtomAction| Atom {
+            at,
             event: 0,
             action,
         };
@@ -679,46 +673,46 @@ mod tests {
             (
                 "partition applies then heals",
                 vec![event(
-                    20,
+                    secs(20),
                     FaultAction::Partition {
                         target: range0,
-                        duration_s: 15,
+                        duration: secs(15),
                         style: PartitionStyle::Reset,
                     },
                 )],
                 vec![
                     atom(
-                        20,
+                        secs(20),
                         AtomAction::Partition {
                             target: range0,
                             style: PartitionStyle::Reset,
                         },
                     ),
-                    atom(35, AtomAction::Heal { target: range0 }),
+                    atom(secs(35), AtomAction::Heal { target: range0 }),
                 ],
             ),
             (
                 "latency clears after its duration",
                 vec![event(
-                    5,
+                    secs(5),
                     FaultAction::Latency {
                         target: FaultTarget::AllRanges,
-                        ms: 100,
-                        jitter_ms: 20,
-                        duration_s: 10,
+                        delay: millis(100),
+                        jitter: millis(20),
+                        duration: secs(10),
                     },
                 )],
                 vec![
                     atom(
-                        5,
+                        secs(5),
                         AtomAction::SetLatency {
                             target: FaultTarget::AllRanges,
-                            ms: 100,
-                            jitter_ms: 20,
+                            delay: millis(100),
+                            jitter: millis(20),
                         },
                     ),
                     atom(
-                        15,
+                        secs(15),
                         AtomAction::ClearLatency {
                             target: FaultTarget::AllRanges,
                         },
@@ -728,23 +722,23 @@ mod tests {
             (
                 "throttle clears after its duration",
                 vec![event(
-                    40,
+                    secs(40),
                     FaultAction::Throttle {
                         target: FaultTarget::Sql(1),
-                        bytes_per_sec: 65536,
-                        duration_s: 5,
+                        rate: kibibytes_per_sec(64),
+                        duration: secs(5),
                     },
                 )],
                 vec![
                     atom(
-                        40,
+                        secs(40),
                         AtomAction::SetThrottle {
                             target: FaultTarget::Sql(1),
-                            bytes_per_sec: 65536,
+                            rate: kibibytes_per_sec(64),
                         },
                     ),
                     atom(
-                        45,
+                        secs(45),
                         AtomAction::ClearThrottle {
                             target: FaultTarget::Sql(1),
                         },
@@ -754,26 +748,26 @@ mod tests {
             (
                 "kill without restart leaves the node down",
                 vec![event(
-                    10,
+                    secs(10),
                     FaultAction::KillNode {
                         node: 2,
-                        restart_after_s: None,
+                        restart_after: None,
                     },
                 )],
-                vec![atom(10, AtomAction::Kill { node: 2 })],
+                vec![atom(secs(10), AtomAction::Kill { node: 2 })],
             ),
             (
                 "kill with restart schedules the restart",
                 vec![event(
-                    10,
+                    secs(10),
                     FaultAction::KillNode {
                         node: 2,
-                        restart_after_s: Some(10),
+                        restart_after: Some(secs(10)),
                     },
                 )],
                 vec![
-                    atom(10, AtomAction::Kill { node: 2 }),
-                    atom(20, AtomAction::Restart { node: 2 }),
+                    atom(secs(10), AtomAction::Kill { node: 2 }),
+                    atom(secs(20), AtomAction::Restart { node: 2 }),
                 ],
             ),
         ];
@@ -785,57 +779,73 @@ mod tests {
     #[test]
     fn flap_alternates_blackhole_and_heal_and_ends_healed() {
         let target = FaultTarget::Range(1);
-        let partition = |at_s: u64| Atom {
-            at_s,
+        let partition = |at: Time| Atom {
+            at,
             event: 0,
             action: AtomAction::Partition {
                 target,
                 style: PartitionStyle::Blackhole,
             },
         };
-        let heal = |at_s: u64| Atom {
-            at_s,
+        let heal = |at: Time| Atom {
+            at,
             event: 0,
             action: AtomAction::Heal { target },
         };
-        let cases: Vec<(&str, u64, u64, u64, Vec<Atom>)> = vec![
+        let cases: Vec<(&str, Time, Time, Time, Vec<Atom>)> = vec![
             (
                 "even half-cycle count ends healed inside the window",
-                0,
-                2,
-                8,
-                vec![partition(0), heal(2), partition(4), heal(6)],
+                Time::ZERO,
+                secs(2),
+                secs(8),
+                vec![
+                    partition(Time::ZERO),
+                    heal(secs(2)),
+                    partition(secs(4)),
+                    heal(secs(6)),
+                ],
             ),
             (
                 "odd half-cycle count heals exactly at the window end",
-                0,
-                2,
-                5,
-                vec![partition(0), heal(2), partition(4), heal(5)],
+                Time::ZERO,
+                secs(2),
+                secs(5),
+                vec![
+                    partition(Time::ZERO),
+                    heal(secs(2)),
+                    partition(secs(4)),
+                    heal(secs(5)),
+                ],
             ),
             (
                 "period longer than duration degenerates to one partition",
-                10,
-                60,
-                5,
-                vec![partition(10), heal(15)],
+                secs(10),
+                secs(60),
+                secs(5),
+                vec![partition(secs(10)), heal(secs(15))],
             ),
-            ("zero duration emits nothing", 10, 2, 0, vec![]),
+            (
+                "zero duration emits nothing",
+                secs(10),
+                secs(2),
+                Time::ZERO,
+                vec![],
+            ),
             (
                 "zero period clamps to one second",
-                0,
-                0,
-                2,
-                vec![partition(0), heal(1)],
+                Time::ZERO,
+                Time::ZERO,
+                secs(2),
+                vec![partition(Time::ZERO), heal(secs(1))],
             ),
         ];
-        for (name, at_s, period_s, duration_s, expected) in cases {
+        for (name, at, period, duration, expected) in cases {
             let events = vec![event(
-                at_s,
+                at,
                 FaultAction::Flap {
                     target,
-                    period_s,
-                    duration_s,
+                    period,
+                    duration,
                 },
             )];
             assert!(expand(&events) == expected, "{name}");
@@ -847,33 +857,33 @@ mod tests {
         let range0 = FaultTarget::Range(0);
         let events = vec![
             event(
-                10,
+                secs(10),
                 FaultAction::Partition {
                     target: range0,
-                    duration_s: 20,
+                    duration: secs(20),
                     style: PartitionStyle::Blackhole,
                 },
             ),
             event(
-                15,
+                secs(15),
                 FaultAction::Latency {
                     target: FaultTarget::AllSql,
-                    ms: 50,
-                    jitter_ms: 0,
-                    duration_s: 5,
+                    delay: millis(50),
+                    jitter: Time::ZERO,
+                    duration: secs(5),
                 },
             ),
             event(
-                20,
+                secs(20),
                 FaultAction::KillNode {
                     node: 1,
-                    restart_after_s: None,
+                    restart_after: None,
                 },
             ),
         ];
         let expected = vec![
             Atom {
-                at_s: 10,
+                at: secs(10),
                 event: 0,
                 action: AtomAction::Partition {
                     target: range0,
@@ -881,30 +891,30 @@ mod tests {
                 },
             },
             Atom {
-                at_s: 15,
+                at: secs(15),
                 event: 1,
                 action: AtomAction::SetLatency {
                     target: FaultTarget::AllSql,
-                    ms: 50,
-                    jitter_ms: 0,
+                    delay: millis(50),
+                    jitter: Time::ZERO,
                 },
             },
             // Same second: the stable sort keeps event order (the latency
             // clear comes from an earlier event than the kill).
             Atom {
-                at_s: 20,
+                at: secs(20),
                 event: 1,
                 action: AtomAction::ClearLatency {
                     target: FaultTarget::AllSql,
                 },
             },
             Atom {
-                at_s: 20,
+                at: secs(20),
                 event: 2,
                 action: AtomAction::Kill { node: 1 },
             },
             Atom {
-                at_s: 30,
+                at: secs(30),
                 event: 0,
                 action: AtomAction::Heal { target: range0 },
             },
@@ -918,32 +928,36 @@ mod tests {
         // range:0 — the t=10 heal must not clear the t=5 partition; the
         // link clears only at t=15.
         let range0 = FaultTarget::Range(0);
-        let partition = |at_s: u64| {
+        let partition = |at: Time| {
             event(
-                at_s,
+                at,
                 FaultAction::Partition {
                     target: range0,
-                    duration_s: 10,
+                    duration: secs(10),
                     style: PartitionStyle::Blackhole,
                 },
             )
         };
         let cut = ProxyCommand::Partition(ProxyId::Range(0), Some(PartitionStyle::Blackhole));
         let expected = vec![
-            (0, vec![cut], "partition range:0 blackhole".to_owned()),
-            (5, vec![cut], "partition range:0 blackhole".to_owned()),
             (
-                10,
+                Time::ZERO,
+                vec![cut],
+                "partition range:0 blackhole".to_owned(),
+            ),
+            (secs(5), vec![cut], "partition range:0 blackhole".to_owned()),
+            (
+                secs(10),
                 vec![cut],
                 "heal range:0 (partition from t=5s still active)".to_owned(),
             ),
             (
-                15,
+                secs(15),
                 vec![ProxyCommand::Partition(ProxyId::Range(0), None)],
                 "heal range:0".to_owned(),
             ),
         ];
-        assert!(drive(&[partition(0), partition(5)], 1, 1) == expected);
+        assert!(drive(&[partition(Time::ZERO), partition(secs(5))], 1, 1) == expected);
     }
 
     #[test]
@@ -951,47 +965,47 @@ mod tests {
         let range0 = FaultTarget::Range(0);
         let events = vec![
             event(
-                0,
+                Time::ZERO,
                 FaultAction::Latency {
                     target: range0,
-                    ms: 100,
-                    jitter_ms: 0,
-                    duration_s: 20,
+                    delay: millis(100),
+                    jitter: Time::ZERO,
+                    duration: secs(20),
                 },
             ),
             event(
-                5,
+                secs(5),
                 FaultAction::Latency {
                     target: range0,
-                    ms: 200,
-                    jitter_ms: 50,
-                    duration_s: 5,
+                    delay: millis(200),
+                    jitter: millis(50),
+                    duration: secs(5),
                 },
             ),
         ];
-        let latency = |ms: u64, jitter_ms: u64| {
-            ProxyCommand::Latency(ProxyId::Range(0), Some(LatencySpec { ms, jitter_ms }))
+        let latency = |delay: Time, jitter: Time| {
+            ProxyCommand::Latency(ProxyId::Range(0), Some(LatencySpec { delay, jitter }))
         };
         let expected = vec![
             (
-                0,
-                vec![latency(100, 0)],
-                "latency range:0 100ms±0ms".to_owned(),
+                Time::ZERO,
+                vec![latency(millis(100), Time::ZERO)],
+                "latency range:0 100ms±0s".to_owned(),
             ),
             (
-                5,
-                vec![latency(200, 50)],
+                secs(5),
+                vec![latency(millis(200), millis(50))],
                 "latency range:0 200ms±50ms".to_owned(),
             ),
             // The second event's clear restores the first event's value.
             (
-                10,
-                vec![latency(100, 0)],
+                secs(10),
+                vec![latency(millis(100), Time::ZERO)],
                 "clear latency range:0 (latency from t=0s still active)".to_owned(),
             ),
             // The last clear removes the state.
             (
-                20,
+                secs(20),
                 vec![ProxyCommand::Latency(ProxyId::Range(0), None)],
                 "clear latency range:0".to_owned(),
             ),
@@ -1003,18 +1017,18 @@ mod tests {
     fn healing_all_ranges_keeps_a_single_range_partition_cut() {
         let events = vec![
             event(
-                0,
+                Time::ZERO,
                 FaultAction::Partition {
                     target: FaultTarget::Range(0),
-                    duration_s: 20,
+                    duration: secs(20),
                     style: PartitionStyle::Blackhole,
                 },
             ),
             event(
-                5,
+                secs(5),
                 FaultAction::Partition {
                     target: FaultTarget::AllRanges,
-                    duration_s: 5,
+                    duration: secs(5),
                     style: PartitionStyle::Blackhole,
                 },
             ),
@@ -1024,20 +1038,24 @@ mod tests {
         };
         let clear = |range: u16| ProxyCommand::Partition(ProxyId::Range(range), None);
         let expected = vec![
-            (0, vec![cut(0)], "partition range:0 blackhole".to_owned()),
             (
-                5,
+                Time::ZERO,
+                vec![cut(0)],
+                "partition range:0 blackhole".to_owned(),
+            ),
+            (
+                secs(5),
                 vec![cut(0), cut(1)],
                 "partition all-ranges blackhole".to_owned(),
             ),
             // The all-ranges heal clears range 1 but re-applies range 0's
             // still-active single-range partition.
             (
-                10,
+                secs(10),
                 vec![cut(0), clear(1)],
                 "heal all-ranges (partition still active on range:0 from t=0s)".to_owned(),
             ),
-            (20, vec![clear(0)], "heal range:0".to_owned()),
+            (secs(20), vec![clear(0)], "heal range:0".to_owned()),
         ];
         assert!(drive(&events, 2, 1) == expected);
     }
@@ -1047,35 +1065,39 @@ mod tests {
         let range1 = FaultTarget::Range(1);
         let events = vec![
             event(
-                0,
+                Time::ZERO,
                 FaultAction::Partition {
                     target: range1,
-                    duration_s: 12,
+                    duration: secs(12),
                     style: PartitionStyle::Blackhole,
                 },
             ),
             event(
-                2,
+                secs(2),
                 FaultAction::Flap {
                     target: range1,
-                    period_s: 2,
-                    duration_s: 6,
+                    period: secs(2),
+                    duration: secs(6),
                 },
             ),
         ];
         let cut = ProxyCommand::Partition(ProxyId::Range(1), Some(PartitionStyle::Blackhole));
         let survived = "heal range:1 (partition from t=0s still active)".to_owned();
         let expected = vec![
-            (0, vec![cut], "partition range:1 blackhole".to_owned()),
-            (2, vec![cut], "partition range:1 blackhole".to_owned()),
+            (
+                Time::ZERO,
+                vec![cut],
+                "partition range:1 blackhole".to_owned(),
+            ),
+            (secs(2), vec![cut], "partition range:1 blackhole".to_owned()),
             // The flap's own heals release only the flap's entry; the
             // standing partition stays applied.
-            (4, vec![cut], survived.clone()),
-            (6, vec![cut], "partition range:1 blackhole".to_owned()),
-            (8, vec![cut], survived),
+            (secs(4), vec![cut], survived.clone()),
+            (secs(6), vec![cut], "partition range:1 blackhole".to_owned()),
+            (secs(8), vec![cut], survived),
             // Only the standing partition's own heal clears the proxy.
             (
-                12,
+                secs(12),
                 vec![ProxyCommand::Partition(ProxyId::Range(1), None)],
                 "heal range:1".to_owned(),
             ),
@@ -1086,15 +1108,15 @@ mod tests {
     #[test]
     fn kill_and_restart_atoms_issue_no_proxy_commands() {
         let events = vec![event(
-            3,
+            secs(3),
             FaultAction::KillNode {
                 node: 1,
-                restart_after_s: Some(4),
+                restart_after: Some(secs(4)),
             },
         )];
         let expected = vec![
-            (3, Vec::new(), "kill node1".to_owned()),
-            (7, Vec::new(), "restart node1".to_owned()),
+            (secs(3), Vec::new(), "kill node1".to_owned()),
+            (secs(7), Vec::new(), "restart node1".to_owned()),
         ];
         assert!(drive(&events, 2, 2) == expected);
     }
@@ -1141,8 +1163,8 @@ mod tests {
             (
                 AtomAction::SetLatency {
                     target: FaultTarget::AllRanges,
-                    ms: 100,
-                    jitter_ms: 20,
+                    delay: millis(100),
+                    jitter: millis(20),
                 },
                 "latency all-ranges 100ms±20ms",
             ),
@@ -1155,9 +1177,9 @@ mod tests {
             (
                 AtomAction::SetThrottle {
                     target: FaultTarget::Sql(1),
-                    bytes_per_sec: 65536,
+                    rate: kibibytes_per_sec(64),
                 },
-                "throttle sql:1 65536B/s",
+                "throttle sql:1 64KiB/s",
             ),
             (
                 AtomAction::ClearThrottle {

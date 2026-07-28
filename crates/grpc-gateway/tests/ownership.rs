@@ -15,6 +15,7 @@ use crabka_grpc_gateway::{
     produce::ProduceCore,
     types::GatewayRecord,
 };
+use crabka_units::prelude::*;
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 
@@ -38,7 +39,7 @@ async fn ownership_split_non_owner_is_unavailable() {
         &bootstrap,
         DEDUP,
         N,
-        3_600_000,
+        hours(1),
         &crabka_grpc_gateway::dedup::topic::InternalTopicPolicy {
             replication_factor: 1,
             ..Default::default()

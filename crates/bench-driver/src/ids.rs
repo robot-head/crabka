@@ -9,29 +9,11 @@
 
 use core::cmp::Ordering;
 
+use crabka_units::prelude::*;
 use derive_more::{Display, From, Into};
 use serde::{Deserialize, Serialize};
 
-/// A window length in **seconds** (e.g. the Prometheus `rate()` window the
-/// resource capture is measured over). Distinct from any count so the two
-/// adjacent `u64` arguments of `capture_resource` cannot be transposed.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    Display,
-    From,
-    Into,
-    Serialize,
-    Deserialize,
-)]
-#[serde(transparent)]
-pub struct DurationSeconds(pub u64);
+use crate::numeric::saturating_u64_to_i64;
 
 /// A number of Kafka messages (produced, consumed, or dropped).
 #[derive(
@@ -57,6 +39,12 @@ pub struct MessageCount(pub u64);
 /// measurement (or wallclock) window start. Ordered so it can key the
 /// per-offset averaging maps. Not to be confused with [`WallclockMs`], which
 /// is an absolute unix-epoch timestamp.
+///
+/// This stays an integer rather than becoming a [`Time`]: it is a *coordinate*
+/// on the fixed sampling grid, and the cross-run averaging in
+/// [`crate::aggregate`] keys `BTreeMap`s by it, which a `f64`-backed quantity
+/// cannot do. [`Self::as_time`] and [`Self::since`] are the seams that turn a
+/// pair of coordinates into the extent between them.
 #[derive(
     Debug,
     Clone,
@@ -75,6 +63,21 @@ pub struct MessageCount(pub u64);
 )]
 #[serde(transparent)]
 pub struct TimeOffsetMs(pub u64);
+
+impl TimeOffsetMs {
+    /// This offset as the time extent from the window start.
+    #[must_use]
+    pub fn as_time(self) -> Time {
+        Time::from_millis(saturating_u64_to_i64(self.0))
+    }
+
+    /// The extent from `earlier` to this offset, or no time at all when the two
+    /// are the wrong way round.
+    #[must_use]
+    pub fn since(self, earlier: Self) -> Time {
+        Time::from_millis(saturating_u64_to_i64(self.0.saturating_sub(earlier.0)))
+    }
+}
 
 /// An **absolute** wallclock timestamp in unix-epoch milliseconds (`i64` to
 /// match `chrono::Utc::now().timestamp_millis()`). Distinct from the
@@ -130,7 +133,21 @@ macro_rules! impl_primitive_cmp {
     };
 }
 
-impl_primitive_cmp!(DurationSeconds, u64);
 impl_primitive_cmp!(MessageCount, u64);
 impl_primitive_cmp!(TimeOffsetMs, u64);
 impl_primitive_cmp!(WallclockMs, i64);
+
+#[cfg(test)]
+mod tests {
+    use assert2::check;
+
+    use super::*;
+
+    #[test]
+    fn offsets_convert_to_extents_and_differences() {
+        check!(TimeOffsetMs(2_500).as_time() == millis(2500));
+        check!(TimeOffsetMs(6_000).since(TimeOffsetMs(4_000)) == secs(2));
+        // Out of order: no negative extents.
+        check!(TimeOffsetMs(4_000).since(TimeOffsetMs(6_000)) == Time::ZERO);
+    }
+}

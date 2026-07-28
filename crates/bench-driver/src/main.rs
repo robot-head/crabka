@@ -13,6 +13,7 @@ use crabka_bench_driver::{
         ConsumerBuildRetryPolicy, DriverConfig,
     },
 };
+use crabka_units::fmt::Human as _;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
@@ -219,15 +220,16 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("write run output to {}", cli.out.display()))?;
 
-    // Brief stdout summary so `kubectl logs` shows progress.
+    // Brief stdout summary so `kubectl logs` shows progress. The dimensioned
+    // values print in the operator form (`2.4GiB`, `4.25ms`).
     println!(
-        "stack={:?} scenario={} produced={} consumed={} mb_in={:.2} p99_ms={:.2}",
+        "stack={:?} scenario={} produced={} consumed={} bytes_in={} p99={}",
         out.stack,
         out.scenario.name,
         out.throughput.msgs_produced,
         out.throughput.msgs_consumed,
-        out.throughput.mb_in,
-        out.producer_latency_ms.p99_ms,
+        out.throughput.bytes_in.human(),
+        out.producer_latency.p99.human(),
     );
     Ok(())
 }

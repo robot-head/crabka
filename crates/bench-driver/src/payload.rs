@@ -2,7 +2,7 @@
 //! are reserved for `(magic_be, scenario_id_be, send_unix_nanos_be)` so
 //! consumers can compute end-to-end latency by re-reading the embedded
 //! `send_unix_nanos`. The remaining bytes are a deterministic filler so
-//! the wire size is exactly `msg_size_bytes`.
+//! the wire size is exactly the scenario's message size.
 //!
 //! 24 bytes (not 16 as the plan sketched) because we want a magic to
 //! detect "this is one of ours" — Kafka's own producers leave their
@@ -11,6 +11,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::{Bytes, BytesMut};
+use crabka_units::prelude::*;
 
 use crate::numeric::saturating_u128_to_u64;
 
@@ -20,13 +21,15 @@ use crate::numeric::saturating_u128_to_u64;
 pub const MAGIC: [u8; 8] = *b"CRABKA_B";
 pub const HEADER_LEN: usize = MAGIC.len() + 8 + 8; // magic + scenario_id + send_nanos = 24
 
-/// Build a reusable filler template of exactly `msg_size_bytes` bytes.
-/// The first 24 bytes are zero and will be overwritten by `stamp_into` at
-/// send time; the remaining bytes are a repeating pattern.
+/// Build a reusable filler template of exactly `msg_size` bytes (or the header
+/// length, whichever is larger). The first 24 bytes are zero and will be
+/// overwritten by `stamp_into` at send time; the remaining bytes are a
+/// repeating pattern.
 #[must_use]
-pub fn template(msg_size_bytes: usize) -> BytesMut {
-    let mut b = BytesMut::with_capacity(msg_size_bytes.max(HEADER_LEN));
-    b.resize(msg_size_bytes.max(HEADER_LEN), 0u8);
+pub fn template(msg_size: ByteSize) -> BytesMut {
+    let len = msg_size.bytes_usize().max(HEADER_LEN);
+    let mut b = BytesMut::with_capacity(len);
+    b.resize(len, 0u8);
     // Fill the body with a repeating ramp so compression has *some* work.
     // All-zeros compresses too well; all-random compresses too poorly.
     for (i, byte) in b.iter_mut().enumerate().skip(HEADER_LEN) {
@@ -72,7 +75,7 @@ mod tests {
 
     #[test]
     fn round_trip_send_nanos() {
-        let mut t = template(64);
+        let mut t = template(bytes(64));
         let b = stamp_into(&mut t, 0xdead_beef);
         let n = read_send_nanos(&b, 0xdead_beef).expect("magic+sid match");
         assert2::assert!(n > 0);
@@ -80,7 +83,7 @@ mod tests {
 
     #[test]
     fn rejects_wrong_scenario_id() {
-        let mut t = template(64);
+        let mut t = template(bytes(64));
         let b = stamp_into(&mut t, 42);
         assert2::assert!(read_send_nanos(&b, 7).is_none());
     }
@@ -99,13 +102,12 @@ mod tests {
 
     #[test]
     fn template_size_honoured_above_header() {
-        let t = template(1024);
-        assert2::assert!(t.len() == 1024);
+        assert2::assert!(template(kibibytes(1)).len() == 1024);
+        assert2::assert!(template(bytes(512)).len() == 512);
     }
 
     #[test]
     fn template_min_size_is_header() {
-        let t = template(0);
-        assert2::assert!(t.len() == HEADER_LEN);
+        assert2::assert!(template(ByteSize::ZERO).len() == HEADER_LEN);
     }
 }

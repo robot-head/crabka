@@ -18,16 +18,25 @@ For workspace development, use the path dependency from this repository instead.
 
 ## Usage example
 
-Run one benchmark scenario against a reachable Kafka-compatible cluster and write the JSON report:
+Run one benchmark scenario against a reachable Kafka-compatible cluster and write the JSON report.
+
+Every size, duration, and rate in the scenario carries its unit — `512B`, `5ms`, `20000/s`. A bare number is rejected rather than guessed at, so a scenario cannot silently mean milliseconds where it meant seconds:
 
 ```bash
 cat > /tmp/smoke.yaml <<'YAML'
 name: smoke-produce-consume
-producer:
-  records: 10000
-  valueBytes: 512
-consumer:
-  expectedRecords: 10000
+mode_tag: ci
+msg_size: 512B
+partitions: 6
+producers: 1
+consumers: 1
+mode:
+  kind: saturate
+acks: leader
+linger: 5ms
+batch_size: 16KiB
+warmup: 5s
+duration: 30s
 YAML
 
 crabka-bench-driver \
@@ -38,6 +47,16 @@ crabka-bench-driver \
   --broker-count 1 \
   --out /tmp/crabka-run.json
 ```
+
+Paced runs replace `mode: {kind: saturate}` with an explicit event rate:
+
+```yaml
+mode:
+  kind: fixed_rate
+  rate: 20000/s
+```
+
+The `RunOutput` JSON the driver writes encodes its *measurements* as exact integers instead — latencies in nanoseconds, sizes in bytes — so the report aggregator compares and plots them without rounding.
 
 ## Documentation
 

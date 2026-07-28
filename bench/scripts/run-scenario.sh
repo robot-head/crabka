@@ -109,9 +109,10 @@ elapsed=$(wait_kafka_ready "$STACK" 600)
 T_READY=$(date +%s%N)
 # This WSL `date` ignores the %3N width spec and emits 19-digit epoch
 # *nanoseconds*, so the T_READY-T0 delta is in ns — convert to ms for the
-# report's startup_ms field. (`%s%N` is unambiguous: epoch seconds + 9-digit ns.)
+# report's `startup` field, which is encoded as whole milliseconds.
+# (`%s%N` is unambiguous: epoch seconds + 9-digit ns.)
 STARTUP_MS=$(( (T_READY - T0) / 1000000 ))
-log "[$STACK/$SCENARIO/$TOPOLOGY] Kafka Ready in ${elapsed}s (startup_ms=$STARTUP_MS)"
+log "[$STACK/$SCENARIO/$TOPOLOGY] Kafka Ready in ${elapsed}s (startup=${STARTUP_MS}ms)"
 
 log "[$STACK/$SCENARIO/$TOPOLOGY] applying KafkaTopic (partitions=$BENCH_PARTITIONS rf=$BENCH_REPLICATION_FACTOR)"
 envsubst < "$TOPIC_PATH" | kubectl apply -f -
@@ -180,7 +181,7 @@ python3 - "$out_json" "$STARTUP_MS" <<'PY'
 import json, sys, pathlib
 p = pathlib.Path(sys.argv[1])
 data = json.loads(p.read_text())
-data["startup_ms"] = int(sys.argv[2])
+data["startup"] = int(sys.argv[2])
 p.write_text(json.dumps(data, indent=2))
 PY
 

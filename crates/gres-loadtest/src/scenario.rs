@@ -2,9 +2,19 @@
 //!
 //! A scenario is the single input to a harness run. [`Scenario::from_yaml_file`]
 //! parses and validates it; every other module consumes the parsed types.
+//!
+//! Every dimensioned field is a [`crabka_units`] quantity and carries its unit
+//! in the YAML — `duration: 60s`, `rate: { fixed: { target_rate: 500/s } }`,
+//! `throttle: { rate: 128KiB/s }`. A bare number is rejected rather than
+//! guessed at, which is the whole point of the types.
 
 use std::{collections::BTreeMap, fmt, path::Path, str::FromStr};
 
+use crabka_units::{
+    fmt::Human as _,
+    prelude::*,
+    serde_units::human::{byte_rate, frequency, option_time, time},
+};
 use serde::{Deserialize, Serialize};
 
 /// A complete harness scenario as parsed from YAML.
@@ -41,12 +51,12 @@ pub struct TopologySpec {
     pub nodes: u16,
     /// Number of ranges (r0..rN-1). Range 0 is the coordinator range.
     pub ranges: u16,
-    /// Per-node HLC wall-clock skew in milliseconds (node index → signed
-    /// offset), passed to `--hlc-wall-offset-ms`. Only meaningful in HLC
-    /// mode; today only the skew of the node hosting range 0 (the single
-    /// HLC authority) is observable.
-    #[serde(default)]
-    pub clock_skew_ms: BTreeMap<u16, i64>,
+    /// Per-node HLC wall-clock skew (node index → signed offset), passed to
+    /// `--hlc-wall-offset-ms`. Only meaningful in HLC mode; today only the
+    /// skew of the node hosting range 0 (the single HLC authority) is
+    /// observable.
+    #[serde(default, with = "skew_map")]
+    pub clock_skew: BTreeMap<u16, Time>,
     /// Pin each node to this many dedicated CPUs (the broker gets its own
     /// slice first — see `broker_cpus` — and nodes get disjoint slices
     /// after it). On a single machine this makes each node behave like a
@@ -64,8 +74,62 @@ pub struct TopologySpec {
     pub broker_cpus: Option<u32>,
 }
 
+/// A node-indexed map of clock-skew extents, written as human time strings
+/// (`clock_skew: { 0: 400ms, 2: -100ms }`).
+///
+/// The per-quantity `#[serde(with = ...)]` modules cover a single value, not a
+/// map of them, so the map's own adapter lives here and reuses the same
+/// parse/render pair.
+mod skew_map {
+    use std::collections::BTreeMap;
+
+    use crabka_units::{Time, fmt::Human as _, parse};
+    use serde::{
+        Deserialize as _, Deserializer, Serializer,
+        de::Error as _,
+        ser::{Error as _, SerializeMap as _},
+    };
+
+    /// Writes each entry's extent as its human string form.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the serializer reports for a map of strings.
+    pub fn serialize<S: Serializer>(
+        value: &BTreeMap<u16, Time>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(value.len()))?;
+        for (node, skew) in value {
+            // `serialize_entry` would need the value pre-rendered anyway; a
+            // `String` keeps the key numeric, which YAML flow maps expect.
+            map.serialize_entry(node, &skew.human().to_string())
+                .map_err(S::Error::custom)?;
+        }
+        map.end()
+    }
+
+    /// Reads each entry's extent from its human string form.
+    ///
+    /// # Errors
+    ///
+    /// If a value is not a time extent with an explicit unit.
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<BTreeMap<u16, Time>, D::Error> {
+        BTreeMap::<u16, String>::deserialize(deserializer)?
+            .into_iter()
+            .map(|(node, raw)| {
+                parse::time(&raw)
+                    .map(|skew| (node, skew))
+                    .map_err(D::Error::custom)
+            })
+            .collect()
+    }
+}
+
 /// Timestamp-source mode for the tenant under test.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum ModeSpec {
     /// Centralized Percolator-style logical timestamp oracle on range 0.
@@ -73,21 +137,26 @@ pub enum ModeSpec {
     LogicalTso,
     /// Hybrid logical clock.
     Hlc {
-        /// Uncertainty window (`max_offset`) in milliseconds.
-        #[serde(default = "default_hlc_max_offset_ms")]
-        max_offset_ms: u64,
+        /// Uncertainty window (`max_offset`).
+        #[serde(default = "default_hlc_max_offset", with = "time")]
+        max_offset: Time,
     },
 }
 
-fn default_hlc_max_offset_ms() -> u64 {
-    250
+fn default_hlc_max_offset() -> Time {
+    millis(250)
+}
+
+/// No extent, for optional duration fields that default to zero.
+fn zero_time() -> Time {
+    Time::ZERO
 }
 
 impl fmt::Display for ModeSpec {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::LogicalTso => write!(f, "logical-tso"),
-            Self::Hlc { max_offset_ms } => write!(f, "hlc(max_offset_ms={max_offset_ms})"),
+            Self::Hlc { max_offset } => write!(f, "hlc(max_offset={})", max_offset.human()),
         }
     }
 }
@@ -102,11 +171,12 @@ pub struct WorkloadSpec {
     /// Pacing: saturate or a fixed aggregate transaction rate.
     #[serde(default, with = "serde_yaml::with::singleton_map")]
     pub rate: RateSpec,
-    /// Seconds of load before measurement starts.
-    #[serde(default = "default_warmup_s")]
-    pub warmup_s: u64,
-    /// Seconds of measured load.
-    pub duration_s: u64,
+    /// Load driven before measurement starts.
+    #[serde(default = "default_warmup", with = "time")]
+    pub warmup: Time,
+    /// Length of the measured window.
+    #[serde(with = "time")]
+    pub duration: Time,
     /// Relative weights of the operation classes.
     pub mix: MixSpec,
     /// Number of rows in the contended-update hot table.
@@ -118,8 +188,8 @@ pub struct WorkloadSpec {
     pub zipf_exponent: f64,
 }
 
-fn default_warmup_s() -> u64 {
-    5
+fn default_warmup() -> Time {
+    secs(5)
 }
 
 fn default_hot_rows() -> u32 {
@@ -131,7 +201,7 @@ fn default_zipf_exponent() -> f64 {
 }
 
 /// Pacing for the workload.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum RateSpec {
     /// Issue transactions as fast as the cluster accepts them.
@@ -139,8 +209,9 @@ pub enum RateSpec {
     Saturate,
     /// Target a fixed aggregate transaction rate across all connections.
     Fixed {
-        /// Transactions per second across the whole workload.
-        tps: u32,
+        /// Transaction rate across the whole workload.
+        #[serde(with = "frequency")]
+        target_rate: Frequency,
     },
 }
 
@@ -179,8 +250,9 @@ impl MixSpec {
 /// One entry in the fault timeline.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FaultEvent {
-    /// Seconds after the start of the measurement window.
-    pub at_s: u64,
+    /// Offset after the start of the measurement window.
+    #[serde(with = "time")]
+    pub at: Time,
     /// The fault to inject.
     #[serde(flatten)]
     pub action: FaultAction,
@@ -194,8 +266,9 @@ pub enum FaultAction {
     Partition {
         /// Which endpoint's proxy to affect.
         target: FaultTarget,
-        /// Seconds until the link heals.
-        duration_s: u64,
+        /// How long until the link heals.
+        #[serde(with = "time")]
+        duration: Time,
         /// How the cut manifests to peers.
         #[serde(default)]
         style: PartitionStyle,
@@ -204,39 +277,46 @@ pub enum FaultAction {
     Latency {
         /// Which endpoint's proxy to affect.
         target: FaultTarget,
-        /// Base one-way delay in milliseconds, applied in each direction.
-        ms: u64,
+        /// Base one-way delay, applied in each direction.
+        #[serde(with = "time")]
+        delay: Time,
         /// Uniform jitter added on top of the base delay.
-        #[serde(default)]
-        jitter_ms: u64,
-        /// Seconds until the delay is removed.
-        duration_s: u64,
+        #[serde(default = "zero_time", with = "time")]
+        jitter: Time,
+        /// How long until the delay is removed.
+        #[serde(with = "time")]
+        duration: Time,
     },
     /// Cap a link's bandwidth for a duration.
     Throttle {
         /// Which endpoint's proxy to affect.
         target: FaultTarget,
-        /// Bandwidth cap in bytes per second, per direction.
-        bytes_per_sec: u64,
-        /// Seconds until the cap is removed.
-        duration_s: u64,
+        /// Bandwidth cap, per direction.
+        #[serde(with = "byte_rate")]
+        rate: ByteRate,
+        /// How long until the cap is removed.
+        #[serde(with = "time")]
+        duration: Time,
     },
     /// SIGKILL a node's process, optionally restarting it later.
     KillNode {
         /// Node index to kill.
         node: u16,
-        /// Seconds to wait before restarting the node. `None` leaves it down.
-        #[serde(default)]
-        restart_after_s: Option<u64>,
+        /// How long to wait before restarting the node. `null` leaves it
+        /// down.
+        #[serde(default, with = "option_time")]
+        restart_after: Option<Time>,
     },
     /// Repeatedly partition and heal a link.
     Flap {
         /// Which endpoint's proxy to affect.
         target: FaultTarget,
-        /// Seconds per on/off half-cycle.
-        period_s: u64,
-        /// Total seconds the link keeps flapping (ends healed).
-        duration_s: u64,
+        /// Length of one on/off half-cycle.
+        #[serde(with = "time")]
+        period: Time,
+        /// How long the link keeps flapping (ends healed).
+        #[serde(with = "time")]
+        duration: Time,
     },
 }
 
@@ -396,17 +476,17 @@ impl Scenario {
         }
         if let Some(node) = self
             .topology
-            .clock_skew_ms
+            .clock_skew
             .keys()
             .find(|node| **node >= self.topology.nodes)
         {
             return invalid(format!(
-                "clock_skew_ms references node {node} but topology has {} nodes",
+                "clock_skew references node {node} but topology has {} nodes",
                 self.topology.nodes
             ));
         }
-        if !self.topology.clock_skew_ms.is_empty() && self.mode == ModeSpec::LogicalTso {
-            return invalid("clock_skew_ms requires hlc mode".to_owned());
+        if !self.topology.clock_skew.is_empty() && self.mode == ModeSpec::LogicalTso {
+            return invalid("clock_skew requires hlc mode".to_owned());
         }
         if self.topology.cpus_per_node == Some(0) {
             return invalid("cpus_per_node must be at least 1 when set".to_owned());
@@ -420,8 +500,8 @@ impl Scenario {
         if self.workload.connections == 0 {
             return invalid("workload.connections must be at least 1".to_owned());
         }
-        if self.workload.duration_s == 0 {
-            return invalid("workload.duration_s must be at least 1".to_owned());
+        if self.workload.duration <= Time::ZERO {
+            return invalid("workload.duration must be positive".to_owned());
         }
         if self.workload.mix.total_weight() == 0 {
             return invalid("workload.mix must have at least one non-zero weight".to_owned());
@@ -439,26 +519,29 @@ impl Scenario {
     }
 
     fn validate_fault(&self, event: &FaultEvent) -> Result<(), ScenarioError> {
-        let window_s = self.workload.duration_s;
-        if event.at_s >= window_s {
+        let window = self.workload.duration;
+        if event.at >= window {
             return Err(ScenarioError::Invalid(format!(
-                "fault at t={}s starts at or after the {window_s}s measurement window ends",
-                event.at_s
+                "fault at t={} starts at or after the {} measurement window ends",
+                event.at.human(),
+                window.human()
             )));
         }
-        let end_s = match &event.action {
-            FaultAction::Partition { duration_s, .. }
-            | FaultAction::Latency { duration_s, .. }
-            | FaultAction::Throttle { duration_s, .. }
-            | FaultAction::Flap { duration_s, .. } => event.at_s.saturating_add(*duration_s),
-            FaultAction::KillNode {
-                restart_after_s, ..
-            } => event.at_s.saturating_add(restart_after_s.unwrap_or(0)),
+        let end = match &event.action {
+            FaultAction::Partition { duration, .. }
+            | FaultAction::Latency { duration, .. }
+            | FaultAction::Throttle { duration, .. }
+            | FaultAction::Flap { duration, .. } => event.at + *duration,
+            FaultAction::KillNode { restart_after, .. } => {
+                event.at + restart_after.unwrap_or(Time::ZERO)
+            }
         };
-        if end_s > window_s {
+        if end > window {
             return Err(ScenarioError::Invalid(format!(
-                "fault at t={}s runs until t={end_s}s, past the {window_s}s measurement window",
-                event.at_s
+                "fault at t={} runs until t={}, past the {} measurement window",
+                event.at.human(),
+                end.human(),
+                window.human()
             )));
         }
         let check_target = |target: &FaultTarget| {
@@ -469,8 +552,8 @@ impl Scenario {
             };
             if index >= bound {
                 return Err(ScenarioError::Invalid(format!(
-                    "fault at t={}s targets {label} {index} but topology has {bound}",
-                    event.at_s
+                    "fault at t={} targets {label} {index} but topology has {bound}",
+                    event.at.human()
                 )));
             }
             Ok(())
@@ -483,8 +566,9 @@ impl Scenario {
             FaultAction::KillNode { node, .. } => {
                 if *node >= self.topology.nodes {
                     return Err(ScenarioError::Invalid(format!(
-                        "fault at t={}s kills node {node} but topology has {} nodes",
-                        event.at_s, self.topology.nodes
+                        "fault at t={} kills node {node} but topology has {} nodes",
+                        event.at.human(),
+                        self.topology.nodes
                     )));
                 }
                 Ok(())
@@ -495,7 +579,7 @@ impl Scenario {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::{assert, check};
 
     use super::*;
 
@@ -505,7 +589,7 @@ name: minimal
 topology: { nodes: 2, ranges: 2 }
 workload:
   connections: 4
-  duration_s: 10
+  duration: 10s
   mix: { single_shard_insert: 1 }
 "
     }
@@ -520,7 +604,7 @@ workload:
             topology: TopologySpec {
                 nodes: 2,
                 ranges: 2,
-                clock_skew_ms: BTreeMap::new(),
+                clock_skew: BTreeMap::new(),
                 cpus_per_node: None,
                 broker_cpus: None,
             },
@@ -528,8 +612,8 @@ workload:
             workload: WorkloadSpec {
                 connections: 4,
                 rate: RateSpec::Saturate,
-                warmup_s: 5,
-                duration_s: 10,
+                warmup: secs(5),
+                duration: secs(10),
                 mix: MixSpec {
                     single_shard_insert: 1,
                     cross_shard_txn: 0,
@@ -552,15 +636,15 @@ description: everything at once
 topology:
   nodes: 3
   ranges: 4
-  clock_skew_ms: { 0: 400, 2: -100 }
+  clock_skew: { 0: 400ms, 2: -100ms }
 mode:
-  hlc: { max_offset_ms: 300 }
+  hlc: { max_offset: 300ms }
 workload:
   connections: 32
   rate:
-    fixed: { tps: 5000 }
-  warmup_s: 10
-  duration_s: 60
+    fixed: { target_rate: 5000/s }
+  warmup: 10s
+  duration: 60s
   mix:
     single_shard_insert: 60
     cross_shard_txn: 20
@@ -569,26 +653,121 @@ workload:
   hot_rows: 100
   zipf_exponent: 1.5
 faults:
-  - at_s: 20
-    partition: { target: 'range:0', duration_s: 10 }
-  - at_s: 35
-    latency: { target: all-ranges, ms: 100, jitter_ms: 20, duration_s: 15 }
-  - at_s: 40
-    throttle: { target: 'sql:1', bytes_per_sec: 65536, duration_s: 5 }
-  - at_s: 50
-    kill_node: { node: 2, restart_after_s: 5 }
-  - at_s: 50
-    flap: { target: 'range:1', period_s: 2, duration_s: 8 }
+  - at: 20s
+    partition: { target: 'range:0', duration: 10s }
+  - at: 35s
+    latency: { target: all-ranges, delay: 100ms, jitter: 20ms, duration: 15s }
+  - at: 40s
+    throttle: { target: 'sql:1', rate: 64KiB/s, duration: 5s }
+  - at: 50s
+    kill_node: { node: 2, restart_after: 5s }
+  - at: 50s
+    flap: { target: 'range:1', period: 2s, duration: 8s }
 ";
         let scenario: Scenario = serde_yaml::from_str(yaml).expect("parse");
         scenario.validate().expect("valid");
-        assert!(scenario.mode == ModeSpec::Hlc { max_offset_ms: 300 });
-        assert!(scenario.workload.rate == RateSpec::Fixed { tps: 5000 });
+        assert!(
+            scenario.mode
+                == ModeSpec::Hlc {
+                    max_offset: millis(300)
+                }
+        );
+        assert!(
+            scenario.workload.rate
+                == RateSpec::Fixed {
+                    target_rate: per_sec(5000)
+                }
+        );
+        assert!(
+            scenario.topology.clock_skew == BTreeMap::from([(0, millis(400)), (2, -millis(100))])
+        );
         assert!(scenario.faults.len() == 5);
         let round_tripped: Scenario =
             serde_yaml::from_str(&serde_yaml::to_string(&scenario).expect("serialize"))
                 .expect("re-parse");
         assert!(round_tripped == scenario);
+    }
+
+    #[test]
+    fn quantity_fields_reject_unitless_numbers() {
+        // Every dimensioned scenario field must carry its unit: `30` is not
+        // a duration, and guessing between seconds and milliseconds is the
+        // failure the quantity types exist to prevent. Each case is the
+        // whole document with exactly one field stripped of its unit.
+        let cases: [(&str, &str); 6] = [
+            (
+                "workload.duration",
+                "
+name: unitless
+topology: { nodes: 1, ranges: 1 }
+workload: { connections: 4, duration: 10, mix: { single_shard_insert: 1 } }
+",
+            ),
+            (
+                "workload.warmup",
+                "
+name: unitless
+topology: { nodes: 1, ranges: 1 }
+workload:
+  connections: 4
+  warmup: 5
+  duration: 10s
+  mix: { single_shard_insert: 1 }
+",
+            ),
+            (
+                "workload.rate.fixed.target_rate",
+                "
+name: unitless
+topology: { nodes: 1, ranges: 1 }
+workload:
+  connections: 4
+  rate:
+    fixed: { target_rate: 500 }
+  duration: 10s
+  mix: { single_shard_insert: 1 }
+",
+            ),
+            (
+                "topology.clock_skew",
+                "
+name: unitless
+topology: { nodes: 1, ranges: 1, clock_skew: { 0: 400 } }
+mode:
+  hlc: { max_offset: 250ms }
+workload: { connections: 4, duration: 10s, mix: { single_shard_insert: 1 } }
+",
+            ),
+            (
+                "faults[].at",
+                "
+name: unitless
+topology: { nodes: 1, ranges: 1 }
+workload: { connections: 4, duration: 10s, mix: { single_shard_insert: 1 } }
+faults:
+  - at: 1
+    partition: { target: 'range:0', duration: 2s }
+",
+            ),
+            (
+                "faults[].throttle.rate",
+                "
+name: unitless
+topology: { nodes: 1, ranges: 1 }
+workload: { connections: 4, duration: 10s, mix: { single_shard_insert: 1 } }
+faults:
+  - at: 1s
+    throttle: { target: 'range:0', rate: 65536, duration: 2s }
+",
+            ),
+        ];
+        for (field, yaml) in cases {
+            let parsed = serde_yaml::from_str::<Scenario>(yaml);
+            assert!(
+                parsed.is_err(),
+                "{field} must reject a unitless value, got {parsed:?}"
+            );
+        }
     }
 
     #[test]
@@ -611,6 +790,18 @@ faults:
     }
 
     #[test]
+    fn mode_displays_its_uncertainty_window_in_human_form() {
+        check!(ModeSpec::LogicalTso.to_string() == "logical-tso");
+        check!(
+            ModeSpec::Hlc {
+                max_offset: millis(250)
+            }
+            .to_string()
+                == "hlc(max_offset=250ms)"
+        );
+    }
+
+    #[test]
     fn validation_rejects_inconsistent_scenarios() {
         let broken = [
             (
@@ -626,12 +817,12 @@ faults:
                 "must not exceed topology.ranges",
             ),
             (
-                "topology: { nodes: 1, ranges: 1, clock_skew_ms: { 5: 100 } }",
-                "clock_skew_ms references node 5",
+                "topology: { nodes: 1, ranges: 1, clock_skew: { 5: 100ms } }",
+                "clock_skew references node 5",
             ),
             (
-                "topology: { nodes: 1, ranges: 1, clock_skew_ms: { 0: 100 } }",
-                "clock_skew_ms requires hlc mode",
+                "topology: { nodes: 1, ranges: 1, clock_skew: { 0: 100ms } }",
+                "clock_skew requires hlc mode",
             ),
         ];
         for (topology, expected_fragment) in broken {
@@ -641,7 +832,7 @@ name: broken
 {topology}
 workload:
   connections: 4
-  duration_s: 10
+  duration: 10s
   mix: {{ single_shard_insert: 1 }}
 "
             );
@@ -661,10 +852,10 @@ name: bad-fault
 topology: { nodes: 2, ranges: 2 }
 workload:
   connections: 4
-  duration_s: 10
+  duration: 10s
   mix: { single_shard_insert: 1 }
 faults:
-  - at_s: 1
+  - at: 1s
     kill_node: { node: 7 }
 ";
         let scenario: Scenario = serde_yaml::from_str(yaml).expect("parse");
@@ -675,32 +866,36 @@ faults:
         // the window ends, and timed faults (or restarts) running past it,
         // are both rejected; ending exactly at the window bound is allowed.
         let bounds_cases = [
-            ("partition: { target: 'range:0', duration_s: 3 }", 7, false),
-            ("partition: { target: 'range:0', duration_s: 5 }", 6, true),
             (
-                "latency: { target: all-ranges, ms: 50, duration_s: 4 }",
-                7,
+                "partition: { target: 'range:0', duration: 3s }",
+                "7s",
+                false,
+            ),
+            ("partition: { target: 'range:0', duration: 5s }", "6s", true),
+            (
+                "latency: { target: all-ranges, delay: 50ms, duration: 4s }",
+                "7s",
                 true,
             ),
-            ("kill_node: { node: 1, restart_after_s: 8 }", 3, true),
-            ("kill_node: { node: 1 }", 9, false),
+            ("kill_node: { node: 1, restart_after: 8s }", "3s", true),
+            ("kill_node: { node: 1 }", "9s", false),
             (
-                "flap: { target: 'range:1', period_s: 2, duration_s: 4 }",
-                6,
+                "flap: { target: 'range:1', period: 2s, duration: 4s }",
+                "6s",
                 false,
             ),
         ];
-        for (action, at_s, rejected) in bounds_cases {
+        for (action, at, rejected) in bounds_cases {
             let yaml = format!(
                 "
 name: bounds
 topology: {{ nodes: 2, ranges: 2 }}
 workload:
   connections: 4
-  duration_s: 10
+  duration: 10s
   mix: {{ single_shard_insert: 1 }}
 faults:
-  - at_s: {at_s}
+  - at: {at}
     {action}
 "
             );
@@ -708,7 +903,7 @@ faults:
             let result = scenario.validate();
             assert!(
                 result.is_err() == rejected,
-                "action {action} at t={at_s}: {result:?}"
+                "action {action} at t={at}: {result:?}"
             );
         }
         let yaml = "
@@ -716,11 +911,11 @@ name: late-start
 topology: { nodes: 2, ranges: 2 }
 workload:
   connections: 4
-  duration_s: 10
+  duration: 10s
   mix: { single_shard_insert: 1 }
 faults:
-  - at_s: 10
-    partition: { target: 'range:0', duration_s: 1 }
+  - at: 10s
+    partition: { target: 'range:0', duration: 1s }
 ";
         let scenario: Scenario = serde_yaml::from_str(yaml).expect("parse");
         assert!(let Err(ScenarioError::Invalid(message)) = scenario.validate());
@@ -731,7 +926,7 @@ name: cross-shard-one-range
 topology: { nodes: 1, ranges: 1 }
 workload:
   connections: 4
-  duration_s: 10
+  duration: 10s
   mix: { cross_shard_txn: 1 }
 ";
         let scenario: Scenario = serde_yaml::from_str(yaml).expect("parse");

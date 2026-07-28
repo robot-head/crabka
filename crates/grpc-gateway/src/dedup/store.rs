@@ -3,17 +3,15 @@
 //! assigned dedup partitions, and keeps the claim map warm. P3 gates every
 //! produce on ownership + warmth so only the owning replica may write.
 
-use std::{
-    sync::{
-        Arc, OnceLock,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Duration,
+use std::sync::{
+    Arc, OnceLock,
+    atomic::{AtomicBool, Ordering},
 };
 
 use bytes::Bytes;
 use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
 use crabka_client_producer::{Acks, Producer, ProducerRecord};
+use crabka_units::prelude::*;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 
@@ -43,7 +41,7 @@ pub struct DedupStore {
     /// Optional membership publisher; set by the binary before `run_ownership`
     /// starts. `None` in single-owner/unit contexts means no publishing.
     membership: OnceLock<Arc<crate::dedup::membership::MembershipPublisher>>,
-    poll_timeout: Duration,
+    poll_timeout: Time,
     warmup_empty_polls: u32,
 }
 
@@ -64,7 +62,7 @@ impl DedupStore {
             warm: AtomicBool::new(false),
             warmed_once: AtomicBool::new(false),
             membership: OnceLock::new(),
-            poll_timeout: Duration::from_millis(runtime.consumer_poll_timeout_ms),
+            poll_timeout: runtime.consumer_poll_timeout,
             warmup_empty_polls: runtime.ownership_warmup_empty_polls,
         }
     }
@@ -142,7 +140,7 @@ impl DedupStore {
         loop {
             let batch = tokio::select! {
                 () = shutdown.cancelled() => break,
-                b = consumer.poll(self.poll_timeout) => match b {
+                b = consumer.poll(self.poll_timeout.to_std()) => match b {
                     Ok(batch) => batch,
                     Err(e) => { poll_err = Some(e.into()); break; }
                 },

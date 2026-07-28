@@ -10,8 +10,8 @@ topology:
 workload:
   connections: 32
   rate: saturate
-  warmup_s: 10
-  duration_s: 60
+  warmup: 10s
+  duration: 60s
   mix:
     cross_shard_txn: 70
     single_shard_insert: 20

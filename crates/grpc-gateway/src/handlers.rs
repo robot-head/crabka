@@ -8,6 +8,7 @@ use connectrpc_axum::message::{ConnectError, ConnectRequest, ConnectResponse};
 use crabka_authz::{AuthorizationRequest, AuthorizationResult};
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_security::{AuthMethod, Principal};
+use crabka_units::prelude::*;
 
 use crate::{metrics::metrics, pb, state::AppState};
 
@@ -211,7 +212,7 @@ pub async fn send(
         }
         let t0 = std::time::Instant::now();
         let produce_result = state.produce.produce(rec, &eff).await;
-        metrics().observe_produce_latency(t0.elapsed().as_secs_f64());
+        metrics().observe_produce_latency(t0.elapsed().as_time());
         let result = match produce_result {
             Ok(ref o) if o.deduplicated => {
                 metrics().record_send("deduplicated");

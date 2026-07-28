@@ -8,6 +8,7 @@ use std::{sync::Arc, time::Duration};
 
 use axum::Router;
 use crabka_security::{AuthMethod, DynamicServerConfig, Principal, TlsConfig};
+use crabka_units::prelude::*;
 use hyper_util::rt::TokioIo;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
@@ -113,18 +114,18 @@ fn peer_principal(tls: &tokio_rustls::server::TlsStream<TcpStream>) -> Option<Pr
 ///
 /// # Panics
 ///
-/// Panics when `reload_interval_secs` is zero. Process configuration validates
-/// this invariant before building the listener.
+/// Panics when `reload_interval` is not positive. Process configuration
+/// validates this invariant before building the listener.
 pub fn build_and_watch_tls(
     cfg: TlsConfig,
-    reload_interval_secs: u64,
+    reload_interval: Time,
     shutdown: CancellationToken,
 ) -> Result<Arc<DynamicServerConfig>, crabka_security::TlsError> {
-    let reload_interval = reload_interval(reload_interval_secs);
+    let tick = reload_tick(reload_interval);
     let dynamic = DynamicServerConfig::from_tls_config(&cfg)?;
     let watch = dynamic.clone();
     tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(reload_interval);
+        let mut ticker = tokio::time::interval(tick);
         ticker.tick().await; // skip the immediate first tick (already loaded)
         loop {
             tokio::select! {
@@ -139,19 +140,30 @@ pub fn build_and_watch_tls(
     Ok(dynamic)
 }
 
-fn reload_interval(reload_interval_secs: u64) -> Duration {
-    assert2::assert!(reload_interval_secs > 0);
-    Duration::from_secs(reload_interval_secs)
+/// The `tokio` tick for a validated reload interval. `tokio::time::interval`
+/// panics on a zero period, so the extent is checked here first.
+fn reload_tick(reload_interval: Time) -> Duration {
+    assert2::assert!(reload_interval > secs(0));
+    reload_interval.to_std()
 }
 
 #[cfg(test)]
 mod policy_tests {
-    use assert2::assert;
+    use assert2::{assert, check};
+    use crabka_units::prelude::*;
 
-    use super::reload_interval;
+    use super::reload_tick;
 
     #[test]
-    fn reload_interval_rejects_zero() {
-        assert!(std::panic::catch_unwind(|| reload_interval(0)).is_err());
+    fn reload_tick_rejects_a_non_positive_interval() {
+        for interval in [secs(0), Time::from_secs(-1)] {
+            assert!(std::panic::catch_unwind(|| reload_tick(interval)).is_err());
+        }
+    }
+
+    #[test]
+    fn reload_tick_hands_tokio_the_configured_extent() {
+        check!(reload_tick(secs(30)) == std::time::Duration::from_secs(30));
+        check!(reload_tick(millis(250)) == std::time::Duration::from_millis(250));
     }
 }

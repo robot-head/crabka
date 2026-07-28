@@ -16,11 +16,12 @@
 
 use std::{
     path::{Path, PathBuf},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Context as _;
 use crabka_gres_control::RegistryPolicy;
+use crabka_units::prelude::*;
 use tokio::time::Instant;
 
 use crate::{
@@ -37,7 +38,7 @@ use crate::{
 };
 
 /// Interval between `/proc` resource samples.
-const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+const SAMPLE_INTERVAL: Time = secs(1);
 
 /// Mode string recorded in external-mode reports; the crabka
 /// timestamp-source modes do not apply to an external system.
@@ -252,8 +253,7 @@ pub async fn run_external_scenario(config: ExternalRunConfig) -> anyhow::Result<
         roster.push(process);
     }
     let sampler = ProcSampler::spawn(roster, SAMPLE_INTERVAL);
-    let started_unix_ms =
-        unix_ms(SystemTime::now()).saturating_add(scenario.workload.warmup_s.saturating_mul(1000));
+    let started_unix_ms = window_start_unix_ms(SystemTime::now(), scenario.workload.warmup);
     let outcome = workload::run(&endpoints, &scenario.workload, &scenario.topology)
         .await
         .context("drive workload")?;
@@ -379,14 +379,13 @@ async fn drive(cluster: &mut Cluster, scenario: &Scenario) -> anyhow::Result<Dri
     // nodes restarted by kill_node faults mid-window under `label#N` entries.
     let sampler = ProcSampler::spawn(cluster.process_roster(), SAMPLE_INTERVAL);
 
-    // The fault schedule anchors at the measurement-window start, warmup_s
+    // The fault schedule anchors at the measurement-window start, one warmup
     // from now. This is an approximation: the workload starts its warmup a
     // moment after this line (it first probes for a live endpoint), so the
     // anchor runs slightly ahead of the true window. Keeping these
     // statements adjacent to the `join!` minimizes the skew.
-    let window_start = Instant::now() + Duration::from_secs(scenario.workload.warmup_s);
-    let started_unix_ms =
-        unix_ms(SystemTime::now()).saturating_add(scenario.workload.warmup_s.saturating_mul(1000));
+    let window_start = Instant::now() + scenario.workload.warmup.to_std();
+    let started_unix_ms = window_start_unix_ms(SystemTime::now(), scenario.workload.warmup);
     let (workload_result, faults_result) = tokio::join!(
         workload::run(&endpoints, &scenario.workload, &scenario.topology),
         faults::run_schedule(
@@ -423,22 +422,13 @@ fn assemble_report(scenario: &Scenario, mode: &str, driven: Driven) -> RunReport
         latency_by_class,
         timeline,
         errors,
-        measured_wall_s,
+        measured_wall,
     } = outcome;
-    let tps_mean = if measured_wall_s > 0.0 {
-        u64_as_f64(committed) / measured_wall_s
-    } else {
-        0.0
-    };
-    let total_cpu_core_seconds: f64 = resources
+    let mean_rate = rate_over(committed, measured_wall);
+    let total_cpu = resources
         .iter()
-        .map(|process| process.cpu_core_seconds)
-        .sum();
-    let committed_txn_per_cpu_second = if total_cpu_core_seconds > 0.0 {
-        u64_as_f64(committed) / total_cpu_core_seconds
-    } else {
-        0.0
-    };
+        .fold(Time::ZERO, |total, process| total + process.cpu_time);
+    let committed_txn_per_cpu = rate_over(committed, total_cpu);
     RunReport {
         scenario: scenario.name.clone(),
         description: scenario.description.clone(),
@@ -448,11 +438,11 @@ fn assemble_report(scenario: &Scenario, mode: &str, driven: Driven) -> RunReport
             nodes: scenario.topology.nodes,
             ranges: scenario.topology.ranges,
         },
-        duration_s: measured_wall_s,
+        duration: measured_wall,
         throughput: ThroughputSummary {
             committed_txn: committed,
             failed_txn: failed,
-            tps_mean,
+            mean_rate,
         },
         latency_by_class: latency_by_class
             .into_iter()
@@ -462,11 +452,28 @@ fn assemble_report(scenario: &Scenario, mode: &str, driven: Driven) -> RunReport
         timeline,
         resources,
         efficiency: EfficiencySummary {
-            total_cpu_core_seconds,
-            committed_txn_per_cpu_second,
+            total_cpu,
+            committed_txn_per_cpu,
         },
         faults,
     }
+}
+
+/// `count` events spread over `window`, or no rate at all when the window is
+/// empty (dividing by it would be an infinity, and "nothing measured" is what
+/// every reader of the report wants there).
+fn rate_over(count: u64, window: Time) -> Frequency {
+    if window <= Time::ZERO {
+        return Frequency::ZERO;
+    }
+    u64_as_f64(count) / window
+}
+
+/// Unix milliseconds at which the measurement window opens: now, plus the
+/// warmup the workload runs first.
+fn window_start_unix_ms(now: SystemTime, warmup: Time) -> u64 {
+    let warmup_ms = u64::try_from(warmup.millis_i64()).unwrap_or(0);
+    unix_ms(now).saturating_add(warmup_ms)
 }
 
 /// Unix milliseconds of a wall-clock time (0 for a pre-epoch clock).
@@ -499,14 +506,14 @@ mod tests {
         workload::OpClass,
     };
 
-    fn test_scenario(mode: ModeSpec, skew_ms: &[(u16, i64)]) -> Scenario {
+    fn test_scenario(mode: ModeSpec, skew: &[(u16, Time)]) -> Scenario {
         Scenario {
             name: "steady".to_owned(),
             description: "Steady load.".to_owned(),
             topology: TopologySpec {
                 nodes: 2,
                 ranges: 3,
-                clock_skew_ms: skew_ms.iter().copied().collect(),
+                clock_skew: skew.iter().copied().collect(),
                 cpus_per_node: None,
                 broker_cpus: None,
             },
@@ -514,8 +521,8 @@ mod tests {
             workload: WorkloadSpec {
                 connections: 8,
                 rate: RateSpec::Saturate,
-                warmup_s: 5,
-                duration_s: 30,
+                warmup: secs(5),
+                duration: secs(30),
                 mix: MixSpec {
                     single_shard_insert: 1,
                     cross_shard_txn: 0,
@@ -533,8 +540,18 @@ mod tests {
     fn mode_slug_strips_the_parenthesized_display_suffix() {
         let cases = [
             (ModeSpec::LogicalTso, "logical-tso"),
-            (ModeSpec::Hlc { max_offset_ms: 250 }, "hlc"),
-            (ModeSpec::Hlc { max_offset_ms: 1 }, "hlc"),
+            (
+                ModeSpec::Hlc {
+                    max_offset: millis(250),
+                },
+                "hlc",
+            ),
+            (
+                ModeSpec::Hlc {
+                    max_offset: millis(1),
+                },
+                "hlc",
+            ),
         ];
         for (mode, expected) in cases {
             assert!(mode_slug(mode) == expected, "mode {mode}");
@@ -545,7 +562,9 @@ mod tests {
     fn report_paths_join_scenario_and_slug() {
         let cases = [
             (
-                mode_slug(ModeSpec::Hlc { max_offset_ms: 250 }),
+                mode_slug(ModeSpec::Hlc {
+                    max_offset: millis(250),
+                }),
                 "out/tso-partition-hlc.json",
                 "out/tso-partition-hlc.md",
             ),
@@ -599,19 +618,31 @@ mod tests {
         // Override to HLC: applied and still valid.
         let scenario = effective_scenario(
             test_scenario(ModeSpec::LogicalTso, &[]),
-            Some(ModeSpec::Hlc { max_offset_ms: 300 }),
+            Some(ModeSpec::Hlc {
+                max_offset: millis(300),
+            }),
         )
         .expect("hlc override is valid");
-        assert!(scenario.mode == ModeSpec::Hlc { max_offset_ms: 300 });
+        assert!(
+            scenario.mode
+                == ModeSpec::Hlc {
+                    max_offset: millis(300)
+                }
+        );
 
         // Override to LogicalTso on a scenario with clock skew: the
         // re-validation must reject the combination.
         let result = effective_scenario(
-            test_scenario(ModeSpec::Hlc { max_offset_ms: 250 }, &[(0, 400)]),
+            test_scenario(
+                ModeSpec::Hlc {
+                    max_offset: millis(250),
+                },
+                &[(0, millis(400))],
+            ),
             Some(ModeSpec::LogicalTso),
         );
         assert!(let Err(ScenarioError::Invalid(message)) = result);
-        assert!(message.contains("clock_skew_ms requires hlc mode"));
+        assert!(message.contains("clock_skew requires hlc mode"));
     }
 
     #[test]
@@ -622,10 +653,10 @@ mod tests {
         external::validate_scenario(&scenario).expect("no faults is valid");
 
         scenario.faults.push(FaultEvent {
-            at_s: 5,
+            at: secs(5),
             action: FaultAction::Partition {
                 target: FaultTarget::Range(0),
-                duration_s: 5,
+                duration: secs(5),
                 style: PartitionStyle::Blackhole,
             },
         });
@@ -642,18 +673,18 @@ mod tests {
         let scenario = test_scenario(ModeSpec::LogicalTso, &[]);
         let latency = LatencySummary {
             count: 1200,
-            mean_ms: 1.5,
-            p50_ms: 1.2,
-            p95_ms: 3.0,
-            p99_ms: 4.5,
-            p999_ms: 6.0,
-            max_ms: 9.0,
+            mean: micros(1500),
+            p50: micros(1200),
+            p95: millis(3),
+            p99: micros(4500),
+            p999: millis(6),
+            max: millis(9),
         };
         let timeline = vec![SecondSample {
-            t_s: 0,
+            t: Time::ZERO,
             committed: 1200,
             errors: 1,
-            mean_latency_ms: Some(1.5),
+            mean_latency: Some(micros(1500)),
         }];
         let errors = ErrorSummary {
             serialization_retries: 3,
@@ -665,18 +696,18 @@ mod tests {
             ProcessResources {
                 label: "broker".to_owned(),
                 pid: 100,
-                cpu_core_seconds: 10.0,
-                max_rss_bytes: 1024,
+                cpu_time: secs(10),
+                max_rss: kibibytes(1),
             },
             ProcessResources {
                 label: "node0".to_owned(),
                 pid: 200,
-                cpu_core_seconds: 20.0,
-                max_rss_bytes: 2048,
+                cpu_time: secs(20),
+                max_rss: kibibytes(2),
             },
         ];
         let faults = vec![AppliedFault {
-            at_s: 20,
+            at: secs(20),
             description: "partition range:0 blackhole".to_owned(),
         }];
         let driven = Driven {
@@ -687,7 +718,7 @@ mod tests {
                 latency_by_class: BTreeMap::from([(OpClass::SingleShardInsert, latency)]),
                 timeline: timeline.clone(),
                 errors,
-                measured_wall_s: 60.0,
+                measured_wall: secs(60),
             },
             resources: resources.clone(),
             faults: faults.clone(),
@@ -701,19 +732,19 @@ mod tests {
                 nodes: 2,
                 ranges: 3,
             },
-            duration_s: 60.0,
+            duration: secs(60),
             throughput: ThroughputSummary {
                 committed_txn: 1200,
                 failed_txn: 3,
-                tps_mean: 20.0,
+                mean_rate: per_sec(20),
             },
             latency_by_class: BTreeMap::from([("single-shard-insert".to_owned(), latency)]),
             errors,
             timeline,
             resources,
             efficiency: EfficiencySummary {
-                total_cpu_core_seconds: 30.0,
-                committed_txn_per_cpu_second: 40.0,
+                total_cpu: secs(30),
+                committed_txn_per_cpu: per_sec(40),
             },
             faults,
         };
@@ -731,7 +762,7 @@ mod tests {
                 latency_by_class: BTreeMap::new(),
                 timeline: Vec::new(),
                 errors: ErrorSummary::default(),
-                measured_wall_s: 0.0,
+                measured_wall: Time::ZERO,
             },
             resources: Vec::new(),
             faults: Vec::new(),
@@ -743,14 +774,14 @@ mod tests {
                 == ThroughputSummary {
                     committed_txn: 500,
                     failed_txn: 0,
-                    tps_mean: 0.0,
+                    mean_rate: Frequency::ZERO,
                 }
         );
         assert!(
             report.efficiency
                 == EfficiencySummary {
-                    total_cpu_core_seconds: 0.0,
-                    committed_txn_per_cpu_second: 0.0,
+                    total_cpu: Time::ZERO,
+                    committed_txn_per_cpu: Frequency::ZERO,
                 }
         );
     }

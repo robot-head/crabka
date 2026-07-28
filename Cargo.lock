@@ -2310,6 +2310,7 @@ dependencies = [
  "crabka-protocol",
  "crabka-security",
  "crabka-units",
+ "datatest-stable",
  "derive_more",
  "exponential-backoff",
  "futures",

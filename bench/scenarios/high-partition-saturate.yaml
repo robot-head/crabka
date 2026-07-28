@@ -4,7 +4,7 @@
 # stresses leader distribution + per-partition append throughput at scale.
 name: high-partition-saturate
 mode_tag: cluster
-msg_size_bytes: 100
+msg_size: 100B
 partitions: 100
 replication_factor: 3
 producers: 4
@@ -13,7 +13,7 @@ mode:
   kind: saturate
 acks: leader
 compression: none
-linger_ms: 5
-batch_size: 16384
-warmup_s: 15
-duration_s: 60
+linger: 5ms
+batch_size: 16KiB
+warmup: 15s
+duration: 60s

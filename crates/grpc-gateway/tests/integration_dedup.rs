@@ -4,6 +4,7 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
+use crabka_units::prelude::*;
 use tempfile::TempDir;
 
 async fn boot() -> (BrokerHandle, String, TempDir) {
@@ -43,7 +44,7 @@ async fn duplicate_idempotency_key_produces_once() {
         &bootstrap,
         dedup_topic,
         4,
-        3_600_000,
+        hours(1),
         &crabka_grpc_gateway::dedup::topic::InternalTopicPolicy {
             replication_factor: 1,
             ..Default::default()
@@ -156,7 +157,7 @@ async fn run_ownership_rebuilds_map_and_owns_all_as_sole_member() {
         &bootstrap,
         topic,
         4,
-        3_600_000,
+        hours(1),
         &crabka_grpc_gateway::dedup::topic::InternalTopicPolicy {
             replication_factor: 1,
             ..Default::default()
@@ -236,7 +237,7 @@ async fn concurrent_duplicates_produce_once() {
         &bootstrap,
         dedup_topic,
         4,
-        3_600_000,
+        hours(1),
         &crabka_grpc_gateway::dedup::topic::InternalTopicPolicy {
             replication_factor: 1,
             ..Default::default()

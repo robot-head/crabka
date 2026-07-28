@@ -2,9 +2,10 @@
 //! offsets. The streaming/poll wire (later plan) drives this. Records are
 //! decoded through the codec on the way out.
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
+use crabka_units::prelude::*;
 
 use crate::{
     codec::{RecordCodec, SchemaMeta},
@@ -66,13 +67,13 @@ impl ConsumeSession {
     /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub async fn poll(
         &mut self,
-        timeout: Duration,
+        timeout: Time,
     ) -> Result<Vec<DecodedConsumerRecord>, GatewayError> {
         let batch = self
             .consumer
             .as_mut()
             .expect("ConsumeSession polled after close")
-            .poll(timeout)
+            .poll(timeout.to_std())
             .await?;
         let mut decoded_batch = Vec::with_capacity(batch.len());
         for r in batch {

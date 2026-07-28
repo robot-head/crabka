@@ -1,7 +1,22 @@
 //! `Scenario` is the on-disk YAML schema the driver reads; `RunOutput` is
 //! the on-disk JSON schema the driver writes. The report aggregator reads
 //! `RunOutput` documents and emits Markdown.
+//!
+//! # Encoding of dimensioned fields
+//!
+//! Every size, extent, and rate here is a [`crabka_units`] quantity, and each
+//! carries an explicit `#[serde(with = ...)]` so the file never holds a bare
+//! base-unit float. The scenario an operator writes uses the human form
+//! (`msg_size: 1KiB`, `linger: 5ms`, `rate: 20000/s`), which refuses a bare
+//! number — guessing whether `5` is seconds or milliseconds is the mistake the
+//! types exist to prevent. The measured output uses the exact integer form
+//! (nanoseconds for latencies, bytes for sizes) so the numbers a report
+//! compares or plots survive the round trip unrounded.
+//!
+//! Epoch timestamps (`wallclock_*_unix_ms`, `Disturbance::kill_at_ms`) stay raw
+//! integers: they are coordinates, not magnitudes.
 
+use crabka_units::{prelude::*, serde_units};
 use serde::{Deserialize, Serialize};
 
 use crate::ids::{MessageCount, TimeOffsetMs, WallclockMs};
@@ -92,16 +107,21 @@ impl Compression {
 pub enum LoadMode {
     /// Producers run flat-out and backpressure naturally.
     Saturate,
-    /// Producers are paced by a token bucket at exactly this rate.
-    FixedRate { msgs_per_sec: u64 },
+    /// Producers are paced by a token bucket at exactly this rate, written as
+    /// an event rate (`20000/s`).
+    FixedRate {
+        #[serde(with = "serde_units::human::frequency")]
+        rate: Frequency,
+    },
 }
 
 /// Inject a broker kill mid-scenario to measure failover behaviour.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FailoverSpec {
-    /// Wall-clock offset (seconds from scenario start) at which to delete
-    /// the target broker pod.
-    pub kill_at_s: u64,
+    /// How far into the scenario the target broker pod is deleted (`4s`).
+    #[serde(with = "serde_units::human::time")]
+    pub kill_after: Time,
     /// Target: `partition0_leader` picks the broker hosting partition 0's
     /// leader; `any_broker` picks the first matching pod. Only
     /// `partition0_leader` is wired today.
@@ -115,15 +135,25 @@ fn default_failover_target() -> String {
 
 /// The scenario configuration. Loaded from YAML by the driver and
 /// echoed back into `RunOutput.scenario` for the report.
+///
+/// Unknown keys are rejected. Almost every field has a default, so without that
+/// a stale or misspelled key is not an error — it is silently ignored and the
+/// default substituted, which means the driver runs a *different* benchmark than
+/// the file describes and labels the results with the file's name. A scenario
+/// written as `msg_size_bytes: 102400` before sizes carried units would have run
+/// at the 1 KiB default and been reported as a 100 KiB benchmark.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Scenario {
     pub name: String,
     #[serde(default = "default_mode_tag")]
     pub mode_tag: ModeTag,
-    #[serde(default = "default_msg_size")]
-    pub msg_size_bytes: usize,
-    #[serde(default)]
-    pub key_size_bytes: usize,
+    /// Record value size on the wire (`1KiB`).
+    #[serde(default = "default_msg_size", with = "serde_units::human::byte_size")]
+    pub msg_size: ByteSize,
+    /// Record key size (`0` for keyless records).
+    #[serde(default, with = "serde_units::human::byte_size")]
+    pub key_size: ByteSize,
     #[serde(default = "default_partitions")]
     pub partitions: i32,
     #[serde(default = "default_replicas")]
@@ -137,14 +167,18 @@ pub struct Scenario {
     pub acks: Acks,
     #[serde(default)]
     pub compression: Compression,
-    #[serde(default = "default_linger_ms")]
-    pub linger_ms: u64,
-    #[serde(default = "default_batch_size")]
-    pub batch_size: usize,
-    #[serde(default = "default_duration_s")]
-    pub duration_s: u64,
-    #[serde(default = "default_warmup_s")]
-    pub warmup_s: u64,
+    /// How long the producer holds a partial batch before sending (`5ms`).
+    #[serde(default = "default_linger", with = "serde_units::human::time")]
+    pub linger: Time,
+    /// Producer batch size (`16KiB`).
+    #[serde(default = "default_batch_size", with = "serde_units::human::byte_size")]
+    pub batch_size: ByteSize,
+    /// Length of the measurement window (`60s`).
+    #[serde(default = "default_duration", with = "serde_units::human::time")]
+    pub duration: Time,
+    /// Length of the discarded warmup window preceding it (`10s`).
+    #[serde(default = "default_warmup", with = "serde_units::human::time")]
+    pub warmup: Time,
     #[serde(default)]
     pub failover: Option<FailoverSpec>,
 }
@@ -152,8 +186,8 @@ pub struct Scenario {
 fn default_mode_tag() -> ModeTag {
     ModeTag::Ci
 }
-fn default_msg_size() -> usize {
-    1024
+fn default_msg_size() -> ByteSize {
+    kibibytes(1)
 }
 fn default_partitions() -> i32 {
     6
@@ -170,68 +204,105 @@ fn default_consumers() -> usize {
 fn default_acks() -> Acks {
     Acks::Leader
 }
-fn default_linger_ms() -> u64 {
-    5
+fn default_linger() -> Time {
+    millis(5)
 }
-fn default_batch_size() -> usize {
-    16 * 1024
+fn default_batch_size() -> ByteSize {
+    kibibytes(16)
 }
-fn default_duration_s() -> u64 {
-    60
+fn default_duration() -> Time {
+    secs(60)
 }
-fn default_warmup_s() -> u64 {
-    10
+fn default_warmup() -> Time {
+    secs(10)
 }
 
 // ── Output schema ───────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Latency percentiles as measured extents. Encoded as whole nanoseconds: the
+/// driver records latencies at microsecond resolution and the report renders
+/// them in milliseconds to three decimal places, both of which a millisecond
+/// integer would round away.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct LatencyPercentiles {
-    pub p50_ms: f64,
-    pub p95_ms: f64,
-    pub p99_ms: f64,
-    pub p999_ms: f64,
-    pub max_ms: f64,
-    pub mean_ms: f64,
+    #[serde(with = "serde_units::numeric::nanos_i64")]
+    pub p50: Time,
+    #[serde(with = "serde_units::numeric::nanos_i64")]
+    pub p95: Time,
+    #[serde(with = "serde_units::numeric::nanos_i64")]
+    pub p99: Time,
+    #[serde(with = "serde_units::numeric::nanos_i64")]
+    pub p999: Time,
+    #[serde(with = "serde_units::numeric::nanos_i64")]
+    pub max: Time,
+    #[serde(with = "serde_units::numeric::nanos_i64")]
+    pub mean: Time,
     pub count: u64,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Throughput {
     pub msgs_produced: MessageCount,
     pub msgs_consumed: MessageCount,
-    pub mb_in: f64,
-    pub mb_out: f64,
-    pub producer_msgs_per_sec: f64,
-    pub consumer_msgs_per_sec: f64,
+    /// Total record bytes produced over the measurement window.
+    #[serde(with = "serde_units::numeric::bytes_u64")]
+    pub bytes_in: ByteSize,
+    /// Total record bytes consumed over the measurement window.
+    #[serde(with = "serde_units::numeric::bytes_u64")]
+    pub bytes_out: ByteSize,
+    #[serde(with = "serde_units::human::frequency")]
+    pub producer_rate: Frequency,
+    #[serde(with = "serde_units::human::frequency")]
+    pub consumer_rate: Frequency,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Resource {
-    pub broker_cpu_seconds: f64,
-    pub mem_cgroup_working_set_bytes: u64,
+    /// CPU time burned by the broker pods over the measurement window.
+    #[serde(with = "serde_units::numeric::nanos_i64")]
+    pub broker_cpu: Time,
+    #[serde(with = "serde_units::numeric::bytes_u64")]
+    pub mem_cgroup_working_set: ByteSize,
     /// Strimzi-only: JVM heap used (sum across broker pods).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub jvm_heap_used_bytes: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "serde_units::numeric::option_bytes_u64"
+    )]
+    pub jvm_heap_used: Option<ByteSize>,
     /// Strimzi-only: JVM non-heap used.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub jvm_nonheap_used_bytes: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "serde_units::numeric::option_bytes_u64"
+    )]
+    pub jvm_nonheap_used: Option<ByteSize>,
     /// Derived: cgroup working set minus JVM heap + non-heap. Approximates
     /// page-cache footprint on the broker pod. Strimzi-only.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub kafka_page_cache_approx_bytes: Option<i64>,
-    pub msgs_per_cpu_core: f64,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "serde_units::numeric::option_bytes_i64"
+    )]
+    pub kafka_page_cache_approx: Option<ByteSize>,
+    /// Messages produced per second of broker CPU time.
+    #[serde(with = "serde_units::human::frequency")]
+    pub msgs_per_cpu_second: Frequency,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Disturbance {
+    /// Unix-epoch millisecond at which the broker pod was deleted — an instant,
+    /// so it stays a raw stamp.
     pub kill_at_ms: TimeOffsetMs,
+    /// Unix-epoch millisecond of the first ack after the kill.
     pub recovery_at_ms: TimeOffsetMs,
     pub dropped: MessageCount,
-    pub latency_spike_max_ms: f64,
+    #[serde(with = "serde_units::numeric::nanos_i64")]
+    pub latency_spike_max: Time,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Topology {
     pub partitions: i32,
     pub replication_factor: i16,
@@ -243,35 +314,42 @@ pub struct Topology {
 /// values *over the test* rather than only end-of-run aggregates. The
 /// latency percentiles are per-interval (this window only), not cumulative,
 /// so a latency-vs-time curve shows real movement.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Sample {
     /// Milliseconds since the measurement window started.
     pub t_offset_ms: TimeOffsetMs,
-    pub producer_msgs_per_sec: f64,
-    pub consumer_msgs_per_sec: f64,
-    /// Interval producer-ack latency (this window only), milliseconds.
-    pub producer_p50_ms: f64,
-    pub producer_p99_ms: f64,
-    /// Interval consumer end-to-end p99 latency (this window only), ms.
-    pub consumer_e2e_p99_ms: f64,
+    #[serde(with = "serde_units::human::frequency")]
+    pub producer_rate: Frequency,
+    #[serde(with = "serde_units::human::frequency")]
+    pub consumer_rate: Frequency,
+    /// Interval producer-ack latency (this window only).
+    #[serde(with = "serde_units::numeric::nanos_i64")]
+    pub producer_p50: Time,
+    #[serde(with = "serde_units::numeric::nanos_i64")]
+    pub producer_p99: Time,
+    /// Interval consumer end-to-end p99 latency (this window only).
+    #[serde(with = "serde_units::numeric::nanos_i64")]
+    pub consumer_e2e_p99: Time,
 }
 
 /// One time-series sample of broker resource usage, scraped from Prometheus
 /// as a range query over the run window (default 15s step = the scrape
 /// interval). Covers the full wallclock window (warmup + measurement).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct BrokerSample {
     /// Milliseconds since `wallclock_start_unix_ms`.
     pub t_offset_ms: TimeOffsetMs,
-    /// Summed CPU usage across broker pods, in cores.
+    /// Summed CPU usage across broker pods, in cores. A core count is
+    /// dimensionless, so it stays a plain number.
     pub cpu_cores: f64,
-    /// Summed working-set memory across broker pods, in bytes.
-    pub mem_working_set_bytes: u64,
+    /// Summed working-set memory across broker pods.
+    #[serde(with = "serde_units::numeric::bytes_u64")]
+    pub mem_working_set: ByteSize,
 }
 
 /// One run = one scenario × one stack. Written by the driver, read by
 /// the report aggregator.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunOutput {
     pub scenario: Scenario,
     pub stack: Stack,
@@ -279,18 +357,24 @@ pub struct RunOutput {
     pub wallclock_start_unix_ms: WallclockMs,
     pub wallclock_end_unix_ms: WallclockMs,
     pub throughput: Throughput,
-    pub producer_latency_ms: LatencyPercentiles,
-    pub consumer_e2e_latency_ms: LatencyPercentiles,
+    pub producer_latency: LatencyPercentiles,
+    pub consumer_e2e_latency: LatencyPercentiles,
     pub resource: Resource,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disturbance: Option<Disturbance>,
     /// Operator+broker startup wall-clock from CR apply → broker Ready
-    /// (filled in by `run-scenario.sh` after the driver finishes).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub startup_ms: Option<u64>,
+    /// (filled in by `run-scenario.sh` after the driver finishes), in whole
+    /// milliseconds so a shell script can write the field.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "serde_units::numeric::option_millis_i64"
+    )]
+    pub startup: Option<Time>,
     /// Driver-observed wall-clock from start to first successful
     /// `send().await.await??`.
-    pub first_ack_ms: u64,
+    #[serde(with = "serde_units::numeric::millis_i64")]
+    pub first_ack: Time,
     #[serde(default)]
     pub errors: Vec<String>,
     #[serde(default)]
@@ -306,8 +390,100 @@ pub struct RunOutput {
 
 #[cfg(test)]
 mod tests {
+    use assert2::check;
 
     use super::*;
+
+    /// A scenario with every dimensioned field set to a distinctive value, so a
+    /// round trip that drops or rescales one is visible.
+    fn scenario() -> Scenario {
+        Scenario {
+            name: "round-trip".into(),
+            mode_tag: ModeTag::Cluster,
+            msg_size: kibibytes(4),
+            key_size: bytes(16),
+            partitions: 12,
+            replication_factor: 3,
+            producers: 2,
+            consumers: 4,
+            mode: LoadMode::FixedRate {
+                rate: per_sec(20_000),
+            },
+            acks: Acks::All,
+            compression: Compression::Zstd,
+            linger: millis(5),
+            batch_size: kibibytes(16),
+            duration: secs(60),
+            warmup: secs(10),
+            failover: Some(FailoverSpec {
+                kill_after: secs(4),
+                target: "partition0_leader".into(),
+            }),
+        }
+    }
+
+    fn run_output() -> RunOutput {
+        RunOutput {
+            scenario: scenario(),
+            stack: Stack::Crabka,
+            topology: Topology {
+                partitions: 12,
+                replication_factor: 3,
+                broker_count: 3,
+            },
+            wallclock_start_unix_ms: WallclockMs(1_700_000_000_000),
+            wallclock_end_unix_ms: WallclockMs(1_700_000_060_000),
+            throughput: Throughput {
+                msgs_produced: MessageCount(600_000),
+                msgs_consumed: MessageCount(599_000),
+                bytes_in: mebibytes(2400),
+                bytes_out: mebibytes(2396),
+                producer_rate: per_sec(10_000),
+                consumer_rate: per_sec(9_983),
+            },
+            producer_latency: LatencyPercentiles {
+                p50: micros(1500),
+                p95: micros(3200),
+                p99: micros(4250),
+                p999: millis(9),
+                max: millis(42),
+                mean: micros(1800),
+                count: 600_000,
+            },
+            consumer_e2e_latency: LatencyPercentiles::default(),
+            resource: Resource {
+                broker_cpu: millis(123_456),
+                mem_cgroup_working_set: mebibytes(300),
+                jvm_heap_used: Some(mebibytes(1024)),
+                jvm_nonheap_used: Some(mebibytes(96)),
+                kafka_page_cache_approx: Some(mebibytes(200)),
+                msgs_per_cpu_second: per_sec(4_860),
+            },
+            disturbance: Some(Disturbance {
+                kill_at_ms: TimeOffsetMs(1_700_000_004_000),
+                recovery_at_ms: TimeOffsetMs(1_700_000_006_000),
+                dropped: MessageCount(7),
+                latency_spike_max: micros(42_500),
+            }),
+            startup: Some(millis(1234)),
+            first_ack: millis(42),
+            errors: vec!["an-error".into()],
+            notes: vec!["a-note".into()],
+            samples: vec![Sample {
+                t_offset_ms: TimeOffsetMs(2000),
+                producer_rate: per_sec(10_100),
+                consumer_rate: per_sec(9_900),
+                producer_p50: micros(1500),
+                producer_p99: micros(4200),
+                consumer_e2e_p99: millis(7),
+            }],
+            broker_samples: vec![BrokerSample {
+                t_offset_ms: TimeOffsetMs(0),
+                cpu_cores: 2.5,
+                mem_working_set: mebibytes(300),
+            }],
+        }
+    }
 
     #[test]
     fn stack_broker_pod_regex_distinguishes_stacks() {
@@ -352,11 +528,11 @@ mod tests {
     }
 
     #[test]
-    fn scenario_yaml_round_trip() {
+    fn scenario_yaml_reads_the_operator_form() {
         let y = r"
 name: small-msg-saturate
 mode_tag: ci
-msg_size_bytes: 100
+msg_size: 100B
 partitions: 6
 replication_factor: 1
 producers: 1
@@ -365,79 +541,129 @@ mode:
   kind: saturate
 acks: leader
 compression: none
-linger_ms: 5
-batch_size: 16384
-duration_s: 60
-warmup_s: 10
+linger: 5ms
+batch_size: 16KiB
+duration: 60s
+warmup: 10s
 ";
         let s: Scenario = serde_yaml::from_str(y).expect("parse");
-        assert2::assert!(s.name.as_str() == "small-msg-saturate");
-        assert2::assert!(s.partitions == 6);
-        assert2::assert!(matches!(s.mode, LoadMode::Saturate));
+        check!(s.name.as_str() == "small-msg-saturate");
+        check!(s.partitions == 6);
+        check!(s.msg_size == bytes(100));
+        check!(s.key_size == ByteSize::ZERO);
+        check!(s.linger == millis(5));
+        check!(s.batch_size == kibibytes(16));
+        check!(s.duration == secs(60));
+        check!(s.warmup == secs(10));
+        check!(matches!(s.mode, LoadMode::Saturate));
     }
 
     #[test]
-    fn fixed_rate_yaml_parses() {
+    fn scenario_yaml_defaults_every_omitted_field() {
+        let y = r"
+name: bare
+mode:
+  kind: saturate
+";
+        let s: Scenario = serde_yaml::from_str(y).expect("parse");
+        check!(s.msg_size == kibibytes(1));
+        check!(s.key_size == ByteSize::ZERO);
+        check!(s.linger == millis(5));
+        check!(s.batch_size == kibibytes(16));
+        check!(s.duration == secs(60));
+        check!(s.warmup == secs(10));
+        check!(s.failover == None);
+    }
+
+    #[test]
+    fn scenario_yaml_rejects_a_size_without_a_unit() {
+        let y = r"
+name: unitless
+msg_size: 100
+mode:
+  kind: saturate
+";
+        let error = serde_yaml::from_str::<Scenario>(y).expect_err("a bare number is not a size");
+        check!(error.to_string().contains("missing unit"));
+    }
+
+    #[test]
+    fn fixed_rate_yaml_parses_an_event_rate() {
         let y = r"
 name: fixed-rate
 mode:
   kind: fixed_rate
-  msgs_per_sec: 20000
+  rate: 20000/s
 ";
         let s: Scenario = serde_yaml::from_str(y).unwrap();
-        assert2::assert!(matches!(
-            s.mode,
-            LoadMode::FixedRate {
-                msgs_per_sec: 20000
-            }
-        ));
+        check!(
+            s.mode
+                == LoadMode::FixedRate {
+                    rate: per_sec(20_000)
+                }
+        );
     }
 
     #[test]
-    fn run_output_round_trips() {
-        let scenario = Scenario {
-            name: "x".into(),
-            mode_tag: ModeTag::Ci,
-            msg_size_bytes: 100,
-            key_size_bytes: 0,
-            partitions: 1,
-            replication_factor: 1,
-            producers: 1,
-            consumers: 1,
-            mode: LoadMode::Saturate,
-            acks: Acks::Leader,
-            compression: Compression::None,
-            linger_ms: 0,
-            batch_size: 16384,
-            duration_s: 1,
-            warmup_s: 0,
-            failover: None,
-        };
-        let out = RunOutput {
-            scenario,
-            stack: Stack::Crabka,
-            topology: Topology {
-                partitions: 1,
-                replication_factor: 1,
-                broker_count: 1,
-            },
-            wallclock_start_unix_ms: WallclockMs(0),
-            wallclock_end_unix_ms: WallclockMs(1000),
-            throughput: Throughput::default(),
-            producer_latency_ms: LatencyPercentiles::default(),
-            consumer_e2e_latency_ms: LatencyPercentiles::default(),
-            resource: Resource::default(),
-            disturbance: None,
-            startup_ms: Some(1234),
-            first_ack_ms: 42,
-            errors: vec![],
-            notes: vec!["test".into()],
-            samples: vec![],
-            broker_samples: vec![],
-        };
-        let s = serde_json::to_string(&out).unwrap();
-        let back: RunOutput = serde_json::from_str(&s).unwrap();
-        assert2::assert!(back.scenario.name.as_str() == "x");
-        assert2::assert!(back.notes == vec!["test".to_owned()]);
+    fn failover_yaml_parses_a_kill_offset() {
+        let y = r"
+name: failover
+mode:
+  kind: saturate
+failover:
+  kill_after: 4s
+";
+        let s: Scenario = serde_yaml::from_str(y).unwrap();
+        check!(
+            s.failover
+                == Some(FailoverSpec {
+                    kill_after: secs(4),
+                    target: "partition0_leader".into(),
+                })
+        );
+    }
+
+    #[test]
+    fn scenario_yaml_round_trips_through_the_human_form() {
+        let yaml = serde_yaml::to_string(&scenario()).expect("encode");
+        // Operator-facing fields carry their unit rather than a bare float.
+        for needle in ["msg_size: 4KiB", "linger: 5ms", "rate: 20000/s"] {
+            check!(yaml.contains(needle));
+        }
+        let back: Scenario = serde_yaml::from_str(&yaml).expect("decode");
+        check!(back == scenario());
+    }
+
+    #[test]
+    fn run_output_json_round_trips() {
+        let out = run_output();
+        let json = serde_json::to_string(&out).expect("encode");
+        let back: RunOutput = serde_json::from_str(&json).expect("decode");
+        check!(back == out);
+    }
+
+    #[test]
+    fn run_output_json_encodes_measurements_as_exact_integers() {
+        let json = serde_json::to_value(run_output()).expect("encode");
+        check!(json["producer_latency"]["p99"] == serde_json::json!(4_250_000));
+        check!(json["throughput"]["bytes_in"] == serde_json::json!(2_516_582_400_u64));
+        check!(json["throughput"]["producer_rate"] == serde_json::json!("10000/s"));
+        check!(json["resource"]["mem_cgroup_working_set"] == serde_json::json!(314_572_800));
+        check!(json["first_ack"] == serde_json::json!(42));
+        check!(json["startup"] == serde_json::json!(1234));
+    }
+
+    #[test]
+    fn absent_optional_resource_fields_decode_as_none() {
+        let mut out = run_output();
+        out.resource.jvm_heap_used = None;
+        out.resource.jvm_nonheap_used = None;
+        out.resource.kafka_page_cache_approx = None;
+        out.startup = None;
+        let json = serde_json::to_string(&out).expect("encode");
+        check!(!json.contains("jvm_heap_used"));
+        check!(!json.contains("startup"));
+        let back: RunOutput = serde_json::from_str(&json).expect("decode");
+        check!(back == out);
     }
 }

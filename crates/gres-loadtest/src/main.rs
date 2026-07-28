@@ -12,11 +12,12 @@ use crabka_gres_loadtest::{
     runner::{self, ExternalRunConfig, RunConfig},
     scenario::{ModeSpec, Scenario},
 };
+use crabka_units::{fmt::Human as _, prelude::*};
 use tracing_subscriber::EnvFilter;
 
-/// `max_offset_ms` for the HLC leg of `compare` when the scenario's own
-/// mode is not HLC.
-const DEFAULT_HLC_MAX_OFFSET_MS: u64 = 250;
+/// HLC uncertainty window for the HLC leg of `compare` when the scenario's
+/// own mode is not HLC.
+const DEFAULT_HLC_MAX_OFFSET: Time = millis(250);
 
 #[derive(Parser)]
 #[command(
@@ -41,9 +42,10 @@ enum CliCommand {
         /// (`logical-tso` or `hlc`). Meaningless with `--external`.
         #[arg(long, conflicts_with = "external")]
         mode: Option<String>,
-        /// `max_offset_ms` when `--mode hlc` is given.
-        #[arg(long, default_value_t = 250)]
-        hlc_max_offset_ms: u64,
+        /// HLC uncertainty window when `--mode hlc` is given, with its unit
+        /// (`250ms`, `1s`).
+        #[arg(long, default_value = "250ms", value_parser = crabka_units::parse::time)]
+        hlc_max_offset: Time,
         /// Output directory for reports.
         #[arg(long, default_value = "loadtest-out")]
         out: PathBuf,
@@ -236,7 +238,7 @@ async fn main() -> anyhow::Result<()> {
             registry,
             scenario,
             mode,
-            hlc_max_offset_ms,
+            hlc_max_offset,
             out,
             keep_work_dir,
             external,
@@ -244,7 +246,7 @@ async fn main() -> anyhow::Result<()> {
             run(
                 &scenario,
                 mode.as_deref(),
-                hlc_max_offset_ms,
+                hlc_max_offset,
                 &out,
                 keep_work_dir,
                 external,
@@ -271,7 +273,7 @@ async fn main() -> anyhow::Result<()> {
 async fn run(
     scenario_path: &Path,
     mode: Option<&str>,
-    hlc_max_offset_ms: u64,
+    hlc_max_offset: Time,
     out: &Path,
     keep_work_dir: bool,
     external: ExternalFlags,
@@ -288,7 +290,7 @@ async fn run(
         print_summary(&report, out, runner::EXTERNAL_MODE);
         return Ok(());
     }
-    let mode_override = parse_mode(mode, hlc_max_offset_ms)?;
+    let mode_override = parse_mode(mode, hlc_max_offset)?;
     let effective_mode = mode_override.unwrap_or(scenario.mode);
     let binaries = Binaries::resolve()?;
     let report = runner::run_scenario(RunConfig {
@@ -317,7 +319,7 @@ async fn compare(
     let hlc = match scenario.mode {
         hlc @ ModeSpec::Hlc { .. } => hlc,
         ModeSpec::LogicalTso => ModeSpec::Hlc {
-            max_offset_ms: DEFAULT_HLC_MAX_OFFSET_MS,
+            max_offset: DEFAULT_HLC_MAX_OFFSET,
         },
     };
     let mut reports = Vec::with_capacity(2);
@@ -358,12 +360,12 @@ fn load_scenario(path: &Path) -> anyhow::Result<Scenario> {
 }
 
 /// Maps the `--mode` string to a mode override.
-fn parse_mode(mode: Option<&str>, hlc_max_offset_ms: u64) -> anyhow::Result<Option<ModeSpec>> {
+fn parse_mode(mode: Option<&str>, hlc_max_offset: Time) -> anyhow::Result<Option<ModeSpec>> {
     match mode {
         None => Ok(None),
         Some("logical-tso") => Ok(Some(ModeSpec::LogicalTso)),
         Some("hlc") => Ok(Some(ModeSpec::Hlc {
-            max_offset_ms: hlc_max_offset_ms,
+            max_offset: hlc_max_offset,
         })),
         Some(other) => anyhow::bail!("unknown mode {other:?}: expected `logical-tso` or `hlc`"),
     }
@@ -376,12 +378,15 @@ fn print_summary(report: &RunReport, out_dir: &Path, slug: &str) {
     println!("scenario:  {} ({})", report.scenario, report.mode);
     println!(
         "committed: {} txn, {:.2} tps mean, {} failed",
-        report.throughput.committed_txn, report.throughput.tps_mean, report.throughput.failed_txn
+        report.throughput.committed_txn,
+        report.throughput.mean_rate.per_sec_f64(),
+        report.throughput.failed_txn
     );
     match busiest_class(report) {
         Some((class, latency)) => println!(
-            "p99:       {:.2} ms ({class}, {} ops)",
-            latency.p99_ms, latency.count
+            "p99:       {} ({class}, {} ops)",
+            latency.p99.human(),
+            latency.count
         ),
         None => println!("p99:       no operations completed"),
     }
@@ -407,16 +412,20 @@ fn busiest_class(report: &RunReport) -> Option<(&str, &LatencySummary)> {
 
 /// One-line mean-TPS delta between the two compared runs.
 fn delta_headline(left: &RunReport, right: &RunReport) -> String {
-    let left_tps = left.throughput.tps_mean;
-    let right_tps = right.throughput.tps_mean;
-    let delta = if left_tps > 0.0 {
-        format!("{:+.2}%", (right_tps - left_tps) / left_tps * 100.0)
+    let left_rate = left.throughput.mean_rate;
+    let right_rate = right.throughput.mean_rate;
+    let delta = if left_rate > Frequency::ZERO {
+        let relative: Ratio = (right_rate - left_rate) / left_rate;
+        format!("{:+.2}%", relative.percent_f64())
     } else {
         "n/a".to_owned()
     };
     format!(
-        "mean tps: {left_tps:.2} ({}) vs {right_tps:.2} ({}) — {delta}",
-        left.mode, right.mode
+        "mean tps: {:.2} ({}) vs {:.2} ({}) — {delta}",
+        left_rate.per_sec_f64(),
+        left.mode,
+        right_rate.per_sec_f64(),
+        right.mode
     )
 }
 
@@ -517,7 +526,7 @@ mod tests {
         assert!(registry.policy() == cli_policy);
     }
 
-    fn fixture(mode: &str, tps_mean: f64, classes: &[(&str, u64, f64)]) -> RunReport {
+    fn fixture(mode: &str, mean_rate: Frequency, classes: &[(&str, u64, Time)]) -> RunReport {
         RunReport {
             scenario: "steady".to_owned(),
             description: String::new(),
@@ -527,25 +536,25 @@ mod tests {
                 nodes: 2,
                 ranges: 3,
             },
-            duration_s: 60.0,
+            duration: secs(60),
             throughput: ThroughputSummary {
                 committed_txn: 100,
                 failed_txn: 0,
-                tps_mean,
+                mean_rate,
             },
             latency_by_class: classes
                 .iter()
-                .map(|(class, count, p99_ms)| {
+                .map(|(class, count, p99)| {
                     (
                         (*class).to_owned(),
                         LatencySummary {
                             count: *count,
-                            mean_ms: 1.0,
-                            p50_ms: 1.0,
-                            p95_ms: 2.0,
-                            p99_ms: *p99_ms,
-                            p999_ms: 5.0,
-                            max_ms: 9.0,
+                            mean: millis(1),
+                            p50: millis(1),
+                            p95: millis(2),
+                            p99: *p99,
+                            p999: millis(5),
+                            max: millis(9),
                         },
                     )
                 })
@@ -554,8 +563,8 @@ mod tests {
             timeline: Vec::new(),
             resources: Vec::new(),
             efficiency: EfficiencySummary {
-                total_cpu_core_seconds: 1.0,
-                committed_txn_per_cpu_second: 100.0,
+                total_cpu: secs(1),
+                committed_txn_per_cpu: per_sec(100),
             },
             faults: Vec::new(),
         }
@@ -564,14 +573,20 @@ mod tests {
     #[test]
     fn parse_mode_maps_strings_to_mode_specs() {
         let cases = [
-            (None, 250, Some(None)),
-            (Some("logical-tso"), 250, Some(Some(ModeSpec::LogicalTso))),
+            (None, millis(250), Some(None)),
+            (
+                Some("logical-tso"),
+                millis(250),
+                Some(Some(ModeSpec::LogicalTso)),
+            ),
             (
                 Some("hlc"),
-                300,
-                Some(Some(ModeSpec::Hlc { max_offset_ms: 300 })),
+                millis(300),
+                Some(Some(ModeSpec::Hlc {
+                    max_offset: millis(300),
+                })),
             ),
-            (Some("banana"), 250, None),
+            (Some("banana"), millis(250), None),
         ];
         for (input, max_offset, expected) in cases {
             if let Some(expected) = expected {
@@ -587,19 +602,19 @@ mod tests {
     fn busiest_class_picks_the_highest_count() {
         let report = fixture(
             "logical-tso",
-            100.0,
+            per_sec(100),
             &[
-                ("read-only", 40, 2.0),
-                ("single-shard-insert", 900, 3.5),
-                ("cross-shard-txn", 60, 8.0),
+                ("read-only", 40, millis(2)),
+                ("single-shard-insert", 900, micros(3500)),
+                ("cross-shard-txn", 60, millis(8)),
             ],
         );
         assert!(let Some(("single-shard-insert", _)) = busiest_class(&report));
         let (_, latency) = busiest_class(&report).expect("classes present");
         assert!(latency.count == 900);
-        assert!((latency.p99_ms - 3.5).abs() < f64::EPSILON);
+        assert!(latency.p99 == micros(3500));
 
-        let empty = fixture("logical-tso", 100.0, &[]);
+        let empty = fixture("logical-tso", per_sec(100), &[]);
         assert!(busiest_class(&empty) == None);
     }
 
@@ -771,14 +786,14 @@ mod tests {
 
     #[test]
     fn delta_headline_reports_percentage_or_na() {
-        let left = fixture("logical-tso", 1000.0, &[]);
-        let right = fixture("hlc(max_offset_ms=250)", 1250.0, &[]);
+        let left = fixture("logical-tso", per_sec(1000), &[]);
+        let right = fixture("hlc(max_offset=250ms)", per_sec(1250), &[]);
         assert!(
             delta_headline(&left, &right)
-                == "mean tps: 1000.00 (logical-tso) vs 1250.00 (hlc(max_offset_ms=250)) — +25.00%"
+                == "mean tps: 1000.00 (logical-tso) vs 1250.00 (hlc(max_offset=250ms)) — +25.00%"
         );
 
-        let zero = fixture("logical-tso", 0.0, &[]);
+        let zero = fixture("logical-tso", Frequency::ZERO, &[]);
         let headline = delta_headline(&zero, &right);
         assert!(headline.ends_with("n/a"), "headline {headline:?}");
     }

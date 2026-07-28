@@ -35,7 +35,6 @@ use std::{
     path::{Path, PathBuf},
     process::Stdio,
     sync::{Arc, Mutex, MutexGuard, PoisonError},
-    time::Duration,
 };
 
 use anyhow::{Context as _, anyhow, bail, ensure};
@@ -44,6 +43,7 @@ use crabka_gres_control::{
     RangeBoundary, RangeLayoutEntry, RangeLifecycle, Registry, RegistryPolicy, SqlUser, TenantId,
     TenantName, TenantRecord, TenantState,
 };
+use crabka_units::{fmt::Human as _, prelude::*};
 use tokio::{
     io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader},
     net::{TcpListener, TcpStream},
@@ -83,9 +83,15 @@ const TLS_SERVER_NAME: &str = "crabka-dev";
 const TLS_PRINCIPAL: &str = "CN=loadtest-range";
 /// Overall bound for a child process to report ready (debug builds replaying
 /// WAL are slow).
-const LAUNCH_TIMEOUT: Duration = Duration::from_mins(2);
+const LAUNCH_TIMEOUT: Time = minutes(2);
 /// Bound for a `SIGKILL`ed child to be reaped.
-const KILL_TIMEOUT: Duration = Duration::from_secs(10);
+const KILL_TIMEOUT: Time = secs(10);
+/// Bound for a killed child's log-pump task to drain.
+const LOG_DRAIN_TIMEOUT: Time = secs(5);
+/// Poll interval while waiting for the broker's Kafka listener.
+const BROKER_POLL_INTERVAL: Time = millis(100);
+/// Timeout handed to the admin client when creating the tenant's WAL topics.
+const TOPIC_CREATE_TIMEOUT: Time = secs(30);
 /// Lines of a child's log included in launch/teardown error messages.
 const LOG_TAIL_LINES: usize = 40;
 
@@ -430,7 +436,7 @@ impl Cluster {
         };
         let label = self.nodes[index].spec.label.clone();
         kill_child(&label, &mut process.child, process.pid).await?;
-        let _ = tokio::time::timeout(Duration::from_secs(5), &mut process.log_task).await;
+        let _ = tokio::time::timeout(LOG_DRAIN_TIMEOUT.to_std(), &mut process.log_task).await;
         tracing::info!(node, "node killed");
         Ok(())
     }
@@ -484,7 +490,7 @@ impl Cluster {
             if let Err(error) = kill_child(&label, &mut process.child, process.pid).await {
                 failures.push(format!("{error:#}"));
             }
-            let _ = tokio::time::timeout(Duration::from_secs(5), &mut process.log_task).await;
+            let _ = tokio::time::timeout(LOG_DRAIN_TIMEOUT.to_std(), &mut process.log_task).await;
         }
         if let Err(error) = kill_child("broker", &mut self.broker.child, self.broker.pid).await {
             failures.push(format!("{error:#}"));
@@ -745,20 +751,21 @@ fn range_layout(ranges: u16, endpoints: &[SocketAddr]) -> Vec<RangeLayoutEntry> 
 }
 
 /// Timestamp-source CLI flags for `mode`, plus the node's HLC wall-clock
-/// skew when nonzero.
-fn timestamp_args(mode: ModeSpec, skew_ms: i64) -> Vec<String> {
+/// skew when nonzero. `crabka-gres` takes both as raw milliseconds, so this
+/// is where the extents leave the quantity domain.
+fn timestamp_args(mode: ModeSpec, skew: Time) -> Vec<String> {
     let mut args = match mode {
         ModeSpec::LogicalTso => vec!["--timestamp-source".to_owned(), "logical-tso".to_owned()],
-        ModeSpec::Hlc { max_offset_ms } => vec![
+        ModeSpec::Hlc { max_offset } => vec![
             "--timestamp-source".to_owned(),
             "hlc".to_owned(),
             "--hlc-max-offset-ms".to_owned(),
-            max_offset_ms.to_string(),
+            max_offset.millis_i64().to_string(),
         ],
     };
-    if skew_ms != 0 {
+    if skew != Time::ZERO {
         args.push("--hlc-wall-offset-ms".to_owned());
-        args.push(skew_ms.to_string());
+        args.push(skew.millis_i64().to_string());
     }
     args
 }
@@ -789,10 +796,10 @@ fn node_spec(node: u16, context: &SpecContext<'_>) -> NodeSpec {
         checkpoints_enabled_for(node),
         context
             .topology
-            .clock_skew_ms
+            .clock_skew
             .get(&node)
             .copied()
-            .unwrap_or(0),
+            .unwrap_or(Time::ZERO),
         context
             .cpu_allocation
             .map(|allocation| allocation.nodes[usize::from(node)].clone()),
@@ -805,7 +812,7 @@ fn build_spec(
     label: &str,
     host_ranges: String,
     with_checkpoints: bool,
-    skew_ms: i64,
+    skew: Time,
     cpuset: Option<String>,
     context: &SpecContext<'_>,
 ) -> NodeSpec {
@@ -850,7 +857,7 @@ fn build_spec(
             "1".to_owned(),
         ]);
     }
-    args.extend(timestamp_args(context.mode, skew_ms));
+    args.extend(timestamp_args(context.mode, skew));
     NodeSpec {
         label: label.to_owned(),
         args,
@@ -868,7 +875,11 @@ fn registry_policy_args(policy: &RegistryPolicy) -> [String; 14] {
         "--registry-topic-create-timeout-ms".to_owned(),
         policy.topic_create_timeout_ms().to_string(),
         "--registry-reader-retry-backoff-ms".to_owned(),
-        policy.reader_retry_backoff().as_millis().to_string(),
+        policy
+            .reader_retry_backoff()
+            .as_time()
+            .millis_i64()
+            .to_string(),
         "--registry-fetch-max-wait-ms".to_owned(),
         policy.fetch_max_wait_ms().to_string(),
         "--registry-fetch-partition-max-bytes".to_owned(),
@@ -927,12 +938,12 @@ async fn wait_node_ready(slot: &mut NodeSlot) -> anyhow::Result<()> {
         .ready
         .take()
         .with_context(|| format!("{label} readiness already consumed"))?;
-    let ready = tokio::time::timeout(LAUNCH_TIMEOUT, receiver)
+    let ready = tokio::time::timeout(LAUNCH_TIMEOUT.to_std(), receiver)
         .await
         .map_err(|_| {
             anyhow!(
-                "{label} did not report CRABKA_GRES_READY within {LAUNCH_TIMEOUT:?}; \
-                 log tail:\n{}",
+                "{label} did not report CRABKA_GRES_READY within {}; log tail:\n{}",
+                LAUNCH_TIMEOUT.human(),
                 log_tail(&log_path)
             )
         })?
@@ -1118,7 +1129,7 @@ async fn wait_for_broker(
     log_path: &Path,
     child: &mut Child,
 ) -> anyhow::Result<()> {
-    let deadline = tokio::time::Instant::now() + LAUNCH_TIMEOUT;
+    let deadline = tokio::time::Instant::now() + LAUNCH_TIMEOUT.to_std();
     loop {
         if TcpStream::connect(addr).await.is_ok() {
             return Ok(());
@@ -1131,11 +1142,12 @@ async fn wait_for_broker(
         }
         if tokio::time::Instant::now() >= deadline {
             bail!(
-                "crabka-broker did not listen on {addr} within {LAUNCH_TIMEOUT:?}; log tail:\n{}",
+                "crabka-broker did not listen on {addr} within {}; log tail:\n{}",
+                LAUNCH_TIMEOUT.human(),
                 log_tail(log_path)
             );
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(BROKER_POLL_INTERVAL.to_std()).await;
     }
 }
 
@@ -1160,7 +1172,7 @@ async fn provision_tenant(
         })
         .collect::<Vec<_>>();
     let outcomes = admin
-        .create_topics(&topics, 30_000)
+        .create_topics(&topics, TOPIC_CREATE_TIMEOUT.millis_i32())
         .await
         .context("create WAL topics")?;
     ensure!(
@@ -1266,9 +1278,14 @@ async fn kill_child(label: &str, child: &mut Child, pid: u32) -> anyhow::Result<
         kill_process_group(pid);
         let _ = child.start_kill();
     }
-    tokio::time::timeout(KILL_TIMEOUT, child.wait())
+    tokio::time::timeout(KILL_TIMEOUT.to_std(), child.wait())
         .await
-        .map_err(|_| anyhow!("{label} did not exit within {KILL_TIMEOUT:?} of SIGKILL"))?
+        .map_err(|_| {
+            anyhow!(
+                "{label} did not exit within {} of SIGKILL",
+                KILL_TIMEOUT.human()
+            )
+        })?
         .with_context(|| format!("wait for {label} to exit"))?;
     Ok(())
 }
@@ -1511,7 +1528,7 @@ mod tests {
         let topology = TopologySpec {
             nodes: 2,
             ranges: 2,
-            clock_skew_ms: BTreeMap::new(),
+            clock_skew: BTreeMap::new(),
             cpus_per_node: Some(3),
             broker_cpus: None,
         };
@@ -1537,7 +1554,7 @@ mod tests {
         let topology = TopologySpec {
             nodes: 3,
             ranges: 4,
-            clock_skew_ms: BTreeMap::new(),
+            clock_skew: BTreeMap::new(),
             cpus_per_node: None,
             broker_cpus: None,
         };
@@ -1583,7 +1600,7 @@ mod tests {
         let topology = TopologySpec {
             nodes: 2,
             ranges: 2,
-            clock_skew_ms: BTreeMap::from([(1, 250)]),
+            clock_skew: BTreeMap::from([(1, millis(250))]),
             cpus_per_node: None,
             broker_cpus: None,
         };
@@ -1591,7 +1608,9 @@ mod tests {
         let registry_policy = RegistryPolicy::default();
         let context = SpecContext {
             topology: &topology,
-            mode: ModeSpec::Hlc { max_offset_ms: 300 },
+            mode: ModeSpec::Hlc {
+                max_offset: millis(300),
+            },
             kafka_bootstrap: "127.0.0.1:19092",
             work_dir: Path::new("/work"),
             log_dir: Path::new("/work/logs"),
@@ -1644,20 +1663,24 @@ mod tests {
 
     #[test]
     fn timestamp_args_cover_modes_and_skew() {
-        let cases: [(ModeSpec, i64, &[&str]); 4] = [
+        let cases: [(ModeSpec, Time, &[&str]); 4] = [
             (
                 ModeSpec::LogicalTso,
-                0,
+                Time::ZERO,
                 &["--timestamp-source", "logical-tso"],
             ),
             (
-                ModeSpec::Hlc { max_offset_ms: 250 },
-                0,
+                ModeSpec::Hlc {
+                    max_offset: millis(250),
+                },
+                Time::ZERO,
                 &["--timestamp-source", "hlc", "--hlc-max-offset-ms", "250"],
             ),
             (
-                ModeSpec::Hlc { max_offset_ms: 300 },
-                -100,
+                ModeSpec::Hlc {
+                    max_offset: millis(300),
+                },
+                -millis(100),
                 &[
                     "--timestamp-source",
                     "hlc",
@@ -1668,8 +1691,10 @@ mod tests {
                 ],
             ),
             (
-                ModeSpec::Hlc { max_offset_ms: 250 },
-                400,
+                ModeSpec::Hlc {
+                    max_offset: millis(250),
+                },
+                millis(400),
                 &[
                     "--timestamp-source",
                     "hlc",
@@ -1683,7 +1708,8 @@ mod tests {
         for (mode, skew, expected) in cases {
             assert!(
                 timestamp_args(mode, skew) == expected,
-                "mode {mode} skew {skew}"
+                "mode {mode} skew {}",
+                skew.human()
             );
         }
     }
@@ -1752,7 +1778,7 @@ mod tests {
             topology: TopologySpec {
                 nodes: 2,
                 ranges: 2,
-                clock_skew_ms: BTreeMap::new(),
+                clock_skew: BTreeMap::new(),
                 cpus_per_node: None,
                 broker_cpus: None,
             },

@@ -35,6 +35,7 @@ use crabka_grpc_gateway::{
 use crabka_security::ca::{
     SubjectAltName, generate_clients_ca, issue_broker_cert, issue_user_cert,
 };
+use crabka_units::prelude::*;
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 
@@ -102,7 +103,7 @@ fn tls_settings(certs: &Certs, client_auth: ClientAuthMode) -> TlsSettings {
         trust_roots_path: Some(certs.ca.clone()),
         client_ca_path: Some(certs.ca.clone()),
         client_auth,
-        reload_interval_secs: 3600,
+        reload_interval: hours(1),
     }
 }
 
@@ -204,7 +205,7 @@ async fn spawn_gateway_tls(bootstrap: &str, client: &str, settings: TlsSettings)
             client_id: client.into(),
             dedup_topic: DEDUP.into(),
             dedup_partitions: N,
-            dedup_window_ms: 3_600_000,
+            dedup_window: hours(1),
             dedup_ownership_group: OWNERS_GROUP.into(),
             dedup_txn_id_prefix: format!("crabka-grpc-dedup-{client}"),
             advertised_addr: addr.clone(),
@@ -231,7 +232,7 @@ async fn spawn_gateway_tls(bootstrap: &str, client: &str, settings: TlsSettings)
             .merge(forward::forward_router(state.clone()));
         let dynamic = serve::build_and_watch_tls(
             settings.to_security(),
-            settings.reload_interval_secs,
+            settings.reload_interval,
             token.clone(),
         )
         .unwrap();
@@ -305,7 +306,7 @@ async fn server_tls_handshake_and_health() {
         &bootstrap,
         DEDUP,
         N,
-        3_600_000,
+        hours(1),
         &crabka_grpc_gateway::dedup::topic::InternalTopicPolicy {
             replication_factor: 1,
             ..Default::default()
@@ -367,7 +368,7 @@ async fn mtls_required_rejects_no_client_cert() {
         &bootstrap,
         DEDUP,
         N,
-        3_600_000,
+        hours(1),
         &crabka_grpc_gateway::dedup::topic::InternalTopicPolicy {
             replication_factor: 1,
             ..Default::default()
@@ -430,7 +431,7 @@ async fn tls_forward_between_two_gateways() {
         &bootstrap,
         DEDUP,
         N,
-        3_600_000,
+        hours(1),
         &crabka_grpc_gateway::dedup::topic::InternalTopicPolicy {
             replication_factor: 1,
             ..Default::default()
