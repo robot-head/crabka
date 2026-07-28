@@ -11,6 +11,8 @@
 #                           Prometheus HTTP request timeout
 #   BENCH_PRODUCER_REQUEST_TIMEOUT_SECONDS
 #                           producer request timeout
+#   BENCH_PRODUCER_FINAL_DRAIN_TIMEOUT_SECONDS
+#                           producer final-drain timeout
 #   BENCH_CONSUMER_REQUEST_TIMEOUT_SECONDS
 #                           active-stack consumer request timeout
 #   BENCH_CONSUMER_BUILD_ATTEMPTS
@@ -85,6 +87,8 @@ spec:
               value: "${BENCH_PROMETHEUS_REQUEST_TIMEOUT_SECONDS}"
             - name: BENCH_PRODUCER_REQUEST_TIMEOUT_SECONDS
               value: "${BENCH_PRODUCER_REQUEST_TIMEOUT_SECONDS}"
+            - name: BENCH_PRODUCER_FINAL_DRAIN_TIMEOUT_SECONDS
+              value: "${BENCH_PRODUCER_FINAL_DRAIN_TIMEOUT_SECONDS}"
             - name: BENCH_CONSUMER_REQUEST_TIMEOUT_SECONDS
               value: "${BENCH_CONSUMER_REQUEST_TIMEOUT_SECONDS}"
             - name: BENCH_CONSUMER_BUILD_ATTEMPTS
