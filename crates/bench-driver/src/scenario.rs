@@ -746,18 +746,22 @@ mode:
 
     #[test]
     fn scenario_yaml_rejects_an_unrunnable_fixed_rate() {
-        for rate in ["-1/s", "0"] {
+        // Quoted because `LoadMode` is internally tagged: serde buffers the
+        // variant's fields before handing them on, and a buffered YAML `0` is an
+        // integer rather than the scalar text the human form reads.
+        for rate in [r#""-1/s""#, r#""0""#] {
             let yaml = format!("name: bounds\nmode:\n  kind: fixed_rate\n  rate: {rate}\n");
             let error = serde_yaml::from_str::<Scenario>(&yaml)
                 .expect_err("a paced producer needs a positive rate");
-            check!(error.to_string().contains("a positive rate"), "{rate:?}");
+            check!(error.to_string().contains("a positive rate"), "{rate}");
         }
     }
 
     #[test]
     fn scenario_yaml_admits_zero_where_zero_is_runnable() {
-        let s = parse_saturate_with("key_size: 0\nlinger: 0\nwarmup: 0\nfailover:\n  kill_after: 0")
-            .expect("keyless records, no linger, no warmup, and an immediate kill all run");
+        let s =
+            parse_saturate_with("key_size: 0\nlinger: 0\nwarmup: 0\nfailover:\n  kill_after: 0")
+                .expect("keyless records, no linger, no warmup, and an immediate kill all run");
         check!(s.key_size == ByteSize::ZERO);
         check!(s.linger == Time::ZERO);
         check!(s.warmup == Time::ZERO);

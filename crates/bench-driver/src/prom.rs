@@ -302,7 +302,8 @@ impl PromClient {
             "max_over_time(sum(container_memory_working_set_bytes{{namespace=\"{namespace}\",pod=~\"{pod_re}\",id=~\".*slice\"}})[{win}s:15s])"
         );
 
-        let broker_cpu = Time::from_secs_f64(self.query_scalar_sum(&cpu_query).await?.unwrap_or(0.0));
+        let broker_cpu =
+            Time::from_secs_f64(self.query_scalar_sum(&cpu_query).await?.unwrap_or(0.0));
         let mem_working =
             nonnegative_f64_to_u64(self.query_scalar_sum(&rss_query).await?.unwrap_or(0.0));
 

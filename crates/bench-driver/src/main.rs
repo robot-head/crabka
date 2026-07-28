@@ -219,6 +219,8 @@ async fn main() -> Result<()> {
         producer_request_timeout_seconds: cli.producer_request_timeout_seconds,
         consumer_request_timeout_seconds,
         consumer_build_retry_policy,
+        consumer_poll_timeout: cli.consumer_poll_timeout_ms,
+        consumer_poll_error_backoff: cli.consumer_poll_error_backoff_ms,
         broker_count: cli.broker_count,
         scenario_id,
         tls,
@@ -261,9 +263,9 @@ fn hash_str(s: &str) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
+    use assert2::{assert, check};
     use clap::Parser;
+    use crabka_units::prelude::*;
 
     use super::*;
 
@@ -284,22 +286,19 @@ mod tests {
         let crabka = Cli::try_parse_from(required_args("crabka")).expect("Crabka timeout defaults");
         let kafka = Cli::try_parse_from(required_args("kafka")).expect("Kafka timeout defaults");
 
-        assert_eq!(
-            crabka.producer_request_timeout_seconds.duration(),
-            Duration::from_secs(2)
-        );
-        assert_eq!(
+        check!(crabka.producer_request_timeout_seconds.timeout() == secs(2));
+        check!(
             resolve_consumer_request_timeout(
                 Stack::Crabka,
-                crabka.consumer_request_timeout_seconds,
+                crabka.consumer_request_timeout_seconds
             )
-            .duration(),
-            Duration::from_secs(5)
+            .timeout()
+                == secs(5)
         );
-        assert_eq!(
-            resolve_consumer_request_timeout(Stack::Kafka, kafka.consumer_request_timeout_seconds,)
-                .duration(),
-            Duration::from_secs(30)
+        check!(
+            resolve_consumer_request_timeout(Stack::Kafka, kafka.consumer_request_timeout_seconds)
+                .timeout()
+                == secs(30)
         );
     }
 
@@ -312,7 +311,7 @@ mod tests {
             for invalid in ["0", "not-a-number", "-1", "2147484"] {
                 let mut args = required_args("crabka");
                 args.extend([option, invalid]);
-                assert!(Cli::try_parse_from(args).is_err(), "{option}={invalid}");
+                check!(Cli::try_parse_from(args).is_err(), "{option}={invalid}");
             }
         }
     }
@@ -322,9 +321,9 @@ mod tests {
         let cli = Cli::try_parse_from(required_args("crabka")).expect("retry defaults");
         let policy = resolve_consumer_build_retry_policy(&cli).expect("valid defaults");
 
-        assert_eq!(policy.attempts(), 6);
-        assert_eq!(policy.initial_backoff(), Duration::from_millis(100));
-        assert_eq!(policy.max_backoff(), Duration::from_secs(2));
+        check!(policy.attempts() == 6);
+        check!(policy.initial_backoff() == millis(100));
+        check!(policy.max_backoff() == secs(2));
     }
 
     #[test]
@@ -343,7 +342,7 @@ mod tests {
         for (option, invalid) in cases {
             let mut args = required_args("crabka");
             args.extend([option, invalid]);
-            assert!(Cli::try_parse_from(args).is_err(), "{option}={invalid}");
+            check!(Cli::try_parse_from(args).is_err(), "{option}={invalid}");
         }
     }
 
@@ -385,12 +384,9 @@ mod tests {
         let from_env = Cli::try_parse_from(required_args("crabka")).expect("environment");
         let environment_policy =
             resolve_consumer_build_retry_policy(&from_env).expect("valid environment");
-        assert_eq!(environment_policy.attempts(), 2);
-        assert_eq!(
-            environment_policy.initial_backoff(),
-            Duration::from_millis(11)
-        );
-        assert_eq!(environment_policy.max_backoff(), Duration::from_millis(12));
+        check!(environment_policy.attempts() == 2);
+        check!(environment_policy.initial_backoff() == millis(11));
+        check!(environment_policy.max_backoff() == millis(12));
 
         let mut args = required_args("crabka");
         args.extend([
@@ -403,23 +399,17 @@ mod tests {
         ]);
         let from_cli = Cli::try_parse_from(args).expect("CLI over environment");
         let cli_policy = resolve_consumer_build_retry_policy(&from_cli).expect("valid CLI");
-        assert_eq!(cli_policy.attempts(), 3);
-        assert_eq!(cli_policy.initial_backoff(), Duration::from_millis(21));
-        assert_eq!(cli_policy.max_backoff(), Duration::from_millis(22));
+        check!(cli_policy.attempts() == 3);
+        check!(cli_policy.initial_backoff() == millis(21));
+        check!(cli_policy.max_backoff() == millis(22));
     }
 
     #[test]
     fn consumer_poll_timing_cli_defaults_preserve_behavior() {
         let cli = Cli::try_parse_from(required_args("crabka")).expect("poll defaults");
 
-        assert_eq!(
-            cli.consumer_poll_timeout_ms.duration(),
-            Duration::from_millis(50)
-        );
-        assert_eq!(
-            cli.consumer_poll_error_backoff_ms.duration(),
-            Duration::from_millis(100)
-        );
+        check!(cli.consumer_poll_timeout_ms.extent() == millis(50));
+        check!(cli.consumer_poll_error_backoff_ms.extent() == millis(100));
     }
 
     #[test]
@@ -431,7 +421,7 @@ mod tests {
             for invalid in ["0", "not-a-number", "-1", "18446744073709551616"] {
                 let mut args = required_args("crabka");
                 args.extend([option, invalid]);
-                assert!(Cli::try_parse_from(args).is_err(), "{option}={invalid}");
+                check!(Cli::try_parse_from(args).is_err(), "{option}={invalid}");
             }
         }
     }
@@ -457,14 +447,8 @@ mod tests {
         }
 
         let from_env = Cli::try_parse_from(required_args("crabka")).expect("environment");
-        assert_eq!(
-            from_env.consumer_poll_timeout_ms.duration(),
-            Duration::from_millis(11)
-        );
-        assert_eq!(
-            from_env.consumer_poll_error_backoff_ms.duration(),
-            Duration::from_millis(12)
-        );
+        check!(from_env.consumer_poll_timeout_ms.extent() == millis(11));
+        check!(from_env.consumer_poll_error_backoff_ms.extent() == millis(12));
 
         let mut args = required_args("crabka");
         args.extend([
@@ -474,14 +458,8 @@ mod tests {
             "22",
         ]);
         let from_cli = Cli::try_parse_from(args).expect("CLI over environment");
-        assert_eq!(
-            from_cli.consumer_poll_timeout_ms.duration(),
-            Duration::from_millis(21)
-        );
-        assert_eq!(
-            from_cli.consumer_poll_error_backoff_ms.duration(),
-            Duration::from_millis(22)
-        );
+        check!(from_cli.consumer_poll_timeout_ms.extent() == millis(21));
+        check!(from_cli.consumer_poll_error_backoff_ms.extent() == millis(22));
     }
 
     #[test]
@@ -505,17 +483,14 @@ mod tests {
         }
 
         let from_env = Cli::try_parse_from(required_args("crabka")).expect("environment");
-        assert_eq!(
-            from_env.producer_request_timeout_seconds.duration(),
-            Duration::from_secs(11)
-        );
-        assert_eq!(
+        check!(from_env.producer_request_timeout_seconds.timeout() == secs(11));
+        check!(
             resolve_consumer_request_timeout(
                 Stack::Crabka,
                 from_env.consumer_request_timeout_seconds,
             )
-            .duration(),
-            Duration::from_secs(12)
+            .timeout()
+                == secs(12)
         );
 
         let mut args = required_args("crabka");
@@ -526,17 +501,14 @@ mod tests {
             "22",
         ]);
         let from_cli = Cli::try_parse_from(args).expect("CLI over environment");
-        assert_eq!(
-            from_cli.producer_request_timeout_seconds.duration(),
-            Duration::from_secs(21)
-        );
-        assert_eq!(
+        check!(from_cli.producer_request_timeout_seconds.timeout() == secs(21));
+        check!(
             resolve_consumer_request_timeout(
                 Stack::Crabka,
                 from_cli.consumer_request_timeout_seconds,
             )
-            .duration(),
-            Duration::from_secs(22)
+            .timeout()
+                == secs(22)
         );
     }
 
@@ -560,17 +532,11 @@ mod tests {
         }
 
         let from_env = Cli::try_parse_from(required_args("crabka")).expect("environment");
-        assert_eq!(
-            from_env.prometheus_request_timeout_seconds.duration(),
-            Duration::from_secs(32)
-        );
+        check!(from_env.prometheus_request_timeout_seconds.timeout() == secs(32));
 
         let mut args = required_args("crabka");
         args.extend(["--prometheus-request-timeout-seconds", "64"]);
         let from_cli = Cli::try_parse_from(args).expect("CLI over environment");
-        assert_eq!(
-            from_cli.prometheus_request_timeout_seconds.duration(),
-            Duration::from_secs(64)
-        );
+        check!(from_cli.prometheus_request_timeout_seconds.timeout() == secs(64));
     }
 }

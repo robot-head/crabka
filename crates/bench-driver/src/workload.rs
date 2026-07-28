@@ -32,7 +32,7 @@ use crate::{
     hist,
     ids::{MessageCount, TimeOffsetMs, WallclockMs},
     numeric::{
-        event_rate, nonnegative_i64_to_u64, saturating_u128_to_u64, saturating_u64_to_i64, to_f64,
+        event_rate, nonnegative_i64_to_u64, saturating_u64_to_i64, saturating_u128_to_u64, to_f64,
     },
     payload,
     prom::{PromClient, PrometheusRequestTimeoutSeconds},
@@ -386,6 +386,19 @@ struct Grid {
 }
 
 impl Grid {
+    /// The grid covering `scenario`'s measurement window, which opens once its
+    /// warmup has elapsed from `started_at`. Always at least one slice wide, so
+    /// a run shorter than a slice still has somewhere to tally into.
+    fn new(started_at: Instant, scenario: &Scenario) -> Self {
+        let interval_ms = SAMPLE_INTERVAL_MS;
+        let duration_ms = nonnegative_i64_to_u64(scenario.duration.millis_i64());
+        Self {
+            meas_start: started_at + scenario.warmup.to_std(),
+            interval_ms,
+            n: usize::try_from(duration_ms.div_ceil(interval_ms).max(1)).unwrap_or(usize::MAX),
+        }
+    }
+
     /// Slice index for an event observed at `now`, clamped into `[0, n-1]`.
     fn idx(&self, now: Instant) -> usize {
         let elapsed_ms =
@@ -478,15 +491,8 @@ pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
     // Time-series sampling grid: split the measurement window into fixed
     // slices. Computed up front (meas_start is t_start + warmup) so it can be
     // handed to each task at spawn time.
-    let interval_ms = SAMPLE_INTERVAL_MS;
-    let duration_ms = nonnegative_i64_to_u64(scenario.duration.millis_i64());
-    let n_intervals =
-        usize::try_from(duration_ms.div_ceil(interval_ms).max(1)).unwrap_or(usize::MAX);
-    let grid = Grid {
-        meas_start: t_start + scenario.warmup.to_std(),
-        interval_ms,
-        n: n_intervals,
-    };
+    let grid = Grid::new(t_start, &scenario);
+    let n_intervals = grid.n;
 
     let mut notes: Vec<String> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
@@ -746,7 +752,7 @@ fn finalize_timing(
     first_ack: u64,
     wallclock_start: i64,
 ) -> (Option<Disturbance>, Time) {
-    let disturbance = failover_active.then(|| Disturbance {
+    let disturbance = failover_active.then_some(Disturbance {
         kill_at_ms: TimeOffsetMs(failover.0),
         recovery_at_ms: TimeOffsetMs(failover.1),
         dropped: MessageCount(failover.2),
@@ -1043,9 +1049,7 @@ async fn run_producer(task: ProducerTask) -> ProducerOut {
         LoadMode::Saturate => None,
         // The scenario rate is for the whole run, so each task paces at its
         // share of it. `Pacer` floors the result at one message a second.
-        LoadMode::FixedRate { rate } => {
-            Some(Pacer::new(rate / to_f64(scenario.producers.max(1))))
-        }
+        LoadMode::FixedRate { rate } => Some(Pacer::new(rate / to_f64(scenario.producers.max(1)))),
     };
 
     // Pipeline depth: how many records may be in flight (awaiting their ack)
