@@ -11,9 +11,8 @@
 //! modules cover topic CRUD, partition expansion, config changes, SCRAM user
 //! credentials, ACLs, quotas, delegation tokens, and log-dir inspection.
 
-use std::time::Duration;
-
 use crabka_client_core::{ClientError, Connection, ConnectionOptions};
+use crabka_units::secs;
 use thiserror::Error;
 
 pub mod configs;
@@ -429,8 +428,8 @@ impl AdminClient {
     fn opts(security: Option<crabka_client_core::security::ClientSecurity>) -> ConnectionOptions {
         ConnectionOptions {
             dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
-            connect_timeout: Duration::from_secs(5),
-            request_timeout: Duration::from_secs(30),
+            connect_timeout: secs(5),
+            request_timeout: secs(30),
             client_id: "crabka-operator".to_string(),
             security: security.map(Box::new),
         }
@@ -609,9 +608,12 @@ pub(crate) fn kafka_error_name(code: i16) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+    use std::{
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
     };
 
     use bytes::{BufMut, BytesMut};
@@ -783,8 +785,8 @@ mod tests {
         ConnectionOptions {
             dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
             client_id: "custom-admin".into(),
-            connect_timeout: Duration::from_millis(100),
-            request_timeout: Duration::from_millis(25),
+            connect_timeout: crabka_units::millis(100),
+            request_timeout: crabka_units::millis(25),
             security: Some(Box::new(ClientSecurity {
                 protocol: ListenerProtocol::SaslPlaintext,
                 tls: None,
@@ -805,7 +807,7 @@ mod tests {
     }
 
     fn assert_custom_connect_timeout_is_stored(admin: &AdminClient) {
-        assert2::assert!(admin.options.connect_timeout == Duration::from_millis(100));
+        assert2::assert!(admin.options.connect_timeout == crabka_units::millis(100));
     }
 
     #[test]
@@ -937,8 +939,8 @@ mod tests {
 
         assert2::assert!(admin.options.dns_timeout == timeout);
         assert2::assert!(admin.options.client_id == "crabka-operator");
-        assert2::assert!(admin.options.connect_timeout == Duration::from_secs(5));
-        assert2::assert!(admin.options.request_timeout == Duration::from_secs(30));
+        assert2::assert!(admin.options.connect_timeout == secs(5));
+        assert2::assert!(admin.options.request_timeout == secs(30));
         live.stop();
     }
 
@@ -967,8 +969,8 @@ mod tests {
         assert2::assert!(admin.options.dns_timeout == timeout);
         assert2::assert!(admin.options.security.is_some());
         assert2::assert!(admin.options.client_id == "crabka-operator");
-        assert2::assert!(admin.options.connect_timeout == Duration::from_secs(5));
-        assert2::assert!(admin.options.request_timeout == Duration::from_secs(30));
+        assert2::assert!(admin.options.connect_timeout == secs(5));
+        assert2::assert!(admin.options.request_timeout == secs(30));
         live.stop();
     }
 
@@ -1032,8 +1034,8 @@ mod tests {
         let options = AdminClient::opts(None);
 
         assert2::assert!(options.client_id == "crabka-operator");
-        assert2::assert!(options.connect_timeout == Duration::from_secs(5));
-        assert2::assert!(options.request_timeout == Duration::from_secs(30));
+        assert2::assert!(options.connect_timeout == secs(5));
+        assert2::assert!(options.request_timeout == secs(30));
         assert2::assert!(options.security.is_none());
     }
 }

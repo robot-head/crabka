@@ -84,9 +84,17 @@ async fn delete_records_truncates_wal_and_maps_outcome() {
         .map_or(WireUuid::ZERO, |id| WireUuid(*id.as_bytes()));
 
     let reader = connect_reader(&bootstrap).await;
-    let fetch_error = fetch_partition(&reader, "wal", topic_id, 0, 0, 500, 1 << 20)
-        .await
-        .unwrap_err();
+    let fetch_error = fetch_partition(
+        &reader,
+        "wal",
+        topic_id,
+        0,
+        0,
+        crabka_units::millis(500),
+        crabka_units::mebibytes(1),
+    )
+    .await
+    .unwrap_err();
     assert!(
         matches!(fetch_error, ClientError::Server { error_code: 1, .. }),
         "fetch below log start should return OFFSET_OUT_OF_RANGE, got {fetch_error:?}"

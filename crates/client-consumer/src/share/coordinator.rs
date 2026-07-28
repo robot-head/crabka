@@ -311,7 +311,7 @@ mod tests {
         let client = Client::builder()
             .bootstrap(mock.addr.to_string())
             .client_id("share-leave-timeout-test")
-            .request_timeout(Duration::from_secs(5))
+            .request_timeout(crabka_units::secs(5))
             .build()
             .await
             .expect("client");

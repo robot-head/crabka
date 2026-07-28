@@ -12,6 +12,7 @@ use std::{
 
 use bytes::{BufMut, Bytes, BytesMut};
 use crabka_ids::{ApiKey, ApiVersion};
+use crabka_units::{Time, convert::TimeExt as _, secs};
 use dashmap::DashMap;
 use refined_type::rule::MinMaxU128;
 use tokio::{
@@ -40,13 +41,21 @@ type Pending = Arc<DashMap<i32, oneshot::Sender<Result<Bytes, ClientError>>>>;
 const API_VERSIONS_KEY: i16 = 18;
 
 /// Default deadline for one client DNS lookup.
+///
+/// A [`Duration`] rather than a `Time` because it feeds [`ClientDnsTimeout`],
+/// which is `Eq` — see that type's note.
 pub const DEFAULT_CLIENT_DNS_TIMEOUT: Duration = Duration::from_secs(10);
 /// Default deadline for one client TCP connection attempt.
-pub const DEFAULT_CLIENT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+pub const DEFAULT_CLIENT_CONNECT_TIMEOUT: Time = secs(30);
 /// Default deadline for one client request.
-pub const DEFAULT_CLIENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+pub const DEFAULT_CLIENT_REQUEST_TIMEOUT: Time = secs(30);
 
 /// Positive, whole-millisecond DNS lookup deadline.
+///
+/// Deliberately still a [`Duration`] rather than a `crabka-units` `Time`: the
+/// type derives `Eq`, which an `f64`-backed quantity cannot satisfy, and the
+/// operator's `Gres` CRD spec holds one and diffs specs by equality to decide
+/// whether to reconcile.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ClientDnsTimeout(Duration);
 
@@ -97,8 +106,8 @@ impl Default for ClientDnsTimeout {
 pub struct ConnectionOptions {
     pub client_id: String,
     pub dns_timeout: ClientDnsTimeout,
-    pub connect_timeout: Duration,
-    pub request_timeout: Duration,
+    pub connect_timeout: Time,
+    pub request_timeout: Time,
     /// Client-side TLS/SASL policy. `None` = plaintext (default).
     ///
     /// Boxed so `ConnectionOptions` stays small: it is cloned widely and
@@ -150,10 +159,11 @@ impl Connection {
         addr: SocketAddr,
         options: ConnectionOptions,
     ) -> Result<Self, ClientError> {
-        let stream = tokio::time::timeout(options.connect_timeout, TcpStream::connect(addr))
-            .await
-            .map_err(|_| ClientError::Timeout(options.connect_timeout))?
-            .map_err(|source| ClientError::Connect { addr, source })?;
+        let stream =
+            tokio::time::timeout(options.connect_timeout.to_std(), TcpStream::connect(addr))
+                .await
+                .map_err(|_| ClientError::Timeout(options.connect_timeout))?
+                .map_err(|source| ClientError::Connect { addr, source })?;
 
         stream.set_nodelay(true).ok();
 
@@ -206,7 +216,7 @@ impl Connection {
         options: ConnectionOptions,
         security: &crate::security::ClientSecurity,
     ) -> Result<Self, ClientError> {
-        let tcp = tokio::time::timeout(options.connect_timeout, TcpStream::connect(addr))
+        let tcp = tokio::time::timeout(options.connect_timeout.to_std(), TcpStream::connect(addr))
             .await
             .map_err(|_| ClientError::Timeout(options.connect_timeout))?
             .map_err(|source| ClientError::Connect { addr, source })?;
@@ -448,7 +458,7 @@ impl Connection {
             .await
             .map_err(|_| ClientError::Disconnected)?;
 
-        match tokio::time::timeout(self.inner.options.request_timeout, rx).await {
+        match tokio::time::timeout(self.inner.options.request_timeout.to_std(), rx).await {
             Ok(Ok(Ok(bytes))) => Ok(bytes),
             Ok(Ok(Err(err))) => Err(err),
             Ok(Err(_recv_closed)) => Err(ClientError::Disconnected),
@@ -621,7 +631,7 @@ async fn fetch_api_versions(conn: &Connection) -> Result<ApiVersionTable, Client
         .await
         .map_err(|_| ClientError::Disconnected)?;
 
-    let body_bytes = tokio::time::timeout(conn.inner.options.connect_timeout, rx)
+    let body_bytes = tokio::time::timeout(conn.inner.options.connect_timeout.to_std(), rx)
         .await
         .map_err(|_| ClientError::Timeout(conn.inner.options.connect_timeout))?
         .map_err(|_| ClientError::Disconnected)??;
@@ -664,8 +674,8 @@ mod tests {
     fn connection_options_own_named_defaults() {
         let options = ConnectionOptions::default();
         assert!(DEFAULT_CLIENT_DNS_TIMEOUT == Duration::from_secs(10));
-        assert!(DEFAULT_CLIENT_CONNECT_TIMEOUT == Duration::from_secs(30));
-        assert!(DEFAULT_CLIENT_REQUEST_TIMEOUT == Duration::from_secs(30));
+        assert!(DEFAULT_CLIENT_CONNECT_TIMEOUT == secs(30));
+        assert!(DEFAULT_CLIENT_REQUEST_TIMEOUT == secs(30));
         assert!(options.dns_timeout == ClientDnsTimeout::default());
         assert!(options.dns_timeout.duration() == DEFAULT_CLIENT_DNS_TIMEOUT);
         assert!(options.connect_timeout == DEFAULT_CLIENT_CONNECT_TIMEOUT);
@@ -812,8 +822,8 @@ mod io_task_tests {
 
         let stream = TcpStream::connect(addr).await.unwrap();
         let opts = ConnectionOptions {
-            request_timeout: Duration::from_secs(5),
-            connect_timeout: Duration::from_secs(5),
+            request_timeout: secs(5),
+            connect_timeout: secs(5),
             ..Default::default()
         };
         let conn = Connection::from_stream(Box::new(stream), opts)

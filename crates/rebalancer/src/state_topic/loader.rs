@@ -372,8 +372,8 @@ mod tests {
             Client::builder()
                 .bootstrap("127.0.0.1:1")
                 .client_id("state-topic-loader-test")
-                .connect_timeout(CLIENT_TIMEOUT.to_std())
-                .request_timeout(CLIENT_TIMEOUT.to_std())
+                .connect_timeout(CLIENT_TIMEOUT)
+                .request_timeout(CLIENT_TIMEOUT)
                 .build()
                 .await
                 .expect("client build does not connect"),

@@ -14,6 +14,10 @@ use crabka_protocol::owned::{
     init_producer_id_request::InitProducerIdRequest,
     init_producer_id_response::InitProducerIdResponse,
 };
+use crabka_units::{
+    Time,
+    convert::{StdDurationExt as _, TimeExt as _},
+};
 use dashmap::DashMap;
 use refined_type::rule::{GreaterI32, GreaterUsize, MinMaxU128, MinMaxUsize};
 use tokio::sync::{Mutex, Notify, mpsc};
@@ -379,16 +383,16 @@ fn producer_identity_from_init(init: &InitProducerIdResponse) -> Result<(i64, i1
 pub(crate) async fn init_producer_id_with_retry(
     client: &Client,
     request: InitProducerIdRequest,
-    retry_timeout: Duration,
-    initial_backoff: Duration,
-    max_backoff: Duration,
+    retry_timeout: Time,
+    initial_backoff: Time,
+    max_backoff: Time,
 ) -> Result<InitProducerIdResponse, ProducerError> {
     let deadline = tokio::time::Instant::now()
-        .checked_add(retry_timeout)
+        .checked_add(retry_timeout.to_std())
         .ok_or_else(|| {
             ProducerError::InvalidConfig("producer-ID retry timeout is too large".to_owned())
         })?;
-    let mut backoff = initial_backoff;
+    let mut backoff = initial_backoff.to_std();
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         let response = tokio::time::timeout(remaining, client.send(request.clone()))
@@ -409,7 +413,7 @@ pub(crate) async fn init_producer_id_with_retry(
         if tokio::time::Instant::now() >= deadline {
             return last_outcome.map_err(ProducerError::Client);
         }
-        backoff = next_backoff(backoff, max_backoff);
+        backoff = next_backoff(backoff, max_backoff.to_std());
     }
 }
 
@@ -467,7 +471,7 @@ impl Producer {
         )
         .map_err(ProducerError::InvalidConfig)?;
         let compression = throughput_policy.compression();
-        let linger = throughput_policy.linger();
+        let linger = throughput_policy.linger().as_time();
         let batch_size = throughput_policy.batch_bytes();
         let max_in_flight_per_connection = throughput_policy.max_in_flight();
 
@@ -481,7 +485,9 @@ impl Producer {
             transaction_timeout,
         )
         .map_err(ProducerError::InvalidConfig)?;
-        let request_timeout = retry_policy.request_timeout();
+        // The validated retry policy derives `Eq`, so it holds `Duration`s;
+        // the domain past this point holds quantities.
+        let request_timeout = retry_policy.request_timeout().as_time();
         let retries = retry_policy.retries();
         let retry_backoff = retry_policy.retry_backoff();
         let routing_retry_budget = retry_policy.routing_retry_budget();
@@ -519,9 +525,9 @@ impl Producer {
             let init = init_producer_id_with_retry(
                 &client,
                 build_init_producer_id_request(),
-                retry_policy.init_retry_timeout(),
-                retry_backoff,
-                retry_policy.init_max_backoff(),
+                retry_policy.init_retry_timeout().as_time(),
+                retry_backoff.as_time(),
+                retry_policy.init_max_backoff().as_time(),
             )
             .await?;
             producer_identity_from_init(&init)?
@@ -555,8 +561,8 @@ impl Producer {
             linger,
             request_timeout_ms: retry_policy.request_timeout_ms(),
             retries,
-            retry_backoff,
-            routing_retry_budget,
+            retry_backoff: retry_backoff.as_time(),
+            routing_retry_budget: routing_retry_budget.as_time(),
             max_in_flight: max_in_flight_per_connection,
             metadata_cache: Arc::clone(&metadata_cache),
             partition_leaders: Arc::clone(&partition_leaders),
@@ -603,9 +609,9 @@ impl Producer {
             sender_handle: Some(sender_handle),
             transactional_id,
             transaction_timeout_ms: retry_policy.transaction_timeout_ms(),
-            init_retry_timeout: retry_policy.init_retry_timeout(),
-            init_retry_backoff: retry_policy.retry_backoff(),
-            init_max_backoff: retry_policy.init_max_backoff(),
+            init_retry_timeout: retry_policy.init_retry_timeout().as_time(),
+            init_retry_backoff: retry_policy.retry_backoff().as_time(),
+            init_max_backoff: retry_policy.init_max_backoff().as_time(),
             txn_state,
             txn_recovery_required,
             txn_recovery_generation,
@@ -1097,7 +1103,7 @@ mod security_arg_tests {
         assert2::assert!(matches!(
             err,
             ProducerError::Client(ClientError::Timeout(d))
-                if d == Duration::from_millis(100)
+                if d == crabka_units::millis(100)
         ));
     }
 
@@ -1164,7 +1170,7 @@ mod security_arg_tests {
         assert2::assert!(matches!(
             error,
             ProducerError::Client(ClientError::Timeout(timeout))
-                if timeout == Duration::from_millis(10)
+                if timeout == crabka_units::millis(10)
         ));
     }
 

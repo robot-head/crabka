@@ -46,17 +46,14 @@ pub async fn run(
     }
 }
 
-/// The KIP-73 throttle rate the image holds for `kind`, as a quantity.
+/// The KIP-73 throttle rate the image holds for `kind`.
 ///
-/// `crabka-metadata` stores broker configs as parsed integers, so the raw
-/// bytes-per-second crosses into the domain here. An unset config is the
-/// bucket's "unthrottled" sentinel, [`ByteRateExt::ZERO`].
+/// An unset or disabled config is the bucket's "unthrottled" sentinel,
+/// [`ByteRateExt::ZERO`].
 fn image_rate(image: &MetadataImage, node_id: NodeId, kind: ThrottleKind) -> ByteRate {
     image
         .broker_throttle_rate(node_id, kind)
-        .map_or(<ByteRate as ByteRateExt>::ZERO, |raw| {
-            ByteRate::from_bytes_per_sec(i64::try_from(raw).unwrap_or(i64::MAX))
-        })
+        .unwrap_or(<ByteRate as ByteRateExt>::ZERO)
 }
 
 fn apply_image(image: &MetadataImage, node_id: NodeId, throttle: &ThrottleState) {

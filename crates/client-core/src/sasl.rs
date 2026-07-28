@@ -26,6 +26,7 @@ use crabka_protocol::{
     },
 };
 use crabka_security::{SaslMechanism, ScramClientExchange};
+use crabka_units::{ByteSize, kibibytes};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -36,10 +37,10 @@ const API_KEY_SASL_AUTHENTICATE: i16 = 36;
 /// SASL handshake. Visible in broker logs as the connection's reporter id.
 const OUTBOUND_CLIENT_ID: &str = "crabka-client";
 
-/// `max_recv_size` advertised in the client's RFC 4752 security-layer choice.
-/// Auth-only QOP means no data is wrapped post-handshake, so the value only
-/// needs to be a sane non-zero buffer; mirror the server's offer size.
-const GSSAPI_MAX_RECV_SIZE: u32 = 0x1_0000;
+/// Maximum receive size advertised in the client's RFC 4752 security-layer
+/// choice. Auth-only QOP means no data is wrapped post-handshake, so the value
+/// only needs to be a sane non-zero buffer; mirror the server's offer size.
+const GSSAPI_MAX_RECV: ByteSize = kibibytes(64);
 
 /// Outbound SASL credentials. Mirrors the broker's
 /// `InterBrokerCredentials`; one variant per supported mechanism.
@@ -300,7 +301,7 @@ where
     let keytab = keytab_path.to_string_lossy();
     let initiator = SspiInitiator::new(&keytab, client_principal, &target_spn, kdc_url)
         .map_err(|e| OutboundSaslError::Sasl(format!("GSSAPI initiator init failed: {e}")))?;
-    let exchange = GssapiClientExchange::new(Box::new(initiator), GSSAPI_MAX_RECV_SIZE, None);
+    let exchange = GssapiClientExchange::new(Box::new(initiator), GSSAPI_MAX_RECV, None);
 
     // Seed the exchange with no server token; this produces the AP-REQ.
     let mut step = exchange

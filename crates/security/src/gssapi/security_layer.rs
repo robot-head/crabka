@@ -1,3 +1,5 @@
+use crabka_units::{ByteSize, convert::ByteSizeExt as _};
+
 /// RFC 4752 security-layer bitmask. We only support auth-only (matches Kafka).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SecurityLayer(pub u8);
@@ -18,11 +20,39 @@ pub enum LayerError {
     Authzid,
 }
 
+/// The RFC 4752 `max recv size` field as its three big-endian wire bytes.
+///
+/// The field is 24 bits wide, so the top byte of the `u32` is dropped —
+/// unchanged from the original encoding, which took a `u32` and sliced
+/// `[1..4]`. A cap wider than `u32` saturates rather than wrapping; every
+/// configured cap is orders of magnitude below that.
+fn max_recv_wire_bytes(max_recv: ByteSize) -> [u8; 3] {
+    let raw = u32::try_from(max_recv.bytes_u64()).unwrap_or(u32::MAX);
+    let [_, b1, b2, b3] = raw.to_be_bytes();
+    [b1, b2, b3]
+}
+
 /// Server offer: 1-byte supported-layer bitmask + 3-byte big-endian max recv size.
 #[must_use]
-pub fn encode_offer(layers: SecurityLayer, max_recv_size: u32) -> Vec<u8> {
-    let s = max_recv_size.to_be_bytes(); // [b0,b1,b2,b3]
-    vec![layers.0, s[1], s[2], s[3]]
+pub fn encode_offer(layers: SecurityLayer, max_recv: ByteSize) -> Vec<u8> {
+    let [b1, b2, b3] = max_recv_wire_bytes(max_recv);
+    vec![layers.0, b1, b2, b3]
+}
+
+/// Client choice reply: the selected layer, the client's max recv size, and an
+/// optional authzid.
+#[must_use]
+pub fn encode_choice(
+    selected: SecurityLayer,
+    max_recv: ByteSize,
+    authzid: Option<&str>,
+) -> Vec<u8> {
+    let [b1, b2, b3] = max_recv_wire_bytes(max_recv);
+    let mut reply = vec![selected.0, b1, b2, b3];
+    if let Some(z) = authzid {
+        reply.extend_from_slice(z.as_bytes());
+    }
+    reply
 }
 
 /// Client choice parsed from the unwrapped response.
@@ -75,13 +105,63 @@ pub fn decode_offer_layers(bytes: &[u8]) -> Result<SecurityLayer, LayerError> {
 #[cfg(test)]
 mod tests {
 
+    use crabka_units::kibibytes;
+
     use super::*;
 
     #[test]
     fn encode_offer_auth_only() {
         // bitmask 0x01 (auth), max recv size 0x10000 (65536)
-        let bytes = encode_offer(SecurityLayer::AUTH, 0x1_0000);
+        let bytes = encode_offer(SecurityLayer::AUTH, kibibytes(64));
         assert2::assert!(bytes == vec![0x01, 0x01, 0x00, 0x00]);
+    }
+
+    /// The 24-bit `max recv size` field is what the peer reads, so a
+    /// [`ByteSize`] must land on exactly the bytes the raw `u32` encoding
+    /// produced: the big-endian value with its top octet dropped.
+    #[test]
+    fn max_recv_size_encodes_to_the_same_three_wire_bytes_as_the_raw_u32() {
+        for raw in [
+            0u32,
+            1,
+            0xFF,
+            0x1000,
+            0x1_0000,
+            0x0010_0000,
+            0x00FF_FFFF,
+            // Above 24 bits the top octet is dropped, exactly as
+            // `u32::to_be_bytes()[1..4]` always did.
+            0x0100_0000,
+            u32::MAX,
+        ] {
+            let expected = {
+                let [_, b1, b2, b3] = raw.to_be_bytes();
+                [b1, b2, b3]
+            };
+            assert2::check!(
+                max_recv_wire_bytes(ByteSize::from_bytes(u64::from(raw))) == expected,
+                "raw = {raw:#x}"
+            );
+        }
+    }
+
+    /// A cap beyond `u32` saturates instead of wrapping, so an absurd
+    /// configuration cannot silently advertise a tiny buffer.
+    #[test]
+    fn max_recv_size_beyond_u32_saturates() {
+        let huge = ByteSize::from_bytes(u64::from(u32::MAX) + 1_000);
+        assert2::check!(max_recv_wire_bytes(huge) == [0xFF, 0xFF, 0xFF]);
+    }
+
+    #[test]
+    fn encode_choice_appends_authzid_after_the_size_field() {
+        assert2::check!(
+            encode_choice(SecurityLayer::AUTH, kibibytes(64), None) == vec![0x01, 0x01, 0x00, 0x00]
+        );
+        assert2::check!(
+            encode_choice(SecurityLayer::AUTH, kibibytes(64), Some("alice"))
+                == vec![0x01, 0x01, 0x00, 0x00, b'a', b'l', b'i', b'c', b'e']
+        );
     }
 
     #[test]

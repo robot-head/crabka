@@ -52,7 +52,7 @@ pub const DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT: Time = millis(100);
 pub const DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX: ByteSize = mebibytes(1);
 /// Default whole-response byte limit for committed-WAL recovery fetches.
 ///
-/// Mirrors [`crabka_client_core::DEFAULT_FETCH_RESPONSE_MAX_BYTES`], which is the
+/// Mirrors [`crabka_client_core::DEFAULT_FETCH_RESPONSE_MAX`], which is the
 /// raw `int32` the client crate hands the wire;
 /// `recovery_read_policy_mirrors_the_client_response_limit` pins the two together.
 pub const DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX: ByteSize = mebibytes(50);
@@ -869,8 +869,8 @@ fn wal_admin_connection_options(config: &LiveRecoveryConfig) -> ConnectionOption
     ConnectionOptions {
         dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
         client_id: config.client_id(),
-        connect_timeout: config.wal_admin_policy.connect_timeout().to_std(),
-        request_timeout: config.wal_admin_policy.request_timeout().to_std(),
+        connect_timeout: config.wal_admin_policy.connect_timeout(),
+        request_timeout: config.wal_admin_policy.request_timeout(),
         security: config.security.clone().map(Box::new),
     }
 }
@@ -974,8 +974,8 @@ fn wal_connection_options(
     ConnectionOptions {
         dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
         client_id: client_id.to_string(),
-        connect_timeout: read_policy.connect_timeout().to_std(),
-        request_timeout: read_policy.request_timeout().to_std(),
+        connect_timeout: read_policy.connect_timeout(),
+        request_timeout: read_policy.request_timeout(),
         security: security.map(Box::new),
     }
 }
@@ -1221,9 +1221,9 @@ fn recovery_fetch(
         topic_id,
         partition: PARTITION,
         fetch_offset,
-        max_wait_ms: read_policy.fetch_max_wait().millis_i32(),
-        max_bytes: read_policy.fetch_response_max().bytes_i32(),
-        partition_max_bytes: read_policy.fetch_partition_max().bytes_i32(),
+        max_wait: read_policy.fetch_max_wait(),
+        max: read_policy.fetch_response_max(),
+        partition_max: read_policy.fetch_partition_max(),
         isolation_level: READ_COMMITTED,
     }
 }
@@ -1641,8 +1641,8 @@ mod tests {
     #[test]
     fn recovery_read_policy_mirrors_the_client_response_limit() {
         assert!(
-            DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX.bytes_i32()
-                == crabka_client_core::DEFAULT_FETCH_RESPONSE_MAX_BYTES
+            DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX
+                == crabka_client_core::DEFAULT_FETCH_RESPONSE_MAX
         );
     }
 
@@ -1777,8 +1777,8 @@ mod tests {
         let options = wal_connection_options("replay-client", Some(security), policy);
 
         assert!(options.client_id == "replay-client");
-        assert!(options.connect_timeout == Duration::from_millis(77));
-        assert!(options.request_timeout == Duration::from_millis(88));
+        assert!(options.connect_timeout == millis(77));
+        assert!(options.request_timeout == millis(88));
         let security = options.security.expect("security");
         assert!(security.protocol == crabka_security::ListenerProtocol::Plaintext);
         assert!(security.sasl_host.as_deref() == Some("broker.internal"));
@@ -1948,8 +1948,8 @@ mod tests {
         let options = wal_admin_connection_options(&config);
 
         assert!(options.client_id == "crabka-gres-tenant-a-r7");
-        assert!(options.connect_timeout == Duration::from_millis(33));
-        assert!(options.request_timeout == Duration::from_millis(44));
+        assert!(options.connect_timeout == millis(33));
+        assert!(options.request_timeout == millis(44));
         assert!(
             options.security.expect("security").sasl_host.as_deref() == Some("broker.internal")
         );
@@ -1960,9 +1960,9 @@ mod tests {
         let policy = RecoveryReadPolicy::new(11, 22, 33, 44).expect("valid policy");
         let fetch = recovery_fetch("topic", WireUuid([7; 16]), 42, policy);
 
-        assert!(fetch.max_wait_ms == 11);
-        assert!(fetch.partition_max_bytes == 22);
-        assert!(fetch.max_bytes == 33);
+        assert!(fetch.max_wait == millis(11));
+        assert!(fetch.partition_max == crabka_units::bytes(22));
+        assert!(fetch.max == crabka_units::bytes(33));
     }
 
     #[test]

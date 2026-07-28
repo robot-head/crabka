@@ -85,8 +85,7 @@ impl BearerSettings {
         Ok(crabka_security::OAuthBearerValidator::Unsecured(
             crabka_security::UnsecuredJwsValidator {
                 principal_claim_name: self.principal_claim_name.clone(),
-                // `crabka-security` takes the tolerance as raw milliseconds.
-                allowable_clock_skew_ms: self.allowable_clock_skew.millis_i64(),
+                allowable_clock_skew: self.allowable_clock_skew,
                 ..Default::default()
             },
         ))
@@ -232,7 +231,7 @@ mod tests {
         let crabka_security::OAuthBearerValidator::Unsecured(unsecured) = validator else {
             panic!("unsecured settings build an unsecured validator");
         };
-        check!(unsecured.allowable_clock_skew_ms == 45_000);
+        check!(unsecured.allowable_clock_skew == secs(45));
         check!(unsecured.principal_claim_name.as_str() == "sub");
     }
 }

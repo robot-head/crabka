@@ -3803,8 +3803,8 @@ async fn load_live_tenant_config(
             topic_id,
             0,
             next_offset,
-            policy.fetch_max_wait().millis_i32(),
-            policy.fetch_partition_max().bytes_i32(),
+            policy.fetch_max_wait(),
+            policy.fetch_partition_max(),
         )
         .await
         .map_err(|error| std::io::Error::other(format!("tenant config fetch: {error}")))?;
@@ -3914,9 +3914,9 @@ fn live_split_operation_fetch<'a>(
         topic_id,
         partition: 0,
         fetch_offset,
-        max_wait_ms: policy.fetch_max_wait().millis_i32(),
-        max_bytes: crabka_client_core::DEFAULT_FETCH_RESPONSE_MAX_BYTES,
-        partition_max_bytes: policy.fetch_partition_max().bytes_i32(),
+        max_wait: policy.fetch_max_wait(),
+        max: crabka_client_core::DEFAULT_FETCH_RESPONSE_MAX,
+        partition_max: policy.fetch_partition_max(),
         isolation_level: 1,
     }
 }
@@ -9029,8 +9029,8 @@ mod tests {
             42,
         );
 
-        assert!(fetch.max_wait_ms == 777);
-        assert!(fetch.partition_max_bytes == 2_000_000);
+        assert!(fetch.max_wait == millis(777));
+        assert!(fetch.partition_max == crabka_units::bytes(2_000_000));
     }
 
     #[tokio::test]

@@ -42,9 +42,7 @@ use crabka_protocol::{
     owned::list_offsets_request::{ListOffsetsPartition, ListOffsetsRequest, ListOffsetsTopic},
     primitives::uuid::Uuid as WireUuid,
 };
-use crabka_units::prelude::{
-    ByteSize, ByteSizeExt as _, Time, TimeExt as _, mebibytes, millis, secs,
-};
+use crabka_units::prelude::{ByteSize, Time, TimeExt as _, mebibytes, millis, secs};
 use futures_util::stream::{StreamExt, unfold};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -78,9 +76,9 @@ const TOPIC_CREATE_TIMEOUT: Time = secs(30);
 /// that cancellation on reassignment is prompt.
 const FETCH_MAX_WAIT: Time = millis(500);
 
-/// `partition_max_bytes` for the per-partition metadata `Fetch`. Metadata
-/// events are small, so one mebibyte is many thousands of them per round-trip.
-const FETCH_MAX_BYTES: ByteSize = mebibytes(1);
+/// Per-partition budget for the metadata `Fetch`. Metadata events are small,
+/// so one mebibyte is many thousands of them per round-trip.
+const FETCH_MAX: ByteSize = mebibytes(1);
 
 /// Pause before retrying a failed metadata `Fetch`, so a broker that is down
 /// does not turn the fetch loop into a busy spin.
@@ -552,8 +550,8 @@ async fn partition_fetch_loop(
                 state.topic_id,
                 partition,
                 next_offset,
-                FETCH_MAX_WAIT.millis_i32(),
-                FETCH_MAX_BYTES.bytes_i32(),
+                FETCH_MAX_WAIT,
+                FETCH_MAX,
             ) => {
                 match res {
                     Ok(records) => {
@@ -601,6 +599,7 @@ fn usize_count(n: i32) -> Result<usize, MetadataLogError> {
 #[cfg(test)]
 mod tests {
     use assert2::{assert, check};
+    use crabka_units::convert::ByteSizeExt as _;
 
     use super::*;
 
@@ -622,7 +621,7 @@ mod tests {
     fn client_tunables_convert_to_their_kafka_wire_images() {
         check!(TOPIC_CREATE_TIMEOUT.millis_i32() == 30_000);
         check!(FETCH_MAX_WAIT.millis_i32() == 500);
-        check!(FETCH_MAX_BYTES.bytes_i32() == 1 << 20);
+        check!(FETCH_MAX.bytes_i32() == 1 << 20);
         check!(FETCH_RETRY_BACKOFF.to_std() == std::time::Duration::from_millis(200));
     }
 

@@ -120,9 +120,17 @@ async fn count_records(admin: &Client, bootstrap: &str, topic: &str) -> usize {
     let mut n = 0usize;
     let mut next = 0_i64;
     while n <= CAP {
-        let records = fetch_partition(&conn, topic, tid, 0, next, 500, 1 << 20)
-            .await
-            .unwrap_or_default();
+        let records = fetch_partition(
+            &conn,
+            topic,
+            tid,
+            0,
+            next,
+            crabka_units::millis(500),
+            crabka_units::mebibytes(1),
+        )
+        .await
+        .unwrap_or_default();
         if records.is_empty() {
             break;
         }
@@ -141,9 +149,17 @@ async fn poll_until_latest(admin: &Client, bootstrap: &str, topic: &str, key: &s
     let mut latest: Option<String> = None;
     let mut next = 0_i64;
     loop {
-        let records: Vec<FetchedRecord> = fetch_partition(&conn, topic, tid, 0, next, 500, 1 << 20)
-            .await
-            .unwrap_or_default();
+        let records: Vec<FetchedRecord> = fetch_partition(
+            &conn,
+            topic,
+            tid,
+            0,
+            next,
+            crabka_units::millis(500),
+            crabka_units::mebibytes(1),
+        )
+        .await
+        .unwrap_or_default();
         for r in &records {
             next = r.offset + 1;
             if r.key.as_deref().and_then(|b| std::str::from_utf8(b).ok()) == Some(key) {

@@ -580,9 +580,11 @@ async fn run_consume(
         .bootstrap(cli.bootstrap.clone())
         .group_id("orders-processor")
         .subscribe([cli.input_topic.clone()])
-        .leave_group_timeout(consumer_leave_group_timeout.duration())
+        .leave_group_timeout(consumer_leave_group_timeout.duration().as_time())
         .subscription_metadata_refresh_interval(
-            consumer_subscription_metadata_refresh_interval.duration(),
+            consumer_subscription_metadata_refresh_interval
+                .duration()
+                .as_time(),
         )
         .build()
         .await?;

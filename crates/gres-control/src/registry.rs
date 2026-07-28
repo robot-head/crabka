@@ -11,8 +11,8 @@ use std::{
 use bytes::Bytes;
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
 use crabka_client_core::{
-    ClientDnsTimeout, Connection, ConnectionOptions, DEFAULT_FETCH_RESPONSE_MAX_BYTES,
-    IsolatedFetch, fetch_partition_with_isolation_progress,
+    ClientDnsTimeout, Connection, ConnectionOptions, DEFAULT_FETCH_RESPONSE_MAX, IsolatedFetch,
+    fetch_partition_with_isolation_progress,
 };
 use crabka_client_producer::{Acks, Producer, ProducerError, ProducerRecord, Transaction};
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
@@ -1683,9 +1683,9 @@ fn registry_fetch(
         topic_id,
         partition: 0,
         fetch_offset,
-        max_wait_ms: policy.fetch_max_wait.millis_i32(),
-        max_bytes: DEFAULT_FETCH_RESPONSE_MAX_BYTES,
-        partition_max_bytes: policy.fetch_partition_max.bytes_i32(),
+        max_wait: policy.fetch_max_wait,
+        max: DEFAULT_FETCH_RESPONSE_MAX,
+        partition_max: policy.fetch_partition_max,
         isolation_level: READ_COMMITTED,
     }
 }
@@ -1958,8 +1958,8 @@ mod tests {
         assert!(timeout_ms == 12_345);
         assert!(tenant_timeout_ms == 12_345);
         let fetch = registry_fetch(42, WireUuid::ZERO, &policy);
-        assert!(fetch.max_wait_ms == 901);
-        assert!(fetch.partition_max_bytes == 234_567);
+        assert!(fetch.max_wait == crabka_units::millis(901));
+        assert!(fetch.partition_max == crabka_units::bytes(234_567));
         assert!(policy.reader_retry_backoff == crabka_units::millis(678));
     }
 

@@ -7,7 +7,6 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
     },
-    time::Duration,
 };
 
 use crabka_client_consumer::ConsumerGroupMetadata;
@@ -23,6 +22,7 @@ use crabka_protocol::owned::{
         TxnOffsetCommitRequest, TxnOffsetCommitRequestPartition, TxnOffsetCommitRequestTopic,
     },
 };
+use crabka_units::{Time, convert::TimeExt};
 use dashmap::DashMap;
 use tokio::{
     sync::{Mutex, Notify, oneshot},
@@ -83,10 +83,10 @@ pub(crate) struct ProducerIdentity {
 
 fn wake_sender_after_append(
     wake_tx: &tokio::sync::mpsc::Sender<DrainIntent>,
-    linger: Duration,
+    linger: Time,
     wakes_sender: bool,
 ) {
-    if linger.is_zero() {
+    if linger == <Time as TimeExt>::ZERO {
         let _ = wake_tx.try_send(DrainIntent::Force);
     } else if wakes_sender {
         let _ = wake_tx.try_send(DrainIntent::Ready);
@@ -115,9 +115,9 @@ pub struct Producer {
     pub(crate) compression: Compression,
     pub(crate) batch_size: usize,
     #[allow(dead_code)]
-    pub(crate) linger: Duration,
+    pub(crate) linger: Time,
     #[allow(dead_code)]
-    pub(crate) request_timeout: Duration,
+    pub(crate) request_timeout: Time,
     pub(crate) flush_timeout: ProducerFlushTimeout,
     #[allow(dead_code)]
     pub(crate) max_in_flight: usize,
@@ -147,9 +147,9 @@ pub struct Producer {
     pub(crate) sender_handle: Option<JoinHandle<()>>,
     pub(crate) transactional_id: Option<String>,
     pub(crate) transaction_timeout_ms: i32,
-    pub(crate) init_retry_timeout: Duration,
-    pub(crate) init_retry_backoff: Duration,
-    pub(crate) init_max_backoff: Duration,
+    pub(crate) init_retry_timeout: Time,
+    pub(crate) init_retry_backoff: Time,
+    pub(crate) init_max_backoff: Time,
     /// Arc-wrapped so the sender task can share the same state without
     /// additional synchronization structures.
     pub(crate) txn_state: Arc<Mutex<TxnState>>,
@@ -1038,14 +1038,14 @@ mod tests {
         else {
             panic!("unexpected BatchFull");
         };
-        wake_sender_after_append(&wake_tx, Duration::from_millis(10), wakes_sender);
+        wake_sender_after_append(&wake_tx, crabka_units::millis(10), wakes_sender);
         assert_eq!(wake_rx.try_recv(), Ok(DrainIntent::Ready));
         let AppendResult::Appended { wakes_sender, .. } =
             coalesced.try_append(None, Some(Bytes::from_static(b"b")), vec![], 0, None)
         else {
             panic!("unexpected BatchFull");
         };
-        wake_sender_after_append(&wake_tx, Duration::from_millis(10), wakes_sender);
+        wake_sender_after_append(&wake_tx, crabka_units::millis(10), wakes_sender);
         assert_eq!(
             wake_rx.try_recv(),
             Err(tokio::sync::mpsc::error::TryRecvError::Empty)
@@ -1058,12 +1058,12 @@ mod tests {
         else {
             panic!("unexpected BatchFull");
         };
-        wake_sender_after_append(&wake_tx, Duration::from_millis(10), wakes_sender);
+        wake_sender_after_append(&wake_tx, crabka_units::millis(10), wakes_sender);
         assert_eq!(wake_rx.try_recv(), Ok(DrainIntent::Ready));
 
         let mut immediate = Accumulator::new(1024);
         let _ = immediate.try_append(None, Some(Bytes::from_static(b"a")), vec![], 0, None);
-        wake_sender_after_append(&wake_tx, Duration::ZERO, false);
+        wake_sender_after_append(&wake_tx, crabka_units::secs(0), false);
         assert_eq!(wake_rx.try_recv(), Ok(DrainIntent::Force));
     }
 

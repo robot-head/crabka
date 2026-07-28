@@ -429,10 +429,17 @@ async fn dump_schemas_records() {
     let mut out: Vec<serde_json::Value> = Vec::new();
     let mut next = 0_i64;
     loop {
-        let recs =
-            crabka_client_core::fetch_partition(&conn, "_schemas", topic_id, 0, next, 500, 1 << 20)
-                .await
-                .expect("fetch");
+        let recs = crabka_client_core::fetch_partition(
+            &conn,
+            "_schemas",
+            topic_id,
+            0,
+            next,
+            crabka_units::millis(500),
+            crabka_units::mebibytes(1),
+        )
+        .await
+        .expect("fetch");
         if recs.is_empty() {
             break;
         }

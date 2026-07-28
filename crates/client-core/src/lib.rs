@@ -73,9 +73,8 @@ pub use connection::{
 };
 pub use error::ClientError;
 pub use fetch::{
-    DEFAULT_FETCH_RESPONSE_MAX_BYTES, FetchPartitionResult, FetchedHeader, FetchedRecord,
-    IsolatedFetch, fetch_partition, fetch_partition_with_isolation,
-    fetch_partition_with_isolation_progress,
+    DEFAULT_FETCH_RESPONSE_MAX, FetchPartitionResult, FetchedHeader, FetchedRecord, IsolatedFetch,
+    fetch_partition, fetch_partition_with_isolation, fetch_partition_with_isolation_progress,
 };
 #[cfg(any(test, feature = "mock"))]
 pub use mock::MockBroker;

@@ -9,7 +9,7 @@
 
 use crabka_client_admin::AdminClient;
 use crabka_client_core::{
-    Connection, DEFAULT_FETCH_RESPONSE_MAX_BYTES, FetchedHeader, IsolatedFetch,
+    Connection, DEFAULT_FETCH_RESPONSE_MAX, FetchedHeader, IsolatedFetch,
     fetch_partition_with_isolation,
 };
 use crabka_pgexec::foreign::ScanBounds;
@@ -17,11 +17,7 @@ use crabka_protocol::{
     owned::list_offsets_request::{ListOffsetsPartition, ListOffsetsRequest, ListOffsetsTopic},
     primitives::uuid::Uuid as WireUuid,
 };
-use crabka_units::{
-    ByteSize, Time,
-    convert::{ByteSizeExt as _, TimeExt as _},
-    mebibytes, secs,
-};
+use crabka_units::{ByteSize, Time, mebibytes, secs};
 
 use crate::{config::ConnProfile, error::KafkaFdwError};
 
@@ -142,13 +138,10 @@ const CONNECT_TIMEOUT: Time = secs(10);
 /// Deadline for one request issued over the scan's connection.
 const REQUEST_TIMEOUT: Time = secs(30);
 
-/// The Fetch RPC's per-call budgets as the generated request carries them:
-/// `(max_wait_ms, partition_max_bytes)`.
-///
-/// `IsolatedFetch` mirrors the wire fields, so the quantities convert back to
-/// raw integers here rather than at the request literal.
-fn fetch_budgets() -> (i32, i32) {
-    (MAX_WAIT.millis_i32(), PARTITION_MAX.bytes_i32())
+/// The Fetch RPC's per-call budgets: how long the broker may hold the request
+/// open, and how much of one partition it may return.
+fn fetch_budgets() -> (Time, ByteSize) {
+    (MAX_WAIT, PARTITION_MAX)
 }
 
 /// Materialise a bounded snapshot of `topic` into a flat `Vec<RawRecord>`.
@@ -369,7 +362,7 @@ pub async fn scan_topic_with_dns_timeout(
                 break;
             }
 
-            let (max_wait_ms, partition_max_bytes) = fetch_budgets();
+            let (max_wait, partition_max) = fetch_budgets();
             let fetched = fetch_partition_with_isolation(
                 &conn,
                 IsolatedFetch {
@@ -377,9 +370,9 @@ pub async fn scan_topic_with_dns_timeout(
                     topic_id: topic_uuid,
                     partition,
                     fetch_offset: next_offset,
-                    max_wait_ms,
-                    max_bytes: DEFAULT_FETCH_RESPONSE_MAX_BYTES,
-                    partition_max_bytes,
+                    max_wait,
+                    max: DEFAULT_FETCH_RESPONSE_MAX,
+                    partition_max,
                     isolation_level: READ_COMMITTED,
                 },
             )
@@ -478,13 +471,12 @@ async fn open_connection(
         .map_err(|e| KafkaFdwError::Other(format!("connect to {host_port}: {e}")))
 }
 
-/// The scan connection's knobs, with the timeout quantities converted into the
-/// [`Duration`](std::time::Duration)s `ConnectionOptions` speaks.
+/// The scan connection's knobs.
 fn connection_options(profile: &ConnProfile) -> crabka_client_core::ConnectionOptions {
     crabka_client_core::ConnectionOptions {
         client_id: "crabka-fdw".to_string(),
-        connect_timeout: CONNECT_TIMEOUT.to_std(),
-        request_timeout: REQUEST_TIMEOUT.to_std(),
+        connect_timeout: CONNECT_TIMEOUT,
+        request_timeout: REQUEST_TIMEOUT,
         security: profile.security.clone().map(Box::new),
         ..crabka_client_core::ConnectionOptions::default()
     }
@@ -610,11 +602,11 @@ mod tests {
         );
     }
 
-    /// The Fetch budgets reach the wire as the same integers a hand-written
-    /// `max_wait_ms` / `partition_max_bytes` carried: 5 s and 10 MiB.
+    /// The Fetch budgets carry the magnitudes the constants name: 5 s and
+    /// 10 MiB.
     #[test]
-    fn fetch_budgets_encode_to_wire_integers() {
-        assert!(fetch_budgets() == (5_000, 10 * 1024 * 1024));
+    fn fetch_budgets_carry_the_configured_magnitudes() {
+        assert!(fetch_budgets() == (secs(5), mebibytes(10)));
     }
 
     /// The connection deadlines reach `crabka-client-core` as the durations the
@@ -632,10 +624,7 @@ mod tests {
 
         let options = connection_options(&profile);
 
-        assert!(
-            (options.connect_timeout, options.request_timeout)
-                == (Duration::from_secs(10), Duration::from_secs(30))
-        );
+        assert!((options.connect_timeout, options.request_timeout) == (secs(10), secs(30)));
     }
 
     #[tokio::test(start_paused = true)]

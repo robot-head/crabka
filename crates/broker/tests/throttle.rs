@@ -627,7 +627,7 @@ async fn broker_scoped_alter_persists_in_image() {
             img.broker_throttle_rate(
                 crabka_metadata::NodeId(node_id),
                 crabka_metadata::ThrottleKind::Leader,
-            ) == Some(2048)
+            ) == Some(crabka_units::bytes_per_sec(2048))
         })
         .await;
     handle.shutdown().await;
@@ -729,7 +729,8 @@ async fn throttle_rate_caps_fetch_response_size() {
                 crabka_metadata::ThrottleKind::Leader,
             );
             let throttle = crabka_broker::throttle::TopicThrottle::for_topic(img, "bar");
-            rate == Some(512) && throttle.leader.contains(0, crabka_broker::NodeId(2))
+            rate == Some(crabka_units::bytes_per_sec(512))
+                && throttle.leader.contains(0, crabka_broker::NodeId(2))
         })
         .await;
 

@@ -1,3 +1,5 @@
+use crabka_units::ByteSize;
+
 use super::{
     AcceptStep, GssAcceptor, GssError,
     security_layer::{SecurityLayer, decode_choice, encode_offer},
@@ -24,12 +26,12 @@ pub enum ServerExchangeError {
 
 struct AcceptingContext {
     acceptor: Box<dyn GssAcceptor>,
-    max_recv_size: u32,
+    max_recv: ByteSize,
 }
 
 struct OfferingLayer {
     acceptor: Box<dyn GssAcceptor>,
-    max_recv_size: u32,
+    max_recv: ByteSize,
 }
 
 struct AwaitingChoice {
@@ -39,7 +41,7 @@ struct AwaitingChoice {
 impl std::fmt::Debug for AcceptingContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AcceptingContext")
-            .field("max_recv_size", &self.max_recv_size)
+            .field("max_recv", &self.max_recv)
             .finish_non_exhaustive()
     }
 }
@@ -47,7 +49,7 @@ impl std::fmt::Debug for AcceptingContext {
 impl std::fmt::Debug for OfferingLayer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OfferingLayer")
-            .field("max_recv_size", &self.max_recv_size)
+            .field("max_recv", &self.max_recv)
             .finish_non_exhaustive()
     }
 }
@@ -80,11 +82,11 @@ impl AcceptingContext {
                         token,
                         OfferingLayer {
                             acceptor: self.acceptor,
-                            max_recv_size: self.max_recv_size,
+                            max_recv: self.max_recv,
                         },
                     ))
                 } else {
-                    let offer = encode_offer(SecurityLayer::AUTH, self.max_recv_size);
+                    let offer = encode_offer(SecurityLayer::AUTH, self.max_recv);
                     let wrapped = self.acceptor.wrap(&offer, false)?;
                     Ok(AcceptOutcome::Choice(
                         wrapped,
@@ -100,7 +102,7 @@ impl AcceptingContext {
 
 impl OfferingLayer {
     fn offer(self) -> Result<(Vec<u8>, AwaitingChoice), ServerExchangeError> {
-        let offer = encode_offer(SecurityLayer::AUTH, self.max_recv_size);
+        let offer = encode_offer(SecurityLayer::AUTH, self.max_recv);
         let wrapped = self.acceptor.wrap(&offer, false)?;
         Ok((
             wrapped,
@@ -161,11 +163,8 @@ impl std::fmt::Debug for GssapiServerExchange {
 
 impl GssapiServerExchange {
     #[must_use]
-    pub fn new(acceptor: Box<dyn GssAcceptor>, max_recv_size: u32) -> Self {
-        Self::AcceptingContext(AcceptingContext {
-            acceptor,
-            max_recv_size,
-        })
+    pub fn new(acceptor: Box<dyn GssAcceptor>, max_recv: ByteSize) -> Self {
+        Self::AcceptingContext(AcceptingContext { acceptor, max_recv })
     }
 
     /// Feed one client token and advance the negotiation.
@@ -204,6 +203,8 @@ impl GssapiServerExchange {
 #[cfg(test)]
 mod tests {
 
+    use crabka_units::kibibytes;
+
     use super::*;
     use crate::gssapi::{AcceptStep, GssAcceptor, GssError};
 
@@ -229,7 +230,8 @@ mod tests {
 
     #[test]
     fn establishes_then_offers_layer_then_completes() {
-        let ex = GssapiServerExchange::new(Box::new(FakeAcceptor { established: false }), 0x1_0000);
+        let ex =
+            GssapiServerExchange::new(Box::new(FakeAcceptor { established: false }), kibibytes(64));
 
         // Round 1: client AP-REQ -> server returns AP-REP, still negotiating.
         let r1 = ex.step(b"AP-REQ").unwrap();
@@ -259,7 +261,8 @@ mod tests {
 
     #[test]
     fn rejects_non_auth_layer_choice() {
-        let ex = GssapiServerExchange::new(Box::new(FakeAcceptor { established: false }), 0x1_0000);
+        let ex =
+            GssapiServerExchange::new(Box::new(FakeAcceptor { established: false }), kibibytes(64));
         let ex = match ex.step(b"AP-REQ").unwrap() {
             ServerStep::Challenge(_, next) => next,
             ServerStep::Done { .. } => panic!("expected challenge"),
@@ -274,16 +277,18 @@ mod tests {
 
     #[test]
     fn debug_includes_observable_state_and_max_receive_size() {
-        let ex = GssapiServerExchange::new(Box::new(FakeAcceptor { established: false }), 0x1_0000);
+        let ex =
+            GssapiServerExchange::new(Box::new(FakeAcceptor { established: false }), kibibytes(64));
         let rendered = format!("{ex:?}");
-        for part in ["GssapiServerExchange", "AcceptingContext", "max_recv_size"] {
+        for part in ["GssapiServerExchange", "AcceptingContext", "max_recv"] {
             assert2::assert!(rendered.contains(part));
         }
     }
 
     #[test]
     fn debug_includes_offering_layer_and_awaiting_choice_phases() {
-        let ex = GssapiServerExchange::new(Box::new(FakeAcceptor { established: false }), 0x1_0000);
+        let ex =
+            GssapiServerExchange::new(Box::new(FakeAcceptor { established: false }), kibibytes(64));
 
         // Round 1: FakeAcceptor establishes with a trailing AP-REP -> OfferingLayer.
         let ex = match ex.step(b"AP-REQ").unwrap() {
@@ -294,7 +299,7 @@ mod tests {
         for part in [
             "GssapiServerExchange::OfferingLayer",
             "OfferingLayer",
-            "max_recv_size",
+            "max_recv",
         ] {
             assert2::assert!(rendered.contains(part));
         }

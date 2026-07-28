@@ -18,7 +18,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use bytes::Bytes;
 use crabka_client_core::{
-    Client, ClientDnsTimeout, Connection, ConnectionOptions, DEFAULT_FETCH_RESPONSE_MAX_BYTES,
+    Client, ClientDnsTimeout, Connection, ConnectionOptions, DEFAULT_FETCH_RESPONSE_MAX,
     IsolatedFetch, fetch_partition_with_isolation,
 };
 use crabka_client_producer::{Acks, Producer, ProducerError, ProducerRecord, RecordMetadata};
@@ -93,9 +93,9 @@ impl RecordFetcher for BrokerFetcher {
                 fetch_offset: offset,
                 // `IsolatedFetch` mirrors the Kafka `Fetch` wire fields, so the
                 // quantities render back to raw integers here.
-                max_wait_ms: self.max_wait.millis_i32(),
-                max_bytes: DEFAULT_FETCH_RESPONSE_MAX_BYTES,
-                partition_max_bytes: self.partition_max.bytes_i32(),
+                max_wait: self.max_wait,
+                max: DEFAULT_FETCH_RESPONSE_MAX,
+                partition_max: self.partition_max,
                 isolation_level,
             },
         )

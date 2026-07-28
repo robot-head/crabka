@@ -19,11 +19,11 @@ use std::{
     net::IpAddr,
     num::NonZeroUsize,
     sync::{Arc, Mutex},
-    time::Duration,
 };
 
 use crabka_authz::{AclSource, AuthorizationRequest, AuthorizationResult, Authorizer};
 use crabka_metadata::{AclOperation, ResourceType};
+use crabka_units::{Time, convert::TimeExt as _, fmt::Human as _};
 use lru::LruCache;
 use serde::{Deserialize, Serialize};
 
@@ -53,7 +53,7 @@ pub struct OpaAuthorizer {
     /// `false` (fail-closed).
     allow_on_error: bool,
     cache: Mutex<LruCache<CacheKey, CachedDecision>>,
-    expire_after_ms: i64,
+    expire_after: Time,
     runtime: tokio::runtime::Handle,
     /// Clock backing the decision-cache TTL (the `expires_at_ms` stamp and its
     /// expiry comparison). Production uses [`qubit_clock::SystemClock`] (wall
@@ -73,7 +73,10 @@ impl std::fmt::Debug for OpaAuthorizer {
             .field("super_users", &self.super_users)
             .field("url", &self.url)
             .field("allow_on_error", &self.allow_on_error)
-            .field("expire_after_ms", &self.expire_after_ms)
+            .field(
+                "expire_after",
+                &format_args!("{}", self.expire_after.human()),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -146,15 +149,15 @@ impl OpaAuthorizer {
         url: String,
         allow_on_error: bool,
         max_cache_size: usize,
-        expire_after_ms: i64,
-        http_timeout: Duration,
+        expire_after: Time,
+        http_timeout: Time,
     ) -> Result<Self, OpaConfigError> {
         Self::with_clock(
             super_users,
             url,
             allow_on_error,
             max_cache_size,
-            expire_after_ms,
+            expire_after,
             http_timeout,
             Arc::new(qubit_clock::SystemClock::new()),
         )
@@ -175,12 +178,12 @@ impl OpaAuthorizer {
         url: String,
         allow_on_error: bool,
         max_cache_size: usize,
-        expire_after_ms: i64,
-        http_timeout: Duration,
+        expire_after: Time,
+        http_timeout: Time,
         clock: Arc<dyn qubit_clock::Clock>,
     ) -> Result<Self, OpaConfigError> {
         let http_client = reqwest::Client::builder()
-            .timeout(http_timeout)
+            .timeout(http_timeout.to_std())
             .build()
             .map_err(|e| OpaConfigError::Http(e.to_string()))?;
         let capacity = NonZeroUsize::new(max_cache_size).ok_or(OpaConfigError::ZeroCache)?;
@@ -193,7 +196,7 @@ impl OpaAuthorizer {
             url,
             allow_on_error,
             cache,
-            expire_after_ms,
+            expire_after,
             runtime,
             clock,
         })
@@ -296,7 +299,7 @@ impl Authorizer for OpaAuthorizer {
             key,
             CachedDecision {
                 decision,
-                expires_at_ms: now + self.expire_after_ms,
+                expires_at_ms: now + self.expire_after.millis_i64(),
             },
         );
         decision
@@ -354,11 +357,12 @@ fn resource_type_str(t: ResourceType) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use std::net::SocketAddr;
+    use std::{net::SocketAddr, time::Duration};
 
     use assert2::assert;
     use crabka_metadata::MetadataImage;
     use crabka_security::{AuthMethod, Principal};
+    use crabka_units::{millis, minutes, secs};
     use uuid::Uuid;
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 
@@ -429,8 +433,8 @@ mod tests {
             opa_url(&mock),
             false,
             100,
-            60_000,
-            Duration::from_secs(5),
+            minutes(1),
+            secs(5),
         )
         .unwrap();
         let image = img();
@@ -455,8 +459,8 @@ mod tests {
             opa_url(&mock),
             false,
             100,
-            60_000,
-            Duration::from_secs(5),
+            minutes(1),
+            secs(5),
         )
         .unwrap();
         let image = img();
@@ -482,8 +486,8 @@ mod tests {
             opa_url(&mock),
             false,
             100,
-            60_000,
-            Duration::from_secs(5),
+            minutes(1),
+            secs(5),
         )
         .unwrap();
         let image = img();
@@ -514,8 +518,8 @@ mod tests {
             opa_url(&mock),
             false,
             100,
-            10,
-            Duration::from_secs(5),
+            millis(10),
+            secs(5),
             clock.clone(),
         )
         .unwrap();
@@ -544,8 +548,8 @@ mod tests {
             opa_url(&mock),
             true,
             100,
-            60_000,
-            Duration::from_secs(5),
+            minutes(1),
+            secs(5),
         )
         .unwrap();
         let image = img();
@@ -567,8 +571,8 @@ mod tests {
             opa_url(&mock),
             false,
             100,
-            60_000,
-            Duration::from_secs(5),
+            minutes(1),
+            secs(5),
         )
         .unwrap();
         let image = img();
@@ -594,8 +598,8 @@ mod tests {
             opa_url(&mock),
             false,
             100,
-            60_000,
-            Duration::from_millis(25),
+            minutes(1),
+            millis(25),
         )
         .unwrap();
         let image = img();
@@ -625,8 +629,8 @@ mod tests {
             opa_url(&mock),
             true,
             100,
-            60_000,
-            Duration::from_secs(5),
+            minutes(1),
+            secs(5),
         )
         .unwrap();
         assert!(auth_open.authorize(&image, &req(&p, &h, "t")) == AuthorizationResult::Allow);
@@ -636,8 +640,8 @@ mod tests {
             opa_url(&mock),
             false,
             100,
-            60_000,
-            Duration::from_secs(5),
+            minutes(1),
+            secs(5),
         )
         .unwrap();
         assert!(auth_closed.authorize(&image, &req(&p, &h, "t")) == AuthorizationResult::Deny);

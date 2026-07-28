@@ -1154,7 +1154,7 @@ async fn sasl_oauthbearer_invalid_token_two_round_failure() {
     let log_dir = tempfile::tempdir().unwrap();
     let validator =
         crabka_security::OAuthBearerValidator::Unsecured(crabka_security::UnsecuredJwsValidator {
-            allowable_clock_skew_ms: 0,
+            allowable_clock_skew: crabka_units::secs(0),
             ..Default::default()
         });
     let handle = start_oauthbearer_broker(log_dir.path(), validator).await;
@@ -1356,7 +1356,7 @@ async fn sasl_oauthbearer_signed_token_wrong_key_two_round_failure() {
 /// the assertion windows in the re-auth tests don't drift.
 fn oauthbearer_zero_skew_validator() -> crabka_security::OAuthBearerValidator {
     crabka_security::OAuthBearerValidator::Unsecured(crabka_security::UnsecuredJwsValidator {
-        allowable_clock_skew_ms: 0,
+        allowable_clock_skew: crabka_units::secs(0),
         ..Default::default()
     })
 }

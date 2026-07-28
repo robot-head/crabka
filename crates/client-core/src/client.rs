@@ -3,6 +3,8 @@
 
 use std::sync::Arc;
 
+use crabka_units::Time;
+
 use crate::{
     bootstrap,
     connection::{ClientDnsTimeout, ConnectionOptions},
@@ -40,10 +42,8 @@ impl Client {
         #[builder(into)] bootstrap: String,
         #[builder(into, default = "crabka".to_string())] client_id: String,
         #[builder(default = crate::DEFAULT_CLIENT_DNS_TIMEOUT)] dns_timeout: std::time::Duration,
-        #[builder(default = crate::DEFAULT_CLIENT_CONNECT_TIMEOUT)]
-        connect_timeout: std::time::Duration,
-        #[builder(default = crate::DEFAULT_CLIENT_REQUEST_TIMEOUT)]
-        request_timeout: std::time::Duration,
+        #[builder(default = crate::DEFAULT_CLIENT_CONNECT_TIMEOUT)] connect_timeout: Time,
+        #[builder(default = crate::DEFAULT_CLIENT_REQUEST_TIMEOUT)] request_timeout: Time,
         security: Option<crate::security::ClientSecurity>,
     ) -> Result<Self, ClientError> {
         let dns_timeout = ClientDnsTimeout::new(dns_timeout).map_err(ClientError::InvalidConfig)?;
@@ -364,6 +364,7 @@ mod bootstrap_failover_tests {
             },
         },
     };
+    use crabka_units::millis;
 
     use super::*;
     use crate::mock::MockBroker;
@@ -486,7 +487,7 @@ mod bootstrap_failover_tests {
         let bootstrap = format!("{},{}", a.addr, b.addr);
         let client = Client::builder()
             .bootstrap(bootstrap)
-            .request_timeout(std::time::Duration::from_millis(500))
+            .request_timeout(millis(500))
             .build()
             .await
             .expect("client connects to bootstrap A");
@@ -519,7 +520,7 @@ mod bootstrap_failover_tests {
         let bootstrap = format!("{},{}", a.addr, b.addr);
         let client = Client::builder()
             .bootstrap(bootstrap)
-            .request_timeout(std::time::Duration::from_millis(500))
+            .request_timeout(millis(500))
             .build()
             .await
             .expect("client builds");
@@ -553,8 +554,8 @@ mod bootstrap_failover_tests {
         let bootstrap = format!("{},{}", a.addr, b.addr);
         let client = Client::builder()
             .bootstrap(bootstrap)
-            .connect_timeout(std::time::Duration::from_millis(500))
-            .request_timeout(std::time::Duration::from_millis(500))
+            .connect_timeout(millis(500))
+            .request_timeout(millis(500))
             .build()
             .await
             .expect("client builds");

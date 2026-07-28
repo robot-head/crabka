@@ -180,9 +180,8 @@ pub fn spawn(
                         topic_id,
                         0,
                         next,
-                        // `fetch_partition` speaks the raw Kafka `Fetch` fields.
-                        policy.fetch_max_wait.millis_i32(),
-                        policy.fetch_max.bytes_i32(),
+                        policy.fetch_max_wait,
+                        policy.fetch_max,
                     ) => {
                         match res {
                             Ok(records) => {
@@ -229,7 +228,7 @@ pub fn spawn(
 
 #[cfg(test)]
 mod tests {
-    use std::{io, time::Duration};
+    use std::io;
 
     use crabka_client_core::ClientError;
 
@@ -292,7 +291,7 @@ mod tests {
             ),
             (
                 "timeout",
-                ClientError::Timeout(Duration::from_millis(1)),
+                ClientError::Timeout(crabka_units::millis(1)),
                 FetchErrorAction::Reconnect,
             ),
             (

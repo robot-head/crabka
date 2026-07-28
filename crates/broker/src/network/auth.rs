@@ -23,7 +23,7 @@ use crabka_protocol::{
     },
 };
 use crabka_security::{Principal, SaslMechanism, ScramServerExchange};
-use crabka_units::{Time, convert::TimeExt as _};
+use crabka_units::{ByteSize, Time, convert::TimeExt as _, kibibytes};
 
 use crate::{
     codes::{ILLEGAL_SASL_STATE, UNSUPPORTED_SASL_MECHANISM},
@@ -215,7 +215,7 @@ const SASL_AUTHENTICATION_FAILED: i16 = 58;
 /// security-layer offer. 64 KiB matches the JVM broker's default SASL receive
 /// buffer; with confidentiality/integrity disabled it only bounds the size of
 /// the (empty) wrapped payloads, so the exact value is not load-bearing.
-const GSSAPI_MAX_RECV_SIZE: u32 = 0x1_0000;
+const GSSAPI_MAX_RECV: ByteSize = kibibytes(64);
 
 /// Handles `SaslHandshake` (`api_key` 17).
 ///
@@ -616,7 +616,7 @@ pub fn handle_authenticate_gssapi(
             Ok(a) => a,
             Err(e) => return fail_authenticate(&format!("GSSAPI acceptor init failed: {e}")),
         };
-        let exchange = GssapiServerExchange::new(Box::new(acceptor), GSSAPI_MAX_RECV_SIZE);
+        let exchange = GssapiServerExchange::new(Box::new(acceptor), GSSAPI_MAX_RECV);
         let step = match exchange.step(&req.auth_bytes) {
             Ok(s) => s,
             Err(e) => return fail_authenticate(&format!("GSSAPI accept failed: {e}")),
@@ -1111,7 +1111,7 @@ mod tests {
     async fn oauthbearer_invalid_token_returns_error_json_then_fails_on_dummy() {
         let validator = crabka_security::OAuthBearerValidator::Unsecured(
             crabka_security::UnsecuredJwsValidator {
-                allowable_clock_skew_ms: 0,
+                allowable_clock_skew: secs(0),
                 ..Default::default()
             },
         );
@@ -1358,7 +1358,7 @@ mod tests {
         // Drive the exchange to `AwaitingChoice` up front (mirroring round
         // 1's work), so this test targets `handle_authenticate_gssapi`'s
         // *subsequent round* branch specifically.
-        let exchange = GssapiServerExchange::new(Box::new(FakeAcceptor), 0x1_0000);
+        let exchange = GssapiServerExchange::new(Box::new(FakeAcceptor), kibibytes(64));
         let exchange = match exchange.step(b"AP-REQ").expect("round 1 step") {
             ServerStep::Challenge(_, next) => next,
             ServerStep::Done { .. } => panic!("expected challenge"),
@@ -1668,7 +1668,7 @@ mod tests {
     async fn handle_authenticate_oauthbearer_applies_max_session_lifetime_cap() {
         let validator = crabka_security::OAuthBearerValidator::Unsecured(
             crabka_security::UnsecuredJwsValidator {
-                allowable_clock_skew_ms: 0,
+                allowable_clock_skew: secs(0),
                 ..Default::default()
             },
         );

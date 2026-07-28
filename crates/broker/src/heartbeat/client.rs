@@ -5,12 +5,12 @@
 
 #![allow(dead_code)]
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use crabka_client_core::ConnectionOptions;
 use crabka_protocol::owned::broker_heartbeat_request::BrokerHeartbeatRequest;
 use crabka_security::ListenerProtocol;
-use crabka_units::{Time, convert::TimeExt as _};
+use crabka_units::{Time, convert::TimeExt as _, fmt::Human as _, millis, secs};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
@@ -72,14 +72,11 @@ fn all_log_dirs_offline(cfg: &Config) -> bool {
     all_dirs_offline(&cfg.all_log_dirs, &cfg.log_dir_status)
 }
 
-fn heartbeat_rpc_timeout(interval: Duration) -> Duration {
-    interval
-        .saturating_mul(2)
-        .max(Duration::from_millis(500))
-        .min(Duration::from_secs(1))
+fn heartbeat_rpc_timeout(interval: Time) -> Time {
+    (interval * 2.0).max(millis(500)).min(secs(1))
 }
 
-fn heartbeat_connection_options(broker_id: i32, interval: Duration) -> ConnectionOptions {
+fn heartbeat_connection_options(broker_id: i32, interval: Time) -> ConnectionOptions {
     let timeout = heartbeat_rpc_timeout(interval);
     ConnectionOptions {
         client_id: format!("crabka-broker-{broker_id}-heartbeat"),
@@ -138,10 +135,10 @@ pub(crate) async fn run(mut cfg: Config) {
                 || (broker_rec.host.clone(), broker_rec.port),
                 |e| (e.host.clone(), e.port),
             );
-        let opts = heartbeat_connection_options(cfg.broker_id, cfg.interval.to_std());
-        let rpc_timeout = heartbeat_rpc_timeout(cfg.interval.to_std());
+        let opts = heartbeat_connection_options(cfg.broker_id, cfg.interval);
+        let rpc_timeout = heartbeat_rpc_timeout(cfg.interval);
         let client_res = tokio::time::timeout(
-            rpc_timeout,
+            rpc_timeout.to_std(),
             cfg.inter_broker_client.connect_as_connection(
                 &host,
                 port,
@@ -159,7 +156,7 @@ pub(crate) async fn run(mut cfg: Config) {
             }
             Err(_) => {
                 debug!(
-                    timeout_ms = rpc_timeout.as_millis(),
+                    rpc_timeout = %rpc_timeout.human(),
                     "heartbeat: connect timed out"
                 );
                 continue;
@@ -168,7 +165,7 @@ pub(crate) async fn run(mut cfg: Config) {
         let want_shut_down = *cfg.want_shutdown.borrow_and_update();
         let offline_log_dirs = offline_dir_uuids(&cfg.log_dir_status, &cfg.log_dir_ids);
         let resp = tokio::time::timeout(
-            rpc_timeout,
+            rpc_timeout.to_std(),
             client.send(BrokerHeartbeatRequest {
                 broker_id: cfg.broker_id,
                 broker_epoch: 0,
@@ -191,7 +188,7 @@ pub(crate) async fn run(mut cfg: Config) {
             }
             Ok(Err(e)) => warn!(error = %e, "heartbeat send failed"),
             Err(_) => warn!(
-                timeout_ms = rpc_timeout.as_millis(),
+                rpc_timeout = %rpc_timeout.human(),
                 "heartbeat send timed out"
             ),
         }
@@ -260,9 +257,9 @@ mod tests {
     #[test]
     fn heartbeat_rpc_timeout_tracks_interval_with_bounds() {
         for (interval, want) in [
-            (Duration::from_millis(50), Duration::from_millis(500)),
-            (Duration::from_millis(500), Duration::from_secs(1)),
-            (Duration::from_secs(5), Duration::from_secs(1)),
+            (millis(50), millis(500)),
+            (millis(500), secs(1)),
+            (secs(5), secs(1)),
         ] {
             assert!(heartbeat_rpc_timeout(interval) == want, "{interval:?}");
         }
@@ -271,10 +268,10 @@ mod tests {
     #[test]
     fn heartbeat_connection_options_use_bounded_rpc_timeout() {
         use assert2::check;
-        let opts = heartbeat_connection_options(9, Duration::from_millis(500));
+        let opts = heartbeat_connection_options(9, millis(500));
 
         check!(opts.client_id == "crabka-broker-9-heartbeat");
-        check!(opts.connect_timeout == Duration::from_secs(1));
-        check!(opts.request_timeout == Duration::from_secs(1));
+        check!(opts.connect_timeout == secs(1));
+        check!(opts.request_timeout == secs(1));
     }
 }

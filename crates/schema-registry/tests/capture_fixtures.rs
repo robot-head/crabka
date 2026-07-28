@@ -325,9 +325,17 @@ async fn capture_schemas_log(topic_id: WireUuid) {
     // Loop fetching until a fetch returns no new records (the writes are done
     // by the time we read, so a single empty fetch means we've drained).
     loop {
-        let records = fetch_partition(&conn, "_schemas", topic_id, 0, next_offset, 1000, 1 << 20)
-            .await
-            .expect("fetch _schemas");
+        let records = fetch_partition(
+            &conn,
+            "_schemas",
+            topic_id,
+            0,
+            next_offset,
+            crabka_units::secs(1),
+            crabka_units::mebibytes(1),
+        )
+        .await
+        .expect("fetch _schemas");
         if records.is_empty() {
             break;
         }

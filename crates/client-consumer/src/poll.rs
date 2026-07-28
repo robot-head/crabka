@@ -8,6 +8,7 @@ use crabka_protocol::owned::{
     fetch_request::{FetchPartition, FetchRequest, FetchTopic},
     list_offsets_request::{ListOffsetsPartition, ListOffsetsRequest, ListOffsetsTopic},
 };
+use crabka_units::{ByteSize, convert::ByteSizeExt as _, mebibytes};
 
 use crate::{
     builder::{AutoOffsetReset, IsolationLevel},
@@ -21,8 +22,8 @@ use crate::{
 const BOOTSTRAP_LEADER: i32 = -1;
 const UNKNOWN_FETCH_OFFSET: i64 = -1;
 const UNKNOWN_LEADER_ID: i32 = -1;
-pub(crate) const DEFAULT_FETCH_PARTITION_MAX_BYTES: i32 = 1 << 20;
-pub(crate) const DEFAULT_FETCH_MAX_BYTES: i32 = 50 * 1024 * 1024;
+pub(crate) const DEFAULT_FETCH_PARTITION_MAX: ByteSize = mebibytes(1);
+pub(crate) const DEFAULT_FETCH_MAX: ByteSize = mebibytes(50);
 
 /// One fetchable partition's request fields:
 /// `(partition, fetch_offset, current_leader_epoch, last_fetched_epoch)`.
@@ -89,7 +90,7 @@ fn build_fetch_topic(
     name: String,
     topic_id: crabka_protocol::primitives::uuid::Uuid,
     partitions: Vec<FetchSpec>,
-    partition_max_bytes: i32,
+    partition_max: ByteSize,
 ) -> FetchTopic {
     FetchTopic {
         topic: name,
@@ -104,7 +105,7 @@ fn build_fetch_topic(
                     // FetchRequest encode boundary.
                     current_leader_epoch: leader_epoch.get(),
                     last_fetched_epoch: last_fetched_epoch.get(),
-                    partition_max_bytes,
+                    partition_max_bytes: partition_max.bytes_i32(),
                     ..Default::default()
                 },
             )
@@ -116,13 +117,13 @@ fn build_fetch_topic(
 fn build_fetch_request(
     timeout_ms: i32,
     isolation_level: IsolationLevel,
-    max_bytes: i32,
+    max: ByteSize,
     topics: Vec<FetchTopic>,
 ) -> FetchRequest {
     FetchRequest {
         max_wait_ms: timeout_ms,
         min_bytes: 1,
-        max_bytes,
+        max_bytes: max.bytes_i32(),
         isolation_level: isolation_level.wire(),
         topics,
         ..Default::default()
@@ -368,15 +369,10 @@ impl Consumer {
                 .into_iter()
                 .map(|(name, plist)| {
                     let topic_id = topic_ids.get(&name).copied().unwrap_or_default();
-                    build_fetch_topic(name, topic_id, plist, self.fetch_partition_max_bytes)
+                    build_fetch_topic(name, topic_id, plist, self.fetch_partition_max)
                 })
                 .collect();
-            let req = build_fetch_request(
-                timeout_ms,
-                self.isolation_level,
-                self.fetch_max_bytes,
-                topics,
-            );
+            let req = build_fetch_request(timeout_ms, self.isolation_level, self.fetch_max, topics);
             let resp = if should_use_bootstrap_leader(leader) {
                 match self.client.send(req).await {
                     Ok(resp) => resp,
@@ -710,6 +706,7 @@ mod offset_advance_tests {
         records::{RecordBatch, RecordsPayload},
         tagged_fields::UnknownTaggedFields,
     };
+    use crabka_units::kibibytes;
 
     use super::*;
 
@@ -784,7 +781,7 @@ mod offset_advance_tests {
 
     #[test]
     fn transient_transport_error_classification_is_narrow() {
-        use std::{io, time::Duration};
+        use std::io;
 
         use crabka_client_core::ClientError;
 
@@ -792,7 +789,7 @@ mod offset_advance_tests {
             ("disconnected", ClientError::Disconnected, true),
             (
                 "timeout",
-                ClientError::Timeout(Duration::from_millis(10)),
+                ClientError::Timeout(crabka_units::millis(10)),
                 true,
             ),
             (
@@ -849,7 +846,7 @@ mod offset_advance_tests {
             "topic-a".into(),
             id(7),
             vec![(2, 42, LeaderEpoch(5), LeaderEpoch(4))],
-            128 * 1024,
+            kibibytes(128),
         );
         assert2::assert!(
             topic
@@ -874,7 +871,7 @@ mod offset_advance_tests {
         let req = build_fetch_request(
             123,
             IsolationLevel::ReadCommitted,
-            2 * 1024 * 1024,
+            mebibytes(2),
             vec![topic.clone()],
         );
         assert2::assert!(

@@ -348,7 +348,7 @@ mod tests {
             },
         },
     };
-    use crabka_units::{Time, bytes_per_sec, convert::TimeExt as _, millis};
+    use crabka_units::{Time, bytes_per_sec, millis};
 
     use super::*;
 
@@ -610,8 +610,8 @@ mod tests {
         let inner = Client::builder()
             .bootstrap("127.0.0.1:1")
             .client_id(format!("rebalancer-live-client-test-{suffix}"))
-            .connect_timeout(CLIENT_TIMEOUT.to_std())
-            .request_timeout(CLIENT_TIMEOUT.to_std())
+            .connect_timeout(CLIENT_TIMEOUT)
+            .request_timeout(CLIENT_TIMEOUT)
             .build()
             .await
             .expect("client build does not connect");

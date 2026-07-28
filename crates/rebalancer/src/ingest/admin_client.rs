@@ -56,7 +56,7 @@ fn list_reassignments_request() -> ListPartitionReassignmentsRequest {
 #[cfg(test)]
 mod tests {
     use assert2::check;
-    use crabka_units::{Time, convert::TimeExt as _, millis};
+    use crabka_units::{Time, millis};
 
     use super::*;
 
@@ -83,8 +83,8 @@ mod tests {
         let client = Client::builder()
             .bootstrap("127.0.0.1:1")
             .client_id("rebalancer-admin-client-test")
-            .connect_timeout(CLIENT_TIMEOUT.to_std())
-            .request_timeout(CLIENT_TIMEOUT.to_std())
+            .connect_timeout(CLIENT_TIMEOUT)
+            .request_timeout(CLIENT_TIMEOUT)
             .build()
             .await
             .expect("client build does not connect");

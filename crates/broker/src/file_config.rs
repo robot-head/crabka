@@ -11,7 +11,7 @@ use crabka_security::ListenerProtocol;
 use crabka_units::{
     ByteSize, Time,
     convert::{ByteSizeExt as _, TimeExt as _},
-    percent,
+    percent, secs,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -754,13 +754,12 @@ pub struct FileOAuthBearerConfig {
 /// Kafka protocol default for `sasl.kerberos.service.name`.
 const DEFAULT_KERBEROS_SERVICE_NAME: &str = "kafka";
 
-/// Default timeout for outbound introspection / userinfo HTTP requests,
-/// in milliseconds (10 s).
-const DEFAULT_INTROSPECTION_HTTP_TIMEOUT_MS: u64 = 10_000;
+/// Default timeout for outbound introspection / userinfo HTTP requests (10 s).
+const DEFAULT_INTROSPECTION_HTTP_TIMEOUT: Time = secs(10);
 
-/// Default clock-skew tolerance for `exp` / `iat` / `nbf` checks, in
-/// milliseconds. Matches the `crabka_security` validators' built-in default.
-const DEFAULT_ALLOWABLE_CLOCK_SKEW_MS: i64 = 30_000;
+/// Default clock-skew tolerance for `exp` / `iat` / `nbf` checks. Matches the
+/// `crabka_security` validators' built-in default.
+const DEFAULT_ALLOWABLE_CLOCK_SKEW: Time = secs(30);
 
 /// TOML shape of `[gssapi]`. Maps to
 /// [`crabka_security::gssapi::GssapiConfig`]. `principal_to_local_rules`
@@ -994,11 +993,11 @@ fn configure_introspection_validator(
         })
         .trim_end_matches(['\n', '\r'])
         .to_owned();
-    let timeout = std::time::Duration::from_millis(
-        oauth
-            .introspection_http_timeout_ms
-            .unwrap_or(DEFAULT_INTROSPECTION_HTTP_TIMEOUT_MS),
-    );
+    let timeout = oauth
+        .introspection_http_timeout_ms
+        .map_or(DEFAULT_INTROSPECTION_HTTP_TIMEOUT, |ms| {
+            Time::from_millis(i64::try_from(ms).unwrap_or(i64::MAX))
+        });
     let client = crate::oauth_introspection::ReqwestIntrospectionClient::build(
         endpoint.to_owned(),
         oauth.userinfo_endpoint_uri.clone(),
@@ -1017,9 +1016,9 @@ fn configure_introspection_validator(
                 .unwrap_or_else(|| "sub".into()),
             custom_claim_check,
             call_userinfo: oauth.userinfo_endpoint_uri.is_some(),
-            allowable_clock_skew_ms: oauth
+            allowable_clock_skew: oauth
                 .allowable_clock_skew_ms
-                .unwrap_or(DEFAULT_ALLOWABLE_CLOCK_SKEW_MS),
+                .map_or(DEFAULT_ALLOWABLE_CLOCK_SKEW, Time::from_millis),
             expected_audience: oauth.expected_audience.clone(),
             fallback_user_name_claim: oauth.fallback_user_name_claim.clone(),
             fallback_user_name_prefix: oauth.fallback_user_name_prefix.clone(),
@@ -1091,7 +1090,7 @@ fn apply_oauthbearer(oauth: Option<FileOAuthBearerConfig>, cfg: &mut crate::conf
                 v.principal_claim_name = name;
             }
             if let Some(skew) = oauth.allowable_clock_skew_ms {
-                v.allowable_clock_skew_ms = skew;
+                v.allowable_clock_skew = Time::from_millis(skew);
             }
             v.valid_issuer = oauth.valid_issuer_uri;
             v.expected_audience = oauth.expected_audience;
@@ -1108,7 +1107,9 @@ fn apply_oauthbearer(oauth: Option<FileOAuthBearerConfig>, cfg: &mut crate::conf
             v.groups_claim_delimiter
                 .clone_from(&oauth.groups_claim_delimiter);
             // Hard cache-expiry threshold.
-            v.expiry_ms = oauth.jwks_expiry_seconds.map(|s| i64::from(s) * 1000);
+            v.cache_expiry = oauth
+                .jwks_expiry_seconds
+                .map(|s| Time::from_secs(i64::from(s)));
             cfg.oauthbearer_validator = crabka_security::OAuthBearerValidator::Signed(v);
             cfg.oauthbearer_jwks_endpoint = Some(jwks_uri);
             if let Some(ms) = oauth.jwks_refresh_interval_ms {
@@ -1144,7 +1145,7 @@ fn apply_oauthbearer(oauth: Option<FileOAuthBearerConfig>, cfg: &mut crate::conf
                 v.principal_claim_name = name;
             }
             if let Some(skew) = oauth.allowable_clock_skew_ms {
-                v.allowable_clock_skew_ms = skew;
+                v.allowable_clock_skew = Time::from_millis(skew);
             }
             // JsonPath custom_claim_check + JWT typ check.
             v.custom_claim_check = custom_claim_check_compiled;
@@ -1385,8 +1386,8 @@ fn apply_config_tail(
                         opa.url.clone(),
                         opa.allow_on_error,
                         opa.maximum_cache_size,
-                        opa.expire_after_ms,
-                        cfg.opa_http_timeout.to_std(),
+                        Time::from_millis(opa.expire_after_ms),
+                        cfg.opa_http_timeout,
                     )
                     .map_err(|error| FileConfigError::OpaConfig(format!("{error:?}")))?,
                 )
@@ -3214,7 +3215,7 @@ jwks_expiry_seconds = 360
                 check!(v.valid_issuer.as_deref() == Some("https://idp.example"));
                 check!(v.expected_audience.as_deref() == Some("kafka"));
                 check!(v.principal_claim_name.as_str() == "client_id");
-                check!(v.expiry_ms == Some(360_000));
+                check!(v.cache_expiry == Some(secs(360)));
             }
             other => panic!("jwks_endpoint_uri must select the Signed validator; got {other:?}"),
         }
@@ -3233,7 +3234,7 @@ allowable_clock_skew_ms = 5000
         assert!(cfg.oauthbearer_jwks_endpoint.is_none());
         match cfg.oauthbearer_validator {
             crabka_security::OAuthBearerValidator::Unsecured(v) => {
-                assert!(v.allowable_clock_skew_ms == 5000);
+                assert!(v.allowable_clock_skew == secs(5));
             }
             other => {
                 panic!("no jwks_endpoint_uri must keep the unsecured validator; got {other:?}")
@@ -3977,10 +3978,8 @@ expire_after_ms = 60000
                 "http://opa.invalid:8181/v1/data/k/a".to_string(),
                 opa.allow_on_error,
                 opa.maximum_cache_size,
-                opa.expire_after_ms,
-                crate::config::BrokerConfig::default()
-                    .opa_http_timeout
-                    .to_std(),
+                Time::from_millis(opa.expire_after_ms),
+                crate::config::BrokerConfig::default().opa_http_timeout,
             )
             .unwrap();
             let img = MetadataImage::new(uuid::Uuid::nil());

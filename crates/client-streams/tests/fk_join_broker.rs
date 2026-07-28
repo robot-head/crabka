@@ -183,10 +183,17 @@ async fn poll_until_latest(
     let mut next_offset = 0_i64;
 
     loop {
-        let records: Vec<FetchedRecord> =
-            fetch_partition(&conn, topic_name, topic_id, 0, next_offset, 500, 1 << 20)
-                .await
-                .unwrap_or_default();
+        let records: Vec<FetchedRecord> = fetch_partition(
+            &conn,
+            topic_name,
+            topic_id,
+            0,
+            next_offset,
+            crabka_units::millis(500),
+            crabka_units::mebibytes(1),
+        )
+        .await
+        .unwrap_or_default();
 
         for r in &records {
             next_offset = r.offset + 1;
@@ -248,9 +255,17 @@ async fn read_all(admin: &Client, bootstrap: &str, topic_name: &str) -> Vec<(Str
     let mut out = Vec::new();
     let mut next = 0_i64;
     loop {
-        let records = fetch_partition(&conn, topic_name, topic_id, 0, next, 500, 1 << 20)
-            .await
-            .unwrap_or_default();
+        let records = fetch_partition(
+            &conn,
+            topic_name,
+            topic_id,
+            0,
+            next,
+            crabka_units::millis(500),
+            crabka_units::mebibytes(1),
+        )
+        .await
+        .unwrap_or_default();
         if records.is_empty() {
             break;
         }

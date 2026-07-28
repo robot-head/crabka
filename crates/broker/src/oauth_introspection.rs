@@ -2,12 +2,13 @@
 //! here (not in `crates/security`) so the security crate stays
 //! I/O-free, mirroring the JWKS-refresher pattern.
 
-use std::{path::Path, sync::Arc, time::Duration};
+use std::{path::Path, sync::Arc};
 
 use async_trait::async_trait;
 use crabka_security::{
     IntrospectionClient, IntrospectionError, JwksTrustError, build_client_config_from_pem,
 };
+use crabka_units::{Time, convert::TimeExt as _};
 
 /// reqwest-backed RFC 7662 introspection client. Uses HTTP Basic Auth
 /// with the operator-configured `client_id` + `client_secret`.
@@ -45,7 +46,7 @@ impl ReqwestIntrospectionClient {
         client_id: String,
         client_secret: String,
         tls_trust: Option<&Path>,
-        timeout: Duration,
+        timeout: Time,
     ) -> Result<Arc<dyn IntrospectionClient>, BuildError> {
         // `file_config::FileConfig::apply_to` constructs this client
         // before `Broker::start` runs, so the rustls CryptoProvider that
@@ -62,7 +63,7 @@ impl ReqwestIntrospectionClient {
         // won the race.
         let _ = rustls::crypto::ring::default_provider().install_default();
 
-        let mut builder = reqwest::Client::builder().timeout(timeout);
+        let mut builder = reqwest::Client::builder().timeout(timeout.to_std());
         if let Some(path) = tls_trust {
             let cfg = build_client_config_from_pem(path)?;
             builder = builder.use_preconfigured_tls((*cfg).clone());
@@ -126,6 +127,7 @@ mod tests {
     use std::{net::SocketAddr, sync::Mutex};
 
     use assert2::assert;
+    use crabka_units::{millis, secs};
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio_rustls::TlsAcceptor;
@@ -270,7 +272,7 @@ mod tests {
             "kafka-broker".into(),
             "secret".into(),
             Some(&ca),
-            Duration::from_secs(5),
+            secs(5),
         )
         .unwrap();
         let resp = client.introspect("tok").await.unwrap();
@@ -288,7 +290,7 @@ mod tests {
             "id".into(),
             "s".into(),
             Some(&ca),
-            Duration::from_secs(5),
+            secs(5),
         )
         .unwrap();
         let resp = client.introspect("tok").await.unwrap();
@@ -305,7 +307,7 @@ mod tests {
             "id".into(),
             "s".into(),
             Some(&ca),
-            Duration::from_secs(5),
+            secs(5),
         )
         .unwrap();
         let err = client.introspect("tok").await.unwrap_err();
@@ -330,7 +332,7 @@ mod tests {
             "id".into(),
             "s".into(),
             Some(&ca),
-            Duration::from_secs(5),
+            secs(5),
         )
         .unwrap();
         client.introspect("tok").await.unwrap();
@@ -350,7 +352,7 @@ mod tests {
             "id".into(),
             "s".into(),
             Some(&ca),
-            Duration::from_secs(5),
+            secs(5),
         )
         .unwrap();
         let ui = client.userinfo("tok").await.unwrap();
@@ -368,7 +370,7 @@ mod tests {
             "id".into(),
             "s".into(),
             Some(&ca),
-            Duration::from_secs(5),
+            secs(5),
         )
         .unwrap();
         let resp = client.introspect("tok").await.unwrap();
@@ -387,7 +389,7 @@ mod tests {
             "kafka-broker".into(),
             "shh".into(),
             Some(&ca),
-            Duration::from_secs(5),
+            secs(5),
         )
         .unwrap();
         client.introspect("tok").await.unwrap();
@@ -408,7 +410,7 @@ mod tests {
             "id".into(),
             "s".into(),
             Some(&ca),
-            Duration::from_secs(5),
+            secs(5),
         )
         .unwrap();
         client.introspect("opaque-abc").await.unwrap();
@@ -438,7 +440,7 @@ mod tests {
             "id".into(),
             "s".into(),
             Some(&ca_path),
-            Duration::from_millis(200),
+            millis(200),
         )
         .unwrap();
         let err = client.introspect("tok").await.unwrap_err();

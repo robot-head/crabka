@@ -15,7 +15,7 @@ use crabka_client_consumer::{AutoOffsetReset, Consumer, ConsumerRecord};
 use crabka_pprof::{FunctionRec, LineRec, LocationRec, MappingRec, MappingSymbolization, SymbolDb};
 use crabka_units::{
     ByteSize, Time,
-    convert::{ByteSizeExt as _, StdDurationExt as _, TimeExt as _},
+    convert::{StdDurationExt as _, TimeExt as _},
     kibibytes, mebibytes, millis, secs,
 };
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload, path::Path};
@@ -302,8 +302,8 @@ pub async fn run_with_config(config: BlockBuilderConfig) -> Result<(), ProfilesE
         .bootstrap(config.bootstrap)
         .group_id(config.group_id.clone())
         .group_instance_id(config.group_id)
-        .fetch_max_bytes(WAL_FETCH_MAX.bytes_i32())
-        .fetch_partition_max_bytes(WAL_FETCH_PARTITION_MAX.bytes_i32())
+        .fetch_max(WAL_FETCH_MAX)
+        .fetch_partition_max(WAL_FETCH_PARTITION_MAX)
         .subscribe(vec![PROFILES_WAL_TOPIC.to_string()])
         .auto_offset_reset(AutoOffsetReset::Earliest)
         .build()

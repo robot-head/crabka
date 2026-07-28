@@ -6,6 +6,7 @@
 //! [`sspi::KeytabIdentity`]) to drive the AS/TGS exchange with no password.
 use std::sync::Mutex;
 
+use crabka_units::{Time, convert::TimeExt as _, minutes};
 use sspi::{
     BufferType, ClientRequestFlags, CredentialUse, Credentials, CredentialsBuffers,
     DataRepresentation, EncryptionFlags, Kerberos, KerberosConfig, KeytabIdentity, Secret,
@@ -24,7 +25,7 @@ use super::{
 const DEFAULT_KDC_URL: &str = "tcp://localhost:88";
 
 /// Max clock skew tolerated when validating an incoming AP-REQ.
-const MAX_TIME_SKEW: std::time::Duration = std::time::Duration::from_mins(5);
+const MAX_TIME_SKEW: Time = minutes(5);
 
 fn kdc_url_from_env() -> String {
     std::env::var("SSPI_KDC_URL").unwrap_or_else(|_| DEFAULT_KDC_URL.to_string())
@@ -126,7 +127,7 @@ impl SspiAcceptor {
         let mut server_properties = ServerProperties::new(
             &primary_sname,
             None,
-            MAX_TIME_SKEW,
+            MAX_TIME_SKEW.to_std(),
             Some(Secret::new(primary.key)),
         )
         .map_err(ctx_err)?;
