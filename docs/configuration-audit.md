@@ -3206,3 +3206,116 @@ bench-driver operational owner is the client request-timeout policy in
 for Crabka consumers, and 30 seconds for Kafka consumers. Those values affect
 network failure behavior and remain fixed rather than flowing through the
 existing CLI/environment boundary.
+
+## Bench Driver Client Request Timeouts
+
+The bench driver's producer and active-stack consumer request timeouts are now
+positive, protocol-safe `ClientRequestTimeoutSeconds` values stored in
+`DriverConfig`. They retain the existing defaults:
+
+- producer: 2 seconds;
+- Crabka consumer: 5 seconds;
+- Kafka consumer: 30 seconds.
+
+The settings are resolved from:
+
+```text
+--producer-request-timeout-seconds
+BENCH_PRODUCER_REQUEST_TIMEOUT_SECONDS
+
+--consumer-request-timeout-seconds
+BENCH_CONSUMER_REQUEST_TIMEOUT_SECONDS
+```
+
+The command-line value wins when both inputs are present. When no consumer
+override is supplied, the parsed stack selects the existing 5- or 30-second
+default. Parsing rejects zero, malformed, negative, and values above 2,147,483
+seconds before client construction or I/O.
+`ClientRequestTimeoutSeconds` uses
+`refined_type::rule::MinMaxU64<1, 2_147_483>` so every accepted whole-second
+value fits the Kafka protocol's signed 32-bit millisecond timeout.
+
+The producer value flow is:
+
+```text
+Cli
+  -> DriverConfig::producer_request_timeout_seconds
+  -> ProducerTask
+  -> Producer::builder
+  -> request_timeout
+```
+
+The consumer value flow is:
+
+```text
+Cli / active-stack default
+  -> DriverConfig::consumer_request_timeout_seconds
+  -> ConsumerTask
+  -> every build_consumer_with_retry attempt
+  -> Consumer::builder
+  -> request_timeout
+```
+
+Producer send and failover behavior, consumer build attempts and backoff,
+polling and error backoff, TLS selection, error reporting, scenario behavior,
+final-drain timing, sampling cadence, and Prometheus timing are unchanged.
+
+The checked-in deployment flow is:
+
+```text
+BENCH_PRODUCER_REQUEST_TIMEOUT_SECONDS
+BENCH_CONSUMER_REQUEST_TIMEOUT_SECONDS
+  -> bench/scripts/run-scenario.sh
+  -> envsubst
+  -> bench/manifests/driver/job-template.yaml
+  -> driver container environment
+```
+
+The launcher supplies an overrideable 2-second producer default and selects the
+5- or 30-second consumer default from its required stack argument. No CRD or
+operator field was added because the benchmark launcher and Job template own
+this binary.
+
+After the implementation and before this section was appended, the exact
+scanner command
+
+```text
+tools/audit-runtime-values.sh
+```
+
+reported 6,298 lines across 1,055 files. Its bench-driver subset contained 50
+lines: four configured defaults, 26 test or harness values, 13 protocol,
+format, state, mathematical, or query invariants, and seven unresolved
+operational values. The categories sum to all 50 lines:
+`4 + 26 + 13 + 7 = 50`.
+
+Before this section was appended, the exact focused search
+
+```text
+rg -n \
+  "producer_request_timeout_seconds|consumer_request_timeout_seconds|ClientRequestTimeoutSeconds|DEFAULT_(PRODUCER|CRABKA_CONSUMER|KAFKA_CONSUMER)_REQUEST_TIMEOUT_SECONDS|producer-request-timeout-seconds|consumer-request-timeout-seconds|BENCH_(PRODUCER|CONSUMER)_REQUEST_TIMEOUT_SECONDS" \
+  crates/bench-driver \
+  bench \
+  docs/configuration-audit.md
+```
+
+reported 62 lines. The mutually exclusive classification is 31 production
+configuration-flow references, 13 deployment-flow references, 18 test
+references, and zero unresolved-owner references:
+`31 + 13 + 18 + 0 = 62`.
+
+The package's 72 registered tests passed, including the preserved defaults,
+protocol-bound acceptance, invalid-value rejection, active-stack resolution,
+and hermetic CLI-over-environment precedence tests. Strict package Clippy,
+nightly formatting, one help entry per flag, shell syntax, rendered Crabka
+2/5, Kafka 2/30, and explicit 7/11 manifests, diff hygiene, and the unchanged
+`Cargo.lock` check all passed.
+
+### Adjacent Pending Policy
+
+This closes only the client request timeouts. The next coherent bench-driver
+operational owner is the consumer-build retry policy in
+`crates/bench-driver/src/workload.rs`: six attempts with a 100-millisecond
+initial backoff and a two-second backoff cap. Those values control startup
+failure recovery and remain fixed rather than flowing through the existing
+CLI/environment boundary.
