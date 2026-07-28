@@ -8,8 +8,8 @@ use std::{
 
 use arrow::compute::concat_batches;
 use crabka_blockstore::{
-    BlockMeta, BlockWriter, PromotedSpanAttr, SCOL_START_NANO, SCOL_TRACE_ID, ShardedTraceBloom,
-    SummaryColumns, TraceBlockStats, TraceIndex, span_block_decl,
+    BlockMeta, BlockWriter, IndexSnapshotRetain, PromotedSpanAttr, SCOL_START_NANO, SCOL_TRACE_ID,
+    ShardedTraceBloom, SummaryColumns, TraceBlockStats, TraceIndex, span_block_decl,
     span_block_schema_with_promoted_attrs,
 };
 use crabka_client_consumer::{Consumer, ConsumerRecord};
@@ -101,6 +101,7 @@ pub struct BlockBuilderConfig {
     pub flush_max_records: usize,
     /// Flush the accumulated buffer once the oldest buffered record reaches this age.
     pub flush_max_age: Duration,
+    pub index_snapshot_retain: IndexSnapshotRetain,
 }
 
 struct BlockBuildOptions<'a> {
@@ -606,7 +607,11 @@ pub async fn flush_partition_windows(
         }
     }
     index
-        .save_latest_snapshot(&object_store, &config.index_key)
+        .save_latest_snapshot_with_retain(
+            &object_store,
+            &config.index_key,
+            config.index_snapshot_retain,
+        )
         .await
         .map(|_| blocks_written)
         .map_err(|err| TracesError::Block(err.to_string()))

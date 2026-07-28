@@ -6,7 +6,10 @@ use std::{net::SocketAddr, process::ExitCode, sync::Arc, time::Duration};
 
 use arc_swap::ArcSwap;
 use clap::{ArgAction, Args, Parser, ValueEnum};
-use crabka_blockstore::{BlockStore, BlockWriter, PromotedSpanAttr, TraceIndex};
+use crabka_blockstore::{
+    BlockStore, BlockWriter, IndexSnapshotMaxBytes, IndexSnapshotRetain, PromotedSpanAttr,
+    TraceIndex,
+};
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
 use crabka_client_producer::Producer;
 use crabka_telemetry::OtlpConfig;
@@ -76,6 +79,18 @@ struct Cli {
     querier_live_store_url: Option<String>,
     #[arg(long, default_value = "index/traces.json")]
     trace_index_key: String,
+    #[arg(
+        long,
+        env = "CRABKA_TRACES_INDEX_SNAPSHOT_MAX_BYTES",
+        default_value_t = IndexSnapshotMaxBytes::default()
+    )]
+    index_snapshot_max_bytes: IndexSnapshotMaxBytes,
+    #[arg(
+        long,
+        env = "CRABKA_TRACES_INDEX_SNAPSHOT_RETAIN",
+        default_value_t = IndexSnapshotRetain::default()
+    )]
+    index_snapshot_retain: IndexSnapshotRetain,
     #[arg(long, default_value = "memory:///")]
     object_store_url: String,
     #[arg(long)]
@@ -299,9 +314,13 @@ async fn run_block_builder(
     let writer = BlockWriter::new(configured.store.clone());
     let object_key_prefix = configured.prefix.to_string();
     let trace_index_key = configured.object_key(&cli.trace_index_key);
-    let initial_index = TraceIndex::load_latest_snapshot(&configured.store, &trace_index_key)
-        .await
-        .unwrap_or_else(|_| TraceIndex::new());
+    let initial_index = TraceIndex::load_latest_snapshot_with_max_bytes(
+        &configured.store,
+        &trace_index_key,
+        cli.index_snapshot_max_bytes,
+    )
+    .await
+    .unwrap_or_else(|_| TraceIndex::new());
     let index = Arc::new(Mutex::new(initial_index));
     blockbuilder::run(
         consumer,
@@ -315,6 +334,7 @@ async fn run_block_builder(
             promoted_attrs,
             flush_max_records: cli.block_builder_flush_max_records,
             flush_max_age: Duration::from_millis(cli.block_builder_flush_max_age_ms),
+            index_snapshot_retain: cli.index_snapshot_retain,
         },
         metrics,
         shutdown,
@@ -380,6 +400,7 @@ async fn run_querier(
     let refresh_store = Arc::clone(&store);
     let refresh_index = Arc::clone(&trace_index);
     let refresh_interval = cli.block_builder_window_secs.max(1);
+    let index_snapshot_max_bytes = cli.index_snapshot_max_bytes;
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(refresh_interval));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -387,7 +408,11 @@ async fn run_querier(
             tokio::select! {
                 () = refresh_shutdown.cancelled() => break,
                 _ = tick.tick() => {
-                    if let Ok(idx) = TraceIndex::load_latest_snapshot(&refresh_store, &trace_index_key).await {
+                    if let Ok(idx) = TraceIndex::load_latest_snapshot_with_max_bytes(
+                        &refresh_store,
+                        &trace_index_key,
+                        index_snapshot_max_bytes,
+                    ).await {
                         refresh_index.store(Arc::new(idx));
                     }
                 }
@@ -423,9 +448,13 @@ async fn build_querier_router_with_live(
 > {
     let configured = build_object_store(cli)?;
     let trace_index_key = configured.object_key(&cli.trace_index_key);
-    let initial = TraceIndex::load_latest_snapshot(&configured.store, &trace_index_key)
-        .await
-        .unwrap_or_else(|_| TraceIndex::new());
+    let initial = TraceIndex::load_latest_snapshot_with_max_bytes(
+        &configured.store,
+        &trace_index_key,
+        cli.index_snapshot_max_bytes,
+    )
+    .await
+    .unwrap_or_else(|_| TraceIndex::new());
     let trace_index: SharedTraceIndex = Arc::new(ArcSwap::from_pointee(initial));
     let blocks = Arc::new(BlockStore::new(
         Arc::clone(&configured.store),
@@ -671,9 +700,13 @@ async fn build_trace_index_catalog(
     }
     let configured = build_object_store(cli)?;
     let trace_index_key = configured.object_key(&cli.trace_index_key);
-    let trace_index = TraceIndex::load_latest_snapshot(&configured.store, &trace_index_key)
-        .await
-        .unwrap_or_else(|_| TraceIndex::new());
+    let trace_index = TraceIndex::load_latest_snapshot_with_max_bytes(
+        &configured.store,
+        &trace_index_key,
+        cli.index_snapshot_max_bytes,
+    )
+    .await
+    .unwrap_or_else(|_| TraceIndex::new());
     let blocks = BlockStore::new(configured.store, configured.root);
     Ok(TraceIndexCatalog::from_trace_index(&blocks, &trace_index)
         .await
@@ -725,9 +758,13 @@ async fn run_compactor(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send 
     let configured = build_object_store(&cli)?;
     let writer = BlockWriter::new(configured.store.clone());
     let trace_index_key = configured.object_key(&cli.trace_index_key);
-    let mut index = TraceIndex::load_latest_snapshot(&configured.store, &trace_index_key)
-        .await
-        .unwrap_or_else(|_| TraceIndex::new());
+    let mut index = TraceIndex::load_latest_snapshot_with_max_bytes(
+        &configured.store,
+        &trace_index_key,
+        cli.index_snapshot_max_bytes,
+    )
+    .await
+    .unwrap_or_else(|_| TraceIndex::new());
     compact_index_window(
         configured.store.clone(),
         &writer,
@@ -738,7 +775,11 @@ async fn run_compactor(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send 
     )
     .await?;
     index
-        .save_latest_snapshot(&configured.store, &trace_index_key)
+        .save_latest_snapshot_with_retain(
+            &configured.store,
+            &trace_index_key,
+            cli.index_snapshot_retain,
+        )
         .await?;
     Ok(())
 }
@@ -986,6 +1027,73 @@ mod tests {
                 == u64::try_from(crabka_traces::blockbuilder::DEFAULT_FLUSH_MAX_AGE.as_millis())
                     .unwrap()
         );
+    }
+
+    #[test]
+    fn index_snapshot_policy_defaults_and_rejects_invalid_values() {
+        let cli = Cli::try_parse_from(["crabka-traces", "--target", "block-builder"]).unwrap();
+        assert_eq!(
+            cli.index_snapshot_max_bytes.into_value(),
+            crabka_blockstore::DEFAULT_INDEX_SNAPSHOT_MAX_BYTES
+        );
+        assert_eq!(
+            cli.index_snapshot_retain.into_value(),
+            crabka_blockstore::DEFAULT_INDEX_SNAPSHOT_RETAIN
+        );
+
+        for flag in ["--index-snapshot-max-bytes", "--index-snapshot-retain"] {
+            for invalid in ["0", "not-a-number", "-1", "18446744073709551616"] {
+                assert!(
+                    Cli::try_parse_from([
+                        "crabka-traces",
+                        "--target",
+                        "block-builder",
+                        flag,
+                        invalid,
+                    ])
+                    .is_err(),
+                    "{flag} should reject {invalid:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn index_snapshot_policy_reads_environment_and_prefers_cli() {
+        const CHILD: &str = "CRABKA_TRACES_INDEX_SNAPSHOT_POLICY_CHILD";
+
+        if std::env::var_os(CHILD).is_none() {
+            let status =
+                std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args([
+                        "--exact",
+                        "tests::index_snapshot_policy_reads_environment_and_prefers_cli",
+                    ])
+                    .env(CHILD, "1")
+                    .env("CRABKA_TRACES_INDEX_SNAPSHOT_MAX_BYTES", "1024")
+                    .env("CRABKA_TRACES_INDEX_SNAPSHOT_RETAIN", "3")
+                    .status()
+                    .expect("child test");
+            assert!(status.success());
+            return;
+        }
+
+        let from_env = Cli::try_parse_from(["crabka-traces", "--target", "block-builder"]).unwrap();
+        assert_eq!(from_env.index_snapshot_max_bytes.into_value(), 1024);
+        assert_eq!(from_env.index_snapshot_retain.into_value(), 3);
+
+        let from_cli = Cli::try_parse_from([
+            "crabka-traces",
+            "--target",
+            "block-builder",
+            "--index-snapshot-max-bytes",
+            "2048",
+            "--index-snapshot-retain",
+            "4",
+        ])
+        .unwrap();
+        assert_eq!(from_cli.index_snapshot_max_bytes.into_value(), 2048);
+        assert_eq!(from_cli.index_snapshot_retain.into_value(), 4);
     }
 
     #[test]
