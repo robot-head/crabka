@@ -1,11 +1,15 @@
 use anyhow::Context;
+use clap::Parser;
+use crabka_admin_ui::config::{AdminUiConfig, AdminUiRuntimeArgs};
 
 #[cfg_attr(test, mutants::skip)]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
-    let cfg = crabka_admin_ui::config::AdminUiConfig::from_env().context("load admin UI config")?;
+    let runtime_args = AdminUiRuntimeArgs::parse();
+    let mut cfg = AdminUiConfig::from_env().context("load admin UI config")?;
+    cfg.mutation_json_body_limit_bytes = runtime_args.mutation_json_body_limit_bytes;
     let listen_addr = cfg.listen_addr;
     let cluster_name = cfg.cluster_name.clone();
     let state = crabka_admin_ui::server::AppState::new(cfg);

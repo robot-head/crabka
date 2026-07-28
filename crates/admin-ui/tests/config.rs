@@ -1,6 +1,10 @@
 use std::{net::SocketAddr, path::PathBuf, process::Command};
 
-use crabka_admin_ui::config::{AdminUiConfig, BrokerSecurityConfig, ConfigError};
+use clap::Parser;
+use crabka_admin_ui::config::{
+    AdminUiConfig, AdminUiRuntimeArgs, BrokerSecurityConfig, ConfigError,
+    DEFAULT_MUTATION_JSON_BODY_LIMIT_BYTES, MutationJsonBodyLimitBytes,
+};
 
 #[test]
 fn default_config_targets_local_server_and_requires_bootstrap() {
@@ -15,6 +19,74 @@ fn default_config_targets_local_server_and_requires_bootstrap() {
 
     let error = cfg.validate().expect_err("empty bootstrap is invalid");
     assert!(matches!(error, ConfigError::MissingBootstrap));
+}
+
+#[test]
+fn mutation_json_body_limit_default_and_boundaries_are_typed() {
+    let cfg = AdminUiConfig::default();
+
+    assert_eq!(
+        cfg.mutation_json_body_limit_bytes.into_value(),
+        DEFAULT_MUTATION_JSON_BODY_LIMIT_BYTES
+    );
+    assert_eq!(
+        MutationJsonBodyLimitBytes::new(1)
+            .expect("one byte is valid")
+            .into_value(),
+        1
+    );
+    assert!(MutationJsonBodyLimitBytes::new(0).is_err());
+
+    let overflowing = format!("{}0", usize::MAX);
+    for invalid in ["0", "not-a-number", "-1", overflowing.as_str()] {
+        assert!(
+            AdminUiRuntimeArgs::try_parse_from([
+                "crabka-admin-ui",
+                "--mutation-json-body-limit-bytes",
+                invalid,
+            ])
+            .is_err(),
+            "{invalid:?} must be rejected"
+        );
+    }
+}
+
+#[test]
+fn mutation_json_body_limit_environment_and_cli_precedence() {
+    let output = Command::new(std::env::current_exe().expect("test binary path is available"))
+        .arg("--exact")
+        .arg("mutation_json_body_limit_precedence_child")
+        .arg("--nocapture")
+        .env("CRABKA_ADMIN_UI_BODY_LIMIT_CHILD", "1")
+        .env("CRABKA_ADMIN_UI_MUTATION_JSON_BODY_LIMIT_BYTES", "32")
+        .output()
+        .expect("child test process runs");
+
+    assert!(
+        output.status.success(),
+        "child test failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn mutation_json_body_limit_precedence_child() {
+    if std::env::var_os("CRABKA_ADMIN_UI_BODY_LIMIT_CHILD").is_none() {
+        return;
+    }
+
+    let from_env = AdminUiRuntimeArgs::try_parse_from(["crabka-admin-ui"])
+        .expect("environment value is valid");
+    assert_eq!(from_env.mutation_json_body_limit_bytes.into_value(), 32);
+
+    let from_cli = AdminUiRuntimeArgs::try_parse_from([
+        "crabka-admin-ui",
+        "--mutation-json-body-limit-bytes",
+        "64",
+    ])
+    .expect("CLI value is valid");
+    assert_eq!(from_cli.mutation_json_body_limit_bytes.into_value(), 64);
 }
 
 #[test]

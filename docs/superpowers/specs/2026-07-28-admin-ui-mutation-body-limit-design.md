@@ -80,8 +80,10 @@ Test-first coverage will prove:
    produces HTTP 413 before deserialization or mutation execution;
 5. the existing authentication-before-decoding behavior remains unchanged.
 
-The crate's all-target tests, strict Clippy, nightly formatting, diff hygiene,
-and `Cargo.lock` immutability remain required completion gates.
+The crate's all-target tests, strict Clippy, nightly formatting, and diff
+hygiene remain required completion gates. `Cargo.lock` may change only to add
+the already-locked `refined_type` package to `crabka-admin-ui`'s direct
+dependency list; package versions and transitive dependencies must not change.
 
 ## Audit Closure
 
