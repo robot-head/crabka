@@ -1,3 +1,8 @@
+//! Unix-only: the pin-cleanup failure path is provoked with Unix mode bits,
+//! which Windows has no equivalent for. Matches the gating its sibling
+//! `topology_process_split_crash.rs` and `topology_process_nemesis.rs` use.
+#![cfg(unix)]
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     os::unix::fs::PermissionsExt as _,
