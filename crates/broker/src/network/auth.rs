@@ -1729,8 +1729,8 @@ mod tests {
             log_dir: std::path::PathBuf,
         ) -> Arc<crabka_raft::ControllerHandle> {
             let cfg = crabka_raft::ControllerConfig {
-                election_timeout: Duration::from_millis(200),
-                heartbeat_interval: Duration::from_millis(50),
+                election_timeout: crabka_units::millis(200),
+                heartbeat_interval: crabka_units::millis(50),
                 client_id: "test".into(),
                 ..crabka_raft::ControllerConfig::for_tests(crabka_raft::NodeId(1), log_dir)
             };

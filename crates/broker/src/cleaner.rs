@@ -155,7 +155,7 @@ mod tests {
         std::fs::create_dir_all(&part_dir).expect("create partition dir");
         let cfg = crabka_log::LogConfig {
             cleanup_policy,
-            segment_bytes: 256,
+            segment_size: crabka_units::bytes(256),
             ..Default::default()
         };
         let mut log = crabka_log::Log::open(&part_dir, cfg).expect("open compactable log");
@@ -184,7 +184,7 @@ mod tests {
             .log
             .lock()
             .expect("partition log lock")
-            .read(crabka_log::Offset(0), 1 << 20)
+            .read(crabka_log::Offset(0), crabka_units::mebibytes(1))
             .expect("read partition log");
         read.batches.iter().map(|batch| batch.records.len()).sum()
     }

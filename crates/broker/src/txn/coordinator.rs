@@ -16,6 +16,7 @@ use crabka_ids::PartitionIndex;
 use crabka_log::{Offset, ProducerId};
 use crabka_metadata::MetadataImage;
 use crabka_protocol::records::{Record, RecordBatch};
+use crabka_units::{ByteSize, mebibytes};
 use dashmap::DashMap;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{info, warn};
@@ -33,6 +34,10 @@ use crate::{
         version::TxnVersion,
     },
 };
+
+/// How much of `__transaction_state` one recovery read pulls back before the
+/// loop advances to the next offset.
+const RECOVERY_READ_MAX: ByteSize = mebibytes(1);
 
 /// A consumer-group committed-offset key: `(topic, partition)`.
 pub(crate) type OffsetKey = (String, i32);
@@ -436,7 +441,7 @@ impl TxnCoordinator {
 
             let mut offset = part.log_start_offset();
             loop {
-                let out = match part.read_log(offset, 1 << 20) {
+                let out = match part.read_log(offset, RECOVERY_READ_MAX) {
                     Ok(o) => o,
                     // OffsetTooLow can happen when the partition just opened
                     // with no data written yet (log_start == log_end == 0

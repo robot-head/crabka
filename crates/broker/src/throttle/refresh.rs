@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use crabka_metadata::{MetadataImage, NodeId, ThrottleKind};
+use crabka_units::{ByteRate, convert::ByteRateExt};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
@@ -45,26 +46,37 @@ pub async fn run(
     }
 }
 
+/// The KIP-73 throttle rate the image holds for `kind`, as a quantity.
+///
+/// `crabka-metadata` stores broker configs as parsed integers, so the raw
+/// bytes-per-second crosses into the domain here. An unset config is the
+/// bucket's "unthrottled" sentinel, [`ByteRateExt::ZERO`].
+fn image_rate(image: &MetadataImage, node_id: NodeId, kind: ThrottleKind) -> ByteRate {
+    image
+        .broker_throttle_rate(node_id, kind)
+        .map_or(<ByteRate as ByteRateExt>::ZERO, |raw| {
+            ByteRate::from_bytes_per_sec(i64::try_from(raw).unwrap_or(i64::MAX))
+        })
+}
+
 fn apply_image(image: &MetadataImage, node_id: NodeId, throttle: &ThrottleState) {
-    let leader_rate = image
-        .broker_throttle_rate(node_id, ThrottleKind::Leader)
-        .unwrap_or(0);
-    let follower_rate = image
-        .broker_throttle_rate(node_id, ThrottleKind::Follower)
-        .unwrap_or(0);
-    if throttle.leader_out.rate() != leader_rate {
+    let leader_rate = image_rate(image, node_id, ThrottleKind::Leader);
+    let follower_rate = image_rate(image, node_id, ThrottleKind::Follower);
+    if throttle.leader_out.byte_rate() != leader_rate {
         debug!(
             node_id = node_id.0,
-            leader_rate, "throttle: leader-out rate update"
+            leader_rate = leader_rate.bytes_per_sec_i64(),
+            "throttle: leader-out rate update"
         );
-        throttle.leader_out.set_rate(leader_rate);
+        throttle.leader_out.set_byte_rate(leader_rate);
     }
-    if throttle.follower_in.rate() != follower_rate {
+    if throttle.follower_in.byte_rate() != follower_rate {
         debug!(
             node_id = node_id.0,
-            follower_rate, "throttle: follower-in rate update"
+            follower_rate = follower_rate.bytes_per_sec_i64(),
+            "throttle: follower-in rate update"
         );
-        throttle.follower_in.set_rate(follower_rate);
+        throttle.follower_in.set_byte_rate(follower_rate);
     }
 }
 
@@ -72,6 +84,7 @@ fn apply_image(image: &MetadataImage, node_id: NodeId, throttle: &ThrottleState)
 mod tests {
     use assert2::assert;
     use crabka_metadata::{BrokerConfigRecord, MetadataRecord};
+    use crabka_units::bytes_per_sec;
     use uuid::Uuid;
 
     use super::*;
@@ -91,8 +104,8 @@ mod tests {
         }));
         let throttle = ThrottleState::new();
         apply_image(&img, NodeId(1), &throttle);
-        assert!(throttle.leader_out.rate() == 2048);
-        assert!(throttle.follower_in.rate() == 1024);
+        assert!(throttle.leader_out.byte_rate() == bytes_per_sec(2048));
+        assert!(throttle.follower_in.byte_rate() == bytes_per_sec(1024));
     }
 
     #[test]
@@ -105,7 +118,7 @@ mod tests {
         }));
         let throttle = ThrottleState::new();
         apply_image(&img, NodeId(1), &throttle);
-        assert!(throttle.leader_out.rate() == 2048);
+        assert!(throttle.leader_out.byte_rate() == bytes_per_sec(2048));
         // Delete the config.
         img.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
             node_id: NodeId(1),
@@ -113,6 +126,6 @@ mod tests {
             config_value: None,
         }));
         apply_image(&img, NodeId(1), &throttle);
-        assert!(throttle.leader_out.rate() == 0);
+        assert!(throttle.leader_out.byte_rate() == <ByteRate as ByteRateExt>::ZERO);
     }
 }

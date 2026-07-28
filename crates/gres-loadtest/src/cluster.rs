@@ -873,17 +873,13 @@ fn registry_policy_args(policy: &RegistryPolicy) -> [String; 14] {
         "--registry-replication-factor".to_owned(),
         policy.replication_factor().to_string(),
         "--registry-topic-create-timeout-ms".to_owned(),
-        policy.topic_create_timeout_ms().to_string(),
+        policy.topic_create_timeout().millis_i32().to_string(),
         "--registry-reader-retry-backoff-ms".to_owned(),
-        policy
-            .reader_retry_backoff()
-            .as_time()
-            .millis_i64()
-            .to_string(),
+        policy.reader_retry_backoff().millis_i64().to_string(),
         "--registry-fetch-max-wait-ms".to_owned(),
-        policy.fetch_max_wait_ms().to_string(),
+        policy.fetch_max_wait().millis_i32().to_string(),
         "--registry-fetch-partition-max-bytes".to_owned(),
-        policy.fetch_partition_max_bytes().to_string(),
+        policy.fetch_partition_max().bytes_i32().to_string(),
         "--registry-producer-dns-timeout-ms".to_owned(),
         policy.producer_dns_timeout().milliseconds().to_string(),
         "--registry-reader-admin-dns-timeout-ms".to_owned(),

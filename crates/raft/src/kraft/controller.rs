@@ -37,6 +37,10 @@ use crabka_metadata::{
     MetadataImage, MetadataRecord, VotersRecord, from_kraft_value, to_kraft_values,
 };
 use crabka_protocol::records::{Record, RecordBatch};
+use crabka_units::{
+    fmt::Human as _,
+    prelude::{ByteSize, ByteSizeExt as _, Time, TimeExt as _, mebibytes},
+};
 use tokio::{
     sync::{mpsc, oneshot, watch},
     time::{Duration, Instant},
@@ -71,6 +75,10 @@ const FETCH_MISS_LIMIT: u32 = 3;
 /// initial announcement (or a rejoining old leader) re-attach without waiting
 /// for an election.
 const HEARTBEAT_DIVISOR: u64 = 3;
+
+/// Floor on an observer's metadata-fetch budget: at least the first committed
+/// batch is always emitted so a zero-budget fetch still makes progress.
+const MIN_FETCH_BUDGET: ByteSize = crabka_units::bytes(1);
 
 /// Filename of the node-local durable quorum-state file.
 const QUORUM_STATE_FILE: &str = "quorum-state";
@@ -112,8 +120,8 @@ struct Engine {
     data_dir: PathBuf,
     /// Monotonic clock base: `SimInstant(ms)` is `(now - base).as_millis()`.
     clock_base: Instant,
-    /// Base election timeout in ms (varied per node by the caller for liveness).
-    election_timeout_ms: u64,
+    /// Base election timeout (varied per node by the caller for liveness).
+    election_timeout: Time,
     /// Pending timer deadlines as `tokio::time::Instant`s. `None` = disarmed.
     election_at: Option<Instant>,
     fetch_at: Option<Instant>,
@@ -172,11 +180,21 @@ pub struct KraftConfig {
     pub me: NodeId,
     pub cluster_id: Uuid,
     pub initial_state: QuorumState,
-    pub election_timeout_ms: u64,
+    pub election_timeout: Time,
     pub peers: Arc<dyn PeerSender>,
     /// Snapshot once committed offset advances this many records past the
     /// last snapshot, then prune the log below it. `0` disables snapshotting.
     pub snapshot_interval_records: u64,
+}
+
+/// The configured election timeout as whole milliseconds.
+///
+/// Every deadline derived from the timeout crosses into integers here. The
+/// core's per-(node, epoch) jitter is defined over integer milliseconds
+/// (`election_jitter_ms`), so keeping the base in the same domain leaves every
+/// election deadline bit-identical to the raw-integer arithmetic it replaces.
+fn election_timeout_ms(election_timeout: Time) -> u64 {
+    u64::try_from(election_timeout.millis_i64()).unwrap_or(0)
 }
 
 fn initial_election_at(
@@ -185,7 +203,7 @@ fn initial_election_at(
     clock_base: Instant,
     me: NodeId,
     initial_epoch: Epoch,
-    election_timeout_ms: u64,
+    election_timeout: Time,
 ) -> Option<Instant> {
     match (
         core.is_voter(),
@@ -202,9 +220,9 @@ fn initial_election_at(
             // Same deterministic per-(node, epoch) jitter the core applies to
             // re-election timers, so the first election round is staggered
             // across closely-synchronized voters.
-            let jitter =
-                crate::kraft::core::election_jitter_ms(me, initial_epoch, election_timeout_ms);
-            let delay_ms = election_timeout_ms.saturating_add(jitter);
+            let base_ms = election_timeout_ms(election_timeout);
+            let jitter = crate::kraft::core::election_jitter_ms(me, initial_epoch, base_ms);
+            let delay_ms = base_ms.saturating_add(jitter);
             Some(
                 clock_base
                     .checked_add(Duration::from_millis(delay_ms))
@@ -215,8 +233,11 @@ fn initial_election_at(
     }
 }
 
-fn heartbeat_period(election_timeout_ms: u64) -> Duration {
-    Duration::from_millis(election_timeout_ms.div_euclid(HEARTBEAT_DIVISOR).max(1))
+fn heartbeat_period(election_timeout: Time) -> Time {
+    let period_ms = election_timeout_ms(election_timeout)
+        .div_euclid(HEARTBEAT_DIVISOR)
+        .max(1);
+    Time::from_millis(i64::try_from(period_ms).unwrap_or(i64::MAX))
 }
 
 fn election_timer_starts_election(is_voter: bool, is_leader: bool) -> bool {
@@ -428,12 +449,12 @@ impl KraftController {
             me,
             cluster_id: _,
             initial_state,
-            election_timeout_ms,
+            election_timeout,
             peers,
             snapshot_interval_records,
         } = config;
 
-        let core = QuorumStateMachine::new(me, initial_state, election_timeout_ms);
+        let core = QuorumStateMachine::new(me, initial_state, election_timeout);
         let initial_leader = core.quorum_state().leader_id;
         let initial_was_leader = core.role().is_leader();
         let initial_epoch = core.quorum_state().leader_epoch;
@@ -472,7 +493,7 @@ impl KraftController {
             clock_base,
             me,
             initial_epoch,
-            election_timeout_ms,
+            election_timeout,
         );
 
         let engine = Engine {
@@ -487,7 +508,7 @@ impl KraftController {
             cmd_tx: cmd_tx.clone(),
             data_dir,
             clock_base,
-            election_timeout_ms,
+            election_timeout,
             election_at,
             fetch_at: None,
             fetch_misses: 0,
@@ -522,7 +543,7 @@ impl KraftController {
     #[tracing::instrument(
         level = "info",
         skip_all,
-        fields(node = me.0, %cluster_id, election_timeout_ms),
+        fields(node = me.0, %cluster_id, election_timeout = %election_timeout.human()),
         err
     )]
     pub fn open(
@@ -530,7 +551,7 @@ impl KraftController {
         me: NodeId,
         cluster_id: Uuid,
         bootstrap_voters: crabka_metadata::voters::VoterSet,
-        election_timeout_ms: u64,
+        election_timeout: Time,
         peers: Arc<dyn PeerSender>,
         snapshot_interval_records: u64,
     ) -> Result<Self, RaftError> {
@@ -568,7 +589,7 @@ impl KraftController {
                 me,
                 cluster_id,
                 initial_state,
-                election_timeout_ms,
+                election_timeout,
                 peers,
                 snapshot_interval_records,
             },
@@ -655,13 +676,13 @@ impl KraftController {
     pub async fn metadata_fetch(
         &self,
         fetch_offset: i64,
-        max_bytes: usize,
+        max_size: ByteSize,
     ) -> Result<MetadataFetchSlice, RaftError> {
         let (reply, rx) = oneshot::channel();
         self.cmd_tx
             .send(Command::MetadataFetch {
                 fetch_offset,
-                max_bytes,
+                max_size,
                 reply,
             })
             .await
@@ -734,8 +755,8 @@ impl Engine {
     /// fire-and-forget (see the module docs).
     async fn run(mut self, mut cmd_rx: mpsc::Receiver<Command>) {
         // Heartbeat ticks the whole time; the loop only acts on it while leader.
-        let hb_period = heartbeat_period(self.election_timeout_ms);
-        let mut heartbeat = tokio::time::interval(hb_period);
+        let hb_period = heartbeat_period(self.election_timeout);
+        let mut heartbeat = tokio::time::interval(hb_period.to_std());
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
@@ -798,10 +819,10 @@ impl Engine {
             }
             Command::MetadataFetch {
                 fetch_offset,
-                max_bytes,
+                max_size,
                 reply,
             } => {
-                let _ = reply.send(self.metadata_fetch_slice(fetch_offset, max_bytes));
+                let _ = reply.send(self.metadata_fetch_slice(fetch_offset, max_size));
             }
             #[cfg(test)]
             Command::TestAppendAndCommit { records, reply } => {
@@ -1031,6 +1052,10 @@ impl Engine {
                         epoch,
                     ) {
                         Some(bytes) => {
+                            // KIP-595 `FetchSnapshot` addresses a byte window of
+                            // the on-disk checkpoint. Both fields are slice
+                            // indices straight off the wire, so they clamp to
+                            // `usize` here rather than becoming quantities.
                             let max = usize::try_from(max_bytes.max(0)).unwrap_or(0);
                             let pos = usize::try_from(position.max(0)).unwrap_or(0);
                             let chunk =
@@ -1216,7 +1241,9 @@ impl Engine {
 
     /// Arm the fetch timer one election-timeout out from now (re-poll cadence).
     fn arm_fetch_timer(&mut self) {
-        self.fetch_at = Some(Instant::now() + Duration::from_millis(self.election_timeout_ms));
+        self.fetch_at = Some(
+            Instant::now() + Duration::from_millis(election_timeout_ms(self.election_timeout)),
+        );
     }
 
     /// Convert a core [`SimInstant`] deadline into a `tokio::time::Instant`.
@@ -1433,7 +1460,7 @@ impl Engine {
             self.maybe_snapshot_and_prune();
             return;
         }
-        match self.log.read_decoded(prev_hwm, MAX_APPLY_BYTES) {
+        match self.log.read_decoded(prev_hwm, MAX_APPLY) {
             Ok(batches) => {
                 let mut changed = false;
                 for batch in &batches {
@@ -1626,14 +1653,17 @@ impl Engine {
     /// HWM and concatenate their verbatim `RecordBatch` bytes (the engine's
     /// records are already Kafka record batches). At least the first batch is
     /// always emitted so the observer makes progress.
-    fn metadata_fetch_slice(&self, fetch_offset: i64, max_bytes: usize) -> MetadataFetchSlice {
+    fn metadata_fetch_slice(&self, fetch_offset: i64, max_size: ByteSize) -> MetadataFetchSlice {
         // `fetch_offset` arrives raw on the observer metadata-fetch wire; wrap it
         // into the `KraftLog` offset domain for the log-bound comparisons/read.
         let fetch_offset = Offset(fetch_offset);
         let high_watermark = self.log.hwm();
         let log_start_offset = self.log.log_start_offset();
         let records = if metadata_fetch_offset_in_committed_window(fetch_offset, high_watermark) {
-            match self.log.read_decoded(fetch_offset, max_bytes.max(1)) {
+            match self
+                .log
+                .read_decoded(fetch_offset, max_size.max(MIN_FETCH_BUDGET))
+            {
                 Ok(batches) => {
                     let committed: Vec<RecordBatch> = batches
                         .into_iter()
@@ -1751,7 +1781,9 @@ impl Engine {
             from: self.me,
             snapshot_id,
             position,
-            max_bytes: i32::try_from(MAX_APPLY_BYTES).unwrap_or(i32::MAX),
+            // KIP-595 `FetchSnapshot.MaxBytes` is an `int32`; the quantity
+            // converts here, at the wire boundary.
+            max_bytes: MAX_APPLY.bytes_i32(),
         }
         .encode();
         self.spawn_send(leader_id, api_key::FETCH_SNAPSHOT, body);
@@ -1768,7 +1800,7 @@ impl Engine {
         if !fetch_offset_has_records(fetch_offset, log_end) {
             return bytes::Bytes::new();
         }
-        let batches = match self.log.read_decoded(fetch_offset, MAX_APPLY_BYTES) {
+        let batches = match self.log.read_decoded(fetch_offset, MAX_APPLY) {
             Ok(b) => b,
             Err(e) => {
                 tracing::error!(?e, "kraft: serve_fetch read failed");
@@ -2051,7 +2083,9 @@ async fn sleep_until_opt(deadline: Option<Instant>) {
     }
 }
 
-const MAX_APPLY_BYTES: usize = 8 * 1024 * 1024;
+/// Read budget for a single decoded log read: replication serve, apply replay,
+/// and image recovery all cap one pass at this much.
+const MAX_APPLY: ByteSize = mebibytes(8);
 
 /// Encode a run of `RecordBatch`es into one contiguous `Bytes` blob (each batch
 /// is self-describing via its `batch_length` header, so they concatenate and
@@ -2150,7 +2184,7 @@ fn leader_change_batch(epoch: Epoch, leader_id: NodeId, voter_ids: &[NodeId]) ->
 /// Replay committed log batches starting at `from` into `image` (idempotent:
 /// records that fail `validate` are skipped). Used by restart recovery.
 fn replay_committed(log: &KraftLog, image: &mut MetadataImage, from: Offset) {
-    match log.read_decoded(from, MAX_APPLY_BYTES) {
+    match log.read_decoded(from, MAX_APPLY) {
         Ok(batches) => {
             for batch in &batches {
                 if batch.attributes.is_control_batch() {
@@ -2354,9 +2388,16 @@ mod tests {
     use std::time::Duration as StdDuration;
 
     use assert2::{assert, check};
+    use crabka_units::prelude::{millis, secs};
 
     use super::*;
     use crate::kraft::transport::NullPeerSender;
+
+    /// Deadline every test-side channel receive is bounded by.
+    const TEST_RECV_TIMEOUT: Time = secs(1);
+
+    /// Default election timeout for engines built by [`build`].
+    const TEST_ELECTION_TIMEOUT: Time = secs(1);
 
     fn voter_set(ids: &[NodeId]) -> crabka_metadata::voters::VoterSet {
         crabka_metadata::voters::VoterSet::from_voters(ids.iter().map(|&id| {
@@ -2370,15 +2411,15 @@ mod tests {
     }
 
     fn build(me: NodeId, ids: &[NodeId]) -> (KraftController, tempfile::TempDir) {
-        build_with_timeout(me, ids, 1000)
+        build_with_timeout(me, ids, TEST_ELECTION_TIMEOUT)
     }
 
     fn build_with_timeout(
         me: NodeId,
         ids: &[NodeId],
-        timeout_ms: u64,
+        election_timeout: Time,
     ) -> (KraftController, tempfile::TempDir) {
-        build_full(me, ids, timeout_ms, 0)
+        build_full(me, ids, election_timeout, 0)
     }
 
     fn build_with_snapshot_interval(
@@ -2386,13 +2427,13 @@ mod tests {
         ids: &[NodeId],
         snapshot_interval_records: u64,
     ) -> (KraftController, tempfile::TempDir) {
-        build_full(me, ids, 1000, snapshot_interval_records)
+        build_full(me, ids, TEST_ELECTION_TIMEOUT, snapshot_interval_records)
     }
 
     fn build_full(
         me: NodeId,
         ids: &[NodeId],
-        timeout_ms: u64,
+        election_timeout: Time,
         snapshot_interval_records: u64,
     ) -> (KraftController, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2403,7 +2444,7 @@ mod tests {
                 me,
                 cluster_id: uuid::Uuid::nil(),
                 initial_state: state,
-                election_timeout_ms: timeout_ms,
+                election_timeout,
                 peers: Arc::new(NullPeerSender),
                 snapshot_interval_records,
             },
@@ -2419,7 +2460,7 @@ mod tests {
         let core = QuorumStateMachine::new(
             me,
             QuorumState::bootstrap(uuid::Uuid::nil(), voter_set(ids)),
-            1000,
+            TEST_ELECTION_TIMEOUT,
         );
         let image = MetadataImage::new(uuid::Uuid::nil());
         let (image_tx, _image_rx) = watch::channel(Arc::new(image.clone()));
@@ -2451,7 +2492,7 @@ mod tests {
                 cmd_tx,
                 data_dir: dir.path().to_path_buf(),
                 clock_base,
-                election_timeout_ms: 1000,
+                election_timeout: TEST_ELECTION_TIMEOUT,
                 election_at: None,
                 fetch_at: None,
                 fetch_misses: 0,
@@ -2510,7 +2551,7 @@ mod tests {
     async fn recv_peer_send(
         rx: &mut mpsc::UnboundedReceiver<CapturedPeerSend>,
     ) -> CapturedPeerSend {
-        tokio::time::timeout(StdDuration::from_secs(1), rx.recv())
+        tokio::time::timeout(TEST_RECV_TIMEOUT.to_std(), rx.recv())
             .await
             .expect("peer send timed out")
             .expect("peer send channel closed")
@@ -2520,7 +2561,7 @@ mod tests {
         rx: &mut mpsc::UnboundedReceiver<CapturedPeerSend>,
         api_key: i16,
     ) -> CapturedPeerSend {
-        let deadline = tokio::time::Instant::now() + StdDuration::from_secs(1);
+        let deadline = tokio::time::Instant::now() + TEST_RECV_TIMEOUT.to_std();
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             let send = tokio::time::timeout(remaining, rx.recv())
@@ -2548,13 +2589,20 @@ mod tests {
 
     #[test]
     fn initial_election_deadline_matches_startup_role() {
+        /// Base election timeout the staggered startup deadline is derived from.
+        const TIMEOUT: Time = millis(400);
+        /// The same extent in the integer milliseconds the core's jitter uses.
+        const TIMEOUT_MS: u64 = 400;
+
         let base = Instant::now();
         let single = QuorumStateMachine::new(
             NodeId(1),
             QuorumState::bootstrap(uuid::Uuid::nil(), voter_set(&[NodeId(1)])),
-            400,
+            TIMEOUT,
         );
-        assert2::assert!(initial_election_at(&single, None, base, NodeId(1), 0, 400) == Some(base));
+        assert2::assert!(
+            initial_election_at(&single, None, base, NodeId(1), 0, TIMEOUT) == Some(base)
+        );
 
         let known_leader = QuorumStateMachine::new(
             NodeId(1),
@@ -2562,10 +2610,11 @@ mod tests {
                 uuid::Uuid::nil(),
                 voter_set(&[NodeId(1), NodeId(2), NodeId(3)]),
             ),
-            400,
+            TIMEOUT,
         );
         assert2::assert!(
-            initial_election_at(&known_leader, Some(NodeId(2)), base, NodeId(1), 0, 400).is_none()
+            initial_election_at(&known_leader, Some(NodeId(2)), base, NodeId(1), 0, TIMEOUT)
+                .is_none()
         );
 
         let non_voter = QuorumStateMachine::new(
@@ -2574,9 +2623,11 @@ mod tests {
                 uuid::Uuid::nil(),
                 voter_set(&[NodeId(1), NodeId(2), NodeId(3)]),
             ),
-            400,
+            TIMEOUT,
         );
-        assert2::assert!(initial_election_at(&non_voter, None, base, NodeId(4), 0, 400).is_none());
+        assert2::assert!(
+            initial_election_at(&non_voter, None, base, NodeId(4), 0, TIMEOUT).is_none()
+        );
 
         let multi = QuorumStateMachine::new(
             NodeId(1),
@@ -2584,12 +2635,26 @@ mod tests {
                 uuid::Uuid::nil(),
                 voter_set(&[NodeId(1), NodeId(2), NodeId(3)]),
             ),
-            400,
+            TIMEOUT,
         );
-        let jitter = crate::kraft::core::election_jitter_ms(NodeId(1), 0, 400);
-        let at =
-            initial_election_at(&multi, None, base, NodeId(1), 0, 400).expect("multi voter timer");
-        assert2::assert!(at.duration_since(base) == Duration::from_millis(400 + jitter));
+        // The jitter is integer milliseconds and the deadline is the integer
+        // sum, so the quantity must not shift the deadline by even a nanosecond.
+        let jitter = crate::kraft::core::election_jitter_ms(NodeId(1), 0, TIMEOUT_MS);
+        let at = initial_election_at(&multi, None, base, NodeId(1), 0, TIMEOUT)
+            .expect("multi voter timer");
+        assert2::assert!(at.duration_since(base) == Duration::from_millis(TIMEOUT_MS + jitter));
+    }
+
+    #[test]
+    fn election_timeout_converts_to_whole_milliseconds() {
+        for (_case, timeout, want_ms) in [
+            ("whole second", secs(1), 1_000u64),
+            ("sub-second", millis(250), 250),
+            ("zero", secs(0), 0),
+            ("negative clamps to zero", Time::from_millis(-4), 0),
+        ] {
+            check!(election_timeout_ms(timeout) == want_ms);
+        }
     }
 
     #[test]
@@ -2611,7 +2676,7 @@ mod tests {
             ("floor below three milliseconds", 2, 1),
             ("zero timeout floor", 0, 1),
         ] {
-            assert2::assert!(heartbeat_period(timeout_ms) == Duration::from_millis(want_ms));
+            assert2::assert!(heartbeat_period(millis(timeout_ms)) == millis(want_ms));
         }
     }
 
@@ -2937,7 +3002,7 @@ mod tests {
         assert2::assert!(engine.log.log_end_offset() == start + 1);
         let batches = engine
             .log
-            .read_decoded(start, MAX_APPLY_BYTES)
+            .read_decoded(start, MAX_APPLY)
             .expect("read appended leader-change");
         assert2::assert!(batches.len() == 1);
         let batch = &batches[0];
@@ -3239,18 +3304,13 @@ mod tests {
 
         assert2::assert!(
             engine
-                .metadata_fetch_slice(-1, MAX_APPLY_BYTES)
+                .metadata_fetch_slice(-1, MAX_APPLY)
                 .records
                 .is_empty()
         );
-        assert2::assert!(
-            engine
-                .metadata_fetch_slice(1, MAX_APPLY_BYTES)
-                .records
-                .is_empty()
-        );
+        assert2::assert!(engine.metadata_fetch_slice(1, MAX_APPLY).records.is_empty());
 
-        let slice = engine.metadata_fetch_slice(0, MAX_APPLY_BYTES);
+        let slice = engine.metadata_fetch_slice(0, MAX_APPLY);
         let decoded = decode_batches(&slice.records).expect("decode fetch slice");
         check!(
             (
@@ -3552,7 +3612,7 @@ mod tests {
     #[tokio::test]
     async fn injected_vote_sequence_makes_multi_voter_leader_before_timer() {
         let (ctrl, _dir) =
-            build_with_timeout(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)], 60_000);
+            build_with_timeout(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)], secs(60));
         elect_leader_with_helper(&ctrl, NodeId(1), NodeId(2)).await;
         ctrl.shutdown().await;
     }
@@ -3612,7 +3672,7 @@ mod tests {
     /// election timeout — no injected event.
     #[tokio::test]
     async fn single_voter_auto_elects_on_election_timeout() {
-        let (ctrl, _dir) = build_with_timeout(NodeId(1), &[NodeId(1)], 80);
+        let (ctrl, _dir) = build_with_timeout(NodeId(1), &[NodeId(1)], millis(80));
         // The election timer is armed at construction; wait for it to fire.
         tokio::time::timeout(
             StdDuration::from_secs(5),
@@ -3630,7 +3690,8 @@ mod tests {
         // Node 1 is a follower in a 3-voter cluster; the NullPeerSender means
         // its fetches fail, but a steady stream of BeginQuorumEpoch heartbeats
         // (which we inject) must keep it attached without electing.
-        let (ctrl, _dir) = build_with_timeout(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)], 120);
+        let (ctrl, _dir) =
+            build_with_timeout(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)], millis(120));
         // Attach to leader 2.
         ctrl.inject_event(Event::ReceiveBeginQuorumEpoch {
             leader_id: NodeId(2),
@@ -3842,7 +3903,7 @@ mod tests {
                     me: NodeId(1),
                     cluster_id,
                     initial_state: QuorumState::bootstrap(cluster_id, voters.clone()),
-                    election_timeout_ms: 1000,
+                    election_timeout: TEST_ELECTION_TIMEOUT,
                     peers: Arc::new(NullPeerSender),
                     snapshot_interval_records: 0,
                 },
@@ -3867,7 +3928,7 @@ mod tests {
             NodeId(1),
             cluster_id,
             voters,
-            1000,
+            TEST_ELECTION_TIMEOUT,
             Arc::new(NullPeerSender),
             0,
         )

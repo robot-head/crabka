@@ -1,11 +1,27 @@
 //! Construction-time config for `Controller::start`.
 
-use std::{future::Future, net::SocketAddr, path::PathBuf, pin::Pin, sync::Arc, time::Duration};
+use std::{future::Future, net::SocketAddr, path::PathBuf, pin::Pin, sync::Arc};
 
 use bytes::Bytes;
+use crabka_units::{
+    fmt::Human as _,
+    prelude::{ByteSize, Time, hours, mebibytes, millis, secs},
+};
 use uuid::Uuid;
 
 use crate::{error::RaftError, network::OutboundDialer, types::NodeId};
+
+/// `metadata.log.max.record.bytes.between.snapshots` default: 20 MiB.
+const DEFAULT_MAX_BYTES_BETWEEN_SNAPSHOTS: ByteSize = mebibytes(20);
+
+/// `metadata.log.max.snapshot.interval.ms` default: one hour.
+const DEFAULT_MAX_SNAPSHOT_INTERVAL: Time = hours(1);
+
+/// Election timeout used by [`ControllerConfig::for_tests`].
+const TEST_ELECTION_TIMEOUT: Time = secs(1);
+
+/// Leader heartbeat cadence used by [`ControllerConfig::for_tests`].
+const TEST_HEARTBEAT_INTERVAL: Time = millis(200);
 
 /// Optional router for KIP-595 traffic addressed to non-metadata quorum shards.
 pub type ShardRouteFuture<'a> =
@@ -68,8 +84,8 @@ pub struct ControllerConfig {
     pub initial_voters: crabka_metadata::VoterSet,
     pub controller_listen_addr: SocketAddr,
     pub log_dir: PathBuf,
-    pub election_timeout: Duration,
-    pub heartbeat_interval: Duration,
+    pub election_timeout: Time,
+    pub heartbeat_interval: Time,
     pub client_id: String,
     pub bootstrap_mode: BootstrapMode,
     /// Cluster UUID applied to the `MetadataImage` on first construction.
@@ -91,9 +107,9 @@ pub struct ControllerConfig {
     /// WAL shards return an encoded response body and bypass metadata dispatch.
     pub shard_router: Option<Arc<dyn RaftShardRouter>>,
     /// `metadata.log.max.record.bytes.between.snapshots` (default 20 MiB).
-    pub max_bytes_between_snapshots: u64,
+    pub max_bytes_between_snapshots: ByteSize,
     /// `metadata.log.max.snapshot.interval.ms` (default 1 h; 0 = disabled).
-    pub max_snapshot_interval: Duration,
+    pub max_snapshot_interval: Time,
     /// Snapshot once committed offset advances this many records past the last
     /// snapshot, then prune the log below it. `0` disables snapshotting.
     pub snapshot_interval_records: u64,
@@ -110,8 +126,16 @@ impl std::fmt::Debug for ControllerConfig {
             .field("initial_voters", &self.initial_voters)
             .field("controller_listen_addr", &self.controller_listen_addr)
             .field("log_dir", &self.log_dir)
-            .field("election_timeout", &self.election_timeout)
-            .field("heartbeat_interval", &self.heartbeat_interval)
+            // Quantities render in the operator form (`1s`, `20MiB`) rather than
+            // `uom`'s dimension-annotated `Debug`, which is unreadable in a log.
+            .field(
+                "election_timeout",
+                &self.election_timeout.human().to_string(),
+            )
+            .field(
+                "heartbeat_interval",
+                &self.heartbeat_interval.human().to_string(),
+            )
             .field("client_id", &self.client_id)
             .field("bootstrap_mode", &self.bootstrap_mode)
             .field("cluster_id", &self.cluster_id)
@@ -120,9 +144,12 @@ impl std::fmt::Debug for ControllerConfig {
             .field("shard_router", &self.shard_router.is_some())
             .field(
                 "max_bytes_between_snapshots",
-                &self.max_bytes_between_snapshots,
+                &self.max_bytes_between_snapshots.human().to_string(),
             )
-            .field("max_snapshot_interval", &self.max_snapshot_interval)
+            .field(
+                "max_snapshot_interval",
+                &self.max_snapshot_interval.human().to_string(),
+            )
             .field("snapshot_interval_records", &self.snapshot_interval_records)
             .finish()
     }
@@ -153,16 +180,16 @@ impl ControllerConfig {
             }]),
             controller_listen_addr: listen,
             log_dir,
-            election_timeout: Duration::from_secs(1),
-            heartbeat_interval: Duration::from_millis(200),
+            election_timeout: TEST_ELECTION_TIMEOUT,
+            heartbeat_interval: TEST_HEARTBEAT_INTERVAL,
             client_id: "crabka-controller-test".into(),
             bootstrap_mode: BootstrapMode::Bootstrap,
             cluster_id: None,
             dialer: None,
             handshake: None,
             shard_router: None,
-            max_bytes_between_snapshots: 20 * 1024 * 1024,
-            max_snapshot_interval: Duration::from_hours(1),
+            max_bytes_between_snapshots: DEFAULT_MAX_BYTES_BETWEEN_SNAPSHOTS,
+            max_snapshot_interval: DEFAULT_MAX_SNAPSHOT_INTERVAL,
             snapshot_interval_records: 0,
         }
     }
@@ -171,6 +198,7 @@ impl ControllerConfig {
 #[cfg(test)]
 mod tests {
     use assert2::check;
+    use crabka_units::prelude::{ByteSizeExt as _, TimeExt as _};
 
     use super::*;
 
@@ -183,8 +211,14 @@ mod tests {
                 cfg.max_bytes_between_snapshots,
                 cfg.max_snapshot_interval,
                 cfg.snapshot_interval_records,
-            ) == (20 * 1024 * 1024, Duration::from_hours(1), 0)
+            ) == (mebibytes(20), hours(1), 0)
         );
+        // The quantities must carry the magnitudes the Kafka configs name, not
+        // just compare equal to the constants they were built from.
+        check!(cfg.max_bytes_between_snapshots.bytes_u64() == 20 * 1024 * 1024);
+        check!(cfg.max_snapshot_interval.millis_i64() == 3_600_000);
+        check!(cfg.election_timeout.millis_i64() == 1_000);
+        check!(cfg.heartbeat_interval.millis_i64() == 200);
     }
 
     #[test]
@@ -198,7 +232,11 @@ mod tests {
             "client_id: \"crabka-controller-test\"",
             "dialer: false",
             "handshake: false",
-            "max_bytes_between_snapshots: 20971520",
+            // Quantities render in the operator form, so 20 MiB reads as `20MiB`
+            // rather than as a bare byte count.
+            "max_bytes_between_snapshots: \"20MiB\"",
+            "election_timeout: \"1s\"",
+            "max_snapshot_interval: \"1h\"",
         ] {
             assert2::assert!(rendered.contains(needle));
         }

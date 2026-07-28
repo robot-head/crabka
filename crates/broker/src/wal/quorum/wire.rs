@@ -3,6 +3,7 @@
 use bytes::Bytes;
 use crabka_ids::PartitionIndex;
 use crabka_protocol::{Decode, Encode, owned::fetch_request::FetchRequest};
+use crabka_units::{ByteSize, convert::ByteSizeExt as _};
 
 const KRAFT_METADATA_TOPIC_ID: crabka_protocol::primitives::uuid::Uuid =
     crabka_protocol::primitives::uuid::Uuid([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
@@ -20,12 +21,14 @@ pub(crate) enum QuorumGroup {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// No `Eq`: `max_size` is a `ByteSize`, which stores `f64`. The derive was
+// unused — `WalFetchRequest` is only destructured, never compared or hashed.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct WalFetchRequest {
     pub(crate) group: QuorumGroup,
     pub(crate) from: crabka_raft::NodeId,
     pub(crate) fetch_offset: i64,
-    pub(crate) max_bytes: usize,
+    pub(crate) max_size: ByteSize,
 }
 
 impl QuorumGroup {
@@ -65,7 +68,7 @@ pub(crate) fn decode_fetch(body: &[u8]) -> Option<WalFetchRequest> {
         group,
         from: crabka_raft::NodeId(u64::try_from(request.replica_state.replica_id).ok()?),
         fetch_offset: partition.fetch_offset,
-        max_bytes: usize::try_from(request.max_bytes.max(0)).unwrap_or(usize::MAX),
+        max_size: ByteSize::from_bytes_i64(i64::from(request.max_bytes.max(0))),
     })
 }
 

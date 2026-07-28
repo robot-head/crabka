@@ -835,7 +835,7 @@ mod join_protocol_tests {
 }
 
 /// Default cap for rows retained by a blocking executor fallback.
-pub const BLOCKING_QUERY_MEMORY_BYTES: usize = 16 * 1024 * 1024;
+pub const BLOCKING_QUERY_MEMORY: crabka_units::ByteSize = crabka_units::mebibytes(16);
 
 /// Collect a cursor for a blocking operator while charging one central byte budget.
 /// # Errors
@@ -844,8 +844,9 @@ pub const BLOCKING_QUERY_MEMORY_BYTES: usize = 16 * 1024 * 1024;
 pub fn collect_cursor_bounded(
     scanner: &dyn RangeScanner,
     request: ScanRequest<'_>,
-    max_bytes: usize,
+    budget: crabka_units::ByteSize,
 ) -> Result<Vec<ScannedRow>, ExecError> {
+    let max_bytes = crabka_units::convert::ByteSizeExt::bytes_usize(budget);
     std::thread::scope(|scope| {
         scope
             .spawn(move || {
@@ -897,8 +898,9 @@ pub(crate) fn collect_partial_aggregates_bounded(
     scanner: &dyn RangeScanner,
     request: ScanRequest<'_>,
     specs: &[PartialAggregateSpec],
-    max_bytes: usize,
+    budget: crabka_units::ByteSize,
 ) -> Result<Vec<Vec<ScannedRow>>, ExecError> {
+    let max_bytes = crabka_units::convert::ByteSizeExt::bytes_usize(budget);
     if specs.is_empty() {
         return Err(ExecError::Unsupported(
             "partial aggregate streaming requires at least one aggregate".into(),
@@ -995,6 +997,14 @@ pub(crate) fn datum_row_bytes(row: &[crabka_pgtypes::Datum]) -> usize {
 
 fn scanned_row_bytes(row: &ScannedRow) -> usize {
     std::mem::size_of::<ScannedRow>().saturating_add(datum_row_bytes(&row.row))
+}
+
+/// Whether a running byte total has passed the central blocking-query memory
+/// budget ([`BLOCKING_QUERY_MEMORY`]). The operators accumulate raw `usize`
+/// totals so they can saturate rather than overflow, so the budget converts
+/// here rather than the totals.
+pub(crate) fn exceeds_query_memory(used: usize) -> bool {
+    used > crabka_units::convert::ByteSizeExt::bytes_usize(BLOCKING_QUERY_MEMORY)
 }
 
 pub(crate) fn memory_budget_exceeded() -> ExecError {
@@ -2055,6 +2065,7 @@ mod cursor_contract_tests {
     use crabka_pgkv::MemKv;
     use crabka_pgmvcc::Snapshot;
     use crabka_pgtypes::{ColumnType, Datum};
+    use crabka_units::bytes;
 
     use super::{
         MaterializedRangeCursor, PredicatePushdown, ProjectionPushdown, RangeCursor, RangeScanner,
@@ -2200,7 +2211,7 @@ mod cursor_contract_tests {
                 partial_aggregate: None,
                 top_k: None,
             },
-            64,
+            bytes(64),
         )
         .expect_err("row must be rejected before exceeding budget");
 
@@ -2227,11 +2238,17 @@ mod streaming_aggregate_tests {
     use crabka_pgkv::MemKv;
     use crabka_pgmvcc::Snapshot;
     use crabka_pgtypes::{ColumnType, Datum};
+    use crabka_units::{ByteSize, bytes, convert::ByteSizeExt as _};
 
     use super::{
         PartialAggregateSpec, PredicatePushdown, ProjectionPushdown, RangeScanner, RowInterval,
         ScanRequest, ScannedRow,
     };
+
+    /// A byte total measured off the fixture rows, as a budget quantity.
+    fn budget_of(total: usize) -> ByteSize {
+        ByteSize::from_bytes(u64::try_from(total).expect("budget fits u64"))
+    }
 
     struct FixedRowsScanner(Vec<ScannedRow>);
 
@@ -2302,7 +2319,7 @@ mod streaming_aggregate_tests {
             .sum::<usize>();
         // A budget the whole table exceeds but a single 1024-row page does not:
         // the streaming fold must succeed exactly where whole-table collection fails.
-        let budget = whole_table_bytes - 1;
+        let budget = budget_of(whole_table_bytes - 1);
         let scanner = FixedRowsScanner(rows);
         let (local, snapshot, table) = (MemKv::new(), snapshot(), table());
         let specs = vec![
@@ -2373,7 +2390,7 @@ mod streaming_aggregate_tests {
             &scanner,
             request(&local, &snapshot, &table),
             &specs,
-            64,
+            bytes(64),
         )
         .expect_err("one oversized page must fail closed");
 
@@ -2409,7 +2426,7 @@ mod streaming_aggregate_tests {
             request(&local, &snapshot, &table),
             &specs,
             // Above one page (and its per-page state), below two pages of groups.
-            page_bytes + page_bytes / 2,
+            budget_of(page_bytes + page_bytes / 2),
         )
         .expect_err("unbounded distinct group keys must fail closed");
 

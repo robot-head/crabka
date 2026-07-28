@@ -18,6 +18,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crabka_units::{
+    fmt::Human as _,
+    prelude::{ByteSize, ByteSizeExt as _},
+};
+
 use crate::{
     chain::{chain_hash, from_hex32},
     event::AuditEventClass,
@@ -32,6 +37,11 @@ fn io<E: std::fmt::Display>(e: E) -> AuditError {
 }
 
 /// Append-only durable spool file.
+///
+/// The byte cap and the running total are held as raw [`MaxSpoolBytes`] /
+/// [`SpoolBytes`] newtypes: both are accumulated and compared exactly, which a
+/// `f64`-backed [`ByteSize`] cannot promise. The quantity is the boundary type —
+/// [`Spool::open`] takes one and [`Spool::size`] hands one back.
 #[derive(Debug)]
 pub struct Spool {
     path: PathBuf,
@@ -46,12 +56,12 @@ impl Spool {
     #[tracing::instrument(
         level = "debug",
         skip_all,
-        fields(dir = %dir.display(), max_bytes, count = tracing::field::Empty, bytes = tracing::field::Empty),
+        fields(dir = %dir.display(), max_size = %max_size.human(), count = tracing::field::Empty, bytes = tracing::field::Empty),
         err
     )]
     /// # Errors
     /// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
-    pub fn open(dir: &Path, max_bytes: u64) -> Result<Self, AuditError> {
+    pub fn open(dir: &Path, max_size: ByteSize) -> Result<Self, AuditError> {
         std::fs::create_dir_all(dir).map_err(io)?;
         let path = dir.join(SPOOL_FILE);
         let file = OpenOptions::new()
@@ -64,7 +74,7 @@ impl Spool {
         let mut s = Self {
             path,
             file,
-            max_bytes: MaxSpoolBytes(max_bytes),
+            max_bytes: MaxSpoolBytes(max_size.bytes_u64()),
             bytes: SpoolBytes(0),
             count: RecordCount(0),
         };
@@ -96,12 +106,14 @@ impl Spool {
         self.count
     }
 
+    /// How much the spool currently holds.
     #[must_use]
-    pub fn bytes(&self) -> SpoolBytes {
-        self.bytes
+    pub fn size(&self) -> ByteSize {
+        ByteSize::from_bytes(self.bytes.0)
     }
 
-    /// Append a record. Returns `Ok(false)` if it would exceed `max_bytes`.
+    /// Append a record. Returns `Ok(false)` if it would exceed the configured
+    /// cap.
     #[tracing::instrument(
         level = "debug",
         skip_all,
@@ -319,6 +331,7 @@ fn take_bytes(b: &mut &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use assert2::check;
+    use crabka_units::prelude::{ByteSize, ByteSizeExt as _, mebibytes};
 
     use super::*;
     use crate::{
@@ -326,6 +339,9 @@ mod tests {
         event::AuditEventClass,
         sink::{AuditRecord, HEADER_PREV_HASH, HEADER_SEQ},
     };
+
+    /// Cap large enough that no test hits it by accident.
+    const ROOMY_CAP: ByteSize = mebibytes(1);
 
     fn chained_record(seq: u64, prev: &[u8; 32], value: &[u8]) -> AuditRecord {
         let mut r = AuditRecord {
@@ -340,7 +356,7 @@ mod tests {
     #[test]
     fn append_then_read_round_trips_records_with_headers() {
         let dir = tempfile::tempdir().unwrap();
-        let mut s = Spool::open(dir.path(), 1 << 20).unwrap();
+        let mut s = Spool::open(dir.path(), ROOMY_CAP).unwrap();
         check!(s.is_empty());
         let r0 = chained_record(0, &GENESIS_HEAD, b"{\"i\":0}");
         let r1 = chained_record(1, &chain_hash(&GENESIS_HEAD, 0, b"{\"i\":0}"), b"{\"i\":1}");
@@ -355,21 +371,21 @@ mod tests {
         // tiny cap: first record fits, second does not
         let r = chained_record(0, &GENESIS_HEAD, b"0123456789");
         let one = {
-            let mut s = Spool::open(dir.path(), 1 << 20).unwrap();
+            let mut s = Spool::open(dir.path(), ROOMY_CAP).unwrap();
             s.append(&r).unwrap();
-            s.bytes()
+            s.size()
         };
         let dir2 = tempfile::tempdir().unwrap();
-        let mut s = Spool::open(dir2.path(), one.0).unwrap(); // exactly one record fits
+        let mut s = Spool::open(dir2.path(), one).unwrap(); // exactly one record fits
         check!(s.append(&r).unwrap()); // accepted
-        check!(!s.append(&r).unwrap()); // rejected (would exceed max_bytes)
+        check!(!s.append(&r).unwrap()); // rejected (would exceed the cap)
         check!((s.count().0, s.read_all().unwrap().len()) == (1, 1)); // not corrupted
     }
 
     #[test]
     fn rewrite_keeps_only_remainder_and_truncate_clears() {
         let dir = tempfile::tempdir().unwrap();
-        let mut s = Spool::open(dir.path(), 1 << 20).unwrap();
+        let mut s = Spool::open(dir.path(), ROOMY_CAP).unwrap();
         let r0 = chained_record(0, &GENESIS_HEAD, b"a");
         let r1 = chained_record(1, &GENESIS_HEAD, b"b");
         let r2 = chained_record(2, &GENESIS_HEAD, b"c");
@@ -377,7 +393,7 @@ mod tests {
         s.append(&r1).unwrap();
         s.append(&r2).unwrap();
         s.rewrite(&[r1.clone(), r2.clone()]).unwrap(); // drop r0 (replayed)
-        check!(s.bytes() > 0); // `*=` mutant would leave bytes at 0
+        check!(s.size() > ByteSize::ZERO); // `*=` mutant would leave bytes at 0
         check!((s.count().0, s.read_all().unwrap()) == (2, vec![r1.clone(), r2.clone()]));
         s.truncate().unwrap();
         check!((s.is_empty(), s.read_all().unwrap().is_empty()) == (true, true));
@@ -388,24 +404,39 @@ mod tests {
         let probe = tempfile::tempdir().unwrap();
         let r = chained_record(0, &GENESIS_HEAD, b"payload");
         let one = {
-            let mut s = Spool::open(probe.path(), 1 << 20).unwrap();
+            let mut s = Spool::open(probe.path(), ROOMY_CAP).unwrap();
             s.append(&r).unwrap();
-            s.bytes()
+            s.size()
         };
         // Cap at exactly two records: the 2nd append fills to max and MUST be
         // accepted (bytes + frame == max, not >). The `+ -> *` mutant computes
         // bytes * frame, which exceeds max and would wrongly reject.
         let dir = tempfile::tempdir().unwrap();
-        let mut s = Spool::open(dir.path(), one.0 * 2).unwrap();
+        let mut s = Spool::open(dir.path(), one * 2.0).unwrap();
         check!(s.append(&r).unwrap());
         check!(s.append(&r).unwrap());
         check!(s.count() == 2);
     }
 
     #[test]
+    fn size_reports_the_bytes_actually_on_disk() {
+        // Anchors the `SpoolBytes` -> `ByteSize` accessor to the real file
+        // length, so a scale slip at that seam cannot hide behind a matching
+        // slip at the `open` seam.
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Spool::open(dir.path(), ROOMY_CAP).unwrap();
+        s.append(&chained_record(0, &GENESIS_HEAD, b"payload"))
+            .unwrap();
+        let on_disk = std::fs::metadata(dir.path().join(SPOOL_FILE))
+            .unwrap()
+            .len();
+        check!(s.size() == ByteSize::from_bytes(on_disk));
+    }
+
+    #[test]
     fn resume_point_is_from_last_chained_record_skipping_checkpoints() {
         let dir = tempfile::tempdir().unwrap();
-        let mut s = Spool::open(dir.path(), 1 << 20).unwrap();
+        let mut s = Spool::open(dir.path(), ROOMY_CAP).unwrap();
         let prev0 = GENESIS_HEAD;
         let r0 = chained_record(0, &prev0, b"v0");
         let head0 = chain_hash(&prev0, 0, b"v0");
@@ -432,7 +463,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let r0 = chained_record(0, &GENESIS_HEAD, b"good");
         {
-            let mut s = Spool::open(dir.path(), 1 << 20).unwrap();
+            let mut s = Spool::open(dir.path(), ROOMY_CAP).unwrap();
             s.append(&r0).unwrap();
         }
         // Simulate a crash mid-append: a length prefix claiming 100 bytes, only 3 follow.
@@ -445,7 +476,7 @@ mod tests {
             f.write_all(b"abc").unwrap();
         }
         // Reopen heals the torn tail; the good record survives and appends continue contiguously.
-        let mut s = Spool::open(dir.path(), 1 << 20).unwrap();
+        let mut s = Spool::open(dir.path(), ROOMY_CAP).unwrap();
         assert2::check!((s.count().0, s.read_all().unwrap()) == (1, vec![r0.clone()]));
         let r1 = chained_record(1, &GENESIS_HEAD, b"more");
         assert2::check!(s.append(&r1).unwrap());
@@ -457,10 +488,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let r0 = chained_record(0, &GENESIS_HEAD, b"x");
         {
-            let mut s = Spool::open(dir.path(), 1 << 20).unwrap();
+            let mut s = Spool::open(dir.path(), ROOMY_CAP).unwrap();
             s.append(&r0).unwrap();
         }
-        let s2 = Spool::open(dir.path(), 1 << 20).unwrap();
+        let s2 = Spool::open(dir.path(), ROOMY_CAP).unwrap();
         check!((s2.count().0, s2.read_all().unwrap()) == (1, vec![r0]));
     }
 }

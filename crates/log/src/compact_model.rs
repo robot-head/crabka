@@ -50,11 +50,9 @@
 //! and a `#[should_panic]` test proves the control-not-deduped assert fires
 //! against it (RED witness).
 
-use std::{
-    collections::{HashMap, HashSet},
-    time::Duration,
-};
+use std::collections::{HashMap, HashSet};
 
+use crabka_units::prelude::{Time, TimeExt as _, minutes};
 use stateright::{Checker, Model, Property};
 
 use super::{
@@ -78,7 +76,7 @@ use super::{
 const TARGET_STATE_COUNT: usize = 4_000_000;
 const MAX_UNIQUE_STATES: usize = 600_000;
 const MAX_DEPTH: usize = 40;
-const CHECK_TIMEOUT: Duration = Duration::from_mins(2);
+const CHECK_TIMEOUT: Time = minutes(2);
 
 /// `delete.retention.ms` used throughout the model. Small so `clock` can
 /// overtake stamped horizons within the bounded clock window (a horizon stamped
@@ -729,7 +727,7 @@ fn run(model: CompactModel, label: &str) {
         .checker()
         .target_max_depth(MAX_DEPTH)
         .target_state_count(TARGET_STATE_COUNT)
-        .timeout(CHECK_TIMEOUT)
+        .timeout(CHECK_TIMEOUT.to_std())
         .spawn_bfs()
         .join();
     eprintln!(

@@ -389,7 +389,7 @@ async fn compaction_dedupes_via_native_client() {
                     .partition_log_config_for_test("compacted", 0)
                     .is_some_and(|cfg| {
                         cfg.cleanup_policy == crabka_log::CleanupPolicy::Compact
-                            && cfg.segment_bytes == 256
+                            && cfg.segment_size == crabka_units::bytes(256)
                     })
             },
         )

@@ -4,7 +4,7 @@ use crabka_audit::{
     EVENT_CLASS_CHECKPOINT, HEADER_PREV_HASH, HEADER_SEQ,
     chain::{chain_hash, from_hex32},
 };
-use crabka_units::{ByteSize, convert::ByteSizeExt as _};
+use crabka_units::ByteSize;
 #[cfg(test)]
 use crabka_units::{bytes, kibibytes, mebibytes};
 
@@ -27,9 +27,7 @@ pub(crate) fn recover_from_partition_tail(
     }
     // Read a bounded tail window (audit records are small).
     let start = tail_window_start(leo, tail_window_offsets);
-    let out = partition
-        .read_log(start, tail_read_max.bytes_usize())
-        .ok()?;
+    let out = partition.read_log(start, tail_read_max).ok()?;
     let mut last: Option<(u64, [u8; 32])> = None;
     for batch in &out.batches {
         for rec in &batch.records {

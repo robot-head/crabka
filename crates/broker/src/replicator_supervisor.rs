@@ -1600,12 +1600,12 @@ mod tests {
                 .lock()
                 .expect("log lock")
                 .config_snapshot()
-                .retention_ms
-                == Some(std::time::Duration::from_mins(1))
+                .retention
+                == Some(crabka_units::minutes(1))
         })
         .await;
         let snap = part.log.lock().expect("log lock").config_snapshot();
-        assert!(snap.retention_ms == Some(std::time::Duration::from_mins(1)));
+        assert!(snap.retention == Some(crabka_units::minutes(1)));
     }
 
     #[tokio::test]
@@ -1669,12 +1669,12 @@ mod tests {
                 .lock()
                 .expect("log lock")
                 .config_snapshot()
-                .retention_ms
-                == LogConfig::default().retention_ms
+                .retention
+                == LogConfig::default().retention
         })
         .await;
         let snap = part.log.lock().expect("log lock").config_snapshot();
-        assert!(snap.retention_ms == LogConfig::default().retention_ms);
+        assert!(snap.retention == LogConfig::default().retention);
     }
 
     #[tokio::test]

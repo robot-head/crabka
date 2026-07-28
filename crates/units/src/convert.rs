@@ -342,8 +342,15 @@ pub trait FrequencyExt: Sized + Copy {
     /// A raw events-per-second rate.
     fn from_per_sec(rate: f64) -> Self;
 
+    /// A whole-events-per-second rate, as a counter-based limiter configures one.
+    fn from_per_sec_u64(rate: u64) -> Self;
+
     /// The rate in events per second.
     fn per_sec_f64(self) -> f64;
+
+    /// The rate as whole events per second, for a limiter that counts in
+    /// integers. Rounds to nearest; negatives and `NaN` become zero.
+    fn per_sec_u64(self) -> u64;
 
     /// The interval between events at this rate.
     ///
@@ -366,8 +373,16 @@ impl FrequencyExt for Frequency {
         }
     }
 
+    fn from_per_sec_u64(rate: u64) -> Self {
+        Self::from_per_sec(widen(rate))
+    }
+
     fn per_sec_f64(self) -> f64 {
         self.value
+    }
+
+    fn per_sec_u64(self) -> u64 {
+        round_u64(self.value)
     }
 
     fn period(self) -> Time {

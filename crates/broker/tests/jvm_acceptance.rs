@@ -6764,7 +6764,7 @@ async fn jvm_kafka_console_consumer_sees_compacted_topic_end_to_end() {
     loop {
         if let Some(cfg) = broker.partition_log_config_for_test(TOPIC, 0)
             && cfg.cleanup_policy == crabka_log::CleanupPolicy::Compact
-            && cfg.segment_bytes == 256
+            && cfg.segment_size == crabka_units::bytes(256)
         {
             break;
         }
@@ -7814,8 +7814,8 @@ async fn create_tiered_topic(broker: &crabka_broker::BrokerHandle, topic: &str) 
     loop {
         if let Some(cfg) = broker.partition_log_config_for_test(topic, 0)
             && cfg.remote_storage_enable
-            && cfg.segment_bytes == 2048
-            && cfg.local_retention_bytes == Some(1)
+            && cfg.segment_size == crabka_units::bytes(2048)
+            && cfg.local_retention_size == Some(crabka_units::bytes(1))
         {
             break;
         }
@@ -8936,10 +8936,14 @@ async fn tiered_storage_topic_rlmm_multi_broker_metadata_sharing() {
     let cfg_deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     loop {
         let b1_ok = b1.partition_log_config_for_test(TOPIC, 0).is_some_and(|c| {
-            c.remote_storage_enable && c.segment_bytes == 2048 && c.local_retention_bytes == Some(1)
+            c.remote_storage_enable
+                && c.segment_size == crabka_units::bytes(2048)
+                && c.local_retention_size == Some(crabka_units::bytes(1))
         });
         let b2_ok = b2.partition_log_config_for_test(TOPIC, 0).is_some_and(|c| {
-            c.remote_storage_enable && c.segment_bytes == 2048 && c.local_retention_bytes == Some(1)
+            c.remote_storage_enable
+                && c.segment_size == crabka_units::bytes(2048)
+                && c.local_retention_size == Some(crabka_units::bytes(1))
         });
         if b1_ok || b2_ok {
             break;

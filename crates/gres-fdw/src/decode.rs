@@ -2,18 +2,19 @@
 //! the registry cache, and materialize an Avro Value, JSON Value, or Protobuf
 //! `DynamicMessage`.
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc};
 
 use crabka_schema_serde::{SchemaCache, SchemaSerdeError};
+use crabka_units::{Time, convert::TimeExt as _, fmt::Human as _, millis, secs};
 use prost_reflect::prost_types::FileDescriptorSet;
 
 use crate::error::KafkaFdwError;
 
 /// Total time the cold-cache schema fetch is allowed to take before giving up.
-const SCHEMA_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+const SCHEMA_FETCH_TIMEOUT: Time = secs(10);
 /// Poll cadence while waiting for the background schema fetch to populate the
 /// cache.
-const SCHEMA_FETCH_POLL: Duration = Duration::from_millis(20);
+const SCHEMA_FETCH_POLL: Time = millis(20);
 
 /// Resolve a writer schema by id, awaiting the cache's background fetch.
 ///
@@ -27,17 +28,18 @@ async fn resolve_writer_schema(
     cache: &Arc<SchemaCache>,
     schema_id: u32,
 ) -> Result<crabka_schema_serde::cache::WriterSchema, KafkaFdwError> {
-    let deadline = tokio::time::Instant::now() + SCHEMA_FETCH_TIMEOUT;
+    let deadline = tokio::time::Instant::now() + SCHEMA_FETCH_TIMEOUT.to_std();
     loop {
         match cache.writer_schema_with_references(schema_id) {
             Ok(schema) => return Ok(schema),
             Err(SchemaSerdeError::WriterSchemaPending(_)) => {
                 if tokio::time::Instant::now() >= deadline {
                     return Err(KafkaFdwError::Other(format!(
-                        "schema registry: writer schema for id {schema_id} not fetched within {SCHEMA_FETCH_TIMEOUT:?}"
+                        "schema registry: writer schema for id {schema_id} not fetched within {}",
+                        SCHEMA_FETCH_TIMEOUT.human()
                     )));
                 }
-                tokio::time::sleep(SCHEMA_FETCH_POLL).await;
+                tokio::time::sleep(SCHEMA_FETCH_POLL.to_std()).await;
             }
             Err(e) => return Err(KafkaFdwError::Other(format!("schema registry: {e}"))),
         }

@@ -15,8 +15,13 @@ use std::time::Duration;
 use assert2::check;
 use crabka_metadata::{FeatureLevelRecord, MetadataRecord, NodeId, TopicRecord};
 use crabka_raft::{BootstrapMode, Controller, ControllerConfig};
+use crabka_units::prelude::{Time, millis};
 use tempfile::TempDir;
 use uuid::Uuid;
+
+/// Single-voter elections are instant; a short timeout keeps each boot well
+/// inside the 30-second leader deadline.
+const FAST_ELECTION_TIMEOUT: Time = millis(200);
 
 async fn wait_for_leader(controller: &crabka_raft::ControllerHandle) {
     let mut rx = controller.watch_leader();
@@ -34,7 +39,7 @@ async fn snapshot_then_restart_recovers_image() {
     // First boot: bootstrap a fresh single voter, commit a topic, then snapshot.
     {
         let mut cfg = ControllerConfig::for_tests(NodeId(1), dir.path().to_path_buf());
-        cfg.election_timeout = Duration::from_millis(200);
+        cfg.election_timeout = FAST_ELECTION_TIMEOUT;
         cfg.cluster_id = Some(cid);
         cfg.bootstrap_mode = BootstrapMode::Bootstrap;
         let controller = Controller::start(cfg).await.expect("first boot start");
@@ -91,7 +96,7 @@ async fn snapshot_then_restart_recovers_image() {
     // image from the on-disk checkpoint + log.
     {
         let mut cfg = ControllerConfig::for_tests(NodeId(1), dir.path().to_path_buf());
-        cfg.election_timeout = Duration::from_millis(200);
+        cfg.election_timeout = FAST_ELECTION_TIMEOUT;
         cfg.cluster_id = Some(cid);
         cfg.bootstrap_mode = BootstrapMode::Rejoin;
         let controller = Controller::start(cfg).await.expect("rejoin start");

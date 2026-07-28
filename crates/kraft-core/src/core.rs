@@ -2,6 +2,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crabka_units::prelude::{Time, TimeExt as _};
+
 use crate::{
     action::{Action, TimerKind},
     event::{Event, LogEnd},
@@ -31,7 +33,13 @@ pub struct QuorumStateMachine {
     me: NodeId,
     state: QuorumState,
     role: Role,
-    /// Base election timeout in ms; callers vary it per node for liveness.
+    /// Base election timeout, in whole milliseconds.
+    ///
+    /// Held raw rather than as a [`Time`]: quantities store `f64`, so a field of
+    /// one would cost this struct its `Eq`/`Hash` derives, which the
+    /// `stateright` model checker needs of every state it explores. Whole
+    /// milliseconds is also the domain the verified jitter kernel is defined
+    /// over. [`QuorumStateMachine::new`] converts at that boundary.
     election_timeout_ms: u64,
 }
 
@@ -46,8 +54,12 @@ struct VoteRequest {
 }
 
 impl QuorumStateMachine {
+    /// `election_timeout` is the base extent an election timer is armed for,
+    /// before jitter; callers vary it per node for liveness. It is rounded to
+    /// whole milliseconds here — the domain the verified jitter kernel and the
+    /// [`SimInstant`] clock are both defined over.
     #[must_use]
-    pub fn new(me: NodeId, state: QuorumState, election_timeout_ms: u64) -> Self {
+    pub fn new(me: NodeId, state: QuorumState, election_timeout: Time) -> Self {
         let observer = !state.voters.contains(me);
         let role = if observer {
             Role::Observer {
@@ -61,7 +73,7 @@ impl QuorumStateMachine {
             me,
             state,
             role,
-            election_timeout_ms,
+            election_timeout_ms: u64::try_from(election_timeout.millis_i64()).unwrap_or(0),
         }
     }
 
@@ -106,6 +118,10 @@ impl QuorumStateMachine {
     /// closely-synchronized voters (e.g. exactly 2 of a 3-voter set) splits the
     /// vote every round — both become candidates, self-vote, and neither reaches
     /// majority — livelocking elections until natural skew breaks the tie.
+    ///
+    /// The whole sum stays in integer milliseconds: the jitter is a verified
+    /// integer kernel, and [`SimInstant`] is a coordinate on a millisecond
+    /// timeline rather than an extent.
     fn election_deadline(&self, now: SimInstant) -> SimInstant {
         now.saturating_add_ms(
             self.election_timeout_ms
@@ -719,6 +735,7 @@ impl QuorumStateMachine {
 #[cfg(test)]
 mod tests {
     use assert2::{assert, check};
+    use crabka_units::prelude::{millis, secs};
 
     use super::*;
     use crate::{
@@ -779,9 +796,12 @@ mod tests {
         QuorumStateMachine::new(
             me,
             QuorumState::bootstrap(uuid::Uuid::nil(), voters(ids)),
-            1000,
+            TEST_ELECTION_TIMEOUT,
         )
     }
+
+    /// The base election timeout every test machine is built with.
+    const TEST_ELECTION_TIMEOUT: Time = secs(1);
 
     #[test]
     fn grants_standard_vote_when_log_up_to_date_and_not_voted() {
@@ -1669,6 +1689,41 @@ mod tests {
                 epoch: 1
             })
         )));
+    }
+
+    #[test]
+    fn election_deadline_is_the_configured_extent_plus_integer_jitter() {
+        // The constructor takes an extent, but the armed deadline must land on
+        // exactly `now + base_ms + jitter_ms` — the same integer timeline the
+        // verified jitter kernel and `SimInstant` are defined over. A rounding
+        // shift here would change which node wins a deterministic election.
+        for (name, timeout, base_ms) in [
+            ("whole seconds", secs(1), 1000u64),
+            ("sub-second extent", millis(250), 250),
+        ] {
+            let mut m = QuorumStateMachine::new(
+                NodeId(1),
+                QuorumState::bootstrap(
+                    uuid::Uuid::nil(),
+                    voters(&[NodeId(1), NodeId(2), NodeId(3)]),
+                ),
+                timeout,
+            );
+            let log = FakeLog {
+                end: 5,
+                last_epoch: 1,
+            };
+            let actions = m.on_event(Event::ElectionTimeout, &log, SimInstant(2000));
+            let armed = actions.iter().find_map(|a| match a {
+                Action::ResetTimer {
+                    kind: TimerKind::Election,
+                    deadline,
+                } => Some(*deadline),
+                _ => None,
+            });
+            let expected = SimInstant(2000 + base_ms + election_jitter_ms(NodeId(1), 0, base_ms));
+            check!(armed == Some(expected), "case {name}");
+        }
     }
 
     #[test]

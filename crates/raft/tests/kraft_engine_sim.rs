@@ -28,7 +28,12 @@ use crabka_raft::{
         transport::{Inbound, api_key},
     },
 };
+use crabka_units::prelude::{Time, millis};
 use tokio::sync::oneshot;
+
+/// Per-node election timeouts, staggered so one node reliably wins the first
+/// round rather than splitting the vote.
+const STAGGERED_TIMEOUTS: [Time; 3] = [millis(150), millis(300), millis(450)];
 
 /// Shared registry of in-process engines, keyed by node id. Each engine holds a
 /// clone of one of these (via [`SimNet`]) so its outbound peer sends can reach
@@ -118,10 +123,10 @@ fn build_engine(
     me: NodeId,
     ids: &[NodeId],
     cluster_id: uuid::Uuid,
-    election_timeout_ms: u64,
+    election_timeout: Time,
     net: &SimNet,
 ) -> (KraftController, tempfile::TempDir) {
-    build_engine_with_snapshot_interval(me, ids, cluster_id, election_timeout_ms, net, 0)
+    build_engine_with_snapshot_interval(me, ids, cluster_id, election_timeout, net, 0)
 }
 
 /// Like [`build_engine`] but with a caller-chosen `snapshot_interval_records`
@@ -131,7 +136,7 @@ fn build_engine_with_snapshot_interval(
     me: NodeId,
     ids: &[NodeId],
     cluster_id: uuid::Uuid,
-    election_timeout_ms: u64,
+    election_timeout: Time,
     net: &SimNet,
     snapshot_interval_records: u64,
 ) -> (KraftController, tempfile::TempDir) {
@@ -142,7 +147,7 @@ fn build_engine_with_snapshot_interval(
             me,
             cluster_id,
             initial_state: QuorumState::bootstrap(cluster_id, voter_set(ids)),
-            election_timeout_ms,
+            election_timeout,
             peers: Arc::new(net.clone()),
             snapshot_interval_records,
         },
@@ -218,7 +223,7 @@ async fn three_engines_elect_one_leader() {
     let cid = uuid::Uuid::from_u128(100);
 
     // Staggered election timeouts so one node reliably wins the first round.
-    let timeouts = [150u64, 300, 450];
+    let timeouts = STAGGERED_TIMEOUTS;
     let mut dirs = Vec::new();
     for (i, &id) in ids.iter().enumerate() {
         let (ctrl, dir) = build_engine(id, &ids, cid, timeouts[i], &net);
@@ -263,7 +268,7 @@ async fn bare_majority_two_of_three_elects_with_uniform_timeouts() {
     // majority of the 3-voter set.
     let mut dirs = Vec::new();
     for &id in &[NodeId(1), NodeId(2)] {
-        let (ctrl, dir) = build_engine(id, &ids, cid, 200, &net);
+        let (ctrl, dir) = build_engine(id, &ids, cid, millis(200), &net);
         net.register(id, ctrl);
         dirs.push(dir);
     }
@@ -288,7 +293,7 @@ async fn follower_submit_change_propagates() {
     let ids = [NodeId(1), NodeId(2), NodeId(3)];
     let cid = uuid::Uuid::from_u128(200);
 
-    let timeouts = [150u64, 300, 450];
+    let timeouts = STAGGERED_TIMEOUTS;
     let mut dirs = Vec::new();
     for (i, &id) in ids.iter().enumerate() {
         let (ctrl, dir) = build_engine(id, &ids, cid, timeouts[i], &net);
@@ -345,7 +350,7 @@ async fn leader_failure_reelects() {
     let ids = [NodeId(1), NodeId(2), NodeId(3)];
     let cid = uuid::Uuid::from_u128(300);
 
-    let timeouts = [150u64, 300, 450];
+    let timeouts = STAGGERED_TIMEOUTS;
     let mut dirs = Vec::new();
     for (i, &id) in ids.iter().enumerate() {
         let (ctrl, dir) = build_engine(id, &ids, cid, timeouts[i], &net);
@@ -398,7 +403,7 @@ async fn restart_recovers_image() {
     let ids = [NodeId(1), NodeId(2), NodeId(3)];
     let cid = uuid::Uuid::from_u128(400);
 
-    let timeouts = [150u64, 300, 450];
+    let timeouts = STAGGERED_TIMEOUTS;
     // Keep per-node data dirs so we can reopen one.
     let mut dirs: HashMap<NodeId, tempfile::TempDir> = HashMap::new();
     for (i, &id) in ids.iter().enumerate() {
@@ -488,7 +493,7 @@ async fn lagging_follower_catches_up_via_snapshot() {
     // Start only TWO voters (leader + one follower): that is a majority of three,
     // so submits commit while the third node stays down. Staggered timeouts so
     // node 1 reliably wins. Node 3 is the lagging node, started later.
-    let timeouts = [150u64, 300, 450];
+    let timeouts = STAGGERED_TIMEOUTS;
     let mut dirs: HashMap<NodeId, tempfile::TempDir> = HashMap::new();
     for &id in &[NodeId(1), NodeId(2)] {
         let idx = usize::try_from(id.0 - 1).unwrap();

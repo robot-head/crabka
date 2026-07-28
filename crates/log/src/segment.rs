@@ -13,6 +13,7 @@ use crabka_ids::{LeaderEpoch, Offset};
 use crabka_protocol::records::{
     HEADER_LEN, RecordBatch, RecordBatchHeader, patch_base_offset_and_leader_epoch,
 };
+use crabka_units::prelude::{ByteSize, ByteSizeExt, bytes, kibibytes, mebibytes};
 use tracing::instrument;
 use zerocopy::FromBytes;
 
@@ -21,6 +22,19 @@ use crate::{
     index::{OffsetIndex, TimeIndex},
     name,
 };
+
+/// Upper bound on the buffer a single read pre-allocates.
+///
+/// A fetch may ask for far more than the segment holds; capping the initial
+/// allocation keeps an optimistic `max_bytes` from reserving gigabytes before
+/// the first `pread` reports how much is actually there.
+const READ_BUF_CAP: ByteSize = mebibytes(4);
+
+/// One window of the timestamp scan in [`Segment::scan_from_floor`].
+///
+/// Roughly a default `index.interval.bytes`' worth of `.log`, so a floor
+/// lookup typically lands a match in the first read.
+const SCAN_WINDOW: ByteSize = kibibytes(64);
 
 /// Positioned read: fill `buf` from `offset` in `file` without moving the
 /// file's cursor, looping over short reads until `buf` is full or EOF.
@@ -344,10 +358,14 @@ impl Segment {
         self.last_offset
     }
 
-    /// Current `.log` file size in bytes.
+    /// Current `.log` file size.
+    ///
+    /// The field itself stays a raw `u64` — it is a file position, used
+    /// directly as a `pread`/`seek` argument — and converts here, where the
+    /// value becomes a magnitude the roll and retention policies compare.
     #[must_use]
-    pub fn size_bytes(&self) -> u64 {
-        self.log_size
+    pub fn size(&self) -> ByteSize {
+        ByteSize::from_bytes(self.log_size)
     }
 
     /// Highest timestamp observed across all batches in this segment.
@@ -404,11 +422,7 @@ impl Segment {
         floor_offset: Offset,
         pred: impl Fn(i64) -> bool,
     ) -> Option<(Offset, i64)> {
-        // One window roughly covers a default index interval's worth of
-        // log bytes, so a floor lookup typically lands a match in the
-        // first read.
-        const SCAN_WINDOW_BYTES: usize = 64 * 1024;
-        self.scan_from_floor_windowed(floor_offset, SCAN_WINDOW_BYTES, pred)
+        self.scan_from_floor_windowed(floor_offset, SCAN_WINDOW, pred)
     }
 
     /// Window-size-parameterized core of [`Segment::scan_from_floor`].
@@ -425,11 +439,11 @@ impl Segment {
     fn scan_from_floor_windowed(
         &self,
         floor_offset: Offset,
-        window_bytes: usize,
+        window_size: ByteSize,
         pred: impl Fn(i64) -> bool,
     ) -> Option<(Offset, i64)> {
         let mut cursor = floor_offset;
-        let mut window = window_bytes.max(1);
+        let mut window = window_size.max(bytes(1));
         loop {
             if cursor > self.last_offset {
                 return None;
@@ -439,7 +453,7 @@ impl Segment {
                 // The batch at `cursor` is larger than the window, so it
                 // could not be fully decoded. Grow the window and retry
                 // the same cursor; bounded by the largest batch size.
-                window = window.saturating_mul(2);
+                window *= 2.0;
                 continue;
             }
             for batch in &batches {
@@ -477,7 +491,7 @@ impl Segment {
     )]
     /// # Errors
     /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
-    pub fn read(&self, offset: Offset, max_bytes: usize) -> Result<Vec<RecordBatch>, LogError> {
+    pub fn read(&self, offset: Offset, max_size: ByteSize) -> Result<Vec<RecordBatch>, LogError> {
         if offset > self.last_offset {
             return Ok(vec![]);
         }
@@ -485,7 +499,10 @@ impl Segment {
             .map_err(|_| LogError::BadSegmentName("target offset out of range".into()))?;
         let start_pos = u64::from(self.offset_index.lookup(target_rel));
 
-        let initial_cap = max_bytes.min(4 * 1024 * 1024);
+        // Below this line the budget is a buffer length and a file-read
+        // count, so it crosses back to `usize` once, here.
+        let max_bytes = max_size.bytes_usize();
+        let initial_cap = max_size.min(READ_BUF_CAP).bytes_usize();
         let mut buf: Vec<u8> = Vec::with_capacity(initial_cap);
         self.read_log_range(start_pos, &mut buf, max_bytes)?;
 
@@ -530,7 +547,7 @@ impl Segment {
         &self,
         fetch_offset: Offset,
         limit_offset: Offset,
-        max_bytes: usize,
+        max_size: ByteSize,
     ) -> Result<RawSegmentRead, LogError> {
         if fetch_offset > self.last_offset || fetch_offset >= limit_offset {
             return Ok(RawSegmentRead::empty());
@@ -539,8 +556,11 @@ impl Segment {
             .map_err(|_| LogError::Corrupt("read_raw target offset out of range".into()))?;
         let start_pos = u64::from(self.offset_index.lookup(target_rel));
 
+        // Below this line the budget indexes into a byte buffer, so it
+        // crosses back to `usize` once, here.
+        let max_bytes = max_size.bytes_usize();
         let first_read = max_bytes.max(HEADER_LEN);
-        let mut buf: Vec<u8> = Vec::with_capacity(first_read.min(4 * 1024 * 1024));
+        let mut buf: Vec<u8> = Vec::with_capacity(first_read.min(READ_BUF_CAP.bytes_usize()));
         self.read_log_range(start_pos, &mut buf, first_read)?;
 
         let mut pos = 0usize;
@@ -636,7 +656,7 @@ impl Segment {
         &self,
         fetch_offset: Offset,
         limit_offset: Offset,
-        max_bytes: usize,
+        max_size: ByteSize,
     ) -> Result<RawSegmentDesc, LogError> {
         if fetch_offset > self.last_offset || fetch_offset >= limit_offset {
             return Ok(RawSegmentDesc::empty());
@@ -654,6 +674,10 @@ impl Segment {
         // then re-read in full if it's complete on disk). We reproduce that with
         // a `window` instead of an actual payload read — the scan stays
         // header-only.
+        //
+        // The budget crosses back to a raw byte count here: everything below
+        // is a file position or a region length.
+        let max_bytes = max_size.bytes_usize();
         let first_read = max_bytes.max(HEADER_LEN) as u64;
         let available = self.log_size.saturating_sub(start_pos);
         let window = first_read.min(available); // == read_raw's buf.len()
@@ -767,7 +791,7 @@ impl Segment {
     /// Side effects:
     /// - Updates `log_size`, `max_timestamp`, `last_offset`.
     /// - Adds sparse index entries when bytes-since-last-entry exceeds
-    ///   `index_interval_bytes` (or for the first batch).
+    ///   `index_interval` (or for the first batch).
     #[instrument(
         level = "debug",
         skip(self, batch),
@@ -784,7 +808,7 @@ impl Segment {
     pub fn append(
         &mut self,
         batch: &RecordBatch,
-        index_interval_bytes: u32,
+        index_interval: ByteSize,
     ) -> Result<u64, LogError> {
         if self.sealed {
             return Err(LogError::Io(std::io::Error::other("segment is sealed")));
@@ -809,7 +833,7 @@ impl Segment {
         let should_index = match self.offset_index.last_entry() {
             None => true,
             Some((_, last_pos)) => {
-                position.saturating_sub(u64::from(last_pos)) >= u64::from(index_interval_bytes)
+                position.saturating_sub(u64::from(last_pos)) >= index_interval.bytes_u64()
             }
         };
         if should_index {
@@ -869,7 +893,7 @@ impl Segment {
         last_offset_delta: i32,
         max_timestamp: i64,
         leader_epoch: LeaderEpoch,
-        index_interval_bytes: u32,
+        index_interval: ByteSize,
     ) -> Result<u64, LogError> {
         if self.sealed {
             return Err(LogError::Io(std::io::Error::other("segment is sealed")));
@@ -908,7 +932,7 @@ impl Segment {
         let should_index = match self.offset_index.last_entry() {
             None => true,
             Some((_, last_pos)) => {
-                position.saturating_sub(u64::from(last_pos)) >= u64::from(index_interval_bytes)
+                position.saturating_sub(u64::from(last_pos)) >= index_interval.bytes_u64()
             }
         };
         if should_index {
@@ -1037,9 +1061,17 @@ mod tests {
     use bytes::Bytes;
     use crabka_ids::Offset;
     use crabka_protocol::records::{Record, RecordBatch};
+    use crabka_units::prelude::gibibytes;
     use tempfile::tempdir;
 
     use super::*;
+
+    /// Index every batch: no batch is ever `0` bytes past the last entry.
+    const DENSE_INDEX: ByteSize = ByteSize::ZERO;
+
+    /// A read budget larger than anything these tests write, so the byte
+    /// budget never clips the result.
+    const NO_LIMIT: ByteSize = gibibytes(4);
 
     fn sample_batch(base_offset: i64, n: i32, ts_base: i64) -> RecordBatch {
         let mut b = RecordBatch {
@@ -1066,8 +1098,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut seg = Segment::create(dir.path(), Offset(0)).unwrap();
         // Two batches: offsets 0..=2 ts 100..=102, offsets 3..=4 ts 200..=201.
-        seg.append(&sample_batch(0, 3, 100), 0).unwrap();
-        seg.append(&sample_batch(3, 2, 200), 0).unwrap();
+        seg.append(&sample_batch(0, 3, 100), DENSE_INDEX).unwrap();
+        seg.append(&sample_batch(3, 2, 200), DENSE_INDEX).unwrap();
         // sample_batch sets per-record timestamp_delta = i, base_timestamp = ts_base.
         // Batch 1 records: (off0,ts100),(off1,ts101),(off2,ts102).
         // Batch 2 records: (off3,ts200),(off4,ts201).
@@ -1105,7 +1137,7 @@ mod tests {
                 value: Some(Bytes::from(format!("v{off}"))),
                 ..Default::default()
             });
-            seg.append(&b, 0).unwrap();
+            seg.append(&b, DENSE_INDEX).unwrap();
         }
         // A window of 1 byte forces one batch per read (anti-stall rule).
         // Target ts is the very last record's, so the loop must advance
@@ -1120,7 +1152,7 @@ mod tests {
             ("no matching record", 10_001, None),
         ] {
             assert2::assert!(
-                seg.scan_from_floor_windowed(Offset(0), 1, |ts| ts >= threshold) == expected
+                seg.scan_from_floor_windowed(Offset(0), bytes(1), |ts| ts >= threshold) == expected
             );
         }
         drop(dir);
@@ -1130,7 +1162,7 @@ mod tests {
     fn scan_returns_absolute_offset_of_matching_record() {
         // A full-size window keeps the match in the first read so the
         // cursor-advance path isn't involved.
-        const WINDOW: usize = 64 * 1024;
+        const WINDOW: ByteSize = kibibytes(64);
         let dir = tempdir().unwrap();
         let mut seg = Segment::create(dir.path(), Offset(0)).unwrap();
         // A leading single-record batch at offset 0, then a 3-record batch
@@ -1139,8 +1171,8 @@ mod tests {
         // `base_offset + offset_delta = 1 + 2 = 3` — a value that only a
         // correct `+` reproduces (`1 - 2` or `1 * 2` both differ), so this
         // pins the returned offset arithmetic.
-        seg.append(&sample_batch(0, 1, 100), 0).unwrap();
-        seg.append(&sample_batch(1, 3, 200), 0).unwrap();
+        seg.append(&sample_batch(0, 1, 100), DENSE_INDEX).unwrap();
+        seg.append(&sample_batch(1, 3, 200), DENSE_INDEX).unwrap();
         let got = seg.scan_from_floor_windowed(Offset(0), WINDOW, |ts| ts >= 202);
         assert2::assert!(got == Some((Offset(3), 202)));
         drop(dir);
@@ -1151,9 +1183,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut seg = Segment::create(dir.path(), Offset(0)).unwrap();
         // Batch records ts: 100,101,102 (max in batch = 102 at offset 2).
-        seg.append(&sample_batch(0, 3, 100), 0).unwrap();
+        seg.append(&sample_batch(0, 3, 100), DENSE_INDEX).unwrap();
         // Second batch: offsets 3,4 ts 200,201 — segment max becomes 201 @4.
-        seg.append(&sample_batch(3, 2, 200), 0).unwrap();
+        seg.append(&sample_batch(3, 2, 200), DENSE_INDEX).unwrap();
         assert2::assert!(seg.offset_of_max_timestamp() == Some((Offset(4), 201)));
 
         // Empty segment → None.
@@ -1184,7 +1216,7 @@ mod tests {
                 ..Default::default()
             });
         }
-        seg.append(&b, 0).unwrap();
+        seg.append(&b, DENSE_INDEX).unwrap();
         assert2::assert!(seg.offset_of_max_timestamp() == Some((Offset(0), 500)));
         drop(dir);
     }
@@ -1195,9 +1227,9 @@ mod tests {
         let mut seg = Segment::create(dir.path(), Offset(0)).unwrap();
         let b1 = sample_batch(0, 3, 1_000_000);
         let b2 = sample_batch(3, 2, 2_000_000);
-        seg.append(&b1, 4096).unwrap();
-        seg.append(&b2, 4096).unwrap();
-        let read = seg.read(Offset(0), usize::MAX).unwrap();
+        seg.append(&b1, kibibytes(4)).unwrap();
+        seg.append(&b2, kibibytes(4)).unwrap();
+        let read = seg.read(Offset(0), NO_LIMIT).unwrap();
         assert2::assert!(seg.last_offset() == Offset(4));
         assert2::assert!(read == vec![b1, b2]);
     }
@@ -1207,14 +1239,14 @@ mod tests {
         let dir = tempdir().unwrap();
         {
             let mut seg = Segment::create(dir.path(), Offset(0)).unwrap();
-            seg.append(&sample_batch(0, 1, 100), 0).unwrap();
-            seg.append(&sample_batch(1, 1, 200), 0).unwrap();
+            seg.append(&sample_batch(0, 1, 100), DENSE_INDEX).unwrap();
+            seg.append(&sample_batch(1, 1, 200), DENSE_INDEX).unwrap();
         }
 
         let mut seg = Segment::open_active(dir.path(), Offset(0), true).unwrap();
-        let position = seg.append(&sample_batch(2, 1, 300), 0).unwrap();
+        let position = seg.append(&sample_batch(2, 1, 300), DENSE_INDEX).unwrap();
 
-        let read = seg.read(Offset(0), usize::MAX).unwrap();
+        let read = seg.read(Offset(0), NO_LIMIT).unwrap();
         assert2::assert!(position > 0);
         assert2::assert!(seg.last_offset() == Offset(2));
         assert2::assert!(
@@ -1236,10 +1268,10 @@ mod tests {
         let dir = tempdir().unwrap();
         let valid_size = {
             let mut seg = Segment::create(dir.path(), Offset(0)).unwrap();
-            seg.append(&sample_batch(0, 3, 100), 0).unwrap();
-            seg.append(&sample_batch(3, 2, 200), 0).unwrap();
+            seg.append(&sample_batch(0, 3, 100), DENSE_INDEX).unwrap();
+            seg.append(&sample_batch(3, 2, 200), DENSE_INDEX).unwrap();
             seg.flush().unwrap();
-            seg.size_bytes()
+            seg.size()
         };
 
         // Append 16 bytes of garbage (an undecodable partial batch tail).
@@ -1252,7 +1284,7 @@ mod tests {
         // Reopen with validation: the tail scan must clip the garbage.
         let seg = Segment::open_active(dir.path(), Offset(0), true).unwrap();
         assert2::assert!(seg.last_offset() == Offset(4));
-        assert2::assert!(seg.size_bytes() == valid_size);
+        assert2::assert!(seg.size() == valid_size);
     }
 
     // `Segment::read` maps the absolute fetch offset to a relative index key
@@ -1266,10 +1298,10 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut seg = Segment::create(dir.path(), Offset(100)).unwrap();
         // Dense index (interval 0 → every batch indexed).
-        seg.append(&sample_batch(100, 3, 100), 0).unwrap(); // offsets 100..=102
-        seg.append(&sample_batch(103, 2, 200), 0).unwrap(); // offsets 103..=104
-        seg.append(&sample_batch(105, 1, 300), 0).unwrap(); // offset 105
-        let read = seg.read(Offset(103), usize::MAX).unwrap();
+        seg.append(&sample_batch(100, 3, 100), DENSE_INDEX).unwrap(); // offsets 100..=102
+        seg.append(&sample_batch(103, 2, 200), DENSE_INDEX).unwrap(); // offsets 103..=104
+        seg.append(&sample_batch(105, 1, 300), DENSE_INDEX).unwrap(); // offset 105
+        let read = seg.read(Offset(103), NO_LIMIT).unwrap();
         assert2::assert!(seg.last_offset() == Offset(105));
         assert2::assert!(read == vec![sample_batch(103, 2, 200), sample_batch(105, 1, 300)]);
     }
@@ -1283,11 +1315,11 @@ mod tests {
     fn read_raw_uses_relative_offset_for_index_lookup() {
         let dir = tempdir().unwrap();
         let mut seg = Segment::create(dir.path(), Offset(100)).unwrap();
-        seg.append(&sample_batch(100, 3, 100), 0).unwrap(); // offsets 100..=102
-        seg.append(&sample_batch(103, 2, 200), 0).unwrap(); // offsets 103..=104
-        seg.append(&sample_batch(105, 1, 300), 0).unwrap(); // offset 105
+        seg.append(&sample_batch(100, 3, 100), DENSE_INDEX).unwrap(); // offsets 100..=102
+        seg.append(&sample_batch(103, 2, 200), DENSE_INDEX).unwrap(); // offsets 103..=104
+        seg.append(&sample_batch(105, 1, 300), DENSE_INDEX).unwrap(); // offset 105
 
-        let r = seg.read_raw(Offset(103), Offset(1000), usize::MAX).unwrap();
+        let r = seg.read_raw(Offset(103), Offset(1000), NO_LIMIT).unwrap();
         assert2::assert!(!r.is_empty());
         assert2::assert!(r.start_offset == Offset(103));
     }
@@ -1301,14 +1333,14 @@ mod tests {
     fn read_consumed_bytes_gates_max_bytes_budget() {
         let dir = tempdir().unwrap();
         let mut seg = Segment::create(dir.path(), Offset(0)).unwrap();
-        seg.append(&sample_batch(0, 1, 100), 0).unwrap();
-        seg.append(&sample_batch(1, 1, 200), 0).unwrap();
-        seg.append(&sample_batch(2, 1, 300), 0).unwrap();
+        seg.append(&sample_batch(0, 1, 100), DENSE_INDEX).unwrap();
+        seg.append(&sample_batch(1, 1, 200), DENSE_INDEX).unwrap();
+        seg.append(&sample_batch(2, 1, 300), DENSE_INDEX).unwrap();
         // Exactly the whole segment: correct consumed accounting fits all three
         // batches; inflated accounting overshoots after the first.
-        let max_bytes = usize::try_from(seg.size_bytes()).unwrap();
+        let max_size = seg.size();
 
-        let read = seg.read(Offset(0), max_bytes).unwrap();
+        let read = seg.read(Offset(0), max_size).unwrap();
         assert2::assert!(
             read == vec![
                 sample_batch(0, 1, 100),
@@ -1322,14 +1354,14 @@ mod tests {
     fn append_after_truncate_writes_at_new_eof() {
         let dir = tempdir().unwrap();
         let mut seg = Segment::create(dir.path(), Offset(0)).unwrap();
-        seg.append(&sample_batch(0, 1, 100), 0).unwrap();
-        let expected_position = seg.size_bytes();
-        seg.append(&sample_batch(1, 1, 200), 0).unwrap();
+        seg.append(&sample_batch(0, 1, 100), DENSE_INDEX).unwrap();
+        let expected_position = seg.size().bytes_u64();
+        seg.append(&sample_batch(1, 1, 200), DENSE_INDEX).unwrap();
 
         seg.truncate_to_relative(1).unwrap();
-        let position = seg.append(&sample_batch(1, 1, 300), 0).unwrap();
+        let position = seg.append(&sample_batch(1, 1, 300), DENSE_INDEX).unwrap();
 
-        let read = seg.read(Offset(0), usize::MAX).unwrap();
+        let read = seg.read(Offset(0), NO_LIMIT).unwrap();
         assert2::assert!(position == expected_position);
         assert2::assert!(seg.last_offset() == Offset(1));
         assert2::assert!(read == vec![sample_batch(0, 1, 100), sample_batch(1, 1, 300)]);
@@ -1346,13 +1378,13 @@ mod tests {
     fn truncate_to_relative_uses_batch_last_offset() {
         let dir = tempdir().unwrap();
         let mut seg = Segment::create(dir.path(), Offset(0)).unwrap();
-        seg.append(&sample_batch(0, 3, 100), 0).unwrap(); // offsets 0..=2
-        seg.append(&sample_batch(3, 3, 200), 0).unwrap(); // offsets 3..=5
+        seg.append(&sample_batch(0, 3, 100), DENSE_INDEX).unwrap(); // offsets 0..=2
+        seg.append(&sample_batch(3, 3, 200), DENSE_INDEX).unwrap(); // offsets 3..=5
         assert2::assert!(seg.last_offset() == 5);
 
         // target_abs = base(0) + rel(3) = 3. Drop batches with last >= 3.
         seg.truncate_to_relative(3).unwrap();
-        let read = seg.read(Offset(0), usize::MAX).unwrap();
+        let read = seg.read(Offset(0), NO_LIMIT).unwrap();
         assert2::assert!(seg.last_offset() == Offset(2));
         assert2::assert!(read == vec![sample_batch(0, 3, 100)]);
     }
@@ -1361,9 +1393,11 @@ mod tests {
     fn read_at_higher_offset_skips_earlier_batches() {
         let dir = tempdir().unwrap();
         let mut seg = Segment::create(dir.path(), Offset(0)).unwrap();
-        seg.append(&sample_batch(0, 3, 1_000_000), 4096).unwrap();
-        seg.append(&sample_batch(3, 2, 2_000_000), 4096).unwrap();
-        let read = seg.read(Offset(4), usize::MAX).unwrap();
+        seg.append(&sample_batch(0, 3, 1_000_000), kibibytes(4))
+            .unwrap();
+        seg.append(&sample_batch(3, 2, 2_000_000), kibibytes(4))
+            .unwrap();
+        let read = seg.read(Offset(4), NO_LIMIT).unwrap();
         // Offset 4 falls inside the second batch (offsets 3..=4).
         assert2::assert!(read == vec![sample_batch(3, 2, 2_000_000)]);
     }
@@ -1374,7 +1408,9 @@ mod tests {
         let mut seg = Segment::create(dir.path(), Offset(0)).unwrap();
         seg.seal();
         assert2::assert!(seg.is_sealed());
-        let err = seg.append(&sample_batch(0, 1, 0), 4096).unwrap_err();
+        let err = seg
+            .append(&sample_batch(0, 1, 0), kibibytes(4))
+            .unwrap_err();
         assert2::assert!(matches!(err, LogError::Io(_)));
     }
 
@@ -1382,8 +1418,9 @@ mod tests {
     fn read_past_last_offset_returns_empty() {
         let dir = tempdir().unwrap();
         let mut seg = Segment::create(dir.path(), Offset(0)).unwrap();
-        seg.append(&sample_batch(0, 2, 1_000), 4096).unwrap();
-        let read = seg.read(Offset(100), usize::MAX).unwrap();
+        seg.append(&sample_batch(0, 2, 1_000), kibibytes(4))
+            .unwrap();
+        let read = seg.read(Offset(100), NO_LIMIT).unwrap();
         assert2::assert!(read.is_empty());
     }
 
@@ -1391,7 +1428,7 @@ mod tests {
     fn flush_succeeds() {
         let dir = tempdir().unwrap();
         let mut seg = Segment::create(dir.path(), Offset(0)).unwrap();
-        seg.append(&sample_batch(0, 1, 42), 4096).unwrap();
+        seg.append(&sample_batch(0, 1, 42), kibibytes(4)).unwrap();
         seg.flush().unwrap();
     }
 
@@ -1426,13 +1463,11 @@ mod tests {
         let mut wire = bytes::BytesMut::new();
         for off in 0..3i64 {
             let b = test_batch_at(off);
-            seg.append(&b, 0).unwrap();
+            seg.append(&b, DENSE_INDEX).unwrap();
             b.encode(&mut wire).unwrap();
         }
         let wire = wire.freeze();
-        let r = seg
-            .read_raw(Offset(0), Offset(3), 10 * 1024 * 1024)
-            .unwrap();
+        let r = seg.read_raw(Offset(0), Offset(3), mebibytes(10)).unwrap();
         assert2::assert!(r.start_offset == Offset(0));
         assert2::assert!(r.last_offset == Offset(2));
         assert2::assert!(&r.bytes[..] == &wire[..]);
@@ -1445,14 +1480,12 @@ mod tests {
         let mut expected = bytes::BytesMut::new();
         for off in 0..3i64 {
             let batch = test_batch_at(off);
-            seg.append(&batch, 0).unwrap();
+            seg.append(&batch, DENSE_INDEX).unwrap();
             if off < 2 {
                 batch.encode(&mut expected).unwrap();
             }
         }
-        let r = seg
-            .read_raw(Offset(0), Offset(2), 10 * 1024 * 1024)
-            .unwrap();
+        let r = seg.read_raw(Offset(0), Offset(2), mebibytes(10)).unwrap();
         assert2::assert!(r.start_offset == Offset(0));
         assert2::assert!(r.last_offset == Offset(1));
         assert2::assert!(&r.bytes[..] == &expected[..]);
@@ -1465,8 +1498,8 @@ mod tests {
         let batch = test_batch_at(0);
         let mut expected = bytes::BytesMut::new();
         batch.encode(&mut expected).unwrap();
-        seg.append(&batch, 0).unwrap();
-        let r = seg.read_raw(Offset(0), Offset(1), 1).unwrap();
+        seg.append(&batch, DENSE_INDEX).unwrap();
+        let r = seg.read_raw(Offset(0), Offset(1), bytes(1)).unwrap();
         assert2::assert!(r.start_offset == Offset(0));
         assert2::assert!(r.last_offset == Offset(0));
         assert2::assert!(&r.bytes[..] == &expected[..]);
@@ -1501,14 +1534,14 @@ mod tests {
     fn read_raw_desc_region_equals_read_raw_bytes() {
         let (dir, mut seg) = test_segment();
         for off in 0..5i64 {
-            seg.append(&test_batch_at(off), 0).unwrap();
+            seg.append(&test_batch_at(off), DENSE_INDEX).unwrap();
         }
         let cases = [
-            ("all batches", 0i64, 5i64, 10 * 1024 * 1024usize),
-            ("limit clamp", 0, 3, 10 * 1024 * 1024),
-            ("mid-stream start", 2, 5, 10 * 1024 * 1024),
-            ("one-batch anti-stall", 0, 5, 1),
-            ("last batch", 4, 5, 10 * 1024 * 1024),
+            ("all batches", 0i64, 5i64, mebibytes(10)),
+            ("limit clamp", 0, 3, mebibytes(10)),
+            ("mid-stream start", 2, 5, mebibytes(10)),
+            ("one-batch anti-stall", 0, 5, bytes(1)),
+            ("last batch", 4, 5, mebibytes(10)),
         ];
         for (_name, fo, lo, mb) in cases {
             let raw = seg.read_raw(Offset(fo), Offset(lo), mb).unwrap();
@@ -1534,11 +1567,11 @@ mod tests {
         let (dir, mut seg) = test_segment();
         // Several batches; a mid-size budget will include some but not all.
         for off in 0..6i64 {
-            seg.append(&test_batch_at(off), 0).unwrap();
+            seg.append(&test_batch_at(off), DENSE_INDEX).unwrap();
         }
         // Budget that admits ~2-3 batches (each batch is small but > a few bytes).
-        let raw = seg.read_raw(Offset(0), Offset(6), 80).unwrap();
-        let desc = seg.read_raw_desc(Offset(0), Offset(6), 80).unwrap();
+        let raw = seg.read_raw(Offset(0), Offset(6), bytes(80)).unwrap();
+        let desc = seg.read_raw_desc(Offset(0), Offset(6), bytes(80)).unwrap();
         let region = desc.region.expect("non-empty");
         assert2::assert!(desc.start_offset == raw.start_offset);
         assert2::assert!(desc.last_offset == raw.last_offset);
@@ -1573,7 +1606,7 @@ mod tests {
             0,
             1_000,
             LeaderEpoch(stamped_epoch),
-            0,
+            DENSE_INDEX,
         )
         .unwrap();
         assert2::assert!(seg.last_offset() == 0);
@@ -1604,10 +1637,10 @@ mod tests {
         producer.encode(&mut wire).unwrap();
         let wire = wire.freeze();
 
-        seg.append_verbatim(&wire, Offset(0), 2, 5_000, LeaderEpoch(0), 0)
+        seg.append_verbatim(&wire, Offset(0), 2, 5_000, LeaderEpoch(0), DENSE_INDEX)
             .unwrap();
         // Reading at offset 2 (inside the batch) returns the batch.
-        let read = seg.read(Offset(2), usize::MAX).unwrap();
+        let read = seg.read(Offset(2), NO_LIMIT).unwrap();
         assert2::assert!(seg.last_offset() == Offset(2));
         assert2::assert!(seg.max_timestamp() == 5_000);
         assert2::assert!(read == vec![producer]);
@@ -1621,7 +1654,7 @@ mod tests {
         let mut wire = bytes::BytesMut::new();
         test_batch_at(0).encode(&mut wire).unwrap();
         let err = seg
-            .append_verbatim(&wire.freeze(), Offset(0), 0, 0, LeaderEpoch(0), 0)
+            .append_verbatim(&wire.freeze(), Offset(0), 0, 0, LeaderEpoch(0), DENSE_INDEX)
             .unwrap_err();
         assert2::assert!(matches!(err, LogError::Io(_)));
         drop(dir);

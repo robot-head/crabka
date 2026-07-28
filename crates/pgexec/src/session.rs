@@ -26,6 +26,7 @@ use crabka_pgwire::{
     },
     error::{PgError, sqlstate},
 };
+use crabka_units::{ByteSize, Time, convert::ByteSizeExt as _, mebibytes};
 use tokio::sync::OwnedRwLockReadGuard;
 
 use crate::{
@@ -854,7 +855,7 @@ pub struct SqlSession {
     /// hosting the session for a remote gateway — because a deadlock cycle
     /// spanning engines is invisible to any one engine's wait-for graph and
     /// only a capped wait resolves it.
-    lock_wait_cap: Option<std::time::Duration>,
+    lock_wait_cap: Option<Time>,
     /// SP37: the injectable clock (shared from the engine). Backs the per-statement
     /// `EvalCtx`'s `now`/`stmt_now` and `clock_timestamp()`. `SystemClock` in
     /// production; a `FixedClock` in tests for deterministic temporal evaluation.
@@ -1131,7 +1132,7 @@ impl SqlSession {
     /// client retries — is the only detector such a cycle has. Purely local
     /// waits should keep the default `None` and rely on the exact
     /// engine-local cycle check.
-    pub fn set_lock_wait_cap(&mut self, cap: Option<std::time::Duration>) {
+    pub fn set_lock_wait_cap(&mut self, cap: Option<Time>) {
         self.lock_wait_cap = cap;
     }
 
@@ -4194,8 +4195,7 @@ impl SqlSession {
                     let stopped = remaining == Some(0);
                     let is_last = page.is_last || stopped;
                     let mut chunks =
-                        into_bounded_row_pages(encoded, page_rows, RESULT_PAGE_MAX_BYTES)
-                            .peekable();
+                        into_bounded_row_pages(encoded, page_rows, RESULT_PAGE_MAX).peekable();
                     if chunks.peek().is_none() && is_last {
                         sink.send(crabka_pgwire::engine::ResultPage::Rows {
                             result_index,
@@ -4312,7 +4312,7 @@ impl Session for SqlSession {
                         continue;
                     }
                     let mut pages =
-                        into_bounded_row_pages(rows, page_rows, RESULT_PAGE_MAX_BYTES).peekable();
+                        into_bounded_row_pages(rows, page_rows, RESULT_PAGE_MAX).peekable();
                     while let Some(rows) = pages.next() {
                         let rows = rows?;
                         let final_page = pages.peek().is_none();
@@ -4711,13 +4711,14 @@ impl Session for SqlSession {
     }
 }
 
-const RESULT_PAGE_MAX_BYTES: usize = 1 << 20;
+const RESULT_PAGE_MAX: ByteSize = mebibytes(1);
 
 fn into_bounded_row_pages(
     rows: Vec<Vec<Option<crabka_pgwire::engine::Cell>>>,
     page_rows: usize,
-    page_bytes: usize,
+    page_max: ByteSize,
 ) -> impl Iterator<Item = Result<Vec<Vec<Option<crabka_pgwire::engine::Cell>>>, PgError>> {
+    let page_bytes = page_max.bytes_usize();
     debug_assert!(page_rows > 0);
     debug_assert!(page_bytes > 0);
     let mut rows = rows.into_iter().peekable();
@@ -4891,7 +4892,7 @@ mod tests {
                 })]
             })
             .collect();
-        let pages: Vec<_> = super::into_bounded_row_pages(rows, 17, usize::MAX)
+        let pages: Vec<_> = super::into_bounded_row_pages(rows, 17, crabka_units::gibibytes(1))
             .collect::<Result<_, _>>()
             .expect("bounded pages");
 
@@ -4915,7 +4916,7 @@ mod tests {
             text: Bytes::from_static(b"12345"),
             binary: Bytes::new(),
         })]];
-        let error = super::into_bounded_row_pages(rows, 10, 4)
+        let error = super::into_bounded_row_pages(rows, 10, crabka_units::bytes(4))
             .next()
             .expect("one result")
             .expect_err("row exceeds byte limit");

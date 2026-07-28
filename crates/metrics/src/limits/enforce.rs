@@ -109,14 +109,19 @@ impl IngestEnforcer {
         // A configured positive rate must never round down to `0`, which the
         // token bucket interprets as the unlimited sentinel. Round to nearest
         // but clamp to at least one sample/sec so e.g. `0.4` still throttles.
-        let rate = configured.round().to_u64().unwrap_or(u64::MAX).max(1);
+        let rate = configured.round().to_i64().unwrap_or(i64::MAX).max(1);
         let stamp = self.next_touch_stamp();
         let entry = self
             .sample_rate_buckets
             .entry(tenant.to_string())
             .or_insert_with(|| {
                 let bucket = Arc::new(TokenBucket::new());
-                bucket.set_rate_with_burst(rate, limits.ingestion_burst_size);
+                // One token is one sample here, so this goes through the
+                // bucket's event-rate pair rather than its byte-rate pair.
+                bucket.set_event_rate_with_burst(
+                    Frequency::from_per_sec_u64(u64::try_from(rate).unwrap_or(u64::MAX)),
+                    limits.ingestion_burst_size,
+                );
                 RateBucket {
                     bucket,
                     last_touch: AtomicU64::new(stamp),

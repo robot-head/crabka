@@ -4,7 +4,6 @@ use std::{
     io::Read as _,
     num::NonZeroU16,
     path::{Path, PathBuf},
-    time::Duration,
 };
 
 use clap::{ArgGroup, Args, Subcommand, ValueEnum};
@@ -24,7 +23,18 @@ use crabka_gres_control::{
     render_pgdog_toml, render_users_toml, tenant_config_topic,
 };
 use crabka_security::{ListenerProtocol, SaslMechanism, scram::PgScramVerifier};
+use crabka_units::{Time, convert::TimeExt as _};
 use serde::Serialize;
+
+/// A validated positive millisecond count as a time extent.
+///
+/// [`PositiveMillis`] is `crabka-gres-control`'s parse-level validator over the
+/// raw `u64` a CLI flag carries; this is the seam where it becomes a quantity.
+/// [`TimeExt::from_millis`] takes an `i64`, so a value past `i64::MAX`
+/// milliseconds saturates rather than wrapping negative.
+fn positive_millis(value: PositiveMillis) -> Time {
+    Time::from_millis(i64::try_from(value.into_value()).unwrap_or(i64::MAX))
+}
 
 const EXIT_OK: i32 = 0;
 const EXIT_ERROR: i32 = 1;
@@ -1214,11 +1224,11 @@ fn render_pgdog_files(records: &[TenantRecord], args: &RenderPgdogArgs) -> Resul
                 .map(|path| path.to_string_lossy().into_owned()),
             passthrough_auth: true,
             pooler_mode: args.pooler_mode,
-            cold_start_ceiling: Duration::from_millis(args.cold_start_ceiling_ms.into_value()),
+            cold_start_ceiling: positive_millis(args.cold_start_ceiling_ms),
             connect_attempts: args.connect_attempts,
             timeouts: None,
-            idle_timeout: Duration::from_millis(idle_timeout_ms.into_value()),
-            server_lifetime: Duration::from_millis(args.server_lifetime_ms.into_value()),
+            idle_timeout: positive_millis(idle_timeout_ms),
+            server_lifetime: positive_millis(args.server_lifetime_ms),
             users,
         },
     };

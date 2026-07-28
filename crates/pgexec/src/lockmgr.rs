@@ -21,9 +21,9 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
-    time::Duration,
 };
 
+use crabka_units::{Time, convert::TimeExt as _};
 use tokio::sync::Notify;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,7 +169,7 @@ impl RowLockManager {
         rowid: u64,
         mode: LockMode,
         my_xid: u64,
-        wait_cap: Option<Duration>,
+        wait_cap: Option<Time>,
     ) -> Result<(), AcquireError> {
         self.acquire_key(LockKey::Row(table, rowid), mode, my_xid, wait_cap)
             .await
@@ -188,9 +188,9 @@ impl RowLockManager {
         key: LockKey,
         mode: LockMode,
         my_xid: u64,
-        wait_cap: Option<Duration>,
+        wait_cap: Option<Time>,
     ) -> Result<(), AcquireError> {
-        let deadline = wait_cap.map(|cap| tokio::time::Instant::now() + cap);
+        let deadline = wait_cap.map(|cap| tokio::time::Instant::now() + cap.to_std());
         loop {
             let (notify, holder) = {
                 let mut g = self.inner.lock().expect("lockmgr");
@@ -380,6 +380,8 @@ fn check_cycle(wait_for: &HashMap<u64, u64>, holder: u64, my_xid: u64) -> CycleC
 
 #[cfg(test)]
 mod tests {
+    use crabka_units::{millis, secs};
+
     use super::*;
 
     #[test]
@@ -648,13 +650,7 @@ mod tests {
         m.try_acquire(1, 1, LockMode::Exclusive, 10);
 
         let result = m
-            .acquire(
-                1,
-                1,
-                LockMode::Exclusive,
-                11,
-                Some(Duration::from_millis(50)),
-            )
+            .acquire(1, 1, LockMode::Exclusive, 11, Some(millis(50)))
             .await;
 
         assert!(result == Err(AcquireError::CapExpired));
@@ -675,14 +671,14 @@ mod tests {
         m.try_acquire(1, 1, LockMode::Exclusive, 10);
         let m2 = Arc::clone(&m);
         let waiter = tokio::spawn(async move {
-            m2.acquire(1, 1, LockMode::Exclusive, 11, Some(Duration::from_secs(30)))
+            m2.acquire(1, 1, LockMode::Exclusive, 11, Some(secs(30)))
                 .await
         });
         tokio::task::yield_now().await;
 
         m.release_all(10);
 
-        let granted = tokio::time::timeout(Duration::from_secs(5), waiter)
+        let granted = tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
             .await
             .expect("waiter did not hang")
             .expect("waiter join");

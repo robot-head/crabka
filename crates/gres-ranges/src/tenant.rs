@@ -5164,7 +5164,7 @@ impl GatewaySession {
     /// state in which a wait can be an edge of a cross-engine deadlock cycle.
     /// Single-range and autocommit forwarding keep `None`, preserving exact
     /// engine-local blocking on the remote host.
-    fn cross_range_statement_cap(&self) -> Option<std::time::Duration> {
+    fn cross_range_statement_cap(&self) -> Option<crabka_units::Time> {
         matches!(
             self.transaction,
             GatewayTransaction::Open {

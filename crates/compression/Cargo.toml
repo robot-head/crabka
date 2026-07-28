@@ -37,6 +37,7 @@ zstd   = ["dep:zstd"]
 [dependencies]
 assert2 = { workspace = true }
 bytes = { workspace = true }
+crabka-units = { workspace = true }
 thiserror = { workspace = true }
 flate2   = { workspace = true, optional = true }
 snap     = { workspace = true, optional = true }

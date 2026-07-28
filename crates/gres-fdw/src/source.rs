@@ -17,6 +17,11 @@ use crabka_protocol::{
     owned::list_offsets_request::{ListOffsetsPartition, ListOffsetsRequest, ListOffsetsTopic},
     primitives::uuid::Uuid as WireUuid,
 };
+use crabka_units::{
+    ByteSize, Time,
+    convert::{ByteSizeExt as _, TimeExt as _},
+    mebibytes, secs,
+};
 
 use crate::{config::ConnProfile, error::KafkaFdwError};
 
@@ -128,10 +133,23 @@ const LATEST: i64 = -1;
 const CONSUMER_REPLICA_ID: i32 = -1;
 /// `READ_COMMITTED` isolation level for the Fetch API.
 const READ_COMMITTED: i8 = 1;
-/// Maximum wait time per Fetch RPC (ms).
-const MAX_WAIT_MS: i32 = 5_000;
+/// Maximum wait time per Fetch RPC.
+const MAX_WAIT: Time = secs(5);
 /// Maximum bytes per partition per Fetch RPC.
-const PARTITION_MAX_BYTES: i32 = 10 * 1024 * 1024; // 10 MiB
+const PARTITION_MAX: ByteSize = mebibytes(10);
+/// Deadline for one TCP connection attempt to a bootstrap broker.
+const CONNECT_TIMEOUT: Time = secs(10);
+/// Deadline for one request issued over the scan's connection.
+const REQUEST_TIMEOUT: Time = secs(30);
+
+/// The Fetch RPC's per-call budgets as the generated request carries them:
+/// `(max_wait_ms, partition_max_bytes)`.
+///
+/// `IsolatedFetch` mirrors the wire fields, so the quantities convert back to
+/// raw integers here rather than at the request literal.
+fn fetch_budgets() -> (i32, i32) {
+    (MAX_WAIT.millis_i32(), PARTITION_MAX.bytes_i32())
+}
 
 /// Materialise a bounded snapshot of `topic` into a flat `Vec<RawRecord>`.
 ///
@@ -351,6 +369,7 @@ pub async fn scan_topic_with_dns_timeout(
                 break;
             }
 
+            let (max_wait_ms, partition_max_bytes) = fetch_budgets();
             let fetched = fetch_partition_with_isolation(
                 &conn,
                 IsolatedFetch {
@@ -358,9 +377,9 @@ pub async fn scan_topic_with_dns_timeout(
                     topic_id: topic_uuid,
                     partition,
                     fetch_offset: next_offset,
-                    max_wait_ms: MAX_WAIT_MS,
+                    max_wait_ms,
                     max_bytes: DEFAULT_FETCH_RESPONSE_MAX_BYTES,
-                    partition_max_bytes: PARTITION_MAX_BYTES,
+                    partition_max_bytes,
                     isolation_level: READ_COMMITTED,
                 },
             )
@@ -372,7 +391,7 @@ pub async fn scan_topic_with_dns_timeout(
             })?;
 
             if fetched.is_empty() {
-                // No records at or after `next_offset` within max_wait_ms.
+                // No records at or after `next_offset` within `MAX_WAIT`.
                 break;
             }
 
@@ -454,17 +473,21 @@ async fn open_connection(
 
     let addr = lookup_first(host_port, dns_timeout, tokio::net::lookup_host(host_port)).await?;
 
-    let options = crabka_client_core::ConnectionOptions {
-        client_id: "crabka-fdw".to_string(),
-        connect_timeout: std::time::Duration::from_secs(10),
-        request_timeout: std::time::Duration::from_secs(30),
-        security: profile.security.clone().map(Box::new),
-        ..crabka_client_core::ConnectionOptions::default()
-    };
-
-    crabka_client_core::Connection::connect_with_options(addr, options)
+    crabka_client_core::Connection::connect_with_options(addr, connection_options(profile))
         .await
         .map_err(|e| KafkaFdwError::Other(format!("connect to {host_port}: {e}")))
+}
+
+/// The scan connection's knobs, with the timeout quantities converted into the
+/// [`Duration`](std::time::Duration)s `ConnectionOptions` speaks.
+fn connection_options(profile: &ConnProfile) -> crabka_client_core::ConnectionOptions {
+    crabka_client_core::ConnectionOptions {
+        client_id: "crabka-fdw".to_string(),
+        connect_timeout: CONNECT_TIMEOUT.to_std(),
+        request_timeout: REQUEST_TIMEOUT.to_std(),
+        security: profile.security.clone().map(Box::new),
+        ..crabka_client_core::ConnectionOptions::default()
+    }
 }
 
 // ── Unit tests ────────────────────────────────────────────────────────────────
@@ -472,6 +495,8 @@ async fn open_connection(
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
+
+    use assert2::assert;
 
     use super::*;
 
@@ -582,6 +607,34 @@ mod tests {
             "start ({}) >= stop ({}) for empty partition",
             plan.start,
             plan.stop
+        );
+    }
+
+    /// The Fetch budgets reach the wire as the same integers a hand-written
+    /// `max_wait_ms` / `partition_max_bytes` carried: 5 s and 10 MiB.
+    #[test]
+    fn fetch_budgets_encode_to_wire_integers() {
+        assert!(fetch_budgets() == (5_000, 10 * 1024 * 1024));
+    }
+
+    /// The connection deadlines reach `crabka-client-core` as the durations the
+    /// quantities name.
+    #[test]
+    fn connection_options_carry_the_configured_deadlines() {
+        let profile = ConnProfile {
+            bootstrap: vec!["b:9092".into()],
+            registry_url: String::new(),
+            security: None,
+            topic: "events".into(),
+            value_format: crate::decode::Wire::Raw,
+            key_format: crate::decode::Wire::Raw,
+        };
+
+        let options = connection_options(&profile);
+
+        assert!(
+            (options.connect_timeout, options.request_timeout)
+                == (Duration::from_secs(10), Duration::from_secs(30))
         );
     }
 

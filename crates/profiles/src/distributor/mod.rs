@@ -23,7 +23,7 @@ use crabka_broker::throttle::TokenBucket;
 use crabka_client_producer::{Header, Producer, ProducerRecord};
 use crabka_pprof::PprofProfile;
 use crabka_units::{
-    ByteSize,
+    ByteSize, Frequency,
     convert::{ByteSizeExt, FrequencyExt as _, StdDurationExt as _},
     mebibytes,
 };
@@ -225,7 +225,8 @@ fn enforce_ingestion_rate(
     }
 
     let configured_rate = rate_tokens_per_sec(limits);
-    let bucket = ingestion_bucket_for_tenant(state, tenant, configured_rate)?;
+    let bucket =
+        ingestion_bucket_for_tenant(state, tenant, Frequency::from_per_sec_u64(configured_rate))?;
     let granted = bucket.try_consume(requested);
     if granted < requested {
         return Err(crate::limits::LimitError::IngestionRateExceeded {
@@ -258,7 +259,7 @@ fn rate_tokens_per_sec(limits: &Limits) -> u64 {
 fn ingestion_bucket_for_tenant(
     state: &DistributorState,
     tenant: &str,
-    rate: u64,
+    rate: Frequency,
 ) -> Result<Arc<TokenBucket>, ProfilesError> {
     let mut buckets = state
         .ingestion_buckets
@@ -273,8 +274,9 @@ fn ingestion_bucket_for_tenant(
         .entry(tenant.to_string())
         .or_insert_with(|| Arc::new(TokenBucket::new()))
         .clone();
-    if bucket.rate() != rate {
-        bucket.set_rate(rate);
+    // One token is one profile sample, not one byte.
+    if bucket.event_rate() != rate {
+        bucket.set_event_rate(rate);
     }
     Ok(bucket)
 }
@@ -1786,7 +1788,7 @@ overrides:
         for idx in 0..(MAX_TENANTS + 50) {
             // `has_tenant_override` is false for the default provider, so the
             // rate path is skipped; allocate buckets directly to exercise the cap.
-            let _ = ingestion_bucket_for_tenant(&state, &format!("tenant-{idx}"), 10);
+            let _ = ingestion_bucket_for_tenant(&state, &format!("tenant-{idx}"), per_sec(10));
         }
 
         let buckets = state.ingestion_buckets.lock().unwrap();

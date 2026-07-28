@@ -22,10 +22,7 @@ use std::{
 
 use crabka_ids::PartitionIndex;
 use crabka_log::{Log, LogConfig, Offset};
-use crabka_units::{
-    ByteSize, Time,
-    convert::{ByteSizeExt as _, TimeExt as _},
-};
+use crabka_units::{ByteSize, Time, convert::TimeExt as _};
 use dashmap::DashMap;
 use tokio::{sync::oneshot, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
@@ -299,7 +296,7 @@ async fn replicator_loop(task: ReplicatorTask) {
         }
         // Read whatever is missing from the future log up to the
         // source's current LEO.
-        let advance = match catch_up(&part, &future_log, policy.read_chunk.bytes_usize()) {
+        let advance = match catch_up(&part, &future_log, policy.read_chunk) {
             Ok(v) => v,
             Err(e) => {
                 warn!(
@@ -374,7 +371,7 @@ async fn replicator_loop(task: ReplicatorTask) {
 }
 
 /// One catch-up iteration: read whatever the future log is missing,
-/// up to `read_chunk_bytes`, and append it. Returns whether the
+/// up to `read_chunk`, and append it. Returns whether the
 /// future log was caught up at the end of the iteration (i.e. nothing
 /// was read AND `future.LEO >= source.LEO`).
 struct CatchUpProgress {
@@ -384,7 +381,7 @@ struct CatchUpProgress {
 fn catch_up(
     part: &Arc<Partition>,
     future_log: &Arc<Mutex<Log>>,
-    read_chunk_bytes: usize,
+    read_chunk: ByteSize,
 ) -> Result<CatchUpProgress, BrokerError> {
     // Snapshot offsets cheaply; the partition log mutex is dropped
     // immediately after each helper.
@@ -405,7 +402,7 @@ fn catch_up(
             .log
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        log.read(future_leo, read_chunk_bytes)?
+        log.read(future_leo, read_chunk)?
     };
     if read.batches.is_empty() {
         // Source advanced its log_start past `future_leo` (retention

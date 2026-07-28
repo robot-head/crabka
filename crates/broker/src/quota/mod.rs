@@ -1,7 +1,10 @@
 //! KIP-13 + KIP-124 + KIP-257 client quotas.
 
 use crabka_metadata::{EntityKey, MetadataImage};
-use crabka_units::{Time, convert::TimeExt};
+use crabka_units::{
+    ByteRate, Time,
+    convert::{ByteRateExt as _, TimeExt},
+};
 
 mod buckets;
 mod controller_mutation;
@@ -73,6 +76,17 @@ fn consume_configured_quota(
 #[must_use]
 pub(crate) fn throttle_time_ms(delay: Time) -> i32 {
     i32::try_from(delay.millis_i64_trunc()).unwrap_or(i32::MAX)
+}
+
+/// A raw quota rate as the [`TokenBucket`](crate::throttle::TokenBucket)'s
+/// [`ByteRate`].
+///
+/// The bucket is byte-dimensioned, but Kafka drives `request_percentage` and
+/// `controller_mutation_rate` through the same token arithmetic, and those are
+/// not byte throughputs. Their raw magnitudes therefore cross into the bucket's
+/// dimension here, in one place, rather than at each call site.
+pub(crate) fn bucket_rate(raw: u64) -> ByteRate {
+    ByteRate::from_bytes_per_sec(i64::try_from(raw).unwrap_or(i64::MAX))
 }
 
 pub(crate) fn positive_f64_to_u64(value: f64) -> u64 {

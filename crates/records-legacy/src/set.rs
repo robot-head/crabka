@@ -13,11 +13,41 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crabka_compression::CompressionType;
 use crabka_ids::Offset;
+use crabka_units::prelude::{
+    ByteSize, ByteSizeExt as _, Ratio, RatioExt as _, gibibytes, mebibytes,
+};
 
 use crate::{
     error::LegacyRecordsError,
     message::{Magic, Message, attrs_with_compression, compression_from_attrs},
 };
+
+/// How far a legacy compressed wrapper may expand before the floor and ceiling
+/// below clamp it. A ratio, not a size: it scales the *compressed* length.
+const MAX_EXPANSION: Ratio = crabka_units::fraction(100.0);
+
+/// Smallest decompression budget granted to a wrapper, so a tiny but legitimate
+/// payload is never rejected for expanding past [`MAX_EXPANSION`].
+const MIN_DECOMPRESSED: ByteSize = mebibytes(16);
+
+/// Hard ceiling on the decompression budget: the decompression-bomb guard.
+const MAX_DECOMPRESSED: ByteSize = gibibytes(1);
+
+/// The length of a wire slice as a byte count.
+///
+/// Saturates rather than wrapping; a `usize` above `u64::MAX` cannot occur on
+/// any target Crabka builds for.
+fn size_of_slice(slice: &[u8]) -> ByteSize {
+    ByteSize::from_bytes(u64::try_from(slice.len()).unwrap_or(u64::MAX))
+}
+
+/// How much output a compressed legacy wrapper of `compressed` bytes is allowed
+/// to produce: [`MAX_EXPANSION`] times its own size, clamped into
+/// `MIN_DECOMPRESSED..=MAX_DECOMPRESSED`.
+fn decompression_budget(compressed: ByteSize) -> ByteSize {
+    let scaled = ByteSize::from_bytes_f64(compressed.bytes_f64() * MAX_EXPANSION.as_f64());
+    scaled.max(MIN_DECOMPRESSED).min(MAX_DECOMPRESSED)
+}
 
 /// A single decoded `MessageSet` entry: the offset-tagged payload of one
 /// logical record after compression unwrapping.
@@ -96,13 +126,12 @@ fn decode_into(
                 LegacyRecordsError::Malformed("compressed wrapper has null value".into())
             })?;
             // Bound decompressed output to guard against a decompression bomb
-            // in a legacy compressed wrapper: ≤100x the compressed size, with a
-            // 16 MiB floor and a 1 GiB ceiling.
-            let max_output = inner_compressed
-                .len()
-                .saturating_mul(100)
-                .clamp(16 * 1024 * 1024, 1024 * 1024 * 1024);
-            let inner_bytes = crabka_compression::decompress(codec, &inner_compressed, max_output)?;
+            // in a legacy compressed wrapper.
+            let max_output = decompression_budget(size_of_slice(&inner_compressed));
+            // `crabka_compression` is a primitive-typed substrate shared with the
+            // generated codec, so its cap crosses as a raw `usize`.
+            let inner_bytes =
+                crabka_compression::decompress(codec, &inner_compressed, max_output.bytes_usize())?;
 
             // Parse the inner set (no nested compression allowed).
             let start_len = out.len();
@@ -247,7 +276,41 @@ pub fn encode_compressed_message_set<B: BufMut>(
 #[cfg(test)]
 mod tests {
 
+    use crabka_units::prelude::{bytes, kibibytes};
+
     use super::*;
+
+    /// The decompression-bomb guard is the only thing standing between a 1 KiB
+    /// wrapper and a gigabyte allocation, so pin every arm of the clamp: below
+    /// the floor, in the linear band, and above the ceiling. A conversion that
+    /// lost a factor of 1024 would silently shrink the budget and start
+    /// rejecting legitimate wrappers.
+    #[test]
+    fn decompression_budget_clamps_into_the_floor_and_ceiling() {
+        for (compressed, expected) in [
+            (ByteSize::ZERO, MIN_DECOMPRESSED),
+            (bytes(1), MIN_DECOMPRESSED),
+            // 160 KiB * 100 is 15.6 MiB — still under the floor.
+            (kibibytes(160), MIN_DECOMPRESSED),
+            // 1 MiB * 100 lands in the linear band between floor and ceiling.
+            (mebibytes(1), mebibytes(100)),
+            // 10 MiB * 100 is 1000 MiB, still under the 1 GiB ceiling.
+            (mebibytes(10), mebibytes(1000)),
+            (mebibytes(11), MAX_DECOMPRESSED),
+            (gibibytes(4), MAX_DECOMPRESSED),
+        ] {
+            assert2::check!(
+                decompression_budget(compressed) == expected,
+                "compressed = {compressed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn slice_length_lifts_to_a_byte_count() {
+        assert2::check!(size_of_slice(&[]) == ByteSize::ZERO);
+        assert2::check!(size_of_slice(&[0u8; 4096]) == kibibytes(4));
+    }
 
     fn sample_records_v1() -> Vec<ParsedRecord> {
         vec![

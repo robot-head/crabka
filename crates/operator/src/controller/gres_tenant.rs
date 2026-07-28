@@ -14,7 +14,7 @@ use crabka_security::{
     ca::{SubjectAltName, generate_cluster_ca, issue_broker_cert},
     scram::PgScramVerifier,
 };
-use crabka_units::convert::TimeExt as _;
+use crabka_units::convert::{ByteSizeExt as _, TimeExt as _};
 use futures::StreamExt as _;
 use k8s_openapi::{
     ByteString,
@@ -1251,7 +1251,7 @@ fn effective_defaults(
         checkpoint_bytes: override_
             .and_then(|d| d.checkpoint_bytes)
             .or_else(|| base.and_then(|d| d.checkpoint_bytes))
-            .or(Some(DEFAULT_CHECKPOINT_BYTES)),
+            .or_else(|| Some(DEFAULT_CHECKPOINT_BYTES.bytes_u64())),
         suspend_max_checkpoint_bytes: override_
             .and_then(|d| d.suspend_max_checkpoint_bytes)
             .or_else(|| base.and_then(|d| d.suspend_max_checkpoint_bytes)),
@@ -1979,6 +1979,32 @@ struct DeploymentRenderConfig<'a> {
     range_tls_hash: Option<&'a str>,
 }
 
+/// The `--registry-*` flags a compute pod inherits from the shared policy.
+///
+/// The policy holds quantities; the flags are the raw integers the compute
+/// binary's parsers accept, so this is the seam that converts them back. The
+/// backoff truncates rather than rounds: the compute side reconstructs the
+/// extent from this integer, and rounding would hand it a delay the operator
+/// never configured.
+fn registry_policy_args(policy: &crabka_gres_control::RegistryPolicy) -> [String; 14] {
+    [
+        "--registry-replication-factor".to_owned(),
+        policy.replication_factor().to_string(),
+        "--registry-topic-create-timeout-ms".to_owned(),
+        policy.topic_create_timeout().millis_i32().to_string(),
+        "--registry-reader-retry-backoff-ms".to_owned(),
+        policy.reader_retry_backoff().millis_i64_trunc().to_string(),
+        "--registry-fetch-max-wait-ms".to_owned(),
+        policy.fetch_max_wait().millis_i32().to_string(),
+        "--registry-fetch-partition-max-bytes".to_owned(),
+        policy.fetch_partition_max().bytes_i32().to_string(),
+        "--registry-producer-dns-timeout-ms".to_owned(),
+        policy.producer_dns_timeout().milliseconds().to_string(),
+        "--registry-reader-admin-dns-timeout-ms".to_owned(),
+        policy.reader_admin_dns_timeout().milliseconds().to_string(),
+    ]
+}
+
 fn render_deployment(
     obj: &GresTenant,
     range: &GresTenantRangeSpec,
@@ -1996,20 +2022,9 @@ fn render_deployment(
         config.bootstrap.to_owned(),
         "--tenant".to_owned(),
         name.clone(),
-        "--registry-replication-factor".to_owned(),
-        config.policy.replication_factor().to_string(),
-        "--registry-topic-create-timeout-ms".to_owned(),
-        config.policy.topic_create_timeout_ms().to_string(),
-        "--registry-reader-retry-backoff-ms".to_owned(),
-        config.policy.reader_retry_backoff().as_millis().to_string(),
-        "--registry-fetch-max-wait-ms".to_owned(),
-        config.policy.fetch_max_wait_ms().to_string(),
-        "--registry-fetch-partition-max-bytes".to_owned(),
-        config.policy.fetch_partition_max_bytes().to_string(),
-        "--registry-producer-dns-timeout-ms".to_owned(),
-        u64::to_string(&config.policy.producer_dns_timeout().milliseconds()),
-        "--registry-reader-admin-dns-timeout-ms".to_owned(),
-        u64::to_string(&config.policy.reader_admin_dns_timeout().milliseconds()),
+    ];
+    args.extend(registry_policy_args(config.policy));
+    args.extend([
         "--fdw-broker-dns-timeout-ms".to_owned(),
         u64::to_string(&compute_policy.fdw_broker_dns_timeout.milliseconds()),
         "--wal-recovery-fetch-max-wait-ms".to_owned(),
@@ -2064,7 +2079,7 @@ fn render_deployment(
             .wal_admin_request_timeout_ms
             .into_value()
             .to_string(),
-    ];
+    ]);
     args.extend(wal_producer_args(&compute_policy));
     if config.range_control_enabled {
         args.extend([
@@ -2100,6 +2115,7 @@ fn render_deployment(
             compute_policy
                 .checkpoint_part_bytes
                 .into_value()
+                .bytes_usize()
                 .to_string(),
             "--checkpoint-retain".to_owned(),
             compute_policy.checkpoint_retain.into_value().to_string(),
@@ -2621,13 +2637,13 @@ mod tests {
                 None,
                 None,
                 DEFAULT_CHECKPOINT_FRAMES,
-                DEFAULT_CHECKPOINT_BYTES,
+                DEFAULT_CHECKPOINT_BYTES.bytes_u64(),
             ),
             (
                 Some(defaults(Some(11), None)),
                 None,
                 11,
-                DEFAULT_CHECKPOINT_BYTES,
+                DEFAULT_CHECKPOINT_BYTES.bytes_u64(),
             ),
             (
                 Some(defaults(None, Some(12))),

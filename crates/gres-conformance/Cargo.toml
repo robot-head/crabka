@@ -44,6 +44,7 @@ serde_json = { workspace = true }
 clap = { workspace = true }
 thiserror = { workspace = true }
 crabka-pgparser = { version = "0.3.9", path = "../pgparser" }
+crabka-units = { workspace = true }
 
 [dev-dependencies]
 assert2 = { workspace = true }

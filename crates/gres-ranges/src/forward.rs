@@ -18,6 +18,7 @@ use crabka_pgwire::{
     },
     error::PgError,
 };
+use crabka_units::{Time, convert::TimeExt as _, secs};
 
 use crate::{
     RangeId,
@@ -109,12 +110,21 @@ pub(crate) const RANGE0_BARRIER_REPLY_BUDGET: Duration = Duration::from_secs(4);
 /// exact engine-local cycle check. Must stay comfortably below the range
 /// transport's 5 s RPC timeout so the participant reports the abort instead of
 /// the gateway timing the RPC out first.
-pub(crate) const CROSS_RANGE_LOCK_WAIT_CAP: Duration = Duration::from_secs(2);
+pub(crate) const CROSS_RANGE_LOCK_WAIT_CAP: Time = secs(2);
 
 /// Encode a lock-wait cap for the session wire, saturating instead of failing
-/// on a pathological over-large duration.
-fn cap_to_millis(cap: Duration) -> u64 {
-    u64::try_from(cap.as_millis()).unwrap_or(u64::MAX)
+/// on a pathological over-large extent.
+///
+/// Truncating, not rounding: the participant reconstructs the cap from this
+/// integer, and a cap rounded up past the range transport's RPC timeout would
+/// let the gateway time the call out before the participant reports its abort.
+fn cap_to_millis(cap: Time) -> u64 {
+    u64::try_from(cap.millis_i64_trunc()).unwrap_or(u64::MAX)
+}
+
+/// Decode a lock-wait cap arriving from the session wire.
+fn cap_from_millis(millis: u64) -> Time {
+    Time::from_millis(i64::try_from(millis).unwrap_or(i64::MAX))
 }
 
 impl HostedRangeService {
@@ -1259,7 +1269,7 @@ async fn handle_session_operation(
             sql,
             lock_wait_cap_ms,
         } => {
-            session.set_lock_wait_cap(lock_wait_cap_ms.map(Duration::from_millis));
+            session.set_lock_wait_cap(lock_wait_cap_ms.map(cap_from_millis));
             session
                 .simple_query(&sql)
                 .await
@@ -1319,7 +1329,7 @@ async fn handle_session_operation(
             max_rows,
             lock_wait_cap_ms,
         } => {
-            session.set_lock_wait_cap(lock_wait_cap_ms.map(Duration::from_millis));
+            session.set_lock_wait_cap(lock_wait_cap_ms.map(cap_from_millis));
             let outcome = session.execute(&portal, max_rows).await;
             outcome.and_then(|outcome| match outcome {
                 ExecuteOutcome::Rows { rows, completion } => {
@@ -2270,7 +2280,7 @@ impl RemoteRangeSession {
     pub async fn simple_query(
         &mut self,
         sql: String,
-        lock_wait_cap: Option<Duration>,
+        lock_wait_cap: Option<Time>,
     ) -> Result<Vec<QueryResult>, PgError> {
         match self
             .call(WireSessionOperation::SimpleQuery {
@@ -2395,7 +2405,7 @@ impl RemoteRangeSession {
         &mut self,
         portal: String,
         max_rows: u32,
-        lock_wait_cap: Option<Duration>,
+        lock_wait_cap: Option<Time>,
     ) -> Result<ExecuteOutcome, PgError> {
         match self
             .call(WireSessionOperation::Execute {
@@ -4525,7 +4535,7 @@ mod tests {
         let error = session
             .simple_query(
                 "UPDATE t SET v = 2 WHERE id = 1".into(),
-                Some(Duration::from_millis(100)),
+                Some(crabka_units::millis(100)),
             )
             .await
             .expect_err("capped wait expires");

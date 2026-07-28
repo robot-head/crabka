@@ -178,7 +178,7 @@ impl RemoteReader {
 
         // Cap the read so the broker doesn't pull an entire segment when the
         // Fetch asked for one batch. Always pull at least one full batch worth
-        // of bytes — the segment's `size_bytes` is the safe ceiling.
+        // of bytes — the segment's `size` is the safe ceiling.
         let segment_size =
             u32::try_from(metadata.segment_size_in_bytes().max(0)).unwrap_or(u32::MAX);
         let end_position = end_position_for(start_position, segment_size, max_bytes);
@@ -717,6 +717,7 @@ mod tests {
         InmemoryRemoteLogMetadataManager, LocalTieredStorage, RemoteLogMetadataManager,
         RemoteStorageManager,
     };
+    use crabka_units::convert::ByteSizeExt as _;
     use uuid::Uuid;
 
     fn tp() -> TopicIdPartition {
@@ -864,7 +865,7 @@ mod tests {
         let mut log = Log::open(
             log_dir,
             LogConfig {
-                segment_bytes: 256,
+                segment_size: crabka_units::bytes(256),
                 ..LogConfig::default()
             },
         )
@@ -902,7 +903,7 @@ mod tests {
                 1,
                 ex.max_timestamp,
                 crabka_remote_storage::RemoteLogSegmentDetails::new(
-                    i32::try_from(ex.size_bytes).unwrap_or(i32::MAX),
+                    ex.size.bytes_i32(),
                     RemoteLogSegmentState::CopySegmentStarted,
                     epochs.clone(),
                 ),
@@ -952,7 +953,7 @@ mod tests {
         let mut log = Log::open(
             log_dir,
             LogConfig {
-                segment_bytes: 256,
+                segment_size: crabka_units::bytes(256),
                 ..LogConfig::default()
             },
         )
@@ -1006,7 +1007,7 @@ mod tests {
                 1,
                 ex.max_timestamp,
                 crabka_remote_storage::RemoteLogSegmentDetails::new(
-                    i32::try_from(ex.size_bytes).unwrap_or(i32::MAX),
+                    ex.size.bytes_i32(),
                     RemoteLogSegmentState::CopySegmentStarted,
                     epochs.clone(),
                 ),

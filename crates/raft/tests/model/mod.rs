@@ -15,6 +15,7 @@ use crabka_raft::kraft::{
     role::Role,
     types::{Epoch, LogView, NodeId, QuorumState, SimInstant},
 };
+use crabka_units::prelude::{Time, TimeExt as _};
 use stateright::{
     Model, Property,
     semantics::{ConsistencyTester, LinearizabilityTester, SequentialSpec},
@@ -263,8 +264,11 @@ impl ConsensusModel {
         }
     }
 
-    fn election_timeout_ms_of(id: NodeId) -> u64 {
-        1000 + id.0 * 50
+    /// The base election timeout configured for node `id`, staggered by id so
+    /// timer ties break deterministically. The model's clock stays a constant
+    /// [`SimInstant`]; this is the extent the core is constructed with.
+    fn election_timeout_of(id: NodeId) -> Time {
+        Time::from_millis(i64::try_from(1000 + id.0 * 50).unwrap_or(i64::MAX))
     }
 
     fn voter_set(&self) -> crabka_metadata::voters::VoterSet {
@@ -523,7 +527,7 @@ impl Model for ConsensusModel {
             let machine = QuorumStateMachine::new(
                 id,
                 QuorumState::bootstrap(uuid::Uuid::nil(), voters.clone()),
-                Self::election_timeout_ms_of(id),
+                Self::election_timeout_of(id),
             );
             nodes.insert(
                 id,

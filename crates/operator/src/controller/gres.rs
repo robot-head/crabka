@@ -8,7 +8,7 @@ use crabka_gres_control::{
 };
 use crabka_units::{
     Time,
-    convert::{StdDurationExt as _, TimeExt as _},
+    convert::{ByteSizeExt as _, TimeExt as _},
 };
 use futures::StreamExt as _;
 use k8s_openapi::{
@@ -105,13 +105,9 @@ async fn reconcile_inner(obj: Arc<Gres>, ctx: Arc<Context>) -> Result<Action, Re
         .and_then(|activator| activator.cold_start_timeout_ms)
         .unwrap_or(DEFAULT_ACTIVATOR_COLD_START_TIMEOUT_MS);
     let cold_start_ceiling = PgdogTimeouts::cold_start_ceiling_for_attempt_timeout(
-        time_from_millis_u64(activator_cold_start_timeout_ms).to_std(),
+        time_from_millis_u64(activator_cold_start_timeout_ms),
         pgdog_policy.connect_attempts,
-    )
-    .map_err(|error| {
-        ReconcileError::Malformed(format!("spec.activator.coldStartTimeoutMs: {error}"))
-    })?
-    .as_time();
+    );
     let ns = obj.namespace().unwrap_or_else(|| "default".into());
     let name = obj.name_any();
     let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &ns);
@@ -421,12 +417,12 @@ fn render_pgdog_files(
                 &obj.name_any(),
                 obj.spec.defaults.as_ref(),
             ) {
-                time_from_millis_u64(policy.suspension_idle_timeout.into_value()).to_std()
+                time_from_millis_u64(policy.suspension_idle_timeout.into_value())
             } else {
-                time_from_millis_u64(policy.idle_timeout.into_value()).to_std()
+                time_from_millis_u64(policy.idle_timeout.into_value())
             },
-            server_lifetime: time_from_millis_u64(policy.server_lifetime.into_value()).to_std(),
-            cold_start_ceiling: cold_start_ceiling.to_std(),
+            server_lifetime: time_from_millis_u64(policy.server_lifetime.into_value()),
+            cold_start_ceiling,
             users,
             ..Default::default()
         },
@@ -922,10 +918,10 @@ fn render_activator_deployment(
                             "--registry-poll-ms", registry_poll_ms.to_string(),
                             "--cold-start-timeout-ms", cold_start_timeout_ms.to_string(),
                             "--registry-replication-factor", registry_policy.replication_factor().to_string(),
-                            "--registry-topic-create-timeout-ms", registry_policy.topic_create_timeout_ms().to_string(),
-                            "--registry-reader-retry-backoff-ms", registry_policy.reader_retry_backoff().as_millis().to_string(),
-                            "--registry-fetch-max-wait-ms", registry_policy.fetch_max_wait_ms().to_string(),
-                            "--registry-fetch-partition-max-bytes", registry_policy.fetch_partition_max_bytes().to_string(),
+                            "--registry-topic-create-timeout-ms", registry_policy.topic_create_timeout().millis_i32().to_string(),
+                            "--registry-reader-retry-backoff-ms", registry_policy.reader_retry_backoff().millis_i64_trunc().to_string(),
+                            "--registry-fetch-max-wait-ms", registry_policy.fetch_max_wait().millis_i32().to_string(),
+                            "--registry-fetch-partition-max-bytes", registry_policy.fetch_partition_max().bytes_i32().to_string(),
                             "--registry-producer-dns-timeout-ms", registry_policy.producer_dns_timeout().milliseconds().to_string(),
                             "--registry-reader-admin-dns-timeout-ms", registry_policy.reader_admin_dns_timeout().milliseconds().to_string(),
                             "--backend-endpoint-template", format!("{{tenant}}-gres.{namespace}.svc:{COMPUTE_PORT}", namespace = obj.namespace().unwrap_or_else(|| "default".into()))

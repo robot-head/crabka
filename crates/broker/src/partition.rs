@@ -23,6 +23,7 @@ use arc_swap::ArcSwap;
 use crabka_ids::PartitionIndex;
 use crabka_log::{AbortedTxn, Log, Offset, ReadOutput, VerbatimBatch};
 use crabka_protocol::records::RecordBatch;
+use crabka_units::ByteSize;
 use tokio::{
     sync::{Notify, mpsc, oneshot},
     task::JoinHandle,
@@ -409,7 +410,7 @@ impl Partition {
     }
 
     /// Read batches from the underlying [`Log`] starting at `offset`,
-    /// returning up to `max_bytes` of data.
+    /// returning up to `max_size` of data.
     ///
     /// Locks the `Arc<Mutex<Log>>` for the duration of the read. Used by
     /// `TxnCoordinator::recover` to replay `__transaction_state` records.
@@ -421,12 +422,12 @@ impl Partition {
     pub(crate) fn read_log(
         &self,
         offset: Offset,
-        max_bytes: usize,
+        max_size: ByteSize,
     ) -> Result<ReadOutput, BrokerError> {
         self.log
             .lock()
             .map_err(|_| BrokerError::Txn("log mutex poisoned".into()))?
-            .read(offset, max_bytes)
+            .read(offset, max_size)
             .map_err(BrokerError::from)
     }
 

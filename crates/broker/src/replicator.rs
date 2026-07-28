@@ -23,6 +23,7 @@ use crabka_protocol::{
 };
 use crabka_raft::NodeId;
 use crabka_security::ListenerProtocol;
+use crabka_units::{ByteRate, convert::ByteRateExt};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
@@ -228,7 +229,7 @@ fn follower_partition_fetch_cap(cfg: &Config) -> FetchThrottleDecision {
     let image = cfg.controller.current_image();
     let throttle = TopicThrottle::for_topic(&image, &cfg.topic);
     let throttled = throttle.follower.contains(cfg.partition.get(), cfg.node_id);
-    if !throttled || cfg.throttle_state.follower_in.rate() == 0 {
+    if !throttled || cfg.throttle_state.follower_in.byte_rate() == <ByteRate as ByteRateExt>::ZERO {
         return FetchThrottleDecision::Fetch(cfg.replication.fetch_max_bytes);
     }
 
@@ -741,6 +742,7 @@ mod tests {
         AddVoter, Node, QuorumState, RaftError, ReconfigOutcome, RemoveVoter, SnapshotRange,
         UpdateVoter,
     };
+    use crabka_units::{bytes, bytes_per_sec};
     use tokio::sync::watch;
 
     use super::*;
@@ -1068,7 +1070,9 @@ mod tests {
     #[test]
     fn follower_partition_fetch_cap_ignores_unthrottled_partitions() {
         let (cfg, _log_dir) = test_config(image_with_leader(LEADER_ID));
-        cfg.throttle_state.follower_in.set_rate_with_burst(1234, 0);
+        cfg.throttle_state
+            .follower_in
+            .set_byte_rate_with_burst(bytes_per_sec(1234), bytes(0));
 
         assert!(
             follower_partition_fetch_cap(&cfg)
@@ -1089,7 +1093,9 @@ mod tests {
     #[test]
     fn follower_partition_fetch_cap_sleeps_when_throttled_bucket_is_empty() {
         let (cfg, _log_dir) = test_config(image_with_follower_throttle("*"));
-        cfg.throttle_state.follower_in.set_rate_with_burst(1024, 0);
+        cfg.throttle_state
+            .follower_in
+            .set_byte_rate_with_burst(bytes_per_sec(1024), bytes(0));
 
         assert!(follower_partition_fetch_cap(&cfg) == FetchThrottleDecision::Sleep);
     }
@@ -1099,7 +1105,7 @@ mod tests {
         let (cfg, _log_dir) = test_config(image_with_follower_throttle("*"));
         cfg.throttle_state
             .follower_in
-            .set_rate_with_burst(1234, 1234);
+            .set_byte_rate_with_burst(bytes_per_sec(1234), bytes(1234));
 
         assert!(follower_partition_fetch_cap(&cfg) == FetchThrottleDecision::Fetch(1234));
     }

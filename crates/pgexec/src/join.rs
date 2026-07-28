@@ -169,7 +169,7 @@ fn push_bounded_join_row(
     row: Vec<Datum>,
 ) -> Result<(), ExecError> {
     let bytes = crate::scanner::datum_row_bytes(&row);
-    if used.saturating_add(bytes) > crate::scanner::BLOCKING_QUERY_MEMORY_BYTES {
+    if crate::scanner::exceeds_query_memory(used.saturating_add(bytes)) {
         return Err(crate::scanner::memory_budget_exceeded());
     }
     *used += bytes;

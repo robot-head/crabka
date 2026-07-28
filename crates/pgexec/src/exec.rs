@@ -92,7 +92,7 @@ pub(crate) struct WriteContext<'a> {
     /// sessions that can be enlisted in a cross-range transaction, whose
     /// deadlock cycles span engines and are invisible to any one engine's
     /// wait-for graph.
-    pub lock_wait_cap: Option<std::time::Duration>,
+    pub lock_wait_cap: Option<crabka_units::Time>,
 }
 
 #[derive(Clone, Copy)]
@@ -2035,14 +2035,16 @@ static PRUNE_ENGAGEMENT: std::sync::LazyLock<std::sync::Mutex<PruneEngagementLog
 /// zero `pruned` shows the write path consults the horizon but finds nothing
 /// dead; non-zero `pruned` confirms end-to-end reclamation.
 fn log_prune_engagement(horizon: u64, pruned: u64) {
-    const EMIT_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
+    use crabka_units::convert::StdDurationExt as _;
+
+    const EMIT_EVERY: crabka_units::Time = crabka_units::secs(1);
     let mut log = PRUNE_ENGAGEMENT.lock().expect("prune engagement log");
     log.rows += 1;
     log.pruned += pruned;
     let now = std::time::Instant::now();
     let due = log
         .last_emitted
-        .is_none_or(|last| now.duration_since(last) >= EMIT_EVERY);
+        .is_none_or(|last| now.duration_since(last).as_time() >= EMIT_EVERY);
     if !due {
         return;
     }
@@ -3527,7 +3529,7 @@ fn build_table_expr(
             let rows = match crate::scanner::collect_cursor_bounded(
                 range_scanner,
                 scan_request,
-                crate::scanner::BLOCKING_QUERY_MEMORY_BYTES,
+                crate::scanner::BLOCKING_QUERY_MEMORY,
             ) {
                 Ok(rows) => rows,
                 Err(error) if should_retry_without_scan_pushdown(&error, distributed_plan) => {
@@ -3548,7 +3550,7 @@ fn build_table_expr(
                             partial_aggregate: None,
                             top_k: None,
                         },
-                        crate::scanner::BLOCKING_QUERY_MEMORY_BYTES,
+                        crate::scanner::BLOCKING_QUERY_MEMORY,
                     )?
                 }
                 Err(error) => return Err(error),
@@ -3973,7 +3975,7 @@ fn try_execute_local_streaming_aggregate(
             top_k: None,
         },
         plan.specs(),
-        crate::scanner::BLOCKING_QUERY_MEMORY_BYTES,
+        crate::scanner::BLOCKING_QUERY_MEMORY,
     )?;
     let rows = match &plan {
         StreamingAggregatePlan::Scalar { calls, specs } => {
@@ -5242,7 +5244,7 @@ pub(crate) async fn execute_read_locking(
     lockmgr: &crate::lockmgr::RowLockManager,
     repeatable_read: bool,
     mode: crate::lockmgr::LockMode,
-    lock_wait_cap: Option<std::time::Duration>,
+    lock_wait_cap: Option<crabka_units::Time>,
     s: &SelectStmt,
 ) -> Result<QueryResult, ExecError> {
     let catalog_kv = read_ctx.catalog_kv;
@@ -5414,7 +5416,7 @@ fn project_rows_ordered(
             }
             let bytes = crate::scanner::datum_row_bytes(&keys)
                 .saturating_add(crate::scanner::datum_row_bytes(&row));
-            if keyed_bytes.saturating_add(bytes) > crate::scanner::BLOCKING_QUERY_MEMORY_BYTES {
+            if crate::scanner::exceeds_query_memory(keyed_bytes.saturating_add(bytes)) {
                 return Err(crate::scanner::memory_budget_exceeded());
             }
             keyed_bytes += bytes;
@@ -5431,7 +5433,7 @@ fn ensure_blocking_rows_fit(rows: &[Vec<Datum>]) -> Result<(), ExecError> {
     let bytes = rows.iter().fold(0usize, |bytes, row| {
         bytes.saturating_add(crate::scanner::datum_row_bytes(row))
     });
-    if bytes > crate::scanner::BLOCKING_QUERY_MEMORY_BYTES {
+    if crate::scanner::exceeds_query_memory(bytes) {
         return Err(crate::scanner::memory_budget_exceeded());
     }
     Ok(())

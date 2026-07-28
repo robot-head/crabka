@@ -6,9 +6,9 @@ use std::time::Duration;
 
 use crabka_client_producer::ProducerFlushTimeout;
 use crabka_gres_control::{
-    CheckpointPartBytes, DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS,
-    DEFAULT_CHECKPOINT_POLL_INTERVAL_MS, DEFAULT_IDLE_SUSPEND_POLL_INTERVAL_MS,
-    DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS, PgdogConnectAttempts, PgdogPoolerMode, PositiveI32,
+    CheckpointPartBytes, DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT,
+    DEFAULT_CHECKPOINT_POLL_INTERVAL, DEFAULT_IDLE_SUSPEND_POLL_INTERVAL,
+    DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL, PgdogConnectAttempts, PgdogPoolerMode, PositiveI32,
     PositiveMillis, PositiveUsize,
 };
 use crabka_gres_substrate::{
@@ -19,10 +19,13 @@ use crabka_gres_substrate::{
     DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES, DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT_MS,
     DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT_MS, DEFAULT_WAL_TOPIC_REPLICATION_FACTOR,
 };
+use crabka_units::convert::TimeExt as _;
 use kube::CustomResource;
 use refined_type::rule::GreaterI32;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+
+use crate::controller::common::millis_u64;
 
 const DEFAULT_LIFECYCLE_REQUEUE_MS: u64 = 5_000;
 
@@ -336,22 +339,22 @@ impl GresComputeSpec {
             .map_err(|error| format!("spec.compute.checkpointRetain: {error}"))?,
             checkpoint_delete_records_timeout_ms: PositiveI32::new(
                 self.checkpoint_delete_records_timeout_ms
-                    .unwrap_or(DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS),
+                    .unwrap_or_else(|| DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT.millis_i32()),
             )
             .map_err(|error| format!("spec.compute.checkpointDeleteRecordsTimeoutMs: {error}"))?,
             checkpoint_poll_interval_ms: PositiveMillis::new(
                 self.checkpoint_poll_interval_ms
-                    .unwrap_or(DEFAULT_CHECKPOINT_POLL_INTERVAL_MS),
+                    .unwrap_or_else(|| millis_u64(DEFAULT_CHECKPOINT_POLL_INTERVAL)),
             )
             .map_err(|error| format!("spec.compute.checkpointPollIntervalMs: {error}"))?,
             idle_suspend_poll_interval_ms: PositiveMillis::new(
                 self.idle_suspend_poll_interval_ms
-                    .unwrap_or(DEFAULT_IDLE_SUSPEND_POLL_INTERVAL_MS),
+                    .unwrap_or_else(|| millis_u64(DEFAULT_IDLE_SUSPEND_POLL_INTERVAL)),
             )
             .map_err(|error| format!("spec.compute.idleSuspendPollIntervalMs: {error}"))?,
             range0_follower_poll_interval_ms: PositiveMillis::new(
                 self.range0_follower_poll_interval_ms
-                    .unwrap_or(DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS),
+                    .unwrap_or_else(|| millis_u64(DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL)),
             )
             .map_err(|error| format!("spec.compute.range0FollowerPollIntervalMs: {error}"))?,
             fdw_broker_dns_timeout: crabka_client_core::ClientDnsTimeout::new(
@@ -886,6 +889,7 @@ mod tests {
     use std::time::Duration;
 
     use assert2::{assert, check};
+    use crabka_units::convert::ByteSizeExt as _;
     use kube::CustomResourceExt as _;
 
     use super::*;
@@ -1087,23 +1091,27 @@ mod tests {
         let defaults = GresComputeSpec::default()
             .effective_policy()
             .expect("default compute policy");
-        assert!(defaults.checkpoint_part_bytes.into_value() == DEFAULT_PART_MAX_BYTES);
+        // The CRD field stays a raw usize (the spec derives Eq); the policy
+        // hands out a ByteSize, so compare at the seam.
+        assert!(
+            defaults.checkpoint_part_bytes.into_value().bytes_usize() == DEFAULT_PART_MAX_BYTES
+        );
         assert!(defaults.checkpoint_retain.into_value() == DEFAULT_CHECKPOINT_RETAIN);
         assert!(
             defaults.checkpoint_delete_records_timeout_ms.into_value()
-                == DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS
+                == DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT.millis_i32()
         );
         assert!(
             defaults.checkpoint_poll_interval_ms.into_value()
-                == DEFAULT_CHECKPOINT_POLL_INTERVAL_MS
+                == millis_u64(DEFAULT_CHECKPOINT_POLL_INTERVAL)
         );
         assert!(
             defaults.idle_suspend_poll_interval_ms.into_value()
-                == DEFAULT_IDLE_SUSPEND_POLL_INTERVAL_MS
+                == millis_u64(DEFAULT_IDLE_SUSPEND_POLL_INTERVAL)
         );
         assert!(
             defaults.range0_follower_poll_interval_ms.into_value()
-                == DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS
+                == millis_u64(DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL)
         );
         assert!(defaults.lifecycle_requeue_ms.into_value() == DEFAULT_LIFECYCLE_REQUEUE_MS);
 

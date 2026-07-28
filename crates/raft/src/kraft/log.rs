@@ -8,6 +8,7 @@ use std::path::Path;
 use crabka_ids::{LeaderEpoch, Offset};
 use crabka_log::{Log, LogConfig, RawRead};
 use crabka_protocol::records::RecordBatch;
+use crabka_units::prelude::ByteSize;
 
 use crate::{
     error::RaftError,
@@ -73,18 +74,18 @@ impl KraftLog {
     pub fn read_decoded(
         &self,
         offset: Offset,
-        max_bytes: usize,
+        max_size: ByteSize,
     ) -> Result<Vec<RecordBatch>, RaftError> {
-        Ok(self.log.read(offset, max_bytes)?.batches)
+        Ok(self.log.read(offset, max_size)?.batches)
     }
 
     /// Serve KIP-595 `Fetch`: verbatim batch bytes in `[offset, min(hwm, log_end))`.
     ///
     /// # Errors
     /// Returns [`RaftError`] if the underlying raw read fails.
-    pub fn read_committed(&self, offset: Offset, max_bytes: usize) -> Result<RawRead, RaftError> {
+    pub fn read_committed(&self, offset: Offset, max_size: ByteSize) -> Result<RawRead, RaftError> {
         let limit = self.hwm.min(self.log.log_end_offset());
-        Ok(self.log.read_raw(offset, limit, max_bytes)?)
+        Ok(self.log.read_raw(offset, limit, max_size)?)
     }
 
     /// Advance the high watermark (monotonic; never past the log end).
@@ -170,8 +171,13 @@ impl LogView for KraftLog {
 #[cfg(test)]
 mod tests {
     use assert2::{assert, check};
+    use crabka_units::prelude::mebibytes;
 
     use super::*;
+
+    /// Read budget the log tests use: larger than any batch they append, so a
+    /// read returns everything written.
+    const TEST_READ_BUDGET: ByteSize = mebibytes(1);
 
     fn open_tmp() -> (KraftLog, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -222,7 +228,7 @@ mod tests {
         let off1 = log.append(&mut batch(0, 1, b"b")).unwrap();
         assert2::assert!((off0, off1, log.log_end_offset()) == (Offset(0), Offset(1), Offset(2)));
         // read back decoded
-        let out = log.read_decoded(Offset(0), 1 << 20).unwrap();
+        let out = log.read_decoded(Offset(0), TEST_READ_BUDGET).unwrap();
         assert2::assert!(
             out.iter()
                 .map(|batch| batch.partition_leader_epoch)
@@ -237,7 +243,7 @@ mod tests {
 
         let first = log.append(&mut batch(0, 1, b"a")).unwrap();
         let second = log.append(&mut batch(0, 1, b"b")).unwrap();
-        let decoded = log.read_decoded(Offset(0), 1 << 20).unwrap();
+        let decoded = log.read_decoded(Offset(0), TEST_READ_BUDGET).unwrap();
 
         check!(
             (
@@ -279,7 +285,7 @@ mod tests {
         log.append_at(&mut batch(0, 2, b"x"), Offset(0)).unwrap();
         assert2::assert!(log.log_end_offset().0 == 1);
         assert2::assert!(
-            log.read_decoded(Offset(0), 1 << 20).unwrap()[0].partition_leader_epoch == 2
+            log.read_decoded(Offset(0), TEST_READ_BUDGET).unwrap()[0].partition_leader_epoch == 2
         );
     }
 
@@ -321,9 +327,9 @@ mod tests {
             log.append(&mut batch(0, 1, b"x")).unwrap();
         } // offsets 0..5
         log.advance_hwm(Offset(3));
-        let r = log.read_committed(Offset(0), 1 << 20).unwrap();
+        let r = log.read_committed(Offset(0), TEST_READ_BUDGET).unwrap();
         // bytes contain only batches with base_offset < 3 (offsets 0,1,2)
-        let decoded = log.read_decoded(Offset(0), 1 << 20).unwrap();
+        let decoded = log.read_decoded(Offset(0), TEST_READ_BUDGET).unwrap();
         let committed: Vec<_> = decoded.into_iter().filter(|b| b.base_offset < 3).collect();
         check!(committed.len() == 3);
         // total committed bytes equals the size of the first 3 batches

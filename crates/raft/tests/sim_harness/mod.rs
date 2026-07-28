@@ -33,6 +33,7 @@ use crabka_raft::kraft::{
     role::Role,
     types::{Epoch, LogView, NodeId, QuorumState, SimInstant},
 };
+use crabka_units::prelude::{Time, TimeExt as _};
 
 // --------------------------------------------------------------------------
 // Pluggable per-node log
@@ -209,7 +210,7 @@ impl<L: SimNodeLog> Sim<L> {
             let machine = QuorumStateMachine::new(
                 id,
                 QuorumState::bootstrap(uuid::Uuid::nil(), voters.clone()),
-                election_timeout_ms,
+                election_timeout_of(id),
             );
             nodes.insert(
                 id,
@@ -770,6 +771,14 @@ const HEARTBEAT_MS: u64 = 300;
 /// lowest live id tends to win the election race — elections always converge.
 fn election_timeout_ms_of(id: NodeId) -> u64 {
     1000 + id.0 * 50
+}
+
+/// [`election_timeout_ms_of`] as the quantity [`QuorumStateMachine::new`] takes.
+/// The simulation's own clock stays integer logical milliseconds — a
+/// [`SimInstant`] is a coordinate, not an extent — so this conversion happens
+/// only at the core's constructor.
+fn election_timeout_of(id: NodeId) -> Time {
+    Time::from_millis(i64::try_from(election_timeout_ms_of(id)).unwrap_or(i64::MAX))
 }
 
 /// Update `best` to the earliest `(deadline, id, kind)` seen so far. Earlier

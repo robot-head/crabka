@@ -114,8 +114,8 @@ async fn await_tiered_config(broker: &BrokerHandle, topic: &str) {
             .partition_log_config_for_test(topic, 0)
             .is_some_and(|config| {
                 config.remote_storage_enable
-                    && config.segment_bytes == 1024
-                    && config.local_retention_bytes == Some(1)
+                    && config.segment_size == crabka_units::kibibytes(1)
+                    && config.local_retention_size == Some(crabka_units::bytes(1))
             })
         {
             return;
@@ -277,8 +277,8 @@ async fn copy_then_fetch_round_trip(
     loop {
         if let Some(cfg) = broker.partition_log_config_for_test(topic, 0)
             && cfg.remote_storage_enable
-            && cfg.segment_bytes == 1024
-            && cfg.local_retention_bytes == Some(1)
+            && cfg.segment_size == crabka_units::kibibytes(1)
+            && cfg.local_retention_size == Some(crabka_units::bytes(1))
         {
             break;
         }

@@ -15,6 +15,7 @@ use crabka_gres_ranges::{
 use crabka_pgkv::Kv as _;
 use crabka_pgwire::engine::{Engine as _, Session as _};
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
+use crabka_units::convert::TimeExt as _;
 use tokio::net::TcpListener;
 
 async fn broker_test_permit() -> tokio::sync::OwnedSemaphorePermit {
@@ -412,9 +413,8 @@ async fn live_multirange_substrate_default_fdw_server_reads_own_broker() {
         checkpoints: None,
         kafka_security: None,
         ranges: Some("0,5".to_string()),
-        range0_follower_poll_interval: std::time::Duration::from_millis(
-            crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
-        ),
+        range0_follower_poll_interval: crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL
+            .to_std(),
         recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
         wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
         producer_dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
@@ -482,9 +482,8 @@ async fn live_multirange_substrate_hlc_mode_commits_and_mints_wall_anchored_stam
         checkpoints: None,
         kafka_security: None,
         ranges: Some("0,5".to_string()),
-        range0_follower_poll_interval: std::time::Duration::from_millis(
-            crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
-        ),
+        range0_follower_poll_interval: crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL
+            .to_std(),
         recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
         wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
         producer_dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
@@ -649,9 +648,8 @@ async fn live_multirange_transfer_stages_populated_successor_without_publishing_
         }),
         kafka_security: None,
         ranges: Some("0,5".to_string()),
-        range0_follower_poll_interval: std::time::Duration::from_millis(
-            crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
-        ),
+        range0_follower_poll_interval: crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL
+            .to_std(),
         recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
         wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
         producer_dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
@@ -1013,9 +1011,8 @@ fn activation_crash_config(
         }),
         kafka_security: None,
         ranges: Some("0,5".to_owned()),
-        range0_follower_poll_interval: std::time::Duration::from_millis(
-            crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
-        ),
+        range0_follower_poll_interval: crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL
+            .to_std(),
         recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
         wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
         producer_dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
@@ -2557,9 +2554,8 @@ async fn live_populated_hash_split_partitions_physical_rows_and_sequence() {
         }),
         kafka_security: None,
         ranges: Some("0,5".to_string()),
-        range0_follower_poll_interval: std::time::Duration::from_millis(
-            crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
-        ),
+        range0_follower_poll_interval: crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL
+            .to_std(),
         recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
         wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
         producer_dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
@@ -2731,9 +2727,8 @@ async fn live_multirange_transfer_rejects_concurrent_pause_without_waiting() {
         }),
         kafka_security: None,
         ranges: Some("0,200".to_string()),
-        range0_follower_poll_interval: std::time::Duration::from_millis(
-            crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
-        ),
+        range0_follower_poll_interval: crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL
+            .to_std(),
         recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
         wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
         producer_dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
@@ -2804,9 +2799,8 @@ async fn non_live_runtimes_do_not_expose_range_transfer_capability() {
         checkpoints: None,
         kafka_security: None,
         ranges: None,
-        range0_follower_poll_interval: std::time::Duration::from_millis(
-            crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
-        ),
+        range0_follower_poll_interval: crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL
+            .to_std(),
         recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
         wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
         producer_dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
@@ -2831,9 +2825,8 @@ async fn non_live_runtimes_do_not_expose_range_transfer_capability() {
             checkpoints: None,
             kafka_security: None,
             ranges: None,
-            range0_follower_poll_interval: std::time::Duration::from_millis(
-                crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
-            ),
+            range0_follower_poll_interval:
+                crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL.to_std(),
             recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
             wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
             producer_dns_timeout: crabka_client_core::ClientDnsTimeout::default(),

@@ -1011,7 +1011,7 @@ pub(crate) fn aggregate_rows(
                 let bytes = crate::scanner::datum_row_bytes(&key)
                     .saturating_mul(2)
                     .saturating_add(specs.len().saturating_mul(std::mem::size_of::<Acc>()));
-                if group_bytes.saturating_add(bytes) > crate::scanner::BLOCKING_QUERY_MEMORY_BYTES {
+                if crate::scanner::exceeds_query_memory(group_bytes.saturating_add(bytes)) {
                     return Err(crate::scanner::memory_budget_exceeded());
                 }
                 group_bytes += bytes;

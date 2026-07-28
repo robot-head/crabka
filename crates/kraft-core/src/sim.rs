@@ -17,6 +17,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+use crabka_units::prelude::{Time, TimeExt as _, millis};
+
 use crate::{
     action::{Action, TimerKind},
     core::QuorumStateMachine,
@@ -227,10 +229,30 @@ enum SimTimer {
     Heartbeat,
 }
 
-const HEARTBEAT_MS: u64 = 300;
+/// How often a simulated leader re-announces its epoch to the cluster.
+const HEARTBEAT: Time = millis(300);
 
-fn election_timeout_ms_of(id: NodeId) -> u64 {
-    1000 + id.0 * 50
+/// The election timeout a simulated voter with the lowest node id starts from.
+const BASE_ELECTION_TIMEOUT: Time = millis(1000);
+
+/// Added to [`BASE_ELECTION_TIMEOUT`] once per unit of node id, so voters do not
+/// arm their election timers in lockstep and ties break deterministically.
+const ELECTION_TIMEOUT_STAGGER: Time = millis(50);
+
+fn election_timeout_of(id: NodeId) -> Time {
+    let rank = f64::from(u32::try_from(id.0).unwrap_or(u32::MAX));
+    BASE_ELECTION_TIMEOUT + ELECTION_TIMEOUT_STAGGER * rank
+}
+
+/// `extent` in whole milliseconds, for arithmetic on the raw-integer
+/// [`SimInstant`] clock.
+///
+/// A [`SimInstant`] is a coordinate on the simulator's logical millisecond
+/// timeline, not a magnitude, so it stays an integer; only the extents added to
+/// it are quantities. The conversion is exact for every extent the simulator
+/// uses.
+fn deadline_millis(extent: Time) -> u64 {
+    u64::try_from(extent.millis_i64()).unwrap_or(0)
 }
 
 fn consider(
@@ -311,11 +333,11 @@ impl Sim {
         let voters = make_voter_set(voter_ids);
         let mut nodes = BTreeMap::new();
         for &id in voter_ids {
-            let election_timeout_ms = election_timeout_ms_of(id);
+            let election_timeout = election_timeout_of(id);
             let machine = QuorumStateMachine::new(
                 id,
                 QuorumState::bootstrap(uuid::Uuid::nil(), voters.clone()),
-                election_timeout_ms,
+                election_timeout,
             );
             nodes.insert(
                 id,
@@ -324,7 +346,7 @@ impl Sim {
                     machine,
                     log: SimLog::default(),
                     high_watermark: 0,
-                    election_deadline: Some(SimInstant(election_timeout_ms)),
+                    election_deadline: Some(SimInstant(deadline_millis(election_timeout))),
                     fetch_deadline: None,
                     heartbeat_deadline: None,
                 },
@@ -639,7 +661,9 @@ impl Sim {
                             .get(&leader_id)
                             .is_some_and(|n| n.machine.role().is_leader());
                     if leader_alive {
-                        let deadline = self.now.saturating_add_ms(election_timeout_ms_of(id));
+                        let deadline = self
+                            .now
+                            .saturating_add_ms(deadline_millis(election_timeout_of(id)));
                         self.nodes.get_mut(&id).unwrap().fetch_deadline = Some(deadline);
                         self.apply_action(id, Action::SendFetch { leader_id });
                         return true;
@@ -675,7 +699,7 @@ impl Sim {
         }
         let epoch = self.nodes[&id].machine.quorum_state().leader_epoch;
         self.apply_action(id, Action::SendBeginQuorumEpoch { epoch });
-        let deadline = self.now.saturating_add_ms(HEARTBEAT_MS);
+        let deadline = self.now.saturating_add_ms(deadline_millis(HEARTBEAT));
         self.nodes.get_mut(&id).unwrap().heartbeat_deadline = Some(deadline);
     }
 
@@ -750,7 +774,8 @@ impl Sim {
                 node.election_deadline = None;
                 node.fetch_deadline = None;
                 if node.heartbeat_deadline.is_none() {
-                    node.heartbeat_deadline = Some(self.now.saturating_add_ms(HEARTBEAT_MS));
+                    node.heartbeat_deadline =
+                        Some(self.now.saturating_add_ms(deadline_millis(HEARTBEAT)));
                 }
             }
             Role::Follower { .. } | Role::Observer { .. } => {
@@ -1089,6 +1114,26 @@ mod tests {
     use assert2::{assert, check};
 
     use super::*;
+
+    #[test]
+    fn election_timeouts_land_on_whole_staggered_milliseconds() {
+        // The scheduler's clock is an integer millisecond timeline, and which
+        // voter wins a race is decided by these exact values. Pin them so a
+        // rounding shift in the extent arithmetic cannot silently rewrite the
+        // simulated timeline.
+        for (id, expected_millis) in [
+            (NodeId(1), 1050),
+            (NodeId(2), 1100),
+            (NodeId(3), 1150),
+            (NodeId(7), 1350),
+        ] {
+            check!(
+                deadline_millis(election_timeout_of(id)) == expected_millis,
+                "node {id}"
+            );
+        }
+        check!(deadline_millis(HEARTBEAT) == 300);
+    }
 
     #[test]
     fn returns_three_traces() {

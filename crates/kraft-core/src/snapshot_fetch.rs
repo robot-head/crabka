@@ -6,6 +6,7 @@
 //! engine restarts cleanly against the current leader.
 
 use bytes::{Bytes, BytesMut};
+use crabka_units::prelude::{ByteSize, ByteSizeExt as _, gibibytes};
 
 use crate::types::NodeId;
 
@@ -20,7 +21,7 @@ pub type SnapshotId = (i64, i32);
 /// legitimate cluster reaches it, while it caps the memory a peer the follower
 /// believes is the leader can force it to allocate (denial-of-service finding
 /// M-3). A peer declaring (or streaming) more than this aborts the transfer.
-const MAX_SNAPSHOT_BYTES: usize = 1024 * 1024 * 1024;
+const MAX_SNAPSHOT: ByteSize = gibibytes(1);
 
 /// In-flight reassembly of one snapshot from one leader.
 #[derive(Debug)]
@@ -69,13 +70,13 @@ impl SnapshotFetchState {
         position: i64,
         chunk: &[u8],
     ) -> SnapshotFetchStep {
-        // `size < 0` is rejected first, so the `as u64` cast below is exact and
-        // never wraps; the declared total must also stay under the hard cap so a
-        // hostile leader cannot make us reassemble unbounded bytes (finding M-3).
+        // A negative declared total is rejected outright; the declared total must
+        // also stay under the hard cap so a hostile leader cannot make us
+        // reassemble unbounded bytes (finding M-3).
         if id != self.snapshot_id
             || position != self.next_position()
             || size < 0
-            || size.cast_unsigned() > MAX_SNAPSHOT_BYTES as u64
+            || size > MAX_SNAPSHOT.bytes_i64()
         {
             return SnapshotFetchStep::Restart;
         }
@@ -148,10 +149,18 @@ mod tests {
     #[test]
     fn declared_size_over_cap_restarts() {
         let mut s = SnapshotFetchState::new((10, 1), NodeId(2));
-        let too_big = i64::try_from(MAX_SNAPSHOT_BYTES).unwrap() + 1;
+        let too_big = MAX_SNAPSHOT.bytes_i64() + 1;
         let step = s.on_chunk((10, 1), too_big, 0, b"abc");
         assert2::assert!(step == SnapshotFetchStep::Restart);
         assert2::assert!(s.next_position() == 0);
+    }
+
+    #[test]
+    fn reassembly_cap_is_exactly_one_gibibyte() {
+        // The cap bounds the memory a peer claiming to be the leader can force
+        // this follower to allocate, so its magnitude is the security property
+        // (finding M-3) — not just that some cap exists.
+        assert2::assert!(MAX_SNAPSHOT.bytes_i64() == 1_073_741_824);
     }
 
     #[test]

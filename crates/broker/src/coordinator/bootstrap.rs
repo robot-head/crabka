@@ -8,7 +8,7 @@ use crabka_ids::PartitionIndex;
 use crabka_metadata::{MetadataRecord, PartitionRecord, TopicRecord};
 use crabka_protocol::records::RecordBatch;
 use crabka_raft::RaftError;
-use crabka_units::convert::TimeExt as _;
+use crabka_units::{ByteSize, convert::TimeExt as _, mebibytes};
 
 use crate::{
     broker::spawn_partition,
@@ -27,6 +27,10 @@ use crate::{
     log_dir,
     partition_registry::PartitionRegistry,
 };
+
+/// How much of `__consumer_offsets` one replay read pulls back before the
+/// walk advances to the next offset.
+const REPLAY_READ_MAX: ByteSize = mebibytes(1);
 
 pub const OFFSETS_TOPIC: &str = "__consumer_offsets";
 pub const OFFSETS_PARTITION: i32 = 0;
@@ -284,7 +288,7 @@ fn replay_records(
     let mut next = log.log_start_offset();
     let end = log.log_end_offset();
     while next < end {
-        let out = log.read(next, 1024 * 1024)?;
+        let out = log.read(next, REPLAY_READ_MAX)?;
         if out.batches.is_empty() {
             break;
         }
@@ -670,8 +674,8 @@ mod tests {
     /// Spin up a controller, wait until it reports a leader, return the handle.
     async fn controller_with_leader(log_dir: std::path::PathBuf) -> Arc<ControllerHandle> {
         let cfg = crabka_raft::ControllerConfig {
-            election_timeout: Duration::from_millis(200),
-            heartbeat_interval: Duration::from_millis(50),
+            election_timeout: crabka_units::millis(200),
+            heartbeat_interval: crabka_units::millis(50),
             client_id: "test".into(),
             ..crabka_raft::ControllerConfig::for_tests(crabka_raft::NodeId(1), log_dir)
         };

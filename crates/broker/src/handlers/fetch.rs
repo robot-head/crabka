@@ -28,7 +28,7 @@ use crabka_protocol::{
     records::{RecordBatch, RecordsPayload},
 };
 use crabka_units::{
-    Time,
+    ByteSize, Time,
     convert::{ByteSizeExt as _, TimeExt},
 };
 use num_traits::ToPrimitive as _;
@@ -1116,7 +1116,7 @@ async fn do_read(
             effective_lso,
             read_committed_aborts,
         } => {
-            let read_max = usize::try_from(max_bytes.max(0)).unwrap_or(0);
+            let read_max = ByteSize::from_bytes_i64(i64::from(max_bytes.max(0)));
             // Run the blocking seek+read (and, for read_committed, the
             // aborted-txn index scan) off the reactor thread. The lock is
             // re-acquired inside the closure for the brief duration of the

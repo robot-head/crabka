@@ -387,8 +387,8 @@ async fn create_tiered_topic(admin: &Client, b1: &BrokerHandle, b2: &BrokerHandl
                 .partition_log_config_for_test(TOPIC, 0)
                 .is_some_and(|config| {
                     config.remote_storage_enable
-                        && config.segment_bytes == 1024
-                        && config.local_retention_bytes == Some(1)
+                        && config.segment_size == crabka_units::kibibytes(1)
+                        && config.local_retention_size == Some(crabka_units::bytes(1))
                 })
         };
         if ready(b1) || ready(b2) {

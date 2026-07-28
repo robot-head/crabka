@@ -4,20 +4,26 @@
 //! assembling text by hand. When the pinned `PgDog` image changes, re-run the G-4
 //! front-door e2e leg against these goldens before accepting any output change.
 
-use std::{collections::HashSet, str::FromStr, time::Duration};
+use std::{collections::HashSet, str::FromStr};
 
+use crabka_units::{Time, convert::TimeExt as _, days, minutes, secs};
 use refined_type::rule::GreaterU16;
 use serde::Serialize;
 
 use crate::{ControlError, TenantState};
 
 const DEFAULT_LISTEN_PORT: u16 = 6_432;
-const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_mins(1);
-const DEFAULT_SERVER_LIFETIME: Duration = Duration::from_mins(5);
+const DEFAULT_COLD_START_CEILING: Time = secs(30);
+const DEFAULT_IDLE_TIMEOUT: Time = minutes(1);
+const DEFAULT_SERVER_LIFETIME: Time = minutes(5);
+/// The shortest timeout `PgDog` is ever configured with, so a derived value
+/// cannot round down to something it would reject.
+const MINIMUM_TIMEOUT: Time = secs(1);
 // PgDog's documented way to disable proactive database healthchecks. This is
 // required for scale-to-zero routes: an ephemeral idle healthcheck must not
-// become the event that wakes a suspended tenant.
-const DISABLED_IDLE_HEALTHCHECK_DELAY_MS: u64 = 3_155_760_000_000;
+// become the event that wakes a suspended tenant. A century, which is how PgDog
+// documents "never".
+const DISABLED_IDLE_HEALTHCHECK_DELAY: Time = days(36_525);
 
 /// One tenant route available to `PgDog`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,72 +86,47 @@ impl FromStr for PgdogConnectAttempts {
 }
 
 /// Explicit timeout overrides for a `PgDog` render.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Not `Eq`: a [`Time`] is `f64`-backed, so it is only `PartialEq`.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PgdogTimeouts {
     /// Backend connection attempt timeout.
-    pub connect_timeout: Duration,
+    pub connect_timeout: Time,
     /// Time a client may wait for a pooled server connection.
-    pub checkout_timeout: Duration,
+    pub checkout_timeout: Time,
 }
 
 impl PgdogTimeouts {
     /// Derive the total cold-start ceiling from one connection-attempt timeout.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when multiplying by the attempt count overflows
-    /// [`Duration`].
+    #[must_use]
     pub fn cold_start_ceiling_for_attempt_timeout(
-        attempt_timeout: Duration,
+        attempt_timeout: Time,
         connect_attempts: PgdogConnectAttempts,
-    ) -> Result<Duration, ControlError> {
-        attempt_timeout
-            .checked_mul(u32::from(connect_attempts.into_value()))
-            .ok_or_else(|| {
-                ControlError::invalid_field(
-                    "cold_start_timeout",
-                    "connection attempt budget overflowed",
-                )
-            })
+    ) -> Time {
+        attempt_timeout * f64::from(connect_attempts.into_value())
     }
 
     /// Build timeout values that can cover the supplied cold-start ceiling.
     #[must_use]
     pub fn for_cold_start_ceiling(
-        cold_start_ceiling: Duration,
+        cold_start_ceiling: Time,
         connect_attempts: PgdogConnectAttempts,
     ) -> Self {
-        let attempt_count = u32::from(connect_attempts.into_value());
-        let connect_timeout =
-            divide_rounding_up(cold_start_ceiling, attempt_count).max(Duration::from_secs(1));
-        let checkout_timeout = cold_start_ceiling.max(Duration::from_secs(1));
+        let attempt_count = f64::from(connect_attempts.into_value());
 
         Self {
-            connect_timeout,
-            checkout_timeout,
+            connect_timeout: at_least(cold_start_ceiling / attempt_count, MINIMUM_TIMEOUT),
+            checkout_timeout: at_least(cold_start_ceiling, MINIMUM_TIMEOUT),
         }
     }
 
     fn ensure_covers_cold_start(
         self,
-        cold_start_ceiling: Duration,
+        cold_start_ceiling: Time,
         connect_attempts: PgdogConnectAttempts,
     ) -> Result<Self, ControlError> {
-        let Some(connect_budget) = self
-            .connect_timeout
-            .checked_mul(u32::from(connect_attempts.into_value()))
-        else {
-            return Err(ControlError::invalid_field(
-                "connect_timeout",
-                "connection budget overflowed",
-            ));
-        };
-        let Some(total_budget) = connect_budget.checked_add(self.checkout_timeout) else {
-            return Err(ControlError::invalid_field(
-                "checkout_timeout",
-                "timeout budget overflowed",
-            ));
-        };
+        let attempt_count = f64::from(connect_attempts.into_value());
+        let total_budget = self.connect_timeout * attempt_count + self.checkout_timeout;
 
         if total_budget < cold_start_ceiling {
             return Err(ControlError::invalid_field(
@@ -170,7 +151,9 @@ pub struct PgdogUser {
 }
 
 /// General `PgDog` settings shared by the rendered fleet.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Not `Eq`: the timeout fields are `f64`-backed quantities.
+#[derive(Debug, Clone, PartialEq)]
 pub struct PgdogGeneral {
     /// `PgDog` frontend listen port.
     pub listen_port: u16,
@@ -185,15 +168,15 @@ pub struct PgdogGeneral {
     /// Fleet-wide pooler mode.
     pub pooler_mode: PgdogPoolerMode,
     /// Maximum acceptable tenant wake latency.
-    pub cold_start_ceiling: Duration,
+    pub cold_start_ceiling: Time,
     /// Number of backend connection attempts.
     pub connect_attempts: PgdogConnectAttempts,
     /// Optional explicit timeout knobs. Omitted values are derived from the ceiling.
     pub timeouts: Option<PgdogTimeouts>,
     /// Idle pooled-server disconnect window.
-    pub idle_timeout: Duration,
+    pub idle_timeout: Time,
     /// Maximum lifetime for pooled backend connections.
-    pub server_lifetime: Duration,
+    pub server_lifetime: Time,
     /// Optional local/dev users rendered to `users.toml`.
     pub users: Vec<PgdogUser>,
 }
@@ -207,7 +190,7 @@ impl Default for PgdogGeneral {
             tls_client_ca_path: None,
             passthrough_auth: true,
             pooler_mode: PgdogPoolerMode::Transaction,
-            cold_start_ceiling: Duration::from_secs(30),
+            cold_start_ceiling: DEFAULT_COLD_START_CEILING,
             connect_attempts: PgdogConnectAttempts::new(3)
                 .expect("the default PgDog connect attempt count is positive"),
             timeouts: None,
@@ -291,6 +274,11 @@ impl<'a> PgdogConfig<'a> {
     }
 }
 
+/// The `[general]` table exactly as `PgDog` parses it.
+///
+/// This is a wire boundary: every field holds the raw form `PgDog` reads —
+/// milliseconds for the timeouts — and the surrounding logic converts once, in
+/// [`RenderGeneral::from_settings`].
 #[derive(Debug, Serialize)]
 struct RenderGeneral<'a> {
     port: u16,
@@ -330,7 +318,7 @@ impl<'a> RenderGeneral<'a> {
             checkout_timeout: milliseconds_rounded_up(timeouts.checkout_timeout),
             idle_timeout: milliseconds_rounded_up(general.idle_timeout),
             server_lifetime: milliseconds_rounded_up(general.server_lifetime),
-            idle_healthcheck_delay: DISABLED_IDLE_HEALTHCHECK_DELAY_MS,
+            idle_healthcheck_delay: milliseconds_rounded_up(DISABLED_IDLE_HEALTHCHECK_DELAY),
             tls_certificate: general.tls_cert_path.as_deref(),
             tls_private_key: general.tls_key_path.as_deref(),
             tls_client_ca_certificate: general.tls_client_ca_path.as_deref(),
@@ -472,26 +460,36 @@ fn push_database<'a>(
     Ok(())
 }
 
-fn divide_rounding_up(duration: Duration, divisor: u32) -> Duration {
-    let quotient = duration / divisor;
-    if quotient.checked_mul(divisor) == Some(duration) {
-        quotient
-    } else {
-        quotient + Duration::from_nanos(1)
-    }
+/// The larger of two extents.
+///
+/// A [`Time`] is `f64`-backed and so only `PartialOrd`, which rules out
+/// [`Ord::max`].
+fn at_least(extent: Time, floor: Time) -> Time {
+    if extent < floor { floor } else { extent }
 }
 
-fn milliseconds_rounded_up(duration: Duration) -> u64 {
-    let millis = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
-    if duration.subsec_nanos().is_multiple_of(1_000_000) {
-        return millis;
-    }
-    millis.saturating_add(1)
+/// One extent as the whole milliseconds `PgDog` reads, never rounding a timeout
+/// down to a shorter one than was configured.
+///
+/// Truncating and then correcting is deliberate: [`TimeExt::millis_i64`] rounds
+/// to nearest, which would report a 1.6 ms timeout as 2 ms and a 2.4 ms timeout
+/// as 2 ms. [`TimeExt::millis_i64_trunc`] divides the exact nanosecond count, so
+/// the round-trip comparison detects a sub-millisecond remainder without ever
+/// tripping on float error in a whole-millisecond value.
+fn milliseconds_rounded_up(extent: Time) -> u64 {
+    let whole = extent.millis_i64_trunc();
+    let millis = if Time::from_millis(whole) < extent {
+        whole.saturating_add(1)
+    } else {
+        whole
+    };
+    u64::try_from(millis).unwrap_or(0)
 }
 
 #[cfg(test)]
 mod tests {
     use assert2::{assert, check};
+    use crabka_units::millis;
 
     use super::*;
 
@@ -662,11 +660,11 @@ mod tests {
     #[test]
     fn rejects_timeout_budget_below_cold_start_ceiling() {
         let general = PgdogGeneral {
-            cold_start_ceiling: Duration::from_secs(30),
+            cold_start_ceiling: secs(30),
             connect_attempts: PgdogConnectAttempts::new(2).expect("positive attempts"),
             timeouts: Some(PgdogTimeouts {
-                connect_timeout: Duration::from_secs(3),
-                checkout_timeout: Duration::from_secs(5),
+                connect_timeout: secs(3),
+                checkout_timeout: secs(5),
             }),
             ..PgdogGeneral::default()
         };
@@ -683,58 +681,73 @@ mod tests {
     }
 
     #[test]
-    fn cold_start_ceiling_uses_attempt_count_and_rejects_overflow() {
+    fn cold_start_ceiling_uses_attempt_count() {
         let three = PgdogConnectAttempts::new(3).expect("positive attempts");
-        let ceiling =
-            PgdogTimeouts::cold_start_ceiling_for_attempt_timeout(Duration::from_secs(30), three)
-                .expect("timeout must fit");
 
-        assert!(ceiling == Duration::from_secs(90));
-        assert!(
-            PgdogTimeouts::cold_start_ceiling_for_attempt_timeout(Duration::MAX, three).is_err()
-        );
+        let ceiling = PgdogTimeouts::cold_start_ceiling_for_attempt_timeout(secs(30), three);
+
+        assert!(ceiling == secs(90));
     }
 
     #[test]
     fn derived_timeouts_use_attempt_count_and_keep_one_second_minimum() {
         let attempts = PgdogConnectAttempts::new(4).expect("positive attempts");
 
-        let rounded = PgdogTimeouts::for_cold_start_ceiling(Duration::from_secs(10), attempts);
-        let minimum = PgdogTimeouts::for_cold_start_ceiling(Duration::from_millis(1), attempts);
+        let rounded = PgdogTimeouts::for_cold_start_ceiling(secs(10), attempts);
+        let minimum = PgdogTimeouts::for_cold_start_ceiling(millis(1), attempts);
 
-        assert!(rounded.connect_timeout == Duration::from_millis(2_500));
-        assert!(rounded.checkout_timeout == Duration::from_secs(10));
-        assert!(minimum.connect_timeout == Duration::from_secs(1));
-        assert!(minimum.checkout_timeout == Duration::from_secs(1));
+        check!(rounded.connect_timeout == millis(2_500));
+        check!(rounded.checkout_timeout == secs(10));
+        check!(minimum.connect_timeout == secs(1));
+        check!(minimum.checkout_timeout == secs(1));
     }
 
     #[test]
-    fn derived_timeout_division_preserves_full_duration_range() {
-        let actual = divide_rounding_up(Duration::from_secs(u64::MAX), 2);
+    fn rendered_milliseconds_round_a_partial_millisecond_up() {
+        struct Case {
+            name: &'static str,
+            extent: Time,
+            expected: u64,
+        }
 
-        assert!(actual == Duration::new(u64::MAX / 2, 500_000_000));
-    }
+        let cases = [
+            Case {
+                name: "whole millisecond",
+                extent: millis(678),
+                expected: 678,
+            },
+            Case {
+                name: "sub-millisecond remainder rounds up",
+                extent: Time::from_secs_f64(0.000_25),
+                expected: 1,
+            },
+            Case {
+                name: "an indivisible attempt share rounds up",
+                extent: secs(10) / 3.0,
+                expected: 3_334,
+            },
+            Case {
+                name: "a century is exact",
+                extent: DISABLED_IDLE_HEALTHCHECK_DELAY,
+                expected: 3_155_760_000_000,
+            },
+            Case {
+                name: "a negative extent floors at zero",
+                extent: secs(0) - secs(1),
+                expected: 0,
+            },
+        ];
 
-    #[test]
-    fn rejects_overflowing_explicit_timeout_budget() {
-        let general = PgdogGeneral {
-            connect_attempts: PgdogConnectAttempts::new(2).expect("positive attempts"),
-            timeouts: Some(PgdogTimeouts {
-                connect_timeout: Duration::MAX,
-                checkout_timeout: Duration::from_secs(1),
-            }),
-            ..PgdogGeneral::default()
-        };
-        let tenants = vec![active_tenant("blue", "blue-0.gres.svc", 5432)];
-        let input = PgdogRenderInput {
-            tenants: &tenants,
-            activator: None,
-            general,
-        };
+        let actual = cases
+            .iter()
+            .map(|case| (case.name, milliseconds_rounded_up(case.extent)))
+            .collect::<Vec<_>>();
+        let expected = cases
+            .iter()
+            .map(|case| (case.name, case.expected))
+            .collect::<Vec<_>>();
 
-        let error = render_pgdog_toml(&input).expect_err("overflowing budget fails");
-
-        assert!(error.to_string().contains("connection budget overflowed"));
+        assert!(actual == expected);
     }
 
     #[test]
@@ -821,10 +834,10 @@ mod tests {
             tls_key_path: Some("/etc/pgdog/tls/tls.key".to_owned()),
             tls_client_ca_path: Some("/etc/pgdog/tls/ca.crt".to_owned()),
             pooler_mode: PgdogPoolerMode::Session,
-            cold_start_ceiling: Duration::from_secs(30),
+            cold_start_ceiling: secs(30),
             connect_attempts: PgdogConnectAttempts::new(5).expect("positive attempts"),
-            idle_timeout: Duration::from_secs(45),
-            server_lifetime: Duration::from_mins(4),
+            idle_timeout: secs(45),
+            server_lifetime: minutes(4),
             users: vec![PgdogUser {
                 name: "alice".to_owned(),
                 database: "blue".to_owned(),

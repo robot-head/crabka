@@ -1256,7 +1256,7 @@ mod tests {
         let r = log
             .lock()
             .unwrap()
-            .read_raw(Offset(0), Offset(1), 10 * 1024 * 1024)
+            .read_raw(Offset(0), Offset(1), crabka_units::mebibytes(10))
             .unwrap();
         assert!(&r.bytes[21..] == &wire[21..], "CRC-covered region verbatim");
         assert!(&r.bytes[17..21] == &wire[17..21], "CRC unchanged");
@@ -1296,7 +1296,7 @@ mod tests {
         let read = log
             .lock()
             .unwrap()
-            .read(Offset(0), 10 * 1024 * 1024)
+            .read(Offset(0), crabka_units::mebibytes(10))
             .unwrap();
         assert!(read.batches.len() == 1);
         check!(read.batches[0].attributes.compression() == CompressionType::Lz4);
@@ -1623,7 +1623,7 @@ mod tests {
         ));
 
         let new_cfg = LogConfig {
-            retention_ms: Some(std::time::Duration::from_mins(2)),
+            retention: Some(crabka_units::minutes(2)),
             ..LogConfig::default()
         };
         let (ack, ack_rx) = tokio::sync::oneshot::channel();
@@ -1636,7 +1636,7 @@ mod tests {
         ack_rx.await.expect("ack");
 
         let observed = log.lock().expect("lock").config_snapshot();
-        assert!(observed.retention_ms == new_cfg.retention_ms);
+        assert!(observed.retention == new_cfg.retention);
 
         drop(tx);
         writer.await.expect("writer join");

@@ -329,8 +329,8 @@ async fn start_metadata_source(
             initial_voters: prepare_initial_voters(config, bootstrap_records),
             controller_listen_addr: config.controller_listen_addr,
             log_dir: config.log_dir.join("__cluster_metadata"),
-            election_timeout: config.controller_election_timeout.to_std(),
-            heartbeat_interval: config.controller_heartbeat_interval.to_std(),
+            election_timeout: config.controller_election_timeout,
+            heartbeat_interval: config.controller_heartbeat_interval,
             client_id: format!("crabka-broker-{}-controller", config.broker_id),
             bootstrap_mode: config.bootstrap_mode,
             cluster_id: config.cluster_id,
@@ -339,8 +339,8 @@ async fn start_metadata_source(
             shard_router: Some(Arc::new(crate::wal::quorum::registry::WalShardRouter::new(
                 wal_shards,
             ))),
-            max_bytes_between_snapshots: config.metadata_max_bytes_between_snapshots.bytes_u64(),
-            max_snapshot_interval: config.metadata_max_snapshot_interval.to_std(),
+            max_bytes_between_snapshots: config.metadata_max_bytes_between_snapshots,
+            max_snapshot_interval: config.metadata_max_snapshot_interval,
             snapshot_interval_records: config.metadata_snapshot_interval_records,
         };
         let controller = Arc::new(
@@ -683,7 +683,7 @@ fn open_audit_spool(config: &BrokerConfig) -> Option<crabka_audit::Spool> {
     } else {
         config.log_dir.join(&config.audit_spool_dir)
     };
-    match crabka_audit::Spool::open(&directory, config.audit_spool_max.bytes_u64()) {
+    match crabka_audit::Spool::open(&directory, config.audit_spool_max) {
         Ok(spool) => Some(spool),
         Err(error) => {
             tracing::error!(%error, "failed to open audit spool; spooling disabled");
@@ -727,7 +727,7 @@ fn spawn_audit_metrics(
                 .set(i64::try_from(stats.depth()).unwrap_or(i64::MAX));
             metrics
                 .audit_spool_bytes
-                .set(i64::try_from(stats.spool_bytes()).unwrap_or(i64::MAX));
+                .set(stats.spool_bytes().bytes_i64());
         }
     });
 }
@@ -785,11 +785,11 @@ fn start_audit_pipeline(
                 product: Broker::audit_product(),
                 signer: audit_signer(config),
                 checkpoint_every_n: config.audit_checkpoint_every_n,
-                checkpoint_every: config.audit_checkpoint_every.to_std(),
+                checkpoint_every: config.audit_checkpoint_every,
                 chain,
                 spool,
                 stats: Arc::clone(&stats),
-                replay_every: config.audit_spool_replay_interval.to_std(),
+                replay_every: config.audit_spool_replay_interval,
                 sleeper: Arc::new(qubit_clock::sleep::SystemSleeper::new()),
             },
         );
@@ -2650,7 +2650,10 @@ impl BrokerHandle {
             .partitions
             .get(topic, PartitionIndex(partition))?;
         let snap = part.log.lock().ok()?.config_snapshot();
-        Some(snap.retention_ms)
+        // `crabka-log` holds this as a `Time` now, but the helper's signature is
+        // public under `test-helpers`, so the extent converts back at the seam
+        // rather than churning the callers.
+        Some(snap.retention.map(TimeExt::to_std))
     }
 
     /// Test-only: full `LogConfig` snapshot for `(topic, partition)`.
@@ -4502,7 +4505,7 @@ fn tune_accepted_socket(
 #[cfg(test)]
 mod tests {
     use assert2::{assert, check};
-    use crabka_units::{kibibytes, millis, minutes, secs};
+    use crabka_units::{kibibytes, mebibytes, millis, minutes, secs};
     use futures_util::future::BoxFuture;
     use tempfile::tempdir;
 
@@ -5771,8 +5774,8 @@ protocol = "Plaintext"
         let helper_topic = "handle-partition-helper-mutant-topic";
         let helper_part = local_partition_with_records(dir.path(), helper_topic, 0, &[]);
         let helper_config = crabka_log::LogConfig {
-            retention_ms: Some(std::time::Duration::from_secs(123)),
-            segment_bytes: 4096,
+            retention: Some(secs(123)),
+            segment_size: kibibytes(4),
             ..Default::default()
         };
         helper_part
@@ -5797,8 +5800,8 @@ protocol = "Plaintext"
         let observed_config = handle
             .partition_log_config_for_test(helper_topic, 0)
             .expect("helper partition log config");
-        assert!(observed_config.retention_ms == helper_config.retention_ms);
-        assert!(observed_config.segment_bytes == helper_config.segment_bytes);
+        assert!(observed_config.retention == helper_config.retention);
+        assert!(observed_config.segment_size == helper_config.segment_size);
         let last_offset = handle
             .produce_records_for_test(helper_topic, 0, 3)
             .await
@@ -5812,7 +5815,7 @@ protocol = "Plaintext"
             .log
             .lock()
             .expect("helper partition log lock")
-            .read(crabka_log::Offset(2), 1 << 20)
+            .read(crabka_log::Offset(2), mebibytes(1))
             .expect("read helper partition records");
         assert!(read.start_offset == crabka_log::Offset(2));
         assert!(!read.batches.is_empty());

@@ -5,16 +5,19 @@ use std::time::Duration;
 
 use crabka_metadata::{MetadataRecord, NodeId, TopicRecord};
 use crabka_raft::{Controller, ControllerConfig};
+use crabka_units::prelude::{Time, millis};
 use tempfile::TempDir;
 use uuid::Uuid;
+
+/// Single-voter elections are instant; a short timeout keeps each test well
+/// inside its 30-second leader deadline.
+const FAST_ELECTION_TIMEOUT: Time = millis(200);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn single_voter_create_topic_round_trip() {
     let dir = TempDir::new().unwrap();
     let mut cfg = ControllerConfig::for_tests(NodeId(1), dir.path().to_path_buf());
-    // Single-voter elections should be instant; lower the election timeout
-    // so we comfortably make the 5-second deadline below.
-    cfg.election_timeout = Duration::from_millis(200);
+    cfg.election_timeout = FAST_ELECTION_TIMEOUT;
     // Pin the controller listen addr to a real loopback port so the network
     // factory has something to dial when initialize wants to seed members.
     cfg.controller_listen_addr = "127.0.0.1:0".parse().unwrap();
@@ -45,7 +48,7 @@ async fn single_voter_create_topic_round_trip() {
 async fn single_voter_duplicate_topic_rejected() {
     let dir = TempDir::new().unwrap();
     let mut cfg = ControllerConfig::for_tests(NodeId(1), dir.path().to_path_buf());
-    cfg.election_timeout = Duration::from_millis(200);
+    cfg.election_timeout = FAST_ELECTION_TIMEOUT;
     cfg.controller_listen_addr = "127.0.0.1:0".parse().unwrap();
     let controller = Controller::start(cfg).await.unwrap();
 

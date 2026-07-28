@@ -80,7 +80,7 @@ impl crabka_raft::RaftShardRouter for WalShardRouter {
                 return Ok(Some(encode_unknown_shard_fetch_response(request.group)));
             };
             let (hwm, records) = engine
-                .serve_fetch(crabka_ids::Offset(request.fetch_offset), request.max_bytes)
+                .serve_fetch(crabka_ids::Offset(request.fetch_offset), request.max_size)
                 .map_err(|err| crabka_raft::RaftError::ChangeRejected(err.to_string()))?;
             Ok(Some(encode_fetch_response(request.group, hwm.0, records)))
         })

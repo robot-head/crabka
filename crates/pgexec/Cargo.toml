@@ -24,6 +24,7 @@ crabka-pgmvcc = { version = "0.3.9", path = "../pgmvcc" }
 crabka-pgcatalog = { version = "0.3.9", path = "../pgcatalog" }
 crabka-pgparser = { version = "0.3.9", path = "../pgparser" }
 crabka-pgwire = { version = "0.3.9", path = "../pgwire" }
+crabka-units = { workspace = true }
 bytes = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }

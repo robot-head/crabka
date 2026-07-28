@@ -9,12 +9,11 @@ use std::{
 
 use crabka_client_core::security::{ClientSecurity, SaslCredentials};
 use crabka_gres_control::{
-    CheckpointPartBytes, DEFAULT_CHECKPOINT_BYTES, DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS,
-    DEFAULT_CHECKPOINT_FRAMES, DEFAULT_CHECKPOINT_POLL_INTERVAL_MS,
-    DEFAULT_IDLE_SUSPEND_POLL_INTERVAL_MS, DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
-    FinalCheckpoint, PositiveI32, PositiveMillis, PositiveUsize, RegistryPolicy,
-    RegistryReplicationFactor, TenantName, TenantRecord, decode_tenant_config_record,
-    tenant_config_topic,
+    CheckpointPartBytes, DEFAULT_CHECKPOINT_BYTES, DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT,
+    DEFAULT_CHECKPOINT_FRAMES, DEFAULT_CHECKPOINT_POLL_INTERVAL,
+    DEFAULT_IDLE_SUSPEND_POLL_INTERVAL, DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL, FinalCheckpoint,
+    PositiveI32, PositiveMillis, PositiveUsize, RegistryPolicy, RegistryReplicationFactor,
+    TenantName, TenantRecord, decode_tenant_config_record, tenant_config_topic,
 };
 use crabka_pgexec::SqlEngine;
 use crabka_pgkv::{FjallKv, Kv, KvScan, MemKv, RestoreKv, SnapshotKv};
@@ -27,6 +26,10 @@ use crabka_pgwire::{
 };
 use crabka_security::{
     ClientAuthMode, ListenerProtocol, SaslMechanism, TlsConfig, scram::PgScramVerifier,
+};
+use crabka_units::{
+    Time,
+    convert::{ByteSizeExt as _, TimeExt as _},
 };
 use rand::RngExt as _;
 use refined_type::rule::GreaterI32;
@@ -778,6 +781,16 @@ fn effective_wal_producer_throughput_policy(
     .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
 }
 
+/// A validated positive millisecond count as a time extent.
+///
+/// [`PositiveMillis`] is `crabka-gres-control`'s parse-level validator over the
+/// raw `u64` a CLI flag carries; this is the seam where it becomes a quantity.
+/// [`TimeExt::from_millis`] takes an `i64`, so a value past `i64::MAX`
+/// milliseconds saturates rather than wrapping negative.
+fn positive_millis(value: PositiveMillis) -> Time {
+    Time::from_millis(i64::try_from(value.into_value()).unwrap_or(i64::MAX))
+}
+
 /// A nonnegative producer retry count representable on the protocol wire.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NonNegativeI32(i32);
@@ -1091,12 +1104,10 @@ impl SubstrateRuntimeConfig {
             checkpoints: CheckpointRuntimeConfig::from_args(args)?,
             kafka_security: tenant_kafka_security_from_env(tenant),
             ranges,
-            range0_follower_poll_interval: Duration::from_millis(
-                args.range0_follower_poll_interval_ms.map_or(
-                    DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
-                    PositiveMillis::into_value,
-                ),
-            ),
+            range0_follower_poll_interval: args
+                .range0_follower_poll_interval_ms
+                .map_or(DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL, positive_millis)
+                .to_std(),
             recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::new(
                 args.wal_recovery_fetch_max_wait_ms.map_or(
                     crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT_MS,
@@ -1271,10 +1282,11 @@ impl CheckpointRuntimeConfig {
         }
 
         let object_store = CheckpointObjectStoreConfig::from_args(args)?;
-        let part_max_bytes = args.checkpoint_part_bytes.map_or(
-            crabka_gres_substrate::DEFAULT_PART_MAX_BYTES,
-            CheckpointPartBytes::into_value,
-        );
+        let part_max_bytes = args
+            .checkpoint_part_bytes
+            .map_or(crabka_gres_substrate::DEFAULT_PART_MAX_BYTES, |value| {
+                value.into_value().bytes_usize()
+            });
         Ok(Some(Self {
             object_store,
             frames_threshold: args
@@ -1282,20 +1294,20 @@ impl CheckpointRuntimeConfig {
                 .map_or(DEFAULT_CHECKPOINT_FRAMES, NonZeroU64::get),
             bytes_threshold: args
                 .checkpoint_bytes
-                .map_or(DEFAULT_CHECKPOINT_BYTES, NonZeroU64::get),
+                .map_or(DEFAULT_CHECKPOINT_BYTES.bytes_u64(), NonZeroU64::get),
             part_max_bytes,
             retain_newest: args.checkpoint_retain.map_or(
                 crabka_gres_substrate::DEFAULT_CHECKPOINT_RETAIN,
                 PositiveUsize::into_value,
             ),
             delete_records_timeout_ms: args.checkpoint_delete_records_timeout_ms.map_or(
-                DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS,
+                DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT.millis_i32(),
                 PositiveI32::into_value,
             ),
-            poll_interval: Duration::from_millis(args.checkpoint_poll_interval_ms.map_or(
-                DEFAULT_CHECKPOINT_POLL_INTERVAL_MS,
-                PositiveMillis::into_value,
-            )),
+            poll_interval: args
+                .checkpoint_poll_interval_ms
+                .map_or(DEFAULT_CHECKPOINT_POLL_INTERVAL, positive_millis)
+                .to_std(),
         }))
     }
 }
@@ -2543,12 +2555,10 @@ pub async fn serve_listener_with_tenant_config_loader(
                 checkpointer,
                 registry,
                 shutdown,
-                Duration::from_millis(
-                    effective_args.idle_suspend_poll_interval_ms.map_or(
-                        DEFAULT_IDLE_SUSPEND_POLL_INTERVAL_MS,
-                        PositiveMillis::into_value,
-                    ),
-                ),
+                effective_args
+                    .idle_suspend_poll_interval_ms
+                    .map_or(DEFAULT_IDLE_SUSPEND_POLL_INTERVAL, positive_millis)
+                    .to_std(),
             ) => result,
         }
     } else {
@@ -3774,8 +3784,8 @@ async fn load_live_tenant_config(
             topic_id,
             0,
             next_offset,
-            policy.fetch_max_wait_ms(),
-            policy.fetch_partition_max_bytes(),
+            policy.fetch_max_wait().millis_i32(),
+            policy.fetch_partition_max().bytes_i32(),
         )
         .await
         .map_err(|error| std::io::Error::other(format!("tenant config fetch: {error}")))?;
@@ -3885,9 +3895,9 @@ fn live_split_operation_fetch<'a>(
         topic_id,
         partition: 0,
         fetch_offset,
-        max_wait_ms: policy.fetch_max_wait_ms(),
+        max_wait_ms: policy.fetch_max_wait().millis_i32(),
         max_bytes: crabka_client_core::DEFAULT_FETCH_RESPONSE_MAX_BYTES,
-        partition_max_bytes: policy.fetch_partition_max_bytes(),
+        partition_max_bytes: policy.fetch_partition_max().bytes_i32(),
         isolation_level: 1,
     }
 }
@@ -8045,7 +8055,7 @@ mod tests {
         assert!(
             environment
                 .checkpoint_part_bytes
-                .map(CheckpointPartBytes::into_value)
+                .map(|value| value.into_value().bytes_usize())
                 == Some(13)
         );
         assert!(environment.checkpoint_retain.map(PositiveUsize::into_value) == Some(14));
@@ -8084,7 +8094,7 @@ mod tests {
         assert!(cli.checkpoint_bytes.map(NonZeroU64::get) == Some(22));
         assert!(
             cli.checkpoint_part_bytes
-                .map(CheckpointPartBytes::into_value)
+                .map(|value| value.into_value().bytes_usize())
                 == Some(23)
         );
         assert!(cli.checkpoint_retain.map(PositiveUsize::into_value) == Some(24));
@@ -9073,11 +9083,12 @@ mod tests {
             .expect("checkpoint defaults")
             .expect("checkpoint config");
         assert!(defaults.frames_threshold == DEFAULT_CHECKPOINT_FRAMES);
-        assert!(defaults.bytes_threshold == DEFAULT_CHECKPOINT_BYTES);
-        assert!(defaults.delete_records_timeout_ms == DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS);
+        assert!(defaults.bytes_threshold == DEFAULT_CHECKPOINT_BYTES.bytes_u64());
         assert!(
-            defaults.poll_interval == Duration::from_millis(DEFAULT_CHECKPOINT_POLL_INTERVAL_MS)
+            defaults.delete_records_timeout_ms
+                == DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT.millis_i32()
         );
+        assert!(defaults.poll_interval == DEFAULT_CHECKPOINT_POLL_INTERVAL.to_std());
 
         let mut record = tenant_record();
         record.checkpoint_frames = Some(77);
@@ -9309,7 +9320,7 @@ mod tests {
         let expected = if std::env::var(CHILD).as_deref() == Ok("environment") {
             17
         } else {
-            DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS
+            u64::try_from(DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL.millis_i64()).unwrap_or_default()
         };
         let parsed = Cli::try_parse_from(base).expect("policy").serve;
         assert_eq!(
@@ -10766,9 +10777,7 @@ mod tests {
             checkpoints: None,
             kafka_security: None,
             ranges: Some("0,100,200".to_string()),
-            range0_follower_poll_interval: Duration::from_millis(
-                DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
-            ),
+            range0_follower_poll_interval: DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL.to_std(),
             recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
             wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
             producer_dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
@@ -10848,9 +10857,7 @@ mod tests {
             }),
             kafka_security: None,
             ranges: None,
-            range0_follower_poll_interval: Duration::from_millis(
-                DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
-            ),
+            range0_follower_poll_interval: DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL.to_std(),
             recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
             wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
             producer_dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
@@ -11211,9 +11218,7 @@ mod tests {
             checkpoints: None,
             kafka_security: None,
             ranges: None,
-            range0_follower_poll_interval: Duration::from_millis(
-                DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
-            ),
+            range0_follower_poll_interval: DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL.to_std(),
             recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
             wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
             producer_dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
@@ -11302,9 +11307,7 @@ mod tests {
             checkpoints: None,
             kafka_security: None,
             ranges: None,
-            range0_follower_poll_interval: Duration::from_millis(
-                DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
-            ),
+            range0_follower_poll_interval: DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL.to_std(),
             recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
             wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
             producer_dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
