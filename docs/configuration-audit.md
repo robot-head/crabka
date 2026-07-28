@@ -3426,3 +3426,103 @@ operational owner is consumer polling in
 100-millisecond sleep after poll errors. Those values control steady-state
 latency and failure recovery and remain fixed rather than flowing through the
 existing CLI/environment boundary.
+
+## Bench Driver Consumer Poll Timing
+
+The bench driver's consumer poll timeout and poll-error backoff are now
+positive `ConsumerPollDurationMs` values stored separately in `DriverConfig`.
+They retain the existing defaults:
+
+- 50 milliseconds for each `Consumer::poll` call;
+- 100 milliseconds of sleep after a poll error.
+
+The settings are resolved from:
+
+```text
+--consumer-poll-timeout-ms
+BENCH_CONSUMER_POLL_TIMEOUT_MS
+
+--consumer-poll-error-backoff-ms
+BENCH_CONSUMER_POLL_ERROR_BACKOFF_MS
+```
+
+The command-line value wins when both inputs are present. Parsing rejects zero,
+malformed, negative, and primitive-overflow values before scenario-file or
+network I/O. `ConsumerPollDurationMs` uses
+`refined_type::rule::GreaterU64<0>`. One shared value type is sufficient
+because both settings are positive millisecond durations and have no
+cross-field invariant.
+
+The value flows are:
+
+```text
+Cli
+  -> DriverConfig::consumer_poll_timeout
+  -> ConsumerTask
+  -> Consumer::poll
+
+Cli
+  -> DriverConfig::consumer_poll_error_backoff
+  -> ConsumerTask
+  -> tokio::time::sleep after a poll error
+```
+
+The consumer loop, stop checks, message processing, first-error recording,
+close behavior, client construction, and all other timing are unchanged.
+
+The checked-in deployment flow is:
+
+```text
+BENCH_CONSUMER_POLL_TIMEOUT_MS
+BENCH_CONSUMER_POLL_ERROR_BACKOFF_MS
+  -> bench/scripts/run-scenario.sh
+  -> envsubst
+  -> bench/manifests/driver/job-template.yaml
+  -> driver container environment
+```
+
+The launcher supplies overrideable 50- and 100-millisecond defaults, and the
+rendered Job always contains both values. No CRD or operator field was added
+because the benchmark launcher and Job template own this binary.
+
+After the implementation and before this section was appended, the exact
+scanner command
+
+```text
+tools/audit-runtime-values.sh
+```
+
+reported 6,319 lines across 1,055 files. Its bench-driver subset contained 71
+lines: nine configured defaults, 47 test or harness values, 13 protocol,
+format, state, mathematical, or query invariants, and two unresolved
+operational values. The categories sum to all 71 lines:
+`9 + 47 + 13 + 2 = 71`.
+
+Before this section was appended, the exact focused search
+
+```text
+rg -n \
+  "consumer_poll_(timeout|error_backoff)|ConsumerPollDurationMs|DEFAULT_CONSUMER_POLL_(TIMEOUT|ERROR_BACKOFF)_MS|consumer-poll-(timeout|error-backoff)-ms|BENCH_CONSUMER_POLL_(TIMEOUT|ERROR_BACKOFF)_MS" \
+  crates/bench-driver \
+  bench \
+  docs/configuration-audit.md
+```
+
+reported 56 lines. The mutually exclusive classification is 25 production
+configuration-flow references, 12 deployment-flow references, 18 test
+references, one prior-audit reference, and zero unresolved-owner references:
+`25 + 12 + 18 + 1 + 0 = 56`.
+
+The package's 86 registered tests passed, including positive-boundary,
+invalid-value, preserved-default, and hermetic CLI-over-environment tests.
+Strict package Clippy, nightly formatting, one help entry per flag, shell
+syntax, default 50/100 and explicit 21/22 manifest renders, diff hygiene, and
+the unchanged `Cargo.lock` check all passed.
+
+### Adjacent Pending Policy
+
+This closes only consumer poll timing. The next coherent bench-driver
+operational owner is the producer's 10-second final-drain timeout in
+`crates/bench-driver/src/workload.rs`. It bounds how long unresolved sends can
+delay benchmark completion and remains fixed rather than flowing through the
+existing CLI/environment boundary.
