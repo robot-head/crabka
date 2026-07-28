@@ -42,11 +42,9 @@ use crate::{
 };
 
 /// Width of one time-series sample bucket. The measurement window is split
-/// into fixed `SAMPLE_INTERVAL_MS` slices; each producer/consumer task tallies
+/// into configured interval slices; each producer/consumer task tallies
 /// per-slice counts + a per-slice latency histogram locally (no shared locks
 /// on the hot path), and `run()` merges them into the `samples` series.
-const SAMPLE_INTERVAL_MS: u64 = 2000;
-
 type AckResult =
     Result<Result<RecordMetadata, ProducerError>, tokio::sync::oneshot::error::RecvError>;
 type AckFuture = Pin<Box<dyn Future<Output = (AckResult, Instant)> + Send>>;
@@ -59,6 +57,7 @@ pub const DEFAULT_CONSUMER_BUILD_ATTEMPTS: u32 = 6;
 pub const DEFAULT_CONSUMER_BUILD_INITIAL_BACKOFF_MS: u64 = 100;
 pub const DEFAULT_CONSUMER_BUILD_MAX_BACKOFF_MS: u64 = 2_000;
 pub const DEFAULT_PRODUCER_FINAL_DRAIN_TIMEOUT_SECONDS: u64 = 10;
+pub const DEFAULT_SAMPLE_INTERVAL_MS: u64 = 2_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClientRequestTimeoutSeconds(u64);
@@ -329,6 +328,49 @@ impl FromStr for ProducerFinalDrainTimeoutSeconds {
             .and_then(Self::new)
     }
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SampleIntervalMs(u64);
+
+impl SampleIntervalMs {
+    /// Validate a time-series sample interval.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `value` is zero.
+    pub fn new(value: u64) -> Result<Self, String> {
+        GreaterU64::<0>::new(value)
+            .map(|value| Self(value.into_value()))
+            .map_err(|error| error.to_string())
+    }
+
+    #[must_use]
+    pub const fn milliseconds(self) -> u64 {
+        self.0
+    }
+}
+
+impl Default for SampleIntervalMs {
+    fn default() -> Self {
+        Self::new(DEFAULT_SAMPLE_INTERVAL_MS).expect("default sample interval is positive")
+    }
+}
+
+impl fmt::Display for SampleIntervalMs {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl FromStr for SampleIntervalMs {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value
+            .parse()
+            .map_err(|error: std::num::ParseIntError| error.to_string())
+            .and_then(Self::new)
+    }
+}
 /// The fixed sampling grid, shared (by Copy) with every task so all tasks
 /// bucket into the same slices.
 #[derive(Clone, Copy)]
@@ -341,6 +383,18 @@ struct Grid {
 }
 
 impl Grid {
+    /// The grid covering `scenario`'s measurement window, which opens once its
+    /// warmup has elapsed from `started_at`. Always at least one slice wide, so
+    /// a run shorter than a slice still has somewhere to tally into.
+    fn new(started_at: Instant, scenario: &Scenario, interval: SampleIntervalMs) -> Self {
+        let interval_ms = interval.milliseconds();
+        let duration_ms = scenario.duration_s.saturating_mul(1_000);
+        Self {
+            meas_start: started_at + Duration::from_secs(scenario.warmup_s),
+            interval_ms,
+            n: usize::try_from(duration_ms.div_ceil(interval_ms).max(1)).unwrap_or(usize::MAX),
+        }
+    }
     /// Slice index for an event observed at `now`, clamped into `[0, n-1]`.
     fn idx(&self, now: Instant) -> usize {
         let elapsed_ms =
@@ -363,6 +417,7 @@ pub struct DriverConfig {
     pub prometheus_request_timeout_seconds: PrometheusRequestTimeoutSeconds,
     pub producer_request_timeout_seconds: ClientRequestTimeoutSeconds,
     pub producer_final_drain_timeout: ProducerFinalDrainTimeoutSeconds,
+    pub sample_interval: SampleIntervalMs,
     pub consumer_request_timeout_seconds: ClientRequestTimeoutSeconds,
     pub consumer_build_retry_policy: ConsumerBuildRetryPolicy,
     pub broker_count: u32,
@@ -425,14 +480,8 @@ pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
     // Time-series sampling grid: split the measurement window into fixed
     // slices. Computed up front (meas_start is t_start + warmup) so it can be
     // handed to each task at spawn time.
-    let interval_ms = SAMPLE_INTERVAL_MS;
-    let n_intervals = usize::try_from((scenario.duration_s * 1000).div_ceil(interval_ms).max(1))
-        .unwrap_or(usize::MAX);
-    let grid = Grid {
-        meas_start: t_start + Duration::from_secs(scenario.warmup_s),
-        interval_ms,
-        n: n_intervals,
-    };
+    let grid = Grid::new(t_start, &scenario, cfg.sample_interval);
+    let n_intervals = grid.n;
 
     let mut notes: Vec<String> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
@@ -1324,6 +1373,7 @@ mod tests {
             prometheus_request_timeout_seconds: PrometheusRequestTimeoutSeconds::default(),
             producer_request_timeout_seconds: default_producer_request_timeout(),
             producer_final_drain_timeout: ProducerFinalDrainTimeoutSeconds::default(),
+            sample_interval: SampleIntervalMs::default(),
             consumer_request_timeout_seconds: default_consumer_request_timeout(Stack::Crabka),
             consumer_build_retry_policy: ConsumerBuildRetryPolicy::default(),
             broker_count,
@@ -1476,6 +1526,31 @@ mod tests {
         for invalid in ["0", "not-a-number", "-1", "18446744073709551616"] {
             assert!(
                 invalid.parse::<ProducerFinalDrainTimeoutSeconds>().is_err(),
+                "{invalid:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn sample_interval_default_preserves_behavior() {
+        assert_eq!(SampleIntervalMs::default().milliseconds(), 2_000);
+    }
+
+    #[test]
+    fn sample_interval_accepts_positive_minimum() {
+        assert_eq!(
+            SampleIntervalMs::new(1)
+                .expect("one millisecond is valid")
+                .milliseconds(),
+            1
+        );
+    }
+
+    #[test]
+    fn sample_interval_rejects_invalid_values() {
+        for invalid in ["0", "not-a-number", "-1", "18446744073709551616"] {
+            assert!(
+                invalid.parse::<SampleIntervalMs>().is_err(),
                 "{invalid:?} must be rejected"
             );
         }

@@ -10,7 +10,7 @@ use crabka_bench_driver::{
     scenario::{Scenario, Stack},
     workload::{
         self, ClientRequestTimeoutSeconds, ConsumerBuildAttempts, ConsumerBuildBackoffMs,
-        ConsumerBuildRetryPolicy, DriverConfig, ProducerFinalDrainTimeoutSeconds,
+        ConsumerBuildRetryPolicy, DriverConfig, ProducerFinalDrainTimeoutSeconds, SampleIntervalMs,
     },
 };
 use tracing_subscriber::EnvFilter;
@@ -83,6 +83,13 @@ struct Cli {
         default_value_t = workload::default_consumer_build_max_backoff()
     )]
     consumer_build_max_backoff_ms: ConsumerBuildBackoffMs,
+    /// Time-series sample interval, in milliseconds.
+    #[arg(
+        long,
+        env = "BENCH_SAMPLE_INTERVAL_MS",
+        default_value_t = SampleIntervalMs::default()
+    )]
+    sample_interval_ms: SampleIntervalMs,
     /// Configured broker count. The driver uses this to gate RF=3-only
     /// scenarios.
     #[arg(long, env = "BENCH_BROKER_COUNT", default_value_t = 1)]
@@ -210,6 +217,7 @@ async fn main() -> Result<()> {
         prometheus_request_timeout_seconds: cli.prometheus_request_timeout_seconds,
         producer_request_timeout_seconds: cli.producer_request_timeout_seconds,
         producer_final_drain_timeout: cli.producer_final_drain_timeout_seconds,
+        sample_interval: cli.sample_interval_ms,
         consumer_request_timeout_seconds,
         consumer_build_retry_policy,
         broker_count: cli.broker_count,
@@ -527,6 +535,50 @@ mod tests {
             from_cli.producer_final_drain_timeout_seconds.duration(),
             Duration::from_secs(21)
         );
+    }
+
+    #[test]
+    fn sample_interval_cli_default_preserves_behavior() {
+        let cli = Cli::try_parse_from(required_args("crabka")).expect("sample default");
+
+        assert_eq!(cli.sample_interval_ms.milliseconds(), 2_000);
+    }
+
+    #[test]
+    fn sample_interval_rejects_invalid_cli_values() {
+        for invalid in ["0", "not-a-number", "-1", "18446744073709551616"] {
+            let mut args = required_args("crabka");
+            args.extend(["--sample-interval-ms", invalid]);
+            assert!(Cli::try_parse_from(args).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn sample_interval_reads_environment_and_prefers_cli() {
+        const CHILD: &str = "CRABKA_BENCH_SAMPLE_INTERVAL_CHILD";
+
+        if std::env::var_os(CHILD).is_none() {
+            let status =
+                std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args([
+                        "--exact",
+                        "tests::sample_interval_reads_environment_and_prefers_cli",
+                    ])
+                    .env(CHILD, "1")
+                    .env("BENCH_SAMPLE_INTERVAL_MS", "11")
+                    .status()
+                    .expect("child test");
+            assert!(status.success());
+            return;
+        }
+
+        let from_env = Cli::try_parse_from(required_args("crabka")).expect("environment");
+        assert_eq!(from_env.sample_interval_ms.milliseconds(), 11);
+
+        let mut args = required_args("crabka");
+        args.extend(["--sample-interval-ms", "21"]);
+        let from_cli = Cli::try_parse_from(args).expect("CLI over environment");
+        assert_eq!(from_cli.sample_interval_ms.milliseconds(), 21);
     }
 
     #[test]
