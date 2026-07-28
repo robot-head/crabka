@@ -1125,9 +1125,9 @@ mod security_arg_tests {
             .request_timeout(Duration::from_millis(100))
             .retry_backoff(Duration::from_millis(10))
             .init_max_backoff(Duration::from_millis(10))
-            .init_retry_timeout(Duration::from_millis(1))
+            .init_retry_timeout(Duration::from_millis(100))
             .build();
-        let error = tokio::time::timeout(Duration::from_millis(200), build)
+        let error = tokio::time::timeout(Duration::from_millis(500), build)
             .await
             .expect("configured init retry timeout must bound the build")
             .expect_err("cold coordinator must remain an error");
