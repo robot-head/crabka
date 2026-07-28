@@ -10,7 +10,7 @@ use std::{
 };
 
 use clap::{Parser, ValueEnum};
-use crabka_blockstore::ProfileIndex;
+use crabka_blockstore::{IndexSnapshotMaxBytes, IndexSnapshotRetain, ProfileIndex};
 use crabka_client_producer::Producer;
 use crabka_pprof::UnionProfileStore;
 use crabka_profiles::{
@@ -40,6 +40,18 @@ struct Cli {
     bootstrap: String,
     #[arg(long, default_value = "file://./.crabka-profiles-blocks")]
     object_store_url: String,
+    #[arg(
+        long,
+        env = "CRABKA_PROFILES_INDEX_SNAPSHOT_MAX_BYTES",
+        default_value_t = IndexSnapshotMaxBytes::default()
+    )]
+    index_snapshot_max_bytes: IndexSnapshotMaxBytes,
+    #[arg(
+        long,
+        env = "CRABKA_PROFILES_INDEX_SNAPSHOT_RETAIN",
+        default_value_t = IndexSnapshotRetain::default()
+    )]
+    index_snapshot_retain: IndexSnapshotRetain,
     #[arg(long, default_value_t = 15 * 60 * 1000)]
     query_frontend_shard_ms: i64,
     #[arg(long)]
@@ -112,13 +124,17 @@ fn spawn_profile_index_refresh(
     cold: Arc<ColdProfileStore>,
     store: Arc<dyn ObjectStore>,
     index_key: String,
+    max_bytes: IndexSnapshotMaxBytes,
 ) {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(15));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tick.tick().await;
-            if let Ok(index) = ProfileIndex::load_latest_snapshot(&store, &index_key).await {
+            if let Ok(index) =
+                ProfileIndex::load_latest_snapshot_with_max_bytes(&store, &index_key, max_bytes)
+                    .await
+            {
                 cold.replace_index(Arc::new(index));
             }
         }
@@ -180,6 +196,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 BlockBuilderConfig::new(cli.bootstrap, configured.store).with_metrics(metrics);
             config.flush_records = cli.block_builder_flush_records;
             config.flush_max_age = Duration::from_millis(cli.block_builder_flush_max_age_ms);
+            config.index_snapshot_max_bytes = cli.index_snapshot_max_bytes;
+            config.index_snapshot_retain = cli.index_snapshot_retain;
             crabka_profiles::blockbuilder::run_with_config(config).await?;
         }
         Target::Querier => {
@@ -189,16 +207,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let configured = build_object_store(&cli.object_store_url)
                 .map_err(|e| format!("object store: {e}"))?;
             let index_key = configured.object_key("index/profiles.json");
-            let index = ProfileIndex::load_latest_snapshot(&configured.store, &index_key)
-                .await
-                .unwrap_or_else(|_| ProfileIndex::new());
+            let index = ProfileIndex::load_latest_snapshot_with_max_bytes(
+                &configured.store,
+                &index_key,
+                cli.index_snapshot_max_bytes,
+            )
+            .await
+            .unwrap_or_else(|_| ProfileIndex::new());
             let refresh_store = Arc::clone(&configured.store);
             let cold = Arc::new(ColdProfileStore::new_with_debuginfod_urls(
                 configured.store,
                 Arc::new(index),
                 cli.debuginfod_urls.clone(),
             )?);
-            spawn_profile_index_refresh(Arc::clone(&cold), refresh_store, index_key.clone());
+            spawn_profile_index_refresh(
+                Arc::clone(&cold),
+                refresh_store,
+                index_key.clone(),
+                cli.index_snapshot_max_bytes,
+            );
             let hot = WalTailProfileStore::new();
             spawn_wal_tail(&cli, hot.clone());
             let union = Arc::new(UnionProfileStore::new(Arc::new(hot), cold));
@@ -219,16 +246,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let configured = build_object_store(&cli.object_store_url)
                 .map_err(|e| format!("object store: {e}"))?;
             let index_key = configured.object_key("index/profiles.json");
-            let index = ProfileIndex::load_latest_snapshot(&configured.store, &index_key)
-                .await
-                .unwrap_or_else(|_| ProfileIndex::new());
+            let index = ProfileIndex::load_latest_snapshot_with_max_bytes(
+                &configured.store,
+                &index_key,
+                cli.index_snapshot_max_bytes,
+            )
+            .await
+            .unwrap_or_else(|_| ProfileIndex::new());
             let refresh_store = Arc::clone(&configured.store);
             let cold = Arc::new(ColdProfileStore::new_with_debuginfod_urls(
                 configured.store,
                 Arc::new(index),
                 cli.debuginfod_urls.clone(),
             )?);
-            spawn_profile_index_refresh(Arc::clone(&cold), refresh_store, index_key.clone());
+            spawn_profile_index_refresh(
+                Arc::clone(&cold),
+                refresh_store,
+                index_key.clone(),
+                cli.index_snapshot_max_bytes,
+            );
             let hot = WalTailProfileStore::new();
             spawn_wal_tail(&cli, hot.clone());
             let union = Arc::new(UnionProfileStore::new(Arc::new(hot), cold));
@@ -260,9 +296,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let configured = build_object_store(&cli.object_store_url)
                 .map_err(|e| format!("object store: {e}"))?;
             let index_key = configured.object_key("index/profiles.json");
-            let mut index = ProfileIndex::load_latest_snapshot(&configured.store, &index_key)
-                .await
-                .unwrap_or_else(|_| ProfileIndex::new());
+            let mut index = ProfileIndex::load_latest_snapshot_with_max_bytes(
+                &configured.store,
+                &index_key,
+                cli.index_snapshot_max_bytes,
+            )
+            .await
+            .unwrap_or_else(|_| ProfileIndex::new());
             let downsample = cli
                 .compactor_downsample_resolution_ns
                 .map(|resolution_ns| DownsamplePolicy { resolution_ns });
@@ -274,7 +314,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
             .await?;
             index
-                .save_latest_snapshot(&configured.store, &index_key)
+                .save_latest_snapshot_with_retain(
+                    &configured.store,
+                    &index_key,
+                    cli.index_snapshot_retain,
+                )
                 .await?;
             tracing::info!(
                 compacted_blocks = metas.len(),
@@ -353,6 +397,74 @@ mod tests {
 
         assert!(cli.block_builder_flush_records == 4096);
         assert!(cli.block_builder_flush_max_age_ms == 60_000);
+    }
+
+    #[test]
+    fn index_snapshot_policy_defaults_and_rejects_invalid_values() {
+        let cli = Cli::try_parse_from(["crabka-profiles", "--target", "block-builder"]).unwrap();
+        assert_eq!(
+            cli.index_snapshot_max_bytes.into_value(),
+            crabka_blockstore::DEFAULT_INDEX_SNAPSHOT_MAX_BYTES
+        );
+        assert_eq!(
+            cli.index_snapshot_retain.into_value(),
+            crabka_blockstore::DEFAULT_INDEX_SNAPSHOT_RETAIN
+        );
+
+        for flag in ["--index-snapshot-max-bytes", "--index-snapshot-retain"] {
+            for invalid in ["0", "not-a-number", "-1", "18446744073709551616"] {
+                assert!(
+                    Cli::try_parse_from([
+                        "crabka-profiles",
+                        "--target",
+                        "block-builder",
+                        flag,
+                        invalid,
+                    ])
+                    .is_err(),
+                    "{flag} should reject {invalid:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn index_snapshot_policy_reads_environment_and_prefers_cli() {
+        const CHILD: &str = "CRABKA_PROFILES_INDEX_SNAPSHOT_POLICY_CHILD";
+
+        if std::env::var_os(CHILD).is_none() {
+            let status =
+                std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args([
+                        "--exact",
+                        "tests::index_snapshot_policy_reads_environment_and_prefers_cli",
+                    ])
+                    .env(CHILD, "1")
+                    .env("CRABKA_PROFILES_INDEX_SNAPSHOT_MAX_BYTES", "1024")
+                    .env("CRABKA_PROFILES_INDEX_SNAPSHOT_RETAIN", "3")
+                    .status()
+                    .expect("child test");
+            assert!(status.success());
+            return;
+        }
+
+        let from_env =
+            Cli::try_parse_from(["crabka-profiles", "--target", "block-builder"]).unwrap();
+        assert_eq!(from_env.index_snapshot_max_bytes.into_value(), 1024);
+        assert_eq!(from_env.index_snapshot_retain.into_value(), 3);
+
+        let from_cli = Cli::try_parse_from([
+            "crabka-profiles",
+            "--target",
+            "block-builder",
+            "--index-snapshot-max-bytes",
+            "2048",
+            "--index-snapshot-retain",
+            "4",
+        ])
+        .unwrap();
+        assert_eq!(from_cli.index_snapshot_max_bytes.into_value(), 2048);
+        assert_eq!(from_cli.index_snapshot_retain.into_value(), 4);
     }
 
     #[test]

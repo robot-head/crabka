@@ -9,7 +9,8 @@ use std::{
 
 use arrow::record_batch::RecordBatch;
 use crabka_blockstore::{
-    BlockIndex, BlockMeta, Labels, ProfileIndex, ProfileSampleRow, encode_profile_samples,
+    BlockIndex, BlockMeta, IndexSnapshotMaxBytes, IndexSnapshotRetain, Labels, ProfileIndex,
+    ProfileSampleRow, encode_profile_samples,
 };
 use crabka_client_consumer::{AutoOffsetReset, Consumer, ConsumerRecord};
 use crabka_pprof::{FunctionRec, LineRec, LocationRec, MappingRec, MappingSymbolization, SymbolDb};
@@ -52,6 +53,8 @@ pub struct BlockBuilderConfig {
     pub flush_records: usize,
     pub flush_max_age: Duration,
     pub poll_timeout: Duration,
+    pub index_snapshot_max_bytes: IndexSnapshotMaxBytes,
+    pub index_snapshot_retain: IndexSnapshotRetain,
     /// Optional self-instrumentation metrics. When set, the block-builder bumps
     /// `crabka_profiles_blocks_built_total` by the number of blocks each flush
     /// wrote. `None` (the default) disables metric emission, keeping the
@@ -70,6 +73,8 @@ impl BlockBuilderConfig {
             flush_records: DEFAULT_FLUSH_RECORDS,
             flush_max_age: DEFAULT_FLUSH_MAX_AGE,
             poll_timeout: Duration::from_millis(500),
+            index_snapshot_max_bytes: IndexSnapshotMaxBytes::default(),
+            index_snapshot_retain: IndexSnapshotRetain::default(),
             metrics: None,
         }
     }
@@ -277,7 +282,12 @@ impl ConsumerRecordAccumulator {
 /// # Errors
 /// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
 pub async fn run_with_config(config: BlockBuilderConfig) -> Result<(), ProfilesError> {
-    let mut index = match ProfileIndex::load_latest_snapshot(&config.store, &config.index_key).await
+    let mut index = match ProfileIndex::load_latest_snapshot_with_max_bytes(
+        &config.store,
+        &config.index_key,
+        config.index_snapshot_max_bytes,
+    )
+    .await
     {
         Ok(index) => index,
         Err(_) => ProfileIndex::new(),
@@ -338,7 +348,11 @@ pub async fn run_with_config(config: BlockBuilderConfig) -> Result<(), ProfilesE
                 metrics.record_blocks_built(metas.len() as u64);
             }
             index
-                .save_latest_snapshot(&config.store, &config.index_key)
+                .save_latest_snapshot_with_retain(
+                    &config.store,
+                    &config.index_key,
+                    config.index_snapshot_retain,
+                )
                 .await
                 .map_err(|err| ProfilesError::Block(err.to_string()))?;
             consumer
@@ -615,6 +629,21 @@ mod tests {
 
         assert!(a == b);
         assert!(a != c);
+    }
+
+    #[test]
+    fn block_builder_snapshot_policy_preserves_defaults() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let config = BlockBuilderConfig::new("broker:9092".into(), store);
+
+        assert_eq!(
+            config.index_snapshot_max_bytes.into_value(),
+            crabka_blockstore::DEFAULT_INDEX_SNAPSHOT_MAX_BYTES
+        );
+        assert_eq!(
+            config.index_snapshot_retain.into_value(),
+            crabka_blockstore::DEFAULT_INDEX_SNAPSHOT_RETAIN
+        );
     }
 
     #[test]
