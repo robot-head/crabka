@@ -9,6 +9,10 @@
 #   BENCH_DRIVER_IMAGE     crabka-bench-driver:e2e (or :0.1.1)
 #   BENCH_PROMETHEUS_REQUEST_TIMEOUT_SECONDS
 #                           Prometheus HTTP request timeout
+#   BENCH_PRODUCER_REQUEST_TIMEOUT_SECONDS
+#                           producer request timeout
+#   BENCH_CONSUMER_REQUEST_TIMEOUT_SECONDS
+#                           active-stack consumer request timeout
 #
 # TLS data-path env vars (run-scenario.sh exports these; default to the
 # plaintext path when BENCH_TLS is unset):
@@ -69,6 +73,10 @@ spec:
               value: http://prometheus.monitoring.svc.cluster.local:9090
             - name: BENCH_PROMETHEUS_REQUEST_TIMEOUT_SECONDS
               value: "${BENCH_PROMETHEUS_REQUEST_TIMEOUT_SECONDS}"
+            - name: BENCH_PRODUCER_REQUEST_TIMEOUT_SECONDS
+              value: "${BENCH_PRODUCER_REQUEST_TIMEOUT_SECONDS}"
+            - name: BENCH_CONSUMER_REQUEST_TIMEOUT_SECONDS
+              value: "${BENCH_CONSUMER_REQUEST_TIMEOUT_SECONDS}"
             - name: BENCH_BROKER_COUNT
               value: "${BENCH_BROKER_COUNT}"
             - name: BENCH_OUTPUT_PATH
