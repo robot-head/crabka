@@ -2344,6 +2344,7 @@ dependencies = [
  "object_store",
  "parquet",
  "proptest",
+ "refined_type",
  "regex",
  "serde",
  "serde_json",

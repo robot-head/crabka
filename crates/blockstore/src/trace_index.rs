@@ -14,7 +14,9 @@ use crate::{
     block_index::BlockIndex,
     bloom::ShardedTraceBloom,
     error::{BlockStoreError, Result},
-    index_snapshot::{latest_index_snapshot_path, put_index_snapshot},
+    index_snapshot::{
+        IndexSnapshotMaxBytes, IndexSnapshotRetain, latest_index_snapshot_path, put_index_snapshot,
+    },
 };
 
 /// The per-block trace footprint registered by a block builder.
@@ -204,27 +206,90 @@ impl TraceIndex {
         store: &Arc<dyn ObjectStore>,
         key: &str,
     ) -> Result<String> {
-        put_index_snapshot(store, key, serde_json::to_vec(self)?).await
+        self.save_latest_snapshot_with_retain(store, key, IndexSnapshotRetain::default())
+            .await
+    }
+
+    /// # Errors
+    /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
+    pub async fn save_latest_snapshot_with_retain(
+        &self,
+        store: &Arc<dyn ObjectStore>,
+        key: &str,
+        retain: IndexSnapshotRetain,
+    ) -> Result<String> {
+        put_index_snapshot(store, key, serde_json::to_vec(self)?, retain).await
     }
 
     /// # Errors
     /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub async fn load(store: &Arc<dyn ObjectStore>, key: &str) -> Result<Self> {
-        Self::load_path(store, &Path::from(key)).await
+        Self::load_with_max_bytes(store, key, IndexSnapshotMaxBytes::default()).await
+    }
+
+    /// # Errors
+    /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
+    pub async fn load_with_max_bytes(
+        store: &Arc<dyn ObjectStore>,
+        key: &str,
+        max_bytes: IndexSnapshotMaxBytes,
+    ) -> Result<Self> {
+        Self::load_path_with_max_bytes(store, &Path::from(key), max_bytes).await
     }
 
     /// # Errors
     /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub async fn load_latest_snapshot(store: &Arc<dyn ObjectStore>, key: &str) -> Result<Self> {
+        Self::load_latest_snapshot_with_max_bytes(store, key, IndexSnapshotMaxBytes::default())
+            .await
+    }
+
+    /// # Errors
+    /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
+    pub async fn load_latest_snapshot_with_max_bytes(
+        store: &Arc<dyn ObjectStore>,
+        key: &str,
+        max_bytes: IndexSnapshotMaxBytes,
+    ) -> Result<Self> {
         if let Some(path) = latest_index_snapshot_path(store, key).await? {
-            return Self::load_path(store, &path).await;
+            return Self::load_path_with_max_bytes(store, &path, max_bytes).await;
         }
-        Self::load(store, key).await
+        Self::load_with_max_bytes(store, key, max_bytes).await
     }
 
     #[instrument(level = "debug", skip_all, fields(path = %path), err)]
-    async fn load_path(store: &Arc<dyn ObjectStore>, path: &Path) -> Result<Self> {
-        let bytes = store.get(path).await?.bytes().await?;
+    async fn load_path_with_max_bytes(
+        store: &Arc<dyn ObjectStore>,
+        path: &Path,
+        max_bytes: IndexSnapshotMaxBytes,
+    ) -> Result<Self> {
+        let bytes = match crabka_object_store::read_capped(store, path, max_bytes.into_value())
+            .await
+        {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return Err(match error {
+                    crabka_object_store::ObjectStoreError::TooLarge {
+                        size, max_bytes, ..
+                    } => BlockStoreError::InvalidBlock(format!(
+                        "trace index snapshot `{path}` is {size} bytes, exceeds cap of {max_bytes} bytes"
+                    )),
+                    crabka_object_store::ObjectStoreError::Backend(message)
+                    | crabka_object_store::ObjectStoreError::InvalidConfig(message) => {
+                        BlockStoreError::ObjectStore(message)
+                    }
+                    crabka_object_store::ObjectStoreError::Io(error) => {
+                        BlockStoreError::ObjectStore(error.to_string())
+                    }
+                    not_found @ crabka_object_store::ObjectStoreError::NotFound(_) => {
+                        match store.head(path).await {
+                            Ok(_) => BlockStoreError::ObjectStore(not_found.to_string()),
+                            Err(missing) => BlockStoreError::ObjectStore(missing.to_string()),
+                        }
+                    }
+                });
+            }
+        };
         let index: Self = serde_json::from_slice(&bytes)?;
         // `Deserialize` bypasses the bloom constructors' invariant checks, so a
         // structurally-valid-but-corrupt snapshot would panic on the first
@@ -565,6 +630,38 @@ mod tests {
         }
 
         assert2::assert!(count == crate::index_snapshot::DEFAULT_INDEX_SNAPSHOT_RETAIN);
+    }
+
+    #[tokio::test]
+    async fn configurable_snapshot_policy_caps_loads_and_retention() {
+        use futures::StreamExt as _;
+        use object_store::{ObjectStore, memory::InMemory};
+
+        let idx = seed();
+        let store: std::sync::Arc<dyn ObjectStore> = std::sync::Arc::new(InMemory::new());
+        let retain = crate::IndexSnapshotRetain::new(2).unwrap();
+
+        for _ in 0..4 {
+            idx.save_latest_snapshot_with_retain(&store, "index/traces.json", retain)
+                .await
+                .unwrap();
+        }
+
+        let prefix = object_store::path::Path::from(crate::index_snapshot_prefix_for_key(
+            "index/traces.json",
+        ));
+        let mut stream = store.list(Some(&prefix));
+        let mut count = 0;
+        while let Some(meta) = stream.next().await {
+            meta.unwrap();
+            count += 1;
+        }
+        assert_eq!(count, 2);
+
+        let cap = crate::IndexSnapshotMaxBytes::new(1).unwrap();
+        let got =
+            TraceIndex::load_latest_snapshot_with_max_bytes(&store, "index/traces.json", cap).await;
+        assert2::assert!(matches!(got, Err(BlockStoreError::InvalidBlock(_))));
     }
 
     #[tokio::test]

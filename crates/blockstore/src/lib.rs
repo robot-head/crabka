@@ -35,7 +35,10 @@ pub use block_index::{BlockIndex, BlockSchema, RequiredColumn, series_block_sche
 pub use bloom::{ShardedTraceBloom, fnv1_32};
 pub use error::{BlockStoreError, Result};
 pub use index::{Index, MAX_INDEX_SNAPSHOT_BYTES};
-pub use index_snapshot::{DEFAULT_INDEX_SNAPSHOT_RETAIN, index_snapshot_prefix_for_key};
+pub use index_snapshot::{
+    DEFAULT_INDEX_SNAPSHOT_MAX_BYTES, DEFAULT_INDEX_SNAPSHOT_RETAIN, IndexSnapshotMaxBytes,
+    IndexSnapshotRetain, index_snapshot_prefix_for_key,
+};
 pub use labels::{Labels, SeriesFingerprint};
 // Logs-path block store. Types that share a name with the canonical
 // (traces/shared) abstractions above are re-exported under `Log*` names.
