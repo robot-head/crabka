@@ -48,3 +48,7 @@ sbom-*.spdx.json
 # Cargo mutant output
 mutants.out
 mutants.out.old
+
+# Why3 prover cache, written by `cargo creusot --replay` (the creusot-verify
+# workflow runs it in a container, which leaves the directory root-owned).
+/.why3find/
