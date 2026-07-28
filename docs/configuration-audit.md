@@ -3817,3 +3817,86 @@ This closes trace/profile index-snapshot size and retention configuration. The
 separate one-gibibyte Parquet block-read cap in
 `crates/blockstore/src/reader.rs` remains pending as the next coherent
 blockstore owner.
+
+## Blockstore Parquet Read Cap
+
+The explicit Parquet readers now use a positive `BlockReadMaxBytes` value while
+preserving the existing 1,073,741,824-byte default. The traces binary accepts:
+
+```text
+--block-read-max-bytes
+CRABKA_TRACES_BLOCK_READ_MAX_BYTES
+```
+
+Command-line values win over environment values. Parsing rejects zero,
+malformed, negative, and primitive-overflow values before object-store or
+network I/O. The newtype uses `refined_type::rule::GreaterU64<0>`.
+
+The compactor flow is:
+
+```text
+CLI / environment / typed default
+  -> traces compactor
+  -> configurable whole-block reader
+  -> object-store head and size check
+  -> Parquet stream
+```
+
+The sharded query flow is:
+
+```text
+CLI / environment / typed default
+  -> query-frontend BlockStore
+  -> configurable row-group metadata reader
+```
+
+```text
+CLI / environment / typed default
+  -> querier BlockStore
+  -> configurable selected-row-group reader
+```
+
+All three reader forms reject an object above the configured cap after
+`head()` and before streaming Parquet bytes. An object exactly at the cap is
+accepted. `BlockStore::empty_like` preserves the configured value.
+
+The existing read functions, `BlockStore::new`, and traces compactor helpers
+remain default-preserving compatibility wrappers. Parquet encoding, block
+writing, existing error mapping, and DataFusion's independent whole-block scan
+path are unchanged.
+
+Metrics has no corresponding setting because its production code does not call
+these capped reader APIs. Its test-only reader calls continue using the default
+wrapper.
+
+The checked-in deployment owner is the traces querier in
+`demo/observability/docker-compose.yml`. Compose supplies an overrideable
+1,073,741,824-byte default. The demo does not run traces query-frontend or
+compactor roles, so it does not carry unused entries for them. No CRD or
+operator field was added because traces is not managed by an existing
+repository CRD.
+
+After implementation and before this section was appended,
+`tools/audit-runtime-values.sh` reported 6,330 lines across 1,055 files. Its
+affected-package subsets contained 65 blockstore lines and 133 traces lines.
+
+Before this section was appended, the exact focused search
+
+```text
+rg -n \
+  'MAX_BLOCK_BYTES|DEFAULT_BLOCK_READ_MAX_BYTES|BlockReadMaxBytes|block_read_max_bytes|block-read-max-bytes|BLOCK_READ_MAX_BYTES' \
+  crates \
+  demo \
+  docs/configuration-audit.md
+```
+
+reported 73 lines. The mutually exclusive classification is 43 production
+configuration-flow or compatibility-API references, one deployment-flow
+reference, 29 test references, and zero unresolved references:
+`43 + 1 + 29 + 0 = 73`.
+
+The combined all-target test gate passed for `crabka-blockstore`,
+`crabka-traces`, and `observability-demo-app`. Strict combined Clippy with
+warnings denied, nightly formatting, one help entry, default and overridden
+Compose rendering, Compose validation, diff hygiene, scanner stability, and
+lockfile-diff inspection also passed. `Cargo.lock` is unchanged.
