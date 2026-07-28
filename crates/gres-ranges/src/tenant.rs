@@ -23,6 +23,7 @@ use crabka_pgwire::{
     },
     error::{PgError, sqlstate},
 };
+use crabka_units::convert::TimeExt as _;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::{
@@ -4293,7 +4294,7 @@ impl GatewaySession {
             // connection hang), so the whole local wait shares the follower
             // RPC reply budget to keep committed DDL from blocking forever.
             let wait = tokio::time::timeout(
-                crate::forward::RANGE0_BARRIER_REPLY_BUDGET,
+                crate::forward::RANGE0_BARRIER_REPLY_BUDGET.to_std(),
                 replica.wait_for_latest_catalog(),
             );
             wait.await

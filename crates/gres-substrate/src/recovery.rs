@@ -1,6 +1,6 @@
 //! Barrier-based recovery primitives.
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use crabka_client_admin::AdminClient;
 use crabka_client_core::{
@@ -18,6 +18,12 @@ use crabka_protocol::{
         fetch_response::FetchResponse,
     },
     primitives::uuid::Uuid as WireUuid,
+};
+use crabka_units::{
+    ByteSize, Time,
+    convert::{ByteSizeExt as _, TimeExt as _},
+    fmt::Human as _,
+    mebibytes, millis, secs,
 };
 use refined_type::rule::{GreaterI32, GreaterU64, GreaterUsize};
 use tokio::sync::Mutex;
@@ -41,20 +47,23 @@ use crate::{
 const READ_COMMITTED: i8 = 1;
 const PARTITION: i32 = 0;
 /// Default broker long-poll wait for committed-WAL recovery fetches.
-pub const DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT_MS: i32 = 100;
+pub const DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT: Time = millis(100);
 /// Default per-partition byte limit for committed-WAL recovery fetches.
-pub const DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES: i32 = 1_048_576;
+pub const DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX: ByteSize = mebibytes(1);
 /// Default whole-response byte limit for committed-WAL recovery fetches.
-pub const DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES: i32 =
-    crabka_client_core::DEFAULT_FETCH_RESPONSE_MAX_BYTES;
+///
+/// Mirrors [`crabka_client_core::DEFAULT_FETCH_RESPONSE_MAX_BYTES`], which is the
+/// raw `int32` the client crate hands the wire;
+/// `recovery_read_policy_mirrors_the_client_response_limit` pins the two together.
+pub const DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX: ByteSize = mebibytes(50);
 /// Default consecutive empty-fetch retries after the initial empty fetch.
 pub const DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES: usize = 100;
 /// Default timeout for resolving a raw committed-WAL broker address.
-pub const DEFAULT_WAL_RECOVERY_DNS_TIMEOUT_MS: u64 = 10_000;
+pub const DEFAULT_WAL_RECOVERY_DNS_TIMEOUT: Time = secs(10);
 /// Default timeout for establishing a raw committed-WAL connection.
-pub const DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT_MS: u64 = 10_000;
+pub const DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT: Time = secs(10);
 /// Default timeout for requests on a raw committed-WAL connection.
-pub const DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT_MS: u64 = 30_000;
+pub const DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT: Time = secs(30);
 /// Committed-end sample fetches must return immediately when the cursor is
 /// already at the stable end; a positive wait would park every barrier call
 /// on the broker's long-poll timer.
@@ -62,19 +71,25 @@ const END_SAMPLE_MAX_WAIT_MS: i32 = 0;
 const OFFSET_OUT_OF_RANGE: i16 = 1;
 
 /// Validated limits for committed-WAL recovery reads.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+///
+/// Not `Eq`: the timeout and size fields are `f64`-backed quantities.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RecoveryReadPolicy {
-    fetch_max_wait_ms: i32,
-    fetch_partition_max_bytes: i32,
-    fetch_response_max_bytes: i32,
+    fetch_max_wait: Time,
+    fetch_partition_max: ByteSize,
+    fetch_response_max: ByteSize,
     empty_fetch_retries: usize,
-    dns_timeout: Duration,
-    connect_timeout: Duration,
-    request_timeout: Duration,
+    dns_timeout: Time,
+    connect_timeout: Time,
+    request_timeout: Time,
 }
 
 impl RecoveryReadPolicy {
     /// Validate recovery read limits.
+    ///
+    /// The parameters keep their unit suffixes: they are the raw integers a CLI
+    /// flag or CRD field carries, and this constructor is the seam where they
+    /// become quantities.
     ///
     /// # Errors
     ///
@@ -86,21 +101,27 @@ impl RecoveryReadPolicy {
         empty_fetch_retries: usize,
     ) -> Result<Self, String> {
         Ok(Self {
-            fetch_max_wait_ms: GreaterI32::<0>::new(fetch_max_wait_ms)
-                .map_err(|error| error.to_string())?
-                .into_value(),
-            fetch_partition_max_bytes: GreaterI32::<0>::new(fetch_partition_max_bytes)
-                .map_err(|error| error.to_string())?
-                .into_value(),
-            fetch_response_max_bytes: GreaterI32::<0>::new(fetch_response_max_bytes)
-                .map_err(|error| error.to_string())?
-                .into_value(),
+            fetch_max_wait: Time::from_millis(i64::from(
+                GreaterI32::<0>::new(fetch_max_wait_ms)
+                    .map_err(|error| error.to_string())?
+                    .into_value(),
+            )),
+            fetch_partition_max: ByteSize::from_bytes_i64(i64::from(
+                GreaterI32::<0>::new(fetch_partition_max_bytes)
+                    .map_err(|error| error.to_string())?
+                    .into_value(),
+            )),
+            fetch_response_max: ByteSize::from_bytes_i64(i64::from(
+                GreaterI32::<0>::new(fetch_response_max_bytes)
+                    .map_err(|error| error.to_string())?
+                    .into_value(),
+            )),
             empty_fetch_retries: GreaterUsize::<0>::new(empty_fetch_retries)
                 .map_err(|error| error.to_string())?
                 .into_value(),
-            dns_timeout: validated_timeout(DEFAULT_WAL_RECOVERY_DNS_TIMEOUT_MS)?,
-            connect_timeout: validated_timeout(DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT_MS)?,
-            request_timeout: validated_timeout(DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT_MS)?,
+            dns_timeout: validated_timeout(millis_u64(DEFAULT_WAL_RECOVERY_DNS_TIMEOUT))?,
+            connect_timeout: validated_timeout(millis_u64(DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT))?,
+            request_timeout: validated_timeout(millis_u64(DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT))?,
         })
     }
 
@@ -129,22 +150,22 @@ impl RecoveryReadPolicy {
         Ok(self)
     }
 
-    /// Return the broker long-poll wait in milliseconds.
+    /// Return the broker long-poll wait.
     #[must_use]
-    pub const fn fetch_max_wait_ms(self) -> i32 {
-        self.fetch_max_wait_ms
+    pub const fn fetch_max_wait(self) -> Time {
+        self.fetch_max_wait
     }
 
     /// Return the per-partition fetch byte limit.
     #[must_use]
-    pub const fn fetch_partition_max_bytes(self) -> i32 {
-        self.fetch_partition_max_bytes
+    pub const fn fetch_partition_max(self) -> ByteSize {
+        self.fetch_partition_max
     }
 
     /// Return the whole-response fetch byte limit.
     #[must_use]
-    pub const fn fetch_response_max_bytes(self) -> i32 {
-        self.fetch_response_max_bytes
+    pub const fn fetch_response_max(self) -> ByteSize {
+        self.fetch_response_max
     }
 
     /// Return consecutive empty-fetch retries after the initial empty fetch.
@@ -155,35 +176,45 @@ impl RecoveryReadPolicy {
 
     /// Return the raw WAL DNS lookup timeout.
     #[must_use]
-    pub const fn dns_timeout(self) -> Duration {
+    pub const fn dns_timeout(self) -> Time {
         self.dns_timeout
     }
 
     /// Return the raw WAL connection establishment timeout.
     #[must_use]
-    pub const fn connect_timeout(self) -> Duration {
+    pub const fn connect_timeout(self) -> Time {
         self.connect_timeout
     }
 
     /// Return the timeout for requests on a raw WAL connection.
     #[must_use]
-    pub const fn request_timeout(self) -> Duration {
+    pub const fn request_timeout(self) -> Time {
         self.request_timeout
     }
 }
 
-fn validated_timeout(milliseconds: u64) -> Result<Duration, String> {
+/// Validate a raw millisecond timeout and lift it into a time extent.
+///
+/// [`TimeExt::from_millis`] takes an `i64`, so a value past `i64::MAX`
+/// milliseconds saturates rather than wrapping negative.
+fn validated_timeout(milliseconds: u64) -> Result<Time, String> {
     GreaterU64::<0>::new(milliseconds)
-        .map(|value| Duration::from_millis(value.into_value()))
+        .map(|value| Time::from_millis(i64::try_from(value.into_value()).unwrap_or(i64::MAX)))
         .map_err(|error| error.to_string())
+}
+
+/// The raw millisecond count [`validated_timeout`] validates, for a default that
+/// is already a quantity.
+fn millis_u64(timeout: Time) -> u64 {
+    u64::try_from(timeout.millis_i64()).unwrap_or_default()
 }
 
 impl Default for RecoveryReadPolicy {
     fn default() -> Self {
         Self::new(
-            DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT_MS,
-            DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES,
-            DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES,
+            DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT.millis_i32(),
+            DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX.bytes_i32(),
+            DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX.bytes_i32(),
             DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES,
         )
         .expect("default recovery read policy is valid")
@@ -838,8 +869,8 @@ fn wal_admin_connection_options(config: &LiveRecoveryConfig) -> ConnectionOption
     ConnectionOptions {
         dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
         client_id: config.client_id(),
-        connect_timeout: config.wal_admin_policy.connect_timeout(),
-        request_timeout: config.wal_admin_policy.request_timeout(),
+        connect_timeout: config.wal_admin_policy.connect_timeout().to_std(),
+        request_timeout: config.wal_admin_policy.request_timeout().to_std(),
         security: config.security.clone().map(Box::new),
     }
 }
@@ -943,26 +974,26 @@ fn wal_connection_options(
     ConnectionOptions {
         dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
         client_id: client_id.to_string(),
-        connect_timeout: read_policy.connect_timeout(),
-        request_timeout: read_policy.request_timeout(),
+        connect_timeout: read_policy.connect_timeout().to_std(),
+        request_timeout: read_policy.request_timeout().to_std(),
         security: security.map(Box::new),
     }
 }
 
 async fn resolve_wal_addr<I>(
     host_port: &str,
-    timeout: Duration,
+    timeout: Time,
     lookup: impl std::future::Future<Output = std::io::Result<I>>,
 ) -> Result<std::net::SocketAddr, SubstrateError>
 where
     I: Iterator<Item = std::net::SocketAddr>,
 {
-    let mut addrs = tokio::time::timeout(timeout, lookup)
+    let mut addrs = tokio::time::timeout(timeout.to_std(), lookup)
         .await
         .map_err(|_| {
             SubstrateError::Unavailable(format!(
-                "DNS lookup {host_port} timed out after {} ms",
-                timeout.as_millis()
+                "DNS lookup {host_port} timed out after {}",
+                timeout.human()
             ))
         })?
         .map_err(|error| SubstrateError::Unavailable(format!("DNS lookup {host_port}: {error}")))?;
@@ -1138,7 +1169,7 @@ impl KafkaCommittedWalReader {
                 &self.topic,
                 self.topic_uuid,
                 0,
-                self.read_policy.fetch_max_wait_ms(),
+                self.read_policy.fetch_max_wait().millis_i32(),
                 self.read_policy,
             ))
             .await
@@ -1162,7 +1193,7 @@ fn build_fetch_request(
     FetchRequest {
         max_wait_ms,
         min_bytes: 1,
-        max_bytes: read_policy.fetch_response_max_bytes(),
+        max_bytes: read_policy.fetch_response_max().bytes_i32(),
         isolation_level: READ_COMMITTED,
         topics: vec![FetchTopic {
             topic: topic.to_owned(),
@@ -1170,7 +1201,7 @@ fn build_fetch_request(
             partitions: vec![FetchPartition {
                 partition: PARTITION,
                 fetch_offset,
-                partition_max_bytes: read_policy.fetch_partition_max_bytes(),
+                partition_max_bytes: read_policy.fetch_partition_max().bytes_i32(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -1190,9 +1221,9 @@ fn recovery_fetch(
         topic_id,
         partition: PARTITION,
         fetch_offset,
-        max_wait_ms: read_policy.fetch_max_wait_ms(),
-        max_bytes: read_policy.fetch_response_max_bytes(),
-        partition_max_bytes: read_policy.fetch_partition_max_bytes(),
+        max_wait_ms: read_policy.fetch_max_wait().millis_i32(),
+        max_bytes: read_policy.fetch_response_max().bytes_i32(),
+        partition_max_bytes: read_policy.fetch_partition_max().bytes_i32(),
         isolation_level: READ_COMMITTED,
     }
 }
@@ -1576,7 +1607,10 @@ impl InMemoryWalState {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicI64, Ordering};
+    use std::{
+        sync::atomic::{AtomicI64, Ordering},
+        time::Duration,
+    };
 
     use assert2::assert;
     use crabka_gres_ranges::{RangeId, TenantName};
@@ -1586,38 +1620,30 @@ mod tests {
 
     use super::*;
     use crate::checkpoint::{
-        DEFAULT_PART_MAX_BYTES, InMemoryCheckpointStore, Manifest, write_checkpoint,
+        DEFAULT_PART_MAX_SIZE, InMemoryCheckpointStore, Manifest, write_checkpoint,
     };
 
     #[test]
     fn recovery_read_policy_owns_defaults() {
         let policy = RecoveryReadPolicy::default();
 
-        assert_eq!(
-            policy.fetch_max_wait_ms(),
-            DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT_MS
+        assert!(policy.fetch_max_wait() == DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT);
+        assert!(policy.fetch_partition_max() == DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX);
+        assert!(policy.fetch_response_max() == DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX);
+        assert!(policy.empty_fetch_retries() == DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES);
+        assert!(policy.connect_timeout() == DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT);
+        assert!(policy.request_timeout() == DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT);
+        assert!(policy.dns_timeout() == DEFAULT_WAL_RECOVERY_DNS_TIMEOUT);
+    }
+
+    /// The recovery response cap is written as a quantity, so it can only stay
+    /// the client crate's wire default if something checks the two agree.
+    #[test]
+    fn recovery_read_policy_mirrors_the_client_response_limit() {
+        assert!(
+            DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX.bytes_i32()
+                == crabka_client_core::DEFAULT_FETCH_RESPONSE_MAX_BYTES
         );
-        assert_eq!(
-            policy.fetch_partition_max_bytes(),
-            DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES
-        );
-        assert_eq!(
-            policy.fetch_response_max_bytes(),
-            DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES
-        );
-        assert_eq!(
-            policy.empty_fetch_retries(),
-            DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES
-        );
-        assert_eq!(
-            policy.connect_timeout(),
-            std::time::Duration::from_millis(DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT_MS)
-        );
-        assert_eq!(
-            policy.request_timeout(),
-            std::time::Duration::from_millis(DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT_MS)
-        );
-        assert!(policy.dns_timeout() == Duration::from_millis(DEFAULT_WAL_RECOVERY_DNS_TIMEOUT_MS));
     }
 
     #[test]
@@ -1631,10 +1657,10 @@ mod tests {
             .with_dns_timeout(77)
             .expect("valid DNS timeout");
 
-        assert!(policy.fetch_max_wait_ms() == 11);
-        assert!(policy.connect_timeout() == Duration::from_millis(55));
-        assert!(policy.request_timeout() == Duration::from_millis(66));
-        assert!(policy.dns_timeout() == Duration::from_millis(77));
+        assert!(policy.fetch_max_wait() == millis(11));
+        assert!(policy.connect_timeout() == millis(55));
+        assert!(policy.request_timeout() == millis(66));
+        assert!(policy.dns_timeout() == millis(77));
     }
 
     #[test]
@@ -1649,10 +1675,10 @@ mod tests {
     fn recovery_read_policy_preserves_valid_values() {
         let policy = RecoveryReadPolicy::new(11, 22, 33, 44).expect("valid policy");
 
-        assert_eq!(policy.fetch_max_wait_ms(), 11);
-        assert_eq!(policy.fetch_partition_max_bytes(), 22);
-        assert_eq!(policy.fetch_response_max_bytes(), 33);
-        assert_eq!(policy.empty_fetch_retries(), 44);
+        assert!(policy.fetch_max_wait() == millis(11));
+        assert!(policy.fetch_partition_max() == crabka_units::bytes(22));
+        assert!(policy.fetch_response_max() == crabka_units::bytes(33));
+        assert!(policy.empty_fetch_retries() == 44);
     }
 
     #[test]
@@ -1670,18 +1696,12 @@ mod tests {
             .with_timeouts(55, 66)
             .expect("valid timeouts");
 
-        assert_eq!(policy.fetch_max_wait_ms(), 11);
-        assert_eq!(policy.fetch_partition_max_bytes(), 22);
-        assert_eq!(policy.fetch_response_max_bytes(), 33);
-        assert_eq!(policy.empty_fetch_retries(), 44);
-        assert_eq!(
-            policy.connect_timeout(),
-            std::time::Duration::from_millis(55)
-        );
-        assert_eq!(
-            policy.request_timeout(),
-            std::time::Duration::from_millis(66)
-        );
+        assert!(policy.fetch_max_wait() == millis(11));
+        assert!(policy.fetch_partition_max() == crabka_units::bytes(22));
+        assert!(policy.fetch_response_max() == crabka_units::bytes(33));
+        assert!(policy.empty_fetch_retries() == 44);
+        assert!(policy.connect_timeout() == millis(55));
+        assert!(policy.request_timeout() == millis(66));
     }
 
     #[tokio::test]
@@ -1690,7 +1710,7 @@ mod tests {
         let second: std::net::SocketAddr = "127.0.0.2:9092".parse().expect("second address");
         let resolved = resolve_wal_addr(
             "broker:9092",
-            Duration::from_millis(10),
+            millis(10),
             std::future::ready(Ok(vec![first, second].into_iter())),
         )
         .await
@@ -1699,7 +1719,7 @@ mod tests {
 
         let error = resolve_wal_addr(
             "broker:9092",
-            Duration::from_millis(10),
+            millis(10),
             std::future::ready(Err::<std::vec::IntoIter<std::net::SocketAddr>, _>(
                 std::io::Error::other("resolver failed"),
             )),
@@ -1717,7 +1737,7 @@ mod tests {
     async fn wal_dns_lookup_rejects_an_empty_result() {
         let error = resolve_wal_addr(
             "broker:9092",
-            Duration::from_millis(10),
+            millis(10),
             std::future::ready(Ok(Vec::<std::net::SocketAddr>::new().into_iter())),
         )
         .await
@@ -1730,7 +1750,7 @@ mod tests {
     async fn wal_dns_lookup_stops_at_the_configured_timeout() {
         let error = resolve_wal_addr(
             "broker:9092",
-            Duration::from_millis(37),
+            millis(37),
             std::future::pending::<std::io::Result<std::vec::IntoIter<std::net::SocketAddr>>>(),
         )
         .await
@@ -1739,7 +1759,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("DNS lookup broker:9092 timed out after 37 ms")
+                .contains("DNS lookup broker:9092 timed out after 37ms")
         );
     }
 
@@ -1756,47 +1776,32 @@ mod tests {
             .expect("valid timeouts");
         let options = wal_connection_options("replay-client", Some(security), policy);
 
-        assert_eq!(options.client_id, "replay-client");
-        assert_eq!(
-            options.connect_timeout,
-            std::time::Duration::from_millis(77)
-        );
-        assert_eq!(
-            options.request_timeout,
-            std::time::Duration::from_millis(88)
-        );
+        assert!(options.client_id == "replay-client");
+        assert!(options.connect_timeout == Duration::from_millis(77));
+        assert!(options.request_timeout == Duration::from_millis(88));
         let security = options.security.expect("security");
-        assert_eq!(
-            security.protocol,
-            crabka_security::ListenerProtocol::Plaintext
-        );
-        assert_eq!(security.sasl_host.as_deref(), Some("broker.internal"));
+        assert!(security.protocol == crabka_security::ListenerProtocol::Plaintext);
+        assert!(security.sasl_host.as_deref() == Some("broker.internal"));
     }
 
     #[test]
     fn recovery_read_policy_defaults_and_replaces_in_live_config() {
         let tenant = TenantName::parse("tenant-a").expect("tenant");
         let config = LiveRecoveryConfig::new("localhost:9092", tenant, RangeId::COORDINATOR, None);
-        assert_eq!(config.read_policy(), RecoveryReadPolicy::default());
+        assert!(config.read_policy() == RecoveryReadPolicy::default());
 
         let replacement = RecoveryReadPolicy::new(11, 22, 33, 44).expect("valid policy");
-        assert_eq!(
-            config.with_read_policy(replacement).read_policy(),
-            replacement
-        );
+        assert!(config.with_read_policy(replacement).read_policy() == replacement);
     }
 
     #[test]
     fn wal_admin_policy_defaults_and_replaces_in_live_config() {
         let tenant = TenantName::parse("tenant-a").expect("tenant");
         let config = LiveRecoveryConfig::new("localhost:9092", tenant, RangeId::COORDINATOR, None);
-        assert_eq!(config.wal_admin_policy(), WalAdminPolicy::default());
+        assert!(config.wal_admin_policy() == WalAdminPolicy::default());
 
         let replacement = WalAdminPolicy::new(11, 22, 33, 44).expect("valid policy");
-        assert_eq!(
-            config.with_wal_admin_policy(replacement).wal_admin_policy(),
-            replacement
-        );
+        assert!(config.with_wal_admin_policy(replacement).wal_admin_policy() == replacement);
     }
 
     #[test]
@@ -1942,18 +1947,11 @@ mod tests {
 
         let options = wal_admin_connection_options(&config);
 
-        assert_eq!(options.client_id, "crabka-gres-tenant-a-r7");
-        assert_eq!(
-            options.connect_timeout,
-            std::time::Duration::from_millis(33)
-        );
-        assert_eq!(
-            options.request_timeout,
-            std::time::Duration::from_millis(44)
-        );
-        assert_eq!(
-            options.security.expect("security").sasl_host.as_deref(),
-            Some("broker.internal")
+        assert!(options.client_id == "crabka-gres-tenant-a-r7");
+        assert!(options.connect_timeout == Duration::from_millis(33));
+        assert!(options.request_timeout == Duration::from_millis(44));
+        assert!(
+            options.security.expect("security").sasl_host.as_deref() == Some("broker.internal")
         );
     }
 
@@ -1962,9 +1960,9 @@ mod tests {
         let policy = RecoveryReadPolicy::new(11, 22, 33, 44).expect("valid policy");
         let fetch = recovery_fetch("topic", WireUuid([7; 16]), 42, policy);
 
-        assert_eq!(fetch.max_wait_ms, 11);
-        assert_eq!(fetch.partition_max_bytes, 22);
-        assert_eq!(fetch.max_bytes, 33);
+        assert!(fetch.max_wait_ms == 11);
+        assert!(fetch.partition_max_bytes == 22);
+        assert!(fetch.max_bytes == 33);
     }
 
     #[test]
@@ -1978,9 +1976,9 @@ mod tests {
             policy,
         );
 
-        assert_eq!(request.max_wait_ms, 0);
-        assert_eq!(request.max_bytes, 33);
-        assert_eq!(request.topics[0].partitions[0].partition_max_bytes, 22);
+        assert!(request.max_wait_ms == 0);
+        assert!(request.max_bytes == 33);
+        assert!(request.topics[0].partitions[0].partition_max_bytes == 22);
     }
 
     #[test]
@@ -2055,7 +2053,9 @@ mod tests {
         let partition = &request.topics[0].partitions[0];
         assert!(partition.partition == PARTITION);
         assert!(partition.fetch_offset == 42);
-        assert!(partition.partition_max_bytes == DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES);
+        assert!(
+            partition.partition_max_bytes == DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX.bytes_i32()
+        );
 
         // The zero-wait sampler path must stay zero-wait: a positioned fetch at
         // the log end returns immediately instead of long-polling.
@@ -2245,7 +2245,7 @@ mod tests {
             "tenant-a",
             &base,
             checkpoint_snapshot(1, 2),
-            DEFAULT_PART_MAX_BYTES,
+            DEFAULT_PART_MAX_SIZE,
         )
         .await
         .expect("checkpoint");
@@ -2299,7 +2299,7 @@ mod tests {
             "tenant-a",
             &older,
             checkpoint_snapshot(1, 2),
-            DEFAULT_PART_MAX_BYTES,
+            DEFAULT_PART_MAX_SIZE,
         )
         .await
         .expect("older checkpoint");
@@ -2312,7 +2312,7 @@ mod tests {
             "tenant-a",
             &newer,
             checkpoint_snapshot(5, 7),
-            DEFAULT_PART_MAX_BYTES,
+            DEFAULT_PART_MAX_SIZE,
         )
         .await
         .expect("newer checkpoint");
@@ -2364,7 +2364,7 @@ mod tests {
             "tenant-a",
             &base,
             checkpoint_snapshot(7, 9),
-            DEFAULT_PART_MAX_BYTES,
+            DEFAULT_PART_MAX_SIZE,
         )
         .await
         .expect("older-generation checkpoint");
@@ -2417,7 +2417,7 @@ mod tests {
             &checkpoint_namespace,
             &base,
             checkpoint_snapshot(1, 2),
-            DEFAULT_PART_MAX_BYTES,
+            DEFAULT_PART_MAX_SIZE,
         )
         .await
         .expect("checkpoint");
@@ -2503,7 +2503,7 @@ mod tests {
             "tenant-a",
             &base,
             checkpoint_snapshot(1, 2),
-            DEFAULT_PART_MAX_BYTES,
+            DEFAULT_PART_MAX_SIZE,
         )
         .await
         .expect("checkpoint");
@@ -2543,7 +2543,7 @@ mod tests {
             "tenant-a",
             &old,
             checkpoint_snapshot(1, 2),
-            DEFAULT_PART_MAX_BYTES,
+            DEFAULT_PART_MAX_SIZE,
         )
         .await
         .expect("old checkpoint");
@@ -2554,7 +2554,7 @@ mod tests {
             "tenant-a",
             &new,
             checkpoint_snapshot(2, 3),
-            DEFAULT_PART_MAX_BYTES,
+            DEFAULT_PART_MAX_SIZE,
         )
         .await
         .expect("new checkpoint");
@@ -2864,7 +2864,7 @@ mod tests {
                 wal_generation,
                 garbage_horizon_xid: 0,
             },
-            DEFAULT_PART_MAX_BYTES,
+            DEFAULT_PART_MAX_SIZE,
         )
         .await
         .expect("checkpoint")

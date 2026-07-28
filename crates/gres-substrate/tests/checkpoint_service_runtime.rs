@@ -10,7 +10,7 @@ use crabka_gres_substrate::{
     SubstrateError, TransactionalWalWriter, WalFrame, WriterGeneration, apply_frame,
     checkpoint::{
         CheckpointConfig, CheckpointService, CheckpointSnapshot, CheckpointStats, CheckpointStore,
-        CheckpointTrigger, CheckpointWalPruner, DEFAULT_CHECKPOINT_RETAIN, DEFAULT_PART_MAX_BYTES,
+        CheckpointTrigger, CheckpointWalPruner, DEFAULT_CHECKPOINT_RETAIN, DEFAULT_PART_MAX_SIZE,
         InMemoryCheckpointStore, ObjectOpsCheckpointStore, RestoreTail,
         restore_latest_and_replay_tail,
     },
@@ -167,7 +167,7 @@ async fn live_broker_checkpoint_delete_records_and_recovery_replays_retained_tai
             topic.clone(),
             2,
             0,
-            DEFAULT_PART_MAX_BYTES,
+            DEFAULT_PART_MAX_SIZE,
             DEFAULT_CHECKPOINT_RETAIN,
             std::time::Duration::from_secs(1),
         )
@@ -377,7 +377,7 @@ fn checkpoint_config() -> CheckpointConfig {
         "__gres_wal.tenant-a.r0".to_string(),
         2,
         0,
-        DEFAULT_PART_MAX_BYTES,
+        DEFAULT_PART_MAX_SIZE,
         DEFAULT_CHECKPOINT_RETAIN,
         std::time::Duration::from_secs(1),
     )

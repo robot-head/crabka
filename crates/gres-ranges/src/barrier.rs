@@ -1,13 +1,14 @@
 //! Range-0 read barrier backed by an on-demand broker end sample.
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use crabka_pgexec::{ExecError, Linearizer};
+use crabka_units::{Time, convert::TimeExt as _, fmt::Human as _, secs};
 use tokio::sync::{Mutex, Notify, watch};
 
 use crate::range0_tail::{Range0Tail, Range0TailError};
 
-const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
+const DEFAULT_WAIT_TIMEOUT: Time = secs(10);
 
 /// Samples a conservative committed range-0 end after a read-barrier call begins.
 #[async_trait::async_trait]
@@ -21,7 +22,7 @@ pub trait Range0EndSampler: Send + Sync {
 pub struct Range0Barrier {
     tail: Range0Tail,
     sampler: Arc<dyn Range0EndSampler>,
-    timeout: Duration,
+    timeout: Time,
     samples: Arc<Mutex<SampleQueue>>,
     refresh_poke: Option<Arc<Notify>>,
 }
@@ -49,7 +50,7 @@ impl Range0Barrier {
     pub fn with_timeout(
         tail: Range0Tail,
         sampler: Arc<dyn Range0EndSampler>,
-        timeout: Duration,
+        timeout: Time,
     ) -> Self {
         Self {
             tail,
@@ -89,7 +90,7 @@ impl Range0Barrier {
             poke.notify_one();
         }
         let end = self.sampler.sample_end_after_call_begins().await?;
-        tokio::time::timeout(self.timeout, self.tail.wait_until_applied(end))
+        tokio::time::timeout(self.timeout.to_std(), self.tail.wait_until_applied(end))
             .await
             .map_err(|_elapsed| BarrierError::CatchUpTimeout(self.timeout))??;
         Ok(())
@@ -186,9 +187,12 @@ impl Range0Barrier {
 impl Linearizer for Range0Barrier {
     async fn ensure_readable(&self) -> Result<(), ExecError> {
         let target_offset = self.sample_target_offset().await?;
-        tokio::time::timeout(self.timeout, self.tail.wait_until_applied(target_offset))
-            .await
-            .map_err(|_| ExecError::Unavailable)??;
+        tokio::time::timeout(
+            self.timeout.to_std(),
+            self.tail.wait_until_applied(target_offset),
+        )
+        .await
+        .map_err(|_| ExecError::Unavailable)??;
         Ok(())
     }
 }
@@ -206,8 +210,8 @@ pub enum BarrierError {
     #[error(transparent)]
     Tail(#[from] Range0TailError),
     /// The local tail did not apply the sampled end within the timeout.
-    #[error("range-0 tail did not catch up within {0:?}")]
-    CatchUpTimeout(Duration),
+    #[error("range-0 tail did not catch up within {}", .0.human())]
+    CatchUpTimeout(Time),
 }
 
 impl From<BarrierError> for ExecError {
@@ -238,10 +242,12 @@ mod tests {
     use std::{
         collections::HashMap,
         sync::atomic::{AtomicUsize, Ordering},
+        time::Duration,
     };
 
     use assert2::assert;
     use crabka_pgkv::{Kv, MemKv, WriteOp};
+    use crabka_units::millis;
     use tokio::sync::{Mutex as TokioMutex, Notify};
 
     use super::*;
@@ -331,8 +337,7 @@ mod tests {
         let store = Arc::new(MemKv::default());
         let tail = Range0Tail::new(store.clone());
         let sampler = Arc::new(ControlledSampler::default());
-        let barrier =
-            Range0Barrier::with_timeout(tail.clone(), sampler.clone(), Duration::from_millis(500));
+        let barrier = Range0Barrier::with_timeout(tail.clone(), sampler.clone(), millis(500));
 
         let waiter = tokio::spawn({
             let barrier = barrier.clone();
@@ -464,8 +469,7 @@ mod tests {
         tail.apply_committed(&Range0Frame::new(3, Vec::new()))
             .expect("apply through 3");
         let sampler = Arc::new(ScriptedSampler::new(vec![3, 9]));
-        let barrier =
-            Range0Barrier::with_timeout(tail.clone(), sampler.clone(), Duration::from_secs(5));
+        let barrier = Range0Barrier::with_timeout(tail.clone(), sampler.clone(), secs(5));
 
         let early = tokio::spawn({
             let barrier = barrier.clone();
@@ -506,8 +510,7 @@ mod tests {
         let store = Arc::new(MemKv::default());
         let tail = Range0Tail::new(store);
         let sampler = Arc::new(IndexedSampler::default());
-        let barrier =
-            Range0Barrier::with_timeout(tail.clone(), sampler.clone(), Duration::from_secs(5));
+        let barrier = Range0Barrier::with_timeout(tail.clone(), sampler.clone(), secs(5));
 
         let stale = tokio::spawn({
             let barrier = barrier.clone();
@@ -545,9 +548,8 @@ mod tests {
         let tail = Range0Tail::new(store);
         let sampler = Arc::new(ControlledSampler::default());
         let poke = Arc::new(Notify::new());
-        let barrier =
-            Range0Barrier::with_timeout(tail.clone(), sampler.clone(), Duration::from_secs(5))
-                .with_refresh_poke(poke.clone());
+        let barrier = Range0Barrier::with_timeout(tail.clone(), sampler.clone(), secs(5))
+            .with_refresh_poke(poke.clone());
 
         // Poll-loop stand-in: parked on the poke; only it releases the sampler
         // and advances the tail, so the wait below completes only if the poke
@@ -583,7 +585,7 @@ mod tests {
         let tail = Range0Tail::new(store);
         let sampler = Arc::new(ControlledSampler::default());
         sampler.release(9).await;
-        let barrier = Range0Barrier::with_timeout(tail, sampler, Duration::from_millis(50));
+        let barrier = Range0Barrier::with_timeout(tail, sampler, millis(50));
 
         let error = barrier
             .wait_for_fresh_end()
@@ -592,7 +594,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            BarrierError::CatchUpTimeout(timeout) if timeout == Duration::from_millis(50)
+            BarrierError::CatchUpTimeout(timeout) if timeout == millis(50)
         ));
     }
 }

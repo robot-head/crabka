@@ -3,7 +3,7 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use assert2::assert;
@@ -24,6 +24,7 @@ use crabka_gres_substrate::{
 };
 use crabka_pgkv::{Kv, MemKv, WriteOp};
 use crabka_pgwire::server::ActivityTracker;
+use crabka_units::{kibibytes, millis, secs};
 use tokio::sync::{Mutex, Notify};
 
 const TENANT: &str = "tenant-a";
@@ -368,8 +369,8 @@ fn final_checkpoint() -> FinalCheckpoint {
 fn suspend_policy() -> SuspendPolicy {
     SuspendPolicy {
         tenant: TENANT.to_string(),
-        idle_window: Duration::from_millis(1),
-        suspend_max_checkpoint_bytes: Some(1024),
+        idle_window: millis(1),
+        suspend_max_checkpoint: Some(kibibytes(1)),
     }
 }
 
@@ -391,8 +392,8 @@ fn wake_request() -> WakeRequest {
 
 fn fast_wait() -> WaitForReadyConfig {
     WaitForReadyConfig {
-        timeout: Duration::from_secs(1),
-        poll_interval: Duration::from_millis(5),
+        timeout: secs(1),
+        poll_interval: millis(5),
     }
 }
 

@@ -12,14 +12,14 @@ use crabka_gres_control::{
     PositiveMillis, PositiveUsize,
 };
 use crabka_gres_substrate::{
-    DEFAULT_CHECKPOINT_RETAIN, DEFAULT_PART_MAX_BYTES, DEFAULT_WAL_ADMIN_CONNECT_TIMEOUT_MS,
-    DEFAULT_WAL_ADMIN_REQUEST_TIMEOUT_MS, DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT_MS,
-    DEFAULT_WAL_RECOVERY_DNS_TIMEOUT_MS, DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES,
-    DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT_MS, DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES,
-    DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES, DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT_MS,
-    DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT_MS, DEFAULT_WAL_TOPIC_REPLICATION_FACTOR,
+    DEFAULT_CHECKPOINT_RETAIN, DEFAULT_PART_MAX_SIZE, DEFAULT_WAL_ADMIN_CONNECT_TIMEOUT,
+    DEFAULT_WAL_ADMIN_REQUEST_TIMEOUT, DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT,
+    DEFAULT_WAL_RECOVERY_DNS_TIMEOUT, DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES,
+    DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT, DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX,
+    DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX, DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT,
+    DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT, DEFAULT_WAL_TOPIC_REPLICATION_FACTOR,
 };
-use crabka_units::convert::TimeExt as _;
+use crabka_units::convert::{ByteSizeExt as _, TimeExt as _};
 use kube::CustomResource;
 use refined_type::rule::GreaterI32;
 use schemars::JsonSchema;
@@ -330,7 +330,8 @@ impl GresComputeSpec {
         Ok(EffectiveGresComputePolicy {
             readiness_probe_period_seconds: self.effective_readiness_probe_period_seconds()?,
             checkpoint_part_bytes: CheckpointPartBytes::new(
-                self.checkpoint_part_bytes.unwrap_or(DEFAULT_PART_MAX_BYTES),
+                self.checkpoint_part_bytes
+                    .unwrap_or_else(|| DEFAULT_PART_MAX_SIZE.bytes_usize()),
             )
             .map_err(|error| format!("spec.compute.checkpointPartBytes: {error}"))?,
             checkpoint_retain: PositiveUsize::new(
@@ -365,17 +366,17 @@ impl GresComputeSpec {
             .map_err(|error| format!("spec.compute.fdwBrokerDnsTimeoutMs: {error}"))?,
             wal_recovery_fetch_max_wait_ms: PositiveI32::new(
                 self.wal_recovery_fetch_max_wait_ms
-                    .unwrap_or(DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT_MS),
+                    .unwrap_or_else(|| DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT.millis_i32()),
             )
             .map_err(|error| format!("spec.compute.walRecoveryFetchMaxWaitMs: {error}"))?,
             wal_recovery_fetch_partition_max_bytes: PositiveI32::new(
                 self.wal_recovery_fetch_partition_max_bytes
-                    .unwrap_or(DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES),
+                    .unwrap_or_else(|| DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX.bytes_i32()),
             )
             .map_err(|error| format!("spec.compute.walRecoveryFetchPartitionMaxBytes: {error}"))?,
             wal_recovery_fetch_response_max_bytes: PositiveI32::new(
                 self.wal_recovery_fetch_response_max_bytes
-                    .unwrap_or(DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES),
+                    .unwrap_or_else(|| DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX.bytes_i32()),
             )
             .map_err(|error| format!("spec.compute.walRecoveryFetchResponseMaxBytes: {error}"))?,
             wal_recovery_empty_fetch_retries: PositiveUsize::new(
@@ -385,17 +386,17 @@ impl GresComputeSpec {
             .map_err(|error| format!("spec.compute.walRecoveryEmptyFetchRetries: {error}"))?,
             wal_recovery_dns_timeout_ms: PositiveMillis::new(
                 self.wal_recovery_dns_timeout_ms
-                    .unwrap_or(DEFAULT_WAL_RECOVERY_DNS_TIMEOUT_MS),
+                    .unwrap_or_else(|| millis_u64(DEFAULT_WAL_RECOVERY_DNS_TIMEOUT)),
             )
             .map_err(|error| format!("spec.compute.walRecoveryDnsTimeoutMs: {error}"))?,
             wal_recovery_connect_timeout_ms: PositiveMillis::new(
                 self.wal_recovery_connect_timeout_ms
-                    .unwrap_or(DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT_MS),
+                    .unwrap_or_else(|| millis_u64(DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT)),
             )
             .map_err(|error| format!("spec.compute.walRecoveryConnectTimeoutMs: {error}"))?,
             wal_recovery_request_timeout_ms: PositiveMillis::new(
                 self.wal_recovery_request_timeout_ms
-                    .unwrap_or(DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT_MS),
+                    .unwrap_or_else(|| millis_u64(DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT)),
             )
             .map_err(|error| format!("spec.compute.walRecoveryRequestTimeoutMs: {error}"))?,
             wal_producer_flush_timeout: ProducerFlushTimeout::new(Duration::from_millis(
@@ -418,17 +419,17 @@ impl GresComputeSpec {
             .map_err(|error| format!("spec.compute.walTopicReplicationFactor: {error}"))?,
             wal_topic_ensure_timeout_ms: PositiveI32::new(
                 self.wal_topic_ensure_timeout_ms
-                    .unwrap_or(DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT_MS),
+                    .unwrap_or_else(|| DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT.millis_i32()),
             )
             .map_err(|error| format!("spec.compute.walTopicEnsureTimeoutMs: {error}"))?,
             wal_admin_connect_timeout_ms: PositiveMillis::new(
                 self.wal_admin_connect_timeout_ms
-                    .unwrap_or(DEFAULT_WAL_ADMIN_CONNECT_TIMEOUT_MS),
+                    .unwrap_or_else(|| millis_u64(DEFAULT_WAL_ADMIN_CONNECT_TIMEOUT)),
             )
             .map_err(|error| format!("spec.compute.walAdminConnectTimeoutMs: {error}"))?,
             wal_admin_request_timeout_ms: PositiveMillis::new(
                 self.wal_admin_request_timeout_ms
-                    .unwrap_or(DEFAULT_WAL_ADMIN_REQUEST_TIMEOUT_MS),
+                    .unwrap_or_else(|| millis_u64(DEFAULT_WAL_ADMIN_REQUEST_TIMEOUT)),
             )
             .map_err(|error| format!("spec.compute.walAdminRequestTimeoutMs: {error}"))?,
             lifecycle_requeue_ms: PositiveMillis::new(
@@ -1094,7 +1095,8 @@ mod tests {
         // The CRD field stays a raw usize (the spec derives Eq); the policy
         // hands out a ByteSize, so compare at the seam.
         assert!(
-            defaults.checkpoint_part_bytes.into_value().bytes_usize() == DEFAULT_PART_MAX_BYTES
+            defaults.checkpoint_part_bytes.into_value().bytes_usize()
+                == DEFAULT_PART_MAX_SIZE.bytes_usize()
         );
         assert!(defaults.checkpoint_retain.into_value() == DEFAULT_CHECKPOINT_RETAIN);
         assert!(
@@ -1211,15 +1213,15 @@ mod tests {
             .expect("default compute policy");
         assert!(
             defaults.wal_recovery_fetch_max_wait_ms.into_value()
-                == DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT_MS
+                == DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT.millis_i32()
         );
         assert!(
             defaults.wal_recovery_fetch_partition_max_bytes.into_value()
-                == DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES
+                == DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX.bytes_i32()
         );
         assert!(
             defaults.wal_recovery_fetch_response_max_bytes.into_value()
-                == DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES
+                == DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX.bytes_i32()
         );
         assert!(
             defaults.wal_recovery_empty_fetch_retries.into_value()
@@ -1227,15 +1229,15 @@ mod tests {
         );
         assert!(
             defaults.wal_recovery_dns_timeout_ms.into_value()
-                == DEFAULT_WAL_RECOVERY_DNS_TIMEOUT_MS
+                == millis_u64(DEFAULT_WAL_RECOVERY_DNS_TIMEOUT)
         );
         assert!(
             defaults.wal_recovery_connect_timeout_ms.into_value()
-                == DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT_MS
+                == millis_u64(DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT)
         );
         assert!(
             defaults.wal_recovery_request_timeout_ms.into_value()
-                == DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT_MS
+                == millis_u64(DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT)
         );
 
         for (policy, path) in [
@@ -1773,15 +1775,15 @@ mod tests {
         );
         assert!(
             defaults.wal_topic_ensure_timeout_ms.into_value()
-                == DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT_MS
+                == DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT.millis_i32()
         );
         assert!(
             defaults.wal_admin_connect_timeout_ms.into_value()
-                == DEFAULT_WAL_ADMIN_CONNECT_TIMEOUT_MS
+                == millis_u64(DEFAULT_WAL_ADMIN_CONNECT_TIMEOUT)
         );
         assert!(
             defaults.wal_admin_request_timeout_ms.into_value()
-                == DEFAULT_WAL_ADMIN_REQUEST_TIMEOUT_MS
+                == millis_u64(DEFAULT_WAL_ADMIN_REQUEST_TIMEOUT)
         );
 
         for (policy, expected) in [

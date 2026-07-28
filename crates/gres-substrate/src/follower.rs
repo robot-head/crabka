@@ -295,7 +295,7 @@ mod tests {
     use crate::{
         InMemoryWalLog, TransactionalWalWriter, WriterGeneration,
         checkpoint::{
-            CheckpointSnapshot, DEFAULT_PART_MAX_BYTES, InMemoryCheckpointStore, write_checkpoint,
+            CheckpointSnapshot, DEFAULT_PART_MAX_SIZE, InMemoryCheckpointStore, write_checkpoint,
         },
     };
 
@@ -332,7 +332,7 @@ mod tests {
                 wal_generation: 0,
                 garbage_horizon_xid: 0,
             },
-            DEFAULT_PART_MAX_BYTES,
+            DEFAULT_PART_MAX_SIZE,
         )
         .await
         .expect("write checkpoint");
@@ -434,7 +434,7 @@ mod tests {
                 wal_generation: 0,
                 garbage_horizon_xid: 0,
             },
-            DEFAULT_PART_MAX_BYTES,
+            DEFAULT_PART_MAX_SIZE,
         )
         .await
         .expect("write older checkpoint");
@@ -453,7 +453,7 @@ mod tests {
                 wal_generation: 0,
                 garbage_horizon_xid: 0,
             },
-            DEFAULT_PART_MAX_BYTES,
+            DEFAULT_PART_MAX_SIZE,
         )
         .await
         .expect("write ahead checkpoint");
@@ -518,7 +518,7 @@ mod tests {
                 wal_generation: 0,
                 garbage_horizon_xid: 0,
             },
-            DEFAULT_PART_MAX_BYTES,
+            DEFAULT_PART_MAX_SIZE,
         )
         .await
         .expect("write checkpoint");
@@ -760,7 +760,7 @@ mod tests {
         let barrier = Range0Barrier::with_timeout(
             tail.clone(),
             Arc::new(BrokerRange0EndSampler(Arc::new(broker.sampler()))),
-            std::time::Duration::from_secs(5),
+            crabka_units::secs(5),
         );
 
         let waiter = tokio::spawn({

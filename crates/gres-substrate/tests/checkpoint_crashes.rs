@@ -6,7 +6,7 @@ use crabka_client_admin::{AdminClient, DeleteRecordsOp};
 use crabka_client_producer::{Acks, Producer};
 use crabka_gres_ranges::{RangeId, TenantName};
 use crabka_gres_substrate::{
-    CheckpointPart, CheckpointSnapshotSource, DEFAULT_PART_MAX_BYTES, GroupCommitRequest,
+    CheckpointPart, CheckpointSnapshotSource, DEFAULT_PART_MAX_SIZE, GroupCommitRequest,
     InMemoryWalLog, Manifest, ProducerWalWriter, RecoveryFencer, SubstrateError,
     TransactionalWalWriter, WalFrame, WriterGeneration, apply_frame,
     checkpoint::{
@@ -105,7 +105,7 @@ async fn live_fresh_generation_restores_old_checkpoint_and_fetches_offset_zero()
             &format!("{tenant}/r0"),
             &old,
             snapshot_at(0, 7, 0),
-            DEFAULT_PART_MAX_BYTES,
+            DEFAULT_PART_MAX_SIZE,
         )
         .await
         .expect("old-generation checkpoint");
@@ -266,7 +266,7 @@ fn live_service(
             topic.into(),
             1,
             0,
-            24,
+            crabka_units::bytes(24),
             2,
             std::time::Duration::from_secs(1),
         )?,
@@ -404,7 +404,7 @@ async fn production_zombie_service_cannot_supersede_successor_manifest() {
                 "wal.g0".into(),
                 1,
                 0,
-                24,
+                crabka_units::bytes(24),
                 2,
                 std::time::Duration::from_secs(1),
             )
@@ -447,7 +447,7 @@ async fn production_zombie_service_cannot_supersede_successor_manifest() {
                 "wal.g1".into(),
                 1,
                 0,
-                24,
+                crabka_units::bytes(24),
                 2,
                 std::time::Duration::from_secs(1),
             )
@@ -579,7 +579,7 @@ impl ProductionCrashHarness {
             "wal-production-crash".into(),
             1,
             0,
-            24,
+            crabka_units::bytes(24),
             2,
             std::time::Duration::from_secs(1),
         )?;
@@ -840,7 +840,7 @@ impl CrashHarness {
             "tenant-a",
             &kv,
             snapshot_at(wal_generation, covered_offset, 1),
-            DEFAULT_PART_MAX_BYTES,
+            DEFAULT_PART_MAX_SIZE,
         )
         .await
         .expect("checkpoint")
@@ -853,7 +853,7 @@ impl CrashHarness {
             "tenant-a",
             &kv,
             snapshot_at(0, covered_offset, 0),
-            DEFAULT_PART_MAX_BYTES,
+            DEFAULT_PART_MAX_SIZE,
         )
         .await
         .expect("zombie checkpoint");

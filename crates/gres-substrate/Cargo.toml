@@ -37,6 +37,7 @@ crabka-protocol = { version = "0.3.9", path = "../protocol" }
 crabka-security = { workspace = true }
 crabka-gres-ranges = { version = "0.3.9", path = "../gres-ranges" }
 crabka-object-store = { version = "0.3.8", path = "../object-store" }
+crabka-units = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
 hex = { workspace = true }
@@ -54,9 +55,6 @@ crabka-pgcatalog = { version = "0.3.9", path = "../pgcatalog" }
 assert2 = { workspace = true }
 proptest = { workspace = true }
 crabka-broker = { version = "0.3.9", path = "../broker", features = ["test-helpers"] }
-# The shared broker test-support module (included by relative path from
-# tests/coordinator_leader_live.rs) configures the broker with quantities.
-crabka-units = { workspace = true }
 crabka-raft = { version = "0.3.8", path = "../raft" }
 crabka-pgtypes = { version = "0.3.9", path = "../pgtypes" }
 stateright = { workspace = true }

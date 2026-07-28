@@ -400,7 +400,9 @@ enum BalanceExecuteMode {
     Validate,
 }
 
-#[derive(Debug, serde::Deserialize, PartialEq, Eq)]
+/// `Eq` is deliberately absent: the balancer's byte thresholds are quantities,
+/// whose `f64` storage is only `PartialEq`.
+#[derive(Debug, serde::Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 struct BalanceDryRunInput {
     #[serde(default)]

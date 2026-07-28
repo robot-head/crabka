@@ -8,11 +8,17 @@ use std::{
     pin::Pin,
     sync::{Arc, Mutex},
     task::{Context, Poll},
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use async_trait::async_trait;
 use crabka_pgwire::engine::{ResultPage, ResultSink};
+use crabka_units::{
+    ByteSize, Time,
+    convert::{ByteSizeExt as _, StdDurationExt as _, TimeExt as _},
+    fmt::Human as _,
+    kibibytes, mebibytes, minutes, secs,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{
@@ -23,19 +29,22 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 use crate::RangeId;
 
-const MAX_FRAME_BYTES: usize = 1 << 20;
-// Leave room for response structure, the final command tag, and JSON punctuation.
-// Individual rows are measured exactly; this conservative envelope keeps every
-// emitted frame below the hard decoder limit without accumulating an encoded copy.
-const SQL_CHUNK_TARGET_BYTES: usize = MAX_FRAME_BYTES - (4 << 10);
-const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(5);
+/// Hard limit on one encoded frame, enforced by both the encoder and the
+/// decoder.
+const MAX_FRAME: ByteSize = mebibytes(1);
+/// Target size for one emitted SQL result chunk: [`MAX_FRAME`] less 4 KiB of
+/// room for response structure, the final command tag, and JSON punctuation.
+/// Individual rows are measured exactly; this conservative envelope keeps every
+/// emitted frame below the hard decoder limit without accumulating an encoded copy.
+const SQL_CHUNK_TARGET: ByteSize = kibibytes(1_020);
+const DEFAULT_RPC_TIMEOUT: Time = secs(5);
 /// How long a kept-alive server connection may sit without a next frame
 /// before the server closes it quietly, so dead peers cannot pin tasks.
-const SERVER_IDLE_TIMEOUT: Duration = Duration::from_mins(1);
+const SERVER_IDLE_TIMEOUT: Time = minutes(1);
 /// Idle age past which a pooled client connection is discarded instead of
 /// reused. Kept far below [`SERVER_IDLE_TIMEOUT`] so the client always evicts
 /// an idle connection before the server would close it.
-const POOL_IDLE_TTL: Duration = Duration::from_secs(5);
+const POOL_IDLE_TTL: Time = secs(5);
 /// Maximum idle connections retained per endpoint. Connections returned to a
 /// full pool are dropped; checkout never blocks waiting for the pool.
 const POOL_MAX_IDLE_PER_ENDPOINT: usize = 32;
@@ -838,7 +847,7 @@ impl JoinRangeReq {
     #[must_use]
     pub fn fits_transport_frame(&self) -> bool {
         serde_json::to_vec(&RangeRequest::JoinRange(self.clone()))
-            .is_ok_and(|bytes| bytes.len() <= MAX_FRAME_BYTES)
+            .is_ok_and(|bytes| bytes.len() <= MAX_FRAME.bytes_usize())
     }
 
     pub(crate) fn to_pgexec(&self) -> crabka_pgexec::JoinRangeRequest {
@@ -1002,6 +1011,10 @@ impl WireErrorKind {
 #[derive(Debug, Error)]
 pub enum TransportError {
     /// Frame exceeded the protocol limit.
+    ///
+    /// Both counts stay raw: they are measured buffer lengths, and one site
+    /// reports a result-index overflow against `u32::MAX` rather than a byte
+    /// magnitude. The dimensioned limit is [`MAX_FRAME`].
     #[error("range frame too large: {actual} bytes exceeds {limit}")]
     FrameTooLarge { actual: usize, limit: usize },
     /// JSON payload was invalid.
@@ -1011,8 +1024,8 @@ pub enum TransportError {
     #[error("range transport io error: {0}")]
     Io(#[from] std::io::Error),
     /// The peer was silent past the configured deadline.
-    #[error("range transport timed out after {0:?}")]
-    Timeout(Duration),
+    #[error("range transport timed out after {}", .0.human())]
+    Timeout(Time),
     /// The remote endpoint returned an application error.
     #[error("range endpoint returned {kind:?}: {message}")]
     Remote {
@@ -1145,8 +1158,8 @@ pub trait RangeService: Send + Sync + 'static {
 /// surfaces the error unchanged — the client never retries on its own.
 #[derive(Debug, Clone)]
 pub struct FramedTcpClient {
-    timeout: Duration,
-    idle_ttl: Duration,
+    timeout: Time,
+    idle_ttl: Time,
     max_idle_per_endpoint: usize,
     mode: RangeClientMode,
     pool: Arc<ConnectionPool>,
@@ -1287,12 +1300,12 @@ impl ConnectionPool {
     /// Connections idle past `idle_ttl`, and connections whose socket became
     /// readable while parked (the server closed or reset the stream), are
     /// dropped instead of returned.
-    fn take(&self, endpoint: &str, idle_ttl: Duration) -> Option<RangeStream> {
+    fn take(&self, endpoint: &str, idle_ttl: Time) -> Option<RangeStream> {
         let runtime = tokio::runtime::Handle::current().id();
         let mut idle = self.lock();
         let conns = idle.get_mut(&runtime)?.get_mut(endpoint)?;
         while let Some(conn) = conns.pop() {
-            if conn.last_used.elapsed() > idle_ttl {
+            if conn.last_used.elapsed().as_time() > idle_ttl {
                 continue;
             }
             if conn.stream.dead_while_idle() {
@@ -1308,12 +1321,12 @@ impl ConnectionPool {
     ///
     /// When the endpoint already holds `max_idle` parked connections the
     /// overflow connection is dropped; check-in never blocks.
-    fn put(&self, endpoint: &str, stream: RangeStream, max_idle: usize, idle_ttl: Duration) {
+    fn put(&self, endpoint: &str, stream: RangeStream, max_idle: usize, idle_ttl: Time) {
         let runtime = tokio::runtime::Handle::current().id();
         let mut idle = self.lock();
         idle.retain(|_, endpoints| {
             endpoints.retain(|_, conns| {
-                conns.retain(|conn| conn.last_used.elapsed() <= idle_ttl);
+                conns.retain(|conn| conn.last_used.elapsed().as_time() <= idle_ttl);
                 !conns.is_empty()
             });
             !endpoints.is_empty()
@@ -1373,7 +1386,7 @@ impl FramedTcpClient {
     /// Build a plaintext client with an explicit wire-silence timeout for unit tests.
     #[cfg(test)]
     #[must_use]
-    pub fn with_timeout(timeout: Duration) -> Self {
+    pub fn with_timeout(timeout: Time) -> Self {
         Self {
             timeout,
             ..Self::with_mode(RangeClientMode::Plaintext)
@@ -1383,7 +1396,7 @@ impl FramedTcpClient {
     /// Override pool tuning knobs for unit tests.
     #[cfg(test)]
     #[must_use]
-    pub fn with_pool_tuning(mut self, idle_ttl: Duration, max_idle_per_endpoint: usize) -> Self {
+    pub fn with_pool_tuning(mut self, idle_ttl: Time, max_idle_per_endpoint: usize) -> Self {
         self.idle_ttl = idle_ttl;
         self.max_idle_per_endpoint = max_idle_per_endpoint;
         self
@@ -1508,7 +1521,7 @@ impl FramedTcpClient {
 async fn call_sql_stream_into<S>(
     stream: &mut S,
     request: &RangeRequest,
-    wait: Duration,
+    wait: Time,
     sink: &mut dyn ResultSink,
 ) -> Result<(), TransportError>
 where
@@ -1694,7 +1707,8 @@ where
     F: Fn(&RangeRequest) -> Result<(), TransportError>,
 {
     loop {
-        let next = tokio::time::timeout(SERVER_IDLE_TIMEOUT, read_request_or_eof(stream)).await;
+        let next =
+            tokio::time::timeout(SERVER_IDLE_TIMEOUT.to_std(), read_request_or_eof(stream)).await;
         let request = match next {
             // Idle past the deadline, or a clean peer disconnect: close quietly.
             Err(_) | Ok(Ok(None)) => return Ok(()),
@@ -1742,7 +1756,7 @@ pub async fn spawn_loopback(service: Arc<dyn RangeService>) -> Result<SocketAddr
 async fn call_stream<S>(
     stream: &mut S,
     request: &RangeRequest,
-    wait: Duration,
+    wait: Time,
 ) -> Result<RangeResponse, TransportError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
@@ -1917,11 +1931,12 @@ async fn write_row_chunks<W>(
 where
     W: AsyncWrite + Unpin,
 {
+    let chunk_target = SQL_CHUNK_TARGET.bytes_usize();
     let mut fields = Some(fields);
     let mut page = Vec::new();
     let mut page_bytes = 0usize;
     for row in rows {
-        let row_bytes = match serialize_json_bounded(&row, SQL_CHUNK_TARGET_BYTES) {
+        let row_bytes = match serialize_json_bounded(&row, SQL_CHUNK_TARGET) {
             Ok(bytes) => bytes.len().saturating_add(1),
             Err(TransportError::FrameTooLarge { .. }) => {
                 write_frame(
@@ -1945,11 +1960,11 @@ where
                     tag: None,
                 },
             };
-            serialize_json_bounded(&probe, SQL_CHUNK_TARGET_BYTES)?.len()
+            serialize_json_bounded(&probe, SQL_CHUNK_TARGET)?.len()
         } else {
             0
         };
-        if !page.is_empty() && page_bytes.saturating_add(row_bytes) > SQL_CHUNK_TARGET_BYTES {
+        if !page.is_empty() && page_bytes.saturating_add(row_bytes) > chunk_target {
             write_row_page(
                 writer,
                 result_index,
@@ -1962,7 +1977,7 @@ where
         }
         if page.is_empty() {
             page_bytes = overhead;
-            if page_bytes.saturating_add(row_bytes) > SQL_CHUNK_TARGET_BYTES {
+            if page_bytes.saturating_add(row_bytes) > chunk_target {
                 write_frame(
                     writer,
                     &RangeResponse::SqlError {
@@ -2018,17 +2033,17 @@ where
     W: AsyncWrite + Unpin + ?Sized,
     T: Serialize,
 {
-    let bytes = serialize_json_bounded(value, MAX_FRAME_BYTES)?;
+    let bytes = serialize_json_bounded(value, MAX_FRAME)?;
     let len = u32::try_from(bytes.len()).map_err(|_| TransportError::FrameTooLarge {
         actual: bytes.len(),
-        limit: MAX_FRAME_BYTES,
+        limit: MAX_FRAME.bytes_usize(),
     })?;
     writer.write_u32(len).await?;
     writer.write_all(&bytes).await?;
     Ok(())
 }
 
-fn serialize_json_bounded<T>(value: &T, limit: usize) -> Result<Vec<u8>, TransportError>
+fn serialize_json_bounded<T>(value: &T, limit: ByteSize) -> Result<Vec<u8>, TransportError>
 where
     T: Serialize,
 {
@@ -2053,6 +2068,7 @@ where
         }
     }
 
+    let limit = limit.bytes_usize();
     let mut writer = BoundedWriter {
         bytes: Vec::new(),
         limit,
@@ -2102,15 +2118,16 @@ where
         }
         filled += read;
     }
+    let max_frame = MAX_FRAME.bytes_usize();
     let len =
         usize::try_from(u32::from_be_bytes(prefix)).map_err(|_| TransportError::FrameTooLarge {
-            actual: MAX_FRAME_BYTES.saturating_add(1),
-            limit: MAX_FRAME_BYTES,
+            actual: max_frame.saturating_add(1),
+            limit: max_frame,
         })?;
-    if len > MAX_FRAME_BYTES {
+    if len > max_frame {
         return Err(TransportError::FrameTooLarge {
             actual: len,
-            limit: MAX_FRAME_BYTES,
+            limit: max_frame,
         });
     }
     let mut bytes = vec![0; len];
@@ -2123,15 +2140,16 @@ where
     R: AsyncRead + Unpin,
     T: for<'de> Deserialize<'de>,
 {
+    let max_frame = MAX_FRAME.bytes_usize();
     let len = reader.read_u32().await?;
     let len = usize::try_from(len).map_err(|_| TransportError::FrameTooLarge {
-        actual: MAX_FRAME_BYTES.saturating_add(1),
-        limit: MAX_FRAME_BYTES,
+        actual: max_frame.saturating_add(1),
+        limit: max_frame,
     })?;
-    if len > MAX_FRAME_BYTES {
+    if len > max_frame {
         return Err(TransportError::FrameTooLarge {
             actual: len,
-            limit: MAX_FRAME_BYTES,
+            limit: max_frame,
         });
     }
     let mut bytes = vec![0; len];
@@ -2139,8 +2157,8 @@ where
     Ok(serde_json::from_slice(&bytes)?)
 }
 
-async fn timeout<T>(wait: Duration, task: impl Future<Output = T>) -> Result<T, TransportError> {
-    tokio::time::timeout(wait, task)
+async fn timeout<T>(wait: Time, task: impl Future<Output = T>) -> Result<T, TransportError> {
+    tokio::time::timeout(wait.to_std(), task)
         .await
         .map_err(|_| TransportError::Timeout(wait))
 }
@@ -2151,18 +2169,21 @@ mod tests {
         collections::BTreeSet,
         path::PathBuf,
         sync::atomic::{AtomicUsize, Ordering},
+        time::Duration,
     };
 
     #[test]
     fn bounded_json_serialization_rejects_before_allocating_an_oversized_candidate() {
-        let oversized = "x".repeat(4 * MAX_FRAME_BYTES);
+        let oversized = "x".repeat(4 * MAX_FRAME.bytes_usize());
 
-        let error = serialize_json_bounded(&oversized, MAX_FRAME_BYTES)
+        let error = serialize_json_bounded(&oversized, MAX_FRAME)
             .expect_err("oversized JSON candidate is rejected at the limit");
 
-        assert!(
-            matches!(error, TransportError::FrameTooLarge { limit, .. } if limit == MAX_FRAME_BYTES)
-        );
+        let max_frame = MAX_FRAME.bytes_usize();
+        assert!(matches!(
+            error,
+            TransportError::FrameTooLarge { limit, .. } if limit == max_frame
+        ));
     }
 
     use super::*;
@@ -2312,9 +2333,9 @@ mod tests {
     fn bounded_framing_rejects_oversized_join_request() {
         let mut request = join_request_fixture();
         request.broadcast_rows = Some(vec![JoinRangeRow {
-            tuple: vec![0; MAX_FRAME_BYTES],
+            tuple: vec![0; MAX_FRAME.bytes_usize()],
         }]);
-        let error = serialize_json_bounded(&RangeRequest::JoinRange(request), MAX_FRAME_BYTES)
+        let error = serialize_json_bounded(&RangeRequest::JoinRange(request), MAX_FRAME)
             .expect_err("frame must be bounded");
         assert!(matches!(error, TransportError::FrameTooLarge { .. }));
     }
@@ -2324,7 +2345,7 @@ mod tests {
         let mut request = join_request_fixture();
         request.broadcast_rows = Some(vec![JoinRangeRow { tuple: vec![] }]);
         let mut low = 0usize;
-        let mut high = MAX_FRAME_BYTES;
+        let mut high = MAX_FRAME.bytes_usize();
         while low < high {
             let mid = low + (high - low).div_ceil(2);
             request.broadcast_rows.as_mut().unwrap()[0]
@@ -2983,7 +3004,7 @@ mod tests {
             tokio::time::sleep(Duration::from_mins(1)).await;
         });
 
-        let error = FramedTcpClient::with_timeout(Duration::from_millis(20))
+        let error = FramedTcpClient::with_timeout(crabka_units::millis(20))
             .call(
                 &addr.to_string(),
                 &RangeRequest::Sql {
@@ -3017,7 +3038,7 @@ mod tests {
         };
         let encoded = serialize_json_bounded(
             &RangeRequest::InspectDurableRecords(request.clone()),
-            MAX_FRAME_BYTES,
+            MAX_FRAME,
         )
         .expect("bounded request");
         assert_eq!(
@@ -3209,7 +3230,7 @@ mod tests {
         use assert2::assert;
         let (addr, accepts) = spawn_counting_loopback(Arc::new(EchoService::default())).await;
         let client = FramedTcpClient::default()
-            .with_pool_tuning(Duration::from_millis(50), POOL_MAX_IDLE_PER_ENDPOINT);
+            .with_pool_tuning(crabka_units::millis(50), POOL_MAX_IDLE_PER_ENDPOINT);
 
         for _ in 0..2 {
             let response = client

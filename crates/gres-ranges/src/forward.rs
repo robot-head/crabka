@@ -18,7 +18,7 @@ use crabka_pgwire::{
     },
     error::PgError,
 };
-use crabka_units::{Time, convert::TimeExt as _, secs};
+use crabka_units::{Time, convert::TimeExt as _, fmt::Human as _, secs};
 
 use crate::{
     RangeId,
@@ -98,7 +98,7 @@ const MAX_REMOTE_SESSIONS: usize = 1024;
 // wire-silence timeout so a slow catch-up surfaces as a typed error frame
 // instead of an ambiguous transport timeout. The gateway's local replica
 // barrier shares it so a stalled broker end sample cannot block DDL forever.
-pub(crate) const RANGE0_BARRIER_REPLY_BUDGET: Duration = Duration::from_secs(4);
+pub(crate) const RANGE0_BARRIER_REPLY_BUDGET: Time = secs(4);
 
 /// Cap on lock waits by sessions enlisted in a cross-range transaction (a
 /// gateway-local session once its transaction escalates past one range, or a
@@ -1112,7 +1112,11 @@ impl HostedRangeService {
         // The barrier's own timeout only bounds tail catch-up, not the broker
         // end sample, so this outer timeout is the one mechanism that bounds
         // the whole reply below the client's 5 s wire-silence deadline.
-        match tokio::time::timeout(RANGE0_BARRIER_REPLY_BUDGET, follower.wait_for_fresh_end()).await
+        match tokio::time::timeout(
+            RANGE0_BARRIER_REPLY_BUDGET.to_std(),
+            follower.wait_for_fresh_end(),
+        )
+        .await
         {
             Ok(Ok(())) => RangeResponse::Range0Barriered,
             Ok(Err(error)) => RangeResponse::Error {
@@ -1122,8 +1126,8 @@ impl HostedRangeService {
             Err(_elapsed) => RangeResponse::Error {
                 error: WireErrorKind::Failed,
                 message: format!(
-                    "range-0 follower did not cover the catalog barrier within \
-                     {RANGE0_BARRIER_REPLY_BUDGET:?}"
+                    "range-0 follower did not cover the catalog barrier within {}",
+                    RANGE0_BARRIER_REPLY_BUDGET.human()
                 ),
             },
         }
@@ -5663,7 +5667,7 @@ mod tests {
         let registry = RangeRegistry::from_tenant_record(&record(addr.to_string())).unwrap();
         let scanner = RegistryRangeScanner::new(
             registry,
-            FramedTcpClient::with_timeout(Duration::from_millis(20)),
+            FramedTcpClient::with_timeout(crabka_units::millis(20)),
             std::collections::BTreeMap::new(),
         );
         let local = MemKv::new();

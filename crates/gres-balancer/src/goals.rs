@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use crabka_units::{ByteSize, convert::ByteSizeExt as _, gibibytes, mebibytes};
 use serde::{Deserialize, Serialize};
 
 use crate::model::{BalanceOperation, OperationKind, RangeMetrics, TenantMetrics};
@@ -15,11 +16,23 @@ pub enum GoalPriority {
 }
 
 /// Configuration and recent-operation memory used by goals.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `PartialEq` but not `Eq`: the two byte thresholds are `f64`-backed
+/// quantities, so equality is not reflexive across the whole domain.
+///
+/// The `_bytes` suffixes stay on the two [`ByteSize`] fields because they are
+/// the JSON keys operators write (`sizeCeilingBytes`, `mergeFloorBytes`) and the
+/// names the `GresBalancerThresholds` CRD mirrors; renaming the Rust fields
+/// would move the wire encoding with them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GoalContext {
-    pub size_ceiling_bytes: u64,
-    pub merge_floor_bytes: u64,
+    /// Split any range stored above this size.
+    #[serde(with = "crabka_units::serde_units::numeric::bytes_u64")]
+    pub size_ceiling_bytes: ByteSize,
+    /// Merge adjacent ranges whose combined size stays below this floor.
+    #[serde(with = "crabka_units::serde_units::numeric::bytes_u64")]
+    pub merge_floor_bytes: ByteSize,
     pub split_stride_rows: u64,
     pub load_skew_hysteresis_pct: u32,
     pub max_ranges_per_compute: Option<usize>,
@@ -44,8 +57,8 @@ impl GoalContext {
 impl Default for GoalContext {
     fn default() -> Self {
         Self {
-            size_ceiling_bytes: 1_073_741_824,
-            merge_floor_bytes: 67_108_864,
+            size_ceiling_bytes: gibibytes(1),
+            merge_floor_bytes: mebibytes(64),
             split_stride_rows: 1_000_000,
             load_skew_hysteresis_pct: 25,
             max_ranges_per_compute: None,
@@ -85,7 +98,9 @@ impl GoalToggles {
 }
 
 /// Complete dry-run balancer configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+///
+/// `PartialEq` but not `Eq`, following [`GoalContext`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct BalancerConfig {
     #[serde(default)]
@@ -302,7 +317,7 @@ impl Goal for ConversionGoal {
                 let Some(totals) = totals else {
                     continue;
                 };
-                if totals.0 < table.convert_store_bytes_threshold
+                if ByteSize::from_bytes(totals.0) < table.convert_store_bytes_threshold
                     && totals.1 < table.convert_commit_rate_threshold
                 {
                     continue;
@@ -325,7 +340,7 @@ fn split_oversized_ranges(tenant: &TenantMetrics, ctx: &GoalContext) -> Vec<Bala
         .filter(|range| {
             range
                 .store_bytes
-                .is_some_and(|bytes| bytes > ctx.size_ceiling_bytes)
+                .is_some_and(|bytes| ByteSize::from_bytes(bytes) > ctx.size_ceiling_bytes)
         })
         .filter(|range| !ctx.is_in_cooldown(range.range_id, OperationKind::Split))
         .map(|range| BalanceOperation::Split {
@@ -352,7 +367,8 @@ fn merge_tiny_adjacent_ranges(tenant: &TenantMetrics, ctx: &GoalContext) -> Vec<
             else {
                 return None;
             };
-            if left_bytes.saturating_add(right_bytes) >= ctx.merge_floor_bytes {
+            if ByteSize::from_bytes(left_bytes.saturating_add(right_bytes)) >= ctx.merge_floor_bytes
+            {
                 return None;
             }
             if ctx.is_in_cooldown(left.range_id, OperationKind::Merge)

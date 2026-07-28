@@ -1,6 +1,7 @@
 //! Registry snapshot and dry-run operation model.
 
 use crabka_gres_substrate::RangeStatsSnapshot;
+use crabka_units::ByteSize;
 use serde::{Deserialize, Serialize};
 
 /// One compute endpoint capable of hosting Chapter Gres ranges.
@@ -11,14 +12,23 @@ pub struct ComputeNode {
 }
 
 /// Table-level policy visible to the balancer.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// `PartialEq` but not `Eq`, and no `Hash`: the conversion size threshold is an
+/// `f64`-backed quantity, so equality is not reflexive across the whole domain
+/// and no consistent hash exists.
+///
+/// The `_bytes` suffix stays on the [`ByteSize`] field because it is the JSON
+/// key the balancer's dry-run input carries (`convertStoreBytesThreshold`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TablePolicy {
     pub table_id: u64,
     pub table_name: String,
     pub is_sharded: bool,
     pub auto_shard_disabled: bool,
-    pub convert_store_bytes_threshold: u64,
+    /// Convert an unsharded table once its ranges together store this much.
+    #[serde(with = "crabka_units::serde_units::numeric::bytes_u64")]
+    pub convert_store_bytes_threshold: ByteSize,
     pub convert_commit_rate_threshold: u64,
 }
 
@@ -59,7 +69,9 @@ impl RangeMetrics {
 }
 
 /// Metrics and policies for one tenant registry record.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// `PartialEq` but not `Eq`, and no `Hash`, following [`TablePolicy`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TenantMetrics {
     pub tenant_name: String,

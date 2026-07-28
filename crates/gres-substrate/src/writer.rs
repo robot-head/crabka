@@ -15,6 +15,7 @@ use crabka_gres_ranges::tso::{
 };
 use crabka_pgexec::{Committer, ExecError, Linearizer};
 use crabka_pgkv::{Kv, KvSnapshot, SnapshotKv, WriteOp};
+use crabka_units::{ByteSize, convert::ByteSizeExt as _, mebibytes};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::{
@@ -25,7 +26,7 @@ use crate::{
 };
 
 /// Default upper bound for an encoded `GRW1` frame.
-pub const DEFAULT_MAX_FRAME_BYTES: usize = 1_048_576;
+pub const DEFAULT_MAX_FRAME_SIZE: ByteSize = mebibytes(1);
 
 /// A compute-writer generation fenced by the WAL substrate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -839,7 +840,7 @@ impl FenceLease for ProducerWalWriter {
 pub fn chunk_wal_batch(
     ops: Vec<WriteOp>,
     first_journal_seq: u64,
-    max_frame_bytes: usize,
+    max_frame_size: ByteSize,
 ) -> Result<Vec<WalFrame>, SubstrateError> {
     if ops.is_empty() {
         return Ok(vec![WalFrame {
@@ -848,6 +849,8 @@ pub fn chunk_wal_batch(
         }]);
     }
 
+    // Encoded lengths are `usize`; comparing there keeps the budget exact.
+    let max_frame_bytes = max_frame_size.bytes_usize();
     let mut frames = Vec::new();
     let mut current_ops = Vec::new();
     let mut current_seq = first_journal_seq;
@@ -914,7 +917,7 @@ pub struct SubstrateCommitter<W> {
     kv: Arc<dyn Kv>,
     writer: Arc<W>,
     generation: WriterGeneration,
-    max_frame_bytes: usize,
+    max_frame_size: ByteSize,
     next_journal_seq: std::sync::atomic::AtomicU64,
     commit_gate: Arc<Semaphore>,
     checkpoint_stats: Option<Arc<CheckpointStats>>,
@@ -1030,7 +1033,7 @@ impl<W> SubstrateCommitter<W> {
             kv,
             writer,
             generation,
-            max_frame_bytes: DEFAULT_MAX_FRAME_BYTES,
+            max_frame_size: DEFAULT_MAX_FRAME_SIZE,
             next_journal_seq: std::sync::atomic::AtomicU64::new(next),
             commit_gate: Arc::new(Semaphore::new(1)),
             checkpoint_stats: None,
@@ -1040,8 +1043,8 @@ impl<W> SubstrateCommitter<W> {
 
     /// Override the maximum encoded frame size.
     #[must_use]
-    pub fn with_max_frame_bytes(mut self, max_frame_bytes: usize) -> Self {
-        self.max_frame_bytes = max_frame_bytes;
+    pub fn with_max_frame_size(mut self, max_frame_size: ByteSize) -> Self {
+        self.max_frame_size = max_frame_size;
         self
     }
 
@@ -1075,7 +1078,7 @@ where
             .await
             .map_err(|_| ExecError::Unavailable)?;
         let next = self.next_journal_seq.load(Ordering::SeqCst);
-        let frames = chunk_wal_batch(ops, next, self.max_frame_bytes)?;
+        let frames = chunk_wal_batch(ops, next, self.max_frame_size)?;
         let ack = self
             .writer
             .commit_group(GroupCommitRequest {
@@ -1852,7 +1855,7 @@ mod tests {
             },
         ];
 
-        let frames = chunk_wal_batch(ops, 7, 36).expect("chunk");
+        let frames = chunk_wal_batch(ops, 7, crabka_units::bytes(36)).expect("chunk");
 
         assert!(frames.len() == 2);
         assert!(frames[0].journal_seq == 7);
@@ -1880,7 +1883,7 @@ mod tests {
             value: vec![7; 64],
         }];
 
-        let frames = chunk_wal_batch(ops, 3, 16).expect("chunk");
+        let frames = chunk_wal_batch(ops, 3, crabka_units::bytes(16)).expect("chunk");
 
         assert!(frames.len() == 1);
         assert!(frames[0].journal_seq == 3);
@@ -2104,7 +2107,7 @@ mod tests {
             horizon.epoch(),
             NonZeroU64::new(4).expect("stride"),
             0,
-            Duration::ZERO,
+            <crabka_units::Time as crabka_units::convert::TimeExt>::ZERO,
         )
         .expect("recover");
         oracle
@@ -2157,7 +2160,7 @@ mod tests {
             horizon.epoch(),
             NonZeroU64::new(4).expect("stride"),
             0,
-            Duration::ZERO,
+            <crabka_units::Time as crabka_units::convert::TimeExt>::ZERO,
         )
         .expect("recover");
         oracle

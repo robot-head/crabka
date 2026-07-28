@@ -28,6 +28,7 @@ mod tests {
         InMemoryRegistryStore, RangeBoundary, RangeLayoutEntry, SqlUser, TenantId, TenantName,
         TenantRecord, TenantRegistryStore, TenantState,
     };
+    use crabka_units::{bytes, gibibytes, mebibytes, minutes};
 
     use super::*;
 
@@ -55,7 +56,7 @@ mod tests {
             table_name: "orders".to_string(),
             is_sharded: true,
             auto_shard_disabled: false,
-            convert_store_bytes_threshold: 10_000,
+            convert_store_bytes_threshold: bytes(10_000),
             convert_commit_rate_threshold: 10_000,
         }
     }
@@ -114,8 +115,8 @@ mod tests {
 
     fn context() -> GoalContext {
         GoalContext {
-            size_ceiling_bytes: 1_000,
-            merge_floor_bytes: 200,
+            size_ceiling_bytes: bytes(1_000),
+            merge_floor_bytes: bytes(200),
             split_stride_rows: 100,
             load_skew_hysteresis_pct: 25,
             max_ranges_per_compute: Some(3),
@@ -137,7 +138,7 @@ mod tests {
     }
 
     fn snapshot_freshness() -> StatsFreshness {
-        StatsFreshness::new(std::time::Duration::from_mins(1))
+        StatsFreshness::new(minutes(1))
     }
 
     fn authoritative_snapshot(
@@ -157,6 +158,59 @@ mod tests {
                 replication_lag_bytes: None,
             }],
         }
+    }
+
+    /// Typing the two byte thresholds must not move the wire encoding: the CLI
+    /// deserialises a `BalancerConfig` from operator-supplied JSON, and the
+    /// `GresBalancerThresholds` CRD mirrors these keys as bare integers.
+    #[test]
+    fn balancer_config_json_keeps_bare_integer_byte_thresholds() {
+        const EXPECTED: &str = concat!(
+            r#"{"goals":{"disabledGoals":[]},"context":{"#,
+            r#""sizeCeilingBytes":1000,"mergeFloorBytes":200,"splitStrideRows":100,"#,
+            r#""loadSkewHysteresisPct":25,"maxRangesPerCompute":3,"maxOperations":32,"#,
+            r#""cooldownEpochs":2,"currentEpoch":10,"cooldowns":[]}}"#,
+        );
+        let config = BalancerConfig {
+            goals: GoalToggles::default(),
+            context: context(),
+        };
+
+        let json = serde_json::to_string(&config).expect("serialize config");
+        let parsed: BalancerConfig = serde_json::from_str(&json).expect("deserialize config");
+
+        check!(json == EXPECTED);
+        check!(parsed.context.size_ceiling_bytes == bytes(1_000));
+        check!(parsed.context.merge_floor_bytes == bytes(200));
+        check!(parsed == config);
+    }
+
+    #[test]
+    fn default_goal_context_keeps_its_gibibyte_and_mebibyte_thresholds() {
+        let defaults = GoalContext::default();
+
+        let json = serde_json::to_value(&defaults).expect("serialize context");
+
+        check!(json["sizeCeilingBytes"] == serde_json::json!(1_073_741_824_u64));
+        check!(json["mergeFloorBytes"] == serde_json::json!(67_108_864_u64));
+        check!(defaults.size_ceiling_bytes == gibibytes(1));
+        check!(defaults.merge_floor_bytes == mebibytes(64));
+    }
+
+    #[test]
+    fn table_policy_json_keeps_a_bare_integer_conversion_threshold() {
+        const EXPECTED: &str = concat!(
+            r#"{"tableId":10,"tableName":"orders","isSharded":true,"#,
+            r#""autoShardDisabled":false,"convertStoreBytesThreshold":10000,"#,
+            r#""convertCommitRateThreshold":10000}"#,
+        );
+
+        let json = serde_json::to_string(&table()).expect("serialize table policy");
+        let parsed: TablePolicy = serde_json::from_str(&json).expect("deserialize table policy");
+
+        check!(json == EXPECTED);
+        check!(parsed.convert_store_bytes_threshold == bytes(10_000));
+        check!(parsed == table());
     }
 
     #[test]
@@ -1026,7 +1080,7 @@ mod tests {
     fn conversion_goal_honors_threshold_and_disable_knob() {
         let mut active = table();
         active.is_sharded = false;
-        active.convert_store_bytes_threshold = 1_000;
+        active.convert_store_bytes_threshold = bytes(1_000);
         let mut disabled = active.clone();
         disabled.table_id = 11;
         disabled.table_name = "audit".to_string();

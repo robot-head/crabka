@@ -28,8 +28,10 @@ use crabka_security::{
     ClientAuthMode, ListenerProtocol, SaslMechanism, TlsConfig, scram::PgScramVerifier,
 };
 use crabka_units::{
-    Time,
-    convert::{ByteSizeExt as _, TimeExt as _},
+    ByteSize, Time,
+    convert::{ByteSizeExt as _, StdDurationExt as _, TimeExt as _},
+    fmt::Human as _,
+    millis, secs,
 };
 use rand::RngExt as _;
 use refined_type::rule::GreaterI32;
@@ -526,23 +528,27 @@ pub struct LocalVacuumOptions {
     idle_after_ms: Option<PositiveMillis>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Pacing knobs for the local vacuum loop.
+///
+/// `Eq` is deliberately absent: the intervals are quantities, whose `f64`
+/// storage is only `PartialEq`.
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct LocalVacuumPolicy {
-    idle_interval: Duration,
-    backoff_floor: Duration,
+    idle_interval: Time,
+    backoff_floor: Time,
     hot_debt: u64,
     key_budget: usize,
     max_key_budget: usize,
-    step_fast: Duration,
-    step_slow: Duration,
-    idle_after: Duration,
+    step_fast: Time,
+    step_slow: Time,
+    idle_after: Time,
 }
 
-const DEFAULT_LOCAL_VACUUM_IDLE_INTERVAL_MS: u64 = 2_000;
-const DEFAULT_LOCAL_VACUUM_BACKOFF_FLOOR_MS: u64 = 25;
-const DEFAULT_LOCAL_VACUUM_STEP_FAST_MS: u64 = 3;
-const DEFAULT_LOCAL_VACUUM_STEP_SLOW_MS: u64 = 12;
-const DEFAULT_LOCAL_VACUUM_IDLE_AFTER_MS: u64 = 1_000;
+const DEFAULT_LOCAL_VACUUM_IDLE_INTERVAL: Time = secs(2);
+const DEFAULT_LOCAL_VACUUM_BACKOFF_FLOOR: Time = millis(25);
+const DEFAULT_LOCAL_VACUUM_STEP_FAST: Time = millis(3);
+const DEFAULT_LOCAL_VACUUM_STEP_SLOW: Time = millis(12);
+const DEFAULT_LOCAL_VACUUM_IDLE_AFTER: Time = secs(1);
 
 fn local_vacuum_policy(args: &ServeArgs) -> std::io::Result<Option<LocalVacuumPolicy>> {
     let options = args.local_vacuum;
@@ -577,26 +583,21 @@ fn local_vacuum_policy(args: &ServeArgs) -> std::io::Result<Option<LocalVacuumPo
             )
         })?,
     };
-    let idle_interval = Duration::from_millis(options.idle_interval_ms.map_or(
-        DEFAULT_LOCAL_VACUUM_IDLE_INTERVAL_MS,
-        PositiveMillis::into_value,
-    ));
-    let backoff_floor = Duration::from_millis(options.backoff_floor_ms.map_or(
-        DEFAULT_LOCAL_VACUUM_BACKOFF_FLOOR_MS,
-        PositiveMillis::into_value,
-    ));
-    let step_fast = Duration::from_millis(options.step_fast_ms.map_or(
-        DEFAULT_LOCAL_VACUUM_STEP_FAST_MS,
-        PositiveMillis::into_value,
-    ));
-    let step_slow = Duration::from_millis(options.step_slow_ms.map_or(
-        DEFAULT_LOCAL_VACUUM_STEP_SLOW_MS,
-        PositiveMillis::into_value,
-    ));
-    let idle_after = Duration::from_millis(options.idle_after_ms.map_or(
-        DEFAULT_LOCAL_VACUUM_IDLE_AFTER_MS,
-        PositiveMillis::into_value,
-    ));
+    let idle_interval = options
+        .idle_interval_ms
+        .map_or(DEFAULT_LOCAL_VACUUM_IDLE_INTERVAL, positive_millis);
+    let backoff_floor = options
+        .backoff_floor_ms
+        .map_or(DEFAULT_LOCAL_VACUUM_BACKOFF_FLOOR, positive_millis);
+    let step_fast = options
+        .step_fast_ms
+        .map_or(DEFAULT_LOCAL_VACUUM_STEP_FAST, positive_millis);
+    let step_slow = options
+        .step_slow_ms
+        .map_or(DEFAULT_LOCAL_VACUUM_STEP_SLOW, positive_millis);
+    let idle_after = options
+        .idle_after_ms
+        .map_or(DEFAULT_LOCAL_VACUUM_IDLE_AFTER, positive_millis);
     if backoff_floor > idle_interval {
         return invalid_input("local vacuum backoff floor exceeds idle interval");
     }
@@ -671,15 +672,15 @@ fn effective_wal_admin_policy(
             PositiveI32::into_value,
         ),
         args.wal_topic_ensure_timeout_ms.map_or(
-            crabka_gres_substrate::DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT_MS,
+            crabka_gres_substrate::DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT.millis_i32(),
             PositiveI32::into_value,
         ),
         args.wal_admin_connect_timeout_ms.map_or(
-            crabka_gres_substrate::DEFAULT_WAL_ADMIN_CONNECT_TIMEOUT_MS,
+            millis_u64(crabka_gres_substrate::DEFAULT_WAL_ADMIN_CONNECT_TIMEOUT),
             PositiveMillis::into_value,
         ),
         args.wal_admin_request_timeout_ms.map_or(
-            crabka_gres_substrate::DEFAULT_WAL_ADMIN_REQUEST_TIMEOUT_MS,
+            millis_u64(crabka_gres_substrate::DEFAULT_WAL_ADMIN_REQUEST_TIMEOUT),
             PositiveMillis::into_value,
         ),
     )
@@ -789,6 +790,13 @@ fn effective_wal_producer_throughput_policy(
 /// milliseconds saturates rather than wrapping negative.
 fn positive_millis(value: PositiveMillis) -> Time {
     Time::from_millis(i64::try_from(value.into_value()).unwrap_or(i64::MAX))
+}
+
+/// A time extent back in whole milliseconds as `u64`, for the `refined_type`
+/// validators and `Duration` constructors that still take a raw count. A
+/// negative extent clamps to zero.
+fn millis_u64(extent: Time) -> u64 {
+    u64::try_from(extent.millis_i64()).unwrap_or_default()
 }
 
 /// A nonnegative producer retry count representable on the protocol wire.
@@ -990,7 +998,10 @@ pub struct RangeRpcRuntimeConfig {
 }
 
 /// Validated substrate checkpointing settings.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Eq` is deliberately absent: the part-size target is a quantity, whose
+/// `f64` storage is only `PartialEq`.
+#[derive(Debug, Clone, PartialEq)]
 pub struct CheckpointRuntimeConfig {
     /// Object-store connection settings for checkpoint objects.
     pub object_store: CheckpointObjectStoreConfig,
@@ -998,8 +1009,8 @@ pub struct CheckpointRuntimeConfig {
     pub frames_threshold: u64,
     /// WAL bytes since the last manifest that trigger a checkpoint.
     pub bytes_threshold: u64,
-    /// Target checkpoint part object size in bytes.
-    pub part_max_bytes: usize,
+    /// Target checkpoint part object size.
+    pub part_max_size: ByteSize,
     /// Number of newest checkpoint directories retained after prune planning.
     pub retain_newest: usize,
     /// Kafka `DeleteRecords` timeout after a durable manifest.
@@ -1110,15 +1121,15 @@ impl SubstrateRuntimeConfig {
                 .to_std(),
             recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::new(
                 args.wal_recovery_fetch_max_wait_ms.map_or(
-                    crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT_MS,
+                    crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT.millis_i32(),
                     PositiveI32::into_value,
                 ),
                 args.wal_recovery_fetch_partition_max_bytes.map_or(
-                    crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES,
+                    crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX.bytes_i32(),
                     PositiveI32::into_value,
                 ),
                 args.wal_recovery_fetch_response_max_bytes.map_or(
-                    crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES,
+                    crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX.bytes_i32(),
                     PositiveI32::into_value,
                 ),
                 args.wal_recovery_empty_fetch_retries.map_or(
@@ -1128,18 +1139,18 @@ impl SubstrateRuntimeConfig {
             )
             .and_then(|policy| {
                 policy.with_dns_timeout(args.wal_recovery_dns_timeout_ms.map_or(
-                    crabka_gres_substrate::DEFAULT_WAL_RECOVERY_DNS_TIMEOUT_MS,
+                    millis_u64(crabka_gres_substrate::DEFAULT_WAL_RECOVERY_DNS_TIMEOUT),
                     PositiveMillis::into_value,
                 ))
             })
             .and_then(|policy| {
                 policy.with_timeouts(
                     args.wal_recovery_connect_timeout_ms.map_or(
-                        crabka_gres_substrate::DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT_MS,
+                        millis_u64(crabka_gres_substrate::DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT),
                         PositiveMillis::into_value,
                     ),
                     args.wal_recovery_request_timeout_ms.map_or(
-                        crabka_gres_substrate::DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT_MS,
+                        millis_u64(crabka_gres_substrate::DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT),
                         PositiveMillis::into_value,
                     ),
                 )
@@ -1282,10 +1293,10 @@ impl CheckpointRuntimeConfig {
         }
 
         let object_store = CheckpointObjectStoreConfig::from_args(args)?;
-        let part_max_bytes = args
+        let part_max_size = args
             .checkpoint_part_bytes
-            .map_or(crabka_gres_substrate::DEFAULT_PART_MAX_BYTES, |value| {
-                value.into_value().bytes_usize()
+            .map_or(crabka_gres_substrate::DEFAULT_PART_MAX_SIZE, |value| {
+                value.into_value()
             });
         Ok(Some(Self {
             object_store,
@@ -1295,7 +1306,7 @@ impl CheckpointRuntimeConfig {
             bytes_threshold: args
                 .checkpoint_bytes
                 .map_or(DEFAULT_CHECKPOINT_BYTES.bytes_u64(), NonZeroU64::get),
-            part_max_bytes,
+            part_max_size,
             retain_newest: args.checkpoint_retain.map_or(
                 crabka_gres_substrate::DEFAULT_CHECKPOINT_RETAIN,
                 PositiveUsize::into_value,
@@ -2008,14 +2019,17 @@ impl SuspendRegistry for LiveSuspendRegistry {
 }
 
 /// Configuration for substrate idle self-suspension.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Eq` is deliberately absent: the idle window and the size gate are
+/// quantities, whose `f64` storage is only `PartialEq`.
+#[derive(Debug, Clone, PartialEq)]
 pub struct SuspendPolicy {
     /// Tenant name written to the registry.
     pub tenant: String,
     /// Idle window before suspend. Zero disables self-suspend.
-    pub idle_window: Duration,
+    pub idle_window: Time,
     /// Optional checkpoint size gate.
-    pub suspend_max_checkpoint_bytes: Option<u64>,
+    pub suspend_max_checkpoint: Option<ByteSize>,
 }
 
 impl SuspendPolicy {
@@ -2028,8 +2042,13 @@ impl SuspendPolicy {
 
         Some(Self {
             tenant: record.name.as_str().to_string(),
-            idle_window: Duration::from_secs(idle_seconds),
-            suspend_max_checkpoint_bytes: record.suspend_max_checkpoint_bytes,
+            // The registry record carries the raw registry JSON encoding
+            // (`crabka-gres-control` leaves it alone by design); this is the
+            // seam where it becomes a quantity.
+            idle_window: Time::from_secs(i64::try_from(idle_seconds).unwrap_or(i64::MAX)),
+            suspend_max_checkpoint: record
+                .suspend_max_checkpoint_bytes
+                .map(ByteSize::from_bytes),
         })
     }
 }
@@ -2044,7 +2063,7 @@ pub async fn try_suspend_idle_tenant(
     checkpointer: &dyn FinalCheckpointer,
     registry: &mut dyn SuspendRegistry,
 ) -> std::io::Result<SuspendMonitorOutcome> {
-    if policy.idle_window.is_zero() {
+    if policy.idle_window <= Time::ZERO {
         return Ok(SuspendMonitorOutcome::Disabled);
     }
 
@@ -2072,7 +2091,7 @@ pub async fn try_suspend_idle_tenant(
     }
 
     let checkpoint_bytes = checkpointer.latest_checkpoint_bytes().await?;
-    if let Some(max_bytes) = policy.suspend_max_checkpoint_bytes
+    if let Some(max_bytes) = policy.suspend_max_checkpoint.map(ByteSize::bytes_u64)
         && checkpoint_bytes > max_bytes
     {
         activity.reopen_after_suspend_abort();
@@ -2094,12 +2113,18 @@ pub async fn try_suspend_idle_tenant(
     Ok(SuspendMonitorOutcome::Suspended)
 }
 
-fn idle_window_elapsed(last_activity_unix_millis: u64, idle_window: Duration) -> bool {
+/// Whether `idle_window` has elapsed since the last recorded activity.
+///
+/// The window is truncated, not rounded, on the way to milliseconds: it is
+/// compared against a delta of two epoch-millisecond instants, so rounding a
+/// sub-millisecond remainder up would hold the tenant warm for a whole extra
+/// millisecond that the operator never asked for.
+fn idle_window_elapsed(last_activity_unix_millis: u64, idle_window: Time) -> bool {
     let Some(now) = current_unix_millis() else {
         return false;
     };
     let idle_millis = now.saturating_sub(last_activity_unix_millis);
-    idle_millis >= u64::try_from(idle_window.as_millis()).unwrap_or(u64::MAX)
+    idle_millis >= u64::try_from(idle_window.millis_i64_trunc()).unwrap_or(u64::MAX)
 }
 
 fn current_unix_millis() -> Option<u64> {
@@ -2580,9 +2605,9 @@ fn local_vacuum_spawn_policy(
 
 /// One pacing decision for the local vacuum loop: how long to sleep before
 /// the next bounded step and how many version keys that step may examine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct VacuumPace {
-    interval: Duration,
+    interval: Time,
     key_budget: usize,
 }
 
@@ -2615,8 +2640,8 @@ struct VacuumStepObservation {
     /// committed since the previous step and no session ran any statement
     /// within [`LocalVacuumPolicy::idle_after`].
     foreground_idle: bool,
-    /// Wall-clock duration of the step itself (excluding the sleep).
-    step_elapsed: Duration,
+    /// Wall-clock extent of the step itself (excluding the sleep).
+    step_elapsed: Time,
 }
 
 /// Adaptive pacing for the local vacuum loop.
@@ -2689,13 +2714,18 @@ impl VacuumPacer {
             self.debt > self.policy.hot_debt
         };
         let interval = if hot {
-            Duration::ZERO
+            Time::ZERO
         } else if self.store_settled {
             // Proven clean: park at the idle cadence outright instead of
             // ramping — there is nothing left the ramp could discover.
             self.policy.idle_interval
         } else {
-            (self.pace.interval * 2).clamp(self.policy.backoff_floor, self.policy.idle_interval)
+            // `Ord::clamp` is unavailable on an `f64`-backed quantity, so the
+            // clamp is spelled out; `local_vacuum_policy` has already rejected
+            // a floor above the idle interval, so the order is the same.
+            (self.pace.interval * 2.0)
+                .max(self.policy.backoff_floor)
+                .min(self.policy.idle_interval)
         };
         let key_budget = if hot {
             if observation.step_elapsed <= self.policy.step_fast {
@@ -2721,12 +2751,11 @@ impl VacuumPacer {
 
 fn local_vacuum_maintenance_due(
     swept_anything: bool,
-    next_interval: Duration,
-    elapsed_since_maintain: Duration,
+    next_interval: Time,
+    elapsed_since_maintain: Time,
     policy: LocalVacuumPolicy,
 ) -> bool {
-    swept_anything
-        && (next_interval > Duration::ZERO || elapsed_since_maintain >= policy.idle_interval)
+    swept_anything && (next_interval > Time::ZERO || elapsed_since_maintain >= policy.idle_interval)
 }
 
 /// Run bounded dead-MVCC-version sweep steps on the LOCAL serving engine
@@ -2748,12 +2777,12 @@ async fn run_local_vacuum_loop(
         let pace = pacer.pace();
         tokio::select! {
             () = shutdown.cancelled() => return,
-            () = tokio::time::sleep(pace.interval) => {}
+            () = tokio::time::sleep(pace.interval.to_std()) => {}
         }
         let step_started = std::time::Instant::now();
         match engine.vacuum_step_budgeted(pace.key_budget).await {
             Ok(step) => {
-                let step_elapsed = step_started.elapsed();
+                let step_elapsed = step_started.elapsed().as_time();
                 let stats = step.stats;
                 let swept_anything = stats.versions_pruned
                     + stats.index_entries_pruned
@@ -2787,7 +2816,7 @@ async fn run_local_vacuum_loop(
                 if local_vacuum_maintenance_due(
                     swept_anything,
                     next.interval,
-                    last_maintain.elapsed(),
+                    last_maintain.elapsed().as_time(),
                     policy,
                 ) {
                     last_maintain = std::time::Instant::now();
@@ -2804,8 +2833,8 @@ async fn run_local_vacuum_loop(
                     writes_since_step,
                     debt = pacer.debt,
                     foreground_idle,
-                    step_elapsed = ?step_elapsed,
-                    next_interval = ?next.interval,
+                    step_elapsed = %step_elapsed.human(),
+                    next_interval = %next.interval.human(),
                     next_key_budget = next.key_budget,
                     "local vacuum step"
                 );
@@ -2824,14 +2853,14 @@ mod vacuum_pacing_tests {
 
     const fn default_policy() -> LocalVacuumPolicy {
         LocalVacuumPolicy {
-            idle_interval: Duration::from_secs(2),
-            backoff_floor: Duration::from_millis(25),
+            idle_interval: secs(2),
+            backoff_floor: millis(25),
             hot_debt: VACUUM_STEP_KEY_BUDGET as u64,
             key_budget: VACUUM_STEP_KEY_BUDGET,
             max_key_budget: VACUUM_STEP_KEY_BUDGET * 4,
-            step_fast: Duration::from_millis(3),
-            step_slow: Duration::from_millis(12),
-            idle_after: Duration::from_secs(1),
+            step_fast: millis(3),
+            step_slow: millis(12),
+            idle_after: secs(1),
         }
     }
 
@@ -2905,20 +2934,20 @@ mod vacuum_pacing_tests {
     #[test]
     fn custom_idle_interval_controls_maintenance_rotation() {
         let policy = LocalVacuumPolicy {
-            idle_interval: Duration::from_millis(40),
+            idle_interval: millis(40),
             ..default_policy()
         };
 
         assert!(!local_vacuum_maintenance_due(
             true,
-            Duration::ZERO,
-            Duration::from_millis(39),
+            Time::ZERO,
+            millis(39),
             policy,
         ));
         assert!(local_vacuum_maintenance_due(
             true,
-            Duration::ZERO,
-            Duration::from_millis(40),
+            Time::ZERO,
+            millis(40),
             policy,
         ));
     }
@@ -2931,21 +2960,21 @@ mod vacuum_pacing_tests {
             swept_anything: false,
             cycle_completed: false,
             foreground_idle: false,
-            step_elapsed: Duration::from_millis(1),
+            step_elapsed: millis(1),
         }
     }
 
     #[test]
     fn custom_policy_controls_every_local_vacuum_decision() {
         let policy = LocalVacuumPolicy {
-            idle_interval: Duration::from_millis(90),
-            backoff_floor: Duration::from_millis(7),
+            idle_interval: millis(90),
+            backoff_floor: millis(7),
             hot_debt: 20,
             key_budget: 10,
             max_key_budget: 40,
-            step_fast: Duration::from_millis(2),
-            step_slow: Duration::from_millis(8),
-            idle_after: Duration::from_millis(30),
+            step_fast: millis(2),
+            step_slow: millis(8),
+            idle_after: millis(30),
         };
         let mut pacer = VacuumPacer::new(policy);
         assert_eq!(
@@ -2958,30 +2987,30 @@ mod vacuum_pacing_tests {
 
         let hot_fast = VacuumStepObservation {
             writes_since_step: 21,
-            step_elapsed: Duration::from_millis(2),
+            step_elapsed: millis(2),
             ..quiet_busy_step()
         };
-        assert_eq!(pacer.observe(&hot_fast).key_budget, 20);
+        assert!(pacer.observe(&hot_fast).key_budget == 20);
         pacer.pace.key_budget = 40;
-        assert_eq!(pacer.observe(&hot_fast).key_budget, 40);
+        assert!(pacer.observe(&hot_fast).key_budget == 40);
 
         let hot_slow = VacuumStepObservation {
-            step_elapsed: Duration::from_millis(8),
+            step_elapsed: millis(8),
             ..hot_fast
         };
-        assert_eq!(pacer.observe(&hot_slow).key_budget, 20);
+        assert!(pacer.observe(&hot_slow).key_budget == 20);
 
         let caught_up = VacuumStepObservation {
             writes_since_step: 0,
             versions_settled: 100,
-            step_elapsed: Duration::from_millis(4),
+            step_elapsed: millis(4),
             ..quiet_busy_step()
         };
-        assert_eq!(pacer.observe(&caught_up).interval, policy.backoff_floor);
+        assert!(pacer.observe(&caught_up).interval == policy.backoff_floor);
         let mut previous = policy.backoff_floor;
         loop {
             let pace = pacer.observe(&quiet_busy_step());
-            assert_eq!(pace.interval, (previous * 2).min(policy.idle_interval));
+            assert!(pace.interval == (previous * 2.0).min(policy.idle_interval));
             previous = pace.interval;
             if pace.interval == policy.idle_interval {
                 break;
@@ -2990,10 +3019,7 @@ mod vacuum_pacing_tests {
 
         let now = current_unix_millis().expect("system clock");
         let last_activity = now.saturating_sub(20);
-        assert!(idle_window_elapsed(
-            last_activity,
-            Duration::from_millis(10)
-        ));
+        assert!(idle_window_elapsed(last_activity, millis(10)));
         assert!(!idle_window_elapsed(last_activity, policy.idle_after));
     }
 
@@ -3011,7 +3037,7 @@ mod vacuum_pacing_tests {
         };
         assert!(pacer.observe(&behind).interval == policy.idle_interval); // debt 3 500
         assert!(pacer.observe(&behind).interval == policy.idle_interval); // debt 7 000
-        assert!(pacer.observe(&behind).interval == Duration::ZERO); // debt 10 500
+        assert!(pacer.observe(&behind).interval == Time::ZERO); // debt 10 500
         // Sweeping catches up: the interval backs off multiplicatively toward
         // the idle cadence instead of snapping straight to it.
         let repaying = VacuumStepObservation {
@@ -3026,7 +3052,7 @@ mod vacuum_pacing_tests {
         let mut previous = caught_up.interval;
         loop {
             let pace = pacer.observe(&quiet_busy_step());
-            assert!(pace.interval == (previous * 2).min(policy.idle_interval));
+            assert!(pace.interval == (previous * 2.0).min(policy.idle_interval));
             previous = pace.interval;
             if pace.interval == policy.idle_interval {
                 break;
@@ -3046,15 +3072,11 @@ mod vacuum_pacing_tests {
                 2 * VACUUM_STEP_KEY_BUDGET,
             ),
             // …but never past the cap…
-            (
-                policy.max_key_budget,
-                Duration::from_millis(1),
-                policy.max_key_budget,
-            ),
+            (policy.max_key_budget, millis(1), policy.max_key_budget),
             // …mid-range latency keeps the budget…
             (
                 2 * VACUUM_STEP_KEY_BUDGET,
-                Duration::from_millis(5),
+                millis(5),
                 2 * VACUUM_STEP_KEY_BUDGET,
             ),
             // …slow steps halve it…
@@ -3064,11 +3086,7 @@ mod vacuum_pacing_tests {
                 VACUUM_STEP_KEY_BUDGET,
             ),
             // …but never below the pgexec default.
-            (
-                VACUUM_STEP_KEY_BUDGET,
-                Duration::from_millis(50),
-                VACUUM_STEP_KEY_BUDGET,
-            ),
+            (VACUUM_STEP_KEY_BUDGET, millis(50), VACUUM_STEP_KEY_BUDGET),
         ];
         for (previous_budget, step_elapsed, expected) in cases {
             let mut pacer = VacuumPacer::new(policy);
@@ -3078,10 +3096,11 @@ mod vacuum_pacing_tests {
                 step_elapsed,
                 ..quiet_busy_step()
             });
-            assert!(pace.interval == Duration::ZERO);
+            assert!(pace.interval == Time::ZERO);
             assert!(
                 pace.key_budget == expected,
-                "previous {previous_budget}, elapsed {step_elapsed:?}"
+                "previous {previous_budget}, elapsed {}",
+                step_elapsed.human()
             );
         }
     }
@@ -3096,17 +3115,17 @@ mod vacuum_pacing_tests {
             swept_anything: true,
             cycle_completed: false,
             foreground_idle: true,
-            step_elapsed: Duration::from_millis(1),
+            step_elapsed: millis(1),
         };
         // Zero debt, but the store is not proven clean: drain back-to-back.
-        assert!(pacer.observe(&idle_dirty).interval == Duration::ZERO);
+        assert!(pacer.observe(&idle_dirty).interval == Time::ZERO);
         // A cycle that still swept something completes: keep draining (the
         // proving lap has not happened yet).
         let dirty_lap_end = VacuumStepObservation {
             cycle_completed: true,
             ..idle_dirty
         };
-        assert!(pacer.observe(&dirty_lap_end).interval == Duration::ZERO);
+        assert!(pacer.observe(&dirty_lap_end).interval == Time::ZERO);
         // A full lap that swept nothing parks the loop at the idle cadence
         // with the default budget, where it stays while nothing happens.
         let clean_lap = VacuumStepObservation {
@@ -3129,7 +3148,7 @@ mod vacuum_pacing_tests {
             writes_since_step: 20_000,
             ..quiet_busy_step()
         };
-        assert!(pacer.observe(&phantom).interval == Duration::ZERO);
+        assert!(pacer.observe(&phantom).interval == Time::ZERO);
         // The hot lap completes without sweeping anything: the ledger resets
         // instead of pinning the loop at full speed forever.
         let clean_lap = VacuumStepObservation {
@@ -3151,7 +3170,7 @@ mod vacuum_pacing_tests {
             swept_anything: false,
             cycle_completed: true,
             foreground_idle: true,
-            step_elapsed: Duration::from_millis(1),
+            step_elapsed: millis(1),
         };
         assert!(pacer.observe(&clean_idle_lap).interval == policy.idle_interval);
         // A small write lands: the store is no longer proven clean, so the
@@ -3165,7 +3184,7 @@ mod vacuum_pacing_tests {
             cycle_completed: false,
             ..clean_idle_lap
         };
-        assert!(pacer.observe(&idle_unproven).interval == Duration::ZERO);
+        assert!(pacer.observe(&idle_unproven).interval == Time::ZERO);
     }
 }
 
@@ -5570,7 +5589,7 @@ impl crabka_gres_ranges::DurableRecordInspector for LiveMultiRangeTransfer {
             let projection = crabka_gres_substrate::FoldProjection::All;
             let limits = crabka_gres_substrate::FoldLimits {
                 max_records: 1_000_000,
-                max_bytes: 256 * 1024 * 1024,
+                max_size: crabka_units::mebibytes(256),
             };
             match snapshot_offset {
                 Some(sample) => {
@@ -7241,7 +7260,7 @@ fn checkpoint_service_config(
         wal_topic,
         config.frames_threshold,
         config.bytes_threshold,
-        config.part_max_bytes,
+        config.part_max_size,
         config.retain_newest,
         config.poll_interval,
     )
@@ -8772,8 +8791,8 @@ mod tests {
     fn suspend_policy() -> SuspendPolicy {
         SuspendPolicy {
             tenant: "tenant-a".to_string(),
-            idle_window: Duration::from_millis(1),
-            suspend_max_checkpoint_bytes: Some(100),
+            idle_window: millis(1),
+            suspend_max_checkpoint: Some(crabka_units::bytes(100)),
         }
     }
 
@@ -9477,17 +9496,17 @@ mod tests {
             (17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27)
         } else {
             (
-                crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT_MS,
-                crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES,
-                crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES,
+                crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT.millis_i32(),
+                crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX.bytes_i32(),
+                crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX.bytes_i32(),
                 crabka_gres_substrate::DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES,
-                crabka_gres_substrate::DEFAULT_WAL_RECOVERY_DNS_TIMEOUT_MS,
-                crabka_gres_substrate::DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT_MS,
-                crabka_gres_substrate::DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT_MS,
+                millis_u64(crabka_gres_substrate::DEFAULT_WAL_RECOVERY_DNS_TIMEOUT),
+                millis_u64(crabka_gres_substrate::DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT),
+                millis_u64(crabka_gres_substrate::DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT),
                 crabka_gres_substrate::DEFAULT_WAL_TOPIC_REPLICATION_FACTOR,
-                crabka_gres_substrate::DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT_MS,
-                crabka_gres_substrate::DEFAULT_WAL_ADMIN_CONNECT_TIMEOUT_MS,
-                crabka_gres_substrate::DEFAULT_WAL_ADMIN_REQUEST_TIMEOUT_MS,
+                crabka_gres_substrate::DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT.millis_i32(),
+                millis_u64(crabka_gres_substrate::DEFAULT_WAL_ADMIN_CONNECT_TIMEOUT),
+                millis_u64(crabka_gres_substrate::DEFAULT_WAL_ADMIN_REQUEST_TIMEOUT),
             )
         };
         let config = SubstrateRuntimeConfig::from_args(
@@ -9498,18 +9517,18 @@ mod tests {
         .expect("valid config")
         .expect("substrate config");
         let policy = config.recovery_read_policy;
-        assert_eq!(policy.fetch_max_wait_ms(), expected.0);
-        assert_eq!(policy.fetch_partition_max_bytes(), expected.1);
-        assert_eq!(policy.fetch_response_max_bytes(), expected.2);
-        assert_eq!(policy.empty_fetch_retries(), expected.3);
-        assert!(policy.dns_timeout() == Duration::from_millis(expected.4));
-        assert_eq!(policy.connect_timeout(), Duration::from_millis(expected.5));
-        assert_eq!(policy.request_timeout(), Duration::from_millis(expected.6));
+        assert!(policy.fetch_max_wait().millis_i32() == expected.0);
+        assert!(policy.fetch_partition_max().bytes_i32() == expected.1);
+        assert!(policy.fetch_response_max().bytes_i32() == expected.2);
+        assert!(policy.empty_fetch_retries() == expected.3);
+        assert!(millis_u64(policy.dns_timeout()) == expected.4);
+        assert!(millis_u64(policy.connect_timeout()) == expected.5);
+        assert!(millis_u64(policy.request_timeout()) == expected.6);
         let admin = config.wal_admin_policy;
-        assert_eq!(admin.replication_factor(), expected.7);
-        assert_eq!(admin.topic_ensure_timeout_ms(), expected.8);
-        assert_eq!(admin.connect_timeout(), Duration::from_millis(expected.9));
-        assert_eq!(admin.request_timeout(), Duration::from_millis(expected.10));
+        assert!(admin.replication_factor() == expected.7);
+        assert!(admin.topic_ensure_timeout().millis_i32() == expected.8);
+        assert!(millis_u64(admin.connect_timeout()) == expected.9);
+        assert!(millis_u64(admin.request_timeout()) == expected.10);
 
         let cli = <Cli as clap::Parser>::try_parse_from(base.into_iter().chain([
             "--wal-recovery-fetch-max-wait-ms=27",
@@ -9529,18 +9548,18 @@ mod tests {
             .expect("valid config")
             .expect("substrate config");
         let policy = config.recovery_read_policy;
-        assert_eq!(policy.fetch_max_wait_ms(), 27);
-        assert_eq!(policy.fetch_partition_max_bytes(), 28);
-        assert_eq!(policy.fetch_response_max_bytes(), 29);
-        assert_eq!(policy.empty_fetch_retries(), 30);
-        assert!(policy.dns_timeout() == Duration::from_millis(30));
-        assert_eq!(policy.connect_timeout(), Duration::from_millis(31));
-        assert_eq!(policy.request_timeout(), Duration::from_millis(32));
+        assert!(policy.fetch_max_wait() == millis(27));
+        assert!(policy.fetch_partition_max() == crabka_units::bytes(28));
+        assert!(policy.fetch_response_max() == crabka_units::bytes(29));
+        assert!(policy.empty_fetch_retries() == 30);
+        assert!(policy.dns_timeout() == millis(30));
+        assert!(policy.connect_timeout() == millis(31));
+        assert!(policy.request_timeout() == millis(32));
         let admin = config.wal_admin_policy;
-        assert_eq!(admin.replication_factor(), 33);
-        assert_eq!(admin.topic_ensure_timeout_ms(), 34);
-        assert_eq!(admin.connect_timeout(), Duration::from_millis(35));
-        assert_eq!(admin.request_timeout(), Duration::from_millis(36));
+        assert!(admin.replication_factor() == 33);
+        assert!(admin.topic_ensure_timeout() == millis(34));
+        assert!(admin.connect_timeout() == millis(35));
+        assert!(admin.request_timeout() == millis(36));
     }
 
     #[test]
@@ -10850,7 +10869,7 @@ mod tests {
                 object_store: CheckpointObjectStoreConfig::InMemory,
                 frames_threshold: 1,
                 bytes_threshold: 1,
-                part_max_bytes: crabka_gres_substrate::DEFAULT_PART_MAX_BYTES,
+                part_max_size: crabka_gres_substrate::DEFAULT_PART_MAX_SIZE,
                 retain_newest: 2,
                 delete_records_timeout_ms: 30_000,
                 poll_interval: Duration::from_secs(1),

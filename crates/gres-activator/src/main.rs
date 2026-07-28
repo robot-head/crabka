@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{net::SocketAddr, sync::Arc};
 
 use clap::Parser;
 use crabka_gres_activator::{
@@ -9,7 +9,18 @@ use crabka_gres_control::{
     PositiveI32, PositiveMillis as RegistryPositiveMillis, Registry, RegistryPolicy,
     RegistryReplicationFactor,
 };
+use crabka_units::{Time, convert::TimeExt as _};
 use tokio::net::TcpListener;
+
+/// A validated positive millisecond count as a time extent.
+///
+/// [`PositiveMillis`] is the activator's parse-level validator over the raw
+/// `u64` a CLI flag carries; this is the seam where it becomes a quantity.
+/// [`TimeExt::from_millis`] takes an `i64`, so a value past `i64::MAX`
+/// milliseconds saturates rather than wrapping negative.
+fn positive_millis(value: PositiveMillis) -> Time {
+    Time::from_millis(i64::try_from(value.into_value()).unwrap_or(i64::MAX))
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "crabka-gres-activator")]
@@ -127,8 +138,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cfg = ActivatorConfig {
         listen: args.listen,
         bootstrap: args.bootstrap.into_value(),
-        registry_poll: Duration::from_millis(args.registry_poll_ms.into_value()),
-        cold_start_timeout: Duration::from_millis(args.cold_start_timeout_ms.into_value()),
+        registry_poll: positive_millis(args.registry_poll_ms),
+        cold_start_timeout: positive_millis(args.cold_start_timeout_ms),
         backend_endpoint_template: args.backend_endpoint_template.into_value(),
     };
     let mut registry =

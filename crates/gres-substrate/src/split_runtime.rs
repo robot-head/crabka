@@ -247,7 +247,7 @@ impl RawKvSplitRuntime {
                 format!("raw-r{range}"),
                 1,
                 0,
-                1024,
+                crabka_units::kibibytes(1),
                 2,
                 std::time::Duration::from_secs(1),
             )

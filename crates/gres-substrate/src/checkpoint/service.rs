@@ -8,6 +8,7 @@ use std::{
 use crabka_client_admin::DeleteRecordsOp;
 use crabka_object_store::{ObjectOps, ObjectStoreClient, ObjectStoreConfig, build_object_store};
 use crabka_pgkv::{KvSnapshot, SnapshotKv};
+use crabka_units::{ByteSize, convert::ByteSizeExt as _};
 use tokio::{
     sync::{Mutex as AsyncMutex, mpsc, oneshot},
     task::JoinHandle,
@@ -45,7 +46,9 @@ pub type CheckpointFailpoint = Arc<dyn Fn(CheckpointServiceStep) -> bool + Send 
 pub const DEFAULT_CHECKPOINT_RETAIN: usize = 2;
 
 /// Checkpointer thresholds and object layout knobs.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Not `Eq`: [`Self::part_max_size`] is an `f64`-backed quantity.
+#[derive(Debug, Clone, PartialEq)]
 pub struct CheckpointConfig {
     /// Tenant whose store is checkpointed.
     pub tenant: String,
@@ -56,7 +59,7 @@ pub struct CheckpointConfig {
     /// Checkpoint after at least this many committed payload bytes. Zero disables it.
     pub bytes_threshold: u64,
     /// Target checkpoint part size.
-    pub part_max_bytes: usize,
+    pub part_max_size: ByteSize,
     /// Number of newest checkpoint directories to retain.
     pub retain_checkpoints: usize,
     /// Background wake-up interval used by [`CheckpointService::spawn`].
@@ -74,7 +77,7 @@ impl CheckpointConfig {
         topic: String,
         frames_threshold: u64,
         bytes_threshold: u64,
-        part_max_bytes: usize,
+        part_max_size: ByteSize,
         retain_checkpoints: usize,
         poll_interval: Duration,
     ) -> Result<Self, SubstrateError> {
@@ -83,7 +86,7 @@ impl CheckpointConfig {
             topic,
             frames_threshold,
             bytes_threshold,
-            part_max_bytes,
+            part_max_size,
             retain_checkpoints,
             poll_interval,
         };
@@ -112,9 +115,9 @@ impl CheckpointConfig {
                 "at least one checkpoint threshold must be non-zero".into(),
             ));
         }
-        if self.part_max_bytes < 8 {
+        if self.part_max_size.bytes_usize() < 8 {
             return Err(SubstrateError::Checkpoint(
-                "checkpoint part_max_bytes must fit one empty key/value pair".into(),
+                "checkpoint part size must fit one empty key/value pair".into(),
             ));
         }
         if self.retain_checkpoints == 0 {
@@ -378,7 +381,7 @@ where
             &self.config.tenant,
             self.kv.as_ref(),
             snapshot,
-            self.config.part_max_bytes,
+            self.config.part_max_size,
         )
         .await?;
         #[cfg(feature = "checkpoint-test-hooks")]
@@ -389,7 +392,7 @@ where
                     &self.config.tenant,
                     self.kv.as_ref(),
                     snapshot,
-                    self.config.part_max_bytes,
+                    self.config.part_max_size,
                     failpoint,
                 )
                 .await?
@@ -400,7 +403,7 @@ where
                     &self.config.tenant,
                     self.kv.as_ref(),
                     snapshot,
-                    self.config.part_max_bytes,
+                    self.config.part_max_size,
                 )
                 .await?
             }
@@ -465,7 +468,7 @@ where
             &self.config.tenant,
             kv_snapshot,
             snapshot,
-            self.config.part_max_bytes,
+            self.config.part_max_size,
         )
         .await?;
         #[cfg(feature = "checkpoint-test-hooks")]
@@ -476,7 +479,7 @@ where
                     &self.config.tenant,
                     kv_snapshot,
                     snapshot,
-                    self.config.part_max_bytes,
+                    self.config.part_max_size,
                     failpoint,
                 )
                 .await?
@@ -487,7 +490,7 @@ where
                     &self.config.tenant,
                     kv_snapshot,
                     snapshot,
-                    self.config.part_max_bytes,
+                    self.config.part_max_size,
                 )
                 .await?
             }
@@ -837,7 +840,7 @@ mod tests {
     use tokio::sync::Notify;
 
     use super::*;
-    use crate::checkpoint::{DEFAULT_PART_MAX_BYTES, InMemoryCheckpointStore};
+    use crate::checkpoint::{DEFAULT_PART_MAX_SIZE, InMemoryCheckpointStore};
 
     #[derive(Default)]
     struct FakePruner {
@@ -911,7 +914,7 @@ mod tests {
             "topic".into(),
             1,
             0,
-            DEFAULT_PART_MAX_BYTES,
+            DEFAULT_PART_MAX_SIZE,
             DEFAULT_CHECKPOINT_RETAIN,
             Duration::ZERO,
         );
@@ -1216,7 +1219,7 @@ mod tests {
             "topic".into(),
             frames_threshold,
             bytes_threshold,
-            DEFAULT_PART_MAX_BYTES,
+            DEFAULT_PART_MAX_SIZE,
             DEFAULT_CHECKPOINT_RETAIN,
             Duration::from_secs(1),
         )

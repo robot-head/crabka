@@ -288,7 +288,7 @@ mod tests {
     use crate::{
         ReplayItem, RestoreTail, WalFrame,
         checkpoint::{
-            CheckpointSnapshot, DEFAULT_PART_MAX_BYTES, InMemoryCheckpointStore,
+            CheckpointSnapshot, DEFAULT_PART_MAX_SIZE, InMemoryCheckpointStore,
             restore_latest_table_transfer_and_replay_tail, write_checkpoint,
         },
         frame::BARRIER_SEQ,
@@ -311,7 +311,7 @@ mod tests {
                 wal_generation: 0,
                 garbage_horizon_xid: 0,
             },
-            DEFAULT_PART_MAX_BYTES,
+            DEFAULT_PART_MAX_SIZE,
         )
         .await
         .expect("checkpoint");
