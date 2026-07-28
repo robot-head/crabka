@@ -1374,6 +1374,38 @@ mod tests {
     }
 
     #[test]
+    fn consumer_poll_timing_defaults_preserve_behavior() {
+        assert_eq!(
+            default_consumer_poll_timeout().duration(),
+            Duration::from_millis(50)
+        );
+        assert_eq!(
+            default_consumer_poll_error_backoff().duration(),
+            Duration::from_millis(100)
+        );
+    }
+
+    #[test]
+    fn consumer_poll_duration_accepts_positive_minimum() {
+        assert_eq!(
+            ConsumerPollDurationMs::new(1)
+                .expect("one millisecond is valid")
+                .duration(),
+            Duration::from_millis(1)
+        );
+    }
+
+    #[test]
+    fn consumer_poll_duration_rejects_invalid_values() {
+        for invalid in ["0", "not-a-number", "-1", "18446744073709551616"] {
+            assert!(
+                invalid.parse::<ConsumerPollDurationMs>().is_err(),
+                "{invalid:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
     fn client_request_timeout_accepts_protocol_bounds() {
         assert_eq!(
             ClientRequestTimeoutSeconds::new(1)
