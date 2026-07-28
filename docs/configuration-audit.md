@@ -2861,27 +2861,35 @@ rg -n \
 ```
 
 Before this section was appended, it reported 37 lines. After this section and
-formatting, it reported 46 lines. The final mutually exclusive classification
-is 16 production-policy-flow references, 12 test or harness references, 18
+formatting, it reported 45 lines. The final mutually exclusive classification
+is 16 production-policy-flow references, 12 test or harness references, 17
 prior-audit references, and zero unresolved-owner references:
-`16 + 12 + 18 + 0 = 46`.
+`16 + 12 + 17 + 0 = 45`.
 
-The `crabka-client-consumer` all-target test passed 152 unit tests and three
-integration tests with no failures. The first workspace all-target test stopped
-in `crabka-client-producer` after 100 tests passed and
-`producer_builder_uses_configured_init_retry_timeout` failed its one-millisecond
-deadline assertion; the focused rerun passed one test with 100 filtered out.
-The authoritative workspace rerun passed that producer test, then stopped in
-`crabka-gres-ranges` after two nemesis tests passed and
-`real_range_partition_aborts_transfer_and_heal_restores_2pc` failed because a
-post-heal request hit its five-second range transport timeout. A focused rerun
-reproduced that failure with two tests filtered out. Task 1 changed only
-`crates/client-consumer`, so neither workspace failure is in this slice.
+The authoritative workspace verification at `90d68c80`
 
-Workspace Clippy exited successfully with two `doc_markdown` warnings for the
-new `ShareFetch` documentation in `ShareAcquireMode` and the pre-existing
-`crabka-traces` large-future warning. Nightly formatting and diff hygiene
-passed. `Cargo.lock` remained unchanged.
+```text
+CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo test --workspace --all-targets --locked
+```
+
+exited successfully. The producer package passed all 101 tests, including
+`producer_builder_uses_configured_init_retry_timeout`, and
+`crossrange_2pc_nemesis` passed all three tests.
+
+Two intermediate workspace failures received scoped fixes. The producer test's
+one-millisecond retry deadline could expire before its local mock response was
+processed under load; only its test timings changed, from 1 ms to 100 ms for
+the configured retry timeout and from 200 ms to 500 ms for the outer guard.
+Its assertions and producer runtime behavior are unchanged. The generic Gres
+`ProcessHarness` checkpoint frame changed from `1` to `u64::MAX`, removing
+accidental periodic pruning from unrelated range tests while preserving the
+manual and dedicated checkpoint tests.
+
+`cargo clippy --workspace --all-targets --locked` exited successfully with only
+the pre-existing `large_futures` warning at
+`crates/traces/src/bin/crabka-traces.rs:170`; the new ShareFetch documentation
+warnings are gone. Nightly formatting, `git diff --check`, and the `Cargo.lock`
+diff check all passed.
 
 ### Adjacent Pending Policy
 
