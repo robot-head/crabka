@@ -5421,7 +5421,7 @@ mod tests {
             (u64::from(right.id), 100),
         ])));
         gateway.set_join_strategy_config(crabka_pgexec::plan_dist::PlannerConfig {
-            broadcast_threshold_bytes: 16,
+            broadcast_threshold: crabka_units::bytes(16),
         });
 
         let result = gateway

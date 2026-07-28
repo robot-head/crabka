@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use crabka_units::{ByteSize, convert::ByteSizeExt as _, gibibytes, mebibytes};
+use crabka_units::{ByteSize, Ratio, convert::ByteSizeExt as _, gibibytes, mebibytes, percent};
 use serde::{Deserialize, Serialize};
 
 use crate::model::{BalanceOperation, OperationKind, RangeMetrics, TenantMetrics};
@@ -17,13 +17,15 @@ pub enum GoalPriority {
 
 /// Configuration and recent-operation memory used by goals.
 ///
-/// `PartialEq` but not `Eq`: the two byte thresholds are `f64`-backed
-/// quantities, so equality is not reflexive across the whole domain.
+/// `PartialEq` but not `Eq`: the two byte thresholds and the skew hysteresis are
+/// `f64`-backed quantities, so equality is not reflexive across the whole
+/// domain.
 ///
-/// The `_bytes` suffixes stay on the two [`ByteSize`] fields because they are
-/// the JSON keys operators write (`sizeCeilingBytes`, `mergeFloorBytes`) and the
-/// names the `GresBalancerThresholds` CRD mirrors; renaming the Rust fields
-/// would move the wire encoding with them.
+/// The `_bytes` and `_pct` suffixes stay on the [`ByteSize`] and [`Ratio`]
+/// fields because they are the JSON keys operators write (`sizeCeilingBytes`,
+/// `mergeFloorBytes`, `loadSkewHysteresisPct`) and the names the
+/// `GresBalancerThresholds` CRD mirrors; renaming the Rust fields would move the
+/// wire encoding with them.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GoalContext {
@@ -34,7 +36,9 @@ pub struct GoalContext {
     #[serde(with = "crabka_units::serde_units::numeric::bytes_u64")]
     pub merge_floor_bytes: ByteSize,
     pub split_stride_rows: u64,
-    pub load_skew_hysteresis_pct: u32,
+    /// Leave load skew alone while it stays within this margin.
+    #[serde(with = "percent_u32")]
+    pub load_skew_hysteresis_pct: Ratio,
     pub max_ranges_per_compute: Option<usize>,
     pub max_operations: usize,
     pub cooldown_epochs: u64,
@@ -60,13 +64,58 @@ impl Default for GoalContext {
             size_ceiling_bytes: gibibytes(1),
             merge_floor_bytes: mebibytes(64),
             split_stride_rows: 1_000_000,
-            load_skew_hysteresis_pct: 25,
+            load_skew_hysteresis_pct: percent(25),
             max_ranges_per_compute: None,
             max_operations: 32,
             cooldown_epochs: 2,
             current_epoch: 0,
             cooldowns: Vec::new(),
         }
+    }
+}
+
+/// A [`Ratio`] encoded as the bare whole percent its JSON key has always
+/// carried.
+///
+/// `crabka_units::serde_units` has no percent adapter, and neither of the two it
+/// does offer fits: `human::ratio` writes the string `"25%"`, and reads a bare
+/// number as a raw *fraction*, so `25` would come back as 2500%. The
+/// `loadSkewHysteresisPct` key is operator-supplied config, mirrored by the
+/// `GresBalancerThresholds` CRD, so it keeps its bare-integer-percent form and
+/// the conversion lives here instead.
+pub mod percent_u32 {
+    use crabka_units::{Ratio, convert::RatioExt as _, percent, uom::num::ToPrimitive as _};
+    use serde::{Deserializer, Serialize as _, Serializer, de::Deserialize as _};
+
+    /// Writes the fraction as a whole percent, rounded to nearest.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the serializer reports for a `u32`.
+    pub fn serialize<S: Serializer>(value: &Ratio, serializer: S) -> Result<S::Ok, S::Error> {
+        whole_percent(*value).serialize(serializer)
+    }
+
+    /// Reads the fraction from a whole percent.
+    ///
+    /// # Errors
+    ///
+    /// If the value is not a `u32`.
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Ratio, D::Error> {
+        Ok(percent(u32::deserialize(deserializer)?))
+    }
+
+    /// The fraction as whole percent, rounding to nearest and saturating at
+    /// `u32`'s bounds the way `crabka_units::convert` does; a negative or `NaN`
+    /// margin becomes zero.
+    fn whole_percent(value: Ratio) -> u32 {
+        let rounded = value.percent_f64().round();
+        if rounded.is_nan() {
+            return 0;
+        }
+        rounded
+            .to_u32()
+            .unwrap_or(if rounded < 0.0 { 0 } else { u32::MAX })
     }
 }
 
@@ -253,7 +302,7 @@ impl Goal for LoadSkewGoal {
         let mut operations = Vec::new();
         for tenant in tenants {
             let totals = load_by_compute(tenant);
-            if skew_pct(&totals) <= ctx.load_skew_hysteresis_pct {
+            if percent(skew_pct(&totals)) <= ctx.load_skew_hysteresis_pct {
                 continue;
             }
             let Some((hot_compute, _)) = totals.iter().max_by_key(|(_, total)| *total) else {

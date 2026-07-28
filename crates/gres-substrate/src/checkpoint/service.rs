@@ -1122,7 +1122,7 @@ mod tests {
             service.planner_stats(),
         )));
         let planner_config = PlannerConfig {
-            broadcast_threshold_bytes: 64,
+            broadcast_threshold: crabka_units::bytes(64),
         };
         let inputs = JoinInputs {
             left_table_id: 1,
@@ -1189,7 +1189,7 @@ mod tests {
         let left = table(1, "left", "pair");
         let right = table(2, "right", "pair");
         let no_broadcast = PlannerConfig {
-            broadcast_threshold_bytes: 0,
+            broadcast_threshold: ByteSize::ZERO,
         };
         assert_eq!(
             plan_join_for_tables(

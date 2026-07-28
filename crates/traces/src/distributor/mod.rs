@@ -13,7 +13,7 @@ use axum::{
 use crabka_client_producer::{Header, Producer, ProducerRecord};
 use crabka_units::{
     ByteSize, Frequency,
-    convert::{ByteSizeExt as _, FrequencyExt},
+    convert::{ByteSizeExt as _, FrequencyExt, StdDurationExt as _},
     kibibytes, mebibytes,
 };
 use flate2::read::GzDecoder;
@@ -357,7 +357,7 @@ async fn otlp_push(
     body: Bytes,
 ) -> Response {
     let start = std::time::Instant::now();
-    let bytes = body.len() as u64;
+    let body_size = ByteSize::from_bytes(body.len() as u64);
     // One ingest span per request (NOT per span-record). The accepted-span count
     // is only known after decode, so it is declared `Empty` and recorded below;
     // this span becomes the local parent whose context is injected onto each WAL
@@ -369,14 +369,15 @@ async fn otlp_push(
         messaging.destination.name = TRACES_WAL_TOPIC,
         crabka.tenant = %tenant(&headers),
         crabka.ingest.spans = tracing::field::Empty,
-        crabka.ingest.bytes = bytes,
+        // A span field is a raw-number seam: emit the byte count itself.
+        crabka.ingest.bytes = body_size.bytes_u64(),
     );
     async move {
         if let Err(err) = require_content_type(
             &headers,
             &["application/x-protobuf", "application/protobuf"],
         ) {
-            return record_ingest_response(&state, error_response(&err), bytes, 0, start);
+            return record_ingest_response(&state, error_response(&err), body_size, 0, start);
         }
         match decode_body(&headers, &body, state.max_decompressed)
             .and_then(|body| {
@@ -390,9 +391,9 @@ async fn otlp_push(
                 tracing::Span::current().record("crabka.ingest.spans", items);
                 let resp =
                     append_decoded_response(&state, &headers, spans, otlp_success_response()).await;
-                record_ingest_response(&state, resp, bytes, items, start)
+                record_ingest_response(&state, resp, body_size, items, start)
             }
-            Err(err) => record_ingest_response(&state, error_response(&err), bytes, 0, start),
+            Err(err) => record_ingest_response(&state, error_response(&err), body_size, 0, start),
         }
     }
     .instrument(span)
@@ -405,18 +406,18 @@ async fn zipkin_push(
     body: Bytes,
 ) -> Response {
     let start = std::time::Instant::now();
-    let bytes = body.len() as u64;
+    let body_size = ByteSize::from_bytes(body.len() as u64);
     if let Err(err) = require_content_type(&headers, &["application/json"]) {
-        return record_ingest_response(&state, error_response(&err), bytes, 0, start);
+        return record_ingest_response(&state, error_response(&err), body_size, 0, start);
     }
     match decode_body(&headers, &body, state.max_decompressed).and_then(|body| decode_zipkin(&body))
     {
         Ok(spans) => {
             let items = spans.len() as u64;
             let resp = append_decoded(&state, &headers, spans, StatusCode::ACCEPTED).await;
-            record_ingest_response(&state, resp, bytes, items, start)
+            record_ingest_response(&state, resp, body_size, items, start)
         }
-        Err(err) => record_ingest_response(&state, error_response(&err), bytes, 0, start),
+        Err(err) => record_ingest_response(&state, error_response(&err), body_size, 0, start),
     }
 }
 
@@ -426,7 +427,7 @@ async fn jaeger_push(
     body: Bytes,
 ) -> Response {
     let start = std::time::Instant::now();
-    let bytes = body.len() as u64;
+    let body_size = ByteSize::from_bytes(body.len() as u64);
     if let Err(err) = require_content_type(
         &headers,
         &[
@@ -435,7 +436,7 @@ async fn jaeger_push(
             "application/vnd.apache.thrift.binary",
         ],
     ) {
-        return record_ingest_response(&state, error_response(&err), bytes, 0, start);
+        return record_ingest_response(&state, error_response(&err), body_size, 0, start);
     }
     match decode_body(&headers, &body, state.max_decompressed).and_then(|body| {
         if is_jaeger_binary_thrift(&headers) {
@@ -447,9 +448,9 @@ async fn jaeger_push(
         Ok(spans) => {
             let items = spans.len() as u64;
             let resp = append_decoded(&state, &headers, spans, StatusCode::ACCEPTED).await;
-            record_ingest_response(&state, resp, bytes, items, start)
+            record_ingest_response(&state, resp, body_size, items, start)
         }
-        Err(err) => record_ingest_response(&state, error_response(&err), bytes, 0, start),
+        Err(err) => record_ingest_response(&state, error_response(&err), body_size, 0, start),
     }
 }
 
@@ -457,17 +458,20 @@ async fn jaeger_push(
 /// the response unchanged. `ok` is true for any 2xx; the WAL/produce failure
 /// counter is bumped separately at the [`produce_spans`] error site, so a 4xx
 /// validation/rate-limit reject here does not inflate it.
+///
+/// `start` stays an [`Instant`](std::time::Instant) — an instant is a
+/// coordinate, not a magnitude; only the elapsed extent is a quantity.
 fn record_ingest_response(
     state: &DistributorState,
     resp: Response,
-    bytes: u64,
+    body: ByteSize,
     items: u64,
     start: std::time::Instant,
 ) -> Response {
     let ok = resp.status().is_success();
     state
         .metrics
-        .record_ingest(ok, bytes, items, start.elapsed().as_secs_f64());
+        .record_ingest(ok, body, items, start.elapsed().as_time());
     resp
 }
 

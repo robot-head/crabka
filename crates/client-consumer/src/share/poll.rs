@@ -38,7 +38,10 @@ use crabka_protocol::{
     },
     primitives::uuid::Uuid as WireUuid,
 };
-use crabka_units::{Time, convert::TimeExt as _};
+use crabka_units::{
+    ByteSize, Time,
+    convert::{ByteSizeExt as _, TimeExt as _},
+};
 
 use super::{
     consumer::ShareConsumer,
@@ -81,8 +84,8 @@ fn build_share_fetch_request(
     member_id: String,
     share_session_epoch: i32,
     timeout: Time,
-    min_bytes: i32,
-    max_bytes: i32,
+    min: ByteSize,
+    max: ByteSize,
     max_records: i32,
     acquire_mode: ShareAcquireMode,
     topics: Vec<FetchTopic>,
@@ -95,8 +98,8 @@ fn build_share_fetch_request(
         // wire field, so a fractional millisecond must not round up past the
         // caller's budget and an elapsed budget must not go negative.
         max_wait_ms: i32::try_from(timeout.millis_i64_trunc().max(0)).unwrap_or(i32::MAX),
-        min_bytes,
-        max_bytes,
+        min_bytes: min.bytes_i32(),
+        max_bytes: max.bytes_i32(),
         max_records,
         batch_size: max_records,
         share_acquire_mode: acquire_mode.wire(),
@@ -193,8 +196,8 @@ impl ShareConsumer {
                 self.member_id.clone(),
                 self.share_session_epoch,
                 timeout,
-                self.fetch_min_bytes,
-                self.fetch_max_bytes,
+                self.fetch_min,
+                self.fetch_max,
                 self.fetch_max_records,
                 self.acquire_mode,
                 topics,
@@ -567,8 +570,8 @@ mod tests {
             assignment: Arc::new(Mutex::new(vec![(id(7), "topic-a".into(), 2)])),
             topic_names: Arc::new(Mutex::new(HashMap::new())),
             share_session_epoch: 4,
-            fetch_min_bytes: crate::share::DEFAULT_SHARE_CONSUMER_FETCH_MIN_BYTES,
-            fetch_max_bytes: crate::share::DEFAULT_SHARE_CONSUMER_FETCH_MAX_BYTES,
+            fetch_min: crate::share::DEFAULT_SHARE_CONSUMER_FETCH_MIN,
+            fetch_max: crate::share::DEFAULT_SHARE_CONSUMER_FETCH_MAX,
             fetch_max_records: crate::share::DEFAULT_SHARE_CONSUMER_FETCH_MAX_RECORDS,
             acquire_mode: ShareAcquireMode::BatchOptimized,
             ack_mode,
@@ -602,8 +605,8 @@ mod tests {
             "member-a".into(),
             4,
             crabka_units::millis(250),
-            7,
-            65_536,
+            crabka_units::bytes(7),
+            crabka_units::bytes(65_536),
             37,
             ShareAcquireMode::RecordLimit,
             vec![topic.clone()],
@@ -632,8 +635,8 @@ mod tests {
             "member-a".into(),
             4,
             Time::from_millis(i64::from(u32::MAX)),
-            7,
-            65_536,
+            crabka_units::bytes(7),
+            crabka_units::bytes(65_536),
             37,
             ShareAcquireMode::BatchOptimized,
             Vec::new(),
@@ -647,13 +650,46 @@ mod tests {
             "member-a".into(),
             4,
             crabka_units::micros(250_900),
-            7,
-            65_536,
+            crabka_units::bytes(7),
+            crabka_units::bytes(65_536),
             37,
             ShareAcquireMode::BatchOptimized,
             Vec::new(),
         );
         assert2::assert!(fractional.max_wait_ms == 250);
+    }
+
+    #[test]
+    fn share_fetch_request_encodes_default_sizes_as_their_exact_wire_integers() {
+        let req = build_share_fetch_request(
+            "group-a".into(),
+            "member-a".into(),
+            0,
+            crabka_units::millis(500),
+            crabka_units::bytes(1),
+            crabka_units::mebibytes(50),
+            500,
+            ShareAcquireMode::BatchOptimized,
+            Vec::new(),
+        );
+
+        assert2::assert!(
+            req == ShareFetchRequest {
+                group_id: Some("group-a".into()),
+                member_id: Some("member-a".into()),
+                share_session_epoch: 0,
+                max_wait_ms: 500,
+                min_bytes: 1,
+                max_bytes: 52_428_800,
+                max_records: 500,
+                batch_size: 500,
+                share_acquire_mode: 0,
+                is_renew_ack: false,
+                topics: Vec::new(),
+                forgotten_topics_data: Vec::new(),
+                unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+            }
+        );
     }
 
     #[test]

@@ -16,6 +16,7 @@ use crabka_protocol::{
     },
     primitives::uuid::Uuid as WireUuid,
 };
+use crabka_units::{ByteSize, bytes, convert::ByteSizeExt as _, mebibytes};
 use refined_type::rule::{GreaterI32, MinMaxU128};
 use tokio::{sync::Mutex, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
@@ -29,10 +30,10 @@ use crate::error::ConsumerError;
 /// Default deadline for the final best-effort `ShareGroup` leave heartbeat.
 pub const DEFAULT_SHARE_CONSUMER_LEAVE_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Default minimum response bytes for a `ShareFetch`.
-pub const DEFAULT_SHARE_CONSUMER_FETCH_MIN_BYTES: i32 = 1;
-/// Default maximum response bytes for a `ShareFetch`.
-pub const DEFAULT_SHARE_CONSUMER_FETCH_MAX_BYTES: i32 = 52_428_800;
+/// Default minimum response size for a `ShareFetch`.
+pub const DEFAULT_SHARE_CONSUMER_FETCH_MIN: ByteSize = bytes(1);
+/// Default maximum response size for a `ShareFetch`.
+pub const DEFAULT_SHARE_CONSUMER_FETCH_MAX: ByteSize = mebibytes(50);
 /// Default maximum records acquired by a `ShareFetch`.
 pub const DEFAULT_SHARE_CONSUMER_FETCH_MAX_RECORDS: i32 = 500;
 
@@ -61,7 +62,7 @@ impl ShareConsumerFetchMinBytes {
 
 impl Default for ShareConsumerFetchMinBytes {
     fn default() -> Self {
-        Self::new(DEFAULT_SHARE_CONSUMER_FETCH_MIN_BYTES)
+        Self::new(DEFAULT_SHARE_CONSUMER_FETCH_MIN.bytes_i32())
             .expect("default share consumer fetch min bytes is valid")
     }
 }
@@ -91,7 +92,7 @@ impl ShareConsumerFetchMaxBytes {
 
 impl Default for ShareConsumerFetchMaxBytes {
     fn default() -> Self {
-        Self::new(DEFAULT_SHARE_CONSUMER_FETCH_MAX_BYTES)
+        Self::new(DEFAULT_SHARE_CONSUMER_FETCH_MAX.bytes_i32())
             .expect("default share consumer fetch max bytes is valid")
     }
 }
@@ -248,8 +249,8 @@ pub struct ShareConsumer {
     /// `ShareFetch` session epoch: 0 opens the session, then 1, 2, … per
     /// successful fetch. Owned by `poll()`.
     pub(crate) share_session_epoch: i32,
-    pub(crate) fetch_min_bytes: i32,
-    pub(crate) fetch_max_bytes: i32,
+    pub(crate) fetch_min: ByteSize,
+    pub(crate) fetch_max: ByteSize,
     pub(crate) fetch_max_records: i32,
     pub(crate) acquire_mode: ShareAcquireMode,
     pub(crate) ack_mode: ShareAckMode,
@@ -293,8 +294,8 @@ impl ShareConsumer {
         #[builder(into)] subscribe: Vec<String>,
         #[builder(default = ShareAckMode::Implicit)] ack_mode: ShareAckMode,
         #[builder(default = ShareAcquireMode::BatchOptimized)] acquire_mode: ShareAcquireMode,
-        #[builder(default = DEFAULT_SHARE_CONSUMER_FETCH_MIN_BYTES)] fetch_min_bytes: i32,
-        #[builder(default = DEFAULT_SHARE_CONSUMER_FETCH_MAX_BYTES)] fetch_max_bytes: i32,
+        #[builder(default = DEFAULT_SHARE_CONSUMER_FETCH_MIN)] fetch_min: ByteSize,
+        #[builder(default = DEFAULT_SHARE_CONSUMER_FETCH_MAX)] fetch_max: ByteSize,
         #[builder(default = DEFAULT_SHARE_CONSUMER_FETCH_MAX_RECORDS)] fetch_max_records: i32,
         #[builder(default = std::time::Duration::from_secs(45))] session_timeout: Duration,
         #[builder(default = std::time::Duration::from_secs(3))] heartbeat_interval: Duration,
@@ -312,16 +313,24 @@ impl ShareConsumer {
         if group_id.is_empty() {
             return Err(ConsumerError::RebalanceFailed("group_id required".into()));
         }
-        let fetch_min_bytes = ShareConsumerFetchMinBytes::new(fetch_min_bytes)
-            .map_err(ConsumerError::RebalanceFailed)?
-            .bytes();
-        let fetch_max_bytes = ShareConsumerFetchMaxBytes::new(fetch_max_bytes)
-            .map_err(ConsumerError::RebalanceFailed)?
-            .bytes();
+        // The two fetch-size newtypes below still speak `i32`: both derive `Eq`,
+        // which an `f64`-backed quantity cannot satisfy. Their whole job is to
+        // police the positive-`int32` invariant, so the quantity meets them at
+        // their own boundary and comes straight back.
+        let fetch_min = ByteSize::from_bytes_i64(i64::from(
+            ShareConsumerFetchMinBytes::new(fetch_min.bytes_i32())
+                .map_err(ConsumerError::RebalanceFailed)?
+                .bytes(),
+        ));
+        let fetch_max = ByteSize::from_bytes_i64(i64::from(
+            ShareConsumerFetchMaxBytes::new(fetch_max.bytes_i32())
+                .map_err(ConsumerError::RebalanceFailed)?
+                .bytes(),
+        ));
         let fetch_max_records = ShareConsumerFetchMaxRecords::new(fetch_max_records)
             .map_err(ConsumerError::RebalanceFailed)?
             .records();
-        if fetch_min_bytes > fetch_max_bytes {
+        if fetch_min > fetch_max {
             return Err(ConsumerError::RebalanceFailed(
                 "share consumer fetch min bytes must not exceed fetch max bytes".to_owned(),
             ));
@@ -424,8 +433,8 @@ impl ShareConsumer {
             assignment,
             topic_names,
             share_session_epoch: 0,
-            fetch_min_bytes,
-            fetch_max_bytes,
+            fetch_min,
+            fetch_max,
             fetch_max_records,
             acquire_mode,
             ack_mode,
@@ -569,12 +578,10 @@ mod tests {
 
     #[test]
     fn share_fetch_limits_use_defaults_and_valid_overrides() {
-        check!(
-            ShareConsumerFetchMinBytes::default().bytes() == DEFAULT_SHARE_CONSUMER_FETCH_MIN_BYTES
-        );
-        check!(
-            ShareConsumerFetchMaxBytes::default().bytes() == DEFAULT_SHARE_CONSUMER_FETCH_MAX_BYTES
-        );
+        check!(ShareConsumerFetchMinBytes::default().bytes() == 1);
+        check!(ShareConsumerFetchMaxBytes::default().bytes() == 52_428_800);
+        check!(DEFAULT_SHARE_CONSUMER_FETCH_MIN.bytes_i32() == 1);
+        check!(DEFAULT_SHARE_CONSUMER_FETCH_MAX.bytes_i32() == 52_428_800);
         check!(
             ShareConsumerFetchMaxRecords::default().records()
                 == DEFAULT_SHARE_CONSUMER_FETCH_MAX_RECORDS
@@ -621,8 +628,8 @@ mod tests {
             .bootstrap("invalid.invalid:9092")
             .group_id("fetch-limit-validation")
             .subscribe(["topic".to_owned()])
-            .fetch_min_bytes(2)
-            .fetch_max_bytes(1)
+            .fetch_min(bytes(2))
+            .fetch_max(bytes(1))
             .build()
             .await
             .err()
@@ -649,8 +656,8 @@ mod tests {
             assignment: Arc::new(Mutex::new(vec![(id(7), "topic-a".into(), 2)])),
             topic_names: Arc::new(Mutex::new(HashMap::new())),
             share_session_epoch: 0,
-            fetch_min_bytes: DEFAULT_SHARE_CONSUMER_FETCH_MIN_BYTES,
-            fetch_max_bytes: DEFAULT_SHARE_CONSUMER_FETCH_MAX_BYTES,
+            fetch_min: DEFAULT_SHARE_CONSUMER_FETCH_MIN,
+            fetch_max: DEFAULT_SHARE_CONSUMER_FETCH_MAX,
             fetch_max_records: DEFAULT_SHARE_CONSUMER_FETCH_MAX_RECORDS,
             acquire_mode: ShareAcquireMode::BatchOptimized,
             ack_mode: ShareAckMode::Explicit,

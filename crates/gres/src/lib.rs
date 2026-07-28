@@ -1964,7 +1964,10 @@ impl Session for RuntimeSession {
 }
 
 /// Result of one self-suspend monitor iteration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Not `Eq`: the size-gate outcome carries quantities, whose `f64` storage is
+/// only `PartialEq`.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SuspendMonitorOutcome {
     /// The tenant is not configured for idle suspension.
     Disabled,
@@ -1977,7 +1980,7 @@ pub enum SuspendMonitorOutcome {
     /// A session raced with admission close, so this attempt was aborted.
     RacedSession { count: usize },
     /// Checkpoint size gate was exceeded, so the tenant remains warm.
-    CheckpointTooLarge { bytes: u64, max_bytes: u64 },
+    CheckpointTooLarge { size: ByteSize, max: ByteSize },
     /// A final checkpoint was durable and the registry was marked suspended.
     Suspended,
 }
@@ -1997,7 +2000,7 @@ pub trait SuspendRegistry: Send {
 #[async_trait::async_trait]
 pub trait FinalCheckpointer: Send + Sync {
     /// Return the latest checkpoint size estimate used by the suspend size gate.
-    async fn latest_checkpoint_bytes(&self) -> std::io::Result<u64>;
+    async fn latest_checkpoint_size(&self) -> std::io::Result<ByteSize>;
 
     /// Force and await a durable final checkpoint manifest.
     async fn force_final_checkpoint(&self) -> std::io::Result<FinalCheckpoint>;
@@ -2093,21 +2096,18 @@ pub async fn try_suspend_idle_tenant(
         });
     }
 
-    let checkpoint_bytes = checkpointer.latest_checkpoint_bytes().await?;
-    if let Some(max_bytes) = policy.suspend_max_checkpoint.map(ByteSize::bytes_u64)
-        && checkpoint_bytes > max_bytes
+    let size = checkpointer.latest_checkpoint_size().await?;
+    if let Some(max) = policy.suspend_max_checkpoint
+        && size > max
     {
         activity.reopen_after_suspend_abort();
         tracing::info!(
             tenant = %policy.tenant,
-            checkpoint_bytes,
-            max_bytes,
+            size = %size.human(),
+            max = %max.human(),
             "skip idle suspend because checkpoint exceeds configured size gate"
         );
-        return Ok(SuspendMonitorOutcome::CheckpointTooLarge {
-            bytes: checkpoint_bytes,
-            max_bytes,
-        });
+        return Ok(SuspendMonitorOutcome::CheckpointTooLarge { size, max });
     }
 
     let checkpoint = checkpointer.force_final_checkpoint().await?;
@@ -3326,8 +3326,13 @@ async fn run_suspend_monitor(
                 shutdown.cancel();
                 return Ok(());
             }
-            SuspendMonitorOutcome::CheckpointTooLarge { bytes, max_bytes } => {
-                tracing::info!(tenant = %policy.tenant, bytes, max_bytes, "tenant remains warm after suspend size-gate skip");
+            SuspendMonitorOutcome::CheckpointTooLarge { size, max } => {
+                tracing::info!(
+                    tenant = %policy.tenant,
+                    size = %size.human(),
+                    max = %max.human(),
+                    "tenant remains warm after suspend size-gate skip"
+                );
             }
             SuspendMonitorOutcome::Disabled
             | SuspendMonitorOutcome::OpenSessions { .. }
@@ -7125,7 +7130,7 @@ fn committed_tail_sha256(tail: &[crabka_gres_ranges::CommittedTailRecord]) -> St
 
 #[async_trait::async_trait]
 impl FinalCheckpointer for StartedCheckpointRuntime {
-    async fn latest_checkpoint_bytes(&self) -> std::io::Result<u64> {
+    async fn latest_checkpoint_size(&self) -> std::io::Result<ByteSize> {
         let snapshot = self.snapshot_source.snapshot();
         let metadata = crabka_gres_substrate::latest_checkpoint_metadata(
             self.store.as_ref(),
@@ -7135,10 +7140,12 @@ impl FinalCheckpointer for StartedCheckpointRuntime {
         )
         .await
         .map_err(|error| std::io::Error::other(format!("latest checkpoint metadata: {error}")))?;
-        Ok(remember_latest_checkpoint_bytes(
+        // The cache is an `AtomicU64`, which cannot hold a quantity, so it stays
+        // raw bytes and the conversion happens here in the accessor.
+        Ok(ByteSize::from_bytes(remember_latest_checkpoint_bytes(
             &self.latest_checkpoint_bytes,
             metadata.map(|metadata| metadata.total_bytes),
-        ))
+        )))
     }
 
     async fn force_final_checkpoint(&self) -> std::io::Result<FinalCheckpoint> {
@@ -8592,8 +8599,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl FinalCheckpointer for FakeCheckpointer {
-        async fn latest_checkpoint_bytes(&self) -> std::io::Result<u64> {
-            Ok(self.bytes.load(Ordering::SeqCst))
+        async fn latest_checkpoint_size(&self) -> std::io::Result<ByteSize> {
+            Ok(ByteSize::from_bytes(self.bytes.load(Ordering::SeqCst)))
         }
 
         async fn force_final_checkpoint(&self) -> std::io::Result<FinalCheckpoint> {
@@ -8881,12 +8888,12 @@ mod tests {
         .await
         .expect("check");
 
-        assert_eq!(
-            outcome,
-            SuspendMonitorOutcome::CheckpointTooLarge {
-                bytes: 101,
-                max_bytes: 100,
-            }
+        assert!(
+            outcome
+                == SuspendMonitorOutcome::CheckpointTooLarge {
+                    size: crabka_units::bytes(101),
+                    max: crabka_units::bytes(100),
+                }
         );
         assert_eq!(checkpointer.checkpoints.load(Ordering::SeqCst), 0);
         assert!(!registry.marked.load(Ordering::SeqCst));
@@ -10926,12 +10933,12 @@ mod tests {
                 .iter()
                 .any(|object| object.key == checkpoint.manifest_key)
         );
-        assert_eq!(
+        assert!(
             checkpoint_runtime
-                .latest_checkpoint_bytes()
+                .latest_checkpoint_size()
                 .await
-                .expect("range-zero checkpoint metadata"),
-            checkpoint.total_bytes
+                .expect("range-zero checkpoint metadata")
+                == ByteSize::from_bytes(checkpoint.total_bytes)
         );
         checkpoint_runtime
             .handle

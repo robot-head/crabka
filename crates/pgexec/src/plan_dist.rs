@@ -5,6 +5,7 @@ use std::{collections::BTreeMap, sync::Arc};
 use crabka_pgcatalog::Table;
 use crabka_pgparser::ast::{BinaryOp, Expr, FuncArgs, FuncCall, SelectItem};
 use crabka_pgtypes::{ColumnType, Datum};
+use crabka_units::{ByteSize, convert::ByteSizeExt as _, mebibytes};
 
 use crate::{
     ExecError,
@@ -114,15 +115,20 @@ impl Stats for CheckpointMetadata {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Thresholds governing distributed join-strategy selection.
+///
+/// Not `Eq`: the broadcast threshold is a quantity, whose `f64` storage is only
+/// `PartialEq`.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PlannerConfig {
-    pub broadcast_threshold_bytes: u64,
+    /// Broadcast a join input only when its estimate is at most this size.
+    pub broadcast_threshold: ByteSize,
 }
 
 impl Default for PlannerConfig {
     fn default() -> Self {
         Self {
-            broadcast_threshold_bytes: 64 * 1024 * 1024,
+            broadcast_threshold: mebibytes(64),
         }
     }
 }
@@ -202,7 +208,9 @@ pub fn plan_join(stats: &dyn Stats, config: PlannerConfig, inputs: JoinInputs) -
     if let Some((small_table_id, _)) = estimates
         .into_iter()
         .filter_map(|(table_id, bytes)| bytes.map(|bytes| (table_id, bytes)))
-        .filter(|(_, bytes)| *bytes <= config.broadcast_threshold_bytes)
+        // The raw estimate stays a `u64` through the iterator so the tie-break
+        // key below is `Ord`; only the threshold comparison is dimensioned.
+        .filter(|(_, bytes)| ByteSize::from_bytes(*bytes) <= config.broadcast_threshold)
         .min_by_key(|&(table_id, bytes)| (bytes, table_id))
     {
         return JoinStrategy::Broadcast { small_table_id };

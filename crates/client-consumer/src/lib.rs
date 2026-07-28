@@ -98,9 +98,9 @@ pub use consumer::{
 pub use error::ConsumerError;
 pub use group_metadata::ConsumerGroupMetadata;
 pub use share::{
-    DEFAULT_SHARE_CONSUMER_FETCH_MAX_BYTES, DEFAULT_SHARE_CONSUMER_FETCH_MAX_RECORDS,
-    DEFAULT_SHARE_CONSUMER_FETCH_MIN_BYTES, DEFAULT_SHARE_CONSUMER_LEAVE_HEARTBEAT_TIMEOUT,
-    ShareAckMode, ShareAckType, ShareAcquireMode, ShareConsumer, ShareConsumerFetchMaxBytes,
+    DEFAULT_SHARE_CONSUMER_FETCH_MAX, DEFAULT_SHARE_CONSUMER_FETCH_MAX_RECORDS,
+    DEFAULT_SHARE_CONSUMER_FETCH_MIN, DEFAULT_SHARE_CONSUMER_LEAVE_HEARTBEAT_TIMEOUT, ShareAckMode,
+    ShareAckType, ShareAcquireMode, ShareConsumer, ShareConsumerFetchMaxBytes,
     ShareConsumerFetchMaxRecords, ShareConsumerFetchMinBytes, ShareConsumerLeaveHeartbeatTimeout,
     ShareConsumerRecord,
 };

@@ -28,7 +28,7 @@ mod tests {
         InMemoryRegistryStore, RangeBoundary, RangeLayoutEntry, SqlUser, TenantId, TenantName,
         TenantRecord, TenantRegistryStore, TenantState,
     };
-    use crabka_units::{bytes, gibibytes, mebibytes, minutes};
+    use crabka_units::{bytes, gibibytes, mebibytes, minutes, percent};
 
     use super::*;
 
@@ -118,7 +118,7 @@ mod tests {
             size_ceiling_bytes: bytes(1_000),
             merge_floor_bytes: bytes(200),
             split_stride_rows: 100,
-            load_skew_hysteresis_pct: 25,
+            load_skew_hysteresis_pct: percent(25),
             max_ranges_per_compute: Some(3),
             max_operations: 32,
             cooldown_epochs: 2,
@@ -160,9 +160,11 @@ mod tests {
         }
     }
 
-    /// Typing the two byte thresholds must not move the wire encoding: the CLI
-    /// deserialises a `BalancerConfig` from operator-supplied JSON, and the
-    /// `GresBalancerThresholds` CRD mirrors these keys as bare integers.
+    /// Typing the two byte thresholds and the skew hysteresis must not move the
+    /// wire encoding: the CLI deserialises a `BalancerConfig` from
+    /// operator-supplied JSON, and the `GresBalancerThresholds` CRD mirrors
+    /// these keys as bare integers — byte counts for the first two, a whole
+    /// percent for `loadSkewHysteresisPct`.
     #[test]
     fn balancer_config_json_keeps_bare_integer_byte_thresholds() {
         const EXPECTED: &str = concat!(
@@ -183,6 +185,23 @@ mod tests {
         check!(parsed.context.size_ceiling_bytes == bytes(1_000));
         check!(parsed.context.merge_floor_bytes == bytes(200));
         check!(parsed == config);
+    }
+
+    /// The bare-percent encoding is not an artefact of the default value: a
+    /// hysteresis an operator set by hand round-trips through the same key.
+    #[test]
+    fn skew_hysteresis_json_keeps_a_bare_integer_percent() {
+        let ctx = GoalContext {
+            load_skew_hysteresis_pct: percent(60),
+            ..context()
+        };
+
+        let json = serde_json::to_string(&ctx).expect("serialize context");
+        let parsed: GoalContext = serde_json::from_str(&json).expect("deserialize context");
+
+        check!(json.contains(r#""loadSkewHysteresisPct":60"#));
+        check!(parsed.load_skew_hysteresis_pct == percent(60));
+        check!(parsed == ctx);
     }
 
     #[test]
@@ -1124,7 +1143,7 @@ mod tests {
         ])];
 
         let ctx = GoalContext {
-            load_skew_hysteresis_pct: 60,
+            load_skew_hysteresis_pct: percent(60),
             ..context()
         };
         let output_a = planner().plan(&fleet_a, &ctx);
@@ -1156,7 +1175,7 @@ mod tests {
             range(5, "c3", 500, 20),
         ])];
         let ctx = GoalContext {
-            load_skew_hysteresis_pct: 25,
+            load_skew_hysteresis_pct: percent(25),
             max_operations: 1,
             ..context()
         };

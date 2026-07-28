@@ -15,6 +15,7 @@ use crabka_pgexec::{
         finalize_partial_aggregate_rows, merge_top_k_streams,
     },
 };
+use crabka_units::{ByteSize, bytes, convert::ByteSizeExt as _};
 
 #[test]
 fn co_partitioning_requires_identical_hash_metadata() {
@@ -61,7 +62,7 @@ fn selected_copartitioned_join_falls_back_when_catalog_proof_is_missing() {
         plan_join_for_tables(
             &stats,
             PlannerConfig {
-                broadcast_threshold_bytes: 64,
+                broadcast_threshold: bytes(64),
             },
             &left,
             &right,
@@ -92,7 +93,7 @@ impl Stats for FakeStats {
 #[test]
 fn join_strategy_golden_prefers_broadcast_then_copartitioned_then_gather() {
     let config = PlannerConfig {
-        broadcast_threshold_bytes: 64,
+        broadcast_threshold: bytes(64),
     };
     let inputs = JoinInputs {
         left_table_id: 1,
@@ -1022,7 +1023,7 @@ async fn sql_inner_equi_join_dispatches_selected_broadcast_request() {
     engine.set_range_scanner(scanner.clone());
     engine.set_join_stats(Arc::new(SequenceCounters::new([(1, 1)])));
     engine.set_join_strategy_config(PlannerConfig {
-        broadcast_threshold_bytes: u64::MAX,
+        broadcast_threshold: ByteSize::from_bytes(u64::MAX),
     });
     let mut session = engine.connect();
     session
@@ -1056,7 +1057,7 @@ async fn sql_copartitioned_join_requires_the_join_key_to_match_hash_metadata() {
         co_partitioned: true,
     }));
     engine.set_join_strategy_config(PlannerConfig {
-        broadcast_threshold_bytes: 0,
+        broadcast_threshold: ByteSize::ZERO,
     });
     engine
         .connect()
@@ -1078,7 +1079,7 @@ async fn sql_copartitioned_join_uses_catalog_proof_when_stats_only_estimate_size
     engine.set_range_scanner(scanner.clone());
     engine.set_join_stats(Arc::new(SequenceCounters::new([(1, 100), (2, 100)])));
     engine.set_join_strategy_config(PlannerConfig {
-        broadcast_threshold_bytes: 0,
+        broadcast_threshold: ByteSize::ZERO,
     });
     engine
         .connect()
@@ -1156,7 +1157,7 @@ async fn sql_join_strategies_dispatch_and_match_local_whole_rows() {
                 right: 100,
                 co_partitioned: false,
             },
-            u64::MAX,
+            ByteSize::from_bytes(u64::MAX),
             JoinExecutionStrategy::BroadcastLeft,
         ),
         (
@@ -1165,7 +1166,7 @@ async fn sql_join_strategies_dispatch_and_match_local_whole_rows() {
                 right: 100,
                 co_partitioned: true,
             },
-            0,
+            ByteSize::ZERO,
             JoinExecutionStrategy::CoPartitioned,
         ),
         (
@@ -1174,7 +1175,7 @@ async fn sql_join_strategies_dispatch_and_match_local_whole_rows() {
                 right: 100,
                 co_partitioned: false,
             },
-            0,
+            ByteSize::ZERO,
             JoinExecutionStrategy::CoPartitioned,
         ),
     ];
@@ -1188,7 +1189,7 @@ async fn sql_join_strategies_dispatch_and_match_local_whole_rows() {
         pushed.set_range_scanner(scanner.clone());
         pushed.set_join_stats(Arc::new(stats));
         pushed.set_join_strategy_config(PlannerConfig {
-            broadcast_threshold_bytes: threshold,
+            broadcast_threshold: threshold,
         });
         let local = SqlEngine::new();
         let ddl = format!(

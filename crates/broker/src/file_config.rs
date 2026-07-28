@@ -1765,52 +1765,55 @@ impl RuntimeFileConfig {
         cfg: &mut crate::config::BrokerConfig,
     ) -> Result<(), FileConfigError> {
         let runtime = self;
-        set_runtime_i32!(
+        set_runtime_size_bytes!(
             runtime,
             replication_fetch_max_bytes,
-            cfg.replication.fetch_max_bytes
+            cfg.replication.fetch_max,
+            positive_i32
         );
-        set_runtime_i32!(
+        set_runtime_time_millis!(
             runtime,
             replication_fetch_max_wait_ms,
-            cfg.replication.fetch_max_wait_ms
+            cfg.replication.fetch_max_wait,
+            positive_i32
         );
-        set_runtime_i32!(
+        set_runtime_size_bytes!(
             runtime,
             replication_fetch_min_bytes,
-            cfg.replication.fetch_min_bytes
+            cfg.replication.fetch_min,
+            positive_i32
         );
-        set_runtime_duration!(
+        set_runtime_time_millis!(
             runtime,
             replication_throttle_exhausted_backoff_ms,
             cfg.replication.throttle_exhausted_backoff
         );
-        set_runtime_duration!(
+        set_runtime_time_millis!(
             runtime,
             replication_send_error_backoff_ms,
             cfg.replication.send_error_backoff
         );
-        set_runtime_duration!(
+        set_runtime_time_millis!(
             runtime,
             replication_unknown_topic_retry_delay_ms,
             cfg.replication.unknown_topic_retry_delay
         );
-        set_runtime_duration!(
+        set_runtime_time_millis!(
             runtime,
             replication_epoch_fence_backoff_ms,
             cfg.replication.epoch_fence_backoff
         );
-        set_runtime_duration!(
+        set_runtime_time_millis!(
             runtime,
             replication_unexpected_error_backoff_ms,
             cfg.replication.unexpected_error_backoff
         );
-        set_runtime_duration!(
+        set_runtime_time_millis!(
             runtime,
             replication_reconnect_initial_delay_ms,
             cfg.replication.reconnect_initial_delay
         );
-        set_runtime_duration!(
+        set_runtime_time_millis!(
             runtime,
             replication_reconnect_delay_cap_ms,
             cfg.replication.reconnect_delay_cap
@@ -2645,6 +2648,7 @@ mod tests {
 
     use assert2::{assert, check};
     use crabka_units::{
+        bytes,
         convert::{ByteSizeExt as _, RatioExt as _, TimeExt as _},
         days, hours, mebibytes, millis, minutes, secs,
     };
@@ -4363,10 +4367,17 @@ replication_fetch_min_bytes = 2
                 cfg.cleaner_interval,
                 cfg.isr_scan_interval,
                 cfg.opa_http_timeout,
-                cfg.replication.fetch_max_bytes,
-                cfg.replication.fetch_max_wait_ms,
-                cfg.replication.fetch_min_bytes,
-            ) == (secs(7), millis(800), millis(2_500), 2_097_152, 750, 2)
+                cfg.replication.fetch_max,
+                cfg.replication.fetch_max_wait,
+                cfg.replication.fetch_min,
+            ) == (
+                secs(7),
+                millis(800),
+                millis(2_500),
+                mebibytes(2),
+                millis(750),
+                bytes(2)
+            )
         );
     }
 
@@ -4391,6 +4402,9 @@ delegation_token_max_lifetime_ms = 604800000
 socket_request_max_bytes = 104857600
 client_metrics_telemetry_max_bytes = 1048576
 observer_fetch_max_bytes = 1048576
+replication_fetch_max_wait_ms = 500
+replication_fetch_max_bytes = 1048576
+replication_fetch_min_bytes = 1
 ",
         )
         .expect("parse runtime config");
@@ -4410,9 +4424,12 @@ observer_fetch_max_bytes = 1048576
         assert!(cfg.socket_request_max == mebibytes(100));
         assert!(cfg.client_metrics_telemetry_max == mebibytes(1));
         assert!(cfg.observer_fetch_max == mebibytes(1));
+        assert!(cfg.replication.fetch_max_wait == millis(500));
+        assert!(cfg.replication.fetch_max == mebibytes(1));
+        assert!(cfg.replication.fetch_min == bytes(1));
 
         // …and leave for the wire exactly the integers that came in.
-        let millis: [(&str, i64); 8] = [
+        let millis: [(&str, i64); 9] = [
             ("heartbeat_interval_ms", cfg.heartbeat_interval.millis_i64()),
             ("heartbeat_timeout_ms", cfg.heartbeat_timeout.millis_i64()),
             (
@@ -4439,6 +4456,12 @@ observer_fetch_max_bytes = 1048576
                 "delegation_token_max_lifetime_ms",
                 cfg.delegation_token_max_lifetime.millis_i64(),
             ),
+            // Truncating, exactly as `build_fetch_request` narrows it for the
+            // `FetchRequest.max_wait_ms` wire field.
+            (
+                "replication_fetch_max_wait_ms",
+                cfg.replication.fetch_max_wait.millis_i64_trunc(),
+            ),
         ];
         assert!(
             millis
@@ -4451,9 +4474,10 @@ observer_fetch_max_bytes = 1048576
                     ("producer_id_expiration_ms", 86_400_000),
                     ("client_metrics_default_interval_ms", 300_000),
                     ("delegation_token_max_lifetime_ms", 604_800_000),
+                    ("replication_fetch_max_wait_ms", 500),
                 ]
         );
-        let sizes: [(&str, i64); 3] = [
+        let sizes: [(&str, i64); 5] = [
             (
                 "socket_request_max_bytes",
                 cfg.socket_request_max.bytes_i64(),
@@ -4466,6 +4490,14 @@ observer_fetch_max_bytes = 1048576
                 "observer_fetch_max_bytes",
                 cfg.observer_fetch_max.bytes_i64(),
             ),
+            (
+                "replication_fetch_max_bytes",
+                i64::from(cfg.replication.fetch_max.bytes_i32()),
+            ),
+            (
+                "replication_fetch_min_bytes",
+                i64::from(cfg.replication.fetch_min.bytes_i32()),
+            ),
         ];
         assert!(
             sizes
@@ -4473,6 +4505,8 @@ observer_fetch_max_bytes = 1048576
                     ("socket_request_max_bytes", 104_857_600),
                     ("client_metrics_telemetry_max_bytes", 1_048_576),
                     ("observer_fetch_max_bytes", 1_048_576),
+                    ("replication_fetch_max_bytes", 1_048_576),
+                    ("replication_fetch_min_bytes", 1),
                 ]
         );
     }

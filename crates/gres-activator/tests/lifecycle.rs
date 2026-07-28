@@ -24,7 +24,7 @@ use crabka_gres_substrate::{
 };
 use crabka_pgkv::{Kv, MemKv, WriteOp};
 use crabka_pgwire::server::ActivityTracker;
-use crabka_units::{kibibytes, millis, secs};
+use crabka_units::{ByteSize, convert::ByteSizeExt as _, kibibytes, millis, secs};
 use tokio::sync::{Mutex, Notify};
 
 const TENANT: &str = "tenant-a";
@@ -313,8 +313,8 @@ impl FakeFinalCheckpointer {
 
 #[async_trait::async_trait]
 impl FinalCheckpointer for FakeFinalCheckpointer {
-    async fn latest_checkpoint_bytes(&self) -> std::io::Result<u64> {
-        Ok(self.checkpoint.total_bytes)
+    async fn latest_checkpoint_size(&self) -> std::io::Result<ByteSize> {
+        Ok(ByteSize::from_bytes(self.checkpoint.total_bytes))
     }
 
     async fn force_final_checkpoint(&self) -> std::io::Result<FinalCheckpoint> {

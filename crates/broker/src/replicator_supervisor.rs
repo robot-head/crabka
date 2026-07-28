@@ -766,7 +766,7 @@ mod tests {
         AddVoter, Node, QuorumState, RaftError, ReconfigOutcome, RemoveVoter, SnapshotRange,
         UpdateVoter,
     };
-    use crabka_units::hours;
+    use crabka_units::{bytes, hours, millis};
     use tokio::sync::watch;
     use uuid::Uuid;
 
@@ -1272,8 +1272,8 @@ mod tests {
             MetadataRecord::V1BrokerRegistration(broker_record(NodeId(1))),
         ]);
         let (mut supervisor, _partitions, _reporter, _dir) = supervisor_fixture(image.clone());
-        supervisor.replication.fetch_max_bytes = 2_345_678;
-        supervisor.replication.send_error_backoff = std::time::Duration::from_millis(37);
+        supervisor.replication.fetch_max = bytes(2_345_678);
+        supervisor.replication.send_error_backoff = millis(37);
         supervisor.inter_broker_server_name = "broker.internal".into();
         let broker = image.broker(NodeId(1)).expect("leader broker");
         let topic = image.topic("t").expect("topic");
@@ -1286,8 +1286,8 @@ mod tests {
             CancellationToken::new(),
         );
 
-        assert!(config.replication.fetch_max_bytes == 2_345_678);
-        assert!(config.replication.send_error_backoff == std::time::Duration::from_millis(37));
+        assert!(config.replication.fetch_max == bytes(2_345_678));
+        assert!(config.replication.send_error_backoff == millis(37));
         assert!(config.inter_broker_server_name == "broker.internal");
     }
 

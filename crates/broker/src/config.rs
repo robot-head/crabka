@@ -90,49 +90,50 @@ pub struct BrokerFeatureFlags {
     pub transaction_two_phase_commit_enable: bool,
 }
 
-/// Runtime policy used by follower replication tasks.
+/// Runtime policy used by follower replication tasks: the size and patience of
+/// each replication fetch, and the backoffs the follower loop waits out between
+/// them.
 ///
-/// Deliberately still raw integers and [`Duration`]s rather than
-/// `crabka-units` quantities: the struct derives `Eq`, and a quantity stores
-/// `f64`, which is only `PartialEq`. The dimensions are attached where the
-/// replication fetch is built.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Not `Eq`: every knob here is a quantity, whose `f64` storage is only
+/// `PartialEq`. The three fetch knobs are the ones that reach the wire, as
+/// `FetchRequest`'s `max_bytes`, `min_bytes`, and `max_wait_ms`.
+#[derive(Debug, Clone, PartialEq)]
 pub struct ReplicationRuntimeConfig {
     /// Maximum bytes requested from a leader in one replication fetch.
-    pub fetch_max_bytes: i32,
+    pub fetch_max: ByteSize,
     /// Maximum leader wait for a replication fetch.
-    pub fetch_max_wait_ms: i32,
+    pub fetch_max_wait: Time,
     /// Minimum bytes that satisfy a replication fetch.
-    pub fetch_min_bytes: i32,
+    pub fetch_min: ByteSize,
     /// Delay after a replication throttle budget is exhausted.
-    pub throttle_exhausted_backoff: Duration,
+    pub throttle_exhausted_backoff: Time,
     /// Retry delay after sending a replication request fails.
-    pub send_error_backoff: Duration,
+    pub send_error_backoff: Time,
     /// Retry delay when the leader does not yet know the topic.
-    pub unknown_topic_retry_delay: Duration,
+    pub unknown_topic_retry_delay: Time,
     /// Retry delay after a leader-epoch fence.
-    pub epoch_fence_backoff: Duration,
+    pub epoch_fence_backoff: Time,
     /// Retry delay after an unexpected replication error.
-    pub unexpected_error_backoff: Duration,
+    pub unexpected_error_backoff: Time,
     /// Initial delay before reconnecting to a leader.
-    pub reconnect_initial_delay: Duration,
+    pub reconnect_initial_delay: Time,
     /// Maximum delay between leader reconnection attempts.
-    pub reconnect_delay_cap: Duration,
+    pub reconnect_delay_cap: Time,
 }
 
 impl Default for ReplicationRuntimeConfig {
     fn default() -> Self {
         Self {
-            fetch_max_bytes: 1_048_576,
-            fetch_max_wait_ms: 500,
-            fetch_min_bytes: 1,
-            throttle_exhausted_backoff: Duration::from_millis(100),
-            send_error_backoff: Duration::from_secs(1),
-            unknown_topic_retry_delay: Duration::from_millis(100),
-            epoch_fence_backoff: Duration::from_millis(200),
-            unexpected_error_backoff: Duration::from_millis(500),
-            reconnect_initial_delay: Duration::from_millis(100),
-            reconnect_delay_cap: Duration::from_secs(5),
+            fetch_max: mebibytes(1),
+            fetch_max_wait: millis(500),
+            fetch_min: bytes(1),
+            throttle_exhausted_backoff: millis(100),
+            send_error_backoff: secs(1),
+            unknown_topic_retry_delay: millis(100),
+            epoch_fence_backoff: millis(200),
+            unexpected_error_backoff: millis(500),
+            reconnect_initial_delay: millis(100),
+            reconnect_delay_cap: secs(5),
         }
     }
 }
@@ -1182,7 +1183,7 @@ impl BrokerConfig {
                 "RLMM bootstrap initial backoff exceeds maximum".into(),
             ));
         }
-        if self.replication.fetch_min_bytes > self.replication.fetch_max_bytes {
+        if self.replication.fetch_min > self.replication.fetch_max {
             return Err(BrokerError::InvalidRuntimeConfig(
                 "replication fetch minimum bytes exceeds maximum".into(),
             ));
@@ -1468,6 +1469,10 @@ impl BrokerConfig {
         }
         for (name, value) in [
             (
+                "replication.fetch_max_wait",
+                self.replication.fetch_max_wait,
+            ),
+            (
                 "replication.throttle_exhausted_backoff",
                 self.replication.throttle_exhausted_backoff,
             ),
@@ -1496,11 +1501,7 @@ impl BrokerConfig {
                 self.replication.reconnect_delay_cap,
             ),
         ] {
-            if value.is_zero() {
-                return Err(BrokerError::InvalidRuntimeConfig(format!(
-                    "{name} must be positive"
-                )));
-            }
+            require_positive_time(name, value)?;
         }
         for (name, value) in [
             (
@@ -1511,28 +1512,10 @@ impl BrokerConfig {
                 "metadata_max_bytes_between_snapshots",
                 self.metadata_max_bytes_between_snapshots,
             ),
+            ("replication.fetch_max", self.replication.fetch_max),
+            ("replication.fetch_min", self.replication.fetch_min),
         ] {
             require_positive_size(name, value)?;
-        }
-        for (name, value) in [
-            (
-                "replication.fetch_max_bytes",
-                self.replication.fetch_max_bytes,
-            ),
-            (
-                "replication.fetch_max_wait_ms",
-                self.replication.fetch_max_wait_ms,
-            ),
-            (
-                "replication.fetch_min_bytes",
-                self.replication.fetch_min_bytes,
-            ),
-        ] {
-            if value <= 0 {
-                return Err(BrokerError::InvalidRuntimeConfig(format!(
-                    "{name} must be positive"
-                )));
-            }
         }
         if self.metadata_snapshot_interval_records == 0 {
             return Err(BrokerError::InvalidRuntimeConfig(
@@ -2040,16 +2023,16 @@ mod tests {
         assert!(
             config.replication
                 == ReplicationRuntimeConfig {
-                    fetch_max_bytes: 1_048_576,
-                    fetch_max_wait_ms: 500,
-                    fetch_min_bytes: 1,
-                    throttle_exhausted_backoff: std::time::Duration::from_millis(100),
-                    send_error_backoff: std::time::Duration::from_secs(1),
-                    unknown_topic_retry_delay: std::time::Duration::from_millis(100),
-                    epoch_fence_backoff: std::time::Duration::from_millis(200),
-                    unexpected_error_backoff: std::time::Duration::from_millis(500),
-                    reconnect_initial_delay: std::time::Duration::from_millis(100),
-                    reconnect_delay_cap: std::time::Duration::from_secs(5),
+                    fetch_max: mebibytes(1),
+                    fetch_max_wait: millis(500),
+                    fetch_min: bytes(1),
+                    throttle_exhausted_backoff: millis(100),
+                    send_error_backoff: secs(1),
+                    unknown_topic_retry_delay: millis(100),
+                    epoch_fence_backoff: millis(200),
+                    unexpected_error_backoff: millis(500),
+                    reconnect_initial_delay: millis(100),
+                    reconnect_delay_cap: secs(5),
                 }
         );
         assert!(
@@ -2191,11 +2174,11 @@ mod tests {
         assert_invalid_runtime(&config, "RLMM bootstrap initial backoff exceeds maximum");
 
         let mut config = BrokerConfig::default();
-        config.replication.fetch_min_bytes = config.replication.fetch_max_bytes + 1;
+        config.replication.fetch_min = config.replication.fetch_max + bytes(1);
         assert_invalid_runtime(&config, "replication fetch minimum bytes exceeds maximum");
 
         let mut config = BrokerConfig::default();
-        config.replication.reconnect_initial_delay = config.replication.reconnect_delay_cap * 2;
+        config.replication.reconnect_initial_delay = config.replication.reconnect_delay_cap * 2.0;
         assert_invalid_runtime(&config, "replication reconnect initial delay exceeds cap");
 
         let mut config = BrokerConfig::default();
@@ -2248,17 +2231,17 @@ mod tests {
             ("client_metrics_otlp_queue_capacity", |c| {
                 c.client_metrics_otlp_queue_capacity = 0;
             }),
-            ("replication.fetch_max_bytes", |c| {
-                c.replication.fetch_max_bytes = 0;
+            ("replication.fetch_max", |c| {
+                c.replication.fetch_max = <ByteSize as ByteSizeExt>::ZERO;
             }),
-            ("replication.fetch_max_wait_ms", |c| {
-                c.replication.fetch_max_wait_ms = 0;
+            ("replication.fetch_max_wait", |c| {
+                c.replication.fetch_max_wait = <Time as TimeExt>::ZERO;
             }),
-            ("replication.fetch_min_bytes", |c| {
-                c.replication.fetch_min_bytes = 0;
+            ("replication.fetch_min", |c| {
+                c.replication.fetch_min = <ByteSize as ByteSizeExt>::ZERO;
             }),
             ("replication.send_error_backoff", |c| {
-                c.replication.send_error_backoff = Duration::ZERO;
+                c.replication.send_error_backoff = <Time as TimeExt>::ZERO;
             }),
             ("heartbeat_interval", |c| {
                 c.heartbeat_interval = <Time as TimeExt>::ZERO;
