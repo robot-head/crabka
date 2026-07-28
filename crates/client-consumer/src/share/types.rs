@@ -36,7 +36,7 @@ pub enum ShareAckMode {
     Explicit,
 }
 
-/// How a ShareFetch applies its maximum-record limit.
+/// How a `ShareFetch` applies its maximum-record limit.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ShareAcquireMode {
     /// Acquire complete record batches, which may exceed the requested record
@@ -48,7 +48,7 @@ pub enum ShareAcquireMode {
 }
 
 impl ShareAcquireMode {
-    /// The `i8` wire value carried in ShareFetch version 2 and later.
+    /// The `i8` wire value carried in `ShareFetch` version 2 and later.
     pub(crate) fn wire(self) -> i8 {
         match self {
             ShareAcquireMode::BatchOptimized => 0,
