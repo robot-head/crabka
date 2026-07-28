@@ -252,6 +252,17 @@ fn rendering_picks_the_operator_unit() {
     check!(percent(25).human().to_string() == "25%");
 }
 
+/// A magnitude too large for the thousandths arithmetic renders its base unit
+/// instead of overflowing.
+#[test]
+fn absurd_magnitudes_fall_back_to_the_base_unit() {
+    assert!(let Ok(huge) = parse::byte_size("1000000000000000000000000000000000000B"));
+    let rendered = huge.human().to_string();
+    check!(rendered.ends_with('B'));
+    assert!(let Ok(reparsed) = parse::byte_size(&rendered));
+    check!(reparsed == huge);
+}
+
 /// A non-finite quantity still renders, for diagnostics.
 #[test]
 fn rendering_survives_non_finite_values() {

@@ -78,9 +78,15 @@ struct PartialLimits {
     max_samples_per_query: Option<u64>,
     #[serde(default)]
     max_fetched_series_per_query: Option<u64>,
-    #[serde(default, with = "serde_units::human::option_time")]
+    #[serde(
+        default,
+        deserialize_with = "super::option_non_negative_time::deserialize"
+    )]
     max_query_lookback: Option<Time>,
-    #[serde(default, with = "serde_units::human::option_time")]
+    #[serde(
+        default,
+        deserialize_with = "super::option_non_negative_time::deserialize"
+    )]
     max_query_length: Option<Time>,
     #[serde(default, with = "serde_units::human::option_time")]
     out_of_order_time_window: Option<Time>,
@@ -194,5 +200,16 @@ overrides:
         .unwrap_err();
 
         assert!(matches!(error, OverridesError::Yaml(_)));
+    }
+
+    /// A negative cap would read as "unlimited" downstream, since the enforcer
+    /// only applies a cap greater than zero. Zero is the documented sentinel.
+    #[test]
+    fn negative_query_span_caps_are_rejected() {
+        const NEGATIVE: &str = "overrides:\n  tenant-a:\n    max_query_length: \"-1s\"\n";
+        const ZERO: &str = "overrides:\n  tenant-a:\n    max_query_length: \"0\"\n";
+
+        assert!(let Err(_) = OverridesProvider::from_yaml(NEGATIVE));
+        assert!(let Ok(_) = OverridesProvider::from_yaml(ZERO));
     }
 }

@@ -67,8 +67,8 @@ SCEN_PATH="$REPO_ROOT/bench/scenarios/${SCENARIO}.yaml"
 
 BENCH_PARTITIONS=$(scenario_field "$SCEN_PATH" partitions)
 BENCH_REPLICATION_FACTOR=$(scenario_field "$SCEN_PATH" replication_factor)
-BENCH_DURATION_S=$(scenario_field "$SCEN_PATH" duration_s)
-BENCH_WARMUP_S=$(scenario_field "$SCEN_PATH" warmup_s)
+BENCH_DURATION_S=$(scenario_seconds "$SCEN_PATH" duration)
+BENCH_WARMUP_S=$(scenario_seconds "$SCEN_PATH" warmup)
 : "${BENCH_PARTITIONS:=6}"
 : "${BENCH_REPLICATION_FACTOR:=1}"
 : "${BENCH_DURATION_S:=60}"

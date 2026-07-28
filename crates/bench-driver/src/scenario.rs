@@ -15,11 +15,135 @@
 //!
 //! Epoch timestamps (`wallclock_*_unix_ms`, `Disturbance::kill_at_ms`) stay raw
 //! integers: they are coordinates, not magnitudes.
+//!
+//! Every input magnitude is also range-checked as it is read — see [`bounded`]
+//! — so a scenario file that asks for something unrunnable fails at load rather
+//! than at the far end of the driver.
 
 use crabka_units::{prelude::*, serde_units};
 use serde::{Deserialize, Serialize};
 
 use crate::ids::{MessageCount, TimeOffsetMs, WallclockMs};
+
+/// `#[serde(with = ...)]` adapters that bound an operator-written magnitude.
+///
+/// The human forms accept a signed magnitude — `-1B` reads as minus one byte —
+/// where the `usize`/`u64` fields they replaced could not be negative at all. Left
+/// unchecked, a negative size deserializes cleanly and then saturates to zero deep
+/// inside the driver: `payload::template` would quietly emit header-sized records
+/// for a scenario asking for `-1B`, and the run would be reported under the name of
+/// the benchmark it did not perform. Bounding on the read path turns that into a
+/// load failure naming the field.
+///
+/// Whether zero is admissible is a per-field question, so each field picks the
+/// adapter that matches it: a keyless record (`key_size: 0`) and an unbuffered
+/// producer (`linger: 0`) are runnable, a zero-length measurement window or a
+/// zero-byte record is not.
+mod bounded {
+    /// Defines a `#[serde(with = ...)]` module that reads a quantity's human form
+    /// and then rejects a magnitude this field cannot run.
+    ///
+    /// Serialization delegates to the unbounded sibling: a value admitted on the
+    /// way in is by construction in range on the way out.
+    macro_rules! bounded_module {
+        (
+            $(#[$meta:meta])*
+            $name:ident, $quantity:ty, $encode:path, $decode:path,
+            $admits:expr, $requirement:literal
+        ) => {
+            $(#[$meta])*
+            pub mod $name {
+                use crabka_units::{fmt::Human as _, prelude::*};
+                use serde::{Deserializer, Serializer, de::Error as _};
+
+                /// Writes the quantity as its human string form.
+                ///
+                /// # Errors
+                ///
+                /// Whatever the serializer reports for a string.
+                pub fn serialize<S: Serializer>(
+                    value: &$quantity,
+                    serializer: S,
+                ) -> Result<S::Ok, S::Error> {
+                    $encode(value, serializer)
+                }
+
+                /// Reads the quantity from its human string form and bounds it.
+                ///
+                /// # Errors
+                ///
+                /// If the value is not a quantity of this dimension carrying an
+                /// explicit unit, or its magnitude is one this field cannot run.
+                pub fn deserialize<'de, D: Deserializer<'de>>(
+                    deserializer: D,
+                ) -> Result<$quantity, D::Error> {
+                    let value = $decode(deserializer)?;
+                    let admits: fn($quantity) -> bool = $admits;
+                    if admits(value) {
+                        return Ok(value);
+                    }
+                    Err(D::Error::custom(format!(
+                        "must be {}, got {}",
+                        $requirement,
+                        value.human()
+                    )))
+                }
+            }
+        };
+    }
+
+    bounded_module!(
+        /// A size that must be positive: a record or a producer batch.
+        positive_size,
+        ByteSize,
+        crabka_units::serde_units::human::byte_size::serialize,
+        crabka_units::serde_units::human::byte_size::deserialize,
+        |value: ByteSize| value > ByteSize::ZERO,
+        "a positive size"
+    );
+
+    bounded_module!(
+        /// A size that may be zero: a key length, where zero means keyless.
+        nonnegative_size,
+        ByteSize,
+        crabka_units::serde_units::human::byte_size::serialize,
+        crabka_units::serde_units::human::byte_size::deserialize,
+        |value: ByteSize| value >= ByteSize::ZERO,
+        "a size of zero or more"
+    );
+
+    bounded_module!(
+        /// An extent that must be positive: a measurement window.
+        positive_time,
+        Time,
+        crabka_units::serde_units::human::time::serialize,
+        crabka_units::serde_units::human::time::deserialize,
+        |value: Time| value > Time::ZERO,
+        "a positive extent"
+    );
+
+    bounded_module!(
+        /// An extent that may be zero: a warmup that is skipped, a producer that
+        /// does not linger, a kill scheduled at the very start of the run.
+        nonnegative_time,
+        Time,
+        crabka_units::serde_units::human::time::serialize,
+        crabka_units::serde_units::human::time::deserialize,
+        |value: Time| value >= Time::ZERO,
+        "an extent of zero or more"
+    );
+
+    bounded_module!(
+        /// An event rate that must be positive: a paced producer that asks for no
+        /// messages at all never sends one, which no scenario means to express.
+        positive_rate,
+        Frequency,
+        crabka_units::serde_units::human::frequency::serialize,
+        crabka_units::serde_units::human::frequency::deserialize,
+        |value: Frequency| value > Frequency::ZERO,
+        "a positive rate"
+    );
+}
 
 /// Which Kafka stack the scenario is running against. Pure metadata; the
 /// driver's client behaviour is identical for both — Crabka's
@@ -110,7 +234,7 @@ pub enum LoadMode {
     /// Producers are paced by a token bucket at exactly this rate, written as
     /// an event rate (`20000/s`).
     FixedRate {
-        #[serde(with = "serde_units::human::frequency")]
+        #[serde(with = "bounded::positive_rate")]
         rate: Frequency,
     },
 }
@@ -119,8 +243,9 @@ pub enum LoadMode {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FailoverSpec {
-    /// How far into the scenario the target broker pod is deleted (`4s`).
-    #[serde(with = "serde_units::human::time")]
+    /// How far into the scenario the target broker pod is deleted (`4s`). Zero
+    /// kills at the very start of warmup, which is extreme but runnable.
+    #[serde(with = "bounded::nonnegative_time")]
     pub kill_after: Time,
     /// Target: `partition0_leader` picks the broker hosting partition 0's
     /// leader; `any_broker` picks the first matching pod. Only
@@ -148,11 +273,12 @@ pub struct Scenario {
     pub name: String,
     #[serde(default = "default_mode_tag")]
     pub mode_tag: ModeTag,
-    /// Record value size on the wire (`1KiB`).
-    #[serde(default = "default_msg_size", with = "serde_units::human::byte_size")]
+    /// Record value size on the wire (`1KiB`). A zero-byte record measures
+    /// nothing, so it is rejected rather than floored at the payload header.
+    #[serde(default = "default_msg_size", with = "bounded::positive_size")]
     pub msg_size: ByteSize,
     /// Record key size (`0` for keyless records).
-    #[serde(default, with = "serde_units::human::byte_size")]
+    #[serde(default, with = "bounded::nonnegative_size")]
     pub key_size: ByteSize,
     #[serde(default = "default_partitions")]
     pub partitions: i32,
@@ -167,17 +293,20 @@ pub struct Scenario {
     pub acks: Acks,
     #[serde(default)]
     pub compression: Compression,
-    /// How long the producer holds a partial batch before sending (`5ms`).
-    #[serde(default = "default_linger", with = "serde_units::human::time")]
+    /// How long the producer holds a partial batch before sending (`5ms`). Zero
+    /// means send as soon as a record arrives.
+    #[serde(default = "default_linger", with = "bounded::nonnegative_time")]
     pub linger: Time,
     /// Producer batch size (`16KiB`).
-    #[serde(default = "default_batch_size", with = "serde_units::human::byte_size")]
+    #[serde(default = "default_batch_size", with = "bounded::positive_size")]
     pub batch_size: ByteSize,
-    /// Length of the measurement window (`60s`).
-    #[serde(default = "default_duration", with = "serde_units::human::time")]
+    /// Length of the measurement window (`60s`). A zero-length window measures
+    /// nothing, so it is rejected.
+    #[serde(default = "default_duration", with = "bounded::positive_time")]
     pub duration: Time,
-    /// Length of the discarded warmup window preceding it (`10s`).
-    #[serde(default = "default_warmup", with = "serde_units::human::time")]
+    /// Length of the discarded warmup window preceding it (`10s`). Zero skips
+    /// warmup and measures from the first record.
+    #[serde(default = "default_warmup", with = "bounded::nonnegative_time")]
     pub warmup: Time,
     #[serde(default)]
     pub failover: Option<FailoverSpec>,
@@ -585,6 +714,54 @@ mode:
 ";
         let error = serde_yaml::from_str::<Scenario>(y).expect_err("a bare number is not a size");
         check!(error.to_string().contains("missing unit"));
+    }
+
+    /// A minimal `saturate` scenario with `extra` appended, so one field's bound
+    /// can be exercised against an otherwise-runnable file.
+    fn parse_saturate_with(extra: &str) -> Result<Scenario, serde_yaml::Error> {
+        serde_yaml::from_str(&format!("name: bounds\nmode:\n  kind: saturate\n{extra}\n"))
+    }
+
+    #[test]
+    fn scenario_yaml_rejects_unrunnable_magnitudes() {
+        // The human forms accept a sign, so every field that used to be an
+        // unsigned primitive has to say so itself.
+        for (field, requirement) in [
+            ("msg_size: -1B", "a positive size"),
+            ("msg_size: 0", "a positive size"),
+            ("key_size: -1B", "a size of zero or more"),
+            ("batch_size: -16KiB", "a positive size"),
+            ("batch_size: 0", "a positive size"),
+            ("linger: -5ms", "an extent of zero or more"),
+            ("duration: -60s", "a positive extent"),
+            ("duration: 0", "a positive extent"),
+            ("warmup: -10s", "an extent of zero or more"),
+            ("failover:\n  kill_after: -4s", "an extent of zero or more"),
+        ] {
+            let error = parse_saturate_with(field)
+                .expect_err("an unrunnable magnitude must fail at load, not at run");
+            check!(error.to_string().contains(requirement), "{field:?}");
+        }
+    }
+
+    #[test]
+    fn scenario_yaml_rejects_an_unrunnable_fixed_rate() {
+        for rate in ["-1/s", "0"] {
+            let yaml = format!("name: bounds\nmode:\n  kind: fixed_rate\n  rate: {rate}\n");
+            let error = serde_yaml::from_str::<Scenario>(&yaml)
+                .expect_err("a paced producer needs a positive rate");
+            check!(error.to_string().contains("a positive rate"), "{rate:?}");
+        }
+    }
+
+    #[test]
+    fn scenario_yaml_admits_zero_where_zero_is_runnable() {
+        let s = parse_saturate_with("key_size: 0\nlinger: 0\nwarmup: 0\nfailover:\n  kill_after: 0")
+            .expect("keyless records, no linger, no warmup, and an immediate kill all run");
+        check!(s.key_size == ByteSize::ZERO);
+        check!(s.linger == Time::ZERO);
+        check!(s.warmup == Time::ZERO);
+        check!(s.failover.map(|failover| failover.kill_after) == Some(Time::ZERO));
     }
 
     #[test]

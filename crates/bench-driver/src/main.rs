@@ -10,7 +10,7 @@ use crabka_bench_driver::{
     scenario::{Scenario, Stack},
     workload::{
         self, ClientRequestTimeoutSeconds, ConsumerBuildAttempts, ConsumerBuildBackoffMs,
-        ConsumerBuildRetryPolicy, DriverConfig,
+        ConsumerBuildRetryPolicy, ConsumerPollDurationMs, DriverConfig,
     },
 };
 use crabka_units::fmt::Human as _;
@@ -77,6 +77,20 @@ struct Cli {
         default_value_t = workload::default_consumer_build_max_backoff()
     )]
     consumer_build_max_backoff_ms: ConsumerBuildBackoffMs,
+    /// Consumer poll timeout, in milliseconds.
+    #[arg(
+        long,
+        env = "BENCH_CONSUMER_POLL_TIMEOUT_MS",
+        default_value_t = workload::default_consumer_poll_timeout()
+    )]
+    consumer_poll_timeout_ms: ConsumerPollDurationMs,
+    /// Sleep after a consumer poll error, in milliseconds.
+    #[arg(
+        long,
+        env = "BENCH_CONSUMER_POLL_ERROR_BACKOFF_MS",
+        default_value_t = workload::default_consumer_poll_error_backoff()
+    )]
+    consumer_poll_error_backoff_ms: ConsumerPollDurationMs,
     /// Configured broker count. The driver uses this to gate RF=3-only
     /// scenarios.
     #[arg(long, env = "BENCH_BROKER_COUNT", default_value_t = 1)]

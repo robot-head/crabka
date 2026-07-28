@@ -24,14 +24,79 @@ pub struct Limits {
     pub max_samples_per_query: u64,
     pub max_fetched_series_per_query: u64,
     /// How far back a query may reach; a zero extent disables the cap.
-    #[serde(with = "serde_units::human::time")]
+    #[serde(with = "non_negative_time")]
     pub max_query_lookback: Time,
     /// The widest span a range query may cover; a zero extent disables the cap.
-    #[serde(with = "serde_units::human::time")]
+    #[serde(with = "non_negative_time")]
     pub max_query_length: Time,
     /// Accepted out-of-order ingest window; a negative extent disables the cap.
     #[serde(with = "serde_units::human::time")]
     pub out_of_order_time_window: Time,
+}
+
+/// A configured extent that must not be negative.
+///
+/// `human::time` accepts a signed magnitude, and `QueryEnforcer::check_range`
+/// only applies a cap that is greater than zero — so a runtime override of
+/// `"-1s"` would load cleanly and silently mean *unlimited*, when zero is the
+/// documented way to disable a cap. Rejecting it at parse time keeps the
+/// sentinel single.
+pub mod non_negative_time {
+    use serde::{Deserializer, Serializer, de::Error as _};
+
+    use crate::limits::{Time, serde_units};
+
+    /// Writes the extent in its human form.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the serializer reports for a string.
+    pub fn serialize<S: Serializer>(value: &Time, serializer: S) -> Result<S::Ok, S::Error> {
+        serde_units::human::time::serialize(value, serializer)
+    }
+
+    /// Reads the extent, rejecting a negative one.
+    ///
+    /// # Errors
+    ///
+    /// If the value is not a human time string, or names a negative extent.
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Time, D::Error> {
+        let value = serde_units::human::time::deserialize(deserializer)?;
+        if value < Time::default() {
+            return Err(D::Error::custom(
+                "query span caps cannot be negative; use 0 to disable the cap",
+            ));
+        }
+        Ok(value)
+    }
+}
+
+/// The `Option` form of [`non_negative_time`], for the sparse override struct.
+///
+/// The override path deserializes through `PartialLimits`, not `Limits`, so the
+/// guard has to exist on both or a per-tenant override slips past it.
+/// Deserialize-only: `PartialLimits` is never serialized.
+pub(crate) mod option_non_negative_time {
+    use serde::{Deserializer, de::Error as _};
+
+    use crate::limits::{Time, serde_units};
+
+    /// Reads the optional extent, rejecting a negative one.
+    ///
+    /// # Errors
+    ///
+    /// If the value is not a human time string, or names a negative extent.
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Time>, D::Error> {
+        let value = serde_units::human::option_time::deserialize(deserializer)?;
+        if value.is_some_and(|value| value < Time::default()) {
+            return Err(D::Error::custom(
+                "query span caps cannot be negative; use 0 to disable the cap",
+            ));
+        }
+        Ok(value)
+    }
 }
 
 impl Default for Limits {

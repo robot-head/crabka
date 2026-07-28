@@ -1405,7 +1405,10 @@ fn search_json(resp: SearchResponse) -> Value {
                 "rootServiceName": trace.root_service_name,
                 "rootTraceName": trace.root_trace_name,
                 "startTimeUnixNano": trace.start_time_unix_nano.to_string(),
-                "durationMs": trace.duration.millis_i64(),
+                // Truncated, not rounded: Tempo integer-divides its nanosecond duration,
+                // and the frontend merges this querier JSON into the public search
+                // response, so a rounded value would surface there too.
+                "durationMs": trace.duration.millis_i64_trunc(),
                 "spanSets": trace.span_sets.into_iter().map(|set| {
                     json!({
                         "spans": set.spans.iter().map(search_span_json).collect::<Vec<_>>(),

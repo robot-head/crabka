@@ -2,15 +2,16 @@
 //! queries at scenario end to capture resource usage on the broker pods
 //! and (Strimzi only) JVM heap / non-heap from the JMX exporter.
 
-use std::{collections::BTreeMap, fmt, str::FromStr, time::Duration};
+use std::{collections::BTreeMap, fmt, str::FromStr};
 
 use anyhow::{Context, Result, anyhow};
+use crabka_units::prelude::*;
 use refined_type::rule::GreaterU64;
 use serde::Deserialize;
 
 use crate::{
-    ids::{DurationSeconds, MessageCount, TimeOffsetMs},
-    numeric::{nonnegative_f64_to_u64, to_f64},
+    ids::{MessageCount, TimeOffsetMs},
+    numeric::{event_rate, nonnegative_f64_to_u64, saturating_u64_to_i64, to_f64},
     scenario::{BrokerSample, Resource, Stack},
 };
 
@@ -18,6 +19,11 @@ use crate::{
 pub const DEFAULT_PROMETHEUS_REQUEST_TIMEOUT_SECONDS: u64 = 15;
 
 /// A positive Prometheus HTTP request timeout in seconds.
+///
+/// Stays an integer newtype rather than becoming a [`Time`]: it is the `clap`
+/// parse target for `--prometheus-request-timeout-seconds`, and the `Eq` that a
+/// `refined_type`-validated CLI value derives is incompatible with a
+/// `f64`-backed quantity. The dimension is attached in [`Self::timeout`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PrometheusRequestTimeoutSeconds(u64);
 
@@ -33,10 +39,13 @@ impl PrometheusRequestTimeoutSeconds {
             .map_err(|error| error.to_string())
     }
 
-    /// Return the validated timeout.
+    /// Return the validated timeout as an extent.
+    ///
+    /// A configured value beyond `i64::MAX` seconds saturates rather than
+    /// wrapping negative.
     #[must_use]
-    pub const fn duration(self) -> Duration {
-        Duration::from_secs(self.0)
+    pub fn timeout(self) -> Time {
+        Time::from_secs(saturating_u64_to_i64(self.0))
     }
 }
 
@@ -79,7 +88,7 @@ impl PromClient {
         request_timeout: PrometheusRequestTimeoutSeconds,
     ) -> Result<Self> {
         let http = reqwest::Client::builder()
-            .timeout(request_timeout.duration())
+            .timeout(request_timeout.timeout().to_std())
             .build()
             .context("build reqwest client")?;
         Ok(Self {
@@ -245,13 +254,13 @@ impl PromClient {
             .map(|(ts_ms, (cpu_cores, mem))| BrokerSample {
                 t_offset_ms: TimeOffsetMs(ts_ms.saturating_sub(range_start_ms)),
                 cpu_cores,
-                mem_working_set_bytes: mem,
+                mem_working_set: ByteSize::from_bytes(mem),
             })
             .collect())
     }
 
     /// Capture broker resource usage for the given stack over a window
-    /// ending now. `window_s` should be slightly larger than the measured
+    /// ending now. `window` should be slightly larger than the measured
     /// scenario duration so the `rate()` window doesn't tail off.
     /// # Errors
     /// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
@@ -259,7 +268,7 @@ impl PromClient {
         &self,
         stack: Stack,
         namespace: &str,
-        window_s: DurationSeconds,
+        window: Time,
         msgs_produced: MessageCount,
     ) -> Result<Resource> {
         // `broker_pod_regex()` returns a `^`-anchored *prefix* (e.g.
@@ -272,7 +281,9 @@ impl PromClient {
         // append `.*` so `demo-broker.*` matches the ordinal-suffixed pods.
         let pod_re = format!("{}.*", stack.broker_pod_regex().trim_start_matches('^'));
         let pod_re = pod_re.as_str();
-        let win = window_s.0.max(15); // PromQL needs at least one full scrape
+        // PromQL range selectors take whole units, and need at least one full
+        // scrape interval to have anything to rate over.
+        let win = window.secs_i64().max(15);
 
         // GKE's kubelet-cadvisor series carry `pod`/`namespace` but NO
         // `container` label — so the old `container!=""` filter matched nothing
@@ -291,21 +302,20 @@ impl PromClient {
             "max_over_time(sum(container_memory_working_set_bytes{{namespace=\"{namespace}\",pod=~\"{pod_re}\",id=~\".*slice\"}})[{win}s:15s])"
         );
 
-        let broker_cpu_seconds = self.query_scalar_sum(&cpu_query).await?.unwrap_or(0.0);
+        let broker_cpu = Time::from_secs_f64(self.query_scalar_sum(&cpu_query).await?.unwrap_or(0.0));
         let mem_working =
             nonnegative_f64_to_u64(self.query_scalar_sum(&rss_query).await?.unwrap_or(0.0));
 
         let mut res = Resource {
-            broker_cpu_seconds,
-            mem_cgroup_working_set_bytes: mem_working,
-            jvm_heap_used_bytes: None,
-            jvm_nonheap_used_bytes: None,
-            kafka_page_cache_approx_bytes: None,
-            msgs_per_cpu_core: if broker_cpu_seconds > 0.0 {
-                to_f64(msgs_produced.0) / broker_cpu_seconds
-            } else {
-                0.0
-            },
+            broker_cpu,
+            mem_cgroup_working_set: ByteSize::from_bytes(mem_working),
+            jvm_heap_used: None,
+            jvm_nonheap_used: None,
+            kafka_page_cache_approx: None,
+            // Messages per second of burnt CPU: the same count-over-window shape
+            // as a throughput, with CPU time standing in for wallclock. A run
+            // that burnt no CPU (nothing scraped) reports no rate.
+            msgs_per_cpu_second: event_rate(msgs_produced.0, broker_cpu),
         };
 
         if matches!(stack, Stack::Kafka) {
@@ -324,10 +334,10 @@ impl PromClient {
             let heap = nonnegative_f64_to_u64(self.query_scalar_sum(&heap_q).await?.unwrap_or(0.0));
             let nonheap =
                 nonnegative_f64_to_u64(self.query_scalar_sum(&nonheap_q).await?.unwrap_or(0.0));
-            res.jvm_heap_used_bytes = Some(heap);
-            res.jvm_nonheap_used_bytes = Some(nonheap);
+            res.jvm_heap_used = Some(ByteSize::from_bytes(heap));
+            res.jvm_nonheap_used = Some(ByteSize::from_bytes(nonheap));
             let page_cache = mem_working.saturating_sub(heap).saturating_sub(nonheap);
-            res.kafka_page_cache_approx_bytes = Some(i64::try_from(page_cache).unwrap_or(i64::MAX));
+            res.kafka_page_cache_approx = Some(ByteSize::from_bytes(page_cache));
         }
 
         Ok(res)
@@ -364,34 +374,32 @@ struct PromResult {
 
 #[cfg(test)]
 mod tests {
+    use assert2::{assert, check};
 
     use super::*;
 
     #[test]
     fn prometheus_request_timeout_default_remains_fifteen_seconds() {
-        assert_eq!(
-            PrometheusRequestTimeoutSeconds::default().duration(),
-            Duration::from_secs(15)
-        );
+        check!(PrometheusRequestTimeoutSeconds::default().timeout() == secs(15));
     }
 
     #[test]
     fn prometheus_request_timeout_accepts_one_second() {
-        assert_eq!(
+        check!(
             PrometheusRequestTimeoutSeconds::new(1)
                 .expect("one second is valid")
-                .duration(),
-            Duration::from_secs(1)
+                .timeout()
+                == secs(1)
         );
     }
 
     #[test]
     fn prometheus_request_timeout_rejects_invalid_values() {
-        assert!(PrometheusRequestTimeoutSeconds::new(0).is_err());
+        check!(PrometheusRequestTimeoutSeconds::new(0).is_err());
 
         let overflow = format!("{}0", u64::MAX);
         for invalid in ["0", "not-a-number", "-1", overflow.as_str()] {
-            assert!(
+            check!(
                 invalid.parse::<PrometheusRequestTimeoutSeconds>().is_err(),
                 "{invalid:?} must be rejected"
             );

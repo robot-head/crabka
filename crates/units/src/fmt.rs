@@ -78,8 +78,13 @@ fn write_scaled(
         let subunits = value * subunits_per_base;
         let rounded = subunits.round();
         let drift = (subunits - rounded).abs();
+        // The thousandths multiply inside `write_units` has to fit: `parse` will
+        // accept a magnitude near `i128::MAX / 1000` (`10^36B`), which has no
+        // thousandths representation. Such a value falls through to the raw
+        // base-unit rendering below rather than overflowing.
         if drift <= subunits.abs().max(1.0) * INTEGRAL_TOLERANCE
             && let Some(count) = rounded.to_i128()
+            && count.checked_mul(MILLI).is_some()
         {
             return write_units(f, count, units, base, suffix);
         }

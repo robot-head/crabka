@@ -38,13 +38,21 @@ pub struct TimeWindows {
     pub grace: Time,
 }
 
+/// The finest window a millisecond timeline can express.
+///
+/// `windows_for` works in epoch milliseconds and divides by the hop, so a
+/// sub-millisecond size or advance would round to zero and divide by zero. The
+/// former `i64`-millisecond API could not express such a value; the quantity can,
+/// so the constructors have to reject it.
+const MIN_RESOLUTION: Time = millis(1);
+
 impl TimeWindows {
     /// Tumbling window of `size` (advance == size, grace 0).
     #[must_use]
     /// # Panics
     /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub fn of_size(size: Time) -> Self {
-        assert!(size > Time::ZERO, "window size must be > 0");
+        assert!(size >= MIN_RESOLUTION, "window size must be >= 1ms");
         Self {
             size,
             advance: size,
@@ -57,8 +65,8 @@ impl TimeWindows {
     /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub fn advance_by(mut self, advance: Time) -> Self {
         assert!(
-            advance > Time::ZERO && advance <= self.size,
-            "0 < advance <= size"
+            advance >= MIN_RESOLUTION && advance <= self.size,
+            "1ms <= advance <= size"
         );
         self.advance = advance;
         self
@@ -338,6 +346,20 @@ mod tests {
     use assert2::check;
 
     use super::*;
+
+    #[test]
+    fn sub_millisecond_windows_are_rejected() {
+        // `windows_for` divides by the hop in whole milliseconds, so anything
+        // finer than a millisecond would divide by zero rather than window.
+        check!(std::panic::catch_unwind(|| TimeWindows::of_size(micros(100))).is_err());
+        check!(
+            std::panic::catch_unwind(|| TimeWindows::of_size(millis(10)).advance_by(micros(500)))
+                .is_err()
+        );
+        // One millisecond is the finest the timeline can express, and works.
+        let finest = TimeWindows::of_size(millis(1));
+        check!(finest.windows_for(0) == vec![0]);
+    }
 
     #[test]
     fn windows_for_tumbling_one_window() {
