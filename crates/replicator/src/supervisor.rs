@@ -5,10 +5,9 @@
 //! restarts any worker whose connect runtime has entered
 //! [`RuntimeState::Failed`].
 
-use std::time::Duration;
-
 use crabka_client_admin::AdminClient;
 use crabka_connect::RuntimeState;
+use crabka_units::prelude::{Time, TimeExt as _, secs};
 use tokio::{sync::watch, task::JoinHandle};
 
 use crate::{
@@ -20,7 +19,7 @@ use crate::{
 };
 
 /// How often the supervision loop polls each worker's runtime state.
-const SUPERVISE_INTERVAL: Duration = Duration::from_secs(3);
+const SUPERVISE_INTERVAL: Time = secs(3);
 
 /// Owned, `Clone`-able inputs needed to rebuild a [`FlowWorkerParams`] (and thus
 /// a fresh [`FlowWorker`]) when the supervision loop restarts a failed worker.
@@ -164,7 +163,7 @@ impl FlowSupervisor {
 
         let (shutdown, mut rx) = watch::channel(false);
         let handle = tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(SUPERVISE_INTERVAL);
+            let mut ticker = tokio::time::interval(SUPERVISE_INTERVAL.to_std());
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 tokio::select! {
@@ -307,13 +306,7 @@ mod tests {
         };
 
         let sup = FlowSupervisor::run(config).await.unwrap();
-        crate::test_util::await_topic_count(
-            &tb,
-            "us-east.orders",
-            1,
-            std::time::Duration::from_secs(20),
-        )
-        .await;
+        crate::test_util::await_topic_count(&tb, "us-east.orders", 1, secs(20)).await;
         sup.shutdown().await;
         assert2::assert!(crate::test_util::topic_record_count(&tb, "us-east.orders").await >= 1);
         // `noise` was excluded by the selector, so it must never have been

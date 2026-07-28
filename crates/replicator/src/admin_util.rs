@@ -3,15 +3,24 @@
 //! All functions return `Result<_, String>` and map client errors via
 //! `.map_err(|e| e.to_string())` so callers stay wire-error-agnostic.
 
-use std::{collections::BTreeMap, time::Duration};
+use std::collections::BTreeMap;
 
 use bytes::Bytes;
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
 use crabka_client_core::security::ClientSecurity;
+use crabka_units::prelude::{Time, TimeExt as _, millis, secs};
 
 /// Kafka error code: the topic already exists.
 const TOPIC_ALREADY_EXISTS: i16 = 36;
+
+/// How long the broker may take to complete a `CreateTopics` request before it
+/// answers with a timeout error. Kafka carries this as an `int32` millisecond
+/// field, so it converts at the `create_topics` call.
+const CREATE_TOPICS_TIMEOUT: Time = secs(10);
+
+/// Per-call fetch wait used while draining an internal topic.
+const DRAIN_POLL_TIMEOUT: Time = millis(500);
 
 /// Ensure `topic` exists with the given parameters, treating an
 /// already-exists response as success.
@@ -41,7 +50,7 @@ pub async fn ensure_topic(
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            10_000,
+            CREATE_TOPICS_TIMEOUT.millis_i32(),
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -89,7 +98,7 @@ pub async fn ensure_compacted_topic(
                 replicas: 1,
                 configs,
             }],
-            10_000,
+            CREATE_TOPICS_TIMEOUT.millis_i32(),
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -142,7 +151,7 @@ async fn build_drain_consumer(
 /// Drain all records from `topic` from the earliest offset, returning
 /// `(key, value)` pairs in order.
 ///
-/// Uses N=3 consecutive empty polls (500 ms each) as the drain sentinel.
+/// Uses N=3 consecutive empty polls ([`DRAIN_POLL_TIMEOUT`] each) as the drain sentinel.
 /// Poll errors for a not-yet-existing topic are silently treated as empty.
 pub type RawRecord = (Option<Bytes>, Option<Bytes>);
 
@@ -178,7 +187,7 @@ pub async fn read_all(
     let mut consecutive_empty = 0usize;
 
     loop {
-        match consumer.poll(Duration::from_millis(500)).await {
+        match consumer.poll(DRAIN_POLL_TIMEOUT.to_std()).await {
             Ok(batch) => {
                 if batch.is_empty() {
                     consecutive_empty += 1;
@@ -242,6 +251,23 @@ fn is_unknown_topic_error(msg: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use crabka_units::prelude::{TimeExt as _, secs};
+
+    #[test]
+    fn create_topics_timeout_reaches_the_wire_as_int32_millis() {
+        // Kafka's `CreateTopics.timeoutMs` is an int32 count of milliseconds, so
+        // the configured extent must cross the seam as 10000 — a seconds-valued
+        // 10 would have the broker give up almost immediately.
+        assert2::assert!(super::CREATE_TOPICS_TIMEOUT.millis_i32() == 10_000);
+    }
+
+    #[test]
+    fn drain_poll_timeout_converts_to_a_half_second_duration() {
+        assert2::assert!(
+            super::DRAIN_POLL_TIMEOUT.to_std() == std::time::Duration::from_millis(500)
+        );
+    }
+
     #[test]
     fn unknown_topic_error_matches_each_substring() {
         // Each positive exercises exactly one of the OR'd substrings, so the
@@ -284,6 +310,6 @@ mod tests {
             .await
             .unwrap();
 
-        crate::test_util::await_topic_count(&b, "t", 2, std::time::Duration::from_secs(5)).await;
+        crate::test_util::await_topic_count(&b, "t", 2, secs(5)).await;
     }
 }

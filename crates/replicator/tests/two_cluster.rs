@@ -5,7 +5,7 @@
 
 mod common;
 
-use std::{collections::BTreeMap, time::Duration};
+use std::collections::BTreeMap;
 
 use crabka_replicator::{
     config::{
@@ -14,6 +14,7 @@ use crabka_replicator::{
     },
     supervisor::FlowSupervisor,
 };
+use crabka_units::prelude::{TimeExt as _, secs};
 
 // ---------------------------------------------------------------------------
 // Test 1 — selective replication, remote-topic naming, residency
@@ -106,25 +107,13 @@ async fn selective_replication_naming_and_residency() {
     let sup = FlowSupervisor::run(config).await.unwrap();
 
     // Wait for replicated topics to appear on the target.
-    common::await_count(
-        &target.bootstrap,
-        "us-east.orders",
-        3,
-        Duration::from_secs(20),
-    )
-    .await;
-    common::await_count(
-        &target.bootstrap,
-        "us-east.payments",
-        2,
-        Duration::from_secs(20),
-    )
-    .await;
+    common::await_count(&target.bootstrap, "us-east.orders", 3, secs(20)).await;
+    common::await_count(&target.bootstrap, "us-east.payments", 2, secs(20)).await;
 
     // Give time for any wrongly replicated records to arrive.
     // real-time wait (not a progress poll): settle-then-assert-absence; proves excluded and
     // residency-blocked topics received zero records, so the wait can't be a progress poll.
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    tokio::time::sleep(secs(2).to_std()).await;
 
     // --- assertions -------------------------------------------------------
 
@@ -234,17 +223,17 @@ async fn active_active_loop_prevention() {
     let sup = FlowSupervisor::run(config).await.unwrap();
 
     // Wait until `orders` from `ca` is visible on `cb` as `ca.orders`.
-    common::await_count(&b.bootstrap, "ca.orders", 3, Duration::from_secs(20)).await;
+    common::await_count(&b.bootstrap, "ca.orders", 3, secs(20)).await;
 
     // Also wait for `pings` from `cb` to appear on `ca` as `cb.pings` — this
     // proves the cb → ca flow is actively running, so any loop would have shown
     // up by now.
-    common::await_count(&a.bootstrap, "cb.pings", 1, Duration::from_secs(20)).await;
+    common::await_count(&a.bootstrap, "cb.pings", 1, secs(20)).await;
 
     // Allow several supervision cycles for any additional loop bounce.
     // real-time wait (not a progress poll): settle-then-assert-absence; proves the looped
     // `cb.ca.orders` never appears, so the wait can't be a progress poll.
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    tokio::time::sleep(secs(3).to_std()).await;
 
     // --- assertions -------------------------------------------------------
 

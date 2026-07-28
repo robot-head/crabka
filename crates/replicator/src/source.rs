@@ -1,19 +1,20 @@
 //! Source side: a consumer on the source cluster that emits [`ReplicatedRecord`]s
 //! and snapshots all partition positions as a [`SourceOffset`].
 
-use std::{
-    collections::{BTreeMap, VecDeque},
-    time::Duration,
-};
+use std::collections::{BTreeMap, VecDeque};
 
 use async_trait::async_trait;
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
 use crabka_connect::{ConnectError, ConnectRecord, OffsetMap, OffsetValue, Source, SourceOffset};
+use crabka_units::prelude::{Time, TimeExt as _, millis};
 
 use crate::{
     ids::{Offset, PartitionIndex, Timestamp},
     record::ReplicatedRecord,
 };
+
+/// How long each source fetch waits for records before reporting "caught up".
+const POLL_TIMEOUT: Time = millis(500);
 
 /// A [`Source`] implementation backed by a Kafka consumer on the source cluster.
 ///
@@ -111,7 +112,7 @@ impl Source<(), ReplicatedRecord> for SourceConsumer {
                 .consumer
                 .as_mut()
                 .ok_or_else(|| ConnectError::Backend("source consumer is closed".into()))?
-                .poll(Duration::from_millis(500))
+                .poll(POLL_TIMEOUT.to_std())
                 .await
                 .map_err(|e| ConnectError::Backend(e.to_string()))?;
 

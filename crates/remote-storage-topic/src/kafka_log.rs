@@ -31,7 +31,6 @@
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{Arc, Mutex as StdMutex},
-    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -42,6 +41,9 @@ use crabka_client_producer::{Acks, Producer, ProducerRecord};
 use crabka_protocol::{
     owned::list_offsets_request::{ListOffsetsPartition, ListOffsetsRequest, ListOffsetsTopic},
     primitives::uuid::Uuid as WireUuid,
+};
+use crabka_units::prelude::{
+    ByteSize, ByteSizeExt as _, Time, TimeExt as _, mebibytes, millis, secs,
 };
 use futures_util::stream::{StreamExt, unfold};
 use tokio::sync::mpsc;
@@ -66,6 +68,23 @@ pub const DEFAULT_NUM_PARTITIONS: i32 = 50;
 /// Default replication factor for `__remote_log_metadata`, matching
 /// Apache Kafka's `remote.log.metadata.topic.replication.factor`.
 pub const DEFAULT_REPLICATION: i32 = 3;
+
+/// How long `CreateTopics` may take to provision `__remote_log_metadata`
+/// before the broker gives up on the round-trip.
+const TOPIC_CREATE_TIMEOUT: Time = secs(30);
+
+/// `max_wait_ms` for the per-partition metadata `Fetch`. Long enough that an
+/// idle partition costs one RPC per interval rather than a spin, short enough
+/// that cancellation on reassignment is prompt.
+const FETCH_MAX_WAIT: Time = millis(500);
+
+/// `partition_max_bytes` for the per-partition metadata `Fetch`. Metadata
+/// events are small, so one mebibyte is many thousands of them per round-trip.
+const FETCH_MAX_BYTES: ByteSize = mebibytes(1);
+
+/// Pause before retrying a failed metadata `Fetch`, so a broker that is down
+/// does not turn the fetch loop into a busy spin.
+const FETCH_RETRY_BACKOFF: Time = millis(200);
 
 /// Construction-time configuration for [`KafkaMetadataEventLog`].
 #[derive(Debug, Clone)]
@@ -417,7 +436,7 @@ async fn ensure_topic(cfg: &KafkaMetadataLogConfig) -> Result<(i32, WireUuid), M
         configs,
     };
     let outcomes = admin
-        .create_topics(&[spec], 30_000)
+        .create_topics(&[spec], TOPIC_CREATE_TIMEOUT.millis_i32())
         .await
         .map_err(|e| MetadataLogError::Other(format!("create_topics failed: {e}")))?;
     let outcome = outcomes
@@ -533,8 +552,8 @@ async fn partition_fetch_loop(
                 state.topic_id,
                 partition,
                 next_offset,
-                500,
-                1 << 20,
+                FETCH_MAX_WAIT.millis_i32(),
+                FETCH_MAX_BYTES.bytes_i32(),
             ) => {
                 match res {
                     Ok(records) => {
@@ -567,7 +586,7 @@ async fn partition_fetch_loop(
                     }
                     Err(e) => {
                         warn!(error = %e, partition, "metadata consumer: fetch failed; retrying");
-                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        tokio::time::sleep(FETCH_RETRY_BACKOFF.to_std()).await;
                     }
                 }
             }
@@ -593,6 +612,18 @@ mod tests {
         check!(cfg.replication == 3);
         check!(cfg.bootstrap == "127.0.0.1:9092");
         check!(cfg.security.is_none());
+    }
+
+    /// The metadata client's tunables are quantities but reach Kafka as raw
+    /// `int32` milliseconds and bytes. Pin the wire images: a wrong scale here
+    /// is invisible in the types and would show up only as a metadata consumer
+    /// that spins (too short a `max_wait`) or truncates batches.
+    #[test]
+    fn client_tunables_convert_to_their_kafka_wire_images() {
+        check!(TOPIC_CREATE_TIMEOUT.millis_i32() == 30_000);
+        check!(FETCH_MAX_WAIT.millis_i32() == 500);
+        check!(FETCH_MAX_BYTES.bytes_i32() == 1 << 20);
+        check!(FETCH_RETRY_BACKOFF.to_std() == std::time::Duration::from_millis(200));
     }
 
     #[test]

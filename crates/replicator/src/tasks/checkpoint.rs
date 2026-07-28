@@ -7,6 +7,10 @@
 use bytes::Bytes;
 use crabka_client_admin::AdminClient;
 use crabka_client_producer::{Acks, Producer, ProducerRecord};
+use crabka_units::{
+    fmt::Human as _,
+    prelude::{Time, TimeExt as _},
+};
 use tracing::warn;
 
 use crate::{
@@ -165,9 +169,9 @@ impl CheckpointTask {
     #[tracing::instrument(
         level = "info",
         skip_all,
-        fields(source_alias = %params.source_alias, interval_ms = interval.as_millis()),
+        fields(source_alias = %params.source_alias, interval = %interval.human()),
     )]
-    pub fn start(params: CheckpointParams, interval: std::time::Duration) -> Self {
+    pub fn start(params: CheckpointParams, interval: Time) -> Self {
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
 
         let handle = tokio::spawn(async move {
@@ -206,7 +210,7 @@ impl CheckpointTask {
 
                 // Wait for the next interval or a shutdown signal.
                 tokio::select! {
-                    () = tokio::time::sleep(interval) => {}
+                    () = tokio::time::sleep(interval.to_std()) => {}
                     _ = shutdown_rx.changed() => {
                         if *shutdown_rx.borrow() {
                             break;

@@ -11,16 +11,14 @@
 
 mod common;
 
-use std::{
-    collections::{BTreeMap, HashSet},
-    time::Duration,
-};
+use std::collections::{BTreeMap, HashSet};
 
 use assert2::check;
 use crabka_replicator::{
     config::{ClusterConfig, Delivery, FlowConfig, NamingPolicy, ReplicatorConfig, Selectors},
     supervisor::FlowSupervisor,
 };
+use crabka_units::prelude::secs;
 
 /// Build a `ReplicatorConfig` for the us-east → eu-west flow that replicates
 /// the `orders` topic.  Both brokers must already be running when this is
@@ -82,13 +80,7 @@ async fn restart_resumes_with_no_gap() {
         .expect("first supervisor run");
 
     // Wait until all 10 initial records arrive on the target.
-    common::await_count(
-        &target.bootstrap,
-        "us-east.orders",
-        10,
-        Duration::from_secs(30),
-    )
-    .await;
+    common::await_count(&target.bootstrap, "us-east.orders", 10, secs(30)).await;
 
     // Gracefully stop the replicator.
     sup.shutdown().await;
@@ -106,13 +98,7 @@ async fn restart_resumes_with_no_gap() {
         .expect("second supervisor run");
 
     // Wait until at least 20 records have arrived (dups are fine; at-least-once).
-    common::await_count(
-        &target.bootstrap,
-        "us-east.orders",
-        20,
-        Duration::from_secs(30),
-    )
-    .await;
+    common::await_count(&target.bootstrap, "us-east.orders", 20, secs(30)).await;
 
     // ── Step 6: collect the full key set from the target ─────────────────────
     let recs = crabka_replicator::admin_util::read_all(&target.bootstrap, "us-east.orders", None)
