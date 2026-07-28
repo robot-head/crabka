@@ -36,7 +36,7 @@ async-trait = { workspace = true }
 axum = { workspace = true, features = ["json"] }
 base64 = { workspace = true }
 bytes = { workspace = true }
-clap = { workspace = true }
+clap = { workspace = true, features = ["env"] }
 datafusion = { workspace = true }
 dashmap = { workspace = true }
 derive_more = { workspace = true }
