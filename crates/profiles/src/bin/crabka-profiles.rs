@@ -6,7 +6,6 @@ use std::{
     net::SocketAddr,
     path::Path,
     sync::{Arc, Mutex},
-    time::Duration,
 };
 
 use clap::{Parser, ValueEnum};
@@ -26,6 +25,7 @@ use crabka_profiles::{
     query_frontend::FrontendConfig,
 };
 use crabka_telemetry::OtlpConfig;
+use crabka_units::{Time, convert::TimeExt as _, mebibytes, millis, secs};
 use object_store::{ObjectStore, path::Path as ObjectPath};
 
 #[derive(Debug, Parser)]
@@ -40,7 +40,10 @@ struct Cli {
     bootstrap: String,
     #[arg(long, default_value = "file://./.crabka-profiles-blocks")]
     object_store_url: String,
-    #[arg(long, default_value_t = 15 * 60 * 1000)]
+    // Same deployment contract as the flush-max-age flag: the name and the
+    // millisecond integer stay, and the value is lifted into a `Time` where it
+    // enters the frontend config.
+    #[arg(long, default_value_t = FrontendConfig::default().shard_width.millis_i64())]
     query_frontend_shard_ms: i64,
     #[arg(long)]
     tenant_limits_config: Option<std::path::PathBuf>,
@@ -54,8 +57,11 @@ struct Cli {
     compactor_downsample_resolution_ns: Option<i64>,
     #[arg(long, default_value_t = crabka_profiles::blockbuilder::DEFAULT_FLUSH_RECORDS)]
     block_builder_flush_records: usize,
-    #[arg(long, default_value_t = crabka_profiles::blockbuilder::DEFAULT_FLUSH_MAX_AGE.as_millis() as u64)]
-    block_builder_flush_max_age_ms: u64,
+    // The flag name and its millisecond integer encoding are the deployment
+    // contract (`demo/observability/docker-compose.yml` passes it), so the raw
+    // value is held here and lifted into a `Time` where it enters the config.
+    #[arg(long, default_value_t = crabka_profiles::blockbuilder::DEFAULT_FLUSH_MAX_AGE.millis_i64())]
+    block_builder_flush_max_age_ms: i64,
     /// debuginfod base URLs (comma-separated) to fetch DWARF for unsymbolized
     /// native frames. Empty by default: the symbolizer makes NO outbound
     /// requests unless an operator explicitly opts in by supplying URLs.
@@ -102,6 +108,12 @@ fn build_object_store(
     })
 }
 
+/// How often the querier reloads the profile block index from object storage.
+const INDEX_REFRESH_INTERVAL: Time = secs(15);
+
+/// How long each hot WAL-tail poll waits for records.
+const WAL_TAIL_POLL_TIMEOUT: Time = millis(500);
+
 /// Periodically reload the profile block index from object storage and swap it
 /// into the cold store. The block-builder writes new blocks continuously; without
 /// this the querier only ever sees the index snapshot it loaded at boot, so blocks
@@ -114,7 +126,7 @@ fn spawn_profile_index_refresh(
     index_key: String,
 ) {
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(std::time::Duration::from_secs(15));
+        let mut tick = tokio::time::interval(INDEX_REFRESH_INTERVAL.to_std());
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tick.tick().await;
@@ -163,7 +175,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 active_series: Mutex::default(),
                 ingestion_buckets: Mutex::default(),
                 relabel: Vec::<RelabelConfig>::new(),
-                max_decompressed: 1 << 24,
+                max_decompressed: mebibytes(16),
                 metrics: metrics.clone(),
             });
             let shutdown = async {
@@ -179,7 +191,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut config =
                 BlockBuilderConfig::new(cli.bootstrap, configured.store).with_metrics(metrics);
             config.flush_records = cli.block_builder_flush_records;
-            config.flush_max_age = Duration::from_millis(cli.block_builder_flush_max_age_ms);
+            config.flush_max_age = Time::from_millis(cli.block_builder_flush_max_age_ms);
             crabka_profiles::blockbuilder::run_with_config(config).await?;
         }
         Target::Querier => {
@@ -236,7 +248,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 QuerierState::new_frontend_with_overrides(
                     union,
                     FrontendConfig {
-                        shard_width_ms: cli.query_frontend_shard_ms,
+                        shard_width: Time::from_millis(cli.query_frontend_shard_ms),
                     },
                     overrides,
                 )
@@ -311,7 +323,7 @@ fn spawn_wal_tail(cli: &Cli, hot: WalTailProfileStore) {
     let bootstrap = cli.bootstrap.clone();
     let group_id = cli.query_wal_tail_group_id.clone();
     tokio::spawn(async move {
-        if let Err(err) = run_wal_tail(hot, bootstrap, group_id, Duration::from_millis(500)).await {
+        if let Err(err) = run_wal_tail(hot, bootstrap, group_id, WAL_TAIL_POLL_TIMEOUT).await {
             tracing::warn!(%err, "profiles hot WAL-tail stopped");
         }
     });
@@ -321,6 +333,7 @@ fn spawn_wal_tail(cli: &Cli, hot: WalTailProfileStore) {
 mod tests {
     use assert2::{assert, check};
     use clap::Parser;
+    use crabka_units::{bytes, per_sec};
 
     use super::*;
 
@@ -490,13 +503,13 @@ mod tests {
             r#"{
               "default": {
                 "max_label_names_per_series": 10,
-                "max_label_value_len": 100,
+                "max_label_value": "100B",
                 "session_id_buckets": 32
               },
               "tenants": {
                 "tenant-a": {
                   "max_label_names_per_series": 2,
-                  "max_label_value_len": 3,
+                  "max_label_value": "3B",
                   "session_id_buckets": 4
                 }
               }
@@ -507,7 +520,7 @@ mod tests {
         let config = load_tenant_limits_config(Some(&path)).unwrap();
 
         assert!(config.default.max_label_names_per_series == 10);
-        assert!(config.for_tenant("tenant-a").max_label_value_len == 3);
+        assert!(config.for_tenant("tenant-a").max_label_value == bytes(3));
     }
 
     #[test]
@@ -530,22 +543,22 @@ overrides:
         assert!(
             *overrides.for_tenant("tenant-a")
                 == crabka_profiles::limits::Limits {
-                    ingestion_rate_profiles_per_sec: 10_000.0,
+                    ingestion_rate: per_sec(10_000),
                     ingestion_burst_profiles: 10_000,
                     max_series: 0,
-                    max_label_name_length: 1024,
-                    max_label_value_length: 2048,
+                    max_label_name: bytes(1024),
+                    max_label_value: bytes(2048),
                     max_label_names_per_series: 40,
                     max_flamegraph_nodes_default: 2048,
                     max_flamegraph_nodes_max: 512,
-                    max_query_length_secs: 30,
+                    max_query_length: secs(30),
                     max_session_id_cardinality: 0,
                 }
         );
         // An unlisted tenant inherits the process default query-length cap.
         check!(
-            overrides.for_tenant("tenant-b").max_query_length_secs
-                == crabka_profiles::limits::DEFAULT_MAX_QUERY_LENGTH_SECS
+            overrides.for_tenant("tenant-b").max_query_length
+                == crabka_profiles::limits::DEFAULT_MAX_QUERY_LENGTH
         );
     }
 

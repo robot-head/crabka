@@ -41,7 +41,7 @@ pub use samples::{
     COL_FINGERPRINT, COL_TIMESTAMP, PCOL_PROFILE_TYPE, PCOL_SPAN_ID, PCOL_STACKTRACE_ID,
     PCOL_STACKTRACE_PARTITION, PCOL_TOTAL_VALUE, PCOL_TRACE_ID, PCOL_VALUE, profile_samples_schema,
 };
-pub use series::{Series, SeriesAgg, fold_bucket, step_bucket_ms, step_ms_from_secs};
+pub use series::{Series, SeriesAgg, fold_bucket, step_bucket_ms, step_from_secs};
 pub use store::{ProfileScan, ProfileStats, ProfileStore};
 pub use symbol_db::{
     FunctionRec, LineRec, LocationRec, MappingRec, MappingSymbolization, RawLocation, SymbolDb,

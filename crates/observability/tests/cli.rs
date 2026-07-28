@@ -3,6 +3,7 @@ use clap::Parser;
 use crabka_observability::{
     QuerierIndexSource, Role, ServiceConfig, build_service_dependencies, run,
 };
+use crabka_units::{kibibytes, millis, nanos};
 
 #[test]
 fn parses_explicit_service_targets() {
@@ -41,12 +42,12 @@ fn parses_querier_object_store_shard_catalog_config() {
         "10",
         "--query-end-ns",
         "30",
-        "--max-query-range-ns",
-        "20",
+        "--max-query-range",
+        "20ns",
         "--max-query-series",
         "10",
-        "--max-query-bytes",
-        "1024",
+        "--max-query-read",
+        "1KiB",
         "--max-query-length",
         "64",
     ])
@@ -67,12 +68,12 @@ fn parses_querier_object_store_shard_catalog_config() {
                 index_prefix: Some("observability/logs".to_string()),
                 query_start_ns: Some(10),
                 query_end_ns: Some(30),
-                max_query_range_ns: Some(20),
+                max_query_range: Some(nanos(20)),
                 max_query_series: Some(10),
-                max_query_bytes: Some(1024),
+                max_query_read: Some(kibibytes(1)),
                 max_query_length: Some(64),
-                max_ingest_body_bytes: None,
-                wal_append_timeout_ms: None,
+                max_ingest_body: None,
+                wal_append_timeout: None,
             }
     );
 }
@@ -87,10 +88,10 @@ fn parses_distributor_wal_config() {
         "127.0.0.1:9092",
         "--wal-topic",
         "__crabka_observability_logs_wal",
-        "--max-ingest-body-bytes",
-        "2048",
-        "--wal-append-timeout-ms",
-        "250",
+        "--max-ingest-body",
+        "2KiB",
+        "--wal-append-timeout",
+        "250ms",
     ])
     .unwrap();
 
@@ -109,12 +110,12 @@ fn parses_distributor_wal_config() {
                 index_prefix: None,
                 query_start_ns: None,
                 query_end_ns: None,
-                max_query_range_ns: None,
+                max_query_range: None,
                 max_query_series: None,
-                max_query_bytes: None,
+                max_query_read: None,
                 max_query_length: None,
-                max_ingest_body_bytes: Some(2048),
-                wal_append_timeout_ms: Some(250),
+                max_ingest_body: Some(kibibytes(2)),
+                wal_append_timeout: Some(millis(250)),
             }
     );
 }
@@ -153,12 +154,12 @@ fn parses_compactor_wal_consumer_config() {
                 index_prefix: Some("observability/logs".to_string()),
                 query_start_ns: None,
                 query_end_ns: None,
-                max_query_range_ns: None,
+                max_query_range: None,
                 max_query_series: None,
-                max_query_bytes: None,
+                max_query_read: None,
                 max_query_length: None,
-                max_ingest_body_bytes: None,
-                wal_append_timeout_ms: None,
+                max_ingest_body: None,
+                wal_append_timeout: None,
             }
     );
 }
@@ -193,12 +194,12 @@ fn parses_querier_wal_tail_config() {
                 index_prefix: None,
                 query_start_ns: None,
                 query_end_ns: None,
-                max_query_range_ns: None,
+                max_query_range: None,
                 max_query_series: None,
-                max_query_bytes: None,
+                max_query_read: None,
                 max_query_length: None,
-                max_ingest_body_bytes: None,
-                wal_append_timeout_ms: None,
+                max_ingest_body: None,
+                wal_append_timeout: None,
             }
     );
 }
@@ -218,12 +219,12 @@ async fn querier_dependencies_require_wal_bootstrap_server() {
         index_prefix: None,
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     };
 
     match build_service_dependencies(&config).await {

@@ -3,6 +3,7 @@ use std::{cmp::Ordering, collections::BTreeMap, fmt::Write as _};
 use base64::{Engine as _, prelude::BASE64_STANDARD};
 use chrono::{FixedOffset, LocalResult, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use chrono_tz::Tz;
+use crabka_units::convert::ByteSizeExt as _;
 use regex::{NoExpand, Regex};
 use time::OffsetDateTime;
 
@@ -2082,6 +2083,7 @@ fn format_template_bytes(value: &str) -> String {
     let Some(bytes) = parse_bytes_literal(value) else {
         return String::new();
     };
+    let bytes = bytes.bytes_f64();
     if bytes.fract() == 0.0 {
         format!("{bytes:.0}")
     } else {

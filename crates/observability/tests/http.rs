@@ -29,6 +29,7 @@ use crabka_observability::{
     distributor_router, loki_router, otlp_grpc_logs_service, otlp_grpc_logs_service_with_limiter,
     serve_service_listener, write_compaction_frontier_to_object_store,
 };
+use crabka_units::{Time, bytes, millis, nanos};
 use datafusion::arrow::{
     array::{Float64Array, MapArray, StringArray, TimestampNanosecondArray},
     datatypes::{DataType, TimeUnit},
@@ -1529,12 +1530,12 @@ fn minimal_service_config(target: Role) -> ServiceConfig {
         index_prefix: None,
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     }
 }
 
@@ -1801,12 +1802,12 @@ async fn service_router_builds_distributor_role() {
         index_prefix: None,
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     };
     let app = build_service_router(
         &config,
@@ -1866,12 +1867,12 @@ async fn service_router_rejects_stale_loki_push_timestamp_without_wal_append() {
         index_prefix: None,
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     };
     let app = build_service_router(
         &config,
@@ -1929,12 +1930,12 @@ async fn service_router_rejects_missing_protobuf_timestamp_like_loki_without_wal
         index_prefix: None,
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     };
     let app = build_service_router(
         &config,
@@ -1996,12 +1997,12 @@ async fn service_router_rejects_future_loki_push_timestamp_without_wal_append() 
         index_prefix: None,
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     };
     let app = build_service_router(
         &config,
@@ -2060,12 +2061,12 @@ async fn service_router_rejects_future_otlp_timestamp_without_wal_append() {
         index_prefix: None,
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     };
     let app = build_service_router(
         &config,
@@ -2135,12 +2136,12 @@ async fn service_router_rejects_loki_push_over_configured_ingest_body_limit_with
         index_prefix: None,
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: Some(1),
-        wal_append_timeout_ms: None,
+        max_ingest_body: Some(bytes(1)),
+        wal_append_timeout: None,
     };
     let app = build_service_router(
         &config,
@@ -2197,12 +2198,12 @@ async fn service_router_rejects_loki_push_over_ingest_quota_without_wal_append()
         index_prefix: None,
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     };
     let app = build_service_router(
         &config,
@@ -2265,12 +2266,12 @@ async fn service_router_times_out_loki_push_when_wal_append_stalls() {
         index_prefix: None,
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: Some(1),
+        max_ingest_body: None,
+        wal_append_timeout: Some(millis(1)),
     };
     let app = build_service_router(
         &config,
@@ -2331,12 +2332,12 @@ async fn service_listener_serves_distributor_role_on_bound_tcp_listener() {
         index_prefix: None,
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     };
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -2404,12 +2405,12 @@ async fn service_listener_serves_otlp_grpc_logs_for_distributor_role() {
         index_prefix: None,
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     };
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -3251,12 +3252,12 @@ async fn loki_push_endpoint_rejects_negative_protobuf_timestamp_like_loki_withou
         index_prefix: None,
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     };
     let app = build_service_router(
         &config,
@@ -5000,12 +5001,12 @@ async fn compactor_router_exposes_loki_status_and_ring_endpoints() {
         index_prefix: Some("observability/logs".to_string()),
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     };
     let app = build_service_router(&config, ServiceDependencies::default(), None)
         .await
@@ -5107,12 +5108,12 @@ async fn compactor_delete_endpoint_tracks_and_cancels_delete_requests() {
         index_prefix: Some("observability/logs".to_string()),
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     };
     let app = build_service_router(&config, ServiceDependencies::default(), None)
         .await
@@ -5209,12 +5210,12 @@ async fn compactor_delete_endpoint_accepts_form_post_query_with_raw_ampersand() 
         index_prefix: Some("observability/logs".to_string()),
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     };
     let app = build_service_router(&config, ServiceDependencies::default(), None)
         .await
@@ -5270,12 +5271,12 @@ async fn compactor_delete_endpoint_rejects_invalid_requests() {
         index_prefix: Some("observability/logs".to_string()),
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     };
     let app = build_service_router(&config, ServiceDependencies::default(), None)
         .await
@@ -5355,12 +5356,12 @@ async fn compactor_delete_requests_filter_querier_stream_results() {
         index_prefix: Some("observability/logs".to_string()),
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     };
     let compactor_app = build_service_router(
         &compactor_config,
@@ -5419,12 +5420,12 @@ async fn compactor_delete_requests_filter_querier_stream_results() {
         index_prefix: None,
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     };
     let querier_app = build_service_router(
         &querier_config,
@@ -5505,12 +5506,12 @@ async fn compactor_delete_requests_persist_for_configured_querier() {
         index_prefix: Some("observability/logs".to_string()),
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     };
     let compactor_app =
         build_service_router(&compactor_config, ServiceDependencies::default(), None)
@@ -5542,12 +5543,12 @@ async fn compactor_delete_requests_persist_for_configured_querier() {
         index_prefix: None,
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     };
     let querier_app = build_service_router(&querier_config, ServiceDependencies::default(), None)
         .await
@@ -5600,12 +5601,12 @@ async fn compactor_delete_requests_filter_querier_metric_results() {
         index_prefix: Some("observability/logs".to_string()),
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     };
     let compactor_app = build_service_router(
         &compactor_config,
@@ -5664,12 +5665,12 @@ async fn compactor_delete_requests_filter_querier_metric_results() {
         index_prefix: None,
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     };
     let querier_app = build_service_router(
         &querier_config,
@@ -5749,12 +5750,12 @@ async fn format_query_endpoint_is_available_on_distributor_and_compactor_routers
         index_prefix: Some("observability/logs".to_string()),
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     };
     let compactor_app = build_service_router(&config, ServiceDependencies::default(), None)
         .await
@@ -11744,12 +11745,12 @@ async fn compactor_delete_requests_filter_querier_tail_results() {
         index_prefix: Some("observability/logs".to_string()),
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     };
     let compactor_app = build_service_router(
         &compactor_config,
@@ -11814,12 +11815,12 @@ async fn compactor_delete_requests_filter_querier_tail_results() {
         index_prefix: None,
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     };
     let app = build_service_router(
         &querier_config,
@@ -14183,12 +14184,12 @@ async fn service_router_applies_query_authorizer_dependency_to_querier_role() {
         index_prefix: None,
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     };
     let app = build_service_router(
         &config,
@@ -14253,12 +14254,12 @@ async fn service_router_builds_querier_role_with_hot_tail_dependency() {
         index_prefix: None,
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     };
     let app = build_service_router(
         &config,
@@ -14307,12 +14308,12 @@ async fn service_router_applies_configured_query_range_limit() {
         index_prefix: None,
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: Some(20),
+        max_query_range: Some(nanos(20)),
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     };
     let app = build_service_router(&config, ServiceDependencies::default(), None)
         .await
@@ -14352,12 +14353,12 @@ async fn service_router_applies_configured_query_length_limit() {
         index_prefix: None,
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: Some(10),
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     };
     let app = build_service_router(&config, ServiceDependencies::default(), None)
         .await
@@ -14398,12 +14399,12 @@ async fn service_router_applies_configured_query_series_limit() {
         index_prefix: None,
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: Some(1),
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     };
     let app = build_service_router(&config, ServiceDependencies::default(), None)
         .await
@@ -14451,12 +14452,12 @@ async fn service_router_applies_configured_query_bytes_limit() {
         index_prefix: None,
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: Some(1),
+        max_query_read: Some(bytes(1)),
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     };
     let app = build_service_router(&config, ServiceDependencies::default(), None)
         .await
@@ -14506,12 +14507,12 @@ async fn service_router_builds_querier_role_with_wal_consumer_hot_tail_poller() 
         index_prefix: None,
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     };
     let app = build_service_router(
         &config,
@@ -14678,12 +14679,12 @@ async fn configured_object_store_query_returns_partial_warning_for_missing_block
         index_prefix: Some(prefix.to_string()),
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     };
     let app = build_service_router(&config, ServiceDependencies::default(), None)
         .await
@@ -14779,12 +14780,12 @@ async fn configured_object_store_backward_limited_query_stops_after_newest_block
         index_prefix: Some(prefix.to_string()),
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     };
     let app = build_service_router(&config, ServiceDependencies::default(), None)
         .await
@@ -14883,12 +14884,12 @@ async fn configured_object_store_query_merges_hot_tail_with_source_split_stats()
         index_prefix: Some(prefix.to_string()),
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     };
     let app = build_service_router(
         &config,
@@ -14986,12 +14987,12 @@ async fn configured_object_store_metric_query_returns_partial_warning_for_missin
         index_prefix: Some(prefix.to_string()),
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     };
     let app = build_service_router(&config, ServiceDependencies::default(), None)
         .await
@@ -15293,7 +15294,7 @@ async fn query_range_endpoint_returns_loki_error_for_invalid_start() {
 
 #[tokio::test]
 async fn query_range_endpoint_rejects_ranges_over_configured_limit() {
-    let state = fixture().with_max_query_range_ns(20);
+    let state = fixture().with_max_query_range(nanos(20));
     let app = loki_router(state);
 
     let response = app
@@ -15333,7 +15334,7 @@ async fn query_endpoint_rejects_series_over_configured_limit() {
 
 #[tokio::test]
 async fn query_endpoint_rejects_planned_block_bytes_over_configured_limit() {
-    let state = fixture().with_max_query_bytes(1);
+    let state = fixture().with_max_query_read(bytes(1));
     let app = loki_router(state);
 
     let response = app
@@ -19022,12 +19023,12 @@ async fn configured_object_store_index_stats_endpoint_counts_entries_from_object
         index_prefix: Some(prefix.to_string()),
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     };
     let app = build_service_router(&config, ServiceDependencies::default(), None)
         .await
@@ -19103,12 +19104,12 @@ async fn configured_object_store_index_stats_endpoint_loads_request_tenant_manif
         index_prefix: Some(prefix.to_string()),
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     };
     let app = build_service_router(&config, ServiceDependencies::default(), None)
         .await
@@ -19184,12 +19185,12 @@ async fn configured_object_store_index_volume_endpoint_loads_request_tenant_mani
         index_prefix: Some(prefix.to_string()),
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     };
     let app = build_service_router(&config, ServiceDependencies::default(), None)
         .await
@@ -19288,12 +19289,12 @@ async fn configured_object_store_patterns_endpoint_loads_request_tenant_manifest
         index_prefix: Some(prefix.to_string()),
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     };
     let app = build_service_router(&config, ServiceDependencies::default(), None)
         .await
@@ -19374,12 +19375,12 @@ async fn configured_object_store_detected_fields_endpoint_loads_request_tenant_m
         index_prefix: Some(prefix.to_string()),
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     };
     let app = build_service_router(&config, ServiceDependencies::default(), None)
         .await
@@ -19496,12 +19497,12 @@ async fn configured_object_store_querier_loads_manifest_for_request_tenant_heade
         index_prefix: Some(prefix.to_string()),
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     };
     let app = build_service_router(&config, ServiceDependencies::default(), None)
         .await
@@ -19575,12 +19576,12 @@ async fn configured_object_store_labels_endpoint_loads_manifest_for_request_tena
         index_prefix: Some(prefix.to_string()),
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     };
     let app = build_service_router(&config, ServiceDependencies::default(), None)
         .await
@@ -19649,12 +19650,12 @@ async fn configured_object_store_shard_catalog_querier_loads_shards_for_request_
         index_prefix: Some(prefix.to_string()),
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     };
     let app = build_service_router(&config, ServiceDependencies::default(), None)
         .await
@@ -19745,12 +19746,12 @@ async fn configured_object_store_shard_catalog_labels_endpoint_loads_request_ten
         index_prefix: Some(prefix.to_string()),
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     };
     let app = build_service_router(&config, ServiceDependencies::default(), None)
         .await
@@ -20092,12 +20093,12 @@ async fn tenant_object_store_shard_catalog_service_fixture()
         index_prefix: Some(prefix.to_string()),
         query_start_ns: Some(0),
         query_end_ns: Some(19),
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     };
 
     (config, store, dir)
@@ -20184,7 +20185,7 @@ impl RecordingWalConsumer {
 
 #[async_trait]
 impl LogWalConsumer for RecordingWalConsumer {
-    async fn poll(&mut self, _timeout: Duration) -> Result<Vec<KafkaWalRecord>, WalConsumerError> {
+    async fn poll(&mut self, _timeout: Time) -> Result<Vec<KafkaWalRecord>, WalConsumerError> {
         if let Some(poll_count) = &self.poll_count {
             poll_count.fetch_add(1, Ordering::SeqCst);
         }
@@ -20263,12 +20264,12 @@ fn test_service_config(target: Role, data_root: impl Into<std::path::PathBuf>) -
         index_prefix,
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     }
 }
 

@@ -266,12 +266,12 @@ fn service_config(role: Role, bootstrap: &str, topic: &str, data_root: &TempDir)
         index_prefix: None,
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
     }
 }
 

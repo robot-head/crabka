@@ -3,12 +3,12 @@
 use std::{
     collections::VecDeque,
     sync::{Arc, RwLock},
-    time::Duration,
 };
 
 use crabka_blockstore::LabelMatcher;
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
 use crabka_pprof::{InMemoryProfileStore, ProfileError, ProfileScan, ProfileStats, ProfileStore};
+use crabka_units::{Time, convert::TimeExt as _, hours};
 
 use crate::{
     blockbuilder::{intern_record, profile_timestamp_ms},
@@ -19,7 +19,7 @@ use crate::{
 /// Default retention horizon for the in-memory WAL tail: samples older than this
 /// (relative to the newest sample seen) are dropped so the hot store cannot grow
 /// without bound.
-const DEFAULT_MAX_AGE_MS: i64 = 6 * 60 * 60 * 1_000; // 6h
+const DEFAULT_MAX_AGE: Time = hours(6);
 
 /// Hard cap on the number of retained source records, so a burst of same-instant
 /// samples still cannot grow the hot store unboundedly.
@@ -36,8 +36,8 @@ const REBUILD_AMORTIZE_FACTOR: usize = 8;
 /// Retention policy for the in-memory WAL tail.
 #[derive(Clone, Copy, Debug)]
 pub struct RetentionConfig {
-    /// Drop samples whose timestamp is older than `newest_ts - max_age_ms`.
-    pub max_age_ms: i64,
+    /// Drop samples whose timestamp is older than `newest_ts - max_age`.
+    pub max_age: Time,
     /// Drop the oldest records once more than this many are retained.
     pub max_records: usize,
 }
@@ -45,7 +45,7 @@ pub struct RetentionConfig {
 impl Default for RetentionConfig {
     fn default() -> Self {
         Self {
-            max_age_ms: DEFAULT_MAX_AGE_MS,
+            max_age: DEFAULT_MAX_AGE,
             max_records: DEFAULT_MAX_RECORDS,
         }
     }
@@ -141,8 +141,11 @@ impl WalTailProfileStore {
     /// Drop retained records that fall outside the retention window, counting how
     /// many were evicted since the last rebuild.
     fn prune(retention: &RetentionConfig, state: &mut RetainedState) {
+        // `max_ts_ms` is an epoch-millisecond instant; only the retention window
+        // is an extent, so it converts here and the subtraction stays exact
+        // integer arithmetic (and saturates rather than overflowing).
         let newest = state.records.back().map_or(i64::MIN, |item| item.max_ts_ms);
-        let horizon = newest.saturating_sub(retention.max_age_ms);
+        let horizon = newest.saturating_sub(retention.max_age.millis_i64());
         while state
             .records
             .front()
@@ -294,7 +297,7 @@ pub async fn run_wal_tail(
     store: WalTailProfileStore,
     bootstrap: String,
     group_id: String,
-    poll_timeout: Duration,
+    poll_timeout: Time,
 ) -> Result<(), ProfilesError> {
     let mut consumer = Consumer::builder()
         .bootstrap(bootstrap)
@@ -306,7 +309,7 @@ pub async fn run_wal_tail(
         .map_err(|err| ProfilesError::Wal(format!("hot WAL-tail consumer build failed: {err}")))?;
 
     loop {
-        let records = consumer.poll(poll_timeout).await.map_err(|err| {
+        let records = consumer.poll(poll_timeout.to_std()).await.map_err(|err| {
             ProfilesError::Wal(format!("hot WAL-tail consumer poll failed: {err}"))
         })?;
         for record in records {
@@ -330,10 +333,18 @@ mod tests {
     use assert2::assert;
     use crabka_blockstore::{LabelMatcher, MatchOp};
     use crabka_pprof::{EngineOpts, FlameEngine, PCOL_TRACE_ID, ProfileStore, SeriesAgg};
+    use crabka_units::{Time, convert::TimeExt as _, secs};
 
     use crate::wal::{ProfileRecord, WalFunction, WalLocation, WalSample, WalSymbolSet};
 
     const PT: &str = "process_cpu:cpu:nanoseconds:cpu:nanoseconds";
+
+    /// A retention window so long nothing can age out of it, for the tests that
+    /// exercise the record-count budget in isolation. The pruning horizon
+    /// saturates to `i64::MIN`, so no timestamp is ever below it.
+    fn unlimited_max_age() -> Time {
+        Time::from_millis(i64::MAX)
+    }
 
     fn record() -> ProfileRecord {
         ProfileRecord {
@@ -394,7 +405,7 @@ mod tests {
             .select_series(
                 ("tenant-a", PT, r#"{service_name="api"}"#),
                 &[],
-                1.0,
+                secs(1),
                 SeriesAgg::Sum,
                 (0, i64::MAX),
             )
@@ -457,7 +468,7 @@ mod tests {
         // Tight 1s window: an old sample must be dropped once a much newer one
         // arrives, so the hot store does not grow without bound.
         let store = super::WalTailProfileStore::with_retention(super::RetentionConfig {
-            max_age_ms: 1_000,
+            max_age: secs(1),
             max_records: usize::MAX,
         });
         // Old sample at t=0ms, then a fresh sample 10s later.
@@ -484,7 +495,7 @@ mod tests {
         // max_records=2 with an unbounded age window: the third append drops the
         // oldest record regardless of age.
         let store = super::WalTailProfileStore::with_retention(super::RetentionConfig {
-            max_age_ms: i64::MAX,
+            max_age: unlimited_max_age(),
             max_records: 2,
         });
         store.append_record(record_at(1, 1_000_000)).unwrap();
@@ -507,7 +518,7 @@ mod tests {
         // timestamp-scoped query must still return exactly the records inside the
         // requested window, regardless of any lingering older rows.
         let store = super::WalTailProfileStore::with_retention(super::RetentionConfig {
-            max_age_ms: i64::MAX,
+            max_age: unlimited_max_age(),
             max_records: 10,
         });
         for i in 1..=50_i64 {

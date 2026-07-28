@@ -5,9 +5,13 @@ use std::{
     io::Read,
     path::PathBuf,
     sync::{Arc, Mutex, MutexGuard},
-    time::Duration,
 };
 
+use crabka_units::{
+    ByteSize, Time,
+    convert::{ByteSizeExt as _, TimeExt as _},
+    mebibytes, secs,
+};
 use object::{Object, ObjectSymbol};
 
 use crate::{Frame, RawLocation, SymbolDb, SymbolSource};
@@ -17,7 +21,14 @@ use crate::{Frame, RawLocation, SymbolDb, SymbolSource};
 /// compromised server could otherwise stream an unbounded body and exhaust
 /// memory. 512 MiB comfortably covers real debug objects while bounding the
 /// blast radius.
-const MAX_DEBUGINFO_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_DEBUGINFO: ByteSize = mebibytes(512);
+
+/// How long a debuginfod connection may take to establish. A connect timeout
+/// bounds slow-connect denial of service ahead of the total request timeout.
+const DEBUGINFOD_CONNECT_TIMEOUT: Time = secs(5);
+
+/// How long a whole debuginfod request may take, connection included.
+const DEBUGINFOD_REQUEST_TIMEOUT: Time = secs(10);
 
 /// Returns `true` iff `build_id` is a valid debuginfod build-id: a non-empty
 /// lowercase hex string. debuginfod build-ids are hex digests, so anything
@@ -140,20 +151,17 @@ pub struct DebuginfodResolver {
     base_urls: Vec<reqwest::Url>,
     client: reqwest::blocking::Client,
     cache: Mutex<HashMap<String, Option<ObjectSymbolResolver>>>,
-    max_debuginfo_bytes: u64,
+    max_debuginfo: ByteSize,
 }
 
 impl DebuginfodResolver {
     /// # Errors
     /// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
     pub fn new(base_urls: Vec<String>) -> Result<Self, String> {
-        Self::with_max_debuginfo_bytes(base_urls, MAX_DEBUGINFO_BYTES)
+        Self::with_max_debuginfo(base_urls, MAX_DEBUGINFO)
     }
 
-    fn with_max_debuginfo_bytes(
-        base_urls: Vec<String>,
-        max_debuginfo_bytes: u64,
-    ) -> Result<Self, String> {
+    fn with_max_debuginfo(base_urls: Vec<String>, max_debuginfo: ByteSize) -> Result<Self, String> {
         let base_urls = base_urls
             .into_iter()
             .filter(|url| !url.trim().is_empty())
@@ -164,19 +172,17 @@ impl DebuginfodResolver {
         }
         // Do not follow redirects: a redirect from a debuginfod server is a
         // vector for SSRF pivots (e.g. to internal hosts or 169.254.169.254).
-        // A connect timeout bounds slow-connect DoS in addition to the total
-        // request timeout.
         let client = reqwest::blocking::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(10))
+            .connect_timeout(DEBUGINFOD_CONNECT_TIMEOUT.to_std())
+            .timeout(DEBUGINFOD_REQUEST_TIMEOUT.to_std())
             .build()
             .map_err(|err| err.to_string())?;
         Ok(Self {
             base_urls,
             client,
             cache: Mutex::new(HashMap::new()),
-            max_debuginfo_bytes,
+            max_debuginfo,
         })
     }
 
@@ -225,10 +231,11 @@ impl DebuginfodResolver {
             // Reject artifacts whose advertised length already exceeds the cap,
             // then read the body with a hard byte ceiling so a server that
             // lies about (or omits) Content-Length still cannot exhaust memory.
-            if !content_length_within_cap(response.content_length(), self.max_debuginfo_bytes) {
+            let cap = self.max_debuginfo.bytes_u64();
+            if !content_length_within_cap(response.content_length(), cap) {
                 continue;
             }
-            let Some(bytes) = read_capped(response, self.max_debuginfo_bytes) else {
+            let Some(bytes) = read_capped(response, cap) else {
                 continue;
             };
             if let Ok(resolver) = ObjectSymbolResolver::from_bytes(bytes) {
@@ -654,7 +661,7 @@ mod tests {
         };
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base_url = format!("http://{}", listener.local_addr().unwrap());
-        let max_debuginfo_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        let max_debuginfo = ByteSize::from_bytes(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
         let served = Arc::new(AtomicUsize::new(0));
         let served_clone = Arc::clone(&served);
         let server_thread = std::thread::spawn(move || {
@@ -673,8 +680,7 @@ mod tests {
             std::io::Write::write_all(&mut stream, &bytes).unwrap();
         });
         let resolver =
-            DebuginfodResolver::with_max_debuginfo_bytes(vec![base_url], max_debuginfo_bytes)
-                .unwrap();
+            DebuginfodResolver::with_max_debuginfo(vec![base_url], max_debuginfo).unwrap();
 
         let first = resolver
             .symbolize(&SymbolizeRequest {

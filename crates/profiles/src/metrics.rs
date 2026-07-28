@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use crabka_units::{Time, convert::TimeExt as _};
 use prometheus_client::{
     encoding::EncodeLabelSet,
     metrics::{counter::Counter, family::Family, histogram::Histogram},
@@ -173,7 +174,7 @@ impl ServiceMetrics {
     /// This does NOT touch `wal_append_failures` — increment that separately at
     /// the actual WAL/produce error site (a 4xx client/validation error is an
     /// `ok=false` request but not a WAL failure).
-    pub fn record_ingest(&self, ok: bool, bytes: IngestBytes, items: IngestItems, secs: f64) {
+    pub fn record_ingest(&self, ok: bool, bytes: IngestBytes, items: IngestItems, elapsed: Time) {
         let status = if ok { "ok" } else { "error" };
         self.ingest_requests
             .get_or_create(&StatusLabel {
@@ -186,7 +187,9 @@ impl ServiceMetrics {
         if items.0 > 0 {
             self.ingest_items.inc_by(items.0);
         }
-        self.ingest_duration.observe(secs);
+        // `prometheus-client` histograms take fractional seconds, so the extent
+        // is extracted here, at the exposition seam.
+        self.ingest_duration.observe(elapsed.secs_f64());
     }
 
     /// Record one WAL/produce append failure (the durable write to the profiles
@@ -221,7 +224,7 @@ impl ServiceMetrics {
 
     /// Record one query request outcome on `route`: bump the per-route+status
     /// request counter and observe the per-route latency.
-    pub fn record_query(&self, route: &str, ok: bool, secs: f64) {
+    pub fn record_query(&self, route: &str, ok: bool, elapsed: Time) {
         let status = if ok { "ok" } else { "error" };
         self.query_requests
             .get_or_create(&RouteStatusLabel {
@@ -233,7 +236,7 @@ impl ServiceMetrics {
             .get_or_create(&RouteLabel {
                 route: route.into(),
             })
-            .observe(secs);
+            .observe(elapsed.secs_f64());
     }
 }
 
@@ -282,6 +285,7 @@ mod tests {
         body::Body,
         http::{Request, StatusCode},
     };
+    use crabka_units::millis;
     use tower::ServiceExt as _;
 
     use super::*;
@@ -289,13 +293,13 @@ mod tests {
     #[tokio::test]
     async fn registry_has_profiles_prefix_and_all_metrics() {
         let m = ServiceMetrics::new();
-        m.record_ingest(true, IngestBytes(1024), IngestItems(3), 0.012);
-        m.record_ingest(false, IngestBytes(0), IngestItems(0), 0.001);
+        m.record_ingest(true, IngestBytes(1024), IngestItems(3), millis(12));
+        m.record_ingest(false, IngestBytes(0), IngestItems(0), millis(1));
         m.record_wal_append_failure();
         m.record_ingest_samples("tenant-a", 3);
         m.record_blocks_built(2);
-        m.record_query("select_series", true, 0.5);
-        m.record_query("render", false, 0.1);
+        m.record_query("select_series", true, millis(500));
+        m.record_query("render", false, millis(100));
 
         let mut buf = String::new();
         let r = m.registry.lock().await;
@@ -326,7 +330,7 @@ mod tests {
     #[tokio::test]
     async fn metrics_route_returns_openmetrics() {
         let m = ServiceMetrics::new();
-        m.record_ingest(true, IngestBytes(42), IngestItems(1), 0.01);
+        m.record_ingest(true, IngestBytes(42), IngestItems(1), millis(10));
         let app = metrics_router(m.registry);
         let resp = app
             .oneshot(
@@ -356,7 +360,7 @@ mod tests {
     #[test]
     fn record_ingest_adds_positive_bytes_and_items() {
         let m = ServiceMetrics::new();
-        m.record_ingest(true, IngestBytes(1024), IngestItems(3), 0.012);
+        m.record_ingest(true, IngestBytes(1024), IngestItems(3), millis(12));
 
         // A positive body/item count must flow through to the cumulative
         // counters. This pins the `> 0` guards: flipping to `< 0` or `== 0`
@@ -369,7 +373,7 @@ mod tests {
     fn wal_append_failure_is_separate_from_request_outcome() {
         let m = ServiceMetrics::new();
         // An ok=false request alone must NOT bump wal_append_failures.
-        m.record_ingest(false, IngestBytes(0), IngestItems(0), 0.001);
+        m.record_ingest(false, IngestBytes(0), IngestItems(0), millis(1));
         assert!(m.wal_append_failures.get() == 0);
         // Only the explicit WAL-failure call does.
         m.record_wal_append_failure();

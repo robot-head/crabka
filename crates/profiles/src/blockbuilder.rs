@@ -4,7 +4,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     io::Cursor,
     sync::Arc,
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use arrow::record_batch::RecordBatch;
@@ -13,6 +13,11 @@ use crabka_blockstore::{
 };
 use crabka_client_consumer::{AutoOffsetReset, Consumer, ConsumerRecord};
 use crabka_pprof::{FunctionRec, LineRec, LocationRec, MappingRec, MappingSymbolization, SymbolDb};
+use crabka_units::{
+    ByteSize, Time,
+    convert::{ByteSizeExt as _, StdDurationExt as _, TimeExt as _},
+    kibibytes, mebibytes, millis, secs,
+};
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload, path::Path};
 use parquet::arrow::ArrowWriter;
 use tracing::Instrument as _;
@@ -24,11 +29,19 @@ use crate::{
 };
 
 pub const STACKTRACE_PARTITION: u64 = 0;
+/// Scale between the epoch-nanosecond timestamps the WAL carries and the
+/// epoch-millisecond timestamps blocks are indexed by.
+///
+/// This is instant arithmetic, not an extent, so it deliberately stays exact
+/// integer division: an absolute nanosecond timestamp is ~1.8e18 and cannot
+/// round-trip through the `f64` seconds a `Time` stores.
 const NANOS_PER_MILLI: i64 = 1_000_000;
-const WAL_FETCH_MAX_BYTES: i32 = 2 * 1024 * 1024;
-const WAL_FETCH_PARTITION_MAX_BYTES: i32 = 256 * 1024;
+/// Fetch budget for one WAL poll across all assigned partitions.
+const WAL_FETCH_MAX: ByteSize = mebibytes(2);
+/// Fetch budget for one WAL poll per partition.
+const WAL_FETCH_PARTITION_MAX: ByteSize = kibibytes(256);
 pub const DEFAULT_FLUSH_RECORDS: usize = 1024;
-pub const DEFAULT_FLUSH_MAX_AGE: Duration = Duration::from_secs(10);
+pub const DEFAULT_FLUSH_MAX_AGE: Time = secs(10);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BuiltSample {
@@ -50,8 +63,10 @@ pub struct BlockBuilderConfig {
     pub store: Arc<dyn ObjectStore>,
     pub index_key: String,
     pub flush_records: usize,
-    pub flush_max_age: Duration,
-    pub poll_timeout: Duration,
+    /// Flush the accumulated buffer once the oldest buffered record reaches this age.
+    pub flush_max_age: Time,
+    /// How long each WAL poll waits for records.
+    pub poll_timeout: Time,
     /// Optional self-instrumentation metrics. When set, the block-builder bumps
     /// `crabka_profiles_blocks_built_total` by the number of blocks each flush
     /// wrote. `None` (the default) disables metric emission, keeping the
@@ -69,7 +84,7 @@ impl BlockBuilderConfig {
             index_key: "index/profiles.json".to_string(),
             flush_records: DEFAULT_FLUSH_RECORDS,
             flush_max_age: DEFAULT_FLUSH_MAX_AGE,
-            poll_timeout: Duration::from_millis(500),
+            poll_timeout: millis(500),
             metrics: None,
         }
     }
@@ -235,11 +250,11 @@ struct ConsumerRecordAccumulator {
     records: Vec<ConsumerRecord>,
     oldest_record_at: Option<Instant>,
     flush_records: usize,
-    flush_max_age: Duration,
+    flush_max_age: Time,
 }
 
 impl ConsumerRecordAccumulator {
-    fn new(flush_records: usize, flush_max_age: Duration) -> Self {
+    fn new(flush_records: usize, flush_max_age: Time) -> Self {
         Self {
             records: Vec::new(),
             oldest_record_at: None,
@@ -263,8 +278,9 @@ impl ConsumerRecordAccumulator {
         if self.records.len() >= self.flush_records {
             return true;
         }
-        self.oldest_record_at
-            .is_some_and(|oldest| now.saturating_duration_since(oldest) >= self.flush_max_age)
+        self.oldest_record_at.is_some_and(|oldest| {
+            now.saturating_duration_since(oldest).as_time() >= self.flush_max_age
+        })
     }
 
     fn take(&mut self) -> Vec<ConsumerRecord> {
@@ -286,8 +302,8 @@ pub async fn run_with_config(config: BlockBuilderConfig) -> Result<(), ProfilesE
         .bootstrap(config.bootstrap)
         .group_id(config.group_id.clone())
         .group_instance_id(config.group_id)
-        .fetch_max_bytes(WAL_FETCH_MAX_BYTES)
-        .fetch_partition_max_bytes(WAL_FETCH_PARTITION_MAX_BYTES)
+        .fetch_max_bytes(WAL_FETCH_MAX.bytes_i32())
+        .fetch_partition_max_bytes(WAL_FETCH_PARTITION_MAX.bytes_i32())
         .subscribe(vec![PROFILES_WAL_TOPIC.to_string()])
         .auto_offset_reset(AutoOffsetReset::Earliest)
         .build()
@@ -298,7 +314,7 @@ pub async fn run_with_config(config: BlockBuilderConfig) -> Result<(), ProfilesE
         ConsumerRecordAccumulator::new(config.flush_records, config.flush_max_age);
     loop {
         let records = consumer
-            .poll(config.poll_timeout)
+            .poll(config.poll_timeout.to_std())
             .await
             .map_err(|err| ProfilesError::Block(format!("consumer poll failed: {err}")))?;
         let now = Instant::now();
@@ -523,6 +539,7 @@ mod tests {
     use bytes::Bytes;
     use crabka_client_consumer::ConsumerRecord;
     use crabka_pprof::SymbolDb;
+    use crabka_units::minutes;
     use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory};
 
     use super::*;
@@ -710,7 +727,7 @@ mod tests {
 
     #[test]
     fn accumulator_flushes_on_record_threshold() {
-        let mut accumulator = ConsumerRecordAccumulator::new(2, Duration::from_mins(1));
+        let mut accumulator = ConsumerRecordAccumulator::new(2, minutes(1));
         let start = Instant::now();
 
         accumulator.push(vec![consumer_record(0, 10, rec("cpu", 5))], start);
@@ -718,21 +735,21 @@ mod tests {
 
         accumulator.push(
             vec![consumer_record(0, 11, rec("cpu", 7))],
-            start + Duration::from_millis(1),
+            start + millis(1).to_std(),
         );
-        check!(accumulator.should_flush(start + Duration::from_millis(1)));
+        check!(accumulator.should_flush(start + millis(1).to_std()));
         check!(accumulator.take().len() == 2);
-        check!(!accumulator.should_flush(start + Duration::from_mins(2)));
+        check!(!accumulator.should_flush(start + minutes(2).to_std()));
     }
 
     #[test]
     fn accumulator_flushes_on_max_age() {
-        let mut accumulator = ConsumerRecordAccumulator::new(100, Duration::from_secs(10));
+        let mut accumulator = ConsumerRecordAccumulator::new(100, secs(10));
         let start = Instant::now();
 
         accumulator.push(vec![consumer_record(0, 10, rec("cpu", 5))], start);
-        assert!(!accumulator.should_flush(start + Duration::from_secs(9)));
-        assert!(accumulator.should_flush(start + Duration::from_secs(10)));
+        assert!(!accumulator.should_flush(start + secs(9).to_std()));
+        assert!(accumulator.should_flush(start + secs(10).to_std()));
     }
 
     fn consumer_record(partition: i32, offset: i64, record: ProfileRecord) -> ConsumerRecord {

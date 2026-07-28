@@ -1,5 +1,9 @@
 use std::collections::HashMap;
 
+use crabka_units::{
+    ByteSize, Frequency, Time,
+    convert::{ByteSizeExt as _, FrequencyExt, TimeExt as _},
+};
 use serde::Deserialize;
 
 use super::Limits;
@@ -73,9 +77,11 @@ struct RuntimeFile {
     overrides: HashMap<String, PartialLimits>,
 }
 
-// Tenant entries are intentionally partial: Pyroscope overrides merge the
-// tenant-specific fields over the process defaults. Unknown keys are rejected
-// (see `RuntimeFile`).
+// The Pyroscope-shaped runtime-overrides keys, in the units an operator writes
+// them (profiles/sec, bytes, seconds). Tenant entries are intentionally partial:
+// this is partial configuration, not old-schema compatibility — each entry
+// overrides only the limit fields it names, `merge_over` lifts them into the
+// dimensioned `Limits`, and unknown keys are rejected (see `RuntimeFile`).
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PartialLimits {
@@ -139,19 +145,19 @@ impl PartialLimits {
 
     fn merge_over(self, defaults: &Limits) -> Limits {
         Limits {
-            ingestion_rate_profiles_per_sec: self
+            ingestion_rate: self
                 .ingestion_rate_profiles_per_sec
-                .unwrap_or(defaults.ingestion_rate_profiles_per_sec),
+                .map_or(defaults.ingestion_rate, Frequency::from_per_sec),
             ingestion_burst_profiles: self
                 .ingestion_burst_profiles
                 .unwrap_or(defaults.ingestion_burst_profiles),
             max_series: self.max_series.unwrap_or(defaults.max_series),
-            max_label_name_length: self
+            max_label_name: self
                 .max_label_name_length
-                .unwrap_or(defaults.max_label_name_length),
-            max_label_value_length: self
+                .map_or(defaults.max_label_name, ByteSize::from_bytes),
+            max_label_value: self
                 .max_label_value_length
-                .unwrap_or(defaults.max_label_value_length),
+                .map_or(defaults.max_label_value, ByteSize::from_bytes),
             max_label_names_per_series: self
                 .max_label_names_per_series
                 .unwrap_or(defaults.max_label_names_per_series),
@@ -161,9 +167,11 @@ impl PartialLimits {
             max_flamegraph_nodes_max: self
                 .max_flamegraph_nodes_max
                 .unwrap_or(defaults.max_flamegraph_nodes_max),
-            max_query_length_secs: self
+            max_query_length: self
                 .max_query_length_secs
-                .unwrap_or(defaults.max_query_length_secs),
+                .map_or(defaults.max_query_length, |secs| {
+                    Time::from_secs(i64::try_from(secs).unwrap_or(i64::MAX))
+                }),
             max_session_id_cardinality: self
                 .max_session_id_cardinality
                 .unwrap_or(defaults.max_session_id_cardinality),
@@ -174,6 +182,7 @@ impl PartialLimits {
 #[cfg(test)]
 mod tests {
     use assert2::{assert, check};
+    use crabka_units::{bytes, per_sec, secs};
 
     use super::*;
 
@@ -194,15 +203,15 @@ overrides:
         assert!(
             *tenant_a
                 == Limits {
-                    ingestion_rate_profiles_per_sec: 500.0,
+                    ingestion_rate: per_sec(500),
                     ingestion_burst_profiles: 10_000,
                     max_series: 1000,
-                    max_label_name_length: 1024,
-                    max_label_value_length: 2048,
+                    max_label_name: bytes(1024),
+                    max_label_value: bytes(2048),
                     max_label_names_per_series: 40,
                     max_flamegraph_nodes_default: 2048,
                     max_flamegraph_nodes_max: 0,
-                    max_query_length_secs: 2_595_600,
+                    max_query_length: secs(2_595_600),
                     max_session_id_cardinality: 0,
                 }
         );
@@ -213,13 +222,8 @@ overrides:
         let provider = OverridesProvider::from_yaml(YAML).unwrap();
         let tenant_b = provider.for_tenant("tenant-b");
 
-        assert!(tenant_b.max_label_value_length == 64);
-        assert!(
-            (tenant_b.ingestion_rate_profiles_per_sec
-                - Limits::default().ingestion_rate_profiles_per_sec)
-                .abs()
-                <= f64::EPSILON
-        );
+        assert!(tenant_b.max_label_value == bytes(64));
+        assert!(tenant_b.ingestion_rate == Limits::default().ingestion_rate);
     }
 
     #[test]
@@ -322,15 +326,15 @@ overrides:
         assert!(
             *tenant_a
                 == Limits {
-                    ingestion_rate_profiles_per_sec: 0.0,
+                    ingestion_rate: <Frequency as FrequencyExt>::ZERO,
                     ingestion_burst_profiles: 10_000,
                     max_series: 0,
-                    max_label_name_length: 1024,
-                    max_label_value_length: 2048,
+                    max_label_name: bytes(1024),
+                    max_label_value: bytes(2048),
                     max_label_names_per_series: 40,
                     max_flamegraph_nodes_default: 0,
                     max_flamegraph_nodes_max: 4096,
-                    max_query_length_secs: 2_595_600,
+                    max_query_length: secs(2_595_600),
                     max_session_id_cardinality: 0,
                 }
         );

@@ -9,6 +9,14 @@
 use derive_more::{Display, From, Into};
 
 /// A range-selector window, in nanoseconds (the `[5m]` in a metric query).
+///
+/// Raw nanoseconds rather than a `crabka_units::Time`: that stores `f64`
+/// seconds, which is exact for integers only below 2^53 — about 104 days of
+/// nanoseconds — while `LogQL` admits `w` and `y` duration literals well past
+/// that. A window written as `1y2w3d4h5m6s7ms8us9ns` has to round-trip to the
+/// nanosecond, and the field filters compare durations exactly, so the value
+/// stays an integer. `docs/uom-adoption.md` excludes nanosecond magnitudes for
+/// the same reason.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Display, From, Into)]
 pub struct DurationNanos(pub i64);
 

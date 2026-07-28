@@ -22,6 +22,7 @@ addr2line = { workspace = true }
 arrow = { workspace = true }
 async-trait = { workspace = true }
 crabka-blockstore = { path = "../blockstore", version = "0.3.7" }
+crabka-units = { workspace = true }
 datafusion = { workspace = true }
 object = { workspace = true }
 prost = { workspace = true }
