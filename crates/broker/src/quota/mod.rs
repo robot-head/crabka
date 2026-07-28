@@ -5,6 +5,7 @@ use crabka_units::{
     ByteRate, Time,
     convert::{ByteRateExt as _, TimeExt},
 };
+use num_traits::cast::{NumCast, ToPrimitive as _};
 
 mod buckets;
 mod controller_mutation;
@@ -89,18 +90,24 @@ pub(crate) fn bucket_rate(raw: u64) -> ByteRate {
     ByteRate::from_bytes_per_sec(i64::try_from(raw).unwrap_or(i64::MAX))
 }
 
+/// A configured rate as a whole token count, truncated toward zero.
+///
+/// Negative and non-finite rates are not throughputs and collapse to `0`, the
+/// bucket's "no limit configured" sentinel; anything past `u64::MAX` saturates.
 pub(crate) fn positive_f64_to_u64(value: f64) -> u64 {
     if !value.is_finite() || value <= 0.0 {
         return 0;
     }
-    value.trunc().to_string().parse().unwrap_or(u64::MAX)
+    value.trunc().to_u64().unwrap_or(u64::MAX)
 }
 
-fn u64_to_f64(value: u64) -> f64 {
-    value
-        .to_string()
-        .parse()
-        .expect("every u64 is a finite f64")
+/// A token count widened for the overage-over-rate division.
+///
+/// Exact below 2^53, which covers every quota magnitude Kafka can express.
+/// `NumCast` never fails for `u64` into `f64`; the fallback keeps the quota path
+/// total rather than panicking on a value that cannot occur.
+pub(crate) fn u64_to_f64(value: u64) -> f64 {
+    NumCast::from(value).unwrap_or(f64::INFINITY)
 }
 
 #[cfg(test)]
@@ -188,6 +195,27 @@ mod tests {
         assert!(positive_f64_to_u64(10.9) == 10);
         assert!(positive_f64_to_u64(f64::MAX) == u64::MAX);
         assert!(u64_to_f64(u64::MAX).is_finite());
+    }
+
+    /// The producer path carried its own copy of this widening until the two
+    /// were merged. They agreed on every input, and this pins that they still
+    /// would — bit patterns rather than `==`, so the comparison is exact.
+    #[test]
+    fn widening_agrees_with_the_former_producer_copy() {
+        for value in [0_u64, 1, 1024, 1 << 52, (1_u64 << 53) - 1, u64::MAX] {
+            let former: f64 = value.to_string().parse().unwrap_or(f64::INFINITY);
+            check!(u64_to_f64(value).to_bits() == former.to_bits());
+        }
+    }
+
+    /// Truncating a configured rate agrees with the producer path's former
+    /// floor-and-parse, including the sub-one rates it rejects.
+    #[test]
+    fn rate_truncation_agrees_with_the_former_producer_copy() {
+        for rate in [1.0_f64, 1.9, 1024.0, 9.007_199_254_740_99e15, f64::MAX] {
+            let former: Option<u64> = rate.floor().to_string().parse().ok();
+            check!(rate.floor().to_u64() == former);
+        }
     }
 
     #[test]

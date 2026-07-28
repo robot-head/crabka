@@ -2,8 +2,9 @@
 
 use crabka_metadata::MetadataImage;
 use crabka_units::{Time, convert::TimeExt as _};
+use num_traits::cast::ToPrimitive as _;
 
-use super::{QuotaConsumption, buckets::QuotaBuckets, consume_configured_quota};
+use super::{QuotaConsumption, buckets::QuotaBuckets, consume_configured_quota, u64_to_f64};
 
 #[must_use]
 pub fn consume_producer_quota(
@@ -39,11 +40,7 @@ fn quota_rate_to_bucket_rate(rate: f64) -> Option<u64> {
         return None;
     }
 
-    rate.floor().to_string().parse().ok()
-}
-
-fn u64_to_f64(value: u64) -> f64 {
-    value.to_string().parse().unwrap_or(f64::INFINITY)
+    rate.floor().to_u64()
 }
 
 #[cfg(test)]
