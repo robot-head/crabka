@@ -29,6 +29,7 @@ use crabka_promql::{
     RulerShard, RulerStateSink, RulerWalError, ScanResult, TsdbBlock, WalHead,
     evaluate_and_persist_ruler_rule_set_for_shard_due_for_eval, prometheus_router,
 };
+use crabka_units::prelude::*;
 use futures::TryStreamExt;
 pub use ids::{Offset, PartitionIndex};
 use object_store::{ObjectStore, ObjectStoreExt, path::Path};
@@ -309,10 +310,7 @@ fn wal_record_max_timestamp_ms(record: &WalRecord) -> Option<i64> {
 
 #[async_trait::async_trait]
 pub trait WalHeadConsumerPoll: Send {
-    async fn poll(
-        &mut self,
-        timeout: Duration,
-    ) -> Result<Vec<ConsumerRecord>, WalHeadConsumerError>;
+    async fn poll(&mut self, timeout: Time) -> Result<Vec<ConsumerRecord>, WalHeadConsumerError>;
 }
 
 #[async_trait::async_trait]
@@ -322,11 +320,8 @@ pub trait WalHeadConsumerCommit: Send {
 
 #[async_trait::async_trait]
 impl WalHeadConsumerPoll for Consumer {
-    async fn poll(
-        &mut self,
-        timeout: Duration,
-    ) -> Result<Vec<ConsumerRecord>, WalHeadConsumerError> {
-        Consumer::poll(self, timeout)
+    async fn poll(&mut self, timeout: Time) -> Result<Vec<ConsumerRecord>, WalHeadConsumerError> {
+        Consumer::poll(self, timeout.to_std())
             .await
             .map_err(|error| WalHeadConsumerError::Poll(error.to_string()))
     }
@@ -355,7 +350,7 @@ pub async fn poll_wal_head_consumer_once<C>(
     consumer: &mut C,
     head: &WalHead,
     wal_topic: &str,
-    timeout: Duration,
+    timeout: Time,
 ) -> Result<WalHeadReplayResult, WalHeadConsumerError>
 where
     C: WalHeadConsumerPoll + WalHeadConsumerCommit + ?Sized,
@@ -394,7 +389,7 @@ pub async fn poll_ruler_state_consumer_once<S, C>(
     consumer: &mut C,
     state: &PrometheusApiState<S>,
     state_topic: &str,
-    timeout: Duration,
+    timeout: Time,
 ) -> Result<WalHeadReplayResult, RulerStateConsumerError>
 where
     S: MetricStore,
@@ -433,7 +428,7 @@ pub async fn run_ruler_state_consumer_loop<S, C, Stop>(
     consumer: &mut C,
     state: &PrometheusApiState<S>,
     state_topic: &str,
-    timeout: Duration,
+    timeout: Time,
     mut should_stop: Stop,
 ) -> Result<WalHeadConsumerLoopSummary, RulerStateConsumerError>
 where
@@ -463,7 +458,7 @@ pub async fn run_wal_head_consumer_loop<C, Stop>(
     consumer: &mut C,
     head: &WalHead,
     wal_topic: &str,
-    timeout: Duration,
+    timeout: Time,
     mut should_stop: Stop,
 ) -> Result<WalHeadConsumerLoopSummary, WalHeadConsumerError>
 where
@@ -852,7 +847,7 @@ pub async fn run_ruler_evaluation_loop<S, W, A, R, Stop>(
     sinks: (W, A, R),
     tenant: String,
     shard: RulerShard,
-    interval: Duration,
+    interval: Time,
     mut should_stop: Stop,
 ) -> Result<(), crabka_promql::PromqlError>
 where
@@ -881,7 +876,7 @@ where
         if should_stop() {
             break;
         }
-        tokio::time::sleep(interval).await;
+        tokio::time::sleep(interval.to_std()).await;
     }
     Ok(())
 }
@@ -963,15 +958,17 @@ struct CachedMetricBlockStore {
 
 /// Lookback substituted for an unbounded (`i64::MIN..i64::MAX`) query range so
 /// metadata-style requests don't force a full cold-manifest scan.
-const UNBOUNDED_COMPATIBILITY_LOOKBACK: Duration = Duration::from_hours(1);
+const UNBOUNDED_COMPATIBILITY_LOOKBACK: Time = hours(1);
 
 /// How long a cached cold-block store snapshot is served before manifests are
 /// re-listed from the object store.
-const COLD_CACHE_TTL: Duration = Duration::from_secs(30);
+const COLD_CACHE_TTL: Time = secs(30);
 
 impl CachedMetricBlockStore {
-    fn covers(&self, start_ms: i64, end_ms: i64, ttl: Duration) -> bool {
-        self.cached_at.elapsed() < ttl && self.start_ms <= start_ms && self.end_ms >= end_ms
+    fn covers(&self, start_ms: i64, end_ms: i64, ttl: Time) -> bool {
+        self.cached_at.elapsed().as_time() < ttl
+            && self.start_ms <= start_ms
+            && self.end_ms >= end_ms
     }
 }
 
@@ -1061,7 +1058,7 @@ impl RefreshingMetricBlockStore {
 fn normalize_refresh_range(start_ms: i64, end_ms: i64) -> (i64, i64) {
     if start_ms == i64::MIN && end_ms == i64::MAX {
         return (
-            unix_time_ms().saturating_sub(duration_ms(UNBOUNDED_COMPATIBILITY_LOOKBACK)),
+            unix_time_ms().saturating_sub(UNBOUNDED_COMPATIBILITY_LOOKBACK.millis_i64()),
             i64::MAX,
         );
     }
@@ -1474,6 +1471,7 @@ mod tests {
     use bytes::Bytes;
     use crabka_client_consumer::ConsumerRecord;
     use crabka_promql::{AlertmanagerSink, MetricStore};
+    use crabka_units::prelude::*;
     use futures::{StreamExt, stream::BoxStream};
     use object_store::{
         CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
@@ -1490,7 +1488,7 @@ mod tests {
     impl super::WalHeadConsumerPoll for RecordingWalHeadConsumer {
         async fn poll(
             &mut self,
-            _timeout: std::time::Duration,
+            _timeout: Time,
         ) -> Result<Vec<ConsumerRecord>, super::WalHeadConsumerError> {
             Ok(self.batches.remove(0))
         }
@@ -1526,11 +1524,11 @@ mod tests {
         inner: Arc<InMemory>,
         list_calls: Arc<AtomicUsize>,
         get_calls: Arc<AtomicUsize>,
-        list_delay: std::time::Duration,
+        list_delay: Time,
     }
 
     impl CountingObjectStore {
-        fn new(list_calls: Arc<AtomicUsize>, list_delay: std::time::Duration) -> Self {
+        fn new(list_calls: Arc<AtomicUsize>, list_delay: Time) -> Self {
             Self {
                 inner: Arc::new(InMemory::new()),
                 list_calls,
@@ -1597,7 +1595,7 @@ mod tests {
             prefix: Option<&Path>,
         ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
             self.list_calls.fetch_add(1, Ordering::SeqCst);
-            let delay = self.list_delay;
+            let delay = self.list_delay.to_std();
             Box::pin(self.inner.list(prefix).then(move |item| async move {
                 tokio::time::sleep(delay).await;
                 item
@@ -2116,7 +2114,7 @@ rules:
             &mut consumer,
             &state,
             super::RULER_STATE_TOPIC,
-            std::time::Duration::from_millis(1),
+            millis(1),
         )
         .await
         .unwrap();
@@ -2267,11 +2265,9 @@ rules:
     #[tokio::test]
     async fn refreshing_blockstore_singleflights_concurrent_cold_cache_loads() {
         let list_calls = Arc::new(AtomicUsize::new(0));
-        let object_store: std::sync::Arc<dyn ObjectStore> =
-            std::sync::Arc::new(CountingObjectStore::new(
-                Arc::clone(&list_calls),
-                std::time::Duration::from_millis(25),
-            ));
+        let object_store: std::sync::Arc<dyn ObjectStore> = std::sync::Arc::new(
+            CountingObjectStore::new(Arc::clone(&list_calls), millis(25)),
+        );
         let base = url::Url::parse("memory:///").unwrap();
         let writer_store = crabka_blockstore::BlockStore::new(object_store.clone(), base.clone());
         let mut labels = crabka_blockstore::Labels::new();
@@ -2443,7 +2439,7 @@ rules:
         let list_calls = Arc::new(AtomicUsize::new(0));
         let object_store = Arc::new(CountingObjectStore::new(
             Arc::clone(&list_calls),
-            std::time::Duration::ZERO,
+            Time::ZERO,
         ));
         let get_calls = Arc::clone(&object_store.get_calls);
         let object_store: std::sync::Arc<dyn ObjectStore> = object_store;
@@ -2840,7 +2836,7 @@ rules:
             &mut consumer,
             &head,
             crabka_metrics::WAL_TOPIC,
-            std::time::Duration::from_millis(1),
+            millis(1),
         )
         .await
         .unwrap();
@@ -2869,7 +2865,7 @@ rules:
             &mut consumer,
             &head,
             crabka_metrics::WAL_TOPIC,
-            std::time::Duration::from_millis(1),
+            millis(1),
         )
         .await
         .unwrap();
@@ -2914,7 +2910,7 @@ rules:
             &mut consumer,
             &head,
             crabka_metrics::WAL_TOPIC,
-            std::time::Duration::from_millis(1),
+            millis(1),
             |summary| summary.polls == 2,
         )
         .await

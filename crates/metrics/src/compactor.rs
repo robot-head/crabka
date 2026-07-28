@@ -3,7 +3,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
-    time::Duration,
 };
 
 use arrow::{
@@ -16,6 +15,7 @@ use crabka_blockstore::{BlockMeta, BlockStoreError, BlockWriter};
 use crabka_client_consumer::{AutoOffsetReset, Consumer, ConsumerError, ConsumerRecord};
 use crabka_ids::{Offset, PartitionIndex};
 use crabka_telemetry::propagation::{TRACEPARENT, set_remote_parent};
+use crabka_units::prelude::*;
 use futures::TryStreamExt;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload, path::Path};
 use serde::{Deserialize, Serialize};
@@ -169,14 +169,14 @@ pub struct CompactionPollResult {
 }
 
 /// Runtime knobs for the compactor polling loop.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CompactionLoopConfig {
     pub wal_topic: String,
-    pub poll_timeout: Duration,
+    pub poll_timeout: Time,
     /// Flush the accumulated buffer once this many WAL records are buffered.
     pub flush_max_rows: usize,
     /// Flush the accumulated buffer once its oldest record reaches this age.
-    pub flush_max_age: Duration,
+    pub flush_max_age: Time,
 }
 
 /// Summary returned after a compactor loop exits.
@@ -201,7 +201,7 @@ pub struct CompactionRetentionStats {
 pub const DEFAULT_FLUSH_MAX_ROWS: usize = 50_000;
 
 /// Default maximum age the oldest buffered WAL record may reach before a flush.
-pub const DEFAULT_FLUSH_MAX_AGE: Duration = Duration::from_mins(1);
+pub const DEFAULT_FLUSH_MAX_AGE: Time = minutes(1);
 
 const COMPACTION_OBJECT_PREFIX: &str = "metrics";
 
@@ -212,12 +212,12 @@ pub struct MetricsCompactorConfig {
     pub group_id: String,
     pub client_id: String,
     pub wal_topic: String,
-    pub poll_timeout: Duration,
+    pub poll_timeout: Time,
     pub auto_offset_reset: AutoOffsetReset,
     /// Flush the accumulated buffer once this many WAL records are buffered.
     pub flush_max_rows: usize,
     /// Flush the accumulated buffer once its oldest record reaches this age.
-    pub flush_max_age: Duration,
+    pub flush_max_age: Time,
 }
 
 /// Runtime handles assembled for the compactor role.
@@ -431,13 +431,13 @@ impl CompactionIndexSink for ObjectStoreCompactionIndexSink {
 pub async fn enforce_compaction_retention(
     store: Arc<dyn ObjectStore>,
     now_ms: i64,
-    retention: Duration,
+    retention: Time,
 ) -> Result<CompactionRetentionStats, CompactionRetentionError> {
-    if retention.is_zero() {
+    if retention <= Time::ZERO {
         return Ok(CompactionRetentionStats::default());
     }
 
-    let cutoff_ms = now_ms.saturating_sub(duration_millis(retention));
+    let cutoff_ms = now_ms.saturating_sub(retention.millis_i64());
     let mut objects = store
         .list(Some(&Path::from(COMPACTION_OBJECT_PREFIX)))
         .try_collect::<Vec<_>>()
@@ -495,10 +495,6 @@ async fn delete_if_exists(
     }
 }
 
-fn duration_millis(duration: Duration) -> i64 {
-    i64::try_from(duration.as_millis().min(i64::MAX as u128)).unwrap_or(i64::MAX)
-}
-
 impl MetricsCompactorConfig {
     /// Configuration defaults for the metrics compactor role.
     #[must_use]
@@ -508,7 +504,7 @@ impl MetricsCompactorConfig {
             group_id: "crabka-metrics-compactor".to_string(),
             client_id: "crabka-metrics-compactor".to_string(),
             wal_topic: crate::WAL_TOPIC.to_string(),
-            poll_timeout: Duration::from_secs(1),
+            poll_timeout: secs(1),
             auto_offset_reset: AutoOffsetReset::Earliest,
             flush_max_rows: DEFAULT_FLUSH_MAX_ROWS,
             flush_max_age: DEFAULT_FLUSH_MAX_AGE,
@@ -522,7 +518,7 @@ impl MetricsCompactorConfig {
         validate_non_empty("group_id", &self.group_id)?;
         validate_non_empty("client_id", &self.client_id)?;
         validate_non_empty("wal_topic", &self.wal_topic)?;
-        if self.poll_timeout.is_zero() {
+        if self.poll_timeout <= Time::ZERO {
             return Err(MetricsCompactorConfigError::ZeroPollTimeout);
         }
         if self.flush_max_rows == 0 {
@@ -605,7 +601,7 @@ pub trait CompactionConsumerCommitMut: Send {
 pub trait CompactionConsumerPoll: Send {
     async fn poll(
         &mut self,
-        timeout: Duration,
+        timeout: Time,
     ) -> Result<Vec<ConsumerRecord>, CompactionConsumerPollError>;
 }
 
@@ -613,9 +609,9 @@ pub trait CompactionConsumerPoll: Send {
 impl CompactionConsumerPoll for Consumer {
     async fn poll(
         &mut self,
-        timeout: Duration,
+        timeout: Time,
     ) -> Result<Vec<ConsumerRecord>, CompactionConsumerPollError> {
-        Consumer::poll(self, timeout)
+        Consumer::poll(self, timeout.to_std())
             .await
             .map_err(|error| CompactionConsumerPollError::Poll(error.to_string()))
     }
@@ -1084,7 +1080,7 @@ pub async fn poll_compactor_once<P, S, C>(
     index_sink: &S,
     committer: &C,
     wal_topic: &str,
-    timeout: Duration,
+    timeout: Time,
 ) -> Result<CompactionPollResult, CompactionPollError>
 where
     P: CompactionConsumerPoll + ?Sized,
@@ -1167,7 +1163,7 @@ impl CompactionBuffer {
             return true;
         }
         self.oldest_arrival
-            .is_some_and(|anchor| now.duration_since(anchor) >= config.flush_max_age)
+            .is_some_and(|anchor| now.duration_since(anchor).as_time() >= config.flush_max_age)
     }
 
     /// Take all buffered records, resetting the buffer to empty.
@@ -1487,7 +1483,7 @@ pub async fn poll_compactor_consumer_once<C, S>(
     block_writer: &BlockWriter,
     index_sink: &S,
     wal_topic: &str,
-    timeout: Duration,
+    timeout: Time,
 ) -> Result<CompactionPollResult, CompactionPollError>
 where
     C: CompactionConsumerPoll + CompactionConsumerCommitMut + ?Sized,
@@ -2018,6 +2014,7 @@ mod tests {
     use assert2::{assert, check};
     use async_trait::async_trait;
     use crabka_blockstore::Labels;
+    use crabka_units::prelude::*;
     use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory};
 
     use super::{compact_wal_records, encode_tenant_batches};
@@ -2326,13 +2323,9 @@ mod tests {
             .await
             .expect("write fresh manifest");
 
-        let stats = super::enforce_compaction_retention(
-            object_store.clone(),
-            10_000,
-            std::time::Duration::from_secs(5),
-        )
-        .await
-        .expect("enforce retention");
+        let stats = super::enforce_compaction_retention(object_store.clone(), 10_000, secs(5))
+            .await
+            .expect("enforce retention");
 
         assert_eq!(
             stats,
@@ -2368,13 +2361,18 @@ mod tests {
         );
     }
 
-    #[test]
-    fn duration_millis_converts_and_saturates() {
-        assert!(super::duration_millis(std::time::Duration::from_millis(1_234)) == 1_234);
-        assert!(
-            super::duration_millis(std::time::Duration::from_millis(i64::MAX as u64 + 1))
-                == i64::MAX
-        );
+    #[tokio::test]
+    async fn zero_and_negative_retention_windows_sweep_nothing() {
+        // The retention window is an extent, so "no window configured" is any
+        // non-positive extent — the sweep must not treat it as "delete all".
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        for retention in [Time::ZERO, Time::from_millis(-1)] {
+            let stats =
+                super::enforce_compaction_retention(object_store.clone(), 10_000, retention)
+                    .await
+                    .expect("enforce retention");
+            assert!(stats == super::CompactionRetentionStats::default());
+        }
     }
 
     #[tokio::test]
@@ -2403,13 +2401,9 @@ mod tests {
             .await
             .expect("write mismatched manifest");
 
-        let error = super::enforce_compaction_retention(
-            object_store.clone(),
-            10_000,
-            std::time::Duration::from_secs(5),
-        )
-        .await
-        .expect_err("mismatched manifest should fail");
+        let error = super::enforce_compaction_retention(object_store.clone(), 10_000, secs(5))
+            .await
+            .expect_err("mismatched manifest should fail");
 
         assert!(matches!(
             error,
@@ -2431,7 +2425,7 @@ mod tests {
             group_id: "metrics-compactor".to_string(),
             client_id: "crabka-metrics-compactor".to_string(),
             wal_topic: crate::WAL_TOPIC.to_string(),
-            poll_timeout: std::time::Duration::from_millis(500),
+            poll_timeout: millis(500),
             auto_offset_reset: crabka_client_consumer::AutoOffsetReset::Earliest,
             flush_max_rows: super::DEFAULT_FLUSH_MAX_ROWS,
             flush_max_age: super::DEFAULT_FLUSH_MAX_AGE,
@@ -2449,10 +2443,10 @@ mod tests {
             group_id: "metrics-compactor".to_string(),
             client_id: "crabka-metrics-compactor".to_string(),
             wal_topic: crate::WAL_TOPIC.to_string(),
-            poll_timeout: std::time::Duration::from_millis(250),
+            poll_timeout: millis(250),
             auto_offset_reset: crabka_client_consumer::AutoOffsetReset::Earliest,
             flush_max_rows: 12_345,
-            flush_max_age: std::time::Duration::from_secs(7),
+            flush_max_age: secs(7),
         };
 
         let runtime = cfg
@@ -2462,9 +2456,9 @@ mod tests {
             runtime.loop_config,
             super::CompactionLoopConfig {
                 wal_topic: crate::WAL_TOPIC.to_string(),
-                poll_timeout: std::time::Duration::from_millis(250),
+                poll_timeout: millis(250),
                 flush_max_rows: 12_345,
-                flush_max_age: std::time::Duration::from_secs(7),
+                flush_max_age: secs(7),
             }
         );
 
@@ -2888,7 +2882,7 @@ mod tests {
     impl super::CompactionConsumerPoll for StaticPoller {
         async fn poll(
             &mut self,
-            _timeout: std::time::Duration,
+            _timeout: Time,
         ) -> Result<Vec<crabka_client_consumer::ConsumerRecord>, super::CompactionConsumerPollError>
         {
             Ok(std::mem::take(&mut self.records))
@@ -2922,7 +2916,7 @@ mod tests {
             &sink,
             &committer,
             crate::WAL_TOPIC,
-            std::time::Duration::from_millis(1),
+            millis(1),
         )
         .await
         .expect("poll compactor once");
@@ -2949,7 +2943,7 @@ mod tests {
     impl super::CompactionConsumerPoll for QueuePoller {
         async fn poll(
             &mut self,
-            _timeout: std::time::Duration,
+            _timeout: Time,
         ) -> Result<Vec<crabka_client_consumer::ConsumerRecord>, super::CompactionConsumerPollError>
         {
             if self.batches.is_empty() {
@@ -2996,11 +2990,11 @@ mod tests {
             &committer,
             super::CompactionLoopConfig {
                 wal_topic: crate::WAL_TOPIC.to_string(),
-                poll_timeout: std::time::Duration::from_millis(1),
+                poll_timeout: millis(1),
                 // High row threshold and long age so neither below-threshold
                 // poll triggers a mid-loop flush; only the shutdown flush writes.
                 flush_max_rows: 50_000,
-                flush_max_age: std::time::Duration::from_hours(1),
+                flush_max_age: hours(1),
             },
             &mut stop_after_empty,
         )
@@ -3068,9 +3062,9 @@ mod tests {
             &committer,
             super::CompactionLoopConfig {
                 wal_topic: crate::WAL_TOPIC.to_string(),
-                poll_timeout: std::time::Duration::from_millis(1),
+                poll_timeout: millis(1),
                 flush_max_rows: 2,
-                flush_max_age: std::time::Duration::from_hours(1),
+                flush_max_age: hours(1),
             },
             &mut stop_after_empty,
         )
@@ -3159,9 +3153,9 @@ mod tests {
             &committer,
             super::CompactionLoopConfig {
                 wal_topic: crate::WAL_TOPIC.to_string(),
-                poll_timeout: std::time::Duration::from_millis(1),
+                poll_timeout: millis(1),
                 flush_max_rows: 50_000,
-                flush_max_age: std::time::Duration::from_mins(1),
+                flush_max_age: minutes(1),
             },
             &mut stop_after_three,
             clock.as_ref(),
@@ -3215,9 +3209,9 @@ mod tests {
             &sink,
             super::CompactionLoopConfig {
                 wal_topic: crate::WAL_TOPIC.to_string(),
-                poll_timeout: std::time::Duration::from_millis(1),
+                poll_timeout: millis(1),
                 flush_max_rows: 50_000,
-                flush_max_age: std::time::Duration::from_hours(1),
+                flush_max_age: hours(1),
             },
             |result| result.polled_records == 0,
         )
@@ -3262,9 +3256,9 @@ mod tests {
             &sink,
             super::CompactionLoopConfig {
                 wal_topic: crate::WAL_TOPIC.to_string(),
-                poll_timeout: std::time::Duration::from_millis(1),
+                poll_timeout: millis(1),
                 flush_max_rows: 50_000,
-                flush_max_age: std::time::Duration::from_hours(1),
+                flush_max_age: hours(1),
             },
             |result| result.polled_records == 0,
         )
@@ -3390,9 +3384,9 @@ mod tests {
             &committer,
             super::CompactionLoopConfig {
                 wal_topic: crate::WAL_TOPIC.to_string(),
-                poll_timeout: std::time::Duration::from_millis(1),
+                poll_timeout: millis(1),
                 flush_max_rows: 50_000,
-                flush_max_age: std::time::Duration::from_hours(1),
+                flush_max_age: hours(1),
             },
             |result| result.polled_records == 0,
         )
@@ -3415,7 +3409,7 @@ mod tests {
     impl super::CompactionConsumerPoll for PollAndCommit {
         async fn poll(
             &mut self,
-            _timeout: std::time::Duration,
+            _timeout: Time,
         ) -> Result<Vec<crabka_client_consumer::ConsumerRecord>, super::CompactionConsumerPollError>
         {
             if self.batches.is_empty() {

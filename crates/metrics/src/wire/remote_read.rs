@@ -4,6 +4,7 @@
 //! `STREAMED_XOR_CHUNKS` is intentionally not advertised or encoded here.
 
 use crabka_blockstore::{LabelMatcher, Labels, MatchOp};
+use crabka_units::prelude::*;
 use prost::Message;
 use thiserror::Error;
 
@@ -12,7 +13,7 @@ use crate::wire::{decoded::snappy_block_decode_raw, pb::v1};
 /// Default decompressed-body cap for `remote_read` requests when a caller does
 /// not supply its own. Mirrors the distributor's ingest default so a single
 /// `read` request cannot decompress to an unbounded allocation.
-pub const DEFAULT_MAX_READ_DECOMPRESSED: usize = 32 * 1024 * 1024;
+pub const DEFAULT_MAX_READ_DECOMPRESSED: ByteSize = mebibytes(32);
 
 #[derive(Debug, Error)]
 pub enum RemoteReadError {
@@ -36,11 +37,11 @@ pub enum RemoteReadError {
 /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub fn decode_read_request(
     snappy_body: &[u8],
-    max_output: usize,
+    max_output: ByteSize,
 ) -> Result<v1::ReadRequest, RemoteReadError> {
     let raw = snappy_block_decode_raw(
         snappy_body,
-        max_output,
+        max_output.bytes_usize(),
         RemoteReadError::SnappyDecode,
         RemoteReadError::SnappyOutputTooLarge,
     )?;
@@ -181,7 +182,7 @@ mod tests {
 
         assert!(snap::raw::decompress_len(&frame).unwrap() as u64 == huge);
 
-        let err = decode_read_request(&frame, 1 << 20).unwrap_err();
+        let err = decode_read_request(&frame, mebibytes(1)).unwrap_err();
 
         assert!(matches!(err, RemoteReadError::SnappyOutputTooLarge(_)));
     }

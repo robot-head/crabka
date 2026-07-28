@@ -25,6 +25,7 @@ use crabka_metrics::{
     run_compactor_consumer_loop,
     wire::pb,
 };
+use crabka_units::prelude::*;
 use object_store::{ObjectStore, memory::InMemory};
 use prost::Message;
 use tower::ServiceExt as _;
@@ -84,7 +85,7 @@ async fn remote_write_v1_lands_as_block() {
     let mut config = MetricsCompactorConfig::new(bootstrap);
     config.group_id = "metrics-roundtrip-compactor".into();
     config.client_id = "metrics-roundtrip-compactor".into();
-    config.poll_timeout = Duration::from_millis(100);
+    config.poll_timeout = millis(100);
     let runtime = config
         .build_runtime(object_store.clone())
         .expect("compactor runtime");
