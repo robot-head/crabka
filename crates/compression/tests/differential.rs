@@ -26,7 +26,7 @@ macro_rules! diff_test {
 
                 // JVM compresses; Rust decompresses; bytes match input.
                 let jvm_z = o.borrow_mut().compress($codec_str, &data);
-                let rust_back = decompress($ct, &jvm_z, usize::MAX).unwrap();
+                let rust_back = decompress($ct, &jvm_z, crabka_units::convert::ByteSizeExt::from_bytes(u64::MAX)).unwrap();
                 prop_assert_eq!(rust_back.as_ref(), data.as_slice());
             });
         }

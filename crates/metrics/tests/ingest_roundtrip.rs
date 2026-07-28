@@ -150,7 +150,7 @@ async fn create_metrics_wal_topic(bootstrap: &str) {
                 replicas: 1,
                 configs: BTreeMap::default(),
             }],
-            5_000,
+            crabka_units::secs(5),
         )
         .await
         .expect("create metrics wal topic");
@@ -169,7 +169,7 @@ async fn inspect_wal_record(bootstrap: &str) -> WalRecord {
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
         let records = consumer
-            .poll(Duration::from_millis(250))
+            .poll(crabka_units::millis(250))
             .await
             .expect("poll inspect consumer");
         if let Some(record) = records.into_iter().find(|record| record.topic == WAL_TOPIC) {

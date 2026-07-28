@@ -169,7 +169,7 @@ async fn create_topic(bootstrap: &str, name: &str) {
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            10_000,
+            crabka_units::secs(10),
         )
         .await
         .unwrap();
@@ -631,7 +631,7 @@ async fn count_value(bootstrap: &str, topic: &str, value: &[u8]) -> usize {
         .unwrap();
     let mut n = 0;
     for _ in 0..10 {
-        let batch = consumer.poll(Duration::from_millis(500)).await.unwrap();
+        let batch = consumer.poll(crabka_units::millis(500)).await.unwrap();
         for r in batch {
             if r.value.as_deref() == Some(value) {
                 n += 1;

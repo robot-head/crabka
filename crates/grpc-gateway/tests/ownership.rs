@@ -59,7 +59,7 @@ async fn ownership_split_non_owner_is_unavailable() {
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            10_000,
+            crabka_units::secs(10),
         )
         .await
         .unwrap();

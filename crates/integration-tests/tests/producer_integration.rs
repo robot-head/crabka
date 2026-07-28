@@ -156,7 +156,7 @@ async fn idempotent_produce_then_consume() {
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
     while seen < PRODUCE_N && std::time::Instant::now() < deadline {
         seen += consumer
-            .poll(Duration::from_millis(500))
+            .poll(crabka_units::millis(500))
             .await
             .expect("poll")
             .len();

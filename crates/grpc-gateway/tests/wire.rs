@@ -104,7 +104,7 @@ async fn send_handler_ok_and_error_arms() {
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            10_000,
+            crabka_units::secs(10),
         )
         .await
         .unwrap();

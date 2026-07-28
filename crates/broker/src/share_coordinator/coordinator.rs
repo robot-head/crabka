@@ -23,7 +23,6 @@ use crabka_ids::PartitionIndex;
 use crabka_log::Offset;
 use crabka_metadata::MetadataImage;
 use crabka_protocol::records::{Record, RecordBatch};
-use crabka_units::{ByteSize, convert::ByteSizeExt as _};
 use dashmap::DashMap;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{info, warn};
@@ -468,10 +467,7 @@ impl ShareCoordinator {
             .copied()
             .collect();
 
-        // `ShareCoordinatorConfig` is public API and derives `Eq`, so it keeps
-        // the raw byte count; the quantity is built once here, at the seam.
-        let read_max =
-            ByteSize::from_bytes(u64::try_from(self.config.recovery_read_max_bytes).unwrap_or(0));
+        let read_max = self.config.recovery_read_max;
 
         for p in local_partitions {
             let Some(part) = self.partitions.get(bootstrap::TOPIC, p) else {
@@ -704,7 +700,7 @@ mod tests {
             crabka_audit::NodeId(1),
             Arc::clone(&registry),
             ShareCoordinatorConfig {
-                recovery_read_max_bytes: 700,
+                recovery_read_max: crabka_units::bytes(700),
                 ..ShareCoordinatorConfig::default()
             },
         );
@@ -715,7 +711,7 @@ mod tests {
             crabka_audit::NodeId(1),
             registry,
             ShareCoordinatorConfig {
-                recovery_read_max_bytes: 4_096,
+                recovery_read_max: crabka_units::kibibytes(4),
                 ..ShareCoordinatorConfig::default()
             },
         );

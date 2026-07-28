@@ -33,7 +33,7 @@ async fn subscribe_receives_then_commits() {
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            10_000,
+            crabka_units::secs(10),
         )
         .await
         .unwrap();

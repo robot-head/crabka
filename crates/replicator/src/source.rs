@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, VecDeque};
 use async_trait::async_trait;
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
 use crabka_connect::{ConnectError, ConnectRecord, OffsetMap, OffsetValue, Source, SourceOffset};
-use crabka_units::prelude::{Time, TimeExt as _, millis};
+use crabka_units::prelude::{Time, millis};
 
 use crate::{
     ids::{Offset, PartitionIndex, Timestamp},
@@ -112,7 +112,7 @@ impl Source<(), ReplicatedRecord> for SourceConsumer {
                 .consumer
                 .as_mut()
                 .ok_or_else(|| ConnectError::Backend("source consumer is closed".into()))?
-                .poll(POLL_TIMEOUT.to_std())
+                .poll(POLL_TIMEOUT)
                 .await
                 .map_err(|e| ConnectError::Backend(e.to_string()))?;
 

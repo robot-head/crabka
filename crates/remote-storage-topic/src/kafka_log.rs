@@ -434,7 +434,7 @@ async fn ensure_topic(cfg: &KafkaMetadataLogConfig) -> Result<(i32, WireUuid), M
         configs,
     };
     let outcomes = admin
-        .create_topics(&[spec], TOPIC_CREATE_TIMEOUT.millis_i32())
+        .create_topics(&[spec], TOPIC_CREATE_TIMEOUT)
         .await
         .map_err(|e| MetadataLogError::Other(format!("create_topics failed: {e}")))?;
     let outcome = outcomes

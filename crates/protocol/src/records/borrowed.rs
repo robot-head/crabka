@@ -130,7 +130,11 @@ fn decode_borrow_impl<'de>(buf: &mut &'de [u8]) -> Result<RecordBatch<'de>, Reco
             .len()
             .saturating_mul(DECOMPRESS_MAX_RATIO)
             .clamp(DECOMPRESS_MIN_CAP, DECOMPRESS_ABSOLUTE_CEILING);
-        let decompressed = crabka_compression::decompress(codec, raw_body, max_output)?;
+        let decompressed = crabka_compression::decompress(
+            codec,
+            raw_body,
+            crabka_units::convert::ByteSizeExt::from_bytes(max_output as u64),
+        )?;
         RecordBody::Owned(decompressed)
     };
 

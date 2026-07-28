@@ -71,12 +71,24 @@ fn bench_one_shape(
             b.iter(|| compress(ct, black_box(&data)).unwrap());
         });
         group.bench_function(format!("decompress_{size}"), |b| {
-            b.iter(|| decompress(ct, black_box(&compressed), usize::MAX).unwrap());
+            b.iter(|| {
+                decompress(
+                    ct,
+                    black_box(&compressed),
+                    crabka_units::convert::ByteSizeExt::from_bytes(u64::MAX),
+                )
+                .unwrap()
+            });
         });
         group.bench_function(format!("roundtrip_{size}"), |b| {
             b.iter(|| {
                 let c = compress(ct, black_box(&data)).unwrap();
-                let d = decompress(ct, &c, usize::MAX).unwrap();
+                let d = decompress(
+                    ct,
+                    &c,
+                    crabka_units::convert::ByteSizeExt::from_bytes(u64::MAX),
+                )
+                .unwrap();
                 black_box(d)
             });
         });
@@ -112,7 +124,14 @@ fn bench_none(c: &mut Criterion) {
             b.iter(|| compress(CompressionType::None, black_box(&data)).unwrap());
         });
         group.bench_function(format!("decompress_{size}"), |b| {
-            b.iter(|| decompress(CompressionType::None, black_box(&data), usize::MAX).unwrap());
+            b.iter(|| {
+                decompress(
+                    CompressionType::None,
+                    black_box(&data),
+                    crabka_units::convert::ByteSizeExt::from_bytes(u64::MAX),
+                )
+                .unwrap()
+            });
         });
     }
     group.finish();

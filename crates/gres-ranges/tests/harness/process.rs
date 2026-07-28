@@ -753,7 +753,7 @@ async fn provision_control(bootstrap: &str, tenant: &str, r0_port: u16, r1_port:
     })
     .collect::<Vec<_>>();
     let outcomes = admin
-        .create_topics(&topics, 30_000)
+        .create_topics(&topics, crabka_units::secs(30))
         .await
         .expect("create WAL topics");
     assert!(

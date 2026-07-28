@@ -73,7 +73,7 @@ impl ConsumeSession {
             .consumer
             .as_mut()
             .expect("ConsumeSession polled after close")
-            .poll(timeout.to_std())
+            .poll(timeout)
             .await?;
         let mut decoded_batch = Vec::with_capacity(batch.len());
         for r in batch {

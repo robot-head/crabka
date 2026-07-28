@@ -150,7 +150,7 @@ async fn main() {
                 .await
                 .expect("consumer build");
             while !stop.load(Ordering::Relaxed) {
-                let _ = consumer.poll(Duration::from_millis(200)).await;
+                let _ = consumer.poll(crabka_units::millis(200)).await;
             }
             consumer.close().await.ok();
         }));

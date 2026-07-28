@@ -8,10 +8,7 @@ pub(crate) mod otlp_sink;
 pub(crate) mod prometheus_sink;
 use std::sync::Arc;
 
-use crabka_units::{
-    ByteSize, Time,
-    convert::{ByteSizeExt as _, TimeExt as _},
-};
+use crabka_units::{ByteSize, Time, convert::TimeExt as _};
 pub(crate) use manager::ClientMetricsManager;
 
 use self::{otlp_sink::OtlpForwarder, prometheus_sink::ClientMetricsCollector};
@@ -38,10 +35,7 @@ impl ClientMetrics {
             None => OtlpForwarder::disabled(),
         };
         Self {
-            manager: ClientMetricsManager::new(
-                telemetry_max.bytes_i32(),
-                default_interval.millis_i32(),
-            ),
+            manager: ClientMetricsManager::new(telemetry_max, default_interval),
             prometheus: Arc::new(ClientMetricsCollector::new(
                 prometheus_snapshot_ttl.to_std(),
             )),

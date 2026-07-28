@@ -14,7 +14,11 @@ use crabka_security::{
     ca::{SubjectAltName, generate_cluster_ca, issue_broker_cert},
     scram::PgScramVerifier,
 };
-use crabka_units::convert::{ByteSizeExt as _, TimeExt as _};
+use crabka_units::{
+    Time,
+    convert::{ByteSizeExt as _, TimeExt as _},
+    secs,
+};
 use futures::StreamExt as _;
 use k8s_openapi::{
     ByteString,
@@ -61,6 +65,10 @@ use crate::{
 };
 
 const FINALIZER: &str = "crabka.io/gres-tenant-finalizer";
+
+/// How long the broker may take to finish a tenant WAL-topic mutation before
+/// it answers with a timeout error, carried as Kafka's `timeout_ms` field.
+const TENANT_TOPIC_MUTATION_TIMEOUT: Time = secs(30);
 const APP_NAME: &str = "crabka-gres";
 const DEFAULT_IMAGE: &str = concat!("ghcr.io/robot-head/crabka-gres:", env!("CARGO_PKG_VERSION"));
 pub(super) const COMPUTE_PORT: i32 = 5432;
@@ -124,7 +132,7 @@ struct ReadyTenant {
     defaults: EffectiveDefaults,
     compute_image: String,
     compute_policy: EffectiveGresComputePolicy,
-    direct_bootstrap_grace_ms: u64,
+    direct_bootstrap_grace: Time,
     kafka_sasl: bool,
 }
 
@@ -170,7 +178,7 @@ async fn prepare_tenant(
                     registry_version: None,
                     lifecycle_phase: preserved_lifecycle_state(obj),
                     advance_generation: false,
-                    direct_bootstrap_grace_ms: None,
+                    direct_bootstrap_grace: None,
                 },
             )
             .await?;
@@ -192,7 +200,7 @@ async fn prepare_tenant(
                 registry_version: None,
                 lifecycle_phase: preserved_lifecycle_state(obj),
                 advance_generation: false,
-                direct_bootstrap_grace_ms: None,
+                direct_bootstrap_grace: None,
             },
         )
         .await?;
@@ -267,7 +275,9 @@ async fn prepare_tenant(
         defaults: effective_defaults(gres.spec.defaults.as_ref(), obj.spec.overrides.as_ref()),
         compute_image,
         compute_policy,
-        direct_bootstrap_grace_ms: pgdog_policy.direct_bootstrap_grace.into_value(),
+        direct_bootstrap_grace: Time::from_millis(
+            i64::try_from(pgdog_policy.direct_bootstrap_grace.into_value()).unwrap_or(i64::MAX),
+        ),
         kafka_sasl: kafka_internal_listener_requires_sasl(&kafka),
     })))
 }
@@ -288,7 +298,7 @@ async fn patch_cluster_not_ready(
             registry_version: None,
             lifecycle_phase: preserved_lifecycle_state(obj),
             advance_generation: false,
-            direct_bootstrap_grace_ms: None,
+            direct_bootstrap_grace: None,
         },
     )
     .await
@@ -313,7 +323,7 @@ async fn reconcile_inner(
         defaults,
         compute_image,
         compute_policy,
-        direct_bootstrap_grace_ms,
+        direct_bootstrap_grace,
         kafka_sasl,
     } = *ready;
     let (wal_topic, cfg_topic) = (wal_topic(&tenant_name), tenant_config_topic(&tenant_name));
@@ -464,7 +474,7 @@ async fn reconcile_inner(
             image: &compute_image,
             compute_policy,
             record: &record,
-            direct_bootstrap_grace_ms,
+            direct_bootstrap_grace,
             kafka_sasl,
             range_control_enabled,
             range_tls_hash: range_tls_hash.as_deref(),
@@ -482,7 +492,7 @@ async fn reconcile_inner(
                 &error,
                 registry_version,
                 lifecycle_state,
-                direct_bootstrap_grace_ms,
+                direct_bootstrap_grace,
             )
             .await?;
             Err(error)
@@ -519,7 +529,7 @@ async fn patch_reconcile_failed(
     error: &ReconcileError,
     registry_version: Option<u64>,
     lifecycle_phase: TenantState,
-    direct_bootstrap_grace_ms: u64,
+    direct_bootstrap_grace: Time,
 ) -> Result<(), ReconcileError> {
     patch_status(
         tenant_api,
@@ -532,7 +542,7 @@ async fn patch_reconcile_failed(
             registry_version,
             lifecycle_phase,
             advance_generation: false,
-            direct_bootstrap_grace_ms: Some(direct_bootstrap_grace_ms),
+            direct_bootstrap_grace: Some(direct_bootstrap_grace),
         },
     )
     .await
@@ -584,7 +594,9 @@ async fn provision_tenant_resources(
     }
     let missing = missing_topics(admin, &topic_specs).await?;
     if !missing.is_empty() {
-        admin.create_topics(&missing, 30_000).await?;
+        admin
+            .create_topics(&missing, TENANT_TOPIC_MUTATION_TIMEOUT)
+            .await?;
     }
 
     let password = read_password_secret(
@@ -671,7 +683,7 @@ struct ComputeStatusConfig<'a> {
     image: &'a str,
     compute_policy: EffectiveGresComputePolicy,
     record: &'a TenantRecord,
-    direct_bootstrap_grace_ms: u64,
+    direct_bootstrap_grace: Time,
     kafka_sasl: bool,
     range_control_enabled: bool,
     range_tls_hash: Option<&'a str>,
@@ -746,7 +758,7 @@ async fn reconcile_compute_and_status(
             registry_version: Some(config.record.record_version),
             lifecycle_phase: config.record.state,
             advance_generation: endpoint_ready,
-            direct_bootstrap_grace_ms: Some(config.direct_bootstrap_grace_ms),
+            direct_bootstrap_grace: Some(config.direct_bootstrap_grace),
         },
     )
     .await?;
@@ -1066,7 +1078,7 @@ pub trait RangeRetirementAdmin: Send {
     async fn delete_topics(
         &mut self,
         names: &[&str],
-        timeout_ms: i32,
+        timeout: Time,
     ) -> Result<Vec<crabka_client_admin::DeleteTopicOutcome>, crabka_client_admin::AdminError>;
 }
 
@@ -1085,9 +1097,9 @@ where
     async fn delete_topics(
         &mut self,
         names: &[&str],
-        timeout_ms: i32,
+        timeout: Time,
     ) -> Result<Vec<crabka_client_admin::DeleteTopicOutcome>, crabka_client_admin::AdminError> {
-        crabka_client_admin::AdminClientLike::delete_topics(self, names, timeout_ms).await
+        crabka_client_admin::AdminClientLike::delete_topics(self, names, timeout).await
     }
 }
 
@@ -1159,7 +1171,9 @@ where
 {
     for range_id in ranges {
         let topic = wal_topic_for_generation(tenant, *range_id, generation);
-        let outcomes = admin.delete_topics(&[topic.as_str()], 30_000).await?;
+        let outcomes = admin
+            .delete_topics(&[topic.as_str()], TENANT_TOPIC_MUTATION_TIMEOUT)
+            .await?;
         for outcome in outcomes {
             if let Some(error) = outcome.error {
                 return Err(ReconcileError::Malformed(format!(
@@ -2412,7 +2426,7 @@ struct TenantStatusUpdate<'a> {
     registry_version: Option<u64>,
     lifecycle_phase: TenantState,
     advance_generation: bool,
-    direct_bootstrap_grace_ms: Option<u64>,
+    direct_bootstrap_grace: Option<Time>,
 }
 
 async fn patch_status(
@@ -2444,7 +2458,7 @@ async fn patch_status(
         existing_grace,
         update.lifecycle_phase,
         u64::try_from(now).unwrap_or(u64::MAX),
-        update.direct_bootstrap_grace_ms,
+        update.direct_bootstrap_grace,
     );
     let body = json!({
         "status": {
@@ -2474,7 +2488,7 @@ fn pgdog_grace_deadline(
     existing_grace: Option<u64>,
     lifecycle_phase: TenantState,
     now: u64,
-    direct_bootstrap_grace_ms: Option<u64>,
+    direct_bootstrap_grace: Option<Time>,
 ) -> Option<u64> {
     if lifecycle_phase != TenantState::Active {
         return None;
@@ -2482,7 +2496,10 @@ fn pgdog_grace_deadline(
     if previous_phase == Some("active") && existing_grace.is_some() {
         return existing_grace;
     }
-    direct_bootstrap_grace_ms.map(|grace| now.saturating_add(grace))
+    // `now` is a unix-millisecond instant, so the grace extent crosses into
+    // millisecond form here to produce the deadline the CRD status carries.
+    direct_bootstrap_grace
+        .map(|grace| now.saturating_add(grace.millis_i64().try_into().unwrap_or(u64::MAX)))
 }
 
 fn preserved_lifecycle_state(obj: &GresTenant) -> TenantState {
@@ -2514,7 +2531,7 @@ mod tests {
                 None,
                 TenantState::Active,
                 10_000,
-                Some(7_000)
+                Some(secs(7))
             ) == Some(17_000)
         );
         assert!(
@@ -2523,7 +2540,7 @@ mod tests {
                 None,
                 TenantState::Active,
                 u64::MAX - 1,
-                Some(7_000)
+                Some(secs(7))
             ) == Some(u64::MAX)
         );
         assert!(
@@ -2532,7 +2549,7 @@ mod tests {
                 Some(12_000),
                 TenantState::Active,
                 20_000,
-                Some(7_000)
+                Some(secs(7))
             ) == Some(12_000)
         );
         assert!(
@@ -2541,7 +2558,7 @@ mod tests {
                 None,
                 TenantState::Active,
                 20_000,
-                Some(7_000)
+                Some(secs(7))
             ) == Some(27_000)
         );
         assert!(
@@ -2550,7 +2567,7 @@ mod tests {
                 None,
                 TenantState::Active,
                 u64::MAX - 1,
-                Some(7_000)
+                Some(secs(7))
             ) == Some(u64::MAX)
         );
         assert!(

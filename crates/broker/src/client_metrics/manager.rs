@@ -10,6 +10,10 @@ use std::{
 };
 
 use crabka_metadata::MetadataImage;
+use crabka_units::{
+    ByteSize, Time,
+    convert::{ByteSizeExt as _, TimeExt as _},
+};
 use uuid::Uuid;
 
 use super::config::{self, ALL_METRICS};
@@ -63,8 +67,8 @@ pub(crate) enum PushDecision {
 
 pub(crate) struct ClientMetricsManager {
     instances: Mutex<HashMap<Uuid, ClientInstance>>,
-    default_interval_ms: i32,
-    telemetry_max_bytes: i32,
+    default_interval: Time,
+    telemetry_max: ByteSize,
 }
 
 /// Compression codecs the broker advertises, in Kafka's fixed order:
@@ -72,16 +76,18 @@ pub(crate) struct ClientMetricsManager {
 pub(crate) const ACCEPTED_COMPRESSION_TYPES: [i8; 4] = [4, 3, 1, 2];
 
 impl ClientMetricsManager {
-    pub(crate) fn new(telemetry_max_bytes: i32, default_interval_ms: i32) -> Self {
+    pub(crate) fn new(telemetry_max: ByteSize, default_interval: Time) -> Self {
         Self {
             instances: Mutex::new(HashMap::new()),
-            default_interval_ms,
-            telemetry_max_bytes,
+            default_interval,
+            telemetry_max,
         }
     }
 
+    /// The KIP-714 `PushTelemetry` size ceiling in the `int32` byte form the
+    /// wire response carries.
     pub(crate) fn telemetry_max_bytes(&self) -> i32 {
-        self.telemetry_max_bytes
+        self.telemetry_max.bytes_i32()
     }
 
     pub(crate) fn assign(
@@ -89,7 +95,9 @@ impl ClientMetricsManager {
         image: &MetadataImage,
         attrs: &ClientAttributes,
     ) -> SubscriptionAssignment {
-        let computed = compute_subscription(image, attrs, self.default_interval_ms);
+        // `push_interval_ms` is both a wire field and a byte-exact input to the
+        // subscription-id hash, so the interval crosses into milliseconds here.
+        let computed = compute_subscription(image, attrs, self.default_interval.millis_i32());
         let sub_id = subscription_id(&computed, attrs.client_instance_id);
         let now = Instant::now();
         let mut guard = self
@@ -187,7 +195,7 @@ impl ClientMetricsManager {
 
         // 6. Payload oversize → TELEMETRY_TOO_LARGE.
         //    Do NOT update last_push on this path.
-        let max_payload_len = usize::try_from(self.telemetry_max_bytes).unwrap_or(0);
+        let max_payload_len = self.telemetry_max.bytes_usize();
         if payload_len > max_payload_len {
             return PushDecision::Reject {
                 error_code: crate::codes::TELEMETRY_TOO_LARGE,
@@ -458,7 +466,7 @@ mod tests {
 
     #[test]
     fn push_throttle_ladder() {
-        let m = ClientMetricsManager::new(1024, 300_000);
+        let m = ClientMetricsManager::new(crabka_units::kibibytes(1), crabka_units::minutes(5));
         let id = Uuid::from_u128(7);
         let img = img_with("all", &[("metrics", "*"), ("interval.ms", "60000")]);
         let attrs = ClientAttributes {

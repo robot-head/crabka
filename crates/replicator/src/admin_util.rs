@@ -9,7 +9,7 @@ use bytes::Bytes;
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
 use crabka_client_core::security::ClientSecurity;
-use crabka_units::prelude::{Time, TimeExt as _, millis, secs};
+use crabka_units::prelude::{Time, millis, secs};
 
 /// Kafka error code: the topic already exists.
 const TOPIC_ALREADY_EXISTS: i16 = 36;
@@ -50,7 +50,7 @@ pub async fn ensure_topic(
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            CREATE_TOPICS_TIMEOUT.millis_i32(),
+            CREATE_TOPICS_TIMEOUT,
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -98,7 +98,7 @@ pub async fn ensure_compacted_topic(
                 replicas: 1,
                 configs,
             }],
-            CREATE_TOPICS_TIMEOUT.millis_i32(),
+            CREATE_TOPICS_TIMEOUT,
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -187,7 +187,7 @@ pub async fn read_all(
     let mut consecutive_empty = 0usize;
 
     loop {
-        match consumer.poll(DRAIN_POLL_TIMEOUT.to_std()).await {
+        match consumer.poll(DRAIN_POLL_TIMEOUT).await {
             Ok(batch) => {
                 if batch.is_empty() {
                     consecutive_empty += 1;
@@ -262,10 +262,8 @@ mod tests {
     }
 
     #[test]
-    fn drain_poll_timeout_converts_to_a_half_second_duration() {
-        assert2::assert!(
-            super::DRAIN_POLL_TIMEOUT.to_std() == std::time::Duration::from_millis(500)
-        );
+    fn drain_poll_timeout_is_half_a_second() {
+        assert2::assert!(super::DRAIN_POLL_TIMEOUT == crabka_units::millis(500));
     }
 
     #[test]

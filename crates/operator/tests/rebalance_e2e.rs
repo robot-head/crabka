@@ -126,7 +126,7 @@ async fn operator_client_round_trips_against_real_rebalancer() {
                 replicas: 1,
                 configs: BTreeMap::default(),
             }],
-            5_000,
+            crabka_units::secs(5),
         )
         .await
         .unwrap();

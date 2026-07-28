@@ -140,7 +140,7 @@ impl DedupStore {
         loop {
             let batch = tokio::select! {
                 () = shutdown.cancelled() => break,
-                b = consumer.poll(self.poll_timeout.to_std()) => match b {
+                b = consumer.poll(self.poll_timeout) => match b {
                     Ok(batch) => batch,
                     Err(e) => { poll_err = Some(e.into()); break; }
                 },

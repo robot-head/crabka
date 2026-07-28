@@ -24,6 +24,7 @@ use crabka_client_admin::{
 use crabka_client_core::ClientError;
 use crabka_metadata::DelegationToken;
 use crabka_security::KafkaPrincipal;
+use crabka_units::{Time, convert::TimeExt as _, days};
 
 /// Per-RPC error to inject. `Broker` surfaces as a per-outcome error
 /// (matches how Kafka reports per-topic errors); `Transport` surfaces as
@@ -85,7 +86,7 @@ pub enum RecordedCall {
     CreateDelegationToken {
         owner_principal_name: String,
         renewers: Vec<String>,
-        max_lifetime_ms: i64,
+        max_lifetime: Option<Time>,
     },
     RenewDelegationToken {
         hmac: Vec<u8>,
@@ -310,7 +311,7 @@ impl AdminClientLike for FakeAdminClient {
     async fn create_topics(
         &mut self,
         specs: &[CreateTopicSpec],
-        _timeout_ms: i32,
+        _timeout: Time,
     ) -> Result<Vec<CreateTopicOutcome>, AdminError> {
         self.recorded_calls
             .lock()
@@ -369,7 +370,7 @@ impl AdminClientLike for FakeAdminClient {
     async fn delete_topics(
         &mut self,
         names: &[&str],
-        _timeout_ms: i32,
+        _timeout: Time,
     ) -> Result<Vec<DeleteTopicOutcome>, AdminError> {
         self.recorded_calls
             .lock()
@@ -420,7 +421,7 @@ impl AdminClientLike for FakeAdminClient {
     async fn create_partitions(
         &mut self,
         ops: &[CreatePartitionsOp],
-        _timeout_ms: i32,
+        _timeout: Time,
     ) -> Result<Vec<CreatePartitionsOutcome>, AdminError> {
         self.recorded_calls
             .lock()
@@ -468,7 +469,7 @@ impl AdminClientLike for FakeAdminClient {
     async fn delete_records(
         &mut self,
         ops: &[DeleteRecordsOp],
-        _timeout_ms: i32,
+        _timeout: Time,
     ) -> Result<Vec<DeleteRecordsOutcome>, AdminError> {
         self.recorded_calls
             .lock()
@@ -778,7 +779,7 @@ impl AdminClientLike for FakeAdminClient {
         &mut self,
         owner_principal_name: &str,
         renewers: &[String],
-        max_lifetime_ms: i64,
+        max_lifetime: Option<Time>,
     ) -> Result<DelegationToken, AdminError> {
         self.recorded_calls
             .lock()
@@ -786,14 +787,17 @@ impl AdminClientLike for FakeAdminClient {
             .push(RecordedCall::CreateDelegationToken {
                 owner_principal_name: owner_principal_name.into(),
                 renewers: renewers.to_vec(),
-                max_lifetime_ms,
+                max_lifetime,
             });
         let now_ms = chrono::Utc::now().timestamp_millis();
-        let lifetime_ms = if max_lifetime_ms <= 0 {
-            7 * 24 * 60 * 60 * 1_000
-        } else {
-            max_lifetime_ms.min(7 * 24 * 60 * 60 * 1_000)
-        };
+        // The broker caps an absent or over-long lifetime at its 7-day
+        // `delegation.token.max.lifetime.ms` default.
+        let broker_ceiling = days(7);
+        let lifetime_ms = max_lifetime
+            .filter(|lifetime| *lifetime > Time::ZERO)
+            .unwrap_or(broker_ceiling)
+            .min(broker_ceiling)
+            .millis_i64();
         let max_ts = now_ms + 30 * 24 * 60 * 60 * 1_000;
         let id = {
             let mut next = self.next_token_id.lock().unwrap();

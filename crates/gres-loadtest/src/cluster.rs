@@ -1168,7 +1168,7 @@ async fn provision_tenant(
         })
         .collect::<Vec<_>>();
     let outcomes = admin
-        .create_topics(&topics, TOPIC_CREATE_TIMEOUT.millis_i32())
+        .create_topics(&topics, TOPIC_CREATE_TIMEOUT)
         .await
         .context("create WAL topics")?;
     ensure!(

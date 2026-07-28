@@ -308,7 +308,7 @@ impl HaElectionConsumerPoll for Consumer {
         &mut self,
         timeout: Time,
     ) -> Result<Vec<ConsumerRecord>, HaElectionConsumerError> {
-        Consumer::poll(self, timeout.to_std())
+        Consumer::poll(self, timeout)
             .await
             .map_err(|error| HaElectionConsumerError::Poll(error.to_string()))
     }

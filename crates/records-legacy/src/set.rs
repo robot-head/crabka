@@ -130,8 +130,7 @@ fn decode_into(
             let max_output = decompression_budget(size_of_slice(&inner_compressed));
             // `crabka_compression` is a primitive-typed substrate shared with the
             // generated codec, so its cap crosses as a raw `usize`.
-            let inner_bytes =
-                crabka_compression::decompress(codec, &inner_compressed, max_output.bytes_usize())?;
+            let inner_bytes = crabka_compression::decompress(codec, &inner_compressed, max_output)?;
 
             // Parse the inner set (no nested compression allowed).
             let start_len = out.len();

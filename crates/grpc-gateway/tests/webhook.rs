@@ -221,7 +221,7 @@ async fn count_topic(bootstrap: &str, topic: &str, group: &str) -> usize {
         .unwrap();
     let mut n = 0;
     for _ in 0..10 {
-        let batch = consumer.poll(Duration::from_millis(500)).await.unwrap();
+        let batch = consumer.poll(crabka_units::millis(500)).await.unwrap();
         n += batch.len();
     }
     let _ = consumer.close().await;
@@ -271,7 +271,7 @@ async fn valid_hmac_produces() {
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            10_000,
+            crabka_units::secs(10),
         )
         .await
         .unwrap();
@@ -335,7 +335,7 @@ async fn invalid_hmac_rejected() {
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            10_000,
+            crabka_units::secs(10),
         )
         .await
         .unwrap();
@@ -398,7 +398,7 @@ async fn jsonpath_idempotency_redelivery_dedups() {
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            10_000,
+            crabka_units::secs(10),
         )
         .await
         .unwrap();
@@ -490,7 +490,7 @@ async fn header_idempotency_works() {
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            10_000,
+            crabka_units::secs(10),
         )
         .await
         .unwrap();
@@ -579,7 +579,7 @@ async fn generic_produce_route() {
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            10_000,
+            crabka_units::secs(10),
         )
         .await
         .unwrap();
@@ -834,7 +834,7 @@ async fn simpleacl_denies_webhook_principal() {
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            10_000,
+            crabka_units::secs(10),
         )
         .await
         .unwrap();

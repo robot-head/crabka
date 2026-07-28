@@ -104,7 +104,7 @@ pub async fn consume_and_commit(bootstrap: &str, group: &str, topic: &str) {
         .expect("consumer");
     let mut idle = 0;
     while idle < 3 {
-        let recs = consumer.poll(POLL_TIMEOUT.to_std()).await.expect("poll");
+        let recs = consumer.poll(POLL_TIMEOUT).await.expect("poll");
         if recs.is_empty() {
             idle += 1;
         } else {

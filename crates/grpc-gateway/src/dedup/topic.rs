@@ -117,8 +117,7 @@ async fn create_with_rf(
         configs: configs.clone(),
     };
     let outcomes = admin
-        // `create_topics` takes Kafka's `int32` millisecond timeout field.
-        .create_topics(&[spec], policy.create_timeout.millis_i32())
+        .create_topics(&[spec], policy.create_timeout)
         .await
         .map_err(|e| GatewayError::Other(format!("create_topics: {e}")))?;
     for o in outcomes {

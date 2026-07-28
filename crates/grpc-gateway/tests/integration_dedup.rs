@@ -64,7 +64,7 @@ async fn duplicate_idempotency_key_produces_once() {
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            10_000,
+            crabka_units::secs(10),
         )
         .await
         .unwrap();
@@ -129,7 +129,7 @@ async fn duplicate_idempotency_key_produces_once() {
     let mut count = 0;
     for _ in 0..10 {
         count += consumer
-            .poll(std::time::Duration::from_millis(500))
+            .poll(crabka_units::millis(500))
             .await
             .unwrap()
             .len();
@@ -257,7 +257,7 @@ async fn concurrent_duplicates_produce_once() {
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            10_000,
+            crabka_units::secs(10),
         )
         .await
         .unwrap();
@@ -338,7 +338,7 @@ async fn concurrent_duplicates_produce_once() {
     let mut count = 0;
     for _ in 0..10 {
         count += consumer
-            .poll(std::time::Duration::from_millis(500))
+            .poll(crabka_units::millis(500))
             .await
             .unwrap()
             .len();

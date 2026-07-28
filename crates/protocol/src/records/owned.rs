@@ -511,7 +511,11 @@ impl RecordBatch {
                 .len()
                 .saturating_mul(DECOMPRESS_MAX_RATIO)
                 .clamp(DECOMPRESS_MIN_CAP, DECOMPRESS_ABSOLUTE_CEILING);
-            crabka_compression::decompress(codec, &body, max_output)?
+            crabka_compression::decompress(
+                codec,
+                &body,
+                crabka_units::convert::ByteSizeExt::from_bytes(max_output as u64),
+            )?
         };
 
         // Parse records.

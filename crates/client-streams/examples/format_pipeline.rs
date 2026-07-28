@@ -175,7 +175,7 @@ async fn drain(bootstrap: &str, topic: &str, group: &str, want: usize) -> Vec<By
             break;
         }
         let recs = consumer
-            .poll(Duration::from_millis(500))
+            .poll(crabka_units::millis(500))
             .await
             .expect("poll");
         for r in recs {
@@ -225,7 +225,7 @@ async fn main() {
                     replicas: 1,
                     configs: BTreeMap::new(),
                 }],
-                5_000,
+                crabka_units::secs(5),
             )
             .await
             .expect("create topic");

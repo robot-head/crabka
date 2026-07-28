@@ -24,7 +24,7 @@
 //! `ShareFetch` / `ShareAcknowledge` (sequence 0 → 1 → 2 → …). Getting this wrong
 //! makes the broker drop the session (`INVALID_SHARE_SESSION_EPOCH`).
 
-use std::{collections::HashMap, time::Duration};
+use std::collections::HashMap;
 
 use crabka_protocol::{
     owned::{
@@ -38,6 +38,7 @@ use crabka_protocol::{
     },
     primitives::uuid::Uuid as WireUuid,
 };
+use crabka_units::{Time, convert::TimeExt as _};
 
 use super::{
     consumer::ShareConsumer,
@@ -79,7 +80,7 @@ fn build_share_fetch_request(
     group_id: String,
     member_id: String,
     share_session_epoch: i32,
-    timeout: Duration,
+    timeout: Time,
     min_bytes: i32,
     max_bytes: i32,
     max_records: i32,
@@ -90,7 +91,10 @@ fn build_share_fetch_request(
         group_id: Some(group_id),
         member_id: Some(member_id),
         share_session_epoch,
-        max_wait_ms: i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX),
+        // Truncate rather than round, and floor at zero: `max_wait_ms` is a
+        // wire field, so a fractional millisecond must not round up past the
+        // caller's budget and an elapsed budget must not go negative.
+        max_wait_ms: i32::try_from(timeout.millis_i64_trunc().max(0)).unwrap_or(i32::MAX),
         min_bytes,
         max_bytes,
         max_records,
@@ -156,7 +160,7 @@ impl ShareConsumer {
             group_id = %self.group_id,
             member_id = %self.member_id,
             session_epoch = self.share_session_epoch,
-            timeout_ms = timeout.as_millis(),
+            timeout_ms = timeout.millis_i64_trunc(),
             assigned_partitions = tracing::field::Empty,
             records = tracing::field::Empty,
         ),
@@ -164,16 +168,13 @@ impl ShareConsumer {
     )]
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
-    pub async fn poll(
-        &mut self,
-        timeout: Duration,
-    ) -> Result<Vec<ShareConsumerRecord>, ConsumerError> {
+    pub async fn poll(&mut self, timeout: Time) -> Result<Vec<ShareConsumerRecord>, ConsumerError> {
         // Snapshot the live assignment; with nothing assigned there is nothing
         // to fetch — sleep out the timeout and return empty (matches classic).
         let assignment = self.assignment.lock().await.clone();
         tracing::Span::current().record("assigned_partitions", assignment.len());
         if assignment.is_empty() {
-            tokio::time::sleep(timeout).await;
+            tokio::time::sleep(timeout.to_std()).await;
             return Ok(Vec::new());
         }
 
@@ -600,7 +601,7 @@ mod tests {
             "group-a".into(),
             "member-a".into(),
             4,
-            Duration::from_millis(250),
+            crabka_units::millis(250),
             7,
             65_536,
             37,
@@ -630,7 +631,7 @@ mod tests {
             "group-a".into(),
             "member-a".into(),
             4,
-            Duration::from_millis(u64::from(u32::MAX)),
+            Time::from_millis(i64::from(u32::MAX)),
             7,
             65_536,
             37,
@@ -638,6 +639,21 @@ mod tests {
             Vec::new(),
         );
         assert2::assert!((saturated.max_wait_ms, saturated.share_acquire_mode) == (i32::MAX, 0));
+
+        // A sub-millisecond remainder truncates: rounding 250.9 ms up to 251
+        // would hold the broker's Fetch open past the caller's budget.
+        let fractional = build_share_fetch_request(
+            "group-a".into(),
+            "member-a".into(),
+            4,
+            crabka_units::micros(250_900),
+            7,
+            65_536,
+            37,
+            ShareAcquireMode::BatchOptimized,
+            Vec::new(),
+        );
+        assert2::assert!(fractional.max_wait_ms == 250);
     }
 
     #[test]

@@ -4,6 +4,7 @@ use std::{collections::BTreeMap, io::Cursor};
 
 use crabka_blockstore::Labels;
 use crabka_pprof::PprofProfile;
+use crabka_units::{ByteSize, convert::ByteSizeExt as _};
 use serde::Deserialize;
 
 use crate::{error::ProfilesError, ingest::RawProfile};
@@ -100,7 +101,7 @@ pub async fn decode_ingest_multipart(
     query: &IngestQuery,
     content_type: &str,
     body: bytes::Bytes,
-    max: usize,
+    max: ByteSize,
 ) -> Result<RawProfile, ProfilesError> {
     let boundary =
         multer::parse_boundary(content_type).map_err(|e| ProfilesError::Invalid(e.to_string()))?;
@@ -122,8 +123,10 @@ pub async fn decode_ingest_multipart(
             .bytes()
             .await
             .map_err(|e| ProfilesError::Invalid(e.to_string()))?;
-        if data.len() > max {
-            return Err(ProfilesError::TooLarge { limit: max });
+        if data.len() > max.bytes_usize() {
+            return Err(ProfilesError::TooLarge {
+                limit: max.bytes_usize(),
+            });
         }
         match name.as_str() {
             "profile" if query.format == IngestFormat::Pprof => pprof_bytes = Some(data.to_vec()),
@@ -224,7 +227,7 @@ pub async fn decode_ingest_body(
     query: &IngestQuery,
     content_type: Option<&str>,
     body: bytes::Bytes,
-    max: usize,
+    max: ByteSize,
 ) -> Result<RawProfile, ProfilesError> {
     if let Some(content_type) = content_type
         && content_type
@@ -235,8 +238,10 @@ pub async fn decode_ingest_body(
         return decode_ingest_multipart(query, content_type, body, max).await;
     }
 
-    if body.len() > max {
-        return Err(ProfilesError::TooLarge { limit: max });
+    if body.len() > max.bytes_usize() {
+        return Err(ProfilesError::TooLarge {
+            limit: max.bytes_usize(),
+        });
     }
 
     let profile = match query.format {
@@ -1068,6 +1073,7 @@ fn urldecode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use assert2::{assert, check};
+    use crabka_units::mebibytes;
 
     use super::*;
 
@@ -1106,7 +1112,7 @@ mod tests {
             &query,
             &format!("multipart/form-data; boundary={boundary}"),
             bytes::Bytes::from(body),
-            1 << 20,
+            mebibytes(1),
         )
         .await
         .unwrap();
@@ -1137,7 +1143,7 @@ mod tests {
             &query,
             &format!("multipart/form-data; boundary={boundary}"),
             bytes::Bytes::from(body),
-            1 << 20,
+            mebibytes(1),
         )
         .await
         .unwrap();
@@ -1166,7 +1172,7 @@ mod tests {
             &query,
             &format!("multipart/form-data; boundary={boundary}"),
             bytes::Bytes::from(body),
-            1 << 20,
+            mebibytes(1),
         )
         .await
         .unwrap();
@@ -1192,7 +1198,7 @@ mod tests {
             &query,
             &format!("multipart/form-data; boundary={boundary}"),
             bytes::Bytes::from(body),
-            1 << 20,
+            mebibytes(1),
         )
         .await
         .unwrap();
@@ -1209,7 +1215,7 @@ mod tests {
             &query,
             Some("text/plain"),
             bytes::Bytes::from(body),
-            1 << 20,
+            mebibytes(1),
         )
         .await
         .unwrap();
@@ -1254,7 +1260,7 @@ mod tests {
             &query,
             Some("application/json"),
             bytes::Bytes::from(body),
-            1 << 20,
+            mebibytes(1),
         )
         .await
         .unwrap();
@@ -1278,7 +1284,7 @@ mod tests {
         let body =
             bytes::Bytes::from_static(b"\x00\x00\x01\x01a\x00\x02\x01b\x01\x00\x01c\x02\x00");
 
-        let raw = decode_ingest_body(&query, Some("application/octet-stream"), body, 1 << 20)
+        let raw = decode_ingest_body(&query, Some("application/octet-stream"), body, mebibytes(1))
             .await
             .unwrap();
 
@@ -1311,7 +1317,7 @@ mod tests {
         let body =
             bytes::Bytes::from_static(b"\x00\x00\x01\x02a;\x00\x02\x01b\x01\x00\x01c\x02\x00");
 
-        let raw = decode_ingest_body(&query, Some("application/octet-stream"), body, 1 << 20)
+        let raw = decode_ingest_body(&query, Some("application/octet-stream"), body, mebibytes(1))
             .await
             .unwrap();
 
@@ -1355,7 +1361,7 @@ mod tests {
             &query,
             &format!("multipart/form-data; boundary={boundary}"),
             bytes::Bytes::from(body),
-            1 << 20,
+            mebibytes(1),
         )
         .await
         .unwrap();
@@ -1387,7 +1393,7 @@ mod tests {
             &query,
             &format!("multipart/form-data; boundary={boundary}"),
             bytes::Bytes::from(body),
-            1 << 20,
+            mebibytes(1),
         )
         .await
         .unwrap();
@@ -1421,7 +1427,7 @@ mod tests {
             &query,
             &format!("multipart/form-data; boundary={boundary}"),
             bytes::Bytes::from(body),
-            1 << 20,
+            mebibytes(1),
         )
         .await
         .unwrap();

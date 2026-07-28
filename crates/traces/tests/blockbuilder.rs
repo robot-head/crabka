@@ -728,7 +728,7 @@ impl ScriptedConsumer {
 impl WalConsumerPoll for ScriptedConsumer {
     async fn poll(
         &mut self,
-        _window: std::time::Duration,
+        _window: crabka_units::Time,
     ) -> Result<Vec<ConsumerRecord>, TracesError> {
         if let Some(batch) = self.batches.pop_front() {
             Ok(batch)

@@ -225,7 +225,7 @@ where
             ]),
         }];
         let outcomes = self
-            .create_topics(&specs, timeout.millis_i32())
+            .create_topics(&specs, timeout)
             .await
             .map_err(|error| SubstrateError::Topic(error.to_string()))?;
         let failed = outcomes.iter().find(|outcome| {

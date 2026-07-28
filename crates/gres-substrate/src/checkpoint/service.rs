@@ -57,7 +57,7 @@ pub struct CheckpointConfig {
     /// Checkpoint after at least this many committed frames. Zero disables it.
     pub frames_threshold: u64,
     /// Checkpoint after at least this many committed payload bytes. Zero disables it.
-    pub bytes_threshold: u64,
+    pub bytes_threshold: ByteSize,
     /// Target checkpoint part size.
     pub part_max_size: ByteSize,
     /// Number of newest checkpoint directories to retain.
@@ -76,7 +76,7 @@ impl CheckpointConfig {
         tenant: String,
         topic: String,
         frames_threshold: u64,
-        bytes_threshold: u64,
+        bytes_threshold: ByteSize,
         part_max_size: ByteSize,
         retain_checkpoints: usize,
         poll_interval: Duration,
@@ -110,7 +110,7 @@ impl CheckpointConfig {
                 "checkpoint WAL topic must not be empty".into(),
             ));
         }
-        if self.frames_threshold == 0 && self.bytes_threshold == 0 {
+        if self.frames_threshold == 0 && self.bytes_threshold == ByteSize::ZERO {
             return Err(SubstrateError::Checkpoint(
                 "at least one checkpoint threshold must be non-zero".into(),
             ));
@@ -342,7 +342,9 @@ where
         if self.config.frames_threshold != 0 && frames >= self.config.frames_threshold {
             return Some(CheckpointTrigger::Frames);
         }
-        if self.config.bytes_threshold != 0 && bytes >= self.config.bytes_threshold {
+        if self.config.bytes_threshold != ByteSize::ZERO
+            && ByteSize::from_bytes(bytes) >= self.config.bytes_threshold
+        {
             return Some(CheckpointTrigger::Bytes);
         }
         None
@@ -883,9 +885,14 @@ mod tests {
         let store: Arc<dyn CheckpointStore> = InMemoryCheckpointStore::shared();
         let pruner = Arc::new(FakePruner::default());
         let stats = Arc::new(CheckpointStats::default());
-        let service =
-            CheckpointService::new(config(2, 0), kv, store, pruner.clone(), stats.clone())
-                .expect("service");
+        let service = CheckpointService::new(
+            config(2, ByteSize::ZERO),
+            kv,
+            store,
+            pruner.clone(),
+            stats.clone(),
+        )
+        .expect("service");
 
         stats.record_committed(1, 10);
         assert!(
@@ -913,7 +920,7 @@ mod tests {
             "tenant".into(),
             "topic".into(),
             1,
-            0,
+            ByteSize::ZERO,
             DEFAULT_PART_MAX_SIZE,
             DEFAULT_CHECKPOINT_RETAIN,
             Duration::ZERO,
@@ -929,8 +936,9 @@ mod tests {
         let pruner = Arc::new(FakePruner::default());
         pruner.fail.store(true, Ordering::SeqCst);
         let stats = Arc::new(CheckpointStats::default());
-        let service = CheckpointService::new(config(1, 0), kv, store, pruner, stats.clone())
-            .expect("service");
+        let service =
+            CheckpointService::new(config(1, ByteSize::ZERO), kv, store, pruner, stats.clone())
+                .expect("service");
         stats.record_committed(1, 7);
 
         let result = service.checkpoint_if_threshold_crossed(snapshot(3)).await;
@@ -946,8 +954,14 @@ mod tests {
         let pruner = Arc::new(BlockingPruner::default());
         let stats = Arc::new(CheckpointStats::default());
         let service = Arc::new(
-            CheckpointService::new(config(0, 10), kv, store, pruner.clone(), stats.clone())
-                .expect("service"),
+            CheckpointService::new(
+                config(0, crabka_units::bytes(10)),
+                kv,
+                store,
+                pruner.clone(),
+                stats.clone(),
+            )
+            .expect("service"),
         );
         stats.record_committed(1, 10);
 
@@ -1035,7 +1049,7 @@ mod tests {
         let store = InMemoryCheckpointStore::shared();
         let pruner = Arc::new(FakePruner::default());
         let stats = Arc::new(CheckpointStats::default());
-        let mut config = config(1, 0);
+        let mut config = config(1, ByteSize::ZERO);
         config.retain_checkpoints = 1;
         let service = Arc::new(
             CheckpointService::new(config, kv, store.clone(), pruner.clone(), stats)
@@ -1094,7 +1108,7 @@ mod tests {
         let kv: Arc<dyn SnapshotKv> = concrete_kv.clone();
         let store: Arc<dyn CheckpointStore> = InMemoryCheckpointStore::shared();
         let service = CheckpointService::new(
-            config(1, 0),
+            config(1, ByteSize::ZERO),
             kv,
             Arc::clone(&store),
             Arc::new(FakePruner::default()),
@@ -1130,7 +1144,7 @@ mod tests {
         );
 
         let restarted = CheckpointService::new(
-            config(1, 0),
+            config(1, ByteSize::ZERO),
             Arc::new(MemKv::default()),
             Arc::clone(&store),
             Arc::new(FakePruner::default()),
@@ -1213,7 +1227,7 @@ mod tests {
         );
     }
 
-    fn config(frames_threshold: u64, bytes_threshold: u64) -> CheckpointConfig {
+    fn config(frames_threshold: u64, bytes_threshold: ByteSize) -> CheckpointConfig {
         CheckpointConfig::new(
             "tenant".into(),
             "topic".into(),
@@ -1238,7 +1252,7 @@ mod tests {
         let store = InMemoryCheckpointStore::shared();
         let pruner = Arc::new(FakePruner::default());
         let stats = Arc::new(CheckpointStats::default());
-        let mut config = config(frames_threshold, 0);
+        let mut config = config(frames_threshold, ByteSize::ZERO);
         config.poll_interval = Duration::from_millis(10);
         let service = Arc::new(
             CheckpointService::new(config, kv, store, pruner.clone(), stats.clone())

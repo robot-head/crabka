@@ -2,6 +2,7 @@
 
 use ::polars::prelude::*;
 use bytes::Bytes;
+use crabka_units::{ByteSize, convert::ByteSizeExt as _, kibibytes};
 
 use crate::{columnar::serde::polars::PolarsIpcSerde, processor::serde::Serde};
 
@@ -71,13 +72,13 @@ pub struct BlobCodec {
     /// Soft cap on one produced record's encoded size; the frame is row-chunked
     /// to stay under it. Defaults to ~900 KiB (under Kafka's default 1 MiB
     /// `max.request.size`, leaving headroom for record headers/framing).
-    pub max_record_bytes: usize,
+    pub max_record_bytes: ByteSize,
 }
 
 impl Default for BlobCodec {
     fn default() -> Self {
         Self {
-            max_record_bytes: 900 * 1024,
+            max_record_bytes: kibibytes(900),
         }
     }
 }
@@ -112,7 +113,7 @@ impl BatchCodec for BlobCodec {
         let payload = drop_reserved_columns(df);
         let ts = last_timestamp(df).unwrap_or(0);
         let mut out = Vec::new();
-        for chunk in chunk_by_size(&payload, self.max_record_bytes) {
+        for chunk in chunk_by_size(&payload, self.max_record_bytes.bytes_usize()) {
             let value = PolarsIpcSerde.serialize("", &chunk);
             out.push(ProduceRecord {
                 key: None,

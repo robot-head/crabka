@@ -114,13 +114,13 @@ pub(crate) fn decide(
 pub(crate) trait DelegationTokenAdmin: Send + Sync {
     /// KIP-48 act-as: the operator (a super-user) mints a token owned by
     /// `owner_principal_name` (a `User:` principal). `renewers` is the
-    /// list of `"User:<name>"` principal strings. `max_lifetime_ms` of
-    /// `-1` defers to the broker's `delegation.token.max.lifetime.ms`.
+    /// list of `"User:<name>"` principal strings. A `max_lifetime` of
+    /// `None` defers to the broker's `delegation.token.max.lifetime.ms`.
     async fn create_delegation_token_as_owner(
         &self,
         owner_principal_name: &str,
         renewers: &[String],
-        max_lifetime_ms: i64,
+        max_lifetime: Option<Time>,
     ) -> Result<DelegationToken, AdminError>;
 
     /// Extend the token's `expiry_timestamp_ms` (clamped by
@@ -306,16 +306,16 @@ pub(crate) async fn reconcile(
     })
 }
 
-/// `Create` arm: issue a new token via act-as. `max_lifetime_ms` defaults
-/// to `-1` (broker ceiling) when the spec omits the field.
+/// `Create` arm: issue a new token via act-as. The lifetime falls back to
+/// the broker ceiling when the spec omits the field.
 async fn issue_new_token(
     name: &str,
     auth: &DelegationTokenAuth,
     admin: &dyn DelegationTokenAdmin,
 ) -> Result<DelegationToken, AdminError> {
-    let max_lifetime_ms = auth.max_lifetime_ms.unwrap_or(-1);
+    let max_lifetime = auth.max_lifetime_ms.map(Time::from_millis);
     admin
-        .create_delegation_token_as_owner(name, &auth.renewers, max_lifetime_ms)
+        .create_delegation_token_as_owner(name, &auth.renewers, max_lifetime)
         .await
 }
 
@@ -613,11 +613,11 @@ impl DelegationTokenAdmin for crate::context::AdminClientHandle {
         &self,
         owner_principal_name: &str,
         renewers: &[String],
-        max_lifetime_ms: i64,
+        max_lifetime: Option<Time>,
     ) -> Result<DelegationToken, AdminError> {
         let mut admin = self.lock().await;
         admin
-            .create_delegation_token_as_owner(owner_principal_name, renewers, max_lifetime_ms)
+            .create_delegation_token_as_owner(owner_principal_name, renewers, max_lifetime)
             .await
     }
 
@@ -723,12 +723,14 @@ mod tests {
     /// Recorded call against the mock admin client. Tests assert on
     /// this to verify the reconciler called the right RPC with the
     /// right shape.
-    #[derive(Debug, Clone, PartialEq, Eq)]
+    /// Not `Eq`: `Create` carries a `Time`, whose `f64` storage is only
+    /// `PartialEq`.
+    #[derive(Debug, Clone, PartialEq)]
     enum MockCall {
         Create {
             owner: String,
             renewers: Vec<String>,
-            max_lifetime_ms: i64,
+            max_lifetime: Option<Time>,
         },
         Renew {
             hmac: Vec<u8>,
@@ -775,12 +777,12 @@ mod tests {
             &self,
             owner_principal_name: &str,
             renewers: &[String],
-            max_lifetime_ms: i64,
+            max_lifetime: Option<Time>,
         ) -> Result<DelegationToken, AdminError> {
             self.calls.lock().unwrap().push(MockCall::Create {
                 owner: owner_principal_name.into(),
                 renewers: renewers.to_vec(),
-                max_lifetime_ms,
+                max_lifetime,
             });
             if let Some(code) = self.force_broker_error {
                 return Err(AdminError::Broker {
@@ -947,7 +949,7 @@ mod tests {
                     MockCall::Create {
                         owner: "alice".into(),
                         renewers: vec!["User:bob".into()],
-                        max_lifetime_ms: 86_400_000,
+                        max_lifetime: Some(hours(24)),
                     },
                 ],
             "expected Describe+Create, got: {calls:?}",

@@ -16,7 +16,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            30_000,
+            crabka_units::secs(30),
         )
         .await?;
     println!("Topic 'test-topic' created successfully! Fetching metadata...");

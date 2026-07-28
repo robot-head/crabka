@@ -47,8 +47,7 @@ pub async fn ensure_schemas_topic(
     let mut admin = AdminClient::connect_secured(&bootstrap, security).await?;
 
     let (spec, timeout) = schemas_topic_spec(cfg);
-    // `create_topics` takes the raw `CreateTopics.timeout_ms` wire field.
-    let outcomes = admin.create_topics(&[spec], timeout.millis_i32()).await?;
+    let outcomes = admin.create_topics(&[spec], timeout).await?;
     if let Some(o) = outcomes.into_iter().next() {
         match o.error {
             None => {

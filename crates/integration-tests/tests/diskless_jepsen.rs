@@ -124,7 +124,7 @@ async fn consume_count(bootstrap: &str, expected: usize) -> usize {
     let deadline = Instant::now() + Duration::from_secs(15);
     while seen < expected && Instant::now() < deadline {
         seen += consumer
-            .poll(Duration::from_millis(500))
+            .poll(crabka_units::millis(500))
             .await
             .expect("poll")
             .len();

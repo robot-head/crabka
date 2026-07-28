@@ -81,7 +81,7 @@ async fn create_topic(bootstrap: &str, name: &str, partitions: i32) {
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            10_000,
+            crabka_units::secs(10),
         )
         .await
         .unwrap();

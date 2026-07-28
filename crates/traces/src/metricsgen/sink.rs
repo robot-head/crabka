@@ -3,12 +3,11 @@
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},
-    time::Duration,
 };
 
 use async_trait::async_trait;
 use crabka_client_consumer::{Consumer, ConsumerRecord};
-use crabka_units::{ByteSize, convert::ByteSizeExt as _};
+use crabka_units::{ByteSize, Time, convert::ByteSizeExt as _, millis};
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::{
@@ -44,7 +43,7 @@ pub trait SpanSource: Send + Sync {
 /// Kafka-backed source for the traces WAL consumer group.
 pub struct KafkaSpanSource {
     consumer: AsyncMutex<Consumer>,
-    poll_timeout: Duration,
+    poll_timeout: Time,
 }
 
 impl KafkaSpanSource {
@@ -52,12 +51,12 @@ impl KafkaSpanSource {
     pub fn new(consumer: Consumer) -> Self {
         Self {
             consumer: AsyncMutex::new(consumer),
-            poll_timeout: Duration::from_millis(500),
+            poll_timeout: millis(500),
         }
     }
 
     #[must_use]
-    pub fn with_poll_timeout(mut self, poll_timeout: Duration) -> Self {
+    pub fn with_poll_timeout(mut self, poll_timeout: Time) -> Self {
         self.poll_timeout = poll_timeout;
         self
     }

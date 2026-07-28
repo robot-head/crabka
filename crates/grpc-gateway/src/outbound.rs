@@ -89,7 +89,7 @@ pub async fn run_subscription(
     loop {
         let batch = tokio::select! {
             () = shutdown.cancelled() => break,
-            b = consumer.poll(poll_timeout.to_std()) => match b {
+            b = consumer.poll(poll_timeout) => match b {
                 Ok(b) => b,
                 Err(e) => {
                     poll_err = Some(e.into());

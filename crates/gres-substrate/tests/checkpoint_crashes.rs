@@ -265,7 +265,7 @@ fn live_service(
             namespace.into(),
             topic.into(),
             1,
-            0,
+            crabka_units::bytes(0),
             crabka_units::bytes(24),
             2,
             std::time::Duration::from_secs(1),
@@ -337,7 +337,7 @@ impl CheckpointWalPruner for LiveAdminPruner {
             .admin
             .lock()
             .await
-            .delete_records(ops, 5_000)
+            .delete_records(ops, crabka_units::secs(5))
             .await
             .map_err(|error| SubstrateError::Checkpoint(error.to_string()))?;
         if let Some(failed) = outcomes.iter().find(|outcome| outcome.error_code != 0) {
@@ -403,7 +403,7 @@ async fn production_zombie_service_cannot_supersede_successor_manifest() {
                 "zombie-race".into(),
                 "wal.g0".into(),
                 1,
-                0,
+                crabka_units::bytes(0),
                 crabka_units::bytes(24),
                 2,
                 std::time::Duration::from_secs(1),
@@ -446,7 +446,7 @@ async fn production_zombie_service_cannot_supersede_successor_manifest() {
                 "zombie-race".into(),
                 "wal.g1".into(),
                 1,
-                0,
+                crabka_units::bytes(0),
                 crabka_units::bytes(24),
                 2,
                 std::time::Duration::from_secs(1),
@@ -578,7 +578,7 @@ impl ProductionCrashHarness {
             "tenant-production-crash".into(),
             "wal-production-crash".into(),
             1,
-            0,
+            crabka_units::bytes(0),
             crabka_units::bytes(24),
             2,
             std::time::Duration::from_secs(1),

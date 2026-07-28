@@ -5,6 +5,7 @@ use std::io::Read;
 
 use crabka_blockstore::Labels;
 use crabka_pprof::PprofProfile;
+use crabka_units::{ByteSize, convert::ByteSizeExt as _};
 
 use crate::{error::ProfilesError, ingest::RawProfile, wire::pb};
 
@@ -12,7 +13,10 @@ use crate::{error::ProfilesError, ingest::RawProfile, wire::pb};
 ///
 /// # Errors
 /// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
-pub fn gunzip(body: &[u8], max_output: usize) -> Result<Vec<u8>, ProfilesError> {
+pub fn gunzip(body: &[u8], max_output: ByteSize) -> Result<Vec<u8>, ProfilesError> {
+    // The read loop compares against buffer lengths, so the cap crosses into
+    // its exact byte count here.
+    let max_output = max_output.bytes_usize();
     let mut decoder = flate2::read::GzDecoder::new(body);
     let mut out = Vec::new();
     let mut buf = [0_u8; 8192];
@@ -39,7 +43,7 @@ pub fn gunzip(body: &[u8], max_output: usize) -> Result<Vec<u8>, ProfilesError> 
 /// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
 pub fn decode_push(
     req: &pb::push::v1::PushRequest,
-    max_decompressed: usize,
+    max_decompressed: ByteSize,
 ) -> Result<Vec<RawProfile>, ProfilesError> {
     let mut out = Vec::new();
     for series in &req.series {
@@ -73,6 +77,7 @@ mod tests {
     use std::io::Write;
 
     use assert2::assert;
+    use crabka_units::{bytes, mebibytes};
 
     use super::*;
     use crate::wire::pb;
@@ -87,8 +92,8 @@ mod tests {
     fn gunzip_round_trips_and_caps() {
         let raw = b"the quick brown fox";
         let gz = gzip(raw);
-        assert!(gunzip(&gz, 1 << 20).unwrap() == raw);
-        assert!(gunzip(&gz, 4).is_err());
+        assert!(gunzip(&gz, mebibytes(1)).unwrap() == raw);
+        assert!(gunzip(&gz, bytes(4)).is_err());
     }
 
     #[test]
@@ -114,7 +119,7 @@ mod tests {
             }],
         };
 
-        let out = decode_push(&req, 1 << 20).unwrap();
+        let out = decode_push(&req, mebibytes(1)).unwrap();
 
         assert!(out.len() == 1);
         assert!(out[0].labels.get("__name__") == Some("process_cpu"));
@@ -143,7 +148,7 @@ mod tests {
             }],
         };
 
-        let out = decode_push(&req, 1 << 20).unwrap();
+        let out = decode_push(&req, mebibytes(1)).unwrap();
 
         assert!(out.len() == 1);
         assert!(out[0].labels.get("__profile_id__") == Some("profile-a"));

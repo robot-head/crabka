@@ -3,7 +3,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
-    time::Duration,
 };
 
 use arrow::record_batch::RecordBatch;
@@ -150,7 +149,7 @@ pub async fn run(
 ) -> Result<(), TracesError> {
     while !shutdown.is_cancelled() {
         let records = consumer
-            .poll(Duration::from_millis(500))
+            .poll(crabka_units::millis(500))
             .await
             .map_err(|err| TracesError::Wal(err.to_string()))?;
         if records.is_empty() {

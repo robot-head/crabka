@@ -98,7 +98,7 @@ async fn send_stream_produces_all_records() {
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            10_000,
+            crabka_units::secs(10),
         )
         .await
         .unwrap();
@@ -144,7 +144,7 @@ async fn send_stream_produces_all_records() {
     let mut seen = 0;
     for _ in 0..10 {
         seen += consumer
-            .poll(std::time::Duration::from_millis(500))
+            .poll(crabka_units::millis(500))
             .await
             .unwrap()
             .len();
@@ -171,7 +171,7 @@ async fn subscribe_streams_records_then_commits() {
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            10_000,
+            crabka_units::secs(10),
         )
         .await
         .unwrap();
@@ -261,7 +261,7 @@ async fn streaming_wrappers_and_router_build() {
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            10_000,
+            crabka_units::secs(10),
         )
         .await
         .unwrap();

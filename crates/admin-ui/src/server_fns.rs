@@ -7,6 +7,7 @@ use crabka_client_admin::{
     IncrementalAlterOp, PatternType, PermissionType, QuotaOp, ResourceType, ScramDeletion,
     ScramUpsertion,
 };
+use crabka_units::{Time, convert::TimeExt as _};
 use serde::{Deserialize, Serialize};
 
 pub use crate::dto::{AclRow, QuotaRow, UserRow};
@@ -23,6 +24,18 @@ use crate::{
     server::AppState,
     session::{SessionId, SessionRecord, SessionStore},
 };
+
+/// How long the broker may take to finish a UI-issued topic mutation before it
+/// answers with a timeout error, carried on `CreateTopics`/`DeleteTopics`/
+/// `CreatePartitions` as Kafka's `timeout_ms` field.
+/// The configured topic-mutation timeout, as the quantity `AdminClient` takes.
+///
+/// The config newtype stores whole `i32` milliseconds because it derives `Eq`
+/// and polices the positive-`int32` invariant the Kafka field requires; the
+/// quantity meets it here, at its own boundary.
+fn mutation_timeout(cfg: &AdminUiConfig) -> Time {
+    Time::from_millis(i64::from(cfg.topic_mutation_timeout_ms.into_value()))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CurrentSession {
@@ -729,7 +742,7 @@ impl AdminMutationSeam for BrokerAdminMutationSeam {
                         replicas: request.replicas,
                         configs,
                     }],
-                    self.0.cfg.topic_mutation_timeout_ms.into_value(),
+                    mutation_timeout(&self.0.cfg),
                 )
                 .await?;
 
@@ -745,10 +758,7 @@ impl AdminMutationSeam for BrokerAdminMutationSeam {
             let mut facade = self.0.facade().await?;
             let outcomes = facade
                 .client_mut()
-                .delete_topics(
-                    &[request.name.as_str()],
-                    self.0.cfg.topic_mutation_timeout_ms.into_value(),
-                )
+                .delete_topics(&[request.name.as_str()], mutation_timeout(&self.0.cfg))
                 .await?;
 
             Ok(resource_outcome_rows(outcomes))
@@ -768,7 +778,7 @@ impl AdminMutationSeam for BrokerAdminMutationSeam {
                         name: request.topic,
                         new_total_count: request.total_count,
                     }],
-                    self.0.cfg.topic_mutation_timeout_ms.into_value(),
+                    mutation_timeout(&self.0.cfg),
                 )
                 .await?;
 

@@ -611,7 +611,7 @@ impl CompactionConsumerPoll for Consumer {
         &mut self,
         timeout: Time,
     ) -> Result<Vec<ConsumerRecord>, CompactionConsumerPollError> {
-        Consumer::poll(self, timeout.to_std())
+        Consumer::poll(self, timeout)
             .await
             .map_err(|error| CompactionConsumerPollError::Poll(error.to_string()))
     }

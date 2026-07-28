@@ -321,7 +321,7 @@ pub trait WalHeadConsumerCommit: Send {
 #[async_trait::async_trait]
 impl WalHeadConsumerPoll for Consumer {
     async fn poll(&mut self, timeout: Time) -> Result<Vec<ConsumerRecord>, WalHeadConsumerError> {
-        Consumer::poll(self, timeout.to_std())
+        Consumer::poll(self, timeout)
             .await
             .map_err(|error| WalHeadConsumerError::Poll(error.to_string()))
     }

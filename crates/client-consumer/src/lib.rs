@@ -8,9 +8,8 @@
 //! ## Quick start
 //!
 //! ```no_run
-//! use std::time::Duration;
-//!
 //! use crabka_client_consumer::{AutoOffsetReset, Consumer};
+//! use crabka_units::millis;
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut consumer = Consumer::builder()
@@ -23,7 +22,7 @@
 //!     .await?;
 //!
 //! loop {
-//!     let records = consumer.poll(Duration::from_millis(500)).await?;
+//!     let records = consumer.poll(millis(500)).await?;
 //!     for _r in records {
 //!         // ... handle r ...
 //!     }
@@ -35,9 +34,8 @@
 //! ## Share-group consumption
 //!
 //! ```no_run
-//! use std::time::Duration;
-//!
 //! use crabka_client_consumer::{ShareAckMode, ShareAckType, ShareConsumer};
+//! use crabka_units::secs;
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut consumer = ShareConsumer::builder()
@@ -48,7 +46,7 @@
 //!     .build()
 //!     .await?;
 //!
-//! let records = consumer.poll(Duration::from_secs(1)).await?;
+//! let records = consumer.poll(secs(1)).await?;
 //! for record in &records {
 //!     consumer.acknowledge(record, ShareAckType::Accept)?;
 //! }

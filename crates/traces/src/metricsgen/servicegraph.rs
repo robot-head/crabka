@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use bytes::{Buf, BufMut, BytesMut};
-use crabka_units::convert::TimeExt as _;
+use crabka_units::{Time, convert::TimeExt as _};
 use num_traits::ToPrimitive as _;
 
 use crate::metricsgen::{
@@ -98,7 +98,7 @@ impl EdgeAgg {
 #[derive(Debug)]
 pub struct EdgeStore {
     max_items: usize,
-    ttl_ns: i64,
+    ttl: Time,
     enable_messaging_latency: bool,
     bucket_edges_ns: Vec<f64>,
     edges: HashMap<EdgeKey, Edge>,
@@ -112,7 +112,7 @@ impl EdgeStore {
     pub fn new(cfg: &MetricsGenConfig) -> Self {
         Self {
             max_items: cfg.edge_store_max_items,
-            ttl_ns: cfg.edge_ttl.nanos_i64(),
+            ttl: cfg.edge_ttl,
             enable_messaging_latency: cfg.enable_messaging_system_latency,
             bucket_edges_ns: cfg.histogram_buckets_ns.clone(),
             edges: HashMap::new(),
@@ -189,7 +189,9 @@ impl EdgeStore {
         let expired: Vec<_> = self
             .edges
             .iter()
-            .filter(|(_, edge)| now_ns.saturating_sub(edge.first_seen_ns) >= self.ttl_ns)
+            .filter(|(_, edge)| {
+                Time::from_nanos(now_ns.saturating_sub(edge.first_seen_ns)) >= self.ttl
+            })
             .map(|(key, _)| *key)
             .collect();
 

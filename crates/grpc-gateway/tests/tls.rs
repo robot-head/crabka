@@ -284,7 +284,7 @@ async fn count_in_user_topic(bootstrap: &str, key_filter: &str) -> usize {
         .unwrap();
     let mut n = 0;
     for _ in 0..10 {
-        let batch = consumer.poll(Duration::from_millis(500)).await.unwrap();
+        let batch = consumer.poll(crabka_units::millis(500)).await.unwrap();
         for r in batch {
             if r.value.as_deref() == Some(key_filter.as_bytes()) {
                 n += 1;
@@ -462,7 +462,7 @@ async fn tls_forward_between_two_gateways() {
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            10_000,
+            crabka_units::secs(10),
         )
         .await
         .unwrap();

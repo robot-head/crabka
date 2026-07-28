@@ -1634,8 +1634,8 @@ async fn ensure_compacted_single_partition_topic(
     let mut admin =
         AdminClient::connect_with_dns_timeout(&bootstrap_addrs, policy.reader_admin_dns_timeout())
             .await?;
-    let (spec, timeout_ms) = compacted_topic_request(topic, replicas, policy);
-    let outcomes = admin.create_topics(&[spec], timeout_ms).await?;
+    let (spec, timeout) = compacted_topic_request(topic, replicas, policy);
+    let outcomes = admin.create_topics(&[spec], timeout).await?;
     if let Some(outcome) = outcomes.into_iter().next() {
         match outcome.error {
             None => {}
@@ -1661,7 +1661,7 @@ fn compacted_topic_request(
     topic: &str,
     replicas: i32,
     policy: &RegistryPolicy,
-) -> (CreateTopicSpec, i32) {
+) -> (CreateTopicSpec, Time) {
     (
         CreateTopicSpec {
             name: topic.to_string(),
@@ -1669,7 +1669,7 @@ fn compacted_topic_request(
             replicas,
             configs: BTreeMap::from([("cleanup.policy".to_string(), "compact".to_string())]),
         },
-        policy.topic_create_timeout.millis_i32(),
+        policy.topic_create_timeout,
     )
 }
 
@@ -1950,13 +1950,13 @@ mod tests {
     fn registry_policy_reaches_topic_and_fetch_requests() {
         let policy = RegistryPolicy::new(7, 12_345, 678, 901, 234_567).unwrap();
 
-        let (registry_spec, timeout_ms) =
+        let (registry_spec, timeout) =
             compacted_topic_request(TENANT_REGISTRY_TOPIC, policy.replication_factor(), &policy);
-        let (tenant_spec, tenant_timeout_ms) = compacted_topic_request("tenant-config", 3, &policy);
+        let (tenant_spec, tenant_timeout) = compacted_topic_request("tenant-config", 3, &policy);
         assert!(registry_spec.replicas == 7);
         assert!(tenant_spec.replicas == 3);
-        assert!(timeout_ms == 12_345);
-        assert!(tenant_timeout_ms == 12_345);
+        assert!(timeout == crabka_units::millis(12_345));
+        assert!(tenant_timeout == crabka_units::millis(12_345));
         let fetch = registry_fetch(42, WireUuid::ZERO, &policy);
         assert!(fetch.max_wait == crabka_units::millis(901));
         assert!(fetch.partition_max == crabka_units::bytes(234_567));

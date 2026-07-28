@@ -437,9 +437,10 @@ async fn run_produce(cli: &Cli, metrics: &DemoMetrics) -> Result<(), BoxError> {
         futures_idle().await;
         return Ok(());
     }
-    let per_sec = f64::from(cli.orders_per_sec);
-    let period = Duration::from_secs_f64(1.0 / per_sec);
-    let mut tick = tokio::time::interval(period);
+    // The reciprocal of an order rate is the inter-order period.
+    let rate: Frequency = per_sec(cli.orders_per_sec);
+    let period: Time = 1.0 / rate;
+    let mut tick = tokio::time::interval(period.to_std());
     let mut i: u64 = 0;
     loop {
         tick.tick().await;
@@ -510,7 +511,7 @@ async fn run_produce(cli: &Cli, metrics: &DemoMetrics) -> Result<(), BoxError> {
                 &order.region,
                 &order.payment_method,
                 order.amount,
-                start.elapsed().as_secs_f64(),
+                Time::from_std(start.elapsed()),
             );
             Ok::<(), BoxError>(())
         }
@@ -590,7 +591,7 @@ async fn run_consume(
         .await?;
     tracing::info!(topic = %cli.input_topic, "order processor starting");
     loop {
-        let records = consumer.poll(Duration::from_millis(500)).await?;
+        let records = consumer.poll(crabka_units::millis(500)).await?;
         for record in records {
             process_order_record(&serde, &cli.input_topic, metrics, &record).await;
         }
@@ -670,7 +671,7 @@ async fn process_order_inner(
         &order.category,
         &order.region,
         outcome,
-        start.elapsed().as_secs_f64(),
+        Time::from_std(start.elapsed()),
     );
 
     match outcome {
@@ -704,7 +705,7 @@ async fn stage(metrics: &DemoMetrics, name: &'static str, work: Duration) {
     async move {
         let start = Instant::now();
         tokio::time::sleep(work).await;
-        metrics.record_stage(name, start.elapsed().as_secs_f64());
+        metrics.record_stage(name, Time::from_std(start.elapsed()));
     }
     .instrument(span)
     .await;

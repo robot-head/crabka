@@ -87,7 +87,7 @@ pub async fn commit_group(bootstrap: &str, group: &str, topic: &str) {
     let mut empty_streak = 0usize;
     loop {
         let batch = consumer
-            .poll(POLL_TIMEOUT.to_std())
+            .poll(POLL_TIMEOUT)
             .await
             .unwrap_or_else(|e| panic!("commit_group({group}): poll: {e}"));
         if batch.is_empty() {

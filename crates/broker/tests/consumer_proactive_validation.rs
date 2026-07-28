@@ -242,7 +242,7 @@ async fn consumer_proactively_validates_and_surfaces_truncation() {
         let deadline = Instant::now() + Duration::from_secs(15);
         while Instant::now() < deadline && epochs.len() < 4 {
             for r in seed
-                .poll(Duration::from_millis(300))
+                .poll(crabka_units::millis(300))
                 .await
                 .expect("seed consume must not error")
             {
@@ -359,7 +359,7 @@ async fn consumer_proactively_validates_and_surfaces_truncation() {
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut got = None;
     while Instant::now() < deadline {
-        match consumer.poll(Duration::from_millis(300)).await {
+        match consumer.poll(crabka_units::millis(300)).await {
             Ok(recs) => {
                 assert!(
                     recs.is_empty(),

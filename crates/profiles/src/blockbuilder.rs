@@ -14,9 +14,7 @@ use crabka_blockstore::{
 use crabka_client_consumer::{AutoOffsetReset, Consumer, ConsumerRecord};
 use crabka_pprof::{FunctionRec, LineRec, LocationRec, MappingRec, MappingSymbolization, SymbolDb};
 use crabka_units::{
-    ByteSize, Time,
-    convert::{StdDurationExt as _, TimeExt as _},
-    kibibytes, mebibytes, millis, secs,
+    ByteSize, Time, convert::StdDurationExt as _, kibibytes, mebibytes, millis, secs,
 };
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload, path::Path};
 use parquet::arrow::ArrowWriter;
@@ -314,7 +312,7 @@ pub async fn run_with_config(config: BlockBuilderConfig) -> Result<(), ProfilesE
         ConsumerRecordAccumulator::new(config.flush_records, config.flush_max_age);
     loop {
         let records = consumer
-            .poll(config.poll_timeout.to_std())
+            .poll(config.poll_timeout)
             .await
             .map_err(|err| ProfilesError::Block(format!("consumer poll failed: {err}")))?;
         let now = Instant::now();
@@ -539,7 +537,7 @@ mod tests {
     use bytes::Bytes;
     use crabka_client_consumer::ConsumerRecord;
     use crabka_pprof::SymbolDb;
-    use crabka_units::minutes;
+    use crabka_units::{convert::TimeExt as _, minutes};
     use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory};
 
     use super::*;

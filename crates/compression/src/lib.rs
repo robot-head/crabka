@@ -21,10 +21,11 @@
 //!
 //! ```rust
 //! use crabka_compression::{CompressionType, compress, decompress};
+//! use crabka_units::kibibytes;
 //!
 //! # fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let compressed = compress(CompressionType::Lz4, b"order-created")?;
-//! let plain = decompress(CompressionType::Lz4, &compressed, 1024)?;
+//! let plain = decompress(CompressionType::Lz4, &compressed, kibibytes(1))?;
 //! assert_eq!(plain.as_ref(), b"order-created");
 //! # Ok(())
 //! # }
@@ -35,6 +36,7 @@ mod error;
 
 use bytes::Bytes;
 pub use codec_type::CompressionType;
+use crabka_units::{ByteSize, convert::ByteSizeExt as _};
 pub use error::CompressionError;
 
 /// Compress `data` using the codec identified by `ct`.
@@ -68,8 +70,11 @@ pub fn compress(ct: CompressionType, data: &[u8]) -> Result<Bytes, CompressionEr
 pub fn decompress(
     ct: CompressionType,
     data: &[u8],
-    max_output: usize,
+    max_output: ByteSize,
 ) -> Result<Bytes, CompressionError> {
+    // The per-codec decoders compare against buffer lengths and size
+    // allocations, so they keep the exact `usize` count.
+    let max_output = max_output.bytes_usize();
     match ct {
         CompressionType::None => {
             if data.len() > max_output {
@@ -141,6 +146,7 @@ fn zstd_decompress(_: &[u8], _: usize) -> Result<Bytes, CompressionError> {
 
 #[cfg(test)]
 mod tests {
+    use crabka_units::{bytes, kibibytes};
 
     use super::*;
 
@@ -152,7 +158,7 @@ mod tests {
 
     #[test]
     fn passthrough_none_decompress() {
-        let out = decompress(CompressionType::None, b"abcdef", 1024).unwrap();
+        let out = decompress(CompressionType::None, b"abcdef", kibibytes(1)).unwrap();
         assert2::assert!(out.as_ref() == b"abcdef");
     }
 
@@ -160,7 +166,7 @@ mod tests {
     fn passthrough_none_decompress_respects_cap() {
         // Input larger than the cap is rejected even for the None passthrough.
         assert2::assert!(matches!(
-            decompress(CompressionType::None, b"abcdef", 3),
+            decompress(CompressionType::None, b"abcdef", bytes(3)),
             Err(CompressionError::TooLarge { limit: 3 })
         ));
     }
@@ -169,7 +175,7 @@ mod tests {
     fn passthrough_none_decompress_at_exact_cap() {
         // Boundary: input of exactly `max_output` bytes is allowed (the cap
         // check is `len > max_output`, not `>=`).
-        let out = decompress(CompressionType::None, b"abcdef", 6).unwrap();
+        let out = decompress(CompressionType::None, b"abcdef", bytes(6)).unwrap();
         assert2::assert!(out.as_ref() == b"abcdef");
     }
 }

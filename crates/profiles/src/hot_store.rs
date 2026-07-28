@@ -309,7 +309,7 @@ pub async fn run_wal_tail(
         .map_err(|err| ProfilesError::Wal(format!("hot WAL-tail consumer build failed: {err}")))?;
 
     loop {
-        let records = consumer.poll(poll_timeout.to_std()).await.map_err(|err| {
+        let records = consumer.poll(poll_timeout).await.map_err(|err| {
             ProfilesError::Wal(format!("hot WAL-tail consumer poll failed: {err}"))
         })?;
         for record in records {

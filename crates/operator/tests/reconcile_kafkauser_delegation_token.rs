@@ -185,18 +185,18 @@ async fn delegation_token_user_reconcile_creates_secret_and_status() {
         RecordedCall::CreateDelegationToken {
             owner_principal_name,
             renewers,
-            max_lifetime_ms,
+            max_lifetime,
         } => Some((
             owner_principal_name.clone(),
             renewers.clone(),
-            *max_lifetime_ms,
+            *max_lifetime,
         )),
         _ => None,
     });
     // Owner principal name carries no `User:` prefix; unset
-    // spec.max_lifetime_ms → -1 (broker default).
+    // spec.max_lifetime_ms → `None` (broker default).
     assert!(
-        create_call == Some(("alice".to_string(), vec!["User:bob".to_string()], -1_i64,)),
+        create_call == Some(("alice".to_string(), vec!["User:bob".to_string()], None)),
         "CreateDelegationToken must have been issued with these exact args",
     );
 

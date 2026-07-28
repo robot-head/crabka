@@ -2844,7 +2844,7 @@ impl LogWalConsumer for KafkaLogWalConsumer {
     #[cfg_attr(test, mutants::skip)]
     async fn poll(&mut self, timeout: Time) -> Result<Vec<KafkaWalRecord>, WalConsumerError> {
         self.consumer
-            .poll(timeout.to_std())
+            .poll(timeout)
             .await?
             .into_iter()
             .map(|record| {

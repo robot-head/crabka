@@ -1,14 +1,18 @@
 //! `Consumer::poll` — issues one `Fetch` covering every assigned partition,
 //! advances next-offsets, and returns the decoded records.
 
-use std::{collections::HashMap, time::Duration};
+use std::collections::HashMap;
 
 use crabka_ids::LeaderEpoch;
 use crabka_protocol::owned::{
     fetch_request::{FetchPartition, FetchRequest, FetchTopic},
     list_offsets_request::{ListOffsetsPartition, ListOffsetsRequest, ListOffsetsTopic},
 };
-use crabka_units::{ByteSize, convert::ByteSizeExt as _, mebibytes};
+use crabka_units::{
+    ByteSize, Time,
+    convert::{ByteSizeExt as _, TimeExt as _},
+    mebibytes,
+};
 
 use crate::{
     builder::{AutoOffsetReset, IsolationLevel},
@@ -168,7 +172,7 @@ impl Consumer {
         skip_all,
         fields(
             group_id = %self.group_id,
-            timeout_ms = timeout.as_millis(),
+            timeout_ms = timeout.millis_i64_trunc(),
             assigned_partitions = tracing::field::Empty,
             leaders = tracing::field::Empty,
             records = tracing::field::Empty,
@@ -177,7 +181,7 @@ impl Consumer {
     )]
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
-    pub async fn poll(&mut self, timeout: Duration) -> Result<Vec<ConsumerRecord>, ConsumerError> {
+    pub async fn poll(&mut self, timeout: Time) -> Result<Vec<ConsumerRecord>, ConsumerError> {
         if !self.prepare_poll().await? {
             return Ok(Vec::new());
         }
@@ -186,7 +190,7 @@ impl Consumer {
         let assigned = self.assigned.lock().await.clone();
         tracing::Span::current().record("assigned_partitions", assigned.len());
         if assigned.is_empty() {
-            tokio::time::sleep(timeout).await;
+            tokio::time::sleep(timeout.to_std()).await;
             return Ok(Vec::new());
         }
 
@@ -353,11 +357,15 @@ impl Consumer {
 
     async fn send_fetches(
         &self,
-        timeout: Duration,
+        timeout: Time,
         by_leader: FetchByLeader,
         topic_ids: &HashMap<String, crabka_protocol::primitives::uuid::Uuid>,
     ) -> Result<Vec<crabka_protocol::owned::fetch_response::FetchResponse>, ConsumerError> {
-        let timeout_ms = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
+        // Truncate rather than round: `max_wait_ms` is a wire field, and a
+        // fractional millisecond rounded up would ask the broker to hold the
+        // Fetch open past the caller's budget. A negative budget — a deadline
+        // already passed — means "do not wait", as `Duration` did before.
+        let timeout_ms = i32::try_from(timeout.millis_i64_trunc().max(0)).unwrap_or(i32::MAX);
 
         // Issue one Fetch per leader. All guards are released; we collect every
         // response before re-locking to process them. Sent sequentially so a

@@ -248,7 +248,7 @@ async fn consumer_fetches_from_non_bootstrap_leaders() {
     let mut seen: HashSet<String> = HashSet::new();
     let deadline = Instant::now() + Duration::from_secs(30);
     while seen.len() < expected.len() && Instant::now() < deadline {
-        for r in consumer.poll(Duration::from_millis(300)).await.unwrap() {
+        for r in consumer.poll(crabka_units::millis(300)).await.unwrap() {
             seen.insert(String::from_utf8_lossy(r.value.as_deref().unwrap_or(&[])).into_owned());
         }
     }

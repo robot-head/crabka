@@ -9,6 +9,7 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use crabka_client_admin::{
     AdminClientLike, CreatePartitionsOp, CreateTopicSpec, IncrementalAlterOp,
 };
+use crabka_units::{Time, secs};
 use futures::StreamExt as _;
 use kube::{
     Resource, ResourceExt as _,
@@ -28,6 +29,11 @@ use crate::{
 };
 
 const FINALIZER: &str = "crabka.io/topic-finalizer";
+
+/// How long the broker may take to finish a reconcile-issued topic mutation
+/// before it answers with a timeout error, carried on `CreateTopics`,
+/// `DeleteTopics`, and `CreatePartitions` as Kafka's `timeout_ms` field.
+const TOPIC_MUTATION_TIMEOUT: Time = secs(30);
 
 /// Run the controller forever.
 /// # Errors
@@ -110,7 +116,7 @@ async fn create_topic(
                 replicas: obj.spec.replicas,
                 configs: obj.spec.config.clone().unwrap_or_default(),
             }],
-            30_000,
+            TOPIC_MUTATION_TIMEOUT,
         )
         .await
     {
@@ -225,7 +231,10 @@ async fn prepare_topic(
             && let Ok(client) = ctx.admin_client_for(&cluster, &bootstrap).await
         {
             let mut admin = client.lock().await;
-            if let Err(error) = admin.delete_topics(&[&topic_name], 30_000).await {
+            if let Err(error) = admin
+                .delete_topics(&[&topic_name], TOPIC_MUTATION_TIMEOUT)
+                .await
+            {
                 tracing::warn!(%error, %topic_name, "DeleteTopics failed during finalizer");
             }
         }
@@ -346,7 +355,7 @@ async fn reconcile_inner(
                             name: topic_name.clone(),
                             new_total_count: obj.spec.partitions,
                         }],
-                        30_000,
+                        TOPIC_MUTATION_TIMEOUT,
                     )
                     .await;
                 match outcomes {

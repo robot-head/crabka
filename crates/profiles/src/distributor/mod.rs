@@ -497,7 +497,7 @@ async fn push_handler(
     );
     let result = async {
         let tenant = tenant_from_headers(&headers)?;
-        let raws = decode_push(&req.0, state.max_decompressed.bytes_usize())?;
+        let raws = decode_push(&req.0, state.max_decompressed)?;
         let items = raws.len() as u64;
         process_raw(&state, &tenant, raws).await?;
         Ok::<u64, ProfilesError>(items)
@@ -649,13 +649,7 @@ async fn ingest_handler(
         let content_type = headers
             .get(axum::http::header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok());
-        let raw = decode_ingest_body(
-            &query,
-            content_type,
-            body,
-            state.max_decompressed.bytes_usize(),
-        )
-        .await?;
+        let raw = decode_ingest_body(&query, content_type, body, state.max_decompressed).await?;
         process_raw(&state, &tenant, vec![raw]).await
     }
     .instrument(ingest_span)

@@ -645,7 +645,7 @@ impl RangeRetirementAdmin for CountingRetirementAdmin {
     async fn delete_topics(
         &mut self,
         names: &[&str],
-        timeout_ms: i32,
+        timeout: crabka_units::Time,
     ) -> Result<Vec<crabka_client_admin::DeleteTopicOutcome>, crabka_client_admin::AdminError> {
         if names != [self.expected_topic.as_str()] {
             let mut ledger = self.ledger.lock().expect("delete ledger");
@@ -659,7 +659,7 @@ impl RangeRetirementAdmin for CountingRetirementAdmin {
             ));
         }
         self.ledger.lock().expect("delete ledger").exact_calls += 1;
-        let result = self.inner.delete_topics(names, timeout_ms).await?;
+        let result = self.inner.delete_topics(names, timeout).await?;
         if self.fail_after_delete && result.iter().all(|outcome| outcome.error.is_none()) {
             self.fail_after_delete = false;
             let mut ledger = self.ledger.lock().expect("delete ledger");
@@ -4433,7 +4433,7 @@ async fn prepare_split_system(
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            30_000,
+            crabka_units::secs(30),
         )
         .await
         .expect("create sentinel topic");

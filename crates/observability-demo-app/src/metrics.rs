@@ -15,6 +15,7 @@
 
 use std::sync::Arc;
 
+use crabka_units::{Time, convert::TimeExt as _};
 use prometheus_client::{
     encoding::EncodeLabelSet,
     metrics::{counter::Counter, family::Family, histogram::Histogram},
@@ -130,7 +131,7 @@ impl DemoMetrics {
         region: &str,
         payment_method: &str,
         value_dollars: f64,
-        latency_secs: f64,
+        latency: Time,
     ) {
         self.orders_produced
             .get_or_create(&ProducedLabel {
@@ -140,20 +141,20 @@ impl DemoMetrics {
             })
             .inc();
         self.order_value_dollars.observe(value_dollars);
-        self.produce_latency.observe(latency_secs);
+        self.produce_latency.observe(latency.secs_f64());
     }
 
     /// Observe one processing-stage latency.
-    pub fn record_stage(&self, stage: &str, secs: f64) {
+    pub fn record_stage(&self, stage: &str, latency: Time) {
         self.process_stage_latency
             .get_or_create(&StageLabel {
                 stage: stage.into(),
             })
-            .observe(secs);
+            .observe(latency.secs_f64());
     }
 
     /// Record one processed order's terminal outcome and total latency.
-    pub fn record_processed(&self, category: &str, region: &str, outcome: &str, total_secs: f64) {
+    pub fn record_processed(&self, category: &str, region: &str, outcome: &str, total: Time) {
         self.orders_processed
             .get_or_create(&ProcessedLabel {
                 category: category.into(),
@@ -161,7 +162,7 @@ impl DemoMetrics {
                 outcome: outcome.into(),
             })
             .inc();
-        self.order_processing_latency.observe(total_secs);
+        self.order_processing_latency.observe(total.secs_f64());
     }
 }
 
@@ -207,15 +208,17 @@ async fn export(
 #[cfg(test)]
 mod tests {
 
+    use crabka_units::{micros, millis};
+
     use super::*;
 
     #[tokio::test]
     async fn registry_has_demo_prefix_and_all_metrics() {
         let m = DemoMetrics::new();
-        m.record_produced("books", "us-east", "card", 42.0, 0.002);
-        m.record_stage("validate", 0.0003);
-        m.record_stage("fraud_check", 0.0011);
-        m.record_processed("books", "us-east", "fulfilled", 0.004);
+        m.record_produced("books", "us-east", "card", 42.0, millis(2));
+        m.record_stage("validate", micros(300));
+        m.record_stage("fraud_check", micros(1_100));
+        m.record_processed("books", "us-east", "fulfilled", millis(4));
 
         let mut buf = String::new();
         let r = m.registry.lock().await;
@@ -241,9 +244,9 @@ mod tests {
     #[test]
     fn produced_counter_accumulates_per_label() {
         let m = DemoMetrics::new();
-        m.record_produced("toys", "eu-west", "wire", 10.0, 0.001);
-        m.record_produced("toys", "eu-west", "wire", 20.0, 0.001);
-        m.record_produced("toys", "ap-south", "wire", 30.0, 0.001);
+        m.record_produced("toys", "eu-west", "wire", 10.0, millis(1));
+        m.record_produced("toys", "eu-west", "wire", 20.0, millis(1));
+        m.record_produced("toys", "ap-south", "wire", 30.0, millis(1));
         assert2::assert!(
             m.orders_produced
                 .get_or_create(&ProducedLabel {

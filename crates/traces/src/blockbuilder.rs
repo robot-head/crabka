@@ -13,11 +13,7 @@ use crabka_blockstore::{
     span_block_schema_with_promoted_attrs,
 };
 use crabka_client_consumer::{Consumer, ConsumerRecord};
-use crabka_units::{
-    Time,
-    convert::{StdDurationExt as _, TimeExt as _},
-    secs,
-};
+use crabka_units::{Time, convert::StdDurationExt as _, secs};
 use object_store::ObjectStore;
 use tokio::{sync::Mutex, time::Instant};
 use tokio_util::sync::CancellationToken;
@@ -43,7 +39,7 @@ const TRACEPARENT_HEADER: &str = "traceparent";
 /// [`decode_consumer_records`] consumes so the loop body is unchanged.
 #[async_trait::async_trait]
 pub trait WalConsumerPoll: Send {
-    async fn poll(&mut self, window: Duration) -> Result<Vec<ConsumerRecord>, TracesError>;
+    async fn poll(&mut self, window: Time) -> Result<Vec<ConsumerRecord>, TracesError>;
 }
 
 /// Minimal WAL-consumer commit surface the block-builder loop drives.
@@ -58,7 +54,7 @@ pub trait WalConsumerCommit: Send {
 
 #[async_trait::async_trait]
 impl WalConsumerPoll for Consumer {
-    async fn poll(&mut self, window: Duration) -> Result<Vec<ConsumerRecord>, TracesError> {
+    async fn poll(&mut self, window: Time) -> Result<Vec<ConsumerRecord>, TracesError> {
         Consumer::poll(self, window)
             .await
             .map_err(|err| TracesError::Wal(err.to_string()))
@@ -448,7 +444,7 @@ where
 {
     let mut accumulator = FlushAccumulator::new();
     while !shutdown.is_cancelled() {
-        let records = consumer.poll(config.window.to_std()).await?;
+        let records = consumer.poll(config.window).await?;
         let windows = decode_consumer_records(&records)?;
 
         // One consume span per NON-EMPTY poll batch (NOT per record). Parent it

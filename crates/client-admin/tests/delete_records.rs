@@ -24,7 +24,7 @@ async fn delete_records_truncates_wal_and_maps_outcome() {
                 replicas: 1,
                 configs: std::collections::BTreeMap::default(),
             }],
-            5_000,
+            crabka_units::secs(5),
         )
         .await
         .unwrap();
@@ -58,7 +58,7 @@ async fn delete_records_truncates_wal_and_maps_outcome() {
                 partition: 0,
                 offset: 50,
             }],
-            5_000,
+            crabka_units::secs(5),
         )
         .await
         .unwrap();

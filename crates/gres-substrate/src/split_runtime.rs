@@ -246,7 +246,7 @@ impl RawKvSplitRuntime {
                 self.checkpoint_tenant(range),
                 format!("raw-r{range}"),
                 1,
-                0,
+                crabka_units::bytes(0),
                 crabka_units::kibibytes(1),
                 2,
                 std::time::Duration::from_secs(1),

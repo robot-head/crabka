@@ -201,14 +201,14 @@ impl RangeRetirementAdmin for CountingRetirementAdmin {
     async fn delete_topics(
         &mut self,
         names: &[&str],
-        timeout_ms: i32,
+        timeout: crabka_units::Time,
     ) -> Result<Vec<crabka_client_admin::DeleteTopicOutcome>, crabka_client_admin::AdminError> {
         self.ledger
             .lock()
             .expect("retirement delete ledger")
             .record_delete_request(&self.expected_topic, names)
             .map_err(crabka_client_admin::AdminError::Protocol)?;
-        let outcomes = self.inner.delete_topics(names, timeout_ms).await?;
+        let outcomes = self.inner.delete_topics(names, timeout).await?;
         if self.error_after_delete && outcomes.iter().all(|outcome| outcome.error.is_none()) {
             self.error_after_delete = false;
             self.ledger
@@ -1165,7 +1165,7 @@ async fn prepare_split_foundation() -> SplitFoundationSetup {
                 replicas: 1,
                 configs: BTreeMap::default(),
             }],
-            30_000,
+            crabka_units::secs(30),
         )
         .await
         .expect("create split sentinel");
@@ -2205,7 +2205,7 @@ async fn prepare_move_nemesis(kill_point: SourceKillPoint) -> PreparedMoveNemesi
                 replicas: 1,
                 configs: BTreeMap::default(),
             }],
-            30_000,
+            crabka_units::secs(30),
         )
         .await
         .expect("create sentinel topic");

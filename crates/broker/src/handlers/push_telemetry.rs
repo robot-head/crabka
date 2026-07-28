@@ -86,8 +86,7 @@ pub(crate) fn handle(
                 broker.config.telemetry_max_decompression_ratio,
                 broker.config.telemetry_decompressed_output_floor,
                 broker.config.telemetry_decompressed_output_ceiling,
-            )
-            .bytes_usize();
+            );
             match crabka_compression::decompress(ct, &req.metrics, max_output) {
                 Ok(raw) => match otlp::decode_metrics(&raw) {
                     Ok(md) => {

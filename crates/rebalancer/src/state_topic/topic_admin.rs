@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 
 use crabka_client_admin::{AdminClient, AdminError, CreateTopicOutcome, CreateTopicSpec};
-use crabka_units::{Time, convert::TimeExt as _, secs};
+use crabka_units::{Time, secs};
 use tracing::warn;
 
 use crate::state_topic::error::StateTopicError;
@@ -33,7 +33,7 @@ impl TopicAdminClient for AdminClient {
         specs: &[CreateTopicSpec],
         timeout: Time,
     ) -> Result<Vec<CreateTopicOutcome>, AdminError> {
-        AdminClient::create_topics(self, specs, timeout.millis_i32()).await
+        AdminClient::create_topics(self, specs, timeout).await
     }
 }
 

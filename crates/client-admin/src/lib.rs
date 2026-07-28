@@ -12,7 +12,7 @@
 //! credentials, ACLs, quotas, delegation tokens, and log-dir inspection.
 
 use crabka_client_core::{ClientError, Connection, ConnectionOptions};
-use crabka_units::secs;
+use crabka_units::{Time, secs};
 use thiserror::Error;
 
 pub mod configs;
@@ -49,22 +49,22 @@ pub trait AdminClientLike: Send {
     async fn create_topics(
         &mut self,
         specs: &[CreateTopicSpec],
-        timeout_ms: i32,
+        timeout: Time,
     ) -> Result<Vec<CreateTopicOutcome>, AdminError>;
     async fn delete_topics(
         &mut self,
         names: &[&str],
-        timeout_ms: i32,
+        timeout: Time,
     ) -> Result<Vec<DeleteTopicOutcome>, AdminError>;
     async fn create_partitions(
         &mut self,
         ops: &[CreatePartitionsOp],
-        timeout_ms: i32,
+        timeout: Time,
     ) -> Result<Vec<CreatePartitionsOutcome>, AdminError>;
     async fn delete_records(
         &mut self,
         ops: &[DeleteRecordsOp],
-        timeout_ms: i32,
+        timeout: Time,
     ) -> Result<Vec<DeleteRecordsOutcome>, AdminError>;
     async fn describe_configs(
         &mut self,
@@ -119,7 +119,7 @@ pub trait AdminClientLike: Send {
         &mut self,
         owner_principal_name: &str,
         renewers: &[String],
-        max_lifetime_ms: i64,
+        max_lifetime: Option<Time>,
     ) -> Result<crabka_metadata::DelegationToken, AdminError>;
     async fn renew_delegation_token(
         &mut self,
@@ -140,30 +140,30 @@ impl AdminClientLike for AdminClient {
     async fn create_topics(
         &mut self,
         specs: &[CreateTopicSpec],
-        timeout_ms: i32,
+        timeout: Time,
     ) -> Result<Vec<CreateTopicOutcome>, AdminError> {
-        AdminClient::create_topics(self, specs, timeout_ms).await
+        AdminClient::create_topics(self, specs, timeout).await
     }
     async fn delete_topics(
         &mut self,
         names: &[&str],
-        timeout_ms: i32,
+        timeout: Time,
     ) -> Result<Vec<DeleteTopicOutcome>, AdminError> {
-        AdminClient::delete_topics(self, names, timeout_ms).await
+        AdminClient::delete_topics(self, names, timeout).await
     }
     async fn create_partitions(
         &mut self,
         ops: &[CreatePartitionsOp],
-        timeout_ms: i32,
+        timeout: Time,
     ) -> Result<Vec<CreatePartitionsOutcome>, AdminError> {
-        AdminClient::create_partitions(self, ops, timeout_ms).await
+        AdminClient::create_partitions(self, ops, timeout).await
     }
     async fn delete_records(
         &mut self,
         ops: &[DeleteRecordsOp],
-        timeout_ms: i32,
+        timeout: Time,
     ) -> Result<Vec<DeleteRecordsOutcome>, AdminError> {
-        AdminClient::delete_records(self, ops, timeout_ms).await
+        AdminClient::delete_records(self, ops, timeout).await
     }
     async fn describe_configs(
         &mut self,
@@ -236,7 +236,7 @@ impl AdminClientLike for AdminClient {
         &mut self,
         owner_principal_name: &str,
         renewers: &[String],
-        max_lifetime_ms: i64,
+        max_lifetime: Option<Time>,
     ) -> Result<crabka_metadata::DelegationToken, AdminError> {
         // The create-response carries every field the image type needs
         // *except* the renewer list (the broker does not echo it back),
@@ -247,7 +247,7 @@ impl AdminClientLike for AdminClient {
             self,
             owner_principal_name,
             renewers,
-            max_lifetime_ms,
+            max_lifetime,
         )
         .await?;
         let renewers_image = renewers

@@ -1008,13 +1008,13 @@ pub struct CheckpointRuntimeConfig {
     /// WAL frames since the last manifest that trigger a checkpoint.
     pub frames_threshold: u64,
     /// WAL bytes since the last manifest that trigger a checkpoint.
-    pub bytes_threshold: u64,
+    pub bytes_threshold: ByteSize,
     /// Target checkpoint part object size.
     pub part_max_size: ByteSize,
     /// Number of newest checkpoint directories retained after prune planning.
     pub retain_newest: usize,
     /// Kafka `DeleteRecords` timeout after a durable manifest.
-    pub delete_records_timeout_ms: i32,
+    pub delete_records_timeout: Time,
     /// Background checkpoint threshold polling interval.
     pub poll_interval: Duration,
 }
@@ -1305,16 +1305,19 @@ impl CheckpointRuntimeConfig {
                 .map_or(DEFAULT_CHECKPOINT_FRAMES, NonZeroU64::get),
             bytes_threshold: args
                 .checkpoint_bytes
-                .map_or(DEFAULT_CHECKPOINT_BYTES.bytes_u64(), NonZeroU64::get),
+                .map_or(DEFAULT_CHECKPOINT_BYTES, |bytes| {
+                    ByteSize::from_bytes(bytes.get())
+                }),
             part_max_size,
             retain_newest: args.checkpoint_retain.map_or(
                 crabka_gres_substrate::DEFAULT_CHECKPOINT_RETAIN,
                 PositiveUsize::into_value,
             ),
-            delete_records_timeout_ms: args.checkpoint_delete_records_timeout_ms.map_or(
-                DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT.millis_i32(),
-                PositiveI32::into_value,
-            ),
+            delete_records_timeout: args
+                .checkpoint_delete_records_timeout_ms
+                .map_or(DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT, |ms| {
+                    Time::from_millis(i64::from(ms.into_value()))
+                }),
             poll_interval: args
                 .checkpoint_poll_interval_ms
                 .map_or(DEFAULT_CHECKPOINT_POLL_INTERVAL, positive_millis)
@@ -2138,7 +2141,7 @@ fn current_unix_millis() -> Option<u64> {
 struct GresCheckpointWalPruner {
     bootstrap: CheckpointPruneBackend,
     security: Option<ClientSecurity>,
-    delete_records_timeout_ms: i32,
+    delete_records_timeout: Time,
 }
 
 enum CheckpointPruneBackend {
@@ -2147,18 +2150,18 @@ enum CheckpointPruneBackend {
 }
 
 impl GresCheckpointWalPruner {
-    fn in_memory(delete_records_timeout_ms: i32) -> Self {
+    fn in_memory(delete_records_timeout: Time) -> Self {
         Self {
             bootstrap: CheckpointPruneBackend::InMemory,
             security: None,
-            delete_records_timeout_ms,
+            delete_records_timeout,
         }
     }
 
     fn kafka(
         bootstrap: &str,
         security: Option<ClientSecurity>,
-        delete_records_timeout_ms: i32,
+        delete_records_timeout: Time,
     ) -> std::io::Result<Self> {
         let bootstrap_addrs: Vec<_> = bootstrap
             .split(',')
@@ -2172,7 +2175,7 @@ impl GresCheckpointWalPruner {
         Ok(Self {
             bootstrap: CheckpointPruneBackend::Kafka { bootstrap_addrs },
             security,
-            delete_records_timeout_ms,
+            delete_records_timeout,
         })
     }
 }
@@ -2201,7 +2204,7 @@ impl crabka_gres_substrate::CheckpointWalPruner for GresCheckpointWalPruner {
             ))
         })?;
         let outcomes = admin
-            .delete_records(ops, self.delete_records_timeout_ms)
+            .delete_records(ops, self.delete_records_timeout)
             .await
             .map_err(|error| {
                 crabka_gres_substrate::SubstrateError::Unavailable(format!(
@@ -4071,7 +4074,7 @@ async fn open_substrate_runtime_with_tenant_record(
         crabka_gres_substrate::wal_topic(&config.tenant),
         format!("{}/r0", config.tenant),
         None,
-        |timeout_ms| Ok(GresCheckpointWalPruner::in_memory(timeout_ms)),
+        |timeout| Ok(GresCheckpointWalPruner::in_memory(timeout)),
     )?;
     if let Some(checkpoint) = &checkpoint {
         seed_checkpoint_planner_stats(checkpoint).await?;
@@ -7173,7 +7176,7 @@ fn build_checkpoint_runtime(
     wal_topic: String,
     checkpoint_namespace: String,
     checkpoint_store: Option<Arc<dyn crabka_gres_substrate::checkpoint::CheckpointStore>>,
-    pruner: impl FnOnce(i32) -> std::io::Result<GresCheckpointWalPruner>,
+    pruner: impl FnOnce(Time) -> std::io::Result<GresCheckpointWalPruner>,
 ) -> std::io::Result<Option<StartedCheckpointRuntime>> {
     let Some(checkpoint_config) = &config.checkpoints else {
         return Ok(None);
@@ -7189,7 +7192,7 @@ fn build_checkpoint_runtime(
         service_config,
         store,
         Arc::clone(&checkpoint_store),
-        Arc::new(pruner(checkpoint_config.delete_records_timeout_ms)?),
+        Arc::new(pruner(checkpoint_config.delete_records_timeout)?),
         Arc::clone(&stats),
     )
     .map_err(|error| std::io::Error::other(format!("checkpoint service: {error}")))?;
@@ -7233,7 +7236,7 @@ fn build_range_checkpoint_runtime(
         Arc::new(GresCheckpointWalPruner::kafka(
             &config.bootstrap,
             config.kafka_security.clone(),
-            checkpoint_config.delete_records_timeout_ms,
+            checkpoint_config.delete_records_timeout,
         )?),
         Arc::clone(&stats),
     )
@@ -7305,11 +7308,11 @@ async fn open_live_substrate_runtime(
         wal_selection.checkpoint_topic,
         wal_selection.checkpoint_namespace,
         checkpoint_store,
-        |timeout_ms| {
+        |timeout| {
             GresCheckpointWalPruner::kafka(
                 &config.bootstrap,
                 config.kafka_security.clone(),
-                timeout_ms,
+                timeout,
             )
         },
     )?;
@@ -9102,11 +9105,8 @@ mod tests {
             .expect("checkpoint defaults")
             .expect("checkpoint config");
         assert!(defaults.frames_threshold == DEFAULT_CHECKPOINT_FRAMES);
-        assert!(defaults.bytes_threshold == DEFAULT_CHECKPOINT_BYTES.bytes_u64());
-        assert!(
-            defaults.delete_records_timeout_ms
-                == DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT.millis_i32()
-        );
+        assert!(defaults.bytes_threshold == DEFAULT_CHECKPOINT_BYTES);
+        assert!(defaults.delete_records_timeout == DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT);
         assert!(defaults.poll_interval == DEFAULT_CHECKPOINT_POLL_INTERVAL.to_std());
 
         let mut record = tenant_record();
@@ -9118,7 +9118,7 @@ mod tests {
             .expect("record checkpoint policy")
             .expect("checkpoint config");
         assert!(from_record.frames_threshold == 77);
-        assert!(from_record.bytes_threshold == 88);
+        assert!(from_record.bytes_threshold == crabka_units::bytes(88));
 
         args.checkpoint_frames = Some(NonZeroU64::new(7).expect("nonzero"));
         args.checkpoint_bytes = Some(NonZeroU64::new(8).expect("nonzero"));
@@ -9128,7 +9128,7 @@ mod tests {
             .expect("explicit checkpoint policy")
             .expect("checkpoint config");
         assert!(from_explicit.frames_threshold == 7);
-        assert!(from_explicit.bytes_threshold == 8);
+        assert!(from_explicit.bytes_threshold == crabka_units::bytes(8));
     }
 
     #[test]
@@ -9153,10 +9153,10 @@ mod tests {
             "__gres_wal.tenant-a.r0".to_owned(),
         )
         .expect("service config");
-        let pruner = GresCheckpointWalPruner::in_memory(checkpoint.delete_records_timeout_ms);
+        let pruner = GresCheckpointWalPruner::in_memory(checkpoint.delete_records_timeout);
 
         assert!(service.poll_interval == Duration::from_millis(5_678));
-        assert!(pruner.delete_records_timeout_ms == 1_234);
+        assert!(pruner.delete_records_timeout == crabka_units::millis(1_234));
     }
 
     #[test]
@@ -10532,18 +10532,12 @@ mod tests {
             .expect("valid config")
             .expect("substrate config");
 
-        assert_eq!(
-            config.checkpoints.as_ref().map(|cfg| cfg.frames_threshold),
-            Some(100)
+        assert!(config.checkpoints.as_ref().map(|cfg| cfg.frames_threshold) == Some(100));
+        assert!(
+            config.checkpoints.as_ref().map(|cfg| cfg.bytes_threshold)
+                == Some(crabka_units::mebibytes(1))
         );
-        assert_eq!(
-            config.checkpoints.as_ref().map(|cfg| cfg.bytes_threshold),
-            Some(1_048_576)
-        );
-        assert_eq!(
-            config.checkpoints.as_ref().map(|cfg| cfg.retain_newest),
-            Some(3)
-        );
+        assert!(config.checkpoints.as_ref().map(|cfg| cfg.retain_newest) == Some(3));
         assert!(matches!(
             config.checkpoints.expect("checkpoint config").object_store,
             CheckpointObjectStoreConfig::S3 { ref bucket, ref region, ref prefix, .. }
@@ -10868,10 +10862,10 @@ mod tests {
             checkpoints: Some(CheckpointRuntimeConfig {
                 object_store: CheckpointObjectStoreConfig::InMemory,
                 frames_threshold: 1,
-                bytes_threshold: 1,
+                bytes_threshold: crabka_units::bytes(1),
                 part_max_size: crabka_gres_substrate::DEFAULT_PART_MAX_SIZE,
                 retain_newest: 2,
-                delete_records_timeout_ms: 30_000,
+                delete_records_timeout: crabka_units::secs(30),
                 poll_interval: Duration::from_secs(1),
             }),
             kafka_security: None,
@@ -10910,7 +10904,7 @@ mod tests {
             wal_selection.checkpoint_topic,
             wal_selection.checkpoint_namespace,
             Some(Arc::clone(&checkpoint_store)),
-            |timeout_ms| Ok(GresCheckpointWalPruner::in_memory(timeout_ms)),
+            |timeout| Ok(GresCheckpointWalPruner::in_memory(timeout)),
         )
         .expect("checkpoint runtime")
         .expect("checkpoint runtime enabled");
