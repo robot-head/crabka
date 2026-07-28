@@ -2900,3 +2900,75 @@ operational owner is the admin UI mutation JSON body limit,
 policy applied to every authenticated mutation request, remains a fixed
 constant rather than an `AdminUiConfig` value, and is not a protocol constant,
 sentinel, test fixture, ignored argument, or already-configured value.
+
+## Admin UI Mutation JSON Body Limit
+
+The admin UI mutation JSON body limit is now a positive
+`MutationJsonBodyLimitBytes` stored in `AdminUiConfig`. It retains the
+1,048,576-byte default and is resolved from:
+
+```text
+--mutation-json-body-limit-bytes
+CRABKA_ADMIN_UI_MUTATION_JSON_BODY_LIMIT_BYTES
+```
+
+The command-line value wins when both inputs are present. Parsing rejects zero,
+malformed, negative, and platform-overflow values before server startup.
+`MutationJsonBodyLimitBytes` uses `refined_type::rule::GreaterUsize<0>` for the
+positive-value invariant.
+
+The exact runtime flow is:
+
+```text
+AdminUiRuntimeArgs
+  -> AdminUiConfig::mutation_json_body_limit_bytes
+  -> AppState
+  -> read_mutation_json
+  -> axum::body::to_bytes
+```
+
+Every mutation route continues to authenticate before decoding its request
+body. Oversized authenticated bodies still return HTTP 413, and malformed JSON
+within the configured limit still returns HTTP 400. No CRD or operator field
+was added because no checked-in Kubernetes owner deploys the standalone admin
+UI process.
+
+After the implementation and before this section was appended, the exact
+scanner command
+
+```text
+tools/audit-runtime-values.sh
+```
+
+reported 6,280 lines across 1,054 files. Its admin UI subset contained 14
+lines: one configured body-limit default, 11 invariant permission-bit
+assignments, one invariant session-cookie name, and one structural sidebar-link
+table. The categories sum to all 14 lines, with zero unresolved scanner-visible
+admin UI owners.
+
+Before this section was appended, the exact focused search
+
+```text
+rg -n \
+  "mutation_json_body_limit_bytes|MutationJsonBodyLimitBytes|DEFAULT_MUTATION_JSON_BODY_LIMIT_BYTES|mutation-json-body-limit-bytes|CRABKA_ADMIN_UI_MUTATION_JSON_BODY_LIMIT_BYTES" \
+  crates/admin-ui \
+  docs/configuration-audit.md
+```
+
+reported 26 lines. The mutually exclusive classification is 14 production
+configuration-flow references, 12 test references, and zero unresolved-owner
+references: `14 + 12 + 0 = 26`.
+
+The package's 116 tests passed, including typed boundary and hermetic
+CLI-over-environment precedence tests, the shared-limit mutation-route test,
+and the authentication-before-decoding test. Strict package Clippy, nightly
+formatting, the single-help-entry check, diff hygiene, and the exact one-line
+`Cargo.lock` direct-dependency change all passed.
+
+### Adjacent Pending Policy
+
+This closes only the admin UI mutation JSON body limit. The next admin UI
+operational owner is the eight-hour `session_ttl_seconds` default, which is
+stored in `AdminUiConfig` but has no CLI or environment input. The three
+30,000-millisecond broker-admin request timeouts in `server_fns.rs` also remain
+fixed operational policy for a later slice.
