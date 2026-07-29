@@ -24,11 +24,11 @@ applicable rule below:
 ## Coverage Status
 
 - Complete: `admin-ui`, `audit`, `authz`, `bench-driver`, `blockstore`,
-  `broker`, `cli`, `client-admin`, `compression`, `grpc-gateway`, `operator`,
-  `schema-registry`.
+  `broker`, `cli`, `client-admin`, `compression`, `connect-derive`,
+  `grpc-gateway`, `logfmt`, `operator`, `schema-registry`.
 - Pending: `client-consumer`, `client-core`, `client-producer`,
-  `client-streams`, `connect`, `connect-derive`,
-  `connect-postgres`, `docgen`, `gres`, `gres-activator`, `gres-balancer`,
+  `client-streams`, `connect`, `connect-postgres`, `docgen`, `gres`,
+  `gres-activator`, `gres-balancer`,
   `gres-conformance`, `gres-control`, `gres-fdw`, `gres-loadtest`,
   `gres-ranges`, `gres-substrate`, `ids`,
   `integration-tests`, `kafka-tap`, `kraft-core`, `log`, `log-iobench`,
@@ -4293,3 +4293,21 @@ surface is warranted.
 The current compression all-target gate passed 41 tests; four JVM-oracle
 differential tests remained intentionally ignored. Its benchmark target ran
 successfully, and strict all-target Clippy passed.
+
+## Connect Derive and Logfmt
+
+The `connect-derive` and `logfmt` owners each have zero scanner rows. A full
+production-source review found no hidden runtime timing, capacity, retry, or
+resource policy:
+
+- `connect-derive` translates user-declared connector field metadata into
+  schema code. Its numeric tokens are Rust primitive type names and generated
+  syntax, not runtime values.
+- `logfmt` maps tracing events to Cloud Logging JSON. Its timestamp format,
+  severity mapping, and JSON field representation are output contracts; all
+  numeric values are in tests.
+
+Neither crate owns a process or deployment boundary, so CLI, environment, and
+CRD settings would be unused. The current combined gate passed 17 tests across
+both crates, including compile-pass and compile-fail cases, and strict
+all-target Clippy passed.
