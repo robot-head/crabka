@@ -280,7 +280,7 @@ spec:
   user: alice
   passwordSecretRef: {name: tenant-a-password, key: password}
   overrides:
-    suspendMaxCheckpointBytes: 0
+    suspendMaxCheckpointSize: "0B"
 YAML
 deadline_wait 60 "tenant compute Deployment creation" "kubectl get deploy tenant-a-gres >/dev/null 2>&1"
 deadline_wait 60 "PgDog Deployment creation" "kubectl get deploy fleet-pgdog >/dev/null 2>&1"
@@ -321,7 +321,7 @@ PGPASSWORD="$PGPASSWORD_VALUE" psql \
     -v ON_ERROR_STOP=1 -c "UPDATE lifecycle_marker SET value='survives' WHERE id=1"
 sleep 3
 kubectl patch grestenant tenant-a --type merge \
-    -p '{"spec":{"overrides":{"checkpointFrames":1000000,"suspendMaxCheckpointBytes":0}}}'
+    -p '{"spec":{"overrides":{"checkpointFrames":1000000,"suspendMaxCheckpointSize":"0B"}}}'
 deadline_wait 60 "stable size-gate config" \
     '[ "$(kubectl get grestenant tenant-a -o jsonpath='"'"'{.status.observedGeneration}'"'"')" = "$(kubectl get grestenant tenant-a -o jsonpath='"'"'{.metadata.generation}'"'"')" ]'
 kubectl rollout restart deploy/tenant-a-gres
