@@ -25,7 +25,8 @@ applicable rule below:
 
 - Complete: `admin-ui`, `audit`, `authz`, `bench-driver`, `blockstore`,
   `broker`, `cli`, `client-admin`, `compression`, `connect-derive`,
-  `docgen`, `grpc-gateway`, `ids`, `logfmt`, `operator`, `schema-registry`.
+  `docgen`, `grpc-gateway`, `ids`, `logfmt`, `operator`, `protocol-codegen`,
+  `schema-registry`.
 - Pending: `client-consumer`, `client-core`, `client-producer`,
   `client-streams`, `connect`, `connect-postgres`, `gres`, `gres-activator`,
   `gres-balancer`,
@@ -35,8 +36,8 @@ applicable rule below:
   `logfmt`, `logql`, `metadata`, `metrics`, `metrics-service`,
   `object-store`, `observability`, `observability-demo-app`,
   `pgcatalog`, `pgexec`, `pgkv`, `pgmvcc`, `pgparser`, `pgtypes`, `pgwire`,
-  `playground`, `pprof`, `profiles`, `promql`, `protocol`,
-  `protocol-codegen`, `raft`, `rebalancer`, `records-legacy`,
+  `playground`, `pprof`, `profiles`, `promql`, `protocol`, `raft`,
+  `rebalancer`, `records-legacy`,
   `remote-storage`, `remote-storage-topic`, `replicator`,
   `schema-serde`, `security`, `telemetry`, `throttle`,
   `traceql`, `traces`, `verified`, and `voters`.
@@ -4338,3 +4339,20 @@ is warranted for this build-time tool.
 
 The current docgen all-target gate passed 20 tests, including cyclic-schema
 termination and generated-tree output, and strict all-target Clippy passed.
+
+## Protocol Codegen
+
+The `protocol-codegen` owner has 16 scanner rows. Fifteen are emitted Rust
+constant declarations or generator lookup tables whose values come from the
+vendored Kafka schemas. The remaining 127 version cap bounds generated
+differential-test cases to Kafka's signed protocol-version domain; it is not a
+deployed runtime limit.
+
+Primitive widths, nullable markers, version ranges, formatting width, and
+generated default literals are serialization or source-format contracts.
+Changing them through runtime configuration would make generated code
+non-deterministic, so no setting is warranted.
+
+The current protocol-codegen all-target gate passed 35 tests, including every
+vendored schema parse, validation, parity, snapshot, and compile check. Strict
+all-target Clippy passed.
