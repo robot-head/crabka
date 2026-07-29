@@ -61,7 +61,7 @@ use crate::{
     compression::Compression,
     error::ProducerError,
     partitioner::UniformStickyPartitioner,
-    producer::{Acks, STATE_ACTIVE, STATE_FENCED, TopicMetadata},
+    producer::{Acks, STATE_ACTIVE, STATE_FENCED, TopicMetadata, UNRESOLVED_TOPIC_PARTITION_COUNT},
     record::RecordMetadata,
     transactional::TxnState,
     transport::ProduceTransport,
@@ -88,14 +88,6 @@ mod codes {
 /// `< 0` or whose advertised address the pool can't dial falls back to the
 /// bootstrap `Client::send` rather than `Client::broker(id)`.
 const BOOTSTRAP_LEADER: i32 = -1;
-
-/// Transport attempts to a specific leader before re-routing. `1` means: on the
-/// first failure, re-resolve immediately rather than burning more
-/// `request_timeout`s on a leader that has likely moved (failover). A transient
-/// blip (socket dropped, broker still alive) is handled just as cheaply — the
-/// re-route re-resolves to the same alive leader and reconnects — so paying
-/// multiple full request-timeouts here only slows failover recovery.
-const TRANSPORT_RETRIES: i32 = 1;
 
 /// Maximum Produce requests in flight **per partition** at once.
 ///
@@ -984,42 +976,30 @@ async fn send_one_batch(cfg: &SenderConfig, mut pb: PreparedBatch) -> BatchSendR
         Some(leader)
     };
 
-    let mut attempts: i32 = 0;
-    let resp: ProduceResponse = loop {
-        attempts += 1;
-        let send = cfg.transport.send_produce(route, req.clone()).await;
-        match send {
-            Ok(r) => break r,
-            Err(e) => {
-                // The cached connection is likely dead (broker bounced / failed
-                // over). Evict it so a reconnect targets the broker's current
-                // address; never evict the shared bootstrap connection.
-                if leader != BOOTSTRAP_LEADER {
-                    cfg.transport.evict_broker(leader);
-                }
-                if attempts >= TRANSPORT_RETRIES {
-                    tracing::warn!(
-                        leader,
-                        partition = pb.partition,
-                        base_sequence = pb.base_sequence,
-                        error = %e,
-                        "produce to leader failed {attempts}×; will re-route",
-                    );
-                    // Transport failure → retry (park in the retry slot, resend
-                    // verbatim). Back off before the resend so a down/refusing
-                    // leader isn't hammered by the drain scheduler, and force a
-                    // metadata refresh so the resend re-resolves to whatever
-                    // leader the cluster (re-)elected.
-                    pb.backoff_until = Some(backoff_deadline(Instant::now(), cfg.retry_backoff));
-                    return BatchSendResult {
-                        pb,
-                        verdict: BatchVerdict::Retry,
-                        refresh_needed: true,
-                    };
-                }
-                tracing::warn!(leader, error = %e, "produce attempt {attempts} failed; reconnecting");
-                tokio::time::sleep(cfg.retry_backoff).await;
+    let resp: ProduceResponse = match cfg.transport.send_produce(route, req).await {
+        Ok(response) => response,
+        Err(error) => {
+            // The cached connection is likely dead (broker bounced / failed
+            // over). Evict it so a reconnect targets the broker's current
+            // address; never evict the shared bootstrap connection.
+            if leader != BOOTSTRAP_LEADER {
+                cfg.transport.evict_broker(leader);
             }
+            tracing::warn!(
+                leader,
+                partition = pb.partition,
+                base_sequence = pb.base_sequence,
+                error = %error,
+                "produce to leader failed; will re-route",
+            );
+            // Park the batch for a verbatim resend after backoff, and refresh
+            // metadata so the resend targets the current leader.
+            pb.backoff_until = Some(backoff_deadline(Instant::now(), cfg.retry_backoff));
+            return BatchSendResult {
+                pb,
+                verdict: BatchVerdict::Retry,
+                refresh_needed: true,
+            };
         }
     };
 
@@ -1177,7 +1157,9 @@ async fn update_leaders_from_metadata(cfg: &SenderConfig) {
             // backfill it on resend (see `send_one_batch`). Only update topics we
             // already track, so a full-cluster refresh doesn't bloat the cache.
             if let Some(entry) = cache.get_mut(name) {
-                entry.num_partitions = i32::try_from(t.partitions.len()).unwrap_or(1).max(1);
+                entry.num_partitions = i32::try_from(t.partitions.len())
+                    .unwrap_or(UNRESOLVED_TOPIC_PARTITION_COUNT)
+                    .max(UNRESOLVED_TOPIC_PARTITION_COUNT);
                 entry.topic_id = t.topic_id;
             }
         }

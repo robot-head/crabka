@@ -62,6 +62,9 @@ pub const DEFAULT_PRODUCER_INIT_MAX_BACKOFF: Duration = Duration::from_secs(1);
 /// Default transaction timeout.
 pub const DEFAULT_PRODUCER_TRANSACTION_TIMEOUT: Duration = Duration::from_mins(1);
 
+/// Bounded backlog for coalescing internal sender wakeups.
+const SENDER_WAKE_CHANNEL_CAPACITY: usize = 16;
+
 /// Validated deadline for flushing all buffered and in-flight records.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProducerFlushTimeout(Duration);
@@ -530,7 +533,7 @@ impl Producer {
         };
 
         // 3. Spawn the sender.
-        let (wake_tx, wake_rx) = mpsc::channel(16);
+        let (wake_tx, wake_rx) = mpsc::channel(SENDER_WAKE_CHANNEL_CAPACITY);
         let shutdown = CancellationToken::new();
         let state = Arc::new(AtomicU8::new(0));
         let metadata_cache = Arc::new(Mutex::new(HashMap::new()));

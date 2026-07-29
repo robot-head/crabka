@@ -64,6 +64,7 @@ impl Acks {
 pub(crate) const STATE_ACTIVE: u8 = 0;
 pub(crate) const STATE_FENCED: u8 = 1;
 pub(crate) const STATE_CLOSED: u8 = 2;
+pub(crate) const UNRESOLVED_TOPIC_PARTITION_COUNT: i32 = 1;
 
 #[derive(Debug, Clone)]
 pub(crate) struct TopicMetadata {
@@ -866,7 +867,9 @@ impl Producer {
                 // to a default of 1 so the caller can still attempt the send.
                 let (count, topic_id) = match topic_meta {
                     Some(t) if t.error_code == 0 => {
-                        let count = i32::try_from(t.partitions.len()).unwrap_or(1).max(1);
+                        let count = i32::try_from(t.partitions.len())
+                            .unwrap_or(UNRESOLVED_TOPIC_PARTITION_COUNT)
+                            .max(UNRESOLVED_TOPIC_PARTITION_COUNT);
                         // Cache the per-partition leader id so the sender can
                         // route each Produce to the partition leader.
                         for part in &t.partitions {
@@ -875,7 +878,10 @@ impl Producer {
                         }
                         (count, t.topic_id)
                     }
-                    _ => (1, crabka_protocol::primitives::uuid::Uuid::ZERO),
+                    _ => (
+                        UNRESOLVED_TOPIC_PARTITION_COUNT,
+                        crabka_protocol::primitives::uuid::Uuid::ZERO,
+                    ),
                 };
                 // NOTE: an unresolved lookup is cached as `{count: 1, topic_id:
                 // ZERO}` to avoid a metadata-refresh storm (this runs per record
@@ -895,7 +901,7 @@ impl Producer {
                 tracing::Span::current().record("num_partitions", count);
                 count
             }
-            Err(_) => 1,
+            Err(_) => UNRESOLVED_TOPIC_PARTITION_COUNT,
         }
     }
 
