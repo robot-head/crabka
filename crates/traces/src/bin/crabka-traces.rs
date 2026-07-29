@@ -31,7 +31,7 @@ use crabka_traces::{
         self as trace_querier,
         http::HttpConfig,
         live::{LiveSource, LiveTier, RemoteLiveSource},
-        store::{CrabkaSpanStore, SharedTraceIndex},
+        store::{CrabkaSpanStore, ScanConcatMaxBytes, SharedTraceIndex},
     },
     span::batch::RESOURCE_ATTR_PREFIX,
 };
@@ -127,6 +127,12 @@ struct Cli {
         default_value_t = BlockReadMaxBytes::default()
     )]
     block_read_max_bytes: BlockReadMaxBytes,
+    #[arg(
+        long,
+        env = "CRABKA_TRACES_SCAN_CONCAT_MAX_BYTES",
+        default_value_t = ScanConcatMaxBytes::default()
+    )]
+    scan_concat_max_bytes: ScanConcatMaxBytes,
     #[arg(long, default_value = "memory:///")]
     object_store_url: String,
     #[arg(long)]
@@ -521,7 +527,12 @@ async fn build_querier_router_with_live(
     } else {
         None
     };
-    let store = Arc::new(CrabkaSpanStore::new(blocks, Arc::clone(&trace_index), live));
+    let store = Arc::new(CrabkaSpanStore::new_with_scan_concat_max_bytes(
+        blocks,
+        Arc::clone(&trace_index),
+        live,
+        cli.scan_concat_max_bytes,
+    ));
     let engine = Arc::new(TraceqlEngine::new(store, engine_opts_from_cli(cli)));
     let router = trace_querier::http::router_with_config_and_metrics(
         engine,
@@ -547,7 +558,12 @@ fn build_live_store_router(
         Arc::clone(&live_store),
         Arc::clone(&trace_index),
     )));
-    let store = Arc::new(CrabkaSpanStore::new(blocks, trace_index, Some(live)));
+    let store = Arc::new(CrabkaSpanStore::new_with_scan_concat_max_bytes(
+        blocks,
+        trace_index,
+        Some(live),
+        cli.scan_concat_max_bytes,
+    ));
     let engine = Arc::new(TraceqlEngine::new(store, engine_opts_from_cli(cli)));
     let tempo_router = trace_querier::http::router_with_config(
         engine,
@@ -1212,6 +1228,65 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(from_cli.block_read_max_bytes.into_value(), 2048);
+    }
+
+    #[test]
+    fn scan_concat_max_bytes_preserves_default_and_rejects_invalid_values() {
+        let cli = Cli::try_parse_from(["crabka-traces", "--target", "querier"]).unwrap();
+        assert_eq!(cli.scan_concat_max_bytes.into_value(), 1_500_000_000);
+
+        for invalid in [
+            "0",
+            "not-a-number",
+            "-1",
+            "1500000001",
+            "18446744073709551616",
+        ] {
+            assert!(
+                Cli::try_parse_from([
+                    "crabka-traces",
+                    "--target",
+                    "querier",
+                    "--scan-concat-max-bytes",
+                    invalid,
+                ])
+                .is_err(),
+                "--scan-concat-max-bytes should reject {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn scan_concat_max_bytes_reads_environment_and_prefers_cli() {
+        const CHILD: &str = "CRABKA_TRACES_SCAN_CONCAT_MAX_BYTES_CHILD";
+
+        if std::env::var_os(CHILD).is_none() {
+            let status =
+                std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args([
+                        "--exact",
+                        "tests::scan_concat_max_bytes_reads_environment_and_prefers_cli",
+                    ])
+                    .env(CHILD, "1")
+                    .env("CRABKA_TRACES_SCAN_CONCAT_MAX_BYTES", "1024")
+                    .status()
+                    .expect("child test");
+            assert!(status.success());
+            return;
+        }
+
+        let from_env = Cli::try_parse_from(["crabka-traces", "--target", "querier"]).unwrap();
+        assert_eq!(from_env.scan_concat_max_bytes.into_value(), 1024);
+
+        let from_cli = Cli::try_parse_from([
+            "crabka-traces",
+            "--target",
+            "querier",
+            "--scan-concat-max-bytes",
+            "2048",
+        ])
+        .unwrap();
+        assert_eq!(from_cli.scan_concat_max_bytes.into_value(), 2048);
     }
 
     #[test]

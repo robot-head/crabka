@@ -2,6 +2,8 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fmt,
+    str::FromStr,
     sync::Arc,
 };
 
@@ -32,7 +34,12 @@ use crabka_traceql::{
     ScanResult, ScopedTag, SpanMatcher, SpanRef, SpanStore, TagScope, TraceSpans, TraceqlError,
     TypedValue, span_schema,
 };
+use crabka_units::{
+    ByteSize,
+    convert::ByteSizeExt as _,
+};
 use datafusion::{catalog::MemTable, prelude::SessionContext};
+use refined_type::rule::MinMaxU64;
 
 use crate::{querier::live::LiveTier, span::batch::RESOURCE_ATTR_PREFIX};
 
@@ -70,11 +77,67 @@ const SCOPE_ORDER: &[TagScope] = &[
 /// runtime so a background task can reload it without restarting.
 pub type SharedTraceIndex = Arc<ArcSwap<TraceIndex>>;
 
+/// Default and maximum safe memory size for concatenating scan batches.
+pub const DEFAULT_SCAN_CONCAT_MAX_BYTES: u64 = 1_500_000_000;
+
+/// Configured scan-concatenation memory cap within Arrow's safe offset range.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ScanConcatMaxBytes(u64);
+
+impl ScanConcatMaxBytes {
+    /// Validate a scan-concatenation memory cap.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless `value` is between 1 and
+    /// [`DEFAULT_SCAN_CONCAT_MAX_BYTES`] inclusive.
+    pub fn new(value: u64) -> Result<Self, String> {
+        MinMaxU64::<1, DEFAULT_SCAN_CONCAT_MAX_BYTES>::new(value)
+            .map(|value| Self(value.into_value()))
+            .map_err(|error| error.to_string())
+    }
+
+    #[must_use]
+    pub const fn into_value(self) -> u64 {
+        self.0
+    }
+
+    #[must_use]
+    pub fn size(self) -> ByteSize {
+        ByteSize::from_bytes(self.0)
+    }
+}
+
+impl Default for ScanConcatMaxBytes {
+    fn default() -> Self {
+        Self::new(DEFAULT_SCAN_CONCAT_MAX_BYTES)
+            .expect("default scan concatenation cap is within Arrow's safe range")
+    }
+}
+
+impl fmt::Display for ScanConcatMaxBytes {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl FromStr for ScanConcatMaxBytes {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value
+            .parse()
+            .map_err(|error: std::num::ParseIntError| error.to_string())
+            .and_then(Self::new)
+    }
+}
+
 /// Query-side span store that merges sealed blocks with an optional live tier.
 pub struct CrabkaSpanStore {
     blocks: Arc<BlockStore>,
     trace_index: SharedTraceIndex,
     live: Option<LiveTier>,
+    scan_concat_max_bytes: ScanConcatMaxBytes,
 }
 
 impl CrabkaSpanStore {
@@ -84,10 +147,26 @@ impl CrabkaSpanStore {
         trace_index: SharedTraceIndex,
         live: Option<LiveTier>,
     ) -> Self {
+        Self::new_with_scan_concat_max_bytes(
+            blocks,
+            trace_index,
+            live,
+            ScanConcatMaxBytes::default(),
+        )
+    }
+
+    #[must_use]
+    pub fn new_with_scan_concat_max_bytes(
+        blocks: Arc<BlockStore>,
+        trace_index: SharedTraceIndex,
+        live: Option<LiveTier>,
+        scan_concat_max_bytes: ScanConcatMaxBytes,
+    ) -> Self {
         Self {
             blocks,
             trace_index,
             live,
+            scan_concat_max_bytes,
         }
     }
 
@@ -160,7 +239,7 @@ impl CrabkaSpanStore {
             .iter()
             .map(|b| u64::try_from(b.get_array_memory_size()).unwrap_or(u64::MAX))
             .fold(0_u64, u64::saturating_add);
-        let batches = recompute_scan_nested_sets(batches)?;
+        let batches = recompute_scan_nested_sets(batches, self.scan_concat_max_bytes.size())?;
         let batches = filter_batches_by_matchers(batches, matchers)?;
         let mut expansion_matchers = matchers.to_vec();
         expansion_matchers.extend(options.projection_matchers.clone());
@@ -1308,24 +1387,33 @@ fn recompute_trace_nested_sets(spans: &mut [SpanRef]) {
     }
 }
 
-fn recompute_scan_nested_sets(batches: Vec<RecordBatch>) -> Result<Vec<RecordBatch>, TraceqlError> {
+fn recompute_scan_nested_sets(
+    batches: Vec<RecordBatch>,
+    max_scan_concat: ByteSize,
+) -> Result<Vec<RecordBatch>, TraceqlError> {
     // `concat_batches` materialises every matched span into one RecordBatch.
     // Arrow's variable-length columns use i32 offsets, so a combined batch over
     // ~2 GiB overflows with an opaque `Offset overflow error`. Cap the merge at a
     // safe 1.5 GiB and surface an actionable error so a pathological query (an
     // unbounded time range over a huge tenant) degrades cleanly instead of
     // emitting `concat scan batches: Offset overflow error`.
-    const MAX_SCAN_CONCAT_BYTES: usize = 1_500_000_000;
     if batches.is_empty() {
         return Ok(batches);
     }
     let schema = batches[0].schema();
     let batches = align_scan_batches_to_schema(batches, &schema)?;
-    let total_bytes: usize = batches.iter().map(RecordBatch::get_array_memory_size).sum();
-    if total_bytes > MAX_SCAN_CONCAT_BYTES {
+    let total: ByteSize = batches
+        .iter()
+        .map(|batch| {
+            ByteSize::from_bytes(u64::try_from(batch.get_array_memory_size()).unwrap_or(u64::MAX))
+        })
+        .sum();
+    if total > max_scan_concat {
         return Err(TraceqlError::Store(format!(
-            "scan result too large to merge ({total_bytes} bytes > {MAX_SCAN_CONCAT_BYTES} cap); \
-             narrow the query time range or selector"
+            "scan result too large to merge ({} bytes > {} cap); \
+             narrow the query time range or selector",
+            total.bytes_usize(),
+            max_scan_concat.bytes_usize()
         )));
     }
     let batch = concat_batches(&schema, &batches)
@@ -2595,6 +2683,7 @@ mod tests {
         COL_CHILD_COUNT, COL_INSTRUMENTATION_NAME, COL_INSTRUMENTATION_VERSION, EngineOpts,
         EventRef, LinkRef, ScanJob, ScanOptions, TraceqlEngine,
     };
+    use crabka_units::{convert::ByteSizeExt as _, nanos};
     use object_store::{memory::InMemory, path::Path};
     use parquet::{
         arrow::{AsyncArrowWriter, async_writer::ParquetObjectWriter},
@@ -2749,6 +2838,49 @@ mod tests {
             ],
         )
         .unwrap()
+    }
+
+    #[test]
+    fn scan_concat_max_bytes_validates_and_converts_to_uom() {
+        for value in [1, DEFAULT_SCAN_CONCAT_MAX_BYTES] {
+            let cap = value.to_string().parse::<ScanConcatMaxBytes>().unwrap();
+            assert2::assert!(cap.into_value() == value);
+            assert2::assert!(cap.size().bytes_u64() == value);
+            assert2::assert!(cap.to_string() == value.to_string());
+        }
+
+        for invalid in [
+            "0",
+            "-1",
+            "not-a-number",
+            "1500000001",
+            "18446744073709551616",
+        ] {
+            assert2::assert!(invalid.parse::<ScanConcatMaxBytes>().is_err());
+        }
+    }
+
+    #[test]
+    fn scan_concat_cap_accepts_exact_size_and_rejects_one_byte_less() {
+        let batch = batch();
+        let size = u64::try_from(batch.get_array_memory_size()).unwrap();
+        let exact = ScanConcatMaxBytes::new(size).unwrap();
+        assert2::assert!(recompute_scan_nested_sets(vec![batch.clone()], exact.size()).is_ok());
+
+        let smaller = ScanConcatMaxBytes::new(size - 1).unwrap();
+        let error = recompute_scan_nested_sets(vec![batch], smaller.size()).unwrap_err();
+        assert2::assert!(error.to_string().contains("scan result too large to merge"));
+    }
+
+    #[test]
+    fn span_store_constructor_preserves_scan_concat_default() {
+        let blocks = Arc::new(BlockStore::new(
+            Arc::new(InMemory::new()),
+            Url::parse("memory:///").unwrap(),
+        ));
+        let store = CrabkaSpanStore::new(blocks, shared(TraceIndex::new()), None);
+
+        assert2::assert!(store.scan_concat_max_bytes.into_value() == DEFAULT_SCAN_CONCAT_MAX_BYTES);
     }
 
     fn dictionary_attr_batch() -> RecordBatch {
