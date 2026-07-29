@@ -26,13 +26,13 @@ applicable rule below:
 - Complete: `admin-ui`, `audit`, `authz`, `bench-driver`, `blockstore`,
   `broker`, `cli`, `client-admin`, `compression`, `connect-derive`,
   `connect-postgres`,
-  `docgen`, `gres-activator`, `gres-control`, `grpc-gateway`, `ids`,
+  `docgen`, `gres`, `gres-activator`, `gres-control`, `grpc-gateway`, `ids`,
   `integration-tests`, `kafka-tap`,
   `log-iobench`, `logfmt`, `logql`, `object-store`, `operator`,
   `protocol-codegen`, `remote-storage`, `pgparser`, `playground`,
   `schema-registry`, `throttle`, `verified`, `voters`.
 - Pending: `client-consumer`, `client-core`, `client-producer`,
-  `client-streams`, `connect`, `gres`, `gres-balancer`,
+  `client-streams`, `connect`, `gres-balancer`,
   `gres-conformance`, `gres-fdw`, `gres-loadtest`,
   `gres-ranges`, `gres-substrate`,
   `kraft-core`, `log`, `metadata`, `metrics`,
@@ -4542,3 +4542,22 @@ policy.
 
 No additional CLI, environment variable, or CRD field is warranted. The
 current all-target gate passed 84 tests, and strict all-target Clippy passed.
+
+## Gres Binary Completion
+
+The `gres` owner has 181 scanner rows, overwhelmingly CLI validation,
+environment-precedence, and runtime integration fixtures. Its production
+local-vacuum cadence, debt, step thresholds, and key budgets are all exposed as
+validated CLI options with environment-variable backing. Registry, checkpoint,
+idle-suspend, range-zero follower, durable-inspection, WAL recovery/admin/
+producer, and FDW DNS policy also enter through typed CLI/environment settings
+and the operator's Gres CRD.
+
+The remaining production values are storage/protocol key prefixes, topology
+contracts, configured-value derivations, and exact allocation hints. Policy
+identified in `gres-fdw`, `gres-ranges`, and `gres-substrate` remains pending
+under those owning crates rather than being duplicated here.
+
+No additional binary-owned CLI, environment variable, or CRD field is
+warranted. The current all-target gate passed 220 tests, including process-level
+runtime, crash, and topology targets, and strict all-target Clippy passed.
