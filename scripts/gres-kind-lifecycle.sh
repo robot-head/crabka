@@ -66,20 +66,54 @@ wait_lifecycle() {
         "[ \"\$(kubectl get grestenant tenant-a -o jsonpath='{.status.lifecyclePhase}' 2>/dev/null)\" = '$expected' ]"
 }
 
+# The wake query, timed. A tenant coming out of suspend can briefly answer
+# `40001 ... not the leader, retry` while range leadership settles; that is a
+# retryable condition the client contract expects a caller to retry, not a
+# failure of the wake. Retrying it here keeps the gate measuring cold-start
+# latency instead of failing on a transient.
+#
+# The reported latency deliberately spans every attempt: a client that has to
+# retry really did wait that long, so hiding it would defeat the p95 ceiling.
+# Retries are therefore kept short, and a leader that never settles exhausts
+# the budget and fails with its own message, distinct from the flake.
 measure_tls_query_ms() {
-    python3 - "$ARTIFACT_DIR/ca.crt" "$ARTIFACT_DIR/client.crt" "$ARTIFACT_DIR/client.key" <<'PY'
-import os, subprocess, sys, time
+    python3 - "$ARTIFACT_DIR/ca.crt" "$ARTIFACT_DIR/client.crt" "$ARTIFACT_DIR/client.key" \
+        "$ARTIFACT_DIR/wake-query-attempts.tsv" <<'PY'
+import os, pathlib, subprocess, sys, time
 env = os.environ.copy()
 env["PGPASSWORD"] = os.environ["G5_SQL_PASSWORD"]
+# Only a leadership handoff is retried. Anything else — a wrong answer, a TLS
+# or auth failure, a genuine query error — stays fatal on the first attempt.
+RETRYABLE = ("not the leader", "40001")
+RETRY_BUDGET_S = 30.0
+attempts_path = pathlib.Path(sys.argv[4])
 start = time.monotonic_ns()
-run = subprocess.run([
-    "psql", "host=localhost port=16432 dbname=tenant-a user=alice sslmode=verify-full sslrootcert=" + sys.argv[1] + " sslcert=" + sys.argv[2] + " sslkey=" + sys.argv[3],
-    "-v", "ON_ERROR_STOP=1", "-tAc", "SELECT value FROM lifecycle_marker WHERE id=1"
-], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-   timeout=40, check=False)
-if run.returncode or run.stdout.strip() != "survives":
-    sys.stderr.write(run.stderr + "\nstdout=" + repr(run.stdout) + "\n")
-    raise SystemExit(run.returncode or 1)
+deadline = time.monotonic() + RETRY_BUDGET_S
+attempts = 0
+while True:
+    attempts += 1
+    run = subprocess.run([
+        "psql", "host=localhost port=16432 dbname=tenant-a user=alice sslmode=verify-full sslrootcert=" + sys.argv[1] + " sslcert=" + sys.argv[2] + " sslkey=" + sys.argv[3],
+        "-v", "ON_ERROR_STOP=1", "-tAc", "SELECT value FROM lifecycle_marker WHERE id=1"
+    ], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+       timeout=40, check=False)
+    if run.returncode == 0 and run.stdout.strip() == "survives":
+        break
+    combined = (run.stderr or "") + (run.stdout or "")
+    if not any(marker in combined for marker in RETRYABLE):
+        sys.stderr.write(run.stderr + "\nstdout=" + repr(run.stdout) + "\n")
+        raise SystemExit(run.returncode or 1)
+    if time.monotonic() >= deadline:
+        sys.stderr.write(
+            f"wake query still reported a leadership handoff after {attempts} attempts "
+            f"across {RETRY_BUDGET_S:.0f}s; treating as a stuck leader\n"
+            + run.stderr + "\nstdout=" + repr(run.stdout) + "\n"
+        )
+        raise SystemExit(run.returncode or 1)
+    sys.stderr.write(f"wake query attempt {attempts} hit a leadership handoff; retrying\n")
+    time.sleep(0.5)
+with attempts_path.open("a") as handle:
+    handle.write(f"{attempts}\n")
 print((time.monotonic_ns() - start) // 1_000_000)
 PY
 }
@@ -392,11 +426,15 @@ for iteration in $(seq 1 "$ITERATIONS"); do
     KEEPER_PID=$!
     sleep 1
     kill -0 "$KEEPER_PID" 2>/dev/null || fail "post-wake busy-session keeper exited"
-    deadline_wait 120 "active PgDog tenant credential removal" \
+    # These three gate on the operator rewriting the PgDog config AND the
+    # resulting Deployment rollout landing. A rollout is given 180s of its own
+    # elsewhere in this script, so a 120s budget here was internally
+    # inconsistent and the first to expire on a loaded runner.
+    deadline_wait 240 "active PgDog tenant credential removal" \
         "! kubectl get secret fleet-pgdog-config -o jsonpath='{.data.users\\.toml}' | base64 -d | grep -q 'g5-secret-password'"
-    deadline_wait 120 "confirmed direct PgDog route" \
+    deadline_wait 240 "confirmed direct PgDog route" \
         '[ "$(kubectl get gres fleet -o jsonpath='"'"'{.status.confirmedPgdogConfigHash}'"'"')" = "$(kubectl get secret fleet-pgdog-config -o jsonpath='"'"'{.metadata.annotations.crabka\.io/pgdog-config-hash}'"'"')" ]'
-    deadline_wait 120 "PgDog Deployment direct hash" \
+    deadline_wait 240 "PgDog Deployment direct hash" \
         '[ "$(kubectl get deploy fleet-pgdog -o jsonpath='"'"'{.spec.template.metadata.annotations.crabka\.io/pgdog-config-hash}'"'"')" = "$(kubectl get secret fleet-pgdog-config -o jsonpath='"'"'{.metadata.annotations.crabka\.io/pgdog-rollout-hash}'"'"')" ]'
     timeout 180s kubectl rollout status deploy/fleet-pgdog --timeout=170s
     kubectl get secret fleet-pgdog-config -o jsonpath='{.data.pgdog\.toml}' \
