@@ -137,6 +137,93 @@ fn rule_topic(name: &str, ops: &[AclOp]) -> AclRule {
     }
 }
 
+#[tokio::test]
+async fn invalid_spec_uses_configured_requeue() {
+    let state = MockState::new(vec![MockRule {
+        method: Method::PATCH,
+        path_substr: format!("/kafkausers/{USER}/status"),
+        response: json_response(200, &user_body(USER, NS)),
+    }]);
+    let mut ctx = fixture_ctx(mock_client(&state, NS), NS);
+    Arc::get_mut(&mut ctx.config)
+        .expect("fixture owns operator config")
+        .controller_invalid_requeue = crabka_units::millis(2_345);
+    let user = ku_with_finalizer(USER, vec![rule_topic("orders", &[])]);
+
+    let action = reconcile(Arc::new(user), Arc::new(ctx)).await.unwrap();
+
+    assert!(
+        action
+            == kube::runtime::controller::Action::requeue(std::time::Duration::from_millis(2_345))
+    );
+}
+
+#[tokio::test]
+async fn missing_cluster_uses_configured_dependency_requeue() {
+    let state = MockState::new(vec![
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/kafkas/{CLUSTER}"),
+            response: Response::builder()
+                .status(404)
+                .header("content-type", "application/json")
+                .body(not_found_body("not found"))
+                .expect("404 builds"),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/kafkausers/{USER}/status"),
+            response: json_response(200, &user_body(USER, NS)),
+        },
+    ]);
+    let mut ctx = fixture_ctx(mock_client(&state, NS), NS);
+    Arc::get_mut(&mut ctx.config)
+        .expect("fixture owns operator config")
+        .controller_dependency_requeue = crabka_units::millis(3_456);
+
+    let action = reconcile(Arc::new(ku_with_finalizer(USER, vec![])), Arc::new(ctx))
+        .await
+        .unwrap();
+
+    assert!(
+        action
+            == kube::runtime::controller::Action::requeue(std::time::Duration::from_millis(3_456))
+    );
+}
+
+#[tokio::test]
+async fn secret_read_failure_uses_configured_error_requeue() {
+    let state = MockState::new(vec![
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/kafkas/{CLUSTER}"),
+            response: json_response(200, &ready_kafka_body(CLUSTER, NS)),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{USER}"),
+            response: Response::builder()
+                .status(500)
+                .header("content-type", "application/json")
+                .body(not_found_body("injected failure"))
+                .expect("500 builds"),
+        },
+    ]);
+    let mut ctx = fixture_ctx(mock_client(&state, NS), NS);
+    Arc::get_mut(&mut ctx.config)
+        .expect("fixture owns operator config")
+        .controller_error_requeue = crabka_units::millis(4_567);
+
+    let action = reconcile(Arc::new(ku_with_finalizer(USER, vec![])), Arc::new(ctx))
+        .await
+        .unwrap();
+
+    assert!(
+        action
+            == kube::runtime::controller::Action::requeue(std::time::Duration::from_millis(4_567))
+    );
+}
+
 /// `KafkaUser` with TLS authentication.
 fn ku_tls(name: &str, acls: Vec<AclRule>) -> KafkaUser {
     ku_tls_full(name, acls, None, TlsAuth::default())
@@ -263,7 +350,11 @@ async fn first_reconcile_provisions_scram_and_acls() {
     ];
     let state = MockState::new(rules);
     let client = mock_client(&state, NS);
-    let ctx = Arc::new(fixture_ctx(client, NS));
+    let mut ctx = fixture_ctx(client, NS);
+    Arc::get_mut(&mut ctx.config)
+        .expect("fixture owns operator config")
+        .controller_drift_requeue = crabka_units::millis(1_234);
+    let ctx = Arc::new(ctx);
 
     let fake = Arc::new(tokio::sync::Mutex::new(FakeAdminClient::new()));
     let fake_for_assert = fake.clone();
@@ -273,7 +364,11 @@ async fn first_reconcile_provisions_scram_and_acls() {
         USER,
         vec![rule_topic("orders", &[AclOp::Read, AclOp::Describe])],
     );
-    reconcile(Arc::new(ku), ctx).await.unwrap();
+    let action = reconcile(Arc::new(ku), ctx).await.unwrap();
+    assert!(
+        action
+            == kube::runtime::controller::Action::requeue(std::time::Duration::from_millis(1_234))
+    );
 
     let calls = fake_for_assert.lock().await.calls();
     // Expected sequence: AlterUserScramCredentials (upsert) -> DescribeAcls -> CreateAcls.

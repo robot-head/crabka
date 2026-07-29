@@ -5061,8 +5061,13 @@ async fn drive_split_operation(mut input: SplitDriveInput<'_>) -> SplitDriveOutc
                 if !killed && input.point == SplitKillPoint::DeleteSuccessBeforeSidecarCas {
                     retirement.fail_after_delete = true;
                 }
-                let _ =
-                    reconcile_one_retiring_range_wal(&control, &mut retirement, &tenant_name).await;
+                let _ = reconcile_one_retiring_range_wal(
+                    &control,
+                    &mut retirement,
+                    &tenant_name,
+                    crabka_units::secs(30),
+                )
+                .await;
                 let current = load_operation(input.system, input.operation_id).await;
                 let current_tenant = load_tenant(input.system).await;
                 let sidecar_parked = current_tenant.range_retirements.iter().any(|retirement| {

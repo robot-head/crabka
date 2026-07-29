@@ -17,7 +17,6 @@
 use std::{
     collections::{BTreeMap, HashMap},
     sync::Arc,
-    time::Duration,
 };
 
 use futures::StreamExt as _;
@@ -923,7 +922,9 @@ async fn reconcile_cas(input: CaPhaseInput<'_>) -> Result<CaPhaseResult, Reconci
                 );
                 let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), ns);
                 patch_status_with_condition(&kafka_api, name, cond).await?;
-                return Ok(CaPhaseResult::Done(Action::requeue(Duration::from_mins(1))));
+                return Ok(CaPhaseResult::Done(common::requeue(
+                    ctx.config.controller_drift_requeue,
+                )));
             }
             Err(e) => return Err(e),
         };
@@ -949,7 +950,9 @@ async fn reconcile_cas(input: CaPhaseInput<'_>) -> Result<CaPhaseResult, Reconci
                 );
                 let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), ns);
                 patch_status_with_condition(&kafka_api, name, cond).await?;
-                return Ok(CaPhaseResult::Done(Action::requeue(Duration::from_mins(1))));
+                return Ok(CaPhaseResult::Done(common::requeue(
+                    ctx.config.controller_drift_requeue,
+                )));
             }
             Err(e) => return Err(e),
         };
@@ -1072,7 +1075,9 @@ async fn validate_listener_dependencies(
             let cond = condition("Ready", "False", reason, &e.to_string());
             let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), ns);
             patch_status_with_condition(&kafka_api, name, cond).await?;
-            return Ok(Some(Action::requeue(Duration::from_secs(30))));
+            return Ok(Some(common::requeue(
+                ctx.config.controller_dependency_requeue,
+            )));
         }
         Err(e) => return Err(e),
     }
@@ -1110,7 +1115,9 @@ async fn validate_listener_dependencies(
             let cond = condition("Ready", "False", reason, &e.to_string());
             let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), ns);
             patch_status_with_condition(&kafka_api, name, cond).await?;
-            return Ok(Some(Action::requeue(Duration::from_secs(30))));
+            return Ok(Some(common::requeue(
+                ctx.config.controller_dependency_requeue,
+            )));
         }
         Err(e) => return Err(e),
     }
@@ -1178,7 +1185,9 @@ async fn validate_listener_dependencies(
             let cond = condition("Ready", "False", reason, &e.to_string());
             let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), ns);
             patch_status_with_condition(&kafka_api, name, cond).await?;
-            return Ok(Some(Action::requeue(Duration::from_secs(30))));
+            return Ok(Some(common::requeue(
+                ctx.config.controller_dependency_requeue,
+            )));
         }
         Err(e) => return Err(e),
     }
@@ -1196,7 +1205,9 @@ async fn validate_listener_dependencies(
         let cond = condition("ListenersValid", "False", e.reason(), &e.message());
         let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), ns);
         patch_status_with_condition(&kafka_api, name, cond).await?;
-        return Ok(Some(Action::requeue(Duration::from_secs(30))));
+        return Ok(Some(common::requeue(
+            ctx.config.controller_dependency_requeue,
+        )));
     }
 
     Ok(None)
@@ -1647,7 +1658,7 @@ async fn finalize_kafka(input: FinalizeKafkaInput<'_>) -> Result<Action, Reconci
         return Err(e);
     }
 
-    Ok(Action::requeue(Duration::from_secs(30)))
+    Ok(common::requeue(ctx.config.controller_dependency_requeue))
 }
 
 async fn reconcile_inner(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, ReconcileError> {

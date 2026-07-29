@@ -27,7 +27,7 @@
 //! broker-client cert with the cluster CA would be rejected by the broker's
 //! `client_ca_path`; the child-KafkaUser path sidesteps that by construction.
 
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, sync::Arc};
 
 use crabka_security::ca::{SubjectAltName, issue_broker_cert};
 use crabka_units::{
@@ -1495,7 +1495,7 @@ async fn reconcile_inner(
             "metadata.labels.\"crabka.io/cluster\" is required to link a gateway to its parent Kafka",
         );
         patch_conditions(&gw_api, &name, observed_generation, vec![cond]).await?;
-        return Ok(Action::requeue(Duration::from_secs(30)));
+        return Ok(common::requeue(ctx.config.controller_dependency_requeue));
     };
 
     let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &ns);
@@ -1507,7 +1507,7 @@ async fn reconcile_inner(
             &format!("Kafka '{parent_name}' not found in namespace '{ns}'"),
         );
         patch_conditions(&gw_api, &name, observed_generation, vec![cond]).await?;
-        return Ok(Action::requeue(Duration::from_secs(30)));
+        return Ok(common::requeue(ctx.config.controller_dependency_requeue));
     };
 
     // (2) Version gate (copy of the pool's logic).
@@ -1520,7 +1520,7 @@ async fn reconcile_inner(
             vec![cond, version_valid],
         )
         .await?;
-        return Ok(Action::requeue(Duration::from_secs(30)));
+        return Ok(common::requeue(ctx.config.controller_dependency_requeue));
     }
 
     // (3) SSA the child KafkaUser; GET its issued Secret. If absent, the
@@ -1546,7 +1546,7 @@ async fn reconcile_inner(
             "waiting for the gateway's broker-mTLS client cert",
         );
         patch_conditions(&gw_api, &name, observed_generation, vec![ready, cond]).await?;
-        return Ok(Action::requeue(Duration::from_secs(15)));
+        return Ok(common::requeue(ctx.config.controller_error_requeue));
     }
 
     // (4) Issue / renew the serving cert.
@@ -1583,7 +1583,7 @@ async fn reconcile_inner(
             ),
         );
         patch_conditions(&gw_api, &name, observed_generation, vec![ready, degraded]).await?;
-        return Ok(Action::requeue(Duration::from_secs(30)));
+        return Ok(common::requeue(ctx.config.controller_dependency_requeue));
     };
 
     // Image: spec override > operator default (--default-gateway-image) > built-in default.
@@ -1642,7 +1642,7 @@ async fn reconcile_inner(
     };
     patch_status::<KafkaGrpcGateway, KafkaGrpcGatewayStatus>(&gw_api, &name, status).await?;
 
-    Ok(Action::requeue(Duration::from_secs(30)))
+    Ok(common::requeue(ctx.config.controller_dependency_requeue))
 }
 
 /// Requeue on transient error.

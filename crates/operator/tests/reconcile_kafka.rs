@@ -381,10 +381,18 @@ async fn kafka_applies_service_configmap_secret_no_statefulset() {
     // status branch is identical, but a present pool makes the
     // "no StatefulSet" assertion meaningful).
     let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
-    let (ctx, state) = build_ctx("y", happy_path_rules("demo", "y", &items));
+    let state = MockState::new(happy_path_rules("demo", "y", &items));
+    let mut ctx = fixture_ctx(mock_client(&state, "y"), "y");
+    Arc::get_mut(&mut ctx.config)
+        .expect("fixture owns operator config")
+        .controller_dependency_requeue = crabka_units::millis(1_234);
     let kafka = kafka_cr("demo", "y");
 
-    reconcile(Arc::new(kafka), ctx).await.unwrap();
+    let action = reconcile(Arc::new(kafka), Arc::new(ctx)).await.unwrap();
+    assert!(
+        action
+            == kube::runtime::controller::Action::requeue(std::time::Duration::from_millis(1_234))
+    );
 
     let observed = state.take_observed();
     let methods_and_uris: Vec<(Method, String)> = observed

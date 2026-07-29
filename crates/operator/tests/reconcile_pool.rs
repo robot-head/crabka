@@ -165,10 +165,18 @@ async fn pool_applies_statefulset_with_pool_name() {
 
 #[tokio::test]
 async fn pool_status_ready_when_sts_ready() {
-    let (ctx, state) = build_ctx("y", happy_path_rules("demo", "brokers", "y", Some(1)));
+    let state = MockState::new(happy_path_rules("demo", "brokers", "y", Some(1)));
+    let mut ctx = fixture_ctx(mock_client(&state, "y"), "y");
+    Arc::get_mut(&mut ctx.config)
+        .expect("fixture owns operator config")
+        .controller_dependency_requeue = crabka_units::millis(1_234);
     let pool = pool_cr("brokers", "y", Some("demo"), 1);
 
-    reconcile(Arc::new(pool), ctx).await.unwrap();
+    let action = reconcile(Arc::new(pool), Arc::new(ctx)).await.unwrap();
+    assert!(
+        action
+            == kube::runtime::controller::Action::requeue(std::time::Duration::from_millis(1_234))
+    );
 
     let observed = state.take_observed();
     let status_patch = observed

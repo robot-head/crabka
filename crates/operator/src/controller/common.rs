@@ -48,6 +48,10 @@ pub(crate) const DEFAULT_BROKER_IMAGE: &str = concat!(
 pub(super) fn error_requeue(ctx: Arc<Context>) -> Action {
     let delay = ctx.config.controller_error_requeue;
     drop(ctx);
+    requeue(delay)
+}
+
+pub(crate) fn requeue(delay: Time) -> Action {
     Action::requeue(delay.to_std())
 }
 

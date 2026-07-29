@@ -18,7 +18,6 @@ use crabka_units::{
     ByteSize, Time,
     convert::{ByteSizeExt as _, TimeExt as _},
     fmt::Human as _,
-    secs,
 };
 use futures::StreamExt as _;
 use k8s_openapi::{
@@ -67,9 +66,6 @@ use crate::{
 
 const FINALIZER: &str = "crabka.io/gres-tenant-finalizer";
 
-/// How long the broker may take to finish a tenant WAL-topic mutation before
-/// it answers with a timeout error, carried as Kafka's `timeout_ms` field.
-const TENANT_TOPIC_MUTATION_TIMEOUT: Time = secs(30);
 const APP_NAME: &str = "crabka-gres";
 const DEFAULT_IMAGE: &str = concat!("ghcr.io/robot-head/crabka-gres:", env!("CARGO_PKG_VERSION"));
 pub(super) const COMPUTE_PORT: i32 = 5432;
@@ -183,8 +179,8 @@ async fn prepare_tenant(
                 },
             )
             .await?;
-            return Ok(TenantPreparation::Requeue(Action::requeue(
-                Duration::from_mins(5),
+            return Ok(TenantPreparation::Requeue(common::requeue(
+                ctx.config.controller_invalid_requeue,
             )));
         }
     };
@@ -205,8 +201,8 @@ async fn prepare_tenant(
             },
         )
         .await?;
-        return Ok(TenantPreparation::Requeue(Action::requeue(
-            Duration::from_secs(30),
+        return Ok(TenantPreparation::Requeue(common::requeue(
+            ctx.config.controller_dependency_requeue,
         )));
     };
     let pgdog_policy = gres
@@ -228,14 +224,14 @@ async fn prepare_tenant(
     let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &namespace);
     let Some(kafka) = kafka_api.get_opt(&cluster).await? else {
         patch_cluster_not_ready(&tenant_api, &name, obj).await?;
-        return Ok(TenantPreparation::Requeue(Action::requeue(
-            Duration::from_secs(30),
+        return Ok(TenantPreparation::Requeue(common::requeue(
+            ctx.config.controller_dependency_requeue,
         )));
     };
     let Some(bootstrap) = internal_listener_bootstrap(&kafka) else {
         patch_cluster_not_ready(&tenant_api, &name, obj).await?;
-        return Ok(TenantPreparation::Requeue(Action::requeue(
-            Duration::from_secs(30),
+        return Ok(TenantPreparation::Requeue(common::requeue(
+            ctx.config.controller_dependency_requeue,
         )));
     };
     let policy = kafka
@@ -385,6 +381,7 @@ async fn reconcile_inner(
             &tenant_name,
             &mut record,
             current_record.as_ref(),
+            ctx.config.topic_mutation_timeout,
         )
         .await?;
         let parking_progress = if matches!(
@@ -400,6 +397,7 @@ async fn reconcile_inner(
                 current_record
                     .as_ref()
                     .map(|current| current.record_version),
+                ctx.config.topic_mutation_timeout,
             )
             .await?
         } else {
@@ -596,7 +594,7 @@ async fn provision_tenant_resources(
     let missing = missing_topics(admin, &topic_specs).await?;
     if !missing.is_empty() {
         admin
-            .create_topics(&missing, TENANT_TOPIC_MUTATION_TIMEOUT)
+            .create_topics(&missing, config.ctx.config.topic_mutation_timeout)
             .await?;
     }
 
@@ -893,6 +891,7 @@ async fn park_suspended_tenant_wal(
     tenant: &TenantName,
     record: &mut TenantRecord,
     expected_record_version: Option<u64>,
+    topic_mutation_timeout: Time,
 ) -> Result<ParkingProgress, ReconcileError> {
     let generation_to_park = if record.state == TenantState::Parking {
         record.wal_generation.saturating_sub(1)
@@ -948,7 +947,14 @@ async fn park_suspended_tenant_wal(
     *record = latest;
 
     if !ranges_to_park.is_empty() {
-        delete_wal_topics(&mut **admin, tenant, &ranges_to_park, generation_to_park).await?;
+        delete_wal_topics(
+            &mut **admin,
+            tenant,
+            &ranges_to_park,
+            generation_to_park,
+            topic_mutation_timeout,
+        )
+        .await?;
     }
     if wal_topics_remain(admin, tenant, ranges, generation_to_park).await? {
         return Ok(ParkingProgress::DeletionPending);
@@ -972,6 +978,7 @@ async fn park_retiring_ranges(
     tenant: &TenantName,
     record: &mut TenantRecord,
     current: Option<&TenantRecord>,
+    topic_mutation_timeout: Time,
 ) -> Result<ParkingProgress, ReconcileError> {
     if let Some(current) = current.filter(|current| {
         current.range_retirements.iter().any(|retirement| {
@@ -1000,7 +1007,14 @@ async fn park_retiring_ranges(
         }
         let topic = wal_topic_for_generation(tenant, range_id, generation);
         if topic_exists(&mut **admin, &topic).await? {
-            delete_wal_topics(&mut **admin, tenant, &[range_id], generation).await?;
+            delete_wal_topics(
+                &mut **admin,
+                tenant,
+                &[range_id],
+                generation,
+                topic_mutation_timeout,
+            )
+            .await?;
         }
         if topic_exists(&mut **admin, &topic).await? {
             return Ok(ParkingProgress::DeletionPending);
@@ -1049,7 +1063,14 @@ async fn park_retiring_ranges(
     for (range_id, operation_id, generation) in retiring {
         let topic = wal_topic_for_generation(tenant, range_id, generation);
         if topic_exists(&mut **admin, &topic).await? {
-            delete_wal_topics(&mut **admin, tenant, &[range_id], generation).await?;
+            delete_wal_topics(
+                &mut **admin,
+                tenant,
+                &[range_id],
+                generation,
+                topic_mutation_timeout,
+            )
+            .await?;
         }
         if topic_exists(&mut **admin, &topic).await? {
             return Ok(ParkingProgress::DeletionPending);
@@ -1111,6 +1132,7 @@ pub async fn reconcile_one_retiring_range_wal(
     control: &crate::context::GresControlHandle,
     admin: &mut (dyn RangeRetirementAdmin + Send),
     tenant: &TenantName,
+    topic_mutation_timeout: Time,
 ) -> Result<bool, ReconcileError> {
     let Some(record) = control.get_tenant(tenant).await? else {
         return Err(ReconcileError::Malformed(format!(
@@ -1129,7 +1151,14 @@ pub async fn reconcile_one_retiring_range_wal(
     let generation = retirement.source_generation;
     let topic = wal_topic_for_generation(tenant, range_id, generation);
     if topic_exists(admin, &topic).await? {
-        delete_wal_topics(admin, tenant, &[range_id], generation).await?;
+        delete_wal_topics(
+            admin,
+            tenant,
+            &[range_id],
+            generation,
+            topic_mutation_timeout,
+        )
+        .await?;
     }
     if topic_exists(admin, &topic).await? {
         return Ok(false);
@@ -1166,6 +1195,7 @@ async fn delete_wal_topics<A>(
     tenant: &TenantName,
     ranges: &[u32],
     generation: u64,
+    topic_mutation_timeout: Time,
 ) -> Result<(), ReconcileError>
 where
     A: RangeRetirementAdmin + Send + ?Sized,
@@ -1173,7 +1203,7 @@ where
     for range_id in ranges {
         let topic = wal_topic_for_generation(tenant, *range_id, generation);
         let outcomes = admin
-            .delete_topics(&[topic.as_str()], TENANT_TOPIC_MUTATION_TIMEOUT)
+            .delete_topics(&[topic.as_str()], topic_mutation_timeout)
             .await?;
         for outcome in outcomes {
             if let Some(error) = outcome.error {
@@ -2597,7 +2627,7 @@ mod tests {
                 None,
                 TenantState::Active,
                 10_000,
-                Some(secs(7))
+                Some(crabka_units::secs(7))
             ) == Some(17_000)
         );
         assert!(
@@ -2606,7 +2636,7 @@ mod tests {
                 None,
                 TenantState::Active,
                 u64::MAX - 1,
-                Some(secs(7))
+                Some(crabka_units::secs(7))
             ) == Some(u64::MAX)
         );
         assert!(
@@ -2615,7 +2645,7 @@ mod tests {
                 Some(12_000),
                 TenantState::Active,
                 20_000,
-                Some(secs(7))
+                Some(crabka_units::secs(7))
             ) == Some(12_000)
         );
         assert!(
@@ -2624,7 +2654,7 @@ mod tests {
                 None,
                 TenantState::Active,
                 20_000,
-                Some(secs(7))
+                Some(crabka_units::secs(7))
             ) == Some(27_000)
         );
         assert!(
@@ -2633,7 +2663,7 @@ mod tests {
                 None,
                 TenantState::Active,
                 u64::MAX - 1,
-                Some(secs(7))
+                Some(crabka_units::secs(7))
             ) == Some(u64::MAX)
         );
         assert!(

@@ -652,12 +652,15 @@ async fn dependency_failure_replaces_obsolete_multi_range_status() {
             response: json_response(200, &tenant_body()),
         },
     ]);
-    let ctx = fixture_ctx(mock_client(&state, "ns"), "ns");
+    let mut ctx = fixture_ctx(mock_client(&state, "ns"), "ns");
+    Arc::get_mut(&mut ctx.config)
+        .expect("fixture owns operator config")
+        .controller_dependency_requeue = crabka_units::millis(1_234);
 
     let action = reconcile(Arc::new(legacy_tenant), Arc::new(ctx))
         .await
         .expect("missing Gres is represented by a dependency requeue");
-    assert!(action == Action::requeue(Duration::from_secs(30)));
+    assert!(action == Action::requeue(Duration::from_millis(1_234)));
 
     let observed = state.take_observed();
     let status = observed
@@ -778,7 +781,10 @@ async fn reconciles_topics_scram_acls_records_workload_and_status() {
     let rules = tenant_reconcile_rules();
     let state = MockState::new(rules);
     let client = mock_client(&state, "ns");
-    let ctx = fixture_ctx(client, "ns");
+    let mut ctx = fixture_ctx(client, "ns");
+    Arc::get_mut(&mut ctx.config)
+        .expect("fixture owns operator config")
+        .topic_mutation_timeout = crabka_units::millis(4_321);
     let admin = Arc::new(tokio::sync::Mutex::new(FakeAdminClient::new()));
     let control = Arc::new(FakeGresControl::default());
     ctx.insert_admin_client_for_test("demo", admin.clone())
@@ -790,6 +796,7 @@ async fn reconciles_topics_scram_acls_records_workload_and_status() {
     assert!(action == Action::requeue(Duration::from_secs(5)));
 
     let calls = admin.lock().await.calls();
+    assert!(admin.lock().await.create_topic_timeouts() == [crabka_units::millis(4_321)]);
     assert!(calls.iter().any(|call| matches!(call, RecordedCall::CreateTopics(specs) if specs.iter().any(|spec| spec.name == "__gres_wal.tenant-a.r0") && specs.iter().any(|spec| spec.name == "__gres_cfg.tenant-a") && !specs.iter().any(|spec| spec.name == crabka_gres_control::TENANT_REGISTRY_TOPIC))));
     assert!(calls.iter().any(|call| matches!(call, RecordedCall::AlterUserScramCredentials { upsertions, .. } if upsertions.iter().any(|upsert| upsert.username == "gres-tenant-a"))));
     assert!(calls.iter().any(|call| matches!(call, RecordedCall::CreateAcls(acls) if acls.iter().any(|acl| acl.resource_name == "__gres_wal.tenant-a" && acl.pattern_type == crabka_client_admin::PatternType::Prefixed && acl.principal == "User:gres-tenant-a") && acls.iter().any(|acl| acl.resource_name == "__gres.tenant-a" && acl.pattern_type == crabka_client_admin::PatternType::Prefixed) && !acls.iter().any(|acl| acl.resource_name == "__gres_tenants"))));
@@ -874,7 +881,10 @@ async fn repeated_reconcile_preserves_scram_and_does_not_replace_the_registry_re
 async fn suspended_registry_state_parks_wal_and_scales_compute_to_zero() {
     let state = MockState::new(tenant_reconcile_rules());
     let client = mock_client(&state, "ns");
-    let ctx = fixture_ctx(client, "ns");
+    let mut ctx = fixture_ctx(client, "ns");
+    Arc::get_mut(&mut ctx.config)
+        .expect("fixture owns operator config")
+        .topic_mutation_timeout = crabka_units::millis(5_432);
     let admin = Arc::new(tokio::sync::Mutex::new(FakeAdminClient::new()));
     admin.lock().await.add_topic(
         "__gres_wal.tenant-a.r0.g0000000004",
@@ -902,6 +912,7 @@ async fn suspended_registry_state_parks_wal_and_scales_compute_to_zero() {
     reconcile(Arc::new(tenant()), Arc::new(ctx)).await.unwrap();
 
     let calls = admin.lock().await.calls();
+    assert!(admin.lock().await.delete_topic_timeouts() == [crabka_units::millis(5_432)]);
     assert!(calls.iter().any(|call| matches!(call, RecordedCall::DeleteTopics(names) if names == &vec!["__gres_wal.tenant-a.r0.g0000000004".to_string()])));
     let upserts = control.upserts.lock().await;
     assert!(upserts.len() == 2);

@@ -1,7 +1,7 @@
 use std::{net::SocketAddr, str::FromStr};
 
 use clap::{Args, ValueEnum};
-use crabka_units::{Time, parse};
+use crabka_units::{Time, convert::TimeExt as _, parse};
 use refined_type::rule::GreaterU64;
 use serde::{Deserialize, Serialize};
 
@@ -148,6 +148,126 @@ pub struct OperatorConfig {
         value_parser = parse::positive_time
     )]
     pub controller_error_requeue: Time,
+    /// Requeue delay while a referenced Kubernetes resource is not ready.
+    #[arg(
+        long,
+        env = "CONTROLLER_DEPENDENCY_REQUEUE",
+        default_value = "30s",
+        value_parser = parse::positive_time
+    )]
+    pub controller_dependency_requeue: Time,
+    /// Periodic cadence for detecting external state drift.
+    #[arg(
+        long,
+        env = "CONTROLLER_DRIFT_REQUEUE",
+        default_value = "1m",
+        value_parser = parse::positive_time
+    )]
+    pub controller_drift_requeue: Time,
+    /// Requeue delay for invalid resources that require user correction.
+    #[arg(
+        long,
+        env = "CONTROLLER_INVALID_REQUEUE",
+        default_value = "5m",
+        value_parser = parse::positive_time
+    )]
+    pub controller_invalid_requeue: Time,
+    /// Requeue delay while a certificate dependency is being provisioned.
+    #[arg(
+        long,
+        env = "CONTROLLER_CERTIFICATE_REQUEUE",
+        default_value = "10s",
+        value_parser = parse::positive_time
+    )]
+    pub controller_certificate_requeue: Time,
+    /// Drift-check cadence for operator-managed TLS users.
+    #[arg(
+        long,
+        env = "USER_TLS_DRIFT_REQUEUE",
+        default_value = "6h",
+        value_parser = parse::positive_time
+    )]
+    pub user_tls_drift_requeue: Time,
+    /// Duration for which an unrenewed leader-election lease remains valid.
+    #[arg(
+        long,
+        env = "LEADER_LEASE_DURATION",
+        default_value = "15s",
+        value_parser = parse::positive_time
+    )]
+    pub leader_lease_duration: Time,
+    /// Poll cadence while another operator replica holds the lease.
+    #[arg(
+        long,
+        env = "LEADER_RETRY_INTERVAL",
+        default_value = "2s",
+        value_parser = parse::positive_time
+    )]
+    pub leader_retry_interval: Time,
+    /// Timeout for Kafka topic create and delete operations.
+    #[arg(
+        long,
+        env = "TOPIC_MUTATION_TIMEOUT",
+        default_value = "30s",
+        value_parser = parse::positive_time
+    )]
+    pub topic_mutation_timeout: Time,
+    /// Timeout for one operator-to-rebalancer request.
+    #[arg(
+        long,
+        env = "REBALANCER_REQUEST_TIMEOUT",
+        default_value = "30s",
+        value_parser = parse::positive_time
+    )]
+    pub rebalancer_request_timeout: Time,
+    /// Requeue cadence while a rebalance is executing.
+    #[arg(
+        long,
+        env = "REBALANCER_POLL_INTERVAL",
+        default_value = "10s",
+        value_parser = parse::positive_time
+    )]
+    pub rebalancer_poll_interval: Time,
+    /// Requeue cadence while no rebalance action is active.
+    #[arg(
+        long,
+        env = "REBALANCER_IDLE_INTERVAL",
+        default_value = "5m",
+        value_parser = parse::positive_time
+    )]
+    pub rebalancer_idle_interval: Time,
+    /// Requeue delay after an invalid delegation-token broker request.
+    #[arg(
+        long,
+        env = "DELEGATION_TOKEN_INVALID_REQUEUE",
+        default_value = "1h",
+        value_parser = parse::positive_time
+    )]
+    pub delegation_token_invalid_requeue: Time,
+    /// Backoff after a transient delegation-token broker failure.
+    #[arg(
+        long,
+        env = "DELEGATION_TOKEN_TRANSIENT_BACKOFF",
+        default_value = "5m",
+        value_parser = parse::positive_time
+    )]
+    pub delegation_token_transient_backoff: Time,
+    /// Shortest delegation-token renewal requeue.
+    #[arg(
+        long,
+        env = "DELEGATION_TOKEN_MIN_REQUEUE",
+        default_value = "1m",
+        value_parser = parse::positive_time
+    )]
+    pub delegation_token_min_requeue: Time,
+    /// Longest delegation-token renewal requeue.
+    #[arg(
+        long,
+        env = "DELEGATION_TOKEN_MAX_REQUEUE",
+        default_value = "24h",
+        value_parser = parse::positive_time
+    )]
+    pub delegation_token_max_requeue: Time,
 
     /// Durable checkpoint object store used to verify a suspended tenant before
     /// its WAL topics are deleted. Parking is disabled when this is unset.
@@ -199,6 +319,32 @@ impl OperatorConfig {
             Some(&self.watch_namespaces)
         }
     }
+
+    /// Validate relationships between independently parsed runtime settings.
+    ///
+    /// # Errors
+    ///
+    /// Returns the invalid relationship before any external I/O begins.
+    pub fn validate(&self) -> Result<(), String> {
+        let lease_seconds_f64 = self.leader_lease_duration.secs_f64();
+        if !lease_seconds_f64.is_finite() || lease_seconds_f64.fract() != 0.0 {
+            return Err("leader lease duration must be a whole number of seconds".to_owned());
+        }
+        let lease_seconds = self.leader_lease_duration.secs_i64();
+        if i32::try_from(lease_seconds).is_err() {
+            return Err("leader lease duration exceeds Kubernetes i32 seconds".to_owned());
+        }
+        if self.leader_retry_interval > self.leader_lease_duration {
+            return Err("leader retry interval exceeds lease duration".to_owned());
+        }
+        if self.rebalancer_poll_interval > self.rebalancer_idle_interval {
+            return Err("rebalancer poll interval exceeds idle interval".to_owned());
+        }
+        if self.delegation_token_min_requeue > self.delegation_token_max_requeue {
+            return Err("delegation-token minimum requeue exceeds maximum requeue".to_owned());
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -206,7 +352,8 @@ mod tests {
     use std::process::Command;
 
     use assert2::assert;
-    use clap::Parser;
+    use clap::{CommandFactory as _, Parser};
+    use crabka_units::{hours, millis, minutes, secs};
 
     use super::*;
 
@@ -227,6 +374,127 @@ mod tests {
         assert!(parsed.cfg.pgdog_admin_timeout == secs(20));
         assert!(parsed.cfg.pgdog_transition_poll == secs(60));
         assert!(parsed.cfg.controller_error_requeue == secs(15));
+    }
+
+    #[test]
+    fn runtime_timing_policy_uses_uom_defaults_cli_env_and_ordering() {
+        let defaults = Wrap::parse_from(["bin"]).cfg;
+        assert!(defaults.controller_dependency_requeue == secs(30));
+        assert!(defaults.controller_drift_requeue == minutes(1));
+        assert!(defaults.controller_invalid_requeue == minutes(5));
+        assert!(defaults.controller_certificate_requeue == secs(10));
+        assert!(defaults.user_tls_drift_requeue == hours(6));
+        assert!(defaults.leader_lease_duration == secs(15));
+        assert!(defaults.leader_retry_interval == secs(2));
+        assert!(defaults.topic_mutation_timeout == secs(30));
+        assert!(defaults.rebalancer_request_timeout == secs(30));
+        assert!(defaults.rebalancer_poll_interval == secs(10));
+        assert!(defaults.rebalancer_idle_interval == minutes(5));
+        assert!(defaults.delegation_token_invalid_requeue == hours(1));
+        assert!(defaults.delegation_token_transient_backoff == minutes(5));
+        assert!(defaults.delegation_token_min_requeue == minutes(1));
+        assert!(defaults.delegation_token_max_requeue == hours(24));
+        defaults.validate().expect("default timing policy");
+
+        let command = Wrap::command();
+        for (id, environment) in [
+            (
+                "controller_dependency_requeue",
+                "CONTROLLER_DEPENDENCY_REQUEUE",
+            ),
+            ("controller_drift_requeue", "CONTROLLER_DRIFT_REQUEUE"),
+            ("controller_invalid_requeue", "CONTROLLER_INVALID_REQUEUE"),
+            (
+                "controller_certificate_requeue",
+                "CONTROLLER_CERTIFICATE_REQUEUE",
+            ),
+            ("user_tls_drift_requeue", "USER_TLS_DRIFT_REQUEUE"),
+            ("leader_lease_duration", "LEADER_LEASE_DURATION"),
+            ("leader_retry_interval", "LEADER_RETRY_INTERVAL"),
+            ("topic_mutation_timeout", "TOPIC_MUTATION_TIMEOUT"),
+            ("rebalancer_request_timeout", "REBALANCER_REQUEST_TIMEOUT"),
+            ("rebalancer_poll_interval", "REBALANCER_POLL_INTERVAL"),
+            ("rebalancer_idle_interval", "REBALANCER_IDLE_INTERVAL"),
+            (
+                "delegation_token_invalid_requeue",
+                "DELEGATION_TOKEN_INVALID_REQUEUE",
+            ),
+            (
+                "delegation_token_transient_backoff",
+                "DELEGATION_TOKEN_TRANSIENT_BACKOFF",
+            ),
+            (
+                "delegation_token_min_requeue",
+                "DELEGATION_TOKEN_MIN_REQUEUE",
+            ),
+            (
+                "delegation_token_max_requeue",
+                "DELEGATION_TOKEN_MAX_REQUEUE",
+            ),
+        ] {
+            let argument = command
+                .get_arguments()
+                .find(|argument| argument.get_id().as_str() == id)
+                .expect("timing argument");
+            assert_eq!(argument.get_env(), Some(std::ffi::OsStr::new(environment)));
+        }
+
+        let configured = Wrap::parse_from([
+            "bin",
+            "--controller-dependency-requeue=31ms",
+            "--controller-drift-requeue=32ms",
+            "--controller-invalid-requeue=33ms",
+            "--controller-certificate-requeue=34ms",
+            "--user-tls-drift-requeue=35ms",
+            "--leader-lease-duration=36ms",
+            "--leader-retry-interval=37ms",
+            "--topic-mutation-timeout=38ms",
+            "--rebalancer-request-timeout=39ms",
+            "--rebalancer-poll-interval=40ms",
+            "--rebalancer-idle-interval=41ms",
+            "--delegation-token-invalid-requeue=42ms",
+            "--delegation-token-transient-backoff=43ms",
+            "--delegation-token-min-requeue=44ms",
+            "--delegation-token-max-requeue=45ms",
+        ])
+        .cfg;
+        assert!(configured.controller_dependency_requeue == millis(31));
+        assert!(configured.controller_drift_requeue == millis(32));
+        assert!(configured.controller_invalid_requeue == millis(33));
+        assert!(configured.controller_certificate_requeue == millis(34));
+        assert!(configured.user_tls_drift_requeue == millis(35));
+        assert!(configured.leader_lease_duration == millis(36));
+        assert!(configured.leader_retry_interval == millis(37));
+        assert!(configured.topic_mutation_timeout == millis(38));
+        assert!(configured.rebalancer_request_timeout == millis(39));
+        assert!(configured.rebalancer_poll_interval == millis(40));
+        assert!(configured.rebalancer_idle_interval == millis(41));
+        assert!(configured.delegation_token_invalid_requeue == millis(42));
+        assert!(configured.delegation_token_transient_backoff == millis(43));
+        assert!(configured.delegation_token_min_requeue == millis(44));
+        assert!(configured.delegation_token_max_requeue == millis(45));
+
+        let mut inverted = defaults;
+        inverted.leader_retry_interval = inverted.leader_lease_duration + millis(1);
+        assert!(inverted.validate().unwrap_err().contains("leader retry"));
+        inverted = Wrap::parse_from(["bin"]).cfg;
+        inverted.rebalancer_poll_interval = inverted.rebalancer_idle_interval + millis(1);
+        assert!(inverted.validate().unwrap_err().contains("rebalancer poll"));
+        inverted = Wrap::parse_from(["bin"]).cfg;
+        inverted.delegation_token_min_requeue = inverted.delegation_token_max_requeue + millis(1);
+        assert!(
+            inverted
+                .validate()
+                .unwrap_err()
+                .contains("delegation-token minimum")
+        );
+        inverted = Wrap::parse_from(["bin"]).cfg;
+        inverted.leader_lease_duration = millis(1_500);
+        let error = inverted.validate().unwrap_err();
+        assert!(error.contains("whole number of seconds"), "got: {error}");
+        inverted = Wrap::parse_from(["bin"]).cfg;
+        inverted.leader_lease_duration = crabka_units::days(365 * 100);
+        assert!(inverted.validate().unwrap_err().contains("i32 seconds"));
     }
 
     #[test]

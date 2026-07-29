@@ -1724,17 +1724,26 @@ async fn drive_operation(
                         && restarted_pids.is_none()
                 }) {
                     retirement_admin.arm_error_after_delete();
-                    let error =
-                        reconcile_one_retiring_range_wal(&control, &mut retirement_admin, &tenant)
-                            .await
-                            .expect_err("AfterDelete must stop before sidecar CAS");
+                    let error = reconcile_one_retiring_range_wal(
+                        &control,
+                        &mut retirement_admin,
+                        &tenant,
+                        crabka_units::secs(30),
+                    )
+                    .await
+                    .expect_err("AfterDelete must stop before sidecar CAS");
                     assert!(error.to_string().contains("injected ambiguity"));
                     continue;
                 }
                 assert!(
-                    reconcile_one_retiring_range_wal(&control, &mut retirement_admin, &tenant)
-                        .await
-                        .expect("WAL retirement")
+                    reconcile_one_retiring_range_wal(
+                        &control,
+                        &mut retirement_admin,
+                        &tenant,
+                        crabka_units::secs(30),
+                    )
+                    .await
+                    .expect("WAL retirement")
                 );
                 if kill_injection.as_ref().is_some_and(|injection| {
                     injection.point == SourceKillPoint::RetiringParked && restarted_pids.is_none()

@@ -431,6 +431,21 @@ pub fn op_config(namespace: &str) -> OperatorConfig {
         pgdog_admin_timeout: crabka_units::secs(20),
         pgdog_transition_poll: crabka_units::minutes(1),
         controller_error_requeue: crabka_units::secs(15),
+        controller_dependency_requeue: crabka_units::secs(30),
+        controller_drift_requeue: crabka_units::minutes(1),
+        controller_invalid_requeue: crabka_units::minutes(5),
+        controller_certificate_requeue: crabka_units::secs(10),
+        user_tls_drift_requeue: crabka_units::hours(6),
+        leader_lease_duration: crabka_units::secs(15),
+        leader_retry_interval: crabka_units::secs(2),
+        topic_mutation_timeout: crabka_units::secs(30),
+        rebalancer_request_timeout: crabka_units::secs(30),
+        rebalancer_poll_interval: crabka_units::secs(10),
+        rebalancer_idle_interval: crabka_units::minutes(5),
+        delegation_token_invalid_requeue: crabka_units::hours(1),
+        delegation_token_transient_backoff: crabka_units::minutes(5),
+        delegation_token_min_requeue: crabka_units::minutes(1),
+        delegation_token_max_requeue: crabka_units::hours(24),
         gres_checkpoint_store: None,
         gres_checkpoint_bucket: None,
         gres_checkpoint_region: None,
@@ -633,9 +648,26 @@ pub fn build_ctx(
     namespace: &str,
     rules: Vec<MockRule>,
 ) -> (Arc<crabka_operator::context::Context>, Arc<MockState>) {
+    build_ctx_with_config(namespace, rules, op_config(namespace))
+}
+
+pub fn build_ctx_with_config(
+    namespace: &str,
+    rules: Vec<MockRule>,
+    config: OperatorConfig,
+) -> (Arc<crabka_operator::context::Context>, Arc<MockState>) {
     let state = MockState::new(rules);
     let client = mock_client(&state, namespace);
-    (Arc::new(fixture_ctx(client, namespace)), state)
+    let (registry, metrics) = new_registry_with_metrics();
+    (
+        Arc::new(Context::new(
+            client,
+            config,
+            Arc::new(AsyncMutex::new(registry)),
+            metrics,
+        )),
+        state,
+    )
 }
 
 // ---------------------------------------------------------------------------

@@ -14,7 +14,6 @@
 use std::{
     collections::{BTreeMap, HashSet},
     sync::Arc,
-    time::Duration,
 };
 
 use crabka_units::fmt::Human as _;
@@ -1556,7 +1555,7 @@ async fn reconcile_inner(
             &format!("Kafka '{kafka_name}' not found in namespace '{ns}'"),
         );
         patch_status_for_pool(&pool_api, &name, cond).await?;
-        return Ok(Action::requeue(Duration::from_secs(30)));
+        return Ok(common::requeue(ctx.config.controller_dependency_requeue));
     };
 
     // Gate on the parent's version model. Version validation lives in
@@ -1569,7 +1568,7 @@ async fn reconcile_inner(
     //     reconcile once the parent publishes its verdict.
     if let VersionGate::Blocked(cond) = version_gate(&parent) {
         patch_status_for_pool(&pool_api, &name, cond).await?;
-        return Ok(Action::requeue(Duration::from_secs(30)));
+        return Ok(common::requeue(ctx.config.controller_dependency_requeue));
     }
 
     // 3. Resolve broker image: spec override > operator default > built-in.
@@ -1627,7 +1626,7 @@ async fn reconcile_inner(
     };
     common::patch_status::<KafkaNodePool, KafkaNodePoolStatus>(&pool_api, &name, status).await?;
 
-    Ok(Action::requeue(Duration::from_secs(30)))
+    Ok(common::requeue(ctx.config.controller_dependency_requeue))
 }
 
 pub fn error_policy(_obj: Arc<KafkaNodePool>, err: &ReconcileError, ctx: Arc<Context>) -> Action {

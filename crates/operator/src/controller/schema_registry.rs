@@ -2,7 +2,7 @@
 //! Service + `ClusterIP` Service for the `crabka-schema-registry` binary,
 //! associated with a managed `Kafka` via the `crabka.io/cluster` label.
 
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, sync::Arc};
 
 use crabka_units::{
     ByteSize, Time,
@@ -146,7 +146,7 @@ async fn reconcile_inner(
                 None,
             )
             .await?;
-            return Ok(Action::requeue(Duration::from_mins(1)));
+            return Ok(common::requeue(ctx.config.controller_drift_requeue));
         };
         let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &ns);
         let kafka = kafka_api.get_opt(&cluster).await?;
@@ -163,7 +163,7 @@ async fn reconcile_inner(
             None,
         )
         .await?;
-        return Ok(Action::requeue(Duration::from_secs(30)));
+        return Ok(common::requeue(ctx.config.controller_dependency_requeue));
     };
 
     // 3. Resolve TLS secret name (handles issuerRef path + mutual-exclusion).
@@ -180,7 +180,7 @@ async fn reconcile_inner(
                     None,
                 )
                 .await?;
-                return Ok(Action::requeue(Duration::from_secs(30)));
+                return Ok(common::requeue(ctx.config.controller_dependency_requeue));
             }
             (None, None) => {
                 set_status(
@@ -193,7 +193,7 @@ async fn reconcile_inner(
                     None,
                 )
                 .await?;
-                return Ok(Action::requeue(Duration::from_secs(30)));
+                return Ok(common::requeue(ctx.config.controller_dependency_requeue));
             }
             (Some(sn), None) => Some(sn.clone()),
             (None, Some(issuer)) => {
@@ -212,7 +212,7 @@ async fn reconcile_inner(
                         None,
                     )
                     .await?;
-                    return Ok(Action::requeue(Duration::from_secs(10)));
+                    return Ok(common::requeue(ctx.config.controller_certificate_requeue));
                 }
                 Some(cert_secret)
             }
@@ -279,7 +279,7 @@ async fn reconcile_inner(
         )
         .await?;
     }
-    Ok(Action::requeue(Duration::from_mins(1)))
+    Ok(common::requeue(ctx.config.controller_drift_requeue))
 }
 
 fn deployment_name(n: &str) -> String {

@@ -110,7 +110,7 @@ async fn create_topic(
                 replicas: obj.spec.replicas,
                 configs: obj.spec.config.clone().unwrap_or_default(),
             }],
-            30_000,
+            ctx.config.topic_mutation_timeout,
         )
         .await
     {
@@ -120,7 +120,7 @@ async fn create_topic(
             if matches!(error, crabka_client_admin::AdminError::Transport(_)) {
                 ctx.drop_admin_client(cluster).await;
             }
-            return Ok(Action::requeue(Duration::from_secs(15)));
+            return Ok(common::requeue(ctx.config.controller_error_requeue));
         }
     };
     if let Some(error) = outcome.error {
@@ -137,7 +137,7 @@ async fn create_topic(
             false,
         )
         .await?;
-        return Ok(Action::requeue(Duration::from_secs(15)));
+        return Ok(common::requeue(ctx.config.controller_error_requeue));
     }
     patch_status(
         topic_api,
@@ -148,7 +148,7 @@ async fn create_topic(
         true,
     )
     .await?;
-    Ok(Action::requeue(Duration::from_mins(1)))
+    Ok(common::requeue(ctx.config.controller_drift_requeue))
 }
 
 async fn prepare_topic(
@@ -177,8 +177,8 @@ async fn prepare_topic(
             false,
         )
         .await?;
-        return Ok(TopicPreparation::Done(Action::requeue(
-            Duration::from_mins(1),
+        return Ok(TopicPreparation::Done(common::requeue(
+            ctx.config.controller_drift_requeue,
         )));
     };
     let topic_name = obj.spec.topic_name.clone().unwrap_or_else(|| name.into());
@@ -192,8 +192,8 @@ async fn prepare_topic(
             false,
         )
         .await?;
-        return Ok(TopicPreparation::Done(Action::requeue(
-            Duration::from_mins(5),
+        return Ok(TopicPreparation::Done(common::requeue(
+            ctx.config.controller_invalid_requeue,
         )));
     }
     let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), namespace);
@@ -216,8 +216,8 @@ async fn prepare_topic(
             false,
         )
         .await?;
-        return Ok(TopicPreparation::Done(Action::requeue(
-            Duration::from_secs(30),
+        return Ok(TopicPreparation::Done(common::requeue(
+            ctx.config.controller_dependency_requeue,
         )));
     };
     if obj.meta().deletion_timestamp.is_some() {
@@ -225,7 +225,10 @@ async fn prepare_topic(
             && let Ok(client) = ctx.admin_client_for(&cluster, &bootstrap).await
         {
             let mut admin = client.lock().await;
-            if let Err(error) = admin.delete_topics(&[&topic_name], 30_000).await {
+            if let Err(error) = admin
+                .delete_topics(&[&topic_name], ctx.config.topic_mutation_timeout)
+                .await
+            {
                 tracing::warn!(%error, %topic_name, "DeleteTopics failed during finalizer");
             }
         }
@@ -266,7 +269,7 @@ async fn reconcile_inner(
         Ok(h) => h,
         Err(e) => {
             tracing::warn!(error = %e, %cluster, "AdminClient connect failed");
-            return Ok(Action::requeue(Duration::from_secs(15)));
+            return Ok(common::requeue(ctx.config.controller_error_requeue));
         }
     };
     let mut admin = admin_handle.lock().await;
@@ -280,7 +283,7 @@ async fn reconcile_inner(
             if is_transport {
                 ctx.drop_admin_client(&cluster).await;
             }
-            return Ok(Action::requeue(Duration::from_secs(15)));
+            return Ok(common::requeue(ctx.config.controller_error_requeue));
         }
     };
     let current = md.topics.iter().find(|t| t.name == topic_name);
@@ -319,7 +322,7 @@ async fn reconcile_inner(
                     false,
                 )
                 .await?;
-                return Ok(Action::requeue(Duration::from_mins(5)));
+                return Ok(common::requeue(ctx.config.controller_invalid_requeue));
             }
             if cur.partition_count > obj.spec.partitions {
                 patch_status(
@@ -335,7 +338,7 @@ async fn reconcile_inner(
                     false,
                 )
                 .await?;
-                return Ok(Action::requeue(Duration::from_mins(5)));
+                return Ok(common::requeue(ctx.config.controller_invalid_requeue));
             }
 
             // Partition increase
@@ -346,7 +349,7 @@ async fn reconcile_inner(
                             name: topic_name.clone(),
                             new_total_count: obj.spec.partitions,
                         }],
-                        30_000,
+                        ctx.config.topic_mutation_timeout,
                     )
                     .await;
                 match outcomes {
@@ -366,7 +369,7 @@ async fn reconcile_inner(
                                 false,
                             )
                             .await?;
-                            return Ok(Action::requeue(Duration::from_secs(15)));
+                            return Ok(common::requeue(ctx.config.controller_error_requeue));
                         }
                     }
                     Err(e) => {
@@ -377,7 +380,7 @@ async fn reconcile_inner(
                         if is_transport {
                             ctx.drop_admin_client(&cluster).await;
                         }
-                        return Ok(Action::requeue(Duration::from_secs(15)));
+                        return Ok(common::requeue(ctx.config.controller_error_requeue));
                     }
                 }
             }
@@ -397,7 +400,7 @@ async fn reconcile_inner(
                     if is_transport {
                         ctx.drop_admin_client(&cluster).await;
                     }
-                    return Ok(Action::requeue(Duration::from_secs(15)));
+                    return Ok(common::requeue(ctx.config.controller_error_requeue));
                 }
             };
             let ops = diff_configs(&overrides, &desired, &topic_name);
@@ -421,7 +424,7 @@ async fn reconcile_inner(
                                 false,
                             )
                             .await?;
-                            return Ok(Action::requeue(Duration::from_secs(15)));
+                            return Ok(common::requeue(ctx.config.controller_error_requeue));
                         }
                     }
                     Err(e) => {
@@ -432,7 +435,7 @@ async fn reconcile_inner(
                         if is_transport {
                             ctx.drop_admin_client(&cluster).await;
                         }
-                        return Ok(Action::requeue(Duration::from_secs(15)));
+                        return Ok(common::requeue(ctx.config.controller_error_requeue));
                     }
                 }
             }
@@ -446,7 +449,7 @@ async fn reconcile_inner(
                 true,
             )
             .await?;
-            Ok(Action::requeue(Duration::from_mins(1)))
+            Ok(common::requeue(ctx.config.controller_drift_requeue))
         }
     }
 }

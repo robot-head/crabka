@@ -957,7 +957,10 @@ impl Context {
         if let Some(client) = map.get(endpoint) {
             return client.clone();
         }
-        let client: RebalancerClientHandle = Arc::new(ConnectRebalancerClient::new(endpoint));
+        let client: RebalancerClientHandle = Arc::new(ConnectRebalancerClient::new(
+            endpoint,
+            self.config.rebalancer_request_timeout,
+        ));
         map.insert(endpoint.to_string(), client.clone());
         client
     }

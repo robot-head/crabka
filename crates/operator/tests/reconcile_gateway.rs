@@ -29,10 +29,10 @@ use http::{Method, Response};
 mod shared;
 
 use shared::{
-    MockRule, build_ctx, fake_broker_user_secret, fake_cluster_ca_cert_secret,
-    fake_cluster_ca_key_secret, fake_config_secret, fake_deployment_body, fake_gateway_body,
-    fake_kafkauser_body, fake_parent_kafka_body, fake_service_body, fake_serving_secret,
-    json_response, not_found_body,
+    MockRule, build_ctx, build_ctx_with_config, fake_broker_user_secret,
+    fake_cluster_ca_cert_secret, fake_cluster_ca_key_secret, fake_config_secret,
+    fake_deployment_body, fake_gateway_body, fake_kafkauser_body, fake_parent_kafka_body,
+    fake_service_body, fake_serving_secret, json_response, not_found_body,
 };
 
 const NS: &str = "default";
@@ -384,14 +384,16 @@ async fn happy_path_all_objects_created_ready() {
         },
     ];
 
-    let (ctx, state) = build_ctx(NS, rules);
+    let mut config = shared::op_config(NS);
+    config.controller_dependency_requeue = crabka_units::millis(1_234);
+    let (ctx, state) = build_ctx_with_config(NS, rules, config);
     let gw = gw_cr(GW);
     let action = reconcile(Arc::new(gw), ctx).await.expect("reconcile ok");
 
-    // Action must be a 30-second requeue.
     assert!(
-        action == kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(30)),
-        "expected requeue(30s), got {action:?}"
+        action
+            == kube::runtime::controller::Action::requeue(std::time::Duration::from_millis(1_234)),
+        "expected configured dependency requeue, got {action:?}"
     );
 
     let observed = state.take_observed();

@@ -384,11 +384,18 @@ async fn kafka_present_but_not_ready_gates_with_no_children() {
     ];
     let state = MockState::new(rules);
     let client = mock_client(&state, NS);
-    let ctx = Arc::new(fixture_ctx(client, NS));
+    let mut ctx = fixture_ctx(client, NS);
+    Arc::get_mut(&mut ctx.config)
+        .expect("fixture owns operator config")
+        .controller_dependency_requeue = crabka_units::millis(1_234);
 
-    reconcile(Arc::new(sr("sr1", Some(CLUSTER))), ctx)
+    let action = reconcile(Arc::new(sr("sr1", Some(CLUSTER))), Arc::new(ctx))
         .await
         .unwrap();
+    assert!(
+        action
+            == kube::runtime::controller::Action::requeue(std::time::Duration::from_millis(1_234))
+    );
 
     let observed = state.take_observed();
     // The gate must fire BEFORE any child is applied.

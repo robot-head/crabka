@@ -149,7 +149,7 @@ async fn operator_client_round_trips_against_real_rebalancer() {
     let _server = tokio::spawn(async move { axum::serve(listener, app).await });
 
     // 3. Drive the operator's production client at it.
-    let client = ConnectRebalancerClient::new(&format!("http://{addr}"));
+    let client = ConnectRebalancerClient::new(&format!("http://{addr}"), secs(30));
 
     // CreateProposal — single-broker cluster ⇒ Computed (likely zero
     // movements). The point is the wire round-trip + enum decode.
