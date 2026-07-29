@@ -24,15 +24,15 @@ applicable rule below:
 ## Coverage Status
 
 - Complete: `admin-ui`, `audit`, `authz`, `bench-driver`, `blockstore`,
-  `broker`, `cli`, `client-admin`, `compression`, `connect-derive`,
-  `connect-postgres`,
+  `broker`, `cli`, `client-admin`, `client-producer`, `compression`,
+  `connect-derive`, `connect-postgres`,
   `docgen`, `gres`, `gres-activator`, `gres-control`, `grpc-gateway`, `ids`,
   `integration-tests`, `kafka-tap`,
   `log-iobench`, `logfmt`, `logql`, `object-store`, `operator`,
   `protocol-codegen`, `remote-storage`, `pgparser`, `playground`,
   `schema-registry`, `throttle`, `verified`, `voters`.
-- Pending: `client-consumer`, `client-core`, `client-producer`,
-  `client-streams`, `connect`, `gres-balancer`,
+- Pending: `client-consumer`, `client-core`, `client-streams`, `connect`,
+  `gres-balancer`,
   `gres-conformance`, `gres-fdw`, `gres-loadtest`,
   `gres-ranges`, `gres-substrate`,
   `kraft-core`, `log`, `metadata`, `metrics`,
@@ -4561,3 +4561,29 @@ under those owning crates rather than being duplicated here.
 No additional binary-owned CLI, environment variable, or CRD field is
 warranted. The current all-target gate passed 220 tests, including process-level
 runtime, crash, and topology targets, and strict all-target Clippy passed.
+
+## Client Producer
+
+The `client-producer` owner has 177 scanner rows, predominantly test deadlines,
+mock-clock advances, and model bounds. All production deployment policy is
+already exposed through validated producer-builder inputs: compression, linger,
+batch bytes, cross-partition in-flight concurrency, DNS, request and flush
+timeouts, resend count and backoff, routing and initialization retry budgets,
+and transaction timeout. Dimensioned values are represented as `Duration` at
+the public API and converted to `Time` inside the runtime; validated duration,
+count, and byte boundaries use `refined_type`.
+
+The bounded sender wake channel is an internal coalescing mechanism. Producers
+use best-effort `try_send` for ordinary wakeups, and the sender derives work
+from authoritative accumulator state, so its capacity neither limits buffered
+records nor controls throughput. The per-partition in-flight limit is pinned to
+one, with a compile-time assertion, because raising it without ordered frame
+writes can violate idempotent sequence ordering. Neither value is meaningful or
+safe deployment tuning.
+
+The remaining production constants are Kafka error codes, sentinel identities,
+state tags, the Kafka-compatible Murmur2 hash constants, protocol-unit
+conversion bounds, and exact allocation hints. No additional CLI, environment
+variable, or CRD field is warranted. The current all-target gate passed 101
+unit, runtime, and bounded failover-model tests, and strict all-target Clippy
+passed.
