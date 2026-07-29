@@ -10,29 +10,24 @@ fn demo() -> Command {
 fn environment_is_used_and_cli_wins_before_external_io() {
     let environment = demo()
         .args(["--role", "produce"])
-        .env("CRABKA_DEMO_STREAMS_REBALANCE_TIMEOUT_MS", "37000")
+        .env("CRABKA_DEMO_STREAMS_REBALANCE_TIMEOUT", "37s")
         .output()
         .expect("run demo");
     assert!(!environment.status.success());
     assert!(
         String::from_utf8_lossy(&environment.stderr)
-            .contains("--streams-rebalance-timeout-ms (37000 ms) is only valid with --role stream")
+            .contains("--streams-rebalance-timeout (37s) is only valid with --role stream")
     );
 
     let cli = demo()
-        .args([
-            "--role",
-            "produce",
-            "--streams-rebalance-timeout-ms",
-            "41000",
-        ])
-        .env("CRABKA_DEMO_STREAMS_REBALANCE_TIMEOUT_MS", "37000")
+        .args(["--role", "produce", "--streams-rebalance-timeout", "41s"])
+        .env("CRABKA_DEMO_STREAMS_REBALANCE_TIMEOUT", "37s")
         .output()
         .expect("run demo");
     assert!(!cli.status.success());
     assert!(
         String::from_utf8_lossy(&cli.stderr)
-            .contains("--streams-rebalance-timeout-ms (41000 ms) is only valid with --role stream")
+            .contains("--streams-rebalance-timeout (41s) is only valid with --role stream")
     );
 }
 
@@ -40,15 +35,15 @@ fn environment_is_used_and_cli_wins_before_external_io() {
 fn invalid_values_fail_early_and_help_lists_the_flag_once() {
     let zero = demo()
         .args(["--role", "stream"])
-        .env("CRABKA_DEMO_STREAMS_REBALANCE_TIMEOUT_MS", "0")
+        .env("CRABKA_DEMO_STREAMS_REBALANCE_TIMEOUT", "0ms")
         .output()
         .expect("run demo");
     assert!(!zero.status.success());
-    assert!(String::from_utf8_lossy(&zero.stderr).contains("invalid value '0'"));
+    assert!(String::from_utf8_lossy(&zero.stderr).contains("invalid value '0ms'"));
 
     let overflow = demo()
         .args(["--role", "stream"])
-        .env("CRABKA_DEMO_STREAMS_REBALANCE_TIMEOUT_MS", "2147483648")
+        .env("CRABKA_DEMO_STREAMS_REBALANCE_TIMEOUT", "2147483648ms")
         .output()
         .expect("run demo");
     assert!(!overflow.status.success());
@@ -59,7 +54,7 @@ fn invalid_values_fail_early_and_help_lists_the_flag_once() {
     let help = String::from_utf8(help.stdout).expect("UTF-8 help");
     assert_eq!(
         help.split_whitespace()
-            .filter(|token| *token == "--streams-rebalance-timeout-ms")
+            .filter(|token| *token == "--streams-rebalance-timeout")
             .count(),
         1
     );

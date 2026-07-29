@@ -11,7 +11,7 @@
 //! streams showcase.
 
 use std::{
-    num::{NonZeroU64, NonZeroUsize},
+    num::NonZeroUsize,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -32,6 +32,7 @@ use crabka_client_streams::{
 use crabka_schema_serde::{
     CacheConfig, RegistryClient, SchemaCache, format::protobuf::ProtobufSerde, set_default_registry,
 };
+use crabka_units::{fmt::Human as _, parse, prelude::*};
 use observability_demo_app::{
     Order, classify_outcome, is_anomalous,
     metrics::{DemoMetrics, metrics_router},
@@ -72,58 +73,91 @@ struct Cli {
     output_topic: String,
     #[arg(long, env = "CRABKA_DEMO_ORDERS_PER_SEC", default_value_t = 50)]
     orders_per_sec: u32,
-    /// Classic Consumer best-effort leave-group timeout in milliseconds.
-    #[arg(long, env = "CRABKA_DEMO_CONSUMER_LEAVE_GROUP_TIMEOUT_MS")]
-    consumer_leave_group_timeout_ms: Option<NonZeroU64>,
-    /// Classic Consumer subscribed-topic metadata refresh interval in milliseconds.
+    /// Classic Consumer best-effort leave-group timeout.
     #[arg(
         long,
-        env = "CRABKA_DEMO_CONSUMER_SUBSCRIPTION_METADATA_REFRESH_INTERVAL_MS"
+        env = "CRABKA_DEMO_CONSUMER_LEAVE_GROUP_TIMEOUT",
+        value_parser = parse::positive_time
     )]
-    consumer_subscription_metadata_refresh_interval_ms: Option<NonZeroU64>,
-    /// Kafka Streams broker DNS timeout in milliseconds.
-    #[arg(long, env = "CRABKA_DEMO_STREAMS_BROKER_DNS_TIMEOUT_MS")]
-    streams_broker_dns_timeout_ms: Option<NonZeroU64>,
-    /// Client Streams processing poll interval in milliseconds.
-    #[arg(long, env = "CRABKA_DEMO_STREAMS_POLL_INTERVAL_MS")]
-    streams_poll_interval_ms: Option<NonZeroU64>,
-    /// Client Streams commit interval in milliseconds.
-    #[arg(long, env = "CRABKA_DEMO_STREAMS_COMMIT_INTERVAL_MS")]
-    streams_commit_interval_ms: Option<NonZeroU64>,
-    /// Client Streams rebalance timeout in milliseconds.
-    #[arg(long, env = "CRABKA_DEMO_STREAMS_REBALANCE_TIMEOUT_MS")]
-    streams_rebalance_timeout_ms: Option<NonZeroU64>,
-    /// Client Streams final leave-heartbeat timeout in milliseconds.
-    #[arg(long, env = "CRABKA_DEMO_STREAMS_LEAVE_HEARTBEAT_TIMEOUT_MS")]
-    streams_leave_heartbeat_timeout_ms: Option<NonZeroU64>,
-    /// Client Streams initial join retry backoff in milliseconds.
-    #[arg(long, env = "CRABKA_DEMO_STREAMS_JOIN_RETRY_BACKOFF_MS")]
-    streams_join_retry_backoff_ms: Option<NonZeroU64>,
+    consumer_leave_group_timeout: Option<Time>,
+    /// Classic Consumer subscribed-topic metadata refresh interval.
+    #[arg(
+        long,
+        env = "CRABKA_DEMO_CONSUMER_SUBSCRIPTION_METADATA_REFRESH_INTERVAL",
+        value_parser = parse::positive_time
+    )]
+    consumer_subscription_metadata_refresh_interval: Option<Time>,
+    /// Kafka Streams broker DNS timeout.
+    #[arg(
+        long,
+        env = "CRABKA_DEMO_STREAMS_BROKER_DNS_TIMEOUT",
+        value_parser = parse::positive_time
+    )]
+    streams_broker_dns_timeout: Option<Time>,
+    /// Client Streams processing poll interval.
+    #[arg(
+        long,
+        env = "CRABKA_DEMO_STREAMS_POLL_INTERVAL",
+        value_parser = parse::positive_time
+    )]
+    streams_poll_interval: Option<Time>,
+    /// Client Streams commit interval.
+    #[arg(
+        long,
+        env = "CRABKA_DEMO_STREAMS_COMMIT_INTERVAL",
+        value_parser = parse::positive_time
+    )]
+    streams_commit_interval: Option<Time>,
+    /// Client Streams rebalance timeout.
+    #[arg(
+        long,
+        env = "CRABKA_DEMO_STREAMS_REBALANCE_TIMEOUT",
+        value_parser = parse::positive_time
+    )]
+    streams_rebalance_timeout: Option<Time>,
+    /// Client Streams final leave-heartbeat timeout.
+    #[arg(
+        long,
+        env = "CRABKA_DEMO_STREAMS_LEAVE_HEARTBEAT_TIMEOUT",
+        value_parser = parse::positive_time
+    )]
+    streams_leave_heartbeat_timeout: Option<Time>,
+    /// Client Streams initial join retry backoff.
+    #[arg(
+        long,
+        env = "CRABKA_DEMO_STREAMS_JOIN_RETRY_BACKOFF",
+        value_parser = parse::positive_time
+    )]
+    streams_join_retry_backoff: Option<Time>,
     /// Capacity shared by the Client Streams interactive-query request queues.
     #[arg(long, env = "CRABKA_DEMO_STREAMS_INTERACTIVE_QUERY_QUEUE_CAPACITY")]
     streams_interactive_query_queue_capacity: Option<NonZeroUsize>,
-    /// Client Streams state-store record-cache budget in bytes; zero disables it.
-    #[arg(long, env = "CRABKA_DEMO_STREAMS_STATE_STORE_CACHE_MAX_BYTES")]
-    streams_state_store_cache_max_bytes: Option<i64>,
+    /// Client Streams state-store record-cache budget; zero disables it.
+    #[arg(
+        long,
+        env = "CRABKA_DEMO_STREAMS_STATE_STORE_CACHE_MAX",
+        value_parser = parse::non_negative_byte_size
+    )]
+    streams_state_store_cache_max: Option<ByteSize>,
 }
 
 fn effective_consumer_leave_group_timeout(cli: &Cli) -> std::io::Result<ConsumerLeaveGroupTimeout> {
     if cli.role != Role::Consume
-        && let Some(milliseconds) = cli.consumer_leave_group_timeout_ms
+        && let Some(timeout) = cli.consumer_leave_group_timeout
     {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!(
-                "--consumer-leave-group-timeout-ms ({} ms) is only valid with --role consume",
-                milliseconds.get(),
+                "--consumer-leave-group-timeout ({}) is only valid with --role consume",
+                timeout.human(),
             ),
         ));
     }
 
-    cli.consumer_leave_group_timeout_ms.map_or_else(
+    cli.consumer_leave_group_timeout.map_or_else(
         || Ok(ConsumerLeaveGroupTimeout::default()),
-        |milliseconds| {
-            ConsumerLeaveGroupTimeout::new(Duration::from_millis(milliseconds.get()))
+        |timeout| {
+            ConsumerLeaveGroupTimeout::new(timeout.to_std())
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
         },
     )
@@ -133,46 +167,44 @@ fn effective_consumer_subscription_metadata_refresh_interval(
     cli: &Cli,
 ) -> std::io::Result<ConsumerSubscriptionMetadataRefreshInterval> {
     if cli.role != Role::Consume
-        && let Some(milliseconds) = cli.consumer_subscription_metadata_refresh_interval_ms
+        && let Some(interval) = cli.consumer_subscription_metadata_refresh_interval
     {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!(
-                "--consumer-subscription-metadata-refresh-interval-ms ({} ms) is only valid with --role consume",
-                milliseconds.get(),
+                "--consumer-subscription-metadata-refresh-interval ({}) is only valid with --role consume",
+                interval.human(),
             ),
         ));
     }
 
-    cli.consumer_subscription_metadata_refresh_interval_ms
+    cli.consumer_subscription_metadata_refresh_interval
         .map_or_else(
             || Ok(ConsumerSubscriptionMetadataRefreshInterval::default()),
-            |milliseconds| {
-                ConsumerSubscriptionMetadataRefreshInterval::new(Duration::from_millis(
-                    milliseconds.get(),
-                ))
-                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
+            |interval| {
+                ConsumerSubscriptionMetadataRefreshInterval::new(interval.to_std())
+                    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
             },
         )
 }
 
 fn effective_streams_broker_dns_timeout(cli: &Cli) -> std::io::Result<ClientDnsTimeout> {
     if cli.role != Role::Stream
-        && let Some(milliseconds) = cli.streams_broker_dns_timeout_ms
+        && let Some(timeout) = cli.streams_broker_dns_timeout
     {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!(
-                "--streams-broker-dns-timeout-ms ({} ms) is only valid with --role stream",
-                milliseconds.get(),
+                "--streams-broker-dns-timeout ({}) is only valid with --role stream",
+                timeout.human(),
             ),
         ));
     }
 
-    cli.streams_broker_dns_timeout_ms.map_or_else(
+    cli.streams_broker_dns_timeout.map_or_else(
         || Ok(ClientDnsTimeout::default()),
-        |milliseconds| {
-            ClientDnsTimeout::new(Duration::from_millis(milliseconds.get()))
+        |timeout| {
+            ClientDnsTimeout::new(timeout.to_std())
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
         },
     )
@@ -182,37 +214,37 @@ fn effective_streams_runtime_cadence(
     cli: &Cli,
 ) -> std::io::Result<(StreamsPollInterval, StreamsCommitInterval)> {
     if cli.role != Role::Stream {
-        if let Some(milliseconds) = cli.streams_poll_interval_ms {
+        if let Some(interval) = cli.streams_poll_interval {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!(
-                    "--streams-poll-interval-ms ({} ms) is only valid with --role stream",
-                    milliseconds.get(),
+                    "--streams-poll-interval ({}) is only valid with --role stream",
+                    interval.human(),
                 ),
             ));
         }
-        if let Some(milliseconds) = cli.streams_commit_interval_ms {
+        if let Some(interval) = cli.streams_commit_interval {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!(
-                    "--streams-commit-interval-ms ({} ms) is only valid with --role stream",
-                    milliseconds.get(),
+                    "--streams-commit-interval ({}) is only valid with --role stream",
+                    interval.human(),
                 ),
             ));
         }
     }
 
-    let poll = cli.streams_poll_interval_ms.map_or_else(
+    let poll = cli.streams_poll_interval.map_or_else(
         || Ok(StreamsPollInterval::default()),
-        |milliseconds| {
-            StreamsPollInterval::new(Duration::from_millis(milliseconds.get()))
+        |interval| {
+            StreamsPollInterval::new(interval.to_std())
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
         },
     )?;
-    let commit = cli.streams_commit_interval_ms.map_or_else(
+    let commit = cli.streams_commit_interval.map_or_else(
         || Ok(StreamsCommitInterval::default()),
-        |milliseconds| {
-            StreamsCommitInterval::new(Duration::from_millis(milliseconds.get()))
+        |interval| {
+            StreamsCommitInterval::new(interval.to_std())
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
         },
     )?;
@@ -221,21 +253,21 @@ fn effective_streams_runtime_cadence(
 
 fn effective_streams_rebalance_timeout(cli: &Cli) -> std::io::Result<StreamsRebalanceTimeout> {
     if cli.role != Role::Stream
-        && let Some(milliseconds) = cli.streams_rebalance_timeout_ms
+        && let Some(timeout) = cli.streams_rebalance_timeout
     {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!(
-                "--streams-rebalance-timeout-ms ({} ms) is only valid with --role stream",
-                milliseconds.get(),
+                "--streams-rebalance-timeout ({}) is only valid with --role stream",
+                timeout.human(),
             ),
         ));
     }
 
-    cli.streams_rebalance_timeout_ms.map_or_else(
+    cli.streams_rebalance_timeout.map_or_else(
         || Ok(StreamsRebalanceTimeout::default()),
-        |milliseconds| {
-            StreamsRebalanceTimeout::new(Duration::from_millis(milliseconds.get()))
+        |timeout| {
+            StreamsRebalanceTimeout::new(timeout.to_std())
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
         },
     )
@@ -245,21 +277,21 @@ fn effective_streams_leave_heartbeat_timeout(
     cli: &Cli,
 ) -> std::io::Result<StreamsLeaveHeartbeatTimeout> {
     if cli.role != Role::Stream
-        && let Some(milliseconds) = cli.streams_leave_heartbeat_timeout_ms
+        && let Some(timeout) = cli.streams_leave_heartbeat_timeout
     {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!(
-                "--streams-leave-heartbeat-timeout-ms ({} ms) is only valid with --role stream",
-                milliseconds.get(),
+                "--streams-leave-heartbeat-timeout ({}) is only valid with --role stream",
+                timeout.human(),
             ),
         ));
     }
 
-    cli.streams_leave_heartbeat_timeout_ms.map_or_else(
+    cli.streams_leave_heartbeat_timeout.map_or_else(
         || Ok(StreamsLeaveHeartbeatTimeout::default()),
-        |milliseconds| {
-            StreamsLeaveHeartbeatTimeout::new(Duration::from_millis(milliseconds.get()))
+        |timeout| {
+            StreamsLeaveHeartbeatTimeout::new(timeout.to_std())
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
         },
     )
@@ -267,21 +299,21 @@ fn effective_streams_leave_heartbeat_timeout(
 
 fn effective_streams_join_retry_backoff(cli: &Cli) -> std::io::Result<StreamsJoinRetryBackoff> {
     if cli.role != Role::Stream
-        && let Some(milliseconds) = cli.streams_join_retry_backoff_ms
+        && let Some(backoff) = cli.streams_join_retry_backoff
     {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!(
-                "--streams-join-retry-backoff-ms ({} ms) is only valid with --role stream",
-                milliseconds.get(),
+                "--streams-join-retry-backoff ({}) is only valid with --role stream",
+                backoff.human(),
             ),
         ));
     }
 
-    cli.streams_join_retry_backoff_ms.map_or_else(
+    cli.streams_join_retry_backoff.map_or_else(
         || Ok(StreamsJoinRetryBackoff::default()),
-        |milliseconds| {
-            StreamsJoinRetryBackoff::new(Duration::from_millis(milliseconds.get()))
+        |backoff| {
+            StreamsJoinRetryBackoff::new(backoff.to_std())
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
         },
     )
@@ -315,20 +347,21 @@ fn effective_streams_state_store_cache_max_bytes(
     cli: &Cli,
 ) -> std::io::Result<StreamsStateStoreCacheMaxBytes> {
     if cli.role != Role::Stream
-        && let Some(bytes) = cli.streams_state_store_cache_max_bytes
+        && let Some(size) = cli.streams_state_store_cache_max
     {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!(
-                "--streams-state-store-cache-max-bytes ({bytes}) is only valid with --role stream"
+                "--streams-state-store-cache-max ({}) is only valid with --role stream",
+                size.human(),
             ),
         ));
     }
 
-    cli.streams_state_store_cache_max_bytes.map_or_else(
+    cli.streams_state_store_cache_max.map_or_else(
         || Ok(StreamsStateStoreCacheMaxBytes::default()),
-        |bytes| {
-            StreamsStateStoreCacheMaxBytes::new(bytes)
+        |size| {
+            StreamsStateStoreCacheMaxBytes::new(size)
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
         },
     )
@@ -432,9 +465,10 @@ async fn run_produce(cli: &Cli, metrics: &DemoMetrics) -> Result<(), BoxError> {
         futures_idle().await;
         return Ok(());
     }
-    let per_sec = f64::from(cli.orders_per_sec);
-    let period = Duration::from_secs_f64(1.0 / per_sec);
-    let mut tick = tokio::time::interval(period);
+    // The reciprocal of an order rate is the inter-order period.
+    let rate: Frequency = per_sec(cli.orders_per_sec);
+    let period: Time = 1.0 / rate;
+    let mut tick = tokio::time::interval(period.to_std());
     let mut i: u64 = 0;
     loop {
         tick.tick().await;
@@ -505,7 +539,7 @@ async fn run_produce(cli: &Cli, metrics: &DemoMetrics) -> Result<(), BoxError> {
                 &order.region,
                 &order.payment_method,
                 order.amount,
-                start.elapsed().as_secs_f64(),
+                Time::from_std(start.elapsed()),
             );
             Ok::<(), BoxError>(())
         }
@@ -542,7 +576,7 @@ async fn run_stream(
         .leave_heartbeat_timeout(streams_leave_heartbeat_timeout)
         .join_retry_backoff(streams_join_retry_backoff)
         .interactive_query_queue_capacity(streams_interactive_query_queue_capacity)
-        .cache_max_bytes(streams_state_store_cache_max_bytes.bytes())
+        .cache_max_bytes(streams_state_store_cache_max_bytes.size())
         .build();
     let topology = app.streams_builder();
     topology
@@ -575,15 +609,17 @@ async fn run_consume(
         .bootstrap(cli.bootstrap.clone())
         .group_id("orders-processor")
         .subscribe([cli.input_topic.clone()])
-        .leave_group_timeout(consumer_leave_group_timeout.duration())
+        .leave_group_timeout(consumer_leave_group_timeout.duration().as_time())
         .subscription_metadata_refresh_interval(
-            consumer_subscription_metadata_refresh_interval.duration(),
+            consumer_subscription_metadata_refresh_interval
+                .duration()
+                .as_time(),
         )
         .build()
         .await?;
     tracing::info!(topic = %cli.input_topic, "order processor starting");
     loop {
-        let records = consumer.poll(Duration::from_millis(500)).await?;
+        let records = consumer.poll(crabka_units::millis(500)).await?;
         for record in records {
             process_order_record(&serde, &cli.input_topic, metrics, &record).await;
         }
@@ -663,7 +699,7 @@ async fn process_order_inner(
         &order.category,
         &order.region,
         outcome,
-        start.elapsed().as_secs_f64(),
+        Time::from_std(start.elapsed()),
     );
 
     match outcome {
@@ -697,7 +733,7 @@ async fn stage(metrics: &DemoMetrics, name: &'static str, work: Duration) {
     async move {
         let start = Instant::now();
         tokio::time::sleep(work).await;
-        metrics.record_stage(name, start.elapsed().as_secs_f64());
+        metrics.record_stage(name, Time::from_std(start.elapsed()));
     }
     .instrument(span)
     .await;
@@ -727,8 +763,8 @@ mod tests {
             "observability-demo-app",
             "--role",
             "consume",
-            "--consumer-subscription-metadata-refresh-interval-ms",
-            "37",
+            "--consumer-subscription-metadata-refresh-interval",
+            "37ms",
         ])
         .expect("override CLI");
         assert_eq!(
@@ -748,16 +784,16 @@ mod tests {
             input_topic: "orders".to_owned(),
             output_topic: "order-counts".to_owned(),
             orders_per_sec: 50,
-            consumer_leave_group_timeout_ms: None,
-            consumer_subscription_metadata_refresh_interval_ms: None,
-            streams_broker_dns_timeout_ms: None,
-            streams_poll_interval_ms: None,
-            streams_commit_interval_ms: None,
-            streams_rebalance_timeout_ms: None,
-            streams_leave_heartbeat_timeout_ms: None,
-            streams_join_retry_backoff_ms: None,
+            consumer_leave_group_timeout: None,
+            consumer_subscription_metadata_refresh_interval: None,
+            streams_broker_dns_timeout: None,
+            streams_poll_interval: None,
+            streams_commit_interval: None,
+            streams_rebalance_timeout: None,
+            streams_leave_heartbeat_timeout: None,
+            streams_join_retry_backoff: None,
             streams_interactive_query_queue_capacity: None,
-            streams_state_store_cache_max_bytes: None,
+            streams_state_store_cache_max: None,
         };
         assert_eq!(
             effective_streams_broker_dns_timeout(&defaults).expect("typed default"),
@@ -765,7 +801,7 @@ mod tests {
         );
 
         let overridden = Cli {
-            streams_broker_dns_timeout_ms: std::num::NonZeroU64::new(37),
+            streams_broker_dns_timeout: Some(millis(37)),
             ..defaults
         };
         assert_eq!(
@@ -782,8 +818,8 @@ mod tests {
             "observability-demo-app",
             "--role",
             "stream",
-            "--streams-broker-dns-timeout-ms",
-            "0",
+            "--streams-broker-dns-timeout",
+            "0ms",
         ])
         .expect_err("zero must fail in Clap");
 
@@ -791,14 +827,14 @@ mod tests {
             "observability-demo-app",
             "--role",
             "produce",
-            "--streams-broker-dns-timeout-ms",
-            "37",
+            "--streams-broker-dns-timeout",
+            "37ms",
         ])
         .expect("parse before role validation");
         let error = effective_streams_broker_dns_timeout(&produce).expect_err("Stream-only option");
         assert_eq!(
             error.to_string(),
-            "--streams-broker-dns-timeout-ms (37 ms) is only valid with --role stream"
+            "--streams-broker-dns-timeout (37ms) is only valid with --role stream"
         );
     }
 
@@ -811,16 +847,16 @@ mod tests {
             input_topic: "orders".to_owned(),
             output_topic: "order-counts".to_owned(),
             orders_per_sec: 50,
-            consumer_leave_group_timeout_ms: None,
-            consumer_subscription_metadata_refresh_interval_ms: None,
-            streams_broker_dns_timeout_ms: None,
-            streams_poll_interval_ms: None,
-            streams_commit_interval_ms: None,
-            streams_rebalance_timeout_ms: None,
-            streams_leave_heartbeat_timeout_ms: None,
-            streams_join_retry_backoff_ms: None,
+            consumer_leave_group_timeout: None,
+            consumer_subscription_metadata_refresh_interval: None,
+            streams_broker_dns_timeout: None,
+            streams_poll_interval: None,
+            streams_commit_interval: None,
+            streams_rebalance_timeout: None,
+            streams_leave_heartbeat_timeout: None,
+            streams_join_retry_backoff: None,
             streams_interactive_query_queue_capacity: None,
-            streams_state_store_cache_max_bytes: None,
+            streams_state_store_cache_max: None,
         };
         let (poll, commit) = effective_streams_runtime_cadence(&defaults).expect("typed defaults");
         assert_eq!(poll, crabka_client_streams::StreamsPollInterval::default());
@@ -830,8 +866,8 @@ mod tests {
         );
 
         let overridden = Cli {
-            streams_poll_interval_ms: std::num::NonZeroU64::new(37),
-            streams_commit_interval_ms: std::num::NonZeroU64::new(41),
+            streams_poll_interval: Some(millis(37)),
+            streams_commit_interval: Some(millis(41)),
             ..defaults
         };
         let (poll, commit) =
@@ -846,16 +882,16 @@ mod tests {
             "observability-demo-app",
             "--role",
             "stream",
-            "--streams-poll-interval-ms",
-            "0",
+            "--streams-poll-interval",
+            "0ms",
         ])
         .expect_err("zero poll interval");
         Cli::try_parse_from([
             "observability-demo-app",
             "--role",
             "stream",
-            "--streams-commit-interval-ms",
-            "0",
+            "--streams-commit-interval",
+            "0ms",
         ])
         .expect_err("zero commit interval");
 
@@ -863,14 +899,14 @@ mod tests {
             "observability-demo-app",
             "--role",
             "produce",
-            "--streams-poll-interval-ms",
-            "37",
+            "--streams-poll-interval",
+            "37ms",
         ])
         .expect("parse before role validation");
         let error = effective_streams_runtime_cadence(&produce).expect_err("Stream-only option");
         assert_eq!(
             error.to_string(),
-            "--streams-poll-interval-ms (37 ms) is only valid with --role stream"
+            "--streams-poll-interval (37ms) is only valid with --role stream"
         );
     }
 
@@ -883,16 +919,16 @@ mod tests {
             input_topic: "orders".to_owned(),
             output_topic: "order-counts".to_owned(),
             orders_per_sec: 50,
-            consumer_leave_group_timeout_ms: None,
-            consumer_subscription_metadata_refresh_interval_ms: None,
-            streams_broker_dns_timeout_ms: None,
-            streams_poll_interval_ms: None,
-            streams_commit_interval_ms: None,
-            streams_rebalance_timeout_ms: None,
-            streams_leave_heartbeat_timeout_ms: None,
-            streams_join_retry_backoff_ms: None,
+            consumer_leave_group_timeout: None,
+            consumer_subscription_metadata_refresh_interval: None,
+            streams_broker_dns_timeout: None,
+            streams_poll_interval: None,
+            streams_commit_interval: None,
+            streams_rebalance_timeout: None,
+            streams_leave_heartbeat_timeout: None,
+            streams_join_retry_backoff: None,
             streams_interactive_query_queue_capacity: None,
-            streams_state_store_cache_max_bytes: None,
+            streams_state_store_cache_max: None,
         };
         assert_eq!(
             effective_streams_rebalance_timeout(&defaults).expect("typed default"),
@@ -900,7 +936,7 @@ mod tests {
         );
 
         let overridden = Cli {
-            streams_rebalance_timeout_ms: std::num::NonZeroU64::new(45_000),
+            streams_rebalance_timeout: Some(secs(45)),
             ..defaults
         };
         assert_eq!(
@@ -917,8 +953,8 @@ mod tests {
             "observability-demo-app",
             "--role",
             "stream",
-            "--streams-rebalance-timeout-ms",
-            "0",
+            "--streams-rebalance-timeout",
+            "0ms",
         ])
         .expect_err("zero must fail in Clap");
 
@@ -926,8 +962,8 @@ mod tests {
             "observability-demo-app",
             "--role",
             "stream",
-            "--streams-rebalance-timeout-ms",
-            "2147483648",
+            "--streams-rebalance-timeout",
+            "2147483648ms",
         ])
         .expect("parse before typed validation");
         let error =
@@ -938,14 +974,14 @@ mod tests {
             "observability-demo-app",
             "--role",
             "produce",
-            "--streams-rebalance-timeout-ms",
-            "45000",
+            "--streams-rebalance-timeout",
+            "45s",
         ])
         .expect("parse before role validation");
         let error = effective_streams_rebalance_timeout(&produce).expect_err("Stream-only option");
         assert_eq!(
             error.to_string(),
-            "--streams-rebalance-timeout-ms (45000 ms) is only valid with --role stream"
+            "--streams-rebalance-timeout (45s) is only valid with --role stream"
         );
     }
 
@@ -958,16 +994,16 @@ mod tests {
             input_topic: "orders".to_owned(),
             output_topic: "order-counts".to_owned(),
             orders_per_sec: 50,
-            consumer_leave_group_timeout_ms: None,
-            consumer_subscription_metadata_refresh_interval_ms: None,
-            streams_broker_dns_timeout_ms: None,
-            streams_poll_interval_ms: None,
-            streams_commit_interval_ms: None,
-            streams_rebalance_timeout_ms: None,
-            streams_leave_heartbeat_timeout_ms: None,
-            streams_join_retry_backoff_ms: None,
+            consumer_leave_group_timeout: None,
+            consumer_subscription_metadata_refresh_interval: None,
+            streams_broker_dns_timeout: None,
+            streams_poll_interval: None,
+            streams_commit_interval: None,
+            streams_rebalance_timeout: None,
+            streams_leave_heartbeat_timeout: None,
+            streams_join_retry_backoff: None,
             streams_interactive_query_queue_capacity: None,
-            streams_state_store_cache_max_bytes: None,
+            streams_state_store_cache_max: None,
         };
         assert_eq!(
             effective_streams_join_retry_backoff(&defaults).expect("typed default"),
@@ -975,7 +1011,7 @@ mod tests {
         );
 
         let overridden = Cli {
-            streams_join_retry_backoff_ms: NonZeroU64::new(37),
+            streams_join_retry_backoff: Some(millis(37)),
             ..defaults
         };
         assert_eq!(
@@ -995,16 +1031,16 @@ mod tests {
             input_topic: "orders".to_owned(),
             output_topic: "order-counts".to_owned(),
             orders_per_sec: 50,
-            consumer_leave_group_timeout_ms: None,
-            consumer_subscription_metadata_refresh_interval_ms: None,
-            streams_broker_dns_timeout_ms: None,
-            streams_poll_interval_ms: None,
-            streams_commit_interval_ms: None,
-            streams_rebalance_timeout_ms: None,
-            streams_leave_heartbeat_timeout_ms: None,
-            streams_join_retry_backoff_ms: None,
+            consumer_leave_group_timeout: None,
+            consumer_subscription_metadata_refresh_interval: None,
+            streams_broker_dns_timeout: None,
+            streams_poll_interval: None,
+            streams_commit_interval: None,
+            streams_rebalance_timeout: None,
+            streams_leave_heartbeat_timeout: None,
+            streams_join_retry_backoff: None,
             streams_interactive_query_queue_capacity: None,
-            streams_state_store_cache_max_bytes: None,
+            streams_state_store_cache_max: None,
         };
         assert_eq!(
             effective_streams_interactive_query_queue_capacity(&defaults).expect("typed default"),

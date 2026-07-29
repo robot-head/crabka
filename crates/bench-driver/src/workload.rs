@@ -13,7 +13,6 @@ use std::{
         Arc,
         atomic::{AtomicU8, AtomicU64, Ordering},
     },
-    time::Duration,
 };
 
 use anyhow::{Context, Result};
@@ -22,18 +21,21 @@ use crabka_client_consumer::{AutoOffsetReset, Consumer};
 use crabka_client_core::security::{ClientSecurity, TlsConnectorConfig};
 use crabka_client_producer::{Producer, ProducerError, ProducerRecord, RecordMetadata};
 use crabka_security::ListenerProtocol;
+use crabka_units::prelude::*;
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use hdrhistogram::Histogram;
-use refined_type::rule::{GreaterU32, GreaterU64, MinMaxU64};
+use refined_type::rule::GreaterU32;
 use tokio::{task::JoinSet, time::Instant};
 use tracing::{info, warn};
 
 use crate::{
     hist,
-    ids::{DurationSeconds, MessageCount, TimeOffsetMs, WallclockMs},
-    numeric::{nonnegative_i64_to_u64, saturating_u128_to_u64, to_f64},
+    ids::{MessageCount, TimeOffsetMs, WallclockMs},
+    numeric::{
+        event_rate, nonnegative_i64_to_u64, saturating_u64_to_i64, saturating_u128_to_u64, to_f64,
+    },
     payload,
-    prom::{PromClient, PrometheusRequestTimeoutSeconds},
+    prom::PromClient,
     rate::Pacer,
     scenario::{
         BrokerSample, Disturbance, LoadMode, ModeTag, Resource, RunOutput, Sample, Scenario, Stack,
@@ -49,54 +51,17 @@ type AckResult =
     Result<Result<RecordMetadata, ProducerError>, tokio::sync::oneshot::error::RecvError>;
 type AckFuture = Pin<Box<dyn Future<Output = (AckResult, Instant)> + Send>>;
 
-pub const MAX_CLIENT_REQUEST_TIMEOUT_SECONDS: u64 = 2_147_483;
-pub const DEFAULT_PRODUCER_REQUEST_TIMEOUT_SECONDS: u64 = 2;
-pub const DEFAULT_CRABKA_CONSUMER_REQUEST_TIMEOUT_SECONDS: u64 = 5;
-pub const DEFAULT_KAFKA_CONSUMER_REQUEST_TIMEOUT_SECONDS: u64 = 30;
+pub const MAX_CLIENT_REQUEST_TIMEOUT: Time = millis(2_147_483_647);
+pub const DEFAULT_PRODUCER_REQUEST_TIMEOUT: Time = secs(2);
+pub const DEFAULT_CRABKA_CONSUMER_REQUEST_TIMEOUT: Time = secs(5);
+pub const DEFAULT_KAFKA_CONSUMER_REQUEST_TIMEOUT: Time = secs(30);
 pub const DEFAULT_CONSUMER_BUILD_ATTEMPTS: u32 = 6;
-pub const DEFAULT_CONSUMER_BUILD_INITIAL_BACKOFF_MS: u64 = 100;
-pub const DEFAULT_CONSUMER_BUILD_MAX_BACKOFF_MS: u64 = 2_000;
-pub const DEFAULT_PRODUCER_FINAL_DRAIN_TIMEOUT_SECONDS: u64 = 10;
-pub const DEFAULT_SAMPLE_INTERVAL_MS: u64 = 2_000;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ClientRequestTimeoutSeconds(u64);
-
-impl ClientRequestTimeoutSeconds {
-    /// Validate a client request timeout.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when `value` is zero or exceeds the largest
-    /// whole-second Kafka protocol timeout.
-    pub fn new(value: u64) -> Result<Self, String> {
-        MinMaxU64::<1, 2_147_483>::new(value)
-            .map(|value| Self(value.into_value()))
-            .map_err(|error| error.to_string())
-    }
-
-    #[must_use]
-    pub const fn duration(self) -> Duration {
-        Duration::from_secs(self.0)
-    }
-}
-
-impl fmt::Display for ClientRequestTimeoutSeconds {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(formatter)
-    }
-}
-
-impl FromStr for ClientRequestTimeoutSeconds {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        value
-            .parse()
-            .map_err(|error: std::num::ParseIntError| error.to_string())
-            .and_then(Self::new)
-    }
-}
+pub const DEFAULT_CONSUMER_BUILD_INITIAL_BACKOFF: Time = millis(100);
+pub const DEFAULT_CONSUMER_BUILD_MAX_BACKOFF: Time = secs(2);
+pub const DEFAULT_CONSUMER_POLL_TIMEOUT: Time = millis(50);
+pub const DEFAULT_CONSUMER_POLL_ERROR_BACKOFF: Time = millis(100);
+pub const DEFAULT_PRODUCER_FINAL_DRAIN_TIMEOUT: Time = secs(10);
+pub const DEFAULT_SAMPLE_INTERVAL: Time = secs(2);
 
 /// Return the validated producer request-timeout default.
 ///
@@ -104,9 +69,8 @@ impl FromStr for ClientRequestTimeoutSeconds {
 ///
 /// Panics if the named default is not protocol-safe.
 #[must_use]
-pub fn default_producer_request_timeout() -> ClientRequestTimeoutSeconds {
-    ClientRequestTimeoutSeconds::new(DEFAULT_PRODUCER_REQUEST_TIMEOUT_SECONDS)
-        .expect("default producer request timeout is protocol-safe")
+pub const fn default_producer_request_timeout() -> Time {
+    DEFAULT_PRODUCER_REQUEST_TIMEOUT
 }
 
 /// Return the validated consumer request-timeout default for `stack`.
@@ -115,13 +79,11 @@ pub fn default_producer_request_timeout() -> ClientRequestTimeoutSeconds {
 ///
 /// Panics if the selected named default is not protocol-safe.
 #[must_use]
-pub fn default_consumer_request_timeout(stack: Stack) -> ClientRequestTimeoutSeconds {
-    let seconds = match stack {
-        Stack::Crabka => DEFAULT_CRABKA_CONSUMER_REQUEST_TIMEOUT_SECONDS,
-        Stack::Kafka => DEFAULT_KAFKA_CONSUMER_REQUEST_TIMEOUT_SECONDS,
-    };
-    ClientRequestTimeoutSeconds::new(seconds)
-        .expect("default consumer request timeout is protocol-safe")
+pub const fn default_consumer_request_timeout(stack: Stack) -> Time {
+    match stack {
+        Stack::Crabka => DEFAULT_CRABKA_CONSUMER_REQUEST_TIMEOUT,
+        Stack::Kafka => DEFAULT_KAFKA_CONSUMER_REQUEST_TIMEOUT,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,71 +131,21 @@ impl FromStr for ConsumerBuildAttempts {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ConsumerBuildBackoffMs(u64);
-
-impl ConsumerBuildBackoffMs {
-    /// Validate a consumer-build retry backoff.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when `value` is zero.
-    pub fn new(value: u64) -> Result<Self, String> {
-        GreaterU64::<0>::new(value)
-            .map(|value| Self(value.into_value()))
-            .map_err(|error| error.to_string())
-    }
-
-    #[must_use]
-    pub const fn duration(self) -> Duration {
-        Duration::from_millis(self.0)
-    }
-}
-
-impl fmt::Display for ConsumerBuildBackoffMs {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(formatter)
-    }
-}
-
-impl FromStr for ConsumerBuildBackoffMs {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        value
-            .parse()
-            .map_err(|error: std::num::ParseIntError| error.to_string())
-            .and_then(Self::new)
-    }
-}
-
-/// Return the validated initial consumer-build backoff default.
-///
-/// # Panics
-///
-/// Panics if the named default is not positive.
 #[must_use]
-pub fn default_consumer_build_initial_backoff() -> ConsumerBuildBackoffMs {
-    ConsumerBuildBackoffMs::new(DEFAULT_CONSUMER_BUILD_INITIAL_BACKOFF_MS)
-        .expect("default initial consumer-build backoff is positive")
+pub const fn default_consumer_build_initial_backoff() -> Time {
+    DEFAULT_CONSUMER_BUILD_INITIAL_BACKOFF
 }
 
-/// Return the validated maximum consumer-build backoff default.
-///
-/// # Panics
-///
-/// Panics if the named default is not positive.
 #[must_use]
-pub fn default_consumer_build_max_backoff() -> ConsumerBuildBackoffMs {
-    ConsumerBuildBackoffMs::new(DEFAULT_CONSUMER_BUILD_MAX_BACKOFF_MS)
-        .expect("default maximum consumer-build backoff is positive")
+pub const fn default_consumer_build_max_backoff() -> Time {
+    DEFAULT_CONSUMER_BUILD_MAX_BACKOFF
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ConsumerBuildRetryPolicy {
     attempts: ConsumerBuildAttempts,
-    initial_backoff: ConsumerBuildBackoffMs,
-    max_backoff: ConsumerBuildBackoffMs,
+    initial_backoff: Time,
+    max_backoff: Time,
 }
 
 impl ConsumerBuildRetryPolicy {
@@ -244,10 +156,10 @@ impl ConsumerBuildRetryPolicy {
     /// Returns an error when the initial backoff exceeds the maximum.
     pub fn new(
         attempts: ConsumerBuildAttempts,
-        initial_backoff: ConsumerBuildBackoffMs,
-        max_backoff: ConsumerBuildBackoffMs,
+        initial_backoff: Time,
+        max_backoff: Time,
     ) -> Result<Self, String> {
-        if initial_backoff.duration() > max_backoff.duration() {
+        if initial_backoff > max_backoff {
             return Err("consumer-build initial backoff exceeds maximum".to_owned());
         }
         Ok(Self {
@@ -263,13 +175,13 @@ impl ConsumerBuildRetryPolicy {
     }
 
     #[must_use]
-    pub const fn initial_backoff(self) -> Duration {
-        self.initial_backoff.duration()
+    pub fn initial_backoff(self) -> Time {
+        self.initial_backoff
     }
 
     #[must_use]
-    pub const fn max_backoff(self) -> Duration {
-        self.max_backoff.duration()
+    pub fn max_backoff(self) -> Time {
+        self.max_backoff
     }
 }
 
@@ -284,93 +196,16 @@ impl Default for ConsumerBuildRetryPolicy {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ProducerFinalDrainTimeoutSeconds(u64);
-
-impl ProducerFinalDrainTimeoutSeconds {
-    /// Validate a producer final-drain timeout.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when `value` is zero.
-    pub fn new(value: u64) -> Result<Self, String> {
-        GreaterU64::<0>::new(value)
-            .map(|value| Self(value.into_value()))
-            .map_err(|error| error.to_string())
-    }
-
-    #[must_use]
-    pub const fn duration(self) -> Duration {
-        Duration::from_secs(self.0)
-    }
+#[must_use]
+pub const fn default_consumer_poll_timeout() -> Time {
+    DEFAULT_CONSUMER_POLL_TIMEOUT
 }
 
-impl Default for ProducerFinalDrainTimeoutSeconds {
-    fn default() -> Self {
-        Self::new(DEFAULT_PRODUCER_FINAL_DRAIN_TIMEOUT_SECONDS)
-            .expect("default producer final-drain timeout is positive")
-    }
+#[must_use]
+pub const fn default_consumer_poll_error_backoff() -> Time {
+    DEFAULT_CONSUMER_POLL_ERROR_BACKOFF
 }
 
-impl fmt::Display for ProducerFinalDrainTimeoutSeconds {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(formatter)
-    }
-}
-
-impl FromStr for ProducerFinalDrainTimeoutSeconds {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        value
-            .parse()
-            .map_err(|error: std::num::ParseIntError| error.to_string())
-            .and_then(Self::new)
-    }
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SampleIntervalMs(u64);
-
-impl SampleIntervalMs {
-    /// Validate a time-series sample interval.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when `value` is zero.
-    pub fn new(value: u64) -> Result<Self, String> {
-        GreaterU64::<0>::new(value)
-            .map(|value| Self(value.into_value()))
-            .map_err(|error| error.to_string())
-    }
-
-    #[must_use]
-    pub const fn milliseconds(self) -> u64 {
-        self.0
-    }
-}
-
-impl Default for SampleIntervalMs {
-    fn default() -> Self {
-        Self::new(DEFAULT_SAMPLE_INTERVAL_MS).expect("default sample interval is positive")
-    }
-}
-
-impl fmt::Display for SampleIntervalMs {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(formatter)
-    }
-}
-
-impl FromStr for SampleIntervalMs {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        value
-            .parse()
-            .map_err(|error: std::num::ParseIntError| error.to_string())
-            .and_then(Self::new)
-    }
-}
 /// The fixed sampling grid, shared (by Copy) with every task so all tasks
 /// bucket into the same slices.
 #[derive(Clone, Copy)]
@@ -386,15 +221,16 @@ impl Grid {
     /// The grid covering `scenario`'s measurement window, which opens once its
     /// warmup has elapsed from `started_at`. Always at least one slice wide, so
     /// a run shorter than a slice still has somewhere to tally into.
-    fn new(started_at: Instant, scenario: &Scenario, interval: SampleIntervalMs) -> Self {
-        let interval_ms = interval.milliseconds();
-        let duration_ms = scenario.duration_s.saturating_mul(1_000);
+    fn new(started_at: Instant, scenario: &Scenario, interval: Time) -> Self {
+        let interval_ms = nonnegative_i64_to_u64(interval.millis_i64());
+        let duration_ms = nonnegative_i64_to_u64(scenario.duration.millis_i64());
         Self {
-            meas_start: started_at + Duration::from_secs(scenario.warmup_s),
+            meas_start: started_at + scenario.warmup.to_std(),
             interval_ms,
             n: usize::try_from(duration_ms.div_ceil(interval_ms).max(1)).unwrap_or(usize::MAX),
         }
     }
+
     /// Slice index for an event observed at `now`, clamped into `[0, n-1]`.
     fn idx(&self, now: Instant) -> usize {
         let elapsed_ms =
@@ -402,6 +238,11 @@ impl Grid {
         usize::try_from(elapsed_ms / self.interval_ms)
             .unwrap_or(usize::MAX)
             .min(self.n.saturating_sub(1))
+    }
+
+    /// The width of one slice, as the extent the per-slice rates divide by.
+    fn interval(&self) -> Time {
+        Time::from_millis(saturating_u64_to_i64(self.interval_ms))
     }
 }
 
@@ -414,12 +255,16 @@ pub struct DriverConfig {
     pub stack: Stack,
     pub namespace: String,
     pub prometheus_url: Option<String>,
-    pub prometheus_request_timeout_seconds: PrometheusRequestTimeoutSeconds,
-    pub producer_request_timeout_seconds: ClientRequestTimeoutSeconds,
-    pub producer_final_drain_timeout: ProducerFinalDrainTimeoutSeconds,
-    pub sample_interval: SampleIntervalMs,
-    pub consumer_request_timeout_seconds: ClientRequestTimeoutSeconds,
+    pub prometheus_request_timeout: Time,
+    pub producer_request_timeout: Time,
+    pub producer_final_drain_timeout: Time,
+    pub sample_interval: Time,
+    pub consumer_request_timeout: Time,
     pub consumer_build_retry_policy: ConsumerBuildRetryPolicy,
+    /// How long one consumer `poll` waits for records.
+    pub consumer_poll_timeout: Time,
+    /// How long the consumer loop sleeps after a poll error before retrying.
+    pub consumer_poll_error_backoff: Time,
     pub broker_count: u32,
     pub scenario_id: u64,
     /// TLS data-path config. `None` → plaintext (the default benchmark path).
@@ -515,7 +360,7 @@ pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
             first_ack,
             security: sec,
             grid,
-            request_timeout: cfg.producer_request_timeout_seconds,
+            request_timeout: cfg.producer_request_timeout,
             final_drain_timeout: cfg.producer_final_drain_timeout,
         }));
     }
@@ -537,8 +382,10 @@ pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
             stop,
             security: sec,
             grid,
-            request_timeout: cfg.consumer_request_timeout_seconds,
+            request_timeout: cfg.consumer_request_timeout,
             build_retry_policy: cfg.consumer_build_retry_policy,
+            poll_timeout: cfg.consumer_poll_timeout,
+            poll_error_backoff: cfg.consumer_poll_error_backoff,
         }));
     }
 
@@ -552,11 +399,11 @@ pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
         kill_at_ms.clone(),
     );
 
-    let warmup_end = t_start + Duration::from_secs(scenario.warmup_s);
+    let warmup_end = t_start + scenario.warmup.to_std();
     tokio::time::sleep_until(warmup_end).await;
     stop.store(STATE_MEASURING, Ordering::SeqCst);
 
-    let meas_end = warmup_end + Duration::from_secs(scenario.duration_s);
+    let meas_end = warmup_end + scenario.duration.to_std();
     tokio::time::sleep_until(meas_end).await;
     stop.store(STATE_STOP, Ordering::SeqCst);
 
@@ -566,7 +413,7 @@ pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
     let mut prod_bytes = 0u64;
     let mut prod_dropped = 0u64;
     let mut earliest_recovery_ms = 0u64;
-    let mut max_spike_us = 0u64;
+    let mut max_spike = Time::ZERO;
     let mut prod_iv_msgs = vec![0u64; n_intervals];
     let mut prod_iv_hist: Vec<Histogram<u64>> = (0..n_intervals).map(|_| hist::new()).collect();
     while let Some(j) = prod_set.join_next().await {
@@ -584,8 +431,8 @@ pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
                         prod_iv_hist[iv].add(h).ok();
                     }
                 }
-                if t.latency_spike_max_us > max_spike_us {
-                    max_spike_us = t.latency_spike_max_us;
+                if t.latency_spike_max > max_spike {
+                    max_spike = t.latency_spike_max;
                 }
                 if t.recovery_unix_ms > 0
                     && (earliest_recovery_ms == 0 || t.recovery_unix_ms < earliest_recovery_ms)
@@ -628,13 +475,12 @@ pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
     }
 
     let samples = build_samples(
-        interval_ms,
+        grid.interval(),
         (&prod_iv_msgs, &prod_iv_hist),
         (&cons_iv_msgs, &cons_iv_hist),
     );
 
     let wallclock_end = Utc::now().timestamp_millis();
-    let duration_s = to_f64(scenario.duration_s.max(1));
     let (resource, broker_samples) = capture_resources(
         &scenario,
         &cfg,
@@ -644,13 +490,13 @@ pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
     )
     .await;
 
-    let (disturbance, first_ack_ms) = finalize_timing(
+    let (disturbance, first_ack) = finalize_timing(
         failover_active,
         (
             kill_at_ms.load(Ordering::SeqCst),
             earliest_recovery_ms,
             prod_dropped,
-            max_spike_us,
+            max_spike,
         ),
         first_ack_unix_ms.load(Ordering::SeqCst),
         wallclock_start,
@@ -669,17 +515,17 @@ pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
         throughput: Throughput {
             msgs_produced: MessageCount(prod_msgs),
             msgs_consumed: MessageCount(cons_msgs),
-            mb_in: bytes_to_mb(prod_bytes),
-            mb_out: bytes_to_mb(cons_bytes),
-            producer_msgs_per_sec: to_f64(prod_msgs) / duration_s,
-            consumer_msgs_per_sec: to_f64(cons_msgs) / duration_s,
+            bytes_in: ByteSize::from_bytes(prod_bytes),
+            bytes_out: ByteSize::from_bytes(cons_bytes),
+            producer_rate: event_rate(prod_msgs, scenario.duration),
+            consumer_rate: event_rate(cons_msgs, scenario.duration),
         },
-        producer_latency_ms: hist::percentiles(&prod_hist),
-        consumer_e2e_latency_ms: hist::percentiles(&cons_hist),
+        producer_latency: hist::percentiles(&prod_hist),
+        consumer_e2e_latency: hist::percentiles(&cons_hist),
         resource,
         disturbance,
-        startup_ms: None,
-        first_ack_ms,
+        startup: None,
+        first_ack,
         errors,
         notes,
         samples,
@@ -702,16 +548,17 @@ fn client_security(cfg: &DriverConfig) -> Option<ClientSecurity> {
 }
 
 fn build_samples(
-    interval_ms: u64,
+    interval: Time,
     producer: (&[u64], &[Histogram<u64>]),
     consumer: (&[u64], &[Histogram<u64>]),
 ) -> Vec<Sample> {
-    let interval_seconds = to_f64(interval_ms) / 1000.0;
+    let interval_ms = nonnegative_i64_to_u64(interval.millis_i64());
+    // The histogram counts microseconds; an empty slice measured nothing.
     let percentile = |histogram: &Histogram<u64>, quantile: f64| {
         if histogram.is_empty() {
-            0.0
+            Time::ZERO
         } else {
-            to_f64(histogram.value_at_quantile(quantile)) / 1000.0
+            Time::from_micros(saturating_u64_to_i64(histogram.value_at_quantile(quantile)))
         }
     };
     producer
@@ -724,37 +571,40 @@ fn build_samples(
                     .unwrap_or(u64::MAX)
                     .saturating_mul(interval_ms),
             ),
-            producer_msgs_per_sec: to_f64(*messages) / interval_seconds,
-            consumer_msgs_per_sec: to_f64(consumer.0[index]) / interval_seconds,
-            producer_p50_ms: percentile(&producer.1[index], 0.50),
-            producer_p99_ms: percentile(&producer.1[index], 0.99),
-            consumer_e2e_p99_ms: percentile(&consumer.1[index], 0.99),
+            producer_rate: event_rate(*messages, interval),
+            consumer_rate: event_rate(consumer.0[index], interval),
+            producer_p50: percentile(&producer.1[index], 0.50),
+            producer_p99: percentile(&producer.1[index], 0.99),
+            consumer_e2e_p99: percentile(&consumer.1[index], 0.99),
         })
         .collect()
 }
 
 fn finalize_timing(
     failover_active: bool,
-    failover: (u64, u64, u64, u64),
+    failover: (u64, u64, u64, Time),
     first_ack: u64,
     wallclock_start: i64,
-) -> (Option<Disturbance>, u64) {
-    let disturbance = failover_active.then(|| Disturbance {
+) -> (Option<Disturbance>, Time) {
+    let disturbance = failover_active.then_some(Disturbance {
         kill_at_ms: TimeOffsetMs(failover.0),
         recovery_at_ms: TimeOffsetMs(failover.1),
         dropped: MessageCount(failover.2),
-        latency_spike_max_ms: to_f64(failover.3) / 1000.0,
+        latency_spike_max: failover.3,
     });
-    let first_ack_ms = if first_ack == 0 {
-        0
+    // Both stamps are epoch milliseconds — coordinates — so their difference is
+    // the extent from run start to the first ack. No ack at all means no extent.
+    let first_ack = if first_ack == 0 {
+        Time::ZERO
     } else {
-        nonnegative_i64_to_u64(
+        Time::from_millis(
             i64::try_from(first_ack)
                 .unwrap_or(i64::MAX)
-                .saturating_sub(wallclock_start),
+                .saturating_sub(wallclock_start)
+                .max(0),
         )
     };
-    (disturbance, first_ack_ms)
+    (disturbance, first_ack)
 }
 
 fn validate_topology(
@@ -799,7 +649,7 @@ async fn capture_resources(
         notes.push("prometheus-url-not-set".into());
         return (Resource::default(), Vec::new());
     };
-    let client = match PromClient::new(url, cfg.prometheus_request_timeout_seconds) {
+    let client = match PromClient::new(url, cfg.prometheus_request_timeout) {
         Ok(client) => client,
         Err(error) => {
             notes.push(format!("prometheus-client-failed: {error}"));
@@ -810,7 +660,7 @@ async fn capture_resources(
         .capture_resource(
             cfg.stack,
             &cfg.namespace,
-            DurationSeconds(scenario.duration_s),
+            scenario.duration,
             MessageCount(produced),
         )
         .await
@@ -852,7 +702,7 @@ fn spawn_failover(
     let bootstrap = cfg.bootstrap.clone();
     let topic = cfg.topic.clone();
     tokio::spawn(async move {
-        tokio::time::sleep_until(started_at + Duration::from_secs(spec.kill_at_s)).await;
+        tokio::time::sleep_until(started_at + spec.kill_after.to_std()).await;
         kill_at.store(
             nonnegative_i64_to_u64(Utc::now().timestamp_millis()),
             Ordering::SeqCst,
@@ -894,7 +744,7 @@ struct ProducerOut {
     bytes: u64,
     dropped: u64,
     recovery_unix_ms: u64,
-    latency_spike_max_us: u64,
+    latency_spike_max: Time,
     error: String,
     /// Per-slice (see [`Grid`]) measurement-window tallies. Empty on a build
     /// failure; `run()` merges by index with bounds checks.
@@ -909,10 +759,6 @@ struct ConsumerOut {
     error: String,
     interval_msgs: Vec<u64>,
     interval_hist: Vec<Histogram<u64>>,
-}
-
-fn bytes_to_mb(bytes: u64) -> f64 {
-    (to_f64(bytes)) / 1_048_576.0
 }
 
 fn empty_output(
@@ -933,12 +779,12 @@ fn empty_output(
         wallclock_start_unix_ms: WallclockMs(start),
         wallclock_end_unix_ms: WallclockMs(start),
         throughput: Throughput::default(),
-        producer_latency_ms: crate::scenario::LatencyPercentiles::default(),
-        consumer_e2e_latency_ms: crate::scenario::LatencyPercentiles::default(),
+        producer_latency: crate::scenario::LatencyPercentiles::default(),
+        consumer_e2e_latency: crate::scenario::LatencyPercentiles::default(),
         resource: Resource::default(),
         disturbance: None,
-        startup_ms: None,
-        first_ack_ms: 0,
+        startup: None,
+        first_ack: Time::ZERO,
         errors,
         notes,
         samples: Vec::new(),
@@ -958,8 +804,8 @@ struct ProducerTask {
     first_ack: Arc<AtomicU64>,
     security: Option<ClientSecurity>,
     grid: Grid,
-    request_timeout: ClientRequestTimeoutSeconds,
-    final_drain_timeout: ProducerFinalDrainTimeoutSeconds,
+    request_timeout: Time,
+    final_drain_timeout: Time,
 }
 
 async fn run_producer(task: ProducerTask) -> ProducerOut {
@@ -985,8 +831,8 @@ async fn run_producer(task: ProducerTask) -> ProducerOut {
         .acks(scenario.acks.into_producer())
         .compression(scenario.compression.into_producer())
         .enable_idempotence(enable_idempotence)
-        .linger(Duration::from_millis(scenario.linger_ms))
-        .batch_size(scenario.batch_size)
+        .linger(scenario.linger.to_std())
+        .batch_size(scenario.batch_size.bytes_usize())
         // The producer pipelines one in-flight request PER PARTITION and uses
         // this value as the cross-partition fan-out cap (how many distinct
         // partitions it services concurrently per drain cycle). The default (5)
@@ -999,7 +845,7 @@ async fn run_producer(task: ProducerTask) -> ProducerOut {
         // send to a *killed* leader blocks before the client re-routes, so the
         // measured failover recovery reflects the cluster's leader re-election
         // rather than the 30s default request timeout.
-        .request_timeout(request_timeout.duration())
+        .request_timeout(request_timeout.to_std())
         // `None` → plaintext (default). `Some` → all produce traffic for this
         // task goes over the broker's TLS listener.
         .maybe_security(security)
@@ -1015,7 +861,7 @@ async fn run_producer(task: ProducerTask) -> ProducerOut {
                 bytes: 0,
                 dropped: 0,
                 recovery_unix_ms: 0,
-                latency_spike_max_us: 0,
+                latency_spike_max: Time::ZERO,
                 error: format!("producer-{idx}-build: {e:#}"),
                 interval_msgs: Vec::new(),
                 interval_hist: Vec::new(),
@@ -1023,7 +869,7 @@ async fn run_producer(task: ProducerTask) -> ProducerOut {
         }
     };
 
-    let mut tmpl = payload::template(scenario.msg_size_bytes);
+    let mut tmpl = payload::template(scenario.msg_size);
     let mut meas_hist = hist::new();
     let mut iv_msgs = vec![0u64; grid.n];
     let mut iv_hist: Vec<Histogram<u64>> = (0..grid.n).map(|_| hist::new()).collect();
@@ -1031,16 +877,15 @@ async fn run_producer(task: ProducerTask) -> ProducerOut {
     let mut meas_bytes = 0u64;
     let mut dropped = 0u64;
     let mut recovery_unix_ms = 0u64;
-    let mut latency_spike_max_us = 0u64;
+    let mut latency_spike_max = Time::ZERO;
     let mut kill_observed = false;
     let mut error = String::new();
 
     let mut pacer = match scenario.mode {
         LoadMode::Saturate => None,
-        LoadMode::FixedRate { msgs_per_sec } => {
-            let per_task = (msgs_per_sec / scenario.producers.max(1) as u64).max(1);
-            Some(Pacer::new(per_task))
-        }
+        // The scenario rate is for the whole run, so each task paces at its
+        // share of it. `Pacer` floors the result at one message a second.
+        LoadMode::FixedRate { rate } => Some(Pacer::new(rate / to_f64(scenario.producers.max(1)))),
     };
 
     // Pipeline depth: how many records may be in flight (awaiting their ack)
@@ -1058,20 +903,20 @@ async fn run_producer(task: ProducerTask) -> ProducerOut {
         ($res:expr, $t0:expr) => {
             match $res {
                 Ok(_meta) => {
-                    let us = saturating_u128_to_u64($t0.elapsed().as_micros());
+                    let latency = $t0.elapsed().as_time();
                     if stop.load(Ordering::Relaxed) == STATE_MEASURING {
-                        hist::record_us(&mut meas_hist, us);
+                        hist::record(&mut meas_hist, latency);
                         meas_msgs += 1;
-                        meas_bytes += scenario.msg_size_bytes as u64;
+                        meas_bytes += scenario.msg_size.bytes_u64();
                         let iv = grid.idx(Instant::now());
                         iv_msgs[iv] += 1;
-                        hist::record_us(&mut iv_hist[iv], us);
+                        hist::record(&mut iv_hist[iv], latency);
                         if kill_observed && recovery_unix_ms == 0 {
                             recovery_unix_ms =
                                 nonnegative_i64_to_u64(Utc::now().timestamp_millis());
                         }
-                        if kill_observed && us > latency_spike_max_us {
-                            latency_spike_max_us = us;
+                        if kill_observed && latency > latency_spike_max {
+                            latency_spike_max = latency;
                         }
                     }
                     if first_ack.load(Ordering::Relaxed) == 0 {
@@ -1153,7 +998,7 @@ async fn run_producer(task: ProducerTask) -> ProducerOut {
     // do not let a stuck producer retry slot keep the whole benchmark job alive
     // forever. Unsettled sends are counted as drops so failover reports capture
     // the stall instead of timing out without a JSON result.
-    let drain_until = Instant::now() + final_drain_timeout.duration();
+    let drain_until = Instant::now() + final_drain_timeout.to_std();
     while !inflight.is_empty() {
         let now = Instant::now();
         if now >= drain_until {
@@ -1187,7 +1032,7 @@ async fn run_producer(task: ProducerTask) -> ProducerOut {
         bytes: meas_bytes,
         dropped,
         recovery_unix_ms,
-        latency_spike_max_us,
+        latency_spike_max,
         error,
         interval_msgs: iv_msgs,
         interval_hist: iv_hist,
@@ -1205,8 +1050,10 @@ struct ConsumerTask {
     stop: Arc<AtomicU8>,
     security: Option<ClientSecurity>,
     grid: Grid,
-    request_timeout: ClientRequestTimeoutSeconds,
+    request_timeout: Time,
     build_retry_policy: ConsumerBuildRetryPolicy,
+    poll_timeout: Time,
+    poll_error_backoff: Time,
 }
 
 async fn run_consumer(task: ConsumerTask) -> ConsumerOut {
@@ -1221,6 +1068,8 @@ async fn run_consumer(task: ConsumerTask) -> ConsumerOut {
         grid,
         request_timeout,
         build_retry_policy,
+        poll_timeout,
+        poll_error_backoff,
     } = task;
     let group_id = format!("crabka-bench-{}", scenario.name);
     let mut consumer = match build_consumer_with_retry(
@@ -1258,7 +1107,7 @@ async fn run_consumer(task: ConsumerTask) -> ConsumerOut {
         if stop.load(Ordering::Relaxed) == STATE_STOP {
             break;
         }
-        match consumer.poll(Duration::from_millis(50)).await {
+        match consumer.poll(poll_timeout).await {
             Ok(records) => {
                 let now_ns =
                     nonnegative_i64_to_u64(Utc::now().timestamp_nanos_opt().unwrap_or_default());
@@ -1268,13 +1117,17 @@ async fn run_consumer(task: ConsumerTask) -> ConsumerOut {
                     if let Some(val) = &r.value {
                         let bytes = val.len() as u64;
                         if let Some(send_nanos) = payload::read_send_nanos(val, scenario_id) {
-                            let latency_us = (now_ns.saturating_sub(send_nanos)) / 1000;
+                            // Both stamps are epoch nanoseconds; their
+                            // difference is the end-to-end extent.
+                            let latency = Time::from_nanos(saturating_u64_to_i64(
+                                now_ns.saturating_sub(send_nanos),
+                            ));
                             if phase == STATE_MEASURING {
-                                hist::record_us(&mut meas_hist, latency_us);
+                                hist::record(&mut meas_hist, latency);
                                 meas_msgs += 1;
                                 meas_bytes += bytes;
                                 iv_msgs[iv] += 1;
-                                hist::record_us(&mut iv_hist[iv], latency_us);
+                                hist::record(&mut iv_hist[iv], latency);
                             }
                         } else if phase == STATE_MEASURING {
                             // Non-bench record (e.g. left over from a prior
@@ -1288,7 +1141,7 @@ async fn run_consumer(task: ConsumerTask) -> ConsumerOut {
                 if error.is_empty() {
                     error = format!("consumer-{idx}-poll: {e}");
                 }
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                tokio::time::sleep(poll_error_backoff.to_std()).await;
             }
         }
     }
@@ -1309,13 +1162,13 @@ async fn build_consumer_with_retry(
     group_id: String,
     topic: &str,
     security: Option<ClientSecurity>,
-    request_timeout: ClientRequestTimeoutSeconds,
+    request_timeout: Time,
     retry_policy: ConsumerBuildRetryPolicy,
 ) -> Result<Consumer> {
     let backoff = exponential_backoff::Backoff::new(
         retry_policy.attempts(),
-        retry_policy.initial_backoff(),
-        Some(retry_policy.max_backoff()),
+        retry_policy.initial_backoff().to_std(),
+        Some(retry_policy.max_backoff().to_std()),
     );
     for (attempt_idx, delay) in backoff.into_iter().enumerate() {
         let attempt = attempt_idx + 1;
@@ -1325,7 +1178,7 @@ async fn build_consumer_with_retry(
             .group_id(group_id.clone())
             .subscribe(vec![topic.to_string()])
             .auto_offset_reset(AutoOffsetReset::Earliest)
-            .request_timeout(request_timeout.duration())
+            .request_timeout(request_timeout)
             // `None` → plaintext (default). `Some` → all fetch traffic for this
             // task goes over the broker's TLS listener (kTLS sendfile on crabka).
             .maybe_security(security.clone())
@@ -1358,7 +1211,7 @@ async fn build_consumer_with_retry(
 
 #[cfg(test)]
 mod tests {
-    use assert2::check;
+    use assert2::{assert, check};
 
     use super::*;
     use crate::scenario::{Acks, Compression, FailoverSpec, LoadMode, ModeTag};
@@ -1370,12 +1223,14 @@ mod tests {
             stack: Stack::Crabka,
             namespace: "default".into(),
             prometheus_url: None,
-            prometheus_request_timeout_seconds: PrometheusRequestTimeoutSeconds::default(),
-            producer_request_timeout_seconds: default_producer_request_timeout(),
-            producer_final_drain_timeout: ProducerFinalDrainTimeoutSeconds::default(),
-            sample_interval: SampleIntervalMs::default(),
-            consumer_request_timeout_seconds: default_consumer_request_timeout(Stack::Crabka),
+            prometheus_request_timeout: crate::prom::DEFAULT_PROMETHEUS_REQUEST_TIMEOUT,
+            producer_request_timeout: default_producer_request_timeout(),
+            producer_final_drain_timeout: DEFAULT_PRODUCER_FINAL_DRAIN_TIMEOUT,
+            sample_interval: DEFAULT_SAMPLE_INTERVAL,
+            consumer_request_timeout: default_consumer_request_timeout(Stack::Crabka),
             consumer_build_retry_policy: ConsumerBuildRetryPolicy::default(),
+            consumer_poll_timeout: default_consumer_poll_timeout(),
+            consumer_poll_error_backoff: default_consumer_poll_error_backoff(),
             broker_count,
             scenario_id: 0,
             tls: None,
@@ -1386,8 +1241,8 @@ mod tests {
         Scenario {
             name: "x".into(),
             mode_tag: ModeTag::Ci,
-            msg_size_bytes: 100,
-            key_size_bytes: 0,
+            msg_size: bytes(100),
+            key_size: ByteSize::ZERO,
             partitions: 1,
             replication_factor: rf,
             producers: 1,
@@ -1395,69 +1250,47 @@ mod tests {
             mode: LoadMode::Saturate,
             acks: Acks::Leader,
             compression: Compression::None,
-            linger_ms: 0,
-            batch_size: 16384,
-            duration_s: 1,
-            warmup_s: 0,
+            linger: Time::ZERO,
+            batch_size: kibibytes(16),
+            duration: secs(1),
+            warmup: Time::ZERO,
             failover: None,
         }
     }
 
     #[test]
-    fn bytes_to_mb_is_proper_mebibyte() {
-        assert2::assert!((bytes_to_mb(1_048_576) - 1.0).abs() < f64::EPSILON);
-        assert2::assert!(bytes_to_mb(0).abs() < f64::EPSILON);
-    }
-
-    #[test]
     fn client_request_timeout_defaults_preserve_policy() {
-        assert_eq!(
-            default_producer_request_timeout().duration(),
-            Duration::from_secs(2)
-        );
-        assert_eq!(
-            default_consumer_request_timeout(Stack::Crabka).duration(),
-            Duration::from_secs(5)
-        );
-        assert_eq!(
-            default_consumer_request_timeout(Stack::Kafka).duration(),
-            Duration::from_secs(30)
-        );
+        check!(default_producer_request_timeout() == secs(2));
+        check!(default_consumer_request_timeout(Stack::Crabka) == secs(5));
+        check!(default_consumer_request_timeout(Stack::Kafka) == secs(30));
     }
 
     #[test]
     fn consumer_build_retry_defaults_preserve_policy() {
         let policy = ConsumerBuildRetryPolicy::default();
 
-        assert_eq!(policy.attempts(), 6);
-        assert_eq!(policy.initial_backoff(), Duration::from_millis(100));
-        assert_eq!(policy.max_backoff(), Duration::from_secs(2));
+        check!(policy.attempts() == 6);
+        check!(policy.initial_backoff() == millis(100));
+        check!(policy.max_backoff() == secs(2));
     }
 
     #[test]
     fn consumer_build_retry_accepts_positive_minimum_and_equal_backoffs() {
         let attempts = ConsumerBuildAttempts::new(1).expect("one attempt is valid");
-        let one_ms = ConsumerBuildBackoffMs::new(1).expect("one millisecond is valid");
-        let policy = ConsumerBuildRetryPolicy::new(attempts, one_ms, one_ms)
+        let policy = ConsumerBuildRetryPolicy::new(attempts, millis(1), millis(1))
             .expect("equal bounds are valid");
 
-        assert_eq!(policy.attempts(), 1);
-        assert_eq!(policy.initial_backoff(), Duration::from_millis(1));
-        assert_eq!(policy.max_backoff(), Duration::from_millis(1));
+        check!(policy.attempts() == 1);
+        check!(policy.initial_backoff() == millis(1));
+        check!(policy.max_backoff() == millis(1));
     }
 
     #[test]
     fn consumer_build_retry_rejects_invalid_primitive_values() {
         for invalid in ["0", "not-a-number", "-1", "4294967296"] {
-            assert!(
+            check!(
                 invalid.parse::<ConsumerBuildAttempts>().is_err(),
                 "attempts {invalid:?} must be rejected"
-            );
-        }
-        for invalid in ["0", "not-a-number", "-1", "18446744073709551616"] {
-            assert!(
-                invalid.parse::<ConsumerBuildBackoffMs>().is_err(),
-                "backoff {invalid:?} must be rejected"
             );
         }
     }
@@ -1465,121 +1298,23 @@ mod tests {
     #[test]
     fn consumer_build_retry_rejects_inverted_backoff_range() {
         let attempts = ConsumerBuildAttempts::new(1).expect("valid attempts");
-        let initial = ConsumerBuildBackoffMs::new(2).expect("valid initial");
-        let max = ConsumerBuildBackoffMs::new(1).expect("valid maximum");
-
-        assert!(ConsumerBuildRetryPolicy::new(attempts, initial, max).is_err());
+        assert!(ConsumerBuildRetryPolicy::new(attempts, millis(2), millis(1)).is_err());
     }
 
     #[test]
     fn consumer_poll_timing_defaults_preserve_behavior() {
-        assert_eq!(
-            default_consumer_poll_timeout().duration(),
-            Duration::from_millis(50)
-        );
-        assert_eq!(
-            default_consumer_poll_error_backoff().duration(),
-            Duration::from_millis(100)
-        );
-    }
-
-    #[test]
-    fn consumer_poll_duration_accepts_positive_minimum() {
-        assert_eq!(
-            ConsumerPollDurationMs::new(1)
-                .expect("one millisecond is valid")
-                .duration(),
-            Duration::from_millis(1)
-        );
-    }
-
-    #[test]
-    fn consumer_poll_duration_rejects_invalid_values() {
-        for invalid in ["0", "not-a-number", "-1", "18446744073709551616"] {
-            assert!(
-                invalid.parse::<ConsumerPollDurationMs>().is_err(),
-                "{invalid:?} must be rejected"
-            );
-        }
+        check!(default_consumer_poll_timeout() == millis(50));
+        check!(default_consumer_poll_error_backoff() == millis(100));
     }
 
     #[test]
     fn producer_final_drain_timeout_default_preserves_behavior() {
-        assert_eq!(
-            ProducerFinalDrainTimeoutSeconds::default().duration(),
-            Duration::from_secs(10)
-        );
-    }
-
-    #[test]
-    fn producer_final_drain_timeout_accepts_positive_minimum() {
-        assert_eq!(
-            ProducerFinalDrainTimeoutSeconds::new(1)
-                .expect("one second is valid")
-                .duration(),
-            Duration::from_secs(1)
-        );
-    }
-
-    #[test]
-    fn producer_final_drain_timeout_rejects_invalid_values() {
-        for invalid in ["0", "not-a-number", "-1", "18446744073709551616"] {
-            assert!(
-                invalid.parse::<ProducerFinalDrainTimeoutSeconds>().is_err(),
-                "{invalid:?} must be rejected"
-            );
-        }
+        check!(DEFAULT_PRODUCER_FINAL_DRAIN_TIMEOUT == secs(10));
     }
 
     #[test]
     fn sample_interval_default_preserves_behavior() {
-        assert_eq!(SampleIntervalMs::default().milliseconds(), 2_000);
-    }
-
-    #[test]
-    fn sample_interval_accepts_positive_minimum() {
-        assert_eq!(
-            SampleIntervalMs::new(1)
-                .expect("one millisecond is valid")
-                .milliseconds(),
-            1
-        );
-    }
-
-    #[test]
-    fn sample_interval_rejects_invalid_values() {
-        for invalid in ["0", "not-a-number", "-1", "18446744073709551616"] {
-            assert!(
-                invalid.parse::<SampleIntervalMs>().is_err(),
-                "{invalid:?} must be rejected"
-            );
-        }
-    }
-
-    #[test]
-    fn client_request_timeout_accepts_protocol_bounds() {
-        assert_eq!(
-            ClientRequestTimeoutSeconds::new(1)
-                .expect("one second is valid")
-                .duration(),
-            Duration::from_secs(1)
-        );
-        assert_eq!(
-            ClientRequestTimeoutSeconds::new(MAX_CLIENT_REQUEST_TIMEOUT_SECONDS)
-                .expect("maximum whole-second protocol timeout is valid")
-                .duration(),
-            Duration::from_secs(2_147_483)
-        );
-    }
-
-    #[test]
-    fn client_request_timeout_rejects_invalid_values() {
-        for invalid in ["0", "not-a-number", "-1", "2147484"] {
-            assert!(
-                invalid.parse::<ClientRequestTimeoutSeconds>().is_err(),
-                "{invalid:?} must be rejected"
-            );
-        }
+        assert_eq!(DEFAULT_SAMPLE_INTERVAL, secs(2));
     }
 
     // TLS enabled: a CA path + server_name must build a `ClientSecurity` whose
@@ -1641,13 +1376,13 @@ mod tests {
         let s = scenario(1);
         let c = cfg(1);
         let out = empty_output(&s, &c, 42, vec!["a-note".into()], vec!["an-error".into()]);
-        assert2::assert!(out.wallclock_start_unix_ms == WallclockMs(42));
-        assert2::assert!(out.wallclock_end_unix_ms == WallclockMs(42));
-        assert2::assert!(out.topology.broker_count == 1);
-        assert2::assert!(out.notes == vec!["a-note".to_owned()]);
-        assert2::assert!(out.errors == vec!["an-error".to_owned()]);
-        assert2::assert!(out.first_ack_ms == 0);
-        assert2::assert!(out.disturbance.is_none());
+        check!(out.wallclock_start_unix_ms == WallclockMs(42));
+        check!(out.wallclock_end_unix_ms == WallclockMs(42));
+        check!(out.topology.broker_count == 1);
+        check!(out.notes == vec!["a-note".to_owned()]);
+        check!(out.errors == vec!["an-error".to_owned()]);
+        check!(out.first_ack == Time::ZERO);
+        check!(out.disturbance.is_none());
     }
 
     // The state byte is shared across producer/consumer tasks; verify the
@@ -1680,18 +1415,18 @@ mod tests {
     )]
     async fn failover_request_without_rf3_records_skip_note() {
         // Scenario asks for failover, but RF=1 + 1 broker → driver must
-        // record a skip note. duration_s=0/warmup_s=0 means the
+        // record a skip note. A zero duration and warmup mean the
         // producer/consumer build loops exit immediately, so this is
         // safe to run without a live broker.
         let mut s = scenario(1);
         s.failover = Some(FailoverSpec {
-            kill_at_s: 1,
+            kill_after: secs(1),
             target: "partition0_leader".into(),
         });
-        s.warmup_s = 0;
-        s.duration_s = 0;
+        s.warmup = Time::ZERO;
+        s.duration = Time::ZERO;
         let out = run(s, cfg(1)).await.expect("run returned");
-        assert2::assert!(
+        check!(
             out.notes
                 .iter()
                 .any(|n| n.contains("skipped:failover-needs-rf3"))

@@ -6,13 +6,13 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Parser;
 use crabka_bench_driver::{
-    prom::PrometheusRequestTimeoutSeconds,
     scenario::{Scenario, Stack},
     workload::{
-        self, ClientRequestTimeoutSeconds, ConsumerBuildAttempts, ConsumerBuildBackoffMs,
-        ConsumerBuildRetryPolicy, DriverConfig, ProducerFinalDrainTimeoutSeconds, SampleIntervalMs,
+        self, ConsumerBuildAttempts, ConsumerBuildRetryPolicy, DriverConfig,
+        MAX_CLIENT_REQUEST_TIMEOUT,
     },
 };
+use crabka_units::{fmt::Human as _, parse, prelude::*};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
@@ -37,31 +37,38 @@ struct Cli {
     /// `notes` reflects the skip.
     #[arg(long, env = "BENCH_PROMETHEUS_URL")]
     prometheus: Option<String>,
-    /// HTTP request timeout for Prometheus queries, in seconds.
+    /// HTTP request timeout for Prometheus queries.
     #[arg(
         long,
-        env = "BENCH_PROMETHEUS_REQUEST_TIMEOUT_SECONDS",
-        default_value_t = PrometheusRequestTimeoutSeconds::default()
+        env = "BENCH_PROMETHEUS_REQUEST_TIMEOUT",
+        default_value = "15s",
+        value_parser = parse::positive_time
     )]
-    prometheus_request_timeout_seconds: PrometheusRequestTimeoutSeconds,
-    /// Producer request timeout, in seconds.
+    prometheus_request_timeout: Time,
+    /// Producer request timeout.
     #[arg(
         long,
-        env = "BENCH_PRODUCER_REQUEST_TIMEOUT_SECONDS",
-        default_value_t = workload::default_producer_request_timeout()
+        env = "BENCH_PRODUCER_REQUEST_TIMEOUT",
+        default_value = "2s",
+        value_parser = parse_client_request_timeout
     )]
-    producer_request_timeout_seconds: ClientRequestTimeoutSeconds,
-    /// Maximum time to drain outstanding producer sends, in seconds.
+    producer_request_timeout: Time,
+    /// Maximum time to drain outstanding producer sends.
     #[arg(
         long,
-        env = "BENCH_PRODUCER_FINAL_DRAIN_TIMEOUT_SECONDS",
-        default_value_t = ProducerFinalDrainTimeoutSeconds::default()
+        env = "BENCH_PRODUCER_FINAL_DRAIN_TIMEOUT",
+        default_value = "10s",
+        value_parser = parse::positive_time
     )]
-    producer_final_drain_timeout_seconds: ProducerFinalDrainTimeoutSeconds,
-    /// Consumer request timeout, in seconds. Defaults to 5 for Crabka and 30
+    producer_final_drain_timeout: Time,
+    /// Consumer request timeout. Defaults to 5s for Crabka and 30s
     /// for Kafka.
-    #[arg(long, env = "BENCH_CONSUMER_REQUEST_TIMEOUT_SECONDS")]
-    consumer_request_timeout_seconds: Option<ClientRequestTimeoutSeconds>,
+    #[arg(
+        long,
+        env = "BENCH_CONSUMER_REQUEST_TIMEOUT",
+        value_parser = parse_client_request_timeout
+    )]
+    consumer_request_timeout: Option<Time>,
     /// Maximum attempts when building each consumer.
     #[arg(
         long,
@@ -69,27 +76,46 @@ struct Cli {
         default_value_t = ConsumerBuildAttempts::default()
     )]
     consumer_build_attempts: ConsumerBuildAttempts,
-    /// Initial consumer-build retry backoff, in milliseconds.
+    /// Initial consumer-build retry backoff.
     #[arg(
         long,
-        env = "BENCH_CONSUMER_BUILD_INITIAL_BACKOFF_MS",
-        default_value_t = workload::default_consumer_build_initial_backoff()
+        env = "BENCH_CONSUMER_BUILD_INITIAL_BACKOFF",
+        default_value = "100ms",
+        value_parser = parse::positive_time
     )]
-    consumer_build_initial_backoff_ms: ConsumerBuildBackoffMs,
-    /// Maximum consumer-build retry backoff, in milliseconds.
+    consumer_build_initial_backoff: Time,
+    /// Maximum consumer-build retry backoff.
     #[arg(
         long,
-        env = "BENCH_CONSUMER_BUILD_MAX_BACKOFF_MS",
-        default_value_t = workload::default_consumer_build_max_backoff()
+        env = "BENCH_CONSUMER_BUILD_MAX_BACKOFF",
+        default_value = "2s",
+        value_parser = parse::positive_time
     )]
-    consumer_build_max_backoff_ms: ConsumerBuildBackoffMs,
-    /// Time-series sample interval, in milliseconds.
+    consumer_build_max_backoff: Time,
+    /// Consumer poll timeout.
     #[arg(
         long,
-        env = "BENCH_SAMPLE_INTERVAL_MS",
-        default_value_t = SampleIntervalMs::default()
+        env = "BENCH_CONSUMER_POLL_TIMEOUT",
+        default_value = "50ms",
+        value_parser = parse::positive_time
     )]
-    sample_interval_ms: SampleIntervalMs,
+    consumer_poll_timeout: Time,
+    /// Sleep after a consumer poll error.
+    #[arg(
+        long,
+        env = "BENCH_CONSUMER_POLL_ERROR_BACKOFF",
+        default_value = "100ms",
+        value_parser = parse::positive_time
+    )]
+    consumer_poll_error_backoff: Time,
+    /// Time-series sample interval.
+    #[arg(
+        long,
+        env = "BENCH_SAMPLE_INTERVAL",
+        default_value = "2s",
+        value_parser = parse_sample_interval
+    )]
+    sample_interval: Time,
     /// Configured broker count. The driver uses this to gate RF=3-only
     /// scenarios.
     #[arg(long, env = "BENCH_BROKER_COUNT", default_value_t = 1)]
@@ -139,18 +165,35 @@ impl StackArg {
     }
 }
 
-fn resolve_consumer_request_timeout(
-    stack: Stack,
-    configured: Option<ClientRequestTimeoutSeconds>,
-) -> ClientRequestTimeoutSeconds {
+fn parse_client_request_timeout(input: &str) -> Result<Time, String> {
+    let value = parse::positive_time(input).map_err(|error| error.to_string())?;
+    let millis = value.millis_i64();
+    if Time::from_millis(millis) == value && value <= MAX_CLIENT_REQUEST_TIMEOUT {
+        Ok(value)
+    } else {
+        Err("request timeout must be a whole positive i32 millisecond count".to_string())
+    }
+}
+
+fn parse_sample_interval(input: &str) -> Result<Time, String> {
+    let value = parse::positive_time(input).map_err(|error| error.to_string())?;
+    let millis = value.millis_i64();
+    if millis > 0 && Time::from_millis(millis) == value {
+        Ok(value)
+    } else {
+        Err("sample interval must be a whole positive millisecond count".to_string())
+    }
+}
+
+fn resolve_consumer_request_timeout(stack: Stack, configured: Option<Time>) -> Time {
     configured.unwrap_or_else(|| workload::default_consumer_request_timeout(stack))
 }
 
 fn resolve_consumer_build_retry_policy(cli: &Cli) -> Result<ConsumerBuildRetryPolicy> {
     ConsumerBuildRetryPolicy::new(
         cli.consumer_build_attempts,
-        cli.consumer_build_initial_backoff_ms,
-        cli.consumer_build_max_backoff_ms,
+        cli.consumer_build_initial_backoff,
+        cli.consumer_build_max_backoff,
     )
     .map_err(anyhow::Error::msg)
 }
@@ -206,20 +249,22 @@ async fn main() -> Result<()> {
     };
 
     let stack = cli.stack.into_stack();
-    let consumer_request_timeout_seconds =
-        resolve_consumer_request_timeout(stack, cli.consumer_request_timeout_seconds);
+    let consumer_request_timeout =
+        resolve_consumer_request_timeout(stack, cli.consumer_request_timeout);
     let cfg = DriverConfig {
         bootstrap: cli.bootstrap,
         topic: cli.topic,
         stack,
         namespace: cli.namespace,
         prometheus_url: cli.prometheus,
-        prometheus_request_timeout_seconds: cli.prometheus_request_timeout_seconds,
-        producer_request_timeout_seconds: cli.producer_request_timeout_seconds,
-        producer_final_drain_timeout: cli.producer_final_drain_timeout_seconds,
-        sample_interval: cli.sample_interval_ms,
-        consumer_request_timeout_seconds,
+        prometheus_request_timeout: cli.prometheus_request_timeout,
+        producer_request_timeout: cli.producer_request_timeout,
+        producer_final_drain_timeout: cli.producer_final_drain_timeout,
+        sample_interval: cli.sample_interval,
+        consumer_request_timeout,
         consumer_build_retry_policy,
+        consumer_poll_timeout: cli.consumer_poll_timeout,
+        consumer_poll_error_backoff: cli.consumer_poll_error_backoff,
         broker_count: cli.broker_count,
         scenario_id,
         tls,
@@ -235,15 +280,16 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("write run output to {}", cli.out.display()))?;
 
-    // Brief stdout summary so `kubectl logs` shows progress.
+    // Brief stdout summary so `kubectl logs` shows progress. The dimensioned
+    // values print in the operator form (`2.4GiB`, `4.25ms`).
     println!(
-        "stack={:?} scenario={} produced={} consumed={} mb_in={:.2} p99_ms={:.2}",
+        "stack={:?} scenario={} produced={} consumed={} bytes_in={} p99={}",
         out.stack,
         out.scenario.name,
         out.throughput.msgs_produced,
         out.throughput.msgs_consumed,
-        out.throughput.mb_in,
-        out.producer_latency_ms.p99_ms,
+        out.throughput.bytes_in.human(),
+        out.producer_latency.p99.human(),
     );
     Ok(())
 }
@@ -261,9 +307,9 @@ fn hash_str(s: &str) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
+    use assert2::{assert, check};
     use clap::Parser;
+    use crabka_units::prelude::*;
 
     use super::*;
 
@@ -284,35 +330,24 @@ mod tests {
         let crabka = Cli::try_parse_from(required_args("crabka")).expect("Crabka timeout defaults");
         let kafka = Cli::try_parse_from(required_args("kafka")).expect("Kafka timeout defaults");
 
-        assert_eq!(
-            crabka.producer_request_timeout_seconds.duration(),
-            Duration::from_secs(2)
+        check!(crabka.producer_request_timeout == secs(2));
+        check!(
+            resolve_consumer_request_timeout(Stack::Crabka, crabka.consumer_request_timeout)
+                == secs(5)
         );
-        assert_eq!(
-            resolve_consumer_request_timeout(
-                Stack::Crabka,
-                crabka.consumer_request_timeout_seconds,
-            )
-            .duration(),
-            Duration::from_secs(5)
-        );
-        assert_eq!(
-            resolve_consumer_request_timeout(Stack::Kafka, kafka.consumer_request_timeout_seconds,)
-                .duration(),
-            Duration::from_secs(30)
+        check!(
+            resolve_consumer_request_timeout(Stack::Kafka, kafka.consumer_request_timeout)
+                == secs(30)
         );
     }
 
     #[test]
     fn client_request_timeout_rejects_invalid_cli_values() {
-        for option in [
-            "--producer-request-timeout-seconds",
-            "--consumer-request-timeout-seconds",
-        ] {
-            for invalid in ["0", "not-a-number", "-1", "2147484"] {
+        for option in ["--producer-request-timeout", "--consumer-request-timeout"] {
+            for invalid in ["0s", "not-a-number", "-1s", "2147483648ms", "1"] {
                 let mut args = required_args("crabka");
                 args.extend([option, invalid]);
-                assert!(Cli::try_parse_from(args).is_err(), "{option}={invalid}");
+                check!(Cli::try_parse_from(args).is_err(), "{option}={invalid}");
             }
         }
     }
@@ -322,9 +357,9 @@ mod tests {
         let cli = Cli::try_parse_from(required_args("crabka")).expect("retry defaults");
         let policy = resolve_consumer_build_retry_policy(&cli).expect("valid defaults");
 
-        assert_eq!(policy.attempts(), 6);
-        assert_eq!(policy.initial_backoff(), Duration::from_millis(100));
-        assert_eq!(policy.max_backoff(), Duration::from_secs(2));
+        check!(policy.attempts() == 6);
+        check!(policy.initial_backoff() == millis(100));
+        check!(policy.max_backoff() == secs(2));
     }
 
     #[test]
@@ -332,18 +367,15 @@ mod tests {
         let cases = [
             ("--consumer-build-attempts", "0"),
             ("--consumer-build-attempts", "4294967296"),
-            ("--consumer-build-initial-backoff-ms", "0"),
-            (
-                "--consumer-build-initial-backoff-ms",
-                "18446744073709551616",
-            ),
-            ("--consumer-build-max-backoff-ms", "0"),
-            ("--consumer-build-max-backoff-ms", "18446744073709551616"),
+            ("--consumer-build-initial-backoff", "0ms"),
+            ("--consumer-build-initial-backoff", "1"),
+            ("--consumer-build-max-backoff", "0ms"),
+            ("--consumer-build-max-backoff", "1"),
         ];
         for (option, invalid) in cases {
             let mut args = required_args("crabka");
             args.extend([option, invalid]);
-            assert!(Cli::try_parse_from(args).is_err(), "{option}={invalid}");
+            check!(Cli::try_parse_from(args).is_err(), "{option}={invalid}");
         }
     }
 
@@ -351,10 +383,10 @@ mod tests {
     fn consumer_build_retry_rejects_inverted_cli_range() {
         let mut args = required_args("crabka");
         args.extend([
-            "--consumer-build-initial-backoff-ms",
-            "2",
-            "--consumer-build-max-backoff-ms",
-            "1",
+            "--consumer-build-initial-backoff",
+            "2ms",
+            "--consumer-build-max-backoff",
+            "1ms",
         ]);
         let cli = Cli::try_parse_from(args).expect("individual values are valid");
 
@@ -374,8 +406,8 @@ mod tests {
                     ])
                     .env(CHILD, "1")
                     .env("BENCH_CONSUMER_BUILD_ATTEMPTS", "2")
-                    .env("BENCH_CONSUMER_BUILD_INITIAL_BACKOFF_MS", "11")
-                    .env("BENCH_CONSUMER_BUILD_MAX_BACKOFF_MS", "12")
+                    .env("BENCH_CONSUMER_BUILD_INITIAL_BACKOFF", "11ms")
+                    .env("BENCH_CONSUMER_BUILD_MAX_BACKOFF", "12ms")
                     .status()
                     .expect("child test");
             assert!(status.success());
@@ -385,53 +417,41 @@ mod tests {
         let from_env = Cli::try_parse_from(required_args("crabka")).expect("environment");
         let environment_policy =
             resolve_consumer_build_retry_policy(&from_env).expect("valid environment");
-        assert_eq!(environment_policy.attempts(), 2);
-        assert_eq!(
-            environment_policy.initial_backoff(),
-            Duration::from_millis(11)
-        );
-        assert_eq!(environment_policy.max_backoff(), Duration::from_millis(12));
+        check!(environment_policy.attempts() == 2);
+        check!(environment_policy.initial_backoff() == millis(11));
+        check!(environment_policy.max_backoff() == millis(12));
 
         let mut args = required_args("crabka");
         args.extend([
             "--consumer-build-attempts",
             "3",
-            "--consumer-build-initial-backoff-ms",
-            "21",
-            "--consumer-build-max-backoff-ms",
-            "22",
+            "--consumer-build-initial-backoff",
+            "21ms",
+            "--consumer-build-max-backoff",
+            "22ms",
         ]);
         let from_cli = Cli::try_parse_from(args).expect("CLI over environment");
         let cli_policy = resolve_consumer_build_retry_policy(&from_cli).expect("valid CLI");
-        assert_eq!(cli_policy.attempts(), 3);
-        assert_eq!(cli_policy.initial_backoff(), Duration::from_millis(21));
-        assert_eq!(cli_policy.max_backoff(), Duration::from_millis(22));
+        check!(cli_policy.attempts() == 3);
+        check!(cli_policy.initial_backoff() == millis(21));
+        check!(cli_policy.max_backoff() == millis(22));
     }
 
     #[test]
     fn consumer_poll_timing_cli_defaults_preserve_behavior() {
         let cli = Cli::try_parse_from(required_args("crabka")).expect("poll defaults");
 
-        assert_eq!(
-            cli.consumer_poll_timeout_ms.duration(),
-            Duration::from_millis(50)
-        );
-        assert_eq!(
-            cli.consumer_poll_error_backoff_ms.duration(),
-            Duration::from_millis(100)
-        );
+        check!(cli.consumer_poll_timeout == millis(50));
+        check!(cli.consumer_poll_error_backoff == millis(100));
     }
 
     #[test]
     fn consumer_poll_timing_rejects_invalid_cli_values() {
-        for option in [
-            "--consumer-poll-timeout-ms",
-            "--consumer-poll-error-backoff-ms",
-        ] {
-            for invalid in ["0", "not-a-number", "-1", "18446744073709551616"] {
+        for option in ["--consumer-poll-timeout", "--consumer-poll-error-backoff"] {
+            for invalid in ["0ms", "not-a-number", "-1ms", "1"] {
                 let mut args = required_args("crabka");
                 args.extend([option, invalid]);
-                assert!(Cli::try_parse_from(args).is_err(), "{option}={invalid}");
+                check!(Cli::try_parse_from(args).is_err(), "{option}={invalid}");
             }
         }
     }
@@ -448,8 +468,8 @@ mod tests {
                         "tests::consumer_poll_timing_reads_environment_and_prefers_cli",
                     ])
                     .env(CHILD, "1")
-                    .env("BENCH_CONSUMER_POLL_TIMEOUT_MS", "11")
-                    .env("BENCH_CONSUMER_POLL_ERROR_BACKOFF_MS", "12")
+                    .env("BENCH_CONSUMER_POLL_TIMEOUT", "11ms")
+                    .env("BENCH_CONSUMER_POLL_ERROR_BACKOFF", "12ms")
                     .status()
                     .expect("child test");
             assert!(status.success());
@@ -457,48 +477,33 @@ mod tests {
         }
 
         let from_env = Cli::try_parse_from(required_args("crabka")).expect("environment");
-        assert_eq!(
-            from_env.consumer_poll_timeout_ms.duration(),
-            Duration::from_millis(11)
-        );
-        assert_eq!(
-            from_env.consumer_poll_error_backoff_ms.duration(),
-            Duration::from_millis(12)
-        );
+        check!(from_env.consumer_poll_timeout == millis(11));
+        check!(from_env.consumer_poll_error_backoff == millis(12));
 
         let mut args = required_args("crabka");
         args.extend([
-            "--consumer-poll-timeout-ms",
-            "21",
-            "--consumer-poll-error-backoff-ms",
-            "22",
+            "--consumer-poll-timeout",
+            "21ms",
+            "--consumer-poll-error-backoff",
+            "22ms",
         ]);
         let from_cli = Cli::try_parse_from(args).expect("CLI over environment");
-        assert_eq!(
-            from_cli.consumer_poll_timeout_ms.duration(),
-            Duration::from_millis(21)
-        );
-        assert_eq!(
-            from_cli.consumer_poll_error_backoff_ms.duration(),
-            Duration::from_millis(22)
-        );
+        check!(from_cli.consumer_poll_timeout == millis(21));
+        check!(from_cli.consumer_poll_error_backoff == millis(22));
     }
 
     #[test]
     fn producer_final_drain_timeout_cli_default_preserves_behavior() {
         let cli = Cli::try_parse_from(required_args("crabka")).expect("drain default");
 
-        assert_eq!(
-            cli.producer_final_drain_timeout_seconds.duration(),
-            Duration::from_secs(10)
-        );
+        assert_eq!(cli.producer_final_drain_timeout, secs(10));
     }
 
     #[test]
     fn producer_final_drain_timeout_rejects_invalid_cli_values() {
-        for invalid in ["0", "not-a-number", "-1", "18446744073709551616"] {
+        for invalid in ["0s", "not-a-number", "-1s", "1"] {
             let mut args = required_args("crabka");
-            args.extend(["--producer-final-drain-timeout-seconds", invalid]);
+            args.extend(["--producer-final-drain-timeout", invalid]);
             assert!(Cli::try_parse_from(args).is_err(), "{invalid}");
         }
     }
@@ -515,7 +520,7 @@ mod tests {
                         "tests::producer_final_drain_timeout_reads_environment_and_prefers_cli",
                     ])
                     .env(CHILD, "1")
-                    .env("BENCH_PRODUCER_FINAL_DRAIN_TIMEOUT_SECONDS", "11")
+                    .env("BENCH_PRODUCER_FINAL_DRAIN_TIMEOUT", "11s")
                     .status()
                     .expect("child test");
             assert!(status.success());
@@ -523,32 +528,26 @@ mod tests {
         }
 
         let from_env = Cli::try_parse_from(required_args("crabka")).expect("environment");
-        assert_eq!(
-            from_env.producer_final_drain_timeout_seconds.duration(),
-            Duration::from_secs(11)
-        );
+        assert_eq!(from_env.producer_final_drain_timeout, secs(11));
 
         let mut args = required_args("crabka");
-        args.extend(["--producer-final-drain-timeout-seconds", "21"]);
+        args.extend(["--producer-final-drain-timeout", "21s"]);
         let from_cli = Cli::try_parse_from(args).expect("CLI over environment");
-        assert_eq!(
-            from_cli.producer_final_drain_timeout_seconds.duration(),
-            Duration::from_secs(21)
-        );
+        assert_eq!(from_cli.producer_final_drain_timeout, secs(21));
     }
 
     #[test]
     fn sample_interval_cli_default_preserves_behavior() {
         let cli = Cli::try_parse_from(required_args("crabka")).expect("sample default");
 
-        assert_eq!(cli.sample_interval_ms.milliseconds(), 2_000);
+        assert_eq!(cli.sample_interval, secs(2));
     }
 
     #[test]
     fn sample_interval_rejects_invalid_cli_values() {
-        for invalid in ["0", "not-a-number", "-1", "18446744073709551616"] {
+        for invalid in ["0ms", "not-a-number", "-1ms", "0.5ms", "1"] {
             let mut args = required_args("crabka");
-            args.extend(["--sample-interval-ms", invalid]);
+            args.extend(["--sample-interval", invalid]);
             assert!(Cli::try_parse_from(args).is_err(), "{invalid}");
         }
     }
@@ -565,7 +564,7 @@ mod tests {
                         "tests::sample_interval_reads_environment_and_prefers_cli",
                     ])
                     .env(CHILD, "1")
-                    .env("BENCH_SAMPLE_INTERVAL_MS", "11")
+                    .env("BENCH_SAMPLE_INTERVAL", "11ms")
                     .status()
                     .expect("child test");
             assert!(status.success());
@@ -573,12 +572,12 @@ mod tests {
         }
 
         let from_env = Cli::try_parse_from(required_args("crabka")).expect("environment");
-        assert_eq!(from_env.sample_interval_ms.milliseconds(), 11);
+        assert_eq!(from_env.sample_interval, millis(11));
 
         let mut args = required_args("crabka");
-        args.extend(["--sample-interval-ms", "21"]);
+        args.extend(["--sample-interval", "21ms"]);
         let from_cli = Cli::try_parse_from(args).expect("CLI over environment");
-        assert_eq!(from_cli.sample_interval_ms.milliseconds(), 21);
+        assert_eq!(from_cli.sample_interval, millis(21));
     }
 
     #[test]
@@ -593,8 +592,8 @@ mod tests {
                         "tests::client_request_timeouts_read_environment_and_prefer_cli",
                     ])
                     .env(CHILD, "1")
-                    .env("BENCH_PRODUCER_REQUEST_TIMEOUT_SECONDS", "11")
-                    .env("BENCH_CONSUMER_REQUEST_TIMEOUT_SECONDS", "12")
+                    .env("BENCH_PRODUCER_REQUEST_TIMEOUT", "11s")
+                    .env("BENCH_CONSUMER_REQUEST_TIMEOUT", "12s")
                     .status()
                     .expect("child test");
             assert!(status.success());
@@ -602,38 +601,24 @@ mod tests {
         }
 
         let from_env = Cli::try_parse_from(required_args("crabka")).expect("environment");
-        assert_eq!(
-            from_env.producer_request_timeout_seconds.duration(),
-            Duration::from_secs(11)
-        );
-        assert_eq!(
-            resolve_consumer_request_timeout(
-                Stack::Crabka,
-                from_env.consumer_request_timeout_seconds,
-            )
-            .duration(),
-            Duration::from_secs(12)
+        check!(from_env.producer_request_timeout == secs(11));
+        check!(
+            resolve_consumer_request_timeout(Stack::Crabka, from_env.consumer_request_timeout,)
+                == secs(12)
         );
 
         let mut args = required_args("crabka");
         args.extend([
-            "--producer-request-timeout-seconds",
-            "21",
-            "--consumer-request-timeout-seconds",
-            "22",
+            "--producer-request-timeout",
+            "21s",
+            "--consumer-request-timeout",
+            "22s",
         ]);
         let from_cli = Cli::try_parse_from(args).expect("CLI over environment");
-        assert_eq!(
-            from_cli.producer_request_timeout_seconds.duration(),
-            Duration::from_secs(21)
-        );
-        assert_eq!(
-            resolve_consumer_request_timeout(
-                Stack::Crabka,
-                from_cli.consumer_request_timeout_seconds,
-            )
-            .duration(),
-            Duration::from_secs(22)
+        check!(from_cli.producer_request_timeout == secs(21));
+        check!(
+            resolve_consumer_request_timeout(Stack::Crabka, from_cli.consumer_request_timeout,)
+                == secs(22)
         );
     }
 
@@ -649,7 +634,7 @@ mod tests {
                         "tests::prometheus_request_timeout_environment_and_cli_precedence",
                     ])
                     .env(CHILD, "1")
-                    .env("BENCH_PROMETHEUS_REQUEST_TIMEOUT_SECONDS", "32")
+                    .env("BENCH_PROMETHEUS_REQUEST_TIMEOUT", "32s")
                     .status()
                     .expect("child test");
             assert!(status.success());
@@ -657,17 +642,11 @@ mod tests {
         }
 
         let from_env = Cli::try_parse_from(required_args("crabka")).expect("environment");
-        assert_eq!(
-            from_env.prometheus_request_timeout_seconds.duration(),
-            Duration::from_secs(32)
-        );
+        check!(from_env.prometheus_request_timeout == secs(32));
 
         let mut args = required_args("crabka");
-        args.extend(["--prometheus-request-timeout-seconds", "64"]);
+        args.extend(["--prometheus-request-timeout", "64s"]);
         let from_cli = Cli::try_parse_from(args).expect("CLI over environment");
-        assert_eq!(
-            from_cli.prometheus_request_timeout_seconds.duration(),
-            Duration::from_secs(64)
-        );
+        check!(from_cli.prometheus_request_timeout == secs(64));
     }
 }

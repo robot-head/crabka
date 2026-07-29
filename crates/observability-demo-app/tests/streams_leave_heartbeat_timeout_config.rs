@@ -10,31 +10,29 @@ fn demo() -> Command {
 fn environment_is_used_and_cli_wins_before_external_io() {
     let environment = demo()
         .args(["--role", "produce"])
-        .env("CRABKA_DEMO_STREAMS_LEAVE_HEARTBEAT_TIMEOUT_MS", "37")
+        .env("CRABKA_DEMO_STREAMS_LEAVE_HEARTBEAT_TIMEOUT", "37ms")
         .output()
         .expect("run demo");
     assert!(!environment.status.success());
     assert!(
-        String::from_utf8_lossy(&environment.stderr).contains(
-            "--streams-leave-heartbeat-timeout-ms (37 ms) is only valid with --role stream"
-        )
+        String::from_utf8_lossy(&environment.stderr)
+            .contains("--streams-leave-heartbeat-timeout (37ms) is only valid with --role stream")
     );
 
     let cli = demo()
         .args([
             "--role",
             "produce",
-            "--streams-leave-heartbeat-timeout-ms",
-            "41",
+            "--streams-leave-heartbeat-timeout",
+            "41ms",
         ])
-        .env("CRABKA_DEMO_STREAMS_LEAVE_HEARTBEAT_TIMEOUT_MS", "37")
+        .env("CRABKA_DEMO_STREAMS_LEAVE_HEARTBEAT_TIMEOUT", "37ms")
         .output()
         .expect("run demo");
     assert!(!cli.status.success());
     assert!(
-        String::from_utf8_lossy(&cli.stderr).contains(
-            "--streams-leave-heartbeat-timeout-ms (41 ms) is only valid with --role stream"
-        )
+        String::from_utf8_lossy(&cli.stderr)
+            .contains("--streams-leave-heartbeat-timeout (41ms) is only valid with --role stream")
     );
 }
 
@@ -42,18 +40,18 @@ fn environment_is_used_and_cli_wins_before_external_io() {
 fn zero_fails_early_and_help_lists_the_flag_once() {
     let zero = demo()
         .args(["--role", "stream"])
-        .env("CRABKA_DEMO_STREAMS_LEAVE_HEARTBEAT_TIMEOUT_MS", "0")
+        .env("CRABKA_DEMO_STREAMS_LEAVE_HEARTBEAT_TIMEOUT", "0ms")
         .output()
         .expect("run demo");
     assert!(!zero.status.success());
-    assert!(String::from_utf8_lossy(&zero.stderr).contains("invalid value '0'"));
+    assert!(String::from_utf8_lossy(&zero.stderr).contains("invalid value '0ms'"));
 
     let help = demo().arg("--help").output().expect("help");
     assert!(help.status.success());
     let help = String::from_utf8(help.stdout).expect("UTF-8 help");
     assert_eq!(
         help.split_whitespace()
-            .filter(|token| *token == "--streams-leave-heartbeat-timeout-ms")
+            .filter(|token| *token == "--streams-leave-heartbeat-timeout")
             .count(),
         1
     );

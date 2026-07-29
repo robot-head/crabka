@@ -10,31 +10,29 @@ fn demo() -> Command {
 fn environment_is_used_and_cli_wins_before_external_io() {
     let environment = demo()
         .args(["--role", "produce"])
-        .env("CRABKA_DEMO_STREAMS_STATE_STORE_CACHE_MAX_BYTES", "37")
+        .env("CRABKA_DEMO_STREAMS_STATE_STORE_CACHE_MAX", "37B")
         .output()
         .expect("run demo");
     assert!(!environment.status.success());
     assert!(
-        String::from_utf8_lossy(&environment.stderr).contains(
-            "--streams-state-store-cache-max-bytes (37) is only valid with --role stream"
-        )
+        String::from_utf8_lossy(&environment.stderr)
+            .contains("--streams-state-store-cache-max (37B) is only valid with --role stream")
     );
 
     let cli = demo()
         .args([
             "--role",
             "produce",
-            "--streams-state-store-cache-max-bytes",
-            "41",
+            "--streams-state-store-cache-max",
+            "41B",
         ])
-        .env("CRABKA_DEMO_STREAMS_STATE_STORE_CACHE_MAX_BYTES", "37")
+        .env("CRABKA_DEMO_STREAMS_STATE_STORE_CACHE_MAX", "37B")
         .output()
         .expect("run demo");
     assert!(!cli.status.success());
     assert!(
-        String::from_utf8_lossy(&cli.stderr).contains(
-            "--streams-state-store-cache-max-bytes (41) is only valid with --role stream"
-        )
+        String::from_utf8_lossy(&cli.stderr)
+            .contains("--streams-state-store-cache-max (41B) is only valid with --role stream")
     );
 }
 
@@ -42,23 +40,21 @@ fn environment_is_used_and_cli_wins_before_external_io() {
 fn negative_fails_early_zero_is_parseable_and_help_lists_the_flag_once() {
     let negative = demo()
         .args(["--role", "stream"])
-        .env("CRABKA_DEMO_STREAMS_STATE_STORE_CACHE_MAX_BYTES", "-1")
+        .env("CRABKA_DEMO_STREAMS_STATE_STORE_CACHE_MAX", "-1B")
         .output()
         .expect("run demo");
     assert!(!negative.status.success());
-    assert!(
-        String::from_utf8_lossy(&negative.stderr).contains("streams state-store cache max bytes")
-    );
+    assert!(String::from_utf8_lossy(&negative.stderr).contains("must be non-negative"));
 
     let zero = demo()
         .args(["--role", "produce"])
-        .env("CRABKA_DEMO_STREAMS_STATE_STORE_CACHE_MAX_BYTES", "0")
+        .env("CRABKA_DEMO_STREAMS_STATE_STORE_CACHE_MAX", "0B")
         .output()
         .expect("run demo");
     assert!(!zero.status.success());
     assert!(
         String::from_utf8_lossy(&zero.stderr)
-            .contains("--streams-state-store-cache-max-bytes (0) is only valid with --role stream")
+            .contains("--streams-state-store-cache-max (0B) is only valid with --role stream")
     );
 
     let help = demo().arg("--help").output().expect("help");
@@ -66,7 +62,7 @@ fn negative_fails_early_zero_is_parseable_and_help_lists_the_flag_once() {
     let help = String::from_utf8(help.stdout).expect("UTF-8 help");
     assert_eq!(
         help.split_whitespace()
-            .filter(|token| *token == "--streams-state-store-cache-max-bytes")
+            .filter(|token| *token == "--streams-state-store-cache-max")
             .count(),
         1
     );
