@@ -28,14 +28,14 @@ applicable rule below:
   `connect`, `connect-derive`, `connect-postgres`,
   `docgen`, `gres`, `gres-activator`, `gres-control`, `grpc-gateway`, `ids`,
   `integration-tests`, `kafka-tap`,
-  `log-iobench`, `logfmt`, `logql`, `object-store`, `operator`,
+  `log-iobench`, `logfmt`, `logql`, `metadata`, `object-store`, `operator`,
   `protocol-codegen`, `remote-storage`, `pgparser`, `playground`,
   `schema-registry`, `throttle`, `verified`, `voters`.
 - Pending: `client-consumer`, `client-core`, `client-streams`,
   `gres-balancer`,
   `gres-conformance`, `gres-fdw`, `gres-loadtest`,
   `gres-ranges`, `gres-substrate`,
-  `kraft-core`, `log`, `metadata`, `metrics`,
+  `kraft-core`, `log`, `metrics`,
   `metrics-service`, `observability`, `observability-demo-app`,
   `pgcatalog`, `pgexec`, `pgkv`, `pgmvcc`, `pgtypes`, `pgwire`,
   `pprof`, `profiles`, `promql`, `protocol`, `raft`,
@@ -4605,4 +4605,19 @@ inside this library.
 
 No additional library configuration surface is warranted. The current
 all-target gate passed 70 unit, derive-contract, and integration tests, and
+strict all-target Clippy passed.
+
+## Metadata
+
+The `metadata` owner has 27 scanner rows. Every production value is a
+compatibility contract: KRaft private record keys, feature names and supported
+levels, metadata-version gates, serialized sentinels, and the deterministic
+hash multiplier used to derive stable ACL identifiers. Changing any of these
+through deployment configuration would make stored metadata or advertised
+protocol capabilities incompatible.
+
+The remaining rows are exact serialization preallocation and test fixtures.
+This crate owns no runtime timing, queue, retry, or resource policy, so no CLI,
+environment variable, or CRD field is warranted. The current all-target gate
+passed 180 unit and evolution tests plus the complete benchmark target, and
 strict all-target Clippy passed.
