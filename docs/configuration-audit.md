@@ -24,10 +24,10 @@ applicable rule below:
 ## Coverage Status
 
 - Complete: `admin-ui`, `audit`, `authz`, `bench-driver`, `blockstore`,
-  `broker`, `cli`, `client-admin`, `grpc-gateway`, `operator`,
+  `broker`, `cli`, `client-admin`, `compression`, `grpc-gateway`, `operator`,
   `schema-registry`.
 - Pending: `client-consumer`, `client-core`, `client-producer`,
-  `client-streams`, `compression`, `connect`, `connect-derive`,
+  `client-streams`, `connect`, `connect-derive`,
   `connect-postgres`, `docgen`, `gres`, `gres-activator`, `gres-balancer`,
   `gres-conformance`, `gres-control`, `gres-fdw`, `gres-loadtest`,
   `gres-ranges`, `gres-substrate`, `ids`,
@@ -4276,3 +4276,20 @@ actual process owners, so no new setting is warranted.
 
 The current client-admin all-target gate passed 78 library and integration
 tests, and strict affected-package Clippy passed.
+
+## Compression
+
+The `compression` owner has 16 scanner rows. Its three production values are
+Kafka interoperability contracts: the xerial Snappy header, xerial's 32 KiB
+chunk size, and Kafka's default zstd compression level 3. Changing any of them
+would change the wire output rather than tune deployment policy.
+
+All decompression entry points already require callers to provide a
+dimensioned `ByteSize` output cap. LZ4 framing likewise intentionally matches
+Kafka's fixed 64 KiB independent-block format. The remaining scanner rows are
+test payloads, safety caps, and expected error limits, so no configuration
+surface is warranted.
+
+The current compression all-target gate passed 41 tests; four JVM-oracle
+differential tests remained intentionally ignored. Its benchmark target ran
+successfully, and strict all-target Clippy passed.
