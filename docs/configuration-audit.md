@@ -26,7 +26,7 @@ applicable rule below:
 - Complete: `admin-ui`, `audit`, `authz`, `bench-driver`, `blockstore`,
   `broker`, `cli`, `client-admin`, `compression`, `connect-derive`,
   `docgen`, `grpc-gateway`, `ids`, `integration-tests`, `kafka-tap`, `logfmt`,
-  `logql`, `operator`, `protocol-codegen`, `remote-storage`,
+  `logql`, `object-store`, `operator`, `protocol-codegen`, `remote-storage`,
   `schema-registry`.
 - Pending: `client-consumer`, `client-core`, `client-producer`,
   `client-streams`, `connect`, `connect-postgres`, `gres`, `gres-activator`,
@@ -34,8 +34,7 @@ applicable rule below:
   `gres-conformance`, `gres-control`, `gres-fdw`, `gres-loadtest`,
   `gres-ranges`, `gres-substrate`,
   `kraft-core`, `log`, `log-iobench`, `metadata`, `metrics`,
-  `metrics-service`,
-  `object-store`, `observability`, `observability-demo-app`,
+  `metrics-service`, `observability`, `observability-demo-app`,
   `pgcatalog`, `pgexec`, `pgkv`, `pgmvcc`, `pgparser`, `pgtypes`, `pgwire`,
   `playground`, `pprof`, `profiles`, `promql`, `protocol`, `raft`,
   `rebalancer`, `records-legacy`, `remote-storage-topic`, `replicator`,
@@ -4399,3 +4398,18 @@ in this crate.
 
 The current remote-storage all-target gate passed 60 tests, including
 configured multipart paths for S3 and GCS, and strict all-target Clippy passed.
+
+## Object Store
+
+The `object-store` owner has four scanner rows. Its 100 MiB multipart threshold
+and 16 MiB chunk size are defaults in the public S3/GCS configuration structs,
+not fixed use-site policy. Broker file configuration and Kafka CRDs can
+override both values. Every buffered object read separately requires its
+caller to supply an explicit cap.
+
+The remaining two scanner rows are expected limits in error and capped-read
+tests. Backend protocol limits and secret redaction are fixed invariants, so no
+additional setting is warranted.
+
+The current object-store all-target gate passed 29 tests, including configured
+multipart boundaries and capped reads, and strict all-target Clippy passed.
